@@ -48,7 +48,7 @@ export const STATIC_STUB_RESOLVED_ID = "\0" + STATIC_STUB_VIRTUAL_ID;
  *
  * Exposed (and exported) so tests can verify the shape without spinning
  * up a real Vite environment. Notable invariants:
- *   - `publicDir: false` — the SSR outDir is `dist/server/`, and Vite's
+ *   - `publicDir: false` - the SSR outDir is `<build.dist>/server/`, and Vite's
  *     default would copy `public/*` into it. Those copies then end up
  *     cataloged as `worker.modules` entries, which is wrong: public
  *     files are static assets, not worker code. The client build keeps
@@ -430,8 +430,8 @@ export function buildPlugin(
   let logger: { warn: (msg: string) => void } | undefined;
 
   /**
-   * Run the SSR server sub-build (`virtual:zeroship/_server-entry` →
-   * `dist/server/index.js`) exactly once per Vite invocation.
+   * Run the SSR server sub-build (`virtual:zeroship/_server-entry` to
+   * `<build.dist>/server/index.js`) exactly once per Vite invocation.
    *
    * Invoked from BOTH `writeBundle` and `closeBundle`. `writeBundle`
    * fires per emitted client output bundle — but a SERVER-ONLY app (no
@@ -479,7 +479,7 @@ export function buildPlugin(
     // — that virtual module imports the user's entry, re-exports its
     // bindings, and provides our own `default.{ fetch, rpc }`.
     // Rolldown collapses everything into a single ESM file at
-    // `dist/server/index.js`. The synthetic entry's `_procedures`
+    // `<build.dist>/server/index.js`. The synthetic entry's `_procedures`
     // dispatch table is built at module-init time by iterating the
     // user namespace's exports — no global registry, no side effects.
     //
@@ -495,7 +495,7 @@ export function buildPlugin(
     const ssrConfig = buildSsrInlineConfig({
       root,
       ssrEntry: SERVER_ENTRY_VIRTUAL_ID,
-      outDir: "dist/server",
+      outDir: resolve(clientOutDir, "server"),
       ssrPlugins: [
         // node-compat MUST come first so its `resolve.id` returns
         // the polyfill path before Vite tries to load `node:crypto`
@@ -550,7 +550,7 @@ export function buildPlugin(
     // globals (process, Buffer, setImmediate, etc.) are installed by
     // the Rust runtime on every isolate before any user module
     // evaluates — see `crates/runtime/src/core/init.rs`.
-    const bundlePath = resolve(root, "dist/server/index.js");
+    const bundlePath = resolve(clientOutDir, "server", "index.js");
     try {
       const stripped = stripUseServer(readFileSync(bundlePath, "utf8"));
       writeFileSync(bundlePath, stripped, "utf8");

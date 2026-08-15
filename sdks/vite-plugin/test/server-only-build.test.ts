@@ -34,9 +34,14 @@ import { zeroship } from "../src/index.js";
 
 // ── Minimal USTAR reader (manifest.json is the first entry) ────────────────
 
-function readManifestFromZship(archive: Buffer): Record<string, unknown> {
+function readZship(archive: Buffer): {
+  manifest: Record<string, unknown>;
+  entries: Set<string>;
+} {
   const tar = zstdDecompressSync(archive);
   let offset = 0;
+  let manifest: Record<string, unknown> | undefined;
+  const entries = new Set<string>();
   while (offset + 512 <= tar.length) {
     const header = tar.subarray(offset, offset + 512);
     if (header.every((b) => b === 0)) break;
@@ -48,12 +53,14 @@ function readManifestFromZship(archive: Buffer): Record<string, unknown> {
       .trim();
     const size = parseInt(sizeOctal, 8) || 0;
     const body = tar.subarray(offset + 512, offset + 512 + size);
+    entries.add(name);
     if (name === "manifest.json") {
-      return JSON.parse(body.toString("utf8"));
+      manifest = JSON.parse(body.toString("utf8"));
     }
     offset += 512 + Math.ceil(size / 512) * 512;
   }
-  throw new Error("manifest.json not found in archive");
+  if (manifest == null) throw new Error("manifest.json not found in archive");
+  return { manifest, entries };
 }
 
 // A pure-backend app: `default = { fetch }`, NO `index.html`, NO client
@@ -95,7 +102,7 @@ describe("ISS-59 — server-only app (no index.html) builds to a valid .zship", 
       // Pre-fix: vite build throws before we get here. If it somehow
       // produced no archive, this assertion still pins the contract.
       const archive = await fs.readFile(archivePath);
-      const manifest = readManifestFromZship(archive);
+      const { manifest } = readZship(archive);
 
       assert.equal(manifest.version, 1, "manifest schema version");
 
@@ -135,6 +142,49 @@ describe("ISS-59 — server-only app (no index.html) builds to a valid .zship", 
         assets["/index.html"],
         undefined,
         "server-only build must not emit an /index.html asset",
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("custom build.dist packs the full server artifact", async () => {
+    const root = await makeServerOnlyApp();
+    try {
+      await fs.writeFile(resolve(root, "index.html"), "<!doctype html><title>custom dist</title>\n");
+      await fs.writeFile(
+        resolve(root, "zeroship.jsonc"),
+        JSON.stringify({
+          name: "custom-dist",
+          control: "http://localhost:9090",
+          runtime_date: "2026-08-14",
+          build: { mode: "full", dist: "build", output: "build/app.zship" },
+          migrations: { dir: "migrations", out: "generated/zeroship" },
+        }),
+      );
+
+      await viteBuild({
+        root,
+        configFile: false,
+        logLevel: "silent",
+        build: { outDir: "build" },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        plugins: zeroship() as any,
+      });
+
+      const archive = await fs.readFile(resolve(root, "build", "app.zship"));
+      const { manifest, entries } = readZship(archive);
+      const worker = manifest.worker as
+        | { entry: string; modules: Record<string, string> }
+        | undefined
+        | null;
+      assert.ok(worker, "a mode=full custom-dist archive must contain its server worker");
+      assert.equal(worker.entry, "index.js");
+      const workerHash = worker.modules[worker.entry];
+      assert.match(workerHash, /^[0-9a-f]{64}$/);
+      assert.ok(
+        entries.has(`blobs/${workerHash}`),
+        "the packed archive must contain the worker module blob",
       );
     } finally {
       await fs.rm(root, { recursive: true, force: true });
