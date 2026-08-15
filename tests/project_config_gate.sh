@@ -269,6 +269,14 @@ else
   fail "operational callers bypass the shared control resolver:$missing_control_resolver"
 fi
 
+GEN_TYPES_ALL="sdks/vite-plugin/scripts/gen-types-all.ts"
+if grep -Fq 'const migrationsDir = resolve(app.root, config.migrations.dir);' \
+  "$GEN_TYPES_ALL"; then
+  pass "gen-types-all preserves an absolute config-rooted migrations path"
+else
+  fail "gen-types-all re-roots the resolved migrations path"
+fi
+
 echo
 echo "== 3. round trip: the two readers agree byte for byte =="
 while IFS='|' read -r fixture ENVSEL label; do

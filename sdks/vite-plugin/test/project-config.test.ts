@@ -394,6 +394,22 @@ describe("resolution", () => {
 });
 
 describe("the config escape hatch", () => {
+  test("an external config roots a relative build path override before returning it", () => {
+    const root = scratch({ "apps/foo/zeroship.jsonc": FULL });
+    const appRoot = join(root, "apps", "foo");
+    try {
+      const { config } = readProjectConfig(root, {
+        configPath: "apps/foo/zeroship.jsonc",
+        override: (current) => ({
+          build: { ...current.build, dist: "apps/foo" },
+        }),
+      });
+      assert.equal(config.build.dist, join(appRoot, "apps/foo"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("the reader rejects a callback that moves build.dist over the project", () => {
     const root = scratch({ [CONFIG_FILENAME]: FULL });
     try {
