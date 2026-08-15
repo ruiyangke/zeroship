@@ -2,10 +2,10 @@
  * Center — centers its content on both axes.
  *
  * Anatomy:
- *   .zs-center            — the centering flex box
- *   .zs-center > *        — children (min-inline-size:0 + max-inline-size:100%
+ *   [data-slot="center"]            — the centering flex box
+ *   [data-slot="center"] > *        — children (min-inline-size:0 + max-inline-size:100%
  *                           so a wide/unbreakable child stays contained)
- *   .zs-center--inline    — horizontal-only variant (drops vertical)
+ *   [data-slot="center"][data-inline]    — horizontal-only variant (drops vertical)
  *
  * Driven by inline custom properties set from props:
  *   --center-min-block    length   (applied as min-block-size when set)

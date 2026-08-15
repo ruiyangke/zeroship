@@ -2,15 +2,15 @@
  * AuthForm — centered sign-in / sign-up form.
  *
  * Anatomy:
- *   .zs-auth-form-center                  <Center> root — centers the Card
- *     └─ .zs-auth-form                     <Card variant="elevated">
- *         └─ .zs-auth-form__form           <form> (Base UI Form), aria-labelledby title
- *             ├─ header  (.zs-auth-form__title / __description)
- *             ├─ .zs-auth-form__error      danger Banner (live region)
- *             ├─ .zs-auth-form__fieldset   <fieldset> wrapping the Field rows
- *             ├─ .zs-auth-form__submit     full-width submit Button
- *             ├─ social  (.zs-auth-form__or + __social-actions)
- *             └─ .zs-auth-form__footer     mode-switch prompt + link
+ *   [data-slot="auth-form-center"]                  <Center> root — centers the Card
+ *     └─ [data-slot="auth-form"]                     <Card variant="elevated">
+ *         └─ [data-slot="auth-form-form"]           <form> (Base UI Form), aria-labelledby title
+ *             ├─ header  ([data-slot="auth-form-title"] / __description)
+ *             ├─ [data-slot="auth-form-error"]      danger Banner (live region)
+ *             ├─ [data-slot="auth-form-fields"]   <fieldset> wrapping the Field rows
+ *             ├─ [data-slot="auth-form-submit"]     full-width submit Button
+ *             ├─ social  ([data-slot="auth-form-or"] + __social-actions)
+ *             └─ [data-slot="auth-form-footer"]     mode-switch prompt + link
  *
  * The block paints no surface of its own beyond what Card provides; the
  * Center only arranges. Logical properties throughout so it flips under

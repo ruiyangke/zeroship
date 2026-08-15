@@ -2,14 +2,14 @@
  * FormSection — governed settings/form section.
  *
  * Anatomy:
- *   .zs-form-section                     <section> root (aria-labelledby title)
- *     ├─ .zs-form-section__header        <div> — title + description region
- *     │   ├─ .zs-form-section__title       <h3> — relevelable heading
- *     │   └─ .zs-form-section__description <p>  — muted supporting copy
- *     ├─ .zs-form-section__body          <div> — vertical stack of fields
- *     └─ .zs-form-section__footer        <div> — separator + action row
- *         ├─ .zs-form-section__footer-divider  the hairline Separator
- *         └─ .zs-form-section__actions   <div> — right-aligned Cluster of Buttons
+ *   [data-slot="form-section"]                     <section> root (aria-labelledby title)
+ *     ├─ [data-slot="form-section-header"]        <div> — title + description region
+ *     │   ├─ [data-slot="form-section-title"]       <h3> — relevelable heading
+ *     │   └─ [data-slot="form-section-description"] <p>  — muted supporting copy
+ *     ├─ [data-slot="form-section-body"]          <div> — vertical stack of fields
+ *     └─ [data-slot="form-section-footer"]        <div> — separator + action row
+ *         ├─ [data-slot="form-section-footer-divider"]  the hairline Separator
+ *         └─ [data-slot="form-section-actions"]   <div> — right-aligned Cluster of Buttons
  *
  * The section paints NO surface of its own — it sits inside whatever
  * panel/Card/page region the consumer provides. It only arranges the

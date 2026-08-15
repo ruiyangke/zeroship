@@ -2,12 +2,12 @@
  * EmptyState — "nothing here yet" panel.
  *
  * Anatomy:
- *   .zs-empty-state                  — outer region (paints nothing itself)
+ *   [data-slot="empty-state"]                  — outer region (paints nothing itself)
  *     └─ Center → Stack column        — both-axes centering + governed gap
- *         ├─ .zs-empty-state__icon         — decorative glyph (aria-hidden)
- *         ├─ .zs-empty-state__title        — heading (h2 by default)
- *         ├─ .zs-empty-state__description  — muted supporting copy
- *         └─ .zs-empty-state__actions      — action row (e.g. a Button)
+ *         ├─ [data-slot="empty-state-icon"]         — decorative glyph (aria-hidden)
+ *         ├─ [data-slot="empty-state-title"]        — heading (h2 by default)
+ *         ├─ [data-slot="empty-state-description"]  — muted supporting copy
+ *         └─ [data-slot="empty-state-actions"]      — action row (e.g. a Button)
  *
  * The centering + gap come from the composed Center/Stack primitives;
  * this file only paints the parts and sets the generous padding.

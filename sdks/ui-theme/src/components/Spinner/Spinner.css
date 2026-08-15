@@ -2,8 +2,8 @@
  * Spinner — standalone activity indicator.
  *
  * Anatomy:
- *   .zs-spinner            — role="status" inline-flex host
- *     └─ .zs-spinner__ring  — the rotating arc (aria-hidden)
+ *   [data-slot="spinner"]            — role="status" inline-flex host
+ *     └─ [data-slot="spinner-ring"]  — the rotating arc (aria-hidden)
  *
  * Modifier classes (size):
  *   --sm | --md (default) | --lg

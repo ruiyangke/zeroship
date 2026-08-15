@@ -2,14 +2,14 @@
  * Breadcrumbs — navigational trail.
  *
  * Anatomy:
- *   .zs-breadcrumbs               — root <nav aria-label="Breadcrumb">
- *     └─ .zs-breadcrumbs__list    — the <ol> (inline wrapping row)
- *        ├─ .zs-breadcrumbs__item        — <li> crumb wrapper
- *        │   ├─ .zs-breadcrumbs__link    — <a> (or asChild) crumb link
- *        │   ├─ .zs-breadcrumbs__page    — <span aria-current="page">
- *        │   ├─ .zs-breadcrumbs__text    — plain (non-link, non-current)
- *        │   └─ .zs-breadcrumbs__ellipsis — collapse <button>
- *        └─ .zs-breadcrumbs__separator   — <li aria-hidden> glyph
+ *   [data-slot="breadcrumbs"]               — root <nav aria-label="Breadcrumb">
+ *     └─ [data-slot="breadcrumbs-list"]    — the <ol> (inline wrapping row)
+ *        ├─ [data-slot="breadcrumbs-item"]        — <li> crumb wrapper
+ *        │   ├─ [data-slot="breadcrumbs-link"]    — <a> (or asChild) crumb link
+ *        │   ├─ [data-slot="breadcrumbs-page"]    — <span aria-current="page">
+ *        │   ├─ [data-slot="breadcrumbs-text"]    — plain (non-link, non-current)
+ *        │   └─ [data-slot="breadcrumbs-ellipsis"] — collapse <button>
+ *        └─ [data-slot="breadcrumbs-separator"]   — <li aria-hidden> glyph
  *
  * Colors (live crystal set):
  *   link text          --zeroship-label

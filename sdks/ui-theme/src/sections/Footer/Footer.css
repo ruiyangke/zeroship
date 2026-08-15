@@ -2,21 +2,21 @@
  * Footer — the site footer band (contentinfo landmark).
  *
  * Anatomy:
- *   .zs-footer              — the <footer> landmark; generous vertical
+ *   [data-slot="footer"]              — the <footer> landmark; generous vertical
  *                             padding, NO heavy background (composable)
- *   .zs-footer__top         — the top row: brand block beside link columns
- *   .zs-footer__brand-block — the brand + description stack
- *   .zs-footer__brand       — the brand / wordmark slot
- *   .zs-footer__description  — short blurb under the brand (muted)
- *   .zs-footer__columns      — the link-group Grid
- *   .zs-footer__column       — each link group
- *   .zs-footer__column-title — the column <h3>
- *   .zs-footer__links        — the column's <ul> of links
- *   .zs-footer__link         — a single <a> (house link treatment)
- *   .zs-footer__separator    — the composed Separator above the bottom bar
- *   .zs-footer__bottom       — the bottom bar (copyright + actions)
- *   .zs-footer__copyright    — bottom-bar inline-start
- *   .zs-footer__actions      — bottom-bar inline-end (social / secondary slot)
+ *   [data-slot="footer-top"]         — the top row: brand block beside link columns
+ *   [data-slot="footer-brand-block"] — the brand + description stack
+ *   [data-slot="footer-brand"]       — the brand / wordmark slot
+ *   [data-slot="footer-description"]  — short blurb under the brand (muted)
+ *   [data-slot="footer-columns"]      — the link-group Grid
+ *   [data-slot="footer-column"]       — each link group
+ *   [data-slot="footer-column-title"] — the column <h3>
+ *   [data-slot="footer-links"]        — the column's <ul> of links
+ *   [data-slot="footer-link"]         — a single <a> (house link treatment)
+ *   [data-slot="footer-footnotes-separator"], [data-slot="footer-separator"]    — the composed Separator above the bottom bar
+ *   [data-slot="footer-bottom"]       — the bottom bar (copyright + actions)
+ *   [data-slot="footer-copyright"]    — bottom-bar inline-start
+ *   [data-slot="footer-actions"]      — bottom-bar inline-end (social / secondary slot)
  *
  * Layout discipline:
  *   - The section sets only its vertical rhythm; the composed Container owns
@@ -177,9 +177,9 @@
 
 /* House link treatment: muted by default, label ink on hover/focus, with a
    token-driven focus ring so keyboard users get a visible target.
-   Applied via the DESCENDANT selector `.zs-footer__links a` so BOTH authoring
+   Applied via the DESCENDANT selector `[data-slot="footer-links"] a` so BOTH authoring
    modes render identically: the ergonomic `links`-array path (which stamps the
-   `.zs-footer__link` class on each `<a>`) AND the compound `<Footer.Column>`
+   `[data-slot="footer-link"]` class on each `<a>`) AND the compound `<Footer.Column>`
    raw-children path (where the consumer supplies bare `<a>` anchors with no
    house class). Without this, raw children fell back to browser-default blue
    underlined anchors — inconsistent with the gray array links. */

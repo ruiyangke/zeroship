@@ -2,17 +2,17 @@
  * Select — popover-anchored dropdown from a fixed option list.
  *
  * Anatomy:
- *   .zs-select-trigger              — Base UI's <button>, reads like Input
- *     ├─ .zs-select-trigger__value  — selected value or placeholder
- *     └─ .zs-select-trigger__icon   — chevron
- *   .zs-select-positioner           — Floating UI anchored layer
- *     └─ .zs-select-popup           — opaque sheet with --zeroship-shadow-dialog
- *          └─ .zs-select-list       — vertical option list
- *               ├─ .zs-select-group + .zs-select-group-label
- *               ├─ .zs-select-item
- *               │   ├─ .zs-select-item__indicator (checkmark gutter)
- *               │   └─ .zs-select-item__text
- *               └─ .zs-select-separator
+ *   [data-slot="select-trigger"]              — Base UI's <button>, reads like Input
+ *     ├─ [data-slot="select-trigger-value"]  — selected value or placeholder
+ *     └─ [data-slot="select-trigger-icon"]   — chevron
+ *   [data-slot="select-positioner"]           — Floating UI anchored layer
+ *     └─ [data-slot="select-popup"]           — opaque sheet with --zeroship-shadow-dialog
+ *          └─ [data-slot="select-list"]       — vertical option list
+ *               ├─ [data-slot="select-group"] + [data-slot="select-group-label"]
+ *               ├─ [data-slot="select-item"]
+ *               │   ├─ [data-slot="select-item-indicator"] (checkmark gutter)
+ *               │   └─ [data-slot="select-item-text"]
+ *               └─ [data-slot="select-separator"]
  *
  * Modifier classes:
  *   trigger:  --default | --outline · --sm | --md | --lg
@@ -30,7 +30,7 @@
  * Forced-colors: every state selector below is mirrored inside
  * `@media (forced-colors: active)` per the Slice-5 lesson — pre-mirror
  * the `:hover` / `[data-highlighted]` selectors had higher specificity
- * than a bare `.zs-select-item` reset and the high-contrast mode would
+ * than a bare `[data-slot="select-item"]` reset and the high-contrast mode would
  * leak through the oklch token tints.
  *
  * Backdrop: NO Backdrop primitive — Select is a popover, not a modal.
@@ -393,7 +393,7 @@
  * Mirror every state selector that paints background / color / box-shadow
  * inside the forced-colors media so the system palette wins over the
  * oklch token mixes. Slice-5 lesson: the per-state selectors outrank a
- * bare `.zs-select-item` reset block, so we re-emit each rule at equal
+ * bare `[data-slot="select-item"]` reset block, so we re-emit each rule at equal
  * (or higher) specificity. Pay particular attention to `:hover` rules
  * gated by `:not([disabled])` — those carry higher specificity than a
  * single-class trigger reset, so they MUST be mirrored at equal

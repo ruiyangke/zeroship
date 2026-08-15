@@ -2,10 +2,10 @@
  * PreviewCard — hover-anchored rich preview surface.
  *
  * Anatomy:
- *   .zs-preview-card-backdrop      optional scrim layer (opt-in only).
- *   .zs-preview-card-positioner    Base UI's Floating UI anchored layer
- *     └─ .zs-preview-card-popup    opaque sheet with --zeroship-shadow-popover
- *           ├─ .zs-preview-card-arrow      optional 16×8 SVG triangle
+ *   [data-slot="preview-card-backdrop"]      optional scrim layer (opt-in only).
+ *   [data-slot="preview-card-positioner"]    Base UI's Floating UI anchored layer
+ *     └─ [data-slot="preview-card-popup"]    opaque sheet with --zeroship-shadow-popover
+ *           ├─ [data-slot="preview-card-arrow"]      optional 16×8 SVG triangle
  *           └─ children                    free composition (img, h*, p, …)
  *
  * Base UI emits `data-starting-style` / `data-ending-style` on Popup
@@ -256,7 +256,7 @@
   color: var(--zeroship-surface);
   /* Sit behind the popup chrome so the rectangle of the arrow wrapper
    * doesn't paint over the popup body. `isolation: isolate` on
-   * .zs-preview-card-popup establishes the stacking context. */
+   * [data-slot="preview-card-popup"] establishes the stacking context. */
   z-index: -1;
   filter: drop-shadow(
     0 var(--zeroship-selection-hairline) var(--zeroship-space-half)

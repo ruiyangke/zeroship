@@ -2,12 +2,12 @@
  * Slider — continuous range with thumb(s) and a filled indicator.
  *
  * Anatomy:
- *   .zs-slider                              — Root (display grid for label/value/track)
- *     ├─ .zs-slider__value                  — optional numeric badge (output)
- *     └─ .zs-slider__control                — interactive area (pointer events)
- *         └─ .zs-slider__track              — the rail
- *             ├─ .zs-slider__indicator      — the filled segment
- *             └─ .zs-slider__thumb (×1-N)   — the draggable
+ *   [data-slot="slider"]                              — Root (display grid for label/value/track)
+ *     ├─ [data-slot="slider-value"]                  — optional numeric badge (output)
+ *     └─ [data-slot="slider-control"]                — interactive area (pointer events)
+ *         └─ [data-slot="slider-track"]              — the rail
+ *             ├─ [data-slot="slider-indicator"]      — the filled segment
+ *             └─ [data-slot="slider-thumb"] (×1-N)   — the draggable
  *
  * Modifier classes:
  *   variant:     --default | --outline
@@ -242,7 +242,7 @@
 }
 
 /* Focus ring on the input nested inside the Thumb. Base UI renders
-   <input type="range"> inside .zs-slider__thumb; sighted focus is the
+   <input type="range"> inside [data-slot="slider-thumb"]; sighted focus is the
    ring on the knob itself. */
 [data-slot="slider-thumb"]:focus-within {
   box-shadow:
@@ -379,10 +379,10 @@
  *
  * Slice 5/6 lesson reapplied (Slice-7 review item 3): mirror every state
  * selector at EQUAL specificity so the system palette wins. The bare
- * `.zs-slider__track / __indicator / __thumb` resets are single-class —
- * variant rules (`.zs-slider--outline .zs-slider__thumb`) and
- * per-state-with-variant (`.zs-slider--outline[data-disabled]
- * .zs-slider__thumb`) above are higher-spec and would otherwise paint
+ * `[data-slot="slider-track"] / __indicator / __thumb` resets are single-class —
+ * variant rules (`[data-slot="slider"] [data-slot="slider-thumb"]`) and
+ * per-state-with-variant (`[data-slot="slider"][data-disabled]
+ * [data-slot="slider-thumb"]`) above are higher-spec and would otherwise paint
  * the accent-derived background through. The aria-wiring suite asserts
  * the thumb's computed background resolves to a system color
  * (Highlight) under forced-colors emulation, not an oklch token mix.
@@ -450,7 +450,7 @@
   }
   /* Outline-variant disabled — triple-spec (2 classes + 1 attribute) so
      mirror at equal spec or higher. Without this the
-     `.zs-slider--outline[data-disabled] .zs-slider__thumb` rule above
+     `[data-slot="slider"][data-disabled] [data-slot="slider-thumb"]` rule above
      re-paints with the accent-derived surface-raised background under
      forced-colors. */
   [data-slot="slider"][data-variant="outline"][data-disabled] [data-slot="slider-thumb"] {

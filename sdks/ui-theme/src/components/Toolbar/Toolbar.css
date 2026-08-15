@@ -2,10 +2,10 @@
  * Toolbar — `role="toolbar"` cluster.
  *
  * Anatomy:
- *   .zs-toolbar              flex row (or column) of controls
- *     ├─ .zs-toolbar-button  Toolbar.Button / Toolbar.Link items
- *     ├─ .zs-toolbar-input   Toolbar.Input items
- *     └─ .zs-toolbar-separator
+ *   [data-slot="toolbar"]              flex row (or column) of controls
+ *     ├─ [data-slot="toolbar-button"]  Toolbar.Button / Toolbar.Link items
+ *     ├─ [data-slot="toolbar-input"]   Toolbar.Input items
+ *     └─ [data-slot="toolbar-separator"]
  *
  * Visual rhythm:
  *   - Horizontal toolbars sit on a translucent fill so the cluster reads
@@ -158,7 +158,7 @@
  * Mirror EVERY interactive selector inside the media block at equal
  * specificity (matching the Slice 5 Toggle pattern). Without the
  * mirrors, the oklch hover/active fills above can outrank the bare
- * `.zs-toolbar-button` reset under high-contrast emulation. */
+ * `[data-slot="toolbar-button"]` reset under high-contrast emulation. */
 @media (forced-colors: active) {
   [data-slot="toolbar"] {
     background-color: Canvas;

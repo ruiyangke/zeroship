@@ -2,9 +2,9 @@
  * Form — submit + validation surface.
  *
  * Anatomy:
- *   .zs-form              the root <form> element (variant=default —
+ *   [data-slot="form-card"]              the root <form> element (variant=default —
  *                         no surface chrome; pure layout container).
- *   .zs-form--card        same root with an opaque surface + Card-style
+ *   [data-slot="form-card"]        same root with an opaque surface + Card-style
  *                         rim so the form can stand alone as a page-
  *                         level container without nesting inside Card.
  *

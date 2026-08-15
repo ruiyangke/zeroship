@@ -13,7 +13,7 @@
  * (e.g. AlertDialog's Action/Cancel buttons, which stamp `data-tone` for
  * their own intent styling) is NEVER matched — only true section bands are.
  * The shared
- * `.zs-section-eyebrow` class (defined at the foot of this sheet) is the
+ * `[data-slot="cta-eyebrow"], [data-slot="faq-eyebrow"], [data-slot="feature-grid-eyebrow"], [data-slot="hero-eyebrow"], [data-slot="section-header-eyebrow"], [data-slot="stats-band-eyebrow"]` class (defined at the foot of this sheet) is the
  * single cohesive eyebrow style applied across every section's lead-in
  * label, so the eyebrows read as ONE confident family rather than seven
  * near-duplicate one-offs.
@@ -39,7 +39,7 @@
  * The remap targets the section ink hooks via a SHARED selector list so the
  * accent treatment is keyed off `[data-section-band][data-tone="accent"]`
  * once rather than re-declared inside each section sheet. The shared eyebrow class
- * `.zs-section-eyebrow` (see the per-section sheets) is one of those hooks.
+ * `[data-slot="cta-eyebrow"], [data-slot="faq-eyebrow"], [data-slot="feature-grid-eyebrow"], [data-slot="hero-eyebrow"], [data-slot="section-header-eyebrow"], [data-slot="stats-band-eyebrow"]` (see the per-section sheets) is one of those hooks.
  *
  * forced-colors: an accent band cannot rely on the painted accent fill (it
  * drops out under a forced palette). The block re-pins the band to

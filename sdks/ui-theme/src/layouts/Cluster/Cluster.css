@@ -2,7 +2,7 @@
  * Cluster — wrapping inline group.
  *
  * Anatomy:
- *   .zs-cluster   — the wrapping flex row
+ *   [data-slot="cluster"]   — the wrapping flex row
  *
  * Driven by inline custom properties set from props:
  *   --cluster-gap       --zeroship-space-*    (default --zeroship-space-2)

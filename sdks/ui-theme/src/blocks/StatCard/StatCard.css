@@ -5,11 +5,11 @@
  * Card's — StatCard adds NO surface paint of its own. These rules only
  * style the three interior rows StatCard injects:
  *
- *   .zs-stat-card__head      label row (label + optional decorative icon)
- *     ├─ .zs-stat-card__label    metric name — secondary label, small
- *     └─ .zs-stat-card__icon     decorative glyph, aria-hidden
- *   .zs-stat-card__value     the metric value — large title scale
- *   .zs-stat-card__delta     the change row — glyph + value, tinted by
+ *   [data-slot="stat-card-head"]      label row (label + optional decorative icon)
+ *     ├─ [data-slot="stat-card-label"]    metric name — secondary label, small
+ *     └─ [data-slot="stat-card-icon"]     decorative glyph, aria-hidden
+ *   [data-slot="stat-card-value"]     the metric value — large title scale
+ *   [data-slot="stat-card-delta"]     the change row — glyph + value, tinted by
  *                            [data-direction] (up/down/flat)
  *
  * Card's flex-column already governs the gap between these rows, so we

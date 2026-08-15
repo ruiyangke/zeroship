@@ -2,12 +2,12 @@
  * Meter — static gauge bar.
  *
  * Anatomy:
- *   .zs-meter                        — Root row (grid: header + track)
- *     ├─ .zs-meter__header           — optional label + value row
- *     │   ├─ .zs-meter__label        — inline-start label
- *     │   └─ .zs-meter__value        — inline-end numeric badge
- *     └─ .zs-meter__track            — the rail
- *         └─ .zs-meter__indicator    — the filled segment
+ *   [data-slot="meter"]                        — Root row (grid: header + track)
+ *     ├─ [data-slot="meter-header"]           — optional label + value row
+ *     │   ├─ [data-slot="meter-label"]        — inline-start label
+ *     │   └─ [data-slot="meter-value"]        — inline-end numeric badge
+ *     └─ [data-slot="meter-track"]            — the rail
+ *         └─ [data-slot="meter-indicator"]    — the filled segment
  *
  * Modifier classes:
  *   intent: --neutral | --success | --warning | --danger

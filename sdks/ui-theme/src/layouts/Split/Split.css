@@ -2,9 +2,9 @@
  * Split — fixed rail + fluid main, compound primitive.
  *
  * Anatomy:
- *   .zs-split          — the flex row (rail + main)
- *   .zs-split__side    — the fixed-width rail
- *   .zs-split__main    — the fluid main region
+ *   [data-slot="split"]          — the flex row (rail + main)
+ *   [data-slot="split-side"]    — the fixed-width rail
+ *   [data-slot="split-main"]    — the fluid main region
  *
  * Driven by inline custom properties / data-attributes set from props:
  *   --split-side-width   length          (default 16rem)

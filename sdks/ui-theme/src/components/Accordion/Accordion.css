@@ -2,14 +2,14 @@
  * Accordion — Root + Item + Header + Trigger + Panel.
  *
  * Anatomy:
- *   .zs-accordion                    — root container; data-orientation
- *     ├─ .zs-accordion-item          — Item wrapper (separator paint)
- *     │   ├─ .zs-accordion-header    — <h3> wrapper around the trigger
- *     │   │   └─ .zs-accordion-trigger
- *     │   │       ├─ .zs-accordion-trigger-label
- *     │   │       └─ .zs-accordion-trigger-chevron
- *     │   └─ .zs-accordion-panel     — Panel; height-animated container
- *     │       └─ .zs-accordion-panel-inner — content padding lives here
+ *   [data-slot="accordion"]                    — root container; data-orientation
+ *     ├─ [data-slot="accordion-item"]          — Item wrapper (separator paint)
+ *     │   ├─ [data-slot="accordion-header"]    — <h3> wrapper around the trigger
+ *     │   │   └─ [data-slot="accordion-trigger"]
+ *     │   │       ├─ [data-slot="accordion-trigger-label"]
+ *     │   │       └─ [data-slot="accordion-trigger-chevron"]
+ *     │   └─ [data-slot="accordion-panel"]     — Panel; height-animated container
+ *     │       └─ [data-slot="accordion-panel-inner"] — content padding lives here
  *
  * The Panel uses Base UI's `--accordion-panel-height` custom property
  * (emitted on panels carrying `data-open` / `data-starting-style` /
@@ -220,7 +220,7 @@
  * transition (the flip still happens, just instantly). */
 /* The chevron is the governed `Icon` (a Lucide chevron-down svg) carrying
    `zs-icon` + `zs-icon--md` alongside this class. We scope the sizing
-   under the trigger so this rule (0,2,0) outranks `.zs-icon--md` (0,1,0)
+   under the trigger so this rule (0,2,0) outranks `[data-slot="icon"]` (0,1,0)
    regardless of stylesheet concat order — the chevron stays at the
    accordion token size, not the default Icon md box. */
 [data-slot="accordion-trigger"] [data-slot="accordion-trigger-chevron"] {
@@ -269,7 +269,7 @@
  * Per-orientation scoping is load-bearing: the vertical rules only
  * touch `block-size`, and the horizontal rules only touch
  * `inline-size`. An earlier shape had a generic
- * `.zs-accordion-panel[data-starting-style], [data-ending-style] {
+ * `[data-slot="accordion-panel"][data-starting-style], [data-ending-style] {
  * block-size: 0 }` rule that ran on ALL panels regardless of
  * orientation — and there was no later horizontal override for
  * `block-size`, so horizontal panels collapsed on the BLOCK axis

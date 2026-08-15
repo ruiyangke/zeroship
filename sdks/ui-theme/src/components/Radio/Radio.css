@@ -2,9 +2,9 @@
  * Radio + RadioGroup — mutually-exclusive choice primitive.
  *
  * Anatomy:
- *   .zs-radio-group           — Base UI's <div> with the group context
- *     ├─ .zs-radio            — visible chip (Base UI's <span>, focusable)
- *     │   └─ .zs-radio__indicator — inner dot (Base UI Indicator)
+ *   [data-slot="radio-group"]           — Base UI's <div> with the group context
+ *     ├─ [data-slot="radio"]            — visible chip (Base UI's <span>, focusable)
+ *     │   └─ [data-slot="radio-indicator"] — inner dot (Base UI Indicator)
  *     │  (and a hidden <input> Base UI emits beside the chip)
  *     └─ … repeated …
  *
@@ -35,7 +35,7 @@
  *      the chip — a bare chip still meets ≥ 1.75rem / 2.75rem
  *      (slice-4 review fix item 3).
  *
- *   5. Focus ring lives on the chip ROOT (`.zs-radio:focus-visible`)
+ *   5. Focus ring lives on the chip ROOT (`[data-slot="radio"]:focus-visible`)
  *      so the canonical Field pattern paints a ring without needing
  *      the in-component label-row wrapper (slice-4 review fix item 2).
  *
@@ -249,7 +249,7 @@
 
 /* ─── forced-colors ─────────────────────────────────────────────────── *
  *
- * Because `.zs-radio` carries `forced-color-adjust: none` (the chip is a
+ * Because `[data-slot="radio"]` carries `forced-color-adjust: none` (the chip is a
  * non-native surface, not a `<input type=radio>`), browsers will NOT
  * auto-substitute system colors. Every selector that paints a token
  * outside this block (hover, checked, disabled, readonly + combinations)
@@ -257,7 +257,7 @@
  * Windows High Contrast / forced-colors users see system colors, not
  * brand tokens. Slice-8 review red #1: the pre-fix block only mirrored
  * base/checked/disabled selectors — the hover + readonly + readonly-
- * checked rules outranked the unconditional `.zs-radio` reset on
+ * checked rules outranked the unconditional `[data-slot="radio"]` reset on
  * specificity and leaked `--zeroship-*` tokens through. */
 @media (forced-colors: active) {
   [data-slot="radio"] {

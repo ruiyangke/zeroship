@@ -13,7 +13,7 @@
 
 /* The autocomplete item drops the indicator gutter — content gets the
  * full inline width. We override the grid template defined by
- * .zs-combobox-item (which reserves a 1.25rem column for the indicator)
+ * [data-slot="autocomplete-item"], [data-slot="combobox-item"] (which reserves a 1.25rem column for the indicator)
  * so single-column rows stretch comfortably. */
 [data-slot="autocomplete-item"] {
   grid-template-columns: 1fr;
@@ -38,11 +38,11 @@
 
 /* Forced-colors mirror — the autocomplete-specific override needs to
  * stay equal-specificity with the Combobox forced-colors rule that
- * paints items. Without re-emitting, the bare `.zs-combobox-item`
+ * paints items. Without re-emitting, the bare `[data-slot="autocomplete-item"], [data-slot="combobox-item"]`
  * rule under forced-colors would stay in place (which is fine — the
  * grid-template-columns we changed above is layout, not paint).
  *
- * The hover-state mirror for `.zs-autocomplete-input-group` is also
+ * The hover-state mirror for `[data-slot="autocomplete-input-group"]` is also
  * defensive: an autocomplete-specific selector that escaped the
  * generic combobox hover mirror would leak oklch tints under
  * high-contrast. Re-declare here so any future divergence stays

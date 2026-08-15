@@ -2,12 +2,12 @@
  * Popover — anchored panel.
  *
  * Anatomy:
- *   .zs-popover-backdrop      optional scrim layer (opt-in only).
- *   .zs-popover-positioner    Base UI's Floating UI anchored layer
- *     └─ .zs-popover-popup    opaque sheet with --zeroship-shadow-dialog
- *           ├─ .zs-popover-arrow         optional 16x8 SVG triangle
- *           ├─ .zs-popover__title        Title heading
- *           ├─ .zs-popover__description  Description paragraph
+ *   [data-slot="popover-backdrop"]      optional scrim layer (opt-in only).
+ *   [data-slot="popover-positioner"]    Base UI's Floating UI anchored layer
+ *     └─ [data-slot="popover-popup"]    opaque sheet with --zeroship-shadow-dialog
+ *           ├─ [data-slot="popover-arrow"]         optional 16x8 SVG triangle
+ *           ├─ [data-slot="popover-title"]        Title heading
+ *           ├─ [data-slot="popover-description"]  Description paragraph
  *           └─ children                  user content + Close
  *
  * Base UI emits `data-starting-style` / `data-ending-style` on Popup
@@ -191,7 +191,7 @@
    * (Floating UI positions it inside the popup bounding box) overlaps
    * the title text and reads as a triangle stamped onto the content
    * (Slice-10 visual review item 1). `isolation: isolate` on
-   * `.zs-popover-popup` already establishes the stacking context, so
+   * `[data-slot="popover-popup"]` already establishes the stacking context, so
    * the -1 only sinks the arrow below sibling content — it doesn't
    * escape the popup. */
   z-index: -1;

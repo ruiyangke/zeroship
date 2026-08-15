@@ -2,12 +2,12 @@
  * Field — form-frame.
  *
  * Anatomy:
- *   .zs-field                  — the root (Base UI Field.Root → <div>)
- *     ├─ .zs-field__label      — Base UI Field.Label → <label>
- *     │   └─ .zs-field__required (or .zs-field__required--fallback)
+ *   [data-slot="field"]                  — the root (Base UI Field.Root → <div>)
+ *     ├─ [data-slot="field-label"]      — Base UI Field.Label → <label>
+ *     │   └─ [data-slot="field-required"], [data-slot="field-required-fallback"] (or [data-slot="field-required-fallback"])
  *     ├─ <Input>               — see Input.css
- *     ├─ .zs-field__description — Base UI Field.Description → <p>
- *     └─ .zs-field__error      — Base UI Field.Error → <div>
+ *     ├─ [data-slot="field-description"] — Base UI Field.Description → <p>
+ *     └─ [data-slot="field-error"]      — Base UI Field.Error → <div>
  *
  * Modifier classes (one of each axis):
  *   orientation:  --vertical | --horizontal

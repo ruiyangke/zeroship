@@ -3,11 +3,11 @@
  * visible label (Legend) and a shared `disabled` cascade.
  *
  * Anatomy:
- *   .zs-fieldset             the root <fieldset> element (Base UI
+ *   [data-slot="fieldset"]             the root <fieldset> element (Base UI
  *                             auto-wires aria-labelledby to the legend's
  *                             id; the legend itself can sit anywhere
  *                             inside the fieldset).
- *     └─ .zs-fieldset__legend  the visible group label (Base UI
+ *     └─ [data-slot="fieldset-legend"]  the visible group label (Base UI
  *                              renders a <div>, not a <legend> — see
  *                              Fieldset.tsx header for the rationale).
  *
@@ -104,7 +104,7 @@
  * disabled cascade already greys every interactive descendant; the
  * legend keeping label-secondary reads as "section is disabled"
  * without the AA shortfall. */
-/* Descendant matcher — not `> .zs-fieldset__legend`. The Fieldset
+/* Descendant matcher — not `> [data-slot="fieldset-legend"]`. The Fieldset
  * contract (Fieldset.tsx file-header) says the Legend can sit
  * anywhere inside the fieldset, including wrapped in a layout div
  * (e.g. for CustomLegendPosition / Form-card layouts). A

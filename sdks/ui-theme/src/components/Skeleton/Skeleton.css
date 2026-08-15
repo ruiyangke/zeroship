@@ -2,11 +2,11 @@
  * Skeleton — loading placeholder.
  *
  * Anatomy:
- *   .zs-skeleton                  — a single placeholder block
+ *   [data-slot="skeleton"], [data-slot="skeleton-line"]                  — a single placeholder block
  *     --text   : text-line bar (block-size keyed to a body line)
  *     --rect   : rectangle, --zeroship-radius-2 corners
  *     --circle : full-radius circle, square aspect
- *   .zs-skeleton-lines            — container for multi-line text (N bars)
+ *   [data-slot="skeleton"]            — container for multi-line text (N bars)
  *
  * Paint: a base fill (--zeroship-fill-tertiary) with a diagonal shimmer
  * sweep painted in --zeroship-fill-quaternary via a moving gradient. The base

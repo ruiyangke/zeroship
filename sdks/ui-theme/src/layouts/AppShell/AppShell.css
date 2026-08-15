@@ -2,12 +2,12 @@
  * AppShell — application frame composition.
  *
  * Anatomy:
- *   .zs-app-shell            — the full-height flex column (Header / body / Footer)
- *   .zs-app-shell__header    — top band (<header>): raised surface + bottom hairline
- *   .zs-app-shell__body      — the body row (a `Split`: Sidebar rail + Main)
- *   .zs-app-shell__sidebar   — the fixed-width rail (<aside> / <nav>)
- *   .zs-app-shell__main      — the fluid main region (<main>)
- *   .zs-app-shell__footer    — optional bottom band (<footer>)
+ *   [data-slot="app-shell"]            — the full-height flex column (Header / body / Footer)
+ *   [data-slot="app-shell-header"]    — top band (<header>): raised surface + bottom hairline
+ *   [data-slot="app-shell-body"]      — the body row (a `Split`: Sidebar rail + Main)
+ *   [data-slot="app-shell-sidebar"]   — the fixed-width rail (<aside> / <nav>)
+ *   [data-slot="app-shell-main"]      — the fluid main region (<main>)
+ *   [data-slot="app-shell-footer"]    — optional bottom band (<footer>)
  *
  * Driven by inline custom properties / data-attributes set from props:
  *   --app-shell-sidebar-width   length (default 16rem) — rail inline-size

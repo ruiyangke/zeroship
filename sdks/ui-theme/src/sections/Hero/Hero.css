@@ -2,19 +2,19 @@
  * Hero — top-of-page marketing band.
  *
  * Anatomy:
- *   .zs-hero                  — the <section>; generous vertical padding,
+ *   [data-slot="hero"]                  — the <section>; generous vertical padding,
  *                               NO heavy background by default (composable)
- *   .zs-hero__body            — the band body inside the Container; single
+ *   [data-slot="hero-body"]            — the band body inside the Container; single
  *                               column or a two-column split (data-layout)
- *   .zs-hero__text            — the text column (composed Stack):
+ *   [data-slot="hero-text"]            — the text column (composed Stack):
  *                               eyebrow → title → description → actions
- *   .zs-hero__eyebrow         — small label region above the headline
- *   .zs-hero__title           — the <h1> headline (relevelable via asChild)
- *   .zs-hero__description      — muted supporting <p> on a reading measure
- *   .zs-hero__actions          — CTA Cluster (composed); aligns to the band
- *   .zs-hero__media-column     — the media grid track (holds every media
+ *   [data-slot="hero-eyebrow"]         — small label region above the headline
+ *   [data-slot="hero-title"]           — the <h1> headline (relevelable via asChild)
+ *   [data-slot="hero-description"]      — muted supporting <p> on a reading measure
+ *   [data-slot="hero-actions"]          — CTA Cluster (composed); aligns to the band
+ *   [data-slot="hero-media-column"]     — the media grid track (holds every media
  *                               source, stacked in document order)
- *   .zs-hero__media            — each optional media source (decorative wrapper)
+ *   [data-slot="hero-media"]            — each optional media source (decorative wrapper)
  *
  * Layout discipline:
  *   - The section sets only its vertical rhythm (block padding) and lets
@@ -139,9 +139,9 @@
 
 /* ─── Eyebrow — small label above the headline ───────────────────────────── */
 /* The eyebrow's font, color, and pill chrome are owned by the shared
-   `.zs-section-eyebrow` treatment in `sections/_section-tone.css`, so every
+   `[data-slot="cta-eyebrow"], [data-slot="faq-eyebrow"], [data-slot="feature-grid-eyebrow"], [data-slot="hero-eyebrow"], [data-slot="section-header-eyebrow"], [data-slot="stats-band-eyebrow"]` treatment in `sections/_section-tone.css`, so every
    section's lead-in label reads as ONE family. Hero adds no bespoke type or
-   color of its own; the `.zs-hero__eyebrow` hook is kept only as a stable
+   color of its own; the `[data-slot="hero-eyebrow"]` hook is kept only as a stable
    per-section target (and for any future Hero-specific rhythm). */
 
 /* ─── Title — the page headline ──────────────────────────────────────────── */

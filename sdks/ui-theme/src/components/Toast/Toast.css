@@ -1,12 +1,12 @@
 /*
  * Toast — transient notification anatomy.
  *
- *   .zs-toast-viewport             fixed positioning, holds the stack
- *     └─ .zs-toast-root            single toast surface (raised + shadow)
- *           ├─ .zs-toast-title     headline (h2)
- *           ├─ .zs-toast-description supplementary text (p)
- *           ├─ .zs-toast-action    inline action button
- *           └─ .zs-toast-close     dismiss button
+ *   [data-slot="toast-viewport"]             fixed positioning, holds the stack
+ *     └─ [data-slot="toast-root"]            single toast surface (raised + shadow)
+ *           ├─ [data-slot="toast-title"]     headline (h2)
+ *           ├─ [data-slot="toast-description"] supplementary text (p)
+ *           ├─ [data-slot="toast-action"]    inline action button
+ *           └─ [data-slot="toast-close"]     dismiss button
  *
  * Surface — raised translucent panel (`--zeroship-surface-raised`) over a
  * `--zeroship-shadow-popover` elevation. A `box-shadow inset` hairline carries
@@ -58,7 +58,7 @@
 [data-slot="toast-viewport"] {
   position: fixed;
   /* Toasts stack above dialogs but below tooltips (matches
-   * .zs-tooltip-positioner's `--zeroship-z-modal + 20` ceiling). */
+   * [data-slot="tooltip-positioner"]'s `--zeroship-z-modal + 20` ceiling). */
   z-index: calc(var(--zeroship-z-modal) + 10);
   outline: none;
   /* The container is a passive label region — clicks fall through to

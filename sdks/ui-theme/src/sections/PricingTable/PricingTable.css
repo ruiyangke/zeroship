@@ -2,30 +2,30 @@
  * PricingTable — the monetization band.
  *
  * Anatomy:
- *   .zs-pricing                — the <section>; generous vertical padding,
+ *   [data-slot="pricing-table"]                — the <section>; generous vertical padding,
  *                                NO heavy background (composable — the
  *                                consumer paints the page backdrop)
- *   .zs-pricing__lead          — optional centered title + description band
- *   .zs-pricing__title         — the optional section lead-in <h2>
- *   .zs-pricing__lead-description — muted lead-in <p>
- *   .zs-pricing__grid          — the responsive Grid of tier cards
- *   .zs-pricing__tier          — each tier Card (relabels Card's "card");
+ *   [data-slot="pricing-table-lead"]          — optional centered title + description band
+ *   [data-slot="pricing-table-title"]         — the optional section lead-in <h2>
+ *   [data-slot="pricing-lead-description"] — muted lead-in <p>
+ *   [data-slot="pricing-table-grid"]          — the responsive Grid of tier cards
+ *   [data-slot="pricing-tier"]          — each tier Card (relabels Card's "card");
  *                                a column flexbox so the CTA pins to bottom
- *   .zs-pricing__header        — badge + name + price + description region
- *   .zs-pricing__badge         — the featured "Most popular" badge row
- *   .zs-pricing__name          — the tier name heading
- *   .zs-pricing__price         — the price line (amount + muted period)
- *   .zs-pricing__amount        — the price amount (prominent type)
- *   .zs-pricing__period        — the period suffix (muted)
- *   .zs-pricing__description    — one-line positioning copy
- *   .zs-pricing__divider        — the Separator between header + features
- *   .zs-pricing__features       — the feature <ul>; GROWS so the CTA pins
- *   .zs-pricing__feature        — each feature <li> (icon + label + note)
- *   .zs-pricing__feature-icon   — the Check / Minus inclusion icon
- *   .zs-pricing__feature-label  — the feature text
- *   .zs-pricing__feature-note   — optional muted trailing note
- *   .zs-pricing__cta            — the trailing CTA row (pinned to bottom)
- *   .zs-pricing__cta-button     — the default CTA Button (full-width)
+ *   [data-slot="pricing-tier-header"]        — badge + name + price + description region
+ *   [data-slot="pricing-badge"]         — the featured "Most popular" badge row
+ *   [data-slot="pricing-name"]          — the tier name heading
+ *   [data-slot="pricing-price"]         — the price line (amount + muted period)
+ *   [data-slot="pricing-amount"]        — the price amount (prominent type)
+ *   [data-slot="pricing-period"]        — the period suffix (muted)
+ *   [data-slot="pricing-description"]    — one-line positioning copy
+ *   [data-slot="pricing-divider"]        — the Separator between header + features
+ *   [data-slot="pricing-features"]       — the feature <ul>; GROWS so the CTA pins
+ *   [data-slot="pricing-feature"]        — each feature <li> (icon + label + note)
+ *   [data-slot="pricing-feature-icon"]   — the Check / Minus inclusion icon
+ *   [data-slot="pricing-feature-label"]  — the feature text
+ *   [data-slot="pricing-feature-note"]   — optional muted trailing note
+ *   [data-slot="pricing-cta"]            — the trailing CTA row (pinned to bottom)
+ *   [data-slot="pricing-cta-button"]     — the default CTA Button (full-width)
  *
  * Layout discipline:
  *   - The section sets only its vertical rhythm; the composed Container

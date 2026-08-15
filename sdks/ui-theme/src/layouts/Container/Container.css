@@ -2,7 +2,7 @@
  * Container — the page-width authority.
  *
  * Anatomy:
- *   .zs-container   — the constrained, centered content column
+ *   [data-slot="container"]   — the constrained, centered content column
  *
  * Driven by inline custom properties set from props:
  *   --container-max-width       --zeroship-container-* | none  (default lg token)

@@ -2,14 +2,14 @@
  * Banner — inline page-level message.
  *
  * Anatomy:
- *   .zs-banner                    opaque tinted shell (per intent)
- *     └─ .zs-banner__row          row Stack: icon + text column + dismiss
- *         ├─ .zs-banner__icon        intent glyph, tinted, aria-hidden
- *         ├─ .zs-banner__text        Stack: title / description / parts
- *         │   ├─ .zs-banner__title       headline
- *         │   ├─ .zs-banner__description supporting copy
- *         │   └─ .zs-banner__actions     action row
- *         └─ .zs-banner__dismiss      real <button aria-label="Dismiss">
+ *   [data-slot="banner"]                    opaque tinted shell (per intent)
+ *     └─ [data-slot="banner-row"]          row Stack: icon + text column + dismiss
+ *         ├─ [data-slot="banner-icon"]        intent glyph, tinted, aria-hidden
+ *         ├─ [data-slot="banner-text"]        Stack: title / description / parts
+ *         │   ├─ [data-slot="banner-title"]       headline
+ *         │   ├─ [data-slot="banner-description"] supporting copy
+ *         │   └─ [data-slot="banner-actions"]     action row
+ *         └─ [data-slot="banner-dismiss"]      real <button aria-label="Dismiss">
  *
  * Glass / axe-contrast invariant: the shell paints an OPAQUE tinted
  * background — the intent color blended INTO the opaque `--zeroship-surface`
@@ -87,7 +87,7 @@
 
 /* The glyph is a Lucide icon (rendered as an <svg> by the Icon primitive);
    this descendant rule still matches and keeps the prior 1em footprint
-   (the .zs-icon--md size class loses on specificity to this class+element
+   (the [data-slot="icon"][data-size="md"] size rule loses on specificity to this class+element
    selector). Lucide glyphs are fully stroked in currentColor — both the
    circled check (success) and the circled alert (info/warning/danger) carry
    their full mark as strokes, so no per-shape fill override is needed. */

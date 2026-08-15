@@ -2,17 +2,17 @@
  * ListView — governed stacked list of item rows.
  *
  * Anatomy:
- *   ul.zs-list-view                     — the list (list semantics)
- *     └─ li.zs-list-view__item           — one row (flex: main · aside)
- *         ├─ .zs-list-view__main          — leading + content column
+ *   ul[data-slot="list-view"]                     — the list (list semantics)
+ *     └─ li[data-slot="list-view-item"]           — one row (flex: main · aside)
+ *         ├─ [data-slot="list-view-main"]          — leading + content column
  *         │   (rendered as <a>/<button>/<div> per interactivity)
- *         │   ├─ .zs-list-view__leading       — avatar / icon
- *         │   └─ .zs-list-view__content        — title + description column
- *         │       ├─ .zs-list-view__title
- *         │       └─ .zs-list-view__description
- *         └─ .zs-list-view__aside          — meta + trailing (OUTSIDE main)
- *             ├─ .zs-list-view__meta
- *             └─ .zs-list-view__trailing
+ *         │   ├─ [data-slot="list-view-leading"]       — avatar / icon
+ *         │   └─ [data-slot="list-view-content"]        — title + description column
+ *         │       ├─ [data-slot="list-view-title"]
+ *         │       └─ [data-slot="list-view-description"]
+ *         └─ [data-slot="list-view-aside"]          — meta + trailing (OUTSIDE main)
+ *             ├─ [data-slot="list-view-meta"]
+ *             └─ [data-slot="list-view-trailing"]
  *
  * The row is a flex row: `main` grows to fill, `aside` hugs the end.
  * `main` itself is a nested flex row (leading · content). The

@@ -6,12 +6,12 @@
  * actions sub-clusters); the surface belongs to the composed Input /
  * Tag / Button primitives. These rules only:
  *
- *   .zs-filter-bar             root Cluster — full inline size so the
+ *   [data-slot="filter-bar"]             root Cluster — full inline size so the
  *                              spacer has room to push actions to the end
- *   .zs-filter-bar__search     give the search Input a sensible grow +
+ *   .zeroship-filter-bar__search     give the search Input a sensible grow +
  *                              floor so it owns the leading space and
  *                              shrinks (not disappears) as the row narrows
- *   .zs-filter-bar__spacer     the flex spacer that pushes `actions` to
+ *   [data-slot="filter-bar-spacer"]     the flex spacer that pushes `actions` to
  *                              the inline-end edge on a single line
  *
  * Logical properties throughout (inline-size, margin-inline) so RTL is

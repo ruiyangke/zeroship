@@ -2,7 +2,7 @@
  * Menubar — horizontal (or vertical) strip of menu triggers.
  *
  * Anatomy:
- *   .zs-menubar                                       flex row of children (Menu siblings)
+ *   [data-slot="menubar"]                                       flex row of children (Menu siblings)
  *     └─ button[data-chrome="menubar"]                each child renders a real <button>
  *
  * Visual rhythm:

@@ -2,7 +2,7 @@
  * Separator — visual divider.
  *
  * Anatomy:
- *   .zs-separator                    — the line element
+ *   [data-slot="separator"]                    — the line element
  *
  * Modifier classes:
  *   orientation: --horizontal | --vertical

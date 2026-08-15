@@ -2,8 +2,8 @@
  * Checkbox — selection primitive (independent boolean).
  *
  * Anatomy:
- *   .zs-checkbox                  — focusable surface (Base UI's <span>)
- *     ├─ .zs-checkbox__indicator  — checkmark / minus glyph container (SVG)
+ *   [data-slot="checkbox"]                  — focusable surface (Base UI's <span>)
+ *     ├─ [data-slot="checkbox-indicator"]  — checkmark / minus glyph container (SVG)
  *     └─ hidden <input>           — Base UI renders this beside the chip
  *
  * Modifier classes (one of each axis):
@@ -28,12 +28,12 @@
  *   3. Hit target ≥ 1.75rem no matter how small the visible chip is.
  *      The chip's invisible `::before` overlay extends the tap rect so
  *      a BARE chip (no wrapping label) still meets the floor — earlier
- *      the floor lived on `.zs-checkbox-field` (only applied when the
+ *      the floor lived on `[data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"]` (only applied when the
  *      component's own `label` prop was set), so the canonical
  *      `<Field><Field.Label>…</Field.Label><Checkbox /></Field>`
  *      pattern violated it. Slice-4 review fix item 3.
  *
- *   4. Focus ring lives on the chip ROOT (`.zs-checkbox:focus-visible`),
+ *   4. Focus ring lives on the chip ROOT (`[data-slot="checkbox"]:focus-visible`),
  *      not on a wrapper. Base UI emits the chip as a `<span tabIndex=0>`
  *      with a hidden `<input tabIndex=-1>` beside it; keyboard focus
  *      lands on the chip. Earlier the ring was keyed off the hidden
@@ -88,7 +88,7 @@
   --zeroship-checkbox-border-tinted-hover: var(--zeroship-fill);
 }
 
-/* ─── the visible chip (.zs-checkbox) ──────────────────────────────── */
+/* ─── the visible chip ([data-slot="checkbox"]) ──────────────────────────────── */
 [data-slot="checkbox"] {
   position: relative;
   display: inline-flex;
@@ -275,7 +275,7 @@
  * positioning inside the relatively-positioned indicator container. */
 [data-slot="checkbox-indicator"] [data-glyph] {
   position: absolute;
-  /* Physical centering (see `.zs-checkbox::before` for the same
+  /* Physical centering (see `[data-slot="checkbox"]::before` for the same
    * rationale): the glyph is centered inside a symmetric indicator
    * container, so the positioning is direction-agnostic. Logical
    * `inset-inline-start: 50%` + physical `translate: -50%` mismatched

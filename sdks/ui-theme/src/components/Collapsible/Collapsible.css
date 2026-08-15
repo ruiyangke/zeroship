@@ -2,12 +2,12 @@
  * Collapsible — Root + Trigger + Panel.
  *
  * Anatomy:
- *   .zs-collapsible                  — root container
- *     ├─ .zs-collapsible-trigger     — button row with chevron
- *     │   ├─ .zs-collapsible-trigger-label
- *     │   └─ .zs-collapsible-trigger-chevron
- *     └─ .zs-collapsible-panel       — Panel; height-animated container
- *         └─ .zs-collapsible-panel-inner — padding lives here
+ *   [data-slot="collapsible"]                  — root container
+ *     ├─ [data-slot="collapsible-trigger"]     — button row with chevron
+ *     │   ├─ [data-slot="collapsible-trigger-label"]
+ *     │   └─ [data-slot="collapsible-trigger-chevron"]
+ *     └─ [data-slot="collapsible-panel"]       — Panel; height-animated container
+ *         └─ [data-slot="collapsible-panel-inner"] — padding lives here
  *
  * Panel animates `block-size: 0 ↔ var(--collapsible-panel-height)` —
  * Base UI emits the natural height on the panel element while
@@ -107,7 +107,7 @@
 /* ─── chevron ───────────────────────────────────────────────────────── */
 /* The chevron is the governed `Icon` (a Lucide chevron-down svg) carrying
    `zs-icon` + `zs-icon--md` alongside this class. Scope the sizing under
-   the trigger so this rule (0,2,0) outranks `.zs-icon--md` (0,1,0)
+   the trigger so this rule (0,2,0) outranks `[data-slot="icon"]` (0,1,0)
    regardless of stylesheet concat order — the chevron keeps the
    collapsible token size, not the default Icon md box. */
 [data-slot="collapsible-trigger"] [data-slot="collapsible-trigger-chevron"] {

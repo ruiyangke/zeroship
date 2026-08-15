@@ -2,10 +2,10 @@
  * Input — single-line text field shell.
  *
  * Anatomy:
- *   .zs-input                    — bordered shell (focus ring lives here)
- *     ├─ .zs-input__slot--start  — optional leading adornment (aria-hidden by default)
- *     ├─ .zs-input__control      — the native <input>
- *     └─ .zs-input__slot--end    — optional trailing adornment
+ *   [data-slot="input"]                    — bordered shell (focus ring lives here)
+ *     ├─ [data-slot="input-slot-start"]  — optional leading adornment (aria-hidden by default)
+ *     ├─ [data-slot="input-control"]      — the native <input>
+ *     └─ [data-slot="input-slot-end"]    — optional trailing adornment
  *
  * Modifier classes (one of each axis):
  *   variant:  --outline | --filled | --plain

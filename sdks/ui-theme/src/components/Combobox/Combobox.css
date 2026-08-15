@@ -2,21 +2,21 @@
  * Combobox — typeahead + selection hybrid.
  *
  * Anatomy:
- *   .zs-combobox-input-group            — Input-shaped trigger row
- *     ├─ .zs-combobox-chips             — (multi-mode) chip rail
- *     │     └─ .zs-combobox-chip
- *     │          ├─ .zs-combobox-chip__label
- *     │          └─ .zs-combobox-chip__remove
- *     ├─ .zs-combobox-input             — the actual <input>
- *     └─ .zs-combobox-input-group__icon — chevron
- *   .zs-combobox-positioner             — Floating UI anchored layer
- *     └─ .zs-combobox-popup             — opaque sheet
- *          ├─ .zs-combobox-list
- *          │     ├─ .zs-combobox-item
- *          │     │     ├─ .zs-combobox-item__indicator (checkmark gutter)
- *          │     │     └─ .zs-combobox-item__text
+ *   [data-slot="autocomplete-input-group"], [data-slot="combobox-input-group"]            — Input-shaped trigger row
+ *     ├─ [data-slot="combobox-chips"]             — (multi-mode) chip rail
+ *     │     └─ [data-slot="combobox-chip"]
+ *     │          ├─ [data-slot="combobox-chip-label"]
+ *     │          └─ [data-slot="combobox-chip-remove"]
+ *     ├─ [data-slot="combobox-input"]             — the actual <input>
+ *     └─ [data-slot="combobox-input-group-icon"] — chevron
+ *   [data-slot="combobox-positioner"]             — Floating UI anchored layer
+ *     └─ [data-slot="autocomplete-popup"], [data-slot="combobox-popup"]             — opaque sheet
+ *          ├─ [data-slot="combobox-list"]
+ *          │     ├─ [data-slot="autocomplete-item"], [data-slot="combobox-item"]
+ *          │     │     ├─ [data-slot="combobox-item-indicator"] (checkmark gutter)
+ *          │     │     └─ [data-slot="combobox-item-text"]
  *          │     └─ … repeated
- *          └─ .zs-combobox-empty        — "No results" sentinel
+ *          └─ [data-slot="combobox-empty"]        — "No results" sentinel
  *
  * Mirrors Select.css's tokens line-for-line so a Combobox sitting next
  * to a Select reads coherent (same height, same rhythm, same focus ring).
@@ -416,7 +416,7 @@
     color: HighlightText;
   }
   /* Chip-remove hover mirror — single-class :hover outranks the bare
-   * `.zs-combobox-chip__remove` rule, so we re-emit at equal specificity. */
+   * `[data-slot="combobox-chip-remove"]` rule, so we re-emit at equal specificity. */
   [data-slot="combobox-chip-remove"]:hover {
     background-color: HighlightText;
     color: Highlight;

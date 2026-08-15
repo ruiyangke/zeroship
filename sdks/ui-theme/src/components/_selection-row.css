@@ -12,8 +12,8 @@
  *
  * The three primitives' rows are visually identical — same gap, same
  * cursor, same disabled tint. Per-primitive overrides (if any future
- * slice needs them) can extend `.zs-checkbox-field`, `.zs-switch-field`,
- * `.zs-radio-field` in their own CSS.
+ * slice needs them) can extend `[data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"]`, `[data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"]`,
+ * `[data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"]` in their own CSS.
  */
 :is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"]),
 :is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"]),

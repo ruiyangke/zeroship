@@ -2,13 +2,13 @@
  * Faq — a frequently-asked-questions band.
  *
  * Anatomy:
- *   .zs-faq             — the <section>; generous vertical padding, NO heavy
+ *   [data-slot="faq"]             — the <section>; generous vertical padding, NO heavy
  *                         background (composable)
- *   .zs-faq__header     — optional eyebrow + title + desc band
- *   .zs-faq__eyebrow    — small label above the title (accent)
- *   .zs-faq__title      — the optional section lead-in <h2>
- *   .zs-faq__description — muted lead-in <p>
- *   .zs-faq__list       — the composed Accordion wrapper (constrained measure)
+ *   [data-slot="faq-header"]     — optional eyebrow + title + desc band
+ *   [data-slot="faq-eyebrow"]    — small label above the title (accent)
+ *   [data-slot="faq-title"]      — the optional section lead-in <h2>
+ *   [data-slot="faq-description"] — muted lead-in <p>
+ *   [data-slot="faq-list"]       — the composed Accordion wrapper (constrained measure)
  *
  * Layout discipline:
  *   - The section sets only its vertical rhythm; the composed Container owns
@@ -43,7 +43,7 @@
   text-align: start;
 }
 
-/* The eyebrow styling is the shared `.zs-section-eyebrow` (defined once in
+/* The eyebrow styling is the shared `[data-slot="cta-eyebrow"], [data-slot="faq-eyebrow"], [data-slot="feature-grid-eyebrow"], [data-slot="hero-eyebrow"], [data-slot="section-header-eyebrow"], [data-slot="stats-band-eyebrow"]` (defined once in
    _section-tone.css); this BEM hook remains only as a stable consumer target. */
 
 [data-slot="faq-title"] {

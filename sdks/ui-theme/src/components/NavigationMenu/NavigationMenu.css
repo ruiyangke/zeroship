@@ -2,18 +2,18 @@
  * NavigationMenu — topnav with mega-menu popouts.
  *
  * Anatomy:
- *   .zs-navmenu                     <nav> at root (Base UI); <div> when nested.
- *     └─ .zs-navmenu-list           <ul>
- *           └─ .zs-navmenu-item     <li>
- *                 ├─ .zs-navmenu-trigger    <button> + chevron
- *                 └─ .zs-navmenu-link       <a> (top-level direct-link items)
+ *   [data-slot="navmenu"]                     <nav> at root (Base UI); <div> when nested.
+ *     └─ [data-slot="navmenu-list"]           <ul>
+ *           └─ [data-slot="navmenu-item"]     <li>
+ *                 ├─ [data-slot="navmenu-trigger"]    <button> + chevron
+ *                 └─ [data-slot="navmenu-link"]       <a> (top-level direct-link items)
  *
- *   .zs-navmenu-positioner          Floating UI anchored layer
- *     └─ .zs-navmenu-popup          opaque sheet
- *           ├─ .zs-navmenu-arrow    optional 16x8 triangle
- *           └─ .zs-navmenu-viewport clipping window holding active Content
- *                 └─ .zs-navmenu-content (Base UI portals it in)
- *                       └─ .zs-navmenu-link (nested links inside a panel)
+ *   [data-slot="navmenu-positioner"]          Floating UI anchored layer
+ *     └─ [data-slot="navmenu-popup"]          opaque sheet
+ *           ├─ [data-slot="navmenu-arrow"]    optional 16x8 triangle
+ *           └─ [data-slot="navmenu-viewport"] clipping window holding active Content
+ *                 └─ [data-slot="navmenu-content"] (Base UI portals it in)
+ *                       └─ [data-slot="navmenu-link"] (nested links inside a panel)
  *
  * Crystal material pattern: Popup paints a computable
  * `background-color` (--zeroship-surface), then layers the active rim,
@@ -303,7 +303,7 @@
  * Mirror EVERY interactive state inside the media block at equal
  * specificity (matching the Slice 5 Toggle pattern). Without the
  * mirrored hover/focus rules the oklch token paints above can outrank
- * the bare `.zs-navmenu-trigger` reset under high-contrast emulation. */
+ * the bare `[data-slot="navmenu-trigger"]` reset under high-contrast emulation. */
 @media (forced-colors: active) {
   [data-slot="navmenu-trigger"],
   [data-slot="navmenu-link"] {

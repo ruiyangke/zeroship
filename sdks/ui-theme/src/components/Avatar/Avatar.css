@@ -2,9 +2,9 @@
  * Avatar — identity lockup (image with fallback).
  *
  * Anatomy:
- *   .zs-avatar                       — Root span (the content-box)
- *     ├─ .zs-avatar__image           — <img> when src loaded
- *     └─ .zs-avatar__fallback        — <span> initials / icon
+ *   [data-slot="avatar"]                       — Root span (the content-box)
+ *     ├─ [data-slot="avatar-image"]           — <img> when src loaded
+ *     └─ [data-slot="avatar-fallback"]        — <span> initials / icon
  *
  * Modifier classes:
  *   size:    --xs | --sm | --md | --lg | --xl

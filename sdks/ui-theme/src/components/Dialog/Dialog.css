@@ -3,19 +3,19 @@
  *
  * Anatomy (review-fix item 19 — Backdrop and Popup are SIBLINGS under
  * Portal, not parent/child; the previous tree comment was misleading):
- *   .zs-dialog-backdrop        fixed-position overlay; tinted via
+ *   [data-slot="alertdialog-backdrop"], [data-slot="dialog-backdrop"]        fixed-position overlay; tinted via
  *                                data-tint="scrim|material|invisible".
- *   .zs-dialog-popup           the sheet — opaque surface; rounded;
+ *   [data-slot="alertdialog-popup"], [data-slot="dialog-popup"]           the sheet — opaque surface; rounded;
  *                                shadow; scrolls internally; data-
  *                                size="sm|md|lg|full", data-placement.
  *   (Backdrop and Popup render as SIBLINGS inside Portal — neither
  *   contains the other. The Popup positions itself directly on the
  *   viewport while the Backdrop overlays the document underneath.)
  *
- *   .zs-dialog-popup
- *     ├─ .zs-dialog__header    Title + Description + close button.
- *     ├─ .zs-dialog__body      scroll container.
- *     └─ .zs-dialog__footer    button row (right-aligned by default).
+ *   [data-slot="alertdialog-popup"], [data-slot="dialog-popup"]
+ *     ├─ [data-slot="alertdialog-header"], [data-slot="dialog-header"]    Title + Description + close button.
+ *     ├─ [data-slot="alertdialog-body"], [data-slot="dialog-body"]      scroll container.
+ *     └─ [data-slot="alertdialog-footer"], [data-slot="dialog-footer"]    button row (right-aligned by default).
  *
  * Base UI emits `data-starting-style` and `data-ending-style` on
  * Popup and Backdrop while the open/close transitions are running.
@@ -236,7 +236,7 @@
    * frame the popup is open and focus-trapped yet painted at opacity 0,
    * i.e. fully invisible to a reduced-motion user (a real defect, not
    * just a test artifact). Reset opacity to 1 and the transform to the
-   * steady centred value (mirrors the base `.zs-dialog-popup` rule;
+   * steady centred value (mirrors the base `[data-slot="alertdialog-popup"], [data-slot="dialog-popup"]` rule;
    * `--nested-*` custom props keep nested-dialog scaling intact). */
   :is([data-slot="alertdialog-popup"], [data-slot="dialog-popup"])[data-starting-style],
   :is([data-slot="alertdialog-popup"], [data-slot="dialog-popup"])[data-ending-style] {

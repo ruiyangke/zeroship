@@ -2,14 +2,14 @@
  * Button — Style × Intent matrix.
  *
  * Anatomy:
- *   .zs-button
- *     ├─ .zs-button__inner       — wraps slots+label; active-scale lives here
- *     │  ├─ .zs-button__start    — optional leading slot.
- *     │  ├─ .zs-button__label    — visible label (hidden via opacity:0
+ *   [data-slot="button"]
+ *     ├─ [data-slot="button-inner"]       — wraps slots+label; active-scale lives here
+ *     │  ├─ [data-slot="button-start"]    — optional leading slot.
+ *     │  ├─ [data-slot="button-label"]    — visible label (hidden via opacity:0
  *     │  │                         when aria-busy, preserving width and
  *     │  │                         the accessible name).
- *     │  └─ .zs-button__end      — optional trailing slot.
- *     └─ .zs-button__spinner     — absolutely-centered spinner when loading.
+ *     │  └─ [data-slot="button-end"]      — optional trailing slot.
+ *     └─ [data-slot="button-spinner"]     — absolutely-centered spinner when loading.
  *
  * Modifier classes (one of each axis):
  *   sizes:    --small | --medium | --large
@@ -27,7 +27,7 @@
   justify-content: center;
   /* Slot↔label gap tightened from --zeroship-space-2 → --zeroship-space-1 so icons
      no longer feel mechanically spaced from the label (button-polish
-     item 9). Slot sizing is capped on .zs-button__start / __end below. */
+     item 9). Slot sizing is capped on [data-slot="button-start"] / __end below. */
   gap: var(--zeroship-space-1);
   border: 0;
   cursor: pointer;
@@ -70,7 +70,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  /* Mirrors .zs-button's tightened slot↔label gap (button-polish item 9). */
+  /* Mirrors [data-slot="button"]'s tightened slot↔label gap (button-polish item 9). */
   gap: var(--zeroship-space-1);
   /* Allow the label child to shrink and ellipsize inside this flex
      container — without min-width:0 the inner asserts its content's
@@ -494,8 +494,8 @@
  * OR HIGHER specificity so the cascade picks the system-color rule in
  * HCM. The normal-mode rules climb specificity via `:not(:disabled)
  * :not([aria-disabled="true"]):not([aria-busy="true"])` chains (hover/
- * active), via class compounding (`.zs-button--destructive
- * .zs-button--filled`), and via attribute matchers on the disabled/busy
+ * active), via class compounding (`[data-slot="button"][data-intent="destructive"]
+ * [data-slot="button"]`), and via attribute matchers on the disabled/busy
  * states. Each forced-colors selector below uses the SAME selector
  * shape (same class compounding + the same `:not(...)` chain or
  * attribute matchers) so specificity ties — and source order (this
@@ -557,7 +557,7 @@
   }
 
   /* Per-variant disabled mirrors. Equal class+attr count to the
-     normal-mode `.zs-button--filled:disabled` form (class:1, pseudo/
+     normal-mode `[data-slot="button"]:disabled` form (class:1, pseudo/
      attr:1) — and adding `[aria-disabled="true"]` keeps parity for
      asChild anchors. */
   [data-slot="button"][data-variant="filled"]:disabled,
@@ -578,7 +578,7 @@
   }
 
   /* Destructive — rest, hover, active. Class-compound (0,2,0) matches
-     the normal-mode `.zs-button--destructive.zs-button--filled` rule. */
+     the normal-mode `[data-slot="button"][data-intent="destructive"][data-slot="button"]` rule. */
   [data-slot="button"][data-intent="destructive"][data-variant="filled"] {
     background: Highlight;
     color: HighlightText;
@@ -612,7 +612,7 @@
   }
 
   /* Destructive disabled mirrors. Class-compound + attr matches
-     normal-mode `.zs-button--destructive.zs-button--filled:disabled`. */
+     normal-mode `[data-slot="button"][data-intent="destructive"][data-slot="button"]:disabled`. */
   [data-slot="button"][data-intent="destructive"][data-variant="filled"]:disabled,
   [data-slot="button"][data-intent="destructive"][data-variant="filled"][aria-disabled="true"],
   [data-slot="button"][data-intent="destructive"][data-variant="filled"][aria-busy="true"],
@@ -631,7 +631,7 @@
   }
 
   /* Generic disabled fallback (kept for any future selector that uses
-     the bare `.zs-button:disabled` shape). */
+     the bare `[data-slot="button"]:disabled` shape). */
   [data-slot="button"]:disabled,
   [data-slot="button"][aria-disabled="true"],
   [data-slot="button"][aria-busy="true"] {

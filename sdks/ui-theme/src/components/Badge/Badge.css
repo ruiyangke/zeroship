@@ -45,7 +45,7 @@
      transparent same-width border so the box size is identical across
      variants (no layout shift when a consumer swaps variant). */
   border: var(--zeroship-selection-hairline) solid transparent;
-  /* Long-label safety lives on the inner `.zs-badge__label` span — a flex
+  /* Long-label safety lives on the inner `[data-slot="badge-label"]` span — a flex
      container ignores `text-overflow`, so the clamp must sit on a block
      descendant (mirrors Tag). The root keeps `min-inline-size: 0` so the
      flex item is allowed to shrink below its content size and the label

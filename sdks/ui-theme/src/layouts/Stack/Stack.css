@@ -2,8 +2,8 @@
  * Stack — one-dimensional flex arrangement.
  *
  * Anatomy:
- *   .zs-stack    — the flex container
- *   .zs-stack > * — children (min-inline-size/min-block-size: 0 so a long
+ *   [data-slot="stack"]    — the flex container
+ *   [data-slot="stack"] > * — children (min-inline-size/min-block-size: 0 so a long
  *                   token or wide <pre> can shrink instead of overflowing)
  *
  * Driven by inline custom properties set from props:

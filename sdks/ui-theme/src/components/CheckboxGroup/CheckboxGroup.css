@@ -2,7 +2,7 @@
  * CheckboxGroup — layout-only primitive.
  *
  * Anatomy:
- *   .zs-checkbox-group           — Base UI's <div> (CheckboxGroupContext)
+ *   [data-slot="checkbox-group"]           — Base UI's <div> (CheckboxGroupContext)
  *     └─ <Checkbox /> children — each paints its own chip + (optional) label
  *
  * Modifier classes:

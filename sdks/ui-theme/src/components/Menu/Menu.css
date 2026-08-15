@@ -2,19 +2,19 @@
  * Menu — anchored dropdown opened by a click trigger.
  *
  * Anatomy:
- *   .zs-menu-backdrop          optional scrim (opt-in only).
- *   .zs-menu-positioner        Base UI's Floating UI anchored layer.
- *     └─ .zs-menu-popup        opaque sheet with --zeroship-shadow-dialog.
- *           ├─ .zs-menu-arrow              16x8 triangle (currentColor).
- *           ├─ .zs-menu-group + .zs-menu-group-label
- *           ├─ .zs-menu-item               grid: indicator | text | tail
- *           │     ├─ .zs-menu-item__indicator       (checkmark / dot gutter)
- *           │     └─ .zs-menu-item__text
- *           ├─ .zs-menu-checkbox-item       accent square when checked
- *           ├─ .zs-menu-radio-item          dot when selected
- *           ├─ .zs-menu-link-item           native <a>
- *           ├─ .zs-menu-submenu-trigger     adds chevron tail
- *           └─ .zs-menu-separator
+ *   [data-slot="menu-backdrop"]          optional scrim (opt-in only).
+ *   [data-slot="menu-positioner"]        Base UI's Floating UI anchored layer.
+ *     └─ [data-slot="menu-popup"], [data-slot="menu-popup-submenu"]        opaque sheet with --zeroship-shadow-dialog.
+ *           ├─ [data-slot="menu-arrow"]              16x8 triangle (currentColor).
+ *           ├─ [data-slot="menu-group"] + [data-slot="menu-group-label"]
+ *           ├─ [data-slot="menu-checkbox-item"], [data-slot="menu-item"], [data-slot="menu-link-item"], [data-slot="menu-radio-item"], [data-slot="menu-submenu-trigger"]               grid: indicator | text | tail
+ *           │     ├─ [data-slot="menu-item-indicator"]       (checkmark / dot gutter)
+ *           │     └─ [data-slot="menu-item-text"]
+ *           ├─ [data-slot="menu-checkbox-item"]       accent square when checked
+ *           ├─ [data-slot="menu-radio-item"]          dot when selected
+ *           ├─ [data-slot="menu-link-item"]           native <a>
+ *           ├─ [data-slot="menu-submenu-trigger"]     adds chevron tail
+ *           └─ [data-slot="menu-separator"]
  *
  * Crystal material pattern: the popup paints a computable background
  * color, then layers the active rim, shadow, and material tokens.
@@ -27,7 +27,7 @@
  * is mirrored inside `@media (forced-colors: active)` at equal or
  * higher specificity, so the system palette wins over the oklch token
  * mixes. Without this, per-state hover/highlight selectors gated by
- * `:not([data-disabled])` outrank a bare `.zs-menu-item` reset and the
+ * `:not([data-disabled])` outrank a bare `[data-slot="menu-checkbox-item"], [data-slot="menu-item"], [data-slot="menu-link-item"], [data-slot="menu-radio-item"], [data-slot="menu-submenu-trigger"]` reset and the
  * high-contrast mode leaks through.
  *
  * RTL: layout-affecting axes use logical properties (`padding-inline`,
@@ -332,7 +332,7 @@
 /* ─── Submenu trigger — chevron tail ───────────────────────────────── *
  *
  * The chevron occupies the row's trailing column (the same `auto` lane
- * used by `.zs-menu-item__shortcut`). The base `.zs-menu-item` grid
+ * used by `[data-slot="menu-item-shortcut"]`). The base `[data-slot="menu-checkbox-item"], [data-slot="menu-item"], [data-slot="menu-link-item"], [data-slot="menu-radio-item"], [data-slot="menu-submenu-trigger"]` grid
  * already declares it; no override needed here. */
 [data-slot="menu-submenu-trigger-chevron"] {
   display: inline-flex;

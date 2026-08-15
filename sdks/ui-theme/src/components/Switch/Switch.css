@@ -2,8 +2,8 @@
  * Switch — binary state primitive (on / off, immediate effect).
  *
  * Anatomy:
- *   .zs-switch                 — track (Base UI's <span>, focusable)
- *     └─ .zs-switch__thumb     — sliding pip (Base UI's <span>)
+ *   [data-slot="switch"]                 — track (Base UI's <span>, focusable)
+ *     └─ [data-slot="switch-thumb"]     — sliding pip (Base UI's <span>)
  *   (Base UI also emits a hidden <input> beside the track for form
  *    submission; we don't style it.)
  *
@@ -316,7 +316,7 @@
    * selectors below (hover-with-:not-:hover at lines 145/148, disabled-
    * checked at line 174, readonly-unchecked at line 190, readonly-checked
    * at lines 193+197) WIN inside forced-colors mode because they have
-   * more selectors than the bare `.zs-switch[data-checked]` rule above,
+   * more selectors than the bare `[data-slot="switch"][data-checked]` rule above,
    * and `background-color: var(--zeroship-…)` would override the `Highlight`/
    * `Canvas`/`GrayText` system colors. Mirror each higher-specificity
    * rule with the matching forced-colors paint so the system-color

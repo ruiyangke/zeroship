@@ -2,17 +2,17 @@
  * StatsBand — a horizontal band of headline metrics.
  *
  * Anatomy:
- *   .zs-stats-band                  — the <section>; generous vertical
+ *   [data-slot="stats-band"]                  — the <section>; generous vertical
  *                                     padding, NO heavy background (composable)
- *   .zs-stats-band__header          — optional eyebrow + title + desc band
- *   .zs-stats-band__eyebrow         — small label above the title (accent)
- *   .zs-stats-band__title           — the optional section lead-in <h2>
- *   .zs-stats-band__description      — muted lead-in <p>
- *   .zs-stats-band__items            — the responsive Grid of stats
- *   .zs-stats-band__stat             — each stat cell (a group)
- *   .zs-stats-band__stat-value       — the large metric value (plain text)
- *   .zs-stats-band__stat-label       — the muted label (plain text)
- *   .zs-stats-band__stat-description — the optional small supporting line
+ *   [data-slot="stats-band-header"]          — optional eyebrow + title + desc band
+ *   [data-slot="stats-band-eyebrow"]         — small label above the title (accent)
+ *   [data-slot="stats-band-title"]           — the optional section lead-in <h2>
+ *   [data-slot="stats-band-description"]      — muted lead-in <p>
+ *   [data-slot="stats-band-items"]            — the responsive Grid of stats
+ *   [data-slot="stats-band-stat"]             — each stat cell (a group)
+ *   [data-slot="stats-band-stat-value"]       — the large metric value (plain text)
+ *   [data-slot="stats-band-stat-label"]       — the muted label (plain text)
+ *   [data-slot="stats-band-stat-description"] — the optional small supporting line
  *
  * Layout discipline:
  *   - The section sets only its vertical rhythm; the composed Container owns
@@ -64,7 +64,7 @@
   text-align: start;
 }
 
-/* The eyebrow styling is the shared `.zs-section-eyebrow` (defined once in
+/* The eyebrow styling is the shared `[data-slot="cta-eyebrow"], [data-slot="faq-eyebrow"], [data-slot="feature-grid-eyebrow"], [data-slot="hero-eyebrow"], [data-slot="section-header-eyebrow"], [data-slot="stats-band-eyebrow"]` (defined once in
    _section-tone.css); this BEM hook remains only as a stable consumer target. */
 
 [data-slot="stats-band-title"] {

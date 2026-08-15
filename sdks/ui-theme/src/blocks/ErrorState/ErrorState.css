@@ -2,12 +2,12 @@
  * ErrorState — "something went wrong" panel.
  *
  * Anatomy:
- *   .zs-error-state                  — outer region (paints nothing itself)
+ *   [data-slot="error-state"]                  — outer region (paints nothing itself)
  *     └─ Center → Stack column
- *         ├─ .zs-error-state__icon         — alert glyph, tinted by intent
- *         ├─ .zs-error-state__title        — heading (h2 by default)
- *         ├─ .zs-error-state__description  — muted supporting copy
- *         └─ .zs-error-state__actions      — action row (Retry Button)
+ *         ├─ [data-slot="error-state-icon"]         — alert glyph, tinted by intent
+ *         ├─ [data-slot="error-state-title"]        — heading (h2 by default)
+ *         ├─ [data-slot="error-state-description"]  — muted supporting copy
+ *         └─ [data-slot="error-state-actions"]      — action row (Retry Button)
  *
  * Modifier classes (intent):
  *   --danger   → icon tinted system-red   (default)
@@ -57,7 +57,7 @@
 
 /* The glyph is a Lucide CircleAlert (rendered as an <svg> by the Icon
    primitive); this class+element rule still matches and keeps the prior 1em
-   footprint (it wins on specificity over the .zs-icon--md size class).
+   footprint (it wins on specificity over the [data-slot="icon"][data-size="md"] size rule).
    Lucide's mark is fully stroked in currentColor — the alert dot is a short
    stroked line, not a filled circle, so no per-shape fill override remains. */
 [data-slot="error-state-icon"] svg {

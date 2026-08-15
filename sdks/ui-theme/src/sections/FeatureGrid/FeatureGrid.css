@@ -2,19 +2,19 @@
  * FeatureGrid — the marketing "features" band.
  *
  * Anatomy:
- *   .zs-feature-grid                  — the <section>; generous vertical
+ *   [data-slot="feature-grid"]                  — the <section>; generous vertical
  *                                       padding, NO heavy background
  *                                       (composable — the consumer paints
  *                                       the page backdrop)
- *   .zs-feature-grid__header          — optional eyebrow + title + desc band
- *   .zs-feature-grid__eyebrow         — small label above the title (muted)
- *   .zs-feature-grid__title           — the optional section lead-in <h2>
- *   .zs-feature-grid__description      — muted lead-in <p>
- *   .zs-feature-grid__items            — the responsive Grid of items
- *   .zs-feature-grid__item             — each feature cell (icon → h3 → desc)
- *   .zs-feature-grid__item-icon        — the tinted icon badge
- *   .zs-feature-grid__item-title       — the feature title <h3>
- *   .zs-feature-grid__item-description — the muted supporting line
+ *   [data-slot="feature-grid-header"]          — optional eyebrow + title + desc band
+ *   [data-slot="feature-grid-eyebrow"]         — small label above the title (muted)
+ *   [data-slot="feature-grid-title"]           — the optional section lead-in <h2>
+ *   [data-slot="feature-grid-description"]      — muted lead-in <p>
+ *   [data-slot="feature-grid-items"]            — the responsive Grid of items
+ *   [data-slot="feature-grid-item"]             — each feature cell (icon → h3 → desc)
+ *   [data-slot="feature-grid-item-icon"]        — the tinted icon badge
+ *   [data-slot="feature-grid-item-title"]       — the feature title <h3>
+ *   [data-slot="feature-grid-item-description"] — the muted supporting line
  *
  * Layout discipline:
  *   - The section sets only its vertical rhythm; the composed Container
@@ -79,7 +79,7 @@
   text-align: start;
 }
 
-/* The eyebrow styling is the shared `.zs-section-eyebrow` (accent pill,
+/* The eyebrow styling is the shared `[data-slot="cta-eyebrow"], [data-slot="faq-eyebrow"], [data-slot="feature-grid-eyebrow"], [data-slot="hero-eyebrow"], [data-slot="section-header-eyebrow"], [data-slot="stats-band-eyebrow"]` (accent pill,
    footnote, 600, 0.04em, uppercase) defined once in _section-tone.css; this
    BEM hook remains only as a stable consumer target. */
 
@@ -160,7 +160,7 @@
 }
 
 /* Size the glyph UP inside the bigger badge. The composed Icon sets its own
-   `--zeroship-icon-*` box via `.zs-icon--lg` (0,1,0); this descendant rule (0,2,0)
+   `--zeroship-icon-*` box via `[data-slot="icon"][data-size="lg"]` (0,1,0); this descendant rule (0,2,0)
    outranks it regardless of stylesheet concat order, so the badge owns the
    glyph size — the same scoping idiom the Accordion chevron uses. The svg fills
    to the badge's glyph token. */

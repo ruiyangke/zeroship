@@ -2,8 +2,8 @@
  * OtpField — N-cell one-time-password row.
  *
  * Anatomy:
- *   .zs-otp-field                  — Root (display flex row, gap between cells)
- *     └─ .zs-otp-field__input ×N   — per-cell <input>
+ *   [data-slot="otp-field"]                  — Root (display flex row, gap between cells)
+ *     └─ [data-slot="otp-field-input"] ×N   — per-cell <input>
  *
  * Modifier classes:
  *   variant: --default | --outline
@@ -252,7 +252,7 @@
     forced-color-adjust: none;
   }
   /* Outline variant mirror — equal-specificity with the base oklch rule
-     so the bare `.zs-otp-field__input` reset is matched, not overridden,
+     so the bare `[data-slot="otp-field-input"]` reset is matched, not overridden,
      by the variant rule. */
   [data-slot="otp-field"][data-variant="outline"] [data-slot="otp-field-input"] {
     background: Canvas;
@@ -314,8 +314,8 @@
    * `--zeroship-input-bg-readonly` + italic ink; under forced-colors that
    * pair resolves to oklch tokens that the system palette will not
    * honour, so we re-paint with the standard `Field` / `GrayText`
-   * system colors. Specificity matches `.zs-otp-field[data-readonly]
-   * .zs-otp-field__input` (the outside-forced-colors selector) so the
+   * system colors. Specificity matches `[data-slot="otp-field"][data-readonly]
+   * [data-slot="otp-field-input"]` (the outside-forced-colors selector) so the
    * cascade resolves cleanly. */
   [data-slot="otp-field"][data-readonly] [data-slot="otp-field-input"] {
     background: Field;

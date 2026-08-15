@@ -3,7 +3,7 @@
  *
  * The root is an <ol> laid out as a flex line whose direction is driven
  * by [data-orientation]: a row for `horizontal`, a column for
- * `vertical`. Each <li> (.zs-stepper__step) carries the indicator + text
+ * `vertical`. Each <li> ([data-slot="stepper-step"]) carries the indicator + text
  * column and the connector to the next step.
  *
  * In HORIZONTAL mode the steps are equal-width (flex:1 1 0) centred
@@ -13,13 +13,13 @@
  * VERTICAL mode the connector is an in-flow flex-growing block-axis rule
  * down the indicator column.
  *
- *   .zs-stepper                       <ol> — the step line
- *     .zs-stepper__step               <li> — one step + its connector
- *       .zs-stepper__trigger          <button>/<span> — indicator + text
- *         .zs-stepper__indicator      the round number / check badge
- *           .zs-stepper__check        the Lucide Check (complete only)
- *         .zs-stepper__text           label (+ optional description + SR word)
- *       .zs-stepper__connector        the line to the next step (aria-hidden)
+ *   [data-slot="stepper"]                       <ol> — the step line
+ *     [data-slot="stepper-step"]               <li> — one step + its connector
+ *       [data-slot="stepper-trigger"]          <button>/<span> — indicator + text
+ *         [data-slot="stepper-indicator"]      the round number / check badge
+ *           [data-slot="stepper-check"]        the Lucide Check (complete only)
+ *         [data-slot="stepper-text"]           label (+ optional description + SR word)
+ *       [data-slot="stepper-connector"]        the line to the next step (aria-hidden)
  *
  * STATUS COLOR is a REINFORCEMENT, never the sole signal. [data-status]
  * tints the indicator and connector — accent for complete/current, muted

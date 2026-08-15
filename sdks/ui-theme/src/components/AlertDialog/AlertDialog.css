@@ -1,6 +1,6 @@
 /*
  * AlertDialog — overrides on top of Dialog.css. The Popup inherits
- * `.zs-dialog-popup`'s base styling; this file tightens radius,
+ * `[data-slot="alertdialog-popup"], [data-slot="dialog-popup"]`'s base styling; this file tightens radius,
  * padding, max-width, and switches the Footer to a grid that adapts
  * to button count.
  *
@@ -15,7 +15,7 @@
 /* ─── Backdrop ─────────────────────────────────────────────────────────── */
 /* AlertDialog backdrop intentionally uses the thick material. Alerts
  * demand harder focus than Dialogs, so the background should feel
- * structurally unavailable. Lands AFTER `.zs-dialog-backdrop` in the
+ * structurally unavailable. Lands AFTER `[data-slot="alertdialog-backdrop"], [data-slot="dialog-backdrop"]` in the
  * cascade (this file is imported after Dialog.css in styles.css), so
  * equal specificity resolves in favor of the alert rule. */
 [data-slot="alertdialog-backdrop"] {
@@ -107,18 +107,18 @@
 }
 
 /* ─── forced-colors ────────────────────────────────────────────────────── */
-/* `.zs-alertdialog-popup` at the top of this file overrides
+/* `[data-slot="alertdialog-popup"]` at the top of this file overrides
  * `box-shadow` with `var(--zeroship-shadow-4)`. Because AlertDialog.css is
  * imported AFTER Dialog.css (see sdks/ui/src/styles.css), that rule
  * also wins inside `@media (forced-colors: active)` against Dialog's
- * `.zs-dialog-popup { box-shadow: 0 0 0 0.0625rem CanvasText inset; }`
+ * `[data-slot="alertdialog-popup"], [data-slot="dialog-popup"] { box-shadow: 0 0 0 0.0625rem CanvasText inset; }`
  * mirror — both selectors have equal specificity, and source order
  * decides. Without this block the popup loses its system-colored
  * 1px ring in Windows High Contrast and becomes indistinguishable
  * from the page background.
  *
  * The mirror lives at the bottom of the file so it lands strictly
- * after the base `.zs-alertdialog-popup` rule, restoring the system
+ * after the base `[data-slot="alertdialog-popup"]` rule, restoring the system
  * ring (and clearing material/backdrop filters that don't paint in
  * forced-colors anyway). */
 @media (forced-colors: active) {

@@ -2,10 +2,10 @@
  * DescriptionList — semantic key→value list.
  *
  * Anatomy:
- *   .zs-description-list                  <dl> root (paints no surface)
- *     └─ .zs-description-list__item       <div> grouping a term/detail pair
- *         ├─ .zs-description-list__term     <dt> — the key, secondary label
- *         └─ .zs-description-list__detail   <dd> — the value, primary label
+ *   [data-slot="description-list"]                  <dl> root (paints no surface)
+ *     └─ [data-slot="description-list-item"]       <div> grouping a term/detail pair
+ *         ├─ [data-slot="description-list-term"]     <dt> — the key, secondary label
+ *         └─ [data-slot="description-list-detail"]   <dd> — the value, primary label
  *
  * Layout:
  *   --horizontal (default): each item is a two-column grid — term in a

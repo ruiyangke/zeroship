@@ -2,16 +2,16 @@
  * Card — container surface implementation.
  *
  * Anatomy:
- *   .zs-card                     surface; flex column; opaque base; clipped.
- *     ├─ .zs-card__header        grid — Title/Description col 1, Action col 2.
- *     │  ├─ .zs-card__title      heading.
- *     │  ├─ .zs-card__description subtitle.
- *     │  └─ .zs-card__action     col 2; spans rows; centered vertically.
- *     ├─ .zs-card__media         edge-bleed media slot (data-side="...").
- *     ├─ .zs-card__content       main content stack (renamed from __body;
+ *   [data-slot="card"]                     surface; flex column; opaque base; clipped.
+ *     ├─ [data-slot="card-header"]        grid — Title/Description col 1, Action col 2.
+ *     │  ├─ [data-slot="card-title"]      heading.
+ *     │  ├─ [data-slot="card-description"] subtitle.
+ *     │  └─ [data-slot="card-action"]     col 2; spans rows; centered vertically.
+ *     ├─ [data-slot="card-media"]         edge-bleed media slot (data-side="...").
+ *     ├─ [data-slot="card-content"]       main content stack (renamed from __body;
  *     │                          visual-polish item 10 — shadcn/MUI/Chakra
  *     │                          vocabulary).
- *     └─ .zs-card__footer        button row (data-align="end|start|between";
+ *     └─ [data-slot="card-footer"]        button row (data-align="end|start|between";
  *                                   data-divider="top" adds a hairline).
  *
  * Modifier classes:
@@ -63,7 +63,7 @@
 }
 
 /* ─── variants ─────────────────────────────────────────────────────────── */
-/* `.zs-card--surface` gets a subtle inset hairline so it doesn't collapse
+/* `[data-slot="card"]` gets a subtle inset hairline so it doesn't collapse
  * visually when sat on a same-color parent surface. Token-driven so a
  * theme can opt out by setting --zeroship-card-surface-edge: none. Visual-
  * polish item 1. */
@@ -260,7 +260,7 @@
 }
 
 /* The Title → Description half-space gap is now expressed as the
- * grid's `row-gap` on .zs-card__header (visual-polish item 8). The
+ * grid's `row-gap` on [data-slot="card-header"] (visual-polish item 8). The
  * previous adjacent-sibling margin rule was removed so the spacing
  * doesn't compound. */
 
@@ -343,7 +343,7 @@
   position: absolute;
   inset: 0;
   /* z-index: 0 anchors the fill layer; siblings sit above implicitly
-   * via DOM order inside the .zs-card stacking context (review-fix
+   * via DOM order inside the [data-slot="card"] stacking context (review-fix
    * item 17 — `isolation: isolate` on the root). */
   z-index: 0;
   pointer-events: none;
@@ -424,7 +424,7 @@
 /* ─── forced-colors ────────────────────────────────────────────────────── */
 /* Mirror specificity with the variant-scoped interactive hover rules
  * above (wave-7 🟡 3). Without these per-variant overrides, the
- * `.zs-card--surface[data-interactive]:hover` selector (and the
+ * `[data-slot="card"][data-interactive]:hover` selector (and the
  * elevated/outline siblings) win the cascade and re-apply
  * `box-shadow: inset 0 0 0 100rem var(--zeroship-card-hover-tint), …` —
  * which paints a color in forced-colors mode. Each variant's hover

@@ -3,20 +3,20 @@
  * filter row + pagination footer).
  *
  * Structure:
- *   div.zs-data-table-shell
- *     div.zs-data-table__toolbar  (Cluster — title + search + actions)
- *     div.zs-data-table__scroll   (overflow container; sticky-header scope)
- *       table.zs-data-table
- *         caption.zs-data-table__caption
- *         colgroup > col[.zs-data-table__select-col]
- *         thead > tr > th.zs-data-table__th | .zs-data-table__select-cell
- *           th .zs-data-table__sort-button > .zs-data-table__header-label
- *                                           + .zs-data-table__sort-glyph
- *         thead > tr.zs-data-table__filter-row > th.zs-data-table__filter-cell
- *         tbody > tr[data-slot=data-table-row] > td.zs-data-table__td
- *                                              | td.zs-data-table__select-cell
- *                                              | td.zs-data-table__state-cell
- *     div.zs-data-table__footer   (composes the Pagination block)
+ *   div[data-slot="data-table"]
+ *     div[data-slot="data-table-toolbar"]  (Cluster — title + search + actions)
+ *     div[data-slot="data-table-scroll"]   (overflow container; sticky-header scope)
+ *       table[data-slot="data-table-table"]
+ *         caption[data-slot="data-table-caption"]
+ *         colgroup > col[[data-slot="data-table-select-col"]]
+ *         thead > tr > th[data-slot="data-table-column-header"] | [data-slot="data-table-select-cell"], [data-slot="data-table-select-header"]
+ *           th [data-slot="data-table-sort-button"] > [data-slot="data-table-header-label"]
+ *                                           + [data-slot="data-table-sort-glyph"]
+ *         thead > tr[data-slot="data-table-filter-row"] > th[data-slot="data-table-filter-cell"]
+ *         tbody > tr[data-slot=data-table-row] > td[data-slot="data-table-cell"], [data-slot="data-table-td"]
+ *                                              | td[data-slot="data-table-select-cell"], [data-slot="data-table-select-header"]
+ *                                              | td[data-slot="data-table-state-cell"]
+ *     div[data-slot="data-table-footer"]   (composes the Pagination block)
  *
  * Tokens: header bg --zeroship-fill-secondary over the opaque table surface;
  * row separators --zeroship-separator; text --zeroship-label / header

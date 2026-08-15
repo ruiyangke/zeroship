@@ -1,14 +1,14 @@
 /*
  * Drawer — side-anchored modal panel. Anatomy:
  *
- *   .zs-drawer-backdrop      fixed-position overlay; tinted from --zeroship-scrim
+ *   [data-slot="drawer-backdrop"]      fixed-position overlay; tinted from --zeroship-scrim
  *                              + optional --zeroship-blur-overlay (Crystal-gated).
- *   .zs-drawer-content       opaque side-pinned sheet; data-side selects the
+ *   [data-slot="drawer-content"]       opaque side-pinned sheet; data-side selects the
  *                              anchored edge (start | end | top | bottom);
  *                              data-size selects the cross-axis preset.
- *     ├─ .zs-drawer__header  Title / Description / close button.
- *     ├─ .zs-drawer__body    scroll container; fills the middle.
- *     └─ .zs-drawer__footer  trailing action row.
+ *     ├─ [data-slot="drawer-header"]  Title / Description / close button.
+ *     ├─ [data-slot="drawer-body"]    scroll container; fills the middle.
+ *     └─ [data-slot="drawer-footer"]  trailing action row.
  *
  * Base UI emits `data-starting-style` and `data-ending-style` on the
  * Backdrop and Content while the open/close transitions are running.
@@ -83,7 +83,7 @@
    * data-ending rules supply their own translate. We deliberately set
    * `none` (not `translate(0,0)`) because any non-`none` transform
    * spawns a stacking context, which can break position:fixed
-   * descendants inside .zs-drawer__body. */
+   * descendants inside [data-slot="drawer-body"]. */
   transform: none;
 }
 
@@ -209,7 +209,7 @@
  * The per-side `data-side + data-starting-style` rules above are
  * (0,0,3,0) specificity; the LTR/RTL mirror selectors below them are
  * (0,0,3,1) thanks to the `[dir="rtl"]` attribute selector. A bare
- * `.zs-drawer-content[data-starting-style]` rule at (0,0,2,0) inside
+ * `[data-slot="drawer-content"][data-starting-style]` rule at (0,0,2,0) inside
  * the reduced-motion media block LOSES to both. So we mirror each
  * side/state selector at matching specificity inside the media query
  * and set `transform: none` — the slide disappears regardless of
@@ -238,7 +238,7 @@
     /* Reduced motion: no slide AND no fade. We zero the transform so the
      * panel never flies across the viewport, and we DELIBERATELY leave
      * opacity at its steady-open value (1, inherited from the base
-     * `.zs-drawer-content` rule).
+     * `[data-slot="drawer-content"]` rule).
      *
      * Why not `opacity: 0` here: with `transition: none` there is no
      * transitionend event, so Base UI's `data-starting-style` /
@@ -284,8 +284,8 @@
    * inset (the wrong edge). The mismatch is intentional until UAs
    * expose logical safe-area variants; flipping by hand requires
    * direction-aware blocks that don't survive container-query / nested
-   * `dir` flips reliably. Same caveat applies to .zs-drawer__body /
-   * .zs-drawer__footer below. */
+   * `dir` flips reliably. Same caveat applies to [data-slot="drawer-body"] /
+   * [data-slot="drawer-footer"] below. */
   padding-block-start: max(var(--zeroship-space-6), env(safe-area-inset-top));
   padding-inline-start: max(var(--zeroship-space-6), env(safe-area-inset-left));
   padding-inline-end: max(var(--zeroship-space-6), env(safe-area-inset-right));

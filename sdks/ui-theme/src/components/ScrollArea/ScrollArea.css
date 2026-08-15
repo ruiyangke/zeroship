@@ -3,18 +3,18 @@
  *
  * Anatomy:
  *
- *   .zs-scrollarea                  Root — relative-positioned shell.
+ *   [data-slot="scrollarea"]                  Root — relative-positioned shell.
  *                                    data-visibility = auto|always|scroll|hover
  *                                    data-orientation = vertical|horizontal|both
  *
- *     .zs-scrollarea__viewport      Real overflow container (Base UI's
+ *     [data-slot="scrollarea-viewport"]      Real overflow container (Base UI's
  *                                    pattern: overflow:hidden here, the
  *                                    actual scroll happens on the inner
  *                                    Content wrapper Base UI manages).
  *
- *       .zs-scrollarea__content     Block wrapper for the user payload.
+ *       [data-slot="scrollarea-content"]     Block wrapper for the user payload.
  *
- *     .zs-scrollarea__scrollbar     Decorative bar track. Two variants:
+ *     [data-slot="scrollarea-scrollbar"]     Decorative bar track. Two variants:
  *       --vertical                  pinned inline-end (the logical-
  *                                    property cascade flips this to
  *                                    the physical LEFT edge under RTL
@@ -22,9 +22,9 @@
  *                                    `[dir="rtl"]` override needed).
  *       --horizontal                pinned block-end.
  *
- *       .zs-scrollarea__thumb       Draggable pill handle inside the bar.
+ *       [data-slot="scrollarea-thumb"]       Draggable pill handle inside the bar.
  *
- *     .zs-scrollarea__corner        L-intersection square (only painted
+ *     [data-slot="scrollarea-corner"]        L-intersection square (only painted
  *                                    when both bars are visible).
  *
  * Visibility policy (data-visibility on Root drives the CSS):
@@ -173,7 +173,7 @@
  * Every visible-state selector also sets `pointer-events: auto` so the
  * bar accepts thumb drags and track clicks only when it is actually on
  * screen. Hidden states keep the base `pointer-events: none` set on
- * `.zs-scrollarea__scrollbar` above.
+ * `[data-slot="scrollarea-scrollbar"]` above.
  */
 
 /* type=auto — visible by default, fades after the hide-delay.
@@ -183,7 +183,7 @@
  * DISCRETE-type property — under the default `transition-behavior:
  * normal` it would swap instantly at the start of the transition,
  * regardless of `transition-delay`. With `transition-behavior:
- * allow-discrete` (set on `.zs-scrollarea__scrollbar` above), the
+ * allow-discrete` (set on `[data-slot="scrollarea-scrollbar"]` above), the
  * discrete swap is deferred to the END of `duration + delay`. We
  * align the `pointer-events` delay with the opacity fade so the
  * hit-test surface stays `auto` for the FULL hide-delay + fade window

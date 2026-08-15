@@ -2,10 +2,10 @@
  * Grid — two-dimensional grid arrangement.
  *
  * Anatomy:
- *   .zs-grid              — the grid container
- *   .zs-grid > *          — cells (min-inline-size: 0 so content can shrink)
- *   .zs-grid--intrinsic   — minColWidth path (auto-fit, breakpoint-free)
- *   .zs-grid--explicit    — fixed-count path (columns number/object)
+ *   [data-slot="grid"]              — the grid container
+ *   [data-slot="grid"] > *          — cells (min-inline-size: 0 so content can shrink)
+ *   [data-slot="grid"][data-intrinsic]   — minColWidth path (auto-fit, breakpoint-free)
+ *   [data-slot="grid"][data-explicit]    — fixed-count path (columns number/object)
  *
  * Driven by inline custom properties / data-attributes set from props:
  *   --grid-gap       --zeroship-space-*    (default --zeroship-space-0)

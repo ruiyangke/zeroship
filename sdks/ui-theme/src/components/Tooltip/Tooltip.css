@@ -2,9 +2,9 @@
  * Tooltip — anchored label.
  *
  * Anatomy:
- *   .zs-tooltip-positioner    Floating UI anchored layer (no paint)
- *     └─ .zs-tooltip-popup    inverted-surface chip
- *           ├─ .zs-tooltip-arrow    SVG triangle pointed at trigger
+ *   [data-slot="tooltip-positioner"]    Floating UI anchored layer (no paint)
+ *     └─ [data-slot="tooltip-popup"]    inverted-surface chip
+ *           ├─ [data-slot="tooltip-arrow"]    SVG triangle pointed at trigger
  *           └─ children             label text
  *
  * Inverted surface — Tooltips read as system labels, so the popup paints

@@ -2,12 +2,12 @@
  * Progress — task bar (determinate / indeterminate).
  *
  * Anatomy:
- *   .zs-progress                       — Root row (grid: header + track)
- *     ├─ .zs-progress__header          — optional label + value row
- *     │   ├─ .zs-progress__label
- *     │   └─ .zs-progress__value
- *     └─ .zs-progress__track           — the rail
- *         └─ .zs-progress__indicator   — fill (determinate) / shimmer (indeterminate)
+ *   [data-slot="progress"]                       — Root row (grid: header + track)
+ *     ├─ [data-slot="progress-header"]          — optional label + value row
+ *     │   ├─ [data-slot="progress-label"]
+ *     │   └─ [data-slot="progress-value"]
+ *     └─ [data-slot="progress-track"]           — the rail
+ *         └─ [data-slot="progress-indicator"]   — fill (determinate) / shimmer (indeterminate)
  *
  * Modifier classes:
  *   size:   --sm | --md | --lg     (track block-size 0.25 / 0.375 / 0.5rem)
@@ -118,9 +118,9 @@
 /* RTL flip — translate runs the opposite direction so the sweep reads
    right-to-left for RTL writing modes. Uses `:dir(rtl)` (CSS Selectors
    L4) so the match reaches whether `dir="rtl"` is set on `<html>`,
-   `<body>`, an ancestor, or the `.zs-progress` element itself — the
+   `<body>`, an ancestor, or the `[data-slot="progress"]` element itself — the
    prior `[dir="rtl"]` attribute selector only matched when the
-   attribute lived literally on a `.zs-progress` ancestor element that
+   attribute lived literally on a `[data-slot="progress"]` ancestor element that
    happened to also descend through the selector. */
 [data-slot="progress"][data-status="indeterminate"]:dir(rtl) [data-slot="progress-indicator"] {
   animation-name: zeroship-progress-shimmer-rtl;

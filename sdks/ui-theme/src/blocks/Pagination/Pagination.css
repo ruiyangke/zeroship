@@ -8,13 +8,13 @@
  * type, the decorative ellipsis, and the few button overrides that make a
  * dense numeric row read evenly.
  *
- *   .zs-pagination               <nav> — flex row, wraps on narrow widths
- *     ├─ .zs-pagination__summary       "Showing 1–10 of 57" — footnote
- *     ├─ .zs-pagination__page-size     "Rows per page" + <Select>
- *     │    └─ .zs-pagination__page-size-label
- *     └─ .zs-pagination__pages         the button row
- *          ├─ .zs-pagination__button   Prev / Next / page (extends .zs-button)
- *          └─ .zs-pagination__ellipsis decorative gap, aria-hidden
+ *   [data-slot="pagination"]               <nav> — flex row, wraps on narrow widths
+ *     ├─ [data-slot="pagination-summary"]       "Showing 1–10 of 57" — footnote
+ *     ├─ [data-slot="pagination-page-size"]     "Rows per page" + <Select>
+ *     │    └─ [data-slot="pagination-page-size-label"]
+ *     └─ [data-slot="pagination-pages"]         the button row
+ *          ├─ [data-slot="pagination-next"], [data-slot="pagination-page"], [data-slot="pagination-prev"]   Prev / Next / page (extends [data-slot="button"])
+ *          └─ [data-slot="pagination-ellipsis"] decorative gap, aria-hidden
  *
  * Motion: none of our own; Button owns its hover transition (and its
  * reduced-motion handling).

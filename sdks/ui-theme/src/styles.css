@@ -132,7 +132,7 @@
 /* Skip-to-content link — the canonical "jump past the chrome" affordance
    baked into AppShell as the first focusable child. It reuses the
    visually-hidden idiom (the same 1px clip-box recipe as
-   .zs-visually-hidden — the one place raw px is allowed) so it is offered
+   [data-slot="visually-hidden"] — the one place raw px is allowed) so it is offered
    to the AT tree but invisible until keyboard focus lands on it; on
    :focus / :focus-visible it un-hides and pins to the inline-start/top of
    the shell as a real, styled control. Logical properties keep the pin

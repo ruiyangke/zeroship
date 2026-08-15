@@ -2,12 +2,12 @@
  * Tag — interactive chip (removable / static, or filter toggle).
  *
  * Anatomy:
- *   .zs-tag                       — root (span in removable/static mode,
+ *   [data-slot="tag"]                       — root (span in removable/static mode,
  *                                   button in filter mode)
- *     ├─ .zs-tag__icon            — optional decorative leading slot
- *     ├─ .zs-tag__label           — the text token
- *     └─ .zs-tag__remove          — trailing remove button (removable
- *                                   mode only); .zs-tag__remove-glyph
+ *     ├─ [data-slot="tag-icon"]            — optional decorative leading slot
+ *     ├─ [data-slot="tag-label"]           — the text token
+ *     └─ [data-slot="tag-remove"]          — trailing remove button (removable
+ *                                   mode only); [data-slot="tag-remove-glyph"]
  *                                   holds the aria-hidden × glyph
  *
  * Glass / axe-contrast invariant: the resting chip paints an OPAQUE
@@ -207,9 +207,9 @@
     border-color: Highlight;
   }
   /* Specificity mirror (wave-2b 🔴). The normal-mode filter hover
-     selectors `.zs-tag--filter:hover:not([data-selected])` and
-     `.zs-tag--filter[data-selected]:hover` outrank the plain
-     `.zs-tag` / `.zs-tag--filter[data-selected]` system-color rules
+     selectors `[data-slot="tag"][data-filter]:hover:not([data-selected])` and
+     `[data-slot="tag"][data-filter][data-selected]:hover` outrank the plain
+     `[data-slot="tag"]` / `[data-slot="tag"][data-filter][data-selected]` system-color rules
      above, so without a same-shape mirror a HOVERED filter chip would
      paint the OKLCH `--zeroship-label`/`--zeroship-accent-hover` mix instead of the
      system colors. Each mirror reuses the SAME selector shape so

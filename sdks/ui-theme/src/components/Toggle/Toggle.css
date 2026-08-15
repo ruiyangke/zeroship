@@ -2,9 +2,9 @@
  * Toggle + ToggleGroup — pressable two-state button + segmented control.
  *
  * Anatomy:
- *   .zs-toggle-group               — Base UI's <div>, segmented track
- *     ├─ .zs-toggle (data-pressed) — pressed segment / standalone Toggle
- *     ├─ .zs-toggle                — unpressed segment
+ *   [data-slot="toggle-group"]               — Base UI's <div>, segmented track
+ *     ├─ [data-slot="toggle"] (data-pressed) — pressed segment / standalone Toggle
+ *     ├─ [data-slot="toggle"]                — unpressed segment
  *     └─ … repeated …
  *
  * Modifier classes (group):
@@ -30,7 +30,7 @@
  *      lit-up rectangle within the rail.
  *
  *   3. Standalone Toggle (no group) hovers like Button's `--gray`. The
- *      `.zs-toggle-group .zs-toggle` selector strips the standalone
+ *      `[data-slot="toggle-group"] [data-slot="toggle"]` selector strips the standalone
  *      surface so inside-a-group renders the unified track, not a row
  *      of independent buttons.
  *
@@ -414,7 +414,7 @@
  * NB: rules below restrict to `:not([data-pressed])` so the pressed-
  * pill rule defined ABOVE retains the accent fill regardless of group
  * specificity. Without that guard, the descendant selector
- * `.zs-toggle-group .zs-toggle` would override the standalone pressed
+ * `[data-slot="toggle-group"] [data-slot="toggle"]` would override the standalone pressed
  * rule (same specificity, later wins) and leave pressed segments
  * painted transparent over the rail — exactly the axe color-contrast
  * failure caught during slice-5 review. */
@@ -423,8 +423,8 @@
 }
 
 /* Group child radius keys off the CHILD's resolved data-size, not the
- * group modifier class. Item 4 fix: previously `.zs-toggle-group--sm
- * .zs-toggle` overrode any child explicit `size="lg"`, breaking the
+ * group modifier class. Item 4 fix: previously `[data-slot="toggle-group"]
+ * [data-slot="toggle"]` overrode any child explicit `size="lg"`, breaking the
  * documented cascade contract (child prop > group context > default).
  * Both the default <button> and asChild Slot stamp `data-size={size}`
  * (item 8 fix in Toggle.tsx) so these selectors catch every render path.
@@ -489,7 +489,7 @@
 }
 
 /* Pressed segments inside a group keep the accent fill (the standalone
- * `.zs-toggle[data-pressed]` rule above already paints accent on the
+ * `[data-slot="toggle"][data-pressed]` rule above already paints accent on the
  * pill — same specificity, but the unpressed-only group rule above
  * lets it win). z-index lifts the pill over the group's track so the
  * focus outline isn't clipped. */
@@ -550,9 +550,9 @@
   [data-slot="toggle"][data-disabled] {
     /* Item-C fix: re-stamp `background-color: Canvas` inside the
      * forced-colors disabled mirror. The base oklch rule
-     * `.zs-toggle[data-disabled]` paints a token-derived
+     * `[data-slot="toggle"][data-disabled]` paints a token-derived
      * `color-mix(in oklch, var(--zeroship-label) 4%, transparent)` background
-     * with higher specificity than the bare `.zs-toggle { background:
+     * with higher specificity than the bare `[data-slot="toggle"] { background:
      * Canvas }` reset at the top of this @media block. Without the
      * explicit Canvas paint here, a disabled unpressed Toggle under
      * high-contrast mode keeps the token mix instead of resolving to
@@ -579,9 +579,9 @@
   /* ─── Item 1 fix: mirror every STATE selector inside forced-colors so
    * the system colors win over the oklch token rules at every state.
    *
-   * Pre-fix, selectors like `.zs-toggle--default:not([data-disabled])
+   * Pre-fix, selectors like `[data-slot="toggle"]:not([data-disabled])
    * :not([data-pressed]):hover` had higher specificity than the bare
-   * `.zs-toggle` reset block above, so under high-contrast emulation,
+   * `[data-slot="toggle"]` reset block above, so under high-contrast emulation,
    * hovering an unpressed Toggle would re-paint the oklch label-tinted
    * background. We re-emit each state selector with EQUAL specificity
    * inside the forced-colors media so the system colors take the cascade.
@@ -601,7 +601,7 @@
     }
     /* Group + per-variant hover surfaces — same equal-specificity dance.
      * Without these the group descendant rules at `:339`/`:359` would
-     * outrank the forced-colors reset on `.zs-toggle`. */
+     * outrank the forced-colors reset on `[data-slot="toggle"]`. */
     [data-slot="toggle-group"] [data-slot="toggle"]:not([data-disabled]):not([data-pressed]):hover,
     [data-slot="toggle-group"][data-variant="plain"] [data-slot="toggle"]:not([data-disabled]):not([data-pressed]):hover {
       background-color: Canvas;
@@ -625,7 +625,7 @@
     color: CanvasText;
   }
 
-  /* Group-disabled cascade — the original .zs-toggle-group[data-disabled]
+  /* Group-disabled cascade — the original [data-slot="toggle-group"][data-disabled]
    * rule paints a faded oklch fill. Re-emit to Canvas under forced-colors
    * so the rail reads system-neutral, and stamp GrayText on every child
    * so the disabled cascade is visible. */

@@ -2,16 +2,16 @@
  * Cta — a focused call-to-action band.
  *
  * Anatomy:
- *   .zs-cta              — the <section>; generous vertical padding, NO heavy
+ *   [data-slot="cta"]              — the <section>; generous vertical padding, NO heavy
  *                          background by default (composable — the consumer
  *                          paints the page backdrop)
- *   .zs-cta__panel       — the body Stack (eyebrow → h2 → description →
+ *   [data-slot="cta-panel"]       — the body Stack (eyebrow → h2 → description →
  *                          actions); under data-variant="tinted" it becomes a
  *                          rounded accent-tint card with its own padding
- *   .zs-cta__eyebrow     — small label above the title (accent lead-in)
- *   .zs-cta__title       — the section <h2>
- *   .zs-cta__description  — muted supporting <p> on a reading measure
- *   .zs-cta__actions      — the CTA Cluster (composed); aligns to the band
+ *   [data-slot="cta-eyebrow"]     — small label above the title (accent lead-in)
+ *   [data-slot="cta-title"]       — the section <h2>
+ *   [data-slot="cta-description"]  — muted supporting <p> on a reading measure
+ *   [data-slot="cta-actions"]      — the CTA Cluster (composed); aligns to the band
  *
  * Layout discipline:
  *   - The section sets only its vertical rhythm; the composed Container owns
@@ -77,7 +77,7 @@
 }
 
 /* ─── Eyebrow — the shared section eyebrow (accent pill) ──────────────────
-   The styling is `.zs-section-eyebrow` (defined once in _section-tone.css);
+   The styling is `[data-slot="cta-eyebrow"], [data-slot="faq-eyebrow"], [data-slot="feature-grid-eyebrow"], [data-slot="hero-eyebrow"], [data-slot="section-header-eyebrow"], [data-slot="stats-band-eyebrow"]` (defined once in _section-tone.css);
    this BEM hook remains only as a stable consumer target. */
 
 /* ─── Title — the section headline ───────────────────────────────────────── */

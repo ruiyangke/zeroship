@@ -2,13 +2,13 @@
  * NumberField — text input + stepper buttons + optional scrub area.
  *
  * Anatomy:
- *   .zs-number-field                       — Root (positioning context, scrub-area anchor)
- *     ├─ .zs-number-field__scrub           — drag-to-scrub area (optional)
- *     │   └─ .zs-number-field__scrub-cursor  — pointer-locked cursor glyph
- *     └─ .zs-number-field__group           — the bordered shell (focus ring lives here)
- *         ├─ .zs-number-field__step--dec   — stepper "-" button
- *         ├─ .zs-number-field__input       — native <input>
- *         └─ .zs-number-field__step--inc   — stepper "+" button
+ *   [data-slot="number-field"]                       — Root (positioning context, scrub-area anchor)
+ *     ├─ [data-slot="number-field-scrub"]           — drag-to-scrub area (optional)
+ *     │   └─ [data-slot="number-field-scrub-cursor"]  — pointer-locked cursor glyph
+ *     └─ [data-slot="number-field-group"]           — the bordered shell (focus ring lives here)
+ *         ├─ [data-slot="number-field-step-dec"]   — stepper "-" button
+ *         ├─ [data-slot="number-field-input"]       — native <input>
+ *         └─ [data-slot="number-field-step-inc"]   — stepper "+" button
  *
  * Modifier classes (one of each axis):
  *   variant: --default | --outline
@@ -251,7 +251,7 @@
 
    Specificity note: the `--sm` / `--md` / `--lg` size variants above
    set `min-inline-size` at TWO-class specificity
-   (`.zs-number-field--md .zs-number-field__step`), so the coarse-
+   (`[data-slot="number-field"] [data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"]`), so the coarse-
    pointer mirror MUST also be two-class — otherwise the variant rule
    pins the per-size floor (1.75rem / 2rem) and the coarse-pointer
    floor never applies. We re-emit per variant to match. */
@@ -373,9 +373,9 @@
  *
  * Wave-9 review item 3: every selector above that declares a
  * `transition` must be silenced under `prefers-reduced-motion: reduce`.
- * Pre-fix only `.zs-number-field__group` and `.zs-number-field__step`
+ * Pre-fix only `[data-slot="number-field-group"]` and `[data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"]`
  * were covered; the scrub affordance still animated `color` and
- * `box-shadow` on hover. Add `.zs-number-field__scrub` so the mirror
+ * `box-shadow` on hover. Add `[data-slot="number-field-scrub"]` so the mirror
  * is complete. */
 @media (prefers-reduced-motion: reduce) {
   [data-slot="number-field-group"],
@@ -389,15 +389,17 @@
  *
  * Slice 5/6 lesson reapplied (Slice-7 review item 3): every non-forced
  * state selector mirrored inside the @media block at EQUAL specificity
- * so the system palette wins the cascade. The bare `.zs-number-field__
- * group` reset is single-class — variant (`--default` / `--outline`)
- * and per-state (`[data-readonly]`) rules above are double-class and
- * would otherwise outrank the reset.
+ * so the system palette wins the cascade. The bare
+ * `[data-slot="number-field-group"]` reset is one attribute selector --
+ * variant (`[data-variant="default"]` / `"outline"`) and per-state
+ * (`[data-readonly]`) rules above are two and would otherwise outrank
+ * the reset. Attribute selectors weigh the same as classes, so the
+ * specificity argument is unchanged by the move off class names.
  *
  * `forced-color-adjust: none` opts the GROUP surface out of automatic
  * platform re-tinting so the explicit Field / CanvasText / Highlight
  * mappings below survive Chromium's forced-colors emulation pass. We
- * keep it on `.zs-number-field__group` and `.zs-number-field__step`
+ * keep it on `[data-slot="number-field-group"]` and `[data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"]`
  * (both have explicit system-token mappings) but NOT on variant
  * selectors — those should inherit the parent's adjusted paint, not
  * blanket-lock another color. */
@@ -440,7 +442,7 @@
       0 0 0 0.125rem Highlight;
   }
   /* Readonly mirror — the base-block readonly rule
-     (`.zs-number-field[data-readonly] .zs-number-field__group`) is
+     (`[data-slot="number-field"][data-readonly] [data-slot="number-field-group"]`) is
      double-spec and would otherwise outrank the single-class reset. */
   [data-slot="number-field"][data-readonly] [data-slot="number-field-group"] {
     background: Field;
@@ -460,7 +462,7 @@
     background-color: Field;
     forced-color-adjust: none;
   }
-  /* Per-button-disabled mirror — `.zs-number-field__step[data-disabled]`
+  /* Per-button-disabled mirror — `[data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"][data-disabled]`
      in the non-forced block is double-spec (class + attribute) and
      paints `color: var(--zeroship-label-tertiary)`. Mirror at equal spec so
      GrayText wins. */
@@ -501,7 +503,7 @@
     box-shadow: inset 0 0 0 0.0625rem CanvasText;
   }
   /* Hover mirror — the non-forced rule
-     (`.zs-number-field__scrub:hover`) paints token color + token
+     (`[data-slot="number-field-scrub"]:hover`) paints token color + token
      shadow at one-class + :hover specificity. Mirror at equal
      specificity (inside the @media block) so the system palette wins
      on hover under forced-colors. Wave-9 review item 4. */
