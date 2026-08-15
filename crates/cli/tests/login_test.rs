@@ -85,7 +85,7 @@ fn device_grant_flow_polls_until_approved() {
         (400, r#"{"error":"authorization_pending"}"#),
         (
             200,
-            r#"{"access_token":"platform-access","token_type":"Bearer","provider":"platform","expires_in":120,"scope":"apps:deploy apps:read apps:write","principal_id":"11111111-1111-4111-8111-111111111111"}"#,
+            r#"{"access_token":"platform-access","token_type":"Bearer","provider":"platform","expires_in":120,"scope":"apps:deploy apps:read apps:write secrets:read","principal_id":"11111111-1111-4111-8111-111111111111"}"#,
         ),
     ]);
     let config = tempfile::tempdir().expect("tempdir");
@@ -123,6 +123,7 @@ fn device_grant_flow_polls_until_approved() {
     assert_header(&requests[0], "content-type", "application/json");
     assert!(requests[0].body.contains(r#""client_id":"zeroship-cli""#));
     assert!(requests[0].body.contains("apps:write"));
+    assert!(requests[0].body.contains("secrets:read"));
     assert_eq!(requests[1].path, "/api/device/token");
     assert!(requests[1].body.contains(r#""device_code":"dev-123""#));
     assert_eq!(requests[2].path, "/api/device/token");
@@ -162,7 +163,7 @@ fn login_honors_project_config_environment_and_prints_provenance() {
         (400, r#"{"error":"authorization_pending"}"#),
         (
             200,
-            r#"{"access_token":"platform-access","token_type":"Bearer","provider":"platform","expires_in":120,"scope":"apps:deploy apps:read apps:write","principal_id":"11111111-1111-4111-8111-111111111111"}"#,
+            r#"{"access_token":"platform-access","token_type":"Bearer","provider":"platform","expires_in":120,"scope":"apps:deploy apps:read apps:write secrets:read","principal_id":"11111111-1111-4111-8111-111111111111"}"#,
         ),
     ]);
     let project = tempfile::tempdir().expect("project tempdir");
@@ -239,7 +240,7 @@ fn supabase_device_flow_uses_control_and_stores_platform_token() {
         (400, r#"{"error":"authorization_pending"}"#),
         (
             200,
-            r#"{"access_token":"platform-access","token_type":"Bearer","provider":"platform","expires_in":120,"scope":"apps:deploy apps:read apps:write","principal_id":"11111111-1111-4111-8111-111111111111"}"#,
+            r#"{"access_token":"platform-access","token_type":"Bearer","provider":"platform","expires_in":120,"scope":"apps:deploy apps:read apps:write secrets:read","principal_id":"11111111-1111-4111-8111-111111111111"}"#,
         ),
     ]);
     let config = tempfile::tempdir().expect("tempdir");

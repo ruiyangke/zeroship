@@ -78,7 +78,7 @@ column therefore says what the *build* assumes when the key is missing.
 | `$schema` | string | - | neither; an editor hint. The CLI refuses a file whose `$schema` names a different contract than the one it was built against. |
 | `name` | string, `^[a-z0-9][a-z0-9-]{0,62}$` | required | CLI `deploy`, and only as the app name on a first push (see below). The build validates it and otherwise ignores it. |
 | `app` | string | none | CLI: `deploy`, `migrate`, `secret`, `var`. An app id (uuid) or an app name. |
-| `control` | string | required | CLI: same four commands. Control-plane base URL. |
+| `control` | string | required | CLI: the same four commands plus `login`. Control-plane base URL. |
 | `runtime_date` | string, `^[0-9]{4}-[0-9]{2}-[0-9]{2}$` | required | nobody. Reserved; validated only. See [`runtime_date`](#runtime_date-is-reserved). |
 | `build.mode` | `"full"` \| `"static"` | `"full"` | build. `"full"` emits `manifest.worker`; `"static"` is an SSG-only deploy with no worker. |
 | `build.serverEntry` | string | auto-detected | build (dev server and production build). Omit for auto-detection. |
@@ -86,7 +86,7 @@ column therefore says what the *build* assumes when the key is missing.
 | `build.output` | string | `"dist/app.zship"` | build (writes it) and CLI `deploy` (uploads it). |
 | `migrations.dir` | string | `"migrations"` | build: the Vite build, the dev server, `gen-types-all`, `zeroship-dev-migrate`. |
 | `migrations.out` | string | `"generated/zeroship"` | build (writes `env.db.ts`, `schema.runtime.json`, `migrations.ir.json` there) and CLI `migrate` (posts `<out>/migrations.ir.json`). |
-| `secrets` | string[], each `^[A-Z][A-Z0-9_]{0,63}$` | `[]` | declaration only today. See [Secrets](#secrets). |
+| `secrets` | string[], each `^[A-Z][A-Z0-9_]{0,63}$` | `[]` | CLI `deploy` checks the declared names before upload. See [Secrets](#secrets). |
 | `environments.<name>` | object | - | see [Environments](#environments). |
 
 `name`, `control`, `runtime_date`, `build` and `migrations` are required at the
@@ -137,11 +137,9 @@ fallback at all; `--control` reads `ZEROSHIP_CONTROL_URL` and falls back to
 in this file and never resolves from it: `--token=<PAT>`, then `ZEROSHIP_TOKEN`,
 then the token `zeroship login` wrote to `~/.config/zeroship/token.json`.
 
-`zeroship login` is the one soft reader. It takes `control` from the file when
-there is one, prints the value it will use, and gains no `--config` or `--env`
-of its own: a login is a per-machine credential operation, and an unreadable or
-invalid file leaves its old flag / environment / default chain intact rather
-than making `login` refuse to run.
+`zeroship login` resolves `control` exactly like the other commands. It accepts
+`--config` and `--env`, prints provenance, and reports file location, parsing,
+and environment-selection errors instead of suppressing them.
 
 ### Provenance is printed before every mutating call
 
@@ -234,8 +232,11 @@ Two structural guards back the rule up. Every object in the schema is
 message naming `zeroship secret set` and `.env`. An array of strings has nowhere
 to put a value in the first place.
 
-Today the `secrets` array is a declaration and nothing more: both readers
-validate it and no command consumes it yet.
+Before uploading an archive, `zeroship deploy` lists the target app's configured
+secret names and warns once for every declaration that is absent. It never reads
+a secret value. If the advisory check cannot run or its response cannot be
+parsed, deploy prints that validation failure explicitly and continues with the
+upload.
 
 ## `runtime_date` is reserved
 

@@ -703,7 +703,7 @@ pass "GoTrue user session issued and admin lookup confirms email"
 
 step "Device flow: auth, scripted approve, one-time token poll"
 DEVICE="$(post_json "$CONTROL_URL/api/device/auth" \
-  '{"client_id":"zeroship-cli","scope":"openid offline_access apps:write apps:deploy apps:read"}')"
+  '{"client_id":"zeroship-cli","scope":"openid offline_access apps:write apps:deploy apps:read secrets:read"}')"
 DEVICE_CODE="$(json_get '.device_code' <<<"$DEVICE")"
 USER_CODE="$(json_get '.user_code' <<<"$DEVICE")"
 INTERVAL="$(json_get '.interval' <<<"$DEVICE")"
@@ -726,7 +726,7 @@ LINK_COUNT="$(query_control_db "SELECT count(*) FROM zeroship.identity_links WHE
 [ "$LINK_COUNT" = "1" ] || fail "expected one identity_link for GoTrue subject, got $LINK_COUNT"
 GRANTS="$(query_control_db "SELECT string_agg(grant_name, ',' ORDER BY grant_name) FROM zeroship.principal_grants pg JOIN zeroship.identity_links il ON il.principal_id = pg.principal_id WHERE il.provider = 'supabase' AND il.provider_subject = '$GOTRUE_SUB'")"
 echo "  provisioned grants: $GRANTS"
-[ "$GRANTS" = "apps:deploy,apps:read,apps:write" ] || fail "unexpected provisioned grants: $GRANTS"
+[ "$GRANTS" = "apps:deploy,apps:read,apps:write,secrets:read" ] || fail "unexpected provisioned grants: $GRANTS"
 pass "control provisioned and linked the GoTrue principal"
 
 sleep "${INTERVAL:-5}"
@@ -746,7 +746,7 @@ BOUND_SCOPE="$(json_get '.scope' <<<"$DEVICE_TOKEN")"
 BOUND_PRINCIPAL="$(json_get '.principal_id' <<<"$DEVICE_TOKEN")"
 [ "$BOUND_PROVIDER" = "platform" ] || fail "device token provider mismatch: $DEVICE_TOKEN"
 [ -n "$BOUND_ACCESS" ] || fail "device token returned no access_token: $DEVICE_TOKEN"
-[ "$BOUND_SCOPE" = "apps:deploy apps:read apps:write" ] \
+[ "$BOUND_SCOPE" = "apps:deploy apps:read apps:write secrets:read" ] \
   || fail "device token scope mismatch: $BOUND_SCOPE"
 LINKED_PRINCIPAL="$(query_control_db "SELECT principal_id FROM zeroship.identity_links WHERE provider = 'supabase' AND provider_subject = '$GOTRUE_SUB'")"
 [ "$BOUND_PRINCIPAL" = "$LINKED_PRINCIPAL" ] \

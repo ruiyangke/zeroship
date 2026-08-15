@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 const CLIENT_ID: &str = "zeroship-cli";
-const SCOPE: &str = "openid offline_access apps:deploy apps:read apps:write";
+const SCOPE: &str = "openid offline_access apps:deploy apps:read apps:write secrets:read";
 const TOKEN_EXPIRY_SKEW_SECS: u64 = 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
