@@ -213,17 +213,44 @@ pub fn preview_sql(source: PreviewSqlSource) -> Result<Vec<String>> {
         effective_policy,
     };
 
-    envelopes
-        .iter()
-        .enumerate()
-        .map(|(index, envelope)| {
-            zero_migrate::render_ir_envelope_sql(envelope, dialect, &opts).map_err(|e| {
-                Error::from_reason(format!(
-                    "previewSql: envelope[{index}] failed to render: {e}"
-                ))
-            })
-        })
-        .collect()
+    // Each envelope renders against the schema the ones BEFORE it leave behind,
+    // the same way apply lowers them. Rendering every envelope against an empty
+    // schema is what let `lint` report ok on a backfill whose cursor column is
+    // declared by a `createTable` two files earlier and whose type `apply` then
+    // refuses (F653): the rule was never unreachable, the column simply was not
+    // in view.
+    //
+    // A fold that fails is NOT fatal here. This is an offline preview, and an op
+    // the folder cannot model must not cost the operator the whole listing - the
+    // render continues against the schema accumulated so far, which is exactly
+    // how the per-op `[runtime-resolved]` degradation already behaves.
+    let mut history: Vec<zero_migrate::model::ir::Op> = Vec::new();
+    let mut out = Vec::with_capacity(envelopes.len());
+    for (index, envelope) in envelopes.iter().enumerate() {
+        let live = zero_migrate::render::fold::fold_ops(
+            &history,
+            dialect,
+            &opts.default_schema,
+            &opts.effective_policy,
+        )
+        .map_or_else(
+            |_| zero_migrate::LiveSchema::default(),
+            |snapshot| zero_migrate::LiveSchema::from_catalog_snapshot(snapshot, &opts.owner_app),
+        );
+        out.push(
+            zero_migrate::render_ir_envelope_sql_onto(envelope, dialect, &opts, &live).map_err(
+                |e| {
+                    Error::from_reason(format!(
+                        "previewSql: envelope[{index}] failed to render: {e}"
+                    ))
+                },
+            )?,
+        );
+        if let Ok(ir) = serde_json::from_str::<zero_migrate::MigrationIr>(envelope) {
+            history.extend(ir.ops);
+        }
+    }
+    Ok(out)
 }
 
 fn gen_artifacts_err(msg: impl Into<String>) -> GenArtifactsReply {

@@ -976,13 +976,20 @@ async function runLint(args: Args): Promise<number> {
       let renderedSql: string | undefined;
       let previewError: string | undefined;
       try {
-        [renderedSql] = previewSql({
-          envelopes: [envelopeJson[index]],
+        // The whole prefix, not this file alone. A migration's ops are only
+        // checkable against the schema the earlier migrations leave behind: lint
+        // reported ok on a backfill whose cursor column a `createTable` two files
+        // earlier declares with a type apply refuses, because that column was
+        // never in view (F653). The preview folds the prefix and renders the last
+        // envelope against it, so lint reaches the planner's own verdict.
+        const rendered = previewSql({
+          envelopes: envelopeJson.slice(0, index + 1),
           dialect,
           defaultSchema: args.projectSchema,
           ownerApp: args.ownerApp,
           charterLayers,
         });
+        renderedSql = rendered[rendered.length - 1];
       } catch (error) {
         previewError = safeErrorMessage(error, undefined);
       }

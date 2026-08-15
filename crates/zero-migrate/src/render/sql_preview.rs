@@ -264,7 +264,32 @@ pub fn render_ir_envelope_sql(
     dialect: SqlDialect,
     opts: &PreviewOpts,
 ) -> Result<String, String> {
-    let (name, rendered) = render_ir_envelope_rendered(bytes, dialect, opts)?;
+    render_ir_envelope_sql_onto(bytes, dialect, opts, &LiveSchema::default())
+}
+
+/// [`render_ir_envelope_sql`] against a schema the CALLER has already folded from
+/// the migrations that run before this one.
+///
+/// An offline preview of one envelope in isolation cannot see a column another
+/// migration in the same directory declares, so every rule keyed on a column's
+/// type is silently unreachable — the `lint` gate reported ok on a backfill whose
+/// cursor type `apply` refuses, because the `createTable` naming that column was
+/// simply not in view (F653).
+///
+/// Passing the folded prefix does NOT invent a new rule. It gives the existing
+/// lowering the same schema apply gives it, so lint reaches the planner's own
+/// verdict with the planner's own message. A table the prefix never declares
+/// stays absent, and the checks that need it keep deferring rather than guessing.
+///
+/// # Errors
+/// As [`render_ir_envelope_sql`].
+pub fn render_ir_envelope_sql_onto(
+    bytes: &str,
+    dialect: SqlDialect,
+    opts: &PreviewOpts,
+    live: &LiveSchema,
+) -> Result<String, String> {
+    let (name, rendered) = render_ir_envelope_rendered(bytes, dialect, opts, live)?;
     let wrap_mysql = needs_mysql_session_envelope(dialect, &rendered);
     let mut out = String::new();
     // Synthesize a plan header from the IR identity (no full AppliedPlan needed —
@@ -334,7 +359,8 @@ pub fn render_ir_envelope_sql_statements(
     dialect: SqlDialect,
     opts: &PreviewOpts,
 ) -> Result<(String, Vec<String>), String> {
-    let (name, rendered) = render_ir_envelope_rendered(bytes, dialect, opts)?;
+    let (name, rendered) =
+        render_ir_envelope_rendered(bytes, dialect, opts, &LiveSchema::default())?;
     let statements = rendered
         .into_iter()
         .filter(|r| r.statement)
@@ -348,6 +374,7 @@ fn render_ir_envelope_rendered(
     bytes: &str,
     dialect: SqlDialect,
     opts: &PreviewOpts,
+    live: &LiveSchema,
 ) -> Result<(String, Vec<Rendered>), String> {
     // Parse the IR document WITHOUT the ownership/registry gate (this is an offline
     // operator preview, not a deploy): `serde` the wire shape, then validate its
@@ -403,9 +430,24 @@ fn render_ir_envelope_rendered(
         &opts.effective_policy,
     );
 
-    let live = LiveSchema::default();
-    let rendered = render_ir_ops(&author, &ir, &live, dialect, &opts.default_schema);
+    let rendered = render_ir_ops(&author, &ir, live, dialect, &opts.default_schema)?;
     Ok((ir.name, rendered))
+}
+
+/// Whether a lowering failure means "this needs live state" or "this migration is
+/// wrong".
+///
+/// The preview degrades an un-lowerable op to a `[runtime-resolved]` label rather
+/// than aborting, which is right for an op whose SQL genuinely depends on catalog
+/// state. It is WRONG for a refusal the author can act on: labeling it turns a
+/// verdict apply will deliver anyway into a line of prose, and the migration
+/// passes lint on its way to failing the deploy (F653).
+///
+/// `BackfillCursorUnavailable` is the second kind. It is only ever raised when the
+/// cursor table's snapshot IS known, so reaching it means the checker had the
+/// facts and the answer was no.
+const fn is_author_error(error: &IrLowerError) -> bool {
+    matches!(error, IrLowerError::BackfillCursorUnavailable { .. })
 }
 
 /// Per-op lowering for the IR envelope path: lower each op in isolation so a single
@@ -418,7 +460,7 @@ fn render_ir_ops(
     live: &LiveSchema,
     dialect: SqlDialect,
     project_schema: &str,
-) -> Vec<Rendered> {
+) -> Result<Vec<Rendered>, String> {
     let mut out = Vec::new();
     let mut working_live = live.clone();
     for op in &ir.ops {
@@ -434,6 +476,13 @@ fn render_ir_ops(
                 for step in &plan.steps {
                     render_step(op, guard, step, dialect, &mut out);
                 }
+            }
+            Err(e) if is_author_error(&e) => {
+                // Not a gap in what the preview can render - a refusal the author
+                // can act on. Surfacing it here is the point: the same verdict
+                // apply gives, delivered before the deploy rather than during it,
+                // in the planner own words so the two cannot drift.
+                return Err(e.to_string());
             }
             Err(e) => {
                 // The op cannot be lowered offline — it is DB-state-dependent. NEVER
@@ -451,7 +500,7 @@ fn render_ir_ops(
         let _ = working_live.advance_logical_columns(&one, dialect, project_schema, None);
         advance_preview_table_presence(op, dialect, &mut working_live.tables);
     }
-    out
+    Ok(out)
 }
 
 fn advance_preview_table_presence(

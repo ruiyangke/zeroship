@@ -345,7 +345,7 @@ pub use apply::precondition::evaluate as evaluate_precondition;
 pub use apply::precondition::PreconditionError;
 pub use model::precondition::{CmpOp, OnUnmet, Precondition, PreconditionCheck};
 pub use render::sql_preview::{
-    render_ir_envelope_sql, render_ir_envelope_sql_statements, render_plan_sql, render_set_sql,
+    render_ir_envelope_sql, render_ir_envelope_sql_onto, render_ir_envelope_sql_statements, render_plan_sql, render_set_sql,
     PreviewOpts, RUNTIME_RESOLVED,
 };
 // `migrator_role_name` / `RoleError` are pure (identifier derivation + a shared
