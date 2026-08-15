@@ -149,6 +149,24 @@ pub enum IrLoadError {
         /// The disclaimed-reversibility reason carried alongside the inverse.
         reason: String,
     },
+    /// The FORWARD op list contains row-writing DML, but the artifact declares
+    /// neither the recorded reverse nor a reason the write cannot be reversed.
+    #[error(
+        "missing data reverse: the IR envelope's forward ops contain DML, but it declares \
+         neither inverse_ops nor irreversible. Add inverse_ops with the recorded reverse, \
+         or add an irreversible reason that tells the operator why no reverse exists"
+    )]
+    DmlMissingReverse,
+    /// The FORWARD op list combines row-writing DML with DDL/vendor operations.
+    /// These are separate protocol phases and must be authored as separate
+    /// migrations so the data half has one unambiguous reverse declaration.
+    #[error(
+        "mixed migration phases: the IR envelope's forward ops contain both DDL/vendor \
+         operations and DML. Split them into separate schema and data migrations: put \
+         DDL/vendor ops in schema(), and put DML ops in data() with inverse_ops or an \
+         irreversible reason"
+    )]
+    MixedDdlAndDml,
     /// The recorded inverse itself failed the structural validator. Carries the
     /// underlying authoring error, distinguished from a FORWARD failure so the
     /// author knows which half of the migration is wrong.
@@ -620,6 +638,75 @@ pub fn enforce_ir_single_reverse(ir: &MigrationIr) -> Result<(), IrLoadError> {
         return Err(IrLoadError::ReverseDeclaredBothWays {
             reason: ir.irreversible.clone().unwrap_or_default(),
         });
+    }
+    Ok(())
+}
+
+#[derive(Debug, Default)]
+struct ForwardOpKinds {
+    dml: bool,
+    ddl_or_vendor: bool,
+}
+
+fn classify_forward_op(op: &Op, kinds: &mut ForwardOpKinds) {
+    match op {
+        Op::Insert { .. } | Op::Update { .. } | Op::Delete { .. } | Op::Backfill { .. } => {
+            kinds.dml = true;
+        }
+        // `Dialectal` is an envelope around op lists, not an independently
+        // executable DDL/vendor operation. Descend through EVERY leg so an
+        // off-target leg cannot hide DML from this phase-free protocol gate.
+        Op::Dialectal {
+            default,
+            pg,
+            sqlite,
+            mysql,
+        } => {
+            for leg in [
+                default.as_deref(),
+                pg.as_deref(),
+                sqlite.as_deref(),
+                mysql.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                for inner in leg {
+                    classify_forward_op(inner, kinds);
+                }
+            }
+        }
+        _ => kinds.ddl_or_vendor = true,
+    }
+}
+
+/// Enforce the phase-free data-migration protocol over the FORWARD op list.
+///
+/// An IR envelope carries no `schema()` / `data()` marker, so the engine derives
+/// the only facts it can trust from the closed op vocabulary itself:
+///
+/// - any forward DML requires exactly one reverse declaration (the "at most one"
+///   half is [`enforce_ir_single_reverse`]);
+/// - forward DDL/vendor operations and DML may not share one envelope.
+///
+/// This deliberately examines only [`MigrationIr::ops`]. `inverse_ops` is the
+/// reverse declaration itself; requiring that list to carry another reverse
+/// would recurse forever and reject every useful recorded inverse.
+///
+/// # Errors
+/// [`IrLoadError::MixedDdlAndDml`] when the forward list mixes phases, or
+/// [`IrLoadError::DmlMissingReverse`] when DML has no reverse declaration.
+pub fn enforce_ir_forward_data_protocol(ir: &MigrationIr) -> Result<(), IrLoadError> {
+    let mut kinds = ForwardOpKinds::default();
+    for op in &ir.ops {
+        classify_forward_op(op, &mut kinds);
+    }
+
+    if kinds.dml && kinds.ddl_or_vendor {
+        return Err(IrLoadError::MixedDdlAndDml);
+    }
+    if kinds.dml && ir.inverse_ops.is_none() && ir.irreversible.is_none() {
+        return Err(IrLoadError::DmlMissingReverse);
     }
     Ok(())
 }

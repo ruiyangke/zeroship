@@ -210,15 +210,19 @@ async fn ir_envelope_lowers_and_applies_on_sqlite() {
 async fn per_row_backfill_generates_a_fresh_exact_value_for_every_sqlite_row() {
     let p = paths("per_row_generators");
     let be = backend(&p);
-    let ir = no_inject_envelope_json(
-        r#"{"ir_version":1,"name":"sqlite_per_row_generators","ops":[
+    let schema_ir = no_inject_envelope_json(
+        r#"{"ir_version":1,"name":"sqlite_per_row_generators_schema","ops":[
           {"op":"createTable","name":"samples","columns":[
             {"name":"id","type":"bigInt","nullable":false},
             {"name":"uuid4","type":"uuid"},
             {"name":"uuid7","type":"uuid"},
             {"name":"type_id","type":"text","valueFormat":{"typeId":{"prefix":"order"}}},
             {"name":"ulid","type":"text","valueFormat":"ulid"}
-          ],"primaryKey":["id"]},
+          ],"primaryKey":["id"]}
+        ]}"#,
+    );
+    let data_ir = no_inject_envelope_json(
+        r#"{"ir_version":1,"name":"sqlite_per_row_generators_data","irreversible":"inserts rows and overwrites generated identifiers without recording the inserted rows or pre-images","ops":[
           {"op":"insert","table":"samples","columns":["id"],
            "rows":[[1],[2],[3],[4],[5],[6],[7],[8]]},
           {"op":"backfill","table":"samples","name":"fill_per_row_ids",
@@ -230,19 +234,48 @@ async fn per_row_backfill_generates_a_fresh_exact_value_for_every_sqlite_row() {
            }}
         ]}"#,
     );
-    let artifact = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite, &support::no_inject("app"))
+    let charter = support::no_inject("app");
+    let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite, &charter);
+    let guard_cfg = GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite);
+    let schema_artifact = author
         .load_and_lower_guarded(
-            &ir,
+            &schema_ir,
             APP,
             &registry(&[]),
             &LiveSchema::default(),
-            &GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite),
+            &guard_cfg,
         )
-        .expect("declared perRow destination formats must lower on SQLite");
+        .expect("the perRow destination schema must lower on SQLite");
 
     MigrationEngine::new()
         .apply_plan(
-            &artifact.plan.steps,
+            &schema_artifact.plan.steps,
+            Approval::None,
+            &be,
+            &exec_cfg(),
+            "sqlite-per-row-generator-schema-test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("the perRow destination schema applies on SQLite");
+
+    let schema_envelope: MigrationIr =
+        serde_json::from_str(&schema_ir).expect("resolved schema IR parses");
+    let mut live = LiveSchema::from_tables(BTreeSet::from(["samples".to_string()]));
+    live.advance_logical_columns(&schema_envelope, SqlDialect::Sqlite, PROJECT, None)
+        .expect("the schema records the perRow destination formats");
+    let data_artifact = author
+        .load_and_lower_guarded(
+            &data_ir,
+            APP,
+            &registry(&[("samples", APP)]),
+            &live,
+            &guard_cfg,
+        )
+        .expect("declared perRow destination formats must lower on SQLite");
+    MigrationEngine::new()
+        .apply_plan(
+            &data_artifact.plan.steps,
             Approval::Approved,
             &be,
             &exec_cfg(),
@@ -415,7 +448,7 @@ async fn insert_on_conflict_updates_and_does_nothing_on_real_sqlite() {
         .expect("seed conflict target");
 
     let ir = resolved_envelope_json(
-        r#"{"ir_version":1,"name":"sqlite_on_conflict","ops":[
+        r#"{"ir_version":1,"name":"sqlite_on_conflict","irreversible":"updates a conflicting label without recording its pre-image","ops":[
           {"op":"insert","table":"status_codes","columns":["code","label"],
            "rows":[[200,"incoming"]],
            "onConflict":{"columns":["code"],"doUpdate":{"label":"updated"}}},
@@ -491,7 +524,7 @@ async fn portable_scalar_and_date_functions_apply_on_hardened_sqlite() {
         .expect("seed function target");
 
     let ir = resolved_envelope_json(
-        r#"{"ir_version":1,"name":"sqlite_portable_functions","ops":[
+        r#"{"ir_version":1,"name":"sqlite_portable_functions","irreversible":"overwrites derived metric columns without recording their pre-images","ops":[
           {"op":"update","table":"metrics","set":{
             "rounded":{"node":"fnCall","fn":"round","args":[{"node":"colRef","name":"x"}]},
             "floored":{"node":"fnCall","fn":"floor","args":[{"node":"colRef","name":"x"}]},
@@ -590,7 +623,7 @@ async fn byte_value_insert_persists_exact_blob_and_completed_journal_on_real_sql
         .expect("create binary DML target");
 
     let ir = resolved_envelope_json(
-        r#"{"ir_version":1,"name":"sqlite_byte_value","ops":[
+        r#"{"ir_version":1,"name":"sqlite_byte_value","irreversible":"inserts payload bytes without recording an identifier for the inserted row","ops":[
           {"op":"insert","table":"files","columns":["payload"],
            "rows":[[{"bytes":"AAF/gP8="}]]}
         ]}"#,
@@ -675,7 +708,7 @@ async fn byte_value_backfill_persists_exact_blob_on_real_sqlite() {
         .expect("create binary backfill target");
 
     let ir = resolved_envelope_json(
-        r#"{"ir_version":1,"name":"sqlite_byte_backfill","ops":[
+        r#"{"ir_version":1,"name":"sqlite_byte_backfill","irreversible":"overwrites payload bytes; the pre-image is not recorded","ops":[
           {"op":"backfill","table":"files","name":"fill_payload",
            "cursorColumns":["id"],"cursorStability":{"mode":"guardUpdates"},"batchSize":1,
            "set":{"payload":{"node":"literal","value":{"bytes":"AAF/gP8="}}}}
@@ -727,31 +760,64 @@ async fn byte_value_backfill_persists_exact_blob_on_real_sqlite() {
 async fn fixed_decimal_create_and_insert_preserve_exact_text_on_real_sqlite() {
     let p = paths("ir_fixed_decimal");
     let be = backend(&p);
-    let ir = no_inject_envelope_json(
-        r#"{"ir_version":1,"name":"sqlite_fixed_decimal","ops":[
+    let schema_ir = no_inject_envelope_json(
+        r#"{"ir_version":1,"name":"sqlite_fixed_decimal_schema","ops":[
           {"op":"createTable","name":"ledger","columns":[
             {"name":"amount","type":{"decimal":{"precision":30,"scale":10}},"nullable":false}
-          ]},
+          ]}
+        ]}"#,
+    );
+    let data_ir = no_inject_envelope_json(
+        r#"{"ir_version":1,"name":"sqlite_fixed_decimal_data","irreversible":"inserts a decimal row without recording an identifier for deletion","ops":[
           {"op":"insert","table":"ledger","columns":["amount"],
            "rows":[[{"decimal":"12345678901234567890.1234567890"}]]}
         ]}"#,
     );
     let guard_cfg = GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite);
-    let artifact = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite, &support::no_inject("app"))
-        .load_and_lower_guarded(&ir, APP, &registry(&[]), &LiveSchema::default(), &guard_cfg)
-        .expect("a fixed decimal create plus insert lowers on SQLite");
+    let charter = support::no_inject("app");
+    let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite, &charter);
+    let schema_artifact = author
+        .load_and_lower_guarded(
+            &schema_ir,
+            APP,
+            &registry(&[]),
+            &LiveSchema::default(),
+            &guard_cfg,
+        )
+        .expect("a fixed decimal table creation lowers on SQLite");
 
     MigrationEngine::new()
         .apply_plan(
-            &artifact.plan.steps,
+            &schema_artifact.plan.steps,
             Approval::None,
             &be,
             &exec_cfg(),
-            "sqlite-fixed-decimal-test",
+            "sqlite-fixed-decimal-schema-test",
             LockMode::Acquire,
         )
         .await
-        .expect("the fixed decimal plan applies on SQLite");
+        .expect("the fixed decimal schema plan applies on SQLite");
+
+    let data_artifact = author
+        .load_and_lower_guarded(
+            &data_ir,
+            APP,
+            &registry(&[("ledger", APP)]),
+            &LiveSchema::default(),
+            &guard_cfg,
+        )
+        .expect("a fixed decimal insert lowers on SQLite");
+    MigrationEngine::new()
+        .apply_plan(
+            &data_artifact.plan.steps,
+            Approval::None,
+            &be,
+            &exec_cfg(),
+            "sqlite-fixed-decimal-data-test",
+            LockMode::Acquire,
+        )
+        .await
+        .expect("the fixed decimal data plan applies on SQLite");
 
     be.actor()
         .set_mode(Mode::CreatorUp)
@@ -804,7 +870,7 @@ async fn mixed_data_plan_is_refused_before_insert_when_delete_and_backfill_are_u
         .expect("create mixed-plan target");
 
     let ir = resolved_envelope_json(
-        r#"{"ir_version":1,"name":"mixed_data_approval_preflight","ops":[
+        r#"{"ir_version":1,"name":"mixed_data_approval_preflight","irreversible":"deletes and overwrites rows without recording the deleted rows or prior values","ops":[
           {"op":"insert","table":"users","columns":["id","ready"],"rows":[[1,false]]},
           {"op":"delete","table":"users","where":{"node":"binOp","op":"eq",
             "lhs":{"node":"colRef","name":"id"},"rhs":{"node":"literal","value":999}}},

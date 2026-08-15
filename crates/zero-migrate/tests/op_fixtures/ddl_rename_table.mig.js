@@ -10,7 +10,7 @@ import { table } from "zero-migrate";
 
 export const name = "ddl_rename_table";
 
-export function up() {
+export function schema() {
   // Bare rename (no schema / no guard) — the minimal shape.
   table("accounts").rename({ to: "members" });
   // `schema` PRESENT alongside the `ifExists` existence-guard token.

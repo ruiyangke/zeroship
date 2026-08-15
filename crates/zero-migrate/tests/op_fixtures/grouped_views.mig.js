@@ -1,7 +1,7 @@
 import { countStar, view } from "zero-migrate";
 
 export default {
-  up() {
+  schema() {
     view("order_totals").create({
       as: (q) => q
         .from("orders")

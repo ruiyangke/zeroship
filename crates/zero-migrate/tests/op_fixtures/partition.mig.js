@@ -5,7 +5,7 @@ import { table, t } from "zero-migrate";
 
 export const name = "partition";
 
-export function up() {
+export function schema() {
   table("events").create({
     columns: {
       ts: t.timestamp(),

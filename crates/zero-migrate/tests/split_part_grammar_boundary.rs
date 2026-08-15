@@ -82,7 +82,8 @@ fn in_envelope_split_part_helper_accepted() {
         {"op":"update","table":"t",
          "set":{"x":{"node":"fnSynth","fn":"splitPart","args":[
              {"node":"colRef","name":"v"},{"node":"literal","value":","},{"node":"literal","value":1}]}}}
-    ]}"#;
+    ],
+    "irreversible":"grammar-boundary fixture: the pre-image of the overwritten column is not recorded"}"#;
     for dialect in [Dialect::Postgres, Dialect::Sqlite] {
         load_ir_document(ir, APP, dialect, &registry(), None)
             .unwrap_or_else(|e| panic!("in-envelope .splitPart must load on {dialect:?}: {e}"));
@@ -98,7 +99,8 @@ fn out_of_envelope_split_part_pg_loads_sqlite_rejected() {
         {"op":"update","table":"t",
          "set":{"x":{"node":"fnSynth","fn":"splitPart","args":[
              {"node":"colRef","name":"v"},{"node":"literal","value":", "},{"node":"literal","value":1}]}}}
-    ]}"#;
+    ],
+    "irreversible":"grammar-boundary fixture: the pre-image of the overwritten column is not recorded"}"#;
     load_ir_document(ir, APP, Dialect::Postgres, &registry(), None)
         .expect("out-of-envelope splitPart is PG-renderable → loads on PG");
     let err = load_ir_document(ir, APP, Dialect::Sqlite, &registry(), None)

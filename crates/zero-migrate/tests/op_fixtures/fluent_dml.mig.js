@@ -13,8 +13,10 @@ import { table, now, genRandomUuid, concatWs } from "zero-migrate";
 
 export default {
   name: "fluent_dml",
+  irreversible:
+    "this recorder corpus fixture is never applied to a database and does not define a database rollback",
 
-  up() {
+  data() {
     const sc = table("status_codes");
 
     // insert({ rows }) — the row-OBJECT form (normalized to columns + positional

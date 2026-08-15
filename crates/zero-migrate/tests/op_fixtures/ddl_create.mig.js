@@ -11,7 +11,7 @@ import { table, t } from "zero-migrate";
 
 export const name = "ddl_create";
 
-export function up() {
+export function schema() {
   table("orders").create({
     columns: {
       total: t.int().notNull().default(0),

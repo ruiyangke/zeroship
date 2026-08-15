@@ -9,7 +9,7 @@ import { dialect, table, t } from "zero-migrate";
 export default {
   name: "dialectal_ops",
 
-  up() {
+  schema() {
     table("docs").create({
       columns: {
         embedding: t.vector({ dimensions: 3, metric: "cosine" }),

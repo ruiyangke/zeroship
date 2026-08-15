@@ -407,3 +407,68 @@ test("a throwing schema() aborts and leaves the recorder clean", () => {
     columns: [{ name: "id", type: "int" }],
   });
 });
+
+// F656. The separation rule was enforced by which FUNCTION a module exports,
+// never by what that function recorded. So DML inside `schema()` was accepted
+// with no reverse declared at all, and the requirement that a data migration
+// declare `inverse()` or `irreversible` became a naming convention: an author
+// who did not want to write a reverse only had to type `schema` instead of
+// `data`. It is reachable by accident too, which is how it was found -- a
+// mechanical sweep wrapped purely-DML fixture bodies in `schema()` and every
+// gate accepted them.
+test("DML recorded inside schema() is refused, not silently unreversed", () => {
+  const error = captureError(() =>
+    buildEnvelope(
+      {
+        schema() {
+          table("acct").insert({ rows: { id: 1 } });
+        },
+      },
+      { irVersion: 1, nameFallback: "dml_in_schema" },
+    ),
+  );
+  assert.match(
+    String(error),
+    /data\(\)/,
+    `a schema() migration that writes rows must be refused and pointed at data(); ` +
+      `otherwise the reverse requirement is a naming convention, not a rule. Got ${error}`,
+  );
+});
+
+test("DDL recorded inside data() is refused too", () => {
+  // The other direction. Without it, "separation" would mean only that DML
+  // cannot hide in schema(), and a data() migration could still reshape the
+  // schema under a declaration that describes rows.
+  const error = captureError(() =>
+    buildEnvelope(
+      {
+        data() {
+          table("acct").create({ columns: { id: t.int() } });
+        },
+        irreversible: "n/a",
+      },
+      { irVersion: 1, nameFallback: "ddl_in_data" },
+    ),
+  );
+  assert.match(String(error), /schema\(\)/, `got ${error}`);
+});
+
+test("CONTROL: each phase still accepts the ops it is for", () => {
+  // Without this, both refusals above are equally consistent with having broken
+  // recording altogether.
+  buildEnvelope(
+    { schema() { table("acct").create({ columns: { id: t.int() } }); } },
+    { irVersion: 1, nameFallback: "ddl_ok" },
+  );
+  buildEnvelope(
+    {
+      data() {
+        table("acct").insert({ rows: { id: 1 } });
+      },
+      inverse() {
+        table("acct").delete({ where: (col) => col("id").eq(1) });
+      },
+    },
+    { irVersion: 1, nameFallback: "dml_ok" },
+  );
+});

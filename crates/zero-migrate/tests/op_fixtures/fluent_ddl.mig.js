@@ -18,7 +18,7 @@ import { table, t, decimal, now } from "zero-migrate";
 export default {
   name: "fluent_ddl",
 
-  up() {
+  schema() {
     table("accounts").create({
       columns: {
         email: t.text().notNull().unique(),

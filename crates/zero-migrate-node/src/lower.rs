@@ -2111,6 +2111,7 @@ scope = "all"
         serde_json::json!({
             "ir_version": ir_version,
             "name": "seed_and_rewrite_widgets",
+            "irreversible": "test fixture exercises forward DML lowering only",
             "ops": [
                 {
                     "op": "insert",
@@ -3280,6 +3281,7 @@ scope = "all"
         let backfill = serde_json::json!({
             "ir_version": zero_migrate::model::ir::CURRENT_IR_VERSION,
             "name": "backfill_cross_artifact_ids",
+            "irreversible": "test fixture exercises forward backfill lowering only",
             "ops": [{
                 "op": "backfill",
                 "table": "cross_artifact_ids",

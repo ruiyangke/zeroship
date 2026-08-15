@@ -1,7 +1,7 @@
 import { view } from "zero-migrate";
 
 export default {
-  up() {
+  schema() {
     view("order_rollups").create({
       as: (q) => q
         .from("orders")

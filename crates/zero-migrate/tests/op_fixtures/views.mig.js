@@ -1,7 +1,7 @@
 import { view } from "zero-migrate";
 
 export default {
-  up() {
+  schema() {
     view("active_users", { schema: "app", columns: ["id", "email"] }).create({
       replace: true,
       as: (q) => q

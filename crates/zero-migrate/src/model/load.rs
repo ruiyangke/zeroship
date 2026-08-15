@@ -91,9 +91,11 @@ pub fn load_ir_document_authorized(
     //    over the operator's `EffectivePolicy` before this load.)
     validate_ir_authorized(&ir, target_dialect, &[], schema_scope, authority)?;
 
-    // 3a. the declared reverse. A data migration declares exactly one of
-    //    `inverse_ops` / `irreversible`, and a recorded inverse is validated by
-    //    the SAME gate the forward ops just passed. Validating it here rather
+    // 3a. the data-migration protocol. The envelope has no phase marker, so the
+    //    engine classifies the FORWARD ops themselves: DML requires exactly one
+    //    of `inverse_ops` / `irreversible`, and DML may not be mixed with
+    //    DDL/vendor ops. A recorded inverse is then validated by the SAME
+    //    structural gate the forward ops just passed. Validating it here rather
     //    than at rollback is the whole point: a reverse that cannot apply is
     //    worthless precisely when it is needed, and by then the author is not
     //    the one holding it.
@@ -134,6 +136,20 @@ pub fn load_ir_document_authorized(
         };
         enforce_ir_ownership(&inverse, deploying_app, registry)?;
     }
+
+    // 4b. the data-migration protocol, AFTER ownership on purpose. Both gates can
+    //     fire on the same artifact, and ownership is the security one: a
+    //     cross-tenant or unregistered-table attempt must be reported as what it
+    //     is. Running the protocol check first would answer a cross-tenant write
+    //     with "add an irreversible reason", which tells the operator to edit the
+    //     migration that should have been refused outright.
+    //
+    //     The check itself is phase-free because the envelope carries no
+    //     `schema()`/`data()` marker: DML in the forward ops requires exactly one
+    //     of `inverse_ops` / `irreversible`, and DML may not be mixed with
+    //     DDL/vendor ops. That gives the protocol guarantee no matter what the
+    //     author named the function (F656).
+    enforce_ir_forward_data_protocol(&ir)?;
 
     // 5. advisory checksum-hint compare — recompute + compare, then
     //    DROP the hint (it never folds into the authoritative checksum). Done
@@ -216,6 +232,96 @@ mod tests {
         assert!(matches!(err, IrLoadError::Version(_)), "got: {err}");
     }
 
+    // ── phase-free data-migration protocol ─────────────────────────────────
+
+    #[test]
+    fn load_refuses_forward_dml_without_a_reverse_declaration() {
+        let ops = r#"[{"op":"insert","table":"acct","columns":["id"],"rows":[[1]]}]"#;
+        let bytes = envelope_json(ops, "");
+        let reg = registry(&[("acct", "app_a")]);
+
+        let err = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None)
+            .expect_err("forward DML must declare inverse_ops or irreversible");
+
+        assert_eq!(err, IrLoadError::DmlMissingReverse);
+        let message = err.to_string();
+        assert!(
+            message.contains("inverse_ops") && message.contains("irreversible"),
+            "the refusal must name both remedies; got: {message}"
+        );
+    }
+
+    #[test]
+    fn load_accepts_forward_dml_with_inverse_ops() {
+        let ops = r#"[{"op":"insert","table":"acct","columns":["id"],"rows":[[1]]}]"#;
+        let bytes = envelope_json(
+            ops,
+            r#", "inverse_ops":[{"op":"delete","table":"acct","where":{"node":"literal","value":true}}]"#,
+        );
+        let reg = registry(&[("acct", "app_a")]);
+
+        let loaded = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None)
+            .expect("a recorded DML inverse is itself the reverse declaration");
+
+        assert_eq!(loaded.inverse_ops.as_ref().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn load_accepts_forward_dml_with_an_irreversible_reason() {
+        let ops = r#"[{"op":"insert","table":"acct","columns":["id"],"rows":[[1]]}]"#;
+        let bytes = envelope_json(
+            ops,
+            r#", "irreversible":"the fixture seed has no recoverable pre-image""#,
+        );
+        let reg = registry(&[("acct", "app_a")]);
+
+        let loaded = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None)
+            .expect("an explicit irreversible reason satisfies the data protocol");
+
+        assert_eq!(
+            loaded.irreversible.as_deref(),
+            Some("the fixture seed has no recoverable pre-image")
+        );
+    }
+
+    #[test]
+    fn load_refuses_forward_ops_mixing_ddl_and_dml() {
+        let ops = r#"[
+            {"op":"createTable","name":"acct","columns":[{"name":"id","type":"int"}]},
+            {"op":"insert","table":"acct","columns":["id"],"rows":[[1]]}
+        ]"#;
+        let bytes = envelope_json(
+            ops,
+            r#", "irreversible":"splitting the phases does not invent a reverse""#,
+        );
+
+        let err = load_ir_document(
+            &bytes,
+            "app_a",
+            Dialect::Postgres,
+            &registry(&[]),
+            None,
+        )
+        .expect_err("DDL and DML must not share a forward op list");
+
+        assert_eq!(err, IrLoadError::MixedDdlAndDml);
+        let message = err.to_string();
+        assert!(
+            message.contains("schema()") && message.contains("data()"),
+            "the refusal must tell the author how to split the phases; got: {message}"
+        );
+    }
+
+    #[test]
+    fn load_accepts_pure_ddl_without_a_reverse_declaration() {
+        let ops = r#"[{"op":"dropTable","table":"acct"}]"#;
+        let bytes = envelope_json(ops, "");
+        let reg = registry(&[("acct", "app_a")]);
+
+        load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None)
+            .expect("schema migrations do not acquire a reverse requirement");
+    }
+
     // ── validate_ir wired as the loader's gate ──────────────────────────────
     // A hostile IR envelope driven through the REAL loader (not the validator unit
     // test) must have the structural gate FIRE on the production path.
@@ -242,7 +348,10 @@ mod tests {
         // The gate threads target_dialect into validate_ir, so a SQLite deploy
         // refuses it on the production path.
         let ops = r#"[{"op":"update","table":"users","set":{"name":{"node":"fnSynth","fn":"splitPart","args":[{"node":"colRef","name":"first"},{"node":"literal","value":", "},{"node":"literal","value":1}]}}}]"#;
-        let bytes = envelope_json(ops, "");
+        // The `irreversible` reason is what makes this a well-formed DATA
+        // migration; without it the envelope is refused for missing a reverse and
+        // the test stops measuring dialect threading, which is its subject.
+        let bytes = envelope_json(ops, r#","irreversible":"dialect-threading fixture""#);
         let reg = registry(&[("users", "app_a")]);
         // PG accepts (validation OK), SQLite rejects.
         assert!(load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None).is_ok());
@@ -530,20 +639,64 @@ mod tests {
     }
 
     #[test]
-    fn load_allows_dml_positioned_before_its_create_table_in_same_migration() {
-        // ORDER-INDEPENDENCE: the createTable ownership pre-pass
-        // registers ALL createTable names BEFORE the per-op check, so an op that
-        // appears POSITIONALLY BEFORE its createTable still passes ownership — the
-        // table is pre-registered to the deploying app. This is who-may-touch, not
-        // apply-order validity (the executor enforces apply order). It is NOT a
-        // security relaxation: the table is still owned by the deploying app, and a
-        // collision with ANOTHER app's table is still refused (see the test below).
+    fn load_refuses_dml_and_create_table_in_one_migration() {
+        // This envelope used to LOAD, and was the vehicle for the ownership
+        // pre-pass's order-independence. F656 retired the vehicle: an op list
+        // mixing DML with DDL is now refused outright, because the phase a
+        // migration belongs to is derived from its ops rather than from the
+        // function the author happened to name.
+        //
+        // The pre-pass property itself is NOT gone and has not lost its test --
+        // `enforce_ir_ownership_unit_use_then_create` below exercises it directly,
+        // where no phase gate stands in front of it. Retiring a test's vehicle
+        // must not quietly retire the property it covered.
         let ops = r#"[{"op":"insert","table":"fresh","columns":["id"],"rows":[[1]]},{"op":"createTable","name":"fresh","columns":[{"name":"id","type":"int"}]}]"#;
         let bytes = envelope_json(ops, "");
-        let reg = registry(&[]); // `fresh` is brand new — declared later in THIS migration
-        let ir = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None)
-            .expect("DML before its createTable passes ownership (order-independent pre-pass)");
-        assert_eq!(ir.owner_app, "app_a");
+        let reg = registry(&[]);
+        let err = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None)
+            .expect_err("DDL and DML in one migration must be refused");
+        assert!(matches!(err, IrLoadError::MixedDdlAndDml), "got: {err}");
+    }
+
+    #[test]
+    fn enforce_ir_ownership_unit_use_then_create() {
+        // ORDER-INDEPENDENCE, at the gate that owns it. The createTable pre-pass
+        // registers every created name BEFORE the per-op check, so an op that
+        // appears POSITIONALLY BEFORE its createTable still passes ownership: the
+        // table is already pre-registered to the deploying app. This is a
+        // who-may-touch question, not an apply-order one (the executor enforces
+        // apply order), and it is not a relaxation -- a collision with ANOTHER
+        // app's table is still refused, which
+        // `load_refuses_dml_before_create_table_when_table_belongs_to_another_app`
+        // pins on the full load path.
+        let ops = vec![
+            Op::Insert {
+                table: "fresh".to_string(),
+                columns: vec!["id".to_string()],
+                rows: vec![vec![crate::model::ir::IrScalar::Int(1).into()]],
+                on_conflict: None,
+                schema: None,
+            },
+            create_table("fresh"),
+        ];
+        let ir = MigrationIr {
+            ir_version: 1,
+            name: "m".to_string(),
+            owner_app: String::new(),
+            ops,
+            inverse_ops: None,
+            irreversible: None,
+            flags: Default::default(),
+            depends_on: vec![],
+            supersedes: vec![],
+            preconditions: vec![],
+            checksum: None,
+        };
+        assert!(
+            enforce_ir_ownership(&ir, "app_a", &registry(&[])).is_ok(),
+            "a table created later in the same op list is pre-registered to the \
+             deploying app, whatever order the ops appear in"
+        );
     }
 
     #[test]

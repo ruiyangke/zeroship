@@ -83,30 +83,11 @@ function isModuleScope(block: string): boolean {
   return /(^|\n)\s*(export\s+(default|interface|type|const|function)|import\s)/.test(block);
 }
 
-/**
- * Job A is TypeScript-only; the documentation and migration corpus are swept in a
- * later job. Compile the still-legacy module bodies under `schema()` in this test
- * process so their DSL calls remain gated against the new public `Migration` type
- * without adding an `up()` alias to production. The doc tests below assert that
- * this temporary bridge still has legacy input, making it fail closed once the
- * documentation sweep removes the last `up()` and the bridge should be deleted.
- */
-function adaptLegacyMigrationPhase(block: string): string {
-  return block
-    .replace(/^export function up\(\)/m, "export function schema()")
-    .replace(/^(\s*)up\(\)\s*\{/m, "$1schema() {");
-}
-
-function hasLegacyMigrationPhase(block: string): boolean {
-  return /^export function up\(\)/m.test(block) || /^(\s*)up\(\)\s*\{/m.test(block);
-}
-
 /** Assemble the doc snippets into one compilable harness module. */
 function assembleHarness(blocks: string[]): string {
   const moduleBlocks: string[] = [];
   const fragmentBodies: string[] = [];
-  for (const original of blocks) {
-    const b = adaptLegacyMigrationPhase(original);
+  for (const b of blocks) {
     if (isModuleScope(b)) {
       // A module example carries its own imports — but the hero's default-export
       // collides with the next module example. Wrap each module example in its
@@ -179,10 +160,6 @@ test("doc-gate: every typed example in writing-migrations.md typechecks against 
   const md = readFileSync(WRITING_MIGRATIONS_DOC, "utf8");
   const blocks = extractTsBlocks(md);
   assert.ok(blocks.length >= 6, `expected the doc to carry several runnable ts examples; found ${blocks.length}`);
-  assert.ok(
-    blocks.some(hasLegacyMigrationPhase),
-    "the temporary Job A doc bridge expects legacy up() examples until the later docs sweep",
-  );
   const harness = assembleHarness(blocks);
   const diagnostics = typecheck(harness);
   assert.equal(
@@ -201,10 +178,6 @@ test("doc-gate: every DSL example in getting-started.md typechecks against the r
   const md = readFileSync(GETTING_STARTED_DOC, "utf8");
   const blocks = extractTsBlocks(md);
   assert.ok(blocks.length >= 3, `expected getting-started.md to carry several runnable DSL examples; found ${blocks.length}`);
-  assert.ok(
-    blocks.some(hasLegacyMigrationPhase),
-    "the temporary Job A doc bridge expects legacy up() examples until the later docs sweep",
-  );
   const harness = assembleHarness(blocks);
   const diagnostics = typecheck(harness);
   assert.equal(
@@ -245,10 +218,6 @@ for (const file of OTHER_DSL_DOCS) {
     assert.ok(
       blocks.length >= 1,
       `expected docs/${file} to carry at least one zero-migrate DSL example; found ${blocks.length}`,
-    );
-    assert.ok(
-      blocks.some(hasLegacyMigrationPhase),
-      `the temporary Job A doc bridge expects a legacy up() example in docs/${file}`,
     );
     const diagnostics = typecheck(assembleHarness(blocks));
     assert.equal(

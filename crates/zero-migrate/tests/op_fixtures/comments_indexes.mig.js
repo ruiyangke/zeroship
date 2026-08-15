@@ -19,7 +19,7 @@ export const name = "comments_indexes";
 
 const userStatus = enumType("user_status");
 
-export function up() {
+export function schema() {
   userStatus.create({ values: ["active", "disabled"] });
   sequence("users_seq").create();
 

@@ -4,7 +4,7 @@ import { table } from "zero-migrate";
 
 export const name = "alter_primary_key";
 
-export function up() {
+export function schema() {
   const orders = table("orders", { schema: "app" });
   orders.primaryKey().add({ columns: ["legacy_id"] });
   orders.primaryKey().replace({

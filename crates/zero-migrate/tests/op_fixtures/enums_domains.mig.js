@@ -4,7 +4,7 @@ const planTier = enumType("plan_tier");
 const billingPeriod = domain("billing_period");
 const accountState = domain("account_state");
 
-export function up() {
+export function schema() {
   planTier.create({ values: ["free", "pro"] });
   billingPeriod.create({
     as: t.int(),

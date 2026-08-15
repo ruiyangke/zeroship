@@ -1,6 +1,6 @@
 import { table, t } from "zero-migrate";
 
-export function up() {
+export function schema() {
   table("scalar_membership").create({
     columns: {
       http_status: t.int().notNull(),

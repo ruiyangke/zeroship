@@ -5,7 +5,7 @@ import { table, t } from "zero-migrate";
 
 export const name = "runtime_options";
 
-export function up() {
+export function schema() {
   table("posts").create({
     columns: {
       title: t.text().notNull(),

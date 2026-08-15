@@ -6,7 +6,7 @@
 // (`crates/zero-migrate/tests/op_fixture_goldens.rs`) reads the same file, resolves
 // those recorded ops through the real `resolve_create_table_policy`, and compares
 // the result to `<stem>.golden.json`. Composed, the halves check `.mig.js` ->
-// golden for all 26 stems. Neither half alone does, and each runs in the job that
+// golden for all 27 stems. Neither half alone does, and each runs in the job that
 // already has its toolchain.
 //
 // Before this, nothing executed a `.mig.js` at all. The Rust op matrix enumerated
@@ -57,6 +57,7 @@ const EXPECTED_STEMS = [
   "fluent_ddl",
   "fluent_dml",
   "fluent_scalars",
+  "fluent_scalars_dml",
   "grouped_views",
   "in_list_scalars",
   "p2a_facets",
@@ -80,13 +81,6 @@ const UNCOMPARED_IR_VERSION = 1;
 interface RecordedEnvelope {
   name: string;
   ops: unknown[];
-}
-
-/** Temporary import shape for the external corpus swept in a later job. */
-interface LegacyFixtureModule {
-  up?: () => unknown;
-  name?: string;
-  default?: { up?: () => unknown; name?: string };
 }
 
 async function readRecorded(): Promise<Record<string, RecordedEnvelope>> {
@@ -123,20 +117,8 @@ async function recordFixture(stem: string): Promise<RecordedEnvelope> {
     `${stem}${MIG_SUFFIX} must carry exactly one bare "zero-migrate" import to rewrite`,
   );
   const rewritten = parts.join(`from "${indexUrl}"`);
-  // The committed Rust op corpus is intentionally outside Job A's migration-file
-  // sweep, but this package-local test must exercise the new recorder protocol.
-  // Wrap its imported legacy phase in a test-owned `schema()` module so the
-  // fixture bodies still prove byte-for-byte op recording without adding an
-  // `up()` compatibility path to production. Requiring `up()` here makes the
-  // bridge self-expiring when the later corpus sweep lands.
   const dataUrl = `data:text/javascript;base64,${Buffer.from(rewritten).toString("base64")}`;
-  const legacy = (await import(dataUrl)) as LegacyFixtureModule;
-  const phase = typeof legacy.up === "function" ? legacy.up : legacy.default?.up;
-  assert.ok(phase, `${stem}${MIG_SUFFIX} must export its pending legacy up() phase`);
-  const mod: MigrationModule = {
-    schema: phase,
-    name: typeof legacy.name === "string" ? legacy.name : legacy.default?.name,
-  };
+  const mod = (await import(dataUrl)) as MigrationModule;
   // The name fallback is passed explicitly because `deriveNameFromPath` strips ONE
   // extension, which would turn `views.mig.js` into `views.mig`. The double
   // extension is an artifact of this corpus alone -- real migrations are
@@ -151,7 +133,7 @@ async function recordFixture(stem: string): Promise<RecordedEnvelope> {
 
 test("the op fixture corpus is exactly the committed stem list", async () => {
   assert.equal(new Set(EXPECTED_STEMS).size, EXPECTED_STEMS.length, "the stem list has no duplicates");
-  assert.equal(EXPECTED_STEMS.length, 26, "the corpus is 26 stems");
+  assert.equal(EXPECTED_STEMS.length, 27, "the corpus is 27 stems");
 
   const migStems: string[] = [];
   const goldenStems: string[] = [];

@@ -1602,7 +1602,12 @@
             }
           }
         ]
-      },
+      }
+    ]
+  },
+  "fluent_scalars_dml": {
+    "name": "fluent_scalars_dml",
+    "ops": [
       {
         "op": "insert",
         "table": "ledger",

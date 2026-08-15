@@ -15,17 +15,17 @@ import {
   raw,
   revoke,
   role,
-  schema,
+  schema as pgSchema,
 } from "zero-migrate";
 
 export const name = "pg_vendor";
 
-export function up() {
+export function schema() {
   // ── extensions + schemas (0001) ──
   extension("citext").create({ ifNotExists: true });
   extension("citext").drop({ ifExists: true });
-  schema("zero_migrate").create({ ifNotExists: true });
-  schema("zero_migrate").drop({ ifExists: true, cascade: true });
+  pgSchema("zero_migrate").create({ ifNotExists: true });
+  pgSchema("zero_migrate").drop({ ifExists: true, cascade: true });
 
   // ── roles (0025) ──
   role("zero_migrate_auth").create({

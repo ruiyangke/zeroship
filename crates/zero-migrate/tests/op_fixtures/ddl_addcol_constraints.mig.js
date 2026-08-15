@@ -15,7 +15,7 @@ import { table, t } from "zero-migrate";
 
 export const name = "ddl_addcol_constraints";
 
-export function up() {
+export function schema() {
   const accounts = table("accounts");
 
   // `.unique()` on an added column ⇒ a follow-on ADD CONSTRAINT(unique).

@@ -10,8 +10,10 @@
 import { table, decimal } from "zero-migrate";
 
 export const name = "edge_scalars";
+export const irreversible =
+  "this recorder corpus fixture is never applied to a database and does not define a database rollback";
 
-export function up() {
+export function data() {
   table("edge").insert({
     rows: [
       {

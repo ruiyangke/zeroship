@@ -113,24 +113,6 @@
           ]
         }
       ]
-    },
-    {
-      "op": "insert",
-      "table": "ledger",
-      "columns": [
-        "seq",
-        "salt"
-      ],
-      "rows": [
-        [
-          {
-            "decimal": "9007199254740993"
-          },
-          {
-            "bytes": "ABAgQID/"
-          }
-        ]
-      ]
     }
   ],
   "flags": {},

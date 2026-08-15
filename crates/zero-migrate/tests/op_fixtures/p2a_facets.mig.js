@@ -13,7 +13,7 @@ import { table, t } from "zero-migrate";
 export default {
   name: "p2a_facets",
 
-  up() {
+  schema() {
     table("posts").create({
       columns: {
         title: t.text().notNull(),

@@ -4,7 +4,7 @@ import { table } from "zero-migrate";
 
 export const name = "synchronize_identity";
 
-export function up() {
+export function schema() {
   table("orders", { schema: "app" }).column("id").synchronizeIdentity({
     writesQuiesced: "orders_import_window",
   });

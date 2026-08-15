@@ -23,7 +23,7 @@ const HR_TABLES: [&str; 8] = [
     "payroll_items",
     "leave_requests",
 ];
-const MIGRATION_NAMES: [&str; 16] = [
+const MIGRATION_NAMES: [&str; 17] = [
     "create_departments",
     "create_job_grades",
     "create_employees",
@@ -36,6 +36,9 @@ const MIGRATION_NAMES: [&str; 16] = [
     "seed_reference_data",
     "seed_employees",
     "seed_operations",
+    // The column addition is DDL and the backfill is DML, so they are separate
+    // migrations - the same split the TypeScript hr-system carries.
+    "add_full_name",
     "backfill_full_name",
     "adjust_compensation",
     "add_audit_columns",
@@ -84,7 +87,7 @@ async fn hr_migrations_apply_in_sequence_on_real_sqlite() {
 
     let envelopes: Vec<MigrationIr> =
         serde_json::from_str(HR_PREVIEW_IR).expect("preview fixture is valid migration IR");
-    assert_eq!(envelopes.len(), 16, "all HR preview envelopes are captured");
+    assert_eq!(envelopes.len(), 17, "all HR preview envelopes are captured");
     assert!(
         envelopes.iter().all(|envelope| envelope.ir_version == 1),
         "every captured envelope uses IR v1"

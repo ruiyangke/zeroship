@@ -75,13 +75,30 @@ const DROP_ACTIVE_USERS: &str = r#"{"ir_version":1,"name":"drop_active_users","o
     {"op":"dropView","name":"active_users"}
 ]}"#;
 
-/// One authored envelope that lowers to a DDL step AND a DML step, which is the
-/// shape the verb leaves out of the migration set it builds.
-const SEED_NOTES: &str = r#"{"ir_version":1,"name":"seed_notes","ops":[
+/// The table the multi-step data migration below writes into.
+///
+/// This used to be one envelope carrying the createTable AND the insert. F656
+/// retired that shape: DDL and DML may no longer share an op list, so the fixture
+/// has to reach a multi-step plan a way an author could actually write.
+const CREATE_SEEDS: &str = r#"{"ir_version":1,"name":"create_seeds","ops":[
     {"op":"createTable","name":"seeds","columns":[
         {"name":"id","type":"bigInt","nullable":false}
-    ],"primaryKey":["id"]},
-    {"op":"insert","table":"seeds","columns":["id"],"rows":[[1]]}
+    ],"primaryKey":["id"]}
+]}"#;
+
+/// One authored envelope that lowers to TWO journaled DML steps.
+///
+/// Two inserts rather than one createTable plus one insert: the property under
+/// test is that a plan with more than one journaled step has no reverse the verb
+/// can hand over, and that is reached by op COUNT, not by op kind. It declares a
+/// real inverse precisely so the refusal cannot be mistaken for "no reverse was
+/// recorded" -- one IS recorded, and the step count is still what stops it.
+const SEED_NOTES: &str = r#"{"ir_version":1,"name":"seed_notes","ops":[
+    {"op":"insert","table":"seeds","columns":["id"],"rows":[[1]]},
+    {"op":"insert","table":"seeds","columns":["id"],"rows":[[2]]}
+],"inverse_ops":[
+    {"op":"delete","table":"seeds","where":{"node":"inList",
+        "expr":{"node":"colRef","name":"id"},"elems":[1,2],"negated":false}}
 ]}"#;
 
 struct Paths {
@@ -331,7 +348,7 @@ fn a_plan_with_a_data_step_is_refused_by_the_name_its_author_gave_it() {
 
     let (error, still_there) = futures::executor::block_on(async {
         let be = backend(&p);
-        deploy(&be, &[SEED_NOTES]).await;
+        deploy(&be, &[CREATE_SEEDS, SEED_NOTES]).await;
 
         // The authored source IS supplied here. It is the verb that leaves the plan
         // out, because a plan whose steps include a DML identity cannot be handed
@@ -339,7 +356,7 @@ fn a_plan_with_a_data_step_is_refused_by_the_name_its_author_gave_it() {
         let error = rollback_with_locked_backend(
             &be,
             &exec_cfg(),
-            &[SEED_NOTES.to_string()],
+            &[CREATE_SEEDS.to_string(), SEED_NOTES.to_string()],
             OWNER_APP,
             PROJECT_SCHEMA,
             "sqlite",

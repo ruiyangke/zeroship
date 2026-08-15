@@ -7,7 +7,7 @@ import { table } from "zero-migrate";
 
 export const name = "constraint_not_valid";
 
-export function up() {
+export function schema() {
   const lineItems = table("line_items");
   const pgLineItems = table("line_items");
   // FK added NOT VALID — skip the add-time full-table scan.

@@ -4,8 +4,10 @@
 import { table } from "zero-migrate";
 
 export const name = "dml_upsert";
+export const irreversible =
+  "this recorder corpus fixture is never applied to a database and does not define a database rollback";
 
-export function up() {
+export function data() {
   const sc = table("status_codes");
 
   // INSERT … ON CONFLICT (code) DO UPDATE SET label = 'dup'

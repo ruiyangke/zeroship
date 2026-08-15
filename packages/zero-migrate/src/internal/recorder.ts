@@ -50,6 +50,37 @@ type MigrationPhase = () => unknown;
 type PhaseMember = "schema" | "data" | "inverse" | "up" | "down";
 type RecordablePhase = "schema" | "data" | "inverse";
 
+const DML_OPS = new Set(["insert", "update", "delete", "backfill"]);
+
+function recordedOpName(op: unknown): string {
+  if (op !== null && typeof op === "object" && "op" in op) {
+    const name = (op as { op?: unknown }).op;
+    if (typeof name === "string") return name;
+  }
+  return "unknown";
+}
+
+/** Keep phase selection tied to what the author actually recorded, rather than
+ * trusting the exported function name to describe its contents. */
+function enforceRecordedPhase(phase: "schema" | "data", ops: unknown[]): void {
+  if (phase === "schema") {
+    const dml = ops.find((op) => DML_OPS.has(recordedOpName(op)));
+    if (dml !== undefined) {
+      throw new Error(
+        `host recorder: schema() recorded the DML operation ${recordedOpName(dml)}; move this operation to data() and declare inverse() or irreversible`,
+      );
+    }
+    return;
+  }
+
+  const nonDml = ops.find((op) => !DML_OPS.has(recordedOpName(op)));
+  if (nonDml !== undefined) {
+    throw new Error(
+      `host recorder: data() recorded the non-DML operation ${recordedOpName(nonDml)}; move this operation to schema()`,
+    );
+  }
+}
+
 /** Fields that may arrive as named exports or members of the default export.
  *
  * `up` and `down` remain visible here only so the big-bang protocol can refuse
@@ -291,6 +322,7 @@ export function recordMigration(
 ): RecordedMigration {
   const migration = resolveMigration(mod);
   const ops = recordPhase(migration.phase, migration.forward);
+  enforceRecordedPhase(migration.phase, ops);
   const envelope: IrEnvelope = {
     ir_version: opts.irVersion,
     name: resolveMigrationName(mod, opts.nameFallback ?? "migration"),

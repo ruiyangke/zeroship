@@ -8,7 +8,7 @@
 //! file, rebuilds an envelope from the recorded `{ name, ops }`, runs
 //! [`resolve_create_table_policy`] under the shared confined charter, and asserts
 //! the resolved ops equal the golden. Composed, the halves check `.mig.js` ->
-//! golden for all 26 stems, with each half in the job that already has its
+//! golden for all 27 stems, with each half in the job that already has its
 //! toolchain: no new public API and no new CI step.
 //!
 //! The resolver used here is the SAME function the addon's production lowering
@@ -41,7 +41,7 @@ const DEFAULT_SCHEMA: &str = "public";
 /// The corpus, committed rather than globbed. A directory listing cannot notice a
 /// fixture that went missing, so this list is the authority and the directory is
 /// checked against it in both directions below.
-const EXPECTED_STEMS: [&str; 26] = [
+const EXPECTED_STEMS: [&str; 27] = [
     "alter_primary_key",
     "comments_indexes",
     "constraint_not_valid",
@@ -58,6 +58,7 @@ const EXPECTED_STEMS: [&str; 26] = [
     "fluent_ddl",
     "fluent_dml",
     "fluent_scalars",
+    "fluent_scalars_dml",
     "grouped_views",
     "in_list_scalars",
     "p2a_facets",

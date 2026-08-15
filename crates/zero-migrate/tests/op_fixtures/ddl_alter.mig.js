@@ -5,7 +5,7 @@ import { table, t } from "zero-migrate";
 
 export const name = "ddl_alter";
 
-export function up() {
+export function schema() {
   const orders = table("orders");
   orders.column("total").setType({ to: t.bigInt() });
   orders.column("note").setNotNull();

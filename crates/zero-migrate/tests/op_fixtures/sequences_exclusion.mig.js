@@ -5,7 +5,7 @@ import { table, sequence } from "zero-migrate";
 
 export const name = "sequences_exclusion";
 
-export function up() {
+export function schema() {
   sequence("invoice_seq").create({
     increment: 5,
     start: 100,
