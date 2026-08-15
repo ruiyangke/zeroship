@@ -1197,7 +1197,13 @@ function DataTableInner<T>(
     stickyHeader ? "zs-data-table--sticky" : null,
   );
 
-  const fullSpanRow = (content: ReactNode, slot: string) => (
+  // The slot is a closed set, not any string: a theme targets these two by
+  // name, so widening it here would silently put a slot beyond the reach of
+  // both the stylesheet and the coverage check.
+  const fullSpanRow = (
+    content: ReactNode,
+    slot: "data-table-error" | "data-table-empty",
+  ) => (
     <tr data-slot={slot}>
       <td
         className="zs-data-table__state-cell"

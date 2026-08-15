@@ -63,6 +63,76 @@ const program = ts.createProgram(files, {
 });
 const checker = program.getTypeChecker();
 
+/** String-literal members of a type, or null if it is not such a union. */
+function stringLiteralsOf(type) {
+  const parts = type.isUnion() ? type.types : [type];
+  const out = [];
+  for (const t of parts) {
+    if (t.isStringLiteral()) out.push(t.value);
+    else if (t.flags & ts.TypeFlags.Undefined) continue;
+    else return null;
+  }
+  return out.length > 0 ? out : null;
+}
+
+/**
+ * The concrete name(s) a `data-slot` can take, or null if it cannot be pinned.
+ *
+ * Three shapes exist and only the first is greppable, which is why a text
+ * search finds 476 names where the AST finds far more:
+ *
+ *   data-slot="button-spinner"     literal
+ *   data-slot={dataSlot}           a prop with a DEFAULT
+ *   data-slot={`${base}-field`}    interpolated over a string-literal union
+ *
+ * The second is the subtle one. `"data-slot"?: string` means the checker
+ * reports the type as `string`, not `"button"` -- the value lives in the
+ * destructuring default (`"data-slot": dataSlot = "button"`), so this reads the
+ * binding's initializer rather than its type.
+ */
+function slotNamesOf(initializer, checker, source) {
+  if (!initializer) return null;
+  if (ts.isStringLiteral(initializer)) return [initializer.text];
+  if (!ts.isJsxExpression(initializer) || !initializer.expression) return null;
+  const expr = initializer.expression;
+
+  if (ts.isStringLiteral(expr) || ts.isNoSubstitutionTemplateLiteral(expr)) {
+    return [expr.text];
+  }
+
+  if (ts.isTemplateExpression(expr)) {
+    let names = [expr.head.text];
+    for (const span of expr.templateSpans) {
+      const parts = stringLiteralsOf(checker.getTypeAtLocation(span.expression));
+      if (!parts) return null;
+      const tail = span.literal.text;
+      names = names.flatMap((prefix) => parts.map((p) => prefix + p + tail));
+    }
+    return names;
+  }
+
+  if (ts.isIdentifier(expr)) {
+    const symbol = checker.getSymbolAtLocation(expr);
+    for (const decl of symbol?.declarations ?? []) {
+      // `{ "data-slot": dataSlot = "button" }` -- the default, not the type.
+      if (ts.isBindingElement(decl) && decl.initializer) {
+        if (ts.isStringLiteral(decl.initializer)) return [decl.initializer.text];
+        if (ts.isNoSubstitutionTemplateLiteral(decl.initializer)) {
+          return [decl.initializer.text];
+        }
+      }
+      if (ts.isVariableDeclaration(decl) && decl.initializer) {
+        if (ts.isStringLiteral(decl.initializer)) return [decl.initializer.text];
+      }
+    }
+    const fromType = stringLiteralsOf(checker.getTypeAtLocation(expr));
+    if (fromType) return fromType;
+  }
+
+  void source;
+  return null;
+}
+
 /** Every JSX tag in a file that carries a zs- class or a data-slot. */
 function tagsOf(file) {
   const source = program.getSourceFile(file);
@@ -72,11 +142,18 @@ function tagsOf(file) {
   const visit = (node) => {
     if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
       const classes = [];
+      const names = [];
+      const unresolved = [];
       let slots = 0;
       for (const attr of node.attributes.properties) {
         if (!ts.isJsxAttribute(attr)) continue;
         const name = attr.name.getText(source);
-        if (name === "data-slot") slots++;
+        if (name === "data-slot") {
+          slots++;
+          const resolved = slotNamesOf(attr.initializer, checker, source);
+          if (resolved) names.push(...resolved);
+          else unresolved.push(attr.getText(source).replace(/\s+/g, " "));
+        }
         if (name !== "className" || !attr.initializer) continue;
         for (const literal of classNameLiterals(attr.initializer, checker)) {
           classes.push(...(literal.getText().match(/\bzs-[a-z0-9_-]+/g) ?? []));
@@ -93,6 +170,8 @@ function tagsOf(file) {
           file: rel,
           classes,
           slots,
+          names,
+          unresolved,
           line:
             source.getLineAndCharacterOfPosition(node.getStart(source)).line +
             1,
@@ -106,6 +185,25 @@ function tagsOf(file) {
 }
 
 const tags = files.flatMap(tagsOf);
+
+// `--list-slots` prints the resolved names, one per line, and nothing else, so
+// it can be piped. It is the authority the theme translation reads: a selector
+// looks orphaned precisely when its slot name is missing from this list, so an
+// unresolvable value must fail loudly rather than be quietly dropped.
+if (process.argv.includes("--list-slots")) {
+  const stuck = tags.flatMap((t) =>
+    t.unresolved.map((u) => `${t.file}:${t.line}  ${u}`),
+  );
+  if (stuck.length > 0) {
+    console.error("unresolvable data-slot values:\n  " + stuck.join("\n  "));
+    process.exit(1);
+  }
+  for (const name of [...new Set(tags.flatMap((t) => t.names))].sort()) {
+    console.log(name);
+  }
+  process.exit(0);
+}
+
 const uncovered = tags.filter((t) => t.classes.length > 0 && t.slots === 0);
 const doubled = tags.filter((t) => t.slots > 1);
 const covered = tags.filter((t) => t.slots === 1);
