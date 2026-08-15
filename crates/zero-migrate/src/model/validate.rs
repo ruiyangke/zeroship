@@ -2679,8 +2679,10 @@ fn validate_no_op_targets_a_renamed_away_table(
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::Op;
 
-    // old name -> what it was renamed to, for names with nothing behind them now.
-    let mut vacated: BTreeMap<&str, &str> = BTreeMap::new();
+    // A name with nothing behind it any more, and how it got that way: `Some(new)`
+    // when a rename moved it, `None` when a drop removed it. Both leave later
+    // operations naming a relation the server will not find.
+    let mut vacated: BTreeMap<&str, Option<&str>> = BTreeMap::new();
 
     for (op_index, op) in ir.ops.iter().enumerate() {
         // A `createTable` RECLAIMS the name rather than requiring it to be there,
@@ -2691,7 +2693,22 @@ fn validate_no_op_targets_a_renamed_away_table(
             continue;
         }
         if let Some(table) = op.touched_table() {
-            if let Some(new_name) = vacated.get(table) {
+            if let Some(fate) = vacated.get(table) {
+                let (what, fix) = match fate {
+                    Some(new_name) => (
+                        format!(
+                            "an earlier renameTable in this migration renamed it to {new_name:?}"
+                        ),
+                        format!(
+                            "target {new_name:?} instead, or move this operation before the rename"
+                        ),
+                    ),
+                    None => (
+                        "an earlier dropTable in this migration removed it".to_string(),
+                        "move this operation before the drop, or recreate the table first"
+                            .to_string(),
+                    ),
+                };
                 return Err(AuthoringError {
                     code: CODE_OP_INVALID.to_string(),
                     kind: Some(UnsupportedKind::Op),
@@ -2699,21 +2716,23 @@ fn validate_no_op_targets_a_renamed_away_table(
                     ts_location: ts_locations.get(op_index).cloned().flatten(),
                     dialect: target_dialect,
                     reason: format!(
-                        "this operation targets table {table:?}, which an earlier \
-                         renameTable in this migration already renamed to {new_name:?}, \
-                         so the table will not exist under that name when it runs"
+                        "this operation targets table {table:?}, but {what}, so the table \
+                         will not exist under that name when it runs"
                     ),
-                    suggested_fix: Some(format!(
-                        "target {new_name:?} instead, or move this operation before the \
-                         rename"
-                    )),
+                    suggested_fix: Some(fix),
                 });
             }
         }
-        if let Op::RenameTable { table, to, .. } = op {
-            // The destination is occupied again, and the source is now vacant.
-            vacated.remove(to.as_str());
-            vacated.insert(table.as_str(), to.as_str());
+        match op {
+            Op::RenameTable { table, to, .. } => {
+                // The destination is occupied again, and the source is now vacant.
+                vacated.remove(to.as_str());
+                vacated.insert(table.as_str(), Some(to.as_str()));
+            }
+            Op::DropTable { table, .. } => {
+                vacated.insert(table.as_str(), None);
+            }
+            _ => {}
         }
     }
     Ok(())

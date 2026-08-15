@@ -86,3 +86,53 @@ fn operating_on_that_freed_name_after_recreating_it_is_allowed() {
 fn a_rename_on_its_own_is_still_allowed() {
     verdict(r#"{"op":"renameTable","table":"a","to":"b"}"#).expect("a plain rename must pass");
 }
+
+// ---------------------------------------------------------------------------
+// The same shape reached by DROPPING the table instead of renaming it away.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_operation_on_a_dropped_table_is_refused() {
+    // Measured before the fix:
+    //     DROP TABLE "prj_ir"."a"
+    //     ALTER TABLE "prj_ir"."a" ADD COLUMN "n" text
+    let refusal = verdict(
+        r#"{"op":"dropTable","table":"a"},{"op":"addColumn","table":"a","column":"n","type":"text","nullable":true}"#,
+    )
+    .expect_err("an op after the table is dropped names a relation that is gone");
+    assert!(
+        refusal.to_lowercase().contains("drop"),
+        "the refusal must point at the drop: {refusal}"
+    );
+}
+
+#[test]
+fn an_index_on_a_dropped_table_is_refused() {
+    verdict(
+        r#"{"op":"dropTable","table":"a"},{"op":"createIndex","name":"ix","table":"a","columns":[{"kind":"column","name":"v"}]}"#,
+    )
+    .expect_err("an index on a dropped table names a relation that is gone");
+}
+
+#[test]
+fn dropping_a_table_and_recreating_it_is_still_allowed() {
+    // The control that shapes this half exactly as it shaped the rename half: a
+    // createTable reclaims the name, and the recreated table is usable.
+    verdict(
+        r#"{"op":"dropTable","table":"a"},{"op":"createTable","name":"a","columns":[{"name":"c0","type":"int","nullable":false}],"primaryKey":["c0"]},{"op":"addColumn","table":"a","column":"n","type":"text","nullable":true}"#,
+    )
+    .expect("drop-then-recreate, then use, is a real migration pattern");
+}
+
+// MEASURED AND NOT FIXED, stated rather than left implied: the COLUMN-level
+// version of this has the same defect.
+//
+//     ALTER TABLE "prj_ir"."a" DROP COLUMN "v"
+//     CREATE INDEX IF NOT EXISTS "ix" ON "prj_ir"."a" ("v")
+//
+// lowers today and fails at the server with `column "v" does not exist`. It is
+// left out because catching it needs different machinery: this check compares one
+// name per op via `touched_table`, while a column case needs every column each op
+// REFERENCES — index elements, constraint column lists, backfill targets — which
+// is a wider surface than the table name and belongs in its own change with its
+// own controls.
