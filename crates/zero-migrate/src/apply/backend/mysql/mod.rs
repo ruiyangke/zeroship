@@ -5232,8 +5232,7 @@ mod render_tests {
                 // The applied insert now carries the stored reverse as a 7th
                 // bind (NULL for a migration with none), so the kind is the
                 // second-to-last parameter rather than the last.
-                params.len() == 7
-                    && params.get(5) == Some(&Bind::Text("repeatable".to_string()))
+                params.len() == 7 && params.get(5) == Some(&Bind::Text("repeatable".to_string()))
             }),
             "the completed event must remain visible to latest_completed_checksums: {binds:?}"
         );

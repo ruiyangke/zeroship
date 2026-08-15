@@ -295,14 +295,8 @@ mod tests {
             r#", "irreversible":"splitting the phases does not invent a reverse""#,
         );
 
-        let err = load_ir_document(
-            &bytes,
-            "app_a",
-            Dialect::Postgres,
-            &registry(&[]),
-            None,
-        )
-        .expect_err("DDL and DML must not share a forward op list");
+        let err = load_ir_document(&bytes, "app_a", Dialect::Postgres, &registry(&[]), None)
+            .expect_err("DDL and DML must not share a forward op list");
 
         assert_eq!(err, IrLoadError::MixedDdlAndDml);
         let message = err.to_string();

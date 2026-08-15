@@ -366,7 +366,7 @@ impl<'a> ChecksumInput<'a> {
 ///
 /// A schema migration and a data migration authored before the reverse fields
 /// existed are both [`Self::None`], and fold nothing — see
-/// [`Checksum::of_ir_strings_with_reverse`].
+/// the reverse-aware checksum fold (crate-private).
 #[derive(Debug, Clone, Copy)]
 pub enum ReverseDomain<'a> {
     /// No reverse declared. Folds nothing.

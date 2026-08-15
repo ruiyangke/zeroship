@@ -52,12 +52,12 @@ function hostDriver([request, done]) {
   } else if (request.sql.includes('union_all')) {
     rows = [
       row(
-        ['version', 'checksum', 'mig_kind', 'event_seq', 'phase'],
-        [text(COMPLETED), text('checksum-completed'), text('apply'), int(1), text('completed')],
+        ['version', 'checksum', 'mig_kind', 'event_seq', 'phase', 'down'],
+        [text(COMPLETED), text('checksum-completed'), text('apply'), int(1), text('completed'), { kind: 'null' }],
       ),
       row(
-        ['version', 'checksum', 'mig_kind', 'event_seq', 'phase'],
-        [text(INFLIGHT), text('checksum-inflight'), { kind: 'null' }, int(2), text('started')],
+        ['version', 'checksum', 'mig_kind', 'event_seq', 'phase', 'down'],
+        [text(INFLIGHT), text('checksum-inflight'), { kind: 'null' }, int(2), text('started'), { kind: 'null' }],
       ),
     ];
   } else if (

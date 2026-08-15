@@ -1568,7 +1568,7 @@ pub(crate) async fn rollback_dml_plan_transactional<D: SqlSession>(
                     reason: "non-DML step reached PostgreSQL recorded-inverse executor".to_string(),
                 });
             };
-            postgres_dml_params(binds).map_err(|reason| RollbackError::Backend(reason))
+            postgres_dml_params(binds).map_err(RollbackError::Backend)
         })
         .collect::<Result<_, _>>()?;
     let started = Instant::now();

@@ -63,7 +63,7 @@ async fn bootstrap_adds_nullable_down_to_legacy_journal() {
         let journal = rusqlite::Connection::open(&paths.journal).expect("open legacy journal");
         journal
             .execute_batch(
-            "CREATE TABLE schema_migrations (\
+                "CREATE TABLE schema_migrations (\
                 event_seq  INTEGER PRIMARY KEY AUTOINCREMENT, \
                 event_kind TEXT NOT NULL, \
                 version    TEXT NOT NULL, \
@@ -88,5 +88,9 @@ async fn bootstrap_adds_nullable_down_to_legacy_journal() {
 
     let column = down_column(&backend).await;
     assert_eq!(column[2].as_deref(), Some("TEXT"), "down stores SQL text");
-    assert_eq!(column[3].as_deref(), Some("0"), "legacy rows require NULL down");
+    assert_eq!(
+        column[3].as_deref(),
+        Some("0"),
+        "legacy rows require NULL down"
+    );
 }

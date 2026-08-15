@@ -28,7 +28,7 @@
 
 use std::collections::BTreeMap;
 
-use zero_migrate::model::ir::{ColType, IrColumn, IrScalar, IrValue, MigrationIr, Op};
+use zero_migrate::model::ir::{ColType, IrColumn, IrScalar, MigrationIr, Op};
 use zero_migrate::model::load::{authoritative_ir_checksum, load_ir_document, IrLoadError};
 use zero_migrate::model::validate::Dialect;
 

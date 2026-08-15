@@ -80,10 +80,10 @@ use crate::verbs::{
     status_ir_with_locked_backend, ApplyDialect,
 };
 use crate::wire::{
-    ApplyIrSqliteRequest, ApplyReply, ApplyRequest, BuildInfo, CollectionDescriptorDto,
-    FieldDescriptorDto, GenArtifactsReply, GenArtifactsSource, HistoryEventDto, HistoryReply,
-    HistoryRequest, LoadVerifyReply, PreviewSqlSource, ResolvePendingRequest, RollbackRequest,
-    AdvisoryDto, RuntimeOptionsDto, StatusIrRequest, StatusRequest,
+    AdvisoryDto, ApplyIrSqliteRequest, ApplyReply, ApplyRequest, BuildInfo,
+    CollectionDescriptorDto, FieldDescriptorDto, GenArtifactsReply, GenArtifactsSource,
+    HistoryEventDto, HistoryReply, HistoryRequest, LoadVerifyReply, PreviewSqlSource,
+    ResolvePendingRequest, RollbackRequest, RuntimeOptionsDto, StatusIrRequest, StatusRequest,
 };
 
 // ---------------------------------------------------------------------------

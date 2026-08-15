@@ -584,7 +584,10 @@ async fn run_apply_txn(
         // whatever engine happens to be installed then. PostgreSQL already did
         // this; SQLite and MySQL kept writing NULL, so the version-instability
         // hole F654 closed stayed open on two of three dialects.
-        let down_lit = m.down.as_deref().map_or_else(|| "NULL".to_string(), sql_lit);
+        let down_lit = m
+            .down
+            .as_deref()
+            .map_or_else(|| "NULL".to_string(), sql_lit);
         actor
             .exec(&format!(
                 "INSERT INTO \"_mig\".schema_migrations \
