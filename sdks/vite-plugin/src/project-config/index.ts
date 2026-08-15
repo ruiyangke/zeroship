@@ -21,6 +21,7 @@ import {
   getNodeValue,
   parseTree,
   printParseErrorCode,
+  type Node,
   type ParseError,
 } from "jsonc-parser";
 
@@ -106,7 +107,26 @@ export interface LoadedProjectConfig {
   raw: Json;
 }
 
+function findUnpairedSurrogate(node: Node): number | null {
+  if (
+    node.type === "string" &&
+    typeof node.value === "string" &&
+    /[\uD800-\uDFFF]/u.test(node.value)
+  ) {
+    return node.offset;
+  }
+  for (const child of node.children ?? []) {
+    const found = findUnpairedSurrogate(child);
+    if (found != null) return found;
+  }
+  return null;
+}
+
 export function parseProjectConfig(path: string, text: string): LoadedProjectConfig {
+  const bareCarriageReturn = text.search(/\r(?!\n)/);
+  if (bareCarriageReturn >= 0) {
+    throw new Error(`${path}: bare carriage return in JSONC at offset ${bareCarriageReturn}`);
+  }
   const errors: ParseError[] = [];
   const tree = parseTree(text, errors, { allowTrailingComma: true });
   if (errors.length > 0) {
@@ -114,6 +134,12 @@ export function parseProjectConfig(path: string, text: string): LoadedProjectCon
     throw new Error(
       `${path}: ${printParseErrorCode(error.error)} at offset ${error.offset}`,
     );
+  }
+  if (tree != null) {
+    const unpairedSurrogate = findUnpairedSurrogate(tree);
+    if (unpairedSurrogate != null) {
+      throw new Error(`${path}: unpaired surrogate at offset ${unpairedSurrogate}`);
+    }
   }
   const raw: unknown = tree == null ? undefined : getNodeValue(tree);
   if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {

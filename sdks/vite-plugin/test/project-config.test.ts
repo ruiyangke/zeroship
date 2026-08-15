@@ -535,6 +535,10 @@ describe("JSONC edge cases the two readers must agree on", () => {
     assert.equal(r.name, "demo-app");
   });
 
+  test("bare carriage return line endings are rejected", () => {
+    assert.throws(() => parsed(FULL.replaceAll("\n", "\r")), /bare carriage return/);
+  });
+
   test("Unicode-escaped keys and values are decoded", () => {
     const body = FULL
       .replace('"name": "demo-app"', '"\\u006eame": "demo-app"')
@@ -545,6 +549,14 @@ describe("JSONC edge cases the two readers must agree on", () => {
     const r = resolveProjectConfig(parsed(body));
     assert.equal(r.name, "demo-app");
     assert.equal(r.build.serverEntry, "caf\u00e9-\ud83d\ude00.ts");
+  });
+
+  test("an unpaired surrogate is rejected", () => {
+    const body = FULL.replace(
+      '"mode": "full"',
+      '"mode": "full", "serverEntry": "src/\\ud800.ts"',
+    );
+    assert.throws(() => parsed(body), /unpaired surrogate/);
   });
 
   test("a leading BOM is rejected", () => {
