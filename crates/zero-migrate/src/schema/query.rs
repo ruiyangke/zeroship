@@ -5931,3 +5931,53 @@ columns = [
         );
     }
 }
+
+#[cfg(test)]
+mod hostile_identifier_quoting {
+    use super::{mysql_quote_ident, quote_ident};
+
+    /// The schema kernel carries its OWN quoting primitives, deliberately: the
+    /// render layer's structural single-home test
+    /// (`render::dml::tests::no_bare_escape_seam_outside_dml`) exempts this
+    /// subtree because it is a distinct module layer. That exemption is the
+    /// reason these need their own hostile-input coverage — nothing else in the
+    /// tree asserts anything about them, and "correct by inspection" is the
+    /// weakest claim available about an escape function.
+    ///
+    /// The dangerous character is the one that closes THIS quoting: a `"` is
+    /// inert inside backticks and a backtick is inert inside double quotes.
+    #[test]
+    fn a_quote_bearing_identifier_is_doubled_not_left_bare() {
+        assert_eq!(quote_ident(r#"a"b"#), r#""a""b""#);
+        assert_eq!(mysql_quote_ident("a`b"), "`a``b`");
+    }
+
+    #[test]
+    fn an_injecting_identifier_stays_inside_its_quoting() {
+        // The payload's own quote is doubled, so the `);` and everything after it
+        // remain part of the identifier rather than becoming syntax.
+        let pg = quote_ident(r#"x"); DROP TABLE victim; --"#);
+        assert_eq!(pg, r#""x""); DROP TABLE victim; --""#);
+        assert_eq!(
+            pg.matches('"').count() % 2,
+            0,
+            "an odd number of quotes means one of them closes the identifier: {pg}"
+        );
+
+        let my = mysql_quote_ident("x`); DROP TABLE victim; -- ");
+        assert_eq!(my, "`x``); DROP TABLE victim; -- `");
+        assert_eq!(
+            my.matches('`').count() % 2,
+            0,
+            "an odd number of backticks means one of them closes the identifier: {my}"
+        );
+    }
+
+    #[test]
+    fn the_other_dialects_quote_character_needs_no_escaping() {
+        // Each primitive must leave the OTHER dialect's quote alone: doubling it
+        // would corrupt the name for no safety gain.
+        assert_eq!(quote_ident("a`b"), r#""a`b""#);
+        assert_eq!(mysql_quote_ident(r#"a"b"#), r#"`a"b`"#);
+    }
+}
