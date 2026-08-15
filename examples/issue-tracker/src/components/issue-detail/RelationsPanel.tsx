@@ -103,7 +103,7 @@ export function DependenciesPanel({ issueId }: { issueId: string }) {
                       return (
                         <li key={id}>
                           {node ? <IssueLink id={id} summary={node.summary} status={node.status} /> : id}
-                          <Button variant="gray" size="small" disabled={busy} onClick={() => void remove(id)}>
+                          <Button variant="gray" size="sm" disabled={busy} onClick={() => void remove(id)}>
                             Remove
                           </Button>
                         </li>
@@ -134,7 +134,7 @@ export function DependenciesPanel({ issueId }: { issueId: string }) {
       {!graphQ.isError ? (
         <div className="inline-form">
           <Input aria-label="Issue this depends on" placeholder="PARSER-12" value={newDep} onChange={(e) => setNewDep(e.target.value)} />
-          <Button variant="gray" size="small" disabled={busy || !newDep.trim()} onClick={() => void add()}>
+          <Button variant="gray" size="sm" disabled={busy || !newDep.trim()} onClick={() => void add()}>
             Add dependency
           </Button>
         </div>

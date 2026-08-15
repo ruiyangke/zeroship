@@ -148,7 +148,7 @@
    surfaces). See variant blocks below for the disabled overrides. */
 
 /* ─── sizes ────────────────────────────────────────────────────────────── */
-[data-slot="button"][data-size="small"] {
+[data-slot="button"][data-size="sm"] {
   height: var(--zeroship-button-height-sm, 2rem);    /* 32 */
   padding-inline: var(--zeroship-button-padding-sm, var(--zeroship-space-3));
   font-size: var(--zeroship-text-subheadline-size);
@@ -157,7 +157,7 @@
   border-radius: var(--zeroship-button-radius-sm, var(--zeroship-radius-2));
 }
 
-[data-slot="button"][data-size="medium"] {
+[data-slot="button"][data-size="md"] {
   height: var(--zeroship-button-height-md, 2.5rem);  /* 40 */
   padding-inline: var(--zeroship-button-padding-md, var(--zeroship-space-4));
   font-size: var(--zeroship-text-body-size);
@@ -166,7 +166,7 @@
   border-radius: var(--zeroship-button-radius-md, var(--zeroship-radius-3));
 }
 
-[data-slot="button"][data-size="large"] {
+[data-slot="button"][data-size="lg"] {
   height: var(--zeroship-button-height-lg, 3rem);    /* 48 */
   padding-inline: var(--zeroship-button-padding-lg, var(--zeroship-space-5));
   font-size: var(--zeroship-text-headline-size);

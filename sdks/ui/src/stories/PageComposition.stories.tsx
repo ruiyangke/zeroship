@@ -71,7 +71,7 @@ export const ProductRail: Story = {
           title="Build polished product pages from governed pieces."
           description="Use one width authority, one header rhythm, and one media crop contract instead of rebuilding section CSS for every generated page."
           actions={
-            <Button variant="plain" size="small">
+            <Button variant="plain" size="sm">
               View all
             </Button>
           }

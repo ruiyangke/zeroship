@@ -104,14 +104,14 @@ export const WithActions: Story = {
         Upgrade now to keep your projects and avoid interruption.
       </Banner.Description>
       <Banner.Actions>
-        <Button variant="filled" size="small">
+        <Button variant="filled" size="sm">
           Upgrade
         </Button>
         {/* `tinted`/`gray` (not `plain`) on a tinted banner: a plain
             button's transparent fill leaves its accent ink resolving
             against the orange banner tint, which fails contrast. A
             button that carries its own opaque background sidesteps that. */}
-        <Button variant="gray" size="small">
+        <Button variant="gray" size="sm">
           Remind me later
         </Button>
       </Banner.Actions>

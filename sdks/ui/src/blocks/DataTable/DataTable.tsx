@@ -545,7 +545,7 @@ function RowActions({ actions }: { actions: DataTableRowAction[] }) {
           <Button
             type="button"
             variant="plain"
-            size="small"
+            size="sm"
             aria-label="Row actions"
             data-slot="data-table-row-actions-trigger"
           >

@@ -16,7 +16,7 @@ import { Slot } from "../_slot";
 
 export type ButtonVariant = "filled" | "tinted" | "gray" | "plain";
 export type ButtonIntent = "normal" | "destructive";
-export type ButtonSize = "small" | "medium" | "large";
+export type ButtonSize = "sm" | "md" | "lg";
 
 export interface ButtonProps extends Omit<
   ButtonHTMLAttributes<HTMLButtonElement>,
@@ -48,7 +48,7 @@ export interface ButtonProps extends Omit<
    */
   intent?: ButtonIntent;
 
-  /** Size — small 32px, medium 40px (default), large 48px. */
+  /** Size — sm 32px, md 40px (default), lg 48px. */
   size?: ButtonSize;
 
   /**
@@ -116,7 +116,7 @@ export const Button = forwardRef<HTMLElement, ButtonProps>(function Button(
   {
     variant = "filled",
     intent = "normal",
-    size = "medium",
+    size = "md",
     loading = false,
     startSlot,
     endSlot,

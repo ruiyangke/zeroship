@@ -211,7 +211,7 @@ export const FilterBar = forwardRef<HTMLDivElement, FilterBarProps>(
           <Button
             type="button"
             variant="plain"
-            size="small"
+            size="sm"
             data-slot="filter-bar-clear"
             onClick={() => onClearFilters?.()}
           >

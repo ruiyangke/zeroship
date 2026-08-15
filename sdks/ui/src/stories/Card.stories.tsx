@@ -123,7 +123,7 @@ export const Decomposed: Story = {
             Identity, plan, and danger zone for this app.
           </Card.Description>
           <Card.Action>
-            <Button size="small" variant="tinted">
+            <Button size="sm" variant="tinted">
               Edit
             </Button>
           </Card.Action>
@@ -511,7 +511,7 @@ function AsChildRefCompositionImpl() {
         </Card.Header>
         <Card.Content>
           <Button
-            size="small"
+            size="sm"
             variant="tinted"
             onClick={() => {
               const el = consumerRef.current;
@@ -688,7 +688,7 @@ function TitleAsChildSingleAttachImpl() {
         {/* A focusable footer keeps the story canvas from tripping
          * the axe `scrollable-region-focusable` rule. */}
         <Card.Footer>
-          <Button size="small" variant="plain">
+          <Button size="sm" variant="plain">
             Acknowledge
           </Button>
         </Card.Footer>
@@ -733,10 +733,10 @@ export const TitleAsChildAndMediaOverride: Story = {
         </Card.Header>
         <Card.Content>Subpart render-as behavior.</Card.Content>
         <Card.Footer align="between" divider="top">
-          <Button size="small" variant="plain">
+          <Button size="sm" variant="plain">
             Back
           </Button>
-          <Button size="small">Continue</Button>
+          <Button size="sm">Continue</Button>
         </Card.Footer>
       </Card>
     </div>
@@ -789,7 +789,7 @@ export const Ghost: Story = {
 
 /* ─── 8. With form inside ────────────────────────────────────────────── */
 /* Convention: forms embedded inside a Card use smaller
- * controls (Input size="sm", Button size="small"). macOS list-row
+ * controls (Input size="sm", Button size="sm"). macOS list-row
  * forms ship mini controls; reading a form inside a Card with default
  * (md) controls feels chunky because the card already supplies the
  * outer container. The story models the recommended pattern so the
@@ -819,10 +819,10 @@ export const WithFormInside: Story = {
           </Field>
         </Card.Content>
         <Card.Footer divider="top">
-          <Button size="small" variant="plain">
+          <Button size="sm" variant="plain">
             Cancel
           </Button>
-          <Button size="small">Send invite</Button>
+          <Button size="sm">Send invite</Button>
         </Card.Footer>
       </Card>
     </div>

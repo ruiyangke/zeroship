@@ -322,7 +322,7 @@ export function IssueListPage() {
         onClearFilters={activeFilters.length > 0 ? resetFilters : undefined}
         actions={
           <Cluster gap={2} align="center">
-            <Button variant="gray" size="small" onClick={applyFilters}>
+            <Button variant="gray" size="sm" onClick={applyFilters}>
               Apply
             </Button>
             {/* The builder needs an identity and the filters do not. Signed
@@ -333,7 +333,7 @@ export function IssueListPage() {
                 picker stay: they are all served by the anonymous
                 `issues.search`. */}
             {signedOut ? null : (
-              <Button variant="gray" size="small" onClick={() => setBuilderOpen(true)}>
+              <Button variant="gray" size="sm" onClick={() => setBuilderOpen(true)}>
                 Advanced...
               </Button>
             )}
@@ -346,7 +346,7 @@ export function IssueListPage() {
             <div className="column-picker">
               <Button
                 variant="plain"
-                size="small"
+                size="sm"
                 onClick={() => setPickerOpen((open) => !open)}
                 aria-expanded={pickerOpen}
               >
@@ -472,7 +472,7 @@ export function IssueListPage() {
               Showing {advanced.length} result{advanced.length === 1 ? "" : "s"} from advanced
               search
             </span>
-            <Button variant="plain" size="small" onClick={() => setAdvanced(null)}>
+            <Button variant="plain" size="sm" onClick={() => setAdvanced(null)}>
               Back to filters
             </Button>
           </Cluster>
@@ -525,7 +525,7 @@ export function IssueListPage() {
               }}
             />
             <div className="pager">
-              <Button variant="gray" size="small"
+              <Button variant="gray" size="sm"
                 disabled={offset === 0}
                 onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
               >
@@ -534,7 +534,7 @@ export function IssueListPage() {
               <span>
                 {offset + 1}-{offset + issues.length}
               </span>
-              <Button variant="gray" size="small"
+              <Button variant="gray" size="sm"
                 disabled={issues.length < PAGE_SIZE}
                 onClick={() => setOffset(offset + PAGE_SIZE)}
               >

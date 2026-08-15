@@ -172,7 +172,7 @@ export const WithSlots: Story = {
         <Field>
           <Field.Label>Filter</Field.Label>
           {/* Visual-polish item 11: the clear button now uses
-              <Button variant="plain" size="small"> so it carries the
+              <Button variant="plain" size="sm"> so it carries the
               44pt minimum hit-target extension from Button slice 1. The
               visible × glyph stays small; the tap target is comfortable.
               When a first-class `clearable` Input prop ships, the clear
@@ -180,7 +180,7 @@ export const WithSlots: Story = {
           <Input
             defaultValue="ada"
             endSlot={
-              <Button variant="plain" size="small" aria-label="Clear filter">
+              <Button variant="plain" size="sm" aria-label="Clear filter">
                 <IconX />
               </Button>
             }

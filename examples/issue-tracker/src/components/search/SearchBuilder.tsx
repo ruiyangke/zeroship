@@ -153,7 +153,7 @@ export function FieldBuilder({ onResults }: { onResults: (issues: Issue[]) => vo
               aria-label="Value" placeholder="value"
             />
           ) : null}
-          <Button variant="gray" size="small"
+          <Button variant="gray" size="sm"
             disabled={conditions.length === 1}
             onClick={() => setConditions((cs) => cs.filter((_, i) => i !== index))}
           >
@@ -162,10 +162,10 @@ export function FieldBuilder({ onResults }: { onResults: (issues: Issue[]) => vo
         </div>
       ))}
       <div className="field-builder-actions">
-        <Button variant="gray" size="small" onClick={() => setConditions((cs) => [...cs, newCondition()])}>
+        <Button variant="gray" size="sm" onClick={() => setConditions((cs) => [...cs, newCondition()])}>
           Add condition (AND)
         </Button>
-        <Button variant="filled" size="small" disabled={search.isPending} onClick={run}>
+        <Button variant="filled" size="sm" disabled={search.isPending} onClick={run}>
           {search.isPending ? "Searching..." : "Run search"}
         </Button>
       </div>
@@ -222,7 +222,7 @@ export function SavedSearchesPanel({ currentWhere }: { currentWhere: WhereNode |
               <li key={row.id}>
                 {row.name}
                 {row.isShared ? <span className="chip">shared</span> : null}
-                <Button variant="gray" size="small" disabled={busy} onClick={() => remove.mutate(row.id)}>
+                <Button variant="gray" size="sm" disabled={busy} onClick={() => remove.mutate(row.id)}>
                   Delete
                 </Button>
               </li>
@@ -238,7 +238,7 @@ export function SavedSearchesPanel({ currentWhere }: { currentWhere: WhereNode |
           onChange={(e) => setName(e.target.value)}
           disabled={!currentWhere}
         />
-        <Button variant="gray" size="small" disabled={busy || !currentWhere || !name.trim()} onClick={submitSave}>
+        <Button variant="gray" size="sm" disabled={busy || !currentWhere || !name.trim()} onClick={submitSave}>
           Save
         </Button>
       </div>

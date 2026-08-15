@@ -41,7 +41,7 @@ export const SignIn: Story = {
     mode: "signIn",
     description: "Welcome back. Enter your details to continue.",
     secondaryAction: (
-      <Button variant="plain" size="small" type="button">
+      <Button variant="plain" size="sm" type="button">
         Forgot password?
       </Button>
     ),
@@ -234,10 +234,10 @@ export const WithSocial: Story = {
       <>
         {/* Consumer-owned width — providers stretch via the consumer's own
             style, NOT by reaching into the block's private classes. */}
-        <Button variant="gray" size="large" type="button" style={{ inlineSize: "100%" }}>
+        <Button variant="gray" size="lg" type="button" style={{ inlineSize: "100%" }}>
           Continue with Google
         </Button>
-        <Button variant="gray" size="large" type="button" style={{ inlineSize: "100%" }}>
+        <Button variant="gray" size="lg" type="button" style={{ inlineSize: "100%" }}>
           Continue with GitHub
         </Button>
       </>

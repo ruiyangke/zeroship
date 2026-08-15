@@ -44,7 +44,7 @@ export function RailProperty({
         <span className="rail-choice-value">{display}</span>
         <Button
           variant="plain"
-          size="small"
+          size="sm"
           disabled={disabled}
           // Named per property: a rail of bare "Edit" buttons tells a screen
           // reader nothing about which one it has landed on.
@@ -63,7 +63,7 @@ export function RailProperty({
       {children(() => setEditing(false))}
       <Button
         variant="plain"
-        size="small"
+        size="sm"
         aria-label={`Cancel editing ${label}`}
         onClick={() => setEditing(false)}
       >

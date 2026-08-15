@@ -102,7 +102,7 @@ export function FlagTypesAdmin() {
             <Select.Item value="attachment">attachment</Select.Item>
           </Select>
         </Field>
-        <Button variant="filled" size="small"
+        <Button variant="filled" size="sm"
           disabled={busy || !name.trim()}
           onClick={() => void create()}
         >

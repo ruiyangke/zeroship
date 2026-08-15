@@ -59,14 +59,14 @@ function AttachmentRow({ attachment }: { attachment: Attachment }) {
   return (
     <li className={`attachment ${attachment.isObsolete ? "obsolete" : ""}`}>
       <div className="attachment-head">
-        <Button variant="gray" size="small" disabled={downloading} onClick={() => void download()}>
+        <Button variant="gray" size="sm" disabled={downloading} onClick={() => void download()}>
           {downloading ? "..." : attachment.filename}
         </Button>
         <span className="dim">{formatBytes(attachment.sizeBytes)}</span>
         <span className="dim">{attachment.contentType}</span>
         {attachment.isPatch ? <span className="badge patch-badge">patch</span> : null}
         {attachment.isObsolete ? <span className="badge obsolete-badge">obsolete</span> : null}
-        <Button variant="gray" size="small" disabled={busy} onClick={() => void toggleObsolete()}>
+        <Button variant="gray" size="sm" disabled={busy} onClick={() => void toggleObsolete()}>
           {attachment.isObsolete ? "Un-obsolete" : "Mark obsolete"}
         </Button>
         {/* Plain, not destructive-red. On a list row this was the most
@@ -74,7 +74,7 @@ function AttachmentRow({ attachment }: { attachment: Attachment }) {
             page primary -- for an action on a file somebody attached on
             purpose. Deleting is available here, it is not the point of the
             panel. */}
-        <Button variant="plain" size="small" disabled={busy} onClick={() => void remove()}>
+        <Button variant="plain" size="sm" disabled={busy} onClick={() => void remove()}>
           Delete
         </Button>
       </div>

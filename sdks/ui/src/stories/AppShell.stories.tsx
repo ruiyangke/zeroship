@@ -301,7 +301,7 @@ const HeaderBar = ({ extraStart }: { extraStart?: ReactNode }) => (
     {extraStart}
     <BrandLockup />
     <div style={{ flex: 1 }} />
-    <Button variant="plain" size="small" aria-label="Notifications">
+    <Button variant="plain" size="sm" aria-label="Notifications">
       <span className="zeroship-demo-header__icon" aria-hidden="true">
         <svg
           viewBox="0 0 24 24"
@@ -445,7 +445,7 @@ export const FullShell: Story = {
                 </PageHeader.Description>
               </PageHeader.Text>
               <PageHeader.Actions>
-                <Button variant="filled" size="small">
+                <Button variant="filled" size="sm">
                   New project
                 </Button>
               </PageHeader.Actions>
@@ -630,7 +630,7 @@ function SidebarToggle() {
   return (
     <Button
       variant="gray"
-      size="small"
+      size="sm"
       aria-expanded={sidebarOpen}
       onClick={() => setSidebarOpen(!sidebarOpen)}
     >
@@ -805,7 +805,7 @@ export const ScrollFrame: Story = {
                   action makes the scroll region keyboard-reachable so it is
                   not an inaccessible scroll trap (axe
                   scrollable-region-focusable). */}
-              <Button variant="filled" size="small">
+              <Button variant="filled" size="sm">
                 New row
               </Button>
               {Array.from({ length: 40 }, (_, i) => (

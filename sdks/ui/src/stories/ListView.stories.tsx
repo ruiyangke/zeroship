@@ -172,12 +172,12 @@ export const WithActions: Story = {
       onClick: () => onRow(p.id),
       trailing: (
         <>
-          <Button variant="tinted" size="small" onClick={() => onAction(p.id)}>
+          <Button variant="tinted" size="sm" onClick={() => onAction(p.id)}>
             Invite
           </Button>
           <Button
             variant="plain"
-            size="small"
+            size="sm"
             aria-label={`More actions for ${p.name}`}
             onClick={() => onMenu(p.id)}
           >

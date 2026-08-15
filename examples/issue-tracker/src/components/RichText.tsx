@@ -135,7 +135,7 @@ function ToolbarButton({
   return (
     <Button
       variant={isActive ? "tinted" : "plain"}
-      size="small"
+      size="sm"
       aria-pressed={isActive}
       aria-label={title}
       title={title}
@@ -212,7 +212,7 @@ function LinkControl({ editor }: { editor: Editor }) {
               if (event.key === "Escape") setOpen(false);
             }}
           />
-          <Button variant="filled" size="small" onMouseDown={(e) => e.preventDefault()} onClick={apply}>
+          <Button variant="filled" size="sm" onMouseDown={(e) => e.preventDefault()} onClick={apply}>
             Apply
           </Button>
           {refused ? (

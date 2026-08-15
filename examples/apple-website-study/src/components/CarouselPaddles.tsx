@@ -21,13 +21,13 @@ export function CarouselPaddles({
       <Button
         className="carousel-paddle"
         variant="gray"
-        size="small"
+        size="sm"
         aria-label="Previous"
         onClick={() => scroll(-1)}
       >
         <Icon as={ChevronLeft} size="sm" />
       </Button>
-      <Button className="carousel-paddle" variant="gray" size="small" aria-label="Next" onClick={() => scroll(1)}>
+      <Button className="carousel-paddle" variant="gray" size="sm" aria-label="Next" onClick={() => scroll(1)}>
         <Icon as={ChevronRight} size="sm" />
       </Button>
     </div>

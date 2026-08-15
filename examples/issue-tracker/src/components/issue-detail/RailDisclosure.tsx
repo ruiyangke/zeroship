@@ -41,7 +41,7 @@ export function RailDisclosure({
         <span className="rail-choice-value">{summary}</span>
         <Button
           variant="plain"
-          size="small"
+          size="sm"
           // Named per group, so a screen reader landing on the button knows
           // which panel it opens rather than hearing "Edit" four times.
           aria-label={open ? `Close ${label}` : `${action} ${label}`}

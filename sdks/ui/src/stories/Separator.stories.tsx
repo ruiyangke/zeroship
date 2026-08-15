@@ -267,20 +267,20 @@ export const InsideToolbar: Story = {
       aria-label="Toolbar separators"
       style={{ alignItems: "center", gap: "0.5rem" }}
     >
-      <Button size="small" variant="plain" data-testid="separator-tool-1">
+      <Button size="sm" variant="plain" data-testid="separator-tool-1">
         Bold
       </Button>
-      <Button size="small" variant="plain" data-testid="separator-tool-2">
+      <Button size="sm" variant="plain" data-testid="separator-tool-2">
         Italic
       </Button>
       <Separator
         orientation="vertical"
         data-testid="separator-toolbar-divider"
       />
-      <Button size="small" variant="plain" data-testid="separator-tool-3">
+      <Button size="sm" variant="plain" data-testid="separator-tool-3">
         Link
       </Button>
-      <Button size="small" variant="plain" data-testid="separator-tool-4">
+      <Button size="sm" variant="plain" data-testid="separator-tool-4">
         Image
       </Button>
     </div>

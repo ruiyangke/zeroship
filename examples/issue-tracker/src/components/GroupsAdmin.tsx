@@ -156,7 +156,7 @@ export function GroupsAdmin() {
           <Field.Label>New group</Field.Label>
           <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="security" />
         </Field>
-        <Button variant="filled" size="small" disabled={busy || !name.trim()} onClick={() => void create()}>
+        <Button variant="filled" size="sm" disabled={busy || !name.trim()} onClick={() => void create()}>
           Create
         </Button>
       </div>
@@ -186,7 +186,7 @@ export function GroupsAdmin() {
                     access-control object. */}
                 <Button
                   variant="gray"
-                  size="small"
+                  size="sm"
                   intent="destructive"
                   disabled={busy}
                   aria-label={`Delete group ${group.name}`}
@@ -228,7 +228,7 @@ export function GroupsAdmin() {
               placeholder="name or email"
             />
           </Field>
-          <Button variant="gray" size="small" onClick={search}>
+          <Button variant="gray" size="sm" onClick={search}>
             Search
           </Button>
         </div>
@@ -251,7 +251,7 @@ export function GroupsAdmin() {
                   <span>{member.name ?? member.handle}</span>
                   <Button
                     variant="gray"
-                    size="small"
+                    size="sm"
                     intent="destructive"
                     disabled={busy}
                     onClick={() => void removeMember(member.id)}
@@ -270,7 +270,7 @@ export function GroupsAdmin() {
           {matches.map((user) => (
             <li key={user.id}>
               {user.name} <span className="dim">@{user.handle}</span>
-              <Button variant="gray" size="small"
+              <Button variant="gray" size="sm"
                 disabled={busy || !memberGroup}
                 onClick={() => void add(user.id)}
               >
@@ -375,13 +375,13 @@ function ProductRestrictions({
             ))}
           </Select>
         </Field>
-        <Button variant="gray" size="small"
+        <Button variant="gray" size="sm"
           disabled={busy || !productId || !groupId}
           onClick={() => void apply("restrict")}
         >
           Restrict
         </Button>
-        <Button variant="gray" size="small"
+        <Button variant="gray" size="sm"
           disabled={busy || !productId || !groupId}
           onClick={() => void apply("unrestrict")}
         >

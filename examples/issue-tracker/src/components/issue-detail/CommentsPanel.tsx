@@ -163,7 +163,7 @@ function CommentRow({
         <span className="comment-actions">
           <Button
             variant="plain"
-            size="small"
+            size="sm"
             disabled={busy}
             aria-label={`Edit comment ${comment.commentNumber}`}
             onClick={() => (editing ? cancelEditing() : setEditing(true))}
@@ -172,7 +172,7 @@ function CommentRow({
           </Button>
           <Button
             variant="plain"
-            size="small"
+            size="sm"
             disabled={busy}
             aria-label={
               (comment.isPrivate ? "Make comment public " : "Make comment private ") +
@@ -189,12 +189,12 @@ function CommentRow({
         <div className="comment-edit">
           <RichTextEditor value={draft} onChange={setDraft} ariaLabel="Edit comment" />
           <Cluster gap={2} align="center">
-            <Button variant="filled" size="small" disabled={busy} onClick={() => void save()}>
+            <Button variant="filled" size="sm" disabled={busy} onClick={() => void save()}>
               Save
             </Button>
             <Button
               variant="plain"
-              size="small"
+              size="sm"
               disabled={busy}
               aria-label={`Cancel editing comment ${comment.commentNumber}`}
               onClick={cancelEditing}
@@ -350,7 +350,7 @@ function NewCommentForm({ issueId }: { issueId: string }) {
             simply stops being the thing on screen. */}
         <Button
           variant="gray"
-          size="small"
+          size="sm"
           onClick={() => fileRef.current?.click()}
         >
           Attach files
@@ -367,7 +367,7 @@ function NewCommentForm({ issueId }: { issueId: string }) {
         />
         <Button
           variant="filled"
-          size="small"
+          size="sm"
           // A file with no words is still worth posting, so the guard is
           // "nothing at all" rather than "no text".
           disabled={busy || (!hasText(body) && fileNames.length === 0)}

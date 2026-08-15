@@ -57,7 +57,7 @@ export function UserPicker({
             }
           }}
         />
-        <Button variant="gray" size="small" onClick={search} disabled={usersQ.isFetching}>
+        <Button variant="gray" size="sm" onClick={search} disabled={usersQ.isFetching}>
           {usersQ.isFetching ? "..." : "Find"}
         </Button>
       </div>
@@ -69,7 +69,7 @@ export function UserPicker({
           <ul className="user-picker-results">
             {results.map((user) => (
               <li key={user.id}>
-                <Button variant="gray" size="small"
+                <Button variant="gray" size="sm"
                   onClick={() => {
                     onPick(user);
                     setText("");

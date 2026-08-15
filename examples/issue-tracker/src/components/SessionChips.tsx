@@ -33,7 +33,7 @@ function SignInAction() {
   return (
     <Button
       variant="filled"
-      size="small"
+      size="sm"
       onClick={() => {
         signInWithOAuth().catch((err: unknown) => {
           window.alert(`Sign in failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -95,7 +95,7 @@ function AccountMenu({
           lets the trigger BE the design system's button instead. Plain, so
           the name reads as text you can press rather than a second action
           competing with the primary one. */}
-      <Menu.Trigger render={<Button variant="plain" size="small" />}>
+      <Menu.Trigger render={<Button variant="plain" size="sm" />}>
         <span className="user-chip" title={email ?? undefined}>
           {name}
           {!provisioned ? <em> (no activity yet)</em> : null}

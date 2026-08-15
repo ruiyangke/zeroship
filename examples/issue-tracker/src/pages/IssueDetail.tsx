@@ -70,10 +70,10 @@ function TitleEditor({
         }}
       />
       <Cluster gap={2} align="center">
-        <Button variant="filled" size="small" disabled={busy || !draft.trim()} onClick={save}>
+        <Button variant="filled" size="sm" disabled={busy || !draft.trim()} onClick={save}>
           Save
         </Button>
-        <Button variant="plain" size="small" disabled={busy} onClick={onDone}>
+        <Button variant="plain" size="sm" disabled={busy} onClick={onDone}>
           Cancel
         </Button>
       </Cluster>
@@ -201,7 +201,7 @@ export function IssueDetailPage({
             {signedOut ? null : (
               <Button
                 variant="plain"
-                size="small"
+                size="sm"
                 className="issue-title-edit"
                 aria-label="Edit summary"
                 onClick={() => setEditingTitle(true)}
@@ -313,7 +313,7 @@ export function IssueDetailPage({
             <div className="issue-detail-more">
               <Button
                 variant="plain"
-                size="small"
+                size="sm"
                 aria-expanded={moreOpen}
                 onClick={() => setMoreOpen((open) => !open)}
               >

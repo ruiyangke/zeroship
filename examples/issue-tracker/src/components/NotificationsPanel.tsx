@@ -99,7 +99,7 @@ export function NotificationsPanel() {
                 // to a line of its own under a row with one, so the same
                 // control appeared in two places down a single list.
                 trailing: row.isRead ? undefined : (
-                  <Button variant="gray" size="small" onClick={() => markRead.mutate(row.id)}>
+                  <Button variant="gray" size="sm" onClick={() => markRead.mutate(row.id)}>
                     Mark read
                   </Button>
                 ),

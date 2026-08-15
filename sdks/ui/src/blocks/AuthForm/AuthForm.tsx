@@ -282,7 +282,7 @@ export const AuthForm = forwardRef<HTMLFormElement, AuthFormProps>(
           <Button
             type="button"
             variant="plain"
-            size="small"
+            size="sm"
             disabled={loading}
             onClick={() => onModeSwitch?.(FOOTER_COPY[mode].next)}
           >
@@ -400,7 +400,7 @@ export const AuthForm = forwardRef<HTMLFormElement, AuthFormProps>(
               <Button
                 type="submit"
                 variant="filled"
-                size="large"
+                size="lg"
                 loading={loading}
                 data-slot="auth-form-submit"
               >

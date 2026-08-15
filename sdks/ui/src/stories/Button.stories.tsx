@@ -45,15 +45,15 @@ export const AllSizes: Story = {
     <div className="zeroship-story-row" role="group" aria-label="All button sizes">
       <div className="zeroship-story-cell">
         <span className="zeroship-story-label">Small</span>
-        <Button size="small">Save</Button>
+        <Button size="sm">Save</Button>
       </div>
       <div className="zeroship-story-cell">
         <span className="zeroship-story-label">Medium</span>
-        <Button size="medium">Save</Button>
+        <Button size="md">Save</Button>
       </div>
       <div className="zeroship-story-cell">
         <span className="zeroship-story-label">Large</span>
-        <Button size="large">Save</Button>
+        <Button size="lg">Save</Button>
       </div>
     </div>
   ),

@@ -96,7 +96,7 @@ export interface PaginationProps extends Omit<
   pageSizeOptions?: number[];
   /** Fired with the chosen size when the page-size `<Select>` changes. */
   onPageSizeChange?: (size: number) => void;
-  /** Control density. `sm` maps to small buttons, `md` (default) to medium. */
+  /** Control density. `sm` and `md` pass straight through to the button size. */
   size?: PaginationSize;
   /** Disable the entire control — every button becomes non-interactive. */
   disabled?: boolean;
@@ -225,7 +225,9 @@ const PaginationRoot = forwardRef<HTMLElement, PaginationProps>(
     const pageCount = Math.max(1, Math.ceil(safeTotal / safePageSize));
     const currentPage = Math.min(Math.max(intOr(page, 1), 1), pageCount);
 
-    const buttonSize = size === "sm" ? "small" : "medium";
+    // Identity now that Button uses sm/md/lg: the vocabularies agree, so a
+    // translation here would only be somewhere for them to drift apart.
+    const buttonSize = size;
 
     const goTo = (next: number) => {
       if (disabled) return;

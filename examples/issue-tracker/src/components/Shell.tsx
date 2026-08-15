@@ -104,7 +104,7 @@ export function Shell({
                 sitting beside the Sign in button in the same blue and
                 competing with it for the one action that actually works. */}
             {signedIn ? (
-              <Button variant="filled" size="small" asChild>
+              <Button variant="filled" size="sm" asChild>
                 <Link to="/issues/new">New issue</Link>
               </Button>
             ) : null}

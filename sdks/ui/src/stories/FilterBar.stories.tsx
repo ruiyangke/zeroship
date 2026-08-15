@@ -22,7 +22,7 @@ const removeOwnerSpy = fn();
 /* A trailing actions Button used across the stories. */
 function FiltersButton() {
   return (
-    <Button variant="tinted" size="small">
+    <Button variant="tinted" size="sm">
       <Icon as={SlidersHorizontal} size="sm" />
       Filters
     </Button>

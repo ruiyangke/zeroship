@@ -81,7 +81,7 @@ export function SeeAlsoPanel({ issueId }: { issueId: string }) {
               <a href={link.url} target="_blank" rel="noreferrer noopener">
                 {link.url}
               </a>
-              <Button variant="gray" size="small"
+              <Button variant="gray" size="sm"
                 disabled={busy}
                 onClick={() => void remove(link.id)}
               >
@@ -100,7 +100,7 @@ export function SeeAlsoPanel({ issueId }: { issueId: string }) {
             placeholder="https://bugzilla.example.org/show_bug.cgi?id=1"
           />
         </Field>
-        <Button variant="gray" size="small" disabled={busy || !url.trim()} onClick={() => void add()}>
+        <Button variant="gray" size="sm" disabled={busy || !url.trim()} onClick={() => void add()}>
           Add
         </Button>
       </div>

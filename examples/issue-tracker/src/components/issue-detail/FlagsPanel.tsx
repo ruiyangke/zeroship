@@ -122,7 +122,7 @@ function FlagRow({
             {/* Clearing works for ANY live flag now, not only one this panel
                 set, because the id comes from the server rather than from a
                 setFlag response held in component state. */}
-            <Button variant="gray" size="small"
+            <Button variant="gray" size="sm"
               disabled={busy}
               onClick={() => void clear(entry.flag.id)}
             >
@@ -147,7 +147,7 @@ function FlagRow({
           {requesteeId ? (
             <span className="dim">requestee: {requesteeId}</span>
           ) : (
-            <Button variant="gray" size="small"
+            <Button variant="gray" size="sm"
               onClick={() => setPickingRequestee((v) => !v)}
             >
               set requestee
@@ -155,7 +155,7 @@ function FlagRow({
           )}
         </span>
       ) : null}
-      <Button variant="gray" size="small" disabled={busy} onClick={() => void apply()}>
+      <Button variant="gray" size="sm" disabled={busy} onClick={() => void apply()}>
         Set
       </Button>
       {pickingRequestee ? (

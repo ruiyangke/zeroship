@@ -32,7 +32,7 @@ export function ConsiderSection() {
               <Button
                 className="consider-card__more"
                 variant="gray"
-                size="small"
+                size="sm"
                 aria-label={`Read more: ${item.eyebrow}`}
               >
                 <Icon as={Plus} size="sm" />

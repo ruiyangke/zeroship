@@ -130,7 +130,7 @@ export function BuyingSection() {
                         <Button
                           className="incentive-card__more"
                           variant="gray"
-                          size="small"
+                          size="sm"
                           aria-label={`Read more: ${item.title}`}
                         >
                           <Icon as={Plus} size="sm" />
@@ -153,10 +153,10 @@ export function BuyingSection() {
                           </ul>
                         </Dialog.Body>
                         <Dialog.Footer className="buying-detail-dialog__footer">
-                          <Button variant="plain" size="small">
+                          <Button variant="plain" size="sm">
                             {detail.action}
                           </Button>
-                          <Dialog.Close size="small">Done</Dialog.Close>
+                          <Dialog.Close size="sm">Done</Dialog.Close>
                         </Dialog.Footer>
                       </Dialog.Popup>
                     </Dialog.Portal>

@@ -166,7 +166,7 @@ export const ValidationModes: Story = {
               Email is required.
             </Field.Error>
           </Field>
-          <Button type="submit" size="small" variant="filled">
+          <Button type="submit" size="sm" variant="filled">
             Submit
           </Button>
         </Form>

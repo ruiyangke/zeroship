@@ -94,11 +94,11 @@ export const Centered: Story = {
       description="Describe what you want in plain language. AI builds it, and the platform handles hosting, data, auth, and payments."
       actions={
         <>
-          <Button size="large">
+          <Button size="lg">
             Get started
             <Icon as={ArrowRight} size="sm" />
           </Button>
-          <Button size="large" variant="gray">
+          <Button size="lg" variant="gray">
             Read the docs
           </Button>
         </>
@@ -155,8 +155,8 @@ export const Split: Story = {
       description="One prompt, one deploy. Your app gets a database, auth, storage, and a global edge runtime — no infrastructure to manage."
       actions={
         <>
-          <Button size="large">Start building</Button>
-          <Button size="large" variant="gray">
+          <Button size="lg">Start building</Button>
+          <Button size="lg" variant="gray">
             See an example
           </Button>
         </>
@@ -203,7 +203,7 @@ export const Minimal: Story = {
     <Hero
       data-testid="hero-minimal"
       title="Build something today"
-      actions={<Button size="large">Get started</Button>}
+      actions={<Button size="lg">Get started</Button>}
     />
   ),
   play: async ({ canvasElement }) => {
@@ -491,7 +491,7 @@ export const MutedBackdrop: Story = {
       eyebrow={<Badge variant="soft">Platform</Badge>}
       title="From idea to live app in minutes"
       description="The muted surface fill and the accent backdrop wash coexist."
-      actions={<Button size="large">Start building</Button>}
+      actions={<Button size="lg">Start building</Button>}
     />
   ),
   play: async ({ canvasElement }) => {

@@ -199,7 +199,7 @@ function MoveControl({
           "Move" sitting alone like a field whose contents had gone missing.
           It is an action, and it is written as one. */}
       <div className="field-block-head is-action">
-        <Button variant="gray" size="small" onClick={() => setOpen((v) => !v)}>
+        <Button variant="gray" size="sm" onClick={() => setOpen((v) => !v)}>
           {/* Short enough to fit the rail. The full sentence ran past the
               column edge, which is how a rail says "this control does not
               belong here" -- the dialog it opens explains the rest. */}
@@ -241,7 +241,7 @@ function MoveControl({
               ))}
             </Select>
           </Field>
-          <Button variant="filled" size="small"
+          <Button variant="filled" size="sm"
             disabled={busy || !targetProductId || !targetComponentId}
             onClick={() => void move()}
           >
@@ -316,7 +316,7 @@ function GeneralField({
         <span className="field-value">{value ? value : <Absent />}</span>
         <Button
           variant="plain"
-          size="small"
+          size="sm"
           // Named per field: a rail with five bare "Edit" buttons is
           // ambiguous to a screen reader and to a strict-mode locator.
           aria-label={`Edit ${label}`}
@@ -336,12 +336,12 @@ function GeneralField({
       <Field.Label>{label}</Field.Label>
       <span className="field-block-head">
         <Input value={draft} disabled={busy} onChange={(e) => setDraft(e.target.value)} />
-        <Button variant="gray" size="small" disabled={busy} onClick={() => void save()}>
+        <Button variant="gray" size="sm" disabled={busy} onClick={() => void save()}>
           Save
         </Button>
         <Button
           variant="plain"
-          size="small"
+          size="sm"
           disabled={busy}
           aria-label={`Cancel editing ${label}`}
           onClick={() => {
@@ -514,7 +514,7 @@ export function FieldsPanel({
           <GeneralField issue={issue} field="url" label="URL" value={issue.url ?? ""} />
         </>
       ) : (
-        <Button variant="plain" size="small" onClick={() => setShowOther(true)}>
+        <Button variant="plain" size="sm" onClick={() => setShowOther(true)}>
           Set whiteboard, OS, platform or URL
         </Button>
       )}

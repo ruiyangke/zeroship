@@ -136,7 +136,7 @@ export function KeywordsPanel({
           value={newKeyword}
           onChange={(e) => setNewKeyword(e.target.value)}
         />
-        <Button variant="gray" size="small" disabled={busy || !newKeyword.trim()} onClick={() => void createAndAttach()}>
+        <Button variant="gray" size="sm" disabled={busy || !newKeyword.trim()} onClick={() => void createAndAttach()}>
           Create + attach
         </Button>
       </div>

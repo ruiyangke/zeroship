@@ -111,16 +111,16 @@ export function StatusControl({ issue }: { issue: IssueDetail["issue"] }) {
 
       <div className="status-actions">
         {targets.includes("RESOLVED") ? (
-          <Button variant="gray" size="small" disabled={busy} onClick={() => setShowResolve((v) => !v)}>
+          <Button variant="gray" size="sm" disabled={busy} onClick={() => setShowResolve((v) => !v)}>
             Resolve...
           </Button>
         ) : null}
         {currentStatus && !isOpenIssueStatus(currentStatus) ? (
-          <Button variant="gray" size="small" disabled={busy} onClick={() => void run(() => reopen.mutateAsync(undefined))}>
+          <Button variant="gray" size="sm" disabled={busy} onClick={() => void run(() => reopen.mutateAsync(undefined))}>
             Reopen
           </Button>
         ) : null}
-        <Button variant="gray" size="small" disabled={busy} onClick={() => setShowDuplicate((v) => !v)}>
+        <Button variant="gray" size="sm" disabled={busy} onClick={() => setShowDuplicate((v) => !v)}>
           Mark as duplicate...
         </Button>
       </div>
@@ -141,7 +141,7 @@ export function StatusControl({ issue }: { issue: IssueDetail["issue"] }) {
               ))}
             </Select>
           </Field>
-          <Button variant="filled" size="small"
+          <Button variant="filled" size="sm"
             disabled={busy}
             onClick={() => void run(() => resolve.mutateAsync(resolution))}
           >
@@ -160,7 +160,7 @@ export function StatusControl({ issue }: { issue: IssueDetail["issue"] }) {
               placeholder="PARSER-12"
             />
           </Field>
-          <Button variant="filled" size="small"
+          <Button variant="filled" size="sm"
             disabled={busy || !duplicateOf.trim()}
             onClick={() => void run(() => markDuplicate.mutateAsync(duplicateOf.trim()))}
           >

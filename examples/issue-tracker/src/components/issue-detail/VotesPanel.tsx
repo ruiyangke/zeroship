@@ -80,7 +80,7 @@ export function VotesPanel({
               onValueChange={(next) => setCount(Math.max(0, next ?? 0))}
             />
           </Field>
-          <Button variant="gray" size="small" disabled={vote.isPending} onClick={() => void submit()}>
+          <Button variant="gray" size="sm" disabled={vote.isPending} onClick={() => void submit()}>
             {vote.isPending ? "Voting..." : "Vote"}
           </Button>
           {maxVotesPerIssue > 0 ? (

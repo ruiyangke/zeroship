@@ -100,13 +100,13 @@ export function SecurityPanel({ issueId }: { issueId: string }) {
               ))}
             </Select>
           </Field>
-          <Button variant="gray" size="small"
+          <Button variant="gray" size="sm"
             disabled={changeRestriction.isPending || !selected}
             onClick={() => void apply("restrict")}
           >
             Restrict
           </Button>
-          <Button variant="gray" size="small"
+          <Button variant="gray" size="sm"
             disabled={changeRestriction.isPending || !selected}
             onClick={() => void apply("unrestrict")}
           >

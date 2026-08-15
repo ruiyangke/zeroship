@@ -74,7 +74,7 @@ export function CcPanel({ issueId }: { issueId: string }) {
             {rows.map((row) => (
               <li key={row.id}>
                 <span>{row.user?.name ?? row.userId}</span>
-                <Button variant="gray" size="small" disabled={busy} onClick={() => void remove(row.userId)}>
+                <Button variant="gray" size="sm" disabled={busy} onClick={() => void remove(row.userId)}>
                   Remove
                 </Button>
               </li>
@@ -84,7 +84,7 @@ export function CcPanel({ issueId }: { issueId: string }) {
       </AsyncSection>
       {!ccQ.isError ? (
         <>
-          <Button variant="gray" size="small" onClick={() => setPicking((v) => !v)}>
+          <Button variant="gray" size="sm" onClick={() => setPicking((v) => !v)}>
             Add CC
           </Button>
           {picking ? <UserPicker onPick={(u) => void add(u.id)} /> : null}

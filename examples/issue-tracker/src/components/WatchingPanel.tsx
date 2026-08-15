@@ -74,7 +74,7 @@ export function WatchingPanel() {
                 <span>{row.watched?.name ?? row.watched?.handle ?? row.watchedId}</span>
                 <Button
                   variant="gray"
-                  size="small"
+                  size="sm"
                   intent="destructive"
                   disabled={busy}
                   onClick={() => void unwatch(row.watchedId)}
@@ -87,7 +87,7 @@ export function WatchingPanel() {
         </Stack>
       )}
 
-      <Button variant="gray" size="small" disabled={busy} onClick={() => setPicking((v) => !v)}>
+      <Button variant="gray" size="sm" disabled={busy} onClick={() => setPicking((v) => !v)}>
         {picking ? "Cancel" : "Watch someone"}
       </Button>
       {picking ? <UserPicker onPick={(user) => void watch(user.id)} /> : null}
