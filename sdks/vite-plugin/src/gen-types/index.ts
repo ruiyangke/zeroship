@@ -448,25 +448,39 @@ async function emit(
 }
 
 async function assertGeneratedArtifactMayBeReplaced(path: string, file: string): Promise<void> {
-  let stat;
-  try {
-    stat = await fs.lstat(path);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-    throw error;
-  }
-  if (stat.isSymbolicLink() || !stat.isFile()) {
-    throw new Error(`gen-types: refusing to overwrite non-generated ${file} at ${path}`);
-  }
+  // Concurrent HMR folds can expose a briefly truncated generated file. Retry
+  // only while its bytes are changing; a stable unknown owner is still refused.
+  let previous: string | undefined;
+  let stableReads = 0;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    let stat;
+    try {
+      stat = await fs.lstat(path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      throw new Error(`gen-types: refusing to overwrite non-generated ${file} at ${path}`);
+    }
 
-  const existing = await fs.readFile(path, "utf8");
-  if (
-    file === ENV_DB_FILE &&
-    (existing.startsWith(MANUAL_ENV_DB_BANNER) || existing.startsWith(GENERATED_ENV_DB_BANNER))
-  ) return;
-  if (file === RUNTIME_DESCRIPTOR_FILE && isRuntimeDescriptorArtifact(existing)) return;
-  if (file === MIGRATIONS_IR_FILE && isMigrationsIrArtifact(existing)) return;
+    const existing = await fs.readFile(path, "utf8");
+    if (isGeneratedArtifact(file, existing)) return;
+    stableReads = existing === previous ? stableReads + 1 : 0;
+    if (stableReads >= 2 || attempt === 5) break;
+    previous = existing;
+    await new Promise((done) => setTimeout(done, 10));
+  }
   throw new Error(`gen-types: refusing to overwrite creator-owned ${file} at ${path}`);
+}
+
+function isGeneratedArtifact(file: string, existing: string): boolean {
+  if (file === ENV_DB_FILE) {
+    return existing.startsWith(MANUAL_ENV_DB_BANNER) ||
+      existing.startsWith(GENERATED_ENV_DB_BANNER);
+  }
+  if (file === RUNTIME_DESCRIPTOR_FILE) return isRuntimeDescriptorArtifact(existing);
+  return file === MIGRATIONS_IR_FILE && isMigrationsIrArtifact(existing);
 }
 
 function isRuntimeDescriptorArtifact(text: string): boolean {
