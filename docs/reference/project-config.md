@@ -315,6 +315,9 @@ preserves comments, key order, interior blank lines, trailing commas, CRLF line
 endings, and multibyte text. It may normalise extra blank lines immediately
 after the root `{` or immediately before its `}`; no other formatting is
 normalised. The CLI re-parses the complete project config before it writes.
+Immediately before writing, it also re-reads the file as bytes. If the bytes
+changed since load, writeback leaves them untouched and prints the app id with
+an instruction to add it by hand.
 
 ```
 created app my-app (11111111-1111-4111-8111-111111111111)

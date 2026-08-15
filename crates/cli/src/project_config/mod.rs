@@ -446,6 +446,14 @@ impl ProjectConfig {
         // creator did not change.
         ProjectConfig::parse(self.path.clone(), next.clone())
             .map_err(|e| format!("refusing to write a file that would not parse: {e}"))?;
+        let current = std::fs::read(&self.path)
+            .map_err(|e| format!("failed to re-read {} before writing: {e}", self.path.display()))?;
+        if current != self.text.as_bytes() {
+            return Err(format!(
+                "{} changed since it was loaded; refusing to overwrite it",
+                self.path.display()
+            ));
+        }
         std::fs::write(&self.path, &next)
             .map_err(|e| format!("failed to write {}: {e}", self.path.display()))?;
         Ok(())
