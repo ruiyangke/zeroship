@@ -17,8 +17,13 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
+import {
+  getNodeValue,
+  parseTree,
+  printParseErrorCode,
+  type ParseError,
+} from "jsonc-parser";
 
-import { stripJsonc } from "./jsonc.js";
 import {
   CLI_READ_FIELDS,
   CONFIG_ENV_VAR,
@@ -102,12 +107,15 @@ export interface LoadedProjectConfig {
 }
 
 export function parseProjectConfig(path: string, text: string): LoadedProjectConfig {
-  let raw: unknown;
-  try {
-    raw = JSON.parse(stripJsonc(text));
-  } catch (e) {
-    throw new Error(`${path}: ${(e as Error).message}`);
+  const errors: ParseError[] = [];
+  const tree = parseTree(text, errors, { allowTrailingComma: true });
+  if (errors.length > 0) {
+    const error = errors[0];
+    throw new Error(
+      `${path}: ${printParseErrorCode(error.error)} at offset ${error.offset}`,
+    );
   }
+  const raw: unknown = tree == null ? undefined : getNodeValue(tree);
   if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error(`${path}: the top level must be an object`);
   }
