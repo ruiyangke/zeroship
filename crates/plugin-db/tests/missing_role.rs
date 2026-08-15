@@ -73,6 +73,12 @@ async fn classify_missing_role(role: &str) -> DbError {
         .await
         .expect_err("SET LOCAL ROLE to a nonexistent role must fail");
 
+    assert_eq!(
+        err.code().map(|code| code.code()),
+        Some("22023"),
+        "missing-role SET LOCAL ROLE must report the measured SQLSTATE"
+    );
+
     let classified = DbError::from_pg(&err);
     drop(client);
     drain_pg().await;

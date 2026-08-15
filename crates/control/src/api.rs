@@ -2610,6 +2610,10 @@ mod stream_tmp_tests {
             "Public-code app 5xx bodies carry no id.",
             "`@zeroship/rpc` lifts `trace_id`, but app dispatch emits none.",
             "Option 1c remains open for app dispatch.",
+            "`SET LOCAL ROLE` reports `invalid_parameter_value` / `22023`",
+            "A missing schema with a fully-qualified query reports `undefined_table` / `42P01`",
+            "A present role without required grants reports `insufficient_privilege` / `42501`",
+            "`42P01` and `42501` must not be added to the missing-role classifier.",
         ] {
             assert!(
                 proposal.contains(required),

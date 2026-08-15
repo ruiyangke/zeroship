@@ -619,10 +619,17 @@ Risk: low. Payoff: it turns an app's "internal error" into a reportable failure.
 
 ### Tier 2 -- needs a design decision
 
-**Option 2a. Classify the anchor failure properly.** Give
-`DbError::from_pg` an arm for `undefined_object` / role-missing that yields a
-`Configuration`-class error with a public code (say `schema_not_provisioned`) and
-a hint naming `zeroship migrate`. Add that code to the public allow-list.
+**Option 2a. Classify the anchor failure properly.** The measured SQLSTATE is
+part of the contract: `SET LOCAL ROLE` reports `invalid_parameter_value` / `22023`
+for a missing role, not `undefined_object` / `42704`. Classify that failure at
+the per-app session-setup call site as a `Configuration` error with a public
+code (say `schema_not_provisioned`) and a hint naming `zeroship migrate`. Add
+that code to the public allow-list.
+
+Two nearby provisioning failures are deliberately different. A missing schema with a fully-qualified query reports `undefined_table` / `42P01`, not
+`invalid_schema_name` / `3F000`. A present role without required grants reports `insufficient_privilege` / `42501`. `42P01` and `42501` must not be added to the missing-role classifier. In particular, `42501` is also the ordinary
+permission-denied SQLSTATE, so treating it as "run migrate" would prescribe the
+wrong remediation for unrelated authorization failures.
 Cost: a day, including the allow-list and a regression test.
 Payoff: the anchor failure becomes self-diagnosing for the creator, using the
 existing rail with no new machinery. **This is the single highest-value change in
