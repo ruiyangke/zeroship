@@ -96,3 +96,99 @@ fn validate_ir_does_not_scale_quadratically_in_create_table_count() {
          declaration map once per op again, which is the quadratic F666 removed"
     );
 }
+
+/// F667: the same property again, across EVERY op kind that mutates the
+/// declaration map -- because the two tests above each pinned exactly one.
+///
+/// `dropColumn` and `renameTable` were still quadratic (4.53x each) after F666
+/// was fixed, and nothing failed: the `dropTable` guard was green, the
+/// `createTable` guard was green, and the defect sat in the ops neither one
+/// exercised. Adding a third single-kind test would have repeated the mistake,
+/// so this sweeps the kinds instead and reports EVERY offender in one run rather
+/// than stopping at the first.
+///
+/// Measured before the fix: dropColumn 0.604s -> 2.739s, renameTable 0.933s ->
+/// 4.224s. After: 0.037s -> 0.083s and 0.045s -> 0.097s.
+///
+/// `renameColumn` builds its envelope differently on purpose. The rename
+/// isolation rule refuses a `renameColumn` beside any other operation on the same
+/// table, so pairing it with a `createTable` the way the other kinds are paired
+/// produces OP_INVALID rather than a measurement -- an invalid fixture that would
+/// otherwise have been read as "this kind is fine".
+#[test]
+fn validate_ir_does_not_scale_quadratically_in_any_op_kind() {
+    /// `n` ops of `kind`, half seeding tables where the kind needs one.
+    fn envelope(kind: &str, n: usize) -> String {
+        let half = n / 2;
+        if kind == "renameColumn" {
+            let ops: Vec<String> = (0..n)
+                .map(|i| {
+                    format!(
+                        r#"{{"op":"renameColumn","table":"t{i}","from":"c1","to":"d1","type":"bigInt"}}"#
+                    )
+                })
+                .collect();
+            return format!(r#"{{"ir_version":1,"name":"k","ops":[{}]}}"#, ops.join(","));
+        }
+        let mut ops: Vec<String> = (0..half)
+            .map(|i| {
+                format!(
+                    r#"{{"op":"createTable","name":"t{i}","columns":[{{"name":"c0","type":"bigInt","nullable":false}},{{"name":"c1","type":"bigInt","nullable":true}}],"primaryKey":["c0"]}}"#
+                )
+            })
+            .collect();
+        for i in 0..half {
+            ops.push(match kind {
+                "addColumn" => format!(
+                    r#"{{"op":"addColumn","table":"t{i}","column":"c2","type":"text","nullable":true}}"#
+                ),
+                "dropColumn" => format!(r#"{{"op":"dropColumn","table":"t{i}","column":"c1"}}"#),
+                "renameTable" => format!(r#"{{"op":"renameTable","table":"t{i}","to":"r{i}"}}"#),
+                "createIndex" => format!(
+                    r#"{{"op":"createIndex","name":"ix{i}","table":"t{i}","columns":[{{"kind":"column","name":"c0"}}]}}"#
+                ),
+                "dropTable" => format!(r#"{{"op":"dropTable","table":"t{i}"}}"#),
+                other => unreachable!("unhandled op kind {other}"),
+            });
+        }
+        format!(r#"{{"ir_version":1,"name":"k","ops":[{}]}}"#, ops.join(","))
+    }
+
+    fn measure(kind: &str, n: usize) -> f64 {
+        let ir: MigrationIr = serde_json::from_str(&envelope(kind, n)).expect("envelope parses");
+        let start = Instant::now();
+        // A fixture the validator REFUSES measures nothing. Fail loudly here
+        // rather than silently timing an early return.
+        validate_ir(&ir, Dialect::Postgres, &[])
+            .unwrap_or_else(|e| panic!("{kind} fixture must be valid to measure anything: {e:?}"));
+        start.elapsed().as_secs_f64()
+    }
+
+    const KINDS: [&str; 6] = [
+        "addColumn",
+        "dropColumn",
+        "renameTable",
+        "renameColumn",
+        "createIndex",
+        "dropTable",
+    ];
+
+    let mut quadratic = Vec::new();
+    for kind in KINDS {
+        measure(kind, 2_000);
+        let small = measure(kind, 8_000).max(0.001);
+        let large = measure(kind, 16_000);
+        let ratio = large / small;
+        if ratio >= 3.0 {
+            quadratic.push(format!("{kind} {ratio:.1}x ({small:.3}s -> {large:.3}s)"));
+        }
+    }
+
+    assert!(
+        quadratic.is_empty(),
+        "doubling the op count multiplied validate_ir cost by ~4x for: {}. \
+         Above ~4x means a pass is scanning the whole declaration map once per op \
+         again, which is the quadratic F667 removed",
+        quadratic.join("; ")
+    );
+}

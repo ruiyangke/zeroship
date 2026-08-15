@@ -969,29 +969,65 @@ fn alter_primary_key_candidate_key(
     });
 }
 
-fn remove_declared_per_row_table(
-    declared: &mut LogicalColumnContracts,
+/// Keys of every declaration of `table`, under any schema spelling that
+/// `schema_mode` counts as the same.
+///
+/// `LogicalColumnKey` orders table-first, so those declarations are one
+/// contiguous run and this is a `range` rather than a scan of the whole map.
+/// Every caller is reached once per op, from each of three passes, so scanning
+/// here is quadratic in op count -- see f664_scaling.rs for the guard.
+fn declared_table_group_keys(
+    declared: &LogicalColumnContracts,
     schema_mode: LogicalSchemaMode<'_>,
     schema: Option<&str>,
     table: &str,
-) {
-    // One contiguous run under the table-first key order. Reached once per
-    // `createTable` and per `dropTable`, from three separate passes, so scanning
-    // the whole map here is quadratic in op count (F666).
+) -> Vec<LogicalColumnKey> {
     let group_start = LogicalColumnKey {
         table: table.to_string(),
         column: String::new(),
         schema: None,
     };
-    let superseded: Vec<LogicalColumnKey> = declared
+    declared
         .range(group_start..)
         .take_while(|(candidate, _)| candidate.table == table)
         .filter(|(candidate, _)| {
             schema_mode.declarations_match(candidate.schema.as_deref(), schema)
         })
         .map(|(candidate, _)| candidate.clone())
-        .collect();
-    for key in superseded {
+        .collect()
+}
+
+/// Keys of every declaration of one logical column, for the same reason and by
+/// the same mechanism as [`declared_table_group_keys`].
+fn declared_column_group_keys(
+    declared: &LogicalColumnContracts,
+    schema_mode: LogicalSchemaMode<'_>,
+    schema: Option<&str>,
+    table: &str,
+    column: &str,
+) -> Vec<LogicalColumnKey> {
+    let group_start = LogicalColumnKey {
+        table: table.to_string(),
+        column: column.to_string(),
+        schema: None,
+    };
+    declared
+        .range(group_start..)
+        .take_while(|(candidate, _)| candidate.table == table && candidate.column == column)
+        .filter(|(candidate, _)| {
+            schema_mode.declarations_match(candidate.schema.as_deref(), schema)
+        })
+        .map(|(candidate, _)| candidate.clone())
+        .collect()
+}
+
+fn remove_declared_per_row_table(
+    declared: &mut LogicalColumnContracts,
+    schema_mode: LogicalSchemaMode<'_>,
+    schema: Option<&str>,
+    table: &str,
+) {
+    for key in declared_table_group_keys(declared, schema_mode, schema, table) {
         declared.remove(&key);
     }
 }
@@ -1371,12 +1407,11 @@ fn validate_per_row_op(
             ..
         } => {
             let schema = schema_mode.resolve(schema.as_deref());
-            declared.retain(|candidate, _| {
-                candidate.table != *table
-                    || candidate.column != *column
-                    || !schema_mode
-                        .declarations_match(candidate.schema.as_deref(), schema.as_deref())
-            });
+            for key in
+                declared_column_group_keys(declared, schema_mode, schema.as_deref(), table, column)
+            {
+                declared.remove(&key);
+            }
         }
         Op::DropTable { table, schema, .. } => {
             let schema = schema_mode.resolve(schema.as_deref());
@@ -1386,15 +1421,8 @@ fn validate_per_row_op(
             table, to, schema, ..
         } => {
             let schema = schema_mode.resolve(schema.as_deref());
-            let renamed = declared
-                .keys()
-                .filter(|candidate| {
-                    candidate.table == *table
-                        && schema_mode
-                            .declarations_match(candidate.schema.as_deref(), schema.as_deref())
-                })
-                .cloned()
-                .collect::<Vec<_>>();
+            let renamed =
+                declared_table_group_keys(declared, schema_mode, schema.as_deref(), table);
             for from in renamed {
                 if let Some(contract) = declared.remove(&from) {
                     declared.insert(
@@ -1417,16 +1445,8 @@ fn validate_per_row_op(
             ..
         } => {
             let schema = schema_mode.resolve(schema.as_deref());
-            let renamed = declared
-                .keys()
-                .filter(|candidate| {
-                    candidate.table == *table
-                        && candidate.column == *from
-                        && schema_mode
-                            .declarations_match(candidate.schema.as_deref(), schema.as_deref())
-                })
-                .cloned()
-                .collect::<Vec<_>>();
+            let renamed =
+                declared_column_group_keys(declared, schema_mode, schema.as_deref(), table, from);
             let found = !renamed.is_empty();
             for old_key in renamed {
                 if let Some(mut contract) = declared.remove(&old_key) {
@@ -1801,12 +1821,11 @@ fn collect_logical_declarations_op(
             ..
         } => {
             let schema = schema_mode.resolve(schema.as_deref());
-            declared.retain(|candidate, _| {
-                candidate.table != *table
-                    || candidate.column != *column
-                    || !schema_mode
-                        .declarations_match(candidate.schema.as_deref(), schema.as_deref())
-            });
+            for key in
+                declared_column_group_keys(declared, schema_mode, schema.as_deref(), table, column)
+            {
+                declared.remove(&key);
+            }
         }
         Op::DropTable { table, schema, .. } => {
             let schema = schema_mode.resolve(schema.as_deref());
@@ -1816,15 +1835,8 @@ fn collect_logical_declarations_op(
             table, to, schema, ..
         } => {
             let schema = schema_mode.resolve(schema.as_deref());
-            let renamed = declared
-                .keys()
-                .filter(|candidate| {
-                    candidate.table == *table
-                        && schema_mode
-                            .declarations_match(candidate.schema.as_deref(), schema.as_deref())
-                })
-                .cloned()
-                .collect::<Vec<_>>();
+            let renamed =
+                declared_table_group_keys(declared, schema_mode, schema.as_deref(), table);
             for from in renamed {
                 if let Some(contract) = declared.remove(&from) {
                     declared.insert(
@@ -1847,16 +1859,8 @@ fn collect_logical_declarations_op(
             ..
         } => {
             let schema = schema_mode.resolve(schema.as_deref());
-            let renamed = declared
-                .keys()
-                .filter(|candidate| {
-                    candidate.table == *table
-                        && candidate.column == *from
-                        && schema_mode
-                            .declarations_match(candidate.schema.as_deref(), schema.as_deref())
-                })
-                .cloned()
-                .collect::<Vec<_>>();
+            let renamed =
+                declared_column_group_keys(declared, schema_mode, schema.as_deref(), table, from);
             let found = !renamed.is_empty();
             for old_key in renamed {
                 if let Some(mut contract) = declared.remove(&old_key) {
