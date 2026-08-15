@@ -179,6 +179,7 @@ pub fn validate_ir_authorized(
         let ts = ts_locations.get(op_index).and_then(Option::as_deref);
         validate_op_authorized(op, target_dialect, op_index, ts, schema_scope, authority)?;
     }
+    validate_no_op_targets_a_renamed_away_table(ir, target_dialect, ts_locations)?;
     validate_index_names_across_ops(ir, target_dialect, ts_locations)?;
     validate_column_references(ir, target_dialect, ts_locations)?;
     validate_table_foreign_keys(ir, target_dialect, ts_locations)?;
@@ -2656,6 +2657,68 @@ fn logical_table_is_declared(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Refuse an operation that targets a table name an earlier `renameTable` in the
+/// same envelope has already moved away.
+///
+/// Left alone it lowers to SQL naming a relation that no longer exists by the
+/// time it runs — `ALTER TABLE a RENAME TO b` followed by `ALTER TABLE a ADD
+/// COLUMN` — and fails mid-migration with `relation "a" does not exist`.
+///
+/// The engine already refuses the column-level equivalent: a `renameColumn`
+/// beside any other operation on the same table is rejected outright. This closes
+/// the same class of mistake for the table-level rename.
+///
+/// TRACKS THE NAME'S STATE, not merely that a rename happened. Renaming a table
+/// away and then CREATING a fresh one under the freed name is legitimate, and the
+/// recreated table can be operated on normally afterwards, so a `createTable`
+/// restores the name.
+fn validate_no_op_targets_a_renamed_away_table(
+    ir: &crate::model::ir::MigrationIr,
+    target_dialect: Dialect,
+    ts_locations: &[Option<String>],
+) -> Result<(), AuthoringError> {
+    use crate::model::ir::Op;
+
+    // old name -> what it was renamed to, for names with nothing behind them now.
+    let mut vacated: BTreeMap<&str, &str> = BTreeMap::new();
+
+    for (op_index, op) in ir.ops.iter().enumerate() {
+        // A `createTable` RECLAIMS the name rather than requiring it to be there,
+        // so it is handled before the check — `touched_table` reports the table an
+        // op operates on, and for a create that is the name being defined.
+        if let Op::CreateTable { name, .. } = op {
+            vacated.remove(name.as_str());
+            continue;
+        }
+        if let Some(table) = op.touched_table() {
+            if let Some(new_name) = vacated.get(table) {
+                return Err(AuthoringError {
+                    code: CODE_OP_INVALID.to_string(),
+                    kind: Some(UnsupportedKind::Op),
+                    op_index,
+                    ts_location: ts_locations.get(op_index).cloned().flatten(),
+                    dialect: target_dialect,
+                    reason: format!(
+                        "this operation targets table {table:?}, which an earlier \
+                         renameTable in this migration already renamed to {new_name:?}, \
+                         so the table will not exist under that name when it runs"
+                    ),
+                    suggested_fix: Some(format!(
+                        "target {new_name:?} instead, or move this operation before the \
+                         rename"
+                    )),
+                });
+            }
+        }
+        if let Op::RenameTable { table, to, .. } = op {
+            // The destination is occupied again, and the source is now vacant.
+            vacated.remove(to.as_str());
+            vacated.insert(table.as_str(), to.as_str());
+        }
+    }
+    Ok(())
+}
+
 /// Refuse an envelope that creates one index name twice without dropping it in
 /// between, whether the declarations arrive inline on `createTable` or as
 /// standalone `createIndex` ops.
