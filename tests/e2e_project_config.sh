@@ -260,7 +260,7 @@ grep -q "app = $APP_ID (from zeroship.jsonc)" <<<"$MIG_OUT" \
 grep -q "control = http://localhost:$ZEROSHIP_CONTROL_PORT (from zeroship.jsonc)" <<<"$MIG_OUT" \
   && pass "migrate printed the control plane's provenance before the POST" \
   || fail "migrate did not print control provenance"
-grep -q "migrations = generated/elsewhere/migrations.ir.json" <<<"$MIG_OUT" \
+grep -qF "migrations = $APP_DIR/generated/elsewhere/migrations.ir.json" <<<"$MIG_OUT" \
   && pass "migrate resolved the IR path from migrations.out, not from a constant" \
   || fail "migrate did not name the resolved IR path"
 
