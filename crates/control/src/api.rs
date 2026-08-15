@@ -166,14 +166,16 @@ fn error_response(e: RegistryError) -> web::HttpResponse {
 ///
 /// ## What this does NOT close
 ///
-/// Only the control plane. A creator app's own 5xx goes through
-/// `crates/runtime/src/core/dispatch.rs`'s rail, which emits its per-isolate
-/// `u64` dispatch counter -- so a cold app's first failure still reads
-/// `"1"`. `trace_id` there falls back to `format_trace_id_hex(counter)`
-/// because nothing upstream sets `traceparent`, and workflow runs carry no
-/// trace context at all. Joining those needs the edge id propagated through
-/// the worker into the runtime and into workflow runs, which is separate
-/// work; see the header of `is_public_error_code` for the shape of the gap.
+/// The app-dispatch path remains uncorrelated:
+///
+/// - generic sanitized 5xx bodies carry a per-isolate `request_id`;
+/// - public-code 5xx bodies carry no id; and
+/// - `@zeroship/rpc` can lift `trace_id`, but this path emits none.
+///
+/// The generic body's counter is logged by that isolate, but it is not a
+/// globally unique id and does not join to the gateway's `X-Request-Id`.
+/// Closing this gap needs an edge id propagated through the worker and into
+/// app and workflow dispatch, which is separate work.
 pub(crate) fn infrastructure_error_response(
     status: StatusCode,
     context: &'static str,
@@ -2570,5 +2572,49 @@ mod stream_tmp_tests {
         let contents = std::fs::read(&path).unwrap();
         assert_eq!(contents, b"pre-existing");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn infrastructure_comment_names_the_uncorrelated_app_dispatch_shapes() {
+        let source = include_str!("api.rs");
+        let (comment, _) = source
+            .split_once("pub(crate) fn infrastructure_error_response")
+            .expect("infrastructure helper must remain documented");
+        let comment = comment
+            .rsplit_once("/// Log the real cause")
+            .map(|(_, tail)| tail)
+            .expect("infrastructure helper documentation must keep its anchor");
+
+        for required in [
+            "app-dispatch path remains uncorrelated",
+            "generic sanitized 5xx bodies carry a per-isolate `request_id`",
+            "public-code 5xx bodies carry no id",
+            "`@zeroship/rpc` can lift `trace_id`, but this path emits none",
+        ] {
+            assert!(
+                comment.contains(required),
+                "infrastructure helper documentation must say {required:?}; got:\n{comment}"
+            );
+        }
+    }
+
+    #[test]
+    fn proposal_keeps_app_dispatch_correlation_open() {
+        let proposal = include_str!(
+            "../../../docs/proposals/2026-08-14-error-message-quality.md"
+        );
+
+        for required in [
+            "The control helper loop is closed; the app-dispatch loop is not.",
+            "Generic sanitized app 5xx bodies carry a per-isolate `request_id`",
+            "Public-code app 5xx bodies carry no id.",
+            "`@zeroship/rpc` lifts `trace_id`, but app dispatch emits none.",
+            "Option 1c remains open for app dispatch.",
+        ] {
+            assert!(
+                proposal.contains(required),
+                "the proposal must state the partial Option 1c scope: {required:?}"
+            );
+        }
     }
 }
