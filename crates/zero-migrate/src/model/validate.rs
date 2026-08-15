@@ -743,13 +743,17 @@ fn existing_candidate_key_sources(
     table: &str,
     column: &str,
 ) -> CandidateKeySources {
+    // Ranged over the contiguous column group rather than scanned, for the same
+    // reason as its neighbours (F669).
+    let group_start = LogicalColumnKey {
+        table: table.to_string(),
+        column: column.to_string(),
+        schema: None,
+    };
     declared
-        .iter()
-        .find(|(candidate, _)| {
-            candidate.table == table
-                && candidate.column == column
-                && schema_mode.declarations_match(candidate.schema.as_deref(), schema)
-        })
+        .range(group_start..)
+        .take_while(|(candidate, _)| candidate.table == table && candidate.column == column)
+        .find(|(candidate, _)| schema_mode.declarations_match(candidate.schema.as_deref(), schema))
         .map(|(_, contract)| contract.candidate_key_sources.clone())
         .unwrap_or_default()
 }
@@ -913,19 +917,16 @@ fn alter_primary_key_candidate_key(
 ) {
     use crate::model::ir::AlterPrimaryKeyAction;
 
-    let known_columns = declared
-        .keys()
-        .filter(|candidate| {
-            candidate.table == table
-                && schema_mode.declarations_match(candidate.schema.as_deref(), schema)
-        })
-        .map(|candidate| candidate.column.as_str())
+    // Ranged over the contiguous table group, not a scan: reached once per
+    // `alterPrimaryKey`, so scanning the whole map is quadratic in op count
+    // (F669).
+    let known_columns = declared_table_group_keys(declared, schema_mode, schema, table)
+        .into_iter()
+        .map(|candidate| candidate.column)
         .collect::<BTreeSet<_>>();
-    let target_is_known = action.target_columns().is_none_or(|columns| {
-        columns
-            .iter()
-            .all(|column| known_columns.contains(column.as_str()))
-    });
+    let target_is_known = action
+        .target_columns()
+        .is_none_or(|columns| columns.iter().all(|column| known_columns.contains(column)));
     if !target_is_known {
         // A lifecycle op never declares a column. If the authored graph cannot
         // resolve every target component, keep its candidate-key state unchanged;
@@ -1187,15 +1188,10 @@ fn validate_per_row_destination(
         ));
     }
 
-    let matches: Vec<&LogicalColumnContract> = declared
-        .iter()
-        .filter(|(candidate, _)| {
-            candidate.table == table
-                && candidate.column == column
-                && schema_mode.destination_matches(candidate.schema.as_deref(), schema)
-        })
-        .map(|(_, contract)| contract)
-        .collect();
+    let matches: Vec<&LogicalColumnContract> =
+        logical_column_matches(declared, schema_mode, schema, table, column)
+            .into_iter()
+            .collect();
     let qualified_table =
         schema.map_or_else(|| table.to_string(), |schema| format!("{schema}.{table}"));
     let destination = match matches.as_slice() {
@@ -2067,16 +2063,13 @@ fn validate_one_column_reference(
     op_index: usize,
     ts_locations: &[Option<String>],
 ) -> Result<(), AuthoringError> {
-    let matches = declared
-        .iter()
-        .filter(|(candidate, _)| {
-            candidate.table == reference.table
-                && candidate.column == reference.column
-                && schema_mode
-                    .destination_matches(candidate.schema.as_deref(), local.schema.as_deref())
-        })
-        .map(|(_, contract)| contract)
-        .collect::<Vec<_>>();
+    let matches = logical_column_matches(
+        declared,
+        schema_mode,
+        local.schema.as_deref(),
+        &reference.table,
+        &reference.column,
+    );
 
     let target = match matches.as_slice() {
         [] => {

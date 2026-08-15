@@ -247,6 +247,48 @@ fn validate_ir_does_not_scale_quadratically_in_any_envelope_shape() {
                     ));
                 }
             }
+            // F669. Tables are created WITHOUT a primary key so the lifecycle op
+            // has something to add.
+            "alterPrimaryKey" => {
+                for i in 0..half {
+                    ops.push(format!(
+                        r#"{{"op":"createTable","name":"t{i}","columns":[{{"name":"c0","type":"bigInt","nullable":false}}]}}"#
+                    ));
+                }
+                for i in 0..half {
+                    ops.push(format!(
+                        r#"{{"op":"alterPrimaryKey","table":"t{i}","action":{{"kind":"add","columns":["c0"]}}}}"#
+                    ));
+                }
+            }
+            // F669. The set value MUST be `perRow`; a literal never reaches
+            // `validate_per_row_destination` and measures nothing about it.
+            "perRowGen" => {
+                for i in 0..half {
+                    ops.push(format!(
+                        r#"{{"op":"createTable","name":"t{i}","columns":[{{"name":"c0","type":"bigInt","nullable":false}},{{"name":"u0","type":"uuid","nullable":true}}],"primaryKey":["c0"]}}"#
+                    ));
+                }
+                for i in 0..half {
+                    ops.push(format!(
+                        r#"{{"op":"backfill","table":"t{i}","name":"bf{i}","cursorColumns":["c0"],"cursorStability":{{"mode":"guardUpdates"}},"batchSize":100,"set":{{"u0":{{"perRow":"uuidV4"}}}}}}"#
+                    ));
+                }
+            }
+            // F669. An INLINE column reference, which is a different type from
+            // the table-level foreign key above and takes a different path.
+            "inlineRef" => {
+                for i in 0..half {
+                    ops.push(format!(
+                        r#"{{"op":"createTable","name":"p{i}","columns":[{{"name":"c0","type":"bigInt","nullable":false}}],"primaryKey":["c0"]}}"#
+                    ));
+                }
+                for i in 0..half {
+                    ops.push(format!(
+                        r#"{{"op":"createTable","name":"k{i}","columns":[{{"name":"c0","type":"bigInt","nullable":false}},{{"name":"f0","type":"bigInt","nullable":true,"references":{{"table":"p{i}","column":"c0"}}}}],"primaryKey":["c0"]}}"#
+                    ));
+                }
+            }
             other => unreachable!("unhandled shape {other}"),
         }
         format!(r#"{{"ir_version":1,"name":"s","ops":[{}]}}"#, ops.join(","))
@@ -261,7 +303,14 @@ fn validate_ir_does_not_scale_quadratically_in_any_envelope_shape() {
     }
 
     let mut quadratic = Vec::new();
-    for shape in ["foreignKey", "multiSchema", "perRow"] {
+    for shape in [
+        "foreignKey",
+        "multiSchema",
+        "perRow",
+        "alterPrimaryKey",
+        "perRowGen",
+        "inlineRef",
+    ] {
         measure(shape, 1_000);
         let small = measure(shape, 4_000).max(0.001);
         let large = measure(shape, 8_000);
@@ -275,7 +324,7 @@ fn validate_ir_does_not_scale_quadratically_in_any_envelope_shape() {
         quadratic.is_empty(),
         "doubling the op count multiplied validate_ir cost by ~4x for: {}. \
          Above ~4x means a pass is scanning the whole declaration map once per op \
-         again, which is the quadratic F668 removed",
+         again. F668 covered foreign keys; F669 added alterPrimaryKey, per-row generation and inline column references",
         quadratic.join("; ")
     );
 }
