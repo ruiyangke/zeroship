@@ -216,7 +216,11 @@ curl -sf "http://localhost:$ZEROSHIP_MIGRATED_PORT/readyz" >/dev/null 2>&1 && pa
 # worker: generated worker_key; direct /dispatch calls present its bearer;
 # shared blob-store with control (single-host shared-volume pattern);
 # ZEROSHIP_WORKER_DATABASE_URL for env.db.
-"$BIN/zeroship-worker" --port $ZEROSHIP_WORKER_PORT --threads 2 \
+# Keep the diagnostic probes on one warmed isolate. Separate worker threads can
+# select a less-warmed isolate whose free-tier 50 ms CPU budget expires after
+# the database error is classified but before the SSE frame reaches the client.
+# That tests cold-start limits rather than the error payload.
+"$BIN/zeroship-worker" --port $ZEROSHIP_WORKER_PORT --threads 1 \
   --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
   --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 PIDS+=($!)
@@ -369,21 +373,13 @@ fi
 zs_unmigrated_frame "$WORK/frame-unmigrated-stream.bin" POST \
   "http://db-todos-e2e.localhost/__zeroship/v1/diagnostics.unmigratedStream" \
   '{"json":null}' 'text/event-stream'
-zs_unmigrated_stream_request() {
-  curl -s -N --max-time 5 -w '\n%{http_code}' -X POST \
-    "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$APP_ID" \
-    -H "Authorization: Bearer $ZEROSHIP_WORKER_KEY" \
-    -H 'content-type: application/octet-stream' \
-    --data-binary @"$WORK/frame-unmigrated-stream.bin"
-}
-STREAM_RESP="$(zs_unmigrated_stream_request)"
+STREAM_RESP="$(curl -s -N --max-time 5 -w '\n%{http_code}' -X POST \
+  "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$APP_ID" \
+  -H "Authorization: Bearer $ZEROSHIP_WORKER_KEY" \
+  -H 'content-type: application/octet-stream' \
+  --data-binary @"$WORK/frame-unmigrated-stream.bin")"
 STREAM_CODE="$(echo "$STREAM_RESP" | tail -1)"
 STREAM_BODY="$(echo "$STREAM_RESP" | sed '$d')"
-if [ "$STREAM_CODE" = "200" ] && [ -z "$STREAM_BODY" ]; then
-  STREAM_RESP="$(zs_unmigrated_stream_request)"
-  STREAM_CODE="$(echo "$STREAM_RESP" | tail -1)"
-  STREAM_BODY="$(echo "$STREAM_RESP" | sed '$d')"
-fi
 if [ "$STREAM_CODE" = "200" ] \
   && grep -Eq '"code":"(schema_not_provisioned|SCHEMA_NOT_PROVISIONED)"' <<<"$STREAM_BODY" \
   && grep -Fq 'zeroship migrate' <<<"$STREAM_BODY"; then
