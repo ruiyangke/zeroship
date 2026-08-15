@@ -399,6 +399,30 @@ function withDefaults(value: Json): ResolvedProjectConfig {
   return out as unknown as ResolvedProjectConfig;
 }
 
+const FILE_RELATIVE_PATHS = [
+  ["build", "serverEntry"],
+  ["build", "dist"],
+  ["build", "output"],
+  ["migrations", "dir"],
+  ["migrations", "out"],
+] as const;
+
+/** Root paths stated by a config file at that file's own directory. */
+function rootFilePaths(
+  config: ResolvedProjectConfig,
+  configRoot: string,
+): ResolvedProjectConfig {
+  const out = structuredClone(config) as unknown as Json;
+  for (const [section, member] of FILE_RELATIVE_PATHS) {
+    const block = out[section] as Json | undefined;
+    const value = block?.[member];
+    if (typeof value === "string" && !isAbsolute(value)) {
+      block![member] = resolve(configRoot, value);
+    }
+  }
+  return out as unknown as ResolvedProjectConfig;
+}
+
 // ---------------------------------------------------------------------------
 // The `config` escape hatch
 // ---------------------------------------------------------------------------
@@ -495,10 +519,15 @@ export function readProjectConfig(
   opts: ProjectConfigInput = {},
 ): { config: ResolvedProjectConfig; path: string | null } {
   const path = locateProjectConfig(root, opts.configPath);
-  const base =
-    path == null ? defaultProjectConfig() : resolveProjectConfig(loadProjectConfig(path), opts.environment);
+  const configRoot = path == null ? resolve(root) : dirname(path);
+  const base = path == null
+    ? defaultProjectConfig()
+    : rootFilePaths(
+        resolveProjectConfig(loadProjectConfig(path), opts.environment),
+        configRoot,
+      );
   const config = applyProjectConfigOverride(base, opts.override);
-  assertWritablePathsAreSafe(root, path ?? resolve(root, CONFIG_FILENAME), config);
+  assertWritablePathsAreSafe(configRoot, path ?? resolve(root, CONFIG_FILENAME), config);
   return { config, path };
 }
 

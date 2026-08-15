@@ -516,6 +516,103 @@ else
 fi
 
 echo
+echo "== 3c. external config paths use the config directory =="
+EXTERNAL_RUNNER="$WORK/external-runner"
+EXTERNAL_APP="$EXTERNAL_RUNNER/apps/foo"
+EXTERNAL_BIN="$WORK/external-bin"
+mkdir -p \
+  "$EXTERNAL_RUNNER/dist" \
+  "$EXTERNAL_RUNNER/generated/zeroship" \
+  "$EXTERNAL_APP/dist" \
+  "$EXTERNAL_APP/generated/zeroship" \
+  "$EXTERNAL_BIN"
+printf 'runner deploy body\n' > "$EXTERNAL_RUNNER/dist/app.zship"
+printf 'config deploy body\n' > "$EXTERNAL_APP/dist/app.zship"
+printf '{"source":"runner"}\n' > "$EXTERNAL_RUNNER/generated/zeroship/migrations.ir.json"
+printf '{"source":"config"}\n' > "$EXTERNAL_APP/generated/zeroship/migrations.ir.json"
+cat > "$EXTERNAL_APP/zeroship.jsonc" <<'JSONC'
+{
+  "name": "external-config-probe",
+  "app": "77777777-7777-4777-8777-777777777777",
+  "control": "https://external-config.invalid",
+  "runtime_date": "2026-08-14",
+  "build": { "mode": "full", "dist": "dist", "output": "dist/app.zship" },
+  "migrations": { "dir": "migrations", "out": "generated/zeroship" },
+  "secrets": []
+}
+JSONC
+cat > "$EXTERNAL_BIN/curl" <<'SH'
+#!/bin/sh
+cat > "$ZEROSHIP_CAPTURE_BODY"
+case "$*" in
+  *"/migrations/apply"*)
+    printf '%s\n200\n' '{"applied":[],"skipped":[]}'
+    ;;
+  *)
+    printf '%s\n200\n' '{"deploy_hash":"sha256:external-config-probe"}'
+    ;;
+esac
+SH
+chmod +x "$EXTERNAL_BIN/curl"
+
+for selector in flag environment; do
+  selector_args=()
+  selector_env=()
+  if [ "$selector" = flag ]; then
+    selector_args=("--config=apps/foo/zeroship.jsonc")
+  else
+    selector_env=("ZEROSHIP_CONFIG=apps/foo/zeroship.jsonc")
+  fi
+  external_ok=1
+  (
+    cd "$EXTERNAL_RUNNER" || exit 1
+    env -u ZEROSHIP_CONFIG -u ZEROSHIP_CONTROL_URL \
+      "${selector_env[@]+"${selector_env[@]}"}" \
+      PATH="$EXTERNAL_BIN:$PATH" \
+      ZEROSHIP_CAPTURE_BODY="$WORK/external-$selector-deploy.body" \
+      ZEROSHIP_TOKEN="test-token" \
+      "$BIN" deploy "${selector_args[@]+"${selector_args[@]}"}"
+  ) > "$WORK/external-$selector-deploy.out" 2> "$WORK/external-$selector-deploy.err" \
+    || external_ok=0
+  (
+    cd "$EXTERNAL_RUNNER" || exit 1
+    env -u ZEROSHIP_CONFIG -u ZEROSHIP_CONTROL_URL \
+      "${selector_env[@]+"${selector_env[@]}"}" \
+      PATH="$EXTERNAL_BIN:$PATH" \
+      ZEROSHIP_CAPTURE_BODY="$WORK/external-$selector-migrate.body" \
+      ZEROSHIP_TOKEN="test-token" \
+      "$BIN" migrate "${selector_args[@]+"${selector_args[@]}"}"
+  ) > "$WORK/external-$selector-migrate.out" 2> "$WORK/external-$selector-migrate.err" \
+    || external_ok=0
+  cmp -s "$EXTERNAL_APP/dist/app.zship" "$WORK/external-$selector-deploy.body" \
+    || external_ok=0
+  cmp -s "$EXTERNAL_APP/generated/zeroship/migrations.ir.json" \
+    "$WORK/external-$selector-migrate.body" || external_ok=0
+  if [ "$external_ok" = 1 ]; then
+    pass "$selector selection roots deploy and migrate paths at the config directory"
+  else
+    fail "$selector selection rooted a config path at the command working directory"
+    sed 's/^/       deploy: /' "$WORK/external-$selector-deploy.err" | tail -4
+    sed 's/^/       migrate: /' "$WORK/external-$selector-migrate.err" | tail -4
+  fi
+done
+
+ln -s . "$EXTERNAL_APP/linked-root"
+sed 's/"dist": "dist"/"dist": "linked-root"/' \
+  "$EXTERNAL_APP/zeroship.jsonc" > "$EXTERNAL_APP/unsafe.jsonc"
+if (
+  cd "$EXTERNAL_RUNNER" || exit 1
+  env -u ZEROSHIP_CONFIG "$BIN" config show --config=apps/foo/unsafe.jsonc
+) > "$WORK/external-unsafe.out" 2> "$WORK/external-unsafe.err"; then
+  fail "external config containment was checked at the command working directory"
+elif grep -q "build.dist" "$WORK/external-unsafe.err"; then
+  pass "external config containment is checked at the config directory"
+else
+  fail "external config containment failed without naming build.dist"
+  sed 's/^/       /' "$WORK/external-unsafe.err" | tail -6
+fi
+
+echo
 echo "== 4. the scope invariant: zeroship.jsonc is never packed =="
 SENTINEL="zsprojectcfg$(date +%s)$$"
 probe() {

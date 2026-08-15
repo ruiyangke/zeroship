@@ -122,23 +122,29 @@ pub struct ProjectConfig {
     /// value span rather than re-serialise it.
     pub text: String,
     root: Map<String, Value>,
+    project_root: PathBuf,
 }
 
 impl ProjectConfig {
     pub fn load(path: &Path) -> Result<Self, String> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-        let project_root = std::env::current_dir()
-            .map_err(|e| format!("cannot read the working directory: {e}"))?;
-        Self::parse_with_root(path.to_path_buf(), text, &project_root)
+        Self::parse(path.to_path_buf(), text)
     }
 
     pub fn parse(path: PathBuf, text: String) -> Result<Self, String> {
-        let project_root = path.parent().unwrap_or_else(|| Path::new("."));
-        Self::parse_with_root(path.clone(), text, project_root)
-    }
-
-    fn parse_with_root(path: PathBuf, text: String, project_root: &Path) -> Result<Self, String> {
+        let cwd = std::env::current_dir()
+            .map_err(|e| format!("cannot read the working directory: {e}"))?;
+        let absolute_path = if path.is_absolute() {
+            path.clone()
+        } else {
+            cwd.join(&path)
+        };
+        let project_root = lexical_normalize(
+            absolute_path
+                .parent()
+                .unwrap_or_else(|| Path::new(std::path::MAIN_SEPARATOR_STR)),
+        );
         let value: Value = jsonc::parse(&text)
             .map_err(|e| format!("{}: {e}", path.display()))?;
         let root = match value {
@@ -150,8 +156,13 @@ impl ProjectConfig {
                 ))
             }
         };
-        let cfg = ProjectConfig { path, text, root };
-        cfg.validate(project_root)?;
+        let cfg = ProjectConfig {
+            path,
+            text,
+            root,
+            project_root,
+        };
+        cfg.validate()?;
         Ok(cfg)
     }
 
@@ -159,7 +170,7 @@ impl ProjectConfig {
         format!("{}: {}", self.path.display(), msg.as_ref())
     }
 
-    fn validate(&self, project_root: &Path) -> Result<(), String> {
+    fn validate(&self) -> Result<(), String> {
         self.reject_forbidden_names(&Value::Object(self.root.clone()), "")?;
         // A `$schema` pointing somewhere else is a file written against a
         // different contract. Accepting it silently would mean validating v1
@@ -183,7 +194,6 @@ impl ProjectConfig {
         check_members(&self.root, "").map_err(|e| self.err(e))?;
         self.reject_unsafe_write_path(
             &self.root,
-            project_root,
             "build",
             "dist",
             "build.dist",
@@ -191,7 +201,6 @@ impl ProjectConfig {
         )?;
         self.reject_unsafe_write_path(
             &self.root,
-            project_root,
             "build",
             "output",
             "build.output",
@@ -199,7 +208,6 @@ impl ProjectConfig {
         )?;
         self.reject_unsafe_write_path(
             &self.root,
-            project_root,
             "migrations",
             "out",
             "migrations.out",
@@ -232,7 +240,6 @@ impl ProjectConfig {
                     .map_err(|e| self.err(e))?;
                 self.reject_unsafe_write_path(
                     entry,
-                    project_root,
                     "build",
                     "dist",
                     &format!("environments.{name}.build.dist"),
@@ -240,7 +247,6 @@ impl ProjectConfig {
                 )?;
                 self.reject_unsafe_write_path(
                     entry,
-                    project_root,
                     "build",
                     "output",
                     &format!("environments.{name}.build.output"),
@@ -248,7 +254,6 @@ impl ProjectConfig {
                 )?;
                 self.reject_unsafe_write_path(
                     entry,
-                    project_root,
                     "migrations",
                     "out",
                     &format!("environments.{name}.migrations.out"),
@@ -262,7 +267,6 @@ impl ProjectConfig {
     fn reject_unsafe_write_path(
         &self,
         value: &Map<String, Value>,
-        project_root: &Path,
         section: &str,
         member: &str,
         field: &str,
@@ -278,11 +282,7 @@ impl ProjectConfig {
         };
         let cwd = std::env::current_dir()
             .map_err(|e| self.err(format!("cannot read the working directory: {e}")))?;
-        let lexical_root = lexical_normalize(&if project_root.is_absolute() {
-            project_root.to_path_buf()
-        } else {
-            cwd.join(project_root)
-        });
+        let lexical_root = self.project_root.clone();
         let lexical_config = lexical_normalize(&if self.path.is_absolute() {
             self.path.clone()
         } else {
@@ -439,6 +439,7 @@ impl ProjectConfig {
             path: self.path.clone(),
             value: out,
             origin,
+            project_root: self.project_root.clone(),
         })
     }
 
@@ -741,6 +742,7 @@ pub struct Resolved {
     pub path: PathBuf,
     pub origin: Source,
     value: Map<String, Value>,
+    project_root: PathBuf,
 }
 
 impl Resolved {
@@ -772,6 +774,26 @@ impl Resolved {
                 generated::CLI_READ_FIELDS.join(", ")
             )
         })
+    }
+
+    /// Resolve a path read from the config against that config's directory.
+    pub fn require_path(&self, dotted: &str) -> Result<PathBuf, String> {
+        let configured = Path::new(self.require(dotted)?);
+        Ok(lexical_normalize(&if configured.is_absolute() {
+            configured.to_path_buf()
+        } else {
+            self.project_root.join(configured)
+        }))
+    }
+
+    /// Resolve an optional path read from the config against its directory.
+    pub fn resolve_path(&self, dotted: &str) -> Option<PathBuf> {
+        let configured = Path::new(self.str(dotted)?);
+        Some(lexical_normalize(&if configured.is_absolute() {
+            configured.to_path_buf()
+        } else {
+            self.project_root.join(configured)
+        }))
     }
 
     pub fn is_protected(&self) -> bool {
