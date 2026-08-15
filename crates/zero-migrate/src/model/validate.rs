@@ -2655,6 +2655,52 @@ fn logical_table_is_declared(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Refuse a `createTable` declaring two indexes under one name.
+///
+/// This is a FAIL-OPEN rather than a late verdict. Both lower to
+/// `CREATE INDEX IF NOT EXISTS` under the same name, so PostgreSQL answers the
+/// second with `NOTICE: relation "ix" already exists, skipping` — a notice, not
+/// an error. The apply SUCCEEDS, the schema carries one index, and the one the
+/// author declared second does not exist with nothing reporting it.
+///
+/// `IF NOT EXISTS` is correct for idempotent re-application; it is also precisely
+/// what turns this authoring mistake into silence, which is why the refusal has
+/// to happen here instead.
+///
+/// Only EXPLICIT names are compared: `name` is optional and an omitted one is
+/// derived per index, so two unnamed indexes cannot collide this way.
+fn validate_index_names_are_distinct(
+    table: &str,
+    indexes: &[crate::model::ir::IrIndex],
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_locations: &[Option<String>],
+) -> Result<(), AuthoringError> {
+    let mut seen = BTreeSet::new();
+    let Some(duplicate) = indexes
+        .iter()
+        .filter_map(|index| index.name.as_deref())
+        .find(|name| !seen.insert(*name))
+    else {
+        return Ok(());
+    };
+    Err(AuthoringError {
+        code: CODE_OP_INVALID.to_string(),
+        kind: Some(UnsupportedKind::Op),
+        op_index,
+        ts_location: ts_locations.get(op_index).cloned().flatten(),
+        dialect: target_dialect,
+        reason: format!(
+            "createTable {table:?} declares more than one index named {duplicate:?}; \
+             they render as `CREATE INDEX IF NOT EXISTS`, so every one after the \
+             first is skipped and never exists"
+        ),
+        suggested_fix: Some(
+            "give each index its own name, or drop the duplicate declaration".to_string(),
+        ),
+    })
+}
+
 /// Refuse a `UNIQUE` constraint that names the same column twice.
 ///
 /// PostgreSQL rejects `UNIQUE (c, c)` with `column "c" appears twice in unique
@@ -2997,6 +3043,13 @@ fn validate_table_foreign_keys_op(
                 constraints,
                 indexes,
             );
+            validate_index_names_are_distinct(
+                name,
+                indexes,
+                target_dialect,
+                op_index,
+                ts_locations,
+            )?;
             for constraint in constraints {
                 validate_unique_constraint_columns(
                     name,
