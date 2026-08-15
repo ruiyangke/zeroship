@@ -143,8 +143,15 @@ pub mod rule {
     pub const CONSTRAINT_NOT_VALIDATED: &str = "CONSTRAINT_NOT_VALIDATED";
     /// Plain `CREATE INDEX` (not `CONCURRENTLY`) — blocks writes for the build.
     pub const NON_CONCURRENT_INDEX: &str = "NON_CONCURRENT_INDEX";
-    /// An `ACCESS EXCLUSIVE` table rewrite (volatile-default ADD COLUMN / ALTER
-    /// TYPE).
+    /// An `ACCESS EXCLUSIVE` table rewrite forced by a volatile-default
+    /// `ADD COLUMN` — the only statement that raises THIS rule.
+    ///
+    /// `ALTER COLUMN … TYPE` rewrites the table too, and says so, but reports it
+    /// under [`LOSSY_TYPE_CHANGE`]: one statement, one advisory, carrying both
+    /// the data-loss risk and the rewrite. Verified against live PostgreSQL by
+    /// comparing `pg_relation_filenode` before and after each statement — a
+    /// constant `DEFAULT` does not rewrite on PG11+ and correctly raises nothing,
+    /// a volatile one does and raises this.
     pub const TABLE_REWRITE: &str = "TABLE_REWRITE";
     /// An FK referencing column with no supporting index in the same migration.
     pub const FK_WITHOUT_INDEX: &str = "FK_WITHOUT_INDEX";
