@@ -15599,6 +15599,7 @@ columns = [
         let manifest = crate::ops::status::PlanStatusManifest::from_applied_plan(&edited, &[])
             .expect("empty-plan anchor projects to status");
         let journal = [crate::apply::journal::AppliedEntry {
+            down: None,
             version: applied_version.as_str().to_string(),
             checksum: applied.checksum.as_str().to_string(),
             phase: crate::apply::journal::Phase::Completed,
@@ -15669,6 +15670,7 @@ columns = [
                 crate::ops::status::PlanStatusManifest::from_applied_plan(&repeated, &[])
                     .expect("repeated anchor projects to status");
             let journal = [crate::apply::journal::AppliedEntry {
+                down: None,
                 version: first_anchor.version.as_str().to_string(),
                 checksum: first_anchor.checksum.as_str().to_string(),
                 phase: crate::apply::journal::Phase::Completed,

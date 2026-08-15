@@ -3431,6 +3431,7 @@ async fn journal_ensure_is_idempotent_and_records_read_back() {
         &session,
         &cfg,
         zero_migrate::apply::journal::CompletedRecord {
+            down: None,
             version: v.as_str(),
             name: "manual",
             checksum: "cafef00d",
