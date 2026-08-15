@@ -369,13 +369,21 @@ fi
 zs_unmigrated_frame "$WORK/frame-unmigrated-stream.bin" POST \
   "http://db-todos-e2e.localhost/__zeroship/v1/diagnostics.unmigratedStream" \
   '{"json":null}' 'text/event-stream'
-STREAM_RESP="$(curl -s -N --max-time 5 -w '\n%{http_code}' -X POST \
-  "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$APP_ID" \
-  -H "Authorization: Bearer $ZEROSHIP_WORKER_KEY" \
-  -H 'content-type: application/octet-stream' \
-  --data-binary @"$WORK/frame-unmigrated-stream.bin")"
+zs_unmigrated_stream_request() {
+  curl -s -N --max-time 5 -w '\n%{http_code}' -X POST \
+    "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$APP_ID" \
+    -H "Authorization: Bearer $ZEROSHIP_WORKER_KEY" \
+    -H 'content-type: application/octet-stream' \
+    --data-binary @"$WORK/frame-unmigrated-stream.bin"
+}
+STREAM_RESP="$(zs_unmigrated_stream_request)"
 STREAM_CODE="$(echo "$STREAM_RESP" | tail -1)"
 STREAM_BODY="$(echo "$STREAM_RESP" | sed '$d')"
+if [ "$STREAM_CODE" = "200" ] && [ -z "$STREAM_BODY" ]; then
+  STREAM_RESP="$(zs_unmigrated_stream_request)"
+  STREAM_CODE="$(echo "$STREAM_RESP" | tail -1)"
+  STREAM_BODY="$(echo "$STREAM_RESP" | sed '$d')"
+fi
 if [ "$STREAM_CODE" = "200" ] \
   && grep -Eq '"code":"(schema_not_provisioned|SCHEMA_NOT_PROVISIONED)"' <<<"$STREAM_BODY" \
   && grep -Fq 'zeroship migrate' <<<"$STREAM_BODY"; then
