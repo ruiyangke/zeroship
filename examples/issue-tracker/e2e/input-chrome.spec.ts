@@ -24,12 +24,12 @@ import { signIn } from "./session";
  * clipped strings compared equal, I concluded the DS drew nothing on focus,
  * and I added an outline back. That made three edges.
  *
- * What the DS actually draws on `.zs-input[data-focused]`:
+ * What the DS actually draws on `[data-slot="input"][data-focused]`:
  *
  *   inset 0 0 0 0.0625rem var(--zs-input-border-focus)   accent hairline
  *   0 0 0 0.1875rem var(--zs-input-focus-ring-color)     soft 16% halo
  *
- * and `.zs-input__control { outline: none }`, deliberately, so the wrapper
+ * and `[data-slot="input-control"] { outline: none }`, deliberately, so the wrapper
  * owns the ring and the control and slots share it.
  *
  * THE INVARIANT, and note it is the OPPOSITE of what this spec asserted after
@@ -45,13 +45,13 @@ test("the app adds no edge of its own to a design-system field", async ({ page, 
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/issues");
 
-  const control = page.locator("input.zs-input__control").first();
+  const control = page.locator("input[data-slot=\"input-control\"]").first();
   await expect(control).toBeVisible();
 
   const read = () =>
     page.evaluate(() => {
-      const el = document.querySelector("input.zs-input__control") as HTMLElement;
-      const wrapper = el.closest(".zs-input") as HTMLElement;
+      const el = document.querySelector("input[data-slot=\"input-control\"]") as HTMLElement;
+      const wrapper = el.closest("[data-slot=\"input\"]") as HTMLElement;
       const cs = getComputedStyle(el);
       const ws = getComputedStyle(wrapper);
       return {

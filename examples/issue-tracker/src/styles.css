@@ -307,7 +307,7 @@ tbody tr:hover { background: var(--surface-2); }
 }
 
 /* Note on what is deliberately NOT here: a rule shrinking the empty state
-   inside these panels. Reaching into `.zs-empty-state` would restyle the
+   inside these panels. Reaching into `[data-slot="empty-state"]` would restyle the
    design system from the app again -- the exact thing the label and th rules
    above were removed for. A panel that wants a quieter empty case asks
    AsyncSection for one (`tone="inline"`), so the component decides how small
@@ -646,7 +646,7 @@ tbody tr:hover { background: var(--surface-2); }
 }
 
 /* One alignment for the whole rail: expressed through Field's own
-   orientation prop in FieldsPanel, NOT by styling .zs-field__label from here.
+   orientation prop in FieldsPanel, NOT by styling [data-slot="field-label"] from here.
    The rail had three alignments -- DescriptionList inline, Select rows
    stacked, compact rows inline -- so reading down the column the eye had to
    re-find where a label starts three times. Fixing that by reaching into the
@@ -1332,12 +1332,12 @@ fieldset.issue-detail-extras { display: grid; }
 
 /* NO focus styling here. The design system already draws it.
    ==========================================================
-   .zs-input[data-focused] sets TWO shadow layers on the wrapper:
+   [data-slot="input"][data-focused] sets TWO shadow layers on the wrapper:
 
      inset 0 0 0 0.0625rem var(--zs-input-border-focus)   <- accent hairline
      0 0 0 0.1875rem var(--zs-input-focus-ring-color)     <- soft 16% halo
 
-   and .zs-input__control sets outline:none deliberately, so the wrapper
+   and [data-slot="input-control"] sets outline:none deliberately, so the wrapper
    owns the ring and the slots and the control share it.
 
    A rule here that put an outline back on the control produced a THIRD

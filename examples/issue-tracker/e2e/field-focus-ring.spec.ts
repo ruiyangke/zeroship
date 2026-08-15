@@ -101,8 +101,8 @@ test("the app's own fields wear the design system's focus ring", async ({ page, 
 
   // The reference: a real DS Input, in this app, in this theme.
   await page.goto("/issues");
-  await page.locator("input.zs-input__control").first().waitFor();
-  const ds = await shadows(page, ".zs-input", "input.zs-input__control");
+  await page.locator("input[data-slot=\"input-control\"]").first().waitFor();
+  const ds = await shadows(page, "[data-slot=\"input\"]", "input[data-slot=\"input-control\"]");
   expect(ds.rest, "the reference Input actually changes on focus").not.toBe(ds.focus);
   expect(ds.focus, "and specifically paints the 3px halo").toMatch(/0px 0px 0px 3px/);
 
