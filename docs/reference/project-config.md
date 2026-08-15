@@ -25,7 +25,7 @@ about what belongs here:
 
 | | `zeroship.jsonc` | the `.zship` manifest |
 | --- | --- | --- |
-| Written by | you | the build |
+| Written by | you, plus the first-deploy `app` writeback | the build |
 | Read by | the `zeroship` CLI and the build | control plane, gateway, worker |
 | Travels | never leaves your machine | uploaded on every deploy |
 | Describes | how the tooling operates | how the app behaves |
@@ -307,20 +307,21 @@ situation: the resolved file had no `app`, so deploy used its `name` fallback.
 An existing config `app` or an explicit `--app` is never a writeback target,
 even if that named target is auto-created. The file is not opened for writing.
 
-Because the eligible file has no `app` member, the CLI **refuses to insert
-one** and prints the line to paste instead. Inserting a member into arbitrary
-JSONC means guessing which comment it belongs under and at what indentation;
-a printed line is honest about the edit the creator needs to make.
+Because the eligible file has no `app` member, the CLI appends it as the final
+root member and reports the path it wrote. The edit uses the JSONC CST and
+preserves comments, key order, interior blank lines, trailing commas, CRLF line
+endings, and multibyte text. It may normalise extra blank lines immediately
+after the root `{` or immediately before its `}`; no other formatting is
+normalised. The CLI re-parses the complete project config before it writes.
 
 ```
 created app my-app (11111111-1111-4111-8111-111111111111)
-  add this to /home/me/app/zeroship.jsonc so the next command finds it:
-    "app": "11111111-1111-4111-8111-111111111111",
+  wrote app id into /home/me/app/zeroship.jsonc
 ```
 
-Nothing else is ever written. In particular, `control` is never a writeback
-target: a `--control=` typo becoming permanent is worse than typing the flag
-twice.
+No other config member is ever written. In particular, `control` is never a
+writeback target: a `--control=` typo becoming permanent is worse than typing
+the flag twice.
 
 **A deploy run with `--env=` never writes either.** The writeback helper only
 targets the top-level member, and an id created for staging written at the root

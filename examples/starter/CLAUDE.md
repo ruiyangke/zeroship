@@ -108,7 +108,7 @@ prints each resolved value and its source before it uploads. `--app=<id>`,
 `--token=<PAT>` (or `ZEROSHIP_TOKEN`) replaces `zeroship login`.
 
 This directory's `zeroship.jsonc` has no `app` key yet. The first deploy falls
-back to the project `name`, creates that app, and prints the id for you to paste
-in as `"app": "..."`; `migrate`, `secret` and `var` do not take that fallback and
-ask for it until you do. Keep app changes local, rebuild to produce a new
+back to the project `name`, creates that app, and appends its id to the file;
+`migrate`, `secret` and `var` do not take the fallback, but can read the id after
+that first deploy. Keep app changes local, rebuild to produce a new
 `dist/app.zship`, then deploy that artifact.

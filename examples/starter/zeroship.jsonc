@@ -12,8 +12,8 @@
   // creator app points at the hosted control plane, which is what the scaffold
   // template (sdks/create-zeroship-app/template/zeroship.jsonc) ships.
   //
-  // `app` is absent: the first `zeroship deploy` auto-creates and prints the
-  // id to paste here.
+  // `app` is absent: the first `zeroship deploy` auto-creates the app and
+  // appends its id to this root object.
   "control": "http://localhost:9090",
   "runtime_date": "2026-08-14",
 

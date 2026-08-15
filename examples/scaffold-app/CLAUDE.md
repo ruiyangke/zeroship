@@ -98,9 +98,9 @@ what it resolved and from where before it acts. `--app=<id>` and
 `--control=<url>` still override the file.
 
 `zeroship.jsonc` ships with no `app` key: on the first push `deploy` falls back
-to the project `name`, creates that app, and prints the id. Paste the id into
-the file as `"app": "..."` - `migrate`, `secret` and `var` do NOT take that
-fallback and will ask for it by name until you do.
+to the project `name`, creates that app, and appends its id to the file.
+`migrate`, `secret` and `var` do NOT take that fallback, but can read the id
+after that first deploy.
 
 **Both steps, in that order, every time the migrations change.** The `.zship`
 carries the app's *code* and the generated schema *typing*; it does not carry
