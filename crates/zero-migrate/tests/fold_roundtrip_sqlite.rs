@@ -321,4 +321,73 @@ async fn fold_equals_introspect_sqlite() {
     ]}"#;
     all_ops.extend(apply_doc(&be, desc_idx, &both, &live_tables, Approval::None).await);
     assert_matches_live(&be, &all_ops, "create descending index").await;
+
+    // (6) The ops PostgreSQL's fold sweep covers and this one did not.
+    //
+    // `fold_roundtrip_pg.rs` folds 35 op kinds; this file folded 7. Most of the
+    // difference is PostgreSQL-only surface (domains, enums, functions, triggers,
+    // partitions, sequences) or ops SQLite refuses outright (alter-column,
+    // constraint add/drop), and their absence is correct. These are the ones
+    // SQLite genuinely supports, where a fold that disagreed with the live catalog
+    // would go unnoticed.
+    let rename = r#"{"ir_version":1,"name":"rename_tbl","ops":[
+        {"op":"renameTable","table":"folded","to":"folded_renamed"}
+    ]}"#;
+    all_ops.extend(apply_doc(&be, rename, &both, &live_tables, Approval::Approved).await);
+    live_tables.remove("folded");
+    live_tables.insert("folded_renamed".to_string());
+    assert_matches_live(&be, &all_ops, "rename table").await;
+
+    let renamed_reg = registry(&[("notes", APP), ("folded_renamed", APP)]);
+
+    // A view: SQLite stores its text in sqlite_master, so a fold that models the
+    // definition differently from what the emitter wrote shows up here.
+    let mk_view = r#"{"ir_version":1,"name":"mk_view","ops":[
+        {"op":"createView","name":"notes_titles","query":{"kind":"structured","select":{
+            "from":{"name":"notes"},
+            "projection":[{"kind":"colRef","name":"title"}]
+        }}}
+    ]}"#;
+    all_ops.extend(apply_doc(&be, mk_view, &renamed_reg, &live_tables, Approval::None).await);
+    assert_matches_live(&be, &all_ops, "create view").await;
+
+    let drop_view = r#"{"ir_version":1,"name":"drop_view","ops":[
+        {"op":"dropView","name":"notes_titles"}
+    ]}"#;
+    all_ops.extend(apply_doc(&be, drop_view, &renamed_reg, &live_tables, Approval::None).await);
+    assert_matches_live(&be, &all_ops, "drop view").await;
+
+    // dropTable last: the fold must forget the table AND everything hanging off
+    // it — its columns, its indexes, its constraints — and a fold that dropped the
+    // table while keeping a child object would drift only here.
+    let drop_tbl = r#"{"ir_version":1,"name":"drop_tbl","ops":[
+        {"op":"dropTable","table":"folded_renamed"}
+    ]}"#;
+    all_ops.extend(
+        apply_doc(
+            &be,
+            drop_tbl,
+            &renamed_reg,
+            &live_tables,
+            Approval::Approved,
+        )
+        .await,
+    );
+    live_tables.remove("folded_renamed");
+    assert_matches_live(&be, &all_ops, "drop table").await;
+
+    // NOT COVERED: alterPrimaryKey. SQLite runs it as the 12-step table rebuild,
+    // which makes it the most interesting fold to check here and the most work to
+    // set up. Its lifecycle preconditions are strict and fail closed, in order:
+    //
+    //   `add`      refused - "add expected no current primary key on \"notes\",
+    //              found (id)", because the charter injects an `id` primary key
+    //   `replace`  refused - "target primary key (title) requires an exact
+    //              pre-existing UNIQUE key"
+    //
+    // So a fixture needs a unique index on the target column first. Both refusals
+    // are the engine being correct rather than a defect; the stage is absent
+    // because that setup chain was not worth the cycles in the round that added
+    // the four stages above, and saying so beats leaving a reader to assume the
+    // rebuild path is fold-verified.
 }
