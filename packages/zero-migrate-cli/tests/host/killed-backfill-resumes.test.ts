@@ -235,3 +235,99 @@ test("a backfill killed mid-flight resumes without losing or repeating a row", a
     rmSync(work, { recursive: true, force: true });
   }
 });
+
+test("MySQL: a backfill killed mid-flight resumes the same way", async (ctx) => {
+  // MySQL is not covered by the PostgreSQL arm above, and assuming it were is the
+  // F658 mistake: its DDL auto-commits, so every migration takes the two-phase
+  // non-transactional path with its own inflight marker. Whether a killed
+  // backfill leaves one, and whether the retry resumes or refuses, is a different
+  // question there.
+  //
+  // Measured by hand first: 5,470 / 20,000 filled after SIGKILL, only the create
+  // journaled, and NO inflight marker - then the retry finished all 20,000
+  // correctly.
+  const url = process.env.ZERO_MIGRATE_MYSQL_URL;
+  if (!url) {
+    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset");
+    return;
+  }
+  const mysql = (await import("mysql2/promise")).default;
+  const admin = await mysql.createConnection({ uri: url, multipleStatements: true });
+  const database = `killbf_${Date.now().toString(36)}`;
+  const work = project();
+  const target = `${url.slice(0, url.lastIndexOf("/"))}/${database}`;
+
+  const myArgv = (): string[] => [
+    "--import", "tsx", CLI_BIN, "apply", "--approve",
+    "--dir", join(work, "migrations"),
+    "--database-url", target,
+    "--policy", join(work, "policy.toml"),
+    "--registry", join(work, "registry.json"),
+    "--schema", database,
+    "--owner-app", OWNER_APP,
+  ];
+  const filled = async (): Promise<number> => {
+    const [rows] = await admin.query(
+      `SELECT count(*) AS n FROM \`${database}\`.${TABLE} WHERE filled IS NOT NULL`,
+    );
+    return Number((rows as Array<{ n: number }>)[0].n);
+  };
+
+  try {
+    await admin.query(`CREATE DATABASE \`${database}\``);
+    assert.equal(
+      spawnSync(process.execPath, myArgv(), {
+        cwd: work, encoding: "utf8", env: { ...process.env, ...ENV },
+      }).status,
+      0,
+      "the create must apply",
+    );
+    // MySQL's default cte_max_recursion_depth is 1000, which silently caps the
+    // seed at 1001 rows and leaves the backfill too fast to interrupt.
+    await admin.query(`SET SESSION cte_max_recursion_depth = 100000`);
+    await admin.query(
+      `INSERT INTO \`${database}\`.${TABLE} (id, val)
+       WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM s WHERE n < ${ROWS})
+       SELECT n, n FROM s`,
+    );
+    writeFileSync(join(work, "migrations", "20260101000001_fill.ts"), BACKFILL);
+
+    const child = spawn(process.execPath, myArgv(), {
+      cwd: work, env: { ...process.env, ...ENV }, stdio: "ignore",
+    });
+    const deadline = Date.now() + 60_000;
+    let progressed = 0;
+    while (Date.now() < deadline) {
+      await new Promise((done) => setTimeout(done, 100));
+      progressed = await filled();
+      if (progressed > 0) break;
+    }
+    child.kill("SIGKILL");
+    await new Promise((done) => child.on("exit", done));
+
+    assert.ok(progressed > 0, "the backfill must have committed a batch");
+    assert.ok(progressed < ROWS, `the kill must land MID-backfill (${progressed}/${ROWS})`);
+
+    assert.equal(
+      spawnSync(process.execPath, myArgv(), {
+        cwd: work, encoding: "utf8", env: { ...process.env, ...ENV },
+      }).status,
+      0,
+      "re-running apply must finish the interrupted backfill",
+    );
+
+    const [check] = await admin.query(
+      `SELECT count(*) AS total,
+              sum(CASE WHEN filled = val + 1 THEN 1 ELSE 0 END) AS correct
+         FROM \`${database}\`.${TABLE}`,
+    );
+    const row = (check as Array<{ total: number; correct: number }>)[0];
+    assert.equal(Number(row.total), ROWS, "every row is still present");
+    assert.equal(Number(row.correct), ROWS, "every row carries its own computed value");
+  } finally {
+    await admin.query(`DROP DATABASE IF EXISTS \`${database}\``).catch(() => {});
+    await admin.query(`DROP DATABASE IF EXISTS \`${database}_migrations\``).catch(() => {});
+    await admin.end().catch(() => {});
+    rmSync(work, { recursive: true, force: true });
+  }
+});
