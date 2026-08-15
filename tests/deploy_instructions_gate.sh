@@ -88,7 +88,7 @@ fi
 # first version of this block exited 1 in silence when I renamed the const to
 # test it - a guard that cannot say why it failed, in the commit that is about
 # attaching instruments to their subject.
-PARSER_FLAGS="$(grep -m1 '^const DEPLOY_KNOWN_FLAGS' "$CLI_MAIN" \
+PARSER_FLAGS="$(sed -n '/^const DEPLOY_KNOWN_FLAGS/,/^];/p' "$CLI_MAIN" \
   | grep -oE '"[-][-][a-z-]+"' | tr -d '"' | sort -u || true)"
 PARSER_COUNT="$(printf '%s\n' "$PARSER_FLAGS" | grep -c . || true)"
 if [ "$PARSER_COUNT" -lt 2 ]; then
@@ -151,8 +151,11 @@ while IFS= read -r line; do
     zeroship|*/zeroship) ;;
     *) continue ;;                                # prose; flags above still checked
   esac
+  # A config-backed deploy may start with a flag or have no argument before an
+  # inline comment. Neither is a positional artifact. When a positional is
+  # present, inspect only its first token; later flags are checked above.
   pos="$(printf '%s\n' "$cmd" \
-        | sed -E 's/.*zeroship deploy[[:space:]]+//; s/[[:space:]]+--.*//; s/[[:space:]]*\\$//')"
+        | sed -E 's/.*zeroship deploy[[:space:]]+//; s/[[:space:]]*\\$//; s/[[:space:]]*#.*$//; s/^[[:space:]]*--.*$//; s/[[:space:]].*$//')"
   case "$pos" in
     *.zship|*.zship'>') ;;
     "") ;;   # no argument on this line; nothing to check

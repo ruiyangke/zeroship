@@ -57,7 +57,12 @@ const POLL_INTERVAL_SECS: i64 = 5;
 const USER_CODE_ATTEMPTS: usize = 8;
 const PLATFORM_MINT_TIMEOUT: StdDuration = StdDuration::from_secs(3);
 const PLATFORM_TOKEN_ENDPOINT: &str = "/internal/platform-token";
-const DEPLOY_TOKEN_SCOPES: [&str; 3] = ["apps:deploy", "apps:read", "apps:write"];
+const DEPLOY_TOKEN_SCOPES: [&str; 4] = [
+    "apps:deploy",
+    "apps:read",
+    "apps:write",
+    "secrets:read",
+];
 
 /// Lifetime of the deploy token `zeroship login` ends up holding.
 ///
@@ -940,4 +945,14 @@ fn oauth_error(status: StatusCode, error: &'static str) -> web::HttpResponse {
 
 fn internal_error() -> web::HttpResponse {
     web::HttpResponse::InternalServerError().json(&json!({"error": "internal error"}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DEPLOY_TOKEN_SCOPES;
+
+    #[test]
+    fn deploy_tokens_can_read_secret_names() {
+        assert!(DEPLOY_TOKEN_SCOPES.contains(&"secrets:read"));
+    }
 }

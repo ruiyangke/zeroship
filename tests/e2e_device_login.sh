@@ -490,7 +490,7 @@ fi
 grep -q 'the zeroship CLI' "$DEV_GET" \
   && pass "the page renders the confirmation for the zeroship CLI" \
   || fail "confirmation page did not name the CLI: $(head -c 400 "$DEV_GET")"
-for scope in 'apps:deploy' 'apps:read' 'apps:write'; do
+for scope in 'apps:deploy' 'apps:read' 'apps:write' 'secrets:read'; do
   grep -q "$scope" "$DEV_GET" && pass "the page discloses $scope" || fail "the page hid $scope"
 done
 
@@ -542,7 +542,7 @@ TOKEN_IAT="$(jwt_claim "$TOKEN" iat)"
 TOKEN_TTL=$((TOKEN_EXP - TOKEN_IAT))
 echo "  token: sub=$TOKEN_SUB scope='$TOKEN_SCOPE' ttl=${TOKEN_TTL}s"
 # B2: an empty scope here is the bug that made approval succeed and deploy 403.
-[ "$TOKEN_SCOPE" = "apps:deploy apps:read apps:write" ] \
+[ "$TOKEN_SCOPE" = "apps:deploy apps:read apps:write secrets:read" ] \
   && pass "the deploy token carries the creator scopes" \
   || fail "deploy token scope was '$TOKEN_SCOPE'"
 [ "$TOKEN_SUB" = "$USER_ID" ] && pass "the token's subject is the approving user" \
@@ -580,7 +580,7 @@ grep -q 'platform token mint transport failed' "$WORK/control.log" \
   || pass "control logged no mint transport failure"
 
 GRANTS_AFTER="$(psql_q "SELECT string_agg(grant_name, ',' ORDER BY grant_name) FROM zeroship.principal_grants WHERE principal_id = '$USER_ID'")"
-[ "$GRANTS_AFTER" = "apps:deploy,apps:read,apps:write" ] \
+[ "$GRANTS_AFTER" = "apps:deploy,apps:read,apps:write,secrets:read" ] \
   && pass "control provisioned the creator grants ($GRANTS_AFTER)" \
   || fail "unexpected grants after login: '$GRANTS_AFTER'"
 
@@ -627,7 +627,7 @@ step "Migrate the same app with the same login credential"
 #
 # WHAT THIS LEG COVERS AND WHAT IT DOES NOT. It covers AUTHORIZATION: that the
 # credential `zeroship login` produced -- an OAuth device-flow bearer carrying
-# `apps:deploy apps:read apps:write`, asserted above -- is accepted all the way
+# the full CLI scope asserted above is accepted all the way
 # through control's authz, control's forward, and migrated's independent
 # re-verification plus its `app_members` owner-row check (the row was created by
 # `POST /api/apps` above, not seeded here). Nothing else in the suite drives

@@ -480,9 +480,22 @@ cargo run -p zeroship-config-contract -- raw-env 2>&1 >/dev/null | grep class
 ```
 
 **creator CLI** (`CliEnv`): `ZEROSHIP_TOKEN` `ZEROSHIP_CONTROL_URL`
-`ZEROSHIP_CONFIG_HOME` `ZEROSHIP_KV_PATH` `ZEROSHIP_KV_URL`
+`ZEROSHIP_CONFIG` `ZEROSHIP_CONFIG_HOME` `ZEROSHIP_KV_PATH` `ZEROSHIP_KV_URL`
 `ZEROSHIP_STORAGE_URL` `ZEROSHIP_HEAP_LIMIT_MB` `ZEROSHIP_WORKFLOW_SQLITE_PATH`
 `ZEROSHIP_LOG_FORMAT` `ZEROSHIP_DIE_WITH_PARENT`
+
+`ZEROSHIP_CONFIG` is one name over two contracts, and the generated table above
+cannot say so. For the six server binaries it selects the operator TOML overlay
+(the `config` bootstrap-control row). For the creator toolchain it selects the
+project file `zeroship.jsonc`: `crates/cli/src/project_config/mod.rs` reads it
+in `deploy`, `migrate`, `secret`, `var` and `config` (and `login` reads the
+file's `control`, though it accepts no `--config` of its own), and the Vite
+plugin reads the same name in `sdks/vite-plugin/src/project-config/index.ts`. Both readers
+take it second, after the explicit `--config=` flag / `configPath` option, and a
+path that does not exist is an error rather than a fall-through to
+auto-discovery. Exporting it globally in a shell that runs both a server binary
+and `zeroship deploy` points each at a file written for the other; scope it to
+the command. See `docs/reference/project-config.md`.
 
 **dev-only** (`DevEnv`): `ZEROSHIP_DEV` `ZEROSHIP_DEV_AUTH_SECRET`
 `ZEROSHIP_DEV_INSECURE`
@@ -528,7 +541,7 @@ and changing one here changes nothing.
 ### @zeroship/vite-plugin
 
 `ZEROSHIP_BIN` (override the `zeroship` binary the dev bootstrap spawns)
-`ZEROSHIP_ENTRY` `ZEROSHIP_DEV` `ZEROSHIP_VITE_ORIGIN`
+`ZEROSHIP_CONFIG` `ZEROSHIP_ENTRY` `ZEROSHIP_DEV` `ZEROSHIP_VITE_ORIGIN`
 `ZEROSHIP_RUNTIME_DESCRIPTOR` `ZEROSHIP_DIE_WITH_PARENT`
 `NAPI_RS_NATIVE_LIBRARY_PATH` `DATABASE_URL` `OPENAI_API_KEY` `NODE_ENV`
 

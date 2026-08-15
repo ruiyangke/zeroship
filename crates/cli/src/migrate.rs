@@ -2,11 +2,15 @@
 //! database.
 //!
 //! Shape:
-//!   zeroship migrate [path-to-migrations.ir.json] --app=<name|uuid>
-//!                    [--control=URL] [--token=PAT]
+//!   zeroship migrate [path-to-migrations.ir.json] [--app=<name|uuid>]
+//!                    [--control=URL] [--token=PAT] [--config=PATH] [--env=NAME] [--yes]
 //!
-//! The path defaults to [`DEFAULT_IR_PATH`], which is where the build writes
-//! the recorded migration set. The file is the request body verbatim - the CLI
+//! The path comes from `zeroship.jsonc`'s `migrations.out` unless a positional
+//! overrides it. There is NO compiled default: the build decides where it
+//! writes the recorded migration set, and a Rust constant guessing the same
+//! string is how the two came to disagree in the first place.
+//!
+//! The file is the request body verbatim - the CLI
 //! does not build, parse or rewrite it, because recording a `.ts` migration
 //! means EVALUATING it, which needs Node, esbuild and the installed
 //! `zero-migrate` engine (`sdks/vite-plugin/src/gen-types/recorder.ts`). That
@@ -31,16 +35,42 @@
 
 use std::path::PathBuf;
 
+use crate::project_config::{self, ProjectConfig, Resolved};
 use crate::{
     flag_str, is_uuid, parse_app_id, resolve_bearer_token, run_curl, ControlResponse,
 };
 
-/// Where the build writes the recorded migration set.
+/// The migration set to post: a positional path, else `<migrations.out>/<IR_FILENAME>`.
 ///
-/// `generated/zeroship/` already holds the other two artifacts the migration
-/// fold produces (`env.db.ts`, `schema.runtime.json`), and all three are
-/// written by the same emit step, so they cannot drift apart.
-pub const DEFAULT_IR_PATH: &str = "generated/zeroship/migrations.ir.json";
+/// There is deliberately no third arm. Before this change the fallback was a
+/// hardcoded `generated/zeroship/migrations.ir.json` while the build wrote
+/// wherever `genTypesOut` said - two spellings of one fact, and the one the CLI
+/// held could not see the one the build used.
+fn resolve_ir_path(args: &[String], cfg: Option<&Resolved>) -> Result<String, String> {
+    if let Some(p) = positional_path(args) {
+        return Ok(p);
+    }
+    let Some(cfg) = cfg else {
+        return Err(format!(
+            "no migration set to apply. Pass the path written by the build \
+             (`<migrations.out>/{IR_FILENAME}`), or add a {} declaring `migrations.out`.",
+            project_config::CONFIG_FILENAME
+        ));
+    };
+    let out = cfg.require("migrations.out")?;
+    Ok(PathBuf::from(out)
+        .join(IR_FILENAME)
+        .to_string_lossy()
+        .into_owned())
+}
+
+/// The filename the build writes inside `migrations.out`.
+///
+/// This is a fact about the EMITTER's layout, not a path: `generated/zeroship/`
+/// already holds the other two artifacts the migration fold produces
+/// (`env.db.ts`, `schema.runtime.json`), all three are written by the same emit
+/// step, and the directory that holds them is read from `zeroship.jsonc`.
+pub const IR_FILENAME: &str = "migrations.ir.json";
 
 /// Known flags accepted by `zeroship migrate` (bare names, no `=`).
 ///
@@ -49,25 +79,67 @@ pub const DEFAULT_IR_PATH: &str = "generated/zeroship/migrations.ir.json";
 /// error: it would silently target `http://localhost:9090` instead of the
 /// control plane named on the command line, and applying a migration set to
 /// the wrong database is not something an error message afterwards can undo.
-const MIGRATE_KNOWN_FLAGS: &[&str] = &["--app", "--control", "--token"];
+const MIGRATE_KNOWN_FLAGS: &[&str] = &[
+    "--app", "--control", "--token", "--config", "--env", "--yes",
+];
 
 pub fn cmd_migrate(args: &[String]) -> Result<(), String> {
     check_unknown_migrate_flags(args)?;
 
-    let input = positional_path(args).unwrap_or_else(|| DEFAULT_IR_PATH.to_string());
-    let app = flag_str(args, "--app=").ok_or_else(|| {
-        "--app=<name|uuid> is required. \
-         Usage: zeroship migrate [path-to-migrations.ir.json] --app=<name|uuid> \
-         [--control=<url>] [--token=<PAT>]"
-            .to_string()
-    })?;
-    let control_url = flag_str(args, "--control=")
-        .or_else(|| {
-            zeroship_core::declared_env!(cli, "ZEROSHIP_CONTROL_URL", crate::ZeroshipCliConsumer)
-        })
-        .unwrap_or_else(|| "http://localhost:9090".into());
+    let cwd = std::env::current_dir().map_err(|e| format!("cannot read the working directory: {e}"))?;
+    let file = project_config::locate(args, &cwd)?;
+    let loaded = file.as_deref().map(ProjectConfig::load).transpose()?;
+    let resolved = match (&loaded, flag_str(args, "--env=")) {
+        (Some(cfg), env) => Some(cfg.resolve(env.as_deref())?),
+        // NO IMPLICIT ENVIRONMENT: `--env=` without a file is a
+        // typo, not a request, and silently ignoring it would run against the
+        // wrong target with the creator believing otherwise.
+        (None, Some(env)) => {
+            return Err(format!(
+                "--env={env} needs a {} in this directory to read the environment from",
+                project_config::CONFIG_FILENAME
+            ))
+        }
+        (None, None) => None,
+    };
+
+    let app = project_config::resolve_value(
+        args,
+        "--app",
+        None,
+        None,
+        resolved.as_ref(),
+        "app",
+        None,
+    )?;
+    let control_url = project_config::resolve_control(args, resolved.as_ref())?;
     let token = resolve_bearer_token(args)?;
 
+    let input = resolve_ir_path(args, resolved.as_ref())?;
+
+    // BEFORE the POST, always. Applying a migration set to the wrong database
+    // "is not something an error message afterwards can undo", and with a
+    // config file the target is no longer visible in the command itself.
+    project_config::print_provenance(
+        "migrate",
+        &[("app", &app), ("control", &control_url)],
+    );
+    eprintln!("zeroship migrate: migrations = {input}");
+
+    // A CORRECT config run at the wrong moment is the one failure the
+    // provenance line cannot stop. `"protected": true` on an environment is the
+    // creator saying so; `--yes` is them saying they meant it.
+    if resolved.as_ref().is_some_and(project_config::Resolved::is_protected)
+        && !args.iter().any(|a| a == "--yes")
+    {
+        return Err(format!(
+            "the selected environment is marked \"protected\": true and this would apply \
+             migrations to {}. Re-run with --yes if that is what you meant.",
+            control_url.value
+        ));
+    }
+
+    let (app, control_url) = (app.value, control_url.value);
     let path = PathBuf::from(&input);
     let body = std::fs::read_to_string(&path).map_err(|e| {
         format!(
@@ -118,7 +190,8 @@ pub(crate) fn check_unknown_migrate_flags(args: &[String]) -> Result<(), String>
                  falling back to its default would apply migrations to \
                  http://localhost:9090 instead of the control plane you named. \
                  Usage: zeroship migrate [path-to-migrations.ir.json] \
-                 --app=<name|uuid> [--control=<url>] [--token=<PAT>]"
+                 [--app=<name|uuid>] [--control=<url>] [--token=<PAT>] \
+                 [--config=<path>] [--env=<name>] [--yes]"
             ));
         }
     }

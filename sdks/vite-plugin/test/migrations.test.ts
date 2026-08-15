@@ -16,7 +16,6 @@ import { dirname, join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 
 import { emitZship } from "../src/zship.js";
-import { migrationsForEmit } from "../src/build.js";
 
 /** Local sha256 hex — the SAME convention the `.zship` packer uses. */
 function sha256Hex(bytes: Buffer): string {
@@ -79,6 +78,7 @@ describe("op.* runtime schema descriptor bundling", () => {
         silent: true,
         builtAt: "2026-06-24T00:00:00Z",
         userHasDefaultFetch: false,
+        migrations: { dir: "migrations", genTypesOut: "generated/zeroship" },
       });
 
       assert.ok(
@@ -138,6 +138,10 @@ describe("op.* runtime schema descriptor bundling", () => {
           silent: true,
           builtAt: "2026-06-24T00:00:00Z",
           userHasDefaultFetch: false,
+          // Stated, not defaulted: the packer no longer guesses these, so a
+          // test that omitted them would exercise the "caller did not ask for
+          // a descriptor" arm instead of this one.
+          migrations: { dir: "migrations", genTypesOut: "generated/zeroship" },
         }),
         /migration source files.*schema\.runtime\.json|schema\.runtime\.json.*migration service/
       );
@@ -175,6 +179,7 @@ describe("op.* runtime schema descriptor bundling", () => {
             silent: true,
             builtAt: "2026-06-24T00:00:00Z",
             userHasDefaultFetch: false,
+            migrations: { dir: "migrations", genTypesOut: "generated/zeroship" },
           }),
         /runtime_descriptor.*UTF-8|schema\.runtime\.json.*UTF-8/i,
       );
@@ -200,7 +205,7 @@ describe("op.* runtime schema descriptor bundling", () => {
         silent: true,
         builtAt: "2026-06-24T00:00:00Z",
         userHasDefaultFetch: false,
-        migrations: { genTypesOut: "custom/out" },
+        migrations: { dir: "migrations", genTypesOut: "custom/out" },
       });
       assert.ok(res.manifest.runtime_descriptor);
       assert.equal(res.manifest.runtime_descriptor!.hash, sha256Hex(onDisk));
@@ -210,21 +215,7 @@ describe("op.* runtime schema descriptor bundling", () => {
   });
 });
 
-describe("build.ts migration sub-option forwarding", () => {
-  test("migrationsForEmit forwards descriptor-relevant fields", () => {
-    const out = migrationsForEmit({
-      dir: "migrations",
-      genTypesOut: "generated/zeroship",
-    });
-    assert.equal(out.dir, "migrations");
-    assert.equal(out.genTypesOut, "generated/zeroship");
-  });
-
-  test("migrationsForEmit on undefined yields an all-undefined object (defaults preserved)", () => {
-    const out = migrationsForEmit(undefined);
-    assert.deepEqual(out, {
-      dir: undefined,
-      genTypesOut: undefined,
-    });
-  });
-});
+// `migrationsForEmit` is gone with the plugin options it forwarded. The build
+// now hands `emitZship` the two paths from the resolved project config
+// directly, and `ZshipOptions.migrations` REQUIRES both - so there is nothing
+// left to forward and no second place for either default to live.

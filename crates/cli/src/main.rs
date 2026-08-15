@@ -1,8 +1,14 @@
-//! zeroship CLI - serve, deploy, login, secret, var, dev.
+//! zeroship CLI - serve, deploy, migrate, config, login, secret, var, dev.
 //!
 //! Commands:
 //!   zeroship serve   <file-or-dir> [--port=3000] [--workers=0]
-//!   zeroship deploy  <path-to-.zship> --app=<name> [--control=URL] [--token=PAT] [--no-create]
+//!   zeroship deploy  [<path-to-.zship>] [--app=<name>] [--control=URL] [--token=PAT]
+//!                    [--no-create] [--config=PATH] [--env=NAME]
+//!   zeroship migrate [<path-to-migrations.ir.json>] [--app=<name|uuid>]
+//!                    [--control=URL] [--token=PAT] [--config=PATH] [--env=NAME] [--yes]
+//!   zeroship config show [--config=PATH] [--env=NAME]
+//!   zeroship config path [--config=PATH]
+//!   zeroship login [--control=URL] [--config=PATH] [--env=NAME]
 //!   zeroship dev init [--secrets-dir=PATH] [--env-file=PATH]
 //!
 //! `build` and `inspect` were removed in the artifact-layout redesign —
@@ -20,6 +26,7 @@ mod auth;
 mod dev;
 mod migrate;
 mod parent_death;
+mod project_config;
 mod secrets;
 
 zeroship_core::declare_env_consumer!(
@@ -53,6 +60,7 @@ fn main() {
         "serve" => cmd_serve(&args),
         "deploy" => cmd_deploy(&args),
         "migrate" => exit_on_error("migrate", migrate::cmd_migrate(&args)),
+        "config" => exit_on_error("config", project_config::cmd_config(&args)),
         "login" => exit_on_error("login", auth::cmd_login(&args)),
         "logout" => exit_on_error("logout", auth::cmd_logout()),
         "whoami" => exit_on_error("whoami", auth::cmd_whoami()),
@@ -350,28 +358,37 @@ fn cmd_serve(args: &[String]) {
 // A raw `.js` deploy with database tables needs committed migrations plus the
 // generated descriptor before it can install typed `env.db`.
 fn cmd_deploy(args: &[String]) {
-    let input = args.get(2).expect(
-        "Usage: zeroship deploy <path-to-.zship> --app=<name> [--control=http://localhost:9090] [--token=<PAT>] [--no-create]",
-    );
     // Before ANY flag is read, so a typo is reported as a typo rather than as
     // the downstream symptom of its default. Mirrors cmd_serve.
     if let Err(e) = check_unknown_deploy_flags(args) {
         eprintln!("zeroship deploy: {e}");
         std::process::exit(1);
     }
-    let app = flag_str(args, "--app=").expect("--app=<name> is required");
-    let control_url = flag_str(args, "--control=")
-        .or_else(|| {
-            zeroship_core::declared_env!(cli, "ZEROSHIP_CONTROL_URL", crate::ZeroshipCliConsumer)
-        })
-        .unwrap_or_else(|| "http://localhost:9090".into());
+    let (config, resolved, app, control_url, input) =
+        deploy_target(args).unwrap_or_else(|e| {
+            eprintln!("zeroship deploy: {e}");
+            std::process::exit(1);
+        });
     let token = resolve_bearer_token(args).unwrap_or_else(|e| {
         eprintln!("zeroship deploy: {e}");
         std::process::exit(1);
     });
     let auto_create = deploy_auto_create(args);
+    let declared_secrets = resolved
+        .as_ref()
+        .and_then(|cfg| cfg.get("secrets"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
 
-    let input_path = PathBuf::from(input);
+    project_config::print_provenance("deploy", &[("app", &app), ("control", &control_url)]);
+    let app_source = app.source.clone();
+    let (app, control_url) = (app.value, control_url.value);
+
+    let input_path = PathBuf::from(&input);
     let body = std::fs::read(&input_path).unwrap_or_else(|e| {
         eprintln!("Failed to read {}: {e}", input_path.display());
         eprintln!("Run `vite build` (with @zeroship/vite-plugin) to produce a .zship archive.");
@@ -385,21 +402,155 @@ fn cmd_deploy(args: &[String]) {
     );
 
     let mut client = CurlControlClient;
-    match deploy_archive(&mut client, &control_url, &app, &token, &body, auto_create) {
+    match deploy_archive(
+        &mut client,
+        &control_url,
+        &app,
+        &token,
+        &body,
+        &declared_secrets,
+        auto_create,
+    ) {
         Ok(outcome) => {
             if let Some(created) = outcome.created_app {
                 eprintln!("created app {} ({})", created.name, created.id);
+                record_created_app(
+                    config.as_ref(),
+                    flag_str(args, "--env=").as_deref(),
+                    &app_source,
+                    &created.id,
+                );
             }
             eprintln!("Deployed successfully!");
             if let Some(hash) = outcome.deploy_hash {
                 eprintln!("  deploy_hash: {hash}");
             }
-            print_migrate_reminder(&app, &control_url);
+            print_migrate_reminder(&app, &control_url, resolved.as_ref());
         }
         Err(e) => {
             eprintln!("zeroship deploy: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+type DeployTarget = (
+    Option<project_config::ProjectConfig>,
+    Option<project_config::Resolved>,
+    project_config::Sourced,
+    project_config::Sourced,
+    String,
+);
+
+/// Resolve the deploy target and the artifact to upload.
+///
+/// The positional `.zship` path becomes OPTIONAL here: with a config file the
+/// packer's own output path is already written down, so `zeroship deploy` with
+/// zero arguments is the whole point. Without one, nothing changes.
+fn deploy_target(args: &[String]) -> Result<DeployTarget, String> {
+    let cwd =
+        std::env::current_dir().map_err(|e| format!("cannot read the working directory: {e}"))?;
+    let file = project_config::locate(args, &cwd)?;
+    let config = file
+        .as_deref()
+        .map(project_config::ProjectConfig::load)
+        .transpose()?;
+    let resolved = match (&config, flag_str(args, "--env=")) {
+        (Some(cfg), env) => Some(cfg.resolve(env.as_deref())?),
+        (None, Some(env)) => {
+            return Err(format!(
+                "--env={env} needs a {} in this directory to read the environment from",
+                project_config::CONFIG_FILENAME
+            ))
+        }
+        (None, None) => None,
+    };
+
+    // `app` FALLS BACK TO `name` HERE AND NOWHERE ELSE, and only when the file
+    // is present. A brand-new project has no app id: `app` is
+    // deliberately not a required key, `deploy` already resolves-or-creates by
+    // name, and the id it mints is reported for the file. Doing this in
+    // `migrate` would let a typo'd name migrate a fresh empty app while the
+    // real one stayed broken, and in `secret`/`var` it would not work at all -
+    // the control plane parses that path segment as a uuid.
+    let app = project_config::resolve_value(
+        args,
+        "--app",
+        None,
+        None,
+        resolved.as_ref(),
+        "app",
+        None,
+    )
+    .or_else(|e| match resolved.as_ref().and_then(|r| r.str("name")) {
+        Some(name) if deploy_auto_create(args) => Ok(project_config::Sourced {
+            value: name.to_string(),
+            source: project_config::Source::FileMember("name"),
+        }),
+        _ => Err(e),
+    })?;
+    let control_url = project_config::resolve_control(args, resolved.as_ref())?;
+
+    let input = match args.get(2).filter(|a| !a.starts_with("--")) {
+        Some(p) => p.clone(),
+        None => match resolved.as_ref() {
+            Some(cfg) => cfg.require("build.output")?.to_string(),
+            None => {
+                return Err(
+                    "Usage: zeroship deploy <path-to-.zship> --app=<name> \
+                     [--control=<url>] [--token=<PAT>] [--no-create]\n\
+                     With a zeroship.jsonc the path, app and control all come from the file \
+                     and `zeroship deploy` takes no arguments."
+                        .to_string(),
+                )
+            }
+        },
+    };
+    Ok((config, resolved, app, control_url, input))
+}
+
+/// Report where to put an id created from the file's `name` fallback.
+///
+/// WRITEBACK IS DELIBERATELY TINY: one field and one code path.
+/// Not `control` - a `--control=` typo becoming permanent is worse than typing
+/// it twice. An existing config `app` or an explicit `--app` is never a
+/// writeback target, even if that target is auto-created; only a missing `app`
+/// that fell back to `name` reaches the file.
+///
+/// A missing root member is appended through the JSONC CST. Existing values
+/// still use their original source span, but the source guard below means that
+/// replacement is not reachable from an auto-create writeback.
+fn record_created_app(
+    config: Option<&project_config::ProjectConfig>,
+    environment: Option<&str>,
+    app_source: &project_config::Source,
+    id: &str,
+) {
+    let Some(config) = config else {
+        eprintln!("  record it with --app={id} on the next command, or in a {} (see docs/reference/project-config.md)",
+            project_config::CONFIG_FILENAME);
+        return;
+    };
+    // An `--env=` deploy's app id belongs to THAT environment, and the splice
+    // only ever touches the top-level member. Writing it at the root would put
+    // staging's id where every un-flagged command reads production's - which is
+    // the cross-targeting the non-inheritable rule exists to prevent, arriving
+    // through the writeback door.
+    if let Some(env) = environment {
+        eprintln!(
+            "  add this under environments.{env} in {}:\n    \"app\": \"{id}\",",
+            config.path.display()
+        );
+        return;
+    }
+    if app_source != &project_config::Source::FileMember("name") {
+        return;
+    }
+    match config.write_app(id) {
+        Ok(()) => {
+            eprintln!("  wrote app id into {}", config.path.display());
+        }
+        Err(e) => eprintln!("  could not record the app id ({e}); add it by hand: \"app\": \"{id}\","),
     }
 }
 
@@ -419,8 +570,18 @@ fn cmd_deploy(args: &[String]) {
 /// That is the right place for it and it is not built. This is the cheap half,
 /// and it is here because the expensive half not existing is what let a deploy
 /// answer 200 over an app that could not serve a single database call.
-fn print_migrate_reminder(app: &str, control_url: &str) {
-    let ir = PathBuf::from(migrate::DEFAULT_IR_PATH);
+fn print_migrate_reminder(
+    app: &str,
+    control_url: &str,
+    resolved: Option<&project_config::Resolved>,
+) {
+    // The reminder now reads the SAME `migrations.out` the build wrote to.
+    // Before this it read a hardcoded const, so a project that moved its
+    // generated dir got silence from the one hint it had.
+    let Some(out) = resolved.and_then(|r| r.str("migrations.out")) else {
+        return;
+    };
+    let ir = PathBuf::from(out).join(migrate::IR_FILENAME);
     if !ir.is_file() {
         return;
     }
@@ -446,6 +607,13 @@ trait ControlClient {
     ) -> Result<ControlResponse, String>;
 
     fn list_apps(&mut self, control_url: &str, token: &str) -> Result<ControlResponse, String>;
+
+    fn list_secrets(
+        &mut self,
+        control_url: &str,
+        app: &str,
+        token: &str,
+    ) -> Result<ControlResponse, String>;
 
     fn create_app(
         &mut self,
@@ -487,6 +655,19 @@ impl ControlClient for CurlControlClient {
 
     fn list_apps(&mut self, control_url: &str, token: &str) -> Result<ControlResponse, String> {
         let url = format!("{control_url}/api/apps");
+        let auth = format!("Authorization: Bearer {token}");
+        let mut command = std::process::Command::new("curl");
+        command.args(["-s", "-w", "\n%{http_code}", "-H", &auth, &url]);
+        run_curl(&mut command, None)
+    }
+
+    fn list_secrets(
+        &mut self,
+        control_url: &str,
+        app: &str,
+        token: &str,
+    ) -> Result<ControlResponse, String> {
+        let url = format!("{control_url}/api/apps/{app}/secrets");
         let auth = format!("Authorization: Bearer {token}");
         let mut command = std::process::Command::new("curl");
         command.args(["-s", "-w", "\n%{http_code}", "-H", &auth, &url]);
@@ -591,10 +772,18 @@ fn deploy_archive<C: ControlClient>(
     app: &str,
     token: &str,
     body: &[u8],
+    declared_secrets: &[String],
     auto_create: bool,
 ) -> Result<DeployOutcome, String> {
     if !is_uuid(app) {
         let resolved = resolve_or_create_app(client, control_url, token, app, None, auto_create)?;
+        warn_for_missing_declared_secrets(
+            client,
+            control_url,
+            &resolved.id,
+            token,
+            declared_secrets,
+        );
         let response = client.deploy_zship(control_url, &resolved.id, token, body)?;
         if response.status != 200 {
             return Err(format!(
@@ -605,6 +794,7 @@ fn deploy_archive<C: ControlClient>(
         return deploy_success(response.body, resolved.created);
     }
 
+    warn_for_missing_declared_secrets(client, control_url, app, token, declared_secrets);
     let first = client.deploy_zship(control_url, app, token, body)?;
     if first.status == 200 {
         return deploy_success(first.body, None);
@@ -615,11 +805,71 @@ fn deploy_archive<C: ControlClient>(
     }
 
     let resolved = resolve_or_create_app(client, control_url, token, app, Some(first.status), true)?;
+    warn_for_missing_declared_secrets(
+        client,
+        control_url,
+        &resolved.id,
+        token,
+        declared_secrets,
+    );
     let retry = client.deploy_zship(control_url, &resolved.id, token, body)?;
     if retry.status != 200 {
         return Err(format!("Deploy failed (HTTP {}): {}", retry.status, retry.body));
     }
     deploy_success(retry.body, resolved.created)
+}
+
+fn warn_for_missing_declared_secrets<C: ControlClient>(
+    client: &mut C,
+    control_url: &str,
+    app: &str,
+    token: &str,
+    declared: &[String],
+) {
+    if declared.is_empty() {
+        return;
+    }
+    let response = match client.list_secrets(control_url, app, token) {
+        Ok(response) => response,
+        Err(error) => {
+            eprintln!(
+                "zeroship deploy: warning: could not check declared secrets for app {app}: {error}"
+            );
+            return;
+        }
+    };
+    if response.status != 200 {
+        eprintln!(
+            "zeroship deploy: warning: could not check declared secrets for app {app} \
+             (HTTP {}): {}",
+            response.status, response.body
+        );
+        return;
+    }
+    let Some(present) = parse_secret_names(&response.body) else {
+        eprintln!(
+            "zeroship deploy: warning: could not parse the secret list for app {app}: {}",
+            response.body
+        );
+        return;
+    };
+    for name in declared {
+        if !present.contains(name) {
+            eprintln!(
+                "zeroship deploy: warning: zeroship.jsonc declares `{name}`, but \
+                 `zeroship secret list` does not show it"
+            );
+        }
+    }
+}
+
+fn parse_secret_names(body: &str) -> Option<std::collections::HashSet<String>> {
+    let json: serde_json::Value = serde_json::from_str(body).ok()?;
+    json.get("secrets")?
+        .as_array()?
+        .iter()
+        .map(|value| value.as_str().map(str::to_string))
+        .collect()
 }
 
 fn should_resolve_or_create_after_deploy_failure(response: &ControlResponse) -> bool {
@@ -750,15 +1000,19 @@ fn print_usage() {
     eprintln!("Usage:");
     eprintln!("  zeroship serve    <file> [--port=3000] [--workers=0]");
     eprintln!("                   Run a single JS file with the V8 runtime.");
-    eprintln!("  zeroship deploy   <path-to-.zship> --app=<name> [--control=URL] [--token=PAT] [--no-create]");
+    eprintln!("  zeroship deploy   [<path-to-.zship>] [--app=<name>] [--control=URL] [--token=PAT] [--no-create] [--config=PATH] [--env=NAME]");
     eprintln!("                   Upload a pre-built .zship to the control plane.");
     eprintln!("                   Token source: --token, ZEROSHIP_TOKEN, or zeroship login.");
-    eprintln!("  zeroship migrate  [path-to-migrations.ir.json] --app=<name|uuid> [--control=URL] [--token=PAT]");
+    eprintln!("  zeroship migrate  [<path-to-migrations.ir.json>] [--app=<name|uuid>] [--control=URL] [--token=PAT] [--config=PATH] [--env=NAME] [--yes]");
     eprintln!("                   Apply the app's committed migrations to its DEPLOYED database.");
-    eprintln!("                   Path defaults to generated/zeroship/migrations.ir.json (written");
-    eprintln!("                   by the build). An app that uses env.db needs this after deploy,");
+    eprintln!("                   Without a path, reads <migrations.out>/migrations.ir.json from");
+    eprintln!("                   zeroship.jsonc; without either, the command errors.");
+    eprintln!("                   An app that uses env.db needs this after deploy,");
     eprintln!("                   or its first database call fails with a missing-role error.");
-    eprintln!("  zeroship login    [--control=URL] [--provider=platform|supabase]");
+    eprintln!("  zeroship config   show [--config=PATH] [--env=NAME]");
+    eprintln!("  zeroship config   path [--config=PATH]");
+    eprintln!("                   Show the resolved project config or its selected path.");
+    eprintln!("  zeroship login    [--control=URL] [--provider=platform|supabase] [--config=PATH] [--env=NAME]");
     eprintln!("                   Sign in with the platform device flow.");
     eprintln!("  zeroship whoami");
     eprintln!("                   Show the signed-in account.");
@@ -864,7 +1118,14 @@ pub(crate) fn check_unknown_serve_flags(args: &[String]) -> Result<(), String> {
 /// checks shipped deploy instructions (`tests/deploy_instructions_gate.sh`)
 /// already reads THAT - so if this list ever drifts, it should drift against
 /// the parser, not against the prose.
-const DEPLOY_KNOWN_FLAGS: &[&str] = &["--app", "--control", "--token", "--no-create"];
+const DEPLOY_KNOWN_FLAGS: &[&str] = &[
+    "--app",
+    "--control",
+    "--token",
+    "--no-create",
+    "--config",
+    "--env",
+];
 
 /// Return `Err` if any `--flag` argument in `args[3..]` is not a known `deploy`
 /// flag. Positional args (no leading `--`) are left unchecked.
@@ -875,8 +1136,11 @@ const DEPLOY_KNOWN_FLAGS: &[&str] = &["--app", "--control", "--token", "--no-cre
 /// `--token` are equals-only and `--no-create` takes no value - so skipping a
 /// token after a bare flag would swallow whatever followed `--no-create`.
 pub(crate) fn check_unknown_deploy_flags(args: &[String]) -> Result<(), String> {
-    // args[0] = binary, args[1] = "deploy", args[2] = <path>; flags start at 3.
-    for arg in args.iter().skip(3) {
+    // args[0] = binary, args[1] = "deploy", args[2] = the OPTIONAL <path>.
+    // Scanning from 2 rather than 3 is what makes `zeroship deploy --app=x`
+    // (no positional, path from the config file) still get its typo check;
+    // positional args are skipped by the `--` test below either way.
+    for arg in args.iter().skip(2) {
         if !arg.starts_with("--") {
             continue;
         }
@@ -889,8 +1153,9 @@ pub(crate) fn check_unknown_deploy_flags(args: &[String]) -> Result<(), String> 
                 "unknown flag `{flag_name}`; a typo here is silent - \
                  `--control` falling back to its default would deploy to \
                  http://localhost:9090 instead of the control plane you named. \
-                 Usage: zeroship deploy <path-to-.zship> --app=<name> \
-                 [--control=<url>] [--token=<PAT>] [--no-create]"
+                 Usage: zeroship deploy [<path-to-.zship>] [--app=<name>] \
+                 [--control=<url>] [--token=<PAT>] [--no-create] \
+                 [--config=<path>] [--env=<name>]"
             ));
         }
     }
@@ -1087,6 +1352,7 @@ mod tests {
     enum FakeCall {
         Deploy(String),
         List,
+        ListSecrets(String),
         Create(String),
     }
 
@@ -1096,6 +1362,7 @@ mod tests {
         deploys: VecDeque<ControlResponse>,
         lists: VecDeque<ControlResponse>,
         creates: VecDeque<ControlResponse>,
+        secret_lists: VecDeque<ControlResponse>,
     }
 
     impl FakeControlClient {
@@ -1149,6 +1416,18 @@ mod tests {
                 .ok_or_else(|| "unexpected list call".to_string())
         }
 
+        fn list_secrets(
+            &mut self,
+            _control_url: &str,
+            app: &str,
+            _token: &str,
+        ) -> Result<ControlResponse, String> {
+            self.calls.push(FakeCall::ListSecrets(app.to_string()));
+            self.secret_lists
+                .pop_front()
+                .ok_or_else(|| "unexpected secret list call".to_string())
+        }
+
         fn create_app(
             &mut self,
             _control_url: &str,
@@ -1180,6 +1459,7 @@ mod tests {
             missing_app,
             "token",
             b"zship",
+            &[],
             true,
         )
         .expect("deploy should create and retry");
@@ -1204,33 +1484,154 @@ mod tests {
     }
 
     #[test]
-    fn deploy_name_create_path_resolves_before_upload() {
+    fn deploy_flag_auto_create_preserves_configured_app() {
+        let temp = tempfile::tempdir().expect("create temp project");
+        let config_path = temp.path().join(project_config::CONFIG_FILENAME);
+        let original = r#"{
+  "name": "production-app",
+  "app": "11111111-1111-4111-8111-111111111111",
+  "control": "http://control.test",
+  "runtime_date": "2026-08-14",
+  "build": { "mode": "full", "dist": "dist", "output": "dist/app.zship" },
+  "migrations": { "dir": "migrations", "out": "generated/zeroship" },
+  "secrets": []
+}
+"#;
+        std::fs::write(&config_path, original).expect("write project config");
+        let config = project_config::ProjectConfig::load(&config_path).expect("load config");
+        let resolved = config.resolve(None).expect("resolve config");
+        let args = s(&[
+            "zeroship",
+            "deploy",
+            "dist/app.zship",
+            "--app=scratch-test",
+        ]);
+        let app = project_config::resolve_value(
+            &args,
+            "--app",
+            None,
+            None,
+            Some(&resolved),
+            "app",
+            None,
+        )
+        .expect("resolve flag app");
+        assert_eq!(app.source, project_config::Source::Flag("--app"));
+
         let mut client = FakeControlClient::default()
             .with_list(200, "[]")
             .with_create(
                 201,
-                r#"{"id":"22222222-2222-4222-8222-222222222222","name":"calendar"}"#,
+                r#"{"id":"22222222-2222-4222-8222-222222222222","name":"scratch-test"}"#,
             )
             .with_deploy(200, r#"{"deploy_hash":"sha256:def"}"#);
 
         let outcome = deploy_archive(
             &mut client,
             "http://control.test",
-            "calendar",
+            &app.value,
             "token",
             b"zship",
+            &[],
             true,
         )
         .expect("name deploy should create and retry by id");
+
+        let created = outcome.created_app.expect("scratch app was created");
+        record_created_app(Some(&config), None, &app.source, &created.id);
 
         assert_eq!(outcome.deploy_hash.as_deref(), Some("sha256:def"));
         assert_eq!(
             client.calls,
             vec![
                 FakeCall::List,
-                FakeCall::Create("calendar".to_string()),
+                FakeCall::Create("scratch-test".to_string()),
                 FakeCall::Deploy("22222222-2222-4222-8222-222222222222".to_string()),
             ]
+        );
+        assert_eq!(
+            std::fs::read_to_string(&config_path).expect("read project config"),
+            original,
+            "an auto-created --app target must not replace the committed app",
+        );
+    }
+
+    #[test]
+    fn deploy_file_app_auto_create_preserves_configured_app() {
+        let temp = tempfile::tempdir().expect("create temp project");
+        let config_path = temp.path().join(project_config::CONFIG_FILENAME);
+        let original = r#"{
+  "name": "production-app",
+  "app": "configured-name",
+  "control": "http://control.test",
+  "runtime_date": "2026-08-14",
+  "build": { "mode": "full", "dist": "dist", "output": "dist/app.zship" },
+  "migrations": { "dir": "migrations", "out": "generated/zeroship" },
+  "secrets": []
+}
+"#;
+        std::fs::write(&config_path, original).expect("write project config");
+        let config = project_config::ProjectConfig::load(&config_path).expect("load config");
+        let resolved = config.resolve(None).expect("resolve config");
+        let app = project_config::resolve_value(
+            &s(&["zeroship", "deploy"]),
+            "--app",
+            None,
+            None,
+            Some(&resolved),
+            "app",
+            None,
+        )
+        .expect("resolve file app");
+        assert_eq!(app.source, project_config::Source::File);
+
+        record_created_app(
+            Some(&config),
+            None,
+            &app.source,
+            "33333333-3333-4333-8333-333333333333",
+        );
+
+        assert_eq!(
+            std::fs::read_to_string(&config_path).expect("read project config"),
+            original,
+            "an auto-created app resolved from the file must not rewrite it",
+        );
+    }
+
+    #[test]
+    fn deploy_environment_auto_create_never_writes_the_root() {
+        let temp = tempfile::tempdir().expect("create temp project");
+        let config_path = temp.path().join(project_config::CONFIG_FILENAME);
+        let original = r#"{
+  "name": "production-app",
+  "control": "http://control.test",
+  "runtime_date": "2026-08-14",
+  "build": { "mode": "full", "dist": "dist", "output": "dist/app.zship" },
+  "migrations": { "dir": "migrations", "out": "generated/zeroship" },
+  "secrets": [],
+  "environments": {
+    "staging": {
+      "app": "staging-app",
+      "control": "http://staging-control.test"
+    }
+  }
+}
+"#;
+        std::fs::write(&config_path, original).expect("write project config");
+        let config = project_config::ProjectConfig::load(&config_path).expect("load config");
+
+        record_created_app(
+            Some(&config),
+            Some("staging"),
+            &project_config::Source::FileMember("name"),
+            "44444444-4444-4444-8444-444444444444",
+        );
+
+        assert_eq!(
+            std::fs::read_to_string(&config_path).expect("read project config"),
+            original,
+            "an environment app id must never be written at the root",
         );
     }
 
@@ -1255,6 +1656,7 @@ mod tests {
             missing_app,
             "token",
             b"zship",
+            &[],
             deploy_auto_create(&args),
         )
         .expect_err("--no-create should keep the original deploy failure");
@@ -1274,6 +1676,7 @@ mod tests {
             "11111111-1111-4111-8111-111111111111",
             "token",
             b"zship",
+            &[],
             true,
         )
         .expect("existing app deploy");

@@ -1059,7 +1059,7 @@ async fn dual_issuer_gotrue_device_flow_enforces_hashing_auth_and_one_time_use()
         .uri("/api/device/auth")
         .set_json(&json!({
             "client_id": "zeroship-cli",
-            "scope": "openid offline_access apps:deploy apps:read apps:write"
+            "scope": "openid offline_access apps:deploy apps:read apps:write secrets:read"
         }))
         .to_request();
     let auth_resp = test::call_service(&app, auth_req).await;
@@ -1106,7 +1106,7 @@ async fn dual_issuer_gotrue_device_flow_enforces_hashing_auth_and_one_time_use()
     assert_eq!(row.get::<_, String>("provider"), "platform");
     assert_eq!(
         row.get::<_, Option<String>>("scope").as_deref(),
-        Some("openid offline_access apps:deploy apps:read apps:write")
+        Some("openid offline_access apps:deploy apps:read apps:write secrets:read")
     );
 
     let pending_req = test::TestRequest::post()
@@ -1266,7 +1266,7 @@ async fn dual_issuer_gotrue_device_flow_enforces_hashing_auth_and_one_time_use()
     assert_eq!(approved_body["principal_id"], principal_id.to_string());
     assert_eq!(
         approved_body["scope"],
-        "apps:deploy apps:read apps:write"
+        "apps:deploy apps:read apps:write secrets:read"
     );
     assert!(approved_body["expires_in"].as_u64().expect("expires_in") > 0);
     let deploy_token = approved_body["access_token"]
@@ -1287,7 +1287,9 @@ async fn dual_issuer_gotrue_device_flow_enforces_hashing_auth_and_one_time_use()
     assert_eq!(verified.provider_subject, principal_id.to_string());
     assert_eq!(
         verified.provider_authz,
-        ProviderAuthz::OAuthScope("apps:deploy apps:read apps:write".to_string())
+        ProviderAuthz::OAuthScope(
+            "apps:deploy apps:read apps:write secrets:read".to_string()
+        )
     );
     assert_eq!(
         verified.aud.as_deref(),
@@ -1504,7 +1506,7 @@ async fn device_auth_is_rate_limited() {
 /// -> approve with a platform OAuth bearer -> redeem the one-time token.
 ///
 /// `create_platform_principal` no longer pre-inserts `principal_grants`, so
-/// this test's `scope == "apps:deploy apps:read apps:write"` assertion below
+/// this test's full CLI scope assertion below
 /// is also, incidentally, proof that `identity_bridge::ensure_platform_creator_grants`
 /// JIT-provisions the full deploy scope for a principal with zero grants.
 /// `device_token_jit_provisions_full_deploy_scope_for_a_new_platform_principal`
@@ -1532,7 +1534,7 @@ async fn platform_only_provider_completes_the_control_device_flow() {
         .uri("/api/device/auth")
         .set_json(&json!({
             "client_id": "zeroship-cli",
-            "scope": "openid offline_access apps:deploy apps:read apps:write"
+            "scope": "openid offline_access apps:deploy apps:read apps:write secrets:read"
         }))
         .to_request();
     let auth_resp = test::call_service(&app, auth_req).await;
@@ -1570,7 +1572,10 @@ async fn platform_only_provider_completes_the_control_device_flow() {
         serde_json::from_slice(&test::read_body(token_resp).await).expect("token body json");
     assert_eq!(token_body["provider"], "platform");
     assert_eq!(token_body["principal_id"], principal_id.to_string());
-    assert_eq!(token_body["scope"], "apps:deploy apps:read apps:write");
+    assert_eq!(
+        token_body["scope"],
+        "apps:deploy apps:read apps:write secrets:read"
+    );
     let access_token = token_body["access_token"].as_str().expect("access_token");
     let verified = fx
         .state
@@ -1580,7 +1585,9 @@ async fn platform_only_provider_completes_the_control_device_flow() {
         .expect("minted platform token verifies");
     assert_eq!(
         verified.provider_authz,
-        ProviderAuthz::OAuthScope("apps:deploy apps:read apps:write".to_string())
+        ProviderAuthz::OAuthScope(
+            "apps:deploy apps:read apps:write secrets:read".to_string()
+        )
     );
 
     fx.cleanup().await;
@@ -1658,7 +1665,7 @@ async fn platform_mint_url_is_used_instead_of_the_public_issuer() {
         .uri("/api/device/auth")
         .set_json(&json!({
             "client_id": "zeroship-cli",
-            "scope": "openid offline_access apps:deploy apps:read apps:write"
+            "scope": "openid offline_access apps:deploy apps:read apps:write secrets:read"
         }))
         .to_request();
     let auth_resp = test::call_service(&app, auth_req).await;
@@ -1715,7 +1722,9 @@ async fn platform_mint_url_is_used_instead_of_the_public_issuer() {
         .expect("a token minted over the internal route still verifies as public-issued");
     assert_eq!(
         verified.provider_authz,
-        ProviderAuthz::OAuthScope("apps:deploy apps:read apps:write".to_string())
+        ProviderAuthz::OAuthScope(
+            "apps:deploy apps:read apps:write secrets:read".to_string()
+        )
     );
 
     fx.cleanup().await;
@@ -2059,7 +2068,7 @@ async fn supabase_only_provider_cannot_start_a_device_flow() {
 /// `identity_bridge::ensure_platform_creator_grants` runs its once-only seed
 /// path for the first time inside `device_token`'s "approved" arm, before
 /// `deploy_scopes_for_principal` computes the token's scope. This asserts
-/// both ends of that: the `principal_grants` table ends up holding all three
+/// both ends of that: the `principal_grants` table ends up holding every
 /// `DEFAULT_CREATOR_GRANTS`, and the minted token's scope reflects them.
 ///
 /// What it does NOT cover: idempotency of a SECOND login (that a revoked
@@ -2093,7 +2102,7 @@ async fn device_token_jit_provisions_full_deploy_scope_for_a_new_platform_princi
         .uri("/api/device/auth")
         .set_json(&json!({
             "client_id": "zeroship-cli",
-            "scope": "apps:deploy apps:read apps:write"
+            "scope": "apps:deploy apps:read apps:write secrets:read"
         }))
         .to_request();
     let auth_resp = test::call_service(&app, auth_req).await;
@@ -2126,7 +2135,10 @@ async fn device_token_jit_provisions_full_deploy_scope_for_a_new_platform_princi
     assert_eq!(token_resp.status(), StatusCode::OK);
     let token_body: Value =
         serde_json::from_slice(&test::read_body(token_resp).await).expect("token body json");
-    assert_eq!(token_body["scope"], "apps:deploy apps:read apps:write");
+    assert_eq!(
+        token_body["scope"],
+        "apps:deploy apps:read apps:write secrets:read"
+    );
 
     let granted: Vec<String> = fx
         .state
@@ -2141,7 +2153,10 @@ async fn device_token_jit_provisions_full_deploy_scope_for_a_new_platform_princi
         .iter()
         .map(|row| row.get::<_, String>("grant_name"))
         .collect();
-    assert_eq!(granted, vec!["apps:deploy", "apps:read", "apps:write"]);
+    assert_eq!(
+        granted,
+        vec!["apps:deploy", "apps:read", "apps:write", "secrets:read"]
+    );
 
     fx.cleanup().await;
 
@@ -2161,7 +2176,7 @@ async fn device_token_jit_provisions_full_deploy_scope_for_a_new_platform_princi
 /// apps:deploy after the original seed". If `ensure_platform_creator_grants`
 /// keyed off `principal_grants` being empty instead of the identity_links
 /// marker, this principal (zero matching grants at the time of the check,
-/// same as a brand-new principal) would get all three re-granted here.
+/// same as a brand-new principal) would get all defaults re-granted here.
 ///
 /// What it does NOT cover: the ordinary first-seed path (see
 /// `device_token_jit_provisions_full_deploy_scope_for_a_new_platform_principal`),
@@ -2185,7 +2200,7 @@ async fn device_token_keeps_reduced_grants_when_identity_link_already_seeded() {
         .uri("/api/device/auth")
         .set_json(&json!({
             "client_id": "zeroship-cli",
-            "scope": "apps:deploy apps:read apps:write"
+            "scope": "apps:deploy apps:read apps:write secrets:read"
         }))
         .to_request();
     let auth_resp = test::call_service(&app, auth_req).await;

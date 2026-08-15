@@ -62,10 +62,21 @@ describe("resolveDevAuthEnv", () => {
     assert.equal("defaultUserId" in parsed, false);
   });
 
-  test("per-user password is carried through to the dev runtime config", () => {
-    // The dev login form prefills + validates this; it must survive
-    // serialization into ZEROSHIP_DEV_AUTH verbatim.
-    const r = resolveDevAuthEnv({ user: { email: "a@b.c", password: "hunter2" } }, gen);
-    assert.deepEqual(JSON.parse(r.config!), { user: { email: "a@b.c", password: "hunter2" } });
+  test("the identity fields are carried through to the dev runtime config verbatim", () => {
+    // The dev login form + the runtime's identity injection read these out of
+    // ZEROSHIP_DEV_AUTH, so they must survive serialization unchanged. There is
+    // deliberately no `password` among them: the dev tier DERIVES it from `id`
+    // (`devPasswordFor` in sdks/bootstrap/src/dev-auth.ts), so there is nothing
+    // to carry.
+    const user = {
+      id: "pws_alice000000000000000",
+      email: "a@b.c",
+      name: "Alice",
+      avatar: null,
+      scopes: ["openid", "admin"],
+    };
+    const r = resolveDevAuthEnv({ user }, gen);
+    assert.deepEqual(JSON.parse(r.config!), { user });
+    assert.equal(r.config!.includes("password"), false);
   });
 });

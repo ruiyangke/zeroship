@@ -55,10 +55,6 @@ export const MIGRATIONS_IR_FILE = "migrations.ir.json";
  *  illegal in a `.d.ts` ambient context. */
 export const ENV_DB_FILE = "env.db.ts";
 
-/** The default gen-types output dir (relative to root). COMMITTED (not the
- *  gitignored `.zeroship/`) so apps include its `env.db.ts` in tsconfig. */
-export const GEN_TYPES_OUT_DEFAULT = "generated/zeroship";
-
 /** The banner every MANUAL `env.db.ts` carries (the GENERATED variant's banner is
  *  rendered by the Rust verb). */
 const MANUAL_ENV_DB_BANNER =

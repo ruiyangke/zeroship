@@ -16,12 +16,22 @@ sandbox / hosted-build environment is **deferred** (extracted to the standalone
 agent scaffolds (examples/starter)            ← CLAUDE.md teaches the contract
   → pnpm build  (@zeroship/vite-plugin)        → dist/app.zship
                                                + generated/zeroship/migrations.ir.json
-  → zeroship deploy dist/app.zship --app=<id> --token=<PAT>
+  → zeroship deploy                            ← path, app and control from the file
   → control plane ingests → BlobStore + route registry
-  → zeroship migrate --app=<id> --token=<PAT>   ← env.db apps ONLY, and REQUIRED
+  → zeroship migrate                           ← env.db apps ONLY, and REQUIRED
   → control authorizes → zeroship-migrated applies → per-app schema + role
   → gateway pulls routes (5s) → serves the app (static + RPC + env.* primitives)
 ```
+
+The scaffolds ship a committed `zeroship.jsonc` at the project root. It names the
+deploy target (`app`, `control`) and the two paths that cross the tool boundary
+(`build.output`, which the packer writes and `zeroship deploy` uploads;
+`migrations.out`, which the build writes and `zeroship migrate` posts from), so
+the typed commands above carry no target flags. The flags still exist and still
+win over the file, and every command prints what it resolved and from where
+before it acts. See
+[`docs/reference/project-config.md`](reference/project-config.md) for the file,
+its precedence, and named `environments`.
 
 **Deploy is not the last step for an app that uses `env.db`.** The `.zship`
 carries the app's code and the folded runtime schema *descriptor*; it does not
@@ -65,11 +75,20 @@ the only route a creator has to it (`deploy/compose/docker-compose.yml`, the
   `"use server"` RPC functions, bundles the server module, and writes
   `dist/app.zship`. Applies to `examples/starter/` and the
   `create-zeroship-app` template.
-- **Deploy:** `zeroship deploy ./dist/app.zship --app=<id> --control=<url> --token=<PAT>`.
-- **Migrate** (apps that use `env.db`): `zeroship migrate --app=<id> --control=<url> --token=<PAT>`.
-  Defaults to `generated/zeroship/migrations.ir.json`, which the build writes
-  beside the other two gen-types artifacts. Idempotent — re-running with nothing
-  new to apply reports `Applied 0 migration op(s)`.
+- **Deploy:** `zeroship deploy`. The archive path comes from `build.output`, the
+  target from `app` and `control`, all three read from the project's
+  `zeroship.jsonc`; the command prints each resolved value and its source on
+  stderr before it uploads. Authentication is separate and never comes from that
+  file: `zeroship login`, or `--token=<PAT>` / `ZEROSHIP_TOKEN`. Overrides:
+  `zeroship deploy ./other.zship --app=<id> --control=<url>`, and `--env=<name>`
+  to select a named environment.
+- **Migrate** (apps that use `env.db`): `zeroship migrate`. It posts
+  `<migrations.out>/migrations.ir.json` - by default
+  `generated/zeroship/migrations.ir.json`, which the build writes beside the
+  other two gen-types artifacts - to the `app` and `control` the file names. A
+  positional path overrides it. An environment marked `"protected": true`
+  requires `--yes`. Idempotent: re-running with nothing new to apply reports
+  `Applied 0 migration op(s)`.
 
 ## What is validated today (`tests/golden_path.sh`)
 
@@ -173,12 +192,23 @@ For the **real agent flow** against a deployed platform, the path is
   when recorded on 2026-06-29 and regressed on 2026-07-14. Task #265.
 - ✅ Local/CI deploy auth unblocked (`dev-provision`); real flow = `zeroship login`.
 - ☐ Host a real SDK registry (npmjs / hosted Verdaccio) for production gap #1.
-- ☐ Smooth one-step deploy UX (provision-app-if-needed; a `zeroship deploy` that
-  creates the app on first push instead of requiring a pre-created `--app`).
-  The TRANSPORT half of this is done: `deploy/scripts/deploy-app.sh` forwards
-  the control plane over ssh, which is what a remote deploy was actually
-  blocked on -- control binds loopback with no Caddy route, so
-  `--control=https://control.<domain>` 404s and the direct port is refused.
-  What remains is the app-provisioning UX, not the connection.
+- ✅ Smooth one-step deploy UX. `zeroship deploy` with no arguments deploys the
+  artifact the build wrote to the app the project names.
+  Read this row carefully, because two of its three parts were already true when
+  it was written as open: **provision-app-if-needed already existed** -
+  `resolve_or_create_app` looks a non-uuid `--app` up by name and creates it on a
+  miss, with `--no-create` to turn that off; and the TRANSPORT half was done -
+  `deploy/scripts/deploy-app.sh` forwards the control plane over ssh, which is
+  what a remote deploy was blocked on (control binds loopback with no Caddy
+  route, so `--control=https://control.<domain>` 404s and the direct port is
+  refused). What was actually missing, and is what landed: the created id was
+  reported to stderr and then thrown away, so the next command needed the flag
+  again, and the archive path plus the target had to be retyped on every
+  invocation. `zeroship.jsonc` now records all three, and an auto-create splices
+  the new id back into the file's root `app` member (or prints the exact line to
+  paste when the member is absent). A deploy under `--env=<name>` deliberately
+  prints rather than writes: a splice can only touch a top-level member, and
+  staging's id at the root is where every un-flagged command would then read
+  production's.
 - ☐ Agent integration: a control-plane MCP server / Claude Code skill so the
   agent deploys + manages apps directly as tools.

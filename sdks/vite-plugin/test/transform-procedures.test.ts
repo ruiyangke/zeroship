@@ -70,7 +70,7 @@ function getHandler(plugin: ReturnType<typeof transformPlugin>): any {
 describe("transform — procedure metadata", () => {
   test("captures kind from `.config = { kind: 'mutation' }` (legacy shape)", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const ctx = makeCtx("ssr");
@@ -90,7 +90,7 @@ add.config = { kind: "mutation", idempotent: true };
 
   test("generic procedure() defaults unary handlers to mutation regardless of name", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const ctx = makeCtx("ssr");
@@ -112,7 +112,7 @@ export const searchPosts = procedure(async () => []);
 
   test("kind: 'stream' for async generators (function*)", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const ctx = makeCtx("ssr");
@@ -129,7 +129,7 @@ export const logStream = procedure(async function* () { yield 1; yield 2; });
 
   test("captures module-level $config", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const ctx = makeCtx("ssr");
@@ -154,7 +154,7 @@ export const listTodos = procedure(async () => []);
     // schema declarations; their values are stored as a sentinel
     // marker so the rest of the literal still parses cleanly.
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const ctx = makeCtx("ssr");
@@ -190,7 +190,7 @@ listTodos.config = {
 
   test("derives moduleSlug from the file path", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const ctx = makeCtx("ssr");
@@ -208,7 +208,7 @@ export const list = procedure(async () => []);
 
   test("directive: top-of-file `\"use server\"` opts the file in", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const ctx = makeCtx("ssr");
@@ -225,7 +225,7 @@ export const ping = procedure(async () => "pong");
 
   test("directive: works for files anywhere in the project", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const ctx = makeCtx("ssr");
@@ -242,7 +242,7 @@ export const deeplyNested = procedure(async () => 42);
 
   test("directive: missing → file passes through (no discovery)", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const ctx = makeCtx("ssr");
@@ -258,7 +258,7 @@ export const shouldNotBeDiscovered = procedure(async () => 1);
 
   test("directive: legacy path without directive emits a migration warning", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const ctx = makeCtx("ssr");
@@ -282,7 +282,7 @@ export async function unmigrated() { return 1; }
 
   test("directive: each legacy-path file warns once even on repeat transforms (HMR)", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const ctx = makeCtx("ssr");
@@ -297,7 +297,7 @@ export async function unmigrated() { return 1; }
 
   test("directive: NOT a directive when not at body[0] (var first)", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const ctx = makeCtx("ssr");
@@ -317,7 +317,7 @@ export async function nope() { return 1; }
 
   test("directive: leading line + block comments are tolerated before the directive", () => {
     const state = makeState();
-    const plugin = transformPlugin("/_rpc", state);
+    const plugin = transformPlugin(state);
     (plugin.configResolved as (c: unknown) => void).call(plugin, { root: "/r" });
 
     const ctx = makeCtx("ssr");

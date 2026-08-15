@@ -15,8 +15,14 @@ use zeroship_core::device_grant::PLATFORM_PROVIDER;
 
 const DEFAULT_SUPABASE_EMAIL_LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
 // Device-provisioned creators need apps:write for deploy auto-create and
-// apps:deploy for publishing concrete releases.
-const DEFAULT_CREATOR_GRANTS: [&str; 3] = ["apps:write", "apps:deploy", "apps:read"];
+// apps:deploy for publishing concrete releases. secrets:read exposes names
+// only and lets deploy validate the project's declared requirements.
+const DEFAULT_CREATOR_GRANTS: [&str; 4] = [
+    "apps:write",
+    "apps:deploy",
+    "apps:read",
+    "secrets:read",
+];
 
 #[derive(Debug, Error)]
 pub enum IdentityBridgeError {
@@ -67,7 +73,7 @@ fn source_chain(err: &dyn StdError) -> Option<String> {
 ///
 /// The `identity_links` row is the marker, not a count of existing grants: a
 /// principal whose grants an operator has REVOKED must not have them restored
-/// by logging in again, and "revoked all three" is indistinguishable from
+/// by logging in again, and "revoked all defaults" is indistinguishable from
 /// "never provisioned" if you only look at `principal_grants`.
 ///
 /// The insert is guarded on the principal having NO link at all, which keeps
@@ -360,4 +366,14 @@ pub fn parse_gotrue_admin_email_verified(body: &[u8]) -> Option<bool> {
         json.get("email_confirmed_at")
             .is_some_and(|value| !value.is_null()),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DEFAULT_CREATOR_GRANTS;
+
+    #[test]
+    fn default_creator_grants_can_read_secret_names() {
+        assert!(DEFAULT_CREATOR_GRANTS.contains(&"secrets:read"));
+    }
 }

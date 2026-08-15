@@ -81,20 +81,19 @@ interface WireUser {
   scopes: string[];
 }
 
-/** One configured dev user. `id` defaults to a stable `pws_dev…` if omitted. */
+/**
+ * One configured dev user. `id` defaults to a stable `pws_dev...` if omitted.
+ *
+ * There is deliberately NO `password` field: the dev password is DERIVED from
+ * the id by {@link devPasswordFor}, so it cannot be configured into something
+ * the platform would accept. See that function for why.
+ */
 export interface DevUserConfig {
   id?: string;
   email?: string | null;
   name?: string | null;
   avatar?: string | null;
   scopes?: string[];
-  /**
-   * The password this dev user signs in with. The dev login form prefills it
-   * (one-click sign-in) but still *validates* it on submit, so the
-   * `invalid_credentials` failure path is exercisable in dev exactly as in
-   * prod. Defaults to {@link DEFAULT_DEV_PASSWORD} when omitted.
-   */
-  password?: string;
 }
 
 /** Parsed `ZEROSHIP_DEV_AUTH` config. */
@@ -102,7 +101,11 @@ export interface DevAuthConfig {
   users: WireUser[];
   /** The user id pre-selected by the `/authorize` login form. */
   defaultUserId: string;
-  /** `id → password` for credential validation on the login-form POST. */
+  /**
+   * `id` to `password`, for credential validation on the login-form POST. Every
+   * entry is {@link devPasswordFor} of the id; the map exists so the form
+   * renderer and the credential check share one lookup.
+   */
   passwords: Record<string, string>;
 }
 
@@ -122,12 +125,36 @@ const DEV_SESSION_COOKIE = "__zeroship_dev_session";
  */
 const DEV_CSRF_COOKIE = "__zeroship_dev_csrf";
 /**
- * The well-known password every dev user signs in with unless the `devAuth`
- * config overrides it per user. It is *not* a secret — the dev login form
- * prefills it in plain sight; it exists only so the credential-validation path
- * (and its `invalid_credentials` failure arm) is real in dev.
+ * The dev password for a given dev user id: `"dev-"` + the first 8 characters
+ * of the id with any leading `"pws_"` stripped (fewer if the remainder is
+ * shorter). Deterministic, pure, and distinct for distinct id prefixes:
+ *
+ *   pws_alice000000000000000  ->  dev-alice000
+ *   pws_probealpha0000000000  ->  dev-probealp
+ *
+ * It is *not* a secret -- the dev login form prefills it in plain sight. It
+ * exists only so the credential-validation path (and its `invalid_credentials`
+ * failure arm) is real in dev, and it is derived rather than configured so no
+ * creator can accidentally write a dev credential that would also work on the
+ * platform.
+ *
+ * ## Why the result MUST stay under 15 characters
+ *
+ * `crates/auth/src/ui/signup.rs` REFUSES any password shorter than 15
+ * characters, so a dev password below that bound is a credential that works
+ * locally and CANNOT EXIST in production. `tests/e2e_dev_vs_deployed_login.sh`
+ * measures exactly that: its `policy.short_password` assertion submits the dev
+ * password to the deployed platform OP's `POST /signup` and requires that NO
+ * account is created. A derived password of >= 15 characters would silently
+ * invert that measurement into a vacuous pass (the signup would succeed, and
+ * the row would stop meaning anything). `assertPairwiseSubject` pins every id
+ * to `pws_` + exactly 20 characters, so every real derivation here is exactly
+ * 12 characters; the bound is asserted directly in `tests/dev-auth.test.ts`.
  */
-export const DEFAULT_DEV_PASSWORD = "dev";
+export function devPasswordFor(id: string): string {
+  const body = id.startsWith("pws_") ? id.slice(4) : id;
+  return `dev-${body.slice(0, 8)}`;
+}
 /** Dev session lifetime (seconds). One day is plenty for a dev loop. */
 const DEV_SESSION_TTL_SECS = 24 * 60 * 60;
 /** RFC 4648 §5 base64url alphabet (no padding) — matches the Rust URL_SAFE_NO_PAD. */
@@ -312,7 +339,7 @@ function normalizeUser(u: DevUserConfig, index: number): { wire: WireUser; passw
       email_verified: true,
       scopes: u.scopes ?? [...DEFAULT_DEV_USER.scopes],
     },
-    password: u.password ?? DEFAULT_DEV_PASSWORD,
+    password: devPasswordFor(id),
   };
 }
 
@@ -321,7 +348,7 @@ function defaultConfig(): DevAuthConfig {
   return {
     users: [DEFAULT_DEV_USER],
     defaultUserId: DEFAULT_DEV_USER.id,
-    passwords: { [DEFAULT_DEV_USER.id]: DEFAULT_DEV_PASSWORD },
+    passwords: { [DEFAULT_DEV_USER.id]: devPasswordFor(DEFAULT_DEV_USER.id) },
   };
 }
 
@@ -543,7 +570,7 @@ function loginFormHtml(args: {
   const { users, passwords, defaultUserId, state, redirectUri, csrf, error } = args;
   const def = users.find((u) => u.id === defaultUserId) ?? users[0];
   const defEmail = def.email ?? "";
-  const defPassword = passwords[def.id] ?? DEFAULT_DEV_PASSWORD;
+  const defPassword = passwords[def.id] ?? devPasswordFor(def.id);
 
   const errorBanner = error ? `<div class="error" role="alert">${escapeHtml(error)}</div>` : "";
 
@@ -563,7 +590,7 @@ function loginFormHtml(args: {
     // email → password map (dev passwords are well-known; prefilled in plain
     // sight already). Repopulate the password field on selection change.
     const emailToPassword: Record<string, string> = {};
-    for (const u of users) emailToPassword[u.email ?? ""] = passwords[u.id] ?? DEFAULT_DEV_PASSWORD;
+    for (const u of users) emailToPassword[u.email ?? ""] = passwords[u.id] ?? devPasswordFor(u.id);
     pickerScript =
       `<script>(function(){var M=${embedJson(emailToPassword)};` +
       `var e=document.getElementById('zs-email'),p=document.getElementById('zs-password');` +
@@ -714,7 +741,7 @@ export function createDevAuthProvider(
     }
 
     // 2. Credentials: email must match a configured dev user and the password
-    //    must match that user's configured/default dev password.
+    //    must match that user's DERIVED dev password (`devPasswordFor(id)`).
     const email = form.get("email") ?? "";
     const password = form.get("password") ?? "";
     const user = config!.users.find((u) => (u.email ?? "") === email);

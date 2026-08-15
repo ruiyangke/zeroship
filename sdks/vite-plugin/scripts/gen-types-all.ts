@@ -26,10 +26,16 @@
  * out dir; its app root is the nearest ancestor with a `package.json`. A new
  * example is therefore covered the day its artifacts appear, with no edit here.
  *
- * SOURCE SELECTION mirrors the plugin: a `migrations/` dir means the GENERATED
+ * SOURCE SELECTION mirrors the plugin: a migrations dir - named by the app's
+ * `zeroship.jsonc`, or `migrations/` when it has none - means the GENERATED
  * source (`genTypesFromMigrations`), otherwise a committed `schema.ts` means the
  * MANUAL source (`genTypesFromSchemaFile`). Neither present is a hard error, not
  * a silent skip.
+ *
+ * IT READS THE CONFIG NOW, which is the point of `zeroship.jsonc`. Before, this
+ * runner REFUSED to run against any app whose vite config mentioned
+ * `migrations:` or `genTypesOut` - by regex over the config source text,
+ * because there was no machine-readable place to look. See `runOne`.
  *
  *   pnpm --filter @zeroship/vite-plugin gen-types:all             # regenerate
  *   pnpm --filter @zeroship/vite-plugin gen-types:all -- --check  # drift gate
@@ -40,7 +46,7 @@
 
 import { execFileSync } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -50,6 +56,7 @@ import {
   genTypesFromMigrations,
   genTypesFromSchemaFile,
 } from "../src/gen-types/index.js";
+import { readProjectConfig } from "../src/project-config/index.js";
 
 /** Directories a repo walk must never descend into: build output, dependency
  *  trees, sibling git checkouts, and the vendored engine. */
@@ -108,32 +115,19 @@ function appRootFor(outDir: string, root: string): string {
   );
 }
 
-/**
- * Refuse to guess when an app overrides the gen-types input paths in its vite
- * config. This runner derives the migrations dir from disk; a `migrations: {...}`
- * option (a custom `dir` or `genTypesOut`) would silently regenerate from the
- * wrong source, which is worse than failing.
- */
-async function assertNoConfigOverride(appRoot: string): Promise<void> {
-  for (const name of ["vite.config.ts", "vite.config.js", "vite.config.mts"]) {
-    const cfg = join(appRoot, name);
-    if (!existsSync(cfg)) continue;
-    const text = await readFile(cfg, "utf8");
-    if (/\bgenTypesOut\b/.test(text) || /\bmigrations\s*:\s*\{/.test(text)) {
-      throw new Error(
-        `gen-types-all: ${relative(appRoot, cfg)} configures the gen-types inputs ` +
-          `(migrations.dir / migrations.genTypesOut). This runner derives them from disk ` +
-          `and will not guess — teach it to read the config, or drop the override.`,
-      );
-    }
-  }
-}
-
 /** Regenerate (or `--check`) one app's artifacts through the in-process API. */
 async function runOne(app: ArtifactApp, check: boolean): Promise<string> {
-  await assertNoConfigOverride(app.root);
-
-  const migrationsDir = join(app.root, "migrations");
+  // The app's own `zeroship.jsonc` when it has one, schema defaults otherwise.
+  //
+  // THIS REPLACES A HARD REFUSAL. `assertNoConfigOverride` used to throw for any
+  // app whose vite config mentioned `migrations:` or `genTypesOut`, detected by
+  // regex over the config SOURCE TEXT, because there was no machine-readable
+  // place to look. That refusal was the clearest single piece of evidence that
+  // `zeroship.jsonc` needed to exist; with the file in place it has nothing
+  // left to protect, and the regex (which would match a comment and miss a
+  // spread) goes with it.
+  const { config } = readProjectConfig(app.root);
+  const migrationsDir = join(app.root, config.migrations.dir);
   if (existsSync(migrationsDir) && statSync(migrationsDir).isDirectory()) {
     await genTypesFromMigrations(migrationsDir, app.outDir, { check });
     return "migrations";

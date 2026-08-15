@@ -1,0 +1,16 @@
+// Every optional project-config field is deliberately absent.
+// The two readers must resolve this file to the same canonical bytes.
+{
+  "name": "minimal-config-fixture",
+  "control": "https://control.zeroship.ai",
+  "runtime_date": "2026-08-14",
+  "build": {
+    "mode": "full",
+    "dist": "dist",
+    "output": "dist/app.zship"
+  },
+  "migrations": {
+    "dir": "migrations",
+    "out": "generated/zeroship"
+  }
+}
