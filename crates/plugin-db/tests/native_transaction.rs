@@ -275,6 +275,7 @@ fn dispatch_zs_for_app(
     if app_id.is_some() {
         // Production schema bootstrap initializes this backend handle without
         // applying app migrations. Transactions read the handle directly.
+        zeroship_plugin_db::set_db_url_for_tests(url);
         block_on(async {
             zeroship_plugin_db::init_pool_async()
                 .await
