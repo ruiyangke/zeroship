@@ -17,9 +17,9 @@
 // NOT A GENERAL JSON-SCHEMA COMPILER. It understands exactly the constructs
 // `project-v1.json` uses: object/string/boolean/array-of-string, `enum`,
 // `pattern`, `default`, `required`, `additionalProperties: false`, one level of
-// `$ref` into `$defs`, and the `x-cli-read` / `x-required-members` /
-// `x-forbidden-key-names` markers. Anything else in the schema is a codegen
-// error rather than a silent omission -- see `unsupported()`.
+// `$ref` into `$defs`, and the `x-cli-read` / `x-rust-resolved-default` /
+// `x-required-members` / `x-forbidden-key-names` markers. Anything else in the
+// schema is a codegen error rather than a silent omission -- see `unsupported()`.
 
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -58,7 +58,7 @@ const KNOWN_KEYWORDS = new Set([
   "$schema", "$id", "$defs", "$ref", "title", "description", "type", "properties",
   "required", "additionalProperties", "items", "enum", "pattern", "default",
   "x-cli-read", "x-required-members", "x-forbidden-key-names", "x-config-filename",
-  "x-config-env-var",
+  "x-config-env-var", "x-rust-resolved-default",
 ]);
 
 function assertKnownKeywords(node, where) {
@@ -71,7 +71,7 @@ function assertKnownKeywords(node, where) {
 // Walk: collect every leaf with its dotted path, default, and markers.
 // ---------------------------------------------------------------------------
 
-/** @type {{path:string,type:string,default?:unknown,enum?:string[],pattern?:string,cliRead:boolean,itemPattern?:string}[]} */
+/** @type {{path:string,type:string,default?:unknown,enum?:string[],pattern?:string,cliRead:boolean,rustResolvedDefault:boolean,itemPattern?:string}[]} */
 const leaves = [];
 /** @type {{path:string,known:string[],required:string[]}[]} */
 const objects = [];
@@ -107,6 +107,7 @@ function walkObject(node, path) {
     const child = deref(rawChild, childPath);
     assertKnownKeywords(child, childPath);
     const cliRead = child["x-cli-read"] === true;
+    const rustResolvedDefault = child["x-rust-resolved-default"] === true;
     switch (child.type) {
       case "object":
         walkObject(child, childPath);
@@ -115,17 +116,20 @@ function walkObject(node, path) {
         if (child.items?.type !== "string") unsupported(childPath, "array items must be strings");
         recordLeaf({
           path: childPath, type: "string[]", default: child.default,
-          cliRead, itemPattern: child.items.pattern,
+          cliRead, rustResolvedDefault, itemPattern: child.items.pattern,
         });
         break;
       case "string":
         recordLeaf({
           path: childPath, type: "string", default: child.default,
-          enum: child.enum, pattern: child.pattern, cliRead,
+          enum: child.enum, pattern: child.pattern, cliRead, rustResolvedDefault,
         });
         break;
       case "boolean":
-        recordLeaf({ path: childPath, type: "boolean", default: child.default, cliRead });
+        recordLeaf({
+          path: childPath, type: "boolean", default: child.default, cliRead,
+          rustResolvedDefault,
+        });
         break;
       default:
         unsupported(childPath, `type ${child.type}`);
@@ -157,6 +161,7 @@ function walkEnvironmentShape(rawNode, path) {
   const node = deref(rawNode, path);
   assertKnownKeywords(node, path);
   const cliRead = node["x-cli-read"] === true;
+  const rustResolvedDefault = node["x-rust-resolved-default"] === true;
   switch (node.type) {
     case "object":
       for (const [key, child] of Object.entries(node.properties ?? {})) {
@@ -167,17 +172,17 @@ function walkEnvironmentShape(rawNode, path) {
       if (node.items?.type !== "string") unsupported(path, "array items must be strings");
       recordLeaf({
         path, type: "string[]", default: node.default, cliRead,
-        itemPattern: node.items.pattern,
+        rustResolvedDefault, itemPattern: node.items.pattern,
       });
       break;
     case "string":
       recordLeaf({
         path, type: "string", default: node.default, enum: node.enum,
-        pattern: node.pattern, cliRead,
+        pattern: node.pattern, cliRead, rustResolvedDefault,
       });
       break;
     case "boolean":
-      recordLeaf({ path, type: "boolean", default: node.default, cliRead });
+      recordLeaf({ path, type: "boolean", default: node.default, cliRead, rustResolvedDefault });
       break;
     default:
       unsupported(path, `type ${node.type}`);
@@ -218,11 +223,19 @@ assertReaderCoverage("Rust validator", allLeafPaths, RUST_VALIDATOR_FIELDS);
 
 const cliReadFields = leaves.filter((l) => l.cliRead).map((l) => l.path);
 const withDefaults = leaves.filter((l) => l.default !== undefined);
+for (const leaf of leaves) {
+  if (leaf.rustResolvedDefault && (!leaf.cliRead || leaf.default === undefined)) {
+    unsupported(
+      leaf.path,
+      "x-rust-resolved-default requires both x-cli-read and a schema default",
+    );
+  }
+}
 const requiredFields = new Set(
   objects.flatMap((o) => o.required.map((member) => o.path ? `${o.path}.${member}` : member)),
 );
 const rustResolvedDefaults = withDefaults.filter(
-  (l) => !l.cliRead && !requiredFields.has(l.path),
+  (l) => (!l.cliRead || l.rustResolvedDefault) && !requiredFields.has(l.path),
 );
 
 // ---------------------------------------------------------------------------
@@ -247,7 +260,7 @@ function tsSource() {
   L.push(" *");
   L.push(" * The plugin applies every default when there is no file. For a present file,");
   L.push(" * optional non-CLI defaults are also generated into Rust so the readers agree.");
-  L.push(" * Defaults for CLI-read facts never reach Rust: silence there is an error.");
+  L.push(" * CLI-read defaults reach Rust only when the schema marks them safe.");
   L.push(" */");
   L.push("");
   L.push(`export const CONFIG_FILENAME = ${jsonLit(schema["x-config-filename"])};`);
@@ -304,10 +317,9 @@ function rsSource() {
   const L = [];
   for (const line of BANNER_LINES) L.push(line ? `//! ${line}` : "//!");
   L.push("//!");
-  L.push("//! THERE ARE NO DEFAULTS FOR CLI-READ FACTS IN THIS FILE.");
-  L.push("//! A key the CLI operationally reads and the file omits is an error naming the");
-  L.push("//! key. Optional non-CLI defaults are generated below from the same schema so");
-  L.push("//! both readers still produce byte-identical resolved JSON.");
+  L.push("//! CLI-read defaults are absent unless the schema explicitly marks them safe.");
+  L.push("//! Optional defaults generated below keep both readers byte-identical without");
+  L.push("//! inventing a cross-tool scalar fact.");
   L.push("");
   L.push(`pub const CONFIG_FILENAME: &str = ${jsonLit(schema["x-config-filename"])};`);
   L.push(`pub const CONFIG_ENV_VAR: &str = ${jsonLit(schema["x-config-env-var"])};`);

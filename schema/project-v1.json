@@ -130,6 +130,8 @@
     "secrets": {
       "type": "array",
       "default": [],
+      "x-cli-read": true,
+      "x-rust-resolved-default": true,
       "items": {
         "type": "string",
         "pattern": "^[A-Z][A-Z0-9_]{0,63}$"
