@@ -88,3 +88,38 @@ fn dropping_an_object_nothing_later_uses_is_still_allowed() {
     )
     .expect("a drop with no later reference is ordinary cleanup");
 }
+
+// ---------------------------------------------------------------------------
+// Views, added as a KIND on the same map rather than as another walk.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn commenting_on_a_dropped_view_is_refused() {
+    // Measured before the fix:
+    //     DROP VIEW "prj_ir"."vw"
+    //     COMMENT ON VIEW "prj_ir"."vw" IS 'x'
+    let refusal = verdict(
+        r#"{"op":"createTable","name":"a","columns":[{"name":"c0","type":"int","nullable":false}],"primaryKey":["c0"]},{"op":"createView","name":"vw","query":{"kind":"structured","select":{"from":{"name":"a"},"projection":[{"kind":"colRef","name":"c0"}]}}},{"op":"dropView","name":"vw"},{"op":"comment","target":{"kind":"view","name":"vw"},"comment":"x"}"#,
+    )
+    .expect_err("the comment names a view the drop removed");
+    assert!(
+        refusal.to_lowercase().contains("drop"),
+        "the refusal must point at the drop that removed it: {refusal}"
+    );
+}
+
+#[test]
+fn commenting_on_a_live_view_is_still_allowed() {
+    verdict(
+        r#"{"op":"createTable","name":"a","columns":[{"name":"c0","type":"int","nullable":false}],"primaryKey":["c0"]},{"op":"createView","name":"vw","query":{"kind":"structured","select":{"from":{"name":"a"},"projection":[{"kind":"colRef","name":"c0"}]}}},{"op":"comment","target":{"kind":"view","name":"vw"},"comment":"x"}"#,
+    )
+    .expect("commenting on a view that exists is ordinary");
+}
+
+#[test]
+fn recreating_a_dropped_view_before_commenting_is_still_allowed() {
+    verdict(
+        r#"{"op":"createTable","name":"a","columns":[{"name":"c0","type":"int","nullable":false}],"primaryKey":["c0"]},{"op":"createView","name":"vw","query":{"kind":"structured","select":{"from":{"name":"a"},"projection":[{"kind":"colRef","name":"c0"}]}}},{"op":"dropView","name":"vw"},{"op":"createView","name":"vw","query":{"kind":"structured","select":{"from":{"name":"a"},"projection":[{"kind":"colRef","name":"c0"}]}}},{"op":"comment","target":{"kind":"view","name":"vw"},"comment":"x"}"#,
+    )
+    .expect("dropping a view and recreating it before use must remain allowed");
+}

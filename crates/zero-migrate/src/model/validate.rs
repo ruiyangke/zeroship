@@ -2715,7 +2715,35 @@ fn validate_no_column_uses_a_dropped_named_object(
             Op::CreateSequence { name, .. } => {
                 dropped.remove(&("sequence", name.as_str()));
             }
+            Op::CreateView { name, .. } => {
+                dropped.remove(&("view", name.as_str()));
+            }
             _ => {}
+        }
+
+        // A comment names its target directly, so it joins the same map as a
+        // `view` reference rather than needing a walk of its own.
+        if let Op::Comment {
+            target: crate::model::ir::CommentTarget::View { name, .. },
+            ..
+        } = op
+        {
+            if dropped.contains(&("view", name.as_str())) {
+                return Err(AuthoringError {
+                    code: CODE_OP_INVALID.to_string(),
+                    kind: Some(UnsupportedKind::Op),
+                    op_index,
+                    ts_location: ts_locations.get(op_index).cloned().flatten(),
+                    dialect: target_dialect,
+                    reason: format!(
+                        "this comment names view {name:?}, but an earlier dropView in \
+                             this migration removed it, so it will not exist when this runs"
+                    ),
+                    suggested_fix: Some(
+                        "move the comment before the drop, or recreate the view first".to_string(),
+                    ),
+                });
+            }
         }
 
         let columns: Vec<&crate::model::ir::IrColumn> = match op {
@@ -2753,6 +2781,9 @@ fn validate_no_column_uses_a_dropped_named_object(
             }
             Op::DropSequence { name, .. } => {
                 dropped.insert(("sequence", name.as_str()));
+            }
+            Op::DropView { name, .. } => {
+                dropped.insert(("view", name.as_str()));
             }
             _ => {}
         }
