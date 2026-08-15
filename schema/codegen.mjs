@@ -7,12 +7,12 @@
 //   node schema/codegen.mjs            # write both generated files
 //   node schema/codegen.mjs --check    # regenerate in memory, diff, exit 1 on drift
 //
-// WHAT IS ASYMMETRIC, ON PURPOSE. The TypeScript file carries
-// every `default` from the schema, because the Vite plugin must work with
-// `zeroship()` and NO file at all. The Rust file carries NONE: a key the CLI
-// reads and the file omits is an error naming the key. That is what makes it
-// impossible for the two sides to disagree about a value -- there is only one
-// place in the world that holds it.
+// WHAT IS ASYMMETRIC, ON PURPOSE. The TypeScript file carries every `default`
+// from the schema, because the Vite plugin must work with `zeroship()` and NO
+// file at all. Rust receives optional non-CLI defaults plus CLI defaults marked
+// `x-rust-resolved-default`; every other omitted CLI-read key is an error. The
+// explicit safe marker is reserved for defaults such as `secrets: []`, where
+// omission cannot create cross-tool disagreement.
 //
 // NOT A GENERAL JSON-SCHEMA COMPILER. It understands exactly the constructs
 // `project-v1.json` uses: object/string/boolean/array-of-string, `enum`,
@@ -364,7 +364,7 @@ function rsSource() {
   L.push("/// exists\" instead of a deliberate resolution rule.");
   L.push(`pub const SCHEMA_DEFAULTED_FIELDS: &[&str] = &[${withDefaults.map((l) => jsonLit(l.path)).join(", ")}];`);
   L.push("");
-  L.push("/// Optional, non-CLI-read defaults applied to a present file's resolved view.");
+  L.push("/// Optional defaults explicitly safe for a present file's resolved view.");
   L.push("/// Values are JSON so arrays and future object defaults stay schema-generated.");
   L.push(`pub const RESOLVED_OPTIONAL_DEFAULTS_JSON: &[(&str, &str)] = &[${rustResolvedDefaults.map((l) => `(${jsonLit(l.path)}, ${jsonLit(JSON.stringify(l.default))})`).join(", ")}];`);
   L.push("");

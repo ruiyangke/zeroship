@@ -5,16 +5,16 @@
 //! the runtime, NEVER packed into a `.zship`, and never leaves the creator's
 //! machine. `tests/project_config_gate.sh` enforces all three.
 //!
-//! NO DEFAULTS FOR CLI-READ FACTS LIVE HERE. When the file is present and a key
-//! the CLI operationally reads is absent, the command errors naming the key.
-//! Optional non-CLI defaults are generated from the schema into both readers so
-//! their resolved JSON stays byte-identical.
+//! CLI-read defaults live here only when the schema explicitly marks them safe.
+//! Otherwise, when the file is present and an operationally read key is absent,
+//! the command errors naming the key. Optional safe defaults are generated from
+//! the schema into both readers so their resolved JSON stays byte-identical.
 //!
 //! WHEN NO FILE IS PRESENT nothing changes: `--flag`, then the environment
 //! variable, then the compiled fallback each command already had. A creator in
-//! a scratch directory keeps the CLI they have. The no-default rule is scoped to
-//! "there IS a file and it does not say", which is the case where a guess would
-//! contradict a written intention.
+//! a scratch directory keeps the CLI they have. The restricted-default rule is
+//! scoped to "there IS a file and it does not say", where guessing a scalar
+//! fact would contradict a written intention.
 
 pub mod generated;
 mod jsonc;
@@ -278,22 +278,31 @@ impl ProjectConfig {
         };
         let cwd = std::env::current_dir()
             .map_err(|e| self.err(format!("cannot read the working directory: {e}")))?;
-        let root = lexical_normalize(&if project_root.is_absolute() {
+        let lexical_root = lexical_normalize(&if project_root.is_absolute() {
             project_root.to_path_buf()
         } else {
             cwd.join(project_root)
         });
-        let config = lexical_normalize(&if self.path.is_absolute() {
+        let lexical_config = lexical_normalize(&if self.path.is_absolute() {
             self.path.clone()
         } else {
             cwd.join(&self.path)
         });
+        let root = canonicalize_existing_prefix(&lexical_root).map_err(|e| {
+            self.err(format!("cannot resolve the project root for `{field}`: {e}"))
+        })?;
+        let config = canonicalize_existing_prefix(&lexical_config).map_err(|e| {
+            self.err(format!("cannot resolve {CONFIG_FILENAME} for `{field}`: {e}"))
+        })?;
         let candidate = Path::new(configured_path);
-        let resolved = lexical_normalize(&if candidate.is_absolute() {
+        let lexical_resolved = lexical_normalize(&if candidate.is_absolute() {
             candidate.to_path_buf()
         } else {
             root.join(candidate)
         });
+        let resolved = canonicalize_existing_prefix(&lexical_resolved).map_err(|e| {
+            self.err(format!("cannot resolve `{field}` ({configured_path}): {e}"))
+        })?;
         if root.starts_with(&resolved) || config.starts_with(&resolved) {
             return Err(self.err(format!(
                 "`{field}` ({configured_path}) cannot resolve to the project root or an ancestor containing \
@@ -301,16 +310,25 @@ impl ProjectConfig {
             )));
         }
         if let Some(extension) = existing_artifact_extension {
-            let metadata = std::fs::symlink_metadata(&resolved);
-            if let Ok(metadata) = metadata {
-                let is_artifact_file = metadata.is_file()
-                    && !metadata.file_type().is_symlink()
-                    && resolved.extension().and_then(|value| value.to_str()) == Some(extension);
-                if !is_artifact_file {
+            match std::fs::symlink_metadata(&lexical_resolved) {
+                Ok(metadata) => {
+                    let is_artifact_file = metadata.is_file()
+                        && !metadata.file_type().is_symlink()
+                        && resolved.extension().and_then(|value| value.to_str())
+                            == Some(extension);
+                    if !is_artifact_file {
+                        return Err(self.err(format!(
+                            "`{field}` ({configured_path}) resolves to existing non-artifact file {}; \
+                             refusing to overwrite creator data",
+                            resolved.display()
+                        )));
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
                     return Err(self.err(format!(
-                        "`{field}` ({configured_path}) resolves to existing non-artifact file {}; \
-                         refusing to overwrite creator data",
-                        resolved.display()
+                        "cannot inspect `{field}` ({configured_path}) at {}: {error}",
+                        lexical_resolved.display()
                     )));
                 }
             }
@@ -493,6 +511,32 @@ fn lexical_normalize(path: &Path) -> PathBuf {
         }
     }
     out
+}
+
+fn canonicalize_existing_prefix(path: &Path) -> std::io::Result<PathBuf> {
+    let mut cursor = path.to_path_buf();
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::canonicalize(&cursor) {
+            Ok(mut resolved) => {
+                for component in missing.iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(lexical_normalize(&resolved));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let Some(component) = cursor.file_name().map(ToOwned::to_owned) else {
+                    return Err(error);
+                };
+                let Some(parent) = cursor.parent().map(Path::to_path_buf) else {
+                    return Err(error);
+                };
+                missing.push(component);
+                cursor = parent;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn check_object(

@@ -49,6 +49,6 @@ pub const FIELD_ENUMS: &[(&str, &[&str])] = &[
 /// exists" instead of a deliberate resolution rule.
 pub const SCHEMA_DEFAULTED_FIELDS: &[&str] = &["build.mode", "build.dist", "build.output", "migrations.dir", "migrations.out", "secrets"];
 
-/// Optional, non-CLI-read defaults applied to a present file's resolved view.
+/// Optional defaults explicitly safe for a present file's resolved view.
 /// Values are JSON so arrays and future object defaults stay schema-generated.
 pub const RESOLVED_OPTIONAL_DEFAULTS_JSON: &[(&str, &str)] = &[("secrets", "[]")];

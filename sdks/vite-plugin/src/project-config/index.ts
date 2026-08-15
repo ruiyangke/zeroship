@@ -15,8 +15,8 @@
  * for the two readers to disagree.
  */
 
-import { existsSync, lstatSync, readFileSync } from "node:fs";
-import { extname, isAbsolute, relative, resolve, sep } from "node:path";
+import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
+import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
 import {
   getNodeValue,
   parseTree,
@@ -227,6 +227,26 @@ function pathContains(parent: string, child: string): boolean {
   return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
+function resolveExistingPath(path: string): string {
+  const missing: string[] = [];
+  let cursor = resolve(path);
+  while (true) {
+    try {
+      return resolve(realpathSync(cursor), ...missing.reverse());
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const parent = dirname(cursor);
+      if (parent === cursor) throw error;
+      missing.push(basename(cursor));
+      cursor = parent;
+    }
+  }
+}
+
+export function resolvedPathContains(parent: string, child: string): boolean {
+  return pathContains(resolveExistingPath(parent), resolveExistingPath(child));
+}
+
 function assertWritablePathIsSafe(
   root: string,
   configPath: string,
@@ -236,15 +256,21 @@ function assertWritablePathIsSafe(
 ): void {
   const candidate = resolve(root, configuredPath);
   const absoluteConfig = resolve(configPath);
-  if (pathContains(candidate, resolve(root)) || pathContains(candidate, absoluteConfig)) {
+  if (resolvedPathContains(candidate, root) || resolvedPathContains(candidate, absoluteConfig)) {
     throw new Error(
       `${configPath}: \`${field}\` (${configuredPath}) cannot resolve to the project root or ` +
         `an ancestor containing ${CONFIG_FILENAME}`,
     );
   }
-  if (existingArtifactExtension == null || !existsSync(candidate)) return;
+  if (existingArtifactExtension == null) return;
 
-  const stat = lstatSync(candidate);
+  let stat: ReturnType<typeof lstatSync>;
+  try {
+    stat = lstatSync(candidate);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
   if (!stat.isFile() || stat.isSymbolicLink() || extname(candidate) !== existingArtifactExtension) {
     throw new Error(
       `${configPath}: \`${field}\` (${configuredPath}) resolves to existing non-artifact file ` +
