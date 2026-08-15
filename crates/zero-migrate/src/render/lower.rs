@@ -7761,9 +7761,19 @@ impl IrAuthor {
     /// MySQL answers `true` and the claim is correct - it has `MODIFY COLUMN` - but
     /// the limit here is OURS: these ops render PostgreSQL syntax on every dialect,
     /// and MySQL's spelling needs the whole column definition restated, which the
-    /// op does not carry. Keeping the two apart matters because the capability also
-    /// feeds the published support matrix, where "MySQL: no native alter column"
-    /// would be a false statement about MySQL.
+    /// op does not carry.
+    ///
+    /// Keeping the two apart matters because they answer different questions and
+    /// a reader who merges them concludes the capability table is lying about
+    /// MySQL. It is not: `true` is the true answer about the engine, and the
+    /// refusal below is about our renderer.
+    ///
+    /// What the OPERATOR is told is a third thing again, and lives in
+    /// `dialect-support.toml`: `setColumnNotNull` and `dropColumnNotNull` are
+    /// `unsupported` on MySQL and SQLite, `dropColumnDefault` on SQLite only,
+    /// because that file describes what this engine renders rather than what the
+    /// database could do (F674 - those cells said `portable` while this gate
+    /// refused them, so the gate accepted work the lowerer then rejected).
     ///
     /// One definition, called from every alter-column arm, so the rule cannot be
     /// added to one op and missed on its siblings.
