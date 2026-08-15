@@ -389,7 +389,6 @@ fn authored_name_within_bound(
 #[derive(Debug)]
 struct TableOperationTarget<'a> {
     schema: Option<&'a str>,
-    table: &'a str,
     op_index: usize,
     is_online_rename: bool,
 }
@@ -3066,7 +3065,7 @@ fn validate_online_rename_isolation_op<'a>(
     target_dialect: Dialect,
     op_index: usize,
     ts_locations: &[Option<String>],
-    seen: &mut Vec<TableOperationTarget<'a>>,
+    seen: &mut std::collections::BTreeMap<&'a str, Vec<TableOperationTarget<'a>>>,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::Op;
 
@@ -3100,9 +3099,18 @@ fn validate_online_rename_isolation_op<'a>(
             };
             let schema = table_op.schema();
             let is_online_rename = matches!(table_op, Op::RenameColumn { .. });
-            if let Some(previous) = seen.iter().find(|previous| {
-                previous.table == table
-                    && schemas_may_name_same_table(previous.schema, schema)
+            // Keyed by table, not a flat list. The predicate below can only ever
+            // match an entry with the SAME table, so scanning just that table's
+            // entries finds exactly what a scan of every entry would - in the same
+            // insertion order, so the EARLIEST conflict is still the one reported.
+            //
+            // The flat Vec made this pass quadratic: a linear scan per op over an
+            // accumulator that grew once per op, paid even by envelopes containing
+            // no rename at all. It was the entire cost of the load gate at scale
+            // (F664): 3.5s of a 3.6s validate over 50k ops.
+            let previous_for_table = seen.get(table).map_or(&[][..], Vec::as_slice);
+            if let Some(previous) = previous_for_table.iter().find(|previous| {
+                schemas_may_name_same_table(previous.schema, schema)
                     && (previous.is_online_rename || is_online_rename)
             }) {
                 let rename_schema = if is_online_rename {
@@ -3131,9 +3139,10 @@ fn validate_online_rename_isolation_op<'a>(
                     )),
                 });
             }
-            seen.push(TableOperationTarget {
+            // The table is the map KEY now, so carrying it in the value too would
+            // be a second copy of the same fact that could drift from it.
+            seen.entry(table).or_default().push(TableOperationTarget {
                 schema,
-                table,
                 op_index,
                 is_online_rename,
             });
@@ -3154,7 +3163,8 @@ fn validate_online_rename_sequence(
     if target_dialect != Dialect::Postgres {
         return Ok(());
     }
-    let mut seen = Vec::new();
+    let mut seen: std::collections::BTreeMap<&str, Vec<TableOperationTarget<'_>>> =
+        std::collections::BTreeMap::new();
     for (op_index, op) in ir.ops.iter().enumerate() {
         validate_online_rename_isolation_op(op, target_dialect, op_index, ts_locations, &mut seen)?;
     }
