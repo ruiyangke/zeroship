@@ -1411,6 +1411,20 @@ pub enum IrLowerError {
          Author the change as an explicit migration with the SQL you want."
     )]
     MysqlAlterColumnUnsupported(&'static str),
+    /// A `createIndex` whose name already exists LIVE with a DIFFERENT shape.
+    ///
+    /// The emitters render `CREATE INDEX IF NOT EXISTS` whether or not the author
+    /// asked, so the server SKIPS such a statement and reports success while
+    /// keeping the live index. Measured: with `ix` live as a non-unique index on
+    /// `(v)`, `CREATE UNIQUE INDEX IF NOT EXISTS "ix" … ("w")` succeeds with a
+    /// NOTICE and leaves the old index — the author gets neither the uniqueness
+    /// they asked for nor an error.
+    ///
+    /// Refused here rather than in the guard probe: the unguarded probe is
+    /// `ownership_only` deliberately, so a same-table re-run stays the
+    /// `IF NOT EXISTS` no-op crash recovery replays. Carries the rendered detail.
+    #[error("{0}")]
+    CreateIndexShapeConflict(String),
     /// A PG/MySQL create-time FK was correctly withheld from a forward
     /// reference, but no matching target-table CREATE appeared later in the
     /// selected artifact leg. Emitting the ALTER anyway would only fail later at
@@ -4785,6 +4799,46 @@ impl IrAuthor {
                     *nulls_not_distinct,
                     self.dialect,
                 )?;
+                // SAME NAME, DIFFERENT SHAPE, ALREADY LIVE — refuse here rather
+                // than emit a `CREATE INDEX IF NOT EXISTS` the server silently
+                // SKIPS. Measured: with `ix` live as a non-unique index on (v),
+                // `CREATE UNIQUE INDEX IF NOT EXISTS "ix" ... ("w")` succeeds with
+                // a NOTICE, journals green, and leaves the old index in place —
+                // so an author who added a UNIQUE index to enforce an invariant
+                // gets neither the uniqueness nor an error.
+                //
+                // DELIBERATELY NOT A PROBE CHANGE. The unguarded probe is
+                // `ownership_only` on purpose, so that a same-table re-run stays
+                // the `IF NOT EXISTS` no-op crash recovery replays; adding an
+                // `expect` there risks turning a met precondition into a SKIPPED
+                // statement. This uses data already in hand instead.
+                //
+                // FAIL-OPEN WHERE IT CANNOT KNOW: only a live snapshot that
+                // POSITIVELY shows a differing same-named index refuses. An absent
+                // or unpopulated snapshot behaves exactly as before, so nothing
+                // that worked starts failing for want of information. A replay of
+                // the engine's own statement matches and stays a no-op.
+                if let Some(live) = live_schema.table_snapshots.get(table.as_str()) {
+                    if let Some(existing) = live.indexes.iter().find(|i| i.name == idx.name) {
+                        if existing.unique != idx.unique || existing.columns != idx.columns {
+                            return Err(IrLowerError::CreateIndexShapeConflict(format!(
+                                "createIndex at op {op_index}: index {:?} already exists on \
+                                 {:?} with a different shape (live: unique={} on {:?}; \
+                                 requested: unique={} on {:?}). The render is `CREATE INDEX \
+                                 IF NOT EXISTS`, so the server would SKIP it and keep the \
+                                 live index while reporting success. Drop the existing index \
+                                 first, or use a different name",
+                                idx.name,
+                                table,
+                                existing.unique,
+                                existing.columns,
+                                idx.unique,
+                                idx.columns
+                            )));
+                        }
+                    }
+                }
+
                 // createIndex ifNotExists: verify (unique, columns)
                 // from the SAME index snapshot the CREATE renders from.
                 if let Some(g) = guard {
