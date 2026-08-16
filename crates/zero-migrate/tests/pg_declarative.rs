@@ -734,3 +734,168 @@ async fn a_rename_hint_on_postgres_produces_a_rename_not_a_drop_and_recreate() {
         hinted.renames
     );
 }
+
+/// The guarantee the whole rename machinery exists for: the ROWS SURVIVE.
+///
+/// The sibling test above proves a hint makes the planner emit a rename instead
+/// of a drop-and-create. That is a statement about a plan, not about data. A
+/// planner could emit a rename step that the apply path then executed as
+/// something lossy and that test would still pass.
+///
+/// SQLite has data-preservation coverage for its rebuild route. The PostgreSQL
+/// expand-contract route had none: no test anywhere asserted that a row written
+/// before an online rename is readable after it.
+#[compio::test]
+async fn rows_survive_a_postgres_online_rename() {
+    use zero_migrate::driver::SqlSession;
+
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
+
+    let engine = MigrationEngine::new();
+    let author = author_for(&cfg);
+    let backend = PostgresBackend::new_generic(&session);
+
+    // v1: deploy, then WRITE A ROW. Without data in the table a rename cannot
+    // lose anything, so the test would pass on a lossy implementation.
+    let mut v1 = descriptor("people", "email", "string", true);
+    v1.fields.insert(
+        0,
+        FieldDescriptor {
+            name: "id".into(),
+            ty: "string".into(),
+            required: true,
+            ..Default::default()
+        },
+    );
+    v1.indexes = vec![zero_migrate::IndexDescriptor {
+        name: "people_id_key".into(),
+        columns: vec!["id".into()],
+        unique: true,
+    }];
+    let desired1 = desired_snapshot(
+        &cfg.project_schema,
+        std::slice::from_ref(&v1),
+        &effective_policy(&cfg),
+    )
+    .expect("desired v1");
+    let live_empty = snapshot_schema(&session, &cfg.project_schema)
+        .await
+        .expect("snapshot live (empty)");
+    let plan1 = engine
+        .plan_declarative(
+            &desired1,
+            &live_empty,
+            &HashMap::new(),
+            &author,
+            &[],
+            &guard_cfg(&cfg),
+            &effective_policy(&cfg),
+        )
+        .expect("plan v1");
+    engine
+        .apply_declarative(
+            &plan1,
+            &effective_policy(&cfg),
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+        )
+        .await
+        .expect("apply v1");
+
+    session
+        .exec(
+            &format!(
+                r#"INSERT INTO "{}"."people" ("id", "email") VALUES ('p1', 'a@example.com')"#,
+                cfg.project_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("seed a row before the rename");
+
+    // v2: the same collection, field renamed, WITH the hint.
+    let mut v2 = descriptor("people", "email_address", "string", true);
+    v2.fields.insert(
+        0,
+        FieldDescriptor {
+            name: "id".into(),
+            ty: "string".into(),
+            required: true,
+            ..Default::default()
+        },
+    );
+    v2.indexes = vec![zero_migrate::IndexDescriptor {
+        name: "people_id_key".into(),
+        columns: vec!["id".into()],
+        unique: true,
+    }];
+    let desired2 = desired_snapshot(
+        &cfg.project_schema,
+        std::slice::from_ref(&v2),
+        &effective_policy(&cfg),
+    )
+    .expect("desired v2");
+    let live_v1 = snapshot_schema(&session, &cfg.project_schema)
+        .await
+        .expect("snapshot live (v1)");
+    let hints = vec![RenameHint {
+        table: "people".into(),
+        from: "email".into(),
+        to: "email_address".into(),
+    }];
+    let plan2 = engine
+        .plan_declarative(
+            &desired2,
+            &live_v1,
+            &HashMap::new(),
+            &author,
+            &hints,
+            &guard_cfg(&cfg),
+            &effective_policy(&cfg),
+        )
+        .expect("plan v2 with a hint");
+    assert_eq!(
+        plan2.renames.len(),
+        1,
+        "the hinted plan must carry a rename"
+    );
+
+    engine
+        .apply_declarative(
+            &plan2,
+            &effective_policy(&cfg),
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+        )
+        .await
+        .expect("apply the online rename");
+
+    // THE ASSERTION THAT MATTERS: the value written under the OLD name is
+    // readable under the NEW one.
+    let row = session
+        .query_one(
+            &format!(
+                r#"SELECT "email_address" AS v FROM "{}"."people""#,
+                cfg.project_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("the renamed column must exist and be queryable");
+    let got: String = row
+        .try_get::<_, String>("v")
+        .expect("decode the renamed column");
+    assert_eq!(
+        got, "a@example.com",
+        "the row written before the rename must survive it"
+    );
+}
