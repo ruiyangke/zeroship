@@ -48,45 +48,89 @@ fn verdict(ops: &str) -> Result<(), String> {
 
 const T: &str = r#"{"op":"createTable","name":"a","columns":[{"name":"c0","type":"int","nullable":false},{"name":"v","type":"int","nullable":true}],"primaryKey":["c0"]}"#;
 
+/// Assert every needle, so a SIBLING's refusal cannot satisfy this test.
+///
+/// The audit that added this started by asking whether an assertion existed. That
+/// was the wrong question: the original guard below checked only that the message
+/// contained "already", which four of these five refusals do. The question that
+/// matters is whether another rule in the same family would pass.
+fn expect_refusal(ops: &str, needles: &[&str], what: &str) {
+    let refusal = verdict(ops).expect_err(what);
+    for needle in needles {
+        assert!(
+            refusal.contains(needle),
+            "{needle:?} is missing, so a sibling rule is satisfying this test \
+             instead of the one it names: {refusal}"
+        );
+    }
+}
+
 #[test]
 fn creating_the_same_table_twice_is_refused() {
-    let refusal = verdict(&format!("{T},{T}")).expect_err("the second createTable retakes a name");
-    assert!(
-        refusal.to_lowercase().contains("already"),
-        "the refusal must say the name is already taken: {refusal}"
+    expect_refusal(
+        &format!("{T},{T}"),
+        &["this createTable claims", "already created a table"],
+        "the second createTable retakes a name",
     );
 }
 
 #[test]
 fn adding_the_same_column_twice_is_refused() {
-    verdict(&format!(
-        r#"{T},{{"op":"addColumn","table":"a","column":"n","type":"int","nullable":true}},{{"op":"addColumn","table":"a","column":"n","type":"text","nullable":true}}"#
-    ))
-    .expect_err("the second addColumn retakes a column name");
+    expect_refusal(
+        &format!(
+            r#"{T},{{"op":"addColumn","table":"a","column":"n","type":"int","nullable":true}},{{"op":"addColumn","table":"a","column":"n","type":"text","nullable":true}}"#
+        ),
+        // The column name is what separates this from the sibling below; both
+        // are addColumn refusals on the same table.
+        &[
+            r#"this addColumn claims the name "n""#,
+            "already added or defined",
+        ],
+        "the second addColumn retakes a column name",
+    );
 }
 
 #[test]
 fn adding_a_column_the_create_table_already_defined_is_refused() {
-    verdict(&format!(
-        r#"{T},{{"op":"addColumn","table":"a","column":"v","type":"text","nullable":true}}"#
-    ))
-    .expect_err("the addColumn retakes a name the createTable defined");
+    expect_refusal(
+        &format!(
+            r#"{T},{{"op":"addColumn","table":"a","column":"v","type":"text","nullable":true}}"#
+        ),
+        &[
+            r#"this addColumn claims the name "v""#,
+            "already added or defined",
+        ],
+        "the addColumn retakes a name the createTable defined",
+    );
 }
 
 #[test]
 fn a_create_table_naming_one_column_twice_is_refused() {
-    verdict(
+    expect_refusal(
         r#"{"op":"createTable","name":"a","columns":[{"name":"c0","type":"int","nullable":false},{"name":"d","type":"int","nullable":true},{"name":"d","type":"text","nullable":true}],"primaryKey":["c0"]}"#,
-    )
-    .expect_err("`column \"d\" specified more than once` is decidable from the op alone");
+        &[r#"names column "d" more than once"#],
+        "`column \"d\" specified more than once` is decidable from the op alone",
+    );
 }
 
 #[test]
 fn renaming_a_table_onto_a_live_name_is_refused() {
-    verdict(&format!(
-        r#"{T},{{"op":"createTable","name":"b","columns":[{{"name":"c0","type":"int","nullable":false}}],"primaryKey":["c0"]}},{{"op":"renameTable","table":"a","to":"b"}}"#
-    ))
-    .expect_err("the rename target is a table this envelope just created");
+    // MEASURED, and not what this fixture's title implies: the refusal comes from
+    // the TYPE namespace, because a rename carries the table's composite row type
+    // and that check runs first. The relation-side rename check is real but is
+    // not what fails here - deleting it would leave this test green, exactly the
+    // trap the partition fixture had to be corrected for.
+    expect_refusal(
+        &format!(
+            r#"{T},{{"op":"createTable","name":"b","columns":[{{"name":"c0","type":"int","nullable":false}}],"primaryKey":["c0"]}},{{"op":"renameTable","table":"a","to":"b"}}"#
+        ),
+        &[
+            "this renameTable claims",
+            "already created a table",
+            "one type namespace",
+        ],
+        "the rename target is a table this envelope just created",
+    );
 }
 
 // ---------------------------------------------------------------------------
