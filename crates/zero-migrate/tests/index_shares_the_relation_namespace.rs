@@ -40,6 +40,20 @@ fn verdict(d: Dialect, ops: &str) -> Result<(), String> {
     validate_ir(&ir, d, &[]).map_err(|e| format!("{}: {}", e.code, e.reason))
 }
 
+/// Assert the refusal is the one the test names, not merely that one happened.
+///
+/// Added by the F769 audit. Every site below had a bare `expect_err`, which any
+/// earlier rule in the pipeline would satisfy - the trap that left two claims in
+/// the partition fixture measuring a different rule than they named.
+fn expect_refusal_mentioning(dialect: Dialect, ops: &str, needle: &str, what: &str) {
+    let refusal = verdict(dialect, ops).expect_err(what);
+    assert!(
+        refusal.contains(needle),
+        "the refusal must be the {needle:?} one this test names, not another rule \
+         that happens to fire first: {refusal}"
+    );
+}
+
 const A: &str = r#"{"op":"createTable","name":"a","columns":[{"name":"c0","type":"int","nullable":false},{"name":"v","type":"int","nullable":true}],"primaryKey":["c0"]}"#;
 const IX: &str =
     r#"{"op":"createIndex","name":"ix","table":"a","columns":[{"kind":"column","name":"v"}]}"#;
@@ -63,47 +77,51 @@ fn a_table_may_not_take_a_live_index_name_on_postgres() {
 #[test]
 fn an_index_may_not_take_a_live_table_name_on_postgres() {
     // The reverse direction, and the one a createTable-only rule would miss.
-    verdict(
+    expect_refusal_mentioning(
         Dialect::Postgres,
         &format!(
             r#"{A},{{"op":"createIndex","name":"a","table":"a","columns":[{{"kind":"column","name":"v"}}]}}"#
         ),
-    )
-    .expect_err("an index may not be named after a live table");
+        "already created a table",
+        "an index may not be named after a live table",
+    );
 }
 
 #[test]
 fn an_index_may_not_take_a_live_view_name_on_postgres() {
-    verdict(
+    expect_refusal_mentioning(
         Dialect::Postgres,
         &format!(
             r#"{A},{{"op":"createView","name":"vw","query":{{"kind":"structured","select":{{"from":{{"name":"a"}},"projection":[{{"kind":"colRef","name":"c0"}}]}}}}}},{{"op":"createIndex","name":"vw","table":"a","columns":[{{"kind":"column","name":"v"}}]}}"#
         ),
-    )
-    .expect_err("an index may not take a live view name");
+        "already created a view",
+        "an index may not take a live view name",
+    );
 }
 
 #[test]
 fn an_index_may_not_take_a_live_sequence_name_on_postgres() {
-    verdict(
+    expect_refusal_mentioning(
         Dialect::Postgres,
         &format!(
             r#"{A},{{"op":"createSequence","name":"sq"}},{{"op":"createIndex","name":"sq","table":"a","columns":[{{"kind":"column","name":"v"}}]}}"#
         ),
-    )
-    .expect_err("an index may not take a live sequence name");
+        "already created a sequence",
+        "an index may not take a live sequence name",
+    );
 }
 
 #[test]
 fn sqlite_refuses_it_too() {
     // MEASURED: `there is already a table named a`.
-    verdict(
+    expect_refusal_mentioning(
         Dialect::Sqlite,
         &format!(
             r#"{A},{{"op":"createIndex","name":"a","table":"a","columns":[{{"kind":"column","name":"v"}}]}}"#
         ),
-    )
-    .expect_err("SQLite keeps indexes and tables in one namespace");
+        "already created a table",
+        "SQLite keeps indexes and tables in one namespace",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -198,15 +216,16 @@ fn dropping_a_table_frees_the_names_of_its_indexes() {
 fn dropping_an_unrelated_table_does_not_free_an_index_name() {
     // THE CONTROL. Releasing every index on any drop would pass the test above
     // and lose what F715 added.
-    verdict(
+    expect_refusal_mentioning(
         Dialect::Postgres,
         &format!(
             r#"{A},{IX},{},{{"op":"dropTable","table":"other"}},{}"#,
             tbl("other"),
             tbl("ix")
         ),
-    )
-    .expect_err("an unrelated drop must not release a live index name");
+        "already created a index",
+        "an unrelated drop must not release a live index name",
+    );
 }
 
 /// A RENAME must carry the parentage the previous two commits introduced.
