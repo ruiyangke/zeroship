@@ -34,6 +34,14 @@ pub const PLATFORM_PROVIDER: &str = "platform";
 /// OAuth client id fixed onto access tokens issued to `zeroship login`.
 pub const PLATFORM_CLI_CLIENT_ID: &str = "zeroship-cli";
 
+/// Scopes the control service may issue to the platform CLI client.
+pub const PLATFORM_CLI_ISSUABLE_SCOPES: [&str; 4] = [
+    "apps:deploy",
+    "apps:read",
+    "apps:write",
+    "secrets:read",
+];
+
 /// Maximum lifetime of a platform CLI token, in seconds.
 ///
 /// There is no supported early-recall operation for these tokens today, so

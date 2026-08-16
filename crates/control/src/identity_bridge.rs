@@ -11,19 +11,12 @@ use serde_json::Value;
 use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
-use zeroship_core::device_grant::PLATFORM_PROVIDER;
+use zeroship_core::device_grant::{PLATFORM_CLI_ISSUABLE_SCOPES, PLATFORM_PROVIDER};
 
 const DEFAULT_SUPABASE_EMAIL_LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
 // Device-provisioned creators need apps:write for deploy auto-create and
 // apps:deploy for publishing concrete releases. secrets:read exposes names
 // only and lets deploy validate the project's declared requirements.
-const DEFAULT_CREATOR_GRANTS: [&str; 4] = [
-    "apps:write",
-    "apps:deploy",
-    "apps:read",
-    "secrets:read",
-];
-
 #[derive(Debug, Error)]
 pub enum IdentityBridgeError {
     #[error("invalid input: {0}")]
@@ -114,7 +107,7 @@ pub async fn ensure_platform_creator_grants(
     if linked.is_none() {
         return Ok(());
     }
-    for grant in DEFAULT_CREATOR_GRANTS {
+    for grant in PLATFORM_CLI_ISSUABLE_SCOPES {
         pg.execute(
             "INSERT INTO zeroship.principal_grants (principal_id, grant_name) \
              VALUES ($1, $2) \
@@ -209,7 +202,7 @@ pub async fn provision_or_link(
     }
 
     if target.newly_created {
-        for grant in DEFAULT_CREATOR_GRANTS {
+        for grant in PLATFORM_CLI_ISSUABLE_SCOPES {
             tx.execute(
                 "INSERT INTO zeroship.principal_grants (principal_id, grant_name) \
                  VALUES ($1, $2) \
@@ -371,10 +364,10 @@ pub fn parse_gotrue_admin_email_verified(body: &[u8]) -> Option<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::DEFAULT_CREATOR_GRANTS;
+    use super::PLATFORM_CLI_ISSUABLE_SCOPES;
 
     #[test]
     fn default_creator_grants_can_read_secret_names() {
-        assert!(DEFAULT_CREATOR_GRANTS.contains(&"secrets:read"));
+        assert!(PLATFORM_CLI_ISSUABLE_SCOPES.contains(&"secrets:read"));
     }
 }
