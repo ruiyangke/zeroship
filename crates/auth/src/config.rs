@@ -968,11 +968,6 @@ mod tests {
         // Shared identities keep their unprefixed canonical names, so auth,
         // gateway and worker read ONE variable for the control-plane URL.
         assert!(envs.contains(&"ZEROSHIP_CONTROL_URL".to_owned()));
-        assert!(envs.contains(&"ZEROSHIP_AUTH_PLATFORM_MINT_KEY".to_owned()));
-        assert!(
-            !envs.contains(&"ZEROSHIP_CONTROL_KEY".to_owned()),
-            "auth must not consume the worker-shared control key"
-        );
 
         // The whole command line, not just the settings carrier: after the
         // secret conversion there is no second flatten to hide an old name in,
@@ -1002,6 +997,23 @@ mod tests {
         // DO carry an environment name, at the canonical spelling. Without it,
         // a build that dropped those arguments entirely would also pass.
         assert!(all_envs.contains(&"ZEROSHIP_AUTH_SIGNING_KEY_FILE".to_owned()));
+    }
+
+    #[test]
+    fn auth_specs_use_only_the_dedicated_platform_mint_key() {
+        let declared = AuthSettings::SPECS
+            .iter()
+            .filter_map(|spec| spec.env_name())
+            .collect::<Vec<_>>();
+
+        assert!(
+            declared.contains(&"ZEROSHIP_AUTH_PLATFORM_MINT_KEY".to_owned()),
+            "auth must consume the dedicated platform mint key"
+        );
+        assert!(
+            !declared.contains(&"ZEROSHIP_CONTROL_KEY".to_owned()),
+            "auth must not consume the worker-shared control key"
+        );
     }
 
     // A `Secret<T>` generates a `-file` PATH flag and NO value flag. That is the
