@@ -30,5 +30,43 @@ publish that key. Production publishes it at `crates/auth/src/main.rs:248`.
 `Issuer::issue_logout_token` reserves the token expiry through the active key
 registry, so the unpublished fixture key is correctly refused.
 
-The baseline suite was still running when this evidence was committed. The
-Gateway red block and final aggregate belong in the next notes commit.
+## Verbatim Gateway red
+
+Each of the eight failures logged this production guard error (the first used
+`oac_bcl_refresh`; the remaining seven used `oac_myapp`):
+
+```text
+[ERROR zeroship_gateway::auth_token] app_user_identities upsert failed on cookie mint error=database: app_user_identities pairwise binding changed app_client_id=oac_myapp
+thread 'token_exchange_swaps_email_for_relay_alias' (2128900) panicked at crates/gateway/tests/auth_token_anchors_test.rs:1477:5:
+assertion `left == right` failed: code exchange must succeed
+  left: 500
+ right: 200
+```
+
+The binary's verbatim failure list and summary were:
+
+```text
+failures:
+    backchannel_logout_revokes_refreshed_session_with_sid_logout_token
+    mint_racing_concurrent_reset_fails_closed_no_fresh_cookie
+    session_mint_invalid_grant_deletes_anchor_and_requires_login
+    session_mint_persists_rotated_refresh_token_for_next_rotation
+    session_mint_recovers_after_reload_one_refresh
+    session_minted_cookie_verifies_locally_bound_to_route_client
+    session_steady_state_reads_gateway_session_without_op
+    token_exchange_swaps_email_for_relay_alias
+
+test result: FAILED. 15 passed; 8 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.38s
+```
+
+The complete runner ended with:
+
+```text
+FAIL: only 451 auth tests passed, fewer than the 505 this gate expects.
+AUTH SUITE: FAILED
+```
+
+The runner's 451 aggregate excludes every passing test in a failed test
+binary, including the 15 anchor passes. There were exactly nine failed tests.
+The separate auth failure was not an HTTP 500 and did not enter the Gateway
+identity upsert, so the original claim that all nine share that path is false.
