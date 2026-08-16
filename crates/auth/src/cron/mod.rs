@@ -1,16 +1,17 @@
 //! In-process cron tasks. Spawned at boot via [`spawn_all`].
 //!
 //! Each task is a `loop { tick; sleep }` future detached on the compio
-//! runtime. Tasks observe their schedule from
-//! [`AuthConfig`](crate::config::AuthConfig) (so an operator can shorten
-//! `--cron-tick-secs` for staging environments) and coordinate via
-//! `zeroship.cron_state` rows when they need durable "last-ran" tracking.
+//! runtime. Audit retention reads its schedule from
+//! [`AuthConfig`](crate::config::AuthConfig); the other tasks use fixed
+//! schedules appropriate to their retention windows.
 //!
 //! The active tasks retain audit logs, drop expired one-shot token rows after
-//! their grace window, and erase accounts whose deletion grace window elapsed.
+//! their grace window, terminally retire elapsed OIDC signing keys, and erase
+//! accounts whose deletion grace window elapsed.
 
 pub mod account_reaper;
 pub mod audit_retention;
+pub mod signing_key_retention;
 pub mod token_sweep;
 
 use std::sync::Arc;
@@ -34,6 +35,12 @@ pub fn spawn_all(
     let cfg_audit = cfg.clone();
     compio::runtime::spawn(async move {
         audit_retention::run(cfg_audit).await;
+    })
+    .detach();
+
+    let db_signing_key_retention = db.clone();
+    compio::runtime::spawn(async move {
+        signing_key_retention::run(db_signing_key_retention).await;
     })
     .detach();
 

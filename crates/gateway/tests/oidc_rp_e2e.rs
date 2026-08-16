@@ -680,7 +680,7 @@ async fn gateway_bearer_rejects_access_token_for_different_resource_audience() {
     let scopes = vec!["openid".to_string(), "email".to_string()];
     let global_user = Uuid::new_v4().to_string();
     let wrong_aud_token = issuer
-        .issue_principal_access_token(&PrincipalAccessTokenMint {
+        .sign_unregistered_principal_access_token_fixture(&PrincipalAccessTokenMint {
             principal_id: &global_user,
             audience: &wrong_resource_audience,
             client_id: &client_id,

@@ -691,8 +691,32 @@ async fn exchange_authorization_code(
         return Err(OAuthError::invalid_grant("consent no longer covers grant"));
     }
 
+    // Keep the global lock order refresh-user -> signing-key. Refresh exchange
+    // already holds the user lock when it advances the signing-key watermark.
+    let refresh_token =
+        if consumed.granted_scopes.iter().any(|scope| scope == "offline_access")
+            && client.refresh_allowed
+        {
+            let keys = RefreshTokenKeys::from_config(cfg)?;
+            Some(
+                refresh::issue_root_refresh_token(
+                    db,
+                    issuer,
+                    &keys,
+                    client,
+                    consumed.user_id,
+                    &consumed.granted_scopes,
+                    consumed.auth_credential_version,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+
     let user_id = consumed.user_id.to_string();
-    let access_token = mint_access_token(issuer, client, consumed.user_id, &consumed.granted_scopes)?;
+    let access_token =
+        mint_access_token(db, issuer, client, consumed.user_id, &consumed.granted_scopes).await?;
 
     let id_token = if consumed.granted_scopes.iter().any(|scope| scope == "openid") {
         let nonce = consumed
@@ -729,42 +753,64 @@ async fn exchange_authorization_code(
             None
         };
         let token = if client.brokered {
-            issuer.issue_principal_id_token(&PrincipalIdTokenMint {
-                principal_id: &user_id,
-                client_id: &client.client_id,
-                sid: &consumed.sid,
-                nonce,
-                access_token: &access_token,
-                auth_time: None,
-                amr: None,
-                acr: None,
-                email: identity_claims.as_ref().and_then(|claims| claims.email.as_deref()),
-                email_verified: identity_claims
-                    .as_ref()
-                    .and_then(|claims| claims.email_verified),
-                name: identity_claims.as_ref().and_then(|claims| claims.name.as_deref()),
-                picture: identity_claims.as_ref().and_then(|claims| claims.picture.as_deref()),
-                ttl_secs: Some(ACCESS_TOKEN_TTL_SECS),
-            })
+            issuer
+                .issue_principal_id_token(
+                    db,
+                    &PrincipalIdTokenMint {
+                        principal_id: &user_id,
+                        client_id: &client.client_id,
+                        sid: &consumed.sid,
+                        nonce,
+                        access_token: &access_token,
+                        auth_time: None,
+                        amr: None,
+                        acr: None,
+                        email: identity_claims
+                            .as_ref()
+                            .and_then(|claims| claims.email.as_deref()),
+                        email_verified: identity_claims
+                            .as_ref()
+                            .and_then(|claims| claims.email_verified),
+                        name: identity_claims
+                            .as_ref()
+                            .and_then(|claims| claims.name.as_deref()),
+                        picture: identity_claims
+                            .as_ref()
+                            .and_then(|claims| claims.picture.as_deref()),
+                        ttl_secs: Some(ACCESS_TOKEN_TTL_SECS),
+                    },
+                )
+                .await
         } else {
-            issuer.issue_id_token(&IdTokenMint {
-                user_id: &user_id,
-                sector: &client.sector_identifier,
-                client_id: &client.client_id,
-                sid: &consumed.sid,
-                nonce,
-                access_token: &access_token,
-                auth_time: None,
-                amr: None,
-                acr: None,
-                email: identity_claims.as_ref().and_then(|claims| claims.email.as_deref()),
-                email_verified: identity_claims
-                    .as_ref()
-                    .and_then(|claims| claims.email_verified),
-                name: identity_claims.as_ref().and_then(|claims| claims.name.as_deref()),
-                picture: identity_claims.as_ref().and_then(|claims| claims.picture.as_deref()),
-                ttl_secs: Some(ACCESS_TOKEN_TTL_SECS),
-            })
+            issuer
+                .issue_id_token(
+                    db,
+                    &IdTokenMint {
+                        user_id: &user_id,
+                        sector: &client.sector_identifier,
+                        client_id: &client.client_id,
+                        sid: &consumed.sid,
+                        nonce,
+                        access_token: &access_token,
+                        auth_time: None,
+                        amr: None,
+                        acr: None,
+                        email: identity_claims
+                            .as_ref()
+                            .and_then(|claims| claims.email.as_deref()),
+                        email_verified: identity_claims
+                            .as_ref()
+                            .and_then(|claims| claims.email_verified),
+                        name: identity_claims
+                            .as_ref()
+                            .and_then(|claims| claims.name.as_deref()),
+                        picture: identity_claims
+                            .as_ref()
+                            .and_then(|claims| claims.picture.as_deref()),
+                        ttl_secs: Some(ACCESS_TOKEN_TTL_SECS),
+                    },
+                )
+                .await
         }
         .map_err(|err| {
             tracing::error!(
@@ -804,27 +850,6 @@ async fn exchange_authorization_code(
             OAuthError::server_error("session participation store unavailable")
         })?;
     }
-
-    let refresh_token =
-        if consumed.granted_scopes.iter().any(|scope| scope == "offline_access")
-            && client.refresh_allowed
-        {
-            let keys = RefreshTokenKeys::from_config(cfg)?;
-            Some(
-                refresh::issue_root_refresh_token(
-                    db,
-                    issuer,
-                    &keys,
-                    client,
-                    consumed.user_id,
-                    &consumed.granted_scopes,
-                    consumed.auth_credential_version,
-                )
-                .await?,
-            )
-        } else {
-            None
-        };
 
     Ok(AuthorizationCodeExchange::Token(TokenResponse {
         access_token,
@@ -1359,7 +1384,8 @@ pub(super) fn authenticate_brokered_client(
     }
 }
 
-pub(super) fn mint_access_token(
+pub(super) async fn mint_access_token(
+    db: &(impl GenericClient + ?Sized),
     issuer: &Issuer,
     client: &OAuthClient,
     user_id: Uuid,
@@ -1368,7 +1394,7 @@ pub(super) fn mint_access_token(
     let user_id = user_id.to_string();
     let audience = client.resource_audience();
     issuer
-        .issue_access_token(&AccessTokenMint {
+        .issue_access_token(db, &AccessTokenMint {
             user_id: &user_id,
             sector: &client.sector_identifier,
             audience: &audience,
@@ -1376,6 +1402,7 @@ pub(super) fn mint_access_token(
             scopes,
             ttl_secs: Some(ACCESS_TOKEN_TTL_SECS),
         })
+        .await
         .map_err(|err| {
             tracing::error!(error = %err, "token: access-token mint failed");
             OAuthError::server_error("access token mint failed")

@@ -477,7 +477,8 @@ async fn exchange_device_code_locked(
 
             delete_device_grant(db, device_code_hash).await?;
 
-            let access_token = mint_access_token(issuer, client, user_id, &granted_scopes)?;
+            let access_token =
+                mint_access_token(db, issuer, client, user_id, &granted_scopes).await?;
             let refresh_token =
                 if granted_scopes.iter().any(|scope| scope == "offline_access")
                     && client.refresh_allowed
@@ -670,13 +671,19 @@ pub async fn mint_platform_token(
         .filter(|scope| granted.contains(scope) && seen.insert(scope.clone()))
         .collect();
     let principal_id = principal_id.to_string();
-    let access_token = match issuer.issue_principal_access_token(&PrincipalAccessTokenMint {
-        principal_id: &principal_id,
-        audience: cfg.settings.oauth_audience.get().trim(),
-        client_id: PLATFORM_CLI_CLIENT_ID,
-        scopes: &scopes,
-        ttl_secs: Some(ttl_secs),
-    }) {
+    let access_token = match issuer
+        .issue_principal_access_token(
+            db.as_ref(),
+            &PrincipalAccessTokenMint {
+                principal_id: &principal_id,
+                audience: cfg.settings.oauth_audience.get().trim(),
+                client_id: PLATFORM_CLI_CLIENT_ID,
+                scopes: &scopes,
+                ttl_secs: Some(ttl_secs),
+            },
+        )
+        .await
+    {
         Ok(token) => token,
         Err(err) => {
             tracing::error!(error = %err, "auth: platform token mint failed");

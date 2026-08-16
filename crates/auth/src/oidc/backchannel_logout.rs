@@ -81,7 +81,7 @@ pub async fn emit_for_session(
     idp_session_id: Uuid,
 ) -> Result<LogoutEmissionReport> {
     let rps = load_rps_for_session(db, idp_session_id).await?;
-    emit_to_rps(issuer, rps).await
+    emit_to_rps(db, issuer, rps).await
 }
 
 /// Emit BCL logout tokens for every RP remembered for all sessions of a user.
@@ -91,7 +91,7 @@ pub async fn emit_for_user(
     user_id: Uuid,
 ) -> Result<LogoutEmissionReport> {
     let rps = load_rps_for_user(db, user_id).await?;
-    emit_to_rps(issuer, rps).await
+    emit_to_rps(db, issuer, rps).await
 }
 
 async fn load_rps_for_session(db: &Client, idp_session_id: Uuid) -> Result<Vec<RelyingPartySession>> {
@@ -145,6 +145,7 @@ fn row_to_rp(row: &compio_postgres::Row) -> Option<RelyingPartySession> {
 }
 
 async fn emit_to_rps(
+    db: &Client,
     issuer: &Issuer,
     rps: Vec<RelyingPartySession>,
 ) -> Result<LogoutEmissionReport> {
@@ -155,12 +156,18 @@ async fn emit_to_rps(
     };
 
     for rp in rps {
-        let token = match issuer.issue_logout_token(&LogoutTokenMint {
-            client_id: &rp.client_id,
-            sub: Some(&rp.sub),
-            sid: Some(&rp.sid),
-            ttl_secs: None,
-        }) {
+        let token = match issuer
+            .issue_logout_token(
+                db,
+                &LogoutTokenMint {
+                    client_id: &rp.client_id,
+                    sub: Some(&rp.sub),
+                    sid: Some(&rp.sid),
+                    ttl_secs: None,
+                },
+            )
+            .await
+        {
             Ok(token) => token,
             Err(e) => {
                 tracing::error!(
