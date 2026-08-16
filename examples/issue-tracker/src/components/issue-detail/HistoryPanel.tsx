@@ -3,7 +3,7 @@
 // this app's fidelity requirement. (Other panels use the
 // same array to reconstruct current keyword/flag state, which is a
 // different thing: this tab is the raw log, unmodified.)
-import { Avatar } from "@zeroship/ui";
+import { Avatar } from "../../ui/Avatar";
 
 import { Muted } from "../AppPrimitives";
 import { EmptyState } from "../StateViews";
