@@ -33,6 +33,21 @@ fn verdict(op: &str) -> Result<(), String> {
     validate_ir(&ir, Dialect::Postgres, &[]).map_err(|e| format!("{}: {}", e.code, e.reason))
 }
 
+/// Assert WHICH rule refused, so the three kinds cannot cover for each other.
+///
+/// The last test here deliberately exercises three DIFFERENT rules in one body -
+/// unique, foreign key and primary key - to pin that the same authoring mistake
+/// is refused whichever constraint carries it. Bare expect_err made that test
+/// pass if ANY one of the three fired, which is the opposite of what it claims.
+fn expect_refusal_from(ops: &str, needle: &str, what: &str) {
+    let refusal = verdict(ops).expect_err(what);
+    assert!(
+        refusal.contains(needle),
+        "{needle:?} is missing, so another constraint kind is satisfying this \
+         test: {refusal}"
+    );
+}
+
 #[test]
 fn add_constraint_unique_repeating_a_column_is_refused() {
     let refusal = verdict(
@@ -54,10 +69,11 @@ fn add_constraint_unique_repeating_a_column_is_refused() {
 #[test]
 fn create_table_with_an_inline_unique_repeating_a_column_is_refused() {
     // The same mistake authored in the other place it can be written.
-    verdict(
+    expect_refusal_from(
         r#"{"op":"createTable","name":"a","columns":[{"name":"c","type":"int","nullable":false}],"primaryKey":["c"],"constraints":[{"kind":{"kind":"unique","columns":["c","c"]}}]}"#,
-    )
-    .expect_err("an inline UNIQUE repeating a column must be refused like the standalone form");
+        "unique constraint",
+        "an inline UNIQUE repeating a column must be refused like the standalone form",
+    );
 }
 
 #[test]
@@ -73,13 +89,15 @@ fn a_unique_over_distinct_columns_is_still_allowed() {
 fn the_sibling_constraint_kinds_already_refuse_it() {
     // Pins the consistency this fix restores rather than assuming it: the same
     // authoring mistake must be refused whichever constraint kind carries it.
-    verdict(
+    expect_refusal_from(
         r#"{"op":"addConstraint","table":"a","constraint":{"kind":{"kind":"fk","columns":["c","c"],"referencesTable":"b","referencesColumns":["x","y"]}}}"#,
-    )
-    .expect_err("a foreign key repeating a local column is refused");
+        "foreign key",
+        "a foreign key repeating a local column is refused",
+    );
 
-    verdict(
+    expect_refusal_from(
         r#"{"op":"createTable","name":"a","columns":[{"name":"c","type":"int","nullable":false}],"primaryKey":["c","c"]}"#,
-    )
-    .expect_err("a primaryKey repeating a column is refused");
+        "primaryKey names column",
+        "a primaryKey repeating a column is refused",
+    );
 }
