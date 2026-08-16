@@ -4,6 +4,7 @@
 //! is a security-sensitive DB protocol: skipping would hide migration/crypto/
 //! one-time-redemption regressions.
 
+use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -185,8 +186,8 @@ struct MockPlatformAuth {
 }
 
 impl MockPlatformAuth {
-    fn start() -> Self {
-        Self::start_advertising(None)
+    fn start(db_url: &str) -> Self {
+        Self::start_advertising(None, db_url)
     }
 
     /// Start a mock whose tokens carry `issuer` in `iss`, while it still LISTENS
@@ -197,11 +198,11 @@ impl MockPlatformAuth {
     /// unresolvable name and any code that dials the issuer instead of the
     /// configured mint URL fails with the same `Connect` error the live
     /// deployment produced.
-    fn start_advertising_public_issuer(issuer: &str) -> Self {
-        Self::start_advertising(Some(issuer.to_owned()))
+    fn start_advertising_public_issuer(issuer: &str, db_url: &str) -> Self {
+        Self::start_advertising(Some(issuer.to_owned()), db_url)
     }
 
-    fn start_advertising(public_issuer: Option<String>) -> Self {
+    fn start_advertising(public_issuer: Option<String>, db_url: &str) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind platform auth mock");
         listener
             .set_nonblocking(true)
@@ -222,13 +223,18 @@ impl MockPlatformAuth {
         );
         let (shutdown_tx, shutdown_rx) = mpsc::channel();
         let thread_issuer = issuer.clone();
+        let thread_db_url = db_url.to_owned();
         let thread = thread::spawn(move || {
             loop {
                 if shutdown_rx.try_recv().is_ok() {
                     break;
                 }
                 match listener.accept() {
-                    Ok((mut stream, _)) => handle_platform_auth_request(&mut stream, &thread_issuer),
+                    Ok((mut stream, _)) => handle_platform_auth_request(
+                        &mut stream,
+                        &thread_issuer,
+                        &thread_db_url,
+                    ),
                     Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(std::time::Duration::from_millis(10));
                     }
@@ -325,7 +331,7 @@ struct MockMintRequest {
     ttl_secs: Option<i64>,
 }
 
-fn handle_platform_auth_request(stream: &mut TcpStream, issuer: &Issuer) {
+fn handle_platform_auth_request(stream: &mut TcpStream, issuer: &Issuer, db_url: &str) {
     let request = read_mock_http_request(stream);
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/.well-known/jwks.json") => {
@@ -345,12 +351,17 @@ fn handle_platform_auth_request(stream: &mut TcpStream, issuer: &Issuer) {
             }
             let body: MockMintRequest =
                 serde_json::from_slice(&request.body).expect("mock mint body json");
+            let scopes = platform_scopes_visible_to_auth(
+                db_url,
+                &body.principal_id,
+                &body.scopes,
+            );
             let token = issuer
                 .issue_principal_access_token(&PrincipalAccessTokenMint {
                     principal_id: &body.principal_id,
                     audience: "control.zeroship.ai",
                     client_id: PLATFORM_CLI_CLIENT_ID,
-                    scopes: &body.scopes,
+                    scopes: &scopes,
                     ttl_secs: body.ttl_secs,
                 })
                 .expect("mock mint token");
@@ -361,7 +372,7 @@ fn handle_platform_auth_request(stream: &mut TcpStream, issuer: &Issuer) {
                     "access_token": token,
                     "token_type": "Bearer",
                     "expires_in": body.ttl_secs.unwrap_or(ACCESS_TOKEN_TTL_SECS),
-                    "scope": body.scopes.join(" "),
+                    "scope": scopes.join(" "),
                     "provider": "platform",
                     "client_id": PLATFORM_CLI_CLIENT_ID,
                 }),
@@ -369,6 +380,49 @@ fn handle_platform_auth_request(stream: &mut TcpStream, issuer: &Issuer) {
         }
         _ => write_mock_json(stream, 404, &json!({"error": "not_found"})),
     }
+}
+
+fn platform_scopes_visible_to_auth(
+    db_url: &str,
+    principal_id: &str,
+    requested: &[String],
+) -> Vec<String> {
+    let principal_id = Uuid::parse_str(principal_id).expect("mock mint principal UUID");
+    let db_url = db_url.to_owned();
+    let granted = compio::runtime::Runtime::new()
+        .expect("mock auth compio runtime")
+        .block_on(async move {
+            let (client, connection) = connect(&db_url, NoTls)
+                .await
+                .expect("mock auth database connection");
+            compio::runtime::spawn(async move {
+                connection.run().await.expect("mock auth database driver");
+            })
+            .detach();
+            client
+                .execute("SET ROLE zeroship_auth", &[])
+                .await
+                .expect("mock auth database role");
+            client
+                .query(
+                    "SELECT pg.grant_name \
+                     FROM zeroship.users u \
+                     LEFT JOIN zeroship.principal_grants pg ON pg.principal_id = u.id \
+                     WHERE u.id = $1",
+                    &[&principal_id],
+                )
+                .await
+                .expect("mock auth principal grant lookup")
+                .iter()
+                .filter_map(|row| row.get::<_, Option<String>>("grant_name"))
+                .collect::<HashSet<_>>()
+        });
+
+    requested
+        .iter()
+        .filter(|scope| granted.contains(scope.as_str()))
+        .cloned()
+        .collect()
 }
 
 fn read_mock_http_request(stream: &mut TcpStream) -> MockHttpRequest {
@@ -537,9 +591,11 @@ impl Fixture {
         let mock_supabase = MockSupabase::start();
         let mock_platform = match topology {
             PlatformTopology::PublicIssuer(issuer) => {
-                MockPlatformAuth::start_advertising_public_issuer(issuer)
+                MockPlatformAuth::start_advertising_public_issuer(issuer, &db_url)
             }
-            PlatformTopology::Colocated | PlatformTopology::NoMintUrl => MockPlatformAuth::start(),
+            PlatformTopology::Colocated | PlatformTopology::NoMintUrl => {
+                MockPlatformAuth::start(&db_url)
+            }
         };
         let issuer = mock_supabase.issuer();
         let (control_pg_client, control_pg_conn) =

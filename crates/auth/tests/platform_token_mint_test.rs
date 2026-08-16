@@ -145,6 +145,26 @@ impl Fixture {
             .expect("delete platform principal");
     }
 
+    async fn disable_principal(&self, principal_id: Uuid) {
+        self.admin_pg
+            .execute(
+                "UPDATE zeroship.users SET disabled_at = NOW() WHERE id = $1",
+                &[&principal_id],
+            )
+            .await
+            .expect("disable platform principal");
+    }
+
+    async fn lock_principal(&self, principal_id: Uuid) {
+        self.admin_pg
+            .execute(
+                "UPDATE zeroship.users SET locked_until = NOW() + INTERVAL '1 hour' WHERE id = $1",
+                &[&principal_id],
+            )
+            .await
+            .expect("lock platform principal");
+    }
+
     async fn mint(&self, bearer: &str, body: serde_json::Value) -> (u16, String) {
         let response = self
             .http
@@ -240,6 +260,54 @@ async fn platform_mint_rejects_an_unknown_principal_over_http() {
             mint_body(Uuid::new_v4(), &[], ACCESS_TOKEN_TTL_SECS),
         )
         .await;
+
+    assert_eq!(status, 400, "platform mint response: {raw_body}");
+    drop(fx.srv);
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn platform_mint_rejects_a_disabled_principal_over_http() {
+    let Some(fx) = Fixture::boot().await else {
+        zeroship_test_support::skip(
+            "[platform_token_mint] skip (need AUTH_DB_URL or CONTROL_TEST_DB)",
+        );
+        return;
+    };
+    let principal_id = fx.create_principal(&["apps:read"]).await;
+    fx.disable_principal(principal_id).await;
+
+    let (status, raw_body) = fx
+        .mint(
+            TEST_PLATFORM_MINT_KEY,
+            mint_body(principal_id, &["apps:read"], ACCESS_TOKEN_TTL_SECS),
+        )
+        .await;
+    fx.delete_principal(principal_id).await;
+
+    assert_eq!(status, 400, "platform mint response: {raw_body}");
+    drop(fx.srv);
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn platform_mint_rejects_a_locked_principal_over_http() {
+    let Some(fx) = Fixture::boot().await else {
+        zeroship_test_support::skip(
+            "[platform_token_mint] skip (need AUTH_DB_URL or CONTROL_TEST_DB)",
+        );
+        return;
+    };
+    let principal_id = fx.create_principal(&["apps:read"]).await;
+    fx.lock_principal(principal_id).await;
+
+    let (status, raw_body) = fx
+        .mint(
+            TEST_PLATFORM_MINT_KEY,
+            mint_body(principal_id, &["apps:read"], ACCESS_TOKEN_TTL_SECS),
+        )
+        .await;
+    fx.delete_principal(principal_id).await;
 
     assert_eq!(status, 400, "platform mint response: {raw_body}");
     drop(fx.srv);

@@ -418,7 +418,7 @@ mod tests {
     /// exactly one of them and know which guard spoke.
     fn healthy() -> AuthConfig {
         let mut cfg = AuthConfig::parse_from(["zeroship-auth"]);
-        cfg.settings.platform_mint_key = supplied("platform-mint-key");
+        cfg.settings.platform_mint_key = supplied("platform-mint-key-at-least-32-bytes");
         cfg.settings.stash_signing_key = supplied("0123456789abcdef0123456789abcdef");
         cfg.settings.totp_enc_key = supplied(&"00".repeat(32));
         cfg
@@ -444,6 +444,11 @@ mod tests {
 
         cfg.settings.platform_mint_key = supplied("   ");
         validate_startup_secrets(&cfg).expect_err("a whitespace-only mint key is rejected");
+
+        cfg.settings.platform_mint_key = supplied("too-short");
+        let message =
+            validate_startup_secrets(&cfg).expect_err("a short platform mint key is rejected");
+        assert!(message.contains("minimum 32 bytes"), "{message}");
     }
 
     // The stash key signs the federation stash cookie; a forgeable one bypasses
