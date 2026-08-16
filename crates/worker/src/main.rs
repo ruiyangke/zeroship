@@ -2,6 +2,7 @@ mod handler;
 mod health;
 mod sync;
 mod cache;
+mod db_posture;
 mod metrics;
 mod logs;
 
@@ -359,6 +360,10 @@ fn main() -> std::io::Result<()> {
         .name("zeroship-worker")
         .build(ntex::rt::DefaultRuntime)
         .block_on(async move {
+    if let Err(error) = db_posture::validate_database_url(&db_url).await {
+        tracing::error!(%error, "worker: refusing unsafe database authority");
+        std::process::exit(1);
+    }
     init_v8();
 
     // Read here rather than inside `zeroship-bundle`, so the record names the

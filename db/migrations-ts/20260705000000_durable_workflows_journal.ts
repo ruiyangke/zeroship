@@ -1,4 +1,4 @@
-import { table, t, now, grant, revoke } from "@zeroship/migrate";
+import { table, t, now, grant, raw, revoke } from "@zeroship/migrate";
 
 export const name = "durable_workflows_journal";
 
@@ -383,9 +383,17 @@ export function up() {
   zs("workflow_schedules").foreignKey("workflow_schedules_deploy_id_fkey").add({ columns: ["deploy_id"], references: { table: "app_deploys", columns: ["id"] }, onDelete: "cascade" });
 
   grant({ privileges: ["select", "insert", "update", "delete"], on: journalTableTarget(), to: ["zeroship_control"] });
+  raw({
+    sql: "GRANT SELECT (id, app_id, deploy_hash, manifest_json, activated_at, created_at) ON zeroship.app_deploys TO zeroship_worker",
+    reason: "worker workflow dispatch reads active deploy identity and manifest fields only",
+  });
 }
 
 export function down() {
+  raw({
+    sql: "REVOKE SELECT (id, app_id, deploy_hash, manifest_json, activated_at, created_at) ON zeroship.app_deploys FROM zeroship_worker",
+    reason: "remove the matching worker column grant before dropping the table",
+  });
   revoke({ privileges: ["select", "insert", "update", "delete"], on: journalTableTarget(), from: ["zeroship_control"] });
 
   zs("workflow_schedules").drop({ ifExists: true });

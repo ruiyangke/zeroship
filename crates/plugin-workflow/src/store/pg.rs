@@ -18,9 +18,7 @@ use crate::store::{
 
 const BLOB_REF_JOURNAL_BYTES: i64 = 160;
 pub const JOURNAL_TABLE_SUFFIXES: [&str; 5] = ["runs", "steps", "signals", "subscriptions", "blobs"];
-const WORKFLOW_JOURNAL_OWNER_ROLE: &str = "__zeroship_platform_role";
-const WORKFLOW_JOURNAL_OWNER_ROLE_ATTRS: &str =
-    "NOLOGIN NOREPLICATION NOCREATEDB NOCREATEROLE NOINHERIT";
+const WORKFLOW_JOURNAL_OWNER_ROLE: &str = "zeroship_workflow_owner";
 
 #[derive(Clone, Debug)]
 pub struct PgStore {
@@ -59,9 +57,6 @@ impl PgStore {
         C: GenericClient + Sync,
     {
         let tables = WorkflowTables::for_app_id(app_id);
-        platform_client
-            .batch_execute(&provision_owner_sql(&tables))
-            .await?;
         platform_client
             .batch_execute(&set_workflow_journal_owner_role_sql())
             .await?;
@@ -302,26 +297,6 @@ CREATE INDEX IF NOT EXISTS workflow_subscriptions_app_topic_idx ON {subscription
         signals = tables.signals,
         subscriptions = tables.subscriptions,
         blobs = tables.blobs,
-    )
-}
-
-fn provision_owner_sql(tables: &WorkflowTables) -> String {
-    let schema = quote_ident(&tables.app_schema);
-    let owner = quote_ident(WORKFLOW_JOURNAL_OWNER_ROLE);
-    let owner_literal = sql_string_literal(WORKFLOW_JOURNAL_OWNER_ROLE);
-    format!(
-        r#"
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {owner_literal}) THEN
-    CREATE ROLE {owner} {attrs};
-  END IF;
-END
-$$;
-CREATE SCHEMA IF NOT EXISTS {schema};
-ALTER SCHEMA {schema} OWNER TO {owner};
-"#,
-        attrs = WORKFLOW_JOURNAL_OWNER_ROLE_ATTRS,
     )
 }
 
@@ -1970,4 +1945,25 @@ where
         pending: row.get("pending"),
         running: row.get("running"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worker_provisioning_uses_a_precreated_narrow_owner_role() {
+        let tables = WorkflowTables::for_app_id(&Uuid::nil());
+        let owner_sql = set_workflow_journal_owner_role_sql();
+        let table_sql = provision_sql(&tables);
+
+        assert!(
+            !table_sql.contains("CREATE ROLE") && !table_sql.contains("CREATE SCHEMA"),
+            "worker workflow provisioning must not create roles or schemas: {table_sql}"
+        );
+        assert!(
+            owner_sql.contains("\"zeroship_workflow_owner\""),
+            "workflow tables must use the dedicated narrow owner: {owner_sql}"
+        );
+    }
 }

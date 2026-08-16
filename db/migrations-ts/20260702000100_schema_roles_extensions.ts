@@ -15,7 +15,8 @@ export function up() {
   role("zeroship_auth").create({ login: true, password: "zeroship_auth", bypassRls: true, setSearchPath: ["zeroship", "public"], ifNotExists: true });
   role("zeroship_control").create({ login: true, password: "zeroship_control", bypassRls: true, setSearchPath: ["zeroship", "public"], ifNotExists: true });
   role("zeroship_gateway").create({ login: true, password: "zeroship_gateway", setSearchPath: ["zeroship", "public"], ifNotExists: true });
-  role("zeroship_worker").create({ login: true, password: "zeroship_worker", setSearchPath: ["zeroship", "public"], ifNotExists: true });
+  role("zeroship_workflow_owner").create({ login: false, ifNotExists: true });
+  role("zeroship_worker").create({ login: true, password: "zeroship_worker", bypassRls: true, inRole: ["zeroship_workflow_owner"], setSearchPath: ["zeroship", "public"], ifNotExists: true });
   role("zeroship_app").create({ login: true, password: "zeroship_app", setSearchPath: ["zeroship", "public"], ifNotExists: true });
   role("sandbox_admin").create({ login: false, ifNotExists: true });
   role("sandbox_app").create({ login: true, password: "sandbox_app", setSearchPath: ["zeroship", "public"], ifNotExists: true });

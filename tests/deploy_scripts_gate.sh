@@ -72,6 +72,7 @@ REMOTE="$ROOT/deploy/scripts/deploy-remote.sh"
 APPDEP="$ROOT/deploy/scripts/deploy-app.sh"
 REAL_COMPOSE="$ROOT/deploy/compose/docker-compose.yml"
 REAL_OVERLAY="$ROOT/deploy/ops/zeroship.toml"
+GRANTS_MIGRATION="$ROOT/db/migrations-ts/20260702000900_grants.ts"
 
 echo "============================================"
 echo "  deploy scripts: extraction, pairing, arguments"
@@ -244,6 +245,36 @@ if [ -f "$REAL_OVERLAY" ]; then
   fi
 else
   fail "the shipped operator overlay is missing: $REAL_OVERLAY"
+fi
+
+# The worker handles attacker-controlled app code. Its default DSN must name
+# the constrained worker role, never the provisioning principal that owns the
+# platform schema. Scope the extraction to the worker service so a safe DSN on
+# another service cannot make this assertion pass.
+if [ -f "$REAL_COMPOSE" ]; then
+  WORKER_DSN_LINE="$(awk '
+    /^  worker:/ { in_worker=1; next }
+    /^  [a-zA-Z0-9_-]+:/ { in_worker=0 }
+    in_worker && /ZEROSHIP_WORKER_DATABASE_URL:/ { print; exit }
+  ' "$REAL_COMPOSE")"
+  if [ -z "$WORKER_DSN_LINE" ]; then
+    fail "the worker service has no ZEROSHIP_WORKER_DATABASE_URL default to inspect"
+  elif [[ "$WORKER_DSN_LINE" == *"postgres://zeroship_worker:"* ]]; then
+    pass "the worker default DSN uses the constrained zeroship_worker identity"
+  else
+    fail "the worker default DSN is not constrained to zeroship_worker: $WORKER_DSN_LINE"
+  fi
+fi
+
+if [ -f "$GRANTS_MIGRATION" ]; then
+  grep -qF 'REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA zeroship FROM zeroship_worker' "$GRANTS_MIGRATION" \
+    && pass "the platform grants revoke worker authority from every current zeroship table" \
+    || fail "the platform grants do not revoke worker authority from every current zeroship table"
+  grep -qF 'ALTER DEFAULT PRIVILEGES IN SCHEMA zeroship REVOKE ALL PRIVILEGES ON TABLES FROM zeroship_worker' "$GRANTS_MIGRATION" \
+    && pass "future zeroship tables remain denied to the worker by default" \
+    || fail "future zeroship tables are not denied to the worker by default"
+else
+  fail "the platform grants migration is missing: $GRANTS_MIGRATION"
 fi
 
 # THE DRIFT CHECK, and the actual defect this whole area is about: two lists,
