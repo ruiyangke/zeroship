@@ -2666,15 +2666,34 @@ fn logical_table_is_declared(
 fn column_named_object_dependencies(
     column: &crate::model::ir::IrColumn,
 ) -> Vec<(&'static str, &str)> {
+    named_object_dependencies(&column.ty, column.default.as_ref())
+}
+
+/// The same dependencies read off a bare type and default rather than a whole
+/// column.
+///
+/// `addColumn` and `setColumnType` carry their type as loose fields instead of an
+/// [`IrColumn`], which is why they went unchecked while `createTable` did not:
+/// the walk collected `IrColumn`s, and an op that has a type without having a
+/// column was invisible to it. Both emit that type into the SQL, so both can name
+/// a dropped enum or domain.
+///
+/// `renameColumn` also carries a type and is deliberately NOT checked: it is
+/// metadata describing the column after the rename, and `ALTER TABLE … RENAME
+/// COLUMN` never mentions a type, so nothing there can fail to resolve.
+fn named_object_dependencies<'a>(
+    ty: &'a crate::model::ir::ColType,
+    default: Option<&'a crate::model::ir::IrDefault>,
+) -> Vec<(&'static str, &'a str)> {
     use crate::model::ir::{ColType, IrDefault};
 
     let mut out = Vec::new();
-    match &column.ty {
+    match ty {
         ColType::Enum { name, .. } => out.push(("enum", name.as_str())),
         ColType::Domain { name, .. } => out.push(("domain", name.as_str())),
         _ => {}
     }
-    if let Some(IrDefault::Nextval { sequence }) = &column.default {
+    if let Some(IrDefault::Nextval { sequence }) = default {
         out.push(("sequence", sequence.name.as_str()));
     }
     out
@@ -2747,12 +2766,59 @@ fn validate_no_column_uses_a_dropped_named_object(
             }
         }
 
-        let columns: Vec<&crate::model::ir::IrColumn> = match op {
-            Op::CreateTable { columns, .. } => columns.iter().collect(),
+        // An `alterSequence` names its sequence directly, the same way a comment
+        // names its view. MEASURED: `DROP SEQUENCE sq; ALTER SEQUENCE sq
+        // INCREMENT BY 2` is `relation "sq" does not exist`.
+        if let Op::AlterSequence { name, .. } = op {
+            if dropped.contains(&("sequence", name.as_str())) {
+                return Err(AuthoringError {
+                    code: CODE_OP_INVALID.to_string(),
+                    kind: Some(UnsupportedKind::Op),
+                    op_index,
+                    ts_location: ts_locations.get(op_index).cloned().flatten(),
+                    dialect: target_dialect,
+                    reason: format!(
+                        "this alterSequence names sequence {name:?}, but an earlier \
+                         dropSequence in this migration removed it, so it will not exist \
+                         when this runs"
+                    ),
+                    suggested_fix: Some(
+                        "move the alter before the drop, or recreate the sequence first"
+                            .to_string(),
+                    ),
+                });
+            }
+        }
+
+        // Every place a type or a nextval default reaches the emitted SQL,
+        // labelled with the column it belongs to. `createTable` was the only
+        // entry here, which is why an `addColumn` naming a dropped enum passed.
+        let dependencies: Vec<(&str, Vec<(&'static str, &str)>)> = match op {
+            Op::CreateTable { columns, .. } => columns
+                .iter()
+                .map(|column| {
+                    (
+                        column.name.as_str(),
+                        column_named_object_dependencies(column),
+                    )
+                })
+                .collect(),
+            Op::AddColumn {
+                column,
+                ty,
+                default,
+                ..
+            } => vec![(
+                column.as_str(),
+                named_object_dependencies(ty, default.as_ref()),
+            )],
+            Op::SetColumnType {
+                column, to_type, ..
+            } => vec![(column.as_str(), named_object_dependencies(to_type, None))],
             _ => Vec::new(),
         };
-        for column in columns {
-            for (kind, name) in column_named_object_dependencies(column) {
+        for (column_name, deps) in dependencies {
+            for (kind, name) in deps {
                 if dropped.contains(&(kind, name)) {
                     return Err(AuthoringError {
                         code: CODE_OP_INVALID.to_string(),
@@ -2761,9 +2827,9 @@ fn validate_no_column_uses_a_dropped_named_object(
                         ts_location: ts_locations.get(op_index).cloned().flatten(),
                         dialect: target_dialect,
                         reason: format!(
-                            "column {:?} depends on {kind} {name:?}, but an earlier drop in \
-                             this migration removed it, so it will not exist when this runs",
-                            column.name
+                            "column {column_name:?} depends on {kind} {name:?}, but an earlier \
+                             drop in this migration removed it, so it will not exist when this \
+                             runs"
                         ),
                         suggested_fix: Some(format!(
                             "move this operation before the drop, or recreate the {kind} first"
