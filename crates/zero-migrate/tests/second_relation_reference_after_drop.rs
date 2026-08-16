@@ -54,64 +54,87 @@ fn fk_to(target: &str) -> String {
     )
 }
 
+/// Assert the refusal names the ROLE this test is about, not merely that one
+/// happened.
+///
+/// Added by the F769 audit. The previous assertions here checked only that the
+/// message contained "drop", which every member of this family satisfies - a
+/// foreign-key test would have passed on a view-source refusal and vice versa.
+/// The role word is what distinguishes them, and it is the thing each test is
+/// actually claiming.
+fn expect_reference_refusal(ops: &str, role: &str, what: &str) {
+    let refusal = verdict(ops).expect_err(what);
+    let expected = format!("names {role}");
+    assert!(
+        refusal.contains(&expected),
+        "the refusal must name the {role:?} this test is about, not another \
+         reference in the same family: {refusal}"
+    );
+}
+
 #[test]
 fn a_view_reading_a_dropped_table_is_refused() {
-    let refusal = verdict(&format!(
-        r#"{A},{{"op":"dropTable","table":"a"}},{}"#,
-        view_from("a")
-    ))
-    .expect_err("the view's source table was dropped earlier");
-    assert!(
-        refusal.to_lowercase().contains("drop"),
-        "the refusal must point at the drop: {refusal}"
+    expect_reference_refusal(
+        &format!(r#"{A},{{"op":"dropTable","table":"a"}},{}"#, view_from("a")),
+        "source table",
+        "the view's source table was dropped earlier",
     );
 }
 
 #[test]
 fn a_foreign_key_to_a_dropped_table_is_refused() {
-    let refusal = verdict(&format!(
-        r#"{A},{B},{{"op":"dropTable","table":"b"}},{}"#,
-        fk_to("b")
-    ))
-    .expect_err("the referenced table was dropped earlier");
-    assert!(
-        refusal.to_lowercase().contains("drop"),
-        "the refusal must point at the drop: {refusal}"
+    expect_reference_refusal(
+        &format!(r#"{A},{B},{{"op":"dropTable","table":"b"}},{}"#, fk_to("b")),
+        "referenced table",
+        "the referenced table was dropped earlier",
     );
 }
 
 #[test]
 fn a_foreign_key_to_a_renamed_away_table_is_refused() {
-    verdict(&format!(
-        r#"{A},{B},{{"op":"renameTable","table":"b","to":"b2"}},{}"#,
-        fk_to("b")
-    ))
-    .expect_err("the referenced table no longer exists under that name");
+    expect_reference_refusal(
+        &format!(
+            r#"{A},{B},{{"op":"renameTable","table":"b","to":"b2"}},{}"#,
+            fk_to("b")
+        ),
+        "referenced table",
+        "the referenced table no longer exists under that name",
+    );
 }
 
 #[test]
 fn a_view_joining_a_dropped_table_is_refused() {
-    // The join list is a second source of names beyond `from`.
-    verdict(&format!(
-        r#"{A},{B},{{"op":"dropTable","table":"b"}},{{"op":"createView","name":"vw","query":{{"kind":"structured","select":{{"from":{{"name":"a"}},"projection":[{{"kind":"colRef","name":"c0"}}],"joins":[{{"kind":"inner","table":{{"name":"b"}},"on":{{"node":"literal","value":true}}}}]}}}}}}"#
-    ))
-    .expect_err("a joined table that was dropped is just as absent as the from-table");
+    // The join list is a second source of names beyond `from`, and the role word
+    // is what proves the JOIN was read rather than the from-table.
+    expect_reference_refusal(
+        &format!(
+            r#"{A},{B},{{"op":"dropTable","table":"b"}},{{"op":"createView","name":"vw","query":{{"kind":"structured","select":{{"from":{{"name":"a"}},"projection":[{{"kind":"colRef","name":"c0"}}],"joins":[{{"kind":"inner","table":{{"name":"b"}},"on":{{"node":"literal","value":true}}}}]}}}}}}"#
+        ),
+        "joined table",
+        "a joined table that was dropped is just as absent as the from-table",
+    );
 }
 
 #[test]
 fn detaching_a_partition_of_a_dropped_parent_is_refused() {
-    verdict(&format!(
-        r#"{PARENT},{P1},{{"op":"dropTable","table":"par"}},{{"op":"detachPartition","parent":"par","name":"p1"}}"#
-    ))
-    .expect_err("the parent of the detach was dropped");
+    expect_reference_refusal(
+        &format!(
+            r#"{PARENT},{P1},{{"op":"dropTable","table":"par"}},{{"op":"detachPartition","parent":"par","name":"p1"}}"#
+        ),
+        "parent table",
+        "the parent of the detach was dropped",
+    );
 }
 
 #[test]
 fn dropping_a_partition_of_a_dropped_parent_is_refused() {
-    verdict(&format!(
-        r#"{PARENT},{P1},{{"op":"dropTable","table":"par"}},{{"op":"dropPartition","parent":"par","name":"p1"}}"#
-    ))
-    .expect_err("the parent of the drop was dropped");
+    expect_reference_refusal(
+        &format!(
+            r#"{PARENT},{P1},{{"op":"dropTable","table":"par"}},{{"op":"dropPartition","parent":"par","name":"p1"}}"#
+        ),
+        "parent table",
+        "the parent of the drop was dropped",
+    );
 }
 
 // ---------------------------------------------------------------------------
