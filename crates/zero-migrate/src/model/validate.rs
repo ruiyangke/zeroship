@@ -3047,6 +3047,37 @@ fn validate_no_name_is_claimed_twice(
                 }
                 columns.entry(key).or_default().insert(column.as_str());
             }
+            // A PARTITION IS A TABLE. `CREATE TABLE ... PARTITION OF` claims the
+            // relation namespace AND, through its composite row type, the type
+            // namespace - both measured against live PostgreSQL.
+            //
+            // `detachPartition` deliberately does NOT appear here: a detached
+            // partition becomes a standalone table under the same name, so the
+            // name stays occupied. Only `dropPartition` releases it.
+            Op::CreatePartition { name, schema, .. } => {
+                let key: Key = (schema.as_deref(), name.as_str());
+                type_name_must_be_free!(key, op_index, "createPartition", name);
+                if let Some(held_by) = relations.get(&key) {
+                    return Err(refuse(
+                        op_index,
+                        &format!(
+                            "this createPartition claims the name {name:?}, but an earlier \
+                             operation in this migration already created a {held_by} with \
+                             that name and nothing dropped it in between"
+                        ),
+                        "drop the existing relation first, or use a different name",
+                    ));
+                }
+                relations.insert(key, "partition");
+                if track_type_namespace {
+                    types.insert(key, "partition");
+                }
+            }
+            Op::DropPartition { name, schema, .. } => {
+                let key: Key = (schema.as_deref(), name.as_str());
+                relations.remove(&key);
+                types.remove(&key);
+            }
             // Views and sequences claim and release names in the SAME namespace
             // as tables, which is why they are handled here rather than in a
             // check of their own.
@@ -3448,7 +3479,13 @@ fn validate_no_op_targets_a_renamed_away_table(
         // A `createTable` RECLAIMS the name rather than requiring it to be there,
         // so it is handled before the check — `touched_table` reports the table an
         // op operates on, and for a create that is the name being defined.
-        if let Op::CreateTable { name, .. } = op {
+        //
+        // A `createPartition` DEFINES a relation too: `CREATE TABLE ... PARTITION
+        // OF` is a CREATE TABLE, and `touched_table` reports the name it defines,
+        // not one it requires. Without this arm, `dropTable b` followed by
+        // `createPartition b` was refused as a use-after-drop — measured against
+        // live PostgreSQL, which accepts it, so the refusal was wrong.
+        if let Op::CreateTable { name, .. } | Op::CreatePartition { name, .. } = op {
             vacated.remove(name.as_str());
             continue;
         }
