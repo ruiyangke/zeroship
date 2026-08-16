@@ -503,3 +503,112 @@ async fn an_out_of_band_alter_lands_in_altered_objects() {
          altered_objects: {drift2:?}"
     );
 }
+
+/// The two NAME buckets must be proven to fill, for the same reason the attribute
+/// bucket was: `missing_objects` and `unexpected_objects` appeared across this
+/// crate ONLY inside `.is_empty()` assertions. Asserting a collection empty
+/// forever cannot distinguish a working detector from one that never reports.
+///
+/// These are the out-of-band CREATE and DROP halves of tamper detection - a table
+/// made by hand outside the journal, and a deployed table removed behind the
+/// engine's back.
+#[compio::test]
+async fn the_name_buckets_fill_on_out_of_band_create_and_drop() {
+    use zero_migrate::driver::SqlSession;
+
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
+
+    let engine = MigrationEngine::new();
+    let author = author_for(&cfg);
+    let desc = descriptor("sprockets", "label", "string", true);
+    let desired = desired_snapshot(
+        &cfg.project_schema,
+        std::slice::from_ref(&desc),
+        &effective_policy(&cfg),
+    )
+    .expect("desired_snapshot");
+
+    let live_empty = snapshot_schema(&session, &cfg.project_schema)
+        .await
+        .expect("snapshot live (empty)");
+    let plan = engine
+        .plan_declarative(
+            &desired,
+            &live_empty,
+            &HashMap::new(),
+            &author,
+            &[],
+            &guard_cfg(&cfg),
+            &effective_policy(&cfg),
+        )
+        .expect("plan_declarative");
+    let backend = PostgresBackend::new_generic(&session);
+    engine
+        .apply_declarative(
+            &plan,
+            &effective_policy(&cfg),
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+        )
+        .await
+        .expect("apply_declarative create sprockets");
+
+    // BASELINE, as in the sibling test: prove the snapshot matches before tampering.
+    let live_after = snapshot_schema(&session, &cfg.project_schema)
+        .await
+        .expect("snapshot live (after deploy)");
+    assert!(
+        diff_snapshots(&desired.snapshot, &live_after).is_clean(),
+        "baseline must be clean before tampering"
+    );
+
+    // OUT-OF-BAND CREATE: a table nobody declared.
+    session
+        .exec(
+            &format!(
+                r#"CREATE TABLE "{}"."handmade" ("id" integer PRIMARY KEY)"#,
+                cfg.project_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("out-of-band CREATE");
+
+    let after_create = snapshot_schema(&session, &cfg.project_schema)
+        .await
+        .expect("snapshot live (after create)");
+    let drift = diff_snapshots(&desired.snapshot, &after_create);
+    assert!(
+        !drift.unexpected_objects.is_empty(),
+        "a hand-made table must surface as UNEXPECTED, not vanish: {drift:?}"
+    );
+    assert!(
+        drift.missing_objects.is_empty(),
+        "nothing declared has gone missing yet, so that bucket must stay empty: {drift:?}"
+    );
+
+    // OUT-OF-BAND DROP: the declared table removed behind the engine's back.
+    session
+        .exec(
+            &format!(r#"DROP TABLE "{}"."sprockets""#, cfg.project_schema),
+            &[],
+        )
+        .await
+        .expect("out-of-band DROP");
+
+    let after_drop = snapshot_schema(&session, &cfg.project_schema)
+        .await
+        .expect("snapshot live (after drop)");
+    let drift2 = diff_snapshots(&desired.snapshot, &after_drop);
+    assert!(
+        !drift2.missing_objects.is_empty(),
+        "a declared table dropped out of band must surface as MISSING: {drift2:?}"
+    );
+}
