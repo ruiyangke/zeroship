@@ -361,3 +361,145 @@ async fn declarative_add_column_diff_applies() {
 
     drop_schemas(&session, &cfg).await;
 }
+
+/// An out-of-band ALTER that changes an attribute WITHOUT changing a name must
+/// land in `altered_objects`.
+///
+/// `StructuralDrift` has three buckets, and the third exists because the first
+/// two cannot see this case - the comment on it says so directly: "the
+/// missing/unexpected name buckets cannot see these because the name still
+/// matches; this bucket is the attribute-aware tamper surface".
+///
+/// That claim had no positive test. The bucket appeared in this file only inside
+/// must-be-clean assertions, which print it when drift is unexpectedly non-empty
+/// and therefore pass whether or not it can ever be populated. A bucket that is
+/// only ever asserted EMPTY is indistinguishable from one that never fills.
+///
+/// Both attributes the surrounding comment names are exercised: a NULLABILITY
+/// change and a UNIQUENESS change, the latter being the example the comment
+/// itself cites.
+#[compio::test]
+async fn an_out_of_band_alter_lands_in_altered_objects() {
+    use zero_migrate::driver::SqlSession;
+
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
+
+    let engine = MigrationEngine::new();
+    let author = author_for(&cfg);
+
+    // A collection with a required field AND a declared UNIQUE index, so the
+    // uniqueness attribute has something to diverge from.
+    let mut desc = descriptor("gadgets", "code", "string", true);
+    desc.indexes = vec![zero_migrate::IndexDescriptor {
+        name: "gadgets_code_key".into(),
+        columns: vec!["code".into()],
+        unique: true,
+    }];
+    let desired = desired_snapshot(
+        &cfg.project_schema,
+        std::slice::from_ref(&desc),
+        &effective_policy(&cfg),
+    )
+    .expect("desired_snapshot");
+
+    let live_empty = snapshot_schema(&session, &cfg.project_schema)
+        .await
+        .expect("snapshot live (empty)");
+    let plan = engine
+        .plan_declarative(
+            &desired,
+            &live_empty,
+            &HashMap::new(),
+            &author,
+            &[],
+            &guard_cfg(&cfg),
+            &effective_policy(&cfg),
+        )
+        .expect("plan_declarative");
+    let backend = PostgresBackend::new_generic(&session);
+    engine
+        .apply_declarative(
+            &plan,
+            &effective_policy(&cfg),
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+        )
+        .await
+        .expect("apply_declarative create gadgets");
+
+    // BASELINE. Without this the test cannot tell "the ALTER was detected" from
+    // "this snapshot never matched in the first place".
+    let live_after = snapshot_schema(&session, &cfg.project_schema)
+        .await
+        .expect("snapshot live (after deploy)");
+    let clean = diff_snapshots(&desired.snapshot, &live_after);
+    assert!(
+        clean.is_clean(),
+        "baseline must be clean before tampering: missing={:?} unexpected={:?} altered={:?}",
+        clean.missing_objects,
+        clean.unexpected_objects,
+        clean.altered_objects
+    );
+
+    // TAMPER 1: nullability, out of band.
+    session
+        .exec(
+            &format!(
+                r#"ALTER TABLE "{}"."gadgets" ALTER COLUMN "code" DROP NOT NULL"#,
+                cfg.project_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("out-of-band ALTER");
+
+    let tampered = snapshot_schema(&session, &cfg.project_schema)
+        .await
+        .expect("snapshot live (tampered)");
+    let drift = diff_snapshots(&desired.snapshot, &tampered);
+    assert!(
+        !drift.altered_objects.is_empty(),
+        "a nullability change must surface in altered_objects, not vanish: {drift:?}"
+    );
+    assert!(
+        drift.missing_objects.is_empty() && drift.unexpected_objects.is_empty(),
+        "the name still matches, so the NAME buckets must stay empty - that is the \
+         whole reason the altered bucket exists: {drift:?}"
+    );
+
+    // TAMPER 2: uniqueness, the example the comment itself cites.
+    session
+        .exec(
+            &format!(r#"DROP INDEX "{}"."gadgets_code_key""#, cfg.project_schema),
+            &[],
+        )
+        .await
+        .expect("drop the unique index");
+    session
+        .exec(
+            &format!(
+                r#"CREATE INDEX "gadgets_code_key" ON "{}"."gadgets" ("code")"#,
+                cfg.project_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("recreate it NON-unique under the same name");
+
+    let tampered2 = snapshot_schema(&session, &cfg.project_schema)
+        .await
+        .expect("snapshot live (tampered 2)");
+    let drift2 = diff_snapshots(&desired.snapshot, &tampered2);
+    assert!(
+        !drift2.altered_objects.is_empty(),
+        "a same-name index that lost its uniqueness must surface in \
+         altered_objects: {drift2:?}"
+    );
+}
