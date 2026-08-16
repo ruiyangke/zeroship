@@ -871,7 +871,7 @@ async fn introspect_expired_access_token_is_inactive() {
     let user_id = fx.user_id.to_string();
     let audience = format!("app:{}", fx.app_id);
     let expired = test_issuer()
-        .issue_access_token(&AccessTokenMint {
+        .sign_unregistered_access_token_fixture(&AccessTokenMint {
             user_id: &user_id,
             sector: SECTOR,
             audience: &audience,

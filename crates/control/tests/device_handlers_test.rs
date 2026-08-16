@@ -286,7 +286,7 @@ impl MockPlatformAuth {
     ) -> String {
         let principal_id = principal_id.to_string();
         self.issuer
-            .issue_principal_access_token(&PrincipalAccessTokenMint {
+            .sign_unregistered_principal_access_token_fixture(&PrincipalAccessTokenMint {
                 principal_id: &principal_id,
                 audience,
                 client_id: "zeroship-console",
@@ -357,7 +357,7 @@ fn handle_platform_auth_request(stream: &mut TcpStream, issuer: &Issuer, db_url:
                 &body.scopes,
             );
             let token = issuer
-                .issue_principal_access_token(&PrincipalAccessTokenMint {
+                .sign_unregistered_principal_access_token_fixture(&PrincipalAccessTokenMint {
                     principal_id: &body.principal_id,
                     audience: "control.zeroship.ai",
                     client_id: PLATFORM_CLI_CLIENT_ID,
