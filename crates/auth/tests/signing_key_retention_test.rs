@@ -1,5 +1,6 @@
 //! Rotated OIDC signing-key retention tests against live PostgreSQL.
 
+use chrono::{DateTime, Utc};
 use compio_postgres::{connect, Client, NoTls};
 use ed25519_dalek::SigningKey;
 use jsonwebtoken::decode_header;
@@ -109,6 +110,16 @@ async fn watermark_exists(db: &Client, kid: &str) -> bool {
     .await
     .unwrap_or_else(|err| panic!("load signing key watermark {kid}: {err}"))
     .get("present")
+}
+
+async fn watermark(db: &Client, kid: &str) -> DateTime<Utc> {
+    db.query_one(
+        "SELECT max_issued_expires_at FROM zeroship.signing_keys WHERE kid = $1",
+        &[&kid],
+    )
+    .await
+    .unwrap_or_else(|err| panic!("load signing key watermark {kid}: {err}"))
+    .get("max_issued_expires_at")
 }
 
 async fn clear_watermark(db: &Client, kid: &str) {
@@ -456,6 +467,39 @@ async fn every_production_token_kind_advances_the_key_watermark() {
         .await
         .expect("issue logout token");
     assert!(watermark_exists(&db, &kid).await);
+
+    clear_watermark(&db, &kid).await;
+    issuer
+        .issue_principal_access_token(
+            &db,
+            &PrincipalAccessTokenMint {
+                principal_id: &user_id,
+                audience: "control.zeroship.test",
+                client_id: "zeroship-cli",
+                scopes: &scopes,
+                ttl_secs: Some(3_600),
+            },
+        )
+        .await
+        .expect("issue long-lived token");
+    let long_watermark = watermark(&db, &kid).await;
+    issuer
+        .issue_logout_token(
+            &db,
+            &LogoutTokenMint {
+                client_id: "oac_retention_kinds",
+                sub: Some(&user_id),
+                sid: None,
+                ttl_secs: Some(60),
+            },
+        )
+        .await
+        .expect("issue later short-lived token");
+    assert_eq!(
+        watermark(&db, &kid).await,
+        long_watermark,
+        "a later short-lived token must not move the watermark backward"
+    );
 
     db.execute(
         "UPDATE zeroship.signing_keys SET status = 'retired' WHERE kid = $1",
