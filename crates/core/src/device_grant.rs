@@ -34,12 +34,19 @@ pub const PLATFORM_PROVIDER: &str = "platform";
 /// OAuth client id fixed onto access tokens issued to `zeroship login`.
 pub const PLATFORM_CLI_CLIENT_ID: &str = "zeroship-cli";
 
+/// Scopes the control service may issue to the platform CLI client.
+pub const PLATFORM_CLI_ISSUABLE_SCOPES: [&str; 4] = [
+    "apps:deploy",
+    "apps:read",
+    "apps:write",
+    "secrets:read",
+];
+
 /// Maximum lifetime of a platform CLI token, in seconds.
 ///
-/// There is no supported early-recall operation for these tokens today, so
-/// expiry is the effective revocation bound. Token-family markers are retained
-/// for 24 hours, so a marker written while a token is live outlasts this
-/// 12-hour maximum remaining lifetime by at least 12 hours.
+/// Account deletion recalls these tokens with a platform-family marker. Other
+/// revocation reasons still rely on expiry, so this remains an authorization
+/// ceiling. Markers are retained for 24 hours and outlast this 12-hour maximum.
 pub const PLATFORM_TOKEN_MAX_TTL_SECS: i64 = 12 * 60 * 60;
 
 /// Path the OP mounts its protocol endpoints under, relative to the auth
@@ -312,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn a_mint_url_that_could_redirect_the_control_key_is_refused() {
+    fn a_mint_url_that_could_redirect_the_platform_mint_key_is_refused() {
         // Each case is a way the resolved destination could differ from the
         // host an operator reading the value would name.
         assert_eq!(platform_mint_base_url(""), Err(MintUrlError::Missing));

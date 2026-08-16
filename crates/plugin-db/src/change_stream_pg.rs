@@ -148,10 +148,10 @@ impl ChangeStream for PgChangeStream {
     /// Idempotently tear down all CDC state for an app deletion.
     ///
     /// Routes through
-    /// [`crate::replication::drop_publication_and_slots`], which makes
-    /// every worker slot inactive, drops those slots, and then drops
-    /// the shared publication. Missing objects are no-ops, so retries
-    /// after partial failure are safe.
+    /// [`crate::replication::drop_worker_slots`], which makes every worker
+    /// slot inactive and drops those slots. The migration-owned publication
+    /// remains outside the worker's authority. Missing slots are no-ops, so
+    /// retries after partial failure are safe.
     ///
     /// The local lifecycle manager signals its consumer first. Active
     /// slots owned by other worker containers are terminated through
@@ -160,7 +160,7 @@ impl ChangeStream for PgChangeStream {
     /// Runs under the platform-role pool (§17.5) — the only role that
     /// may terminate a replication backend and drop a slot.
     async fn deprovision(&self, app_id: &str) -> Result<(), DbError> {
-        crate::replication::drop_publication_and_slots(self.backend.pool(), app_id).await
+        crate::replication::drop_worker_slots(self.backend.pool(), app_id).await
     }
 
     /// Provision this worker's slot, spawn its supervised consumer,
@@ -172,7 +172,7 @@ impl ChangeStream for PgChangeStream {
         app_id: &str,
         worker_id: &str,
     ) -> Result<Self::ConsumerHandle, DbError> {
-        let setup = crate::replication::ensure_publication_and_worker_slot(
+        let setup = crate::replication::ensure_worker_slot(
             self.backend.pool(),
             app_id,
             worker_id,

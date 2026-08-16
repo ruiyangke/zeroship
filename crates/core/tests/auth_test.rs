@@ -1,22 +1,22 @@
-use zeroship_core::auth::{extract_bearer, hash_api_key, validate_api_key, validate_control_key};
+use zeroship_core::auth::{constant_time_eq, extract_bearer, hash_api_key, validate_api_key};
 
 #[test]
 fn control_key_valid() {
-    assert!(validate_control_key("my-secret-key", "my-secret-key"));
+    assert!(constant_time_eq("my-secret-key", "my-secret-key"));
 }
 
 #[test]
 fn control_key_invalid() {
-    assert!(!validate_control_key("wrong-key", "my-secret-key"));
+    assert!(!constant_time_eq("wrong-key", "my-secret-key"));
 }
 
 #[test]
 fn control_key_empty() {
     // Both empty — identical, so valid.
-    assert!(validate_control_key("", ""));
+    assert!(constant_time_eq("", ""));
     // Length mismatch — invalid.
-    assert!(!validate_control_key("", "nonempty"));
-    assert!(!validate_control_key("nonempty", ""));
+    assert!(!constant_time_eq("", "nonempty"));
+    assert!(!constant_time_eq("nonempty", ""));
 }
 
 #[test]

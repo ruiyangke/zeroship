@@ -28,13 +28,9 @@ pub(crate) enum AuthOutcome {
     /// Policy required `User`/`Admin` and no valid user credential was found.
     /// Caller decides between a 401 (API) and a 302 → op (HTML).
     Unauthenticated,
-    /// A request resolved a real user (cookie / raw OP Bearer)
-    /// but the route has no `sector_identifier` yet, so the gateway CANNOT
-    /// derive the per-app pairwise `pws_…`. We FAIL
-    /// CLOSED — never project the global UUID into `ZeroShip-User.id` — and
-    /// answer `503 client_not_provisioned`, the same retryable posture the
-    /// browser-token path uses (`auth_token.rs`). The SDK keeps its
-    /// breadcrumb and retries once control finishes provisioning the app.
+    /// A raw OP bearer resolved a real user, but the route has no
+    /// `sector_identifier` and is not fully provisioned for OAuth. Fail closed
+    /// with `503 client_not_provisioned` until control finishes provisioning.
     ClientNotProvisioned,
     /// The request authenticated successfully (any arm), but the matched
     /// route declares `required_scopes` the principal's granted `scopes`
@@ -148,9 +144,10 @@ async fn family_revocation_decision(
 ///
 /// Without a Bearer credential, the gateway verifies the signed session cookie
 /// locally and applies the same-origin anti-CSRF gate to state-changing requests.
-/// When a database is configured, the per-app family revocation marker is checked
-/// through the read-through cache. With no database, only that revocation check is
-/// skipped; signature, issuer, expiry, key id, and app binding are still verified.
+/// A fresh pushed lifecycle and family-cutoff snapshot is required in every
+/// mode. When a database is configured, the per-app family marker is also
+/// checked through the read-through cache; only that secondary check is skipped
+/// in no-database smoke mode.
 ///
 /// Anonymous routes allow a request without resolved identity. `User` and `Admin`
 /// routes require one, and any declared `required_scopes` must be covered by the
@@ -318,8 +315,8 @@ async fn resolve_auth_inner(
             };
         }
         BearerOutcome::ClientNotProvisioned => {
-            // A valid raw OP Bearer user, but no sector_identifier yet ⇒
-            // cannot derive the per-app pws_. Fail closed.
+            // A valid raw OP Bearer user reached an incompletely provisioned
+            // OAuth route. Fail closed.
             return AuthOutcome::ClientNotProvisioned;
         }
         BearerOutcome::NotUserSession => {
@@ -460,116 +457,6 @@ fn cookie_csrf_rejected(req: &HttpRequest, config: &crate::GateConfig) -> bool {
     false
 }
 
-/// Outcome of projecting a global user id to its per-app pairwise `pws_…`.
-/// Either the route is provisioned with a
-/// `sector_identifier` (and we derived + persisted the `pws_`), or it is
-/// not — in which case the caller MUST fail closed (`503
-/// client_not_provisioned`) rather than ever leak the global UUID.
-enum PairwiseProjection {
-    /// The derived per-app `pws_…` subject + the per-app relay alias (the
-    /// email-claim swap). The global UUID never appears in `pws` (HMAC of
-    /// the UUID under the platform salt); `relay_email` is the app-facing
-    /// `email` claim — `None` when no ACTIVE alias exists, in which case the
-    /// caller FAILS CLOSED on the email (emits empty), NEVER the real address.
-    Projected {
-        pws: String,
-        /// The active relay alias for this `(app, user)`, or `None` when no
-        /// alias is minted / it is revoked. The caller substitutes this for
-        /// the real email and emits empty when it is `None` — the real email
-        /// must NEVER reach an app.
-        relay_email: Option<String>,
-    },
-    /// No `sector_identifier` on the route yet ⇒ no `pws_` derivation
-    /// possible. Fail closed.
-    Unprovisioned,
-}
-
-/// Derive the per-app pairwise `pws_…` for `global_user_id` under the
-/// route's `sector_identifier`, and idempotently UPSERT the mapping into
-/// `zeroship.app_user_identities` so support tooling / the relay handler /
-/// revocation can reverse `pws_ → (app, global_user)`.
-///
-/// Fail-closed contract: returns [`PairwiseProjection::Unprovisioned`]
-/// when the route has no `sector_identifier` (the caller answers `503`),
-/// matching the browser-token path in `auth_token.rs`. The derivation is
-/// a pure HMAC (no DB round-trip); the mapping UPSERT is best-effort —
-/// a DB failure is logged and the (already-correct) `pws_` is still
-/// returned, because the persisted row is a reverse-lookup cache, not
-/// part of the per-request trust decision.
-///
-/// The UPSERT + relay-alias read check out a pooled connection for JUST those
-/// two writes/reads and release it on drop — never held across an outbound
-/// HTTP call.
-///
-/// ## Email-claim swap
-///
-/// In the SAME checkout that upserts the pairwise mapping, this reads the
-/// ACTIVE relay alias (`relay_email`, `revoked_at IS NULL`) for
-/// `(app_client_id, global_user_id)` and returns it as
-/// [`PairwiseProjection::Projected::relay_email`]. The caller substitutes that
-/// alias for the user's REAL email so apps NEVER see the real address.
-/// `None` (no minted alias yet, or the grant was revoked) makes the caller
-/// FAIL CLOSED — emit an empty email — never the real one.
-async fn project_pairwise(
-    state: &Arc<GateState>,
-    app_client_id: Option<&str>,
-    sector_identifier: Option<&str>,
-    global_user_id: &str,
-) -> PairwiseProjection {
-    let Some(sector) = sector_identifier else {
-        return PairwiseProjection::Unprovisioned;
-    };
-    let pws = zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_user_id, sector);
-
-    // Persist the (app_client_id, global_user_id) → pws_ mapping AND read the
-    // active relay alias, both keyed on the per-app oac_ client_id, in
-    // ONE pooled checkout. The UPSERT is best-effort (log-and-continue: the
-    // pws_ is already projected). The relay-alias read is the email-swap
-    // source: a read failure leaves `relay_email = None`, so the caller
-    // fails closed (empty email) — it NEVER falls back to the real address.
-    let mut relay_email = None;
-    if let (Some(app_client_id), Some(db_cfg)) = (app_client_id, state.db.as_ref()) {
-        if let Ok(uuid) = Uuid::parse_str(global_user_id) {
-            match crate::db::checkout(db_cfg).await {
-                Ok(pool) => match pool.get().await {
-                    Ok(mut conn) => {
-                        if let Err(e) =
-                            crate::identities::upsert(&mut conn, app_client_id, uuid, &pws).await
-                        {
-                            tracing::warn!(
-                                error = %e,
-                                app_client_id = %app_client_id,
-                                "app_user_identities upsert failed (non-fatal; pws_ already projected)"
-                            );
-                        }
-                        // Email-claim swap: read the active alias for this
-                        // (app, user). None ⇒ caller emits empty email.
-                        match crate::identities::lookup_relay_email(&mut conn, app_client_id, uuid).await
-                        {
-                            Ok(alias) => relay_email = alias,
-                            Err(e) => tracing::warn!(
-                                error = %e,
-                                app_client_id = %app_client_id,
-                                "relay_email lookup failed (non-fatal; failing closed on email)"
-                            ),
-                        }
-                    }
-                    Err(e) => tracing::warn!(
-                        error = %e,
-                        "app_user_identities upsert: pg pool checkout failed (non-fatal)"
-                    ),
-                },
-                Err(e) => tracing::warn!(
-                    error = %e,
-                    "app_user_identities upsert: pg pool checkout failed (non-fatal)"
-                ),
-            }
-        }
-    }
-
-    PairwiseProjection::Projected { pws, relay_email }
-}
-
 /// Outcome of the Bearer arm ([`resolve_bearer_user_header`]). The five
 /// variants map directly onto the route-policy gate in [`resolve_auth`]:
 /// see the comment at the Bearer-arm call site for the policy table.
@@ -588,9 +475,8 @@ enum BearerOutcome {
     /// A Bearer token whose `iss` is not OP — the reserved API-key path
     /// (a future `zsk_…` shape). 401 on every route.
     NotUserSession,
-    /// A valid raw OP Bearer user, but the route has no
-    /// `sector_identifier` yet ⇒ no per-app `pws_` derivation possible.
-    /// Fail closed (`503`) rather than project the global UUID.
+    /// A valid raw OP Bearer user, but the route has no `sector_identifier`
+    /// and is not fully provisioned for OAuth. Fail closed (`503`).
     ClientNotProvisioned,
     /// No `Authorization: Bearer` header. Fall through to the cookie arm.
     NotBearer,
@@ -645,12 +531,10 @@ fn jwt_issuer_unverified(jwt: &str) -> Option<String> {
 /// subject denylist could not). Per-app scoping means a revocation on app A
 /// leaves the same user's tokens on app B valid.
 ///
-/// Pairwise projection: the RAW-OP path treats `sub` as the global OP UUID
-/// and projects it to the per-app `pws_` via
-/// [`project_pairwise`] before encoding the header (and the mapping row is
-/// upserted). The arm fails closed ([`BearerOutcome::ClientNotProvisioned`]
-/// → `503`) when the route has no `sector_identifier` yet, so the global
-/// UUID never reaches the worker header.
+/// Pairwise binding: the OP issuer already stamps app access tokens with a
+/// `pws_` subject. This path requires that shape and forwards it unchanged.
+/// Treating it as a global UUID and deriving again would produce a different
+/// identity that cannot match revocation or lifecycle state.
 async fn resolve_bearer_user_header(
     req: &HttpRequest,
     state: &Arc<GateState>,
@@ -733,24 +617,25 @@ async fn resolve_bearer_user_header(
             tracing::warn!("raw OP Bearer token missing sub — rejecting");
             return BearerOutcome::Invalid;
         }
-        // Project the per-app pairwise `pws_` FIRST, then key the
-        // revocation check on it — the marker WRITERS (/signout + control's
-        // disconnect-app cascade) key `zeroship.token_revocations` on
-        // `(client_id, pws_)`, NOT the global OP UUID. This branch therefore
-        // treats `claims.sub` as global and derives a `pws_` before lookup;
-        // querying the raw subject directly could never match those markers.
-        //
-        // The pairwise derivation needs the route's `sector_identifier`; with
-        // no sector we cannot derive the `pws_` (and would never reach the
-        // worker without one anyway), so fail closed (503) BEFORE the marker
-        // check rather than fall back to keying on the global UUID.
-        let Some(sector) = sector_identifier else {
+        // Require the complete OAuth route shape even though this verified
+        // token already carries its issuer-projected pairwise subject.
+        let Some(_sector) = sector_identifier else {
             return BearerOutcome::ClientNotProvisioned;
         };
-        // This branch expects a UUID `sub`; `derive_pairwise` canonicalizes its
-        // spelling before hashing.
-        let pws_sub =
-            zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &claims.sub, sector);
+        if !zeroship_core::auth::is_pairwise_subject(&claims.sub) {
+            tracing::warn!(sub = %claims.sub, "raw OP Bearer sub is not pairwise; rejecting");
+            return BearerOutcome::Invalid;
+        }
+        let pws_sub = claims.sub.clone();
+        if !credential_authentication_allows(
+            state,
+            expected_client_id,
+            &pws_sub,
+            claims.iat,
+        ) {
+            tracing::warn!(sub = %pws_sub, "raw OP Bearer principal lifecycle rejected");
+            return BearerOutcome::Invalid;
+        }
         // Cross-node per-app family-marker revocation. Keyed on
         // `(expected_client_id, pws_sub)` — the SAME `(client_id, pws_)` shape
         // the writers use. Per-app: revoking this user on app A leaves their
@@ -784,33 +669,21 @@ async fn resolve_bearer_user_header(
                 RevocationDecision::Unavailable => return BearerOutcome::Invalid,
             }
         }
-        // This branch treats the raw OP `sub` as the global OP UUID and
-        // projects it to the per-app `pws_` (and upserts the mapping + reads the
-        // live relay alias) before the header is built, so the worker never
-        // sees the global id. `expected_client_id` is the route's bound oac_
-        // client (the binding above proved the token agrees), so the mapping
-        // is keyed on it. `project_pairwise` re-derives the SAME `pws_sub` (a
-        // pure deterministic HMAC) and additionally persists the reverse-lookup
-        // row + reads the email-swap alias.
-        let mut owned = build_worker_user_from_access_claims(&claims);
-        match project_pairwise(
+        if !credential_authentication_allows(
             state,
-            Some(expected_client_id),
-            Some(sector),
-            &owned.id,
-        )
-        .await
-        {
-            PairwiseProjection::Projected { pws, relay_email } => {
-                owned.id = pws;
-                // Email-claim swap: project the relay alias, never the
-                // real email. No active alias ⇒ empty (fail closed).
-                owned.email = relay_email.unwrap_or_default();
-            }
-            PairwiseProjection::Unprovisioned => {
-                return BearerOutcome::ClientNotProvisioned;
-            }
+            expected_client_id,
+            &pws_sub,
+            claims.iat,
+        ) {
+            tracing::warn!(sub = %pws_sub, "raw OP Bearer lifecycle changed during verification");
+            return BearerOutcome::Invalid;
         }
+        // The issuer already projected the subject. Forward that verified id
+        // unchanged, but never trust profile claims from a bearer as an app
+        // identity projection: an unexpected email claim could expose the real
+        // inbox. The access-token arm therefore fails closed on email.
+        let mut owned = build_worker_user_from_access_claims(&claims);
+        owned.id = pws_sub;
         let user: oidc_rp::WorkerUser<'_> = (&owned).into();
         return BearerOutcome::Allowed(oidc_rp::encode_user_header(
             &user,
@@ -826,17 +699,15 @@ async fn resolve_bearer_user_header(
 
 /// Materialise a `WorkerUser` from a verified raw OP access JWT.
 ///
-/// `id` is the raw `sub` here. [`resolve_bearer_user_header`] treats it as the
-/// global OP UUID and projects it to the per-app `pws_`
-/// via [`project_pairwise`] BEFORE the header is built,
-/// so the global UUID never reaches the worker. The profile fields come
-/// straight from the verified claims.
+/// `id` is the issuer-projected pairwise `sub`. Email is always empty because
+/// this arm has no trusted relay-alias source and must never forward a real
+/// inbox carried by an unexpected token claim.
 fn build_worker_user_from_access_claims(claims: &crate::oidc_rp::AccessClaims) -> OwnedWorkerUser {
     OwnedWorkerUser {
         id: claims.sub.clone(),
-        email: claims.email.clone().unwrap_or_default(),
+        email: String::new(),
         name: claims.name.clone().unwrap_or_default(),
-        email_verified: claims.email_verified.unwrap_or(false),
+        email_verified: false,
         // Raw-OP arm: scopes come from the access token's `scope` claim.
         scopes: split_scope_claim(claims.scope.as_deref().unwrap_or_default()),
     }
@@ -881,9 +752,10 @@ fn split_scope_claim(scope: &str) -> Vec<String> {
 #[derive(Debug)]
 enum CookieOutcome {
     /// A valid SIGNED session cookie verified LOCALLY (signature, `kid`, `exp`,
-    /// and `app` == route client) and its `(client_id, pws_)` family is not
-    /// revoked. Carries the signed `ZeroShip-User` header built directly from
-    /// the cookie claims (NO DB read for identity).
+    /// and `app` == route client), its principal is allowed by the fresh
+    /// lifecycle snapshot, and its `(client_id, pws_)` family is not revoked.
+    /// Carries the signed `ZeroShip-User` header built directly from the
+    /// cookie claims (NO DB read for identity).
     Allowed(String),
     /// No cookie, no signing key configured, a verification failure
     /// (tampered/expired/wrong-app/wrong-kid), a revoked family marker, or a
@@ -898,7 +770,7 @@ enum CookieOutcome {
 /// here on every request — **no `sessions::validate`, no per-request DB read for
 /// identity**.
 ///
-/// Steps (identity verify is stateless; the revocation gate is one DB read):
+/// Steps (identity verification and lifecycle enforcement are edge-local):
 ///  1. Parse the signed cookie token (opaque to the parser).
 ///  2. Verify it LOCALLY via [`crate::session_token::Verifier`]: signature
 ///     (current OR previous `kid`), `iss`, `exp`, and `app` == the resolved
@@ -908,14 +780,11 @@ enum CookieOutcome {
 ///     the session verifier's typ gate).
 ///  3. Defense-in-depth: the cookie `sub` MUST be a `pws_…` pairwise subject
 ///     (every minter projects it; a non-`pws_` cookie is a mint bug → reject).
-///  4. Revocation gate — the SAME per-app family marker the Bearer arm
-///     use: `is_family_revoked_since(client_id, pws_, iat)`. This is a direct
-///     `SELECT EXISTS` (NOT cached): a revoked `(client_id, pws_)` family rejects
-///     a still-valid signed cookie, at the cost of one revocation DB round-trip
-///     per request. Skipped when no DB is configured (smoke mode), exactly like
-///     the Bearer arm — so a valid signed cookie authenticates with
-///     `db = None` and ZERO DB calls.
-///  5. Emit `ZeroShip-User` DIRECTLY from the cookie claims (`id = pws_`, relay
+///  4. Require a fresh pushed lifecycle snapshot that allows this `pws_`.
+///  5. Check the per-app family marker used by the Bearer arm. A fresh cache hit
+///     is local; a cache miss reads the database and fails closed on error.
+///     Smoke mode skips this marker check when no database is configured.
+///  6. Emit `ZeroShip-User` DIRECTLY from the cookie claims (`id = pws_`, relay
 ///     alias `email`, `scopes`). The relay-alias swap + `pws_` projection
 ///     already happened at ISSUE time (`/session` / interactive callback); the
 ///     hot path does not re-derive them.
@@ -973,7 +842,10 @@ async fn resolve_app_session_user_header_inner(
         );
         return CookieOutcome::None;
     }
-
+    if !credential_authentication_allows(state, &claims.app, &claims.sub, claims.iat) {
+        tracing::warn!(sub = %claims.sub, "signed session cookie principal lifecycle rejected");
+        return CookieOutcome::None;
+    }
     // Revocation gate — the per-app family marker (spec §8.5), keyed on
     // `(client_id, pws_)` with `iat` as the binding instant. The SAME mechanism
     // the Bearer arm uses: a revoked family rejects a still-valid signed
@@ -1002,7 +874,10 @@ async fn resolve_app_session_user_header_inner(
             RevocationDecision::Unavailable => return CookieOutcome::None,
         }
     }
-
+    if !credential_authentication_allows(state, &claims.app, &claims.sub, claims.iat) {
+        tracing::warn!(sub = %claims.sub, "signed session cookie lifecycle changed during verification");
+        return CookieOutcome::None;
+    }
     // Emit ZeroShip-User DIRECTLY from the cookie claims — identity + scopes are
     // self-contained (the relay-alias swap + pws_ projection happened at issue
     // time). NO per-request projection, NO DB.
@@ -1019,6 +894,20 @@ async fn resolve_app_session_user_header_inner(
         &state.config.worker_key,
         *request_id,
     ))
+}
+
+fn credential_authentication_allows(
+    state: &crate::GateState,
+    client_id: &str,
+    subject: &str,
+    issued_at: i64,
+) -> bool {
+    let freshness_budget = zeroship_core::readiness::staleness_budget(
+        std::time::Duration::from_secs(state.config.poll_interval_secs),
+    );
+    state
+        .routes
+        .credential_authentication_allowed(client_id, subject, issued_at, freshness_budget)
 }
 
 /// Lift the `sub` claim out of a JWT *without* verification. This is
@@ -1310,7 +1199,7 @@ mod tests {
             "https://api.zeroship.ai".into(),
         );
 
-        StdArc::new(crate::GateState {
+        let state = StdArc::new(crate::GateState {
             config: crate::GateConfig {
                 control_url: String::new(),
                 control_key: String::new(),
@@ -1349,7 +1238,17 @@ mod tests {
             anchor_enc_key: [0u8; 32],
             pairwise_salt: [0u8; 32],
             meter: StdArc::new(zeroship_metering::Meter::new()),
-        })
+        });
+        state.routes.update_snapshot(
+            zeroship_core::types::GatewaySnapshot {
+                routes: zeroship_core::types::RouteMap::new(),
+                principal_lifecycle: Vec::new(),
+                family_revocations: Vec::new(),
+            },
+            &state.rate_limiters,
+            &state.concurrency,
+        );
+        state
     }
 
     // ─── Bearer arm ────────────────────────────────────────
@@ -2130,9 +2029,8 @@ mod tests {
     async fn bearer_valid_raw_op_jwt_emits_zeroship_user() {
         // Happy path (raw OP): a real EdDSA-signed access JWT,
         // JWKS-verified against a live JWKS server, with a matching
-        // client_id claim → Allowed + ZeroShip-User whose id is the per-app
-        // pairwise pws_; the global UUID sub is projected,
-        // never emitted on the worker header).
+        // client_id claim produces Allowed + ZeroShip-User whose id is the
+        // issuer-projected per-app pws_; no global UUID reaches the worker.
         let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]); // OP's key
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]); // gateway wrapper key
         let srv = start_jwks_server(op_jwks_doc(&jwks_signing)).await;
@@ -2143,9 +2041,11 @@ mod tests {
         let sector = "https://myapp.zeroship.ai";
         let host = "myapp.zeroship.ai";
         let (client_id, resource_aud) = op_app_binding(OP_APP_UUID);
+        let expected_pws =
+            zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_sub, sector);
         let token = sign_op_access_jwt(
             &jwks_signing,
-            global_sub,
+            &expected_pws,
             Some(&client_id),
             // Resource-server audiences, NOT the client. The unrelated first
             // entry keeps this a contains-check, not an equality-check.
@@ -2174,9 +2074,6 @@ mod tests {
         )
         .expect("MAC verifies");
         let user: serde_json::Value = serde_json::from_str(&json).expect("user json");
-        // The raw OP global UUID is projected to the per-app pws_.
-        let expected_pws =
-            zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_sub, sector);
         assert_eq!(user["id"], expected_pws);
         assert!(
             expected_pws.starts_with("pws_"),
@@ -2459,11 +2356,15 @@ mod tests {
         let (client_b, resource_aud_b) = op_app_binding(OP_APP_B_UUID);
         assert_ne!(client_a, client_b, "fixture must model two DIFFERENT apps");
         assert_ne!(resource_aud_a, resource_aud_b);
+        let sector_a = "https://app-a.zeroship.ai";
+        let sector_b = "https://app-b.zeroship.ai";
+        let pws_a = zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &sub, sector_a);
+        let pws_b = zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &sub, sector_b);
 
-        // One user, two apps: same global sub, each token bound to ITS app.
+        // One user, two apps: the issuer signs each app's pairwise subject.
         let token_a = sign_op_access_jwt(
             &jwks_signing,
-            &sub,
+            &pws_a,
             Some(&client_a),
             serde_json::json!([resource_aud_a]),
             "user@example.com",
@@ -2472,7 +2373,7 @@ mod tests {
         );
         let token_b = sign_op_access_jwt(
             &jwks_signing,
-            &sub,
+            &pws_b,
             Some(&client_b),
             serde_json::json!([resource_aud_b]),
             "user@example.com",
@@ -2487,10 +2388,6 @@ mod tests {
         // key the arm now reads (it projects pws_ BEFORE the lookup). Derive
         // each app's pws_ under ITS sector (the state's salt is all-zero, the
         // same salt the arm uses), and revoke ONLY app A's family.
-        let sector_a = "https://app-a.zeroship.ai";
-        let sector_b = "https://app-b.zeroship.ai";
-        let pws_a = zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &sub, sector_a);
-        let pws_b = zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &sub, sector_b);
         {
             let pool = crate::db::checkout(&db).await.expect("pool checkout");
             let conn = pool.get().await.expect("pool checkout");
@@ -2571,9 +2468,11 @@ mod tests {
         let sector = "https://myapp.zeroship.ai";
         let host = "myapp.zeroship.ai";
         let (client_id, resource_aud) = op_app_binding(OP_APP_UUID);
+        let pws_sub =
+            zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_sub, sector);
         let token = sign_op_access_jwt(
             &jwks_signing,
-            global_sub,
+            &pws_sub,
             Some(&client_id),
             serde_json::json!(["http://api.zeroship.localhost", resource_aud]),
             "user@example.com",
@@ -2604,9 +2503,8 @@ mod tests {
         )
         .expect("MAC verifies");
         let user: serde_json::Value = serde_json::from_str(&json).expect("user json");
-        // The raw OP global UUID is projected to the per-app pws_
-        // end-to-end through resolve_auth (the global UUID never reaches the
-        // worker header).
+        // The OP-issued per-app pws_ survives resolve_auth unchanged; the
+        // global UUID never reaches the worker header.
         let expected_pws =
             zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_sub, sector);
         assert_eq!(user["id"], expected_pws);
@@ -2804,10 +2702,10 @@ mod tests {
 
     // ─── Pairwise subject projection ─────────────────────
     //
-    // These cover the four properties of the consistent `pws_` projection:
+    // These cover the four properties of the consistent `pws_` contract:
     // (1) cross-app divergence (same user, two apps → different pws_);
-    // (2) cross-arm + re-login consistency (cookie vs raw OP Bearer →
-    //     the SAME pws_ for the same (user, app));
+    // (2) cross-arm + re-login consistency (the issuer and cookie minter
+    //     produce the SAME pws_ for the same (user, app));
     // (3) the global UUID is ABSENT from every outward `ZeroShip-User`;
     // (4) fail-closed 503 when the route has no sector yet.
     // The DB upsert + cookie arm are PG-gated (skip when AUTH_DB_URL is
@@ -2816,8 +2714,7 @@ mod tests {
     /// A fixed global UUID + two distinct app sectors. A `pws_` derived for
     /// the SAME user under DIFFERENT sectors MUST differ — no cross-app
     /// correlation. This is the cross-app divergence property at the
-    /// gateway projection boundary, asserted against the raw OP arm's
-    /// emitted header (the path that actually projects).
+    /// gateway boundary, asserted against the raw OP arm's emitted header.
     #[ntex::test]
     async fn raw_op_same_user_two_apps_get_different_pws() {
         let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]);
@@ -2835,11 +2732,21 @@ mod tests {
         let (client_b, resource_aud_b) = op_app_binding(OP_APP_B_UUID);
         assert_ne!(client_a, client_b, "fixture must model two DIFFERENT apps");
         assert_ne!(resource_aud_a, resource_aud_b);
+        let pws_a = zeroship_core::auth::derive_pairwise(
+            &state.pairwise_salt,
+            global_sub,
+            "https://app-a.zeroship.ai",
+        );
+        let pws_b = zeroship_core::auth::derive_pairwise(
+            &state.pairwise_salt,
+            global_sub,
+            "https://app-b.zeroship.ai",
+        );
 
         // App A.
         let token_a = sign_op_access_jwt(
             &jwks_signing,
-            global_sub,
+            &pws_a,
             Some(&client_a),
             serde_json::json!([resource_aud_a]),
             "user@example.com",
@@ -2864,7 +2771,7 @@ mod tests {
         // App B — SAME user, different sector/client.
         let token_b = sign_op_access_jwt(
             &jwks_signing,
-            global_sub,
+            &pws_b,
             Some(&client_b),
             serde_json::json!([resource_aud_b]),
             "user@example.com",
@@ -2897,12 +2804,9 @@ mod tests {
         drop(srv);
     }
 
-    /// Cross-arm + re-login consistency: the SAME (user, app) yields the
-    /// SAME `pws_` whether the gateway resolves it via the raw OP arm or
-    /// derives it directly (the cookie arm uses the identical derivation on
-    /// the SAME global UUID + sector). Re-login is modelled by deriving
-    /// twice — `derive_pairwise` is deterministic, so a fresh token for the
-    /// same user re-projects to the same id.
+    /// The OP already mints app access tokens with a pairwise subject. The
+    /// gateway must forward that verified `pws_` unchanged rather than hashing
+    /// it a second time as though it were a global UUID.
     #[ntex::test]
     async fn raw_op_pws_is_consistent_across_arms_and_relogin() {
         let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]);
@@ -2915,11 +2819,13 @@ mod tests {
         let sector = "https://myapp.zeroship.ai";
         let host = "myapp.zeroship.ai";
         let (client_id, resource_aud) = op_app_binding(OP_APP_UUID);
+        let issued_pws =
+            zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_sub, sector);
 
-        // Raw-OP arm projection.
+        // `Issuer::issue_access_token` performs this projection before signing.
         let token = sign_op_access_jwt(
             &jwks_signing,
-            global_sub,
+            &issued_pws,
             Some(&client_id),
             serde_json::json!([resource_aud]),
             "user@example.com",
@@ -2935,27 +2841,89 @@ mod tests {
         };
         let arm_id = decode_header_id(&state, &header);
 
-        // The cookie arm and the raw OP arm use the SAME derivation on the
-        // SAME (global UUID, sector). Re-login (a second fresh token)
-        // re-derives the identical value.
-        let direct = zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_sub, sector);
-        let relogin =
-            zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_sub, sector);
-
         assert_eq!(
-            arm_id, direct,
-            "raw OP arm must project the same pws_ the cookie arm derives"
+            arm_id, issued_pws,
+            "raw OP arm must preserve the pairwise subject the issuer signed"
         );
-        assert_eq!(direct, relogin, "re-login must re-derive the SAME pws_");
         assert!(arm_id.starts_with("pws_"));
 
         drop(srv);
     }
 
-    /// Fail-closed: a VALID raw OP user whose route has NO
-    /// `sector_identifier` yet must NOT be projected — the arm returns
-    /// `ClientNotProvisioned` (which `resolve_auth` maps to 503), never the
-    /// global UUID. Mirrors the browser-token path's posture.
+    #[ntex::test]
+    async fn raw_op_bearer_rejects_a_pushed_disabled_principal() {
+        let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]);
+        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let srv = start_jwks_server(op_jwks_doc(&jwks_signing)).await;
+        let base = srv.url("").trim_end_matches('/').to_string();
+        let state = build_state_for_op(gateway_signing, &base);
+
+        let user_id = Uuid::parse_str("0192f1aa-bbbb-7ccc-8ddd-eeeeffff0088").unwrap();
+        let sector = "https://myapp.zeroship.ai";
+        let host = "myapp.zeroship.ai";
+        let (client_id, resource_aud) = op_app_binding(OP_APP_UUID);
+        let issued_pws = zeroship_core::auth::derive_pairwise(
+            &state.pairwise_salt,
+            &user_id.to_string(),
+            sector,
+        );
+        let mut routes = zeroship_core::types::RouteMap::new();
+        routes.insert(
+            Uuid::parse_str(OP_APP_UUID).unwrap(),
+            zeroship_core::types::RouteEntry {
+                name: host.to_string(),
+                plan_id: "free".to_string(),
+                api_key_hash: "hash".to_string(),
+                deploy_hash: None,
+                manifest: zeroship_bundle::Manifest::passthrough(),
+                oauth_client_id: Some(client_id.clone()),
+                sector_identifier: Some(sector.to_string()),
+                spend_state: zeroship_core::types::SpendState::Allow,
+                account_state: zeroship_core::types::AccountState::Active,
+            },
+        );
+        state.routes.update_snapshot(
+            zeroship_core::types::GatewaySnapshot {
+                routes,
+                principal_lifecycle: vec![
+                    zeroship_core::types::GatewayPrincipalLifecycle::disabled(
+                        user_id,
+                        vec![issued_pws.clone()],
+                    ),
+                ],
+                family_revocations: Vec::new(),
+            },
+            &state.rate_limiters,
+            &state.concurrency,
+        );
+
+        let token = sign_op_access_jwt(
+            &jwks_signing,
+            &issued_pws,
+            Some(&client_id),
+            serde_json::json!([resource_aud]),
+            "",
+            "User",
+            3600,
+        );
+        let outcome = resolve_bearer_user_header(
+            &bearer_req(&token, host),
+            &state,
+            &Uuid::new_v4(),
+            Some(&client_id),
+            Some(sector),
+        )
+        .await;
+        assert!(
+            matches!(outcome, BearerOutcome::Invalid),
+            "a disabled principal in the pushed snapshot must be rejected, got {outcome:?}"
+        );
+
+        drop(srv);
+    }
+
+    /// Fail closed when a valid raw OP token reaches a route whose OAuth
+    /// provisioning is incomplete because its sector is missing.
     #[ntex::test]
     async fn raw_op_unprovisioned_sector_fails_closed() {
         let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]);
@@ -3037,6 +3005,7 @@ mod tests {
             .issue(&crate::session_token::SessionMint {
                 app: client_id,
                 sub: pws_sub,
+                credential_iat: 1_700_000_000,
                 auth_time: Some(1_700_000_000),
                 amr: &["pwd".to_string()],
                 email,
@@ -3046,6 +3015,48 @@ mod tests {
                 scopes,
             })
             .expect("issue signed session cookie")
+    }
+
+    fn install_disabled_principal_snapshot(
+        state: &crate::GateState,
+        user_id: Uuid,
+        client_id: &str,
+        sector: &str,
+        host: &str,
+    ) {
+        let mut routes = zeroship_core::types::RouteMap::new();
+        routes.insert(
+            Uuid::new_v4(),
+            zeroship_core::types::RouteEntry {
+                name: host.to_string(),
+                plan_id: "free".to_string(),
+                api_key_hash: "hash".to_string(),
+                deploy_hash: None,
+                manifest: zeroship_bundle::Manifest::passthrough(),
+                oauth_client_id: Some(client_id.to_string()),
+                sector_identifier: Some(sector.to_string()),
+                spend_state: zeroship_core::types::SpendState::Allow,
+                account_state: zeroship_core::types::AccountState::Active,
+            },
+        );
+        let pairwise = zeroship_core::auth::derive_pairwise(
+            &state.pairwise_salt,
+            &user_id.to_string(),
+            sector,
+        );
+        let lifecycle = zeroship_core::types::GatewayPrincipalLifecycle::disabled(
+            user_id,
+            vec![pairwise],
+        );
+        state.routes.update_snapshot(
+            zeroship_core::types::GatewaySnapshot {
+                routes,
+                principal_lifecycle: vec![lifecycle],
+                family_revocations: Vec::new(),
+            },
+            &state.rate_limiters,
+            &state.concurrency,
+        );
     }
 
     /// The cookie arm verifies a gateway-signed session cookie LOCALLY and emits
@@ -3103,6 +3114,88 @@ mod tests {
             user["scopes"],
             serde_json::json!(["openid", "email"]),
             "scopes from the signed cookie claim"
+        );
+    }
+
+    #[ntex::test]
+    async fn cookie_arm_rejects_a_pushed_disabled_principal() {
+        let state = build_state_with_session_and_auth_ui_url_and_db(
+            ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]),
+            "http://127.0.0.1:1",
+            None,
+        );
+        let user_id = Uuid::new_v4();
+        let client_id = "oac_cookie_lifecycle";
+        let sector = "https://cookie-lifecycle.zeroship.test";
+        let host = "cookie-lifecycle.zeroship.test";
+        install_disabled_principal_snapshot(&state, user_id, client_id, sector, host);
+        let pws = zeroship_core::auth::derive_pairwise(
+            &state.pairwise_salt,
+            &user_id.to_string(),
+            sector,
+        );
+        let token = issue_signed_session_cookie(&state, client_id, &pws, "", &[]);
+        let req = ntex::web::test::TestRequest::default()
+            .uri("/api/me")
+            .header(http::header::HOST, host)
+            .header(
+                "cookie",
+                format!("{}={token}", oidc_rp::app_session_cookie_name()),
+            )
+            .to_http_request();
+
+        let outcome = resolve_app_session_user_header_inner(
+            &req,
+            &state,
+            &Uuid::new_v4(),
+            Some(client_id),
+        )
+        .await;
+        assert!(
+            matches!(outcome, CookieOutcome::None),
+            "a disabled principal's signed cookie must be rejected, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn session_cookie_signing_rechecks_lifecycle_at_emission() {
+        let state = build_state_with_session_and_auth_ui_url_and_db(
+            ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]),
+            "http://127.0.0.1:1",
+            None,
+        );
+        let user_id = Uuid::new_v4();
+        let client_id = "oac_sign_lifecycle";
+        let sector = "https://sign-lifecycle.zeroship.test";
+        install_disabled_principal_snapshot(
+            &state,
+            user_id,
+            client_id,
+            sector,
+            "sign-lifecycle.zeroship.test",
+        );
+        let pws = zeroship_core::auth::derive_pairwise(
+            &state.pairwise_salt,
+            &user_id.to_string(),
+            sector,
+        );
+
+        let result = crate::auth_token::sign_session_cookie(
+            &state,
+            client_id,
+            &pws,
+            1_700_000_000,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+            &[],
+        );
+        assert!(
+            result.is_err(),
+            "a denial pulled during mint work must prevent final cookie signing"
         );
     }
 
@@ -3165,6 +3258,7 @@ mod tests {
             .issue(&crate::session_token::SessionMint {
                 app: client_id,
                 sub: &pws,
+                credential_iat: 1_700_000_000,
                 auth_time: None,
                 amr: &[],
                 email: "",
@@ -3349,6 +3443,7 @@ mod tests {
             .issue(&crate::session_token::SessionMint {
                 app: client_id,
                 sub: &pws,
+                credential_iat: 1_700_000_000,
                 auth_time: None,
                 amr: &[],
                 email: "",
@@ -3927,7 +4022,7 @@ mod tests {
 
         let token = sign_op_access_jwt(
             &jwks_signing,
-            &global_sub,
+            &pws_sub,
             Some(client_id),
             serde_json::json!(["http://api.zeroship.localhost"]),
             "user@example.com",

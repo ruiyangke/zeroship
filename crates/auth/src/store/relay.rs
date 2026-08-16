@@ -1,6 +1,7 @@
 //! Relay alias persistence on `zeroship.app_user_identities` (Slice 5b).
 //!
-//! Four things live here, all keyed on the row the gateway (Slice 4) writes:
+//! Four things live here, all keyed on the pairwise identity row written by
+//! access-token issuance or gateway session minting:
 //!
 //! 1. [`mint_alias_at_consent`] — mint (or reuse) the `{token}@{relay_domain}`
 //!    alias at consent time (sub-spec §2/§6.1). Off the hot path, with
@@ -57,19 +58,18 @@ pub struct AliasTarget {
 ///
 /// **Why an UPDATE, not the §6.1 INSERT-upsert (resolved ambiguity).** The
 /// sub-spec §6.1 sketches the mint as `INSERT … ON CONFLICT … DO UPDATE`, but
-/// that INSERT needs `pairwise_sub`, which is **NOT NULL** and, in the
-/// implemented Slice-4 architecture, is derivable ONLY by the gateway (it alone
-/// holds `pairwise_salt` + the route `sector_identifier`; auth has neither).
-/// So the gateway is the single writer of `pairwise_sub` + the row's existence,
-/// and consent is the writer of `relay_email`. This function therefore mints
-/// onto the **gateway-written row** with an idempotent `UPDATE … COALESCE`:
+/// that INSERT needs `pairwise_sub`, which is **NOT NULL**. The auth issuer can
+/// derive it once a token is issued, and gateway session minters can derive it
+/// once a browser session is established, but consent runs before either write.
+/// Consent therefore remains the writer of `relay_email` and this function
+/// mints onto an existing identity row with an idempotent `UPDATE ... COALESCE`:
 ///
 /// - row exists, `relay_email` NULL ⇒ mint a fresh token, generate-and-retry on
 ///   the active-unique collision, return it.
 /// - row exists, `relay_email` set ⇒ reuse it, clear `revoked_at` (re-grant
 ///   stability, §6.1) — the address is unchanged.
-/// - row absent (consent ran before the gateway's first `ZeroShip-User`
-///   projection) ⇒ returns `None`, and NOTHING mints it afterwards. This arm
+/// - row absent (consent ran before token or session issuance) returns
+///   `None`, and NOTHING mints it afterwards. This arm
 ///   used to claim the gateway's "lazy-mint on read-through miss (main spec
 ///   §7.1)" covered it, "so the app-facing email is never spuriously null".
 ///   That mint does not exist. `crates/gateway/src/identities.rs` has exactly

@@ -11,7 +11,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use zeroship_core::auth::{
-    derive_app_scoped_control_token, extract_bearer, validate_control_key,
+    constant_time_eq, derive_app_scoped_control_token, extract_bearer,
     verify_zeroship_user_header_for_request,
 };
 use zeroship_core::dispatch_frame::decode_dispatch_frame;
@@ -77,7 +77,7 @@ pub(crate) fn check_worker_auth(req: &HttpRequest, worker_key: &str) -> Option<H
         .and_then(|v| v.to_str().ok())
         .and_then(extract_bearer);
     match auth {
-        Some(token) if validate_control_key(token, worker_key) => None,
+        Some(token) if constant_time_eq(token, worker_key) => None,
         _ => {
             metrics::inc(&metrics::DISPATCH_REJECTED_AUTH);
             Some(HttpResponse::Unauthorized().body(r#"{"error":"unauthorized"}"#))

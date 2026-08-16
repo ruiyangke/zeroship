@@ -45,16 +45,15 @@ pub fn spawn_all(
     .detach();
 
     let db_token_sweep = db.clone();
-    let refresh_pool_token_sweep = refresh_pool;
+    let refresh_pool_token_sweep = refresh_pool.clone();
     compio::runtime::spawn(async move {
         token_sweep::run(db_token_sweep, refresh_pool_token_sweep).await;
     })
     .detach();
 
     // ISS-12: erase accounts whose deletion grace window has elapsed.
-    let db_reaper = db;
     compio::runtime::spawn(async move {
-        account_reaper::run(db_reaper).await;
+        account_reaper::run(refresh_pool).await;
     })
     .detach();
 }

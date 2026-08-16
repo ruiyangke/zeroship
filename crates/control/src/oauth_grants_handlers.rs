@@ -222,7 +222,8 @@ async fn revoke_grant_cascade(
         tx.execute(
             "INSERT INTO zeroship.token_revocations (client_id, sub, revoked_after) \
              VALUES ($1, $2, NOW()) \
-             ON CONFLICT (client_id, sub) DO UPDATE SET revoked_after = EXCLUDED.revoked_after",
+             ON CONFLICT (client_id, sub) DO UPDATE SET revoked_after = \
+               GREATEST(zeroship.token_revocations.revoked_after, EXCLUDED.revoked_after)",
             &[&client_id, &pws],
         )
         .await?;

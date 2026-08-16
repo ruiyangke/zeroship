@@ -10,7 +10,7 @@
 //! There is no global subject-only denylist. The previous
 //! `wrapper_revoked_subjects` table was write-only dead code and was removed;
 //! UUID-keyed CLI revocation remains namespaced by `zeroship-cli` in this
-//! shared table. The CLI reader currently has no supported product writer.
+//! shared table. Account deletion writes that platform-family cutoff.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -35,7 +35,8 @@ pub async fn revoke_family(db: &Client, client_id: &str, sub: &str) -> Result<u6
     db.execute(
         "INSERT INTO zeroship.token_revocations (client_id, sub, revoked_after) \
          VALUES ($1, $2, NOW()) \
-         ON CONFLICT (client_id, sub) DO UPDATE SET revoked_after = EXCLUDED.revoked_after",
+         ON CONFLICT (client_id, sub) DO UPDATE SET revoked_after = \
+           GREATEST(zeroship.token_revocations.revoked_after, EXCLUDED.revoked_after)",
         &[&client_id, &sub],
     )
     .await

@@ -61,7 +61,7 @@ pub struct GateSettings {
 
     /// Dedicated PERMANENT pairwise-salt secret (auth-sdk 6.2). The seed for
     /// every app's `pws_` per-app identity anchor, independent of the rotatable
-    /// stash key. MUST be identical on gateway + control and MUST NOT be
+    /// stash key. MUST be identical on auth + gateway + control and MUST NOT be
     /// rotated without a per-app `pws_` migration.
     ///
     /// One field, not two. The pre-conversion declaration had a

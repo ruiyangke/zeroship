@@ -276,7 +276,7 @@ services:
       ZEROSHIP_AUTH_PLATFORM_MINT_URL: http://auth:9092
       # Dedicated to control -> auth platform-token mint calls. The worker does
       # not receive this key, so its control-plane bearer cannot invoke mint.
-      ZEROSHIP_AUTH_PLATFORM_MINT_KEY: ${ZEROSHIP_AUTH_PLATFORM_MINT_KEY:?run zeroship dev init}
+      ZEROSHIP_AUTH_PLATFORM_MINT_KEY: urn:zeroship:file:/etc/zeroship/secrets/platform-mint-key
       # Same split for the key fetch, using the setting that already existed:
       # the JWKS is FETCHED, so it needs a reachable address, while the `iss`
       # it validates stays the public issuer above. Without this the mint would
@@ -367,10 +367,11 @@ services:
     volumes:
       - bundles:/data/bundles
       - ../../data:/data
-      # Control MINTS PATs, so it needs the same key material gateway and auth
-      # already mount. The `migrated` service verifies against this SAME file,
-      # which is what lets a creator PAT authorize a migration apply.
-      - ${ZEROSHIP_SECRETS_DIR:-./secrets}:/etc/zeroship/secrets:ro
+      # Control mints PATs, so it reads the signing key that migrated also
+      # verifies. The platform mint key is a separate file visible only to
+      # control and auth.
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/control-signing.pem:/etc/zeroship/secrets/control-signing.pem:ro
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/platform-mint-key:/etc/zeroship/secrets/platform-mint-key:ro
       # mounted at the well-known path => auto-discovered, no --config needed
       - ../ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
     security_opt:
@@ -445,7 +446,7 @@ services:
       # `{issuer}/.well-known/jwks.json` and sent it out through the edge.
       ZEROSHIP_AUTH_PLATFORM_JWKS_URL: http://auth:9092/oauth2/.well-known/jwks.json
     volumes:
-      - ${ZEROSHIP_SECRETS_DIR:-./secrets}:/etc/zeroship/secrets:ro
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/control-signing.pem:/etc/zeroship/secrets/control-signing.pem:ro
       - ../ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
     # compio/io_uring, same as every other native service here.
     security_opt:
@@ -495,9 +496,9 @@ services:
       retries: 5
       start_period: 40s
     volumes:
-      # Platform key material (Ed25519 signing keys, broker master secret,
-      # pairwise salt). The default host directory is explicitly gitignored.
-      - ${ZEROSHIP_SECRETS_DIR:-./secrets}:/etc/zeroship/secrets:ro
+      # Only the two files the gateway consumes are mounted.
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/gateway-signing.pem:/etc/zeroship/secrets/gateway-signing.pem:ro
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/broker-secret:/etc/zeroship/secrets/broker-secret:ro
       # Same content-addressed blob store control writes to (asset proxy).
       - bundles:/data/bundles
       # mounted at the well-known path => auto-discovered, no --config needed
@@ -558,18 +559,11 @@ services:
     # the gateway's ZEROSHIP_WORKER_KEY.
     # No secret is a flag; each arrives under its own canonical ZEROSHIP_ name
     # in the `environment:` block below. ZEROSHIP_WORKER_KEY must match the
-    # gateway's. NOTE on the worker's DSN: ZEROSHIP_WORKER_DATABASE_URL is
-    # plugin-db's PROVISIONING connection, NOT a constrained system-table role.
-    # plugin-db's register_model creates per-app PG roles + schemas
-    # (CREATEROLE/CREATEDB) and manages the WAL replication slot, so this
-    # connection MUST stay a privileged principal (the postgres superuser here in
-    # dev) - a DIFFERENT role than control/gateway's least-priv DSNs, which is
-    # exactly why the four services have four canonical DSN names rather than one
-    # shared reference. The `zeroship_worker` role from changeset 0025 exists (and owns
-    # ZERO zeroship.* system-table grants), but it is NOT the worker's login role
-    # - the worker never touches the system tables; its per-app tenant access is
-    # gated by plugin-db's own `SET LOCAL ROLE <per-app role>` mechanism, a
-    # separate trust boundary.
+    # gateway's. The worker logs in as the constrained zeroship_worker role.
+    # zeroship-migrated creates app roles, workflow schemas, and publications;
+    # the worker receives only runtime-role membership, its narrow workflow
+    # owner membership, and REPLICATION for per-worker logical slots. It has no
+    # write privilege on any zeroship system relation.
     command:
       - zeroship-worker
       - --port
@@ -603,15 +597,16 @@ services:
       retries: 5
       start_period: 40s
     environment:
-      # Worker DSN = privileged provisioning superuser (see NOTE above); a
-      # DIFFERENT role from control's and the gateway's, and therefore its own
-      # canonical name rather than a shared one they could disagree about.
-      ZEROSHIP_WORKER_DATABASE_URL: ${ZEROSHIP_WORKER_DATABASE_URL:-postgres://postgres:zeroship@postgres:5432/zeroship}
+      # Dedicated constrained worker login. Startup rejects a DSN whose
+      # effective database privileges exceed this role's narrow posture.
+      ZEROSHIP_WORKER_DATABASE_URL: ${ZEROSHIP_WORKER_DATABASE_URL:-postgres://zeroship_worker:zeroship_worker@postgres:5432/zeroship}
       # env.kv backend. Secret-classed: a Redis URL admits userinfo, so it has
       # no value flag and arrives here instead of on the command line.
       ZEROSHIP_WORKER_KV_URL: ${ZEROSHIP_WORKER_KV_URL:-redis://redis:6379}
       ZEROSHIP_CONTROL_KEY: ${ZEROSHIP_CONTROL_KEY:?run zeroship dev init}
       ZEROSHIP_WORKER_KEY: ${ZEROSHIP_WORKER_KEY:?run zeroship dev init}
+      ZEROSHIP_OBSERVABILITY_LOG_FILTER: info,zeroship_=debug
+      ZEROSHIP_OBSERVABILITY_LOG_FORMAT: json
     volumes:
       # Same content-addressed blob store control writes to (deploy blobs).
       - bundles:/data/bundles
@@ -621,9 +616,6 @@ services:
       # pattern (mirrors how `bundles` is shared for deploy blobs). S3/R2
       # replaces this in prod behind the same Backend trait.
       - app-storage:/data/app-storage
-      # Mounted at the well-known path => auto-discovered, so the worker
-      # picks up the shared [observability] defaults with no --config.
-      - ../ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
     deploy:
       replicas: 3
     security_opt:
@@ -734,7 +726,7 @@ services:
       ZEROSHIP_AUTH_PUBLIC_URL: ${ZEROSHIP_ORIGIN_SCHEME:-http}://auth.${ZEROSHIP_DOMAIN:-zeroship.localhost}
       # Dedicated to control -> auth platform-token mint calls. Auth does not
       # receive the broader control API key.
-      ZEROSHIP_AUTH_PLATFORM_MINT_KEY: ${ZEROSHIP_AUTH_PLATFORM_MINT_KEY:?run zeroship dev init}
+      ZEROSHIP_AUTH_PLATFORM_MINT_KEY: urn:zeroship:file:/etc/zeroship/secrets/platform-mint-key
       # Auth has independent stash-cookie and TOTP-at-rest keys. Both are
       # generated once and retained across restarts by the dev overlay.
       ZEROSHIP_AUTH_STASH_SIGNING_KEY: ${ZEROSHIP_AUTH_STASH_SIGNING_KEY:?run zeroship dev init}
@@ -756,9 +748,14 @@ services:
     ports:
       - "127.0.0.1:9092:9092"
     volumes:
-      # Platform key material (Ed25519 signing keys, broker master secret,
-      # pairwise salt). The default host directory is explicitly gitignored.
-      - ${ZEROSHIP_SECRETS_DIR:-./secrets}:/etc/zeroship/secrets:ro
+      # Mount only auth's files; the mint key is not visible to any other
+      # service except control.
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/auth-signing.pem:/etc/zeroship/secrets/auth-signing.pem:ro
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/pairwise-salt:/etc/zeroship/secrets/pairwise-salt:ro
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/broker-secret:/etc/zeroship/secrets/broker-secret:ro
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/refresh-hash-key:/etc/zeroship/secrets/refresh-hash-key:ro
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/refresh-idem-key:/etc/zeroship/secrets/refresh-idem-key:ro
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/platform-mint-key:/etc/zeroship/secrets/platform-mint-key:ro
       # frame_ancestor_origins comes from the shared [auth] overlay,
       # auto-discovered at the well-known path.
       - ../ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro

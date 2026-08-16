@@ -686,8 +686,18 @@ async fn pat_owned_by_anonymized_creator_returns_401() {
         )
         .await
         .expect("insert retained creator account");
+    let (mut deletion, deletion_driver) =
+        compio_postgres::connect(&db_url, compio_postgres::NoTls)
+            .await
+            .expect("account deletion connection");
+    compio::runtime::spawn(async move {
+        if let Err(e) = deletion_driver.run().await {
+            eprintln!("account deletion connection error: {e}");
+        }
+    })
+    .detach();
     users::request_deletion(
-        fx.state.control_pg.as_ref(),
+        &mut deletion,
         pat.user_id,
         account_reaper::GRACE_DAYS,
     )
@@ -703,7 +713,7 @@ async fn pat_owned_by_anonymized_creator_returns_401() {
         )
         .await
         .expect("backdate account deletion");
-    account_reaper::tick(fx.state.control_pg.as_ref())
+    account_reaper::tick(&mut deletion)
         .await
         .expect("run account reaper");
 

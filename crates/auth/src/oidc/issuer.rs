@@ -205,10 +205,10 @@ impl BrokerSecrets {
     #[must_use]
     pub fn verify_client_secret(&self, client_id: &str, presented: &str) -> bool {
         let current = zeroship_core::auth::derive_broker_secret(&self.current, client_id);
-        let current_ok = zeroship_core::auth::validate_control_key(presented, &current);
+        let current_ok = zeroship_core::auth::constant_time_eq(presented, &current);
         let previous_ok = self.previous.as_ref().is_some_and(|previous| {
             let expected = zeroship_core::auth::derive_broker_secret(previous, client_id);
-            zeroship_core::auth::validate_control_key(presented, &expected)
+            zeroship_core::auth::constant_time_eq(presented, &expected)
         });
         current_ok || previous_ok
     }
@@ -904,4 +904,20 @@ fn new_jti() -> String {
     let mut bytes = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)
+}
+
+#[cfg(test)]
+mod ttl_tests {
+    use super::{validate_registered_ttl, PLATFORM_TOKEN_MAX_TTL_SECS};
+
+    #[test]
+    fn registered_token_issuer_enforces_the_platform_ttl_ceiling() {
+        for invalid in [0, -1, PLATFORM_TOKEN_MAX_TTL_SECS + 1] {
+            assert!(
+                validate_registered_ttl(invalid, "access token").is_err(),
+                "registered issuer accepted ttl_secs={invalid}"
+            );
+        }
+        assert!(validate_registered_ttl(PLATFORM_TOKEN_MAX_TTL_SECS, "access token").is_ok());
+    }
 }

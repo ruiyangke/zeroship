@@ -61,7 +61,7 @@ pub struct FileConfig {
     /// Platform-wide shared secret for worker admin endpoints.
     pub worker_key: Option<String>,
     /// Dedicated PERMANENT pairwise-salt secret (auth-sdk 6.2). The per-app
-    /// `pws_` identity anchor seed, identical on gateway and control, never
+    /// `pws_` identity anchor seed, identical on auth, gateway, and control, never
     /// rotated without a migration.
     pub pairwise_salt: Option<String>,
     /// Usage-metering stream (Redpanda) configuration shared by the usage

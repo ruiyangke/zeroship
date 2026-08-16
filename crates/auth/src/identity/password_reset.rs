@@ -255,9 +255,9 @@ pub async fn is_live(db: &Client, raw_token: &str) -> Result<bool> {
 ///      — defense in depth for the IdP-session credential-version gate);
 ///   2. writes a `(client_id, pairwise_sub)` family marker for EVERY app the
 ///      user holds an identity with, drawing the `pairwise_sub` the cookie
-///      carries from `app_user_identities` (auth cannot derive `pws_` itself —
-///      it holds neither `pairwise_salt` nor the route sector — but the gateway
-///      persisted it there at projection time). This rejects every already-live
+///      carries from `app_user_identities` (the access-token issuer and gateway
+///      session minters persist that authoritative reverse mapping). This
+///      rejects every already-live
 ///      app-session cookie / wrapper token for that family from now on; and
 ///   3. revokes (`revoked_at = NOW()`) every `app_session_anchors` row for the
 ///      user, so `anchors::read_live` returns `None` and `?mint=1` fails closed
@@ -339,7 +339,8 @@ pub async fn complete(
                  FROM zeroship.app_user_identities aui \
                  JOIN consumed c ON c.user_id = aui.global_user_id \
                  ON CONFLICT (client_id, sub) \
-                   DO UPDATE SET revoked_after = EXCLUDED.revoked_after \
+                   DO UPDATE SET revoked_after = \
+                     GREATEST(zeroship.token_revocations.revoked_after, EXCLUDED.revoked_after) \
              ), revoked_anchors AS ( \
                  UPDATE zeroship.app_session_anchors a \
                  SET revoked_at = NOW() \
@@ -362,7 +363,8 @@ pub async fn complete(
                  SELECT client_id, sub, revoked_after \
                  FROM refresh_families \
                  ON CONFLICT (client_id, sub) \
-                   DO UPDATE SET revoked_after = EXCLUDED.revoked_after \
+                   DO UPDATE SET revoked_after = \
+                     GREATEST(zeroship.token_revocations.revoked_after, EXCLUDED.revoked_after) \
              ) \
              SELECT user_id, email FROM consumed",
             &[&token_hash.as_slice(), &PURPOSE, &password_hash, &NS_USER],

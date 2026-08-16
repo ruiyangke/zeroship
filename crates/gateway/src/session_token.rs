@@ -27,11 +27,15 @@
 //! No resource server accepts it as authorization; the gateway emits the signed
 //! `ZeroShip-User` header directly from these claims on the cookie arm.
 //!
-//! ## Revocation: per-app family marker, read through a short-TTL cache
+//! ## Revocation: pushed state plus a family-marker cache
 //!
 //! Identity verification is stateless (local signature, `kid`, `iss`, `exp`,
-//! and `app` binding, no DB). The revocation gate is not: the cookie arm runs
-//! the SAME per-app family-marker check the Bearer arm uses,
+//! and `app` binding, no DB). Every request also requires a fresh lifecycle and
+//! family-cutoff snapshot pulled with the route table. This blocks disabled,
+//! anonymized, and deleting principals without a request-path database lookup.
+//!
+//! When gateway database access is configured, the cookie arm additionally
+//! runs the same per-app family-marker check the Bearer arm uses,
 //! `is_family_revoked_since(client_id = app, sub = pws_, iat)`
 //! ([`zeroship_authz::wrapper_revocation`]). `iat` is the binding instant, so a
 //! revoked `(client_id, pws_)` family rejects a still-valid signed cookie
@@ -46,8 +50,8 @@
 //! is DB-free, and revocation written on ANOTHER node is therefore not
 //! instantaneous on this one. A same-node writer busts the entry immediately.
 //!
-//! With `db = None` (smoke mode) the gate is skipped and the whole path is
-//! DB-free for a different reason: nothing is consulted at all.
+//! With `db = None` (smoke mode), only this secondary database check is
+//! skipped. The required pushed lifecycle and cutoff snapshot still applies.
 
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
@@ -114,6 +118,9 @@ pub struct SessionMint<'a> {
     /// Per-app pairwise `pws_…` subject (the same projection the wrapper arms
     /// stamp).
     pub sub: &'a str,
+    /// Issuance time of the verified OP credential this cookie derives from.
+    /// Retaining it keeps family-revocation markers effective across re-signs.
+    pub credential_iat: i64,
     pub auth_time: Option<i64>,
     pub amr: &'a [String],
     pub email: &'a str,
@@ -187,7 +194,7 @@ impl Issuer {
             iss: self.iss.clone(),
             app: m.app.to_string(),
             sub: m.sub.to_string(),
-            iat: now,
+            iat: m.credential_iat.min(now),
             exp: now + SESSION_TOKEN_TTL_SECS,
             auth_time: m.auth_time,
             amr: m.amr.to_vec(),
@@ -338,6 +345,7 @@ mod tests {
         SessionMint {
             app,
             sub,
+            credential_iat: 1_700_000_000,
             auth_time: Some(1_700_000_000),
             amr: &[],
             email: "relay-alias@zeroship.ai",
@@ -364,6 +372,18 @@ mod tests {
         assert_eq!(claims.email, "relay-alias@zeroship.ai");
         assert_eq!(claims.scopes, scopes);
         assert_eq!(claims.auth_time, Some(1_700_000_000));
+    }
+
+    #[test]
+    fn issue_preserves_the_originating_credential_time_for_revocation() {
+        let signing = SigningKey::from_bytes(&[7u8; 32]);
+        let issuer = Issuer::new(&signing, ISS.into()).expect("issuer");
+        let mut request = mint("oac_myapp", "pws_abc123", &[]);
+        request.credential_iat = 1_700_000_123;
+        let token = issuer.issue(&request).expect("issue");
+        let verifier = Verifier::new(&signing.verifying_key(), ISS.into());
+        let claims = verifier.verify(&token, "oac_myapp").expect("verify");
+        assert_eq!(claims.iat, 1_700_000_123);
     }
 
     #[test]

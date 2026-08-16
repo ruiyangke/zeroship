@@ -9,7 +9,9 @@ use ntex::web;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use common::{assert_redirect, cleanup_rate_limits_like, location, test_auth_config};
+use common::{
+    assert_redirect, cleanup_rate_limits_like, dedicated_test_db, location, test_auth_config,
+};
 use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::oidc::{Issuer, ACCESS_TOKEN_TYP};
 use zeroship_auth::sessions::login as session_cookie;
@@ -1094,7 +1096,15 @@ async fn credential_bump_rejects_approved_device_code_after_deletion_is_cancelle
     .await
     .expect("approve native device grant");
 
-    users::request_deletion(&pg, user.id, 30)
+    let db_url = zeroship_core::declared_env!(
+        external,
+        "AUTH_DB_URL",
+        zeroship_core::config::TestHarness
+    )
+    .or_else(|| zeroship_core::test_env!("CONTROL_TEST_DB"))
+    .expect("test database URL");
+    let mut deletion = dedicated_test_db(&db_url).await;
+    users::request_deletion(&mut deletion, user.id, 30)
         .await
         .expect("request account deletion")
         .expect("device grant owner exists");

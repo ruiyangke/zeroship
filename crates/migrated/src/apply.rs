@@ -25,6 +25,7 @@ use crate::policy::{
     ManagedPolicyError, SealVerifier,
 };
 use crate::policy_store::{AppPolicyStore, AppPolicyStoreError};
+use crate::publication::{reconcile_app_publication, PublicationError};
 use crate::provisioning::{exec_retry, provision_migrator, ProvisionRoleError};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -200,6 +201,8 @@ pub enum ApplyRequestError {
     ProvisionRole(#[from] ProvisionRoleError),
     #[error("runtime app role provision: {0}")]
     ProvisionRuntimeRole(compio_postgres::Error),
+    #[error("app publication provision: {0}")]
+    ProvisionPublication(#[from] PublicationError),
     #[error("migration preflight: {0}")]
     Preflight(#[from] IrApplyError),
     #[error("sealed migration apply: {0}")]
@@ -731,6 +734,7 @@ async fn apply_ir_documents_with_policy(
             provision_runtime_app_role(session.client(), &schema, &role)
                 .await
                 .map_err(ApplyRequestError::ProvisionRuntimeRole)?;
+            reconcile_app_publication(session.client(), &schema).await?;
             if migration_store.mark_applied(*app_id, migration_id).await?
                 == TerminalTransition::Lost
             {
@@ -1525,7 +1529,8 @@ pub fn apply_error_kind(err: &ApplyRequestError) -> (ntex::http::StatusCode, &'s
         | ApplyRequestError::Connect(_)
         | ApplyRequestError::ProvisionSchema(_)
         | ApplyRequestError::ProvisionRole(_)
-        | ApplyRequestError::ProvisionRuntimeRole(_) => (
+        | ApplyRequestError::ProvisionRuntimeRole(_)
+        | ApplyRequestError::ProvisionPublication(_) => (
             ntex::http::StatusCode::SERVICE_UNAVAILABLE,
             "migration_infrastructure",
         ),
@@ -1570,9 +1575,32 @@ fn quote_lit(value: &str) -> String {
 }
 
 const APP_ROLE_TEMPLATE: &str = "__zeroship_app_role_template";
+const WORKER_ROLE: &str = "zeroship_worker";
+const WORKFLOW_OWNER_ROLE: &str = "zeroship_workflow_owner";
 
 fn runtime_app_role_name(app_id: &str) -> String {
     format!("app_{app_id}_role")
+}
+
+fn runtime_dependents_sql(schema: &str, runtime_role: &str) -> String {
+    let runtime_role_q = quote_ident(runtime_role);
+    let worker_q = quote_ident(WORKER_ROLE);
+    let workflow_owner_q = quote_ident(WORKFLOW_OWNER_ROLE);
+    let workflow_schema_q = quote_ident(&format!("app_{schema}"));
+    format!(
+        "DO $runtime_dependents$ BEGIN
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{worker_lit}') THEN
+                GRANT {runtime_role_q} TO {worker_q};
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{workflow_owner_lit}') THEN
+                CREATE SCHEMA IF NOT EXISTS {workflow_schema_q} AUTHORIZATION {workflow_owner_q};
+                ALTER SCHEMA {workflow_schema_q} OWNER TO {workflow_owner_q};
+                GRANT CREATE, USAGE ON SCHEMA {workflow_schema_q} TO {workflow_owner_q};
+            END IF;
+         END $runtime_dependents$",
+        worker_lit = quote_lit(WORKER_ROLE),
+        workflow_owner_lit = quote_lit(WORKFLOW_OWNER_ROLE),
+    )
 }
 
 /// PRECONDITION: `schema` and `migrator_role` must contain no single quote.
@@ -1629,7 +1657,11 @@ async fn provision_runtime_app_role(
          ALTER DEFAULT PRIVILEGES FOR ROLE {migrator_q} IN SCHEMA {schema_q}
              GRANT USAGE, SELECT ON SEQUENCES TO {role_q};"
     ))
-    .await
+    .await?;
+
+    // The migration identity creates no platform role here. It only delegates
+    // to the narrow roles that the platform role migration precreated.
+    exec_retry(conn, &runtime_dependents_sql(schema, &role)).await
 }
 
 #[cfg(test)]
@@ -1637,6 +1669,22 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn runtime_provisioning_delegates_only_precreated_narrow_roles() {
+        let sql = runtime_dependents_sql(
+            "0191e7a2-b3c4-4d5e-8f90-123456789abc",
+            "app_0191e7a2-b3c4-4d5e-8f90-123456789abc_role",
+        );
+        assert!(sql.contains("IF EXISTS (SELECT 1 FROM pg_roles"));
+        assert!(sql.contains(
+            "GRANT \"app_0191e7a2-b3c4-4d5e-8f90-123456789abc_role\" TO \"zeroship_worker\""
+        ));
+        assert!(sql.contains(
+            "CREATE SCHEMA IF NOT EXISTS \"app_0191e7a2-b3c4-4d5e-8f90-123456789abc\" AUTHORIZATION \"zeroship_workflow_owner\""
+        ));
+        assert!(!sql.contains("CREATE ROLE"));
+    }
 
     /// Every `IrApplyError` a creator can provoke names the document at fault, so
     /// they know which file to open. `Apply` is the variant most likely to carry an

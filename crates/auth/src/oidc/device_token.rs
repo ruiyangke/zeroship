@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Duration, Utc};
-use compio_postgres::Client;
+use compio_postgres::{Client, Transaction};
 use ntex::http::StatusCode;
 use ntex::web::{self, HttpRequest, HttpResponse};
 use rand::RngCore;
@@ -14,8 +14,10 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zeroship_authz::Scope;
-use zeroship_core::auth::{extract_bearer, validate_control_key};
-use zeroship_core::device_grant::{PLATFORM_CLI_CLIENT_ID, PLATFORM_TOKEN_MAX_TTL_SECS};
+use zeroship_core::auth::{constant_time_eq, extract_bearer};
+use zeroship_core::device_grant::{
+    PLATFORM_CLI_CLIENT_ID, PLATFORM_CLI_ISSUABLE_SCOPES, PLATFORM_TOKEN_MAX_TTL_SECS,
+};
 
 use crate::advisory_lock::lock_refresh_user_xact;
 use crate::config::AuthConfig;
@@ -98,6 +100,33 @@ pub struct MintPlatformTokenResponse {
     pub scope: String,
     pub provider: &'static str,
     pub client_id: &'static str,
+}
+
+struct PlatformMintCaller {
+    token_client_id: &'static str,
+    issuable_scopes: &'static [&'static str],
+}
+
+const CONTROL_MINT_CALLER: PlatformMintCaller = PlatformMintCaller {
+    token_client_id: PLATFORM_CLI_CLIENT_ID,
+    issuable_scopes: &PLATFORM_CLI_ISSUABLE_SCOPES,
+};
+
+fn platform_token_scopes(
+    caller: &PlatformMintCaller,
+    requested: &[String],
+    granted: &HashSet<String>,
+) -> Vec<String> {
+    let mut seen = HashSet::new();
+    requested
+        .iter()
+        .map(|scope| scope.trim().to_string())
+        .filter(|scope| {
+            granted.contains(scope)
+                && caller.issuable_scopes.contains(&scope.as_str())
+                && seen.insert(scope.clone())
+        })
+        .collect()
 }
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
@@ -346,7 +375,7 @@ pub(super) async fn exchange_device_code(
 
 #[allow(clippy::future_not_send)]
 async fn exchange_device_code_locked(
-    db: &(impl compio_postgres::GenericClient + ?Sized),
+    db: &Transaction<'_>,
     cfg: &AuthConfig,
     issuer: &Issuer,
     client: &crate::oidc::authorization_code::OAuthClient,
@@ -447,6 +476,7 @@ async fn exchange_device_code_locked(
                        AND credential_version = $2 \
                        AND disabled_at IS NULL \
                        AND deletion_requested_at IS NULL \
+                       AND deletion_scheduled_for IS NULL \
                        AND anonymized_at IS NULL",
                     &[&user_id, &auth_credential_version],
                 )
@@ -605,13 +635,13 @@ fn verification_uri_complete(verification_uri: &str, user_code: &str) -> String 
 pub async fn mint_platform_token(
     req: HttpRequest,
     cfg: web::types::State<Arc<AuthConfig>>,
-    db: web::types::State<Arc<Client>>,
     issuer: web::types::State<Arc<Issuer>>,
+    refresh_pool: web::types::State<RefreshSessionPool>,
     body: web::types::Json<MintPlatformTokenRequest>,
 ) -> HttpResponse {
-    if !authorized(&req, cfg.as_ref()) {
+    let Some(caller) = authenticated_platform_mint_caller(&req, cfg.as_ref()) else {
         return HttpResponse::Unauthorized().json(&json!({"error": "unauthorized"}));
-    }
+    };
 
     let principal_id = match Uuid::parse_str(body.principal_id.trim()) {
         Ok(principal_id) => principal_id,
@@ -631,7 +661,36 @@ pub async fn mint_platform_token(
         return HttpResponse::BadRequest().json(&json!({"error": "invalid_ttl"}));
     }
 
-    let rows = match db
+    let pool = match refresh_pool.checkout_pool("platform token mint").await {
+        Ok(pool) => pool,
+        Err(err) => {
+            tracing::error!(error = %err, "auth: platform token database pool failed");
+            return HttpResponse::InternalServerError()
+                .json(&json!({"error": "grant_lookup_failed"}));
+        }
+    };
+    let mut conn = match pool.get().await {
+        Ok(conn) => conn,
+        Err(err) => {
+            tracing::error!(error = %err, "auth: platform token database checkout failed");
+            return HttpResponse::InternalServerError()
+                .json(&json!({"error": "grant_lookup_failed"}));
+        }
+    };
+    let tx = match conn.transaction().await {
+        Ok(tx) => tx,
+        Err(err) => {
+            tracing::error!(error = %err, "auth: platform token transaction failed");
+            return HttpResponse::InternalServerError()
+                .json(&json!({"error": "grant_lookup_failed"}));
+        }
+    };
+    if let Err(err) = crate::advisory_lock::lock_refresh_user_xact(&tx, principal_id).await {
+        tracing::error!(error = %err, principal_id = %principal_id, "auth: platform token user lock failed");
+        return HttpResponse::InternalServerError()
+            .json(&json!({"error": "grant_lookup_failed"}));
+    }
+    let rows = match tx
         .query(
             "SELECT pg.grant_name \
              FROM zeroship.users u \
@@ -639,6 +698,8 @@ pub async fn mint_platform_token(
              WHERE u.id = $1 \
                AND u.disabled_at IS NULL \
                AND u.anonymized_at IS NULL \
+               AND u.deletion_requested_at IS NULL \
+               AND u.deletion_scheduled_for IS NULL \
                AND (u.locked_until IS NULL OR u.locked_until <= NOW()) \
              ORDER BY pg.grant_name",
             &[&principal_id],
@@ -663,21 +724,15 @@ pub async fn mint_platform_token(
         .iter()
         .filter_map(|row| row.get::<_, Option<String>>("grant_name"))
         .collect();
-    let mut seen = HashSet::new();
-    let scopes: Vec<String> = body
-        .scopes
-        .iter()
-        .map(|scope| scope.trim().to_string())
-        .filter(|scope| granted.contains(scope) && seen.insert(scope.clone()))
-        .collect();
+    let scopes = platform_token_scopes(caller, &body.scopes, &granted);
     let principal_id = principal_id.to_string();
     let access_token = match issuer
         .issue_principal_access_token(
-            db.as_ref(),
+            &tx,
             &PrincipalAccessTokenMint {
                 principal_id: &principal_id,
                 audience: cfg.settings.oauth_audience.get().trim(),
-                client_id: PLATFORM_CLI_CLIENT_ID,
+                client_id: caller.token_client_id,
                 scopes: &scopes,
                 ttl_secs: Some(ttl_secs),
             },
@@ -690,6 +745,10 @@ pub async fn mint_platform_token(
             return HttpResponse::InternalServerError().json(&json!({"error": "mint_failed"}));
         }
     };
+    if let Err(err) = tx.commit().await {
+        tracing::error!(error = %err, "auth: platform token transaction commit failed");
+        return HttpResponse::InternalServerError().json(&json!({"error": "mint_failed"}));
+    }
 
     HttpResponse::Ok().json(&MintPlatformTokenResponse {
         access_token,
@@ -697,19 +756,42 @@ pub async fn mint_platform_token(
         expires_in: ttl_secs as u64,
         scope: scopes.join(" "),
         provider: "platform",
-        client_id: PLATFORM_CLI_CLIENT_ID,
+        client_id: caller.token_client_id,
     })
 }
 
-fn authorized(req: &HttpRequest, cfg: &AuthConfig) -> bool {
+fn authenticated_platform_mint_caller(
+    req: &HttpRequest,
+    cfg: &AuthConfig,
+) -> Option<&'static PlatformMintCaller> {
     let expected = cfg.settings.platform_mint_key.expose_str().trim();
     if expected.is_empty() {
-        return false;
+        return None;
     }
     let header = req
         .headers()
         .get("authorization")
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    extract_bearer(header).is_some_and(|provided| validate_control_key(provided, expected))
+    extract_bearer(header)
+        .filter(|provided| constant_time_eq(provided, expected))
+        .map(|_| &CONTROL_MINT_CALLER)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::{platform_token_scopes, CONTROL_MINT_CALLER};
+
+    #[test]
+    fn platform_token_scopes_apply_the_callers_issuance_ceiling() {
+        let requested = vec!["apps:read".to_string(), "billing:write".to_string()];
+        let granted = HashSet::from(["apps:read".to_string(), "billing:write".to_string()]);
+
+        assert_eq!(
+            platform_token_scopes(&CONTROL_MINT_CALLER, &requested, &granted),
+            ["apps:read"]
+        );
+    }
 }
