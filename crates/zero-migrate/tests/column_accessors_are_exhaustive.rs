@@ -61,11 +61,17 @@ fn verdict(ops: &str) -> Result<(), String> {
     verdict_on(Dialect::Postgres, ops)
 }
 
-fn expect_column_refusal(ops: &str, what: &str) {
+/// Assert WHICH op named the column, not merely that a column was mentioned.
+///
+/// The first version asserted `contains("column")`, which the whole
+/// dropped-column family satisfies, so the three tests below were mutually
+/// satisfiable. Written before the audit established that a guard every sibling
+/// passes is not a guard.
+fn expect_column_refusal(ops: &str, needle: &str, what: &str) {
     let refusal = verdict(ops).expect_err(what);
     assert!(
-        refusal.contains("column"),
-        "the refusal must be about the column: {refusal}"
+        refusal.contains(needle),
+        "{needle:?} is missing, so a different op is satisfying this test: {refusal}"
     );
 }
 
@@ -83,6 +89,7 @@ const INDEX_V: &str =
 fn synchronizing_identity_on_a_dropped_column_is_refused() {
     expect_column_refusal(
         &format!("{A},{DROP_V},{SYNC_V}"),
+        "this synchronizeIdentity names column",
         "the identity lookup names a column that is gone",
     );
 }
@@ -91,6 +98,7 @@ fn synchronizing_identity_on_a_dropped_column_is_refused() {
 fn a_dialectal_leg_naming_a_dropped_column_is_refused() {
     expect_column_refusal(
         &format!(r#"{A},{DROP_V},{{"op":"dialectal","pg":[{INDEX_V}]}}"#),
+        "this createIndex names column",
         "a nested op names a column that is gone",
     );
 }
@@ -102,6 +110,7 @@ fn a_dialectal_default_leg_naming_a_dropped_column_is_refused() {
     // the test above and misses this.
     expect_column_refusal(
         &format!(r#"{A},{DROP_V},{{"op":"dialectal","default":[{INDEX_V}]}}"#),
+        "this createIndex names column",
         "the default leg runs on PostgreSQL when pg is absent",
     );
 }
@@ -142,7 +151,12 @@ fn the_dialect_specific_leg_wins_over_the_default() {
     let ops = format!(
         r#"{A},{DROP_V},{{"op":"dialectal","sqlite":[{INDEX_V}],"default":[{{"op":"createIndex","name":"ix","table":"a","columns":[{{"kind":"column","name":"c0"}}]}}]}}"#
     );
-    verdict_on(Dialect::Sqlite, &ops).expect_err("the sqlite leg runs and names a dropped column");
+    let sqlite = verdict_on(Dialect::Sqlite, &ops)
+        .expect_err("the sqlite leg runs and names a dropped column");
+    assert!(
+        sqlite.contains("this createIndex names column"),
+        "the SQLite leg must be refused by the same rule as its PG twin: {sqlite}"
+    );
     verdict_on(Dialect::Postgres, &ops)
         .expect("PostgreSQL falls back to the default leg, which names a live column");
 }
