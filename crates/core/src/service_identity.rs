@@ -225,7 +225,7 @@ impl PresentedCredentials<'_> {
 /// Failure to establish a service identity.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum AuthError {
-    /// The transport supplied neither a credential nor a non-empty assertion.
+    /// The transport supplied no non-empty bearer for the supported mechanism.
     #[error("no service credential presented")]
     NoCredentialPresented,
     /// A presented credential did not pass mechanism-specific verification.
@@ -278,7 +278,9 @@ impl IdentityVerifier for StubIdentityVerifier {
 /// # Errors
 ///
 /// Returns [`AuthError::NoCredentialPresented`] when the transport supplied no
-/// usable credential. Other errors come from the verifier implementation.
+/// non-empty bearer assertion. TLS observations are not accepted as credentials
+/// while the only supported mechanism is JWT. Other errors come from the
+/// verifier implementation.
 pub fn verify_identity(
     verifier: &(impl IdentityVerifier + ?Sized),
     observed: &PeerCredentials<'_>,
