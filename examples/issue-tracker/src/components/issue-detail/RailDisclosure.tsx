@@ -61,7 +61,9 @@ export function RailDisclosure({
         }
       />
       {open ? (
-        <div className="rail-disclosure-body col-span-full pt-1 pb-2">{children}</div>
+        <div className="rail-disclosure-body col-span-full pt-1 pb-2 [&>section]:m-0 [&>section]:border-0 [&>section]:bg-transparent [&>section]:p-0">
+          {children}
+        </div>
       ) : null}
     </div>
   );

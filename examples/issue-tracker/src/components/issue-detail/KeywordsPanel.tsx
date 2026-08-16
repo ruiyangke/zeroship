@@ -1,11 +1,12 @@
 import { useMemo, useState } from "react";
 import { Button, Checkbox, Tag, Input } from "@zeroship/ui";
 import { attachKeyword, createKeyword, detachKeyword } from "../../api";
+import { FieldError, InlineForm, Muted } from "../AppPrimitives";
 import { deriveNamedSet } from "../activity";
 import { AsyncSection } from "../StateViews";
 import { errorMessage } from "../rpc";
 import { useAppMutation, useKeywords } from "../../lib/queries";
-import { invalidatedBy, queryKeys } from "../../lib/query-keys";
+import { invalidatedBy } from "../../lib/query-keys";
 import type { Activity } from "../types";
 import { RailDisclosure } from "./RailDisclosure";
 import { Absent } from "./Absent";
@@ -71,7 +72,7 @@ export function KeywordsPanel({
     names.length === 0 ? (
       <Absent />
     ) : (
-      <span className="rail-tags">
+      <span className="flex flex-wrap gap-1">
         {names.map((name) => (
           <Tag key={name} size="sm">
             {name}
@@ -83,7 +84,7 @@ export function KeywordsPanel({
   return (
     <RailDisclosure label="Labels" summary={summary}>
     <section>
-      <div className="keyword-tags">
+      <div className="mb-2">
         {/* These two empty states say DIFFERENT things -- none attached to
             this issue, versus none defined anywhere -- and stacked as "none"
             above "No keywords defined yet." they read as one statement
@@ -97,7 +98,7 @@ export function KeywordsPanel({
           // the list has ARRIVED and is empty, so an in-flight query does not
           // silence this line.
           keywordsQ.data?.length === 0 ? null : (
-            <span className="dim">No keywords on this issue.</span>
+            <Muted>No keywords on this issue.</Muted>
           )
         ) : (
           [...attached].map((name) => (
@@ -115,7 +116,7 @@ export function KeywordsPanel({
         emptyTone="inline"
       >
         {(keywords) => (
-          <div className="keyword-picker">
+          <div className="mb-2 flex flex-wrap gap-2">
             {keywords.map((keyword) => (
               <Checkbox
                 key={keyword.id}
@@ -124,13 +125,13 @@ export function KeywordsPanel({
                 disabled={busy}
                 onCheckedChange={() => void toggle(keyword.id, keyword.name)}
                 label={keyword.name}
-                fieldClassName="keyword-option"
+                fieldClassName="flex-row items-center gap-1 text-base text-ink-secondary"
               />
             ))}
           </div>
         )}
       </AsyncSection>
-      <div className="inline-form">
+      <InlineForm>
         <Input
           aria-label="New keyword name" placeholder="New keyword name"
           value={newKeyword}
@@ -139,8 +140,8 @@ export function KeywordsPanel({
         <Button variant="gray" size="sm" disabled={busy || !newKeyword.trim()} onClick={() => void createAndAttach()}>
           Create + attach
         </Button>
-      </div>
-      {error ? <p className="field-error">{error}</p> : null}
+      </InlineForm>
+      {error ? <FieldError>{error}</FieldError> : null}
     </section>
     </RailDisclosure>
   );

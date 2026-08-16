@@ -6,8 +6,10 @@ import { errorMessage } from "../rpc";
 import { useAppMutation, useCc } from "../../lib/queries";
 import { invalidatedBy } from "../../lib/query-keys";
 import { UserPicker } from "../UserPicker";
+import { FieldError } from "../AppPrimitives";
 import { Absent, Pending } from "./Absent";
 import { RailDisclosure } from "./RailDisclosure";
+import { RailList } from "./RailList";
 
 export function CcPanel({ issueId }: { issueId: string }) {
   const ccQ = useCc(issueId);
@@ -61,37 +63,37 @@ export function CcPanel({ issueId }: { issueId: string }) {
 
   return (
     <RailDisclosure label="CC" summary={summary} action="Add">
-    <section>
-      <AsyncSection
-        query={ccQ}
-        loadingLabel="Loading CC list..."
-        isEmpty={(data) => data.length === 0}
-        emptyTitle="Nobody is CC'd."
-        emptyTone="inline"
-      >
-        {(rows) => (
-          <ul className="cc-list">
-            {rows.map((row) => (
-              <li key={row.id}>
-                <span>{row.user?.name ?? row.userId}</span>
-                <Button variant="gray" size="sm" disabled={busy} onClick={() => void remove(row.userId)}>
-                  Remove
-                </Button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </AsyncSection>
-      {!ccQ.isError ? (
-        <>
-          <Button variant="gray" size="sm" onClick={() => setPicking((v) => !v)}>
-            Add CC
-          </Button>
-          {picking ? <UserPicker onPick={(u) => void add(u.id)} /> : null}
-        </>
-      ) : null}
-      {error ? <p className="field-error">{error}</p> : null}
-    </section>
+      <section>
+        <AsyncSection
+          query={ccQ}
+          loadingLabel="Loading CC list..."
+          isEmpty={(data) => data.length === 0}
+          emptyTitle="Nobody is CC'd."
+          emptyTone="inline"
+        >
+          {(rows) => (
+            <RailList rows="actions">
+              {rows.map((row) => (
+                <li key={row.id}>
+                  <span>{row.user?.name ?? row.userId}</span>
+                  <Button variant="gray" size="sm" disabled={busy} onClick={() => void remove(row.userId)}>
+                    Remove
+                  </Button>
+                </li>
+              ))}
+            </RailList>
+          )}
+        </AsyncSection>
+        {!ccQ.isError ? (
+          <>
+            <Button variant="gray" size="sm" onClick={() => setPicking((v) => !v)}>
+              Add CC
+            </Button>
+            {picking ? <UserPicker onPick={(u) => void add(u.id)} /> : null}
+          </>
+        ) : null}
+        {error ? <FieldError>{error}</FieldError> : null}
+      </section>
     </RailDisclosure>
   );
 }

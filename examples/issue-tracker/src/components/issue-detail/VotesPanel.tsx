@@ -4,7 +4,9 @@ import { Button, Field, NumberField } from "@zeroship/ui";
 import { castVote } from "../../api";
 import { invalidatedBy } from "../../lib/query-keys";
 import { useAppMutation } from "../../lib/queries";
+import { FieldError, Hint } from "../AppPrimitives";
 import { errorMessage } from "../rpc";
+import { DetailPanel } from "./DetailPanel";
 
 /**
  * Bugzilla voting.
@@ -52,13 +54,12 @@ export function VotesPanel({
   };
 
   return (
-    <section className="votes-panel">
-      <h3>Votes</h3>
-      <p>
+    <DetailPanel locator="votes-panel" title="Votes">
+      <p className="mb-2">
         <strong>{voteCount}</strong> {voteCount === 1 ? "vote" : "votes"}
       </p>
       {!votingEnabled ? (
-        <p className="state-hint small">Voting is not enabled for this product.</p>
+        <Hint>Voting is not enabled for this product.</Hint>
       ) : (
         <>
           <Field>
@@ -84,14 +85,14 @@ export function VotesPanel({
             {vote.isPending ? "Voting..." : "Vote"}
           </Button>
           {maxVotesPerIssue > 0 ? (
-            <p className="state-hint small">At most {maxVotesPerIssue} on this issue.</p>
+            <Hint>At most {maxVotesPerIssue} on this issue.</Hint>
           ) : null}
           {confirmed ? (
-            <p className="state-hint small">This issue was confirmed by reaching the vote threshold.</p>
+            <Hint>This issue was confirmed by reaching the vote threshold.</Hint>
           ) : null}
-          {error ? <p className="field-error">{error}</p> : null}
+          {error ? <FieldError>{error}</FieldError> : null}
         </>
       )}
-    </section>
+    </DetailPanel>
   );
 }

@@ -14,10 +14,13 @@ import { Button, Badge, Select } from "@zeroship/ui";
 import { clearFlag, setFlag } from "../../api";
 import { invalidatedBy } from "../../lib/query-keys";
 import { useAppMutation, useFlags } from "../../lib/queries";
+import { FieldError, Hint, Muted } from "../AppPrimitives";
 import { errorMessage } from "../rpc";
 import type { FlagType } from "../types";
 import { UserPicker } from "../UserPicker";
 import { Absent } from "./Absent";
+import { DetailPanel } from "./DetailPanel";
+import { RailList } from "./RailList";
 
 type FlagStatus = "+" | "-" | "?";
 const FLAG_STATUSES: FlagStatus[] = ["+", "-", "?"];
@@ -93,8 +96,8 @@ function FlagRow({
   };
 
   return (
-    <li className="flag-row">
-      <span className="flag-name">{flagType.name}</span>
+    <li className="flex flex-wrap items-center gap-2 text-md">
+      <span className="min-w-22 font-semibold">{flagType.name}</span>
       {mine.length === 0 ? (
         <Absent />
       ) : (
@@ -118,7 +121,7 @@ function FlagRow({
             >
               {entry.flag.status}
             </Badge>
-            {entry.requestee ? <span className="dim"> to {entry.requestee.name}</span> : null}
+            {entry.requestee ? <Muted> to {entry.requestee.name}</Muted> : null}
             {/* Clearing works for ANY live flag now, not only one this panel
                 set, because the id comes from the server rather than from a
                 setFlag response held in component state. */}
@@ -145,7 +148,7 @@ function FlagRow({
       {status === "?" ? (
         <span>
           {requesteeId ? (
-            <span className="dim">requestee: {requesteeId}</span>
+            <Muted>requestee: {requesteeId}</Muted>
           ) : (
             <Button variant="gray" size="sm"
               onClick={() => setPickingRequestee((v) => !v)}
@@ -166,7 +169,7 @@ function FlagRow({
           }}
         />
       ) : null}
-      {error ? <p className="field-error">{error}</p> : null}
+      {error ? <FieldError>{error}</FieldError> : null}
     </li>
   );
 }
@@ -183,14 +186,13 @@ export function FlagsPanel({
 
   const issueFlagTypes = flagTypes?.filter((t) => t.targetType === "issue") ?? [];
   return (
-    <section className="flags-panel">
-      <h3>Flags</h3>
+    <DetailPanel locator="flags-panel" title="Flags">
       {flagTypes === null ? (
-        <p className="state-hint small">Sign in to see and set flags for this product.</p>
+        <Hint>Sign in to see and set flags for this product.</Hint>
       ) : issueFlagTypes.length === 0 ? (
-        <p className="state-hint small">This product defines no issue-level flag types.</p>
+        <Hint>This product defines no issue-level flag types.</Hint>
       ) : (
-        <ul className="flag-list">
+        <RailList roomy>
           {issueFlagTypes.map((flagType) => (
             <FlagRow
               key={flagType.id}
@@ -199,13 +201,13 @@ export function FlagsPanel({
               live={live}
             />
           ))}
-        </ul>
+        </RailList>
       )}
       {/* Surfaced rather than swallowed: an unreadable flag list rendering as
           "not set" would claim, wrongly, that the issue carries no flags. */}
       {flagsQ.isError ? (
-        <p className="field-error">Could not load flags: {errorMessage(flagsQ.error)}</p>
+        <FieldError>Could not load flags: {errorMessage(flagsQ.error)}</FieldError>
       ) : null}
-    </section>
+    </DetailPanel>
   );
 }

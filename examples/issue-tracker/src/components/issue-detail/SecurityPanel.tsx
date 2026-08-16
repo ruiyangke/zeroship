@@ -4,7 +4,9 @@ import { Button, Field, Select } from "@zeroship/ui";
 import { restrictIssue, unrestrictIssue } from "../../api";
 import { useAppMutation, useGroups } from "../../lib/queries";
 import { invalidatedBy } from "../../lib/query-keys";
+import { FieldError, Hint } from "../AppPrimitives";
 import { errorMessage } from "../rpc";
+import { DetailPanel } from "./DetailPanel";
 
 /**
  * Issue-level security groups -- Bugzilla's bug_group_map, the mechanism behind
@@ -65,18 +67,17 @@ export function SecurityPanel({ issueId }: { issueId: string }) {
   };
 
   return (
-    <section className="security-panel">
-      <h3>Security</h3>
+    <DetailPanel locator="security-panel" title="Security">
       {denied ? (
-        <p className="state-hint small">
+        <Hint>
           Only an administrator can see and change which groups an issue is restricted to.
-        </p>
+        </Hint>
       ) : groups === null ? (
-        <p className="state-hint small">Loading groups...</p>
+        <Hint>Loading groups...</Hint>
       ) : groups.length === 0 ? (
-        <p className="state-hint small">
+        <Hint>
           No groups exist yet. Create one under Products to restrict this issue.
-        </p>
+        </Hint>
       ) : (
         <>
           <Field>
@@ -112,10 +113,10 @@ export function SecurityPanel({ issueId }: { issueId: string }) {
           >
             Remove
           </Button>
-          {note ? <p className="state-hint small">{note}</p> : null}
-          {error ? <p className="field-error">{error}</p> : null}
+          {note ? <Hint>{note}</Hint> : null}
+          {error ? <FieldError>{error}</FieldError> : null}
         </>
       )}
-    </section>
+    </DetailPanel>
   );
 }

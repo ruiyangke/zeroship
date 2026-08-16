@@ -4,9 +4,11 @@ import { Button, Field, Input } from "@zeroship/ui";
 import { addSeeAlso, removeSeeAlso } from "../../api";
 import { useAppMutation, useSeeAlso } from "../../lib/queries";
 import { invalidatedBy } from "../../lib/query-keys";
+import { FieldError, FieldRow, Hint } from "../AppPrimitives";
 import { RailDisclosure } from "./RailDisclosure";
 import { errorMessage } from "../rpc";
 import { Absent, Pending } from "./Absent";
+import { RailList } from "./RailList";
 
 /**
  * Bugzilla's See Also: links to the same issue in other trackers.
@@ -73,9 +75,9 @@ export function SeeAlsoPanel({ issueId }: { issueId: string }) {
     <RailDisclosure label="See also" summary={summary} action="Add">
     <section className="see-also-panel">
       {links.length === 0 ? (
-        <p className="state-hint small">No linked reports.</p>
+        <Hint>No linked reports.</Hint>
       ) : (
-        <ul>
+        <RailList rows="actions">
           {links.map((link) => (
             <li key={link.id}>
               <a href={link.url} target="_blank" rel="noreferrer noopener">
@@ -89,9 +91,9 @@ export function SeeAlsoPanel({ issueId }: { issueId: string }) {
               </Button>
             </li>
           ))}
-        </ul>
+        </RailList>
       )}
-      <div className="field-row">
+      <FieldRow>
         <Field>
           <Field.Label>Link</Field.Label>
           <Input
@@ -103,9 +105,9 @@ export function SeeAlsoPanel({ issueId }: { issueId: string }) {
         <Button variant="gray" size="sm" disabled={busy || !url.trim()} onClick={() => void add()}>
           Add
         </Button>
-      </div>
+      </FieldRow>
       {error || linksQ.isError ? (
-        <p className="field-error">{error ?? errorMessage(linksQ.error)}</p>
+        <FieldError>{error ?? errorMessage(linksQ.error)}</FieldError>
       ) : null}
     </section>
     </RailDisclosure>

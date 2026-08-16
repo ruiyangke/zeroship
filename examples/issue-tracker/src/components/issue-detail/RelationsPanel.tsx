@@ -3,16 +3,18 @@ import { Link } from "react-router-dom";
 import { Button, Input } from "@zeroship/ui";
 import { addDependency, removeDependency } from "../../api";
 import { StatusBadge } from "../Badges";
+import { FieldError, Hint, InlineForm, Muted } from "../AppPrimitives";
 import { AsyncSection } from "../StateViews";
 import { errorMessage } from "../rpc";
 import { useAppMutation, useDependencyGraph, useDuplicates } from "../../lib/queries";
 import { invalidatedBy } from "../../lib/query-keys";
 import { Absent, Pending } from "./Absent";
 import { RailDisclosure } from "./RailDisclosure";
+import { RailList } from "./RailList";
 
 function IssueLink({ id, summary, status }: { id: string; summary: string; status: string }) {
   return (
-    <Link to={`/issues/${id}`} className="relation-link">
+    <Link to={`/issues/${id}`} className="inline-flex items-center gap-2">
       <StatusBadge status={status} />
       <span>{summary}</span>
     </Link>
@@ -77,70 +79,70 @@ export function DependenciesPanel({ issueId }: { issueId: string }) {
 
   return (
     <RailDisclosure label="Dependencies" summary={summary}>
-    <section className="relations-panel">
-      <AsyncSection
-        query={graphQ}
-        loadingLabel="Loading dependencies..."
-        isEmpty={(data) => data.nodes.length <= 1}
-        emptyTitle="No dependencies."
-        emptyTone="inline"
-        emptyHint="This issue doesn't block, or depend on, any other issue."
-      >
-        {(graph) => {
-          const byId = new Map(graph.nodes.map((n) => [n.id, n]));
-          const dependsOn = graph.edges.filter((e) => e.issueId === issueId).map((e) => e.dependsOnId);
-          const blocks = graph.edges.filter((e) => e.dependsOnId === issueId).map((e) => e.issueId);
-          return (
-            <div className="relation-columns">
+      <section className="relations-panel">
+        <AsyncSection
+          query={graphQ}
+          loadingLabel="Loading dependencies..."
+          isEmpty={(data) => data.nodes.length <= 1}
+          emptyTitle="No dependencies."
+          emptyTone="inline"
+          emptyHint="This issue doesn't block, or depend on, any other issue."
+        >
+          {(graph) => {
+            const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+            const dependsOn = graph.edges.filter((e) => e.issueId === issueId).map((e) => e.dependsOnId);
+            const blocks = graph.edges.filter((e) => e.dependsOnId === issueId).map((e) => e.issueId);
+            return (
               <div>
-                <h4>Depends on</h4>
-                {dependsOn.length === 0 ? (
-                  <p className="state-hint small">Nothing.</p>
-                ) : (
-                  <ul>
-                    {dependsOn.map((id) => {
-                      const node = byId.get(id);
-                      return (
-                        <li key={id}>
-                          {node ? <IssueLink id={id} summary={node.summary} status={node.status} /> : id}
-                          <Button variant="gray" size="sm" disabled={busy} onClick={() => void remove(id)}>
-                            Remove
-                          </Button>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                )}
+                <div>
+                  <h4 className="mb-2">Depends on</h4>
+                  {dependsOn.length === 0 ? (
+                    <Hint>Nothing.</Hint>
+                  ) : (
+                    <RailList rows="actions">
+                      {dependsOn.map((id) => {
+                        const node = byId.get(id);
+                        return (
+                          <li key={id}>
+                            {node ? <IssueLink id={id} summary={node.summary} status={node.status} /> : id}
+                            <Button variant="gray" size="sm" disabled={busy} onClick={() => void remove(id)}>
+                              Remove
+                            </Button>
+                          </li>
+                        );
+                      })}
+                    </RailList>
+                  )}
+                </div>
+                <div>
+                  <h4 className="mb-2">Blocks</h4>
+                  {blocks.length === 0 ? (
+                    <Hint>Nothing.</Hint>
+                  ) : (
+                    <RailList>
+                      {blocks.map((id) => {
+                        const node = byId.get(id);
+                        return (
+                          <li key={id}>{node ? <IssueLink id={id} summary={node.summary} status={node.status} /> : id}</li>
+                        );
+                      })}
+                    </RailList>
+                  )}
+                </div>
               </div>
-              <div>
-                <h4>Blocks</h4>
-                {blocks.length === 0 ? (
-                  <p className="state-hint small">Nothing.</p>
-                ) : (
-                  <ul>
-                    {blocks.map((id) => {
-                      const node = byId.get(id);
-                      return (
-                        <li key={id}>{node ? <IssueLink id={id} summary={node.summary} status={node.status} /> : id}</li>
-                      );
-                    })}
-                  </ul>
-                )}
-              </div>
-            </div>
-          );
-        }}
-      </AsyncSection>
-      {!graphQ.isError ? (
-        <div className="inline-form">
-          <Input aria-label="Issue this depends on" placeholder="PARSER-12" value={newDep} onChange={(e) => setNewDep(e.target.value)} />
-          <Button variant="gray" size="sm" disabled={busy || !newDep.trim()} onClick={() => void add()}>
-            Add dependency
-          </Button>
-        </div>
-      ) : null}
-      {error ? <p className="field-error">{error}</p> : null}
-    </section>
+            );
+          }}
+        </AsyncSection>
+        {!graphQ.isError ? (
+          <InlineForm>
+            <Input aria-label="Issue this depends on" placeholder="PARSER-12" value={newDep} onChange={(e) => setNewDep(e.target.value)} />
+            <Button variant="gray" size="sm" disabled={busy || !newDep.trim()} onClick={() => void add()}>
+              Add dependency
+            </Button>
+          </InlineForm>
+        ) : null}
+        {error ? <FieldError>{error}</FieldError> : null}
+      </section>
     </RailDisclosure>
   );
 }
@@ -180,32 +182,32 @@ export function DuplicatesPanel({
 
   return (
     <RailDisclosure label="Duplicates" summary={summary}>
-    <section className="relations-panel">
-      {duplicateOfId ? (
-        <p className="state-hint small">
+      <section className="relations-panel">
+        {duplicateOfId ? (
+          <Hint>
           This issue is marked as a duplicate of{" "}
           <Link to={`/issues/${duplicateOfId}`}>{labels[duplicateOfId] ?? duplicateOfId}</Link>.
-        </p>
-      ) : null}
-      <AsyncSection
-        query={duplicatesQ}
-        loadingLabel="Loading duplicates..."
-        isEmpty={() => (cluster?.length ?? 0) === 0}
-        emptyTitle="No known duplicates."
-        emptyTone="inline"
-      >
-        {() => (
-          <ul>
-            {cluster?.map((b) => (
-              <li key={b.id}>
-                <IssueLink id={b.id} summary={b.summary} status={b.status} />
-                {b.duplicateOfId === issueId ? <span className="dim"> (duplicate of this issue)</span> : null}
-              </li>
-            ))}
-          </ul>
-        )}
-      </AsyncSection>
-    </section>
+          </Hint>
+        ) : null}
+        <AsyncSection
+          query={duplicatesQ}
+          loadingLabel="Loading duplicates..."
+          isEmpty={() => (cluster?.length ?? 0) === 0}
+          emptyTitle="No known duplicates."
+          emptyTone="inline"
+        >
+          {() => (
+            <RailList>
+              {cluster?.map((b) => (
+                <li key={b.id}>
+                  <IssueLink id={b.id} summary={b.summary} status={b.status} />
+                  {b.duplicateOfId === issueId ? <Muted> (duplicate of this issue)</Muted> : null}
+                </li>
+              ))}
+            </RailList>
+          )}
+        </AsyncSection>
+      </section>
     </RailDisclosure>
   );
 }

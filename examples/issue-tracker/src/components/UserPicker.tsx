@@ -5,6 +5,7 @@
 import { useState } from "react";
 import { Button, Input } from "@zeroship/ui";
 import { useUserSearch } from "../lib/queries";
+import { FieldError, Hint, Muted } from "./AppPrimitives";
 import { errorMessage } from "./rpc";
 import type { UserRow } from "./types";
 
@@ -44,8 +45,8 @@ export function UserPicker({
   };
 
   return (
-    <div className="user-picker">
-      <div className="user-picker-row">
+    <div className="user-picker mt-1">
+      <div className="user-picker-row flex gap-1 [&>:first-child]:min-w-0 [&>:first-child]:flex-auto">
         <Input
           value={text}
           placeholder={placeholder}
@@ -61,12 +62,12 @@ export function UserPicker({
           {usersQ.isFetching ? "..." : "Find"}
         </Button>
       </div>
-      {error ? <p className="field-error">{error}</p> : null}
+      {error ? <FieldError>{error}</FieldError> : null}
       {results ? (
         results.length === 0 ? (
-          <p className="state-hint small">No matching users.</p>
+          <Hint>No matching users.</Hint>
         ) : (
-          <ul className="user-picker-results">
+          <ul className="mt-1 flex list-none flex-wrap gap-1 p-0">
             {results.map((user) => (
               <li key={user.id}>
                 <Button variant="gray" size="sm"
@@ -76,7 +77,7 @@ export function UserPicker({
                     setSubmittedText(null);
                   }}
                 >
-                  {user.name} <span className="dim">@{user.handle}</span>
+                  {user.name} <Muted>@{user.handle}</Muted>
                 </Button>
               </li>
             ))}
