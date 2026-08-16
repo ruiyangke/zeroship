@@ -4,7 +4,9 @@ use std::cell::Cell;
 
 use compio_postgres::{Client, GenericClient};
 
+use crate::advisory_lock::lock_refresh_user_xact;
 use crate::error::{AuthError, Result};
+use crate::oidc::refresh::revoke_user_refresh_families_in_transaction;
 
 thread_local! {
     /// Test-observable count of failed-login round-trips issued on THIS thread
@@ -330,7 +332,8 @@ pub struct DeletionRequest {
 ///      `deletion_scheduled_for = NOW() + grace_days`,
 ///   3. bump `credential_version` so any already-issued IdP/gateway session
 ///      (which binds the version) stops validating, and
-///   4. mark every live `idp_sessions` / `gateway_sessions` row revoked.
+///   4. revoke every refresh family and its access-token family marker, and
+///   5. mark every live `idp_sessions` / `gateway_sessions` row revoked.
 ///
 /// Idempotent on an already-requested row: it leaves an existing
 /// `deletion_requested_at` untouched (the schedule does not slide) but still
@@ -372,6 +375,9 @@ async fn request_deletion_tx(
     id: uuid::Uuid,
     grace_days: i64,
 ) -> Result<Option<DeletionRequest>> {
+    lock_refresh_user_xact(conn, id)
+        .await
+        .map_err(|e| AuthError::Db(format!("request_deletion refresh user lock: {e}")))?;
     let rows = conn
         .query(
             "UPDATE zeroship.users \
@@ -391,6 +397,9 @@ async fn request_deletion_tx(
     let Some(row) = rows.first() else {
         return Ok(None);
     };
+    revoke_user_refresh_families_in_transaction(conn, id, "account_deletion")
+        .await
+        .map_err(|e| AuthError::Db(format!("request_deletion revoke refresh families: {e}")))?;
     let email: String = row.get("email");
     let name: String = row.get("name");
     let scheduled_for: chrono::DateTime<chrono::Utc> = row.get("deletion_scheduled_for");

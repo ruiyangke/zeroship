@@ -709,6 +709,39 @@ async fn oauth_token_with_apps_read_can_list_apps() {
 }
 
 #[compio::test]
+async fn oauth_token_owned_by_anonymized_user_returns_401() {
+    let user_id = Uuid::new_v4();
+    let Some(fx) = fixture_with_platform("anonymized-owner", user_id).await else {
+        return;
+    };
+    let app = init_control!(fx);
+
+    fx.state
+        .control_pg
+        .execute(
+            "UPDATE zeroship.users \
+             SET disabled_at = NOW(), anonymized_at = NOW(), \
+                 credential_version = credential_version + 1 \
+             WHERE id = $1",
+            &[&user_id],
+        )
+        .await
+        .expect("anonymize OAuth owner");
+    let req = test::TestRequest::get()
+        .uri("/api/apps")
+        .header("authorization", bearer_for_scope(user_id, "apps:read"))
+        .to_request();
+    let status = test::call_service(&app, req).await.status();
+
+    fx.cleanup().await;
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[compio::test]
 async fn oauth_token_ignores_standard_oidc_scopes() {
     let user_id = Uuid::new_v4();
     let Some(fx) = fixture_with_platform("oidc-scopes", user_id).await else {

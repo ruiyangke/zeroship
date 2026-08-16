@@ -1060,6 +1060,100 @@ async fn native_device_grant_approves_via_auth_session_and_polls_op_token() {
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
+async fn credential_bump_rejects_approved_device_code_after_deletion_is_cancelled() {
+    let Some((srv, auth_base, pg, _issuer)) = boot_native().await else {
+        zeroship_test_support::skip("[device_grant_native] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");
+        return;
+    };
+    let http = cyper::Client::new();
+    let client_id = format!("zeroship-cli-lifecycle-{}", Uuid::new_v4().simple());
+    insert_native_device_client(&pg, &client_id, "native device lifecycle test", &["apps:read"])
+        .await;
+    let authz = request_device_authorization(&http, &auth_base, &client_id, "apps:read").await;
+    let user = users::create(
+        &pg,
+        &format!("native-device-lifecycle-{client_id}@zeroship.test"),
+        "Native Device Lifecycle User",
+        None,
+    )
+    .await
+    .expect("create native device lifecycle user");
+    let device_code_hash = sha256_hex(&authz.device_code);
+    let sid = Uuid::new_v4().to_string();
+    pg.execute(
+        "UPDATE zeroship.device_grants \
+         SET principal_id = $1, sid = $2, auth_credential_version = $3, status = 'approved' \
+         WHERE device_code_hash = $4",
+        &[
+            &user.id,
+            &sid,
+            &user.credential_version,
+            &device_code_hash,
+        ],
+    )
+    .await
+    .expect("approve native device grant");
+
+    users::request_deletion(&pg, user.id, 30)
+        .await
+        .expect("request account deletion")
+        .expect("device grant owner exists");
+    assert!(
+        users::cancel_deletion(&pg, user.id)
+            .await
+            .expect("cancel account deletion"),
+        "deletion request must be cancellable"
+    );
+
+    let token_body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair(
+            "grant_type",
+            "urn:ietf:params:oauth:grant-type:device_code",
+        )
+        .append_pair("device_code", &authz.device_code)
+        .append_pair("client_id", &client_id)
+        .finish();
+    let response = http
+        .request(http::Method::POST, format!("{auth_base}/oauth2/token"))
+        .expect("build stale device token poll")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .expect("content-type")
+        .body(token_body)
+        .send()
+        .await
+        .expect("send stale device token poll");
+    let status = response.status().as_u16();
+    let body: serde_json::Value = serde_json::from_str(
+        &response
+            .text()
+            .await
+            .expect("stale device token response body"),
+    )
+    .expect("stale device token response json");
+
+    let _ = pg
+        .execute(
+            "DELETE FROM zeroship.device_grants WHERE device_code_hash = $1",
+            &[&device_code_hash],
+        )
+        .await;
+    let _ = pg
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
+        .await;
+    let _ = pg
+        .execute(
+            "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
+            &[&client_id],
+        )
+        .await;
+    drop(srv);
+
+    assert_eq!(status, 400);
+    assert_eq!(body["error"], "access_denied");
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
 async fn device_user_code_redirects_anonymous_browser_to_login() {
     let Some((srv, auth_base, pg, _issuer)) = boot_native().await else {
         zeroship_test_support::skip("[device_grant] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");

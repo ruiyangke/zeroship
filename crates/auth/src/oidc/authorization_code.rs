@@ -629,13 +629,20 @@ async fn exchange_authorization_code(
     let code_hash = code_hash(code);
     let rows = db
         .query(
-            "UPDATE zeroship.oauth_authorization_codes \
+            "UPDATE zeroship.oauth_authorization_codes AS code \
              SET consumed_at = NOW() \
-             WHERE code_hash = $1 \
-               AND consumed_at IS NULL \
-               AND expires_at > NOW() \
-             RETURNING client_id, redirect_uri, pkce_challenge, pkce_method, \
-                       granted_scopes, nonce, user_id, auth_credential_version, sid",
+             FROM zeroship.users AS owner \
+             WHERE code.code_hash = $1 \
+               AND code.consumed_at IS NULL \
+               AND code.expires_at > NOW() \
+               AND owner.id = code.user_id \
+               AND owner.credential_version = code.auth_credential_version \
+               AND owner.disabled_at IS NULL \
+               AND owner.deletion_requested_at IS NULL \
+               AND owner.anonymized_at IS NULL \
+             RETURNING code.client_id, code.redirect_uri, code.pkce_challenge, code.pkce_method, \
+                       code.granted_scopes, code.nonce, code.user_id, \
+                       code.auth_credential_version, code.sid",
             &[&code_hash],
         )
         .await
