@@ -57,55 +57,86 @@ fn dom(n: &str) -> String {
     format!(r#"{{"op":"createDomain","name":"{n}","as":"text"}}"#)
 }
 
+/// Assert the refusal is the TYPE-namespace one, not merely that one happened.
+///
+/// Added by the F769 audit. Every site below had a bare `expect_err`, and the
+/// partition fixture proved that is not idle worry: two of its claims were
+/// answered by a different rule than they named, and stayed green for it.
+///
+/// All seven refusals here were measured before this helper was written, and all
+/// seven really are the type-namespace rule - so this pins behaviour that was
+/// already correct rather than papering over a discrepancy. The point is that it
+/// STAYS pinned: "verified once" is the guarantee that decays.
+const TYPE_NS: &str = "one type namespace";
+
+fn expect_type_namespace_refusal(ops: &str, what: &str) {
+    let refusal = verdict(ops).expect_err(what);
+    assert!(
+        refusal.contains(TYPE_NS),
+        "the refusal must be the type-namespace one this test names, not another \
+         rule that happens to fire first: {refusal}"
+    );
+}
+
 #[test]
 fn an_enum_and_a_domain_may_not_share_a_name() {
-    let refusal = verdict(&format!("{},{}", enm("e"), dom("e")))
-        .expect_err("enums and domains are both types");
-    assert!(
-        refusal.to_lowercase().contains("already"),
-        "the refusal must say the name is already taken: {refusal}"
+    expect_type_namespace_refusal(
+        &format!("{},{}", enm("e"), dom("e")),
+        "enums and domains are both types",
     );
 }
 
 #[test]
 fn a_domain_and_an_enum_may_not_share_a_name() {
-    verdict(&format!("{},{}", dom("d"), enm("d"))).expect_err("the reverse direction");
+    expect_type_namespace_refusal(
+        &format!("{},{}", dom("d"), enm("d")),
+        "the reverse direction",
+    );
 }
 
 #[test]
 fn an_enum_may_not_take_a_live_table_name() {
     // Every table creates a composite row type of the same name.
-    verdict(&format!("{},{}", tbl("t"), enm("t")))
-        .expect_err("a table's composite row type occupies the type namespace");
+    expect_type_namespace_refusal(
+        &format!("{},{}", tbl("t"), enm("t")),
+        "a table's composite row type occupies the type namespace",
+    );
 }
 
 #[test]
 fn a_table_may_not_take_a_live_enum_name() {
-    verdict(&format!("{},{}", enm("t"), tbl("t"))).expect_err("the reverse direction");
+    expect_type_namespace_refusal(
+        &format!("{},{}", enm("t"), tbl("t")),
+        "the reverse direction",
+    );
 }
 
 #[test]
 fn a_table_may_not_take_a_live_domain_name() {
-    verdict(&format!("{},{}", dom("dm"), tbl("dm"))).expect_err("domains are types too");
+    expect_type_namespace_refusal(
+        &format!("{},{}", dom("dm"), tbl("dm")),
+        "domains are types too",
+    );
 }
 
 #[test]
 fn a_view_may_not_take_a_live_enum_name() {
-    verdict(&format!(
-        r#"{},{},{{"op":"createView","name":"vv","query":{{"kind":"structured","select":{{"from":{{"name":"a"}},"projection":[{{"kind":"colRef","name":"c0"}}]}}}}}}"#,
-        tbl("a"),
-        enm("vv")
-    ))
-    .expect_err("a view creates a composite row type as well");
+    expect_type_namespace_refusal(
+        &format!(
+            r#"{},{},{{"op":"createView","name":"vv","query":{{"kind":"structured","select":{{"from":{{"name":"a"}},"projection":[{{"kind":"colRef","name":"c0"}}]}}}}}}"#,
+            tbl("a"),
+            enm("vv")
+        ),
+        "a view creates a composite row type as well",
+    );
 }
 
 #[test]
 fn a_sequence_may_not_take_a_live_enum_name() {
-    verdict(&format!(
-        r#"{},{{"op":"createSequence","name":"n"}}"#,
-        enm("n")
-    ))
-    .expect_err("creating a sequence requires the type name to be free");
+    expect_type_namespace_refusal(
+        &format!(r#"{},{{"op":"createSequence","name":"n"}}"#, enm("n")),
+        "creating a sequence requires the type name to be free",
+    );
 }
 
 // ---------------------------------------------------------------------------
