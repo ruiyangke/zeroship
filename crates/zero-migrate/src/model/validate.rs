@@ -2853,7 +2853,12 @@ fn validate_no_name_is_claimed_twice(
     // envelope of drops - the `f664_scaling` guard caught exactly that in the
     // first version of this check. Nested, every operation here is logarithmic.
     type Key<'a> = (Option<&'a str>, &'a str);
-    let mut tables: BTreeSet<Key> = BTreeSet::new();
+    // ONE RELATION NAMESPACE, not three per-kind sets. PostgreSQL keeps tables,
+    // views and sequences together, so `CREATE VIEW vw` followed by `CREATE TABLE
+    // vw` is `relation "vw" already exists` even though neither kind repeats.
+    // Per-kind sets would catch the repeats and miss the cross-kind collisions.
+    // The value is the kind that holds the name, so the refusal can say which.
+    let mut relations: BTreeMap<Key, &str> = BTreeMap::new();
     let mut columns: BTreeMap<Key, BTreeSet<&str>> = BTreeMap::new();
 
     // CONSTRAINT NAMES ARE PER TABLE AND PER DIALECT, both measured against real
@@ -2884,15 +2889,15 @@ fn validate_no_name_is_claimed_twice(
             } => {
                 let key: Key = (schema.as_deref(), name.as_str());
                 let name_of = name.as_str();
-                if tables.contains(&key) {
+                if let Some(held_by) = relations.get(&key) {
                     return Err(refuse(
                         op_index,
                         &format!(
                             "this createTable claims the name {name:?}, but an earlier \
-                             operation in this migration already created a table with that \
-                             name and nothing dropped or renamed it in between"
+                             operation in this migration already created a {held_by} with \
+                             that name and nothing dropped or renamed it in between"
                         ),
-                        "drop or rename the first table before recreating the name",
+                        "drop or rename the existing relation before reusing the name",
                     ));
                 }
                 // Decidable from this single op, and the server says `column "d"
@@ -2910,7 +2915,7 @@ fn validate_no_name_is_claimed_twice(
                         ));
                     }
                 }
-                tables.insert(key);
+                relations.insert(key, "table");
                 columns.insert(key, cols.iter().map(|c| c.name.as_str()).collect());
                 if track_constraint_names {
                     let mut named: BTreeSet<&str> = BTreeSet::new();
@@ -2934,7 +2939,7 @@ fn validate_no_name_is_claimed_twice(
             }
             Op::DropTable { table, schema, .. } => {
                 let key: Key = (schema.as_deref(), table.as_str());
-                tables.remove(&key);
+                relations.remove(&key);
                 columns.remove(&key);
                 constraint_names.remove(&key);
             }
@@ -2943,20 +2948,20 @@ fn validate_no_name_is_claimed_twice(
             } => {
                 let from_key: Key = (schema.as_deref(), table.as_str());
                 let to_key: Key = (schema.as_deref(), to.as_str());
-                if tables.contains(&to_key) {
+                if let Some(held_by) = relations.get(&to_key) {
                     return Err(refuse(
                         op_index,
                         &format!(
                             "this renameTable targets the name {to:?}, but an earlier \
-                             operation in this migration already created a table with that \
-                             name and nothing dropped it in between"
+                             operation in this migration already created a {held_by} with \
+                             that name and nothing dropped it in between"
                         ),
-                        "drop the table occupying the target name, or rename to a free name",
+                        "drop the relation occupying the target name, or rename to a free name",
                     ));
                 }
                 // The name moves, and so does everything scoped to it.
-                if tables.remove(&from_key) {
-                    tables.insert(to_key);
+                if let Some(kind) = relations.remove(&from_key) {
+                    relations.insert(to_key, kind);
                 }
                 if let Some(moved) = columns.remove(&from_key) {
                     columns.insert(to_key, moved);
@@ -2987,6 +2992,45 @@ fn validate_no_name_is_claimed_twice(
                     ));
                 }
                 columns.entry(key).or_default().insert(column.as_str());
+            }
+            // Views and sequences claim and release names in the SAME namespace
+            // as tables, which is why they are handled here rather than in a
+            // check of their own.
+            Op::CreateView { name, schema, .. } => {
+                let key: Key = (schema.as_deref(), name.as_str());
+                if let Some(held_by) = relations.get(&key) {
+                    return Err(refuse(
+                        op_index,
+                        &format!(
+                            "this createView claims the name {name:?}, but an earlier \
+                             operation in this migration already created a {held_by} with \
+                             that name and nothing dropped it in between"
+                        ),
+                        "drop the existing relation first, or use a different name",
+                    ));
+                }
+                relations.insert(key, "view");
+            }
+            Op::DropView { name, schema, .. } => {
+                relations.remove(&(schema.as_deref(), name.as_str()));
+            }
+            Op::CreateSequence { name, schema, .. } => {
+                let key: Key = (schema.as_deref(), name.as_str());
+                if let Some(held_by) = relations.get(&key) {
+                    return Err(refuse(
+                        op_index,
+                        &format!(
+                            "this createSequence claims the name {name:?}, but an earlier \
+                             operation in this migration already created a {held_by} with \
+                             that name and nothing dropped it in between"
+                        ),
+                        "drop the existing relation first, or use a different name",
+                    ));
+                }
+                relations.insert(key, "sequence");
+            }
+            Op::DropSequence { name, schema, .. } => {
+                relations.remove(&(schema.as_deref(), name.as_str()));
             }
             Op::AddConstraint {
                 table,
