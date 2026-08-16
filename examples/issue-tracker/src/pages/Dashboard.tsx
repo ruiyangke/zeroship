@@ -91,7 +91,7 @@ function FlagRequestList({ entries, emptyLabel }: { entries: FlagRequestEntry[];
       {(rows) => (
         <ul className="m-0 flex list-none flex-col gap-1 p-0">
           {rows.map(({ entry, issue }) => (
-            <li key={entry.flag.id}>
+            <li key={entry.flag.id} className="space-x-1">
               <Badge intent="neutral" variant="outline" size="sm">
                 {entry.flagType?.name ?? entry.flag.flagTypeId} {entry.flag.status}
               </Badge>
