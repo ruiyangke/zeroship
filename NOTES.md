@@ -70,3 +70,35 @@ The runner's 451 aggregate excludes every passing test in a failed test
 binary, including the 15 anchor passes. There were exactly nine failed tests.
 The separate auth failure was not an HTTP 500 and did not enter the Gateway
 identity upsert, so the original claim that all nine share that path is false.
+
+## Measured subject mismatch and origins
+
+Focused command after adding temporary diagnostics:
+
+```text
+GATEWAY_ANCHORS_DB_URL=postgres://postgres:zeroship@127.0.0.1:5440/zeroship_auth_test AUTH_DB_URL=postgres://postgres:zeroship@127.0.0.1:5440/zeroship_auth_test cargo test -p zeroship-gateway --test auth_token_anchors_test token_exchange_swaps_email_for_relay_alias -- --exact --test-threads 1 --nocapture
+```
+
+Verbatim values from `/tmp/s16-pairwise-instrumented-red.log`:
+
+```text
+pairwise instrumentation: stored_pairwise_sub=pws_seed_8ed3d71548e04205832647f488c5a77e origin=auth_token_anchors_test::seed_relay_alias_for client_id=oac_myapp global_user_id=8ed3d715-48e0-4205-8326-47f488c5a77e
+[ERROR zeroship_gateway::identities] app_user_identities immutable pairwise binding mismatch app_client_id=oac_myapp global_user_id=8ed3d715-48e0-4205-8326-47f488c5a77e stored_pairwise_sub=Some("pws_seed_8ed3d71548e04205832647f488c5a77e") recomputed_pairwise_sub=pws_6LttJUCDnqZy1AhlkD9k recomputed_origin="gateway caller supplied pairwise projection"
+```
+
+The stored value is fabricated by
+`crates/gateway/tests/auth_token_anchors_test.rs:1250`, where the relay fixture
+formats `pws_seed_` plus the UUID. Every one of the eight failing Gateway tests
+calls this helper. The requested value is the real HMAC projection computed by
+`pairwise_sub` at `crates/gateway/src/auth_token.rs:132-138`, invoked for the
+cookie mint at line 541 and passed to the immutable upsert at line 659. The
+guard at `crates/gateway/src/identities.rs:72` correctly refuses the rebind.
+
+Queued finding 9 is stale. Auth still derives the access-token subject at
+`crates/auth/src/oidc/issuer.rs:421` through `pairwise_subject` at lines
+849-850. Current Gateway checks that subject's pairwise shape and copies it at
+`crates/gateway/src/router/auth.rs:625-629`, then emits it unchanged at lines
+681-692. The old `project_pairwise` helper no longer exists. Commit
+`290c85e0a` removed the double projection before this baseline. The cited Auth
+line range and both Gateway ranges have rotted; the core non-UUID behavior is
+still present at `crates/core/src/auth/mod.rs:302-318` but is not reached here.
