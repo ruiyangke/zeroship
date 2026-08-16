@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::{Arc, RwLock};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration as StdDuration, SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{Duration, Utc};
@@ -23,11 +23,16 @@ use zeroship_control::{
 };
 use zeroship_authz::{Action, Resource};
 use zeroship_core::auth_provider::{AuthProvider, PlatformConfig, PlatformProvider};
+use zeroship_core::config::{Secret, SourceKind};
+use zeroship_core::device_grant::{
+    OP_PROVIDER, PLATFORM_CLI_CLIENT_ID, PLATFORM_CLI_ISSUABLE_SCOPES,
+};
 
 mod common;
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 const PLATFORM_ISSUER: &str = "https://auth.zeroship.test";
+const PLATFORM_OP_ISSUER: &str = "https://auth.zeroship.test/oauth2";
 const PLATFORM_KID: &str = "platform-control-authz-kid";
 const PLATFORM_KEY_SEED: u8 = 31;
 
@@ -38,6 +43,17 @@ fn db_url() -> String {
         .unwrap_or_else(|| {
             "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()
         })
+}
+
+fn auth_role_db_url(database_url: &str) -> String {
+    let mut parsed = url::Url::parse(database_url).expect("database URL must be absolute");
+    parsed
+        .set_username("zeroship_auth")
+        .expect("set auth database user");
+    parsed
+        .set_password(Some("zeroship_auth"))
+        .expect("set auth database password");
+    parsed.to_string()
 }
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -56,6 +72,7 @@ struct Fixture {
     blob_root: PathBuf,
     deploy_tmp_dir: PathBuf,
     _jwks: Option<PlatformJwksMock>,
+    _op: Option<PlatformOp>,
 }
 
 impl Fixture {
@@ -191,6 +208,7 @@ async fn fixture_with_auth_provider(
         blob_root,
         deploy_tmp_dir,
         _jwks: jwks,
+        _op: None,
     })
 }
 
@@ -350,8 +368,12 @@ fn bearer_for_subject(subject: impl ToString, scope: &str) -> String {
 }
 
 fn platform_auth_provider(jwks_url: String) -> Arc<AuthProvider> {
+    platform_auth_provider_for(PLATFORM_ISSUER, jwks_url)
+}
+
+fn platform_auth_provider_for(issuer: &str, jwks_url: String) -> Arc<AuthProvider> {
     Arc::new(AuthProvider::platform(PlatformProvider::new(
-        PlatformConfig::new(PLATFORM_ISSUER, Some(jwks_url)).expect("platform config"),
+        PlatformConfig::new(issuer, Some(jwks_url)).expect("platform config"),
     )))
 }
 
@@ -481,6 +503,397 @@ async fn platform_jwks_handler(body: web::types::State<Arc<RwLock<String>>>) -> 
     HttpResponse::Ok()
         .content_type("application/json")
         .body(body.read().expect("jwks body lock").clone())
+}
+
+struct PlatformOp {
+    base: String,
+    issuer: String,
+    shutdown: Option<mpsc::Sender<()>>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl PlatformOp {
+    fn start(database_url: String) -> Self {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (shutdown_tx, shutdown_rx) = mpsc::channel();
+        let thread = thread::spawn(move || {
+            ntex::rt::System::build()
+                .name("control-platform-op")
+                .testing()
+                .build(ntex::rt::DefaultRuntime)
+                .block_on(async move {
+                    let (pg_client, pg_connection) = connect(&database_url, NoTls)
+                        .await
+                        .expect("platform OP pg connect");
+                    compio::runtime::spawn(async move {
+                        let _ = pg_connection.run().await;
+                    })
+                    .detach();
+                    let pg = Arc::new(pg_client);
+
+                    zeroship_auth::oidc::device_token::reconcile_platform_cli_client(
+                        pg.as_ref(),
+                    )
+                    .await
+                    .expect("reconcile platform CLI client as zeroship_auth");
+                    zeroship_auth::oidc::device_token::reconcile_platform_cli_client(
+                        pg.as_ref(),
+                    )
+                    .await
+                    .expect("platform CLI reconciliation is idempotent");
+
+                    let mut cfg = zeroship_auth::config::AuthConfig::parse_from([
+                        "zeroship-auth",
+                        "--addr",
+                        "127.0.0.1:0",
+                        "--frame-ancestor-origins",
+                        "https://console.zeroship.test",
+                        "--mail-from-email",
+                        "test@zeroship.test",
+                        "--mail-from-name",
+                        "Test",
+                        "--public-url",
+                        PLATFORM_ISSUER,
+                    ]);
+                    cfg.settings.database_url =
+                        Secret::supplied(SourceKind::Env, Some(database_url.clone()));
+                    cfg.settings.stash_signing_key = Secret::supplied(
+                        SourceKind::Env,
+                        Some("test-stash-key-not-for-prod-32bytes!".to_string()),
+                    );
+                    cfg.settings.totp_enc_key = Secret::supplied(
+                        SourceKind::Env,
+                        Some(
+                            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+                                .to_string(),
+                        ),
+                    );
+                    let cfg = Arc::new(cfg);
+                    let issuer_url = cfg.op_issuer_url();
+                    assert_eq!(issuer_url, PLATFORM_OP_ISSUER);
+                    let signing = SigningKey::generate(&mut rand::rngs::OsRng);
+                    let issuer = Arc::new(
+                        zeroship_auth::oidc::Issuer::from_signing_key(
+                            &signing,
+                            [17_u8; 32],
+                            issuer_url.clone(),
+                        )
+                        .expect("platform OP issuer"),
+                    );
+                    let signing_kid = issuer.kid().to_string();
+                    let public_jwk = issuer.public_jwk().clone();
+                    pg.execute(
+                        "INSERT INTO zeroship.signing_keys \
+                            (kid, alg, public_jwk, status, activated_at) \
+                         VALUES ($1, 'EdDSA', $2, 'active', NOW())",
+                        &[&signing_kid, &public_jwk],
+                    )
+                    .await
+                    .expect("register isolated platform OP key");
+                    let refresh_pool = zeroship_auth::oidc::refresh::RefreshSessionPool::new(
+                        database_url.clone(),
+                        2,
+                    );
+
+                    let cfg_state = cfg.clone();
+                    let pg_state = pg.clone();
+                    let issuer_state = issuer.clone();
+                    let refresh_pool_state = refresh_pool.clone();
+                    let server = web::test::server(move || {
+                        let cfg_state = cfg_state.clone();
+                        let pg_state = pg_state.clone();
+                        let issuer_state = issuer_state.clone();
+                        let refresh_pool_state = refresh_pool_state.clone();
+                        async move {
+                            web::App::new()
+                                .state(cfg_state)
+                                .state(pg_state)
+                                .state(issuer_state)
+                                .state(refresh_pool_state)
+                                .configure(zeroship_auth::server::configure(false, false))
+                        }
+                    })
+                    .await;
+                    let _ = started_tx.send((server.addr(), issuer_url));
+                    loop {
+                        match shutdown_rx.try_recv() {
+                            Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
+                            Err(mpsc::TryRecvError::Empty) => {
+                                compio::time::sleep(StdDuration::from_millis(10)).await;
+                            }
+                        }
+                    }
+                    drop(server);
+                    pg.execute(
+                        "DELETE FROM zeroship.signing_keys WHERE kid = $1",
+                        &[&signing_kid],
+                    )
+                    .await
+                    .expect("remove isolated platform OP key");
+                });
+        });
+        let (addr, issuer) = started_rx
+            .recv_timeout(StdDuration::from_secs(15))
+            .expect("platform OP starts within 15 seconds");
+        Self {
+            base: format!("http://{addr}"),
+            issuer,
+            shutdown: Some(shutdown_tx),
+            thread: Some(thread),
+        }
+    }
+
+    fn jwks_url(&self) -> String {
+        format!("{}/oauth2/.well-known/jwks.json", self.base)
+    }
+}
+
+impl Drop for PlatformOp {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+async fn assert_platform_cli_registration(pg: &compio_postgres::Client) {
+    let row = pg
+        .query_one(
+            "SELECT client_name, client_uri, logo_uri, redirect_uris, scopes, \
+                    skip_consent, created_by, client_secret_hash, refresh_allowed, \
+                    token_endpoint_auth_method, brokered, backchannel_logout_uri, \
+                    NOT EXISTS ( \
+                        SELECT 1 FROM zeroship.app_oauth_clients aoc \
+                        WHERE aoc.client_id = oauth_clients.client_id \
+                    ) AS has_no_app_extension \
+             FROM zeroship.oauth_clients WHERE client_id = $1",
+            &[&PLATFORM_CLI_CLIENT_ID],
+        )
+        .await
+        .expect("load reconciled platform CLI client");
+    let expected_scopes = PLATFORM_CLI_ISSUABLE_SCOPES
+        .iter()
+        .map(|scope| (*scope).to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(row.get::<_, String>("client_name"), "zeroship CLI");
+    assert!(row.get::<_, Option<String>>("client_uri").is_none());
+    assert!(row.get::<_, Option<String>>("logo_uri").is_none());
+    assert!(row.get::<_, Vec<String>>("redirect_uris").is_empty());
+    assert_eq!(row.get::<_, Vec<String>>("scopes"), expected_scopes);
+    assert!(row.get::<_, bool>("skip_consent"));
+    assert!(row.get::<_, Option<Uuid>>("created_by").is_none());
+    assert!(row.get::<_, Option<String>>("client_secret_hash").is_none());
+    assert!(!row.get::<_, bool>("refresh_allowed"));
+    assert_eq!(row.get::<_, String>("token_endpoint_auth_method"), "none");
+    assert!(!row.get::<_, bool>("brokered"));
+    assert!(row
+        .get::<_, Option<String>>("backchannel_logout_uri")
+        .is_none());
+    assert!(row.get::<_, bool>("has_no_app_extension"));
+}
+
+#[compio::test]
+async fn op_cli_device_token_authorizes_control_endpoint() {
+    let user_id = Uuid::new_v4();
+    let database_url = db_url();
+    let op = PlatformOp::start(auth_role_db_url(&database_url));
+    let auth_provider = platform_auth_provider_for(&op.issuer, op.jwks_url());
+    let Some(mut fx) = fixture_with_auth_provider(
+        "op-cli-control",
+        user_id,
+        auth_provider,
+        None,
+    )
+    .await
+    else {
+        return;
+    };
+    fx._op = Some(op);
+    assert_platform_cli_registration(&fx.state.control_pg).await;
+    let app_id = create_app(&mut fx, "op-cli-control").await;
+
+    let http = cyper::Client::new();
+    let rejected_scope_form = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("client_id", PLATFORM_CLI_CLIENT_ID)
+        .append_pair("scope", "apps:deploy billing:write")
+        .finish();
+    let rejected_scope = http
+        .request(
+            http::Method::POST,
+            format!(
+                "{}/oauth2/device/authorization",
+                fx._op.as_ref().expect("platform OP fixture").base
+            ),
+        )
+        .expect("build rejected OP device authorization request")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .expect("rejected device authorization content type")
+        .body(rejected_scope_form)
+        .send()
+        .await
+        .expect("send rejected OP device authorization request");
+    let rejected_scope_status = rejected_scope.status().as_u16();
+    let rejected_scope_body = rejected_scope
+        .text()
+        .await
+        .expect("read rejected OP device authorization response");
+    assert_eq!(
+        rejected_scope_status, 400,
+        "out-of-policy CLI scope was accepted: {rejected_scope_body}"
+    );
+    let rejected_scope: Value = serde_json::from_str(&rejected_scope_body)
+        .expect("decode rejected OP device authorization response");
+    assert_eq!(rejected_scope["error"], "invalid_scope");
+
+    let authorization_form = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("client_id", PLATFORM_CLI_CLIENT_ID)
+        .append_pair("scope", "apps:deploy apps:read")
+        .finish();
+    let authorization = http
+        .request(
+            http::Method::POST,
+            format!(
+                "{}/oauth2/device/authorization",
+                fx._op.as_ref().expect("platform OP fixture").base
+            ),
+        )
+        .expect("build OP device authorization request")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .expect("device authorization content type")
+        .body(authorization_form)
+        .send()
+        .await
+        .expect("send OP device authorization request");
+    let authorization_status = authorization.status().as_u16();
+    let authorization_body = authorization
+        .text()
+        .await
+        .expect("read OP device authorization response");
+    assert_eq!(
+        authorization_status, 200,
+        "OP device authorization failed: {authorization_body}"
+    );
+    let authorization: Value = serde_json::from_str(&authorization_body)
+        .expect("decode OP device authorization response");
+    let device_code = authorization["device_code"]
+        .as_str()
+        .expect("device authorization returns device_code");
+    let user_code = authorization["user_code"]
+        .as_str()
+        .expect("device authorization returns user_code");
+    let sid = Uuid::new_v4().to_string();
+    let approved = fx
+        .state
+        .control_pg
+        .execute(
+            "UPDATE zeroship.device_grants \
+             SET principal_id = $1, sid = $2, \
+                 auth_credential_version = \
+                    (SELECT credential_version FROM zeroship.users WHERE id = $1), \
+                 status = 'approved' \
+             WHERE user_code = $3 AND provider = $4",
+            &[&user_id, &sid, &user_code, &OP_PROVIDER],
+        )
+        .await
+        .expect("approve OP device grant");
+    assert_eq!(approved, 1, "approve exactly one OP device grant");
+
+    let token_form = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair(
+            "grant_type",
+            "urn:ietf:params:oauth:grant-type:device_code",
+        )
+        .append_pair("device_code", device_code)
+        .append_pair("client_id", PLATFORM_CLI_CLIENT_ID)
+        .finish();
+    let token_response = http
+        .request(
+            http::Method::POST,
+            format!(
+                "{}/oauth2/token",
+                fx._op.as_ref().expect("platform OP fixture").base
+            ),
+        )
+        .expect("build OP device token request")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .expect("device token content type")
+        .body(token_form)
+        .send()
+        .await
+        .expect("send OP device token request");
+    let token_status = token_response.status().as_u16();
+    let token_body = token_response
+        .text()
+        .await
+        .expect("read OP device token response");
+    assert_eq!(token_status, 200, "OP token exchange failed: {token_body}");
+    let token: Value = serde_json::from_str(&token_body).expect("decode OP token response");
+    let access_token = token["access_token"]
+        .as_str()
+        .expect("OP token response returns access_token");
+    let encoded_claims = access_token
+        .split('.')
+        .nth(1)
+        .expect("OP access token contains claims");
+    let claims: Value = serde_json::from_slice(
+        &URL_SAFE_NO_PAD
+            .decode(encoded_claims)
+            .expect("decode OP access token claims"),
+    )
+    .expect("parse OP access token claims");
+    assert_eq!(claims["sub"], user_id.to_string());
+    assert_eq!(claims["aud"], "control.zeroship.ai");
+    assert_eq!(claims["client_id"], PLATFORM_CLI_CLIENT_ID);
+    assert_eq!(claims["scope"], "apps:deploy apps:read");
+    assert_eq!(
+        claims["exp"].as_i64().expect("OP token exp")
+            - claims["iat"].as_i64().expect("OP token iat"),
+        43_200
+    );
+
+    let control = init_control!(fx);
+    let deploy_request = test::TestRequest::post()
+        .uri(&format!("/raw-app/{app_id}/deploy-check"))
+        .header("authorization", bearer_for(access_token))
+        .to_request();
+    let deploy_response = test::call_service(&control, deploy_request).await;
+    let deploy_status = deploy_response.status();
+    let deploy_body = test::read_body(deploy_response).await;
+    let deploy_body_text = String::from_utf8_lossy(&deploy_body).to_string();
+
+    let app_request = test::TestRequest::get()
+        .uri(&format!("/api/apps/{app_id}"))
+        .header("authorization", bearer_for(access_token))
+        .to_request();
+    let app_response = test::call_service(&control, app_request).await;
+    let app_status = app_response.status();
+    let app_body = test::read_body(app_response).await;
+    let app_body_text = String::from_utf8_lossy(&app_body).to_string();
+
+    fx.cleanup().await;
+    drop(control);
+    drop(http);
+    drop(fx);
+    common::drain_pg().await;
+
+    assert_eq!(
+        deploy_status,
+        StatusCode::OK,
+        "OP-issued CLI token was rejected by control deploy authz: {deploy_body_text}"
+    );
+    let control_body: Value =
+        serde_json::from_str(&deploy_body_text).expect("decode control response");
+    assert_eq!(control_body["principal_id"], user_id.to_string());
+    assert_eq!(
+        app_status,
+        StatusCode::OK,
+        "OP-issued CLI token was rejected by a production control endpoint: {app_body_text}"
+    );
+    assert_eq!(token["expires_in"], 43_200);
+    assert_eq!(token["scope"], "apps:deploy apps:read");
 }
 
 #[compio::test]

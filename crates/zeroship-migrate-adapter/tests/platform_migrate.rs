@@ -39,7 +39,7 @@ mod platform_cli {
     /// How many files `db/migrations-ts` holds. Asserted rather than derived so
     /// that a discovery bug which silently drops a file fails loudly instead of
     /// agreeing with itself. Adding a migration updates this one constant.
-    const PLATFORM_MIGRATION_FILES: usize = 21;
+    const PLATFORM_MIGRATION_FILES: usize = 22;
 
     const DURABLE_WORKFLOW_JOURNAL_TABLES: [&str; 10] = [
         "app_deploys",
@@ -626,6 +626,23 @@ mod platform_cli {
         .await
         {
             return Err("app_user_identities INSERT privilege boundary is wrong".to_string());
+        }
+        if !scalar_bool(
+            &probe,
+            "SELECT has_table_privilege( \
+                       'zeroship_auth', \
+                       'zeroship.app_oauth_clients', \
+                       'SELECT' \
+                    ) \
+                AND NOT has_table_privilege( \
+                       'zeroship_worker', \
+                       'zeroship.app_oauth_clients', \
+                       'SELECT' \
+                    )",
+        )
+        .await
+        {
+            return Err("app_oauth_clients SELECT privilege boundary is wrong".to_string());
         }
         if !scalar_bool(
             &probe,
