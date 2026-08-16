@@ -116,7 +116,11 @@ export function IssueResultsTable({
       key: "id",
       header: "ID",
       cell: (issue) => (
-        <Link to={`/issues/${issue.id}`} className="issue-link" title={issue.id}>
+        <Link
+          to={`/issues/${issue.id}`}
+          className="issue-link font-mono text-base"
+          title={issue.id}
+        >
           {issueLabel(issue, productKeysById)}
         </Link>
       ),
@@ -155,7 +159,7 @@ export function IssueResultsTable({
       key: "summary",
       header: "Summary",
       cell: (issue) => (
-        <Link to={`/issues/${issue.id}`} className="issue-summary-link">
+        <Link to={`/issues/${issue.id}`} className="text-ink! hover:text-accent-strong!">
           {issue.summary}
         </Link>
       ),
@@ -189,31 +193,36 @@ export function IssueResultsTable({
   const refetching = loading && issues.length > 0;
 
   return (
-    <div aria-busy={refetching || undefined} className={refetching ? "is-refetching" : undefined}>
-    <DataTable
-      columns={columns.map((key) => ({
-        ...byKey[key],
-        sortable: onSortChange ? Boolean(SERVER_SORTABLE[key]) : false,
-      }))}
-      data={[...issues]}
-      rowKey={(issue) => issue.id}
-      // The SERVER filters, sorts and pages -- searchIssues takes text, sortBy
-      // and limit/offset. Leaving the managed engine on gave the page two
-      // search boxes and two paginators disagreeing with each other: the
-      // built-in one showing "1-10 of 25" over a set the server had already
-      // narrowed to 25 of hundreds.
-      searchable={false}
-      paginated={false}
-      manualSorting
-      manualFiltering
-      manualPagination
-      loading={firstLoad}
-      sort={sort ?? null}
-      onSortChange={onSortChange}
-      // A caption or an aria-label is REQUIRED -- the component dev-warns and
-      // the table is left unnamed for a screen reader without one.
-      aria-label={caption ?? "Issues"}
-    />
+    <div
+      aria-busy={refetching || undefined}
+      className={
+        refetching ? "opacity-55 transition-opacity duration-[120ms] ease-out" : undefined
+      }
+    >
+      <DataTable
+        columns={columns.map((key) => ({
+          ...byKey[key],
+          sortable: onSortChange ? Boolean(SERVER_SORTABLE[key]) : false,
+        }))}
+        data={[...issues]}
+        rowKey={(issue) => issue.id}
+        // The SERVER filters, sorts and pages -- searchIssues takes text, sortBy
+        // and limit/offset. Leaving the managed engine on gave the page two
+        // search boxes and two paginators disagreeing with each other: the
+        // built-in one showing "1-10 of 25" over a set the server had already
+        // narrowed to 25 of hundreds.
+        searchable={false}
+        paginated={false}
+        manualSorting
+        manualFiltering
+        manualPagination
+        loading={firstLoad}
+        sort={sort ?? null}
+        onSortChange={onSortChange}
+        // A caption or an aria-label is REQUIRED -- the component dev-warns and
+        // the table is left unnamed for a screen reader without one.
+        aria-label={caption ?? "Issues"}
+      />
     </div>
   );
 }

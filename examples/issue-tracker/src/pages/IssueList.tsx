@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useClearQuery, useNumericQueryParam, useQueryParam } from "../lib/query-state";
 import { Button, Card, Checkbox, Cluster, Dialog, FilterBar, PageHeader, Select } from "@zeroship/ui";
 import {
@@ -13,6 +13,7 @@ import { isVisitor, useSession } from "../components/session";
 import type { Issue } from "../components/types";
 import { ISSUE_STATUSES, type IssueStatus } from "../lib/workflow";
 import { ISSUE_KINDS, ISSUE_PRIORITIES, ISSUE_SEVERITIES, parseQuickSearch } from "../lib/quicksearch";
+import { FilterControl, Hint, Page } from "../components/AppPrimitives";
 
 /**
  * The parser throws on malformed input ("@" with no handle). A half-typed
@@ -63,6 +64,62 @@ function loadColumns(): IssueColumnKey[] {
   } catch {
     return DEFAULT_COLUMNS;
   }
+}
+
+/**
+ * Popup chrome belongs to the picker rather than to every call site that
+ * happens to render a Card. Card's slot theme intentionally outranks normal
+ * utilities, so the few properties that make this Card a popup are explicit
+ * important overrides instead of silently losing the cascade.
+ */
+function ColumnPickerMenu({ children }: { children: ReactNode }) {
+  return (
+    <Card className="column-picker-menu absolute! right-0 top-[calc(100%+0.25rem)]! z-20 min-w-40! gap-1! border-line-strong! bg-surface! px-3! py-2! shadow-popup!">
+      {children}
+    </Card>
+  );
+}
+
+function ColumnPicker({
+  availableColumns,
+  columns,
+  open,
+  onOpenChange,
+  onToggle,
+}: {
+  availableColumns: typeof ALL_ISSUE_COLUMNS;
+  columns: readonly IssueColumnKey[];
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onToggle: (key: IssueColumnKey) => void;
+}) {
+  return (
+    <div className="column-picker relative">
+      <Button
+        variant="plain"
+        size="sm"
+        onClick={() => onOpenChange(!open)}
+        aria-expanded={open}
+      >
+        Columns
+      </Button>
+      {open ? (
+        <ColumnPickerMenu>
+          <Cluster gap={3}>
+            {availableColumns.map((col) => (
+              <Checkbox
+                key={col.key}
+                checked={columns.includes(col.key)}
+                disabled={col.key === "summary"}
+                onCheckedChange={() => onToggle(col.key)}
+                label={col.label}
+              />
+            ))}
+          </Cluster>
+        </ColumnPickerMenu>
+      ) : null}
+    </div>
+  );
 }
 
 const SORTABLE = ["created_at", "updated_at", "priority", "severity", "status"] as const;
@@ -298,7 +355,7 @@ export function IssueListPage() {
   ].filter((chip): chip is NonNullable<typeof chip> => chip !== null);
 
   return (
-    <div className="page">
+    <Page>
       {/* No page-level "New issue": the shell header carries it on every
           page, and two of them side by side was the first thing the
           screenshot showed. */}
@@ -343,89 +400,84 @@ export function IssueListPage() {
                 positioned ancestor -- the page -- and 110% of a tall block put
                 the menu at y=1692 in a 900px viewport. It opened every time
                 and was 792px below the fold, so the button read as dead. */}
-            <div className="column-picker">
-              <Button
-                variant="plain"
-                size="sm"
-                onClick={() => setPickerOpen((open) => !open)}
-                aria-expanded={pickerOpen}
-              >
-                Columns
-              </Button>
-              {pickerOpen ? (
-                <Card className="column-picker-menu">
-                  <Cluster gap={3}>
-                    {availableColumns.map((col) => (
-                      <Checkbox
-                        key={col.key}
-                        checked={columns.includes(col.key)}
-                        disabled={col.key === "summary"}
-                        onCheckedChange={() => toggleColumn(col.key)}
-                        label={col.label}
-                      />
-                    ))}
-                  </Cluster>
-                </Card>
-              ) : null}
-            </div>
+            <ColumnPicker
+              availableColumns={availableColumns}
+              columns={columns}
+              open={pickerOpen}
+              onOpenChange={setPickerOpen}
+              onToggle={toggleColumn}
+            />
           </Cluster>
         }
       >
-        <Select value={status} onValueChange={(v) => setStatus((v as IssueStatus) ?? "")} placeholder="Any status" className="filter-select">
-          {ISSUE_STATUSES.map((s) => (
-            <Select.Item key={s} value={s}>
-              {s}
-            </Select.Item>
-          ))}
-        </Select>
+        <FilterControl>
+          <Select
+            value={status}
+            onValueChange={(v) => setStatus((v as IssueStatus) ?? "")}
+            placeholder="Any status"
+          >
+            {ISSUE_STATUSES.map((s) => (
+              <Select.Item key={s} value={s}>
+                {s}
+              </Select.Item>
+            ))}
+          </Select>
+        </FilterControl>
         {/* Beside severity, and before it: kind decides what the severity
             beside it is even describing. */}
-        <Select
-          value={kind}
-          onValueChange={(v) => setKind((v as (typeof ISSUE_KINDS)[number]) ?? "")}
-          placeholder="Any kind"
-          className="filter-select"
-        >
-          {ISSUE_KINDS.map((k) => (
-            <Select.Item key={k} value={k}>
-              {k}
-            </Select.Item>
-          ))}
-        </Select>
-        <Select
-          value={severity}
-          onValueChange={(v) => setSeverity((v as (typeof ISSUE_SEVERITIES)[number]) ?? "")}
-          placeholder="Any severity"
-          className="filter-select"
-        >
-          {ISSUE_SEVERITIES.map((s) => (
-            <Select.Item key={s} value={s}>
-              {s}
-            </Select.Item>
-          ))}
-        </Select>
-        <Select
-          value={priority}
-          onValueChange={(v) => setPriority((v as (typeof ISSUE_PRIORITIES)[number]) ?? "")}
-          placeholder="Any priority"
-          className="filter-select"
-        >
-          {ISSUE_PRIORITIES.map((p) => (
-            <Select.Item key={p} value={p}>
-              {p}
-            </Select.Item>
-          ))}
-        </Select>
-        <Select value={productId} onValueChange={(v) => setProductId(v ?? "")} placeholder="Any product"
-          className="filter-select"
-          renderValue={(id) => products.find((p) => p.id === id)?.name ?? id}
-        >
-          {products.map((p) => (
-            <Select.Item key={p.id} value={p.id}>
-              {p.name}
-            </Select.Item>
-          ))}
-        </Select>
+        <FilterControl>
+          <Select
+            value={kind}
+            onValueChange={(v) => setKind((v as (typeof ISSUE_KINDS)[number]) ?? "")}
+            placeholder="Any kind"
+          >
+            {ISSUE_KINDS.map((k) => (
+              <Select.Item key={k} value={k}>
+                {k}
+              </Select.Item>
+            ))}
+          </Select>
+        </FilterControl>
+        <FilterControl>
+          <Select
+            value={severity}
+            onValueChange={(v) => setSeverity((v as (typeof ISSUE_SEVERITIES)[number]) ?? "")}
+            placeholder="Any severity"
+          >
+            {ISSUE_SEVERITIES.map((s) => (
+              <Select.Item key={s} value={s}>
+                {s}
+              </Select.Item>
+            ))}
+          </Select>
+        </FilterControl>
+        <FilterControl>
+          <Select
+            value={priority}
+            onValueChange={(v) => setPriority((v as (typeof ISSUE_PRIORITIES)[number]) ?? "")}
+            placeholder="Any priority"
+          >
+            {ISSUE_PRIORITIES.map((p) => (
+              <Select.Item key={p} value={p}>
+                {p}
+              </Select.Item>
+            ))}
+          </Select>
+        </FilterControl>
+        <FilterControl>
+          <Select
+            value={productId}
+            onValueChange={(v) => setProductId(v ?? "")}
+            placeholder="Any product"
+            renderValue={(id) => products.find((p) => p.id === id)?.name ?? id}
+          >
+            {products.map((p) => (
+              <Select.Item key={p.id} value={p.id}>
+                {p.name}
+              </Select.Item>
+            ))}
+          </Select>
+        </FilterControl>
       </FilterBar>
       {/* No sort bar. Sorting lives on the table headers, where the thing
           being sorted is the thing you click -- a separate control naming a
@@ -468,10 +520,10 @@ export function IssueListPage() {
               that silently replaced the list would be indistinguishable from
               a filter that happened to match those rows. */}
           <Cluster gap={2} align="center">
-            <span className="state-hint small">
+            <Hint as="span" flush>
               Showing {advanced.length} result{advanced.length === 1 ? "" : "s"} from advanced
               search
-            </span>
+            </Hint>
             <Button variant="plain" size="sm" onClick={() => setAdvanced(null)}>
               Back to filters
             </Button>
@@ -524,7 +576,7 @@ export function IssueListPage() {
                 setOffset(0);
               }}
             />
-            <div className="pager">
+            <div className="mt-3 flex items-center gap-3 text-base text-ink-secondary">
               <Button variant="gray" size="sm"
                 disabled={offset === 0}
                 onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
@@ -545,6 +597,6 @@ export function IssueListPage() {
         )}
       </AsyncSection>
       )}
-    </div>
+    </Page>
   );
 }

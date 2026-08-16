@@ -6,7 +6,7 @@
 // without a second box. Leaving the component here exported and unrendered is
 // how it became unreachable in the first place.
 import { useState } from "react";
-import { Button, Input, PageHeader, Select } from "@zeroship/ui";
+import { Badge, Button, Input, Select } from "@zeroship/ui";
 import {
   deleteSavedSearch,
   saveSavedSearch,
@@ -14,12 +14,10 @@ import {
 } from "../../api";
 import { invalidatedBy } from "../../lib/query-keys";
 import { useAppMutation, useSavedSearches } from "../../lib/queries";
-import { ALL_ISSUE_COLUMNS, IssueResultsTable, type IssueColumnKey } from "../IssueResultsTable";
-import { AsyncSection, ErrorState, Loading } from "../StateViews";
-import { errorMessage, isUnauthenticated, toPromise } from "../rpc";
+import { AsyncSection } from "../StateViews";
+import { errorMessage } from "../rpc";
 import type { Issue } from "../types";
-
-const RESULT_COLUMNS: IssueColumnKey[] = ["id", "status", "resolution", "kind", "severity", "priority", "summary", "updated"];
+import { FieldError, InlineForm } from "../AppPrimitives";
 
 type Field =
   | "id"
@@ -106,14 +104,14 @@ export function FieldBuilder({ onResults }: { onResults: (issues: Issue[]) => vo
   };
 
   return (
-    <section className="field-builder">
+    <section className="mb-5 rounded-lg border border-line bg-surface p-4">
       {/* Not "Advanced search" again. The page heading already says that, and
           the two sat one above the other -- the same duplicate-heading defect
           the issue page had. This names what the section IS: the structured
           builder, as opposed to the QuickSearch box above it. */}
-      <h2>Field builder</h2>
+      <h2 className="mb-2">Field builder</h2>
       {conditions.map((condition, index) => (
-        <div className="condition-row" key={condition.id}>
+        <div className="mb-2 flex items-center gap-2" key={condition.id}>
           <Select
             value={condition.field}
             aria-label="Field"
@@ -161,7 +159,7 @@ export function FieldBuilder({ onResults }: { onResults: (issues: Issue[]) => vo
           </Button>
         </div>
       ))}
-      <div className="field-builder-actions">
+      <div className="my-2 flex gap-2">
         <Button variant="gray" size="sm" onClick={() => setConditions((cs) => [...cs, newCondition()])}>
           Add condition (AND)
         </Button>
@@ -169,7 +167,7 @@ export function FieldBuilder({ onResults }: { onResults: (issues: Issue[]) => vo
           {search.isPending ? "Searching..." : "Run search"}
         </Button>
       </div>
-      {search.error ? <p className="field-error">{errorMessage(search.error)}</p> : null}
+      {search.error ? <FieldError>{errorMessage(search.error)}</FieldError> : null}
       <SavedSearchesPanel currentWhere={lastWhere} />
     </section>
   );
@@ -203,8 +201,8 @@ export function SavedSearchesPanel({ currentWhere }: { currentWhere: WhereNode |
   };
 
   return (
-    <div className="saved-searches">
-      <h3>Saved searches</h3>
+    <div className="mt-4 border-t border-line pt-3">
+      <h3 className="mb-2 text-ink-secondary">Saved searches</h3>
       <AsyncSection
         query={savedQ}
         loadingLabel="Loading saved searches..."
@@ -217,11 +215,15 @@ export function SavedSearchesPanel({ currentWhere }: { currentWhere: WhereNode |
         emptyTone="inline"
       >
         {(rows) => (
-          <ul>
+          <ul className="mb-2 flex list-none flex-col gap-1 p-0">
             {rows.map((row) => (
-              <li key={row.id}>
+              <li className="flex items-center gap-2" key={row.id}>
                 {row.name}
-                {row.isShared ? <span className="chip">shared</span> : null}
+                {row.isShared ? (
+                  <Badge intent="neutral" variant="outline" size="sm">
+                    shared
+                  </Badge>
+                ) : null}
                 <Button variant="gray" size="sm" disabled={busy} onClick={() => remove.mutate(row.id)}>
                   Delete
                 </Button>
@@ -230,7 +232,7 @@ export function SavedSearchesPanel({ currentWhere }: { currentWhere: WhereNode |
           </ul>
         )}
       </AsyncSection>
-      <div className="inline-form">
+      <InlineForm>
         <Input
           aria-label="Save current search as"
           placeholder="Save current search as..."
@@ -241,9 +243,8 @@ export function SavedSearchesPanel({ currentWhere }: { currentWhere: WhereNode |
         <Button variant="gray" size="sm" disabled={busy || !currentWhere || !name.trim()} onClick={submitSave}>
           Save
         </Button>
-      </div>
-      {error ? <p className="field-error">{errorMessage(error)}</p> : null}
+      </InlineForm>
+      {error ? <FieldError>{errorMessage(error)}</FieldError> : null}
     </div>
   );
 }
-
