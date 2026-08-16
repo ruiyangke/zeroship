@@ -8,7 +8,6 @@ import { FieldError, FieldRow, Hint } from "../AppPrimitives";
 import { RailDisclosure } from "./RailDisclosure";
 import { errorMessage } from "../rpc";
 import { Absent, Pending } from "./Absent";
-import { RailList } from "./RailList";
 
 /**
  * Bugzilla's See Also: links to the same issue in other trackers.
@@ -77,7 +76,7 @@ export function SeeAlsoPanel({ issueId }: { issueId: string }) {
       {links.length === 0 ? (
         <Hint>No linked reports.</Hint>
       ) : (
-        <RailList rows="actions">
+        <ul className="m-0 list-none p-0">
           {links.map((link) => (
             <li key={link.id}>
               <a href={link.url} target="_blank" rel="noreferrer noopener">
@@ -91,7 +90,7 @@ export function SeeAlsoPanel({ issueId }: { issueId: string }) {
               </Button>
             </li>
           ))}
-        </RailList>
+        </ul>
       )}
       <FieldRow>
         <Field>

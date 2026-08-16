@@ -15,7 +15,7 @@ import {
   useMyVotes,
 } from "../lib/queries";
 import type { Issue, FlagRequestEntry } from "../components/types";
-import { Hint, Muted, Page } from "../components/AppPrimitives";
+import { Hint, Muted, Page, SectionHeading } from "../components/AppPrimitives";
 
 const COLUMNS = ALL_ISSUE_COLUMNS.map((c) => c.key).filter((c) => c !== "reporter");
 
@@ -220,7 +220,7 @@ function DashboardBody() {
       ) : null}
 
       <DashboardSection className="my-work">
-        <h2>My work</h2>
+        <SectionHeading>My work</SectionHeading>
         {/* keepMounted is deliberately NOT set: the panels hold issue tables of
             up to fifty rows each, and mounting all four would put three
             invisible tables in the document for every visit. The data is
@@ -278,12 +278,12 @@ function DashboardBody() {
           stacked they were what pushed the tables above them out of reach. */}
       <Grid minColWidth="24rem" gap={4}>
         <DashboardSection>
-          <h2>Requests waiting on me</h2>
+          <SectionHeading>Requests waiting on me</SectionHeading>
           <FlagRequestList entries={requestedOfMe} emptyLabel="No open flag requests directed at you." />
         </DashboardSection>
 
         <DashboardSection>
-          <h2>My open flag requests</h2>
+          <SectionHeading>My open flag requests</SectionHeading>
           <FlagRequestList entries={setByMe} emptyLabel="You have not requested any flags." />
         </DashboardSection>
 

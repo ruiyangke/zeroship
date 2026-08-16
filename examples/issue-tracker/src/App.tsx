@@ -13,6 +13,7 @@ import { DashboardPage } from "./pages/Dashboard";
 import { NewIssuePage } from "./pages/NewIssue";
 import { ProductsAdminPage } from "./pages/ProductsAdmin";
 import { ReportsPage } from "./pages/Reports";
+import { Page } from "./components/AppPrimitives";
 
 /**
  * Routes, declared. This app hand-rolled a router twice -- first on the hash,
@@ -54,17 +55,21 @@ function IssueDetailRoute() {
 function NotFoundPage() {
   const { pathname } = useLocation();
   return (
-    <div className="page">
+    <Page>
       <EmptyState
         title="No page here"
         hint={
           <>
-            Nothing is routed at <code>{pathname}</code>. Try the{" "}
+            Nothing is routed at{" "}
+            <code className="rounded-lg bg-surface-sunken px-1 py-px font-mono text-[0.85em]">
+              {pathname}
+            </code>
+            . Try the{" "}
             <Link to="/issues">issue list</Link>.
           </>
         }
       />
-    </div>
+    </Page>
   );
 }
 

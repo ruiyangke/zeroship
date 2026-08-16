@@ -17,7 +17,7 @@ import { useAppMutation, useSavedSearches } from "../../lib/queries";
 import { AsyncSection } from "../StateViews";
 import { errorMessage } from "../rpc";
 import type { Issue } from "../types";
-import { FieldError, InlineForm } from "../AppPrimitives";
+import { FieldError, InlineForm, SectionHeading } from "../AppPrimitives";
 
 type Field =
   | "id"
@@ -109,7 +109,7 @@ export function FieldBuilder({ onResults }: { onResults: (issues: Issue[]) => vo
           the two sat one above the other -- the same duplicate-heading defect
           the issue page had. This names what the section IS: the structured
           builder, as opposed to the QuickSearch box above it. */}
-      <h2 className="mb-2">Field builder</h2>
+      <SectionHeading>Field builder</SectionHeading>
       {conditions.map((condition, index) => (
         <div className="mb-2 flex items-center gap-2" key={condition.id}>
           <Select
@@ -202,7 +202,7 @@ export function SavedSearchesPanel({ currentWhere }: { currentWhere: WhereNode |
 
   return (
     <div className="mt-4 border-t border-line pt-3">
-      <h3 className="mb-2 text-ink-secondary">Saved searches</h3>
+      <SectionHeading level={3}>Saved searches</SectionHeading>
       <AsyncSection
         query={savedQ}
         loadingLabel="Loading saved searches..."

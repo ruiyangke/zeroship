@@ -70,7 +70,7 @@ export function Shell({
           <Cluster align="center" gap={4}>
             <Link
               to="/issues"
-              className="text-lg font-bold tracking-[-0.01em] text-ink no-underline hover:text-accent-strong hover:no-underline"
+              className="text-[1rem] font-bold tracking-[-0.01em] text-ink! no-underline! hover:text-accent-strong! hover:no-underline!"
             >
               Issue Tracker
             </Link>
@@ -82,7 +82,7 @@ export function Shell({
                   <NavLink
                     key={link.href}
                     to={link.href}
-                    className="inline-flex items-center whitespace-nowrap rounded-lg px-2 py-1 text-md leading-[1.3] font-medium text-ink-secondary no-underline hover:bg-current/8 hover:text-ink hover:no-underline aria-[current=page]:bg-current/12 aria-[current=page]:font-semibold aria-[current=page]:text-ink"
+                    className="inline-flex items-center whitespace-nowrap rounded-lg px-2 py-1 text-md leading-[1.3] font-medium text-ink-secondary! no-underline! hover:bg-current/8! hover:text-ink! hover:no-underline! aria-[current=page]:bg-current/12! aria-[current=page]:font-semibold aria-[current=page]:text-ink!"
                     // NavLink sets aria-current="page" itself, so the styling
                     // rule and the accessible state cannot drift apart -- and
                     // the app no longer threads a route name down here to work

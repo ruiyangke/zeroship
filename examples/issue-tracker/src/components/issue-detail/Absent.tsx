@@ -22,7 +22,7 @@ export const ABSENT = "--";
 
 /** No value is set. */
 export function Absent() {
-  return <span className="dim">{ABSENT}</span>;
+  return <span className="dim text-ink-muted">{ABSENT}</span>;
 }
 
 /**

@@ -83,3 +83,25 @@ export function FilterControl({ children }: { children: ReactNode }) {
 export function FieldRow({ children }: { children: ReactNode }) {
   return <div className="my-2 flex flex-wrap items-end gap-4">{children}</div>;
 }
+
+/** Repeated heading rhythm for app-owned sections and admin columns. */
+export function SectionHeading({
+  level = 2,
+  children,
+}: {
+  level?: 2 | 3;
+  children: ReactNode;
+}) {
+  const Component = level === 2 ? "h2" : "h3";
+  return (
+    <Component
+      className={
+        level === 2
+          ? "mb-2 text-lg font-semibold tracking-[-0.01em] text-ink"
+          : "mb-2 text-md font-semibold tracking-[-0.01em] text-ink-secondary"
+      }
+    >
+      {children}
+    </Component>
+  );
+}

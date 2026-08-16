@@ -19,7 +19,7 @@ import {
 } from "../lib/queries";
 import { errorMessage } from "./rpc";
 import { MemberList, MemberListItem } from "./MemberList";
-import { FieldError, FieldRow, Hint, Muted } from "./AppPrimitives";
+import { FieldError, FieldRow, Hint, Muted, SectionHeading } from "./AppPrimitives";
 
 function AdminSection(props: Omit<ComponentPropsWithoutRef<"section">, "className">) {
   return (
@@ -136,7 +136,7 @@ export function GroupsAdmin() {
   if (denied) {
     return (
       <AdminSection>
-        <h2>Groups</h2>
+        <SectionHeading>Groups</SectionHeading>
         <Hint>
           Only an administrator can manage groups. The first account to exist becomes the
           administrator.
@@ -156,7 +156,7 @@ export function GroupsAdmin() {
 
   return (
     <AdminSection>
-      <h2>Groups</h2>
+      <SectionHeading>Groups</SectionHeading>
       <Hint>
         A group restricts what its members can see. Restrict a whole product, or one
         confidential issue inside an otherwise readable one.
@@ -252,7 +252,7 @@ export function GroupsAdmin() {
           actually matters. */}
       {memberGroup ? (
         <div>
-          <h3>Members</h3>
+          <SectionHeading level={3}>Members</SectionHeading>
           {members.length === 0 ? (
             <Hint>Nobody is in this group yet.</Hint>
           ) : (
@@ -352,7 +352,7 @@ function ProductRestrictions({
 
   return (
     <div>
-      <h3>Product visibility</h3>
+      <SectionHeading level={3}>Product visibility</SectionHeading>
       <FieldRow>
         <Field>
           <Field.Label>Product</Field.Label>

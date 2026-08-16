@@ -8,7 +8,7 @@ import { errorMessage } from "./rpc";
 import { UserPicker } from "./UserPicker";
 import { DashboardSection } from "./DashboardSection";
 import { MemberList, MemberListItem } from "./MemberList";
-import { FieldError, Hint } from "./AppPrimitives";
+import { FieldError, Hint, SectionHeading } from "./AppPrimitives";
 
 /**
  * Bugzilla's user watching: you also hear about issues the watched person is
@@ -62,7 +62,7 @@ export function WatchingPanel() {
 
   return (
     <DashboardSection className="watching-panel">
-      <h2>People I watch</h2>
+      <SectionHeading>People I watch</SectionHeading>
       <Hint>
         You are notified about issues they report, are assigned, or are CC'd on.
       </Hint>

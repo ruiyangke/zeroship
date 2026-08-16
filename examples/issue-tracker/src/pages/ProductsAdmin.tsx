@@ -45,6 +45,7 @@ import {
   InlineForm,
   Muted,
   Page,
+  SectionHeading,
 } from "../components/AppPrimitives";
 
 /** How many products a page of the list holds. */
@@ -631,7 +632,7 @@ function ComponentsAdmin({
 
   return (
     <ProductAdminColumn>
-      <h3>Components</h3>
+      <SectionHeading level={3}>Components</SectionHeading>
       {components.length === 0 ? (
         <Hint>None yet.</Hint>
       ) : (
@@ -687,7 +688,7 @@ function VersionsAdmin({
 
   return (
     <ProductAdminColumn>
-      <h3>Versions</h3>
+      <SectionHeading level={3}>Versions</SectionHeading>
       {versions.length === 0 ? (
         <Hint>None yet.</Hint>
       ) : (
@@ -732,7 +733,7 @@ function MilestonesAdmin({
 
   return (
     <ProductAdminColumn>
-      <h3>Milestones</h3>
+      <SectionHeading level={3}>Milestones</SectionHeading>
       {milestones.length === 0 ? (
         <Hint>None yet.</Hint>
       ) : (

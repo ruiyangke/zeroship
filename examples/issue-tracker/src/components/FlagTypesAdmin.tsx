@@ -6,7 +6,7 @@ import { createFlagType } from "../api";
 import { invalidatedBy } from "../lib/query-keys";
 import { useAppMutation, useFlagTypes, useProducts } from "../lib/queries";
 import { errorMessage } from "./rpc";
-import { FieldError, Hint, InlineForm, Muted } from "./AppPrimitives";
+import { FieldError, Hint, InlineForm, Muted, SectionHeading } from "./AppPrimitives";
 
 /**
  * Flag type administration.
@@ -64,7 +64,7 @@ export function FlagTypesAdmin() {
 
   return (
     <section className="flag-types-admin">
-      <h2>Flag types</h2>
+      <SectionHeading>Flag types</SectionHeading>
       <Hint>
         A flag is a named request or sign-off on an issue or an attachment. Until a type exists
         here, the Flags panel on every issue stays empty.

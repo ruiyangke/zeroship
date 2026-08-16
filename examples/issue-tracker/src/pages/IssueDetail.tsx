@@ -20,7 +20,7 @@ import { errorMessage } from "../components/rpc";
 import { isVisitor, useSession } from "../components/session";
 import { RailFieldset } from "../components/issue-detail/RailFieldset";
 import { RailSection } from "../components/issue-detail/RailSection";
-import { FieldError } from "../components/AppPrimitives";
+import { FieldError, Page } from "../components/AppPrimitives";
 
 type Tab = "details" | "history";
 
@@ -40,7 +40,7 @@ function IssueDetailExtras({
 }) {
   return (
     <fieldset
-      className="issue-detail-extras m-0 mt-7 grid grid-cols-[repeat(auto-fit,minmax(15rem,1fr))] items-start gap-x-8 gap-y-7 border-0 border-t border-line p-0 pt-5 [&>section]:m-0 [&>section]:min-w-0"
+      className="issue-detail-extras m-0 mt-7 grid grid-cols-[repeat(auto-fit,minmax(15rem,1fr))] items-start gap-x-8 gap-y-7 border-0 border-t border-line p-0 pt-5 disabled:opacity-50 [&>section]:m-0 [&>section]:min-w-0"
       disabled={disabled}
     >
       {children}
@@ -208,7 +208,7 @@ export function IssueDetailPage({
   };
 
   return (
-    <div className="page">
+    <Page>
       {/* The key, the title and the state, in that reading order.
           These used to share one line: a mono key, a long summary and four
           badges all at the same height, so a title that ran long squeezed the
@@ -426,6 +426,6 @@ export function IssueDetailPage({
           />
         </Tabs.Panel>
       </Tabs>
-    </div>
+    </Page>
   );
 }

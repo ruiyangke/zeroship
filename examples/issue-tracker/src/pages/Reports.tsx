@@ -9,12 +9,12 @@ import {
   useReportTrend,
 } from "../lib/queries";
 import { AsyncSection } from "../components/StateViews";
-import { FilterControl, Hint, InlineForm, Page } from "../components/AppPrimitives";
+import { FilterControl, Hint, InlineForm, Page, SectionHeading } from "../components/AppPrimitives";
 
 function ReportSection({ title, children }: { title: ReactNode; children: ReactNode }) {
   return (
     <section className="report-section mb-5 rounded-lg border border-line bg-surface p-4">
-      <h2 className="mb-2">{title}</h2>
+      <SectionHeading>{title}</SectionHeading>
       {children}
     </section>
   );
@@ -57,7 +57,7 @@ function CountBars({ counts }: { counts: Record<string, number> }) {
 function CountBreakdown({ title, counts }: { title: string; counts: Record<string, number> }) {
   return (
     <div>
-      <h3 className="mb-2 text-ink-secondary">{title}</h3>
+      <SectionHeading level={3}>{title}</SectionHeading>
       <CountBars counts={counts} />
     </div>
   );

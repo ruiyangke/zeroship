@@ -20,8 +20,8 @@ export function RailFieldset({
     <fieldset
       className={
         grouped
-          ? "rail-fields -mt-3 mx-0 mb-0 grid grid-cols-[7.5rem_minmax(0,1fr)_auto] items-center gap-x-2 border-0 p-0"
-          : "rail-fields m-0 grid grid-cols-[7.5rem_minmax(0,1fr)_auto] items-center gap-x-2 border-0 p-0"
+          ? "rail-fields -mt-3 mx-0 mb-0 grid grid-cols-[7.5rem_minmax(0,1fr)_auto] items-center gap-x-2 border-0 p-0 disabled:opacity-50"
+          : "rail-fields m-0 grid grid-cols-[7.5rem_minmax(0,1fr)_auto] items-center gap-x-2 border-0 p-0 disabled:opacity-50"
       }
       disabled={disabled}
     >

@@ -6,7 +6,7 @@ import { useAppMutation, useNotifications } from "../lib/queries";
 import { RichText } from "./RichText";
 import { AsyncSection } from "./StateViews";
 import { DashboardSection } from "./DashboardSection";
-import { Hint } from "./AppPrimitives";
+import { Hint, SectionHeading } from "./AppPrimitives";
 
 /**
  * The notification inbox.
@@ -45,7 +45,7 @@ export function NotificationsPanel() {
 
   return (
     <DashboardSection className="notifications-panel">
-      <h2>Notifications</h2>
+      <SectionHeading>Notifications</SectionHeading>
       <AsyncSection
         query={notificationsQ}
         loadingLabel="Loading notifications..."

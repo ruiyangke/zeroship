@@ -99,7 +99,7 @@ export function DependenciesPanel({ issueId }: { issueId: string }) {
                   {dependsOn.length === 0 ? (
                     <Hint>Nothing.</Hint>
                   ) : (
-                    <RailList rows="actions">
+                    <RailList>
                       {dependsOn.map((id) => {
                         const node = byId.get(id);
                         return (

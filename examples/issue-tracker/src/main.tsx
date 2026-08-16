@@ -7,8 +7,6 @@ import { ThemeProvider } from "@zeroship/ui";
 // The component library is headless. This app owns its complete visual layer.
 import "./theme/index.css";
 import { App } from "./App";
-// App-specific composition follows the component theme.
-import "./styles.css";
 import { isUnauthenticated } from "./components/rpc";
 
 /**
