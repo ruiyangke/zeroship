@@ -99,7 +99,7 @@ function FlagRow({
         <Absent />
       ) : (
         mine.map((entry) => (
-          <span key={entry.flag.id} className="flag-current">
+          <span key={entry.flag.id}>
             {/* A real Badge carrying the MEANING. These were spans with
                 flag-current-plus / -minus / -question class names that appear
                 nowhere in the stylesheet, so a granted flag, a denied one and
@@ -143,7 +143,7 @@ function FlagRow({
         ))}
       </Select>
       {status === "?" ? (
-        <span className="flag-requestee">
+        <span>
           {requesteeId ? (
             <span className="dim">requestee: {requesteeId}</span>
           ) : (

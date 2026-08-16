@@ -274,7 +274,7 @@ function DashboardBody() {
       {/* Three short lists across the page rather than three more full-width
           bands down it. None of them is ever more than a handful of lines, and
           stacked they were what pushed the tables above them out of reach. */}
-      <Grid minColWidth="24rem" gap={4} className="dashboard-asides">
+      <Grid minColWidth="24rem" gap={4}>
         <section className="dashboard-section">
           <h2>Requests waiting on me</h2>
           <FlagRequestList entries={requestedOfMe} emptyLabel="No open flag requests directed at you." />

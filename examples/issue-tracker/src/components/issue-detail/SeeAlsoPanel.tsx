@@ -75,7 +75,7 @@ export function SeeAlsoPanel({ issueId }: { issueId: string }) {
       {links.length === 0 ? (
         <p className="state-hint small">No linked reports.</p>
       ) : (
-        <ul className="see-also-list">
+        <ul>
           {links.map((link) => (
             <li key={link.id}>
               <a href={link.url} target="_blank" rel="noreferrer noopener">

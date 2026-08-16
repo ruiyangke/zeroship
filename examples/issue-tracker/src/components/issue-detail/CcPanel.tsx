@@ -61,7 +61,7 @@ export function CcPanel({ issueId }: { issueId: string }) {
 
   return (
     <RailDisclosure label="CC" summary={summary} action="Add">
-    <section className="cc-panel">
+    <section>
       <AsyncSection
         query={ccQ}
         loadingLabel="Loading CC list..."

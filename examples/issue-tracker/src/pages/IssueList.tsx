@@ -298,7 +298,7 @@ export function IssueListPage() {
   ].filter((chip): chip is NonNullable<typeof chip> => chip !== null);
 
   return (
-    <div className="page issue-list-page">
+    <div className="page">
       {/* No page-level "New issue": the shell header carries it on every
           page, and two of them side by side was the first thing the
           screenshot showed. */}
@@ -436,7 +436,7 @@ export function IssueListPage() {
       <Dialog open={builderOpen} onOpenChange={setBuilderOpen}>
         <Dialog.Portal>
           <Dialog.Backdrop />
-          <Dialog.Popup className="search-builder-popup">
+          <Dialog.Popup>
             <Dialog.Header>
               <Dialog.Title>Advanced search</Dialog.Title>
               <Dialog.Description>

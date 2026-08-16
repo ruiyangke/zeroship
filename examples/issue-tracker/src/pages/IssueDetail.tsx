@@ -181,7 +181,7 @@ export function IssueDetailPage({
   };
 
   return (
-    <div className="page issue-detail-page">
+    <div className="page">
       {/* The key, the title and the state, in that reading order.
           These used to share one line: a mono key, a long summary and four
           badges all at the same height, so a title that ran long squeezed the

@@ -134,7 +134,7 @@ export function HistoryPanel({
             <div className="history-event-body">
               <p className="history-event-head">
                 <span className="history-actor">{who}</span>
-                <span className="history-when" title={formatDate(event.changedAt)}>
+                <span title={formatDate(event.changedAt)}>
                   {isCreation ? "filed this issue" : null} {timeAgo(event.changedAt)}
                 </span>
               </p>

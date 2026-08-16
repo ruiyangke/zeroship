@@ -54,7 +54,7 @@ export function VotesPanel({
   return (
     <section className="votes-panel">
       <h3>Votes</h3>
-      <p className="vote-total">
+      <p>
         <strong>{voteCount}</strong> {voteCount === 1 ? "vote" : "votes"}
       </p>
       {!votingEnabled ? (

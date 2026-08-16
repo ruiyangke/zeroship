@@ -240,7 +240,7 @@ export function GroupsAdmin() {
           never seen or revoked -- the half of an access-control surface that
           actually matters. */}
       {memberGroup ? (
-        <div className="group-members">
+        <div>
           <h3>Members</h3>
           {members.length === 0 ? (
             <p className="state-hint small">Nobody is in this group yet.</p>
@@ -266,7 +266,7 @@ export function GroupsAdmin() {
       ) : null}
 
       {matches.length > 0 ? (
-        <ul className="user-matches">
+        <ul>
           {matches.map((user) => (
             <li key={user.id}>
               {user.name} <span className="dim">@{user.handle}</span>
@@ -340,7 +340,7 @@ function ProductRestrictions({
   };
 
   return (
-    <div className="product-restrictions">
+    <div>
       <h3>Product visibility</h3>
       <div className="field-row">
         <Field>

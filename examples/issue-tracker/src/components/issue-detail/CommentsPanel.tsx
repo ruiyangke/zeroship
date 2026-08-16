@@ -142,7 +142,7 @@ function CommentRow({
         {comment.commentNumber === 0 ? (
           <Tag size="sm">Description</Tag>
         ) : null}
-        <span className="comment-when" title={formatDate(comment.created_at)}>
+        <span title={formatDate(comment.created_at)}>
           {timeAgo(comment.created_at)}
         </span>
         {comment.isPrivate ? <span className="badge private-badge">private</span> : null}
@@ -458,7 +458,7 @@ export function CommentsPanel({
                         <span className="timeline-value">{displayValue(change.newValue, labels) || "nothing"}</span>
                       </span>
                     ))}
-                    <span className="timeline-when" title={formatDate(item.at)}>
+                    <span title={formatDate(item.at)}>
                       {" "}
                       {timeAgo(item.at)}
                     </span>

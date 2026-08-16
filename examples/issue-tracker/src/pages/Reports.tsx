@@ -279,7 +279,7 @@ export function ReportsPage() {
   const productNames = Object.fromEntries(products.map((p) => [p.id, p.name]));
 
   return (
-    <div className="page reports-page">
+    <div className="page">
       <PageHeader>
         <PageHeader.Title>Reports</PageHeader.Title>
       </PageHeader>
@@ -288,7 +288,7 @@ export function ReportsPage() {
           the bar had one labelled control and one bare box whose meaning you
           inferred from its placeholder. */}
       <div className="filter-bar report-filters">
-        <Field className="report-filter report-filter--product">
+        <Field className="report-filter--product">
           <Field.Label>Product</Field.Label>
           <Select
           value={productId}
@@ -305,7 +305,7 @@ export function ReportsPage() {
           ))}
           </Select>
         </Field>
-        <Field className="report-filter report-filter--window">
+        <Field className="report-filter--window">
           <Field.Label>Window (days)</Field.Label>
           <NumberField
             min={1}

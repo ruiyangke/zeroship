@@ -198,7 +198,7 @@ function LinkControl({ editor }: { editor: Editor }) {
         }}
       />
       {open ? (
-        <Cluster gap={1} align="center" className="rich-text-link-row">
+        <Cluster gap={1} align="center">
           <Input
             aria-label="Link URL"
             placeholder="https://example.com"

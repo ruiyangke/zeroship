@@ -82,7 +82,7 @@ export function KeywordsPanel({
 
   return (
     <RailDisclosure label="Labels" summary={summary}>
-    <section className="keywords-panel">
+    <section>
       <div className="keyword-tags">
         {/* These two empty states say DIFFERENT things -- none attached to
             this issue, versus none defined anywhere -- and stacked as "none"

@@ -461,7 +461,7 @@ function ProductEditorBody({ detail }: { detail: ProductDetail }) {
   );
 
   return (
-    <Stack gap={4} className="product-editor">
+    <Stack gap={4}>
       {/* LABELLED. These two were bare <Input>s with neither a label nor a
           placeholder -- the only thing distinguishing the name field from the
           description field was which one had more text in it. */}
@@ -510,7 +510,7 @@ function ProductEditorBody({ detail }: { detail: ProductDetail }) {
             next to the primary one at the same weight is how it gets pressed
             by accident; this is the only control on the page that cannot be
             undone. */}
-        <div className="product-danger">
+        <div>
           {confirming === null ? (
             <Button
               variant="plain"
@@ -774,7 +774,7 @@ export function ProductsAdminPage() {
   );
 
   return (
-    <div className="page products-admin-page">
+    <div className="page">
       {/* "Products", not "Products administration". The page is named for what
           most visits do on it, which is browse -- administering one is a
           drawer you open from a row, and the tracker-wide administration is
