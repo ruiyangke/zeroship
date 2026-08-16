@@ -1,9 +1,9 @@
 import type { ReactNode } from "react";
 import { Link, NavLink } from "react-router-dom";
-import { AppShell } from "@zeroship/ui";
 
 import { UnreadBadge, UserChip } from "./SessionChips";
 import type { Session } from "./session";
+import { AppShell } from "../ui/AppShell";
 import { Button } from "../ui/Button";
 
 /**
