@@ -37,7 +37,7 @@ async fn open_conn() -> Option<Client> {
 }
 
 fn test_issuer() -> Issuer {
-    let signing = SigningKey::from_bytes(&[77u8; 32]);
+    let signing = SigningKey::from_bytes(&[42u8; 32]);
     Issuer::from_signing_key(&signing, [9u8; 32], ISSUER.to_string()).expect("issuer")
 }
 
