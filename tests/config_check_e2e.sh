@@ -223,6 +223,9 @@ MIGRATED="$BIN/zeroship-migrated"
 # --check-config exercises the same mandatory guards as real startup. Supply
 # real, strong inputs so these cases vary only the setting each one names.
 STRONG_HEX="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+CONTROL_KEY_HEX="1111111111111111111111111111111111111111111111111111111111111111"
+WORKER_KEY_HEX="2222222222222222222222222222222222222222222222222222222222222222"
+MINT_KEY_HEX="3333333333333333333333333333333333333333333333333333333333333333"
 
 # Secrets are supplied by their CANONICAL ENVIRONMENT NAME, not by a value flag:
 # a secret's only generated flag is `--<name>-file PATH`, so there is no value
@@ -238,9 +241,9 @@ STRONG_HEX="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 CONTROL_MINT_URL="http://auth.internal.check-config.test:9092"
 CONTROL_ENV=(
     env
-    ZEROSHIP_AUTH_PLATFORM_MINT_KEY="$STRONG_HEX"
-    ZEROSHIP_CONTROL_KEY="$STRONG_HEX"
-    ZEROSHIP_WORKER_KEY="$STRONG_HEX"
+    ZEROSHIP_AUTH_PLATFORM_MINT_KEY="$MINT_KEY_HEX"
+    ZEROSHIP_CONTROL_KEY="$CONTROL_KEY_HEX"
+    ZEROSHIP_WORKER_KEY="$WORKER_KEY_HEX"
     ZEROSHIP_PAIRWISE_SALT="$STRONG_HEX"
     ZEROSHIP_AUTH_PLATFORM_MINT_URL="$CONTROL_MINT_URL"
 )
@@ -252,8 +255,8 @@ CONTROL_RUN_NO_MASTER=("${CONTROL_ENV[@]}" "$CONTROL")
 
 GATEWAY_RUN=(
     env
-    ZEROSHIP_CONTROL_KEY="$STRONG_HEX"
-    ZEROSHIP_WORKER_KEY="$STRONG_HEX"
+    ZEROSHIP_CONTROL_KEY="$CONTROL_KEY_HEX"
+    ZEROSHIP_WORKER_KEY="$WORKER_KEY_HEX"
     ZEROSHIP_GATEWAY_STASH_SIGNING_KEY="$STRONG_HEX"
     ZEROSHIP_PAIRWISE_SALT="$STRONG_HEX"
     "$GATEWAY"
@@ -263,7 +266,7 @@ GATEWAY_COMMON=(--broker-secret-file "$ZEROSHIP_GATEWAY_BROKER_SECRET_FILE")
 AUTH_RUN=(
     env
     ZEROSHIP_AUTH_DATABASE_URL=postgres://check-config
-    ZEROSHIP_AUTH_PLATFORM_MINT_KEY="$STRONG_HEX"
+    ZEROSHIP_AUTH_PLATFORM_MINT_KEY="$MINT_KEY_HEX"
     ZEROSHIP_AUTH_STASH_SIGNING_KEY="$STRONG_HEX"
     ZEROSHIP_AUTH_TOTP_ENC_KEY="$STRONG_HEX"
     "$AUTH"
@@ -272,15 +275,15 @@ AUTH_COMMON=()
 
 WORKER_RUN=(
     env
-    ZEROSHIP_CONTROL_KEY="$STRONG_HEX"
-    ZEROSHIP_WORKER_KEY="$STRONG_HEX"
+    ZEROSHIP_CONTROL_KEY="$CONTROL_KEY_HEX"
+    ZEROSHIP_WORKER_KEY="$WORKER_KEY_HEX"
     "$WORKER"
 )
 WORKER_COMMON=()
 
 MIGRATED_RUN=(
     env
-    ZEROSHIP_CONTROL_KEY="$STRONG_HEX"
+    ZEROSHIP_CONTROL_KEY="$CONTROL_KEY_HEX"
     ZEROSHIP_MIGRATED_POLICY_SEAL_KEY="$STRONG_HEX"
     "$MIGRATED"
 )
@@ -732,8 +735,8 @@ echo ""
 # issuer's own origin - that fallback is bit-for-bit the shipped bug, and it
 # would reappear on exactly the deployments that never set the new value.
 run_cmd control-mint-url-missing env \
-    ZEROSHIP_AUTH_PLATFORM_MINT_KEY="$STRONG_HEX" \
-    ZEROSHIP_CONTROL_KEY="$STRONG_HEX" ZEROSHIP_WORKER_KEY="$STRONG_HEX" \
+    ZEROSHIP_AUTH_PLATFORM_MINT_KEY="$MINT_KEY_HEX" \
+    ZEROSHIP_CONTROL_KEY="$CONTROL_KEY_HEX" ZEROSHIP_WORKER_KEY="$WORKER_KEY_HEX" \
     ZEROSHIP_PAIRWISE_SALT="$STRONG_HEX" "${CONTROL_MASTER[@]}" \
     "$CONTROL" --check-config "${CONTROL_COMMON[@]}" \
     --auth-platform-issuer https://auth.public.test/oauth2
@@ -747,8 +750,8 @@ echo ""
 for bad_mint in "auth:9092" "https://auth.internal@evil.example" \
     "http://auth:9092/oauth2"; do
     run_cmd control-mint-url-bad env \
-        ZEROSHIP_AUTH_PLATFORM_MINT_KEY="$STRONG_HEX" \
-        ZEROSHIP_CONTROL_KEY="$STRONG_HEX" ZEROSHIP_WORKER_KEY="$STRONG_HEX" \
+        ZEROSHIP_AUTH_PLATFORM_MINT_KEY="$MINT_KEY_HEX" \
+        ZEROSHIP_CONTROL_KEY="$CONTROL_KEY_HEX" ZEROSHIP_WORKER_KEY="$WORKER_KEY_HEX" \
         ZEROSHIP_PAIRWISE_SALT="$STRONG_HEX" "${CONTROL_MASTER[@]}" \
         ZEROSHIP_AUTH_PLATFORM_MINT_URL="$bad_mint" \
         "$CONTROL" --check-config "${CONTROL_COMMON[@]}" \
@@ -756,6 +759,28 @@ for bad_mint in "auth:9092" "https://auth.internal@evil.example" \
     expect_rejected "ZEROSHIP_AUTH_PLATFORM_MINT_URL" \
         "control rejects the mint destination $bad_mint"
 done
+echo ""
+
+echo "=== Case 18b: the platform mint credential is distinct from worker-held keys ==="
+run_cmd control-mint-equals-control env \
+    ZEROSHIP_AUTH_PLATFORM_MINT_KEY="$CONTROL_KEY_HEX" \
+    ZEROSHIP_CONTROL_KEY="$CONTROL_KEY_HEX" ZEROSHIP_WORKER_KEY="$WORKER_KEY_HEX" \
+    ZEROSHIP_PAIRWISE_SALT="$STRONG_HEX" "${CONTROL_MASTER[@]}" \
+    ZEROSHIP_AUTH_PLATFORM_MINT_URL="$CONTROL_MINT_URL" \
+    "$CONTROL" --check-config "${CONTROL_COMMON[@]}" \
+    --auth-platform-issuer https://auth.public.test/oauth2
+expect_rejected "ZEROSHIP_CONTROL_KEY" \
+    "control rejects a platform mint key equal to the worker-held control key"
+
+run_cmd control-mint-equals-worker env \
+    ZEROSHIP_AUTH_PLATFORM_MINT_KEY="$WORKER_KEY_HEX" \
+    ZEROSHIP_CONTROL_KEY="$CONTROL_KEY_HEX" ZEROSHIP_WORKER_KEY="$WORKER_KEY_HEX" \
+    ZEROSHIP_PAIRWISE_SALT="$STRONG_HEX" "${CONTROL_MASTER[@]}" \
+    ZEROSHIP_AUTH_PLATFORM_MINT_URL="$CONTROL_MINT_URL" \
+    "$CONTROL" --check-config "${CONTROL_COMMON[@]}" \
+    --auth-platform-issuer https://auth.public.test/oauth2
+expect_rejected "ZEROSHIP_WORKER_KEY" \
+    "control rejects a platform mint key equal to the worker dispatch key"
 echo ""
 
 echo "============================================"
@@ -781,10 +806,12 @@ fi
 # Case 18 (the platform mint destination, split from the issuer) added eight:
 # four on the reported issuer/mint pair, one on the refusal when only the
 # issuer is set, three on the rejected spellings. MEASURED after it landed: 84.
+# Case 18b adds two process-level refusals for mint-key equality with each key a
+# worker process holds, bringing the assertion floor to 86.
 #
 # Raise it when you add cases. If it trips after you deleted a case on purpose,
 # lower it deliberately and say so in the commit -- do not delete the check.
-CONFIG_CHECK_MIN_PASSED="${CONFIG_CHECK_MIN_PASSED:-84}"
+CONFIG_CHECK_MIN_PASSED="${CONFIG_CHECK_MIN_PASSED:-86}"
 if [ "$PASS" -lt "$CONFIG_CHECK_MIN_PASSED" ]; then
     echo "" >&2
     echo "FLOOR: only $PASS assertions passed, expected at least $CONFIG_CHECK_MIN_PASSED." >&2

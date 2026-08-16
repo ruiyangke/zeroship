@@ -10,8 +10,9 @@ use zeroship_core::auth_provider::{
     SupabaseProvider,
 };
 use zeroship_core::config::{
-    bootstrap_or_exit, require_nonempty, validate_master_key_material, validate_secret_material,
-    AuthProviderKind, CheckConfigReport, CheckValue,
+    bootstrap_or_exit, validate_master_key_material,
+    validate_platform_mint_key as validate_platform_mint_key_material,
+    validate_secret_material, AuthProviderKind, CheckConfigReport, CheckValue,
 };
 use zeroship_bundle::{
     build_blob_store, build_workflow_blob_store, BlobStore, StoreUrl, WorkflowBlobStore,
@@ -202,17 +203,39 @@ fn platform_config(
 const PLATFORM_MINT_URL_INPUT: &str = "--auth-platform-mint-url / ZEROSHIP_AUTH_PLATFORM_MINT_URL";
 const PLATFORM_MINT_KEY_INPUT: &str =
     "ZEROSHIP_AUTH_PLATFORM_MINT_KEY / --auth-platform-mint-key-file";
+const CONTROL_KEY_INPUT: &str = "ZEROSHIP_CONTROL_KEY / --control-key-file";
 
 fn validate_platform_mint_key(
     issuer: &str,
     key: &zeroship_core::config::Secret<String>,
+    control_key: &zeroship_core::config::Secret<String>,
+    worker_key: &zeroship_core::config::Secret<String>,
 ) -> Result<(), String> {
     if issuer.trim().is_empty() {
         return Ok(());
     }
     validate_secret_material(key, |value| {
-        require_nonempty(PLATFORM_MINT_KEY_INPUT, value.trim())
-    })
+        validate_platform_mint_key_material(PLATFORM_MINT_KEY_INPUT, value)
+    })?;
+
+    let Some(mint_key) = key.expose_secret().map(|value| value.trim()) else {
+        return Ok(());
+    };
+    for (other_label, other) in [
+        (CONTROL_KEY_INPUT, control_key),
+        (WORKER_KEY_LABEL, worker_key),
+    ] {
+        if other
+            .expose_secret()
+            .is_some_and(|other_key| mint_key == other_key.trim())
+        {
+            return Err(format!(
+                "{PLATFORM_MINT_KEY_INPUT} must differ from {other_label}"
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 /// Resolve the validated platform mint destination, or refuse to boot.
@@ -358,7 +381,11 @@ fn main() -> std::io::Result<()> {
     };
     let blob_store_is_remote = store_url.is_remote();
     let control_key = settings.control_key.expose_str().to_owned();
-    let auth_platform_mint_key = settings.auth_platform_mint_key.expose_str().to_owned();
+    let auth_platform_mint_key = settings
+        .auth_platform_mint_key
+        .expose_str()
+        .trim()
+        .to_owned();
     let master_key = settings.master_key.expose_str().to_owned();
     let workers_str = settings.worker_urls.get().clone();
     let gateway_url = settings.gateway_url.get().trim_end_matches('/').to_string();
@@ -438,6 +465,8 @@ fn main() -> std::io::Result<()> {
     if let Err(message) = validate_platform_mint_key(
         &auth_platform_issuer,
         &settings.auth_platform_mint_key,
+        &settings.control_key,
+        &settings.worker_key,
     ) {
         eprintln!("control: {message}");
         tracing::error!(
@@ -1678,6 +1707,8 @@ mod tests {
             validate_platform_mint_key(
                 "https://auth.zeroship.test/oauth2",
                 &Secret::absent(),
+                &Secret::absent(),
+                &Secret::absent(),
             )
             .expect_err("an absent platform mint key must fail closed"),
         ]
@@ -1778,23 +1809,32 @@ mod tests {
 
     #[test]
     fn a_configured_issuer_requires_strong_platform_mint_key_material() {
+        let issuer = "https://auth.zeroship.test/oauth2";
+        let control_key = Secret::supplied(
+            SourceKind::Env,
+            Some("11111111111111111111111111111111".to_owned()),
+        );
+        let worker_key = Secret::supplied(
+            SourceKind::Env,
+            Some("22222222222222222222222222222222".to_owned()),
+        );
+        let validate = |key: &Secret<String>| {
+            validate_platform_mint_key(issuer, key, &control_key, &worker_key)
+        };
+
         let empty = Secret::supplied(SourceKind::Env, Some(String::new()));
-        let err = validate_platform_mint_key(
-            "https://auth.zeroship.test/oauth2",
-            &empty,
-        )
-        .expect_err("an explicitly empty mint key must fail closed");
+        let err = validate(&empty).expect_err("an explicitly empty mint key must fail closed");
         assert!(
             err.contains("ZEROSHIP_AUTH_PLATFORM_MINT_KEY"),
             "the refusal must name the setting to fix: {err}"
         );
 
         let whitespace = Secret::supplied(SourceKind::Env, Some("   ".to_owned()));
-        validate_platform_mint_key("https://auth.zeroship.test/oauth2", &whitespace)
+        validate(&whitespace)
             .expect_err("a whitespace-only mint key must fail closed");
 
         let short = Secret::supplied(SourceKind::Env, Some("too-short".to_owned()));
-        let err = validate_platform_mint_key("https://auth.zeroship.test/oauth2", &short)
+        let err = validate(&short)
             .expect_err("a short mint key must fail closed");
         assert!(err.contains("minimum 32 bytes"), "{err}");
 
@@ -1802,15 +1842,23 @@ mod tests {
             SourceKind::Env,
             Some("platform-mint-key-at-least-32-bytes".to_owned()),
         );
-        validate_platform_mint_key("https://auth.zeroship.test/oauth2", &present)
+        validate(&present)
             .expect("nonempty resolved material is accepted");
 
         let unread_file = Secret::supplied(SourceKind::CliFile, None);
-        validate_platform_mint_key("https://auth.zeroship.test/oauth2", &unread_file)
+        validate(&unread_file)
             .expect("check-config validates file presence without reading it");
 
-        validate_platform_mint_key("", &Secret::absent())
+        validate_platform_mint_key("", &Secret::absent(), &control_key, &worker_key)
             .expect("no platform issuer needs no mint credential");
+
+        let err = validate_platform_mint_key(issuer, &control_key, &control_key, &worker_key)
+            .expect_err("the mint key must differ from the worker-held control key");
+        assert!(err.contains("ZEROSHIP_CONTROL_KEY"), "{err}");
+
+        let err = validate_platform_mint_key(issuer, &worker_key, &control_key, &worker_key)
+            .expect_err("the mint key must differ from the worker dispatch key");
+        assert!(err.contains("ZEROSHIP_WORKER_KEY"), "{err}");
     }
 
     #[test]
