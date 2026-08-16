@@ -17,7 +17,7 @@ use support::PgDevSession;
 use zero_migrate::{
     desired_snapshot, diff_snapshots, snapshot_schema, Approval, CollectionDescriptor,
     DeclarativeAuthor, EffectivePolicy, ExecutorConfig, FieldDescriptor, GuardConfig,
-    MigrationEngine, PostgresBackend, SqlDialect,
+    MigrationEngine, PostgresBackend, RenameHint, SqlDialect,
 };
 
 /// The charter every stage of the deploy runs under, scoped to this run's project
@@ -610,5 +610,127 @@ async fn the_name_buckets_fill_on_out_of_band_create_and_drop() {
     assert!(
         !drift2.missing_objects.is_empty(),
         "a declared table dropped out of band must surface as MISSING: {drift2:?}"
+    );
+}
+
+/// A rename HINT on PostgreSQL must produce an expand-contract rename, not a
+/// drop-and-recreate.
+///
+/// `plan.renames` is the highest-stakes of the collections this session found
+/// asserted only empty. Every assertion on it across the crate was
+/// `.is_empty()` - and on SQLite that is CORRECT, because a rename there routes
+/// to a rebuild and `run_expand` is unreachable. Those tests say so explicitly.
+///
+/// The consequence was that nothing anywhere proved the bucket EVER fills. The
+/// `expand_contract` module has a dozen unit tests, but they author a plan
+/// directly and therefore bypass the diff - the step that has to DECIDE that a
+/// rename happened at all.
+///
+/// That decision is what stands between a rename and data loss: unrecognised, a
+/// renamed column is a drop of the old one plus a create of the new, and the
+/// rows in it are gone.
+#[compio::test]
+async fn a_rename_hint_on_postgres_produces_a_rename_not_a_drop_and_recreate() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&session, &cfg).await;
+    let _schemas = ensure_project_schema(&session, &cfg).await;
+
+    let engine = MigrationEngine::new();
+    let author = author_for(&cfg);
+
+    // v1: deploy `contacts` with an `email` field.
+    let v1 = descriptor("contacts", "email", "string", true);
+    let desired1 = desired_snapshot(
+        &cfg.project_schema,
+        std::slice::from_ref(&v1),
+        &effective_policy(&cfg),
+    )
+    .expect("desired v1");
+    let live_empty = snapshot_schema(&session, &cfg.project_schema)
+        .await
+        .expect("snapshot live (empty)");
+    let plan1 = engine
+        .plan_declarative(
+            &desired1,
+            &live_empty,
+            &HashMap::new(),
+            &author,
+            &[],
+            &guard_cfg(&cfg),
+            &effective_policy(&cfg),
+        )
+        .expect("plan v1");
+    let backend = PostgresBackend::new_generic(&session);
+    engine
+        .apply_declarative(
+            &plan1,
+            &effective_policy(&cfg),
+            Approval::Approved,
+            &backend,
+            &cfg,
+            "app_test",
+        )
+        .await
+        .expect("apply v1");
+
+    // v2: the same collection with the field renamed.
+    let v2 = descriptor("contacts", "email_address", "string", true);
+    let desired2 = desired_snapshot(
+        &cfg.project_schema,
+        std::slice::from_ref(&v2),
+        &effective_policy(&cfg),
+    )
+    .expect("desired v2");
+    let live_v1 = snapshot_schema(&session, &cfg.project_schema)
+        .await
+        .expect("snapshot live (v1)");
+
+    // CONTROL FIRST, and it is the whole point: WITHOUT the hint the diff cannot
+    // know a rename happened, so it must plan a drop plus a create. If this ever
+    // starts producing a rename, the hint is not what drives the decision and
+    // the test below proves nothing.
+    let unhinted = engine
+        .plan_declarative(
+            &desired2,
+            &live_v1,
+            &HashMap::new(),
+            &author,
+            &[],
+            &guard_cfg(&cfg),
+            &effective_policy(&cfg),
+        )
+        .expect("plan v2 without a hint");
+    assert!(
+        unhinted.renames.is_empty(),
+        "without a hint the diff cannot infer a rename: {:?}",
+        unhinted.renames
+    );
+
+    // WITH the hint: the same desired-vs-live pair must now plan a rename.
+    let hints = vec![RenameHint {
+        table: "contacts".into(),
+        from: "email".into(),
+        to: "email_address".into(),
+    }];
+    let hinted = engine
+        .plan_declarative(
+            &desired2,
+            &live_v1,
+            &HashMap::new(),
+            &author,
+            &hints,
+            &guard_cfg(&cfg),
+            &effective_policy(&cfg),
+        )
+        .expect("plan v2 with a hint");
+
+    assert_eq!(
+        hinted.renames.len(),
+        1,
+        "a rename hint must produce exactly one expand-contract rename: {:?}",
+        hinted.renames
     );
 }
