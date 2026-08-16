@@ -1041,6 +1041,62 @@ async fn checksum_drift_detected_over_journal() {
 }
 
 // ---------------------------------------------------------------------------
+// Orphan journal: a version the database has APPLIED but which no longer exists
+// in the supplied migration set - a migration file deleted after being applied.
+// ---------------------------------------------------------------------------
+
+/// The second bucket of `ChecksumDriftReport`, and until now the only one of the
+/// drift buckets never proven to FILL. It appeared across the crate solely inside
+/// `.is_empty()` assertions, which pass whether or not the detector can ever
+/// report - the same gap closed for the structural buckets in the two preceding
+/// commits.
+///
+/// The case is a real operational hazard rather than a hypothetical: someone
+/// deletes a migration file from the bundle after it has been applied, and the
+/// deployment then carries a database whose history nothing in the repository
+/// explains.
+#[compio::test]
+async fn orphan_journal_detected_when_a_migration_is_deleted_from_the_set() {
+    let p = paths("orphan_j");
+    let be = backend(&p);
+    let applied = mig("t", "CREATE TABLE t (id INTEGER PRIMARY KEY);");
+    be.apply_one_additive(&applied, "d").await.expect("apply");
+
+    // CONTROL FIRST: with the migration still present the report is clean, so a
+    // later non-clean result is attributable to its removal and nothing else.
+    let clean = be
+        .check_checksum_drift(&cfg(), std::slice::from_ref(&applied))
+        .await
+        .expect("drift read");
+    assert!(clean.is_clean(), "the intact set has no drift: {clean:?}");
+
+    // DELETE IT FROM THE SET: applied in the database, absent from the bundle.
+    let report = be
+        .check_checksum_drift(&cfg(), &[])
+        .await
+        .expect("drift read");
+    assert!(
+        !report.is_clean(),
+        "a deleted-but-applied migration must not read as clean: {report:?}"
+    );
+    assert!(
+        report.checksum_drift.is_empty(),
+        "nothing was EDITED, so the tamper bucket must stay empty - the two \
+         buckets report different faults: {report:?}"
+    );
+    assert_eq!(
+        report.orphan_journal.len(),
+        1,
+        "exactly the one applied version is orphaned: {report:?}"
+    );
+    assert_eq!(
+        report.orphan_journal[0].version,
+        applied.version.as_str(),
+        "the report must name the orphaned version: {report:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Sentinel recovery: an applied table whose CREATE text carries an inline
 // `/* zero-migrate:mask:... */` sentinel (the emitter's SQLite-side wire) is recovered
 // into the snapshot's comment_sentinel — not silently dropped.
