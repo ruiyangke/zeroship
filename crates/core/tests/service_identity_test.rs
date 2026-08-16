@@ -5,7 +5,7 @@ use serde_json::json;
 use zeroship_core::service_identity::{
     verify_identity, AuthError, IdentityVerifier, MechanismTag, PeerCredentials,
     PresentedCredentials, ServiceIdentity, ServiceName, ServicePrincipal, StubIdentityVerifier,
-    TrustDomain,
+    TlsPeerInfo, TrustDomain,
 };
 
 fn principal(trust_domain: &str, name: &str) -> ServicePrincipal {
@@ -59,7 +59,8 @@ fn framework_rejects_missing_or_empty_credentials_before_verifier_dispatch() {
     };
 
     for bearer_assertion in [None, Some("")] {
-        let observed = PeerCredentials::new(bearer_assertion, "https://control.zeroship.ai");
+        let observed =
+            PeerCredentials::new(bearer_assertion, None, "https://control.zeroship.ai");
         assert_eq!(
             verify_identity(&verifier, &observed),
             Err(AuthError::NoCredentialPresented)
@@ -75,8 +76,52 @@ fn stub_verifier_maps_presented_credentials_to_a_neutral_identity() {
     let verifier = StubIdentityVerifier::new(expected.clone());
     let observed = PeerCredentials::new(
         Some("not-cryptographically-verified"),
+        None,
         "https://control.zeroship.ai",
     );
 
     assert_eq!(verify_identity(&verifier, &observed), Ok(expected));
+}
+
+struct ObservationVerifier;
+
+impl IdentityVerifier for ObservationVerifier {
+    fn verify(
+        &self,
+        credentials: &PresentedCredentials<'_>,
+    ) -> Result<ServiceIdentity, AuthError> {
+        assert_eq!(credentials.bearer_assertion(), Some("observed-assertion"));
+        assert_eq!(
+            credentials
+                .tls_peer()
+                .expect("TLS peer observation is preserved")
+                .certificate_chain_der()
+                .len(),
+            1
+        );
+        assert_eq!(
+            credentials.expected_audience(),
+            "https://control.zeroship.ai"
+        );
+        Ok(identity("svc/gateway"))
+    }
+}
+
+#[test]
+fn mechanism_fat_input_preserves_simultaneous_transport_observations() {
+    let leaf = [1, 2, 3];
+    let certificate_chain: [&[u8]; 1] = [&leaf];
+    let tls_peer = TlsPeerInfo::new(&certificate_chain)
+        .expect("a non-empty certificate chain is a TLS peer observation");
+    let observed = PeerCredentials::new(
+        Some("observed-assertion"),
+        Some(tls_peer),
+        "https://control.zeroship.ai",
+    );
+
+    assert_eq!(
+        verify_identity(&ObservationVerifier, &observed),
+        Ok(identity("svc/gateway"))
+    );
+    assert!(TlsPeerInfo::new(&[]).is_none());
 }
