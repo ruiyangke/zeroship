@@ -21,6 +21,7 @@ import {
   getNodeValue,
   parseTree,
   printParseErrorCode,
+  type Node,
   type ParseError,
 } from "jsonc-parser";
 
@@ -106,7 +107,26 @@ export interface LoadedProjectConfig {
   raw: Json;
 }
 
+function findUnpairedSurrogate(node: Node): number | null {
+  if (
+    node.type === "string" &&
+    typeof node.value === "string" &&
+    /[\uD800-\uDFFF]/u.test(node.value)
+  ) {
+    return node.offset;
+  }
+  for (const child of node.children ?? []) {
+    const found = findUnpairedSurrogate(child);
+    if (found != null) return found;
+  }
+  return null;
+}
+
 export function parseProjectConfig(path: string, text: string): LoadedProjectConfig {
+  const bareCarriageReturn = text.search(/\r(?!\n)/);
+  if (bareCarriageReturn >= 0) {
+    throw new Error(`${path}: bare carriage return in JSONC at offset ${bareCarriageReturn}`);
+  }
   const errors: ParseError[] = [];
   const tree = parseTree(text, errors, { allowTrailingComma: true });
   if (errors.length > 0) {
@@ -114,6 +134,12 @@ export function parseProjectConfig(path: string, text: string): LoadedProjectCon
     throw new Error(
       `${path}: ${printParseErrorCode(error.error)} at offset ${error.offset}`,
     );
+  }
+  if (tree != null) {
+    const unpairedSurrogate = findUnpairedSurrogate(tree);
+    if (unpairedSurrogate != null) {
+      throw new Error(`${path}: unpaired surrogate at offset ${unpairedSurrogate}`);
+    }
   }
   const raw: unknown = tree == null ? undefined : getNodeValue(tree);
   if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
@@ -399,6 +425,30 @@ function withDefaults(value: Json): ResolvedProjectConfig {
   return out as unknown as ResolvedProjectConfig;
 }
 
+const FILE_RELATIVE_PATHS = [
+  ["build", "serverEntry"],
+  ["build", "dist"],
+  ["build", "output"],
+  ["migrations", "dir"],
+  ["migrations", "out"],
+] as const;
+
+/** Root paths stated by a config file at that file's own directory. */
+function rootFilePaths(
+  config: ResolvedProjectConfig,
+  configRoot: string,
+): ResolvedProjectConfig {
+  const out = structuredClone(config) as unknown as Json;
+  for (const [section, member] of FILE_RELATIVE_PATHS) {
+    const block = out[section] as Json | undefined;
+    const value = block?.[member];
+    if (typeof value === "string" && !isAbsolute(value)) {
+      block![member] = resolve(configRoot, value);
+    }
+  }
+  return out as unknown as ResolvedProjectConfig;
+}
+
 // ---------------------------------------------------------------------------
 // The `config` escape hatch
 // ---------------------------------------------------------------------------
@@ -495,10 +545,13 @@ export function readProjectConfig(
   opts: ProjectConfigInput = {},
 ): { config: ResolvedProjectConfig; path: string | null } {
   const path = locateProjectConfig(root, opts.configPath);
-  const base =
-    path == null ? defaultProjectConfig() : resolveProjectConfig(loadProjectConfig(path), opts.environment);
-  const config = applyProjectConfigOverride(base, opts.override);
-  assertWritablePathsAreSafe(root, path ?? resolve(root, CONFIG_FILENAME), config);
+  const configRoot = path == null ? resolve(root) : dirname(path);
+  const base = path == null
+    ? defaultProjectConfig()
+    : resolveProjectConfig(loadProjectConfig(path), opts.environment);
+  const overridden = applyProjectConfigOverride(base, opts.override);
+  const config = path == null ? overridden : rootFilePaths(overridden, configRoot);
+  assertWritablePathsAreSafe(configRoot, path ?? resolve(root, CONFIG_FILENAME), config);
   return { config, path };
 }
 
