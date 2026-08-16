@@ -28,12 +28,8 @@
 #
 # URLS ARE NOT PATHS, and this repo has already been bitten by conflating
 # them: task #58 was "the doc-citation CI check matches paths inside URLs and
-# is green by coincidence". Measured here before writing this gate: the naive
-# pattern reports 42 hits in
-# examples/apple-website-study/src/assets/apple/sources.json, every one of
-# them inside `https://www.apple.com/v/iphone/home/cj/...`, where `home` is an
-# apple.com path segment. So WEB urls are stripped from each line BEFORE
-# matching.
+# is green by coincidence". A URL path can legitimately contain a `/home/`
+# segment, so WEB URLs are stripped from each line BEFORE matching.
 #
 # WEB ONLY - `http`/`https`, never `file:`. A `file:` URL is not a citation, it
 # is a path with a scheme on the front:
