@@ -1,7 +1,8 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Banner, Input, Tabs } from "@zeroship/ui";
+import { Banner, Tabs } from "@zeroship/ui";
 import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
+import { Input } from "../ui/Input";
 import { KindBadge, PriorityBadge, ResolutionBadge, SeverityBadge, StatusBadge } from "../components/Badges";
 import { updateIssue } from "../api";
 import { invalidatedBy } from "../lib/query-keys";

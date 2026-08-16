@@ -1,12 +1,13 @@
 import { useState } from "react";
 
-import { Input, Select } from "@zeroship/ui";
+import { Select } from "@zeroship/ui";
 
 import { createFlagType } from "../api";
 import { invalidatedBy } from "../lib/query-keys";
 import { useAppMutation, useFlagTypes, useProducts } from "../lib/queries";
 import { Button } from "../ui/Button";
 import { Field } from "../ui/Field";
+import { Input } from "../ui/Input";
 import { errorMessage } from "./rpc";
 import { FieldError, Hint, InlineForm, Muted, SectionHeading } from "./AppPrimitives";
 

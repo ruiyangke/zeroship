@@ -4,9 +4,10 @@
 // a duplicate are their own dedicated actions, not options folded into the
 // status dropdown.
 import { useState } from "react";
-import { Input, Select } from "@zeroship/ui";
+import { Select } from "@zeroship/ui";
 import { Button } from "../../ui/Button";
 import { Field } from "../../ui/Field";
+import { Input } from "../../ui/Input";
 import { changeIssueStatus, markIssueDuplicate, reopenIssue, resolveIssue } from "../../api";
 import {
   ISSUE_RESOLUTIONS,

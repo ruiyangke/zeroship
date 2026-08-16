@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { Input } from "@zeroship/ui";
 import { Button } from "../../ui/Button";
 import { Field } from "../../ui/Field";
+import { Input } from "../../ui/Input";
 
 import { addSeeAlso, removeSeeAlso } from "../../api";
 import { useAppMutation, useSeeAlso } from "../../lib/queries";

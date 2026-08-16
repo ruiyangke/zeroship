@@ -1,5 +1,5 @@
 import { useState, type ComponentPropsWithoutRef } from "react";
-import { Input, Select } from "@zeroship/ui";
+import { Select } from "@zeroship/ui";
 
 import {
   addGroupMember,
@@ -12,6 +12,7 @@ import {
 import { invalidatedBy } from "../lib/query-keys";
 import { Button } from "../ui/Button";
 import { Field } from "../ui/Field";
+import { Input } from "../ui/Input";
 import {
   useAppMutation,
   useGroupMembers,

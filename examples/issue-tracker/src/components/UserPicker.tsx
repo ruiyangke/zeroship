@@ -3,9 +3,9 @@
 // becomes the argument to the cached users.list({text}) query -- which is
 // exactly what it is for.
 import { useState } from "react";
-import { Input } from "@zeroship/ui";
 import { useUserSearch } from "../lib/queries";
 import { Button } from "../ui/Button";
+import { Input } from "../ui/Input";
 import { FieldError, Hint, Muted } from "./AppPrimitives";
 import { errorMessage } from "./rpc";
 import type { UserRow } from "./types";

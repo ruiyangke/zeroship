@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { Input } from "@zeroship/ui";
 import { Button } from "../../ui/Button";
+import { Input } from "../../ui/Input";
 import { addDependency, removeDependency } from "../../api";
 import { StatusBadge } from "../Badges";
 import { FieldError, Hint, InlineForm, Muted } from "../AppPrimitives";

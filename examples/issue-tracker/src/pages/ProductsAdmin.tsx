@@ -4,7 +4,6 @@ import { Banner,
   Dialog,
   Drawer,
   FilterBar,
-  Input,
   ListView,
   PageHeader,
   Pagination,
@@ -14,6 +13,7 @@ import { Banner,
 import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
 import { Field } from "../ui/Field";
+import { Input } from "../ui/Input";
 import {
   createComponent,
   createMilestone,
