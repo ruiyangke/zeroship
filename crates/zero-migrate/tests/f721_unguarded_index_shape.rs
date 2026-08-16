@@ -142,3 +142,53 @@ fn an_empty_live_snapshot_still_lowers() {
     live.tables.insert("a".to_string());
     lower(UNIQUE_ON_W, &live).expect("no snapshot means no grounds to refuse");
 }
+
+/// The fix must fire on the PRODUCTION construction path, not only on a
+/// hand-built `LiveSchema`.
+///
+/// This is the F731 trap applied to my own fix: `ts_location` is threaded through
+/// 56 sites and is always `None` because nothing produces it. A check that reads
+/// `table_snapshots` would be worth exactly as much if the production path left
+/// that map empty - it would pass its unit test and never fire for a user.
+///
+/// The chain is: introspection builds a `SchemaSnapshot` whose `tables` are
+/// `TableSnapshot`s carrying their indexes; `LiveSchema::from_catalog_snapshot`
+/// moves that map into `table_snapshots` verbatim; the napi addon's lowering path
+/// calls that constructor. This test exercises the middle link with the real
+/// constructor rather than trusting the field copy.
+#[test]
+fn the_check_fires_through_the_production_live_schema_constructor() {
+    use zero_migrate::model::snapshot::SchemaSnapshot;
+
+    let mut tables = BTreeMap::new();
+    tables.insert(
+        "a".to_string(),
+        TableSnapshot {
+            columns: Vec::new(),
+            indexes: vec![index("ix", false, &["v"])],
+            constraints: Vec::new(),
+            runtime_options: Default::default(),
+            partition_by: None,
+            comment: None,
+            stored_create_sql: None,
+        },
+    );
+    let snapshot = SchemaSnapshot {
+        tables,
+        ..Default::default()
+    };
+    let live = LiveSchema::from_catalog_snapshot(snapshot, "f721");
+
+    // CONTROL: the constructor really did carry the index across. Without this the
+    // refusal below could be passing for want of a snapshot rather than because
+    // of one.
+    assert!(
+        live.table_snapshots
+            .get("a")
+            .is_some_and(|t| t.indexes.iter().any(|i| i.name == "ix")),
+        "from_catalog_snapshot must carry table indexes into table_snapshots"
+    );
+
+    lower(UNIQUE_ON_W, &live)
+        .expect_err("the refusal must fire on the constructor the addon actually uses");
+}
