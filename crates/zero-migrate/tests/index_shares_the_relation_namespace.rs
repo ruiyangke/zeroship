@@ -208,3 +208,32 @@ fn dropping_an_unrelated_table_does_not_free_an_index_name() {
     )
     .expect_err("an unrelated drop must not release a live index name");
 }
+
+/// A RENAME must carry the parentage the previous two commits introduced.
+///
+/// F753 and F754 added a map from container to dependents so a drop releases
+/// both. That map is keyed on the container's NAME - and `renameTable` moves the
+/// relation, type, column, constraint and trigger entries without moving it, so
+/// renaming a table STRANDED its dependents. A later drop of the new name then
+/// released nothing:
+///
+///     createIndex ix on a; renameTable a -> b; dropTable b; createTable ix
+///         -> REFUSED, though PostgreSQL frees the name
+///
+/// Measured live: after the rename and drop, `CREATE TABLE rdep.ix` succeeds.
+///
+/// This is a defect introduced BY the fix for the previous one - the second-order
+/// cost of adding state. Every other per-container map in this walk is moved on
+/// rename; the new one was not, because it was added after that arm was written
+/// and nothing forced the author to revisit it.
+#[test]
+fn a_rename_carries_the_index_parentage_so_a_later_drop_still_frees_it() {
+    verdict(
+        Dialect::Postgres,
+        &format!(
+            r#"{A},{IX},{{"op":"renameTable","table":"a","to":"b"}},{{"op":"dropTable","table":"b"}},{}"#,
+            tbl("ix")
+        ),
+    )
+    .expect("the index went with the renamed table when it was dropped");
+}

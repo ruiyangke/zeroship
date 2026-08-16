@@ -195,3 +195,18 @@ fn dropping_an_unrelated_table_does_not_free_a_partition_name() {
     ))
     .expect_err("an unrelated drop must not release a live partition name");
 }
+
+/// The partition half of the same defect: a rename must carry parentage.
+///
+/// See the sibling test in `index_shares_the_relation_namespace.rs` for the
+/// reasoning. Measured live: after `ALTER TABLE par RENAME TO par2` and
+/// `DROP TABLE par2`, `CREATE TABLE p1` succeeds.
+#[test]
+fn a_rename_carries_the_partition_parentage_so_a_later_drop_still_frees_it() {
+    verdict(&format!(
+        r#"{PARENT},{},{{"op":"renameTable","table":"par","to":"par2"}},{{"op":"dropTable","table":"par2"}},{}"#,
+        part("p1", 0, 10),
+        tbl("p1")
+    ))
+    .expect("the partition went with the renamed parent when it was dropped");
+}

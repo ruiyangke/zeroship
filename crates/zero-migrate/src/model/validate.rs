@@ -3044,6 +3044,14 @@ fn validate_no_name_is_claimed_twice(
                 if let Some(moved) = trigger_names.remove(&from_key) {
                     trigger_names.insert(to_key, moved);
                 }
+                // The dependents move with their container. Without this the map
+                // is stranded on the OLD name, and a later drop of the new name
+                // releases nothing - measured: `createIndex ix on a`, rename a to
+                // b, drop b, then `createTable ix` was refused although
+                // PostgreSQL frees the name.
+                if let Some(moved) = dependents_of.remove(&from_key) {
+                    dependents_of.insert(to_key, moved);
+                }
             }
             Op::AddColumn {
                 table,
