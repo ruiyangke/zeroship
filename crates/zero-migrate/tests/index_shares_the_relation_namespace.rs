@@ -166,3 +166,45 @@ fn dropping_a_table_frees_the_name_for_an_index() {
     )
     .expect("an index may take a name a dropped table released");
 }
+
+/// Dropping a table frees the names of the indexes ON it.
+///
+/// The same dependent-object shape as F753's partitions, found by continuing the
+/// interaction probe that produced it: an index is dropped with its table, so its
+/// name comes free. Measured against live PostgreSQL:
+///
+///     CREATE INDEX ix ON idrop.a (v);
+///     DROP TABLE idrop.a;
+///     -- pg_indexes reports 0 rows for ix
+///     CREATE TABLE idrop.ix (c0 int);       -- SUCCEEDS
+///
+/// Before this, the relation map released the table and kept the index, refusing
+/// a name the database had freed.
+///
+/// The probe that found it also cleared CONSTRAINT and TRIGGER names: both are
+/// keyed per table, so dropping the table removes their entry with it and they
+/// were already correct. Indexes are the exception because they live in the
+/// SCHEMA-WIDE relation namespace, which is exactly what F715 established.
+#[test]
+fn dropping_a_table_frees_the_names_of_its_indexes() {
+    verdict(
+        Dialect::Postgres,
+        &format!(r#"{A},{IX},{{"op":"dropTable","table":"a"}},{}"#, tbl("ix")),
+    )
+    .expect("the index went with its table, so the name is free");
+}
+
+#[test]
+fn dropping_an_unrelated_table_does_not_free_an_index_name() {
+    // THE CONTROL. Releasing every index on any drop would pass the test above
+    // and lose what F715 added.
+    verdict(
+        Dialect::Postgres,
+        &format!(
+            r#"{A},{IX},{},{{"op":"dropTable","table":"other"}},{}"#,
+            tbl("other"),
+            tbl("ix")
+        ),
+    )
+    .expect_err("an unrelated drop must not release a live index name");
+}

@@ -2904,7 +2904,12 @@ fn validate_no_name_is_claimed_twice(
     // later use of a freed name was refused: the engine stricter than the
     // database. Only an envelope carrying BOTH the drop and a later claim shows
     // it, which is why no single-rule fixture caught it.
-    let mut partitions_of: BTreeMap<Key, Vec<Key>> = BTreeMap::new();
+    // Dependents released when their container is dropped: partitions of a
+    // parent, and indexes ON a table. Both live in the schema-wide relation
+    // namespace, so neither is released by removing the container.s own key.
+    // Constraint and trigger names need no entry here - they are keyed PER TABLE,
+    // so dropping the table removes them with it.
+    let mut dependents_of: BTreeMap<Key, Vec<Key>> = BTreeMap::new();
 
     macro_rules! type_name_must_be_free {
         ($key:expr, $op_index:expr, $what:expr, $name:expr) => {
@@ -2995,7 +3000,7 @@ fn validate_no_name_is_claimed_twice(
                 // The composite row type goes with the table.
                 types.remove(&key);
                 // …and so do any partitions it parents.
-                for child in partitions_of.remove(&key).unwrap_or_default() {
+                for child in dependents_of.remove(&key).unwrap_or_default() {
                     relations.remove(&child);
                     types.remove(&child);
                 }
@@ -3091,7 +3096,7 @@ fn validate_no_name_is_claimed_twice(
                     types.insert(key, "partition");
                 }
                 // Remember the parentage, so dropping the parent releases this too.
-                partitions_of
+                dependents_of
                     .entry((schema.as_deref(), of.as_str()))
                     .or_default()
                     .push(key);
@@ -3136,6 +3141,7 @@ fn validate_no_name_is_claimed_twice(
             Op::CreateIndex {
                 name: Some(name),
                 schema,
+                table,
                 ..
             } if index_shares_relation_namespace => {
                 let key: Key = (schema.as_deref(), name.as_str());
@@ -3146,6 +3152,12 @@ fn validate_no_name_is_claimed_twice(
                     // aside so that better message survives.
                     Some(&"index") | None => {
                         relations.insert(key, "index");
+                        // An index goes with its table, so record the parentage
+                        // and let a dropTable release the name.
+                        dependents_of
+                            .entry((schema.as_deref(), table.as_str()))
+                            .or_default()
+                            .push(key);
                     }
                     Some(held_by) => {
                         return Err(refuse(
