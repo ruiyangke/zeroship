@@ -173,6 +173,33 @@ pub trait IdentityVerifier {
     ) -> Result<ServiceIdentity, AuthError>;
 }
 
+/// Non-cryptographic verifier used to exercise the framework seam.
+///
+/// This verifier only proves that transport observations reach an
+/// implementation after the framework's presence check. It must not be used
+/// as an authentication mechanism.
+#[derive(Clone, Debug)]
+pub struct StubIdentityVerifier {
+    identity: ServiceIdentity,
+}
+
+impl StubIdentityVerifier {
+    /// Construct a stub that maps every presented credential to one identity.
+    #[must_use]
+    pub fn new(identity: ServiceIdentity) -> Self {
+        Self { identity }
+    }
+}
+
+impl IdentityVerifier for StubIdentityVerifier {
+    fn verify(
+        &self,
+        _credentials: &PresentedCredentials<'_>,
+    ) -> Result<ServiceIdentity, AuthError> {
+        Ok(self.identity.clone())
+    }
+}
+
 /// Reject absent credentials before dispatching to a verifier implementation.
 ///
 /// # Errors
