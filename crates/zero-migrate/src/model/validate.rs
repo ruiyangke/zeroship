@@ -3339,6 +3339,29 @@ fn expression_column_references<'a>(
             .as_ref()
             .map(|generated| refs(table, &generated.expr))
             .unwrap_or_default(),
+        // THE OTHER DML OPS READ COLUMNS THROUGH THE SAME GAP:
+        // `validate_ir_resolved` resolves their references against the DECLARED
+        // column set, which still holds a column this migration dropped.
+        // Measured, each lowering to DML that names the dropped column:
+        //     UPDATE "public"."a" SET "w" = "v"
+        //     DELETE FROM "public"."a" WHERE ("v" > ...)
+        Op::Update {
+            table,
+            set,
+            r#where,
+            ..
+        } => set
+            .values()
+            .filter_map(|value| match value {
+                crate::model::ir::IrValue::Expr(expr) => Some(expr),
+                // Named rather than wildcarded so a new IrValue variant that can
+                // carry a column reference is a compile error here.
+                crate::model::ir::IrValue::Scalar(_) => None,
+            })
+            .chain(r#where.as_ref())
+            .flat_map(|expr| refs(table, expr))
+            .collect(),
+        Op::Delete { table, r#where, .. } => refs(table, r#where),
         // A BACKFILL READS COLUMNS TOO — the site F711 recorded as the last one
         // its walk did not reach. `dropColumn v` followed by a backfill setting
         // `w = v` lowers to `UPDATE a SET "w" = "v"` after the column is gone;
@@ -3376,6 +3399,16 @@ fn plain_column_references<'a>(op: &'a crate::model::ir::Op) -> Vec<(&'a str, &'
         | Op::DropColumnDefault { table, column, .. }
         | Op::SetColumnType { table, column, .. } => pair(table, column),
         Op::RenameColumn { table, from, .. } => pair(table, from),
+        // An update's written columns and an insert's column list are plain
+        // identifiers on the target table, like the backfill keys below.
+        Op::Update { table, set, .. } => set
+            .keys()
+            .map(|column| (table.as_str(), column.as_str()))
+            .collect(),
+        Op::Insert { table, columns, .. } => columns
+            .iter()
+            .map(|column| (table.as_str(), column.as_str()))
+            .collect(),
         // A backfill's WRITTEN columns and its CURSOR columns are plain
         // identifiers, unlike the expressions on the other side of the `=`.
         Op::Backfill {
