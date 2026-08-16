@@ -51,6 +51,22 @@ fn check(name: &str, column: &str) -> String {
     )
 }
 
+/// Assert WHICH refusal, so no sibling here satisfies the wrong test.
+///
+/// Three of these four are the cross-op rule ("this addConstraint claims the name
+/// ...") and one is the within-one-op rule ("this createTable names constraint ...
+/// more than once"). Those are separate code paths and the fixture covers both on
+/// purpose, so a guard that could not tell them apart would let the inline case
+/// vouch for the cross-op case.
+fn expect_constraint_refusal(dialect: Dialect, ops: &str, needle: &str, what: &str) {
+    let refusal = verdict(dialect, ops).expect_err(what);
+    assert!(
+        refusal.contains(needle),
+        "{needle:?} is missing, so the other constraint-name rule is satisfying \
+         this test: {refusal}"
+    );
+}
+
 #[test]
 fn two_constraints_of_one_name_on_one_table_are_refused_on_postgres() {
     let refusal = verdict(
@@ -58,6 +74,10 @@ fn two_constraints_of_one_name_on_one_table_are_refused_on_postgres() {
         &format!("{T},{},{}", check("same", "v"), check("same", "w")),
     )
     .expect_err("PostgreSQL rejects this with `constraint \"same\" ... already exists`");
+    assert!(
+        refusal.contains(r#"this addConstraint claims the name "same""#),
+        "must be the cross-op constraint-name rule: {refusal}"
+    );
     assert!(
         refusal.to_lowercase().contains("already"),
         "the refusal must say the name is already taken: {refusal}"
@@ -68,14 +88,15 @@ fn two_constraints_of_one_name_on_one_table_are_refused_on_postgres() {
 fn the_clash_is_the_name_not_the_kind() {
     // PostgreSQL gives the SAME error for CHECK-then-UNIQUE, so a check keyed on
     // (kind, name) rather than name alone would miss this.
-    verdict(
+    expect_constraint_refusal(
         Dialect::Postgres,
         &format!(
             r#"{T},{},{{"op":"addConstraint","table":"a","constraint":{{"name":"same","kind":{{"kind":"unique","columns":["w"]}}}}}}"#,
             check("same", "v")
         ),
-    )
-    .expect_err("a UNIQUE may not take a name a CHECK on the same table already holds");
+        r#"this addConstraint claims the name "same""#,
+        "a UNIQUE may not take a name a CHECK on the same table already holds",
+    );
 }
 
 #[test]
@@ -84,20 +105,22 @@ fn two_constraints_of_one_name_on_one_table_are_refused_on_mysql() {
     // expression rendering is PostgreSQL-only in this engine, so a CHECK-based
     // MySQL test passes whatever this rule does. It would be green for the wrong
     // reason - the first draft of this fixture was.
-    verdict(
+    expect_constraint_refusal(
         Dialect::Mysql,
         &format!("{T},{},{}", uniq("same", "v"), uniq("same", "w")),
-    )
-    .expect_err("MySQL rejects a repeated constraint name with ER_DUP_KEYNAME");
+        r#"this addConstraint claims the name "same""#,
+        "MySQL rejects a repeated constraint name with ER_DUP_KEYNAME",
+    );
 }
 
 #[test]
 fn a_create_table_naming_one_constraint_twice_is_refused() {
-    verdict(
+    expect_constraint_refusal(
         Dialect::Postgres,
         r#"{"op":"createTable","name":"a","columns":[{"name":"c0","type":"int","nullable":false},{"name":"v","type":"int","nullable":true}],"primaryKey":["c0"],"constraints":[{"name":"same","kind":{"kind":"unique","columns":["v"]}},{"name":"same","kind":{"kind":"unique","columns":["c0"]}}]}"#,
-    )
-    .expect_err("the same mistake authored inline in a createTable");
+        r#"names constraint "same" more than once"#,
+        "the same mistake authored inline in a createTable",
+    );
 }
 
 // ---------------------------------------------------------------------------
