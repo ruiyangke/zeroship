@@ -30,6 +30,109 @@ fn assert_allowlist_row(name: &str, expected: &[ServiceEndpoint], all: &[Service
     }
 }
 
+fn assert_endpoint(
+    endpoint: ServiceEndpoint,
+    destination: &str,
+    method: &str,
+    path_template: &str,
+) {
+    assert_eq!(endpoint.destination(), destination);
+    assert_eq!(endpoint.method(), method);
+    assert_eq!(endpoint.path_template(), path_template);
+}
+
+#[test]
+fn endpoint_catalog_records_exact_measured_operations() {
+    for (endpoint, destination, method, path_template) in [
+        (
+            endpoints::AUTH_PLATFORM_TOKEN,
+            "auth",
+            "POST",
+            "/internal/platform-token",
+        ),
+        (
+            endpoints::MIGRATED_APPLY_MIGRATIONS,
+            "migrated",
+            "POST",
+            "/v1/apps/{app_id}/migrations/apply",
+        ),
+        (
+            endpoints::GATEWAY_BACKCHANNEL_LOGOUT,
+            "gateway",
+            "POST",
+            "/oidc/backchannel-logout",
+        ),
+        (
+            endpoints::GATEWAY_WORKFLOW_ADVANCE,
+            "gateway",
+            "POST",
+            "/__zeroship/internal/workflow-advance",
+        ),
+        (
+            endpoints::CONTROL_ROUTES,
+            "control",
+            "GET",
+            "/internal/routes",
+        ),
+        (
+            endpoints::CONTROL_WORKFLOW_SIGNAL_INGRESS,
+            "control",
+            "POST",
+            "/internal/workflows/signals/ingress",
+        ),
+        (
+            endpoints::CONTROL_VERSIONS,
+            "control",
+            "GET",
+            "/internal/versions",
+        ),
+        (
+            endpoints::CONTROL_APP,
+            "control",
+            "GET",
+            "/internal/apps/{app_id}",
+        ),
+        (
+            endpoints::CONTROL_APP_ENV,
+            "control",
+            "GET",
+            "/internal/apps/{app_id}/env",
+        ),
+        (
+            endpoints::CONTROL_BILLING_RECONCILE,
+            "control",
+            "POST",
+            "/internal/billing/reconcile",
+        ),
+        (
+            endpoints::CONTROL_SPEND_RECONCILE,
+            "control",
+            "POST",
+            "/internal/spend/reconcile",
+        ),
+        (
+            endpoints::WORKER_DISPATCH,
+            "worker",
+            "POST",
+            "/dispatch/{app_id}",
+        ),
+        (
+            endpoints::WORKER_WORKFLOW_ADVANCE,
+            "worker",
+            "POST",
+            "/workflow-advance-unsigned/{app_id}",
+        ),
+        (
+            endpoints::WORKER_APP_LOGS,
+            "worker",
+            "GET",
+            "/logs/{app_id}",
+        ),
+    ] {
+        assert_endpoint(endpoint, destination, method, path_template);
+    }
+}
+
 #[test]
 fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
     let all = [
@@ -91,10 +194,12 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
 fn authorization_keys_on_individual_compound_identity() {
     let control = identity("zeroship.ai", "svc/control");
     let auth = identity("zeroship.ai", "svc/auth");
+    let unknown = identity("zeroship.ai", "svc/unknown");
     let wrong_domain = identity("attacker.example", "svc/control");
 
     assert!(authorize(&control, endpoints::AUTH_PLATFORM_TOKEN));
     assert!(!authorize(&auth, endpoints::AUTH_PLATFORM_TOKEN));
+    assert!(!authorize(&unknown, endpoints::AUTH_PLATFORM_TOKEN));
     assert!(!authorize(
         &wrong_domain,
         endpoints::AUTH_PLATFORM_TOKEN
