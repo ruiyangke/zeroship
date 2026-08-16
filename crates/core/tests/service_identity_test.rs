@@ -4,7 +4,8 @@ use std::collections::BTreeMap;
 use serde_json::json;
 use zeroship_core::service_identity::{
     verify_identity, AuthError, IdentityVerifier, MechanismTag, PeerCredentials,
-    PresentedCredentials, ServiceIdentity, ServiceName, ServicePrincipal, TrustDomain,
+    PresentedCredentials, ServiceIdentity, ServiceName, ServicePrincipal, StubIdentityVerifier,
+    TrustDomain,
 };
 
 fn principal(trust_domain: &str, name: &str) -> ServicePrincipal {
@@ -66,4 +67,16 @@ fn framework_rejects_missing_or_empty_credentials_before_verifier_dispatch() {
     }
 
     assert_eq!(verifier.calls.get(), 0);
+}
+
+#[test]
+fn stub_verifier_maps_presented_credentials_to_a_neutral_identity() {
+    let expected = identity("svc/gateway");
+    let verifier = StubIdentityVerifier::new(expected.clone());
+    let observed = PeerCredentials::new(
+        Some("not-cryptographically-verified"),
+        "https://control.zeroship.ai",
+    );
+
+    assert_eq!(verify_identity(&verifier, &observed), Ok(expected));
 }
