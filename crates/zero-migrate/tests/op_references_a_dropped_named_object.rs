@@ -35,6 +35,21 @@ fn verdict(ops: &str) -> Result<(), String> {
     validate_ir(&ir, Dialect::Postgres, &[]).map_err(|e| format!("{}: {}", e.code, e.reason))
 }
 
+/// Assert the KIND of object the refusal names.
+///
+/// The three type/default sites here differ only in whether an enum, a domain or
+/// a sequence was dropped, and the rule reports the kind. Without it the domain
+/// test is satisfied by the enum refusal and neither proves the kind is tracked
+/// separately - which is the one thing this fixture exists to show.
+fn expect_dependency_on(ops: &str, kind: &str, name: &str, what: &str) {
+    let refusal = verdict(ops).expect_err(what);
+    let expected = format!("depends on {kind} {name:?}");
+    assert!(
+        refusal.contains(&expected),
+        "{expected:?} is missing, so a sibling kind is satisfying this test: {refusal}"
+    );
+}
+
 #[test]
 fn a_column_typed_by_a_dropped_enum_is_refused() {
     let refusal = verdict(
@@ -49,18 +64,22 @@ fn a_column_typed_by_a_dropped_enum_is_refused() {
 
 #[test]
 fn a_column_typed_by_a_dropped_domain_is_refused() {
-    verdict(
+    expect_dependency_on(
         r#"{"op":"createDomain","name":"d","as":"text"},{"op":"dropDomain","name":"d"},{"op":"createTable","name":"t","columns":[{"name":"c0","type":"int","nullable":false},{"name":"v","type":{"domain":{"name":"d"}},"nullable":true}],"primaryKey":["c0"]}"#,
-    )
-    .expect_err("the column names a domain type the drop removed");
+        "domain",
+        "d",
+        "the column names a domain type the drop removed",
+    );
 }
 
 #[test]
 fn a_default_on_a_dropped_sequence_is_refused() {
-    verdict(
+    expect_dependency_on(
         r#"{"op":"createSequence","name":"sq"},{"op":"dropSequence","name":"sq"},{"op":"createTable","name":"t","columns":[{"name":"c0","type":"bigInt","nullable":false,"default":{"nextval":{"name":"sq"}}}],"primaryKey":["c0"]}"#,
-    )
-    .expect_err("the default draws from a sequence the drop removed");
+        "sequence",
+        "sq",
+        "the default draws from a sequence the drop removed",
+    );
 }
 
 #[test]
