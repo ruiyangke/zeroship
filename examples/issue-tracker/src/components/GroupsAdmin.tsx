@@ -1,5 +1,5 @@
 import { useState, type ComponentPropsWithoutRef } from "react";
-import { Button, Field, Input, Select } from "@zeroship/ui";
+import { Field, Input, Select } from "@zeroship/ui";
 
 import {
   addGroupMember,
@@ -10,6 +10,7 @@ import {
   unrestrictProduct,
 } from "../api";
 import { invalidatedBy } from "../lib/query-keys";
+import { Button } from "../ui/Button";
 import {
   useAppMutation,
   useGroupMembers,
@@ -167,7 +168,7 @@ export function GroupsAdmin() {
           <Field.Label>New group</Field.Label>
           <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="security" />
         </Field>
-        <Button variant="filled" size="sm" disabled={busy || !name.trim()} onClick={() => void create()}>
+        <Button variant="filled" disabled={busy || !name.trim()} onClick={() => void create()}>
           Create
         </Button>
       </FieldRow>
@@ -197,7 +198,6 @@ export function GroupsAdmin() {
                     access-control object. */}
                 <Button
                   variant="gray"
-                  size="sm"
                   intent="destructive"
                   disabled={busy}
                   aria-label={`Delete group ${group.name}`}
@@ -239,7 +239,7 @@ export function GroupsAdmin() {
               placeholder="name or email"
             />
           </Field>
-          <Button variant="gray" size="sm" onClick={search}>
+          <Button variant="gray" onClick={search}>
             Search
           </Button>
         </FieldRow>
@@ -262,7 +262,6 @@ export function GroupsAdmin() {
                   <span>{member.name ?? member.handle}</span>
                   <Button
                     variant="gray"
-                    size="sm"
                     intent="destructive"
                     disabled={busy}
                     onClick={() => void removeMember(member.id)}
@@ -281,7 +280,7 @@ export function GroupsAdmin() {
           {matches.map((user) => (
             <li key={user.id}>
               {user.name} <Muted>@{user.handle}</Muted>
-              <Button variant="gray" size="sm"
+              <Button variant="gray"
                 disabled={busy || !memberGroup}
                 onClick={() => void add(user.id)}
               >
@@ -386,13 +385,13 @@ function ProductRestrictions({
             ))}
           </Select>
         </Field>
-        <Button variant="gray" size="sm"
+        <Button variant="gray"
           disabled={busy || !productId || !groupId}
           onClick={() => void apply("restrict")}
         >
           Restrict
         </Button>
-        <Button variant="gray" size="sm"
+        <Button variant="gray"
           disabled={busy || !productId || !groupId}
           onClick={() => void apply("unrestrict")}
         >

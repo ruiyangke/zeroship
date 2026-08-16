@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
-import { Button, Checkbox, Input } from "@zeroship/ui";
+import { Checkbox, Input } from "@zeroship/ui";
+import { Button } from "../../ui/Button";
 import { Tag } from "../../ui/Tag";
 import { attachKeyword, createKeyword, detachKeyword } from "../../api";
 import { FieldError, InlineForm, Muted } from "../AppPrimitives";
@@ -138,7 +139,7 @@ export function KeywordsPanel({
           value={newKeyword}
           onChange={(e) => setNewKeyword(e.target.value)}
         />
-        <Button variant="gray" size="sm" disabled={busy || !newKeyword.trim()} onClick={() => void createAndAttach()}>
+        <Button variant="gray" disabled={busy || !newKeyword.trim()} onClick={() => void createAndAttach()}>
           Create + attach
         </Button>
       </InlineForm>

@@ -1,9 +1,10 @@
 import type { ReactNode } from "react";
 import { Link, NavLink } from "react-router-dom";
-import { AppShell, Button } from "@zeroship/ui";
+import { AppShell } from "@zeroship/ui";
 
 import { UnreadBadge, UserChip } from "./SessionChips";
 import type { Session } from "./session";
+import { Button } from "../ui/Button";
 
 /**
  * The application frame: one header band over the page, and no rail.
@@ -100,8 +101,9 @@ export function Shell({
             </nav>
           </div>
           <div className="flex min-w-0 flex-row flex-wrap items-center justify-start gap-2">
-            {/* asChild, not render: this library composes onto the child element,
-                so the button styling lands on a real anchor and "New issue"
+            {/* render composes the Button onto the Link itself, while
+                nativeButton={false} tells Base UI the target is not a native
+                button. The styling lands on a real anchor and "New issue"
                 stays a link you can middle-click.
 
                 Only when there is someone to file as. The new-issue page
@@ -110,8 +112,12 @@ export function Shell({
                 sitting beside the Sign in button in the same blue and
                 competing with it for the one action that actually works. */}
             {signedIn ? (
-              <Button variant="filled" size="sm" asChild>
-                <Link to="/issues/new">New issue</Link>
+              <Button
+                variant="filled"
+                nativeButton={false}
+                render={<Link to="/issues/new" />}
+              >
+                New issue
               </Button>
             ) : null}
             <UserChip session={session} />

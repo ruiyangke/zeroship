@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Button } from "@zeroship/ui";
+import { Button } from "../../ui/Button";
 import { addCc, removeCc } from "../../api";
 import { AsyncSection } from "../StateViews";
 import { errorMessage } from "../rpc";
@@ -76,7 +76,7 @@ export function CcPanel({ issueId }: { issueId: string }) {
               {rows.map((row) => (
                 <li key={row.id}>
                   <span>{row.user?.name ?? row.userId}</span>
-                  <Button variant="gray" size="sm" disabled={busy} onClick={() => void remove(row.userId)}>
+                  <Button variant="gray" disabled={busy} onClick={() => void remove(row.userId)}>
                     Remove
                   </Button>
                 </li>
@@ -86,7 +86,7 @@ export function CcPanel({ issueId }: { issueId: string }) {
         </AsyncSection>
         {!ccQ.isError ? (
           <>
-            <Button variant="gray" size="sm" onClick={() => setPicking((v) => !v)}>
+            <Button variant="gray" onClick={() => setPicking((v) => !v)}>
               Add CC
             </Button>
             {picking ? <UserPicker onPick={(u) => void add(u.id)} /> : null}

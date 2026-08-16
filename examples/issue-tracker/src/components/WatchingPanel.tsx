@@ -1,9 +1,9 @@
 import { useState } from "react";
-import { Button } from "@zeroship/ui";
 
 import { addWatcher, removeWatcher } from "../api";
 import { invalidatedBy } from "../lib/query-keys";
 import { useAppMutation, useWatchers } from "../lib/queries";
+import { Button } from "../ui/Button";
 import { errorMessage } from "./rpc";
 import { UserPicker } from "./UserPicker";
 import { DashboardSection } from "./DashboardSection";
@@ -77,7 +77,6 @@ export function WatchingPanel() {
                 <span>{row.watched?.name ?? row.watched?.handle ?? row.watchedId}</span>
                 <Button
                   variant="gray"
-                  size="sm"
                   intent="destructive"
                   disabled={busy}
                   onClick={() => void unwatch(row.watchedId)}
@@ -90,7 +89,7 @@ export function WatchingPanel() {
         </div>
       )}
 
-      <Button variant="gray" size="sm" disabled={busy} onClick={() => setPicking((v) => !v)}>
+      <Button variant="gray" disabled={busy} onClick={() => setPicking((v) => !v)}>
         {picking ? "Cancel" : "Watch someone"}
       </Button>
       {picking ? <UserPicker onPick={(user) => void watch(user.id)} /> : null}

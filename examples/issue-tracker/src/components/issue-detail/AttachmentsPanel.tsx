@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { formatBytes } from "./attachments";
-import { Button } from "@zeroship/ui";
+import { Button } from "../../ui/Button";
 import { deleteAttachment, setAttachmentObsolete } from "../../api";
 import { downloadAttachment } from "../../lib/download";
 import { AsyncSection } from "../StateViews";
@@ -64,14 +64,14 @@ function AttachmentRow({ attachment }: { attachment: Attachment }) {
       className={`border-t border-line py-1 first:border-t-0 ${attachment.isObsolete ? "opacity-[0.55]" : ""}`}
     >
       <div className="flex flex-wrap items-center gap-2 text-base">
-        <Button variant="gray" size="sm" disabled={downloading} onClick={() => void download()}>
+        <Button variant="gray" disabled={downloading} onClick={() => void download()}>
           {downloading ? "..." : attachment.filename}
         </Button>
         <Muted>{formatBytes(attachment.sizeBytes)}</Muted>
         <Muted>{attachment.contentType}</Muted>
         {attachment.isPatch ? <Badge tone="info">patch</Badge> : null}
         {attachment.isObsolete ? <Badge tone="muted">obsolete</Badge> : null}
-        <Button variant="gray" size="sm" disabled={busy} onClick={() => void toggleObsolete()}>
+        <Button variant="gray" disabled={busy} onClick={() => void toggleObsolete()}>
           {attachment.isObsolete ? "Un-obsolete" : "Mark obsolete"}
         </Button>
         {/* Plain, not destructive-red. On a list row this was the most
@@ -79,7 +79,7 @@ function AttachmentRow({ attachment }: { attachment: Attachment }) {
             page primary -- for an action on a file somebody attached on
             purpose. Deleting is available here, it is not the point of the
             panel. */}
-        <Button variant="plain" size="sm" disabled={busy} onClick={() => void remove()}>
+        <Button variant="plain" disabled={busy} onClick={() => void remove()}>
           Delete
         </Button>
       </div>

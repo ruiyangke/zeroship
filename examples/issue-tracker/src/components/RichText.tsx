@@ -1,4 +1,4 @@
-import { Button, Input } from "@zeroship/ui";
+import { Input } from "@zeroship/ui";
 import { EditorContent, useEditor, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
@@ -7,6 +7,7 @@ import { useEffect, useState } from "react";
 
 import { AppFieldShell } from "./AppFieldShell";
 import { FieldError } from "./AppPrimitives";
+import { Button } from "../ui/Button";
 
 /**
  * Rich text for issue descriptions and comments, on tiptap.
@@ -147,8 +148,7 @@ function ToolbarButton({
 }) {
   return (
     <Button
-      variant={isActive ? "tinted" : "plain"}
-      size="sm"
+      variant="plain"
       aria-pressed={isActive}
       aria-label={title}
       title={title}
@@ -225,7 +225,7 @@ function LinkControl({ editor }: { editor: Editor }) {
               if (event.key === "Escape") setOpen(false);
             }}
           />
-          <Button variant="filled" size="sm" onMouseDown={(e) => e.preventDefault()} onClick={apply}>
+          <Button variant="filled" onMouseDown={(e) => e.preventDefault()} onClick={apply}>
             Apply
           </Button>
           {refused ? (

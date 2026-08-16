@@ -7,10 +7,11 @@
 // the header, but they did NOT come back here: navigation lives in Shell.tsx,
 // which is the one place that knows what the frame is.
 import { useAuth } from "@zeroship/auth/react";
-import { Button, Menu } from "@zeroship/ui";
+import { Menu } from "@zeroship/ui";
 import { errorMessage } from "./rpc";
 import type { Session } from "./session";
 import { useUnreadNotificationCount } from "../lib/queries";
+import { Button } from "../ui/Button";
 
 
 /**
@@ -18,8 +19,8 @@ import { useUnreadNotificationCount } from "../lib/queries";
  *
  * @zeroship/auth ships SignInButton, but it renders an unstyled <button> --
  * next to the design system's filled "New issue" it read as a browser default
- * someone forgot about. It also takes no asChild, so it cannot lend its
- * behaviour to a DS Button.
+ * someone forgot about. That auth button offers no render/asChild composition
+ * hook, so it cannot lend its behaviour to this Button.
  *
  * The behaviour worth copying is one line, and it is the line that matters:
  * signInWithOAuth is called SYNCHRONOUSLY inside the click, never awaited,
@@ -31,7 +32,6 @@ function SignInAction() {
   return (
     <Button
       variant="filled"
-      size="sm"
       onClick={() => {
         signInWithOAuth().catch((err: unknown) => {
           window.alert(`Sign in failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -93,7 +93,7 @@ function AccountMenu({
           lets the trigger BE the design system's button instead. Plain, so
           the name reads as text you can press rather than a second action
           competing with the primary one. */}
-      <Menu.Trigger render={<Button variant="plain" size="sm" />}>
+      <Menu.Trigger render={<Button variant="plain" />}>
         <span className="whitespace-nowrap text-base text-ink-secondary" title={email ?? undefined}>
           {name}
           {!provisioned ? <em className="text-ink-muted not-italic"> (no activity yet)</em> : null}

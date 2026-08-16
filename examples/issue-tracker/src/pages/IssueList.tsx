@@ -1,7 +1,8 @@
 import { useState, type ReactNode } from "react";
 import { useClearQuery, useNumericQueryParam, useQueryParam } from "../lib/query-state";
-import { Button, Checkbox, Dialog, FilterBar, PageHeader, Select } from "@zeroship/ui";
+import { Checkbox, Dialog, FilterBar, PageHeader, Select } from "@zeroship/ui";
 import { Card } from "../ui/Card";
+import { Button } from "../ui/Button";
 import {
   ALL_ISSUE_COLUMNS,
   IssueResultsTable,
@@ -97,7 +98,6 @@ function ColumnPicker({
     <div className="column-picker relative">
       <Button
         variant="plain"
-        size="sm"
         onClick={() => onOpenChange(!open)}
         aria-expanded={open}
       >
@@ -379,7 +379,7 @@ export function IssueListPage() {
         onClearFilters={activeFilters.length > 0 ? resetFilters : undefined}
         actions={
           <div className="flex min-w-0 flex-row flex-wrap items-center justify-start gap-2">
-            <Button variant="gray" size="sm" onClick={applyFilters}>
+            <Button variant="gray" onClick={applyFilters}>
               Apply
             </Button>
             {/* The builder needs an identity and the filters do not. Signed
@@ -390,7 +390,7 @@ export function IssueListPage() {
                 picker stay: they are all served by the anonymous
                 `issues.search`. */}
             {signedOut ? null : (
-              <Button variant="gray" size="sm" onClick={() => setBuilderOpen(true)}>
+              <Button variant="gray" onClick={() => setBuilderOpen(true)}>
                 Advanced...
               </Button>
             )}
@@ -524,7 +524,7 @@ export function IssueListPage() {
               Showing {advanced.length} result{advanced.length === 1 ? "" : "s"} from advanced
               search
             </Hint>
-            <Button variant="plain" size="sm" onClick={() => setAdvanced(null)}>
+            <Button variant="plain" onClick={() => setAdvanced(null)}>
               Back to filters
             </Button>
           </div>
@@ -577,7 +577,7 @@ export function IssueListPage() {
               }}
             />
             <div className="mt-3 flex items-center gap-3 text-base text-ink-secondary">
-              <Button variant="gray" size="sm"
+              <Button variant="gray"
                 disabled={offset === 0}
                 onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
               >
@@ -586,7 +586,7 @@ export function IssueListPage() {
               <span>
                 {offset + 1}-{offset + issues.length}
               </span>
-              <Button variant="gray" size="sm"
+              <Button variant="gray"
                 disabled={issues.length < PAGE_SIZE}
                 onClick={() => setOffset(offset + PAGE_SIZE)}
               >

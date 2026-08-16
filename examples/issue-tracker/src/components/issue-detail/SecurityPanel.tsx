@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { Button, Field, Select } from "@zeroship/ui";
+import { Field, Select } from "@zeroship/ui";
+import { Button } from "../../ui/Button";
 
 import { restrictIssue, unrestrictIssue } from "../../api";
 import { useAppMutation, useGroups } from "../../lib/queries";
@@ -101,13 +102,13 @@ export function SecurityPanel({ issueId }: { issueId: string }) {
               ))}
             </Select>
           </Field>
-          <Button variant="gray" size="sm"
+          <Button variant="gray"
             disabled={changeRestriction.isPending || !selected}
             onClick={() => void apply("restrict")}
           >
             Restrict
           </Button>
-          <Button variant="gray" size="sm"
+          <Button variant="gray"
             disabled={changeRestriction.isPending || !selected}
             onClick={() => void apply("unrestrict")}
           >

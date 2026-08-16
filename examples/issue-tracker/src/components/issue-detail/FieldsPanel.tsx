@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { Button, Field, Input, Select } from "@zeroship/ui";
+import { Field, Input, Select } from "@zeroship/ui";
+import { Button } from "../../ui/Button";
 import {
   moveIssue,
   reassignIssue,
@@ -205,7 +206,7 @@ function MoveControl({
           It is an action, and it is written as one. */}
       <span aria-hidden="true" />
       <div className="col-start-3 block">
-        <Button variant="gray" size="sm" onClick={() => setOpen((v) => !v)}>
+        <Button variant="gray" onClick={() => setOpen((v) => !v)}>
           {/* Short enough to fit the rail. The full sentence ran past the
               column edge, which is how a rail says "this control does not
               belong here" -- the dialog it opens explains the rest. */}
@@ -247,7 +248,7 @@ function MoveControl({
               ))}
             </Select>
           </Field>
-          <Button variant="filled" size="sm"
+          <Button variant="filled"
             disabled={busy || !targetProductId || !targetComponentId}
             onClick={() => void move()}
           >
@@ -312,7 +313,6 @@ function GeneralField({
         action={
           <Button
             variant="plain"
-            size="sm"
             // Named per field: a rail with five bare "Edit" buttons is
             // ambiguous to a screen reader and to a strict-mode locator.
             aria-label={`Edit ${label}`}
@@ -336,12 +336,11 @@ function GeneralField({
         editing
         action={
           <span className="flex gap-1">
-            <Button variant="gray" size="sm" disabled={busy} onClick={() => void save()}>
+            <Button variant="gray" disabled={busy} onClick={() => void save()}>
               Save
             </Button>
             <Button
               variant="plain"
-              size="sm"
               disabled={busy}
               aria-label={`Cancel editing ${label}`}
               onClick={() => {
@@ -507,7 +506,7 @@ export function FieldsPanel({
           <GeneralField issue={issue} field="url" label="URL" value={issue.url ?? ""} />
         </>
       ) : (
-        <Button className="col-span-full justify-self-start" variant="plain" size="sm" onClick={() => setShowOther(true)}>
+        <Button className="col-span-full justify-self-start" variant="plain" onClick={() => setShowOther(true)}>
           Set whiteboard, OS, platform or URL
         </Button>
       )}

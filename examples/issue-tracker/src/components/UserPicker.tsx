@@ -3,8 +3,9 @@
 // becomes the argument to the cached users.list({text}) query -- which is
 // exactly what it is for.
 import { useState } from "react";
-import { Button, Input } from "@zeroship/ui";
+import { Input } from "@zeroship/ui";
 import { useUserSearch } from "../lib/queries";
+import { Button } from "../ui/Button";
 import { FieldError, Hint, Muted } from "./AppPrimitives";
 import { errorMessage } from "./rpc";
 import type { UserRow } from "./types";
@@ -58,7 +59,7 @@ export function UserPicker({
             }
           }}
         />
-        <Button variant="gray" size="sm" onClick={search} disabled={usersQ.isFetching}>
+        <Button variant="gray" onClick={search} disabled={usersQ.isFetching}>
           {usersQ.isFetching ? "..." : "Find"}
         </Button>
       </div>
@@ -70,7 +71,7 @@ export function UserPicker({
           <ul className="mt-1 flex list-none flex-wrap gap-1 p-0">
             {results.map((user) => (
               <li key={user.id}>
-                <Button variant="gray" size="sm"
+                <Button variant="gray"
                   onClick={() => {
                     onPick(user);
                     setText("");

@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
-import { Button, Checkbox, Field, Input, Select } from "@zeroship/ui";
+import { Checkbox, Field, Input, Select } from "@zeroship/ui";
+import { Button } from "../ui/Button";
 import { createIssue } from "../api";
 import { invalidatedBy } from "../lib/query-keys";
 import { useAppMutation, useProduct, useProducts } from "../lib/queries";

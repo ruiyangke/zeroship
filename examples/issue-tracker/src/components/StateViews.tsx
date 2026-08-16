@@ -3,10 +3,10 @@
 // signed out) rendered as an explicit sign-in prompt, never as an empty list.
 import type { ReactNode } from "react";
 import {
-  Button,
   EmptyState as UiEmptyState,
   ErrorState as UiErrorState,
 } from "@zeroship/ui";
+import { Button } from "../ui/Button";
 import { Spinner } from "../ui/Spinner";
 
 import { errorCode, errorMessage, isUnauthenticated } from "./rpc";

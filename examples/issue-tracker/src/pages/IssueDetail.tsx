@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Banner, Button, Input, Tabs } from "@zeroship/ui";
+import { Banner, Input, Tabs } from "@zeroship/ui";
 import { Badge } from "../ui/Badge";
+import { Button } from "../ui/Button";
 import { KindBadge, PriorityBadge, ResolutionBadge, SeverityBadge, StatusBadge } from "../components/Badges";
 import { updateIssue } from "../api";
 import { invalidatedBy } from "../lib/query-keys";
@@ -98,10 +99,10 @@ function TitleEditor({
         }}
       />
       <div className="flex min-w-0 flex-row flex-wrap items-center justify-start gap-2">
-        <Button variant="filled" size="sm" disabled={busy || !draft.trim()} onClick={save}>
+        <Button variant="filled" disabled={busy || !draft.trim()} onClick={save}>
           Save
         </Button>
-        <Button variant="plain" size="sm" disabled={busy} onClick={onDone}>
+        <Button variant="plain" disabled={busy} onClick={onDone}>
           Cancel
         </Button>
       </div>
@@ -231,7 +232,6 @@ export function IssueDetailPage({
             {signedOut ? null : (
               <Button
                 variant="plain"
-                size="sm"
                 className="opacity-0 transition-opacity duration-[120ms] group-hover/title:opacity-100 group-focus-within/title:opacity-100 [@media(hover:none)]:opacity-100"
                 aria-label="Edit summary"
                 onClick={() => setEditingTitle(true)}
@@ -343,7 +343,6 @@ export function IssueDetailPage({
             <div className="issue-detail-more mt-3">
               <Button
                 variant="plain"
-                size="sm"
                 className="max-w-full whitespace-normal text-start"
                 aria-expanded={moreOpen}
                 onClick={() => setMoreOpen((open) => !open)}

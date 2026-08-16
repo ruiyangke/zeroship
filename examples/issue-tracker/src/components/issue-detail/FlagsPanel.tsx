@@ -9,7 +9,8 @@
 // problems are gone and the caveat that used to sit at the bottom of this panel
 // is deleted rather than reworded.
 import { useState } from "react";
-import { Button, Select } from "@zeroship/ui";
+import { Select } from "@zeroship/ui";
+import { Button } from "../../ui/Button";
 
 import { clearFlag, setFlag } from "../../api";
 import { invalidatedBy } from "../../lib/query-keys";
@@ -126,7 +127,7 @@ function FlagRow({
             {/* Clearing works for ANY live flag now, not only one this panel
                 set, because the id comes from the server rather than from a
                 setFlag response held in component state. */}
-            <Button variant="gray" size="sm"
+            <Button variant="gray"
               disabled={busy}
               onClick={() => void clear(entry.flag.id)}
             >
@@ -151,7 +152,7 @@ function FlagRow({
           {requesteeId ? (
             <Muted>requestee: {requesteeId}</Muted>
           ) : (
-            <Button variant="gray" size="sm"
+            <Button variant="gray"
               onClick={() => setPickingRequestee((v) => !v)}
             >
               set requestee
@@ -159,7 +160,7 @@ function FlagRow({
           )}
         </span>
       ) : null}
-      <Button variant="gray" size="sm" disabled={busy} onClick={() => void apply()}>
+      <Button variant="gray" disabled={busy} onClick={() => void apply()}>
         Set
       </Button>
       {pickingRequestee ? (

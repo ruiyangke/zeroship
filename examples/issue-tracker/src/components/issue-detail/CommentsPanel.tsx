@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { Avatar, Button, Checkbox } from "@zeroship/ui";
+import { Avatar, Checkbox } from "@zeroship/ui";
+import { Button } from "../../ui/Button";
 
 import { RichText, RichTextEditor, hasText } from "../RichText";
 import { FieldError, Muted } from "../AppPrimitives";
@@ -165,7 +166,6 @@ function CommentRow({
         <span className="ms-auto inline-flex gap-1 opacity-0 transition-opacity duration-[120ms] ease-out group-hover/comment:opacity-100 group-focus-within/comment:opacity-100 [@media(hover:none)]:opacity-100">
           <Button
             variant="plain"
-            size="sm"
             disabled={busy}
             aria-label={`Edit comment ${comment.commentNumber}`}
             onClick={() => (editing ? cancelEditing() : setEditing(true))}
@@ -174,7 +174,6 @@ function CommentRow({
           </Button>
           <Button
             variant="plain"
-            size="sm"
             disabled={busy}
             aria-label={
               (comment.isPrivate ? "Make comment public " : "Make comment private ") +
@@ -191,12 +190,11 @@ function CommentRow({
         <div className="flex flex-col gap-2">
           <RichTextEditor value={draft} onChange={setDraft} ariaLabel="Edit comment" />
           <div className="flex min-w-0 flex-row flex-wrap items-center justify-start gap-2">
-            <Button variant="filled" size="sm" disabled={busy} onClick={() => void save()}>
+            <Button variant="filled" disabled={busy} onClick={() => void save()}>
               Save
             </Button>
             <Button
               variant="plain"
-              size="sm"
               disabled={busy}
               aria-label={`Cancel editing comment ${comment.commentNumber}`}
               onClick={cancelEditing}
@@ -352,7 +350,6 @@ function NewCommentForm({ issueId }: { issueId: string }) {
             simply stops being the thing on screen. */}
         <Button
           variant="gray"
-          size="sm"
           onClick={() => fileRef.current?.click()}
         >
           Attach files
@@ -369,7 +366,6 @@ function NewCommentForm({ issueId }: { issueId: string }) {
         />
         <Button
           variant="filled"
-          size="sm"
           // A file with no words is still worth posting, so the guard is
           // "nothing at all" rather than "no text".
           disabled={busy || (!hasText(body) && fileNames.length === 0)}

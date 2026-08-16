@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { Button } from "@zeroship/ui";
+import { Button } from "../../ui/Button";
 import { RailRow } from "./RailRow";
 
 /**
@@ -49,7 +49,6 @@ export function RailDisclosure({
         action={
           <Button
             variant="plain"
-            size="sm"
             // Named per group, so a screen reader landing on the button knows
             // which panel it opens rather than hearing "Edit" four times.
             aria-label={open ? `Close ${label}` : `${action} ${label}`}

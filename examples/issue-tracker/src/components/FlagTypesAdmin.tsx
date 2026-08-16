@@ -1,10 +1,11 @@
 import { useState } from "react";
 
-import { Button, Field, Input, Select } from "@zeroship/ui";
+import { Field, Input, Select } from "@zeroship/ui";
 
 import { createFlagType } from "../api";
 import { invalidatedBy } from "../lib/query-keys";
 import { useAppMutation, useFlagTypes, useProducts } from "../lib/queries";
+import { Button } from "../ui/Button";
 import { errorMessage } from "./rpc";
 import { FieldError, Hint, InlineForm, Muted, SectionHeading } from "./AppPrimitives";
 
@@ -103,7 +104,7 @@ export function FlagTypesAdmin() {
             <Select.Item value="attachment">attachment</Select.Item>
           </Select>
         </Field>
-        <Button variant="filled" size="sm"
+        <Button variant="filled"
           disabled={busy || !name.trim()}
           onClick={() => void create()}
         >

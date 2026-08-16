@@ -1,8 +1,9 @@
 import { markNotificationRead } from "../api";
 import { Link } from "react-router-dom";
-import { Button, ListView } from "@zeroship/ui";
+import { ListView } from "@zeroship/ui";
 import { invalidatedBy } from "../lib/query-keys";
 import { useAppMutation, useNotifications } from "../lib/queries";
+import { Button } from "../ui/Button";
 import { RichText } from "./RichText";
 import { AsyncSection } from "./StateViews";
 import { DashboardSection } from "./DashboardSection";
@@ -103,7 +104,7 @@ export function NotificationsPanel() {
                 // to a line of its own under a row with one, so the same
                 // control appeared in two places down a single list.
                 trailing: row.isRead ? undefined : (
-                  <Button variant="gray" size="sm" onClick={() => markRead.mutate(row.id)}>
+                  <Button variant="gray" onClick={() => markRead.mutate(row.id)}>
                     Mark read
                   </Button>
                 ),

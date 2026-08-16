@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { Button, Field, Input } from "@zeroship/ui";
+import { Field, Input } from "@zeroship/ui";
+import { Button } from "../../ui/Button";
 
 import { addSeeAlso, removeSeeAlso } from "../../api";
 import { useAppMutation, useSeeAlso } from "../../lib/queries";
@@ -82,7 +83,7 @@ export function SeeAlsoPanel({ issueId }: { issueId: string }) {
               <a href={link.url} target="_blank" rel="noreferrer noopener">
                 {link.url}
               </a>
-              <Button variant="gray" size="sm"
+              <Button variant="gray"
                 disabled={busy}
                 onClick={() => void remove(link.id)}
               >
@@ -101,7 +102,7 @@ export function SeeAlsoPanel({ issueId }: { issueId: string }) {
             placeholder="https://bugzilla.example.org/show_bug.cgi?id=1"
           />
         </Field>
-        <Button variant="gray" size="sm" disabled={busy || !url.trim()} onClick={() => void add()}>
+        <Button variant="gray" disabled={busy || !url.trim()} onClick={() => void add()}>
           Add
         </Button>
       </FieldRow>

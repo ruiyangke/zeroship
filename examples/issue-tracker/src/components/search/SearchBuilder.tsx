@@ -6,8 +6,9 @@
 // without a second box. Leaving the component here exported and unrendered is
 // how it became unreachable in the first place.
 import { useState } from "react";
-import { Button, Input, Select } from "@zeroship/ui";
+import { Input, Select } from "@zeroship/ui";
 import { Badge } from "../../ui/Badge";
+import { Button } from "../../ui/Button";
 import {
   deleteSavedSearch,
   saveSavedSearch,
@@ -152,7 +153,7 @@ export function FieldBuilder({ onResults }: { onResults: (issues: Issue[]) => vo
               aria-label="Value" placeholder="value"
             />
           ) : null}
-          <Button variant="gray" size="sm"
+          <Button variant="gray"
             disabled={conditions.length === 1}
             onClick={() => setConditions((cs) => cs.filter((_, i) => i !== index))}
           >
@@ -161,10 +162,10 @@ export function FieldBuilder({ onResults }: { onResults: (issues: Issue[]) => vo
         </div>
       ))}
       <div className="my-2 flex gap-2">
-        <Button variant="gray" size="sm" onClick={() => setConditions((cs) => [...cs, newCondition()])}>
+        <Button variant="gray" onClick={() => setConditions((cs) => [...cs, newCondition()])}>
           Add condition (AND)
         </Button>
-        <Button variant="filled" size="sm" disabled={search.isPending} onClick={run}>
+        <Button variant="filled" disabled={search.isPending} onClick={run}>
           {search.isPending ? "Searching..." : "Run search"}
         </Button>
       </div>
@@ -225,7 +226,7 @@ export function SavedSearchesPanel({ currentWhere }: { currentWhere: WhereNode |
                     shared
                   </Badge>
                 ) : null}
-                <Button variant="gray" size="sm" disabled={busy} onClick={() => remove.mutate(row.id)}>
+                <Button variant="gray" disabled={busy} onClick={() => remove.mutate(row.id)}>
                   Delete
                 </Button>
               </li>
@@ -241,7 +242,7 @@ export function SavedSearchesPanel({ currentWhere }: { currentWhere: WhereNode |
           onChange={(e) => setName(e.target.value)}
           disabled={!currentWhere}
         />
-        <Button variant="gray" size="sm" disabled={busy || !currentWhere || !name.trim()} onClick={submitSave}>
+        <Button variant="gray" disabled={busy || !currentWhere || !name.trim()} onClick={submitSave}>
           Save
         </Button>
       </InlineForm>

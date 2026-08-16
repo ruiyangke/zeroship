@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { Button } from "@zeroship/ui";
+import { Button } from "../../ui/Button";
 import { RailRow } from "./RailRow";
 
 /**
@@ -46,7 +46,6 @@ export function RailProperty({
         action={
           <Button
             variant="plain"
-            size="sm"
             disabled={disabled}
             // Named per property: a rail of bare "Edit" buttons tells a screen
             // reader nothing about which one it has landed on.
@@ -69,7 +68,6 @@ export function RailProperty({
       action={
         <Button
           variant="plain"
-          size="sm"
           aria-label={`Cancel editing ${label}`}
           onClick={() => setEditing(false)}
         >

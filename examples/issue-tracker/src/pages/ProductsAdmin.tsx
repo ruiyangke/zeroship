@@ -1,6 +1,5 @@
 import { useMemo, useState, type ComponentPropsWithoutRef } from "react";
 import { Banner,
-  Button,
   Checkbox,
   Dialog,
   Drawer,
@@ -14,6 +13,7 @@ import { Banner,
   Tabs,
 } from "@zeroship/ui";
 import { Badge } from "../ui/Badge";
+import { Button } from "../ui/Button";
 import {
   createComponent,
   createMilestone,
@@ -171,7 +171,7 @@ function NewProductDialog() {
     <>
       {/* A plain Button driving the controlled `open`, matching how the issue
           list opens its search builder. */}
-      <Button variant="filled" size="sm" onClick={() => setOpen(true)}>
+      <Button variant="filled" onClick={() => setOpen(true)}>
         New product
       </Button>
       <Dialog open={open} onOpenChange={setOpen}>
@@ -519,7 +519,6 @@ function ProductEditorBody({ detail }: { detail: ProductDetail }) {
         <div>
           <Button
             variant="filled"
-            size="sm"
             disabled={busy}
             onClick={() =>
               save.mutate({
@@ -546,7 +545,6 @@ function ProductEditorBody({ detail }: { detail: ProductDetail }) {
           {confirming === null ? (
             <Button
               variant="plain"
-              size="sm"
               disabled={remove.isPending}
               onClick={async () => {
                 try {
@@ -573,13 +571,12 @@ function ProductEditorBody({ detail }: { detail: ProductDetail }) {
                 <Button
                   variant="filled"
                   intent="destructive"
-                  size="sm"
                   disabled={remove.isPending}
                   onClick={() => remove.mutate({ id: product.id, deleteIssues: true })}
                 >
                   Delete it and its issues
                 </Button>
-                <Button variant="plain" size="sm" onClick={() => setConfirming(null)}>
+                <Button variant="plain" onClick={() => setConfirming(null)}>
                   Keep it
                 </Button>
               </div>
@@ -642,7 +639,6 @@ function ComponentsAdmin({
               </span>
               <Button
                 variant="gray"
-                size="sm"
                 disabled={busy}
                 onClick={() => toggle.mutate({ id: c.id, isActive: c.isActive })}
               >
@@ -654,7 +650,7 @@ function ComponentsAdmin({
       )}
       <InlineForm>
         <Input aria-label="New component" placeholder="New component" value={name} onChange={(e) => setName(e.target.value)} />
-        <Button variant="gray" size="sm" disabled={busy || !name.trim()} onClick={submitAdd}>
+        <Button variant="gray" disabled={busy || !name.trim()} onClick={submitAdd}>
           Add
         </Button>
       </InlineForm>
@@ -698,7 +694,7 @@ function VersionsAdmin({
       )}
       <InlineForm>
         <Input aria-label="New version" placeholder="New version" value={name} onChange={(e) => setName(e.target.value)} />
-        <Button variant="gray" size="sm" disabled={busy || !name.trim()} onClick={submitAdd}>
+        <Button variant="gray" disabled={busy || !name.trim()} onClick={submitAdd}>
           Add
         </Button>
       </InlineForm>
@@ -743,7 +739,7 @@ function MilestonesAdmin({
       )}
       <InlineForm>
         <Input aria-label="New milestone" placeholder="New milestone" value={name} onChange={(e) => setName(e.target.value)} />
-        <Button variant="gray" size="sm" disabled={busy || !name.trim()} onClick={submitAdd}>
+        <Button variant="gray" disabled={busy || !name.trim()} onClick={submitAdd}>
           Add
         </Button>
       </InlineForm>

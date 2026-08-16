@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { Button, Input } from "@zeroship/ui";
+import { Input } from "@zeroship/ui";
+import { Button } from "../../ui/Button";
 import { addDependency, removeDependency } from "../../api";
 import { StatusBadge } from "../Badges";
 import { FieldError, Hint, InlineForm, Muted } from "../AppPrimitives";
@@ -105,7 +106,7 @@ export function DependenciesPanel({ issueId }: { issueId: string }) {
                         return (
                           <li key={id}>
                             {node ? <IssueLink id={id} summary={node.summary} status={node.status} /> : id}
-                            <Button variant="gray" size="sm" disabled={busy} onClick={() => void remove(id)}>
+                            <Button variant="gray" disabled={busy} onClick={() => void remove(id)}>
                               Remove
                             </Button>
                           </li>
@@ -136,7 +137,7 @@ export function DependenciesPanel({ issueId }: { issueId: string }) {
         {!graphQ.isError ? (
           <InlineForm>
             <Input aria-label="Issue this depends on" placeholder="PARSER-12" value={newDep} onChange={(e) => setNewDep(e.target.value)} />
-            <Button variant="gray" size="sm" disabled={busy || !newDep.trim()} onClick={() => void add()}>
+            <Button variant="gray" disabled={busy || !newDep.trim()} onClick={() => void add()}>
               Add dependency
             </Button>
           </InlineForm>
