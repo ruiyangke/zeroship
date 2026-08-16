@@ -102,3 +102,20 @@ Queued finding 9 is stale. Auth still derives the access-token subject at
 `290c85e0a` removed the double projection before this baseline. The cited Auth
 line range and both Gateway ranges have rotted; the core non-UUID behavior is
 still present at `crates/core/src/auth/mod.rs:302-318` but is not reached here.
+
+## Focused real-OP setup red
+
+The first focused run of the strengthened `oidc_rp_e2e` reused the completed
+suite database. It stopped before the new projection assertion because the
+suite had already retired that test's fixed signing key:
+
+```text
+thread 'gateway_bearer_rejects_real_op_id_token_but_accepts_access_token' (2167098) panicked at crates/gateway/tests/oidc_rp_e2e.rs:658:10:
+publish active OP key: Config("signing key RdsIdO3CsMDzCjNZvzh9oqMmTgMASg3jgoAi8dXZLIQ has non-activatable status \"retiring\"")
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.24s
+```
+
+This is cross-command contamination caused by intentionally reusing the suite
+database after the baseline finished. It is not one of the nine suite failures
+and says nothing about the projection assertion. The rerun must use a separate
+freshly migrated local database.
