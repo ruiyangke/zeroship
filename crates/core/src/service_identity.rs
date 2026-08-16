@@ -102,3 +102,94 @@ impl ServiceIdentity {
         &self.attributes
     }
 }
+
+/// Transport observations supplied to the service identity framework.
+///
+/// This is the mechanism-fat input. It can represent an absent assertion so
+/// transports do not have to invent one. Only [`verify_identity`] can convert
+/// it into the presence-proven input accepted by verifier implementations.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PeerCredentials<'a> {
+    bearer_assertion: Option<&'a str>,
+    expected_audience: &'a str,
+}
+
+impl<'a> PeerCredentials<'a> {
+    /// Record the assertion observed by a transport and the expected audience.
+    #[must_use]
+    pub fn new(bearer_assertion: Option<&'a str>, expected_audience: &'a str) -> Self {
+        Self {
+            bearer_assertion,
+            expected_audience,
+        }
+    }
+}
+
+/// Presence-proven credentials passed to a verifier implementation.
+///
+/// Its fields are private and it has no public constructor, so an
+/// implementation can never receive an absent or empty assertion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PresentedCredentials<'a> {
+    bearer_assertion: &'a str,
+    expected_audience: &'a str,
+}
+
+impl PresentedCredentials<'_> {
+    /// Return the non-empty bearer assertion observed by the transport.
+    #[must_use]
+    pub fn bearer_assertion(&self) -> &str {
+        self.bearer_assertion
+    }
+
+    /// Return the audience the verifier must require.
+    #[must_use]
+    pub fn expected_audience(&self) -> &str {
+        self.expected_audience
+    }
+}
+
+/// Failure to establish a service identity.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum AuthError {
+    /// The transport supplied neither a credential nor a non-empty assertion.
+    #[error("no service credential presented")]
+    NoCredentialPresented,
+    /// A presented credential did not pass mechanism-specific verification.
+    #[error("service credential rejected")]
+    CredentialRejected,
+}
+
+/// Mechanism-specific mapping from presented credentials to a neutral identity.
+pub trait IdentityVerifier {
+    /// Verify a presence-proven observation and return a mechanism-thin identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::CredentialRejected`] when mechanism checks fail.
+    fn verify(
+        &self,
+        credentials: &PresentedCredentials<'_>,
+    ) -> Result<ServiceIdentity, AuthError>;
+}
+
+/// Reject absent credentials before dispatching to a verifier implementation.
+///
+/// # Errors
+///
+/// Returns [`AuthError::NoCredentialPresented`] for a missing or empty bearer
+/// assertion. Other errors come from the selected verifier implementation.
+pub fn verify_identity(
+    verifier: &(impl IdentityVerifier + ?Sized),
+    observed: &PeerCredentials<'_>,
+) -> Result<ServiceIdentity, AuthError> {
+    let bearer_assertion = observed
+        .bearer_assertion
+        .filter(|assertion| !assertion.is_empty())
+        .ok_or(AuthError::NoCredentialPresented)?;
+    let presented = PresentedCredentials {
+        bearer_assertion,
+        expected_audience: observed.expected_audience,
+    };
+    verifier.verify(&presented)
+}
