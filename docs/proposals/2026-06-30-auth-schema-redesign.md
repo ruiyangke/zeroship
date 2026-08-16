@@ -57,7 +57,7 @@ Grant matrix for the redesigned tables. `S/I/U/D` mean `SELECT`/`INSERT`/`UPDATE
 | `zeroship.oauth_grants` | SIU | SID | - | - | - | End-user OAuth consent grant table. Control keeps INSERT/DELETE for lifecycle cleanup from `V0025`; do not downgrade to read-only by assumption. |
 | `zeroship.oauth_authorization_codes` | SIUD | - | - | - | - | New P1 OP single-use code store; auth-private. |
 | `zeroship.oauth_refresh_tokens` | SIUD | - | - | - | - | New P1 OP refresh-token family store; auth-private. |
-| `zeroship.signing_keys` | SID | - | - | - | - | Renamed from `jwk_key_state`. Public JWK/rotation metadata only; raw private key custody is file/KMS. |
+| `zeroship.signing_keys` | SIUD | - | S | - | - | Public JWK lifecycle and issued-expiry watermark; raw private key custody is file/KMS. Gateway reads JWKS metadata only. |
 | `zeroship.token_revocations` | - | SID | SID | - | - | Primary Bearer-arm revocation mechanism. `V0025` grants gateway and control SELECT/INSERT/DELETE; auth has no grant in that baseline. |
 | `zeroship.dpop_jtis` | - | - | - | - | - | Renamed from `dpop_jti`. `V0025` grants no service role; any P1 owner change must be explicit. |
 | `zeroship.rate_limits` | SID | SD | - | - | - | Auth throttling and cleanup state; control keeps DELETE for cleanup. |
@@ -78,13 +78,13 @@ Mandatory RLS carried forward from `V0025`:
 - `zeroship.app_user_identities` must `ENABLE` and `FORCE ROW LEVEL SECURITY` unconditionally with `tenant_isolation` keyed on the renamed `client_id` column: `client_id = current_setting('zeroship.tenant_client', true)`. This GUC is TEXT and carries the per-app OAuth client id (`oac_...`), not the UUID app id. Renaming `app_client_id` to `client_id` requires rewriting the policy predicate in lockstep.
 - `zeroship_auth` and `zeroship_control` remain BYPASSRLS service roles; `zeroship_gateway` is the RLS-gated direct-access role. Unset tenant GUCs fail closed because `current_setting(..., true)` returns NULL and the predicate matches no rows.
 
-The secret-bearing OP tables are intentionally not granted to `zeroship_worker`, `zeroship_app`, or `zeroship_gateway`: `zeroship.oauth_refresh_tokens`, `zeroship.oauth_authorization_codes`, `zeroship.signing_keys`, `zeroship.oauth_grants`, and the client-secret/verifier column(s) on `zeroship.oauth_clients`. Not every encrypted token secret is auth-private: `zeroship.app_session_anchors.refresh_token_enc` is intentionally readable/writable by `zeroship_gateway` under FORCE RLS, and `zeroship.device_authorizations.provider_refresh_token_enc` is control-owned device-flow state. Those encrypted columns rely on their own key-custody boundary; they are still never granted directly to worker/app roles.
+The secret-bearing OP tables are intentionally not granted to `zeroship_worker`, `zeroship_app`, or `zeroship_gateway`: `zeroship.oauth_refresh_tokens`, `zeroship.oauth_authorization_codes`, `zeroship.oauth_grants`, and the client-secret/verifier columns on `zeroship.oauth_clients`. The non-secret `zeroship.signing_keys` registry is the exception: gateway has SELECT-only access to its public JWK lifecycle metadata. Not every encrypted token secret is auth-private: `zeroship.app_session_anchors.refresh_token_enc` is intentionally readable/writable by `zeroship_gateway` under FORCE RLS, and `zeroship.device_authorizations.provider_refresh_token_enc` is control-owned device-flow state. Those encrypted columns rely on their own key-custody boundary; they are still never granted directly to worker/app roles.
 
 ### Signing-key custody requirement
 
 `crates/auth` loads the raw OP private signing key from `AUTH_SIGNING_KEY_FILE` at boot. The file contains PEM/PKCS#8 key material and should be provisioned like `GATEWAY_SIGNING_KEY_FILE`, or replaced by a KMS-backed equivalent with the same runtime custody boundary.
 
-`zeroship.signing_keys` is a registry, not the crown-jewel key store. It stores only `kid`, `alg`, public JWK, status, and rotation timestamps. If a future multi-node design requires persisted private-key material for rotation coordination, the persisted value must be encrypted at rest by a key from the file/KMS custody path; it must never be plaintext and must never be readable by any database role as usable private key material.
+`zeroship.signing_keys` is a registry, not the crown-jewel key store. It stores `kid`, `alg`, public JWK, status, rotation timestamps, and `max_issued_expires_at`. The last field is a public-lifecycle watermark, not secret key material. If a future multi-node design requires persisted private-key material for rotation coordination, the persisted value must be encrypted at rest by a key from the file/KMS custody path; it must never be plaintext and must never be readable by any database role as usable private key material.
 
 ## 3. The redesigned tables
 
@@ -236,7 +236,7 @@ Old: `zeroship.jwk_key_state` -> `zeroship.signing_keys`.
 Creating migration: `V0002__auth.sql`.
 Purpose: signing-key/JWKS rotation state. P1 OP should expand this from "state row" into the platform AS public key and rotation registry.
 
-Final columns: `kid TEXT NOT NULL`, `alg TEXT NOT NULL`, `public_jwk JSONB NOT NULL`, `status TEXT NOT NULL CHECK (status IN ('active','next','retiring'))`, `created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`, `activated_at TIMESTAMPTZ NULL`, `retiring_at TIMESTAMPTZ NULL`, `retired_at TIMESTAMPTZ NULL`.
+Final columns: `kid TEXT NOT NULL`, `alg TEXT NOT NULL`, `public_jwk JSONB NOT NULL`, `status TEXT NOT NULL CHECK (status IN ('active','next','retiring','retired'))`, `created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`, `activated_at TIMESTAMPTZ NULL`, `retiring_at TIMESTAMPTZ NULL`, `retired_at TIMESTAMPTZ NULL`, `max_issued_expires_at TIMESTAMPTZ NULL`.
 
 PK/FKs: PK `kid`; no FKs.
 
@@ -543,10 +543,11 @@ Migration mechanics: because this is pre-launch, implement the final names by re
 | `zeroship.jwk_key_state.created_at` | `zeroship.signing_keys.created_at` | keep |
 | `(new)` | `zeroship.signing_keys.alg` | P1 OP addition |
 | `(new)` | `zeroship.signing_keys.public_jwk` | P1 OP addition; public material only |
-| `(new)` | `zeroship.signing_keys.status` | P1 OP addition: `active`, `next`, or `retiring` |
+| `(new)` | `zeroship.signing_keys.status` | P1 OP addition: `active`, `next`, `retiring`, or terminal `retired` |
 | `(new)` | `zeroship.signing_keys.activated_at` | P1 OP rotation timestamp |
 | `(new)` | `zeroship.signing_keys.retiring_at` | P1 OP rotation timestamp |
 | `(new)` | `zeroship.signing_keys.retired_at` | P1 OP rotation timestamp |
+| `(new)` | `zeroship.signing_keys.max_issued_expires_at` | Greatest expiry returned by this key; concurrent-retirement fence |
 | `zeroship.token_revocations` | `zeroship.token_revocations` | keep table |
 | `zeroship.token_revocations.client_id` | `zeroship.token_revocations.client_id` | keep |
 | `zeroship.token_revocations.sub` | `zeroship.token_revocations.token_subject` | rename |

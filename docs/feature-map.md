@@ -347,7 +347,7 @@ audit, and a dev-tier parity implementation.
 | RP-initiated logout | 🟢 | GET/POST /oauth2/logout | `crates/auth/src/ui/logout.rs`, `oidc/refresh.rs` | `docs/reference/auth.md` | — | Revokes local OP session + refresh families. |
 | OIDC backchannel logout (BCL 1.0) | 🟢 | POST /oidc/backchannel-logout (gateway) | `crates/gateway/src/backchannel_logout.rs` | `docs/reference/auth.md` | — | jti replay prevention; per-app + global. |
 | User profile page (/me) | 🟡 | GET /me | `crates/auth/src/ui/me.rs` | `docs/reference/auth.md` | — | Link-a-new-provider deferred ("coming soon"). |
-| JWK rollover (operator-driven) | 🟡 | internal | `crates/auth/src/oidc/issuer.rs` (`publish_active_key`), `oidc/metadata.rs` | — | — | Boot reconcile of `AUTH_SIGNING_KEY_FILE` into `zeroship.signing_keys`; the prior active key goes `retiring` and is still served in JWKS. EdDSA only. The daily rotation cron was deleted with the Hydra machinery, so rollover needs an operator key swap + restart, and nothing purges retiring rows. |
+| JWK rollover (operator-driven) | &#x1F7E1; | internal | `crates/auth/src/oidc/issuer.rs` (`publish_active_key`), `oidc/metadata.rs`, `cron/signing_key_retention.rs` | - | `crates/auth/tests/signing_key_retention_test.rs` | Boot reconcile of `AUTH_SIGNING_KEY_FILE` moves the prior active key to `retiring`; JWKS keeps it until the persisted maximum issued expiry plus cache and skew allowances elapse. The hourly cron then changes it to terminal `retired` and preserves the audit row. EdDSA only. |
 | Audit retention cron | 🟢 | internal | `crates/auth/src/cron/audit_retention.rs` | — | `crates/auth/src/cron/audit_retention.rs` | security 365d / PII 90d / debug 30d. |
 | Token sweep cron | 🟢 | internal | `crates/auth/src/cron/token_sweep.rs` | — | `crates/auth/src/cron/token_sweep.rs` | Expired magic_links/verifications/etc. |
 | Account reaper cron | 🟢 | internal | `crates/auth/src/cron/account_reaper.rs` | — | `crates/auth/src/cron/account_reaper.rs` | Per-user txns; financial-history retention. |
@@ -1202,7 +1202,7 @@ test injection, `kv_connection` retry hint, SCAN glob escaping, the cluster sing
 `ZEROSHIP_STORAGE_ROOT`, the multi-node shared-volume requirement, `content_type` discard behavior,
 path-validation rules, and the missing SDK test suite.
 
-**Auth:** the four crons (JWK rotation, audit retention, token sweep, account reaper), rate
+**Auth:** the four crons (signing-key retention, audit retention, token sweep, account reaper), rate
 limiting, the mailer abstraction + drivers, email suppression, relay email forwarding, CSRF
 double-submit, native OP signing, security-headers middleware, JWK publication, startup
 validation, account eligibility, the `@zeroship/auth` React adapter, `requestScopes`,

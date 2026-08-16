@@ -105,9 +105,14 @@ CLI's `status`, `validate`, or `rollback` verbs. The live-PG
      --project-id zeroship
    ```
 
-The loader picks the file up by its timestamp order — no master file to edit.
-**Never edit an already-applied migration** (the engine validates checksums and
-aborts on drift); add a new timestamped file instead.
+The loader picks the file up by its timestamp order - no master file to edit.
+While the platform remains pre-launch, the repository `AGENTS.md` policy is the
+exception: add a new system field to its creating migration and recreate any
+disposable development database whose checksum now differs. Do not add an
+`ALTER` backfill for users or production data that do not exist. After launch,
+or for creator migrations that have actually shipped, never edit an applied
+migration; the engine validates checksums and aborts on drift, so add a new
+timestamped file instead.
 
 ## Operator-approved creator go-live (online rename / destructive ops)
 

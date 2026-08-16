@@ -530,13 +530,14 @@ Consent linkage: the authoritative relay alias remains in `app_user_identities` 
 | `kid TEXT NOT NULL` (PK) | RFC 7638 JWK thumbprint. |
 | `alg TEXT NOT NULL` | EdDSA for platform keys. |
 | `public_jwk JSONB NOT NULL` | Public OKP Ed25519 JWK served by JWKS. **No private-key column.** |
-| `status TEXT NOT NULL CHECK (status IN ('active','next','retiring'))` | Canonical CHECK domain. There is **no** `retired` or `compromised` status value (the CHECK forbids them); retirement and compromise are modeled by lifecycle + row deletion, see below. |
+| `status TEXT NOT NULL CHECK (status IN ('active','next','retiring','retired'))` | Normal retirement ends in terminal `retired`; compromise remains an operator-approved immediate removal. |
 | `created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()` | Audit. |
 | `activated_at TIMESTAMPTZ NULL` | Set when promoted to `active`. |
-| `retiring_at TIMESTAMPTZ NULL` | Set when moved to `retiring` (replaced by new active). The earliest-removal instant is computed as `retiring_at + overlap` (§5.2); no separate `retire_after` column. |
-| `retired_at TIMESTAMPTZ NULL` | Recorded at the moment the row is removed from JWKS (the row is then deleted). |
+| `retiring_at TIMESTAMPTZ NULL` | Set when moved to `retiring`; it is not assumed to be the last possible signature time. |
+| `retired_at TIMESTAMPTZ NULL` | Recorded when the row enters terminal `retired` and leaves JWKS. |
+| `max_issued_expires_at TIMESTAMPTZ NULL` | Greatest exact expiry of any token returned by this key. Issuance advances it atomically before returning. |
 
-PK `kid`; no FKs. Only one `active` key at a time; at most one `next`. `retiring` keys stay in JWKS until the overlap window closes, then the row is **deleted** (retirement is `retiring` → removed, not a `retired` status value). Compromise is an emergency rotation that promotes a fresh `active` and **deletes** the compromised key's row outright (documented in §5.5), not a status transition.
+PK `kid`; no FKs. Only one `active` key at a time; at most one `next`. `retiring` keys stay in JWKS through their persisted issued-expiry watermark plus every cache/skew allowance, then become terminal `retired`. The row survives for audit while JWKS excludes it. Compromise is an emergency rotation that promotes a fresh `active` and deletes the compromised row outright (Section 5.5).
 
 **Private-key custody (MF-1):** the raw OP private signing key is **never stored in Postgres**. `crates/auth` loads it from `AUTH_SIGNING_KEY_FILE` (PEM/PKCS#8) at boot, mirroring the gateway's `GATEWAY_SIGNING_KEY_FILE` pattern (or a KMS-backed equivalent with the same custody boundary). This table is a public-key + rotation-metadata registry only; no database role can read usable private key material. If a future multi-node design requires persisted private-key material for rotation coordination, it must be encrypted at rest by a wrapping key from the file/KMS custody path and never stored plaintext (schema-redesign §"Signing-key custody requirement").
 
@@ -592,7 +593,7 @@ Concurrency test-grade requirement: two simultaneous `/token` requests using the
 
 <!-- Rewritten in round 1: addressing MF-1. The private key is file-based (AUTH_SIGNING_KEY_FILE), never DB-resident; there is no DB ciphertext, no AAD, and no decrypt_with_keys path for the signing key. -->
 
-The OP has one platform issuer and one signing-key set for access tokens, ID tokens, and logout tokens. Keys are Ed25519 only. The **active private signing key is loaded from `AUTH_SIGNING_KEY_FILE`** (PEM/PKCS#8) into process memory at boot by `crates/auth`, mirroring the gateway's `GATEWAY_SIGNING_KEY_FILE`; a KMS-backed equivalent with the same custody boundary may substitute. The private key is **never written to Postgres** — there is no `private_key_enc` column, no AES-GCM ciphertext, no `core::crypto` AAD, and no `decrypt_with_keys` path for it. `zeroship.signing_keys` holds only the public JWK + rotation metadata (`kid`, `alg`, `public_jwk`, `status`, `created_at`, `activated_at`, `retiring_at`, `retired_at`); the `kid` of the file-provisioned key is computed at boot as the RFC 7638 thumbprint of its public JWK and reconciled against (or inserted into) the registry row. Key provisioning and rollover are out-of-band file/KMS operations coordinated with the registry status transitions in §5.4/§5.5.
+The OP has one platform issuer and one signing-key set for access tokens, ID tokens, and logout tokens. Keys are Ed25519 only. The active private signing key is loaded from `AUTH_SIGNING_KEY_FILE` (PEM/PKCS#8) into process memory at boot by `crates/auth`, mirroring the gateway's `GATEWAY_SIGNING_KEY_FILE`; a KMS-backed equivalent with the same custody boundary may substitute. The private key is never written to Postgres. `zeroship.signing_keys` holds only public JWK and lifecycle metadata: `kid`, `alg`, `public_jwk`, `status`, `created_at`, `activated_at`, `retiring_at`, `retired_at`, and `max_issued_expires_at`. The last field is an expiry watermark, not private key material. Key provisioning and rollover are out-of-band file/KMS operations coordinated with the registry status transitions in Sections 5.4 and 5.5.
 
 ### 5.2 Rotation cadence and overlap
 
@@ -602,14 +603,13 @@ JWKS overlap constants:
 
 | Value | Default |
 | --- | --- |
-| Access token TTL | 15 minutes |
-| ID token TTL | 15 minutes max |
-| Logout token replay window | 5 minutes |
-| JWKS cache TTL | 5 minutes |
+| Maximum signed token lifetime | 12 hours (43,200 seconds) |
+| JWKS `max-age` | 5 minutes (300 seconds) |
+| JWKS `stale-while-revalidate` | 5 minutes (300 seconds) |
 | Clock skew | 2 minutes |
-| Minimum overlap | 1 hour |
+| Full fallback horizon from `retiring_at` | 12 hours 12 minutes (43,920 seconds) |
 
-The overlap window is `max(max_signed_token_ttl + jwks_cache_ttl + clock_skew, 1 hour)`. Refresh tokens are opaque and do not extend JOSE overlap.
+Every production signing path first creates the token, then atomically advances `max_issued_expires_at` before returning it. Normal retirement waits until that exact expiry plus 300 seconds of freshness, 300 seconds of stale-while-revalidate, and 120 seconds of clock skew. A null watermark uses `retiring_at + 43,200 + 300 + 300 + 120 = retiring_at + 43,920 seconds`. Refresh tokens are opaque and do not extend JOSE retention.
 
 ### 5.3 Bootstrap
 
@@ -622,18 +622,18 @@ The overlap window is `max(max_signed_token_ttl + jwks_cache_ttl + clock_skew, 1
 
 ### 5.4 Planned rotation
 
-<!-- Rewritten in round 1: addressing MF-1 (file-provisioned key material) + MF-5 (canonical status domain; retirement = delete, no `retired` status value). -->
+<!-- Updated after implementation: normal retirement preserves a terminal audit row and uses the persisted maximum issued expiry. -->
 
 1. Provision a new Ed25519 key into the file/KMS custody path (the next-key file slot) out-of-band; under advisory lock, insert its public JWK as `status='next'` with its RFC 7638 `kid`. No private bytes touch the DB.
 2. JWKS immediately serves `active + next + retiring`. New tokens are still signed by the `active` file key.
-3. After at least one JWKS cache TTL, promote `next` to `active` (set `activated_at`) and move the old active to `status='retiring'`, set `retiring_at = NOW()`; the file/KMS active-key slot is swapped to the new key in lockstep. The earliest removal instant is `retiring_at + overlap` (§5.2), computed, not stored.
-4. New tokens are signed only by the new active file key.
-5. Verifiers accept keys present in JWKS. `retiring` keys stay published until `retiring_at + overlap`.
-6. After `retiring_at + overlap`, set `retired_at = NOW()` for audit and **delete** the row (and decommission its file/KMS slot); it is no longer served or accepted. Retirement is the `retiring` → removed lifecycle — there is no `retired` status value (the canonical CHECK forbids it).
+3. After at least one JWKS cache TTL, promote `next` to `active` (set `activated_at`) and move the old active to `status='retiring'`, set `retiring_at = NOW()`; the file/KMS active-key slot is swapped to the new key in lockstep.
+4. Existing processes holding the old key may finish issuing while they drain. Each token return first advances that old row's exact `max_issued_expires_at`. A restarted process cannot reactivate a `retiring` row.
+5. Verifiers accept keys present in JWKS. The hourly retention cron serves `retiring` keys until the watermark plus all cache/skew allowances has elapsed. The null-watermark fallback is the full 43,920-second horizon from `retiring_at`.
+6. The cron atomically sets `status='retired'` and preserves `retired_at` plus the row for audit. JWKS excludes `retired`. It never retires `active` or `next` rows.
 
 ### 5.5 Emergency compromise
 
-<!-- Rewritten in round 1: addressing MF-5. Compromise is modeled as emergency rotation + immediate row deletion, not a `compromised` status value (the canonical CHECK only allows active/next/retiring). -->
+<!-- Updated after implementation: emergency deletion bypasses the normal terminal-retirement horizon; there is no `compromised` status. -->
 
 If a private key is suspected compromised:
 
@@ -666,7 +666,7 @@ If a private key is suspected compromised:
 | Scope escalation | `/authorize` validates against client allowlist and `app_scope_defs`; POST consent re-runs classifier; `/token` cannot expand scopes. | RFC 6749 §3.3; RFC 6749 §5.2 `invalid_scope` | `authorize_unknown_scope_invalid_scope`; `token_scope_override_rejected`; `consent_union_does_not_drop_prior_scopes`. |
 | Cross-app subject/email correlation | App tokens and ID tokens use pairwise `sub`; creator-app email claim is relay alias minted at consent, not real inbox. | OIDC Core §8.1, §8.2 | `app_tokens_use_pairwise_sub`; `email_scope_uses_relay_alias`. Residual: user may voluntarily reveal real email inside app. |
 | Logout/revocation gap | `/revoke`, logout, password reset, and refresh replay write `token_revocations`; OP originates BCL logout tokens with no nonce and RP replay checks. | RFC 7009 §2.1; OIDC BCL §2.4-§2.6 | `refresh_reuse_writes_token_revocation`; `logout_token_has_events_no_nonce`; `bcl_failure_does_not_skip_local_revocation`. |
-| JWKS rotation outage | Publish next before use; serve retiring until all old tokens plus cache/skew expire; verifiers stale-on-error last-good keys. | RFC 7517 §5; RFC 7515 §4.1.4 | `jwks_serves_active_next_retiring`; `old_token_verifies_during_overlap`; `retired_key_removed_after_overlap`. |
+| JWKS rotation outage | Publish next before use; atomically persist each key's maximum issued expiry; serve retiring through expiry plus max-age, stale-while-revalidate, and skew; keep active/next immune from pruning. | RFC 7517 Section 5; RFC 7515 Section 4.1.4 | `retiring_key_inside_horizon_remains_published`; `key_past_horizon_leaves_jwks_with_reason_and_idempotently_keeps_audit_row`; `issuance_and_prune_never_return_a_token_without_its_published_key`. |
 
 ## 7. Dual-issuer migration mechanics
 
@@ -739,11 +739,11 @@ This round reconciles the P0 spec against the same-day canonical schema redesign
 
 | Item | Resolution |
 | --- | --- |
-| **MF-1 (CRITICAL) signing-key custody** | Removed `private_key_enc BYTEA NOT NULL` from §3.2 `signing_keys`; removed the §5.1 AES-GCM AAD / `decrypt_with_keys` path and the §5.3 "generate→encrypt→insert active" bootstrap. The private key now loads from `AUTH_SIGNING_KEY_FILE` (PEM/PKCS#8) at boot (mirrors `GATEWAY_SIGNING_KEY_FILE`); the table holds only public JWK + metadata (`kid`, `alg`, `public_jwk`, `status`, `created_at`, `activated_at`, `retiring_at`, `retired_at`). §5.3 bootstrap now *loads + reconciles* the registry row instead of minting into the DB. Matches schema-redesign §`signing_keys` + §"Signing-key custody requirement". |
+| **MF-1 (CRITICAL) signing-key custody** | Removed `private_key_enc BYTEA NOT NULL` from the `signing_keys` design and removed the AES-GCM/decrypt path. The private key loads from `AUTH_SIGNING_KEY_FILE`; the table holds public JWK plus lifecycle metadata, including the non-secret `max_issued_expires_at` watermark. Bootstrap loads and reconciles the registry row instead of minting into the DB. |
 | **MF-2 (CRITICAL) table names** | `auth_codes` → `oauth_authorization_codes`; `refresh_tokens` + `refresh_token_families` collapsed into a single `oauth_refresh_tokens` with a `refresh_family_id` column (no families table). Fixed §3.2 (table specs), §4.1 (CLI rotation), and §1.3 steps 3/5. All names are `zeroship.*` single schema. |
 | **MF-3 (CRITICAL) auth-code binding set** | §4.2 / §1.2 step 6 / §3.2 rewritten to the canonical `oauth_authorization_codes` columns: `code_hash BYTEA`, `user_id` (not subject/pairwise_sub/sector_identifier), `client_id`, `redirect_uri`, `pkce_challenge`/`pkce_method` (not code_challenge/method), split `requested_scopes`/`granted_scopes` (not `scope`), `nonce`, `auth_time`, `amr`, expiry ≤60s, atomic one-time consume. Pairwise is **re-derived** at `/token` via JOIN to `app_oauth_clients.sector_identifier` + check against `app_user_identities.pairwise_sub`, since the code table stores neither. |
 | **MF-4 (CRITICAL) reuse→revoke linkage** | Dropped `token_set_id` everywhere (it does not exist in canonical). Auth-code replay → `invalid_grant` + `auth_code_reuse` audit. The replay→family-revoke path is on the refresh side, keyed on `oauth_refresh_tokens.refresh_family_id` (revoke whole family on replay). Fixed §1.2 steps 5/8, §4.2, §1.3 step 5, and the test wiring (`auth_code_reuse_is_invalid_grant`, `refresh_reuse_revokes_family`). |
-| **MF-5 (CRITICAL) signing-key status** | Status domain is now canonical `CHECK (status IN ('active','next','retiring'))` in §3.2/§5.4/§5.5. Dropped `retired`/`compromised` as status values: retirement = `retiring` → row deletion (with `retired_at` audit stamp); compromise = emergency rotation that deletes the key row outright (prose in §5.5). |
+| **MF-5 (CRITICAL) signing-key status** | Status domain is `active`, `next`, `retiring`, or terminal `retired`. Normal retirement preserves the row and audit timestamps; an operator may still delete a known-compromised key immediately as an emergency cut. |
 | **MF-6 (MAJOR) UserInfo endpoint** | Added §1.10 `GET/POST /userinfo` (OIDC Core §5.3): Bearer access-token auth, RFC 9068 validation reuse, `openid`-scope gate, pairwise `sub` matching the token, scope→claim mapping with relay-alias email. Advertised `userinfo_endpoint` in §1.6 discovery. Required for the Basic-OP conformance gate. |
 | **MF-7 (MAJOR) RP-initiated logout** | Added §1.11 `GET /logout` (OIDC RP-Initiated Logout 1.0): `id_token_hint`, exact-match `post_logout_redirect_uri`, local session/family revocation, 303 redirect with `state`. Advertised `end_session_endpoint` in §1.6. Reconciled with §1.9 (this endpoint is the end-user entry point that triggers OP-originated back-channel logout fan-out). |
 
