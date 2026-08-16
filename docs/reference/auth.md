@@ -180,9 +180,9 @@ All token operations are native to `crates/auth`.
 
 ### CLI platform tokens
 
-The device flow exchanges an approved grant for a platform access token through
-`POST /internal/platform-token`. That mint is deliberately narrower than the
-other internal control APIs:
+The CLI currently uses control's parallel device flow. It exchanges an approved
+grant for a platform access token through `POST /internal/platform-token`. That
+mint is deliberately narrower than the other internal control APIs:
 
 - Only auth and control receive `auth.platform_mint_key`. The worker still
   needs `control_key` for its normal control-plane calls, but that key is not
@@ -196,13 +196,25 @@ other internal control APIs:
   `zeroship-cli` client ID. Neither value is caller-controlled.
 - The requested lifetime must be positive and no more than 12 hours.
 
+Auth also reconciles a first-party `zeroship-cli` OAuth client registration at
+startup. Its registered scope ceiling is exactly `apps:deploy`, `apps:read`,
+`apps:write`, and `secrets:read`; a token request cannot expand that set. An
+approved OP device grant for this client produces a 12-hour access token, still
+bounded by `PLATFORM_TOKEN_MAX_TTL_SECS`, with the configured control audience
+and a public `sub` equal to the platform principal UUID. Generic app clients
+continue to receive app-sector pairwise `pws_...` subjects.
+
+This OP path is additive and `zeroship login` has not switched to it. Control's
+parallel device flow and the internal platform-token mint remain unchanged
+until a later change moves the CLI atomically.
+
 Control's bearer verification path honors a
 `zeroship.token_revocations` marker for `zeroship-cli`. Account deletion writes
 that marker, so credentials issued before a deletion request stay revoked even
-if the request is cancelled. The CLI client is not registered for RFC 7009
-client authentication, and `zeroship logout` deletes only the local credential.
-Other revocation reasons therefore rely on expiry; the 12-hour ceiling remains
-part of the authorization boundary.
+if the request is cancelled. The current `zeroship logout` path does not call
+RFC 7009 and deletes only the local credential. Other revocation reasons
+therefore rely on expiry; the 12-hour ceiling remains part of the authorization
+boundary.
 
 ## OAuth Clients
 
@@ -213,7 +225,9 @@ as apps are created, deployed, and custom-domain redirect URIs change.
 Client IDs for hosted apps are deterministic `oac_...` identifiers. The OP
 loads the client row during authorize/token flows, validates exact redirect URI
 matches, enforces PKCE S256, and uses the app client's sector identifier to
-derive pairwise `pws_...` subjects.
+derive pairwise `pws_...` subjects. The reconciled first-party `zeroship-cli`
+row has no app-client extension and uses the public platform-principal subject
+policy described above.
 
 Brokered clients authenticate at token exchange with a per-client broker secret
 derived from `AUTH_BROKER_SECRET_FILE`. Any other client registered with a

@@ -11,6 +11,15 @@
 //!   `/api/device/token` for a platform access token scoped to the principal's
 //!   `zeroship.principal_grants`.
 //!
+//! The auth service also reconciles a first-party [`PLATFORM_CLI_CLIENT_ID`]
+//! registration at startup. Its OP device grants use [`OP_PROVIDER`] and may
+//! request only [`PLATFORM_CLI_ISSUABLE_SCOPES`]. Redemption issues a public
+//! subject equal to the platform principal UUID, the configured control
+//! audience, and a 12-hour token bounded by [`PLATFORM_TOKEN_MAX_TTL_SECS`].
+//! App clients keep their app-sector pairwise subjects. This path is additive:
+//! `zeroship login` continues to use [`PLATFORM_PROVIDER`] until the CLI and
+//! control's parallel device flow are switched atomically in a later change.
+//!
 //! Both spellings used to be private constants in the crate that wrote them
 //! (`crates/auth/src/oidc/device_token.rs` and
 //! `crates/control/src/device_handlers.rs`), which is how the two flows drifted:
@@ -31,10 +40,15 @@ pub const OP_PROVIDER: &str = "op";
 /// `zeroship.device_grants.provider` for control's platform deploy-token grant.
 pub const PLATFORM_PROVIDER: &str = "platform";
 
-/// OAuth client id fixed onto access tokens issued to `zeroship login`.
+/// OAuth client id reserved for first-party CLI platform access tokens.
+///
+/// Auth reconciles this registration at startup. The current parallel control
+/// flow also fixes this id onto the tokens issued to `zeroship login`.
 pub const PLATFORM_CLI_CLIENT_ID: &str = "zeroship-cli";
 
-/// Scopes the control service may issue to the platform CLI client.
+/// Exact scope ceiling registered for the first-party platform CLI client.
+///
+/// The current parallel control flow uses the same ceiling.
 pub const PLATFORM_CLI_ISSUABLE_SCOPES: [&str; 4] = [
     "apps:deploy",
     "apps:read",
