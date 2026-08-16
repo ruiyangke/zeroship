@@ -100,18 +100,24 @@ fn an_operation_on_a_dropped_table_is_refused() {
         r#"{"op":"dropTable","table":"a"},{"op":"addColumn","table":"a","column":"n","type":"text","nullable":true}"#,
     )
     .expect_err("an op after the table is dropped names a relation that is gone");
+    // Names the OP, not just "drop": every refusal in this family mentions the
+    // drop, so that alone let the addColumn case pass on the createIndex one.
     assert!(
-        refusal.to_lowercase().contains("drop"),
-        "the refusal must point at the drop: {refusal}"
+        refusal.contains("this addColumn targets table"),
+        "the refusal must name the addColumn that targeted the dropped table: {refusal}"
     );
 }
 
 #[test]
 fn an_index_on_a_dropped_table_is_refused() {
-    verdict(
+    let refusal = verdict(
         r#"{"op":"dropTable","table":"a"},{"op":"createIndex","name":"ix","table":"a","columns":[{"kind":"column","name":"v"}]}"#,
     )
     .expect_err("an index on a dropped table names a relation that is gone");
+    assert!(
+        refusal.contains("this createIndex targets table"),
+        "the refusal must name the createIndex, not the sibling addColumn case: {refusal}"
+    );
 }
 
 #[test]

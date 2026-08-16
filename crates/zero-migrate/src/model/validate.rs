@@ -4523,9 +4523,14 @@ fn validate_no_op_targets_a_renamed_away_table(
                     op_index,
                     ts_location: ts_locations.get(op_index).cloned().flatten(),
                     dialect: target_dialect,
+                    // Names the op for the same reason its column-walk sibling
+                    // does: an operator reading this needs to know WHICH
+                    // statement in the envelope targeted the missing table, and
+                    // "this operation" leaves them to find it themselves.
                     reason: format!(
-                        "this operation targets table {table:?}, but {what}, so the table \
-                         will not exist under that name when it runs"
+                        "this {} targets table {table:?}, but {what}, so the table \
+                         will not exist under that name when it runs",
+                        crate::model::op_support::op_kind_and_variant(op).0
                     ),
                     suggested_fix: Some(fix),
                 });

@@ -129,8 +129,12 @@ fn an_index_op_colliding_with_an_inline_index_is_refused() {
     // The two routes crossing: a name declared inline on createTable and again by
     // a standalone createIndex.
     let ops = r#"{"op":"createTable","name":"a","columns":[{"name":"c","type":"int","nullable":false},{"name":"d","type":"int","nullable":true}],"primaryKey":["c"],"indexes":[{"name":"ix","columns":[{"kind":"column","name":"c"}]}]},{"op":"createIndex","name":"ix","table":"a","columns":[{"kind":"column","name":"d"}]}"#;
-    verdict_envelope(ops, Dialect::Postgres)
+    let refusal = verdict_envelope(ops, Dialect::Postgres)
         .expect_err("an inline index and a later createIndex under one name collide the same way");
+    assert!(
+        refusal.contains(r#"index "ix" is created twice"#),
+        "the refusal must be the duplicate-index-name rule naming this index: {refusal}"
+    );
 }
 
 // ---------------------------------------------------------------------------
