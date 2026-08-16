@@ -27,6 +27,7 @@ import type { IssueDetail, ProductDetail } from "../types";
 import { UserPicker } from "../UserPicker";
 import { personName, type PeopleMap } from "./people";
 import { RailSection } from "./RailSection";
+import { RailFieldset } from "./RailFieldset";
 import { StatusControl } from "./StatusControl";
 import { Absent } from "./Absent";
 
@@ -405,7 +406,7 @@ export function FieldsPanel({
   );
   return (
     <div className="fields-panel">
-      <fieldset className="rail-fields" disabled={readOnly}>
+      <RailFieldset disabled={readOnly}>
       {/* The summary is edited in the PAGE HEAD, where the summary is.
           It lived here as "Edit summary" floating at the top of the rail, a
           control several hundred pixels from the words it changes and in a
@@ -509,7 +510,7 @@ export function FieldsPanel({
           Set whiteboard, OS, platform or URL
         </Button>
       )}
-      </fieldset>
+      </RailFieldset>
     </div>
   );
 }

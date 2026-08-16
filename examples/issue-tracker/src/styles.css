@@ -657,10 +657,6 @@ tbody tr:hover { background: var(--surface-2); }
   display: contents;
 }
 
-/* Match the padding used by the other cards in the detail rail. */
-.issue-detail-side .fields-panel {
-  padding: 0.9rem 1rem;
-}
 /* .issue-state itself is defined once, further down (see "bug detail: header
    and tabs") -- that later rule (margin-block-start: 0) absorbed this one. */
 
@@ -1028,9 +1024,6 @@ tbody tr:hover { background: var(--surface-2); }
    rows inline -- so reading down the column the eye had to re-find where a
    value starts three times. */
 .rail-fields {
-  border: 0;
-  padding: 0;
-  margin: 0;
   display: grid;
   grid-template-columns: [label] 7.5rem [value] minmax(0, 1fr) [action] auto;
   column-gap: 0.5rem;

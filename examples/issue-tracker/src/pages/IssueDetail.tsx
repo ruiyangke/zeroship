@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Badge, Banner, Button, Card, Cluster, Input, Stack, Tabs } from "@zeroship/ui";
 import { KindBadge, PriorityBadge, ResolutionBadge, SeverityBadge, StatusBadge } from "../components/Badges";
 import { updateIssue } from "../api";
@@ -18,8 +18,30 @@ import { DependenciesPanel, DuplicatesPanel } from "../components/issue-detail/R
 import { KeywordsPanel } from "../components/issue-detail/KeywordsPanel";
 import { errorMessage } from "../components/rpc";
 import { isVisitor, useSession } from "../components/session";
+import { RailFieldset } from "../components/issue-detail/RailFieldset";
 
 type Tab = "details" | "history";
+
+/**
+ * Main-column related content that is disabled as one unit for visitors.
+ *
+ * This is deliberately not a RailFieldset: it owns a responsive panel grid,
+ * not the rail's label/value/action tracks. The locator stays on the native
+ * fieldset so the signed-out specs keep checking the real disabled boundary.
+ */
+function IssueDetailExtras({
+  children,
+  disabled,
+}: {
+  children: ReactNode;
+  disabled: boolean;
+}) {
+  return (
+    <fieldset className="issue-detail-extras m-0 border-0 p-0" disabled={disabled}>
+      {children}
+    </fieldset>
+  );
+}
 
 /**
  * Editing the issue's title, where the title is.
@@ -291,9 +313,9 @@ export function IssueDetailPage({
                 where nine readOnly props would each be a thing to remember.
                 Their CONTENT still renders -- attachments, watchers and
                 linked issues are readable facts about a public issue. */}
-            <fieldset className="rail-fields issue-detail-extras" disabled={signedOut}>
+            <IssueDetailExtras disabled={signedOut}>
               <AttachmentsPanel issueId={id} />
-            </fieldset>
+            </IssueDetailExtras>
 
             {/* The long tail, folded.
                 Six of these nine panels report ABSENCE on a typical issue -- no
@@ -320,7 +342,7 @@ export function IssueDetailPage({
                 {moreOpen ? "Hide" : "Show"} flags, votes and security
               </Button>
               {moreOpen ? (
-              <fieldset className="rail-fields issue-detail-extras" disabled={signedOut}>
+              <IssueDetailExtras disabled={signedOut}>
               {/* No `activities` prop: the panel reads real flags from
                   flags.list instead of replaying the issue's history. */}
               {/* No `onChanged` props: each panel's mutation declares
@@ -338,7 +360,7 @@ export function IssueDetailPage({
                 votingEnabled={(productDetail?.product.votesPerUser ?? 0) > 0}
               />
               <SecurityPanel issueId={id} />
-              </fieldset>
+              </IssueDetailExtras>
               ) : null}
             </div>
           </div>
@@ -370,7 +392,7 @@ export function IssueDetailPage({
                 These four are about OTHER things -- people and issues -- which
                 is a different kind of fact from severity or component. */}
             <p className="rail-section">Links</p>
-            <fieldset className="rail-fields rail-groups" disabled={signedOut}>
+            <RailFieldset disabled={signedOut} grouped>
               {/* No `onChanged`: attaching a keyword is a relation change, and
                   the panel's own mutation drops the issue detail that
                   `activities` -- and so the attached set it renders -- comes
@@ -384,7 +406,7 @@ export function IssueDetailPage({
                 labels={historyLabels}
               />
               <SeeAlsoPanel issueId={id} />
-            </fieldset>
+            </RailFieldset>
           </Stack>
           </div>
         </Tabs.Panel>
