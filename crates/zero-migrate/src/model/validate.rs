@@ -3339,6 +3339,27 @@ fn expression_column_references<'a>(
             .as_ref()
             .map(|generated| refs(table, &generated.expr))
             .unwrap_or_default(),
+        // A BACKFILL READS COLUMNS TOO — the site F711 recorded as the last one
+        // its walk did not reach. `dropColumn v` followed by a backfill setting
+        // `w = v` lowers to `UPDATE a SET "w" = "v"` after the column is gone;
+        // measured live as `column "v" does not exist`.
+        //
+        // The resolving pass (`validate_ir_resolved`) does check these refs, but
+        // against the table's DECLARED column set, which still contains a column
+        // this migration dropped earlier. That is why the gate has to see them.
+        Op::Backfill {
+            table, set, filter, ..
+        } => set
+            .values()
+            .filter_map(|value| match value {
+                crate::model::ir::BackfillSetValue::Value(crate::model::ir::IrValue::Expr(
+                    expr,
+                )) => Some(expr),
+                _ => None,
+            })
+            .chain(filter.as_ref())
+            .flat_map(|expr| refs(table, expr))
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -3355,6 +3376,19 @@ fn plain_column_references<'a>(op: &'a crate::model::ir::Op) -> Vec<(&'a str, &'
         | Op::DropColumnDefault { table, column, .. }
         | Op::SetColumnType { table, column, .. } => pair(table, column),
         Op::RenameColumn { table, from, .. } => pair(table, from),
+        // A backfill's WRITTEN columns and its CURSOR columns are plain
+        // identifiers, unlike the expressions on the other side of the `=`.
+        Op::Backfill {
+            table,
+            set,
+            cursor_columns,
+            ..
+        } => set
+            .keys()
+            .map(String::as_str)
+            .chain(cursor_columns.iter().map(String::as_str))
+            .map(|column| (table.as_str(), column))
+            .collect(),
         Op::CreateIndex { table, columns, .. } => columns
             .iter()
             .filter_map(|element| match element {
