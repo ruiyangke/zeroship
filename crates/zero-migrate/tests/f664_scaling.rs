@@ -12,6 +12,24 @@
 //! O(n^2). Doubling N must not quadruple the work.
 use std::time::Instant;
 
+/// The best of `REPEATS` timings of `run`.
+///
+/// MINIMUM, not mean or a single shot, and the reason is what this file is for.
+/// Scheduler noise, page faults and a busy machine only ever ADD time, so the
+/// smallest observation is the closest one to the real cost. A single timing of a
+/// ~20ms body is noisy enough that a linear pass can measure 3x on a loaded
+/// machine, and this suite compares a RATIO of two such numbers - noise in the
+/// denominator inflates the result twice over.
+///
+/// That cuts BOTH ways and both matter: a spurious failure wastes a CI run and
+/// teaches people to re-run red builds, while a noise floor that wide can hide a
+/// genuine sub-threshold regression. This guard exists to detect the second, so
+/// its own precision is load-bearing.
+fn best_of(run: impl Fn() -> f64) -> f64 {
+    const REPEATS: usize = 5;
+    (0..REPEATS).map(|_| run()).fold(f64::INFINITY, f64::min)
+}
+
 use zero_migrate::model::ir::MigrationIr;
 use zero_migrate::model::validate::{validate_ir, Dialect};
 
@@ -32,8 +50,8 @@ fn validate_ir_does_not_scale_quadratically_in_op_count() {
     // measured run and inflate the ratio.
     validate_n(2_000);
 
-    let small = validate_n(10_000).max(0.001);
-    let large = validate_n(20_000);
+    let small = best_of(|| validate_n(10_000)).max(0.001);
+    let large = best_of(|| validate_n(20_000));
     let ratio = large / small;
 
     // Quadratic would be ~4x for a doubling. Linear-ish is ~2x. The threshold sits
@@ -84,8 +102,8 @@ fn validate_ir_does_not_scale_quadratically_in_create_table_count() {
 
     validate_creates(2_000);
 
-    let small = validate_creates(8_000).max(0.001);
-    let large = validate_creates(16_000);
+    let small = best_of(|| validate_creates(8_000)).max(0.001);
+    let large = best_of(|| validate_creates(16_000));
     let ratio = large / small;
 
     // Measured ~4.5x before the fix and ~2.2x after, on the same machine.
@@ -176,8 +194,8 @@ fn validate_ir_does_not_scale_quadratically_in_any_op_kind() {
     let mut quadratic = Vec::new();
     for kind in KINDS {
         measure(kind, 2_000);
-        let small = measure(kind, 8_000).max(0.001);
-        let large = measure(kind, 16_000);
+        let small = best_of(|| measure(kind, 8_000)).max(0.001);
+        let large = best_of(|| measure(kind, 16_000));
         let ratio = large / small;
         if ratio >= 3.0 {
             quadratic.push(format!("{kind} {ratio:.1}x ({small:.3}s -> {large:.3}s)"));
@@ -312,8 +330,8 @@ fn validate_ir_does_not_scale_quadratically_in_any_envelope_shape() {
         "inlineRef",
     ] {
         measure(shape, 1_000);
-        let small = measure(shape, 4_000).max(0.001);
-        let large = measure(shape, 8_000);
+        let small = best_of(|| measure(shape, 4_000)).max(0.001);
+        let large = best_of(|| measure(shape, 8_000));
         let ratio = large / small;
         if ratio >= 3.0 {
             quadratic.push(format!("{shape} {ratio:.1}x ({small:.3}s -> {large:.3}s)"));
