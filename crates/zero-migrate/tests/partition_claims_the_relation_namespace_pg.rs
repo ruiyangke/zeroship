@@ -47,50 +47,89 @@ fn tbl(n: &str) -> String {
     )
 }
 
+/// Assert the refusal is the one the test names, not merely that one happened.
+///
+/// Added when this fixture was audited against F768's rule. Every test below had
+/// a bare `expect_err`, and two of them turned out to be decided by a DIFFERENT
+/// rule than the one their message claimed - see the two `createPartition` tests.
+fn expect_refusal_mentioning(ops: &str, needle: &str, what: &str) -> String {
+    let refusal = verdict(ops).expect_err(what);
+    assert!(
+        refusal.contains(needle),
+        "the refusal must be the {needle:?} one this test names, not another rule \
+         that happens to fire first: {refusal}"
+    );
+    refusal
+}
+
+// A `createPartition` claims BOTH namespaces, and the TYPE check runs first, so
+// every refusal aimed at a partition's own name arrives from the type rule. The
+// relation half is real and is covered from the other direction, by the
+// `createTable` tests below - that asymmetry is why these two say "type
+// namespace" while the file is named for the relation one.
+const TYPE_NS: &str = "one type namespace";
+const RELATION_NS: &str = "nothing dropped or renamed it in between";
+
 #[test]
 fn the_same_partition_name_twice_is_refused() {
-    let refusal = verdict(&format!(
-        "{PARENT},{},{}",
-        part("p1", 0, 10),
-        part("p1", 10, 20)
-    ))
-    .expect_err("the second createPartition retakes a relation name");
-    assert!(
-        refusal.to_lowercase().contains("already"),
-        "the refusal must say the name is already taken: {refusal}"
+    // WAS "the second createPartition retakes a relation name", asserting only
+    // that SOME refusal happened plus the word "already". It is the type rule
+    // that fires. Deleting partition tracking from the relation namespace
+    // entirely would have left this test green.
+    expect_refusal_mentioning(
+        &format!("{PARENT},{},{}", part("p1", 0, 10), part("p1", 10, 20)),
+        TYPE_NS,
+        "the second createPartition retakes the name",
     );
 }
 
 #[test]
 fn a_partition_may_not_take_a_live_table_name() {
-    verdict(&format!("{PARENT},{},{}", tbl("b"), part("b", 0, 10)))
-        .expect_err("a partition and a table share the relation namespace");
+    // Same correction: the claim said "share the relation namespace" and the
+    // engine answers from the type namespace, because the table's composite row
+    // type is what the partition collides with first.
+    expect_refusal_mentioning(
+        &format!("{PARENT},{},{}", tbl("b"), part("b", 0, 10)),
+        TYPE_NS,
+        "a partition may not take a live table's name",
+    );
 }
 
 #[test]
 fn a_table_may_not_take_a_live_partition_name() {
-    // The reverse direction, which a fix written only into the createPartition
-    // arm would miss.
-    verdict(&format!("{PARENT},{},{}", part("p1", 0, 10), tbl("p1")))
-        .expect_err("a partition occupies the name against a later table");
+    // THE TEST THAT ACTUALLY COVERS THIS FILE'S TITLE. The reverse direction is
+    // decided by the relation namespace, so this is the one that would fail if
+    // partition tracking were removed from it - which is exactly what the two
+    // tests above were wrongly believed to be doing.
+    expect_refusal_mentioning(
+        &format!("{PARENT},{},{}", part("p1", 0, 10), tbl("p1")),
+        RELATION_NS,
+        "a partition occupies the name against a later table",
+    );
 }
 
 #[test]
 fn a_partition_may_not_take_a_live_enum_name() {
-    verdict(&format!(
-        r#"{PARENT},{{"op":"createEnum","name":"e","values":["a"]}},{}"#,
-        part("e", 0, 10)
-    ))
-    .expect_err("a partition has a composite row type, so it needs the type name free");
+    expect_refusal_mentioning(
+        &format!(
+            r#"{PARENT},{{"op":"createEnum","name":"e","values":["a"]}},{}"#,
+            part("e", 0, 10)
+        ),
+        TYPE_NS,
+        "a partition has a composite row type, so it needs the type name free",
+    );
 }
 
 #[test]
 fn an_enum_may_not_take_a_live_partition_name() {
-    verdict(&format!(
-        r#"{PARENT},{},{{"op":"createEnum","name":"p1","values":["a"]}}"#,
-        part("p1", 0, 10)
-    ))
-    .expect_err("the partition's row type occupies the type namespace");
+    expect_refusal_mentioning(
+        &format!(
+            r#"{PARENT},{},{{"op":"createEnum","name":"p1","values":["a"]}}"#,
+            part("p1", 0, 10)
+        ),
+        TYPE_NS,
+        "the partition's row type occupies the type namespace",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -122,12 +161,15 @@ fn detaching_a_partition_does_not_free_its_name() {
     // THE CONTROL THAT SHAPES THE FIX. A detached partition becomes a standalone
     // TABLE under the same name, so the name is still taken. Treating detach as a
     // release would wrongly accept this.
-    verdict(&format!(
-        r#"{PARENT},{},{{"op":"detachPartition","parent":"par","name":"p1"}},{}"#,
-        part("p1", 0, 10),
-        tbl("p1")
-    ))
-    .expect_err("a detached partition still occupies its name as a standalone table");
+    expect_refusal_mentioning(
+        &format!(
+            r#"{PARENT},{},{{"op":"detachPartition","parent":"par","name":"p1"}},{}"#,
+            part("p1", 0, 10),
+            tbl("p1")
+        ),
+        RELATION_NS,
+        "a detached partition still occupies its name as a standalone table",
+    );
 }
 
 #[test]
@@ -187,13 +229,18 @@ fn a_recreated_parent_may_take_the_same_partition_names() {
 fn dropping_an_unrelated_table_does_not_free_a_partition_name() {
     // THE CONTROL. Releasing every partition on any drop would pass the two tests
     // above and lose the protection F722 added.
-    verdict(&format!(
-        r#"{PARENT},{},{},{{"op":"dropTable","table":"other"}},{}"#,
-        tbl("other"),
-        part("p1", 0, 10),
-        part("p1", 10, 20)
-    ))
-    .expect_err("an unrelated drop must not release a live partition name");
+    expect_refusal_mentioning(
+        &format!(
+            r#"{PARENT},{},{},{{"op":"dropTable","table":"other"}},{}"#,
+            tbl("other"),
+            part("p1", 0, 10),
+            part("p1", 10, 20)
+        ),
+        // The later op is a createPartition, so the type rule answers - the same
+        // asymmetry the two headline tests document.
+        TYPE_NS,
+        "an unrelated drop must not release a live partition name",
+    );
 }
 
 /// The partition half of the same defect: a rename must carry parentage.
@@ -235,12 +282,15 @@ fn a_rename_carries_the_partition_parentage_so_a_later_drop_still_frees_it() {
 /// possible, and this is the fourth in that chain.
 #[test]
 fn detaching_then_dropping_the_parent_does_not_free_the_detached_name() {
-    verdict(&format!(
-        r#"{PARENT},{},{{"op":"detachPartition","parent":"par","name":"p1"}},{{"op":"dropTable","table":"par"}},{}"#,
-        part("p1", 0, 10),
-        tbl("p1")
-    ))
-    .expect_err("a detached partition survives its former parent, so its name is still taken");
+    expect_refusal_mentioning(
+        &format!(
+            r#"{PARENT},{},{{"op":"detachPartition","parent":"par","name":"p1"}},{{"op":"dropTable","table":"par"}},{}"#,
+            part("p1", 0, 10),
+            tbl("p1")
+        ),
+        RELATION_NS,
+        "a detached partition survives its former parent, so its name is still taken",
+    );
 }
 
 /// ATTACH is the mirror of detach, and the last lifecycle event that can touch
@@ -286,6 +336,10 @@ fn attaching_a_table_makes_it_a_dependent_of_the_parent() {
     .expect("the attached table went with its parent, so the name is free");
 
     // THE CONTROL: without the drop the attached table is still there.
-    check(&format!(r#"{PARENT},{t},{attach},{t}"#))
+    let refusal = check(&format!(r#"{PARENT},{t},{attach},{t}"#))
         .expect_err("the attached table is still live, so its name is still taken");
+    assert!(
+        refusal.contains(RELATION_NS),
+        "the refusal must be the relation-namespace one this control names: {refusal}"
+    );
 }
