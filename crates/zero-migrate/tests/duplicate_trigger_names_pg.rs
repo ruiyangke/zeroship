@@ -18,11 +18,18 @@
 //! constraint names rather than the relation/type namespaces of the sibling
 //! fixtures.
 //!
-//! THE OTHER SIX ARE CLOSED BY THE CAPABILITY GATE, not merely unexamined, and
-//! that was measured rather than assumed. `createSchema`, `createExtension`,
-//! `createRole` and `createPolicy` are privileged vendor primitives: each is
-//! refused with VENDOR_OP_DENIED - "unreachable from a confined migration by
-//! construction" - before any name check would run.
+//! THE OTHER SIX ARE CLOSED BY THE CAPABILITY GATE *FOR A CONFINED MIGRATION*,
+//! and that qualifier is load-bearing - it was missing when this was written.
+//! `createSchema`, `createExtension`, `createRole` and `createPolicy` are
+//! privileged vendor primitives: each is refused with VENDOR_OP_DENIED before
+//! any name check would run, which is what the last test here still pins.
+//!
+//! THAT IS NOT THE SAME AS BEING CORRECT. A migration authorised by a granting
+//! profile reaches all four, and every one of them accepted a duplicate name -
+//! see `privileged_names_claimed_twice.rs`, which found four real defects behind
+//! this paragraph's original claim that they needed no check. The reasoning
+//! error worth remembering: A CAPABILITY DENIAL DESCRIBES THE PROFILE THE PROBE
+//! RAN UNDER, NOT A PROPERTY OF THE OP.
 //!
 //! The first draft of this fixture covered policies too, and every policy test
 //! was decided by that gate. One of them PASSED, which is worse than failing: an
@@ -118,8 +125,11 @@ fn dropping_the_table_frees_its_trigger_names() {
 
 #[test]
 fn the_privileged_name_claiming_ops_are_closed_by_the_capability_gate() {
-    // Pins the reason the other six are not checked here. If a capability set
-    // ever grants these by default, this test fails and the gap becomes real.
+    // Pins the DEFAULT-PROFILE behaviour only: an unauthorised envelope never
+    // reaches a name check on these. If a capability set ever grants them by
+    // default, this test fails. It does NOT license leaving their names
+    // unchecked - `privileged_names_claimed_twice.rs` covers the authorised
+    // path, where all four were accepting duplicates.
     for (label, op) in [
         ("schema", r#"{"op":"createSchema","name":"s"}"#),
         ("extension", r#"{"op":"createExtension","name":"citext"}"#),

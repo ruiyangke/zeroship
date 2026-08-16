@@ -2931,6 +2931,40 @@ fn validate_no_name_is_claimed_twice(
     }
     let mut constraint_names: BTreeMap<Key, BTreeSet<&str>> = BTreeMap::new();
 
+    // THE PRIVILEGED NAMESPACES. Schemas, extensions and roles are DATABASE- or
+    // CLUSTER-wide rather than schema-scoped, so these are flat sets and not
+    // keyed by `Key`; policies are scoped PER TABLE, like triggers.
+    //
+    // These four were previously recorded as "closed by the capability gate" and
+    // therefore not worth checking. That was wrong: the gate hides them from a
+    // CONFINED migration, but a migration authorised by a granting profile
+    // reaches all four, and every one of them was accepted with a duplicate name.
+    // Measured against live PostgreSQL, second claim plain:
+    //
+    //     CREATE SCHEMA f759a     x2   ERROR: schema "f759a" already exists
+    //     CREATE ROLE f759role    x2   ERROR: role "f759role" already exists
+    //     CREATE EXTENSION citext x2   ERROR: extension "citext" already exists
+    //     CREATE POLICY p ON a    x2   ERROR: policy "p" for table "a" already exists
+    //
+    // IF NOT EXISTS EXEMPTS THE SECOND CLAIM, and that is measured too - it is
+    // the difference between a rule and an over-refusal:
+    //
+    //     CREATE SCHEMA IF NOT EXISTS f759b x2   NOTICE: ... skipping   ACCEPTED
+    //     CREATE SCHEMA f759c; CREATE SCHEMA IF NOT EXISTS f759c        ACCEPTED
+    //     CREATE EXTENSION citext; CREATE EXTENSION IF NOT EXISTS citext ACCEPTED
+    //
+    // So the flag is read off the SECOND op, not the first: what decides the
+    // outcome is whether the op making the repeat claim tolerates an occupant.
+    // `createPolicy` carries no such flag, so it has no exemption.
+    //
+    // All four ops are PostgreSQL-only in this engine ("schema vendor primitives
+    // are PostgreSQL-only" and siblings), refused at the support check on other
+    // dialects before reaching here, so gating on PostgreSQL costs no coverage.
+    let mut schemas: BTreeSet<&str> = BTreeSet::new();
+    let mut extensions: BTreeSet<&str> = BTreeSet::new();
+    let mut roles: BTreeSet<&str> = BTreeSet::new();
+    let mut policy_names: BTreeMap<Key, BTreeSet<&str>> = BTreeMap::new();
+
     for (op_index, op) in ir.ops.iter().enumerate() {
         match op {
             Op::CreateTable {
@@ -3010,6 +3044,7 @@ fn validate_no_name_is_claimed_twice(
                 columns.remove(&key);
                 constraint_names.remove(&key);
                 trigger_names.remove(&key);
+                policy_names.remove(&key);
             }
             Op::RenameTable {
                 table, to, schema, ..
@@ -3046,6 +3081,14 @@ fn validate_no_name_is_claimed_twice(
                 }
                 if let Some(moved) = trigger_names.remove(&from_key) {
                     trigger_names.insert(to_key, moved);
+                }
+                // Policies follow the table through a rename, exactly as triggers
+                // and constraints do. F755 recorded the general rule: adding
+                // per-entity state creates one obligation per lifecycle event, so
+                // this arm is written at the same time as the map itself rather
+                // than after a later envelope exposes the omission.
+                if let Some(moved) = policy_names.remove(&from_key) {
+                    policy_names.insert(to_key, moved);
                 }
                 // The dependents move with their container. Without this the map
                 // is stranded on the OLD name, and a later drop of the new name
@@ -3364,6 +3407,107 @@ fn validate_no_name_is_claimed_twice(
                 let live = columns.entry(key).or_default();
                 live.remove(from.as_str());
                 live.insert(to.as_str());
+            }
+            // ---------------------------------------------------------------
+            // The privileged namespaces. See the declarations above for the
+            // measurements that fix both the scoping and the IF NOT EXISTS
+            // exemption.
+            // ---------------------------------------------------------------
+            Op::CreateSchema {
+                name,
+                if_not_exists,
+                ..
+            } if track_type_namespace => {
+                if !schemas.insert(name.as_str()) && !if_not_exists.unwrap_or(false) {
+                    return Err(refuse(
+                        op_index,
+                        &format!(
+                            "this createSchema claims the name {name:?}, but an earlier \
+                             operation in this migration already created a schema with that \
+                             name and nothing dropped it in between"
+                        ),
+                        "drop the existing schema first, use a different name, or set \
+                         ifNotExists",
+                    ));
+                }
+            }
+            Op::DropSchema { name, .. } if track_type_namespace => {
+                schemas.remove(name.as_str());
+            }
+            Op::CreateExtension {
+                name,
+                if_not_exists,
+                ..
+            } if track_type_namespace => {
+                if !extensions.insert(name.as_str()) && !if_not_exists.unwrap_or(false) {
+                    return Err(refuse(
+                        op_index,
+                        &format!(
+                            "this createExtension claims the name {name:?}, but an earlier \
+                             operation in this migration already created that extension and \
+                             nothing dropped it in between"
+                        ),
+                        "drop the existing extension first, or set ifNotExists",
+                    ));
+                }
+            }
+            Op::DropExtension { name, .. } if track_type_namespace => {
+                extensions.remove(name.as_str());
+            }
+            Op::CreateRole {
+                name,
+                if_not_exists,
+                ..
+            } if track_type_namespace => {
+                // A role is CLUSTER-wide, so this set carries no schema at all.
+                if !roles.insert(name.as_str()) && !if_not_exists.unwrap_or(false) {
+                    return Err(refuse(
+                        op_index,
+                        &format!(
+                            "this createRole claims the name {name:?}, but an earlier \
+                             operation in this migration already created a role with that \
+                             name and nothing dropped it in between"
+                        ),
+                        "drop the existing role first, use a different name, or set \
+                         ifNotExists",
+                    ));
+                }
+            }
+            Op::DropRole { name, .. } if track_type_namespace => {
+                roles.remove(name.as_str());
+            }
+            // PER TABLE, like triggers rather than like schemas. The server names
+            // the table in its own message - `policy "p" for table "a"` - and one
+            // policy name reused across many tables is an ordinary pattern that a
+            // schema-scoped rule would refuse.
+            Op::CreatePolicy {
+                name,
+                table,
+                schema,
+                ..
+            } if track_type_namespace => {
+                let key: Key = (schema.as_deref(), table.as_str());
+                if !policy_names.entry(key).or_default().insert(name.as_str()) {
+                    return Err(refuse(
+                        op_index,
+                        &format!(
+                            "this createPolicy claims the name {name:?} on table {table:?}, \
+                             but an earlier operation in this migration already gave a policy \
+                             that name and nothing dropped it in between"
+                        ),
+                        "drop the existing policy first, or use a different name",
+                    ));
+                }
+            }
+            Op::DropPolicy {
+                name,
+                table,
+                schema,
+                ..
+            } if track_type_namespace => {
+                if let Some(live) = policy_names.get_mut(&(schema.as_deref(), table.as_str())) {
+                    live.remove(name.as_str());
+                }
             }
             _ => {}
         }
