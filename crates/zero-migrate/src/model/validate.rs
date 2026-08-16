@@ -2699,6 +2699,38 @@ fn named_object_dependencies<'a>(
     out
 }
 
+/// Every role name an operation names, paired with the part it plays.
+///
+/// `"public"` IS EXCLUDED, and that is a semantic point rather than a
+/// convenience: in a grantee list it is the reserved `PUBLIC` sentinel, not a
+/// role reference, so it can never fail to resolve. Treating it as a role would
+/// be harmless today - nothing can successfully drop `public` - but it would
+/// encode the wrong meaning for the next reader.
+fn roles_named_by(op: &crate::model::ir::Op) -> Vec<(&str, &'static str)> {
+    use crate::model::ir::Op;
+
+    fn named<'a>(names: &'a [String], role_of: &'static str) -> Vec<(&'a str, &'static str)> {
+        names
+            .iter()
+            .map(String::as_str)
+            .filter(|name| *name != "public")
+            .map(|name| (name, role_of))
+            .collect()
+    }
+    match op {
+        Op::Grant { to, .. } => named(to, "grantee"),
+        Op::Revoke { from, .. } => named(from, "revokee"),
+        Op::CreatePolicy { to: Some(to), .. } => named(to, "policy role"),
+        Op::DropOwnedBy { roles, .. } => named(roles, "owner role"),
+        Op::AlterRole { name, .. } => vec![(name.as_str(), "role")],
+        Op::CreateSchema {
+            authorization: Some(role),
+            ..
+        } => vec![(role.as_str(), "authorization role")],
+        _ => Vec::new(),
+    }
+}
+
 /// Refuse a column that depends on an enum, domain or sequence an earlier op in
 /// the same migration dropped.
 ///
@@ -2738,6 +2770,12 @@ fn validate_no_column_uses_a_dropped_named_object(
             Op::CreateView { name, .. } => {
                 dropped.remove(&("view", name.as_str()));
             }
+            Op::CreateSchema { name, .. } => {
+                dropped.remove(&("schema", name.as_str()));
+            }
+            Op::CreateRole { name, .. } => {
+                dropped.remove(&("role", name.as_str()));
+            }
             _ => {}
         }
 
@@ -2761,6 +2799,54 @@ fn validate_no_column_uses_a_dropped_named_object(
                     ),
                     suggested_fix: Some(
                         "move the comment before the drop, or recreate the view first".to_string(),
+                    ),
+                });
+            }
+        }
+
+        // THE SCHEMA QUALIFIER. Reuses `Op::schema()`, which is already
+        // EXHAUSTIVE over the closed op set for the confined cross-schema gate,
+        // so a new op variant must declare whether it carries a schema and
+        // cannot silently escape this. MEASURED: `DROP SCHEMA s; CREATE TABLE
+        // s.x (…)` is `schema "s" does not exist`.
+        if let Some(schema) = op.schema() {
+            if dropped.contains(&("schema", schema)) {
+                return Err(AuthoringError {
+                    code: CODE_OP_INVALID.to_string(),
+                    kind: Some(UnsupportedKind::Op),
+                    op_index,
+                    ts_location: ts_locations.get(op_index).cloned().flatten(),
+                    dialect: target_dialect,
+                    reason: format!(
+                        "this operation is qualified with schema {schema:?}, but an earlier \
+                         dropSchema in this migration removed it, so it will not exist when \
+                         this runs"
+                    ),
+                    suggested_fix: Some(
+                        "move this operation before the drop, or recreate the schema first"
+                            .to_string(),
+                    ),
+                });
+            }
+        }
+
+        // THE ROLES AN OP NAMES. MEASURED: `DROP ROLE r; GRANT SELECT ON t TO r`
+        // is `role "r" does not exist`.
+        for (role, role_of) in roles_named_by(op) {
+            if dropped.contains(&("role", role)) {
+                return Err(AuthoringError {
+                    code: CODE_OP_INVALID.to_string(),
+                    kind: Some(UnsupportedKind::Op),
+                    op_index,
+                    ts_location: ts_locations.get(op_index).cloned().flatten(),
+                    dialect: target_dialect,
+                    reason: format!(
+                        "this operation names {role_of} {role:?}, but an earlier dropRole in \
+                         this migration removed it, so it will not exist when this runs"
+                    ),
+                    suggested_fix: Some(
+                        "move this operation before the drop, or recreate the role first"
+                            .to_string(),
                     ),
                 });
             }
@@ -2851,6 +2937,12 @@ fn validate_no_column_uses_a_dropped_named_object(
             }
             Op::DropView { name, .. } => {
                 dropped.insert(("view", name.as_str()));
+            }
+            Op::DropSchema { name, .. } => {
+                dropped.insert(("schema", name.as_str()));
+            }
+            Op::DropRole { name, .. } => {
+                dropped.insert(("role", name.as_str()));
             }
             _ => {}
         }
