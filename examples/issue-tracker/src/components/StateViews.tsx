@@ -2,10 +2,8 @@
 // empty, and error -- with a 401 (fail-closed "user" procedures hit while
 // signed out) rendered as an explicit sign-in prompt, never as an empty list.
 import type { ReactNode } from "react";
-import {
-  EmptyState as UiEmptyState,
-  ErrorState as UiErrorState,
-} from "@zeroship/ui";
+import { EmptyState as UiEmptyState } from "../ui/EmptyState";
+import { ErrorState as UiErrorState } from "../ui/ErrorState";
 import { Button } from "../ui/Button";
 import { Spinner } from "../ui/Spinner";
 
