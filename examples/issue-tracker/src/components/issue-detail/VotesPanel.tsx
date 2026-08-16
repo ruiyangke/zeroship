@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { NumberField } from "@zeroship/ui";
+import { NumberField } from "../../ui/NumberField";
 import { Button } from "../../ui/Button";
 import { Field } from "../../ui/Field";
 
