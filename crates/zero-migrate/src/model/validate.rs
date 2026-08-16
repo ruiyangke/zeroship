@@ -3983,11 +3983,78 @@ fn expression_column_references<'a>(
                 )
                 .collect()
         }
-        _ => Vec::new(),
+        // A dialectal container's nested ops, for the leg this dialect emits.
+        Op::Dialectal {
+            default,
+            pg,
+            sqlite,
+            mysql,
+        } => dialectal_leg(target_dialect, default, pg, sqlite, mysql)
+            .iter()
+            .flat_map(|nested| expression_column_references(nested, target_dialect))
+            .collect(),
+        // EXHAUSTIVE, for the reason given on the sibling accessor: a catch-all
+        // reads a new variant's silence as "no column references", and that is
+        // what shipped F761 through F764. The guarded `createView` arm above
+        // needs this unguarded twin because a match guard never counts toward
+        // exhaustiveness - a JOINED view body lands here, which is the
+        // deliberate under-refusal that arm documents.
+        Op::CreateView { .. }
+        | Op::CreateTable { .. }
+        | Op::CreatePartition { .. }
+        | Op::AttachPartition { .. }
+        | Op::DetachPartition { .. }
+        | Op::DropPartition { .. }
+        | Op::SetTableOptions { .. }
+        | Op::DropTable { .. }
+        | Op::RenameTable { .. }
+        | Op::DropColumn { .. }
+        | Op::CreateIndex { .. }
+        | Op::Comment { .. }
+        | Op::DropIndex { .. }
+        | Op::SetColumnType { .. }
+        | Op::SetColumnNotNull { .. }
+        | Op::DropColumnNotNull { .. }
+        | Op::SetColumnDefault { .. }
+        | Op::DropColumnDefault { .. }
+        | Op::RenameColumn { .. }
+        | Op::AlterPrimaryKey { .. }
+        | Op::SynchronizeIdentity { .. }
+        | Op::ValidateConstraint { .. }
+        | Op::DropConstraint { .. }
+        | Op::Insert { .. }
+        | Op::DropView { .. }
+        | Op::CreateEnum { .. }
+        | Op::DropEnum { .. }
+        | Op::CreateDomain { .. }
+        | Op::DropDomain { .. }
+        | Op::CreateSequence { .. }
+        | Op::AlterSequence { .. }
+        | Op::DropSequence { .. }
+        | Op::CreateSchema { .. }
+        | Op::DropSchema { .. }
+        | Op::CreateExtension { .. }
+        | Op::DropExtension { .. }
+        | Op::CreateRole { .. }
+        | Op::AlterRole { .. }
+        | Op::DropRole { .. }
+        | Op::DropOwnedBy { .. }
+        | Op::Grant { .. }
+        | Op::Revoke { .. }
+        | Op::SetRls { .. }
+        | Op::DropPolicy { .. }
+        | Op::CreateTrigger { .. }
+        | Op::DropTrigger { .. }
+        | Op::CreateFunction { .. }
+        | Op::DropFunction { .. }
+        | Op::PgRaw { .. } => Vec::new(),
     }
 }
 
-fn plain_column_references<'a>(op: &'a crate::model::ir::Op) -> Vec<(&'a str, &'a str)> {
+fn plain_column_references<'a>(
+    op: &'a crate::model::ir::Op,
+    target_dialect: Dialect,
+) -> Vec<(&'a str, &'a str)> {
     use crate::model::ir::{
         AlterPrimaryKeyAction, CommentTarget, IndexElement, IrConstraintKind, Op,
     };
@@ -4081,10 +4148,98 @@ fn plain_column_references<'a>(op: &'a crate::model::ir::Op) -> Vec<(&'a str, &'
                 .iter()
                 .map(|column| (table.as_str(), column.as_str()))
                 .collect(),
-            _ => Vec::new(),
+            IrConstraintKind::Check { .. } | IrConstraintKind::Exclusion { .. } => Vec::new(),
         },
-        _ => Vec::new(),
+        // An identity synchronization names its column, and the lookup it must
+        // perform is exactly the one that fails. MEASURED: after `DROP COLUMN v`,
+        // `pg_get_serial_sequence('a','v')` is `column "v" of relation "a" does
+        // not exist`.
+        Op::SynchronizeIdentity { table, column, .. } => pair(table, column),
+        // A DIALECTAL OP IS A CONTAINER, and its nested ops were invisible to
+        // every walk in this file. Only the leg the target dialect actually
+        // emits is descended into: refusing on a leg that will not run would
+        // reject a migration the server never sees.
+        Op::Dialectal {
+            default,
+            pg,
+            sqlite,
+            mysql,
+        } => dialectal_leg(target_dialect, default, pg, sqlite, mysql)
+            .iter()
+            .flat_map(|nested| plain_column_references(nested, target_dialect))
+            .collect(),
+        // EXHAUSTIVE FROM HERE, and that is the point of this arm rather than a
+        // `_`. Four consecutive defects (F761-F764) were ops that named a column
+        // and were absent from a closed match ending in a catch-all, where a new
+        // variant's silence reads as "no columns". Listing every remaining
+        // variant makes the next one a COMPILE ERROR here instead of an accepted
+        // migration that the server rejects.
+        Op::CreateTable { .. }
+        | Op::CreatePartition { .. }
+        | Op::AttachPartition { .. }
+        | Op::DetachPartition { .. }
+        | Op::DropPartition { .. }
+        | Op::SetTableOptions { .. }
+        | Op::DropTable { .. }
+        | Op::RenameTable { .. }
+        | Op::AddColumn { .. }
+        | Op::Comment { .. }
+        | Op::DropIndex { .. }
+        | Op::ValidateConstraint { .. }
+        | Op::DropConstraint { .. }
+        | Op::Delete { .. }
+        | Op::CreateView { .. }
+        | Op::DropView { .. }
+        | Op::CreateEnum { .. }
+        | Op::DropEnum { .. }
+        | Op::CreateDomain { .. }
+        | Op::DropDomain { .. }
+        | Op::CreateSequence { .. }
+        | Op::AlterSequence { .. }
+        | Op::DropSequence { .. }
+        | Op::CreateSchema { .. }
+        | Op::DropSchema { .. }
+        | Op::CreateExtension { .. }
+        | Op::DropExtension { .. }
+        | Op::CreateRole { .. }
+        | Op::AlterRole { .. }
+        | Op::DropRole { .. }
+        | Op::DropOwnedBy { .. }
+        | Op::Grant { .. }
+        | Op::Revoke { .. }
+        | Op::SetRls { .. }
+        | Op::CreatePolicy { .. }
+        | Op::DropPolicy { .. }
+        | Op::CreateTrigger { .. }
+        | Op::DropTrigger { .. }
+        | Op::CreateFunction { .. }
+        | Op::DropFunction { .. }
+        | Op::PgRaw { .. } => Vec::new(),
     }
+}
+
+/// The nested op sequence a [`Op::Dialectal`] container actually emits for one
+/// target dialect: the dialect's own leg when present, and the `default` leg
+/// otherwise.
+///
+/// Descending into a leg that will NOT run would refuse a migration on a
+/// reference the server never sees, so the choice is made here once and shared.
+fn dialectal_leg<'a>(
+    target_dialect: Dialect,
+    default: &'a Option<Vec<crate::model::ir::Op>>,
+    pg: &'a Option<Vec<crate::model::ir::Op>>,
+    sqlite: &'a Option<Vec<crate::model::ir::Op>>,
+    mysql: &'a Option<Vec<crate::model::ir::Op>>,
+) -> &'a [crate::model::ir::Op] {
+    let specific = match target_dialect {
+        Dialect::Postgres => pg,
+        Dialect::Sqlite => sqlite,
+        Dialect::Mysql => mysql,
+    };
+    specific
+        .as_deref()
+        .or(default.as_deref())
+        .unwrap_or_default()
 }
 
 /// Refuse an operation that names a column an earlier `dropColumn` removed.
@@ -4123,7 +4278,7 @@ fn validate_no_op_references_a_dropped_column(
             _ => {}
         }
 
-        let referenced = plain_column_references(op)
+        let referenced = plain_column_references(op, target_dialect)
             .into_iter()
             .map(|(table, column)| (table, column.to_string()))
             .chain(expression_column_references(op, target_dialect));
