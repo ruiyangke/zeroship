@@ -456,9 +456,9 @@ export function SignIn(props: SignInProps): ReactNode {
 
 // ── immersive login modal (hosts the cross-origin auth iframe) ───────────────
 
-// The SDK can't depend on @zeroship/ui (it's framework-agnostic), so the modal
-// ships unstyled-but-structured: stable class hooks (`zs-auth-*`) + a tiny
-// scoped stylesheet a consumer fully overrides by re-declaring those classes.
+// The SDK cannot depend on an app's local UI layer, so the modal ships
+// unstyled-but-structured: stable class hooks (`zs-auth-*`) + a tiny scoped
+// stylesheet a consumer fully overrides by re-declaring those classes.
 // The modal hosts the cross-origin `auth.zeroship.ai/login` iframe; the
 // password is typed INTO that auth-origin frame, so console JS never sees the
 // credential (SOP, §6.1). The builder themes these with its crystal tokens.

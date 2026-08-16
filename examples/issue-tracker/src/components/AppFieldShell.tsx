@@ -8,8 +8,8 @@ type AppFieldShellProps<T extends ElementType> = {
 /**
  * Design-system field chrome for app-owned controls.
  *
- * The rich-text editor and native textarea cannot use a @zeroship/ui field,
- * but they should still share that field's single edge and focus treatment.
+ * The rich-text editor and native textarea use different controls from the
+ * local Field wrapper, but they should share its edge and focus treatment.
  */
 export function AppFieldShell<T extends ElementType = "div">({
   as,

@@ -1,9 +1,9 @@
 import { expect, type Locator, type Page } from "@playwright/test";
 
 /**
- * Choose an option from a `@zeroship/ui` Select.
+ * Choose an option from the app's Base UI-backed Select.
  *
- * The design system's Select is a combobox, not a native `<select>`, so
+ * The local Select is a combobox, not a native `<select>`, so
  * `selectOption` does nothing on it -- it needs a click on the trigger and a
  * click on the option. The options render in a PORTAL at document body, so
  * they are not inside whatever locator scopes the trigger; querying them from

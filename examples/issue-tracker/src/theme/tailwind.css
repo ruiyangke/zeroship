@@ -12,11 +12,11 @@
  * beat the theme -- the deliberate design lost to the accidental one. A
  * duplicated scale is the same trap with a build step in front of it.
  *
- * SCOPE: utilities are for the app's OWN markup. Library components render
- * their internals inside @zeroship/ui, so the app cannot put a class on them;
- * those are styled by [data-slot~="..."] rules in ./components. Do not reach
- * for @apply inside those selectors -- it would be Tailwind in name only and
- * would give up the co-location that makes utilities worth having.
+ * SCOPE: the app owns the Base UI composition in src/ui, so utilities belong
+ * on the markup rendered there and at feature call sites. Remaining
+ * [data-slot~="..."] rules in ./components are app-local hooks, not an
+ * external package contract. Do not reach for @apply inside those selectors;
+ * keep new visual rules co-located as utilities where the markup is rendered.
  */
 @import "tailwindcss";
 

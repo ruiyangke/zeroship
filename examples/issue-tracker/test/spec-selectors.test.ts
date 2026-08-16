@@ -23,11 +23,10 @@ import { describe, expect, it } from "vitest";
  * became an assertion about nothing.
  *
  * WHAT THIS DOES NOT CATCH. It proves a class NAME appears somewhere in the
- * app or the design system, not that it is rendered on the page the spec
- * visits, nor that it is on the element the spec means. A class mentioned only
- * in a comment counts as found. It is a smell detector for dead selectors, not
- * a proof of live ones -- the suite passing is what shows the selectors match
- * real elements.
+ * app source, not that it is rendered on the page the spec visits, nor that it
+ * is on the element the spec means. A class mentioned only in a comment counts
+ * as found. It is a smell detector for dead selectors, not a proof of live
+ * ones -- the suite passing is what shows the selectors match real elements.
  *
  * It also says nothing about role- or text-based locators, which are the
  * majority here and are checked by the suite itself: `getByRole("tab", ...)`
@@ -64,12 +63,9 @@ function classesUsedBySpecs(): Set<string> {
   return classes;
 }
 
-/** Everything the app could render a class from: its own source, and the DS. */
-function appAndDesignSystem(): string {
-  const sources = [
-    ...filesUnder("src", /\.(tsx?|css)$/),
-    ...filesUnder("../../sdks/ui/src", /\.(tsx?|css)$/),
-  ];
+/** Everything the app could render a class from. */
+function appSource(): string {
+  const sources = filesUnder("src", /\.(tsx?|css)$/);
   return sources.map((f) => readFileSync(f, "utf8")).join("\n");
 }
 
@@ -84,12 +80,12 @@ describe("e2e selectors", () => {
   });
 
   it("selects only classes the app can render", () => {
-    const haystack = appAndDesignSystem();
+    const haystack = appSource();
     const dead = [...classesUsedBySpecs()].filter((cls) => !haystack.includes(cls)).sort();
 
     expect(
       dead,
-      "these classes are selected by specs but appear nowhere in src/ or the design system. A " +
+      "these classes are selected by specs but appear nowhere in src/. A " +
         "positive assertion on them fails loudly; a negative one (toHaveCount(0), not.toBeVisible) " +
         "passes forever while testing nothing:\n  ." +
         dead.join("\n  ."),

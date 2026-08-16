@@ -10,7 +10,7 @@ import { productKey } from "./keys";
  *
  * Both halves have been broken, in opposite directions, one causing the other:
  *
- *  - `@zeroship/ui`'s Select rendered the raw value, so every id-valued
+ *  - The Select implementation rendered the raw value, so every id-valued
  *    picker displayed `prod_03462DM9KMgFwcl7KD7iQ8` where a product name
  *    belongs. Fixed by adding `renderValue`.
  *  - `renderValue` was then called for the EMPTY value too, so it returned ""

@@ -24,13 +24,11 @@ export default defineConfig({
   resolve: {
     // ONE React instance, always.
     //
-    // `@zeroship/ui` is a workspace package, so vite serves its built bundle
-    // from outside this package's tree (a `/@fs/` URL) and its bare `react`
-    // import resolves against `sdks/ui/node_modules`. That is a different
-    // module instance even when it is the same version on disk, and the
-    // second copy has its own hook dispatcher: every component from the
-    // library threw "Invalid hook call ... mismatching versions of React and
-    // the renderer" and the whole page failed to render.
+    // This app consumes React-facing workspace SDK entry points. Vite can
+    // serve their built bundles from outside this package's tree (a `/@fs/`
+    // URL), where a bare `react` import may otherwise resolve through a
+    // different package tree. A second instance has its own hook dispatcher
+    // and makes components fail with "Invalid hook call".
     //
     // The symptom named React versions, which sent me looking at the catalog
     // pins -- both were already 19.2.5. Two instances, not two versions.
