@@ -208,65 +208,72 @@ impl BearerVerifier {
         request_ip: Option<IpAddr>,
         request_id: String,
     ) -> Result<VerifiedPrincipal, HttpRejection> {
-        let claims = match self.pat_issuer.verify(token) {
-            Ok(claims) => claims,
+        let principal = match self.pat_issuer.verify(token) {
             Err(err) => {
                 tracing::debug!(
                     error = %err,
                     "control: bearer was not a valid PAT; trying OAuth introspection"
                 );
-                return self
+                self
                     .oauth_guard_from_bearer(token, request_ip, request_id)
-                    .await;
+                    .await?
+            }
+            Ok(claims) => {
+                let token_id = Uuid::parse_str(&claims.jti)
+                    .map_err(|_| web::error::ErrorUnauthorized("invalid bearer token id"))?;
+                let owner_id = Uuid::parse_str(&claims.owner)
+                    .map_err(|_| web::error::ErrorUnauthorized("invalid bearer owner"))?;
+
+                let rows = self
+                    .control_pg
+                    .query(
+                        "SELECT owner_id FROM zeroship.permission_tokens \
+                         WHERE id = $1 \
+                           AND owner_id = $2 \
+                           AND policy_hash = $3 \
+                           AND kind = 'pat' \
+                           AND revoked_at IS NULL \
+                           AND (expires_at IS NULL OR expires_at > NOW())",
+                        &[&token_id, &owner_id, &claims.policy_hash],
+                    )
+                    .await
+                    .map_err(|err| {
+                        tracing::error!(error = %err, "control: permission token lookup failed");
+                        web::error::ErrorInternalServerError("permission token lookup failed")
+                    })?;
+                let row = rows
+                    .first()
+                    .ok_or_else(|| web::error::ErrorUnauthorized("permission token not active"))?;
+                let principal_id: Uuid = row.get("owner_id");
+
+                VerifiedPrincipal {
+                    principal_id,
+                    token_id: Some(token_id),
+                    token_policy: None,
+                    mfa_verified: false,
+                    mfa_age_seconds: None,
+                    request_ip,
+                    request_id,
+                }
             }
         };
-        let token_id = Uuid::parse_str(&claims.jti)
-            .map_err(|_| web::error::ErrorUnauthorized("invalid bearer token id"))?;
-        let owner_id = Uuid::parse_str(&claims.owner)
-            .map_err(|_| web::error::ErrorUnauthorized("invalid bearer owner"))?;
 
-        let rows = self
-            .control_pg
-            .query(
-                "SELECT owner_id FROM zeroship.permission_tokens \
-                 WHERE id = $1 \
-                   AND owner_id = $2 \
-                   AND policy_hash = $3 \
-                   AND kind = 'pat' \
-                   AND revoked_at IS NULL \
-                   AND (expires_at IS NULL OR expires_at > NOW())",
-                &[&token_id, &owner_id, &claims.policy_hash],
-            )
-            .await
-            .map_err(|err| {
-                tracing::error!(error = %err, "control: permission token lookup failed");
-                web::error::ErrorInternalServerError("permission token lookup failed")
-            })?;
-        let row = rows
-            .first()
-            .ok_or_else(|| web::error::ErrorUnauthorized("permission token not active"))?;
-        let principal_id: Uuid = row.get("owner_id");
+        self.require_active_principal(principal.principal_id).await?;
 
-        if let Err(err) = self
-            .control_pg
-            .execute(
-                "UPDATE zeroship.permission_tokens SET last_used_at = NOW() WHERE id = $1",
-                &[&token_id],
-            )
-            .await
-        {
-            tracing::warn!(error = %err, "control: permission token last_used_at update failed");
+        if let Some(token_id) = principal.token_id {
+            if let Err(err) = self
+                .control_pg
+                .execute(
+                    "UPDATE zeroship.permission_tokens SET last_used_at = NOW() WHERE id = $1",
+                    &[&token_id],
+                )
+                .await
+            {
+                tracing::warn!(error = %err, "control: permission token last_used_at update failed");
+            }
         }
 
-        Ok(VerifiedPrincipal {
-            principal_id,
-            token_id: Some(token_id),
-            token_policy: None,
-            mfa_verified: false,
-            mfa_age_seconds: None,
-            request_ip,
-            request_id,
-        })
+        Ok(principal)
     }
 
     async fn cached_revoked_after_for(
@@ -324,6 +331,46 @@ impl BearerVerifier {
         let revoked_after = self.cached_revoked_after_for(client_id, sub).await?;
         if family_revoked_at(revoked_after, iat) {
             return Err(unauthorized_json("token_revoked"));
+        }
+        Ok(())
+    }
+
+    /// Require a principal row that is still eligible to authenticate.
+    ///
+    /// This is public for the non-bearer device paths. Every bearer accepted by
+    /// [`Self::verify_bearer`] passes this check at one shared convergence point,
+    /// so a future bearer class cannot omit owner lifecycle validation.
+    ///
+    /// # Errors
+    ///
+    /// A 401 rejection when the principal is missing, disabled, pending
+    /// deletion, or anonymized.
+    /// A lookup failure is a 500 rejection and never authenticates the caller.
+    pub async fn require_active_principal(
+        &self,
+        principal_id: Uuid,
+    ) -> Result<(), HttpRejection> {
+        let rows = self
+            .control_pg
+            .query(
+                "SELECT 1 FROM zeroship.users \
+                 WHERE id = $1 \
+                   AND disabled_at IS NULL \
+                   AND deletion_requested_at IS NULL \
+                   AND anonymized_at IS NULL",
+                &[&principal_id],
+            )
+            .await
+            .map_err(|err| {
+                tracing::error!(
+                    error = %err,
+                    principal_id = %principal_id,
+                    "control: principal eligibility lookup failed"
+                );
+                web::error::ErrorInternalServerError("principal eligibility lookup failed")
+            })?;
+        if rows.is_empty() {
+            return Err(unauthorized_json("principal_inactive"));
         }
         Ok(())
     }
