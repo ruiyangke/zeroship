@@ -47,41 +47,81 @@ fn table_named(name: &str) -> String {
     )
 }
 
+/// Assert the claiming op and the kind holding the name, so no sibling in this
+/// five-way matrix can satisfy the wrong test.
+///
+/// MEASURED WHEN THIS WAS ADDED, and worth recording because the prediction was
+/// wrong: three fixtures had already shown that where an op claims BOTH
+/// namespaces the type check answers first, so these were expected to be type
+/// refusals too. They are not - every one of the five is the relation rule,
+/// including `createView` over a live table. The pattern is per-op, not global,
+/// which is exactly why each fixture gets measured rather than reasoned about.
+fn expect_relation_refusal(ops: &str, claiming_op: &str, held_by: &str, what: &str) {
+    let refusal = verdict(ops).expect_err(what);
+    for needle in [
+        &format!("this {claiming_op} claims"),
+        &format!("already created a {held_by} with that name"),
+    ] {
+        assert!(
+            refusal.contains(needle),
+            "the refusal must be {claiming_op} over a live {held_by} - {needle:?} is \
+             missing, so a sibling is satisfying this test: {refusal}"
+        );
+    }
+}
+
 #[test]
 fn creating_the_same_view_twice_is_refused() {
-    let refusal =
-        verdict(&format!("{A},{VIEW},{VIEW}")).expect_err("the second createView retakes a name");
-    assert!(
-        refusal.to_lowercase().contains("already"),
-        "the refusal must say the name is already taken: {refusal}"
+    expect_relation_refusal(
+        &format!("{A},{VIEW},{VIEW}"),
+        "createView",
+        "view",
+        "the second createView retakes a name",
     );
 }
 
 #[test]
 fn creating_the_same_sequence_twice_is_refused() {
-    verdict(&format!("{SEQ},{SEQ}")).expect_err("the second createSequence retakes a name");
+    expect_relation_refusal(
+        &format!("{SEQ},{SEQ}"),
+        "createSequence",
+        "sequence",
+        "the second createSequence retakes a name",
+    );
 }
 
 #[test]
 fn a_table_may_not_take_a_live_view_name() {
-    verdict(&format!("{A},{VIEW},{}", table_named("vw")))
-        .expect_err("a table and a view share the relation namespace");
+    expect_relation_refusal(
+        &format!("{A},{VIEW},{}", table_named("vw")),
+        "createTable",
+        "view",
+        "a table and a view share the relation namespace",
+    );
 }
 
 #[test]
 fn a_table_may_not_take_a_live_sequence_name() {
-    verdict(&format!("{SEQ},{}", table_named("sq")))
-        .expect_err("a table and a sequence share the relation namespace");
+    expect_relation_refusal(
+        &format!("{SEQ},{}", table_named("sq")),
+        "createTable",
+        "sequence",
+        "a table and a sequence share the relation namespace",
+    );
 }
 
 #[test]
 fn a_view_may_not_take_a_live_table_name() {
     // The reverse direction. A rule written only into the createTable arm would
     // pass the three above and miss this.
-    verdict(&format!(
-        r#"{A},{{"op":"createView","name":"a","query":{{"kind":"structured","select":{{"from":{{"name":"a"}},"projection":[{{"kind":"colRef","name":"c0"}}]}}}}}}"#
-    ))
-    .expect_err("a view may not take the name of a table this envelope created");
+    expect_relation_refusal(
+        &format!(
+            r#"{A},{{"op":"createView","name":"a","query":{{"kind":"structured","select":{{"from":{{"name":"a"}},"projection":[{{"kind":"colRef","name":"c0"}}]}}}}}}"#
+        ),
+        "createView",
+        "table",
+        "a view may not take the name of a table this envelope created",
+    );
 }
 
 // ---------------------------------------------------------------------------
