@@ -24,8 +24,9 @@
 # The mint leg is OBSERVED, not inferred. Control POSTs the deploy-token mint to
 # `auth.platform_mint_url`, which is a different setting from
 # `auth.platform_issuer`: the issuer is the `iss` a token must carry, the mint
-# URL is where control_key is sent. Every other harness runs both on one
-# loopback host, where the two agree and code that DERIVES one from the other
+# URL is where the dedicated platform mint key is sent. Every other harness
+# runs both on one loopback host, where the two agree and code that DERIVES one
+# from the other
 # looks identical to code that reads it. So this harness puts a recording proxy
 # on a third port, points the mint there, and asserts both halves: the POST
 # arrived at the configured address, AND the token that came back still carries
@@ -184,7 +185,7 @@ step "Put a RECORDING PROXY in front of the OP, and point the mint at it"
 # host, so the OP's public issuer origin and its reachable address are the same
 # string. When those two agree, code that DERIVES the mint target from the
 # issuer is indistinguishable from code that reads the configured one - which is
-# exactly how a shipped deployment ended up POSTing control_key at its own
+# exactly how a shipped deployment ended up POSTing the mint credential at its own
 # public CDN hostname, failing Connect on every device approval, while every
 # green harness said the flow worked.
 #
@@ -422,9 +423,9 @@ case "$EVIL_ECHOED" in
   *) pass "an off-origin continuation is replaced, not echoed (HTTP $EVIL_CODE, return_to='$EVIL_ECHOED')" ;;
 esac
 
-# B2 regression, checked BEFORE the login: the auth service cannot write
-# `zeroship.principal_grants` (grants.ts gives that table to zeroship_control
-# only), so a freshly signed-up platform creator has NO grants. If control does
+# B2 regression, checked BEFORE the login: the auth service can read but cannot
+# write `zeroship.principal_grants`, so a freshly signed-up platform creator has
+# NO grants. If control does
 # not provision them the deploy token mints with `scope: ""`.
 GRANTS_AT_SIGNUP="$(psql_q "SELECT count(*) FROM zeroship.principal_grants WHERE principal_id = '$USER_ID'")"
 [ "$GRANTS_AT_SIGNUP" = "0" ] \
@@ -537,20 +538,30 @@ TOKEN="$(jget '.access_token' < "$CREDS")"
 
 TOKEN_SCOPE="$(jwt_claim "$TOKEN" scope)"
 TOKEN_SUB="$(jwt_claim "$TOKEN" sub)"
+TOKEN_AUD="$(jwt_claim "$TOKEN" aud)"
+TOKEN_CLIENT_ID="$(jwt_claim "$TOKEN" client_id)"
 TOKEN_EXP="$(jwt_claim "$TOKEN" exp)"
 TOKEN_IAT="$(jwt_claim "$TOKEN" iat)"
 TOKEN_TTL=$((TOKEN_EXP - TOKEN_IAT))
-echo "  token: sub=$TOKEN_SUB scope='$TOKEN_SCOPE' ttl=${TOKEN_TTL}s"
+echo "  token: sub=$TOKEN_SUB aud=$TOKEN_AUD client_id=$TOKEN_CLIENT_ID scope='$TOKEN_SCOPE' ttl=${TOKEN_TTL}s"
 # B2: an empty scope here is the bug that made approval succeed and deploy 403.
 [ "$TOKEN_SCOPE" = "apps:deploy apps:read apps:write secrets:read" ] \
   && pass "the deploy token carries the creator scopes" \
   || fail "deploy token scope was '$TOKEN_SCOPE'"
 [ "$TOKEN_SUB" = "$USER_ID" ] && pass "the token's subject is the approving user" \
   || fail "token sub $TOKEN_SUB != $USER_ID"
-# B3: 15 minutes is the OP default and is not a CLI session.
-[ "$TOKEN_TTL" -ge 3600 ] \
-  && pass "the deploy token outlives a single command (${TOKEN_TTL}s)" \
-  || fail "deploy token TTL is only ${TOKEN_TTL}s"
+[ "$TOKEN_AUD" = "control.zeroship.ai" ] \
+  && pass "the mint fixed the token audience to control" \
+  || fail "token audience was '$TOKEN_AUD'"
+[ "$TOKEN_CLIENT_ID" = "zeroship-cli" ] \
+  && pass "the mint fixed the token client_id to zeroship-cli" \
+  || fail "token client_id was '$TOKEN_CLIENT_ID'"
+# The CLI token has no supported early-recall operation. Its exact 12-hour
+# lifetime is therefore the effective revocation bound, not merely a usability
+# choice above the OP's 15-minute browser default.
+[ "$TOKEN_TTL" = "43200" ] \
+  && pass "the deploy token expires at the 12-hour ceiling (${TOKEN_TTL}s)" \
+  || fail "deploy token TTL was ${TOKEN_TTL}s, expected 43200s"
 
 # ---------------------------------------------------------------------------
 # THE MINT LEG, observed rather than inferred. Two halves, and both must hold:

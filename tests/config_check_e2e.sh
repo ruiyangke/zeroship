@@ -233,11 +233,12 @@ STRONG_HEX="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 # The mint destination is mandatory whenever a platform issuer is configured,
 # and every control case below configures one (the native provider already
 # requires it). It is set here rather than per case for the same reason the
-# three secrets are: it is a precondition of the runs, not the subject of any
+# four secrets are: it is a precondition of the runs, not the subject of any
 # one of them. Case 18 is where it IS the subject.
 CONTROL_MINT_URL="http://auth.internal.check-config.test:9092"
 CONTROL_ENV=(
     env
+    ZEROSHIP_AUTH_PLATFORM_MINT_KEY="$STRONG_HEX"
     ZEROSHIP_CONTROL_KEY="$STRONG_HEX"
     ZEROSHIP_WORKER_KEY="$STRONG_HEX"
     ZEROSHIP_PAIRWISE_SALT="$STRONG_HEX"
@@ -262,6 +263,7 @@ GATEWAY_COMMON=(--broker-secret-file "$ZEROSHIP_GATEWAY_BROKER_SECRET_FILE")
 AUTH_RUN=(
     env
     ZEROSHIP_AUTH_DATABASE_URL=postgres://check-config
+    ZEROSHIP_AUTH_PLATFORM_MINT_KEY="$STRONG_HEX"
     ZEROSHIP_AUTH_STASH_SIGNING_KEY="$STRONG_HEX"
     ZEROSHIP_AUTH_TOTP_ENC_KEY="$STRONG_HEX"
     "$AUTH"
@@ -730,6 +732,7 @@ echo ""
 # issuer's own origin - that fallback is bit-for-bit the shipped bug, and it
 # would reappear on exactly the deployments that never set the new value.
 run_cmd control-mint-url-missing env \
+    ZEROSHIP_AUTH_PLATFORM_MINT_KEY="$STRONG_HEX" \
     ZEROSHIP_CONTROL_KEY="$STRONG_HEX" ZEROSHIP_WORKER_KEY="$STRONG_HEX" \
     ZEROSHIP_PAIRWISE_SALT="$STRONG_HEX" "${CONTROL_MASTER[@]}" \
     "$CONTROL" --check-config "${CONTROL_COMMON[@]}" \
@@ -744,6 +747,7 @@ echo ""
 for bad_mint in "auth:9092" "https://auth.internal@evil.example" \
     "http://auth:9092/oauth2"; do
     run_cmd control-mint-url-bad env \
+        ZEROSHIP_AUTH_PLATFORM_MINT_KEY="$STRONG_HEX" \
         ZEROSHIP_CONTROL_KEY="$STRONG_HEX" ZEROSHIP_WORKER_KEY="$STRONG_HEX" \
         ZEROSHIP_PAIRWISE_SALT="$STRONG_HEX" "${CONTROL_MASTER[@]}" \
         ZEROSHIP_AUTH_PLATFORM_MINT_URL="$bad_mint" \

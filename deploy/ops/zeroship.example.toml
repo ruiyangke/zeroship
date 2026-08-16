@@ -19,9 +19,9 @@
 # trusted_origins = ["https://console.zeroship.ai", "http://localhost:3000"]
 
 # Platform-global secrets, at the ROOT because several binaries read the one
-# value: control_key (control, gateway, worker, migrated, auth), worker_key
-# (control, gateway, worker), pairwise_salt (control, gateway). Root keys must
-# precede the first table header, or TOML puts them inside it.
+# value: control_key (control, gateway, worker, migrated), worker_key (control,
+# gateway, worker), pairwise_salt (control, gateway). Root keys must precede the
+# first table header, or TOML puts them inside it.
 control_key = "urn:zeroship:file:/etc/zeroship/secrets/control_key"
 worker_key = "urn:zeroship:file:/etc/zeroship/secrets/worker_key"
 pairwise_salt = "urn:zeroship:file:/etc/zeroship/secrets/pairwise_salt"
@@ -39,8 +39,9 @@ pairwise_salt = "urn:zeroship:file:/etc/zeroship/secrets/pairwise_salt"
 #                           `iss` claim must equal. PUBLIC, always - it is what
 #                           the OP stamps and what every verifier compares.
 #   auth.platform_mint_url  OUTBOUND. Where control POSTs the deploy-token mint
-#                           (`{url}/internal/platform-token`) carrying
-#                           control_key. Must be an address CONTROL can reach.
+#                           (`{url}/internal/platform-token`) carrying the
+#                           dedicated platform_mint_key. Must be an address
+#                           CONTROL can reach.
 #   auth.platform_jwks_url  OUTBOUND. Where control FETCHES the OP's signing
 #                           keys. Same reasoning; defaults to
 #                           `{issuer}/.well-known/jwks.json`, which is only
@@ -91,6 +92,10 @@ trusted_oauth_clients = []
 # 'none'). Empty/omitted => single-origin / dev (no immersive iframe).
 # frame_ancestor_origins = ["https://console.zeroship.ai"]
 frame_ancestor_origins = []
+
+# Dedicated bearer shared only by control and auth for the internal platform
+# token mint. It is intentionally distinct from the broader control API key.
+platform_mint_key = "urn:zeroship:file:/etc/zeroship/secrets/platform_mint_key"
 
 [observability]
 # Tracing filter passed to Rust tracing subscribers (EnvFilter syntax).

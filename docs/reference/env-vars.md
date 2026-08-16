@@ -48,14 +48,17 @@ process argument list.
 
 ```
 control_key          ZEROSHIP_CONTROL_KEY            --control-key-file
+auth.platform_mint_key ZEROSHIP_AUTH_PLATFORM_MINT_KEY
+  auth: --platform-mint-key-file; control: --auth-platform-mint-key-file
 control.master_key   ZEROSHIP_CONTROL_MASTER_KEY     --master-key-file
 gateway.database_url ZEROSHIP_GATEWAY_DATABASE_URL   --database-url-file
 ```
 
-LOCATION ENCODES SHARING. A canonical name with no scope prefix is one several
-binaries read; a name under `control.` is control's alone. The overlay follows
-the same rule, so a key at the root of `zeroship.toml` is shared and a key under
-`[control]` is not.
+LOCATION ENCODES OWNERSHIP. A canonical name with no scope prefix is
+platform-global. A domain-scoped name belongs to that domain, even when more
+than one binary participates in it: auth and control both read
+`auth.platform_mint_key`, while only control reads `control.master_key`. The
+overlay follows the same paths.
 
 The alias hop is gone. `deploy/ops/zeroship.toml` used to carry a `[secrets]`
 block whose every entry was a `urn:zeroship:env:<VAR>` reference - a config file
@@ -87,7 +90,7 @@ said here:
 | Setting | What it is | Which value |
 | --- | --- | --- |
 | `auth.platform_issuer` | Trust anchor: the exact string a platform token's `iss` claim must equal | The PUBLIC issuer, always |
-| `auth.platform_mint_url` | Outbound: where control POSTs the deploy-token mint, carrying `control_key` | An address control can reach |
+| `auth.platform_mint_url` | Outbound: where control POSTs the deploy-token mint, carrying `auth.platform_mint_key` | An address control can reach |
 | `auth.platform_jwks_url` | Outbound: where the OP's signing keys are fetched | An address the reader can reach |
 
 The first is a NAME. It is fixed by what the OP stamps into its tokens and by
@@ -108,7 +111,7 @@ Consequences worth knowing before you configure a deployment:
   start without it rather than deriving one from the issuer. A derived route is
   wrong on exactly the topologies described above, and wrong in a way that
   surfaces only when a creator has already approved a login in their browser.
-- **It is a credential destination.** Control sends `control_key` to whatever it
+- **It is a credential destination.** Control sends `auth.platform_mint_key` to whatever it
   names, so the value must be a bare absolute `http`/`https` origin: no
   userinfo, no path, no query, no fragment. Anything else is refused at boot.
   It is supplied only by flag, environment variable, or the operator-owned
@@ -141,7 +144,7 @@ OUTSIDE these two markers is hand-maintained and is never rewritten
 by the generator.
 -->
 
-**152 canonical settings**: 114 operational, 31 secret, 5 bootstrap controls, 2 command controls. Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is the canonical name itself, because both are computed from the one declaration rather than spelled twice.
+**153 canonical settings**: 114 operational, 32 secret, 5 bootstrap controls, 2 command controls. Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is the canonical name itself, because both are computed from the one declaration rather than spelled twice.
 
 ### shared (no scope prefix: read by more than one binary)
 
@@ -151,10 +154,10 @@ by the generator.
 | `check_config` | command control | - | - | zeroship-auth `--check-config`<br>zeroship-control `--check-config`<br>zeroship-gate `--check-config`<br>zeroship-migrated `--check-config`<br>zeroship-worker `--check-config`<br>zeroship-workflow-scheduler `--check-config` | - |
 | `check_config_format` | command control | - | - | zeroship-auth `--check-config-format`<br>zeroship-control `--check-config-format`<br>zeroship-gate `--check-config-format`<br>zeroship-migrated `--check-config-format`<br>zeroship-worker `--check-config-format`<br>zeroship-workflow-scheduler `--check-config-format` | `CheckFormat::Text` |
 | `config` | bootstrap control | `ZEROSHIP_CONFIG` | - | zeroship-auth `--config`<br>zeroship-control `--config`<br>zeroship-gate `--config`<br>zeroship-migrated `--config`<br>zeroship-worker `--config`<br>zeroship-workflow-scheduler `--config` | - |
-| `control_key` | secret | `ZEROSHIP_CONTROL_KEY` | `control_key` | zeroship-auth `--control-key-file`<br>zeroship-control `--control-key-file`<br>zeroship-gate `--control-key-file`<br>zeroship-migrated `--control-key-file`<br>zeroship-worker `--control-key-file` | - |
+| `control_key` | secret | `ZEROSHIP_CONTROL_KEY` | `control_key` | zeroship-control `--control-key-file`<br>zeroship-gate `--control-key-file`<br>zeroship-migrated `--control-key-file`<br>zeroship-worker `--control-key-file` | - |
 | `control_url` | operational | `ZEROSHIP_CONTROL_URL` | `control_url` | zeroship-auth `--control-url`<br>zeroship-gate `--control-url`<br>zeroship-worker `--control-url` | `http://localhost:9090` |
 | `no_config` | bootstrap control | `ZEROSHIP_NO_CONFIG` | - | zeroship-auth `--no-config`<br>zeroship-control `--no-config`<br>zeroship-gate `--no-config`<br>zeroship-migrated `--no-config`<br>zeroship-worker `--no-config`<br>zeroship-workflow-scheduler `--no-config` | - |
-| `oauth_audience` | operational | `ZEROSHIP_OAUTH_AUDIENCE` | `oauth_audience` | zeroship-control `--oauth-audience`<br>zeroship-migrated `--oauth-audience` | `control.zeroship.ai` |
+| `oauth_audience` | operational | `ZEROSHIP_OAUTH_AUDIENCE` | `oauth_audience` | zeroship-auth `--oauth-audience`<br>zeroship-control `--oauth-audience`<br>zeroship-migrated `--oauth-audience` | `control.zeroship.ai` |
 | `origin_scheme` | operational | `ZEROSHIP_ORIGIN_SCHEME` | `origin_scheme` | zeroship-control `--origin-scheme`<br>zeroship-gate `--origin-scheme` | `OriginScheme::Https` |
 | `pairwise_salt` | secret | `ZEROSHIP_PAIRWISE_SALT` | `pairwise_salt` | zeroship-control `--pairwise-salt-file`<br>zeroship-gate `--pairwise-salt-file` | - |
 | `poll_interval` | operational | `ZEROSHIP_POLL_INTERVAL` | `poll_interval` | zeroship-gate `--poll-interval`<br>zeroship-worker `--poll-interval` | `5` |
@@ -195,6 +198,7 @@ by the generator.
 | `auth.pairwise_salt_file` | operational | `ZEROSHIP_AUTH_PAIRWISE_SALT_FILE` | `auth.pairwise_salt_file` | zeroship-auth `--pairwise-salt-file` | empty |
 | `auth.platform_issuer` | operational | `ZEROSHIP_AUTH_PLATFORM_ISSUER` | `auth.platform_issuer` | zeroship-control `--auth-platform-issuer`<br>zeroship-migrated `--auth-platform-issuer` | empty |
 | `auth.platform_jwks_url` | operational | `ZEROSHIP_AUTH_PLATFORM_JWKS_URL` | `auth.platform_jwks_url` | zeroship-control `--auth-platform-jwks-url`<br>zeroship-migrated `--auth-platform-jwks-url` | empty |
+| `auth.platform_mint_key` | secret | `ZEROSHIP_AUTH_PLATFORM_MINT_KEY` | `auth.platform_mint_key` | zeroship-auth `--platform-mint-key-file`<br>zeroship-control `--auth-platform-mint-key-file` | - |
 | `auth.platform_mint_url` | operational | `ZEROSHIP_AUTH_PLATFORM_MINT_URL` | `auth.platform_mint_url` | zeroship-control `--auth-platform-mint-url` | empty |
 | `auth.postmark_webhook_password` | secret | `ZEROSHIP_AUTH_POSTMARK_WEBHOOK_PASSWORD` | `auth.postmark_webhook_password` | zeroship-auth `--postmark-webhook-password-file` | - |
 | `auth.postmark_webhook_user` | operational | `ZEROSHIP_AUTH_POSTMARK_WEBHOOK_USER` | `auth.postmark_webhook_user` | zeroship-auth `--postmark-webhook-user` | empty |
@@ -399,15 +403,17 @@ conflict fails without rotating either side.
 32 random bytes as lowercase hex. Rerunning keeps an existing valid value rather
 than rotating it. Here the `.env` name and the container name coincide:
 
-`ZEROSHIP_CONTROL_KEY` `ZEROSHIP_CONTROL_MASTER_KEY` `ZEROSHIP_WORKER_KEY`
+`ZEROSHIP_AUTH_PLATFORM_MINT_KEY` `ZEROSHIP_CONTROL_KEY`
+`ZEROSHIP_CONTROL_MASTER_KEY` `ZEROSHIP_WORKER_KEY`
 `ZEROSHIP_GATEWAY_STASH_SIGNING_KEY` `ZEROSHIP_PAIRWISE_SALT`
 `ZEROSHIP_AUTH_STASH_SIGNING_KEY` `ZEROSHIP_AUTH_TOTP_ENC_KEY`
 `ZEROSHIP_MIGRATED_POLICY_SEAL_KEY`
 
 Compose uses required `${VAR:?run zeroship dev init}` interpolation for these
 values rather than built-in weak defaults. One generated value therefore moves
-every consumer together. In particular, changing `ZEROSHIP_CONTROL_KEY` cannot
-move auth alone while leaving the other four services behind.
+every consumer together. `ZEROSHIP_CONTROL_KEY` reaches control, gateway,
+worker, and migrated. The independent `ZEROSHIP_AUTH_PLATFORM_MINT_KEY` reaches
+only control and auth.
 
 ### Database DSNs an operator may override
 
