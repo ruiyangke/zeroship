@@ -17,6 +17,7 @@ import {
 import { invalidatedBy } from "../../lib/query-keys";
 import { useAppMutation } from "../../lib/queries";
 import { ResolutionBadge } from "../Badges";
+import { FieldError, InlineForm, Muted } from "../AppPrimitives";
 import { errorMessage } from "../rpc";
 import type { IssueDetail } from "../types";
 import { RailSection } from "./RailSection";
@@ -71,9 +72,9 @@ export function StatusControl({ issue }: { issue: IssueDetail["issue"] }) {
   };
 
   return (
-    <div className="status-control">
+    <div className="col-span-full mt-3 mb-1 border-0 bg-transparent p-0">
       <RailSection title="Status" />
-      <div className="status-control-row">
+      <div className="flex flex-wrap gap-2">
         <Field>
           <Select
             value={issue.status}
@@ -100,17 +101,17 @@ export function StatusControl({ issue }: { issue: IssueDetail["issue"] }) {
             pairing with status. A greyed-out text box holding "--" says "you
             could edit this, but not right now", which is the opposite of
             true. */}
-        <div className="status-resolution">
-          <span className="field-label">Resolution</span>
+        <div className="flex items-center gap-2">
+          <span className="text-base font-medium text-ink-muted">Resolution</span>
           {issue.resolution ? (
             <ResolutionBadge resolution={issue.resolution} />
           ) : (
-            <span className="dim">Unresolved</span>
+            <Muted>Unresolved</Muted>
           )}
         </div>
       </div>
 
-      <div className="status-actions">
+      <div className="mt-2 flex flex-wrap gap-2">
         {targets.includes("RESOLVED") ? (
           <Button variant="gray" size="sm" disabled={busy} onClick={() => setShowResolve((v) => !v)}>
             Resolve...
@@ -127,7 +128,7 @@ export function StatusControl({ issue }: { issue: IssueDetail["issue"] }) {
       </div>
 
       {showResolve ? (
-        <div className="inline-form">
+        <InlineForm>
           <Field>
             <Field.Label>Resolution (required to resolve)</Field.Label>
             <Select
@@ -148,11 +149,11 @@ export function StatusControl({ issue }: { issue: IssueDetail["issue"] }) {
           >
             Confirm resolve
           </Button>
-        </div>
+        </InlineForm>
       ) : null}
 
       {showDuplicate ? (
-        <div className="inline-form">
+        <InlineForm>
           <Field>
             <Field.Label>Duplicate of</Field.Label>
             <Input
@@ -167,10 +168,10 @@ export function StatusControl({ issue }: { issue: IssueDetail["issue"] }) {
           >
             Confirm duplicate
           </Button>
-        </div>
+        </InlineForm>
       ) : null}
 
-      {error ? <p className="field-error">{error}</p> : null}
+      {error ? <FieldError>{error}</FieldError> : null}
     </div>
   );
 }

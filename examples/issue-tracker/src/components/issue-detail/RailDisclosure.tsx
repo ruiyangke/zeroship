@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { Button } from "@zeroship/ui";
+import { RailRow } from "./RailRow";
 
 /**
  * A rail group that states a fact and opens its full panel on request.
@@ -35,23 +36,33 @@ export function RailDisclosure({
   const [open, setOpen] = useState(false);
 
   return (
-    <div className={open ? "rail-disclosure is-open" : "rail-disclosure"}>
-      <div className="rail-choice">
-        <span className="field-label">{label}</span>
-        <span className="rail-choice-value">{summary}</span>
-        <Button
-          variant="plain"
-          size="sm"
-          // Named per group, so a screen reader landing on the button knows
-          // which panel it opens rather than hearing "Edit" four times.
-          aria-label={open ? `Close ${label}` : `${action} ${label}`}
-          aria-expanded={open}
-          onClick={() => setOpen((v) => !v)}
-        >
-          {open ? "Close" : action}
-        </Button>
-      </div>
-      {open ? <div className="rail-disclosure-body">{children}</div> : null}
+    <div
+      className={
+        open
+          ? "rail-disclosure is-open col-span-full grid grid-cols-subgrid border-t border-line first:border-t-0"
+          : "rail-disclosure col-span-full grid grid-cols-subgrid border-t border-line first:border-t-0"
+      }
+    >
+      <RailRow
+        label={label}
+        value={summary}
+        action={
+          <Button
+            variant="plain"
+            size="sm"
+            // Named per group, so a screen reader landing on the button knows
+            // which panel it opens rather than hearing "Edit" four times.
+            aria-label={open ? `Close ${label}` : `${action} ${label}`}
+            aria-expanded={open}
+            onClick={() => setOpen((v) => !v)}
+          >
+            {open ? "Close" : action}
+          </Button>
+        }
+      />
+      {open ? (
+        <div className="rail-disclosure-body col-span-full pt-1 pb-2">{children}</div>
+      ) : null}
     </div>
   );
 }

@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { Button } from "@zeroship/ui";
+import { RailRow } from "./RailRow";
 
 /**
  * The shape of one rail property: a fact you read, and edit when you mean to.
@@ -39,36 +40,42 @@ export function RailProperty({
 
   if (!editing) {
     return (
-      <div className="rail-choice">
-        <span className="field-label">{label}</span>
-        <span className="rail-choice-value">{display}</span>
-        <Button
-          variant="plain"
-          size="sm"
-          disabled={disabled}
-          // Named per property: a rail of bare "Edit" buttons tells a screen
-          // reader nothing about which one it has landed on.
-          aria-label={`Edit ${label}`}
-          onClick={() => setEditing(true)}
-        >
-          Edit
-        </Button>
-      </div>
+      <RailRow
+        label={label}
+        value={display}
+        action={
+          <Button
+            variant="plain"
+            size="sm"
+            disabled={disabled}
+            // Named per property: a rail of bare "Edit" buttons tells a screen
+            // reader nothing about which one it has landed on.
+            aria-label={`Edit ${label}`}
+            onClick={() => setEditing(true)}
+          >
+            Edit
+          </Button>
+        }
+      />
     );
   }
 
   return (
-    <div className={wide ? "rail-choice is-editing is-wide" : "rail-choice is-editing"}>
-      <span className="field-label">{label}</span>
-      {children(() => setEditing(false))}
-      <Button
-        variant="plain"
-        size="sm"
-        aria-label={`Cancel editing ${label}`}
-        onClick={() => setEditing(false)}
-      >
-        Cancel
-      </Button>
-    </div>
+    <RailRow
+      label={label}
+      value={children(() => setEditing(false))}
+      editing
+      wide={wide}
+      action={
+        <Button
+          variant="plain"
+          size="sm"
+          aria-label={`Cancel editing ${label}`}
+          onClick={() => setEditing(false)}
+        >
+          Cancel
+        </Button>
+      }
+    />
   );
 }

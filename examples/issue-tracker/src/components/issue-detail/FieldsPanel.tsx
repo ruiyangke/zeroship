@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Button, DescriptionList, Field, Input, Select } from "@zeroship/ui";
+import { Button, Field, Input, Select } from "@zeroship/ui";
 import {
   moveIssue,
   reassignIssue,
@@ -20,8 +20,11 @@ import { invalidatedBy } from "../../lib/query-keys";
 import { useAppMutation, useProduct } from "../../lib/queries";
 
 import { KindBadge, PriorityBadge, SeverityBadge } from "../Badges";
+import { FieldError, Hint, InlineForm } from "../AppPrimitives";
 import { RailChoice } from "./RailChoice";
+import { RailDescriptionList } from "./RailDescriptionList";
 import { RailProperty } from "./RailProperty";
+import { RailRow } from "./RailRow";
 import { errorMessage } from "../rpc";
 import type { IssueDetail, ProductDetail } from "../types";
 import { UserPicker } from "../UserPicker";
@@ -106,7 +109,7 @@ function Classification({ issue }: { issue: Issue }) {
           }
         }}
       />
-      {error ? <p className="field-error">{error}</p> : null}
+      {error ? <FieldError className="col-span-full">{error}</FieldError> : null}
     </>
   );
 }
@@ -149,7 +152,7 @@ function AssigneeControl({
       >
         {(done) => <UserPicker onPick={(user) => void assign(user.id, done)} />}
       </RailProperty>
-      {error ? <p className="field-error">{error}</p> : null}
+      {error ? <FieldError className="col-span-full">{error}</FieldError> : null}
     </>
   );
 }
@@ -195,13 +198,13 @@ function MoveControl({
   };
 
   return (
-    <div className="field-block">
+    <div className="col-span-full grid grid-cols-subgrid">
       {/* No label. Every other rail line is "property: value"; this one had
           no value to state, so hiding its button until hover left the word
           "Move" sitting alone like a field whose contents had gone missing.
           It is an action, and it is written as one. */}
       <span aria-hidden="true" />
-      <div className="field-block-head is-action">
+      <div className="col-start-3 block">
         <Button variant="gray" size="sm" onClick={() => setOpen((v) => !v)}>
           {/* Short enough to fit the rail. The full sentence ran past the
               column edge, which is how a rail says "this control does not
@@ -210,7 +213,7 @@ function MoveControl({
         </Button>
       </div>
       {open ? (
-        <div className="inline-form">
+        <InlineForm className="col-span-full">
           <Field orientation="horizontal">
             <Field.Label>Target product</Field.Label>
             <Select
@@ -250,16 +253,16 @@ function MoveControl({
           >
             Confirm move
           </Button>
-          <p className="state-hint small">
+          <Hint>
             Moving an issue that already has a version or milestone set is rejected by the
             server today (it cannot clear those fields).
-          </p>
-        </div>
+          </Hint>
+        </InlineForm>
       ) : null}
       {error || targetProductQ.isError ? (
-        <p className="field-error">
+        <FieldError className="col-span-full">
           {error ?? errorMessage(targetProductQ.error)}
-        </p>
+        </FieldError>
       ) : null}
     </div>
   );
@@ -303,50 +306,57 @@ function GeneralField({
   // nobody sets. A value you are not changing is something to read.
   if (!editing) {
     return (
-      <div className="field-row-compact">
-        <span className="field-label">{label}</span>
-        <span className="field-value">{value ? value : <Absent />}</span>
-        <Button
-          variant="plain"
-          size="sm"
-          // Named per field: a rail with five bare "Edit" buttons is
-          // ambiguous to a screen reader and to a strict-mode locator.
-          aria-label={`Edit ${label}`}
-          onClick={() => {
-            setDraft(value);
-            setEditing(true);
-          }}
-        >
-          Edit
-        </Button>
-      </div>
+      <RailRow
+        label={label}
+        value={value ? value : <Absent />}
+        action={
+          <Button
+            variant="plain"
+            size="sm"
+            // Named per field: a rail with five bare "Edit" buttons is
+            // ambiguous to a screen reader and to a strict-mode locator.
+            aria-label={`Edit ${label}`}
+            onClick={() => {
+              setDraft(value);
+              setEditing(true);
+            }}
+          >
+            Edit
+          </Button>
+        }
+      />
     );
   }
 
   return (
-    <Field orientation="horizontal" className="field-block">
-      <Field.Label>{label}</Field.Label>
-      <span className="field-block-head">
-        <Input value={draft} disabled={busy} onChange={(e) => setDraft(e.target.value)} />
-        <Button variant="gray" size="sm" disabled={busy} onClick={() => void save()}>
-          Save
-        </Button>
-        <Button
-          variant="plain"
-          size="sm"
-          disabled={busy}
-          aria-label={`Cancel editing ${label}`}
-          onClick={() => {
-            setDraft(value);
-            setEditing(false);
-            setError(null);
-          }}
-        >
-          Cancel
-        </Button>
-      </span>
-      {error ? <p className="field-error">{error}</p> : null}
-    </Field>
+    <>
+      <RailRow
+        label={label}
+        value={<Input value={draft} disabled={busy} onChange={(e) => setDraft(e.target.value)} />}
+        editing
+        action={
+          <span className="flex gap-1">
+            <Button variant="gray" size="sm" disabled={busy} onClick={() => void save()}>
+              Save
+            </Button>
+            <Button
+              variant="plain"
+              size="sm"
+              disabled={busy}
+              aria-label={`Cancel editing ${label}`}
+              onClick={() => {
+                setDraft(value);
+                setEditing(false);
+                setError(null);
+              }}
+            >
+              Cancel
+            </Button>
+          </span>
+        }
+      />
+      {error ? <FieldError className="col-span-full">{error}</FieldError> : null}
+    </>
   );
 }
 
@@ -405,7 +415,7 @@ export function FieldsPanel({
       (issue.platform && issue.platform !== "Unspecified"),
   );
   return (
-    <div className="fields-panel">
+    <div className="fields-panel border-0 bg-transparent p-0">
       <RailFieldset disabled={readOnly}>
       {/* The summary is edited in the PAGE HEAD, where the summary is.
           It lived here as "Edit summary" floating at the top of the rail, a
@@ -423,26 +433,17 @@ export function FieldsPanel({
           were four spans in a row with hand-rolled "Label: value" strings and
           inconsistent emphasis -- two bold values, two not. */}
       <RailSection title="Where" />
-      <DescriptionList>
-        <DescriptionList.Item>
-          <DescriptionList.Term>Product</DescriptionList.Term>
-          <DescriptionList.Detail>{product.name}</DescriptionList.Detail>
-        </DescriptionList.Item>
-        <DescriptionList.Item>
-          <DescriptionList.Term>Component</DescriptionList.Term>
-          <DescriptionList.Detail>{component.name}</DescriptionList.Detail>
-        </DescriptionList.Item>
-        <DescriptionList.Item>
-          <DescriptionList.Term>Reporter</DescriptionList.Term>
-          <DescriptionList.Detail>{personName(issue.reporterId, people)}</DescriptionList.Detail>
-        </DescriptionList.Item>
-        <DescriptionList.Item>
-          <DescriptionList.Term>QA contact</DescriptionList.Term>
-          <DescriptionList.Detail>
-            {issue.qaContactId ? personName(issue.qaContactId, people) : <Absent />}
-          </DescriptionList.Detail>
-        </DescriptionList.Item>
-      </DescriptionList>
+      <RailDescriptionList
+        items={[
+          { term: "Product", detail: product.name },
+          { term: "Component", detail: component.name },
+          { term: "Reporter", detail: personName(issue.reporterId, people) },
+          {
+            term: "QA contact",
+            detail: issue.qaContactId ? personName(issue.qaContactId, people) : <Absent />,
+          },
+        ]}
+      />
 
       {productDetail ? (
         <>
@@ -477,9 +478,11 @@ export function FieldsPanel({
           />
         </>
       ) : (
-        <p className="state-hint small">Sign in to change version/milestone.</p>
+        <Hint className="col-span-full">Sign in to change version/milestone.</Hint>
       )}
-      {versionMilestoneError ? <p className="field-error">{versionMilestoneError}</p> : null}
+      {versionMilestoneError ? (
+        <FieldError className="col-span-full">{versionMilestoneError}</FieldError>
+      ) : null}
 
       {/* After the properties, not among them. It sat between "QA contact"
           and "Version", so a column of "label: value" lines was interrupted
@@ -499,14 +502,12 @@ export function FieldsPanel({
       {hasOther || showOther ? (
         <>
           <GeneralField issue={issue} field="whiteboard" label="Whiteboard" value={issue.whiteboard ?? ""} />
-          <div className="field-row">
-            <GeneralField issue={issue} field="opSys" label="OS" value={issue.opSys} />
-            <GeneralField issue={issue} field="platform" label="Platform" value={issue.platform} />
-          </div>
+          <GeneralField issue={issue} field="opSys" label="OS" value={issue.opSys} />
+          <GeneralField issue={issue} field="platform" label="Platform" value={issue.platform} />
           <GeneralField issue={issue} field="url" label="URL" value={issue.url ?? ""} />
         </>
       ) : (
-        <Button variant="plain" size="sm" onClick={() => setShowOther(true)}>
+        <Button className="col-span-full justify-self-start" variant="plain" size="sm" onClick={() => setShowOther(true)}>
           Set whiteboard, OS, platform or URL
         </Button>
       )}

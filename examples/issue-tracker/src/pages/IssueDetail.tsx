@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Badge, Banner, Button, Card, Cluster, Input, Stack, Tabs } from "@zeroship/ui";
+import { Badge, Banner, Button, Cluster, Input, Tabs } from "@zeroship/ui";
 import { KindBadge, PriorityBadge, ResolutionBadge, SeverityBadge, StatusBadge } from "../components/Badges";
 import { updateIssue } from "../api";
 import { invalidatedBy } from "../lib/query-keys";
@@ -19,6 +19,8 @@ import { KeywordsPanel } from "../components/issue-detail/KeywordsPanel";
 import { errorMessage } from "../components/rpc";
 import { isVisitor, useSession } from "../components/session";
 import { RailFieldset } from "../components/issue-detail/RailFieldset";
+import { RailSection } from "../components/issue-detail/RailSection";
+import { FieldError } from "../components/AppPrimitives";
 
 type Tab = "details" | "history";
 
@@ -37,7 +39,10 @@ function IssueDetailExtras({
   disabled: boolean;
 }) {
   return (
-    <fieldset className="issue-detail-extras m-0 border-0 p-0" disabled={disabled}>
+    <fieldset
+      className="issue-detail-extras m-0 mt-7 grid grid-cols-[repeat(auto-fit,minmax(15rem,1fr))] items-start gap-x-8 gap-y-7 border-0 border-t border-line p-0 pt-5 [&>section]:m-0 [&>section]:min-w-0"
+      disabled={disabled}
+    >
       {children}
     </fieldset>
   );
@@ -76,7 +81,7 @@ function TitleEditor({
   };
 
   return (
-    <div className="issue-title-editor">
+    <div className="mb-2 flex max-w-[46ch] flex-col gap-2">
       <Input
         aria-label="Summary"
         value={draft}
@@ -99,7 +104,7 @@ function TitleEditor({
           Cancel
         </Button>
       </Cluster>
-      {rename.error ? <p className="field-error">{errorMessage(rename.error)}</p> : null}
+      {rename.error ? <FieldError>{errorMessage(rename.error)}</FieldError> : null}
     </div>
   );
 }
@@ -132,7 +137,7 @@ export function IssueDetailPage({
         // scrollIntoView walks up to the nearest scrollable ancestor, which
         // here is the shell's main rather than the document.
         el.scrollIntoView({ block: "center" });
-        el.classList.add("is-linked");
+        el.classList.add("is-linked", "rounded", "bg-accent-soft");
         return;
       }
       if (tries++ < 40) window.setTimeout(find, 100);
@@ -211,20 +216,22 @@ export function IssueDetailPage({
           quiet line above, the summary owns its own line at heading size, and
           the state sits under it where it reads as a caption about the issue
           rather than as more title. */}
-      <div className="page-head issue-head">
-        <span className="issue-id">
+      <div className="mb-1 block">
+        <span className="mr-2 mb-1 inline-block font-mono text-sm tracking-[0.02em] text-ink-muted">
           {detail.product ? `${detail.product.key}-${detail.issue.number}` : detail.issue.id}
         </span>
         {editingTitle ? (
           <TitleEditor issue={detail.issue} onDone={() => setEditingTitle(false)} />
         ) : (
-          <Cluster gap={2} align="center" className="issue-title-row">
-            <h1 className="issue-title">{detail.issue.summary}</h1>
+          <Cluster gap={2} align="center" className="group/title">
+            <h1 className="m-0 max-w-[46ch] text-[1.5rem] leading-[1.25] tracking-[-0.02em]">
+              {detail.issue.summary}
+            </h1>
             {signedOut ? null : (
               <Button
                 variant="plain"
                 size="sm"
-                className="issue-title-edit"
+                className="opacity-0 transition-opacity duration-[120ms] group-hover/title:opacity-100 group-focus-within/title:opacity-100 [@media(hover:none)]:opacity-100"
                 aria-label="Edit summary"
                 onClick={() => setEditingTitle(true)}
               >
@@ -233,7 +240,7 @@ export function IssueDetailPage({
             )}
           </Cluster>
         )}
-        <Cluster gap={2} align="center" className="issue-state">
+        <Cluster gap={2} align="center" className="mt-0">
           <StatusBadge status={detail.issue.status} />
           <ResolutionBadge resolution={detail.issue.resolution ?? null} />
           {/* Before severity, because it qualifies it: "blocker" answers how
@@ -243,7 +250,7 @@ export function IssueDetailPage({
           <KindBadge kind={detail.issue.kind} />
           <SeverityBadge severity={detail.issue.severity} />
           <PriorityBadge priority={detail.issue.priority} />
-          <span className="issue-head-meta">
+          <span className="text-base text-ink-muted">
             {detail.product ? detail.product.name : null}
             {detail.component ? ` / ${detail.component.name}` : null}
           </span>
@@ -280,14 +287,14 @@ export function IssueDetailPage({
         </Tabs.List>
 
         <Tabs.Panel value="details">
-          <div className="issue-detail-grid">
+          <div className="grid grid-cols-[minmax(0,1fr)_22rem] items-start gap-0 max-[900px]:grid-cols-1">
           {/* The conversation IS the issue. It used to sit under a screen of
               editable fields -- summary, status, severity, priority,
               assignee, product, component, version, whiteboard, OS, platform,
               URL -- so the description, which is what the issue actually says,
               started below the fold. Fields are metadata and metadata goes in
               the rail. */}
-          <div className="issue-detail-main">
+          <div className="issue-detail-main flex min-w-0 flex-col gap-5 pr-10">
             {/* No `attachments` / `onAttachmentsChanged` props: the thread and
                 the roll-up below now ask `useAttachments(issueId)` for
                 themselves. Same key, so it is still ONE request -- what the
@@ -332,10 +339,11 @@ export function IssueDetailPage({
                 the element, so a panel would go "not stable, then not
                 visible" under a click. One owner of the state removes the
                 argument entirely. */}
-            <div className="issue-detail-more">
+            <div className="issue-detail-more mt-3">
               <Button
                 variant="plain"
                 size="sm"
+                className="max-w-full whitespace-normal text-start"
                 aria-expanded={moreOpen}
                 onClick={() => setMoreOpen((open) => !open)}
               >
@@ -364,7 +372,7 @@ export function IssueDetailPage({
               ) : null}
             </div>
           </div>
-          <Stack className="issue-detail-side" gap={3}>
+          <div className="issue-detail-side flex min-w-0 flex-col gap-5 border-l border-line pt-1 pl-7 [&_*]:max-w-full [&>*]:shrink-0 min-[901px]:sticky min-[901px]:top-0 min-[901px]:max-h-[calc(100dvh-4rem)] min-[901px]:self-start min-[901px]:overflow-y-auto min-[901px]:overscroll-contain min-[901px]:pb-4">
             <FieldsPanel
               issue={detail.issue}
               people={detail.people}
@@ -391,7 +399,7 @@ export function IssueDetailPage({
                 reads as a heading's space rather than as a gap nobody meant.
                 These four are about OTHER things -- people and issues -- which
                 is a different kind of fact from severity or component. */}
-            <p className="rail-section">Links</p>
+            <RailSection title="Links" />
             <RailFieldset disabled={signedOut} grouped>
               {/* No `onChanged`: attaching a keyword is a relation change, and
                   the panel's own mutation drops the issue detail that
@@ -407,7 +415,7 @@ export function IssueDetailPage({
               />
               <SeeAlsoPanel issueId={id} />
             </RailFieldset>
-          </Stack>
+          </div>
           </div>
         </Tabs.Panel>
         <Tabs.Panel value="history">

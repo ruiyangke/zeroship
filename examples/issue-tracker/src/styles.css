@@ -289,44 +289,10 @@ tbody tr:hover { background: var(--surface-2); }
 /* ── fields / forms ──────────────────────────────────────────────────── */
 .field-row { display: flex; flex-wrap: wrap; gap: 1rem; margin: 0.6rem 0; align-items: flex-end; }
 .field-row.readonly { font-size: 0.85rem; color: var(--ink-2); gap: 1.4rem; }
-.field-block { display: flex; flex-direction: column; gap: 0.3rem; margin: 0.5rem 0; }
-.field-block-head { display: flex; align-items: center; gap: 0.5rem; }
-/* Sentence case, not uppercase. Only SOME field labels went through this rule
-   -- the ones built with .field-label -- so the same panel read "SUMMARY" and
-   "ASSIGNEE" next to "Status", "Severity" and "Version". Two casings in one
-   column look like two kinds of thing. */
-.field-label { font-size: 0.8rem; color: var(--ink-faint); font-weight: 500; }
-.status-actions { display: flex; gap: 0.4rem; margin-top: 0.5rem; flex-wrap: wrap; }
 
 /* ── bug detail ──────────────────────────────────────────────────────── */
-.issue-id { font-family: var(--mono); color: var(--ink-faint); font-size: 0.85rem; margin-right: 0.4rem; }
 /* .tabs / .tabs button / .tabs button.active are defined once, further down
    (see "bug detail: header and tabs") -- that later block absorbed this one. */
-/* Reading column first, metadata rail second. The rail is FIXED rather than
-   fractional: metadata is label-and-value and stops benefiting from width,
-   while the conversation keeps every pixel it is given. */
-.issue-detail-main, .issue-detail-side { display: flex; flex-direction: column; gap: 1.2rem; min-width: 0; }
-/* Every panel on the bug page gets the same chrome, selected STRUCTURALLY.
-   This was a hand-written list of seven class names, and it had simply
-   grown stale: see-also, votes and security were missing, so those three
-   floated unstyled beside carded neighbours in the same grid row. A list
-   you have to remember to extend is the defect -- the omission is just how
-   it showed up. Adding a panel now inherits the chrome by position. */
-.fields-panel,
-.comments-panel,
-.issue-detail-extras > section {
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 1rem;
-}
-
-/* Note on what is deliberately NOT here: a rule shrinking the empty state
-   inside these panels. Reaching into `[data-slot="empty-state"]` would restyle the
-   design system from the app again -- the exact thing the label and th rules
-   above were removed for. A panel that wants a quieter empty case asks
-   AsyncSection for one (`tone="inline"`), so the component decides how small
-   is small. */
 
 /* ── comments ────────────────────────────────────────────────────────── */
 /* A conversation, not a stack of identical boxes.
@@ -641,36 +607,6 @@ tbody tr:hover { background: var(--surface-2); }
   margin-block-end: 0.25rem;
 }
 
-/* Every side panel gets the same chrome, applied once to the rail rather than
-   eight times to eight components. Before this, Keywords and Flags happened to
-   match a bordered rule and Votes, Security and See-also did not, so the page
-   implied a grouping that did not exist. */
-.issue-detail-side > section {
-  border: 1px solid var(--line);
-  border-radius: 0.75rem;
-  padding: 0.9rem 1rem;
-  background: var(--surface, #fff);
-}
-/* OS and Platform are ordinary rail rows. Their pairing wrapper must not
-   introduce another layout inside the 22rem rail. */
-.issue-detail-side .fields-panel .field-row {
-  display: contents;
-}
-
-/* .issue-state itself is defined once, further down (see "bug detail: header
-   and tabs") -- that later rule (margin-block-start: 0) absorbed this one. */
-
-.issue-detail-side > section > h3:first-child {
-  margin-block-start: 0;
-}
-
-/* Resolution reads as a value beside its label, not as a form control. */
-.status-resolution {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-}
-
 /* The group list is bounded and scrolls in place. Unbounded, thirty groups
    pushed every other section of the products admin page below the fold -- and
    groups are not that page's subject. */
@@ -759,38 +695,6 @@ tbody tr:hover { background: var(--surface-2); }
 /* Positional, not by design-system class name: everything laid out in this
    row loses its own vertical margin so the row stays on one baseline. */
 .new-comment-row > * { margin-block: 0; }
-
-/* Absorbed an earlier definition of this selector; the values below are
-   the ones that were already winning by source order. */
-.status-control-row { display: flex; flex-wrap: wrap; gap: 0.5rem; }
-
-/* The bug's related content: files, links, watchers, flags.
-   Two-across inside the main column rather than one stack in the rail.
-   Measured before moving them: these nine panels were 1856px tall inside a
-   352px rail, against 747px of actual conversation -- the metadata column
-   was four times the height of the thing the page is about. */
-.issue-detail-extras > section {
-  margin: 0;
-  min-width: 0;
-}
-
-/* A metadata row you are reading rather than editing: label, value, and a
-   quiet way in. The rail's job is to let you take a bug in at a glance, and
-   an open text input says "type here" about a field you are not changing. */
-.field-row-compact {
-  align-items: baseline;
-  margin: 0.45rem 0;
-  font-size: 0.85rem;
-}
-.field-row-compact .field-value {
-  min-width: 0;
-  color: var(--ink);
-  overflow-wrap: anywhere;
-}
-/* The Edit affordance stays out of the way until the row is worth acting on. */
-.field-row-compact button { opacity: 0; transition: opacity 0.12s; }
-.field-row-compact:hover button,
-.field-row-compact:focus-within button { opacity: 1; }
 
 /* ── dashboard ───────────────────────────────────────────────────────── */
 /* Card chrome, matching the bug page's panels. These sections were the only
@@ -887,44 +791,6 @@ tbody tr:hover { background: var(--surface-2); }
   padding: 1rem;
 }
 
-/* ── bug detail: header and tabs ─────────────────────────────────────── */
-.issue-head {
-  display: block;
-  margin-bottom: 0.25rem;
-}
-.issue-head .issue-id {
-  display: inline-block;
-  font-family: var(--mono);
-  font-size: 0.75rem;
-  letter-spacing: 0.02em;
-  color: var(--ink-faint);
-  margin-bottom: 0.15rem;
-}
-.issue-title {
-  font-size: 1.5rem;
-  line-height: 1.25;
-  letter-spacing: -0.02em;
-  margin: 0 0 0.5rem;
-  /* Long summaries stop before the rail rather than running the full width;
-     a measure this wide is hard to track back from at 1.5rem. */
-  max-inline-size: 46ch;
-}
-.issue-head-meta { font-size: 0.8rem; color: var(--ink-faint); }
-/* Absorbed an earlier .issue-state (margin-block-start: 0.4rem) that lived near
-   .issue-detail-side .fields-panel and was always overridden by this one. */
-.issue-state { margin-block-start: 0; }
-
-/* .rail-section itself is defined once, further down (see "Group joints") --
-   that later rule absorbed this one's margin and padding-block-start. */
-.rail-action { margin-block-end: 0.25rem; }
-
-/* Nothing in the rail may exceed the rail. A long control silently overflowed
-   the column rather than wrapping, so it read as a rendering fault. */
-.issue-detail-side, .issue-detail-side * { max-inline-size: 100%; }
-/* File inputs are sized by the browser from the filename, so they overflow a
-   narrow card. Let it shrink instead. */
-.attachments-panel input[type="file"] { inline-size: 100%; }
-
 /* A notification is a preview, not the document. Clamp it so a long comment
    or one with a heading cannot turn an inbox row into a page. */
 /* Absorbed an earlier definition of this selector; the values below are
@@ -1018,47 +884,6 @@ tbody tr:hover { background: var(--surface-2); }
 .history-creation > summary:hover { color: var(--accent); }
 .history-creation[open] > summary { margin-block-end: 0.4rem; }
 
-/* One alignment for the whole rail: the fieldset owns the label, value and
-   action tracks, and every row inherits them through subgrid. The rail had
-   three alignments -- DescriptionList inline, Select rows stacked, compact
-   rows inline -- so reading down the column the eye had to re-find where a
-   value starts three times. */
-.rail-fields {
-  display: grid;
-  grid-template-columns: [label] 7.5rem [value] minmax(0, 1fr) [action] auto;
-  column-gap: 0.5rem;
-  align-items: center;
-}
-.rail-fields :is(
-  .rail-choice,
-  .field-row-compact,
-  .field-block,
-  .rail-disclosure,
-  [data-slot~="description-list"]
-) {
-  grid-column: 1 / -1;
-  display: grid;
-  grid-template-columns: subgrid;
-  column-gap: normal;
-}
-.rail-fields [data-slot~="description-list-item"] {
-  column-gap: normal;
-}
-.rail-fields :is(.field-error, .state-hint) {
-  grid-column: 1 / -1;
-}
-/* Match Field's horizontal-child specificity so edit errors also span. */
-.rail-fields .field-block > .field-error {
-  grid-column: 1 / -1;
-}
-.fields-panel > .rail-fields > button {
-  grid-column: 1 / -1;
-  justify-self: start;
-}
-/* The extras wrapper IS the grid, so it must not be display:contents -- that
-   would hand the grid back to the page and break the two-across pairing. */
-fieldset.issue-detail-extras { display: grid; }
-
 /* Files that arrived with a comment, listed under it. */
 .comment-attachments { list-style: none; margin: 0.5rem 0 0; padding: 0; display: flex; flex-direction: column; gap: 0.2rem; }
 .comment-attachments > li { font-size: 0.82rem; }
@@ -1067,17 +892,6 @@ fieldset.issue-detail-extras { display: grid; }
 .comment-attach { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.8rem; color: var(--ink-faint); }
 .comment-attach input[type="file"] { inline-size: 11rem; font-size: 0.75rem; }
 .comment-attach-queue { margin: 0.35rem 0 0; color: var(--ink-2); }
-
-/* The folded tail of the bug page. */
-.issue-detail-more { margin-block-start: 0.75rem; }
-.issue-detail-more > summary {
-  cursor: pointer;
-  font-size: 0.82rem;
-  color: var(--ink-faint);
-  padding-block: 0.35rem;
-}
-.issue-detail-more > summary:hover { color: var(--accent); }
-.issue-detail-more[open] > summary { margin-block-end: 0.5rem; }
 
 /* Present to assistive tech and to a file picker, absent from the layout.
    Not display:none: that would make the input inoperable, and the button
@@ -1092,16 +906,6 @@ fieldset.issue-detail-extras { display: grid; }
   clip-path: inset(50%);
   white-space: nowrap;
   border: 0;
-}
-
-/* The fold's label enumerates what is inside, which is the point of it -- but
-   at 390px that ran off the screen and was clipped, so the one thing it exists
-   to tell you was the part cut off. Buttons do not wrap by default; inside
-   this container it may. Selected by element, not by a design-system class. */
-.issue-detail-more button {
-  white-space: normal;
-  text-align: start;
-  max-inline-size: 100%;
 }
 
 /* The composer's action row: options group left, the action anchors right,
@@ -1122,16 +926,6 @@ fieldset.issue-detail-extras { display: grid; }
   position: relative;
 }
 .new-comment-row > *:last-child { margin-inline-start: auto; }
-
-/* The title and its edit affordance. The button stays quiet until the row is
-   hovered or focused, so the heading reads as a heading rather than as a
-   control with a label attached. */
-.issue-title-row .issue-title { margin-block-end: 0; }
-.issue-title-edit { opacity: 0; transition: opacity 0.12s ease; }
-.issue-title-row:hover .issue-title-edit,
-.issue-title-row:focus-within .issue-title-edit { opacity: 1; }
-@media (hover: none) { .issue-title-edit { opacity: 1; } }
-.issue-title-editor { display: flex; flex-direction: column; gap: 0.5rem; max-inline-size: 46ch; margin-block-end: 0.5rem; }
 
 /* Field changes, inline with the conversation.
    GitHub and Linear both do this and they are right: "Alice raised this to P1"
@@ -1179,60 +973,8 @@ fieldset.issue-detail-extras { display: grid; }
    input -- the composer -- because a box is how you say "type here".
    ═══════════════════════════════════════════════════════════════════════ */
 
-/* The two columns: content and rail, divided by a single rule. */
-/* Absorbed an earlier definition of this selector; the values below are
-   the ones that were already winning by source order. */
-.issue-detail-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 22rem;
-  /* Zero, deliberately: the rail draws its own separator, so a grid gap here
-     doubled the space. This value beat the earlier 1.5rem by source order. */
-  gap: 0;
-  align-items: start;
-}
-
-/* AFTER the rule it overrides, deliberately. This block used to sit above the
-   base definition and won by being later; consolidating the base rule
-   downwards silently reversed that, leaving a 22rem rail on a 390px screen.
-   Order is the whole mechanism here -- if either moves again, they move
-   together. */
 @media (max-width: 900px) {
-  .issue-detail-grid { grid-template-columns: 1fr; }
   .report-grid { grid-template-columns: 1fr; }
-}
-.issue-detail-main {
-  padding-inline-end: 2.5rem;
-}
-.issue-detail-side {
-  border-inline-start: 1px solid var(--line);
-  padding-inline-start: 1.75rem;
-  padding-block-start: 0.25rem;
-}
-
-/* Nothing in the main column is a card any more. */
-.comments-panel,
-.fields-panel,
-.issue-detail-extras > section {
-  background: none;
-  border: 0;
-  border-radius: 0;
-  padding: 0;
-}
-
-/* The extras become one quiet band under the conversation rather than three
-   framed panels: a hairline above them is enough to say "different thing". */
-/* Absorbed an earlier definition of this selector; the values below are
-   the ones that were already winning by source order. */
-.issue-detail-extras {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
-  align-items: start;
-  border-block-start: 1px solid var(--line);
-  padding-block-start: 1.25rem;
-  /* margin-block-start beat the earlier margin-top, and this gap beat the
-     earlier 0.75rem. */
-  margin-block-start: 1.75rem;
-  gap: 1.75rem 2rem;
 }
 .issue-detail-extras > section > h3 {
   font-size: 0.7rem;
@@ -1242,61 +984,6 @@ fieldset.issue-detail-extras { display: grid; }
   color: var(--ink-faint);
   margin-block-end: 0.5rem;
 }
-
-/* ── the rail, as property rows ──────────────────────────────────────────
-   Label left, value right, one line each. The selects keep their behaviour
-   and lose their chrome: a bordered box per property turned a column of
-   facts into a column of form controls, which is what made the rail read as
-   heavier than the bug. */
-.fields-panel .field-block,
-.fields-panel .field-row-compact {
-  margin-block: 0;
-}
-/* Group joints: a hairline, not a heading on its own line with margin above
-   and below. This absorbed the earlier .rail-section near .tabs, which set
-   the font/color/border chrome that still applies -- only the margin and
-   padding-block-start changed here. */
-.rail-section {
-  grid-column: 1 / -1;
-  margin: 1.1rem 0 0.5rem;
-  padding-block-start: 0.9rem;
-  border-block-start: 1px solid var(--line);
-  font-size: 0.7rem;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--ink-faint);
-}
-
-/* The status block stops being a card inside the rail.
-   This absorbed the earlier definitions near .field-label and .new-comment-row
-   -- both of which drew it as a bordered, padded card. margin-top 0.7rem
-   (from the first) and margin-block-end 0.35rem (from this one) are the two
-   surviving margin effects; border-radius 0.6rem from the middle definition
-   is dropped, since there is no border or padding left for it to round. */
-.status-control {
-  grid-column: 1 / -1;
-  background: none;
-  border: 0;
-  padding: 0;
-  margin-top: 0.7rem;
-  margin-block-end: 0.35rem;
-}
-
-/* A rail property: label, value, and a way in that stays out of the way. */
-.rail-choice {
-  align-items: center;
-  margin-block: 0.4rem;
-  min-block-size: 1.9rem;
-}
-.rail-choice-value { min-inline-size: 0; }
-.rail-choice > button:where(:last-child) { opacity: 0; transition: opacity 0.12s ease; justify-self: end; }
-.rail-choice:hover > button:where(:last-child),
-.rail-choice:focus-within > button:where(:last-child) { opacity: 1; }
-@media (hover: none) { .rail-choice > button:where(:last-child) { opacity: 1; } }
-/* While editing, the control takes the value column and the row gives it room. */
-.rail-choice.is-editing { row-gap: 0.35rem; }
-.rail-choice.is-editing > button:where(:last-child) { grid-column: 3; opacity: 1; justify-self: start; }
 
 /* The last two boxes on the page.
    A file entry framed inside a band that no longer frames anything, and the
@@ -1311,43 +998,9 @@ fieldset.issue-detail-extras { display: grid; }
   padding: 0.35rem 0;
 }
 .attachment + .attachment { border-block-start: 1px solid var(--line); }
-/* Assignee and Move read as rail rows: label, value, action. */
-.fields-panel .field-block-head {
-  align-items: center;
-  gap: 0.5rem;
-  min-block-size: 1.9rem;
-}
-.fields-panel .field-block-head:not(.is-action) {
-  grid-column: 1 / -1;
-  display: grid;
-  grid-template-columns: subgrid;
-  column-gap: normal;
-}
-.fields-panel .field-block-head > button { justify-self: end; opacity: 0; transition: opacity 0.12s ease; }
-.fields-panel .field-block:hover .field-block-head > button,
-.fields-panel .field-block:focus-within .field-block-head > button { opacity: 1; }
-@media (hover: none) { .fields-panel .field-block-head > button { opacity: 1; } }
-
-/* An action row has an empty label cell and puts its control in the shared
-   action track. */
-.fields-panel .field-block-head.is-action {
-  grid-column: 3;
-  display: block;
-  min-block-size: 0;
-}
-.fields-panel .field-block-head.is-action > button { opacity: 1; }
-.fields-panel .field-block > .inline-form { grid-column: 1 / -1; }
-
-/* An editor that needs the whole rail: the label sits above it rather than
-   beside it, because a people search plus its button will not fit in a
-   column sized for "major". */
-.rail-choice.is-editing.is-wide > * { grid-column: 1 / -1; }
-
 /* Rail groups: a line each, until opened.
    The panels inside were built for the main column, so their headings and
    grid-based inner layouts have to give way in a 324px rail. */
-.rail-disclosure + .rail-disclosure { border-block-start: 1px solid var(--line); }
-.rail-disclosure-body { grid-column: 1 / -1; padding-block: 0.2rem 0.6rem; }
 .rail-disclosure-body section { background: none; border: 0; padding: 0; margin: 0; }
 /* One column. relation-columns is a two-across grid that does not fit here. */
 .rail-disclosure-body .relation-columns { display: block; }
@@ -1355,10 +1008,6 @@ fieldset.issue-detail-extras { display: grid; }
 .rail-disclosure-body .inline-form input { inline-size: 100%; }
 /* Chips wrap rather than widening the row past the rail. */
 .rail-tags { display: flex; flex-wrap: wrap; gap: 0.25rem; }
-/* The heading owns the space above the group, so the fieldset does not also
-   contribute the Stack's gap on top of it. */
-.rail-section + .rail-groups { margin-block-start: -0.7rem; }
-
 /* The column picker anchors to its own button. Without a positioned wrapper
    the menu resolved `top: 110%` against the page and opened below the fold. */
 .column-picker { position: relative; }
@@ -1408,27 +1057,3 @@ fieldset.issue-detail-extras { display: grid; }
    its own scrollbar still reaches everything; too tall would push its bottom
    under the fold where nothing could reach it. Erring small is the safe
    direction. */
-@media (min-width: 901px) {
-  .issue-detail-side {
-    position: sticky;
-    top: 0;
-    align-self: start;
-    max-block-size: calc(100dvh - 4rem);
-    overflow-y: auto;
-    /* A flick over the rail scrolls the rail, not the thread behind it. */
-    overscroll-behavior: contain;
-    /* Room for the last group to clear the bottom edge. */
-    padding-block-end: 1rem;
-  }
-}
-/* Children keep their own height; the RAIL scrolls, not its contents.
-   A flex item defaults to flex-shrink:1, so capping the rail's height
-   squeezed each group below its content -- which then overflowed its box and
-   painted over the group beneath it. The measurements all read fine (the rail
-   was "on screen", the right height); only the screenshot showed LINKS drawn
-   through WHERE. */
-.issue-detail-side > * { flex-shrink: 0; }
-
-/* The comment a permalink pointed at, so arriving somewhere mid-thread does
-   not leave you hunting for which one you were sent to. */
-.comment.is-linked { background: var(--accent-soft); border-radius: var(--radius); }

@@ -18,7 +18,11 @@ export function RailFieldset({
 }) {
   return (
     <fieldset
-      className={grouped ? "rail-fields rail-groups m-0 border-0 p-0" : "rail-fields m-0 border-0 p-0"}
+      className={
+        grouped
+          ? "rail-fields -mt-3 mx-0 mb-0 grid grid-cols-[7.5rem_minmax(0,1fr)_auto] items-center gap-x-2 border-0 p-0"
+          : "rail-fields m-0 grid grid-cols-[7.5rem_minmax(0,1fr)_auto] items-center gap-x-2 border-0 p-0"
+      }
       disabled={disabled}
     >
       {children}
