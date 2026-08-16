@@ -19,6 +19,7 @@ use zeroship_auth::server;
 use zeroship_core::config::Operational;
 use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::store::sessions as session_store;
+use zeroship_auth::store::users;
 use zeroship_core::auth::hash_api_key;
 use zeroship_authz::wrapper_revocation;
 
@@ -220,6 +221,63 @@ async fn stale_credential_version_recheck_rejects_refresh_issuance() {
     assert_error(resp, "invalid_grant").await;
 
     fx.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn deletion_revokes_refresh_family_even_after_cancellation() {
+    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
+        return;
+    };
+    let root = issue_refresh(&fx, FULL_SCOPE).await;
+    let root_refresh = root.refresh_token.expect("root refresh token");
+    let rotated = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE))
+        .await
+        .expect("rotate refresh token");
+    assert_eq!(rotated.status().as_u16(), 200);
+    let successor = rotated
+        .json::<TokenResponse>()
+        .await
+        .expect("rotated token json")
+        .refresh_token
+        .expect("successor refresh token");
+    let family_id = refresh_family_id(&fx).await;
+
+    users::request_deletion(fx.db.as_ref(), fx.user_id, 30)
+        .await
+        .expect("request account deletion")
+        .expect("refresh owner exists");
+    assert!(
+        users::cancel_deletion(fx.db.as_ref(), fx.user_id)
+            .await
+            .expect("cancel account deletion"),
+        "deletion request must be cancellable"
+    );
+
+    let rejected = refresh_request(&fx, &successor, None)
+        .await
+        .expect("refresh after deletion cancellation");
+    let status = rejected.status().as_u16();
+    let body = rejected
+        .json::<Value>()
+        .await
+        .expect("refresh rejection json");
+    let sub = test_issuer().pairwise_subject(&fx.user_id.to_string(), SECTOR);
+    let marker = fx
+        .db
+        .query(
+            "SELECT 1 FROM zeroship.token_revocations WHERE client_id = $1 AND sub = $2",
+            &[&fx.client_id, &sub],
+        )
+        .await
+        .expect("query family revocation marker");
+    assert_family_revoked(&fx, &family_id).await;
+
+    fx.cleanup().await;
+
+    assert_eq!(status, 400);
+    assert_eq!(body["error"], "invalid_grant");
+    assert_eq!(marker.len(), 1, "deletion must retain a family marker");
 }
 
 #[ntex::test]

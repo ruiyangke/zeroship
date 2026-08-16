@@ -15,6 +15,7 @@ use ntex::web::{self, test};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use zeroship_auth::{cron::account_reaper, store::users};
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::{
     token_handlers, AppState, EnvStore, Quota, RateLimiter, Registry,
@@ -665,4 +666,93 @@ async fn using_revoked_pat_returns_401() {
     drop(app);
     drop(fx);
     common::drain_pg().await;
+}
+
+#[compio::test]
+async fn pat_owned_by_anonymized_creator_returns_401() {
+    let db_url = db_url();
+    let fx = Fixture::new(&db_url, "erased-owner", Some("admin")).await;
+    let app = init_control!(fx);
+    let pat = common::authz_fixture::admin_pat(&fx.state).await;
+    let stripe_account_id = format!("acct_{}", Uuid::new_v4().simple());
+
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.creator_accounts (creator_id, stripe_account_id) \
+             VALUES ($1, $2)",
+            &[&pat.user_id, &stripe_account_id],
+        )
+        .await
+        .expect("insert retained creator account");
+    users::request_deletion(
+        fx.state.control_pg.as_ref(),
+        pat.user_id,
+        account_reaper::GRACE_DAYS,
+    )
+    .await
+    .expect("request account deletion")
+    .expect("PAT owner exists");
+    fx.state
+        .control_pg
+        .execute(
+            "UPDATE zeroship.users SET deletion_scheduled_for = NOW() - INTERVAL '1 second' \
+             WHERE id = $1",
+            &[&pat.user_id],
+        )
+        .await
+        .expect("backdate account deletion");
+    account_reaper::tick(fx.state.control_pg.as_ref())
+        .await
+        .expect("run account reaper");
+
+    let owner = fx
+        .state
+        .control_pg
+        .query_one(
+            "SELECT anonymized_at FROM zeroship.users WHERE id = $1",
+            &[&pat.user_id],
+        )
+        .await
+        .expect("retained owner row");
+    assert!(
+        owner
+            .get::<_, Option<chrono::DateTime<chrono::Utc>>>("anonymized_at")
+            .is_some(),
+        "the real reaper must anonymize the retained creator"
+    );
+    let retained_pat = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT 1 FROM zeroship.permission_tokens WHERE id = $1",
+            &[&pat.token_id],
+        )
+        .await
+        .expect("query retained PAT");
+    assert_eq!(retained_pat.len(), 1, "anonymization must retain the PAT row");
+
+    let req = test::TestRequest::get()
+        .uri("/me/tokens")
+        .header("accept", "application/json")
+        .header("authorization", pat.bearer())
+        .to_request();
+    let status = test::call_service(&app, req).await.status();
+
+    fx.state
+        .control_pg
+        .execute(
+            "DELETE FROM zeroship.creator_accounts WHERE creator_id = $1",
+            &[&pat.user_id],
+        )
+        .await
+        .expect("delete retained creator account");
+    pat.cleanup(&fx.state).await;
+    fx.cleanup().await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
