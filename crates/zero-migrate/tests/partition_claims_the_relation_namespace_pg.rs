@@ -139,3 +139,59 @@ fn a_partition_after_dropping_the_colliding_table_is_allowed() {
     ))
     .expect("the name is free once the table is dropped");
 }
+
+// ---------------------------------------------------------------------------
+// Dropping the PARENT releases its partitions' names too.
+// ---------------------------------------------------------------------------
+
+/// A FALSE REFUSAL this fixture's own rule introduced, found by probing what
+/// happens when two of the session's rules apply to one envelope.
+///
+/// A partition is a dependent object: dropping the partitioned parent drops its
+/// partitions with it. Measured against live PostgreSQL:
+///
+///     CREATE TABLE par (...) PARTITION BY RANGE (c0);
+///     CREATE TABLE p1 PARTITION OF par FOR VALUES FROM (0) TO (10);
+///     DROP TABLE par;
+///     -- information_schema now reports 0 tables named p1
+///     CREATE TABLE p1 (c0 int);      -- SUCCEEDS
+///
+/// The relation map released `par` on the drop but kept `p1`, so a later use of
+/// that freed name was refused. The engine was stricter than the database, which
+/// is the failure mode `new_rules_do_not_over_refuse.rs` exists to prevent and
+/// which no single-rule test could surface: it takes a drop AND a later claim in
+/// the same envelope.
+#[test]
+fn dropping_the_parent_frees_its_partitions_names() {
+    verdict(&format!(
+        r#"{PARENT},{},{{"op":"dropTable","table":"par"}},{}"#,
+        part("p1", 0, 10),
+        tbl("p1")
+    ))
+    .expect("dropping the parent drops p1 with it, so the name is free again");
+}
+
+#[test]
+fn a_recreated_parent_may_take_the_same_partition_names() {
+    // The whole point of the shape: tear the partitioned table down and rebuild
+    // it with the same partition layout.
+    verdict(&format!(
+        r#"{PARENT},{},{{"op":"dropTable","table":"par"}},{PARENT},{}"#,
+        part("p1", 0, 10),
+        part("p1", 0, 10)
+    ))
+    .expect("rebuilding a partitioned table with the same partition names is ordinary");
+}
+
+#[test]
+fn dropping_an_unrelated_table_does_not_free_a_partition_name() {
+    // THE CONTROL. Releasing every partition on any drop would pass the two tests
+    // above and lose the protection F722 added.
+    verdict(&format!(
+        r#"{PARENT},{},{},{{"op":"dropTable","table":"other"}},{}"#,
+        tbl("other"),
+        part("p1", 0, 10),
+        part("p1", 10, 20)
+    ))
+    .expect_err("an unrelated drop must not release a live partition name");
+}

@@ -2895,6 +2895,17 @@ fn validate_no_name_is_claimed_twice(
     let mut types: BTreeMap<Key, &str> = BTreeMap::new();
     let mut trigger_names: BTreeMap<Key, BTreeSet<&str>> = BTreeMap::new();
 
+    // A PARTITION IS A DEPENDENT OBJECT. Dropping the partitioned parent drops
+    // its partitions with it, so their names come free too - measured against
+    // live PostgreSQL, where `information_schema` reports the partition gone and
+    // the name is immediately reusable.
+    //
+    // Without this, the map released the parent and kept the children, and a
+    // later use of a freed name was refused: the engine stricter than the
+    // database. Only an envelope carrying BOTH the drop and a later claim shows
+    // it, which is why no single-rule fixture caught it.
+    let mut partitions_of: BTreeMap<Key, Vec<Key>> = BTreeMap::new();
+
     macro_rules! type_name_must_be_free {
         ($key:expr, $op_index:expr, $what:expr, $name:expr) => {
             if track_type_namespace {
@@ -2983,6 +2994,11 @@ fn validate_no_name_is_claimed_twice(
                 relations.remove(&key);
                 // The composite row type goes with the table.
                 types.remove(&key);
+                // …and so do any partitions it parents.
+                for child in partitions_of.remove(&key).unwrap_or_default() {
+                    relations.remove(&child);
+                    types.remove(&child);
+                }
                 columns.remove(&key);
                 constraint_names.remove(&key);
                 trigger_names.remove(&key);
@@ -3054,7 +3070,9 @@ fn validate_no_name_is_claimed_twice(
             // `detachPartition` deliberately does NOT appear here: a detached
             // partition becomes a standalone table under the same name, so the
             // name stays occupied. Only `dropPartition` releases it.
-            Op::CreatePartition { name, schema, .. } => {
+            Op::CreatePartition {
+                name, schema, of, ..
+            } => {
                 let key: Key = (schema.as_deref(), name.as_str());
                 type_name_must_be_free!(key, op_index, "createPartition", name);
                 if let Some(held_by) = relations.get(&key) {
@@ -3072,6 +3090,11 @@ fn validate_no_name_is_claimed_twice(
                 if track_type_namespace {
                     types.insert(key, "partition");
                 }
+                // Remember the parentage, so dropping the parent releases this too.
+                partitions_of
+                    .entry((schema.as_deref(), of.as_str()))
+                    .or_default()
+                    .push(key);
             }
             Op::DropPartition { name, schema, .. } => {
                 let key: Key = (schema.as_deref(), name.as_str());
