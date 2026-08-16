@@ -1,10 +1,14 @@
 import { Input as BaseInput } from "@base-ui/react/input";
-import { forwardRef } from "react";
+import { forwardRef, type ReactNode } from "react";
 
-export type InputProps = Omit<BaseInput.Props, "render">;
+export interface InputProps extends Omit<BaseInput.Props, "render"> {
+  startSlot?: ReactNode;
+  endSlot?: ReactNode;
+  wrapperClassName?: string;
+}
 
 export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
-  props,
+  { startSlot, endSlot, wrapperClassName, ...props },
   ref,
 ) {
   return (
@@ -13,6 +17,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
       ref={ref}
       render={(controlProps, state) => (
         <div
+          className={wrapperClassName}
           data-slot="input"
           data-variant="outline"
           data-size="md"
@@ -22,13 +27,22 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
           data-focused={state.focused ? "" : undefined}
           data-filled={state.filled ? "" : undefined}
         >
+          {startSlot != null ? (
+            <span data-slot="input-slot-start">{startSlot}</span>
+          ) : null}
           <input
             {...controlProps}
-            data-slot="input-control"
+            data-slot={[
+              "input-control",
+              (controlProps as { "data-slot"?: string })["data-slot"],
+            ]
+              .filter(Boolean)
+              .join(" ")}
             aria-required={
               props.required || controlProps["aria-required"] || undefined
             }
           />
+          {endSlot != null ? <span data-slot="input-slot-end">{endSlot}</span> : null}
         </div>
       )}
     />
