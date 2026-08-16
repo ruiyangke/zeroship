@@ -664,7 +664,11 @@ async fn assert_platform_cli_registration(pg: &compio_postgres::Client) {
         .query_one(
             "SELECT client_name, client_uri, logo_uri, redirect_uris, scopes, \
                     skip_consent, created_by, client_secret_hash, refresh_allowed, \
-                    token_endpoint_auth_method, brokered, backchannel_logout_uri \
+                    token_endpoint_auth_method, brokered, backchannel_logout_uri, \
+                    NOT EXISTS ( \
+                        SELECT 1 FROM zeroship.app_oauth_clients aoc \
+                        WHERE aoc.client_id = oauth_clients.client_id \
+                    ) AS has_no_app_extension \
              FROM zeroship.oauth_clients WHERE client_id = $1",
             &[&PLATFORM_CLI_CLIENT_ID],
         )
@@ -688,6 +692,7 @@ async fn assert_platform_cli_registration(pg: &compio_postgres::Client) {
     assert!(row
         .get::<_, Option<String>>("backchannel_logout_uri")
         .is_none());
+    assert!(row.get::<_, bool>("has_no_app_extension"));
 }
 
 #[compio::test]
