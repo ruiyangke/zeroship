@@ -90,7 +90,7 @@ impl IdentityVerifier for ObservationVerifier {
         &self,
         credentials: &PresentedCredentials<'_>,
     ) -> Result<ServiceIdentity, AuthError> {
-        assert_eq!(credentials.bearer_assertion(), Some("observed-assertion"));
+        assert_eq!(credentials.bearer_assertion(), "observed-assertion");
         assert_eq!(
             credentials
                 .tls_peer()
