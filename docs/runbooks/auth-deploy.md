@@ -315,8 +315,18 @@ The current implementation loads one active Ed25519 private key from
 
 1. Generate the new key.
 2. Roll auth with the new key.
-3. Keep old app sessions and tokens within their configured TTL expectations.
-4. Verify discovery and JWKS after rollout.
+3. Verify discovery and JWKS show the new `active` key and the old `retiring`
+   key. Existing old-key processes may finish issuing while they drain; each
+   issuance advances the old key's persisted maximum expiry before returning.
+4. Drain every process holding the old private key. A restarted old-key
+   process is refused once its row is `retiring`.
+5. Let the hourly signing-key retention cron move the old row to terminal
+   `retired`. It waits through the exact maximum issued expiry plus 5 minutes
+   of JWKS freshness, 5 minutes of stale-while-revalidate, and 2 minutes of
+   clock skew. If no expiry was recorded, the conservative total from
+   `retiring_at` is 43,920 seconds (12 hours 12 minutes).
+6. Verify the retired key is absent from JWKS. Keep the `retired` database row
+   as the rotation audit record.
 
 ### Remove a Federated Provider
 

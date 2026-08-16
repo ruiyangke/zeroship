@@ -242,13 +242,30 @@ platform corpus applied through `zeroship-platform-migrate`:
 | `zeroship.oauth_refresh_tokens` | Refresh-token family state |
 | `zeroship.device_grants` | Device authorization grants |
 | `zeroship.principal_grants` | Platform grants; auth has SELECT-only access for CLI mint capping |
-| `zeroship.signing_keys` | Published public JWK metadata |
+| `zeroship.signing_keys` | Public JWK lifecycle and maximum issued-expiry watermark |
 | `zeroship.magic_links`, `zeroship.magic_completions` | Magic-link and reset flows |
 | `zeroship.email_verifications`, `zeroship.email_suppressions` | Email verification and suppression |
 | `zeroship.rate_limits` | Login throttling state |
 | `zeroship.audit_events` | Structured audit log |
 | `zeroship.dpop_jti`, `zeroship.token_revocations` | DPoP replay and revocation state |
-| `zeroship.jwk_key_state`, `zeroship.cron_state` | Key rotation and cron bookkeeping |
+| `zeroship.cron_state` | Durable cron bookkeeping |
+
+### Signing-key retention
+
+JWKS publishes keys in `active`, `next`, or `retiring` state. Every production
+token issuance atomically advances that key row's `max_issued_expires_at`
+before returning the signed token. A concurrent retirement that wins the row
+race changes the status first, so issuance affects zero rows and discards the
+token instead of returning a token whose key is no longer published.
+
+The hourly signing-key retention cron changes only elapsed `retiring` keys to
+terminal `retired`; it never deletes the audit row and never selects `active`
+or `next`. The normal cutoff is the greatest exact issued expiry plus the full
+JWKS cache window and clock-skew allowance: 300 seconds `max-age` + 300 seconds
+`stale-while-revalidate` + 120 seconds skew. A row without an issuance
+watermark uses the conservative fallback of `retiring_at` + the 43,200-second
+maximum token lifetime + those 720 seconds. The full fallback horizon is
+43,920 seconds (12 hours 12 minutes).
 
 ## Operator Notes
 

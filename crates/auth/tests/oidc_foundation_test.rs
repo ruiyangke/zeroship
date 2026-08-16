@@ -175,7 +175,8 @@ async fn access_token_roundtrip_served_jwks_public_only_and_issuer_consistency()
     let user_id = Uuid::new_v4().to_string();
     let scopes = scopes();
     let token = issuer
-        .issue_access_token(&access_mint(&user_id, &scopes))
+        .issue_access_token(&db, &access_mint(&user_id, &scopes))
+        .await
         .expect("issue access token");
     let jwks = jwks_document(&db).await.expect("served JWKS document");
     let header = decode_header(&token).expect("access token header");
@@ -315,11 +316,11 @@ fn id_token_has_nonce_and_correct_at_hash() {
     let user_id = Uuid::new_v4().to_string();
     let scopes = scopes();
     let access_token = issuer
-        .issue_access_token(&access_mint(&user_id, &scopes))
+        .sign_unregistered_access_token_fixture(&access_mint(&user_id, &scopes))
         .expect("issue access token");
     let amr = vec!["pwd".to_string(), "otp".to_string()];
     let id_token = issuer
-        .issue_id_token(&IdTokenMint {
+        .sign_unregistered_id_token_fixture(&IdTokenMint {
             user_id: &user_id,
             sector: SECTOR_A,
             client_id: CLIENT_ID,

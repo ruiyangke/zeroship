@@ -727,7 +727,7 @@ fn access_token_with_scopes(
     let audience = format!("app:{}", fx.app_id);
     let scopes: Vec<String> = scopes.iter().map(|s| (*s).to_string()).collect();
     issuer
-        .issue_access_token(&AccessTokenMint {
+        .sign_unregistered_access_token_fixture(&AccessTokenMint {
             user_id: &user_id,
             sector: SECTOR,
             audience: &audience,

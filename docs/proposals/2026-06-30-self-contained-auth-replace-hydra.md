@@ -324,11 +324,11 @@ If any tripwire trips (e.g. "Login with [creator's app]" for third parties, an e
 - **Risk — owning a security-critical OP forever.** Mitigated by the closed-world subset (smaller, auditable surface), reuse of hardened verify primitives, and adversarial review per slice. The tripwire (§7) bounds it. **But be honest (§11): the closed world makes the OP _auditable_, not _small_.**
 - **Risk — the Hydra-removal blast radius IS the bulk** (§6.2): ~2,700 LoC of gateway RP machinery (`oidc_rp.rs`/`anchors.rs`/`backchannel_logout.rs`) plus the login/consent rewrite. Sized across P4–P6, not a cleanup line.
 - **Risk — the operator accepts** that part of the just-shipped Supabase deploy-auth work is demoted (§8).
-- **Operational surface (new, was absent):** JWKS endpoint caching/`Cache-Control` at the proxy edge; **key-rotation runbook** (generate new `kid` → publish in JWKS → overlap window ≥ max token TTL → sign with new key → retire old `kid` after overlap); monitoring/alerting on mint-failure + verify-failure rates; **no outbound circuit breaker needed** (the AS is in-process — the `oidc_rp` breaker existed only because Hydra was a network sidecar; state its removal explicitly).
+- **Operational surface (new, was absent):** JWKS endpoint caching/`Cache-Control` at the proxy edge; key-rotation runbook (publish, promote, drain old signers, then let persisted-expiry retention terminally retire the old `kid`); monitoring/alerting on mint-failure and verify-failure rates; no outbound circuit breaker is needed because the AS is in-process.
 - **Rollback / coexistence (new, was absent):** the dual-issuer transition (§6.0) **is** the rollback mechanism. Because verifiers accept both `iss` until P6, a failed per-app cutover is reverted by flipping that app's `issuer` flag back to `hydra` — no token-format migration, no re-login storm. Hydra stays installed until P6, so any phase P1–P5 backs out by flag. After P6 (Hydra removed) rollback is forward-only.
 - **Non-goal:** third-party OAuth clients / general-purpose AS (the tripwire).
 - **Non-goal:** FAPI/DPoP/PAR unless a tripwire forces it.
-- **Open (P0):** the per-face refresh model (§4.1); **key-rotation cadence + JWKS overlap windows** (the JOSE *lib* is **decided** — `jsonwebtoken`/EdDSA, standardized across `session_token.rs`/`core/dpop.rs`/`core/oidc_verify.rs`, mandated by the zero-tokio invariant — so lib selection is NOT an open item); whether the BFF and CLI faces share one issuer/JWKS (recommended) or two.
+- **Open (P0):** the per-face refresh model (Section 4.1) and whether the BFF and CLI faces share one issuer/JWKS (recommended) or two. JOSE uses `jsonwebtoken`/EdDSA. The implemented retention horizon is 43,200 seconds maximum token life + 300 seconds max-age + 300 seconds stale-while-revalidate + 120 seconds skew = 43,920 seconds.
 
 ---
 
@@ -358,7 +358,7 @@ Each item maps to a verified code citation; nothing below is asserted from memor
 | 7 | MAJOR | two device surfaces unreconciled | §6.1(2)+§9 P2: single platform device grant in crates/auth; reuse only the RFC-8628 SM; token-issuance + approver-authn are net-new. | `control/device_handlers.rs:63-69,290-343,415-422,477`; `auth/ui/device.rs` (581) |
 | 8 | MAJOR | §8 device "survives/primary" too rosy | §8 split: state machine survives; token model + approver-authn superseded. | `device_handlers.rs:63-69,415-422,477` |
 | 9 | MINOR | §3 public-edge claim | §3 corrected: binds loopback by default; public edge **by proxy**, not by bind. | `main.rs:60-65` |
-| 10 | MINOR | §10 JOSE lib listed as open | §10: lib is **decided** (`jsonwebtoken`/EdDSA, zero-tokio); real open item = key-rotation cadence + JWKS overlap. | `session_token.rs`, `core/dpop.rs`, `core/oidc_verify.rs` |
+| 10 | MINOR | JOSE lib listed as open | JOSE uses `jsonwebtoken`/EdDSA; signing-key retention now uses the persisted maximum issued expiry plus the complete JWKS cache and skew budget. | `crates/auth/src/oidc/issuer.rs`, `crates/auth/src/cron/signing_key_retention.rs` |
 | 11 | MAJOR | signing reuse misattributed | §2 + §3: the Ed25519 JWT **mint** is `session_token.rs::issue`, NOT `signing.rs` (key-loader/thumbprint only); crates/auth has zero JWT-mint today → cross-crate port. | `session_token.rs:166,197`; `signing.rs:1-75` |
 
 Also addressed from the critique's "Missing Concepts": id_token/nonce (§5), relay-alias/pairwise timing (§4.2), the migration/issuer flag (§6.0), the two-device reconciliation (§6.1/§9 P2), rollback/coexistence (§10), and the new-AS operational surface (§10).

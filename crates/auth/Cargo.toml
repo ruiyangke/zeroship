@@ -81,6 +81,8 @@ async-trait = { workspace = true }
 # single-threaded ntex test runtime (`futures::join!`), which is how the
 # rotation/revocation races are exercised. Workspace pin.
 futures = { workspace = true }
+# Capture structured retirement fields in the live retention test.
+tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true
