@@ -49,7 +49,8 @@ use sha2::{Digest, Sha256};
 use zeroship_core::auth::extract_bearer;
 use zeroship_core::auth_provider::{ProviderAuthz, VerifiedToken, VerifyTokenError};
 use zeroship_core::device_grant::{
-    self, PLATFORM_CLI_CLIENT_ID, PLATFORM_PROVIDER, PLATFORM_TOKEN_MAX_TTL_SECS,
+    self, PLATFORM_CLI_CLIENT_ID, PLATFORM_CLI_ISSUABLE_SCOPES, PLATFORM_PROVIDER,
+    PLATFORM_TOKEN_MAX_TTL_SECS,
 };
 
 use crate::{identity_bridge, AppState};
@@ -60,13 +61,6 @@ const POLL_INTERVAL_SECS: i64 = 5;
 const USER_CODE_ATTEMPTS: usize = 8;
 const PLATFORM_MINT_TIMEOUT: StdDuration = StdDuration::from_secs(3);
 const PLATFORM_TOKEN_ENDPOINT: &str = "/internal/platform-token";
-const DEPLOY_TOKEN_SCOPES: [&str; 4] = [
-    "apps:deploy",
-    "apps:read",
-    "apps:write",
-    "secrets:read",
-];
-
 /// Lifetime of the deploy token `zeroship login` ends up holding.
 ///
 /// The OP's default access-token lifetime is 15 minutes
@@ -78,8 +72,9 @@ const DEPLOY_TOKEN_SCOPES: [&str; 4] = [
 ///
 /// What bounds it: the token's `aud` is control's OAuth audience, so the
 /// gateway and app runtime do not accept it; its scope is capped to the
-/// principal's stored grants intersected with [`DEPLOY_TOKEN_SCOPES`], so it
-/// carries no admin or billing authority; and the CLI writes it 0600. What
+/// principal's stored grants intersected with
+/// [`PLATFORM_CLI_ISSUABLE_SCOPES`], so it carries no admin or billing
+/// authority; and the CLI writes it 0600. What
 /// does NOT currently bound it is a supported server-side revocation action.
 /// The bearer read path honors `zeroship.token_revocations`, but disconnecting
 /// an app writes a per-app client and pairwise subject. Auth's generic RFC 7009
@@ -165,7 +160,7 @@ pub async fn device_auth(
         return resp;
     }
     let client_id = body.client_id.trim();
-    if client_id.is_empty() || client_id.len() > 128 {
+    if client_id != PLATFORM_CLI_CLIENT_ID {
         return bad_request("invalid_client_id");
     }
     // Resolved BEFORE the first insert. A grant whose verification URI cannot
@@ -644,7 +639,7 @@ async fn deploy_scopes_for_principal(
         .iter()
         .map(|row| row.get::<_, String>("grant_name"))
         .collect();
-    Ok(DEPLOY_TOKEN_SCOPES
+    Ok(PLATFORM_CLI_ISSUABLE_SCOPES
         .iter()
         .copied()
         .filter(|scope| requested.contains(*scope) && granted.contains(*scope))
@@ -655,11 +650,11 @@ async fn deploy_scopes_for_principal(
 fn requested_deploy_scope_set(raw_scope: Option<&str>) -> HashSet<&'static str> {
     let mut requested = HashSet::new();
     let Some(raw_scope) = raw_scope else {
-        requested.extend(DEPLOY_TOKEN_SCOPES);
+        requested.extend(PLATFORM_CLI_ISSUABLE_SCOPES);
         return requested;
     };
     for scope in raw_scope.split_whitespace() {
-        if let Some(deploy_scope) = DEPLOY_TOKEN_SCOPES
+        if let Some(deploy_scope) = PLATFORM_CLI_ISSUABLE_SCOPES
             .iter()
             .copied()
             .find(|candidate| *candidate == scope)
@@ -1013,10 +1008,10 @@ fn internal_error() -> web::HttpResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::DEPLOY_TOKEN_SCOPES;
+    use super::PLATFORM_CLI_ISSUABLE_SCOPES;
 
     #[test]
     fn deploy_tokens_can_read_secret_names() {
-        assert!(DEPLOY_TOKEN_SCOPES.contains(&"secrets:read"));
+        assert!(PLATFORM_CLI_ISSUABLE_SCOPES.contains(&"secrets:read"));
     }
 }

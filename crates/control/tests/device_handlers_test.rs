@@ -2258,7 +2258,7 @@ async fn supabase_only_provider_cannot_start_a_device_flow() {
 /// path for the first time inside `device_token`'s "approved" arm, before
 /// `deploy_scopes_for_principal` computes the token's scope. This asserts
 /// both ends of that: the `principal_grants` table ends up holding every
-/// `DEFAULT_CREATOR_GRANTS`, and the minted token's scope reflects them.
+/// `PLATFORM_CLI_ISSUABLE_SCOPES`, and the minted token's scope reflects them.
 ///
 /// What it does NOT cover: idempotency of a SECOND login (that a revoked
 /// grant stays revoked on a later poll) - that is
