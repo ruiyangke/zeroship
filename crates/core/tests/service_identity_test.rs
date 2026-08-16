@@ -57,10 +57,22 @@ fn framework_rejects_missing_or_empty_credentials_before_verifier_dispatch() {
     let verifier = FailOpenVerifier {
         calls: Cell::new(0),
     };
+    let leaf = [1, 2, 3];
+    let certificate_chain: [&[u8]; 1] = [&leaf];
+    let tls_peer = TlsPeerInfo::new(&certificate_chain)
+        .expect("a non-empty certificate chain is a TLS peer observation");
 
-    for bearer_assertion in [None, Some("")] {
-        let observed =
-            PeerCredentials::new(bearer_assertion, None, "https://control.zeroship.ai");
+    for (bearer_assertion, tls_observation) in [
+        (None, None),
+        (Some(""), None),
+        (None, Some(tls_peer)),
+        (Some(""), Some(tls_peer)),
+    ] {
+        let observed = PeerCredentials::new(
+            bearer_assertion,
+            tls_observation,
+            "https://control.zeroship.ai",
+        );
         assert_eq!(
             verify_identity(&verifier, &observed),
             Err(AuthError::NoCredentialPresented)
