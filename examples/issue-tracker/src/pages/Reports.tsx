@@ -1,10 +1,11 @@
 import { useState, type ReactNode } from "react";
-import { PageHeader, StatCard } from "@zeroship/ui";
 import { Select } from "../ui/Select";
 import { Badge } from "../ui/Badge";
 import { Field } from "../ui/Field";
 import { Progress } from "../ui/Progress";
 import { NumberField } from "../ui/NumberField";
+import { PageHeader } from "../ui/PageHeader";
+import { StatCard } from "../ui/StatCard";
 import {
   useProducts,
   useReportByAssignee,
