@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Duration, Utc};
-use compio_postgres::{Client, Transaction};
+use compio_postgres::{Client, GenericClient, Transaction};
 use ntex::http::StatusCode;
 use ntex::web::{self, HttpRequest, HttpResponse};
 use rand::RngCore;
@@ -21,6 +21,7 @@ use zeroship_core::device_grant::{
 
 use crate::advisory_lock::lock_refresh_user_xact;
 use crate::config::AuthConfig;
+use crate::error::{AuthError, Result as AuthResult};
 use crate::oidc::authorization_code::{
     load_client, mint_access_token, oauth_error_response, parse_scopes, required_param,
     scope_subset, sort_dedup, OAuthError, TokenRequest, TokenResponse, TOKEN_TYPE_BEARER,
@@ -36,7 +37,127 @@ const DEVICE_TTL_SECS: i64 = 600;
 const INITIAL_POLL_INTERVAL_SECS: i32 = 5;
 const USER_CODE_ATTEMPTS: usize = 8;
 const DEFAULT_DEVICE_SCOPE: &str = "openid";
+const PLATFORM_CLI_CLIENT_NAME: &str = "zeroship CLI";
 pub(crate) use zeroship_core::device_grant::{OP_PROVIDER as OP_DEVICE_PROVIDER, PLATFORM_PROVIDER};
+
+fn platform_cli_redirect_uris() -> Vec<String> {
+    Vec::new()
+}
+
+fn platform_cli_scopes() -> Vec<String> {
+    PLATFORM_CLI_ISSUABLE_SCOPES
+        .iter()
+        .map(|scope| (*scope).to_string())
+        .collect()
+}
+
+async fn platform_cli_registration_is_exact(
+    db: &(impl GenericClient + ?Sized),
+) -> AuthResult<bool> {
+    let redirects = platform_cli_redirect_uris();
+    let scopes = platform_cli_scopes();
+    let rows = db
+        .query(
+            "SELECT oc.client_name = $2 \
+                    AND oc.client_uri IS NULL \
+                    AND oc.logo_uri IS NULL \
+                    AND oc.redirect_uris = $3 \
+                    AND oc.scopes = $4 \
+                    AND oc.skip_consent \
+                    AND oc.created_by IS NULL \
+                    AND oc.client_secret_hash IS NULL \
+                    AND NOT oc.refresh_allowed \
+                    AND oc.token_endpoint_auth_method = 'none' \
+                    AND NOT oc.brokered \
+                    AND oc.backchannel_logout_uri IS NULL \
+                    AND NOT EXISTS ( \
+                        SELECT 1 FROM zeroship.app_oauth_clients aoc \
+                        WHERE aoc.client_id = oc.client_id \
+                    ) AS exact \
+             FROM zeroship.oauth_clients oc \
+             WHERE oc.client_id = $1",
+            &[
+                &PLATFORM_CLI_CLIENT_ID,
+                &PLATFORM_CLI_CLIENT_NAME,
+                &redirects,
+                &scopes,
+            ],
+        )
+        .await
+        .map_err(|err| AuthError::Db(format!("load platform CLI registration: {err}")))?;
+    let Some(row) = rows.first() else {
+        return Ok(false);
+    };
+    row.try_get::<_, bool>("exact")
+        .map_err(|err| AuthError::Db(format!("decode platform CLI registration: {err}")))
+}
+
+/// Create or repair the reserved first-party CLI client registration.
+///
+/// The fixed row is also checked at device authorization and redemption. This
+/// startup reconciliation is availability plumbing, not the policy boundary.
+pub async fn reconcile_platform_cli_client(
+    db: &(impl GenericClient + ?Sized),
+) -> AuthResult<()> {
+    let redirects = platform_cli_redirect_uris();
+    let scopes = platform_cli_scopes();
+    let updated = db
+        .execute(
+            "INSERT INTO zeroship.oauth_clients \
+                (client_id, client_name, client_uri, logo_uri, redirect_uris, scopes, \
+                 skip_consent, created_by, client_secret_hash, refresh_allowed, \
+                 token_endpoint_auth_method, brokered, backchannel_logout_uri) \
+             VALUES ($1, $2, NULL, NULL, $3, $4, TRUE, NULL, NULL, FALSE, \
+                     'none', FALSE, NULL) \
+             ON CONFLICT (client_id) DO UPDATE SET \
+                client_name = EXCLUDED.client_name, \
+                client_uri = NULL, \
+                logo_uri = NULL, \
+                redirect_uris = EXCLUDED.redirect_uris, \
+                scopes = EXCLUDED.scopes, \
+                skip_consent = TRUE, \
+                created_by = NULL, \
+                client_secret_hash = NULL, \
+                refresh_allowed = FALSE, \
+                token_endpoint_auth_method = 'none', \
+                brokered = FALSE, \
+                backchannel_logout_uri = NULL",
+            &[
+                &PLATFORM_CLI_CLIENT_ID,
+                &PLATFORM_CLI_CLIENT_NAME,
+                &redirects,
+                &scopes,
+            ],
+        )
+        .await
+        .map_err(|err| AuthError::Db(format!("reconcile platform CLI registration: {err}")))?;
+    if updated != 1 || !platform_cli_registration_is_exact(db).await? {
+        return Err(AuthError::Config(
+            "zeroship-cli OAuth registration is not the fixed first-party policy".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+async fn platform_cli_policy_selected(
+    db: &(impl GenericClient + ?Sized),
+    client_id: &str,
+) -> Result<bool, OAuthError> {
+    if client_id != PLATFORM_CLI_CLIENT_ID {
+        return Ok(false);
+    }
+    match platform_cli_registration_is_exact(db).await {
+        Ok(true) => Ok(true),
+        Ok(false) => {
+            tracing::error!(client_id, "platform CLI registration is not the fixed policy");
+            Err(OAuthError::server_error("client misconfigured"))
+        }
+        Err(err) => {
+            tracing::error!(error = %err, client_id, "platform CLI registration lookup failed");
+            Err(OAuthError::server_error("client registry unavailable"))
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub struct DeviceAuthorizationRequest {
@@ -158,6 +279,7 @@ async fn device_authorization_inner(
 ) -> Result<DeviceAuthorizationResponse, OAuthError> {
     let client_id = required_param(Some(params.client_id.as_str()), "client_id")?;
     let client = load_client(db, client_id).await?;
+    let platform_cli = platform_cli_policy_selected(db, &client.client_id).await?;
     if client.brokered || client.token_endpoint_auth_method != "none" {
         return Err(oauth_error(
             StatusCode::BAD_REQUEST,
@@ -170,7 +292,12 @@ async fn device_authorization_inner(
         Some(scope) => parse_scopes(scope),
         None => vec![DEFAULT_DEVICE_SCOPE.to_string()],
     };
-    if !scope_subset(&requested_scopes, &client.scopes) {
+    let allowed_scopes = if platform_cli {
+        platform_cli_scopes()
+    } else {
+        client.scopes.clone()
+    };
+    if !scope_subset(&requested_scopes, &allowed_scopes) {
         return Err(OAuthError::invalid_scope("scope is not allowed for client"));
     }
     let scope = requested_scopes.join(" ");
@@ -231,8 +358,8 @@ async fn device_authorization_inner(
 /// that can approve anything.
 ///
 /// The join to `oauth_clients` is a LEFT join for the same reason. Control's
-/// rows carry no `client_id` - the CLI is not a registered OP client - so an
-/// inner join dropped them even before the provider filter did.
+/// parallel-flow rows carry no `client_id`, even though auth now registers the
+/// CLI for its own OP flow, so an inner join would still drop the control rows.
 #[allow(clippy::future_not_send)]
 pub(crate) async fn pending_user_code_details(
     db: &Client,
@@ -407,6 +534,7 @@ async fn exchange_device_code_locked(
     if stored_client_id.as_deref() != Some(client.client_id.as_str()) {
         return Err(OAuthError::invalid_grant("device code binding mismatch"));
     }
+    let platform_cli = platform_cli_policy_selected(db, &client.client_id).await?;
 
     let now = Utc::now();
     if expires_at <= now {
@@ -500,6 +628,11 @@ async fn exchange_device_code_locked(
                 .map(|scope| parse_scopes(&scope))
                 .unwrap_or_default();
             let granted_scopes = sort_dedup(requested_scopes);
+            if platform_cli && !scope_subset(&granted_scopes, &platform_cli_scopes()) {
+                return Err(OAuthError::invalid_grant(
+                    "device grant scope is no longer allowed",
+                ));
+            }
             let Some(sid) = row.get::<_, Option<String>>("sid") else {
                 tracing::error!("device token: approved grant missing sid");
                 return Err(OAuthError::server_error("device grant is incomplete"));
@@ -507,28 +640,51 @@ async fn exchange_device_code_locked(
 
             delete_device_grant(db, device_code_hash).await?;
 
-            let access_token =
-                mint_access_token(db, issuer, client, user_id, &granted_scopes).await?;
-            let refresh_token =
-                if granted_scopes.iter().any(|scope| scope == "offline_access")
-                    && client.refresh_allowed
-                {
-                    let keys = RefreshTokenKeys::from_config(cfg)?;
-                    Some(
-                        refresh::issue_root_refresh_token(
-                            db,
-                            issuer,
-                            &keys,
-                            client,
-                            user_id,
-                            &granted_scopes,
-                            auth_credential_version,
-                        )
-                        .await?,
+            let (access_token, expires_in) = if platform_cli {
+                let principal_id = user_id.to_string();
+                let access_token = issuer
+                    .issue_principal_access_token(
+                        db,
+                        &PrincipalAccessTokenMint {
+                            principal_id: &principal_id,
+                            audience: cfg.settings.oauth_audience.get().as_str(),
+                            client_id: PLATFORM_CLI_CLIENT_ID,
+                            scopes: &granted_scopes,
+                            ttl_secs: Some(PLATFORM_TOKEN_MAX_TTL_SECS),
+                        },
                     )
-                } else {
-                    None
-                };
+                    .await
+                    .map_err(|err| {
+                        tracing::error!(error = %err, "device token: platform CLI mint failed");
+                        OAuthError::server_error("access token mint failed")
+                    })?;
+                (access_token, PLATFORM_TOKEN_MAX_TTL_SECS as u64)
+            } else {
+                (
+                    mint_access_token(db, issuer, client, user_id, &granted_scopes).await?,
+                    ACCESS_TOKEN_TTL_SECS as u64,
+                )
+            };
+            let refresh_token = if !platform_cli
+                && granted_scopes.iter().any(|scope| scope == "offline_access")
+                && client.refresh_allowed
+            {
+                let keys = RefreshTokenKeys::from_config(cfg)?;
+                Some(
+                    refresh::issue_root_refresh_token(
+                        db,
+                        issuer,
+                        &keys,
+                        client,
+                        user_id,
+                        &granted_scopes,
+                        auth_credential_version,
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
 
             tracing::debug!(client_id = %client.client_id, user_id = %user_id, sid = %sid, "device token approved");
             Ok(TokenResponse {
@@ -536,7 +692,7 @@ async fn exchange_device_code_locked(
                 id_token: None,
                 refresh_token,
                 token_type: TOKEN_TYPE_BEARER,
-                expires_in: ACCESS_TOKEN_TTL_SECS as u64,
+                expires_in,
                 scope: granted_scopes.join(" "),
             })
         }

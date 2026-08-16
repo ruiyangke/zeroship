@@ -382,10 +382,9 @@ fn redirect(to: &str) -> HttpResponse {
 
 /// Name shown on the confirmation page for a grant that names no OAuth client.
 ///
-/// Control's rows carry a NULL `client_id`: `zeroship.device_grants.client_id`
-/// has a foreign key into `zeroship.oauth_clients`, and the CLI is not a
-/// registered OP client, so there is no id to store and none to display. The
-/// page still has to tell the human what they are authorizing.
+/// Control's parallel-flow rows carry a NULL `client_id`; they do not bind to
+/// auth's first-party CLI registration. There is no id to display for those
+/// rows, but the page still has to name what the human is authorizing.
 const PLATFORM_DEVICE_CLIENT_NAME: &str = "the zeroship CLI";
 
 /// What the confirmation page calls the thing asking for authorization.
