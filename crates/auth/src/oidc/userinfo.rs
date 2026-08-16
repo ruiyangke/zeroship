@@ -113,7 +113,7 @@ async fn userinfo_inner(
         return Err(UserInfoError::InsufficientScope);
     }
 
-    let Some(global_user_id) = global_user_id_for_pairwise_sub(db, &claims.sub).await? else {
+    let Some(global_user_id) = global_user_id_for_active_pairwise_sub(db, &claims.sub).await? else {
         return Err(UserInfoError::InvalidToken);
     };
     let user_id = global_user_id.to_string();
@@ -138,15 +138,21 @@ async fn userinfo_inner(
 }
 
 #[allow(clippy::future_not_send)]
-async fn global_user_id_for_pairwise_sub(
+async fn global_user_id_for_active_pairwise_sub(
     db: &Client,
     pairwise_sub: &str,
 ) -> Result<Option<Uuid>, UserInfoError> {
     let rows = db
         .query(
-            "SELECT global_user_id \
-             FROM zeroship.app_user_identities \
-             WHERE pairwise_sub = $1 AND revoked_at IS NULL \
+            "SELECT aui.global_user_id \
+             FROM zeroship.app_user_identities aui \
+             JOIN zeroship.users owner ON owner.id = aui.global_user_id \
+             WHERE aui.pairwise_sub = $1 \
+               AND aui.revoked_at IS NULL \
+               AND owner.disabled_at IS NULL \
+               AND owner.anonymized_at IS NULL \
+               AND owner.deletion_requested_at IS NULL \
+               AND owner.deletion_scheduled_for IS NULL \
              LIMIT 1",
             &[&pairwise_sub],
         )

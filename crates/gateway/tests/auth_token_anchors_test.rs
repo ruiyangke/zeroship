@@ -540,8 +540,13 @@ fn build_state_with_route(
     .with_issuer(MOCK_ISSUER);
 
     let routes = RouteCache::new();
-    routes.update(
-        build_route_map_for(app_uuid, app_name, app_host, client_id),
+    let pairwise_salt = zeroship_core::crypto::derive_key("pairwise-test-salt");
+    routes.update_snapshot(
+        zeroship_core::types::GatewaySnapshot {
+            routes: build_route_map_for(app_uuid, app_name, app_host, client_id),
+            principal_lifecycle: Vec::new(),
+            family_revocations: Vec::new(),
+        },
         &zeroship_gateway::enforce::RateLimitRegistry::new(1000, 2000),
         &zeroship_gateway::enforce::ConcurrencyRegistry::new(100),
     );
@@ -577,7 +582,7 @@ fn build_state_with_route(
         session_issuer: Some(Arc::new(session_issuer)),
         session_verifier: Some(Arc::new(session_verifier)),
         anchor_enc_key: zeroship_core::crypto::derive_key("anchor-test-key"),
-        pairwise_salt: zeroship_core::crypto::derive_key("pairwise-test-salt"),
+        pairwise_salt,
         meter: Arc::new(zeroship_metering::Meter::new()),
     })
 }
@@ -746,6 +751,7 @@ fn issue_session_cookie(state: &GateState, sub: &str, scopes: &[String]) -> Stri
         .issue(&session_token::SessionMint {
             app: CLIENT_ID,
             sub,
+            credential_iat: 1_700_000_000,
             auth_time: Some(1_700_000_000),
             amr: &["pwd".to_string()],
             email: "relay-alias@zeroship.ai",
@@ -902,6 +908,7 @@ fn leader_mint_future(
         match op_refresh(&oidc, &op).await {
             Ok(()) => Ok(anchors::RotationOk {
                 global_user_id: user_id,
+                credential_iat: 1_700_000_000,
                 sid: None,
                 granted_scopes: vec!["openid".into()],
                 email_verified: Some(true),
@@ -2569,6 +2576,7 @@ async fn interactive_cookie_mint_writes_identity_so_reset_evicts_session() {
         CLIENT_ID,
         Some(sector.as_str()),
         user_id,
+        cookie_iat,
         Some("Interactive User"),
         None,
         Some(true),

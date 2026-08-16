@@ -169,8 +169,13 @@ fn build_state(opts: StateOpts) -> Arc<GateState> {
     .with_issuer(OP_ISS);
 
     let routes = RouteCache::new();
-    routes.update(
-        build_route_map(opts.provisioned),
+    let pairwise_salt = zeroship_core::crypto::derive_key("pairwise-test-salt");
+    routes.update_snapshot(
+        zeroship_core::types::GatewaySnapshot {
+            routes: build_route_map(opts.provisioned),
+            principal_lifecycle: Vec::new(),
+            family_revocations: Vec::new(),
+        },
         &zeroship_gateway::enforce::RateLimitRegistry::new(1000, 2000),
         &zeroship_gateway::enforce::ConcurrencyRegistry::new(100),
     );
@@ -206,7 +211,7 @@ fn build_state(opts: StateOpts) -> Arc<GateState> {
         session_issuer: Some(Arc::new(session_issuer)),
         session_verifier: Some(Arc::new(session_verifier)),
         anchor_enc_key: zeroship_core::crypto::derive_key("anchor-test-key"),
-        pairwise_salt: zeroship_core::crypto::derive_key("pairwise-test-salt"),
+        pairwise_salt,
         meter: Arc::new(zeroship_metering::Meter::new()),
     })
 }

@@ -496,6 +496,9 @@ pub(crate) async fn mint_session_from_code(
             );
         }
     };
+    if !principal_lifecycle_allows(state, &claims.sub) {
+        return login_required(&route.host);
+    }
 
     // 3. The global user UUID is the OP sub. It is stored INTERNALLY (the
     //    anchor + the gateway session `user_id`) and projected to the per-app
@@ -639,27 +642,31 @@ pub(crate) async fn mint_session_from_code(
         // revocation is the per-app family marker). `_session_id` documents that.
         let _session_id = session.id;
 
-        // 6c. Persist the per-app pairwise mapping into `app_user_identities`,
-        //     SYMMETRIC with the Bearer arm (`project_pairwise` →
-        //     `identities::upsert`). The cookie mint is the DEFAULT
+        // 6c. Reassert the per-app pairwise mapping in
+        //     `app_user_identities`. Auth persists the same mapping when it
+        //     issues an access token; this cookie path retains its own write
+        //     because it also mints sessions from external providers. The
+        //     cookie mint is the DEFAULT
         //     `@zeroship/auth` BFF path; without this row the H1 password-reset
         //     teardown — whose family-marker CTE JOINs `app_user_identities` to
         //     learn each `(client_id, pws_)` to revoke — would write ZERO markers
         //     for a cookie-only user, so the victim's live
         //     `__Host-zeroship_app_session` cookie would outlive the reset for its
-        //     full TTL (security finding F1). Best-effort / log-and-continue,
-        //     EXACTLY like the Bearer arm: the `pws_` is already projected
-        //     and the cookie is the live credential, so a mapping write failure
-        //     must not fail the mint — it only degrades reset-time eviction, which
-        //     the credential_version / anchor-revoke arms still backstop.
+        //     full TTL (security finding F1). A mapping write failure must fail
+        //     the mint because account deletion and password reset enumerate
+        //     these rows to recall access-only and cookie credentials.
         if let Err(e) =
             crate::identities::upsert(&mut conn, &route.client_id, global_user_id, &pws_sub).await
         {
-            tracing::warn!(
+            tracing::error!(
                 error = %e,
                 app_client_id = %route.client_id,
-                "app_user_identities upsert failed on cookie mint \
-                 (non-fatal; pws_ already projected, but reset-time eviction degraded)"
+                "app_user_identities upsert failed on cookie mint"
+            );
+            return error_response(
+                HttpResponse::InternalServerError(),
+                "internal",
+                "identity mapping failed",
             );
         }
 
@@ -676,6 +683,7 @@ pub(crate) async fn mint_session_from_code(
         state,
         &route.client_id,
         &pws_sub,
+        claims.iat,
         relay_email.as_deref(),
         claims.name.as_deref(),
         claims.picture.as_deref(),
@@ -711,11 +719,11 @@ pub(crate) async fn mint_session_from_code(
 /// §2.2). Returns ONLY `{ user, expires_at }` (relay-swapped email, `pws_` id);
 /// NO JWT in any body; the real email never appears.
 ///
-/// Read path: the live `gateway_sessions` row (via the `__Host-zeroship_app_session`
-/// cookie) is the primary source. When that row is gone/expired but the
-/// `__Host-zeroship_app_anchor` is valid, reload-recovery rotates the server-held
-/// refresh family, re-creates the gateway session + re-sets the session cookie,
-/// and returns the projection. `?mint=1` forces that rotation.
+/// Read path: the signed `__Host-zeroship_app_session` cookie is verified
+/// locally and is the primary source. When it is gone or expired but the
+/// `__Host-zeroship_app_anchor` is valid, reload recovery rotates the
+/// server-held refresh family, records the audit session, and signs a new
+/// cookie. `?mint=1` forces that rotation.
 #[allow(clippy::future_not_send, clippy::too_many_lines)]
 pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResponse {
     let route = match resolve_route(&req, &state) {
@@ -758,28 +766,38 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
         ) {
             if let Ok(claims) = verifier.verify(&token, &route.client_id) {
                 // Defense in depth (same as the dispatch arm): the cookie `sub`
-                // MUST be a `pws_…` pairwise subject. A non-`pws_` cookie is a
-                // mint bug — never project it, fall through.
+                // MUST be a `pws_` pairwise subject. A non-`pws_` cookie is a
+                // mint bug; never project it, and fall through.
                 if zeroship_core::auth::is_pairwise_subject(&claims.sub)
-                    && !session_cookie_family_revoked(&state, &claims).await
-                {
-                    // The cookie already carries the relay-swapped email + pws_ id
-                    // (set at issue time). Project them verbatim — no further DB.
-                    let user = user_projection(
+                    && credential_authentication_allows(
+                        &state,
+                        &claims.app,
                         &claims.sub,
-                        Some(&claims.email),
-                        Some(&claims.name),
-                        Some(claims.email_verified),
-                        // No avatar on this path: `SessionClaims` carries
-                        // iss/app/sub/iat/exp/auth_time/amr and no picture, so
-                        // the signed session cookie does not round-trip one.
-                        // This arm therefore still reports `avatar: null` for a
-                        // user who has one; closing it means adding the claim.
-                        None,
-                    );
-                    return identity_projection_ok(&route, user, claims.exp, None);
+                        claims.iat,
+                    )
+                {
+                    let revoked = session_cookie_family_revoked(&state, &claims).await;
+                    if !revoked
+                        && credential_authentication_allows(
+                            &state,
+                            &claims.app,
+                            &claims.sub,
+                            claims.iat,
+                        )
+                    {
+                        // The cookie already carries the relay-swapped profile
+                        // and pws_ id. Project them verbatim with no further DB.
+                        let user = user_projection(
+                            &claims.sub,
+                            Some(&claims.email),
+                            Some(&claims.name),
+                            Some(claims.email_verified),
+                            claims.avatar.as_deref(),
+                        );
+                        return identity_projection_ok(&route, user, claims.exp, None);
+                    }
                 }
-                // Revoked family / non-`pws_` sub → fall through to anchor
+                // Revoked family / non-`pws_` sub: fall through to anchor
                 // reload-recovery (which will end in login_required for a revoked
                 // family). Never return the stale logged-in projection.
             }
@@ -832,12 +850,18 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
             }
         }
     };
+    if !principal_lifecycle_allows(&state, &anchor.global_user_id.to_string()) {
+        return login_required(&route.host);
+    }
 
     // Rotate the server-held family via the per-node single-flight (one OP
     // refresh for N concurrent reloaders), then re-create the gateway session
     // from the rotated id-token facts.
     match rotate_family(&state, &route, &anchor).await {
         Ok(rotated) => {
+            if !principal_lifecycle_allows(&state, &rotated.global_user_id.to_string()) {
+                return login_required(&route.host);
+            }
             // Project the per-app `pws_` (§6.3) + relay-swap the email. Fail
             // closed if the sector is missing (same posture as /token).
             let Some(pws_sub) =
@@ -926,6 +950,7 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
                 &state,
                 &route.client_id,
                 &pws_sub,
+                rotated.credential_iat,
                 relay_email.as_deref(),
                 rotated.name.as_deref(),
                 rotated.avatar_url.as_deref(),
@@ -1261,6 +1286,7 @@ async fn do_refresh(
 
     Ok(RotationOk {
         global_user_id: anchor.global_user_id,
+        credential_iat: raw.iat,
         granted_scopes,
         email_verified,
         name,
@@ -1349,10 +1375,11 @@ fn now_secs() -> i64 {
 /// Returns `Err(response)` (`503`) when the gateway has no signing key (so it
 /// cannot sign a session cookie); the SDK treats `503` as retryable.
 #[allow(clippy::too_many_arguments)]
-fn sign_session_cookie(
+pub(crate) fn sign_session_cookie(
     state: &GateState,
     client_id: &str,
     pws_sub: &str,
+    credential_iat: i64,
     relay_email: Option<&str>,
     name: Option<&str>,
     avatar: Option<&str>,
@@ -1361,6 +1388,14 @@ fn sign_session_cookie(
     amr: &[String],
     scopes: &[String],
 ) -> Result<String, HttpResponse> {
+    if !credential_authentication_allows(state, client_id, pws_sub, credential_iat) {
+        tracing::warn!(sub = %pws_sub, "session cookie principal lifecycle rejected at signing");
+        return Err(error_response(
+            HttpResponse::Unauthorized(),
+            "principal_inactive",
+            "principal lifecycle rejected authentication",
+        ));
+    }
     let Some(issuer) = state.session_issuer.as_ref() else {
         tracing::error!("/session: no session signing key configured — cannot mint session cookie");
         return Err(error_response(
@@ -1373,6 +1408,7 @@ fn sign_session_cookie(
         .issue(&crate::session_token::SessionMint {
             app: client_id,
             sub: pws_sub,
+            credential_iat,
             auth_time,
             amr,
             // Relay alias only (fail closed to empty) — NEVER the real inbox.
@@ -1415,6 +1451,7 @@ pub async fn issue_interactive_session_cookie(
     client_id: &str,
     sector: Option<&str>,
     global_user_id: Uuid,
+    credential_iat: i64,
     name: Option<&str>,
     avatar: Option<&str>,
     email_verified: Option<bool>,
@@ -1422,6 +1459,9 @@ pub async fn issue_interactive_session_cookie(
     amr: &[String],
     scopes: &[String],
 ) -> Result<String, String> {
+    if !principal_lifecycle_allows(state, &global_user_id.to_string()) {
+        return Err("principal lifecycle rejected authentication".to_string());
+    }
     let Some(sector) = sector else {
         return Err("app has no sector_identifier yet".to_string());
     };
@@ -1432,47 +1472,32 @@ pub async fn issue_interactive_session_cookie(
     );
 
     // Persist the per-app `(client_id, global_user, pws_)` mapping into
-    // `app_user_identities`, SYMMETRIC with the SDK popup minter
-    // (`mint_session_from_code` step 6c) and the Bearer arm
-    // (`project_pairwise`). H1's password-reset teardown
+    // `app_user_identities`, symmetric with the SDK popup minter
+    // (`mint_session_from_code` step 6c) and auth's access-token issuer. H1's
+    // password-reset teardown
     // (`password_reset::complete`) learns each `(client_id, pws_)` family to
     // revoke by JOINing `app_user_identities`; without this row the INTERACTIVE
-    // login cookie minted here would survive a reset for its full TTL — the
+    // login cookie minted here would survive a reset for its full TTL; the
     // cookie arm's SOLE revocation gate is that family marker (security finding
-    // 0.0, the F1 missed sibling). Best-effort / log-and-continue, EXACTLY like
-    // the SDK + Bearer paths: the `pws_` is already projected and the cookie
-    // is the live credential, so a mapping write failure must not fail the mint —
-    // it only degrades reset-time eviction.
-    match crate::db::checkout(db_cfg).await {
-        Ok(pool) => match pool.get().await {
-            Ok(mut conn) => {
-                if let Err(e) =
-                    crate::identities::upsert(&mut conn, client_id, global_user_id, &pws_sub).await
-                {
-                    tracing::warn!(
-                        error = %e,
-                        app_client_id = %client_id,
-                        "app_user_identities upsert failed on interactive cookie mint \
-                         (non-fatal; pws_ already projected, but reset-time eviction degraded)"
-                    );
-                }
-            }
-            Err(e) => tracing::warn!(
-                error = %e,
-                "interactive cookie mint: app_user_identities upsert pool get failed (non-fatal)"
-            ),
-        },
-        Err(e) => tracing::warn!(
-            error = %e,
-            "interactive cookie mint: app_user_identities upsert pool checkout failed (non-fatal)"
-        ),
-    }
+    // 0.0, the F1 missed sibling). Fail closed when the durable mapping cannot
+    // be recorded.
+    let pool = crate::db::checkout(db_cfg)
+        .await
+        .map_err(|e| format!("identity mapping pool checkout failed: {e}"))?;
+    let mut conn = pool
+        .get()
+        .await
+        .map_err(|e| format!("identity mapping session checkout failed: {e}"))?;
+    crate::identities::upsert(&mut conn, client_id, global_user_id, &pws_sub)
+        .await
+        .map_err(|e| format!("identity mapping failed: {e}"))?;
 
     let relay_email = relay_alias_for(db_cfg, client_id, global_user_id).await;
     sign_session_cookie(
         state,
         client_id,
         &pws_sub,
+        credential_iat,
         relay_email.as_deref(),
         name,
         avatar,
@@ -1482,6 +1507,29 @@ pub async fn issue_interactive_session_cookie(
         scopes,
     )
     .map_err(|_| "session cookie mint failed".to_string())
+}
+
+fn principal_lifecycle_allows(state: &GateState, subject: &str) -> bool {
+    let freshness_budget = zeroship_core::readiness::staleness_budget(
+        std::time::Duration::from_secs(state.config.poll_interval_secs),
+    );
+    state
+        .routes
+        .principal_authentication_allowed(subject, freshness_budget)
+}
+
+fn credential_authentication_allows(
+    state: &GateState,
+    client_id: &str,
+    subject: &str,
+    issued_at: i64,
+) -> bool {
+    let freshness_budget = zeroship_core::readiness::staleness_budget(
+        std::time::Duration::from_secs(state.config.poll_interval_secs),
+    );
+    state
+        .routes
+        .credential_authentication_allowed(client_id, subject, issued_at, freshness_budget)
 }
 
 /// The browser-facing identity projection (BFF redesign §2.2). Carries ONLY

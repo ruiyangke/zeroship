@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use compio_postgres::{Client, GenericClient};
+use compio_postgres::{Client, GenericClient, Transaction};
 use ntex::http::header::{HeaderValue, COOKIE, LOCATION, WWW_AUTHENTICATE};
 use ntex::http::StatusCode;
 use ntex::web::{self, HttpRequest, HttpResponse};
@@ -618,7 +618,7 @@ async fn token_inner(
 
 #[allow(clippy::future_not_send)]
 async fn exchange_authorization_code(
-    db: &(impl GenericClient + ?Sized),
+    db: &Transaction<'_>,
     issuer: &Issuer,
     cfg: &AuthConfig,
     client: &OAuthClient,
@@ -639,6 +639,7 @@ async fn exchange_authorization_code(
                AND owner.credential_version = code.auth_credential_version \
                AND owner.disabled_at IS NULL \
                AND owner.deletion_requested_at IS NULL \
+               AND owner.deletion_scheduled_for IS NULL \
                AND owner.anonymized_at IS NULL \
              RETURNING code.client_id, code.redirect_uri, code.pkce_challenge, code.pkce_method, \
                        code.granted_scopes, code.nonce, code.user_id, \
@@ -1384,18 +1385,88 @@ pub(super) fn authenticate_brokered_client(
     }
 }
 
+const fn access_identity_upsert_sql() -> &'static str {
+    "INSERT INTO zeroship.app_user_identities \
+        (app_client_id, global_user_id, pairwise_sub) \
+     VALUES ($1, $2, $3) \
+     ON CONFLICT (app_client_id, global_user_id) DO UPDATE SET \
+        pairwise_sub = EXCLUDED.pairwise_sub, \
+        revoked_at = NULL \
+     WHERE zeroship.app_user_identities.pairwise_sub = EXCLUDED.pairwise_sub"
+}
+
+const ACCESS_MINT_PRINCIPAL_ACTIVE_SQL: &str =
+    "SELECT 1 FROM zeroship.users \
+     WHERE id = $1 \
+       AND disabled_at IS NULL \
+       AND anonymized_at IS NULL \
+       AND deletion_requested_at IS NULL \
+       AND deletion_scheduled_for IS NULL";
+
 pub(super) async fn mint_access_token(
-    db: &(impl GenericClient + ?Sized),
+    db: &Transaction<'_>,
     issuer: &Issuer,
     client: &OAuthClient,
     user_id: Uuid,
     scopes: &[String],
 ) -> Result<String, OAuthError> {
-    let user_id = user_id.to_string();
+    crate::advisory_lock::lock_refresh_user_xact(db, user_id)
+        .await
+        .map_err(|err| {
+            tracing::error!(error = %err, user_id = %user_id, "access-token mint user lock failed");
+            OAuthError::server_error("access-token mint unavailable")
+        })?;
+    let active = db
+        .query(ACCESS_MINT_PRINCIPAL_ACTIVE_SQL, &[&user_id])
+        .await
+        .map_err(|err| {
+            tracing::error!(error = %err, user_id = %user_id, "access-token mint lifecycle lookup failed");
+            OAuthError::server_error("access-token mint unavailable")
+        })?;
+    if active.is_empty() {
+        return Err(OAuthError::invalid_grant("authenticated user is inactive"));
+    }
+
+    let user_id_string = user_id.to_string();
+    let pairwise_sub = issuer.pairwise_subject(&user_id_string, &client.sector_identifier);
+    db.execute(
+        "SELECT set_config('zeroship.tenant_client', $1, true)",
+        &[&client.client_id],
+    )
+    .await
+    .map_err(|err| {
+        tracing::error!(error = %err, client_id = %client.client_id, "token: pairwise tenant scope failed");
+        OAuthError::server_error("pairwise identity store unavailable")
+    })?;
+    let mapped = db
+        .execute(
+            access_identity_upsert_sql(),
+            &[&client.client_id, &user_id, &pairwise_sub],
+        )
+        .await
+        .map_err(|err| {
+            tracing::error!(
+                error = %err,
+                client_id = %client.client_id,
+                user_id = %user_id,
+                "token: pairwise identity mapping failed"
+            );
+            OAuthError::server_error("pairwise identity store unavailable")
+        })?;
+    if mapped != 1 {
+        tracing::error!(
+            client_id = %client.client_id,
+            user_id = %user_id,
+            "token: pairwise identity binding changed"
+        );
+        return Err(OAuthError::server_error(
+            "pairwise identity binding changed",
+        ));
+    }
     let audience = client.resource_audience();
     issuer
         .issue_access_token(db, &AccessTokenMint {
-            user_id: &user_id,
+            user_id: &user_id_string,
             sector: &client.sector_identifier,
             audience: &audience,
             client_id: &client.client_id,
@@ -1407,4 +1478,269 @@ pub(super) async fn mint_access_token(
             tracing::error!(error = %err, "token: access-token mint failed");
             OAuthError::server_error("access token mint failed")
         })
+}
+
+#[cfg(test)]
+mod access_identity_tests {
+    use std::time::Duration;
+
+    use base64::Engine as _;
+    use compio_postgres::{connect, Client, NoTls};
+
+    use super::*;
+
+    async fn pg_connect(dsn: &str) -> Client {
+        let (client, connection) = connect(dsn, NoTls).await.expect("connect");
+        compio::runtime::spawn(async move {
+            let _ = connection.run().await;
+        })
+        .detach();
+        client
+    }
+
+    async fn mint_fixture() -> Option<(String, Client, Client, Client, Uuid, OAuthClient, Issuer)> {
+        let dsn = zeroship_core::declared_env!(
+            external,
+            "AUTH_DB_URL",
+            zeroship_core::config::TestHarness
+        )
+        .or_else(|| zeroship_core::test_env!("PG_TEST_URL"))
+        .or_else(|| zeroship_core::test_env!("CONTROL_TEST_DB"))?;
+        let setup = pg_connect(&dsn).await;
+        let mint = pg_connect(&dsn).await;
+        let deletion = pg_connect(&dsn).await;
+        let tag = Uuid::new_v4().simple().to_string();
+        let user_id: Uuid = setup
+            .query_one(
+                "INSERT INTO zeroship.users (email, name, password_hash) \
+                 VALUES ($1::citext, 'Mint Race', 'phc') RETURNING id",
+                &[&format!("mint-race-{tag}@zeroship.test")],
+            )
+            .await
+            .expect("seed user")
+            .get("id");
+        let client_id = format!("oac_mint_race_{tag}");
+        setup
+            .execute(
+                "INSERT INTO zeroship.oauth_clients \
+                    (client_id, client_name, redirect_uris, scopes) \
+                 VALUES ($1, 'Mint Race', $2, $3)",
+                &[
+                    &client_id,
+                    &vec!["https://mint-race.test/callback".to_string()],
+                    &vec!["openid".to_string()],
+                ],
+            )
+            .await
+            .expect("seed client");
+        let client = OAuthClient {
+            client_id,
+            redirect_uris: vec!["https://mint-race.test/callback".to_string()],
+            scopes: vec!["openid".to_string()],
+            app_id: None,
+            sector_identifier: "https://mint-race.test".to_string(),
+            client_secret_hash: None,
+            refresh_allowed: false,
+            token_endpoint_auth_method: "none".to_string(),
+            backchannel_logout_uri: None,
+            brokered: false,
+        };
+        let issuer = Issuer::from_signing_key(
+            &ed25519_dalek::SigningKey::from_bytes(&[61_u8; 32]),
+            [62_u8; 32],
+            "https://auth.mint-race.test".to_string(),
+        )
+        .expect("issuer");
+        issuer
+            .publish_active_key(&setup)
+            .await
+            .expect("publish mint-race signing key");
+        Some((dsn, setup, mint, deletion, user_id, client, issuer))
+    }
+
+    fn token_iat(token: &str) -> i64 {
+        let payload = token.split('.').nth(1).expect("JWT payload");
+        let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .expect("decode JWT payload");
+        serde_json::from_slice::<serde_json::Value>(&decoded)
+            .expect("parse JWT payload")["iat"]
+            .as_i64()
+            .expect("iat")
+    }
+
+    async fn cleanup_mint_fixture(setup: &Client, user_id: Uuid, client_id: &str) {
+        let _ = setup
+            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
+            .await;
+        let _ = setup
+            .execute(
+                "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
+                &[&client_id],
+            )
+            .await;
+    }
+
+    #[test]
+    fn access_token_mint_persists_the_pairwise_revocation_mapping() {
+        let sql = access_identity_upsert_sql();
+        assert!(sql.contains("INSERT INTO zeroship.app_user_identities"));
+        assert!(sql.contains("global_user_id"));
+        assert!(sql.contains("pairwise_sub"));
+        assert!(sql.contains("ON CONFLICT (app_client_id, global_user_id)"));
+        assert!(sql.contains("revoked_at = NULL"));
+        assert!(sql.contains(
+            "WHERE zeroship.app_user_identities.pairwise_sub = EXCLUDED.pairwise_sub"
+        ));
+    }
+
+    #[test]
+    fn access_token_mint_blocks_hard_lifecycle_without_soft_lockout() {
+        for column in [
+            "disabled_at",
+            "anonymized_at",
+            "deletion_requested_at",
+            "deletion_scheduled_for",
+        ] {
+            assert!(
+                ACCESS_MINT_PRINCIPAL_ACTIVE_SQL.contains(&format!("{column} IS NULL")),
+                "missing active lifecycle predicate for {column}"
+            );
+        }
+        assert!(!ACCESS_MINT_PRINCIPAL_ACTIVE_SQL.contains("locked_until"));
+    }
+
+    #[compio::test]
+    async fn access_token_mint_holds_the_user_lock_until_commit() {
+        let Some((_dsn, setup, mut mint, _deletion, user_id, client, issuer)) =
+            mint_fixture().await
+        else {
+            eprintln!("skip: AUTH_DB_URL/PG_TEST_URL unset");
+            return;
+        };
+        let tx = mint.transaction().await.expect("mint transaction");
+        mint_access_token(&tx, &issuer, &client, user_id, &["openid".to_string()])
+            .await
+            .expect("mint token");
+
+        let contender_acquired: bool = setup
+            .query_one(
+                "SELECT pg_try_advisory_xact_lock($1::INT4, hashtext($2::text))",
+                &[&crate::advisory_lock::NS_USER, &user_id.to_string()],
+            )
+            .await
+            .expect("probe mint lock")
+            .get(0);
+        assert!(
+            !contender_acquired,
+            "a competing transaction acquired the mint's user lock"
+        );
+
+        tx.rollback().await.expect("rollback mint");
+        cleanup_mint_fixture(&setup, user_id, &client.client_id).await;
+    }
+
+    #[compio::test]
+    async fn access_token_mint_rejects_a_deleted_principal_after_locking() {
+        let Some((_dsn, mut setup, mut mint, _deletion, user_id, client, issuer)) =
+            mint_fixture().await
+        else {
+            eprintln!("skip: AUTH_DB_URL/PG_TEST_URL unset");
+            return;
+        };
+        crate::store::users::request_deletion(&mut setup, user_id, 30)
+            .await
+            .expect("delete request")
+            .expect("user exists");
+
+        let tx = mint.transaction().await.expect("mint transaction");
+        let result =
+            mint_access_token(&tx, &issuer, &client, user_id, &["openid".to_string()]).await;
+        assert!(
+            result.is_err(),
+            "the shared access-token issuer minted for a deleted principal"
+        );
+        tx.rollback().await.expect("rollback mint");
+        cleanup_mint_fixture(&setup, user_id, &client.client_id).await;
+    }
+
+    #[compio::test]
+    async fn deletion_marker_uses_a_post_lock_timestamp() {
+        let Some((_dsn, setup, mut mint, mut deletion, user_id, client, issuer)) =
+            mint_fixture().await
+        else {
+            eprintln!("skip: AUTH_DB_URL/PG_TEST_URL unset");
+            return;
+        };
+        let tx = mint.transaction().await.expect("mint transaction");
+        crate::advisory_lock::lock_refresh_user_xact(&tx, user_id)
+            .await
+            .expect("hold mint lock");
+
+        let app_name = format!("mint-race-delete-{}", Uuid::new_v4().simple());
+        deletion
+            .execute(
+                "SELECT set_config('application_name', $1, false)",
+                &[&app_name],
+            )
+            .await
+            .expect("name deletion session");
+        let deletion_task = compio::runtime::spawn(async move {
+            crate::store::users::request_deletion(&mut deletion, user_id, 30).await
+        });
+        let mut observed_wait = false;
+        for _ in 0..200 {
+            let waiting = setup
+                .query_opt(
+                    "SELECT 1 FROM pg_stat_activity \
+                     WHERE application_name = $1 \
+                       AND wait_event_type = 'Lock' \
+                       AND wait_event = 'advisory'",
+                    &[&app_name],
+                )
+                .await
+                .expect("inspect deletion wait");
+            if waiting.is_some() {
+                observed_wait = true;
+                break;
+            }
+            compio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(observed_wait, "deletion never reached the held user lock");
+        compio::time::sleep(Duration::from_millis(1100)).await;
+        let token = mint_access_token(
+            &tx,
+            &issuer,
+            &client,
+            user_id,
+            &["openid".to_string()],
+        )
+        .await
+        .expect("mint token while deletion waits");
+        let iat = token_iat(&token);
+        let pairwise = issuer.pairwise_subject(&user_id.to_string(), &client.sector_identifier);
+        tx.commit().await.expect("commit mint");
+        deletion_task
+            .await
+            .expect("join deletion")
+            .expect("delete request")
+            .expect("user exists");
+
+        let marker_is_newer: bool = setup
+            .query_one(
+                "SELECT revoked_after > \
+                        TIMESTAMPTZ 'epoch' + ($3::bigint * INTERVAL '1 second') \
+                 FROM zeroship.token_revocations \
+                 WHERE client_id = $1 AND sub = $2",
+                &[&client.client_id, &pairwise, &iat],
+            )
+            .await
+            .expect("revocation marker")
+            .get(0);
+        assert!(
+            marker_is_newer,
+            "a deletion that waited for mint must revoke the token minted while it waited"
+        );
+        cleanup_mint_fixture(&setup, user_id, &client.client_id).await;
+    }
 }

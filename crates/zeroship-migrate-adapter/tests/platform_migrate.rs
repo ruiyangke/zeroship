@@ -610,6 +610,77 @@ mod platform_cli {
         {
             return Err("no table grants to role 'zeroship_control'".to_string());
         }
+        if !scalar_bool(
+            &probe,
+            "SELECT has_table_privilege( \
+                       'zeroship_auth', \
+                       'zeroship.app_user_identities', \
+                       'INSERT' \
+                    ) \
+                AND NOT has_table_privilege( \
+                       'zeroship_worker', \
+                       'zeroship.app_user_identities', \
+                       'INSERT' \
+                    )",
+        )
+        .await
+        {
+            return Err("app_user_identities INSERT privilege boundary is wrong".to_string());
+        }
+        if !scalar_bool(
+            &probe,
+            "SELECT EXISTS (SELECT 1 FROM pg_indexes \
+             WHERE schemaname = 'zeroship' \
+               AND tablename = 'app_user_identities' \
+               AND indexname = 'app_user_identities_global_user_id_idx')",
+        )
+        .await
+        {
+            return Err("app_user_identities global-user lookup index is missing".to_string());
+        }
+        if !scalar_bool(
+            &probe,
+            "SELECT EXISTS (SELECT 1 FROM pg_indexes \
+             WHERE schemaname = 'zeroship' \
+               AND tablename = 'users' \
+               AND indexname = 'auth_users_non_authenticating_idx')",
+        )
+        .await
+        {
+            return Err("non-authenticating user feed index is missing".to_string());
+        }
+        probe
+            .batch(
+                "INSERT INTO zeroship.users (id, email, name) VALUES \
+                   ('10000000-0000-0000-0000-000000000001', \
+                    'lifecycle-feed@zeroship.test', 'Lifecycle Feed'); \
+                 INSERT INTO zeroship.oauth_clients \
+                   (client_id, client_name, redirect_uris, scopes) VALUES \
+                   ('oac_lifecycle_feed', 'Lifecycle Feed', ARRAY[]::text[], ARRAY[]::text[]); \
+                 INSERT INTO zeroship.app_user_identities \
+                   (app_client_id, global_user_id, pairwise_sub) VALUES \
+                   ('oac_lifecycle_feed', \
+                    '10000000-0000-0000-0000-000000000001', 'pws_lifecycle_feed')",
+            )
+            .await
+            .map_err(|e| format!("seed lifecycle feed: {e}"))?;
+        probe
+            .batch("SET ROLE zeroship_control")
+            .await
+            .map_err(|e| format!("assume control role: {e}"))?;
+        let control_sees_mapping = scalar_bool(
+            &probe,
+            "SELECT count(*) = 1 FROM zeroship.app_user_identities \
+             WHERE global_user_id = '10000000-0000-0000-0000-000000000001'",
+        )
+        .await;
+        probe
+            .batch("RESET ROLE")
+            .await
+            .map_err(|e| format!("reset control role: {e}"))?;
+        if !control_sees_mapping {
+            return Err("control lifecycle feed cannot cross identity RLS".to_string());
+        }
 
         // (6) The app-code worker login is a replication consumer, never a
         // platform-schema writer. Check effective table, column, sequence, and

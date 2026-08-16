@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Duration, Utc};
-use compio_postgres::Client;
+use compio_postgres::{Client, Transaction};
 use ntex::http::StatusCode;
 use ntex::web::{self, HttpRequest, HttpResponse};
 use rand::RngCore;
@@ -375,7 +375,7 @@ pub(super) async fn exchange_device_code(
 
 #[allow(clippy::future_not_send)]
 async fn exchange_device_code_locked(
-    db: &(impl compio_postgres::GenericClient + ?Sized),
+    db: &Transaction<'_>,
     cfg: &AuthConfig,
     issuer: &Issuer,
     client: &crate::oidc::authorization_code::OAuthClient,
@@ -476,6 +476,7 @@ async fn exchange_device_code_locked(
                        AND credential_version = $2 \
                        AND disabled_at IS NULL \
                        AND deletion_requested_at IS NULL \
+                       AND deletion_scheduled_for IS NULL \
                        AND anonymized_at IS NULL",
                     &[&user_id, &auth_credential_version],
                 )
@@ -634,8 +635,8 @@ fn verification_uri_complete(verification_uri: &str, user_code: &str) -> String 
 pub async fn mint_platform_token(
     req: HttpRequest,
     cfg: web::types::State<Arc<AuthConfig>>,
-    db: web::types::State<Arc<Client>>,
     issuer: web::types::State<Arc<Issuer>>,
+    refresh_pool: web::types::State<RefreshSessionPool>,
     body: web::types::Json<MintPlatformTokenRequest>,
 ) -> HttpResponse {
     let Some(caller) = authenticated_platform_mint_caller(&req, cfg.as_ref()) else {
@@ -660,7 +661,36 @@ pub async fn mint_platform_token(
         return HttpResponse::BadRequest().json(&json!({"error": "invalid_ttl"}));
     }
 
-    let rows = match db
+    let pool = match refresh_pool.checkout_pool("platform token mint").await {
+        Ok(pool) => pool,
+        Err(err) => {
+            tracing::error!(error = %err, "auth: platform token database pool failed");
+            return HttpResponse::InternalServerError()
+                .json(&json!({"error": "grant_lookup_failed"}));
+        }
+    };
+    let mut conn = match pool.get().await {
+        Ok(conn) => conn,
+        Err(err) => {
+            tracing::error!(error = %err, "auth: platform token database checkout failed");
+            return HttpResponse::InternalServerError()
+                .json(&json!({"error": "grant_lookup_failed"}));
+        }
+    };
+    let tx = match conn.transaction().await {
+        Ok(tx) => tx,
+        Err(err) => {
+            tracing::error!(error = %err, "auth: platform token transaction failed");
+            return HttpResponse::InternalServerError()
+                .json(&json!({"error": "grant_lookup_failed"}));
+        }
+    };
+    if let Err(err) = crate::advisory_lock::lock_refresh_user_xact(&tx, principal_id).await {
+        tracing::error!(error = %err, principal_id = %principal_id, "auth: platform token user lock failed");
+        return HttpResponse::InternalServerError()
+            .json(&json!({"error": "grant_lookup_failed"}));
+    }
+    let rows = match tx
         .query(
             "SELECT pg.grant_name \
              FROM zeroship.users u \
@@ -668,6 +698,8 @@ pub async fn mint_platform_token(
              WHERE u.id = $1 \
                AND u.disabled_at IS NULL \
                AND u.anonymized_at IS NULL \
+               AND u.deletion_requested_at IS NULL \
+               AND u.deletion_scheduled_for IS NULL \
                AND (u.locked_until IS NULL OR u.locked_until <= NOW()) \
              ORDER BY pg.grant_name",
             &[&principal_id],
@@ -696,7 +728,7 @@ pub async fn mint_platform_token(
     let principal_id = principal_id.to_string();
     let access_token = match issuer
         .issue_principal_access_token(
-            db.as_ref(),
+            &tx,
             &PrincipalAccessTokenMint {
                 principal_id: &principal_id,
                 audience: cfg.settings.oauth_audience.get().trim(),
@@ -713,6 +745,10 @@ pub async fn mint_platform_token(
             return HttpResponse::InternalServerError().json(&json!({"error": "mint_failed"}));
         }
     };
+    if let Err(err) = tx.commit().await {
+        tracing::error!(error = %err, "auth: platform token transaction commit failed");
+        return HttpResponse::InternalServerError().json(&json!({"error": "mint_failed"}));
+    }
 
     HttpResponse::Ok().json(&MintPlatformTokenResponse {
         access_token,

@@ -2,13 +2,13 @@
 //! account-deletion request/undo surface (ISS-12 / GDPR Art. 17).
 //!
 //! `/me/delete` does NOT erase anything synchronously. It begins the lifecycle:
-//! soft-disable + schedule + revoke sessions (all in one DB transaction via
+//! mark deletion requested + schedule + revoke sessions (one DB transaction via
 //! [`users::request_deletion`]), then sends a confirm/undo email and audits.
 //! The irreversible erasure happens later, after the grace window, in
 //! `cron::account_reaper`.
 //!
-//! `/me/delete/cancel` reverses an in-flight request within the grace window
-//! ([`users::cancel_deletion`]) and audits.
+//! `/me/delete/cancel` calls [`users::cancel_deletion`] for an already
+//! authenticated request. It is not a credential-recovery mechanism.
 //!
 //! Both require the `__Host-zsidp_session` cookie + a matching CSRF token,
 //! exactly like `me::unlink`.
@@ -25,6 +25,7 @@ use crate::config::AuthConfig;
 use crate::cron::account_reaper::GRACE_DAYS;
 use crate::csrf;
 use crate::oidc;
+use crate::oidc::refresh::RefreshSessionPool;
 use crate::sessions::login as session_cookie;
 use crate::store::sessions;
 use crate::store::users::{self, UserRow};
@@ -49,6 +50,7 @@ pub async fn request(
     form: web::types::Form<CsrfForm>,
     cfg: web::types::State<Arc<AuthConfig>>,
     db: web::types::State<Arc<compio_postgres::Client>>,
+    refresh_pool: web::types::State<RefreshSessionPool>,
     mailer: web::types::State<Arc<dyn Mailer>>,
     issuer: web::types::State<Arc<oidc::Issuer>>,
 ) -> HttpResponse {
@@ -59,7 +61,21 @@ pub async fn request(
         return redirect_to_login();
     };
 
-    let request = match users::request_deletion(db.as_ref(), user.id, GRACE_DAYS).await {
+    let pool = match refresh_pool.checkout_pool("account deletion").await {
+        Ok(pool) => pool,
+        Err(e) => {
+            tracing::error!(error = %e, user_id = %user.id, "account deletion pool unavailable");
+            return redirect_to_me();
+        }
+    };
+    let mut conn = match pool.get().await {
+        Ok(conn) => conn,
+        Err(e) => {
+            tracing::error!(error = %e, user_id = %user.id, "account deletion session unavailable");
+            return redirect_to_me();
+        }
+    };
+    let request = match users::request_deletion(&mut conn, user.id, GRACE_DAYS).await {
         Ok(Some(r)) => r,
         Ok(None) => {
             // Already anonymized / gone — nothing to do. Land on /me.
@@ -70,6 +86,8 @@ pub async fn request(
             return redirect_to_me();
         }
     };
+    drop(conn);
+    drop(pool);
 
     match oidc::backchannel_logout::emit_for_user(db.as_ref(), issuer.as_ref(), user.id).await {
         Ok(report) => tracing::info!(
@@ -112,9 +130,9 @@ pub async fn request(
 /// `POST /me/delete/cancel` — cancel an in-flight request within the grace
 /// window. 302 back to `/me` regardless (the page reflects the restored state).
 ///
-/// Note: a successful cancel re-enables the account, so the session that was
-/// revoked at request time no longer validates — the redirect to `/me` will
-/// bounce to `/login`, which is the intended "sign in fresh" behaviour.
+/// Cancellation does not restore credentials revoked by the deletion request.
+/// This handler therefore requires a separately valid authenticated context;
+/// it cannot use the session revoked by `/me/delete` as an undo credential.
 #[allow(clippy::future_not_send)]
 pub async fn cancel(
     req: HttpRequest,

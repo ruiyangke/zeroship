@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 use compio::buf::BufResult;
@@ -7,7 +7,7 @@ use compio::net::TcpStream;
 use uuid::Uuid;
 
 use zeroship_core::readiness::SyncFreshness;
-use zeroship_core::types::{RouteEntry, RouteMap};
+use zeroship_core::types::{GatewaySnapshot, RouteEntry, RouteMap};
 
 use zeroship_core::types::SpendState;
 
@@ -31,9 +31,17 @@ pub struct CompiledRoute {
     pub manifest: Arc<CompiledManifest>,
 }
 
+#[derive(Debug, Default)]
+struct AuthenticationSnapshot {
+    denied_principals: HashSet<String>,
+    denied_subjects_by_user: HashMap<Uuid, HashSet<String>>,
+    family_revocations: HashMap<(String, String), i64>,
+}
+
 pub struct RouteCache {
     routes: RwLock<HashMap<Uuid, Arc<CompiledRoute>>>,
     name_index: RwLock<HashMap<String, Uuid>>,
+    authentication: RwLock<AuthenticationSnapshot>,
     /// When the control plane last served a route table this cache accepted.
     /// `/readyz` reads it instead of issuing its own control-plane request.
     sync_freshness: SyncFreshness,
@@ -51,6 +59,7 @@ impl RouteCache {
         Self {
             routes: RwLock::new(HashMap::new()),
             name_index: RwLock::new(HashMap::new()),
+            authentication: RwLock::new(AuthenticationSnapshot::default()),
             sync_freshness: SyncFreshness::new(),
         }
     }
@@ -59,6 +68,101 @@ impl RouteCache {
     #[must_use]
     pub fn sync_freshness(&self) -> &SyncFreshness {
         &self.sync_freshness
+    }
+
+    /// Apply the complete control-plane snapshot and derive the offline
+    /// principal denylist for both global and per-app pairwise subjects.
+    pub fn update_snapshot(
+        &self,
+        snapshot: GatewaySnapshot,
+        rate: &RateLimitRegistry,
+        concurrency: &ConcurrencyRegistry,
+    ) {
+        let GatewaySnapshot {
+            routes,
+            principal_lifecycle,
+            family_revocations,
+        } = snapshot;
+        let mut authentication = self.authentication.write().unwrap();
+        let prior_by_user = &authentication.denied_subjects_by_user;
+        let mut denied_by_user = HashMap::new();
+        for lifecycle in principal_lifecycle
+            .iter()
+            .filter(|lifecycle| lifecycle.blocks_authentication())
+        {
+            let global = lifecycle.user_id.to_string();
+            let mut subjects = prior_by_user
+                .get(&lifecycle.user_id)
+                .cloned()
+                .unwrap_or_default();
+            subjects.insert(global);
+            subjects.extend(lifecycle.pairwise_subjects.iter().cloned());
+            denied_by_user.insert(lifecycle.user_id, subjects);
+        }
+
+        let denied = denied_by_user
+            .values()
+            .flat_map(|subjects| subjects.iter().cloned())
+            .collect();
+        let family_revocations = family_revocations
+            .into_iter()
+            .map(|revocation| {
+                (
+                    (revocation.client_id, revocation.subject),
+                    revocation.revoked_after,
+                )
+            })
+            .collect();
+        *authentication = AuthenticationSnapshot {
+            denied_principals: denied,
+            denied_subjects_by_user: denied_by_user,
+            family_revocations,
+        };
+        drop(authentication);
+        self.update(routes, rate, concurrency);
+        self.sync_freshness.mark_success();
+    }
+
+    /// Decide a verified credential from the locally pushed lifecycle state.
+    /// Missing or stale state rejects instead of silently authenticating.
+    #[must_use]
+    pub fn principal_authentication_allowed(
+        &self,
+        subject: &str,
+        freshness_budget: std::time::Duration,
+    ) -> bool {
+        if !self.sync_freshness.is_fresh(freshness_budget) {
+            return false;
+        }
+        !self
+            .authentication
+            .read()
+            .unwrap()
+            .denied_principals
+            .contains(subject)
+    }
+
+    /// Decide a verified credential entirely from the pushed lifecycle and
+    /// durable family-cutoff snapshot.
+    #[must_use]
+    pub fn credential_authentication_allowed(
+        &self,
+        client_id: &str,
+        subject: &str,
+        issued_at: i64,
+        freshness_budget: std::time::Duration,
+    ) -> bool {
+        if !self.sync_freshness.is_fresh(freshness_budget) {
+            return false;
+        }
+        let authentication = self.authentication.read().unwrap();
+        if authentication.denied_principals.contains(subject) {
+            return false;
+        }
+        authentication
+            .family_revocations
+            .get(&(client_id.to_string(), subject.to_string()))
+            .is_none_or(|revoked_after| *revoked_after <= issued_at)
     }
 
     /// Replace the route table, recompiling each manifest.
@@ -187,16 +291,13 @@ pub fn start_sync(state: Arc<GateState>) {
 async fn sync_once(state: &GateState) -> Result<(), String> {
     let url = format!("{}/internal/routes", state.config.control_url);
     let response = http_get(&url, &state.config.control_key).await?;
-    let routes: RouteMap =
-        serde_json::from_str(&response).map_err(|e| format!("parse routes: {e}"))?;
-    state
-        .routes
-        .update(routes, &state.rate_limiters, &state.concurrency);
-    // Stamped only on a FULL successful cycle - reached the control plane,
-    // parsed the table, applied it. A fetch that fails or a body that does not
-    // parse returns early above and leaves the stamp where it was, so the
-    // route table ages out of `/readyz`'s staleness budget.
-    state.routes.sync_freshness().mark_success();
+    let snapshot: GatewaySnapshot =
+        serde_json::from_str(&response).map_err(|e| format!("parse gateway snapshot: {e}"))?;
+    state.routes.update_snapshot(
+        snapshot,
+        &state.rate_limiters,
+        &state.concurrency,
+    );
     Ok(())
 }
 
@@ -290,6 +391,9 @@ async fn http_get_inner(url: &str, auth_key: &str) -> Result<String, String> {
 mod tests {
     use super::*;
     use zeroship_bundle::Manifest;
+    use zeroship_core::types::{
+        GatewayFamilyRevocation, GatewayPrincipalLifecycle, GatewaySnapshot,
+    };
 
     #[test]
     fn control_timeout_defaults_to_five_seconds() {
@@ -309,6 +413,221 @@ mod tests {
             spend_state: zeroship_core::types::SpendState::Allow,
             account_state: zeroship_core::types::AccountState::Active,
         }
+    }
+
+    #[test]
+    fn lifecycle_snapshot_blocks_every_non_authenticating_state_offline() {
+        let salt = zeroship_core::auth::derive_pairwise_salt(b"lifecycle-snapshot-test-salt");
+        let sector = "https://app.zeroship.test";
+        let app_id = Uuid::new_v4();
+        let mut routes = RouteMap::new();
+        routes.insert(
+            app_id,
+            route_entry("app.zeroship.test", Some("oac_test"), Some(sector)),
+        );
+
+        let disabled = Uuid::new_v4();
+        let anonymized = Uuid::new_v4();
+        let requested = Uuid::new_v4();
+        let scheduled = Uuid::new_v4();
+        let lifecycle = |user_id: Uuid,
+                         lifecycle: fn(Uuid, Vec<String>) -> GatewayPrincipalLifecycle| {
+            let pairwise = zeroship_core::auth::derive_pairwise(
+                &salt,
+                &user_id.to_string(),
+                sector,
+            );
+            lifecycle(user_id, vec![pairwise])
+        };
+        let snapshot = GatewaySnapshot {
+            routes,
+            principal_lifecycle: vec![
+                lifecycle(disabled, GatewayPrincipalLifecycle::disabled),
+                lifecycle(anonymized, GatewayPrincipalLifecycle::anonymized),
+                lifecycle(requested, GatewayPrincipalLifecycle::deletion_requested),
+                lifecycle(scheduled, GatewayPrincipalLifecycle::deletion_scheduled),
+            ],
+            family_revocations: Vec::new(),
+        };
+
+        let cache = RouteCache::new();
+        cache.update_snapshot(
+            snapshot,
+            &RateLimitRegistry::new(1000, 2000),
+            &ConcurrencyRegistry::new(100),
+        );
+        let budget = std::time::Duration::from_secs(60);
+        for user_id in [disabled, anonymized, requested, scheduled] {
+            let global = user_id.to_string();
+            let pairwise = zeroship_core::auth::derive_pairwise(&salt, &global, sector);
+            assert!(!cache.principal_authentication_allowed(&global, budget));
+            assert!(!cache.principal_authentication_allowed(&pairwise, budget));
+        }
+        assert!(cache.principal_authentication_allowed(&Uuid::new_v4().to_string(), budget));
+    }
+
+    #[test]
+    fn lifecycle_authentication_fails_closed_without_a_fresh_snapshot() {
+        let cache = RouteCache::new();
+        assert!(!cache.principal_authentication_allowed(
+            "pws_otherwise-valid",
+            std::time::Duration::from_secs(60),
+        ));
+
+        cache.update_snapshot(
+            GatewaySnapshot {
+                routes: RouteMap::new(),
+                principal_lifecycle: Vec::new(),
+                family_revocations: Vec::new(),
+            },
+            &RateLimitRegistry::new(1000, 2000),
+            &ConcurrencyRegistry::new(100),
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert!(!cache.principal_authentication_allowed(
+            "pws_otherwise-valid",
+            std::time::Duration::from_millis(1),
+        ));
+    }
+
+    #[test]
+    fn route_replacement_retains_persisted_pairwise_denials() {
+        let salt = zeroship_core::auth::derive_pairwise_salt(b"route-replacement-denial-salt");
+        let user_id = Uuid::new_v4();
+        let sector = "https://retired-route.zeroship.test";
+        let pairwise = zeroship_core::auth::derive_pairwise(
+            &salt,
+            &user_id.to_string(),
+            sector,
+        );
+        let app_id = Uuid::new_v4();
+        let mut routes = RouteMap::new();
+        routes.insert(
+            app_id,
+            route_entry(
+                "retired-route.zeroship.test",
+                Some("oac_retired_route"),
+                Some(sector),
+            ),
+        );
+        let cache = RouteCache::new();
+        let rate = RateLimitRegistry::new(1000, 2000);
+        let concurrency = ConcurrencyRegistry::new(100);
+        let lifecycle_with_mapping = || {
+            vec![GatewayPrincipalLifecycle {
+                user_id,
+                disabled: true,
+                anonymized: false,
+                deletion_requested: false,
+                deletion_scheduled: false,
+                pairwise_subjects: vec![pairwise.clone()],
+            }]
+        };
+        let lifecycle_without_mapping = || {
+            vec![GatewayPrincipalLifecycle::disabled(user_id, Vec::new())]
+        };
+        let budget = std::time::Duration::from_secs(60);
+
+        cache.update_snapshot(
+            GatewaySnapshot {
+                routes,
+                principal_lifecycle: lifecycle_with_mapping(),
+                family_revocations: Vec::new(),
+            },
+            &rate,
+            &concurrency,
+        );
+        assert!(!cache.principal_authentication_allowed(&pairwise, budget));
+
+        cache.update_snapshot(
+            GatewaySnapshot {
+                routes: RouteMap::new(),
+                principal_lifecycle: lifecycle_without_mapping(),
+                family_revocations: Vec::new(),
+            },
+            &rate,
+            &concurrency,
+        );
+        assert!(
+            !cache.principal_authentication_allowed(&pairwise, budget),
+            "an in-flight request using the retired route must retain its denial"
+        );
+
+        for _ in 0..3 {
+            cache.update_snapshot(
+                GatewaySnapshot {
+                    routes: RouteMap::new(),
+                    principal_lifecycle: lifecycle_without_mapping(),
+                    family_revocations: Vec::new(),
+                },
+                &rate,
+                &concurrency,
+            );
+            assert!(
+                !cache.principal_authentication_allowed(&pairwise, budget),
+                "a persisted pairwise denial must not age out with its route"
+            );
+        }
+    }
+
+    #[test]
+    fn lifecycle_is_required_on_the_route_pull_wire() {
+        let old_route_only_wire = serde_json::json!({
+            "routes": {},
+            "principal_lifecycle": [],
+        });
+        assert!(serde_json::from_value::<GatewaySnapshot>(old_route_only_wire).is_err());
+    }
+
+    #[test]
+    fn durable_family_cutoff_survives_lifecycle_cancellation_offline() {
+        let cache = RouteCache::new();
+        let rate = RateLimitRegistry::new(1000, 2000);
+        let concurrency = ConcurrencyRegistry::new(100);
+        let user_id = Uuid::new_v4();
+        let subject = "pws_cancelled_deletion";
+        let client_id = "oac_cancelled_deletion";
+        let revocation = GatewayFamilyRevocation {
+            client_id: client_id.to_string(),
+            subject: subject.to_string(),
+            revoked_after: 1_700_000_100,
+        };
+
+        cache.update_snapshot(
+            GatewaySnapshot {
+                routes: RouteMap::new(),
+                principal_lifecycle: vec![GatewayPrincipalLifecycle::deletion_requested(
+                    user_id,
+                    vec![subject.to_string()],
+                )],
+                family_revocations: vec![revocation.clone()],
+            },
+            &rate,
+            &concurrency,
+        );
+        cache.update_snapshot(
+            GatewaySnapshot {
+                routes: RouteMap::new(),
+                principal_lifecycle: Vec::new(),
+                family_revocations: vec![revocation],
+            },
+            &rate,
+            &concurrency,
+        );
+
+        let budget = std::time::Duration::from_secs(60);
+        assert!(!cache.credential_authentication_allowed(
+            client_id,
+            subject,
+            1_700_000_000,
+            budget,
+        ));
+        assert!(cache.credential_authentication_allowed(
+            client_id,
+            subject,
+            1_700_000_200,
+            budget,
+        ));
     }
 
     #[test]

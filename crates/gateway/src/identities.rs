@@ -1,13 +1,10 @@
 //! `zeroship.app_user_identities` — the per-app pairwise + relay identity
 //! mapping.
 //!
-//! The gateway derives the per-app pairwise subject
-//! `pws_ = derive_pairwise(pairwise_salt, global_user_id,
-//! route.sector_identifier)` at the `ZeroShip-User` header boundary and
-//! [`upsert`]s this row whenever it projects a `pws_` for an
-//! `(app_client_id, global_user_id)` — so the mapping exists for support
-//! tooling, the relay handler, and revocation, which all need
-//! to reverse `pws_ → (app, global_user)`.
+//! The auth issuer records this row before signing an app access token. Gateway
+//! session minters reassert the same deterministic pairwise subject before
+//! signing a cookie. The mapping supports relay handling and revocation, which
+//! need to reverse `pws_` to `(app, global_user)`.
 //!
 //! The row is keyed on `(app_client_id, global_user_id)` where
 //! `app_client_id` is the per-app OAuth client_id (`oac_<base62>`). The
@@ -16,12 +13,10 @@
 //! one row). `relay_email` stays `NULL` until the consent flow populates it
 //! on first email-scope consent.
 //!
-//! This module performs ONLY the idempotent mapping write. The pairwise
-//! derivation itself ([`zeroship_core::auth::derive_pairwise`]) is a pure
-//! function — the gateway derives the `pws_` without a DB round-trip and
-//! writes it here so the reverse-lookup is available. A failed mapping
-//! write is therefore NON-fatal to the auth decision (the projected
-//! header is already correct); callers log-and-continue.
+//! This module performs only the idempotent mapping write. The pairwise
+//! derivation itself ([`zeroship_core::auth::derive_pairwise`]) is pure. Cookie
+//! minters require this write before signing because durable account teardown
+//! enumerates these rows to revoke access-only and cookie token families.
 
 use compio_postgres::Client;
 use uuid::Uuid;
@@ -29,13 +24,22 @@ use uuid::Uuid;
 use crate::error::{GatewayError, Result};
 use crate::rls;
 
+const fn identity_upsert_sql() -> &'static str {
+    "INSERT INTO zeroship.app_user_identities \
+        (app_client_id, global_user_id, pairwise_sub) \
+     VALUES ($1, $2, $3) \
+     ON CONFLICT (app_client_id, global_user_id) DO UPDATE SET \
+        pairwise_sub = EXCLUDED.pairwise_sub, \
+        revoked_at = NULL \
+     WHERE zeroship.app_user_identities.pairwise_sub = EXCLUDED.pairwise_sub"
+}
+
 /// Idempotently record the pairwise mapping for `(app_client_id,
 /// global_user_id)`.
 ///
 /// `INSERT … ON CONFLICT (app_client_id, global_user_id) DO UPDATE`:
-///   - `pairwise_sub` is re-asserted to the (deterministic) projected
-///     value — a no-op in the steady state, but it keeps the row correct
-///     if the salt/sector ever rotated.
+///   - `pairwise_sub` must match its immutable stored value. Configuration
+///     drift fails closed instead of replacing the subject used for recall.
 ///   - `revoked_at` is cleared, so a revoke→re-grant reuses the SAME row
 ///     (the deterministic `pws_` row is never duplicated).
 ///   - `relay_email` is LEFT UNTOUCHED, so the gateway projection never
@@ -45,10 +49,8 @@ use crate::rls;
 /// `route.oauth_client_id`); `pairwise_sub` is the derived `pws_…`.
 ///
 /// # Errors
-/// [`GatewayError::Db`] on PG failure. Callers treat this as non-fatal
-/// (the projected `ZeroShip-User` header is already correct) and
-/// log-and-continue — the mapping is a reverse-lookup cache, not part of
-/// the per-request trust decision.
+/// [`GatewayError::Db`] on PG failure. Cookie minters fail closed because a
+/// cookie without this row could not be recalled durably.
 pub async fn upsert(
     conn: &mut Client,
     app_client_id: &str,
@@ -60,21 +62,34 @@ pub async fn upsert(
         .await
         .map_err(|e| GatewayError::Db(format!("app_user_identities upsert begin: {e}")))?;
     rls::set_tenant_client(&tx, app_client_id).await?;
-    tx.execute(
-        "INSERT INTO zeroship.app_user_identities \
-            (app_client_id, global_user_id, pairwise_sub) \
-         VALUES ($1, $2, $3) \
-         ON CONFLICT (app_client_id, global_user_id) DO UPDATE SET \
-            pairwise_sub = EXCLUDED.pairwise_sub, \
-            revoked_at = NULL",
+    let mapped = tx
+        .execute(
+        identity_upsert_sql(),
         &[&app_client_id, &global_user_id, &pairwise_sub],
     )
     .await
     .map_err(|e| GatewayError::Db(format!("app_user_identities upsert: {e}")))?;
+    if mapped != 1 {
+        return Err(GatewayError::Db(
+            "app_user_identities pairwise binding changed".to_string(),
+        ));
+    }
     tx.commit()
         .await
         .map_err(|e| GatewayError::Db(format!("app_user_identities upsert commit: {e}")))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::identity_upsert_sql;
+
+    #[test]
+    fn mapping_upsert_refuses_pairwise_subject_rebinding() {
+        assert!(identity_upsert_sql().contains(
+            "WHERE zeroship.app_user_identities.pairwise_sub = EXCLUDED.pairwise_sub"
+        ));
+    }
 }
 
 /// Read the persisted `pairwise_sub` for `(app_client_id,
@@ -150,4 +165,3 @@ pub async fn lookup_relay_email(
         .map_err(|e| GatewayError::Db(format!("app_user_identities relay lookup commit: {e}")))?;
     Ok(email)
 }
-

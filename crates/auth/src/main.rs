@@ -262,15 +262,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     tracing::info!(
         pool_size = refresh_pool.pool_size(),
-        "refresh dedicated session pool configured"
+        "auth transaction session pool configured"
     );
 
     // 3. Spawn in-process cron tasks. Detached on
     //    the compio runtime — survives across server worker restarts.
     //    Spawned BEFORE `server::run` so the loop is live as soon as
     //    the listener is bound. `Arc<Client>` is shared for autocommit
-    //    cron work; refresh-family sweeps check out bounded dedicated
-    //    sessions for their advisory-locked transactions.
+    //    cron work; state-changing auth transactions check out bounded
+    //    dedicated sessions when they require exclusive connection state.
     let cfg = Arc::new(cfg);
     let db = Arc::new(client);
     cron::spawn_all(db.clone(), cfg.clone(), refresh_pool.clone());

@@ -197,13 +197,12 @@ other internal control APIs:
 - The requested lifetime must be positive and no more than 12 hours.
 
 Control's bearer verification path honors a
-`zeroship.token_revocations` marker for `zeroship-cli`, but the product has no
-supported operation that writes that marker for a CLI platform token. The CLI
-client is not registered for RFC 7009 client authentication, and
-`zeroship logout` deletes only the local credential. A token therefore cannot
-currently be recalled before expiry through a supported flow; that is why the
-12-hour ceiling is part of the authorization boundary rather than an unrelated
-default.
+`zeroship.token_revocations` marker for `zeroship-cli`. Account deletion writes
+that marker, so credentials issued before a deletion request stay revoked even
+if the request is cancelled. The CLI client is not registered for RFC 7009
+client authentication, and `zeroship logout` deletes only the local credential.
+Other revocation reasons therefore rely on expiry; the 12-hour ceiling remains
+part of the authorization boundary.
 
 ## OAuth Clients
 

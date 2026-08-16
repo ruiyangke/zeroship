@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Utc};
-use compio_postgres::{Client, GenericClient, Pool, PoolConfig};
+use compio_postgres::{Client, GenericClient, Pool, PoolConfig, Transaction};
 use ntex::web::{self, HttpRequest, HttpResponse};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -124,7 +124,7 @@ impl RefreshSessionPool {
         tracing::info!(
             operation,
             pool_size = self.inner.pool_size,
-            "refresh dedicated session pool ready"
+            "auth transaction session pool ready"
         );
         Ok(pool)
     }
@@ -333,7 +333,12 @@ pub(super) async fn issue_root_refresh_token(
 
     let rows = db
         .query(
-            "SELECT credential_version FROM zeroship.users WHERE id = $1",
+            "SELECT credential_version FROM zeroship.users \
+             WHERE id = $1 \
+               AND disabled_at IS NULL \
+               AND anonymized_at IS NULL \
+               AND deletion_requested_at IS NULL \
+               AND deletion_scheduled_for IS NULL",
             &[&user_id],
         )
         .await
@@ -461,7 +466,7 @@ async fn preauthenticate_refresh(
 
 #[allow(clippy::future_not_send)]
 async fn exchange_refresh_token_inner(
-    db: &(impl GenericClient + ?Sized),
+    db: &Transaction<'_>,
     issuer: &Issuer,
     keys: &RefreshTokenKeys,
     params: &TokenRequest,
@@ -491,6 +496,7 @@ async fn exchange_refresh_token_inner(
             );
             OAuthError::server_error("refresh rotation unavailable")
         })?;
+    require_refresh_user_active(db, initial.user_id).await?;
 
     let Some(row) = select_refresh_row_for_update(db, &presented_hash.hash).await? else {
         return Err(OAuthError::invalid_grant("refresh token is invalid"));
@@ -588,6 +594,38 @@ async fn exchange_refresh_token_inner(
         expires_in: ACCESS_TOKEN_TTL_SECS as u64,
         scope: new_scopes.join(" "),
     })
+}
+
+const REFRESH_PRINCIPAL_ACTIVE_SQL: &str =
+    "SELECT 1 FROM zeroship.users \
+     WHERE id = $1 \
+       AND disabled_at IS NULL \
+       AND anonymized_at IS NULL \
+       AND deletion_requested_at IS NULL \
+       AND deletion_scheduled_for IS NULL";
+
+async fn refresh_user_active(
+    db: &(impl GenericClient + ?Sized),
+    user_id: Uuid,
+) -> Result<bool, OAuthError> {
+    let rows = db
+        .query(REFRESH_PRINCIPAL_ACTIVE_SQL, &[&user_id])
+        .await
+        .map_err(|err| {
+            tracing::error!(error = %err, user_id = %user_id, "refresh lifecycle lookup failed");
+            OAuthError::server_error("refresh lifecycle unavailable")
+        })?;
+    Ok(!rows.is_empty())
+}
+
+async fn require_refresh_user_active(
+    db: &(impl GenericClient + ?Sized),
+    user_id: Uuid,
+) -> Result<(), OAuthError> {
+    if !refresh_user_active(db, user_id).await? {
+        return Err(OAuthError::invalid_grant("authenticated user is inactive"));
+    }
+    Ok(())
 }
 
 #[allow(clippy::future_not_send)]
@@ -763,14 +801,15 @@ pub(crate) async fn revoke_user_refresh_families_in_transaction(
              WHERE user_id = $1 AND revoked_at IS NULL \
          ), upd AS ( \
              UPDATE zeroship.oauth_refresh_tokens \
-             SET revoked_at = NOW() \
+             SET revoked_at = clock_timestamp() \
              WHERE user_id = $1 AND revoked_at IS NULL \
              RETURNING 1 \
          ) \
          INSERT INTO zeroship.token_revocations (client_id, sub, revoked_after) \
-         SELECT client_id, sub, NOW() FROM fam \
+         SELECT client_id, sub, clock_timestamp() FROM fam \
          ON CONFLICT (client_id, sub) \
-           DO UPDATE SET revoked_after = EXCLUDED.revoked_after",
+           DO UPDATE SET revoked_after = \
+             GREATEST(zeroship.token_revocations.revoked_after, EXCLUDED.revoked_after)",
         &[&user_id],
     )
     .await
@@ -787,7 +826,7 @@ pub async fn sweep_refresh_tokens(refresh_pool: &RefreshSessionPool) -> Result<(
 /// A presentation of an already-rotated token is one of two things: the single
 /// retry a lost response earns, or reuse. Serve the retry, then kill.
 async fn replay_or_kill(
-    db: &(impl GenericClient + ?Sized),
+    db: &Transaction<'_>,
     issuer: &Issuer,
     keys: &RefreshTokenKeys,
     client: &OAuthClient,
@@ -807,7 +846,7 @@ async fn replay_or_kill(
 /// detection for every family at once the moment the idempotency key rotated
 /// or a snapshot came back under a different one.
 async fn replay_lost_response(
-    db: &(impl GenericClient + ?Sized),
+    db: &Transaction<'_>,
     issuer: &Issuer,
     keys: &RefreshTokenKeys,
     client: &OAuthClient,
@@ -988,6 +1027,9 @@ pub(super) async fn introspect_refresh_token(
         || row.family_absolute_expires_at <= now
         || family_has_revoked_row(db, &row.refresh_family_id).await?
     {
+        return Ok(None);
+    }
+    if !refresh_user_active(db, row.user_id).await? {
         return Ok(None);
     }
     Ok(Some(ActiveRefreshToken {
@@ -1185,7 +1227,8 @@ async fn kill_family(
          INSERT INTO zeroship.token_revocations (client_id, sub, revoked_after) \
          SELECT client_id, sub, NOW() FROM fam \
          ON CONFLICT (client_id, sub) \
-           DO UPDATE SET revoked_after = EXCLUDED.revoked_after",
+           DO UPDATE SET revoked_after = \
+             GREATEST(zeroship.token_revocations.revoked_after, EXCLUDED.revoked_after)",
         &[&family_id],
     )
     .await
@@ -1315,7 +1358,8 @@ async fn kill_families_for_subject_inner(
          INSERT INTO zeroship.token_revocations (client_id, sub, revoked_after) \
          VALUES ($1, $2, NOW()) \
          ON CONFLICT (client_id, sub) \
-           DO UPDATE SET revoked_after = EXCLUDED.revoked_after",
+           DO UPDATE SET revoked_after = \
+             GREATEST(zeroship.token_revocations.revoked_after, EXCLUDED.revoked_after)",
         &[&client_id, &sub],
     )
     .await
@@ -1554,6 +1598,27 @@ fn load_hash_keyring(path: &Path) -> Result<Vec<RefreshHashKey>, String> {
         ));
     }
     Ok(keys)
+}
+
+#[cfg(test)]
+mod lifecycle_introspection_tests {
+    use super::*;
+
+    #[test]
+    fn refresh_introspection_uses_hard_lifecycle_without_soft_lockout() {
+        for column in [
+            "disabled_at",
+            "anonymized_at",
+            "deletion_requested_at",
+            "deletion_scheduled_for",
+        ] {
+            assert!(
+                REFRESH_PRINCIPAL_ACTIVE_SQL.contains(&format!("{column} IS NULL")),
+                "missing active lifecycle predicate for {column}"
+            );
+        }
+        assert!(!REFRESH_PRINCIPAL_ACTIVE_SQL.contains("locked_until"));
+    }
 }
 
 fn decode_key_material(value: &str) -> Option<Vec<u8>> {

@@ -8,8 +8,10 @@ use uuid::Uuid;
 use zeroship_core::auth::hash_api_key;
 use zeroship_core::net_policy::normalize_frontable_suffixes;
 use zeroship_core::types::{
-    AppNetPolicy, AppNetPolicyLimits, AppRecord, AppRuntimeLimits, AppVersionInfo, NetAllowEntry,
-    RouteEntry, RouteMap, VersionMap, FREE_TIER_NET_POLICY_LIMITS, FREE_TIER_RUNTIME_LIMITS,
+    AppNetPolicy, AppNetPolicyLimits, AppRecord, AppRuntimeLimits, AppVersionInfo,
+    GatewayFamilyRevocation, GatewayPrincipalLifecycle, GatewaySnapshot, NetAllowEntry, RouteEntry,
+    RouteMap, VersionMap,
+    FREE_TIER_NET_POLICY_LIMITS, FREE_TIER_RUNTIME_LIMITS,
 };
 
 // ---------------------------------------------------------------------------
@@ -738,6 +740,73 @@ impl Registry {
             );
         }
         Ok(map)
+    }
+
+    /// Build the complete gateway pull payload. Lifecycle state is fetched on
+    /// every route cycle so stateless edge credentials are invalidated without
+    /// a per-request database lookup.
+    pub async fn get_gateway_snapshot(&self) -> Result<GatewaySnapshot, RegistryError> {
+        let routes = self.get_routes().await?;
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                "SELECT u.id, u.disabled_at IS NOT NULL AS disabled, \
+                        u.anonymized_at IS NOT NULL AS anonymized, \
+                        u.deletion_requested_at IS NOT NULL AS deletion_requested, \
+                        u.deletion_scheduled_for IS NOT NULL AS deletion_scheduled, \
+                        aui.pairwise_sub \
+                 FROM zeroship.users u \
+                 LEFT JOIN zeroship.app_user_identities aui \
+                   ON aui.global_user_id = u.id \
+                 WHERE u.disabled_at IS NOT NULL \
+                    OR u.anonymized_at IS NOT NULL \
+                    OR u.deletion_requested_at IS NOT NULL \
+                    OR u.deletion_scheduled_for IS NOT NULL \
+                 ORDER BY u.id, aui.pairwise_sub",
+                &[],
+            )
+            .await?;
+        let mut by_user = HashMap::<Uuid, GatewayPrincipalLifecycle>::new();
+        for row in &rows {
+            let user_id: Uuid = row.get("id");
+            let lifecycle = by_user.entry(user_id).or_insert_with(|| {
+                GatewayPrincipalLifecycle {
+                    user_id,
+                    disabled: row.get("disabled"),
+                    anonymized: row.get("anonymized"),
+                    deletion_requested: row.get("deletion_requested"),
+                    deletion_scheduled: row.get("deletion_scheduled"),
+                    pairwise_subjects: Vec::new(),
+                }
+            });
+            if let Some(subject) = row.get::<_, Option<String>>("pairwise_sub") {
+                lifecycle.pairwise_subjects.push(subject);
+            }
+        }
+        let mut principal_lifecycle: Vec<_> = by_user.into_values().collect();
+        principal_lifecycle.sort_by_key(|lifecycle| lifecycle.user_id);
+        let family_revocations = conn
+            .query(
+                "SELECT client_id, sub, \
+                        CEIL(EXTRACT(EPOCH FROM revoked_after))::bigint AS revoked_after \
+                 FROM zeroship.token_revocations \
+                 WHERE revoked_after >= NOW() - INTERVAL '24 hours' \
+                 ORDER BY client_id, sub",
+                &[],
+            )
+            .await?
+            .iter()
+            .map(|row| GatewayFamilyRevocation {
+                client_id: row.get("client_id"),
+                subject: row.get("sub"),
+                revoked_after: row.get("revoked_after"),
+            })
+            .collect();
+        Ok(GatewaySnapshot {
+            routes,
+            principal_lifecycle,
+            family_revocations,
+        })
     }
 
     // -- Usage / Metering ---------------------------------------------------
