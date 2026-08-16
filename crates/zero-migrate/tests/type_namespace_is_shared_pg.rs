@@ -67,21 +67,35 @@ fn dom(n: &str) -> String {
 /// seven really are the type-namespace rule - so this pins behaviour that was
 /// already correct rather than papering over a discrepancy. The point is that it
 /// STAYS pinned: "verified once" is the guarantee that decays.
+/// SHARPENED after the audit's own guard failed the same test it was applying.
+/// The first version asserted only "one type namespace", which EVERY refusal in
+/// this file contains - so each of the seven tests would have passed on any
+/// sibling's refusal, exactly the non-discriminating guard batch 4 found
+/// elsewhere. The claiming op and the kind that holds the name are what
+/// distinguish them, so both are asserted.
 const TYPE_NS: &str = "one type namespace";
 
-fn expect_type_namespace_refusal(ops: &str, what: &str) {
+fn expect_type_namespace_refusal(ops: &str, claiming_op: &str, held_by: &str, what: &str) {
     let refusal = verdict(ops).expect_err(what);
-    assert!(
-        refusal.contains(TYPE_NS),
-        "the refusal must be the type-namespace one this test names, not another \
-         rule that happens to fire first: {refusal}"
-    );
+    for needle in [
+        TYPE_NS,
+        &format!("this {claiming_op} claims"),
+        &format!("already created a {held_by} with that name"),
+    ] {
+        assert!(
+            refusal.contains(needle),
+            "the refusal must be {claiming_op} over a live {held_by} - {needle:?} is \
+             missing, so this test is being satisfied by a sibling's rule: {refusal}"
+        );
+    }
 }
 
 #[test]
 fn an_enum_and_a_domain_may_not_share_a_name() {
     expect_type_namespace_refusal(
         &format!("{},{}", enm("e"), dom("e")),
+        "createDomain",
+        "enum",
         "enums and domains are both types",
     );
 }
@@ -90,6 +104,8 @@ fn an_enum_and_a_domain_may_not_share_a_name() {
 fn a_domain_and_an_enum_may_not_share_a_name() {
     expect_type_namespace_refusal(
         &format!("{},{}", dom("d"), enm("d")),
+        "createEnum",
+        "domain",
         "the reverse direction",
     );
 }
@@ -99,7 +115,9 @@ fn an_enum_may_not_take_a_live_table_name() {
     // Every table creates a composite row type of the same name.
     expect_type_namespace_refusal(
         &format!("{},{}", tbl("t"), enm("t")),
-        "a table's composite row type occupies the type namespace",
+        "createEnum",
+        "table",
+        "a table composite row type occupies the type namespace",
     );
 }
 
@@ -107,6 +125,8 @@ fn an_enum_may_not_take_a_live_table_name() {
 fn a_table_may_not_take_a_live_enum_name() {
     expect_type_namespace_refusal(
         &format!("{},{}", enm("t"), tbl("t")),
+        "createTable",
+        "enum",
         "the reverse direction",
     );
 }
@@ -115,6 +135,8 @@ fn a_table_may_not_take_a_live_enum_name() {
 fn a_table_may_not_take_a_live_domain_name() {
     expect_type_namespace_refusal(
         &format!("{},{}", dom("dm"), tbl("dm")),
+        "createTable",
+        "domain",
         "domains are types too",
     );
 }
@@ -127,6 +149,8 @@ fn a_view_may_not_take_a_live_enum_name() {
             tbl("a"),
             enm("vv")
         ),
+        "createView",
+        "enum",
         "a view creates a composite row type as well",
     );
 }
@@ -135,6 +159,8 @@ fn a_view_may_not_take_a_live_enum_name() {
 fn a_sequence_may_not_take_a_live_enum_name() {
     expect_type_namespace_refusal(
         &format!(r#"{},{{"op":"createSequence","name":"n"}}"#, enm("n")),
+        "createSequence",
+        "enum",
         "creating a sequence requires the type name to be free",
     );
 }
