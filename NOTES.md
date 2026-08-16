@@ -119,3 +119,24 @@ This is cross-command contamination caused by intentionally reusing the suite
 database after the baseline finished. It is not one of the nine suite failures
 and says nothing about the projection assertion. The rerun must use a separate
 freshly migrated local database.
+
+## Full-suite signing fixture interaction
+
+After the pairwise fixture fix and the first logout fixture fix, the full suite
+made all 23 Gateway anchor tests pass and made the logout emission test pass.
+It then failed all 17 `oidc_login_consent_test` cases because the logout test
+had published its private `[77u8; 32]` signing key, retiring the suite's
+canonical `[42u8; 32]` key:
+
+```text
+publish active OP key: Config("signing key RdsIdO3CsMDzCjNZvzh9oqMmTgMASg3jgoAi8dXZLIQ has non-activatable status \"retiring\"")
+test result: FAILED. 0 passed; 17 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.68s
+FAIL: only 488 auth tests passed, fewer than the 505 this gate expects.
+AUTH SUITE: FAILED
+```
+
+This is an intra-run fixture conflict. `oidc_backchannel_logout_test.rs:40`
+uses seed 77 and now publishes it at lines 49-53. The following consent suite
+uses seed 42 at `oidc_login_consent_test.rs:913` and publishes it at lines
+66-69. Publishing seed 77 correctly retires the previously active seed 42,
+so the later fixture correctly refuses to reactivate a retiring key.
