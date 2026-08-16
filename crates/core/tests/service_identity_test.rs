@@ -125,3 +125,34 @@ fn mechanism_fat_input_preserves_simultaneous_transport_observations() {
     );
     assert!(TlsPeerInfo::new(&[]).is_none());
 }
+
+struct DebugVerifier;
+
+impl IdentityVerifier for DebugVerifier {
+    fn verify(
+        &self,
+        credentials: &PresentedCredentials<'_>,
+    ) -> Result<ServiceIdentity, AuthError> {
+        let diagnostic = format!("{credentials:?}");
+        assert!(!diagnostic.contains("credential-must-stay-secret"));
+        assert!(diagnostic.contains("[REDACTED]"));
+        Ok(identity("svc/gateway"))
+    }
+}
+
+#[test]
+fn credential_diagnostics_redact_bearer_assertions() {
+    let observed = PeerCredentials::new(
+        Some("credential-must-stay-secret"),
+        None,
+        "https://control.zeroship.ai",
+    );
+    let diagnostic = format!("{observed:?}");
+
+    assert!(!diagnostic.contains("credential-must-stay-secret"));
+    assert!(diagnostic.contains("[REDACTED]"));
+    assert_eq!(
+        verify_identity(&DebugVerifier, &observed),
+        Ok(identity("svc/gateway"))
+    );
+}
