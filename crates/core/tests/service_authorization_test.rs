@@ -1,0 +1,117 @@
+use std::collections::BTreeMap;
+
+use zeroship_core::service_identity::{
+    authorize, endpoints, service_allowlist, MechanismTag, ServiceEndpoint, ServiceIdentity,
+    ServiceName, ServicePrincipal, TrustDomain,
+};
+
+fn identity(trust_domain: &str, name: &str) -> ServiceIdentity {
+    ServiceIdentity::new(
+        ServicePrincipal::new(TrustDomain::new(trust_domain), ServiceName::new(name)),
+        MechanismTag::new("test-stub"),
+        BTreeMap::new(),
+    )
+}
+
+fn assert_allowlist_row(name: &str, expected: &[ServiceEndpoint], all: &[ServiceEndpoint]) {
+    let identity = identity("zeroship.ai", name);
+    let row = service_allowlist()
+        .iter()
+        .find(|row| row.applies_to(&identity))
+        .expect("known identity has an explicit allowlist row");
+
+    assert_eq!(row.endpoints(), expected);
+    for endpoint in all {
+        assert_eq!(
+            authorize(&identity, *endpoint),
+            expected.contains(endpoint),
+            "unexpected authorization for {name} at {endpoint:?}"
+        );
+    }
+}
+
+#[test]
+fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
+    let all = [
+        endpoints::AUTH_PLATFORM_TOKEN,
+        endpoints::MIGRATED_APPLY_MIGRATIONS,
+        endpoints::GATEWAY_BACKCHANNEL_LOGOUT,
+        endpoints::GATEWAY_WORKFLOW_ADVANCE,
+        endpoints::CONTROL_ROUTES,
+        endpoints::CONTROL_WORKFLOW_SIGNAL_INGRESS,
+        endpoints::CONTROL_VERSIONS,
+        endpoints::CONTROL_APP,
+        endpoints::CONTROL_APP_ENV,
+        endpoints::CONTROL_BILLING_RECONCILE,
+        endpoints::CONTROL_SPEND_RECONCILE,
+        endpoints::WORKER_DISPATCH,
+        endpoints::WORKER_WORKFLOW_ADVANCE,
+        endpoints::WORKER_APP_LOGS,
+    ];
+
+    assert_eq!(service_allowlist().len(), 5);
+    assert_allowlist_row(
+        "svc/control",
+        &[
+            endpoints::AUTH_PLATFORM_TOKEN,
+            endpoints::MIGRATED_APPLY_MIGRATIONS,
+            endpoints::GATEWAY_WORKFLOW_ADVANCE,
+            endpoints::WORKER_APP_LOGS,
+        ],
+        &all,
+    );
+    assert_allowlist_row(
+        "svc/auth",
+        &[endpoints::GATEWAY_BACKCHANNEL_LOGOUT],
+        &all,
+    );
+    assert_allowlist_row("svc/migrated", &[], &all);
+    assert_allowlist_row(
+        "svc/gateway",
+        &[
+            endpoints::CONTROL_ROUTES,
+            endpoints::CONTROL_WORKFLOW_SIGNAL_INGRESS,
+            endpoints::WORKER_DISPATCH,
+            endpoints::WORKER_WORKFLOW_ADVANCE,
+        ],
+        &all,
+    );
+    assert_allowlist_row(
+        "svc/worker",
+        &[
+            endpoints::CONTROL_VERSIONS,
+            endpoints::CONTROL_APP,
+            endpoints::CONTROL_APP_ENV,
+        ],
+        &all,
+    );
+}
+
+#[test]
+fn authorization_keys_on_individual_compound_identity() {
+    let control = identity("zeroship.ai", "svc/control");
+    let auth = identity("zeroship.ai", "svc/auth");
+    let wrong_domain = identity("attacker.example", "svc/control");
+
+    assert!(authorize(&control, endpoints::AUTH_PLATFORM_TOKEN));
+    assert!(!authorize(&auth, endpoints::AUTH_PLATFORM_TOKEN));
+    assert!(!authorize(
+        &wrong_domain,
+        endpoints::AUTH_PLATFORM_TOKEN
+    ));
+}
+
+#[test]
+fn gateway_cannot_reach_env_or_reconcile_endpoints() {
+    let gateway = identity("zeroship.ai", "svc/gateway");
+
+    assert!(!authorize(&gateway, endpoints::CONTROL_APP_ENV));
+    assert!(!authorize(
+        &gateway,
+        endpoints::CONTROL_BILLING_RECONCILE
+    ));
+    assert!(!authorize(
+        &gateway,
+        endpoints::CONTROL_SPEND_RECONCILE
+    ));
+}
