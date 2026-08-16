@@ -750,7 +750,10 @@ log_format = "json"
         assert!(config.control_key.is_some(), "control_key must be a root key");
         assert!(config.worker_key.is_some());
         assert!(config.pairwise_salt.is_some());
-        assert!(config.auth.platform_mint_key.is_some());
+        assert!(
+            config.auth.platform_mint_key.is_none(),
+            "the shared example must not expose the mint key to worker mounts"
+        );
         // A per-binary secret sits in that binary's table.
         assert!(config.control.master_key.is_some());
         assert!(config.gateway.stash_signing_key.is_some());
