@@ -2856,15 +2856,34 @@ fn validate_no_name_is_claimed_twice(
     let mut tables: BTreeSet<Key> = BTreeSet::new();
     let mut columns: BTreeMap<Key, BTreeSet<&str>> = BTreeMap::new();
 
+    // CONSTRAINT NAMES ARE PER TABLE AND PER DIALECT, both measured against real
+    // servers rather than assumed:
+    //
+    //   PostgreSQL  two constraints of one name on one table  ERROR
+    //   MySQL       same                                      ER_CHECK_CONSTRAINT_DUP_NAME
+    //                                                         / ER_DUP_KEYNAME
+    //   SQLite      same                                      ACCEPTED
+    //
+    // So SQLite is not policed here. Refusing there would reject a migration
+    // SQLite runs, which is the line every sibling check in this file holds.
+    //
+    // Only EXPLICIT names participate. An absent name is derived later, and
+    // treating absent as a value would collapse two ordinary anonymous
+    // constraints into one repeated name.
+    let track_constraint_names = !matches!(target_dialect, Dialect::Sqlite);
+    let mut constraint_names: BTreeMap<Key, BTreeSet<&str>> = BTreeMap::new();
+
     for (op_index, op) in ir.ops.iter().enumerate() {
         match op {
             Op::CreateTable {
                 name,
                 columns: cols,
                 schema,
+                constraints,
                 ..
             } => {
                 let key: Key = (schema.as_deref(), name.as_str());
+                let name_of = name.as_str();
                 if tables.contains(&key) {
                     return Err(refuse(
                         op_index,
@@ -2893,11 +2912,31 @@ fn validate_no_name_is_claimed_twice(
                 }
                 tables.insert(key);
                 columns.insert(key, cols.iter().map(|c| c.name.as_str()).collect());
+                if track_constraint_names {
+                    let mut named: BTreeSet<&str> = BTreeSet::new();
+                    for constraint in constraints {
+                        let Some(name) = constraint.name.as_deref() else {
+                            continue;
+                        };
+                        if !named.insert(name) {
+                            return Err(refuse(
+                                op_index,
+                                &format!(
+                                    "this createTable names constraint {name:?} more than \
+                                     once on table {name_of:?}"
+                                ),
+                                "give the second constraint a different name",
+                            ));
+                        }
+                    }
+                    constraint_names.insert(key, named);
+                }
             }
             Op::DropTable { table, schema, .. } => {
                 let key: Key = (schema.as_deref(), table.as_str());
                 tables.remove(&key);
                 columns.remove(&key);
+                constraint_names.remove(&key);
             }
             Op::RenameTable {
                 table, to, schema, ..
@@ -2922,6 +2961,9 @@ fn validate_no_name_is_claimed_twice(
                 if let Some(moved) = columns.remove(&from_key) {
                     columns.insert(to_key, moved);
                 }
+                if let Some(moved) = constraint_names.remove(&from_key) {
+                    constraint_names.insert(to_key, moved);
+                }
             }
             Op::AddColumn {
                 table,
@@ -2945,6 +2987,43 @@ fn validate_no_name_is_claimed_twice(
                     ));
                 }
                 columns.entry(key).or_default().insert(column.as_str());
+            }
+            Op::AddConstraint {
+                table,
+                constraint,
+                schema,
+                ..
+            } if track_constraint_names => {
+                // Only an EXPLICIT name participates; an absent one is derived later.
+                if let Some(name) = constraint.name.as_deref() {
+                    let key: Key = (schema.as_deref(), table.as_str());
+                    if constraint_names
+                        .get(&key)
+                        .is_some_and(|live| live.contains(name))
+                    {
+                        return Err(refuse(
+                            op_index,
+                            &format!(
+                                "this addConstraint claims the name {name:?} on table \
+                                 {table:?}, but an earlier operation in this migration \
+                                 already gave a constraint that name and nothing dropped \
+                                 it in between"
+                            ),
+                            "drop the existing constraint first, or use a different name",
+                        ));
+                    }
+                    constraint_names.entry(key).or_default().insert(name);
+                }
+            }
+            Op::DropConstraint {
+                table,
+                name,
+                schema,
+                ..
+            } => {
+                if let Some(live) = constraint_names.get_mut(&(schema.as_deref(), table.as_str())) {
+                    live.remove(name.as_str());
+                }
             }
             Op::DropColumn {
                 table,
