@@ -905,3 +905,19 @@ fn new_jti() -> String {
     rand::thread_rng().fill_bytes(&mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)
 }
+
+#[cfg(test)]
+mod ttl_tests {
+    use super::{validate_registered_ttl, PLATFORM_TOKEN_MAX_TTL_SECS};
+
+    #[test]
+    fn registered_token_issuer_enforces_the_platform_ttl_ceiling() {
+        for invalid in [0, -1, PLATFORM_TOKEN_MAX_TTL_SECS + 1] {
+            assert!(
+                validate_registered_ttl(invalid, "access token").is_err(),
+                "registered issuer accepted ttl_secs={invalid}"
+            );
+        }
+        assert!(validate_registered_ttl(PLATFORM_TOKEN_MAX_TTL_SECS, "access token").is_ok());
+    }
+}
