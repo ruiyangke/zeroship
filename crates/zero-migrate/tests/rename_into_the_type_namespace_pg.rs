@@ -35,26 +35,49 @@ fn verdict(ops: &str) -> Result<(), String> {
     validate_ir(&ir, Dialect::Postgres, &[]).map_err(|e| format!("{}: {}", e.code, e.reason))
 }
 
+/// Assert the claiming op and the kind holding the name.
+///
+/// The two renameTable tests below differ only in whether an ENUM or a DOMAIN
+/// holds the target name; a guard on the rule alone lets each pass on the
+/// other message.
+fn expect_type_refusal(ops: &str, claiming_op: &str, held_by: &str, what: &str) {
+    let refusal = verdict(ops).expect_err(what);
+    for needle in [
+        "one type namespace",
+        &format!("this {claiming_op} claims"),
+        &format!("already created a {held_by} with that name"),
+    ] {
+        assert!(
+            refusal.contains(needle),
+            "{needle:?} is missing, so a sibling rule satisfies this test: {refusal}"
+        );
+    }
+}
+
 const A: &str = r#"{"op":"createTable","name":"a","columns":[{"name":"c0","type":"int","nullable":false},{"name":"v","type":"int","nullable":true}],"primaryKey":["c0"]}"#;
 
 #[test]
 fn renaming_a_table_onto_a_live_enum_name_is_refused() {
-    let refusal = verdict(&format!(
-        r#"{A},{{"op":"createEnum","name":"e","values":["a"]}},{{"op":"renameTable","table":"a","to":"e"}}"#
-    ))
-    .expect_err("the rename target is taken in the type namespace");
-    assert!(
-        refusal.to_lowercase().contains("already"),
-        "the refusal must say the name is already taken: {refusal}"
+    expect_type_refusal(
+        &format!(
+            r#"{A},{{"op":"createEnum","name":"e","values":["a"]}},{{"op":"renameTable","table":"a","to":"e"}}"#
+        ),
+        "renameTable",
+        "enum",
+        "the rename target is taken in the type namespace",
     );
 }
 
 #[test]
 fn renaming_a_table_onto_a_live_domain_name_is_refused() {
-    verdict(&format!(
-        r#"{A},{{"op":"createDomain","name":"dm","as":"text"}},{{"op":"renameTable","table":"a","to":"dm"}}"#
-    ))
-    .expect_err("a domain occupies the type namespace just as an enum does");
+    expect_type_refusal(
+        &format!(
+            r#"{A},{{"op":"createDomain","name":"dm","as":"text"}},{{"op":"renameTable","table":"a","to":"dm"}}"#
+        ),
+        "renameTable",
+        "domain",
+        "a domain occupies the type namespace just as an enum does",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -92,10 +115,14 @@ fn an_ordinary_rename_is_still_allowed() {
 fn a_renamed_table_carries_its_row_type_to_the_new_name() {
     // After the rename the OLD name is free in both namespaces and the NEW one is
     // taken in both. Pins that the type entry moves rather than being dropped.
-    verdict(&format!(
-        r#"{A},{{"op":"renameTable","table":"a","to":"b"}},{{"op":"createEnum","name":"b","values":["a"]}}"#
-    ))
-    .expect_err("an enum may not take the name the table was renamed onto");
+    expect_type_refusal(
+        &format!(
+            r#"{A},{{"op":"renameTable","table":"a","to":"b"}},{{"op":"createEnum","name":"b","values":["a"]}}"#
+        ),
+        "createEnum",
+        "table",
+        "an enum may not take the name the table was renamed onto",
+    );
 
     verdict(&format!(
         r#"{A},{{"op":"renameTable","table":"a","to":"b"}},{{"op":"createEnum","name":"a","values":["a"]}}"#
