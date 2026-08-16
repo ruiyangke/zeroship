@@ -15,15 +15,17 @@ use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::oidc::{Issuer, ACCESS_TOKEN_TTL_SECS};
 use zeroship_auth::server;
 use zeroship_auth::store::users;
+use zeroship_core::device_grant::{PLATFORM_CLI_CLIENT_ID, PLATFORM_TOKEN_MAX_TTL_SECS};
 
 const TEST_CONTROL_KEY: &str = "platform-mint-http-test-control-key";
-const PLATFORM_TOKEN_MAX_TTL_SECS: i64 = 12 * 60 * 60;
+const TEST_PLATFORM_MINT_KEY: &str = "platform-mint-http-test-dedicated-key";
 
 #[derive(Debug, Deserialize)]
 struct MintResponse {
     access_token: String,
     expires_in: u64,
     scope: String,
+    client_id: String,
 }
 
 struct Fixture {
@@ -36,7 +38,7 @@ struct Fixture {
 
 impl Fixture {
     #[allow(clippy::future_not_send)]
-    async fn boot(configured_control_key: &str) -> Option<Self> {
+    async fn boot() -> Option<Self> {
         let db_url = zeroship_core::declared_env!(
             external,
             "AUTH_DB_URL",
@@ -73,7 +75,7 @@ impl Fixture {
         let auth_pg = Arc::new(auth_client);
 
         let mut cfg = test_auth_config(&db_url);
-        cfg.settings.control_key = test_secret(configured_control_key);
+        cfg.settings.platform_mint_key = test_secret(TEST_PLATFORM_MINT_KEY);
         let cfg = Arc::new(cfg);
         let issuer = Arc::new(test_issuer());
         issuer
@@ -178,8 +180,6 @@ fn test_issuer() -> Issuer {
 fn mint_body(principal_id: Uuid, scopes: &[&str], ttl_secs: i64) -> serde_json::Value {
     json!({
         "principal_id": principal_id,
-        "audience": "control.zeroship.ai",
-        "client_id": "zeroship-cli",
         "scopes": scopes,
         "ttl_secs": ttl_secs,
     })
@@ -188,7 +188,7 @@ fn mint_body(principal_id: Uuid, scopes: &[&str], ttl_secs: i64) -> serde_json::
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn platform_mint_caps_scopes_to_the_principals_stored_grants_over_http() {
-    let Some(fx) = Fixture::boot(TEST_CONTROL_KEY).await else {
+    let Some(fx) = Fixture::boot().await else {
         zeroship_test_support::skip(
             "[platform_token_mint] skip (need AUTH_DB_URL or CONTROL_TEST_DB)",
         );
@@ -198,7 +198,7 @@ async fn platform_mint_caps_scopes_to_the_principals_stored_grants_over_http() {
 
     let (status, raw_body) = fx
         .mint(
-            TEST_CONTROL_KEY,
+            TEST_PLATFORM_MINT_KEY,
             mint_body(
                 principal_id,
                 &["apps:read", "apps:deploy"],
@@ -212,11 +212,14 @@ async fn platform_mint_caps_scopes_to_the_principals_stored_grants_over_http() {
     let minted: MintResponse = serde_json::from_str(&raw_body).expect("decode mint response");
     assert_eq!(minted.expires_in, ACCESS_TOKEN_TTL_SECS as u64);
     assert_eq!(minted.scope, "apps:read");
+    assert_eq!(minted.client_id, PLATFORM_CLI_CLIENT_ID);
     let claims = fx
         .issuer
         .verify_access_token(&minted.access_token)
         .expect("verify minted platform token");
     assert_eq!(claims.sub, principal_id.to_string());
+    assert_eq!(claims.aud, "control.zeroship.ai");
+    assert_eq!(claims.client_id, PLATFORM_CLI_CLIENT_ID);
     assert_eq!(claims.scope, "apps:read");
     drop(fx.srv);
 }
@@ -224,7 +227,7 @@ async fn platform_mint_caps_scopes_to_the_principals_stored_grants_over_http() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn platform_mint_rejects_an_unknown_principal_over_http() {
-    let Some(fx) = Fixture::boot(TEST_CONTROL_KEY).await else {
+    let Some(fx) = Fixture::boot().await else {
         zeroship_test_support::skip(
             "[platform_token_mint] skip (need AUTH_DB_URL or CONTROL_TEST_DB)",
         );
@@ -233,7 +236,7 @@ async fn platform_mint_rejects_an_unknown_principal_over_http() {
 
     let (status, raw_body) = fx
         .mint(
-            TEST_CONTROL_KEY,
+            TEST_PLATFORM_MINT_KEY,
             mint_body(Uuid::new_v4(), &[], ACCESS_TOKEN_TTL_SECS),
         )
         .await;
@@ -245,7 +248,7 @@ async fn platform_mint_rejects_an_unknown_principal_over_http() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn platform_mint_rejects_a_ttl_above_the_ceiling_over_http() {
-    let Some(fx) = Fixture::boot(TEST_CONTROL_KEY).await else {
+    let Some(fx) = Fixture::boot().await else {
         zeroship_test_support::skip(
             "[platform_token_mint] skip (need AUTH_DB_URL or CONTROL_TEST_DB)",
         );
@@ -255,7 +258,7 @@ async fn platform_mint_rejects_a_ttl_above_the_ceiling_over_http() {
 
     let (status, raw_body) = fx
         .mint(
-            TEST_CONTROL_KEY,
+            TEST_PLATFORM_MINT_KEY,
             mint_body(
                 principal_id,
                 &["apps:read"],
@@ -263,16 +266,31 @@ async fn platform_mint_rejects_a_ttl_above_the_ceiling_over_http() {
             ),
         )
         .await;
-    fx.delete_principal(principal_id).await;
 
     assert_eq!(status, 400, "platform mint response: {raw_body}");
+
+    let (status, raw_body) = fx
+        .mint(
+            TEST_PLATFORM_MINT_KEY,
+            mint_body(principal_id, &["apps:read"], PLATFORM_TOKEN_MAX_TTL_SECS),
+        )
+        .await;
+    fx.delete_principal(principal_id).await;
+
+    assert_eq!(status, 200, "platform mint response: {raw_body}");
+    let minted: MintResponse = serde_json::from_str(&raw_body).expect("decode mint response");
+    let claims = fx
+        .issuer
+        .verify_access_token(&minted.access_token)
+        .expect("verify maximum-lifetime platform token");
+    assert_eq!(claims.exp - claims.iat, PLATFORM_TOKEN_MAX_TTL_SECS);
     drop(fx.srv);
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn platform_mint_rejects_the_shared_control_key_over_http() {
-    let Some(fx) = Fixture::boot(TEST_CONTROL_KEY).await else {
+    let Some(fx) = Fixture::boot().await else {
         zeroship_test_support::skip(
             "[platform_token_mint] skip (need AUTH_DB_URL or CONTROL_TEST_DB)",
         );

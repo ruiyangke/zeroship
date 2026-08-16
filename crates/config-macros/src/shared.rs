@@ -160,6 +160,15 @@ pub(crate) const SHARED_IDENTITIES: &[SharedIdentity] = &[
         wrapper: "Operational",
         inner: "String",
     },
+    // Auth accepts this bearer only on the platform-token mint, and control is
+    // its only caller. It must not collapse into the control key the worker
+    // also holds.
+    SharedIdentity {
+        symbol: "AUTH_PLATFORM_MINT_KEY",
+        canonical: "auth.platform_mint_key",
+        wrapper: "Secret",
+        inner: "String",
+    },
     // The GoTrue base URL is ONE deployment fact read by two binaries: control
     // verifies Supabase tokens against it and auth drives the browser-side
     // GoTrue login with it. It became shared the moment auth converted; before
@@ -172,9 +181,9 @@ pub(crate) const SHARED_IDENTITIES: &[SharedIdentity] = &[
         inner: "String",
     },
     // Platform-global SECRETS. These are the shape the flat `[secrets]` table
-    // could not express: one value, set once, read by several binaries. The live
-    // `ZEROSHIP_CONTROL_KEY` split - a literal in four services and a `${VAR}`
-    // indirection in the fifth - is what a flat table with nothing marking
+    // could not express: one value, set once, read by several binaries. A former
+    // `ZEROSHIP_CONTROL_KEY` split used literals in some consumers and an env
+    // indirection in another. That is what a flat table with nothing marking
     // sharing produces, so the sharing is declared here instead.
     SharedIdentity {
         symbol: "CONTROL_KEY",

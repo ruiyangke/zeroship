@@ -1,5 +1,6 @@
 //! Native OP device grant support plus the internal platform-token mint.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -14,6 +15,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zeroship_authz::Scope;
 use zeroship_core::auth::{extract_bearer, validate_control_key};
+use zeroship_core::device_grant::{PLATFORM_CLI_CLIENT_ID, PLATFORM_TOKEN_MAX_TTL_SECS};
 
 use crate::advisory_lock::lock_refresh_user_xact;
 use crate::config::AuthConfig;
@@ -80,10 +82,9 @@ impl PendingDeviceGrant {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MintPlatformTokenRequest {
     pub principal_id: String,
-    pub audience: String,
-    pub client_id: String,
     #[serde(default)]
     pub scopes: Vec<String>,
     pub ttl_secs: Option<i64>,
@@ -96,6 +97,7 @@ pub struct MintPlatformTokenResponse {
     pub expires_in: u64,
     pub scope: String,
     pub provider: &'static str,
+    pub client_id: &'static str,
 }
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
@@ -602,6 +604,7 @@ fn verification_uri_complete(verification_uri: &str, user_code: &str) -> String 
 pub async fn mint_platform_token(
     req: HttpRequest,
     cfg: web::types::State<Arc<AuthConfig>>,
+    db: web::types::State<Arc<Client>>,
     issuer: web::types::State<Arc<Issuer>>,
     body: web::types::Json<MintPlatformTokenRequest>,
 ) -> HttpResponse {
@@ -609,13 +612,12 @@ pub async fn mint_platform_token(
         return HttpResponse::Unauthorized().json(&json!({"error": "unauthorized"}));
     }
 
-    let principal_id = body.principal_id.trim();
-    if Uuid::parse_str(principal_id).is_err() {
-        return HttpResponse::BadRequest().json(&json!({"error": "invalid_principal_id"}));
-    }
-    if body.audience.trim().is_empty() || body.client_id.trim().is_empty() {
-        return HttpResponse::BadRequest().json(&json!({"error": "invalid_token_request"}));
-    }
+    let principal_id = match Uuid::parse_str(body.principal_id.trim()) {
+        Ok(principal_id) => principal_id,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(&json!({"error": "invalid_principal_id"}));
+        }
+    };
     if body
         .scopes
         .iter()
@@ -624,20 +626,51 @@ pub async fn mint_platform_token(
         return HttpResponse::BadRequest().json(&json!({"error": "invalid_scope"}));
     }
     let ttl_secs = body.ttl_secs.unwrap_or(ACCESS_TOKEN_TTL_SECS);
-    if ttl_secs <= 0 {
+    if ttl_secs <= 0 || ttl_secs > PLATFORM_TOKEN_MAX_TTL_SECS {
         return HttpResponse::BadRequest().json(&json!({"error": "invalid_ttl"}));
     }
 
+    let rows = match db
+        .query(
+            "SELECT pg.grant_name \
+             FROM zeroship.users u \
+             LEFT JOIN zeroship.principal_grants pg ON pg.principal_id = u.id \
+             WHERE u.id = $1 \
+             ORDER BY pg.grant_name",
+            &[&principal_id],
+        )
+        .await
+    {
+        Ok(rows) => rows,
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                principal_id = %principal_id,
+                "auth: platform token principal grant lookup failed"
+            );
+            return HttpResponse::InternalServerError()
+                .json(&json!({"error": "grant_lookup_failed"}));
+        }
+    };
+    if rows.is_empty() {
+        return HttpResponse::BadRequest().json(&json!({"error": "unknown_principal"}));
+    }
+    let granted: HashSet<String> = rows
+        .iter()
+        .filter_map(|row| row.get::<_, Option<String>>("grant_name"))
+        .collect();
+    let mut seen = HashSet::new();
     let scopes: Vec<String> = body
         .scopes
         .iter()
         .map(|scope| scope.trim().to_string())
-        .filter(|scope| !scope.is_empty())
+        .filter(|scope| granted.contains(scope) && seen.insert(scope.clone()))
         .collect();
+    let principal_id = principal_id.to_string();
     let access_token = match issuer.issue_principal_access_token(&PrincipalAccessTokenMint {
-        principal_id,
-        audience: body.audience.trim(),
-        client_id: body.client_id.trim(),
+        principal_id: &principal_id,
+        audience: cfg.settings.oauth_audience.get().trim(),
+        client_id: PLATFORM_CLI_CLIENT_ID,
         scopes: &scopes,
         ttl_secs: Some(ttl_secs),
     }) {
@@ -654,11 +687,12 @@ pub async fn mint_platform_token(
         expires_in: ttl_secs as u64,
         scope: scopes.join(" "),
         provider: "platform",
+        client_id: PLATFORM_CLI_CLIENT_ID,
     })
 }
 
 fn authorized(req: &HttpRequest, cfg: &AuthConfig) -> bool {
-    let expected = cfg.settings.control_key.expose_str().trim();
+    let expected = cfg.settings.platform_mint_key.expose_str().trim();
     if expected.is_empty() {
         return false;
     }
