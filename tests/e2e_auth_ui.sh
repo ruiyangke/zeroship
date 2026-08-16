@@ -206,6 +206,9 @@ set +a
 : "${ZEROSHIP_AUTH_PLATFORM_MINT_KEY:?zeroship dev init omitted the platform mint key}"
 : "${ZEROSHIP_AUTH_STASH_SIGNING_KEY:?zeroship dev init omitted the auth stash key}"
 : "${ZEROSHIP_AUTH_TOTP_ENC_KEY:?zeroship dev init omitted the auth TOTP key}"
+# Keep the mint credential out of the Node and Playwright children below. Auth
+# receives it explicitly at its launch boundary.
+export -n ZEROSHIP_AUTH_PLATFORM_MINT_KEY
 
 AUTH_PORT="$(node -e '
 const net = require("node:net");
@@ -221,7 +224,8 @@ BASE_URL="http://127.0.0.1:$AUTH_PORT"
 step "Boot the real native zeroship-auth binary on $BASE_URL"
 unset ZEROSHIP_CONFIG || true
 export ZEROSHIP_AUTH_DATABASE_URL="$DSN"
-"$BIN/zeroship-auth" \
+env ZEROSHIP_AUTH_PLATFORM_MINT_KEY="$ZEROSHIP_AUTH_PLATFORM_MINT_KEY" \
+  "$BIN/zeroship-auth" \
   --no-config \
   --provider native \
   --addr "127.0.0.1:$AUTH_PORT" \

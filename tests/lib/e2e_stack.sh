@@ -253,7 +253,7 @@ stack_up() {
   # --- control --------------------------------------------------------------
   # Every credential arrives through the canonical environment names exported by
   # `stack_workspace`; only non-secret operational values are on the line.
-  "$E2E_BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
+  e2e_with_platform_mint_key "$E2E_BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
     --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
     > "$WORK/control.log" 2>&1 &
   echo $! >> "$PIDFILE"
@@ -262,7 +262,8 @@ stack_up() {
     && _stk_ok "control healthy" || { _stk_bad "control unhealthy"; tail -20 "$WORK/control.log"; return 1; }
 
   # --- worker ---------------------------------------------------------------
-  "$E2E_BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads "$ZEROSHIP_WORKER_THREADS" \
+  e2e_without_platform_mint_key \
+    "$E2E_BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads "$ZEROSHIP_WORKER_THREADS" \
     --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
     --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
   echo $! >> "$PIDFILE"
@@ -271,7 +272,8 @@ stack_up() {
     && _stk_ok "worker healthy" || { _stk_bad "worker unhealthy"; tail -20 "$WORK/worker.log"; return 1; }
 
   # --- gateway --------------------------------------------------------------
-  "$E2E_BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
+  e2e_without_platform_mint_key \
+    "$E2E_BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
     --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/blobs" \
     --blob-cache-disk-root "$WORK/blob-cache" --poll-interval 2 \
     --signing-key-file "$WORK/signing-key.pem" \

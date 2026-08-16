@@ -196,7 +196,7 @@ for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT; do
 ZEROSHIP_CONTROL_SIGNING_KEY_FILE="$WORK/signing-key.pem"
 ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$ZEROSHIP_CONTROL_SIGNING_KEY_FILE"
 e2e_export_runtime_secrets "$WORK" || exit 1
-"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
+e2e_with_platform_mint_key "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
   --blob-store "$BLOB_S3" --signing-key-file "$WORK/signing-key.pem" \
  > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"

@@ -80,7 +80,7 @@ e2e_export_database_urls "$BENCH_DSN"
 docker exec pg-test psql -U postgres -c "DROP TABLE IF EXISTS usage_history, usage, apps CASCADE" > /dev/null 2>&1
 
 # Start platform
-"$BIN/zeroship-control" --port 9090 \
+e2e_with_platform_mint_key "$BIN/zeroship-control" --port 9090 \
     --blob-store /tmp/zeroship-bench-bundles --signing-key-file "$ZEROSHIP_CONTROL_SIGNING_KEY_FILE" > /dev/null 2>&1 &
 PIDS+=($!)
 sleep 3
