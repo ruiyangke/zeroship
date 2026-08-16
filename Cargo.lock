@@ -6886,6 +6886,7 @@ dependencies = [
  "toml 0.8.23",
  "totp-rs",
  "tracing",
+ "tracing-subscriber",
  "url",
  "uuid",
  "zeroship-authz",
