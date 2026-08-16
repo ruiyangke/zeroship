@@ -230,15 +230,18 @@ async fn key_past_horizon_leaves_jwks_with_reason_and_idempotently_keeps_audit_r
         .find(|retired| retired.kid == kid)
         .expect("stale key retired on first tick");
     assert_eq!(retired.reason, signing_key_retention::RETIREMENT_REASON);
-    assert!(events
-        .lock()
-        .expect("retention log buffer mutex")
-        .iter()
-        .any(|event| {
-            event.get("kid") == Some(&kid)
-                && event.get("reason").map(String::as_str)
-                    == Some(signing_key_retention::RETIREMENT_REASON)
-        }), "retirement log must identify the key and structured reason");
+    assert!(
+        events
+            .lock()
+            .expect("retention log buffer mutex")
+            .iter()
+            .any(|event| {
+                event.get("kid") == Some(&kid)
+                    && event.get("reason").map(String::as_str)
+                        == Some(signing_key_retention::RETIREMENT_REASON)
+            }),
+        "retirement log must identify the key and structured reason"
+    );
     assert!(!jwks_contains(&db, &kid).await, "retired key must leave JWKS");
     let (status, retired_at) = key_status(&db, &kid).await;
     assert_eq!(status, "retired");
