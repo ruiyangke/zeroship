@@ -111,8 +111,13 @@ fn a_unique_index_over_a_live_non_unique_one_of_the_same_name_is_refused() {
 
 #[test]
 fn a_differing_column_list_under_the_same_name_is_refused() {
-    lower(PLAIN_ON_V, &live_with(index("ix", false, &["w"])))
+    let refusal = lower(PLAIN_ON_V, &live_with(index("ix", false, &["w"])))
         .expect_err("same name, different columns, silently skipped today");
+    assert!(
+        refusal.contains(r#"live: unique=false on ["w"]"#),
+        "the refusal must quote the LIVE shape it clashed with, which is what
+         distinguishes this case from the unique-vs-plain one: {refusal}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -189,6 +194,11 @@ fn the_check_fires_through_the_production_live_schema_constructor() {
         "from_catalog_snapshot must carry table indexes into table_snapshots"
     );
 
-    lower(UNIQUE_ON_W, &live)
+    let refusal = lower(UNIQUE_ON_W, &live)
         .expect_err("the refusal must fire on the constructor the addon actually uses");
+    assert!(
+        refusal.contains("with a different shape"),
+        "the addon constructor must reach the SAME shape-clash rule, not some other
+         refusal that happens to fire first: {refusal}"
+    );
 }
