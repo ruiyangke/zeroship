@@ -3929,7 +3929,7 @@ fn validate_no_op_references_a_dropped_column(
 /// migration VACATED, never one it simply has not created yet, so a foreign key
 /// pointing at a table defined later in the envelope stays legal.
 fn second_relation_references(op: &crate::model::ir::Op) -> Vec<(&str, &'static str)> {
-    use crate::model::ir::{IrConstraintKind, Op, ViewQuery};
+    use crate::model::ir::{GrantTarget, IrConstraintKind, Op, ViewQuery};
 
     match op {
         Op::CreatePartition { of, .. } => vec![(of.as_str(), "parent table")],
@@ -3954,6 +3954,34 @@ fn second_relation_references(op: &crate::model::ir::Op) -> Vec<(&str, &'static 
                     .iter()
                     .map(|join| (join.table.name.as_str(), "joined table")),
             )
+            .collect(),
+        // GRANT AND REVOKE NAME A LIST OF TABLES, which is why they reached this
+        // point unchecked: every sibling rule above is driven by
+        // `touched_table`, and a single-name accessor has nothing to return for
+        // an op whose target is `names: Vec<String>`. They were the only two ops
+        // targeting a vacated relation that the engine still accepted - measured
+        // against a live server, both directions:
+        //
+        //     CREATE TABLE a; DROP TABLE a; GRANT SELECT ON a TO r
+        //         ERROR: relation "a" does not exist
+        //     ... same for REVOKE, and for the OLD name after a rename
+        //
+        // Only the TABLE target participates. A grant on a schema, or on all
+        // tables in a schema, names something this walk does not track, and
+        // guessing there would refuse migrations the server runs.
+        Op::Grant {
+            on: GrantTarget::Table { names, .. },
+            ..
+        } => names
+            .iter()
+            .map(|name| (name.as_str(), "granted table"))
+            .collect(),
+        Op::Revoke {
+            on: GrantTarget::Table { names, .. },
+            ..
+        } => names
+            .iter()
+            .map(|name| (name.as_str(), "revoked table"))
             .collect(),
         _ => Vec::new(),
     }

@@ -59,8 +59,11 @@ fn validate_ir_does_not_scale_quadratically_in_op_count() {
     assert!(
         ratio < 3.0,
         "doubling the op count multiplied validate_ir cost by {ratio:.1}x \
-         ({small:.3}s -> {large:.3}s). Above ~4x means the per-op cost is growing \
-         with N again, which is the quadratic scan F664 removed"
+         ({small:.3}s -> {large:.3}s), over the 3.0x ceiling this guard holds. \
+         Quadratic is ~4x for a doubling and linear-ish is ~2x, so a ratio this \
+         high means the per-op cost is growing with N again - the quadratic scan \
+         F664 removed. Re-run on an IDLE machine before believing it: these are \
+         wall-clock ratios, and heavy background load inflates them"
     );
 }
 
@@ -110,8 +113,11 @@ fn validate_ir_does_not_scale_quadratically_in_create_table_count() {
     assert!(
         ratio < 3.0,
         "doubling the createTable count multiplied validate_ir cost by {ratio:.1}x \
-         ({small:.3}s -> {large:.3}s). Above ~4x means a pass is scanning the whole \
-         declaration map once per op again, which is the quadratic F666 removed"
+         ({small:.3}s -> {large:.3}s), over the 3.0x ceiling this guard holds. A \
+         ratio this high means a pass is scanning the whole declaration map once \
+         per op again - the quadratic F666 removed. Re-run on an IDLE machine \
+         before believing it: these are wall-clock ratios, and heavy background \
+         load inflates them"
     );
 }
 
@@ -204,9 +210,10 @@ fn validate_ir_does_not_scale_quadratically_in_any_op_kind() {
 
     assert!(
         quadratic.is_empty(),
-        "doubling the op count multiplied validate_ir cost by ~4x for: {}. \
-         Above ~4x means a pass is scanning the whole declaration map once per op \
-         again, which is the quadratic F667 removed",
+        "doubling the op count exceeded the 3.0x ceiling for: {}. That means a pass \
+         is scanning the whole declaration map once per op again - the quadratic \
+         F667 removed. Re-run on an IDLE machine before believing it: these are \
+         wall-clock ratios, and heavy background load inflates them",
         quadratic.join("; ")
     );
 }
@@ -340,9 +347,11 @@ fn validate_ir_does_not_scale_quadratically_in_any_envelope_shape() {
 
     assert!(
         quadratic.is_empty(),
-        "doubling the op count multiplied validate_ir cost by ~4x for: {}. \
-         Above ~4x means a pass is scanning the whole declaration map once per op \
-         again. F668 covered foreign keys; F669 added alterPrimaryKey, per-row generation and inline column references",
+        "doubling the op count exceeded the 3.0x ceiling for: {}. That means a pass \
+         is scanning the whole declaration map once per op again. F668 covered \
+         foreign keys; F669 added alterPrimaryKey, per-row generation and inline \
+         column references. Re-run on an IDLE machine before believing it: these \
+         are wall-clock ratios, and heavy background load inflates them",
         quadratic.join("; ")
     );
 }
