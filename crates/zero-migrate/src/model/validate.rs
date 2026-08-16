@@ -2999,7 +2999,10 @@ fn validate_no_name_is_claimed_twice(
                 relations.remove(&key);
                 // The composite row type goes with the table.
                 types.remove(&key);
-                // …and so do any partitions it parents.
+                // …and so do the dependents it contains: the partitions it
+                // parents AND the indexes built on it. Both live in the
+                // schema-wide relation namespace, so neither is released by
+                // removing this key alone.
                 for child in dependents_of.remove(&key).unwrap_or_default() {
                     relations.remove(&child);
                     types.remove(&child);
