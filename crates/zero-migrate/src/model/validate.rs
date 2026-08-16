@@ -4330,9 +4330,10 @@ fn validate_no_op_references_a_dropped_column(
                     ts_location: ts_locations.get(op_index).cloned().flatten(),
                     dialect: target_dialect,
                     reason: format!(
-                        "this operation names column {column:?} of table {table:?}, but an \
+                        "this {} names column {column:?} of table {table:?}, but an \
                          earlier dropColumn in this migration removed it, so it will not \
-                         exist when this runs"
+                         exist when this runs",
+                        crate::model::op_support::op_kind_and_variant(op).0
                     ),
                     suggested_fix: Some(
                         "move this operation before the drop, or re-add the column first"

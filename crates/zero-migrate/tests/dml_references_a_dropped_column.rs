@@ -38,48 +38,85 @@ fn verdict(ops: &str) -> Result<(), String> {
 const A: &str = r#"{"op":"createTable","name":"a","columns":[{"name":"c0","type":"int","nullable":false},{"name":"v","type":"int","nullable":true},{"name":"w","type":"int","nullable":true}],"primaryKey":["c0"]}"#;
 const DROP_V: &str = r#"{"op":"dropColumn","table":"a","column":"v"}"#;
 
+/// Assert the OP and the COLUMN, so no sibling in this file satisfies the wrong
+/// test.
+///
+/// This fixture is why the refusal now names its op at all. Every one of these
+/// five said "this operation names column ...", so an insert test was satisfied by
+/// a delete refusal and the audit could not pin any of them. Threading the op name
+/// through made the tests separable AND told operators which statement in a
+/// DML-heavy migration actually named the missing column.
+///
+/// The two update-reads cases share a message legitimately - same op, same column,
+/// different clause - which is as far as the text can distinguish and far enough
+/// that no OTHER rule can satisfy them.
+fn expect_dml_refusal(ops: &str, op_name: &str, column: &str, what: &str) {
+    let refusal = verdict(ops).expect_err(what);
+    let expected = format!("this {op_name} names column {column:?}");
+    assert!(
+        refusal.contains(&expected),
+        "{expected:?} is missing, so a sibling DML refusal is satisfying this test: {refusal}"
+    );
+}
+
 #[test]
 fn an_update_reading_a_dropped_column_is_refused() {
-    let refusal = verdict(&format!(
-        r#"{A},{DROP_V},{{"op":"update","table":"a","set":{{"w":{{"node":"colRef","name":"v"}}}}}}"#
-    ))
-    .expect_err("the update reads a column the drop removed");
-    assert!(
-        refusal.to_lowercase().contains("drop"),
-        "the refusal must point at the drop: {refusal}"
+    expect_dml_refusal(
+        &format!(
+            r#"{A},{DROP_V},{{"op":"update","table":"a","set":{{"w":{{"node":"colRef","name":"v"}}}}}}"#
+        ),
+        "update",
+        "v",
+        "the update reads a column the drop removed",
     );
 }
 
 #[test]
 fn an_update_writing_a_dropped_column_is_refused() {
-    verdict(&format!(
-        r#"{A},{{"op":"dropColumn","table":"a","column":"w"}},{{"op":"update","table":"a","set":{{"w":{{"node":"literal","value":1}}}}}}"#
-    ))
-    .expect_err("the update writes a column the drop removed");
+    expect_dml_refusal(
+        &format!(
+            r#"{A},{{"op":"dropColumn","table":"a","column":"w"}},{{"op":"update","table":"a","set":{{"w":{{"node":"literal","value":1}}}}}}"#
+        ),
+        "update",
+        "w",
+        "the update writes a column the drop removed",
+    );
 }
 
 #[test]
 fn an_update_filtering_on_a_dropped_column_is_refused() {
-    verdict(&format!(
-        r#"{A},{DROP_V},{{"op":"update","table":"a","set":{{"w":{{"node":"literal","value":1}}}},"where":{{"node":"binOp","op":"gt","lhs":{{"node":"colRef","name":"v"}},"rhs":{{"node":"literal","value":0}}}}}}"#
-    ))
-    .expect_err("the WHERE clause reads a column the drop removed");
+    expect_dml_refusal(
+        &format!(
+            r#"{A},{DROP_V},{{"op":"update","table":"a","set":{{"w":{{"node":"literal","value":1}}}},"where":{{"node":"binOp","op":"gt","lhs":{{"node":"colRef","name":"v"}},"rhs":{{"node":"literal","value":0}}}}}}"#
+        ),
+        "update",
+        "v",
+        "the WHERE clause reads a column the drop removed",
+    );
 }
 
 #[test]
 fn a_delete_filtering_on_a_dropped_column_is_refused() {
-    verdict(&format!(
-        r#"{A},{DROP_V},{{"op":"delete","table":"a","where":{{"node":"binOp","op":"gt","lhs":{{"node":"colRef","name":"v"}},"rhs":{{"node":"literal","value":0}}}}}}"#
-    ))
-    .expect_err("the DELETE names a column the drop removed");
+    expect_dml_refusal(
+        &format!(
+            r#"{A},{DROP_V},{{"op":"delete","table":"a","where":{{"node":"binOp","op":"gt","lhs":{{"node":"colRef","name":"v"}},"rhs":{{"node":"literal","value":0}}}}}}"#
+        ),
+        "delete",
+        "v",
+        "the DELETE names a column the drop removed",
+    );
 }
 
 #[test]
 fn an_insert_into_a_dropped_column_is_refused() {
-    verdict(&format!(
-        r#"{A},{DROP_V},{{"op":"insert","table":"a","columns":["c0","v"],"rows":[[1,2]]}}"#
-    ))
-    .expect_err("the insert names a column the drop removed");
+    expect_dml_refusal(
+        &format!(
+            r#"{A},{DROP_V},{{"op":"insert","table":"a","columns":["c0","v"],"rows":[[1,2]]}}"#
+        ),
+        "insert",
+        "v",
+        "the insert names a column the drop removed",
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -537,7 +537,7 @@ feature_support_registry! {
 /// derivation is the SINGLE source shared with `dialect_table_faithfulness`'s
 /// corpus (via [`op_variant`]) - the branch-selection that used to live in
 /// the hand-written `support()` dialect arms.
-fn op_kind_and_variant(op: &Op) -> (&'static str, &'static str) {
+pub(crate) fn op_kind_and_variant(op: &Op) -> (&'static str, &'static str) {
     match op {
         Op::CreateTable {
             columns,
