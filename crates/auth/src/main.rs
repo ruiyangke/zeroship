@@ -205,6 +205,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // compose `migrate` service / `deploy/ops/db-migrate.sh`) out of band before this
     // service boots — not here.
 
+    zeroship_auth::oidc::device_token::reconcile_platform_cli_client(&client).await?;
+    tracing::info!(
+        client_id = zeroship_core::device_grant::PLATFORM_CLI_CLIENT_ID,
+        "first-party CLI OAuth client reconciled"
+    );
+
     let signing_key_file = cfg.signing_key_file().ok_or_else(|| {
         AuthError::Config(
             "ZEROSHIP_AUTH_SIGNING_KEY_FILE / --signing-key-file is required".into(),

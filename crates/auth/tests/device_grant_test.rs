@@ -13,7 +13,7 @@ use common::{
     assert_redirect, cleanup_rate_limits_like, dedicated_test_db, location, test_auth_config,
 };
 use zeroship_auth::headers::SecurityHeaders;
-use zeroship_auth::oidc::{Issuer, ACCESS_TOKEN_TYP};
+use zeroship_auth::oidc::{Issuer, ACCESS_TOKEN_TTL_SECS, ACCESS_TOKEN_TYP};
 use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::server;
 use zeroship_auth::store::{sessions as session_store, users};
@@ -1026,7 +1026,7 @@ async fn native_device_grant_approves_via_auth_session_and_polls_op_token() {
         .unwrap_or_else(|e| panic!("decode OP token response: {e}: {token_body}"));
     assert_eq!(token.token_type, "Bearer");
     assert_eq!(token.scope, "apps:read");
-    assert!(token.expires_in > 0);
+    assert_eq!(token.expires_in, ACCESS_TOKEN_TTL_SECS as u64);
     assert!(token.id_token.is_none(), "device grant v1 must not mint nonce-less id_token");
     assert!(token.refresh_token.is_none());
     let claims = issuer
@@ -1035,6 +1035,11 @@ async fn native_device_grant_approves_via_auth_session_and_polls_op_token() {
     assert_eq!(claims.client_id, client_id);
     assert_eq!(claims.aud, "zeroship");
     assert_eq!(claims.scope, "apps:read");
+    assert_eq!(claims.exp - claims.iat, ACCESS_TOKEN_TTL_SECS);
+    assert_eq!(
+        claims.sub,
+        issuer.pairwise_subject(&user.id.to_string(), &client_id)
+    );
     assert_eq!(jsonwebtoken::decode_header(&token.access_token).unwrap().typ.as_deref(), Some(ACCESS_TOKEN_TYP));
 
     let rows = pg

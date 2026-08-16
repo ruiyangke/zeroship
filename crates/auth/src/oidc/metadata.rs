@@ -114,14 +114,23 @@ pub fn discovery_metadata(issuer: &str) -> Value {
             "refresh_token",
             "urn:ietf:params:oauth:grant-type:device_code"
         ],
-        "scopes_supported": ["openid", "profile", "email", "offline_access"],
+        "scopes_supported": [
+            "openid",
+            "profile",
+            "email",
+            "offline_access",
+            "apps:deploy",
+            "apps:read",
+            "apps:write",
+            "secrets:read"
+        ],
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": [
             "none",
             "client_secret_basic",
             "client_secret_post"
         ],
-        "subject_types_supported": ["pairwise"],
+        "subject_types_supported": ["public", "pairwise"],
         "id_token_signing_alg_values_supported": ["EdDSA"],
         "token_endpoint_auth_signing_alg_values_supported": ["EdDSA"],
         "authorization_signing_alg_values_supported": ["EdDSA"],
@@ -171,4 +180,29 @@ fn public_jwk_only(kid: &str, jwk: Value) -> Result<Value> {
         }
     }
     Ok(Value::Object(public))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zeroship_core::device_grant::PLATFORM_CLI_ISSUABLE_SCOPES;
+
+    #[test]
+    fn discovery_advertises_public_subjects_and_cli_scopes() {
+        let metadata = discovery_metadata("https://auth.zeroship.test/oauth2");
+        assert_eq!(
+            metadata["subject_types_supported"],
+            json!(["public", "pairwise"])
+        );
+
+        let scopes = metadata["scopes_supported"]
+            .as_array()
+            .expect("scopes_supported array");
+        for scope in PLATFORM_CLI_ISSUABLE_SCOPES {
+            assert!(
+                scopes.iter().any(|advertised| advertised == scope),
+                "missing CLI scope {scope}"
+            );
+        }
+    }
 }
