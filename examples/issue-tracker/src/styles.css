@@ -651,22 +651,13 @@ tbody tr:hover { background: var(--surface-2); }
   padding: 0.9rem 1rem;
   background: var(--surface, #fff);
 }
-/* The fields panel is a rail card like every other one now, and its rows
-   stack instead of sitting side by side -- a two-column field row inside a
-   22rem rail wrapped into an unreadable zigzag. */
+/* OS and Platform are ordinary rail rows. Their pairing wrapper must not
+   introduce another layout inside the 22rem rail. */
 .issue-detail-side .fields-panel .field-row {
-  flex-direction: column;
-  align-items: stretch;
-  gap: 0.5rem;
+  display: contents;
 }
 
-/* One alignment for the whole rail: expressed through Field's own
-   orientation prop in FieldsPanel, NOT by styling [data-slot="field-label"] from here.
-   The rail had three alignments -- DescriptionList inline, Select rows
-   stacked, compact rows inline -- so reading down the column the eye had to
-   re-find where a label starts three times. Fixing that by reaching into the
-   design system's class names would be the third instance of the mistake the
-   label and th rules were removed for. */
+/* Match the padding used by the other cards in the detail rail. */
 .issue-detail-side .fields-panel {
   padding: 0.9rem 1rem;
 }
@@ -791,15 +782,11 @@ tbody tr:hover { background: var(--surface-2); }
    quiet way in. The rail's job is to let you take a bug in at a glance, and
    an open text input says "type here" about a field you are not changing. */
 .field-row-compact {
-  display: flex;
   align-items: baseline;
-  gap: 0.5rem;
   margin: 0.45rem 0;
   font-size: 0.85rem;
 }
-.field-row-compact .field-label { flex: 0 0 auto; }
 .field-row-compact .field-value {
-  flex: 1 1 auto;
   min-width: 0;
   color: var(--ink);
   overflow-wrap: anywhere;
@@ -1035,9 +1022,46 @@ tbody tr:hover { background: var(--surface-2); }
 .history-creation > summary:hover { color: var(--accent); }
 .history-creation[open] > summary { margin-block-end: 0.4rem; }
 
-/* The rail's fieldset is a disabling wrapper, not a visual group -- it must
-   not draw the dashed box the app's other fieldsets do. */
-.rail-fields { border: 0; padding: 0; margin: 0; display: contents; }
+/* One alignment for the whole rail: the fieldset owns the label, value and
+   action tracks, and every row inherits them through subgrid. The rail had
+   three alignments -- DescriptionList inline, Select rows stacked, compact
+   rows inline -- so reading down the column the eye had to re-find where a
+   value starts three times. */
+.rail-fields {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  grid-template-columns: [label] 7.5rem [value] minmax(0, 1fr) [action] auto;
+  column-gap: 0.5rem;
+  align-items: center;
+}
+.rail-fields :is(
+  .rail-choice,
+  .field-row-compact,
+  .field-block,
+  .rail-disclosure,
+  [data-slot~="description-list"]
+) {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: subgrid;
+  column-gap: normal;
+}
+.rail-fields [data-slot~="description-list-item"] {
+  column-gap: normal;
+}
+.rail-fields :is(.field-error, .state-hint) {
+  grid-column: 1 / -1;
+}
+/* Match Field's horizontal-child specificity so edit errors also span. */
+.rail-fields .field-block > .field-error {
+  grid-column: 1 / -1;
+}
+.fields-panel > .rail-fields > button {
+  grid-column: 1 / -1;
+  justify-self: start;
+}
 /* The extras wrapper IS the grid, so it must not be display:contents -- that
    would hand the grid back to the page and break the two-across pairing. */
 fieldset.issue-detail-extras { display: grid; }
@@ -1235,15 +1259,12 @@ fieldset.issue-detail-extras { display: grid; }
 .fields-panel .field-row-compact {
   margin-block: 0;
 }
-.fields-panel .field-row {
-  flex-direction: column;
-  gap: 0;
-}
 /* Group joints: a hairline, not a heading on its own line with margin above
    and below. This absorbed the earlier .rail-section near .tabs, which set
    the font/color/border chrome that still applies -- only the margin and
    padding-block-start changed here. */
 .rail-section {
+  grid-column: 1 / -1;
   margin: 1.1rem 0 0.5rem;
   padding-block-start: 0.9rem;
   border-block-start: 1px solid var(--line);
@@ -1261,6 +1282,7 @@ fieldset.issue-detail-extras { display: grid; }
    surviving margin effects; border-radius 0.6rem from the middle definition
    is dropped, since there is no border or padding left for it to round. */
 .status-control {
+  grid-column: 1 / -1;
   background: none;
   border: 0;
   padding: 0;
@@ -1270,21 +1292,18 @@ fieldset.issue-detail-extras { display: grid; }
 
 /* A rail property: label, value, and a way in that stays out of the way. */
 .rail-choice {
-  display: grid;
-  grid-template-columns: 7.5rem minmax(0, 1fr) auto;
   align-items: center;
-  gap: 0.5rem;
   margin-block: 0.4rem;
   min-block-size: 1.9rem;
 }
 .rail-choice-value { min-inline-size: 0; }
-.rail-choice > button { opacity: 0; transition: opacity 0.12s ease; justify-self: end; }
-.rail-choice:hover > button,
-.rail-choice:focus-within > button { opacity: 1; }
-@media (hover: none) { .rail-choice > button { opacity: 1; } }
+.rail-choice > button:where(:last-child) { opacity: 0; transition: opacity 0.12s ease; justify-self: end; }
+.rail-choice:hover > button:where(:last-child),
+.rail-choice:focus-within > button:where(:last-child) { opacity: 1; }
+@media (hover: none) { .rail-choice > button:where(:last-child) { opacity: 1; } }
 /* While editing, the control takes the value column and the row gives it room. */
-.rail-choice.is-editing { grid-template-columns: 7.5rem minmax(0, 1fr); row-gap: 0.35rem; }
-.rail-choice.is-editing > button { grid-column: 2; opacity: 1; justify-self: start; }
+.rail-choice.is-editing { row-gap: 0.35rem; }
+.rail-choice.is-editing > button:where(:last-child) { grid-column: 3; opacity: 1; justify-self: start; }
 
 /* The last two boxes on the page.
    A file entry framed inside a band that no longer frames anything, and the
@@ -1301,34 +1320,41 @@ fieldset.issue-detail-extras { display: grid; }
 .attachment + .attachment { border-block-start: 1px solid var(--line); }
 /* Assignee and Move read as rail rows: label, value, action. */
 .fields-panel .field-block-head {
-  display: grid;
-  grid-template-columns: 7.5rem minmax(0, 1fr) auto;
   align-items: center;
   gap: 0.5rem;
   min-block-size: 1.9rem;
+}
+.fields-panel .field-block-head:not(.is-action) {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: subgrid;
+  column-gap: normal;
 }
 .fields-panel .field-block-head > button { justify-self: end; opacity: 0; transition: opacity 0.12s ease; }
 .fields-panel .field-block:hover .field-block-head > button,
 .fields-panel .field-block:focus-within .field-block-head > button { opacity: 1; }
 @media (hover: none) { .fields-panel .field-block-head > button { opacity: 1; } }
 
-/* An action row in the rail is a single control, not a label with a hidden
-   button beside it. */
-.fields-panel .field-block-head.is-action { display: block; min-block-size: 0; }
+/* An action row has an empty label cell and puts its control in the shared
+   action track. */
+.fields-panel .field-block-head.is-action {
+  grid-column: 3;
+  display: block;
+  min-block-size: 0;
+}
 .fields-panel .field-block-head.is-action > button { opacity: 1; }
+.fields-panel .field-block > .inline-form { grid-column: 1 / -1; }
 
 /* An editor that needs the whole rail: the label sits above it rather than
    beside it, because a people search plus its button will not fit in a
    column sized for "major". */
-.rail-choice.is-editing.is-wide { grid-template-columns: minmax(0, 1fr); }
-.rail-choice.is-editing.is-wide > button { grid-column: 1; }
+.rail-choice.is-editing.is-wide > * { grid-column: 1 / -1; }
 
 /* Rail groups: a line each, until opened.
    The panels inside were built for the main column, so their headings and
    grid-based inner layouts have to give way in a 324px rail. */
-.rail-groups { display: flex; flex-direction: column; }
 .rail-disclosure + .rail-disclosure { border-block-start: 1px solid var(--line); }
-.rail-disclosure-body { padding-block: 0.2rem 0.6rem; }
+.rail-disclosure-body { grid-column: 1 / -1; padding-block: 0.2rem 0.6rem; }
 .rail-disclosure-body section { background: none; border: 0; padding: 0; margin: 0; }
 /* One column. relation-columns is a two-across grid that does not fit here. */
 .rail-disclosure-body .relation-columns { display: block; }

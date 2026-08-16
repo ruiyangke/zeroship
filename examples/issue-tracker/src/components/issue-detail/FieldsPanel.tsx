@@ -26,6 +26,7 @@ import { errorMessage } from "../rpc";
 import type { IssueDetail, ProductDetail } from "../types";
 import { UserPicker } from "../UserPicker";
 import { personName, type PeopleMap } from "./people";
+import { RailSection } from "./RailSection";
 import { StatusControl } from "./StatusControl";
 import { Absent } from "./Absent";
 
@@ -198,6 +199,7 @@ function MoveControl({
           no value to state, so hiding its button until hover left the word
           "Move" sitting alone like a field whose contents had gone missing.
           It is an action, and it is written as one. */}
+      <span aria-hidden="true" />
       <div className="field-block-head is-action">
         <Button variant="gray" size="sm" onClick={() => setOpen((v) => !v)}>
           {/* Short enough to fit the rail. The full sentence ran past the
@@ -260,17 +262,6 @@ function MoveControl({
       ) : null}
     </div>
   );
-}
-
-/**
- * A labelled divider between groups of rail fields.
- *
- * The rail was one uninterrupted column of thirteen controls, so status,
- * classification, people and location all had the same standing and the eye
- * had nowhere to rest. These are the joints.
- */
-function RailSection({ title }: { title: string }) {
-  return <p className="rail-section">{title}</p>;
 }
 
 function GeneralField({

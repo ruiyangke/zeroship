@@ -19,6 +19,7 @@ import { useAppMutation } from "../../lib/queries";
 import { ResolutionBadge } from "../Badges";
 import { errorMessage } from "../rpc";
 import type { IssueDetail } from "../types";
+import { RailSection } from "./RailSection";
 
 type NonDuplicateResolution = Exclude<IssueResolution, "DUPLICATE">;
 const NON_DUPLICATE_RESOLUTIONS = ISSUE_RESOLUTIONS.filter(
@@ -71,9 +72,9 @@ export function StatusControl({ issue }: { issue: IssueDetail["issue"] }) {
 
   return (
     <div className="status-control">
+      <RailSection title="Status" />
       <div className="status-control-row">
         <Field>
-          <Field.Label>Status</Field.Label>
           <Select
             value={issue.status}
             disabled={busy || targets.length === 0}
