@@ -4253,6 +4253,17 @@ fn effective_ops(
 ///
 /// Descending into a leg that will NOT run would refuse a migration on a
 /// reference the server never sees, so the choice is made here once and shared.
+/// DELEGATES to [`crate::render::fold::selected_dialectal_leg`] rather than
+/// repeating the own-then-default rule, because that helper is `pub(crate)` for
+/// exactly this reason - its doc comment asks callers outside the fold to select
+/// legs the SAME way "rather than re-deriving the own-then-default rule and
+/// drifting from it".
+///
+/// The first version of this function re-derived it anyway. The two happened to
+/// agree, so nothing broke and nothing would have flagged it; a later change to
+/// one is what a second copy costs. Validate refusing on one leg while the fold
+/// runs another is a divergence no test in either module would catch, since each
+/// would still be self-consistent.
 fn dialectal_leg<'a>(
     target_dialect: Dialect,
     default: &'a Option<Vec<crate::model::ir::Op>>,
@@ -4260,14 +4271,12 @@ fn dialectal_leg<'a>(
     sqlite: &'a Option<Vec<crate::model::ir::Op>>,
     mysql: &'a Option<Vec<crate::model::ir::Op>>,
 ) -> &'a [crate::model::ir::Op] {
-    let specific = match target_dialect {
-        Dialect::Postgres => pg,
-        Dialect::Sqlite => sqlite,
-        Dialect::Mysql => mysql,
+    let sql_dialect = match target_dialect {
+        Dialect::Postgres => crate::schema::query::SqlDialect::Postgres,
+        Dialect::Sqlite => crate::schema::query::SqlDialect::Sqlite,
+        Dialect::Mysql => crate::schema::query::SqlDialect::Mysql,
     };
-    specific
-        .as_deref()
-        .or(default.as_deref())
+    crate::render::fold::selected_dialectal_leg(sql_dialect, default, pg, sqlite, mysql)
         .unwrap_or_default()
 }
 

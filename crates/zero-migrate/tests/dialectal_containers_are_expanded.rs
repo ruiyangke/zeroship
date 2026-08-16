@@ -190,14 +190,26 @@ fn a_nested_op_on_untouched_state_is_still_allowed() {
 }
 
 #[test]
-fn a_container_nested_in_a_container_is_expanded_too() {
-    // Legs may hold containers, so the expansion recurses. A single-level
-    // implementation passes every test above and misses this.
-    expect_refusal(
-        &format!(
-            r#"{A},{},{ADD_Z}"#,
-            pg_leg(&pg_leg(r#"{"op":"dropTable","table":"a"}"#))
-        ),
-        "the doubly nested drop still removed the table",
+fn a_container_inside_a_container_is_refused_before_any_of_this_matters() {
+    // WRITTEN FIRST as "a container nested in a container is expanded too",
+    // asserting that the recursion in `effective_ops` was exercised. It passed -
+    // and for the wrong reason. A PRE-EXISTING rule refuses a `dialectal` leg
+    // holding another `dialectal` op outright, so the envelope never reaches the
+    // walks at all, and the test proved nothing about the recursion.
+    //
+    // The fold refuses the same shape ("nested dialectal op reached fold"), so
+    // the recursion is unreachable by design rather than merely untested. It
+    // stays because `effective_ops` is a general helper and should not depend on
+    // a rule enforced elsewhere, but no test can claim to exercise it, and this
+    // one now pins the real reason instead of a fiction.
+    let refusal = verdict(&format!(
+        r#"{A},{},{ADD_Z}"#,
+        pg_leg(&pg_leg(r#"{"op":"dropTable","table":"a"}"#))
+    ))
+    .expect_err("a nested container is refused on its own");
+    assert!(
+        refusal.contains("nested dialectal"),
+        "the refusal must be the nested-container rule, not anything this change \
+         added: {refusal}"
     );
 }
