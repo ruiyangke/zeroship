@@ -408,7 +408,10 @@ fn platform_scopes_visible_to_auth(
                     "SELECT pg.grant_name \
                      FROM zeroship.users u \
                      LEFT JOIN zeroship.principal_grants pg ON pg.principal_id = u.id \
-                     WHERE u.id = $1",
+                     WHERE u.id = $1 \
+                       AND u.disabled_at IS NULL \
+                       AND u.anonymized_at IS NULL \
+                       AND (u.locked_until IS NULL OR u.locked_until <= NOW())",
                     &[&principal_id],
                 )
                 .await

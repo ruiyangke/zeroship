@@ -636,6 +636,9 @@ pub async fn mint_platform_token(
              FROM zeroship.users u \
              LEFT JOIN zeroship.principal_grants pg ON pg.principal_id = u.id \
              WHERE u.id = $1 \
+               AND u.disabled_at IS NULL \
+               AND u.anonymized_at IS NULL \
+               AND (u.locked_until IS NULL OR u.locked_until <= NOW()) \
              ORDER BY pg.grant_name",
             &[&principal_id],
         )
