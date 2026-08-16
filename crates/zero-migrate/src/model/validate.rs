@@ -2825,7 +2825,7 @@ fn validate_no_name_is_claimed_twice(
     target_dialect: Dialect,
     ts_locations: &[Option<String>],
 ) -> Result<(), AuthoringError> {
-    use crate::model::ir::Op;
+    use crate::model::ir::{FuncArg, FuncArgMode, Op};
 
     let refuse = |op_index: usize, what: &str, fix: &str| AuthoringError {
         code: CODE_OP_INVALID.to_string(),
@@ -2960,6 +2960,33 @@ fn validate_no_name_is_claimed_twice(
     // All four ops are PostgreSQL-only in this engine ("schema vendor primitives
     // are PostgreSQL-only" and siblings), refused at the support check on other
     // dialects before reaching here, so gating on PostgreSQL costs no coverage.
+    // A FUNCTION IS KEYED BY SIGNATURE, NOT BY NAME. Overloading is the whole
+    // point of the object, so a name-keyed rule would refuse it. Measured, both
+    // directions:
+    //
+    //     CREATE FUNCTION b(int); CREATE FUNCTION b(text)   ACCEPTED (overload)
+    //     CREATE FUNCTION a();    CREATE FUNCTION a()       ERROR: function "a"
+    //                                     already exists with same argument types
+    //     CREATE FUNCTION d(x int); CREATE FUNCTION d(y int)  ERROR (same)
+    //
+    // That last line fixes the key: ARGUMENT NAMES DO NOT PARTICIPATE, only
+    // types. And `OUT` parameters do not participate either, while `INOUT` does -
+    // measured rather than taken from the manual:
+    //
+    //     f(x int); f(x int, OUT y int)     ERROR - same signature
+    //     f(x int); f(x int, INOUT z int)   ACCEPTED - different signature
+    //
+    // The value carries what `CREATE OR REPLACE` is allowed to change, because
+    // `replace` is NOT an unconditional exemption - two more measured refusals:
+    //
+    //     ... r1() RETURNS int; CREATE OR REPLACE r1() RETURNS text
+    //         ERROR: cannot change return type of existing function
+    //     ... r2(x int); CREATE OR REPLACE r2(y int)
+    //         ERROR: cannot change name of input parameter "x"
+    #[allow(clippy::type_complexity)]
+    let mut functions: BTreeMap<(Option<&str>, &str, Vec<String>), (&str, Vec<Option<&str>>)> =
+        BTreeMap::new();
+
     let mut schemas: BTreeSet<&str> = BTreeSet::new();
     let mut extensions: BTreeSet<&str> = BTreeSet::new();
     let mut roles: BTreeSet<&str> = BTreeSet::new();
@@ -3476,6 +3503,103 @@ fn validate_no_name_is_claimed_twice(
             Op::DropRole { name, .. } if track_type_namespace => {
                 roles.remove(name.as_str());
             }
+            Op::CreateFunction {
+                name,
+                schema,
+                args,
+                returns,
+                replace,
+                ..
+            } if track_type_namespace => {
+                // `OUT` carries no signature weight; `IN` (the default) and
+                // `INOUT` both do.
+                let signature: Vec<&FuncArg> = args
+                    .iter()
+                    .flatten()
+                    .filter(|a| !matches!(a.mode, Some(FuncArgMode::Out)))
+                    .collect();
+                let arg_types: Vec<String> = signature
+                    .iter()
+                    .map(|a| canonical_pg_arg_type(&a.ty))
+                    .collect();
+                let arg_names: Vec<Option<&str>> =
+                    signature.iter().map(|a| a.name.as_deref()).collect();
+                let key = (schema.as_deref(), name.as_str(), arg_types);
+                match functions.get(&key) {
+                    None => {
+                        functions.insert(key, (returns.as_str(), arg_names));
+                    }
+                    Some((live_returns, live_names)) => {
+                        if !replace.unwrap_or(false) {
+                            return Err(refuse(
+                                op_index,
+                                &format!(
+                                    "this createFunction claims the name {name:?} with argument \
+                                     types an earlier operation in this migration already \
+                                     defined, and nothing dropped it in between"
+                                ),
+                                "set replace to redefine the existing function, drop it first, \
+                                 or give this overload different argument types",
+                            ));
+                        }
+                        if *live_returns != returns.as_str() {
+                            return Err(refuse(
+                                op_index,
+                                &format!(
+                                    "this createFunction replaces {name:?} but changes its \
+                                     return type from {live_returns:?} to {returns:?}, and \
+                                     CREATE OR REPLACE cannot change a return type"
+                                ),
+                                "drop the function first, then create it with the new return \
+                                 type",
+                            ));
+                        }
+                        // Only a rename of a NAMED parameter is refused by the
+                        // server. Naming a previously unnamed one was not
+                        // measured, so it is left alone rather than guessed at.
+                        if let Some((live, now)) = live_names
+                            .iter()
+                            .zip(arg_names.iter())
+                            .find(|(live, now)| matches!((live, now), (Some(l), Some(n)) if l != n))
+                        {
+                            return Err(refuse(
+                                op_index,
+                                &format!(
+                                    "this createFunction replaces {name:?} but renames input \
+                                     parameter {:?} to {:?}, and CREATE OR REPLACE cannot \
+                                     change the name of an input parameter",
+                                    live.unwrap_or_default(),
+                                    now.unwrap_or_default()
+                                ),
+                                "drop the function first, or keep the existing parameter name",
+                            ));
+                        }
+                    }
+                }
+            }
+            Op::DropFunction {
+                name,
+                schema,
+                arg_types,
+                ..
+            } if track_type_namespace => {
+                match arg_types {
+                    Some(types) => {
+                        let canonical: Vec<String> =
+                            types.iter().map(|t| canonical_pg_arg_type(t)).collect();
+                        functions.remove(&(schema.as_deref(), name.as_str(), canonical));
+                    }
+                    // No argument types names the sole overload. Releasing EVERY
+                    // overload of the name is the permissive reading, and that is
+                    // the deliberate direction: releasing too much can only
+                    // under-refuse, while keeping an entry the server has dropped
+                    // would refuse a legitimate recreate.
+                    None => {
+                        functions
+                            .retain(|(s, n, _), _| *s != schema.as_deref() || *n != name.as_str());
+                    }
+                }
+            }
             // PER TABLE, like triggers rather than like schemas. The server names
             // the table in its own message - `policy "p" for table "a"` - and one
             // policy name reused across many tables is an ordinary pattern that a
@@ -3514,6 +3638,37 @@ fn validate_no_name_is_claimed_twice(
     }
 
     Ok(())
+}
+
+/// A PostgreSQL argument-type spelling reduced to the form that decides whether
+/// two function signatures collide.
+///
+/// EVERY PAIR FOLDED HERE WAS MEASURED, one `CREATE FUNCTION` per alias against a
+/// live server, and each of the eight raised `function "p" already exists with
+/// same argument types`. Three near-neighbours were measured NOT to collide and
+/// are deliberately left apart, because folding them would refuse a real
+/// overload: `int`/`bigint`, `varchar`/`text`, and `timestamptz`/`timestamp`.
+///
+/// AN UNRECOGNISED SPELLING FALLS THROUGH TO ITSELF, and that direction is
+/// chosen. A missing alias means two colliding signatures are ACCEPTED here and
+/// refused by the server - the same under-refusal that existed before this
+/// function - whereas a wrong alias would refuse a migration the server runs.
+/// `varchar(255)` versus `varchar` is a known instance: length is not part of a
+/// PG signature, but it is not folded here because it was not measured.
+fn canonical_pg_arg_type(raw: &str) -> String {
+    let lowered = raw.trim().to_ascii_lowercase();
+    let collapsed = lowered.split_whitespace().collect::<Vec<_>>().join(" ");
+    match collapsed.as_str() {
+        "int" | "integer" | "int4" => "int4".to_string(),
+        "bigint" | "int8" => "int8".to_string(),
+        "smallint" | "int2" => "int2".to_string(),
+        "bool" | "boolean" => "bool".to_string(),
+        "varchar" | "character varying" => "varchar".to_string(),
+        "decimal" | "numeric" => "numeric".to_string(),
+        "float8" | "double precision" => "float8".to_string(),
+        "timestamptz" | "timestamp with time zone" => "timestamptz".to_string(),
+        _ => collapsed,
+    }
 }
 
 /// Every column an op names inside an EXPRESSION, attributed to the op's target
