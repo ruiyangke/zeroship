@@ -1,6 +1,7 @@
 //! Mechanism-independent service identity types.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::OnceLock;
 
 use serde_json::Value;
@@ -109,11 +110,25 @@ impl ServiceIdentity {
 /// This is the mechanism-fat input. It can represent an absent assertion so
 /// transports do not have to invent one. Only [`verify_identity`] can convert
 /// it into the presence-proven input accepted by verifier implementations.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub struct PeerCredentials<'a> {
     bearer_assertion: Option<&'a str>,
     tls_peer: Option<TlsPeerInfo<'a>>,
     expected_audience: &'a str,
+}
+
+impl fmt::Debug for PeerCredentials<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PeerCredentials")
+            .field(
+                "bearer_assertion",
+                &self.bearer_assertion.map(|_| "[REDACTED]"),
+            )
+            .field("tls_peer", &self.tls_peer)
+            .field("expected_audience", &self.expected_audience)
+            .finish()
+    }
 }
 
 impl<'a> PeerCredentials<'a> {
@@ -135,9 +150,18 @@ impl<'a> PeerCredentials<'a> {
 /// Peer certificate observations supplied by a TLS transport.
 ///
 /// This is only a transport carrier. It is not an mTLS verifier or adapter.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub struct TlsPeerInfo<'a> {
     certificate_chain_der: &'a [&'a [u8]],
+}
+
+impl fmt::Debug for TlsPeerInfo<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TlsPeerInfo")
+            .field("certificate_count", &self.certificate_chain_der.len())
+            .finish()
+    }
 }
 
 impl<'a> TlsPeerInfo<'a> {
@@ -160,11 +184,22 @@ impl<'a> TlsPeerInfo<'a> {
 ///
 /// Its state is private and it has no public constructor. The bearer assertion
 /// is non-optional, so an implementation can never receive no credential.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub struct PresentedCredentials<'a> {
     bearer_assertion: &'a str,
     tls_peer: Option<TlsPeerInfo<'a>>,
     expected_audience: &'a str,
+}
+
+impl fmt::Debug for PresentedCredentials<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PresentedCredentials")
+            .field("bearer_assertion", &"[REDACTED]")
+            .field("tls_peer", &self.tls_peer)
+            .field("expected_audience", &self.expected_audience)
+            .finish()
+    }
 }
 
 impl PresentedCredentials<'_> {
