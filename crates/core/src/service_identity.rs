@@ -203,10 +203,10 @@ impl fmt::Debug for PresentedCredentials<'_> {
 }
 
 impl PresentedCredentials<'_> {
-    /// Return the non-empty bearer assertion observed by the transport, if any.
+    /// Return the non-empty bearer assertion observed by the transport.
     #[must_use]
-    pub fn bearer_assertion(&self) -> Option<&str> {
-        Some(self.bearer_assertion)
+    pub fn bearer_assertion(&self) -> &str {
+        self.bearer_assertion
     }
 
     /// Return the TLS peer observation supplied by the transport, if any.
