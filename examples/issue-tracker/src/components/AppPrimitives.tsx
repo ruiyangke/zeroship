@@ -55,3 +55,25 @@ export function InlineForm({
     </div>
   );
 }
+
+export function Page({
+  children,
+  className = "",
+}: {
+  children: ReactNode;
+  /** Locator hooks and true page variants only; layout lives in this component. */
+  className?: string;
+}) {
+  return (
+    <div
+      className={`page transition-[opacity,transform] duration-[250ms] ease-out starting:translate-y-1 starting:opacity-0 [&>*+*]:mt-4 [&>h1]:mb-1 [&_[data-slot~="page-header"]]:mb-1 ${className}`}
+    >
+      {children}
+    </div>
+  );
+}
+
+/** Fixed-width slot for selects that share a wrapping filter row. */
+export function FilterControl({ children }: { children: ReactNode }) {
+  return <div className="w-44 flex-none">{children}</div>;
+}

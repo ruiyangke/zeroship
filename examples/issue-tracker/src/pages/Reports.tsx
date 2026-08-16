@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Cluster, Field, NumberField, PageHeader, Progress, Select, StatCard } from "@zeroship/ui";
+import { useState, type ReactNode } from "react";
+import { Badge, Cluster, Field, NumberField, PageHeader, Progress, Select, StatCard } from "@zeroship/ui";
 import {
   useProducts,
   useReportByAssignee,
@@ -9,24 +9,98 @@ import {
   useReportTrend,
 } from "../lib/queries";
 import { AsyncSection } from "../components/StateViews";
+import { FilterControl, Hint, InlineForm, Page } from "../components/AppPrimitives";
+
+function ReportSection({ title, children }: { title: ReactNode; children: ReactNode }) {
+  return (
+    <section className="report-section mb-5 rounded-lg border border-line bg-surface p-4">
+      <h2 className="mb-2">{title}</h2>
+      {children}
+    </section>
+  );
+}
+
+function ReportPair({ children }: { children: ReactNode }) {
+  return (
+    <div className="grid grid-cols-1 items-start gap-5 min-[1101px]:grid-cols-2 [&>*]:min-w-0">
+      {children}
+    </div>
+  );
+}
+
+function CountBar({ label, value, max }: { label: string; value: number; max: number }) {
+  return (
+    <li className="grid grid-cols-[90px_1fr_32px] items-center gap-2 text-sm">
+      <span className="text-ink-secondary capitalize">{label}</span>
+      <Progress value={value} max={max} aria-label={`${label}: ${value}`} />
+      <span className="text-right text-ink-secondary tabular-nums">{value}</span>
+    </li>
+  );
+}
 
 function CountBars({ counts }: { counts: Record<string, number> }) {
   const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
   const max = Math.max(1, ...entries.map(([, v]) => v));
-  if (entries.length === 0) return <p className="state-hint small">Nothing open.</p>;
+  if (entries.length === 0) return <Hint>Nothing open.</Hint>;
   return (
-    <ul className="bar-chart">
+    <ul className="m-0 flex list-none flex-col gap-2 p-0">
       {/* A real Progress rather than two nested spans faking a track and a
           fill with an inline width percentage. It carries the value, max and
           role, so the bar is readable by something other than an eye. */}
       {entries.map(([label, value]) => (
-        <li key={label}>
-          <span className="bar-label">{label}</span>
-          <Progress value={value} max={max} aria-label={`${label}: ${value}`} />
-          <span className="bar-value">{value}</span>
-        </li>
+        <CountBar key={label} label={label} value={value} max={max} />
       ))}
     </ul>
+  );
+}
+
+function CountBreakdown({ title, counts }: { title: string; counts: Record<string, number> }) {
+  return (
+    <div>
+      <h3 className="mb-2 text-ink-secondary">{title}</h3>
+      <CountBars counts={counts} />
+    </div>
+  );
+}
+
+type CountReportRow = {
+  key: string | number;
+  label: ReactNode;
+  count: number;
+};
+
+function CountReportTable({
+  labelHeading,
+  rows,
+}: {
+  labelHeading: string;
+  rows: readonly CountReportRow[];
+}) {
+  return (
+    <table className="w-full border-collapse text-base">
+      <thead>
+        <tr>
+          <th className="border-b border-line bg-surface-sunken px-2 py-2 text-left text-xs font-semibold uppercase tracking-[0.04em] text-ink-muted whitespace-nowrap">
+            {labelHeading}
+          </th>
+          <th className="w-20 border-b border-line bg-surface-sunken px-2 py-2 text-right text-xs font-semibold uppercase tracking-[0.04em] text-ink-muted whitespace-nowrap tabular-nums">
+            Open
+          </th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((row) => (
+          <tr key={row.key} className="hover:bg-surface-sunken">
+            <td className="border-b border-line px-2 py-2 text-left whitespace-nowrap">
+              {row.label}
+            </td>
+            <td className="w-20 border-b border-line px-2 py-2 text-right whitespace-nowrap tabular-nums">
+              {row.count}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }
 
@@ -47,8 +121,7 @@ function SummarySection({ productId }: { productId: string }) {
   return (
     <AsyncSection query={summaryQ} loadingLabel="Loading summary...">
       {(summary) => (
-        <section className="report-section">
-          <h2>Summary</h2>
+        <ReportSection title="Summary">
           {/* StatCards rather than hand-rolled stat divs. Three of them: the
               closed count was derivable from the other two and a reader should
               not have to do the subtraction to answer "how are we doing". */}
@@ -57,11 +130,8 @@ function SummarySection({ productId }: { productId: string }) {
             <StatCard label="Open" value={summary.open} />
             <StatCard label="Closed" value={summary.total - summary.open} />
           </Cluster>
-          <div className="report-grid">
-            <div>
-              <h3>By status</h3>
-              <CountBars counts={summary.byStatus} />
-            </div>
+          <div className="mt-2 grid grid-cols-1 gap-5 min-[901px]:grid-cols-2 min-[1101px]:grid-cols-4">
+            <CountBreakdown title="By status" counts={summary.byStatus} />
             {/* Kind sits BESIDE severity, not folded into it. While a feature
                 request was `severity: enhancement`, "by severity" answered two
                 questions at once and neither cleanly -- the enhancement bar
@@ -69,20 +139,11 @@ function SummarySection({ productId }: { productId: string }) {
                 defect count wearing a general label. `reports.summary` split
                 them; this report kept reading three of the four breakdowns, so
                 it was silently wrong by omission about what the open work IS. */}
-            <div>
-              <h3>By kind</h3>
-              <CountBars counts={summary.byKind} />
-            </div>
-            <div>
-              <h3>By severity</h3>
-              <CountBars counts={summary.bySeverity} />
-            </div>
-            <div>
-              <h3>By priority</h3>
-              <CountBars counts={summary.byPriority} />
-            </div>
+            <CountBreakdown title="By kind" counts={summary.byKind} />
+            <CountBreakdown title="By severity" counts={summary.bySeverity} />
+            <CountBreakdown title="By priority" counts={summary.byPriority} />
           </div>
-        </section>
+        </ReportSection>
       )}
     </AsyncSection>
   );
@@ -135,25 +196,16 @@ function ByComponentSection({
       emptyTitle="No open issues in any component."
     >
       {(rows) => (
-        <section className="report-section">
-          <h2>By component</h2>
-          <table className="report-table">
-            <thead>
-              <tr>
-                <th>Component</th>
-                <th>Open</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row, i) => (
-                <tr key={row.component?.id ?? i}>
-                  <td>{componentLabel(row.component, rows, productNames)}</td>
-                  <td>{row.count}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </section>
+        <ReportSection title="By component">
+          <CountReportTable
+            labelHeading="Component"
+            rows={rows.map((row, index) => ({
+              key: row.component?.id ?? index,
+              label: componentLabel(row.component, rows, productNames),
+              count: row.count,
+            }))}
+          />
+        </ReportSection>
       )}
     </AsyncSection>
   );
@@ -169,27 +221,43 @@ function ByAssigneeSection({ productId }: { productId: string }) {
       emptyTitle="No open issues assigned to anyone."
     >
       {(rows) => (
-        <section className="report-section">
-          <h2>By assignee</h2>
-          <table className="report-table">
-            <thead>
-              <tr>
-                <th>Assignee</th>
-                <th>Open</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row, i) => (
-                <tr key={row.assignee?.id ?? i}>
-                  <td>{row.assignee?.name ?? "Unassigned"}</td>
-                  <td>{row.count}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </section>
+        <ReportSection title="By assignee">
+          <CountReportTable
+            labelHeading="Assignee"
+            rows={rows.map((row, index) => ({
+              key: row.assignee?.id ?? index,
+              label: row.assignee?.name ?? "Unassigned",
+              count: row.count,
+            }))}
+          />
+        </ReportSection>
       )}
     </AsyncSection>
+  );
+}
+
+type TrendKind = "created" | "resolved";
+type TrendRow = { date: string; created: number; resolved: number };
+
+function TrendBar({ value, max, kind }: { value: number; max: number; kind: TrendKind }) {
+  return (
+    <span
+      className={`min-h-px flex-1 rounded-t-sm ${
+        kind === "created" ? "bg-info" : "bg-accent-strong"
+      }`}
+      style={{ height: `${(value / max) * 100}%` }}
+    />
+  );
+}
+
+function TrendDay({ row, max }: { row: TrendRow; max: number }) {
+  return (
+    <div className="flex h-full flex-1 items-end" title={row.date}>
+      <div className="flex h-full w-full items-end gap-[1px]">
+        <TrendBar value={row.created} max={max} kind="created" />
+        <TrendBar value={row.resolved} max={max} kind="resolved" />
+      </div>
+    </div>
   );
 }
 
@@ -205,29 +273,17 @@ function TrendSection({ productId, days }: { productId: string; days: number }) 
       {(rows) => {
         const max = Math.max(1, ...rows.flatMap((r) => [r.created, r.resolved]));
         return (
-          <section className="report-section">
-            <h2>Trend ({days}d)</h2>
-            <div className="trend-chart">
+          <ReportSection title={`Trend (${days}d)`}>
+            <div className="my-2 flex h-[90px] items-end gap-[2px]">
               {rows.map((row) => (
-                <div key={row.date} className="trend-day" title={row.date}>
-                  <div className="trend-bars">
-                    <span
-                      className="trend-bar created"
-                      style={{ height: `${(row.created / max) * 100}%` }}
-                    />
-                    <span
-                      className="trend-bar resolved"
-                      style={{ height: `${(row.resolved / max) * 100}%` }}
-                    />
-                  </div>
-                </div>
+                <TrendDay key={row.date} row={row} max={max} />
               ))}
             </div>
-            <div className="trend-legend">
-              <span className="chip created">created</span>
-              <span className="chip resolved">resolved</span>
+            <div className="flex gap-2">
+              <Badge intent="info" variant="outline" size="sm">created</Badge>
+              <Badge intent="success" variant="outline" size="sm">resolved</Badge>
             </div>
-          </section>
+          </ReportSection>
         );
       }}
     </AsyncSection>
@@ -246,13 +302,11 @@ function TimeToResolveSection({ productId, days }: { productId: string; days: nu
     <AsyncSection query={timeToResolveQ} loadingLabel="Loading resolution time...">
       {(data) =>
         data.resolvedCount === 0 ? (
-          <section className="report-section">
-            <h2>Time to resolve</h2>
-            <p className="state-hint small">No issues resolved in this window.</p>
-          </section>
+          <ReportSection title="Time to resolve">
+            <Hint>No issues resolved in this window.</Hint>
+          </ReportSection>
         ) : (
-          <section className="report-section">
-            <h2>Time to resolve ({days}d)</h2>
+          <ReportSection title={`Time to resolve (${days}d)`}>
             {/* StatCards, like the summary above. These were the last three
                 hand-rolled `.stat` divs in the app: same three numbers, same
                 row, drawn by a second private copy of the treatment the
@@ -264,7 +318,7 @@ function TimeToResolveSection({ productId, days }: { productId: string; days: nu
               <StatCard label="Average" value={humanMs(data.averageMs ?? 0)} />
               <StatCard label="Median" value={humanMs(data.medianMs ?? 0)} />
             </Cluster>
-          </section>
+          </ReportSection>
         )
       }
     </AsyncSection>
@@ -279,7 +333,7 @@ export function ReportsPage() {
   const productNames = Object.fromEntries(products.map((p) => [p.id, p.name]));
 
   return (
-    <div className="page">
+    <Page>
       <PageHeader>
         <PageHeader.Title>Reports</PageHeader.Title>
       </PageHeader>
@@ -287,25 +341,26 @@ export function ReportsPage() {
           aria-label while "Window (days)" beside it showed a visible one, so
           the bar had one labelled control and one bare box whose meaning you
           inferred from its placeholder. */}
-      <div className="filter-bar report-filters">
-        <Field className="report-filter--product">
+      <InlineForm>
+        <Field className="flex-none">
           <Field.Label>Product</Field.Label>
-          <Select
-          value={productId}
-          onValueChange={(next) => setProductId(next ?? "")}
-          placeholder="All products"
-          aria-label="Product"
-          className="filter-select"
-          renderValue={(id) => products.find((p) => p.id === id)?.name ?? id}
-        >
-          {products.map((p) => (
-            <Select.Item key={p.id} value={p.id}>
-              {p.name}
-            </Select.Item>
-          ))}
-          </Select>
+          <FilterControl>
+            <Select
+              value={productId}
+              onValueChange={(next) => setProductId(next ?? "")}
+              placeholder="All products"
+              aria-label="Product"
+              renderValue={(id) => products.find((p) => p.id === id)?.name ?? id}
+            >
+              {products.map((p) => (
+                <Select.Item key={p.id} value={p.id}>
+                  {p.name}
+                </Select.Item>
+              ))}
+            </Select>
+          </FilterControl>
         </Field>
-        <Field className="report-filter--window">
+        <Field className="flex-none">
           <Field.Label>Window (days)</Field.Label>
           <NumberField
             min={1}
@@ -314,7 +369,7 @@ export function ReportsPage() {
             onValueChange={(next) => setDays(Math.min(365, Math.max(1, next ?? 30)))}
           />
         </Field>
-      </div>
+      </InlineForm>
       <SummarySection productId={productId} />
       {/* Paired across the page rather than stacked down it. Every one of these
           four is a narrow thing -- a two-column table, or three numbers -- and
@@ -322,14 +377,14 @@ export function ReportsPage() {
           later reports two screens down. The sidebar is gone; the page has the
           width to show them together, and comparing "which component" against
           "which person" side by side is the whole reason both exist. */}
-      <div className="report-pair">
+      <ReportPair>
         <ByComponentSection productId={productId} productNames={productNames} />
         <ByAssigneeSection productId={productId} />
-      </div>
-      <div className="report-pair">
+      </ReportPair>
+      <ReportPair>
         <TrendSection productId={productId} days={days} />
         <TimeToResolveSection productId={productId} days={days} />
-      </div>
-    </div>
+      </ReportPair>
+    </Page>
   );
 }

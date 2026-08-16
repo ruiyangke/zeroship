@@ -263,15 +263,14 @@ a.btn { text-decoration: none; }
 table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
 th, td { text-align: left; padding: 0.55rem 0.7rem; border-bottom: 1px solid var(--line); white-space: nowrap; }
 td[data-col="summary"] { white-space: normal; min-width: 220px; }
-/* Scoped to the app's OWN tables (History's .table-wrap and the Reports
-   panels' .report-table), not every <th> on the page. As a bare element
+/* Scoped to the app's OWN History table, not every <th> on the page. As a bare element
    rule this reached inside @zeroship/ui's DataTable: a sortable column's
    header text sits inside a <button>, and the browser's UA stylesheet
    resets text-transform on buttons, so a SORTABLE header (ID, Status,
    Severity, Priority -- see SERVER_SORTABLE in BugResultsTable.tsx)
    escaped the uppercase, while a NON-sortable one (Resolution, Product,
    Summary) kept it. One header row rendered in two casings. */
-.table-wrap th, .report-table th {
+.table-wrap th {
   color: var(--ink-faint);
   font-weight: 600;
   font-size: 0.72rem;
@@ -479,53 +478,11 @@ tbody tr:hover { background: var(--surface-2); }
 .admin-col ul { list-style: none; margin: 0 0 0.5rem; padding: 0; display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; }
 .admin-col li { display: flex; align-items: center; gap: 0.4rem; justify-content: space-between; }
 
-/* ── reports ─────────────────────────────────────────────────────────── */
-.report-section { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 1rem; margin-bottom: 1.2rem; }
-/* Four breakdowns, not three: `reports.summary` reports byKind alongside
-   byStatus, bySeverity and byPriority. */
-.report-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1.2rem; margin-top: 0.6rem; }
-/* Two narrow reports side by side. Each child is a .report-section carrying
-   its own card chrome and bottom margin, so the pair only has to place them.
-   `align-items: start` keeps a short report short instead of stretching it to
-   match its neighbour. */
-.report-pair {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 1.2rem;
-  align-items: start;
-}
-.report-pair > * { min-inline-size: 0; }
-.bar-chart { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
-.bar-chart li { display: grid; grid-template-columns: 90px 1fr 32px; align-items: center; gap: 0.5rem; font-size: 0.78rem; }
-.bar-label { color: var(--ink-2); text-transform: capitalize; }
-.bar-value { text-align: right; font-variant-numeric: tabular-nums; color: var(--ink-2); }
-.report-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-.report-table th, .report-table td { text-align: left; padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--line); }
-/* The count column takes only what a count needs, and the digits line up.
-   Left-aligned across half the table, "8" and "257" started in the same place
-   and ended in different ones, so a column of counts could not be compared by
-   eye -- which is the only thing anyone does with it. */
-.report-table th:last-child,
-.report-table td:last-child {
-  text-align: right;
-  inline-size: 5rem;
-  font-variant-numeric: tabular-nums;
-}
-.trend-chart { display: flex; align-items: flex-end; gap: 2px; height: 90px; margin: 0.6rem 0; }
-.trend-day { flex: 1; height: 100%; display: flex; align-items: flex-end; }
-.trend-bars { display: flex; gap: 1px; width: 100%; height: 100%; align-items: flex-end; }
-.trend-bar { flex: 1; border-radius: 2px 2px 0 0; min-height: 1px; }
-.trend-bar.created { background: var(--blue); }
-.trend-bar.resolved { background: var(--accent); }
-.trend-legend { display: flex; gap: 0.5rem; }
-
 /* ── responsive ──────────────────────────────────────────────────────── */
 /* 1100px, not 900: the four-across breakdowns and the two paired reports run
    out of room well before a phone. The dashboard's three asides need nothing
    here -- Grid's minColWidth reflows them on its own. */
 @media (max-width: 1100px) {
-  .report-grid { grid-template-columns: repeat(2, 1fr); }
-  .report-pair { grid-template-columns: 1fr; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -737,15 +694,6 @@ tbody tr:hover { background: var(--surface-2); }
 /* The second and last signal: read fades back. */
 .notification-title.is-read { color: var(--ink-faint); }
 .notification-title.is-read a { color: var(--ink-2); }
-
-/* The reports filters are LABELLED alike, and left to size themselves.
-   An earlier version of this pinned them to 14rem and 11rem so they would
-   look symmetrical. NumberField needs room for a decrement button, the value
-   and an increment button: at 11rem the increment button rendered 108px
-   outside its own field, so the "+" was unreachable. The widths differ
-   because the controls differ; that is not the defect. The defect was that
-   one had a visible label and the other did not. */
-.report-filters > * { flex: 0 0 auto; }
 
 /* The filing steps, shown before you are in them. */
 .form-steps {
@@ -974,7 +922,6 @@ tbody tr:hover { background: var(--surface-2); }
    ═══════════════════════════════════════════════════════════════════════ */
 
 @media (max-width: 900px) {
-  .report-grid { grid-template-columns: 1fr; }
 }
 .issue-detail-extras > section > h3 {
   font-size: 0.7rem;
