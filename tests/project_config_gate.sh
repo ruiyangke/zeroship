@@ -269,6 +269,14 @@ else
   fail "operational callers bypass the shared control resolver:$missing_control_resolver"
 fi
 
+GEN_TYPES_ALL="sdks/vite-plugin/scripts/gen-types-all.ts"
+if grep -Fq 'const migrationsDir = resolve(app.root, config.migrations.dir);' \
+  "$GEN_TYPES_ALL"; then
+  pass "gen-types-all preserves an absolute config-rooted migrations path"
+else
+  fail "gen-types-all re-roots the resolved migrations path"
+fi
+
 echo
 echo "== 3. round trip: the two readers agree byte for byte =="
 while IFS='|' read -r fixture ENVSEL label; do
@@ -377,6 +385,48 @@ if [ "$raw_control_ts_rc" != 0 ] && [ "$raw_control_rs_rc" != 0 ]; then
   pass "TypeScript and Rust both reject a raw control character inside a string"
 else
   fail "the readers disagree on a raw string control (ts=$raw_control_ts_rc rs=$raw_control_rs_rc)"
+fi
+
+BARE_CR_FIXTURE="$WORK/bare-cr.jsonc"
+node - "$MINIMAL_FIXTURE" "$BARE_CR_FIXTURE" <<'NODE'
+const fs = require("node:fs");
+const [source, target] = process.argv.slice(2);
+fs.writeFileSync(target, fs.readFileSync(source, "utf8").replaceAll("\n", "\r"));
+NODE
+( cd "$ROOT/sdks/vite-plugin" && "${NODE_RUN[@]}" "$TS_DUMP" "$BARE_CR_FIXTURE" ) \
+  >"$WORK/bare-cr-ts.json" 2>"$WORK/bare-cr-ts.err"
+bare_cr_ts_rc=$?
+( cd "$WORK" && "$BIN" config show "--config=$BARE_CR_FIXTURE" ) \
+  >"$WORK/bare-cr-rs.json" 2>"$WORK/bare-cr-rs.err"
+bare_cr_rs_rc=$?
+if [ "$bare_cr_ts_rc" != 0 ] && [ "$bare_cr_rs_rc" != 0 ]; then
+  pass "TypeScript and Rust both reject bare carriage return line endings"
+else
+  fail "the readers disagree on bare carriage return line endings (ts=$bare_cr_ts_rc rs=$bare_cr_rs_rc)"
+fi
+
+UNPAIRED_FIXTURE="$WORK/unpaired-surrogate.jsonc"
+node - "$MINIMAL_FIXTURE" "$UNPAIRED_FIXTURE" <<'NODE'
+const fs = require("node:fs");
+const [source, target] = process.argv.slice(2);
+const before = fs.readFileSync(source, "utf8");
+const after = before.replace(
+  '"mode": "full",',
+  '"mode": "full", "serverEntry": "src/\\ud800.ts",',
+);
+if (after === before) throw new Error("fixture insertion did not apply");
+fs.writeFileSync(target, after);
+NODE
+( cd "$ROOT/sdks/vite-plugin" && "${NODE_RUN[@]}" "$TS_DUMP" "$UNPAIRED_FIXTURE" ) \
+  >"$WORK/unpaired-ts.json" 2>"$WORK/unpaired-ts.err"
+unpaired_ts_rc=$?
+( cd "$WORK" && "$BIN" config show "--config=$UNPAIRED_FIXTURE" ) \
+  >"$WORK/unpaired-rs.json" 2>"$WORK/unpaired-rs.err"
+unpaired_rs_rc=$?
+if [ "$unpaired_ts_rc" != 0 ] && [ "$unpaired_rs_rc" != 0 ]; then
+  pass "TypeScript and Rust both reject an unpaired surrogate"
+else
+  fail "the readers disagree on an unpaired surrogate (ts=$unpaired_ts_rc rs=$unpaired_rs_rc)"
 fi
 
 # MUTATION A. Remove a cross-tool key from a file that exists. NEITHER reader
@@ -513,6 +563,103 @@ if grep -Fq "\"app\":\"$WRITEBACK_ID\"" "$WORK/writeback-rs.json"; then
   pass "the appended file resolves the control-plane app id"
 else
   fail "the written file did not resolve app=$WRITEBACK_ID"
+fi
+
+echo
+echo "== 3c. external config paths use the config directory =="
+EXTERNAL_RUNNER="$WORK/external-runner"
+EXTERNAL_APP="$EXTERNAL_RUNNER/apps/foo"
+EXTERNAL_BIN="$WORK/external-bin"
+mkdir -p \
+  "$EXTERNAL_RUNNER/dist" \
+  "$EXTERNAL_RUNNER/generated/zeroship" \
+  "$EXTERNAL_APP/dist" \
+  "$EXTERNAL_APP/generated/zeroship" \
+  "$EXTERNAL_BIN"
+printf 'runner deploy body\n' > "$EXTERNAL_RUNNER/dist/app.zship"
+printf 'config deploy body\n' > "$EXTERNAL_APP/dist/app.zship"
+printf '{"source":"runner"}\n' > "$EXTERNAL_RUNNER/generated/zeroship/migrations.ir.json"
+printf '{"source":"config"}\n' > "$EXTERNAL_APP/generated/zeroship/migrations.ir.json"
+cat > "$EXTERNAL_APP/zeroship.jsonc" <<'JSONC'
+{
+  "name": "external-config-probe",
+  "app": "77777777-7777-4777-8777-777777777777",
+  "control": "https://external-config.invalid",
+  "runtime_date": "2026-08-14",
+  "build": { "mode": "full", "dist": "dist", "output": "dist/app.zship" },
+  "migrations": { "dir": "migrations", "out": "generated/zeroship" },
+  "secrets": []
+}
+JSONC
+cat > "$EXTERNAL_BIN/curl" <<'SH'
+#!/bin/sh
+cat > "$ZEROSHIP_CAPTURE_BODY"
+case "$*" in
+  *"/migrations/apply"*)
+    printf '%s\n200\n' '{"applied":[],"skipped":[]}'
+    ;;
+  *)
+    printf '%s\n200\n' '{"deploy_hash":"sha256:external-config-probe"}'
+    ;;
+esac
+SH
+chmod +x "$EXTERNAL_BIN/curl"
+
+for selector in flag environment; do
+  selector_args=()
+  selector_env=()
+  if [ "$selector" = flag ]; then
+    selector_args=("--config=apps/foo/zeroship.jsonc")
+  else
+    selector_env=("ZEROSHIP_CONFIG=apps/foo/zeroship.jsonc")
+  fi
+  external_ok=1
+  (
+    cd "$EXTERNAL_RUNNER" || exit 1
+    env -u ZEROSHIP_CONFIG -u ZEROSHIP_CONTROL_URL \
+      "${selector_env[@]+"${selector_env[@]}"}" \
+      PATH="$EXTERNAL_BIN:$PATH" \
+      ZEROSHIP_CAPTURE_BODY="$WORK/external-$selector-deploy.body" \
+      ZEROSHIP_TOKEN="test-token" \
+      "$BIN" deploy "${selector_args[@]+"${selector_args[@]}"}"
+  ) > "$WORK/external-$selector-deploy.out" 2> "$WORK/external-$selector-deploy.err" \
+    || external_ok=0
+  (
+    cd "$EXTERNAL_RUNNER" || exit 1
+    env -u ZEROSHIP_CONFIG -u ZEROSHIP_CONTROL_URL \
+      "${selector_env[@]+"${selector_env[@]}"}" \
+      PATH="$EXTERNAL_BIN:$PATH" \
+      ZEROSHIP_CAPTURE_BODY="$WORK/external-$selector-migrate.body" \
+      ZEROSHIP_TOKEN="test-token" \
+      "$BIN" migrate "${selector_args[@]+"${selector_args[@]}"}"
+  ) > "$WORK/external-$selector-migrate.out" 2> "$WORK/external-$selector-migrate.err" \
+    || external_ok=0
+  cmp -s "$EXTERNAL_APP/dist/app.zship" "$WORK/external-$selector-deploy.body" \
+    || external_ok=0
+  cmp -s "$EXTERNAL_APP/generated/zeroship/migrations.ir.json" \
+    "$WORK/external-$selector-migrate.body" || external_ok=0
+  if [ "$external_ok" = 1 ]; then
+    pass "$selector selection roots deploy and migrate paths at the config directory"
+  else
+    fail "$selector selection rooted a config path at the command working directory"
+    sed 's/^/       deploy: /' "$WORK/external-$selector-deploy.err" | tail -4
+    sed 's/^/       migrate: /' "$WORK/external-$selector-migrate.err" | tail -4
+  fi
+done
+
+ln -s . "$EXTERNAL_APP/linked-root"
+sed 's/"dist": "dist"/"dist": "linked-root"/' \
+  "$EXTERNAL_APP/zeroship.jsonc" > "$EXTERNAL_APP/unsafe.jsonc"
+if (
+  cd "$EXTERNAL_RUNNER" || exit 1
+  env -u ZEROSHIP_CONFIG "$BIN" config show --config=apps/foo/unsafe.jsonc
+) > "$WORK/external-unsafe.out" 2> "$WORK/external-unsafe.err"; then
+  fail "external config containment was checked at the command working directory"
+elif grep -q "build.dist" "$WORK/external-unsafe.err"; then
+  pass "external config containment is checked at the config directory"
+else
+  fail "external config containment failed without naming build.dist"
+  sed 's/^/       /' "$WORK/external-unsafe.err" | tail -6
 fi
 
 echo

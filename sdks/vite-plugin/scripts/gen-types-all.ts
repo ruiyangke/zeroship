@@ -127,7 +127,7 @@ async function runOne(app: ArtifactApp, check: boolean): Promise<string> {
   // left to protect, and the regex (which would match a comment and miss a
   // spread) goes with it.
   const { config } = readProjectConfig(app.root);
-  const migrationsDir = join(app.root, config.migrations.dir);
+  const migrationsDir = resolve(app.root, config.migrations.dir);
   if (existsSync(migrationsDir) && statSync(migrationsDir).isDirectory()) {
     await genTypesFromMigrations(migrationsDir, app.outDir, { check });
     return "migrations";

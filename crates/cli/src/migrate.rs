@@ -46,9 +46,9 @@ use crate::{
 /// hardcoded `generated/zeroship/migrations.ir.json` while the build wrote
 /// wherever `genTypesOut` said - two spellings of one fact, and the one the CLI
 /// held could not see the one the build used.
-fn resolve_ir_path(args: &[String], cfg: Option<&Resolved>) -> Result<String, String> {
+fn resolve_ir_path(args: &[String], cfg: Option<&Resolved>) -> Result<PathBuf, String> {
     if let Some(p) = positional_path(args) {
-        return Ok(p);
+        return Ok(PathBuf::from(p));
     }
     let Some(cfg) = cfg else {
         return Err(format!(
@@ -57,11 +57,7 @@ fn resolve_ir_path(args: &[String], cfg: Option<&Resolved>) -> Result<String, St
             project_config::CONFIG_FILENAME
         ));
     };
-    let out = cfg.require("migrations.out")?;
-    Ok(PathBuf::from(out)
-        .join(IR_FILENAME)
-        .to_string_lossy()
-        .into_owned())
+    Ok(cfg.require_path("migrations.out")?.join(IR_FILENAME))
 }
 
 /// The filename the build writes inside `migrations.out`.
@@ -124,7 +120,7 @@ pub fn cmd_migrate(args: &[String]) -> Result<(), String> {
         "migrate",
         &[("app", &app), ("control", &control_url)],
     );
-    eprintln!("zeroship migrate: migrations = {input}");
+    eprintln!("zeroship migrate: migrations = {}", input.display());
 
     // A CORRECT config run at the wrong moment is the one failure the
     // provenance line cannot stop. `"protected": true` on an environment is the
@@ -140,14 +136,13 @@ pub fn cmd_migrate(args: &[String]) -> Result<(), String> {
     }
 
     let (app, control_url) = (app.value, control_url.value);
-    let path = PathBuf::from(&input);
-    let body = std::fs::read_to_string(&path).map_err(|e| {
+    let body = std::fs::read_to_string(&input).map_err(|e| {
         format!(
             "failed to read {}: {e}\n\
              This file is written by the build (`pnpm build` / `vite build` with \
              @zeroship/vite-plugin) from the app's `migrations/*.ts`. An app with no \
              migrations has none to apply.",
-            path.display()
+            input.display()
         )
     })?;
 

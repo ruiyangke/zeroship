@@ -176,6 +176,42 @@ describe("locating the file", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  test("an external config roots its relative paths at the config directory", () => {
+    const body = FULL.replace(
+      '"mode": "full"',
+      '"mode": "full", "serverEntry": "src/server.ts"',
+    );
+    const root = scratch({ "apps/foo/zeroship.jsonc": body });
+    const appRoot = join(root, "apps", "foo");
+    try {
+      const { config } = readProjectConfig(root, {
+        configPath: "apps/foo/zeroship.jsonc",
+      });
+      assert.equal(config.build.serverEntry, join(appRoot, "src/server.ts"));
+      assert.equal(config.build.dist, join(appRoot, "dist"));
+      assert.equal(config.build.output, join(appRoot, "dist/app.zship"));
+      assert.equal(config.migrations.dir, join(appRoot, "migrations"));
+      assert.equal(config.migrations.out, join(appRoot, "generated/zeroship"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("external config containment is checked at the config directory", () => {
+    const body = FULL.replace('"dist": "dist"', '"dist": "linked-root"');
+    const root = scratch({ "apps/foo/zeroship.jsonc": body });
+    const appRoot = join(root, "apps", "foo");
+    symlinkSync(".", join(appRoot, "linked-root"));
+    try {
+      assert.throws(
+        () => readProjectConfig(root, { configPath: "apps/foo/zeroship.jsonc" }),
+        /build\.dist.*zeroship\.jsonc/,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("validation", () => {
@@ -261,7 +297,7 @@ describe("validation", () => {
       "dist/app.zship": "old artifact",
     });
     try {
-      assert.equal(readProjectConfig(root).config.build.output, "dist/app.zship");
+      assert.equal(readProjectConfig(root).config.build.output, join(root, "dist/app.zship"));
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -358,6 +394,22 @@ describe("resolution", () => {
 });
 
 describe("the config escape hatch", () => {
+  test("an external config roots a relative build path override before returning it", () => {
+    const root = scratch({ "apps/foo/zeroship.jsonc": FULL });
+    const appRoot = join(root, "apps", "foo");
+    try {
+      const { config } = readProjectConfig(root, {
+        configPath: "apps/foo/zeroship.jsonc",
+        override: (current) => ({
+          build: { ...current.build, dist: "apps/foo" },
+        }),
+      });
+      assert.equal(config.build.dist, join(appRoot, "apps/foo"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("the reader rejects a callback that moves build.dist over the project", () => {
     const root = scratch({ [CONFIG_FILENAME]: FULL });
     try {
@@ -483,6 +535,10 @@ describe("JSONC edge cases the two readers must agree on", () => {
     assert.equal(r.name, "demo-app");
   });
 
+  test("bare carriage return line endings are rejected", () => {
+    assert.throws(() => parsed(FULL.replaceAll("\n", "\r")), /bare carriage return/);
+  });
+
   test("Unicode-escaped keys and values are decoded", () => {
     const body = FULL
       .replace('"name": "demo-app"', '"\\u006eame": "demo-app"')
@@ -493,6 +549,14 @@ describe("JSONC edge cases the two readers must agree on", () => {
     const r = resolveProjectConfig(parsed(body));
     assert.equal(r.name, "demo-app");
     assert.equal(r.build.serverEntry, "caf\u00e9-\ud83d\ude00.ts");
+  });
+
+  test("an unpaired surrogate is rejected", () => {
+    const body = FULL.replace(
+      '"mode": "full"',
+      '"mode": "full", "serverEntry": "src/\\ud800.ts"',
+    );
+    assert.throws(() => parsed(body), /unpaired surrogate/);
   });
 
   test("a leading BOM is rejected", () => {

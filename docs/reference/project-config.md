@@ -14,6 +14,9 @@ It is read by exactly two readers:
   `sdks/vite-plugin/src/project-config/`
 
 Both readers are generated from one JSON Schema, `schema/project-v1.json`.
+They accept JSON comments and trailing commas, plus standard JSON escapes.
+CRLF line endings and valid Unicode surrogate pairs are accepted. A bare
+carriage return or an unpaired surrogate is rejected by both readers.
 
 ## What it is not
 
@@ -66,6 +69,12 @@ readers then diverge on purpose:
 - **the CLI keeps the flag / environment-variable / compiled-fallback chain it
   always had**, so `zeroship deploy ./dist/app.zship --app=... --control=...`
   still works with no file present.
+
+Once a file is selected, its directory is the project root for every relative
+path stored in that file. This is also true for an external `configPath`,
+`--config`, or `ZEROSHIP_CONFIG` file: the command's working directory roots
+the selector, never `build.*` or `migrations.*` inside the selected file.
+Explicit positional paths remain relative to the command's working directory.
 
 ## Key reference
 
@@ -156,7 +165,7 @@ it resolved and where it came from, on stderr, before it acts:
 $ zeroship migrate --env=prod
 zeroship migrate: app = prod-app (from zeroship.jsonc environments.prod)
 zeroship migrate: control = https://control.example (from zeroship.jsonc environments.prod)
-zeroship migrate: migrations = generated/zeroship/migrations.ir.json
+zeroship migrate: migrations = /home/me/app/generated/zeroship/migrations.ir.json
 ```
 
 The source is one of `<flag> flag`, `$ZEROSHIP_CONTROL_URL`, `zeroship.jsonc`,

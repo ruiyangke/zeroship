@@ -145,6 +145,7 @@ fn unsafe_cli_read_defaults_do_not_reach_rust() {
         path: PathBuf::from("zeroship.jsonc"),
         text: String::new(),
         root: Map::new(),
+        project_root: std::env::current_dir().unwrap(),
     };
     let r = empty.resolve(None).unwrap();
     for field in &stripped {
@@ -232,7 +233,7 @@ fn build_dist_cannot_symlink_to_the_project_root() {
     std::os::unix::fs::symlink(".", &linked_root).unwrap();
     let text = FULL.replace("\"dist\": \"dist\"", "\"dist\": \"linked-root\"");
 
-    let err = ProjectConfig::parse_with_root(config_path, text, dir.path())
+    let err = ProjectConfig::parse(config_path, text)
         .expect_err("a symlinked dist containing zeroship.jsonc must not parse");
     assert!(err.contains("build.dist"), "{err}");
     assert!(err.contains("zeroship.jsonc"), "{err}");
@@ -252,7 +253,7 @@ fn build_output_cannot_target_the_project_root_an_ancestor_or_an_existing_source
             &format!("\"output\": {}", serde_json::to_string(output).unwrap()),
         );
         std::fs::write(&config_path, &text).unwrap();
-        let err = ProjectConfig::parse_with_root(config_path.clone(), text, dir.path())
+        let err = ProjectConfig::parse(config_path.clone(), text)
             .expect_err("an output that can overwrite creator data must not parse");
         assert!(err.contains("build.output"), "{err}");
     }
@@ -266,7 +267,7 @@ fn build_output_may_replace_an_existing_generated_artifact() {
     std::fs::create_dir_all(output_path.parent().unwrap()).unwrap();
     std::fs::write(&output_path, "old artifact").unwrap();
 
-    ProjectConfig::parse_with_root(config_path, FULL.to_string(), dir.path())
+    ProjectConfig::parse(config_path, FULL.to_string())
         .expect("an existing generated artifact remains a valid output");
 }
 
@@ -280,7 +281,7 @@ fn migrations_out_cannot_target_the_project_root_or_one_of_its_ancestors() {
             "\"out\": \"generated/zeroship\"",
             &format!("\"out\": {}", serde_json::to_string(out).unwrap()),
         );
-        let err = ProjectConfig::parse_with_root(config_path.clone(), text, dir.path())
+        let err = ProjectConfig::parse(config_path.clone(), text)
             .expect_err("a gen-types directory containing creator files must not parse");
         assert!(err.contains("migrations.out"), "{err}");
     }
@@ -467,6 +468,14 @@ fn crlf_jsonc_parses() {
 }
 
 #[test]
+fn bare_carriage_return_line_endings_are_rejected() {
+    let text = FULL.replace('\n', "\r");
+    let err = ProjectConfig::parse(PathBuf::from("zeroship.jsonc"), text)
+        .expect_err("bare carriage returns must not be parsed differently from TypeScript");
+    assert!(err.contains("bare carriage return"), "{err}");
+}
+
+#[test]
 fn unicode_escaped_keys_and_values_parse() {
     let text = FULL
         .replacen("\"name\": \"demo-app\"", "\"\\u006eame\": \"demo-app\"", 1)
@@ -481,6 +490,18 @@ fn unicode_escaped_keys_and_values_parse() {
         resolved.str("build.serverEntry"),
         Some("caf\u{e9}-\u{1f600}.ts")
     );
+}
+
+#[test]
+fn unpaired_surrogate_is_rejected() {
+    let text = FULL.replacen(
+        "\"mode\": \"full\"",
+        "\"mode\": \"full\", \"serverEntry\": \"src/\\ud800.ts\"",
+        1,
+    );
+    let err = ProjectConfig::parse(PathBuf::from("zeroship.jsonc"), text)
+        .expect_err("an unpaired surrogate is not a Unicode scalar value");
+    assert!(err.contains("unpaired high surrogate"), "{err}");
 }
 
 #[test]
@@ -727,6 +748,7 @@ fn write_app_reparses_before_writing() {
         path: path.clone(),
         text: text.to_string(),
         root: Map::new(),
+        project_root: dir.path().to_path_buf(),
     };
 
     let error = config
