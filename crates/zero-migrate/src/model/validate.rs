@@ -3848,7 +3848,7 @@ fn expression_column_references<'a>(
     op: &'a crate::model::ir::Op,
     target_dialect: Dialect,
 ) -> Vec<(&'a str, String)> {
-    use crate::model::ir::{IrConstraintKind, Op};
+    use crate::model::ir::{IrConstraintKind, Op, SelectItem, ViewQuery};
     use crate::render::dml::expr_column_refs;
 
     let sql_dialect = match target_dialect {
@@ -3925,12 +3925,72 @@ fn expression_column_references<'a>(
             .chain(filter.as_ref())
             .flat_map(|expr| refs(table, expr))
             .collect(),
+        // A POLICY PREDICATE AND A TRIGGER CONDITION read columns of their own
+        // table, exactly as a CHECK constraint does. Measured live, each after
+        // `ALTER TABLE a DROP COLUMN v`:
+        //     CREATE POLICY p ON a FOR ALL USING (v > 0)      column "v" does not exist
+        //     CREATE TRIGGER … WHEN (NEW.v > 0)               column new.v does not exist
+        Op::CreatePolicy {
+            table,
+            using,
+            with_check,
+            ..
+        } => refs(table, using)
+            .into_iter()
+            .chain(
+                with_check
+                    .as_ref()
+                    .map(|expr| refs(table, expr))
+                    .unwrap_or_default(),
+            )
+            .collect(),
+        Op::CreateTrigger {
+            table,
+            when: Some(when),
+            ..
+        } => refs(table, when),
+        // A VIEW BODY READS ITS SOURCE TABLE, and this arm is deliberately narrow.
+        // An unqualified column in a joined SELECT could belong to EITHER
+        // relation, so attributing it to `from` would refuse a view whose column
+        // lives on the joined table. Only a join-free body attributes cleanly,
+        // and a qualified reference must name the FROM relation to count.
+        //
+        // Measured: `dropColumn v` then `CREATE VIEW vw AS SELECT v FROM a` is
+        // `column "v" does not exist`.
+        Op::CreateView {
+            query: ViewQuery::Structured { select },
+            ..
+        } if select.joins.is_empty() => {
+            let from = select.from.name.as_str();
+            let qualifies =
+                |qualifier: &Option<String>| qualifier.as_deref().is_none_or(|name| name == from);
+            select
+                .projection
+                .iter()
+                .flat_map(|item| match item {
+                    SelectItem::ColRef { table, name, .. } if qualifies(table) => {
+                        vec![(from, name.clone())]
+                    }
+                    SelectItem::Expr { expr, .. } => refs(from, expr),
+                    SelectItem::ColRef { .. } => Vec::new(),
+                })
+                .chain(
+                    select
+                        .r#where
+                        .as_ref()
+                        .map(|expr| refs(from, expr))
+                        .unwrap_or_default(),
+                )
+                .collect()
+        }
         _ => Vec::new(),
     }
 }
 
 fn plain_column_references<'a>(op: &'a crate::model::ir::Op) -> Vec<(&'a str, &'a str)> {
-    use crate::model::ir::{IndexElement, IrConstraintKind, Op};
+    use crate::model::ir::{
+        AlterPrimaryKeyAction, CommentTarget, IndexElement, IrConstraintKind, Op,
+    };
 
     let pair = |table: &'a str, column: &'a str| vec![(table, column)];
     match op {
@@ -3941,6 +4001,45 @@ fn plain_column_references<'a>(op: &'a crate::model::ir::Op) -> Vec<(&'a str, &'
         | Op::DropColumnDefault { table, column, .. }
         | Op::SetColumnType { table, column, .. } => pair(table, column),
         Op::RenameColumn { table, from, .. } => pair(table, from),
+        // A COMMENT NAMES ITS COLUMN as a plain identifier, and an
+        // alterPrimaryKey names a whole tuple of them - both measured live after
+        // the column was dropped:
+        //     COMMENT ON COLUMN a.v IS 'x'    column "v" of relation "a" does not exist
+        //     ALTER TABLE a ADD PRIMARY KEY (v)   column "v" of relation "a" does not exist
+        //
+        // The `expectedColumns` preconditions count too: they are emitted as a
+        // live-key check naming those columns, so a dropped one fails there just
+        // the same.
+        Op::Comment {
+            target: CommentTarget::Column { table, name, .. },
+            ..
+        } => pair(table, name),
+        Op::AlterPrimaryKey { table, action, .. } => {
+            let groups: Vec<&Vec<String>> = match action {
+                AlterPrimaryKeyAction::Add { columns } => vec![columns],
+                AlterPrimaryKeyAction::Replace {
+                    expected_columns,
+                    columns,
+                    drop_identity_from,
+                } => {
+                    let mut groups = vec![expected_columns, columns];
+                    groups.extend(drop_identity_from.as_ref());
+                    groups
+                }
+                AlterPrimaryKeyAction::Drop {
+                    expected_columns,
+                    drop_identity_from,
+                } => {
+                    let mut groups = vec![expected_columns];
+                    groups.extend(drop_identity_from.as_ref());
+                    groups
+                }
+            };
+            groups
+                .into_iter()
+                .flat_map(|group| group.iter().map(|column| (table.as_str(), column.as_str())))
+                .collect()
+        }
         // An update's written columns and an insert's column list are plain
         // identifiers on the target table, like the backfill keys below.
         Op::Update { table, set, .. } => set
