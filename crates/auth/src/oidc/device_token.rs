@@ -121,7 +121,11 @@ pub async fn reconcile_platform_cli_client(
                 refresh_allowed = FALSE, \
                 token_endpoint_auth_method = 'none', \
                 brokered = FALSE, \
-                backchannel_logout_uri = NULL",
+                backchannel_logout_uri = NULL \
+             WHERE NOT EXISTS ( \
+                SELECT 1 FROM zeroship.app_oauth_clients aoc \
+                WHERE aoc.client_id = $1 \
+             )",
             &[
                 &PLATFORM_CLI_CLIENT_ID,
                 &PLATFORM_CLI_CLIENT_NAME,
