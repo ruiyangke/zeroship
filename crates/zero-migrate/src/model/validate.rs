@@ -2990,6 +2990,10 @@ fn validate_no_name_is_claimed_twice(
             } => {
                 let from_key: Key = (schema.as_deref(), table.as_str());
                 let to_key: Key = (schema.as_deref(), to.as_str());
+                // A rename carries the table's composite row type along, so the
+                // target must be free on the TYPE side too. Measured: renaming
+                // onto a live enum is `type "e" already exists`.
+                type_name_must_be_free!(to_key, op_index, "renameTable", to);
                 if let Some(held_by) = relations.get(&to_key) {
                     return Err(refuse(
                         op_index,
