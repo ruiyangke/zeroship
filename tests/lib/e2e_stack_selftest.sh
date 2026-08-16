@@ -1,4 +1,14 @@
 #!/usr/bin/env bash
+
+# Test-only PATH shim: when this file is reached through a symlink named `env`,
+# record that real process's argv before forwarding to the system env binary.
+# The delivery regression below uses this to catch a secret passed as an argv
+# assignment rather than merely inspecting the final consumer after exec.
+if [ "${0##*/}" = "env" ] && [ -n "${MINT_ARGV_CAPTURE:-}" ]; then
+  tr '\0' '\n' < "/proc/$$/cmdline" >> "$MINT_ARGV_CAPTURE"
+  exec /usr/bin/env "$@"
+fi
+
 # ---------------------------------------------------------------------------
 # Self-test for the run-accounting helpers in tests/lib/e2e_stack.sh.
 #
@@ -27,9 +37,9 @@ trap 'rm -rf "$WORK"' EXIT
 check() { # check <label> <expected> <actual>
   T=$((T+1))
   if [ "$2" = "$3" ]; then
-    echo "  ok   $1 (exit $3)"
+    echo "  ok   $1"
   else
-    echo "  FAIL $1: expected exit $2, got $3"
+    echo "  FAIL $1: values differed"
     BAD=$((BAD+1))
   fi
 }
@@ -78,23 +88,51 @@ check "e2e_skipped increments SKIPPED" 1 "$SKIPPED"
 
 # 7. The platform mint credential is shell-local after provisioning. This
 # drives real child environments: an ordinary child gets no key, while the
-# explicit auth/control launcher gets the exact generated material. Then
-# deliberately export it and prove the non-consumer wrapper still scrubs it.
+# explicit auth/control launcher gets the exact supplied material. Its PATH
+# shim and the consumer both append their real /proc cmdlines, which must not
+# contain that material. Then deliberately export it and prove the
+# non-consumer wrapper still scrubs it.
+MINT_SENTINEL="mint-delivery-sentinel-0123456789abcdef"
+ZEROSHIP_AUTH_PLATFORM_MINT_KEY="$MINT_SENTINEL"
+export ZEROSHIP_AUTH_PLATFORM_MINT_KEY
 e2e_export_runtime_secrets "$WORK" >/dev/null || {
   echo "  FAIL runtime secret provisioning failed"
   exit 1
 }
-MINT_SENTINEL="$ZEROSHIP_AUTH_PLATFORM_MINT_KEY"
+mkdir -p "$WORK/probe-bin"
+ln -s "$ROOT/tests/lib/e2e_stack_selftest.sh" "$WORK/probe-bin/env"
+MINT_ARGV_CAPTURE="$WORK/mint-child.argv"
+export MINT_ARGV_CAPTURE
+hash -r
 PLAIN_CHILD_SEES_MINT="$(sh -c \
   'printf %s "${ZEROSHIP_AUTH_PLATFORM_MINT_KEY-unset}"')"
-CONTROL_SEES_MINT="$(e2e_with_platform_mint_key sh -c \
-  'printf %s "${ZEROSHIP_AUTH_PLATFORM_MINT_KEY-unset}"')"
+CONTROL_SEES_MINT="$(PATH="$WORK/probe-bin:$PATH" \
+  e2e_with_platform_mint_key bash -c \
+  'tr '\''\0'\'' '\''\n'\'' < "/proc/$$/cmdline" >> "$MINT_ARGV_CAPTURE"; printf %s "${ZEROSHIP_AUTH_PLATFORM_MINT_KEY-unset}"')"
 export ZEROSHIP_AUTH_PLATFORM_MINT_KEY
 WORKER_SEES_MINT="$(e2e_without_platform_mint_key sh -c \
   'printf %s "${ZEROSHIP_AUTH_PLATFORM_MINT_KEY-unset}"')"
-check "ordinary child inherits no platform mint key" "unset" "$PLAIN_CHILD_SEES_MINT"
-check "worker child receives no platform mint key" "unset" "$WORKER_SEES_MINT"
-check "auth/control child receives the platform mint key" "$MINT_SENTINEL" "$CONTROL_SEES_MINT"
+DELIVERY_ASSERTIONS="$WORK/mint-delivery.assertions"
+check "ordinary child inherits no platform mint key" "unset" "$PLAIN_CHILD_SEES_MINT" >> "$DELIVERY_ASSERTIONS"
+check "worker child receives no platform mint key" "unset" "$WORKER_SEES_MINT" >> "$DELIVERY_ASSERTIONS"
+check "auth/control child receives the platform mint key" "$MINT_SENTINEL" "$CONTROL_SEES_MINT" >> "$DELIVERY_ASSERTIONS"
+
+T=$((T+1))
+if grep -qF "$MINT_SENTINEL" "$MINT_ARGV_CAPTURE"; then
+  echo "  FAIL platform mint key appeared in a child argv/cmdline"
+  BAD=$((BAD+1))
+else
+  echo "  ok   platform mint key stayed out of child argv/cmdline"
+fi
+
+T=$((T+1))
+if grep -qF "$MINT_SENTINEL" "$DELIVERY_ASSERTIONS"; then
+  echo "  FAIL platform mint assertion output exposed the supplied sentinel"
+  BAD=$((BAD+1))
+else
+  cat "$DELIVERY_ASSERTIONS"
+  echo "  ok   platform mint assertion output redacts the supplied sentinel"
+fi
 
 echo ""
 echo "  $T checks, $BAD failed"

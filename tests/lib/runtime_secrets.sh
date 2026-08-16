@@ -62,13 +62,14 @@ _e2e_keep_or_generate_hex_key() {
 # Run an auth/control command with the dedicated mint credential. The key is
 # deliberately not exported by `e2e_export_runtime_secrets`, so every other
 # child process is clean by default.
-e2e_with_platform_mint_key() {
+e2e_with_platform_mint_key() (
   if [ -z "${ZEROSHIP_AUTH_PLATFORM_MINT_KEY:-}" ]; then
     echo "e2e_with_platform_mint_key: ZEROSHIP_AUTH_PLATFORM_MINT_KEY is required" >&2
     return 1
   fi
-  env ZEROSHIP_AUTH_PLATFORM_MINT_KEY="$ZEROSHIP_AUTH_PLATFORM_MINT_KEY" "$@"
-}
+  export ZEROSHIP_AUTH_PLATFORM_MINT_KEY
+  exec "$@"
+)
 
 # Defense in depth for shared launch helpers: even if a caller re-exports the
 # shell-local key after provisioning, a non-consumer child still cannot inherit
