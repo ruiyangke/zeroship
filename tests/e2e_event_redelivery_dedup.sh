@@ -164,7 +164,7 @@ ZEROSHIP_CONTROL_SIGNING_KEY_FILE="$WORK/sk.pem"
 ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$ZEROSHIP_CONTROL_SIGNING_KEY_FILE"
 e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DBURL"
-"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --config "$CFG_TOML" \
+e2e_with_platform_mint_key "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --config "$CFG_TOML" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/sk.pem" \
   --meter-provider lago --invoicer-provider lago \
   --provider-config "{\"lago\":{\"api_url\":\"$LAGO_URL\",\"api_key\":\"$LAGO_KEY\",\"billable_metric_code\":\"requests\"}}" \

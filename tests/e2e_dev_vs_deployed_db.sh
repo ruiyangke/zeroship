@@ -824,7 +824,7 @@ ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$ZEROSHIP_CONTROL_SIGNING_KEY_FILE"
 ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
 e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DBURL"
-"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --blob-store "$WORK/bundles" \
+e2e_with_platform_mint_key "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --blob-store "$WORK/bundles" \
   --signing-key-file "$WORK/sk.pem" > "$WORK/control.log" 2>&1 & PIDS+=($!)
 "$BIN/zeroship-migrated" --port "$ZEROSHIP_MIGRATED_PORT" \
   --signing-key-file "$WORK/sk.pem" --tmp-dir "$WORK/migrated-tmp" \

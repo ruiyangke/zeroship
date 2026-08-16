@@ -15,11 +15,11 @@
 # fallback, it would just set a variable nothing reads, and the harness would
 # fail at the startup guard several hundred lines later.
 #
-# The names are DISTINCT per service by construction, so exporting the whole
-# set into one shell is safe: each binary reads only its own scope, and a
-# gateway process ignores `ZEROSHIP_AUTH_*` entirely. That is what makes a
-# single `e2e_export_runtime_secrets` call able to configure a five-service
-# stack without the harness restating anything.
+# Most names are exported because several child services consume them. The
+# platform mint key is different: only auth and control may receive it, so it
+# remains a shell-local variable and those two launch paths inject it with
+# `e2e_with_platform_mint_key`. A binary ignoring an environment name is not a
+# security boundary; a native escape can still read its process environment.
 
 _e2e_strong_value() {
   local value="${1:-}"
@@ -57,6 +57,24 @@ _e2e_keep_or_generate_hex_key() {
     printf -v "$name" '%s' "$generated"
   fi
   export "$name"
+}
+
+# Run an auth/control command with the dedicated mint credential. The key is
+# deliberately not exported by `e2e_export_runtime_secrets`, so every other
+# child process is clean by default.
+e2e_with_platform_mint_key() {
+  if [ -z "${ZEROSHIP_AUTH_PLATFORM_MINT_KEY:-}" ]; then
+    echo "e2e_with_platform_mint_key: ZEROSHIP_AUTH_PLATFORM_MINT_KEY is required" >&2
+    return 1
+  fi
+  env ZEROSHIP_AUTH_PLATFORM_MINT_KEY="$ZEROSHIP_AUTH_PLATFORM_MINT_KEY" "$@"
+}
+
+# Defense in depth for shared launch helpers: even if a caller re-exports the
+# shell-local key after provisioning, a non-consumer child still cannot inherit
+# it.
+e2e_without_platform_mint_key() {
+  env -u ZEROSHIP_AUTH_PLATFORM_MINT_KEY "$@"
 }
 
 _e2e_secret_file() {
@@ -116,6 +134,7 @@ e2e_export_runtime_secrets() {
   _e2e_keep_or_generate ZEROSHIP_CONTROL_KEY "${ZEROSHIP_CONTROL_KEY:-}" || return 1
   _e2e_keep_or_generate ZEROSHIP_AUTH_PLATFORM_MINT_KEY \
     "${ZEROSHIP_AUTH_PLATFORM_MINT_KEY:-}" || return 1
+  export -n ZEROSHIP_AUTH_PLATFORM_MINT_KEY
   _e2e_keep_or_generate_hex_key ZEROSHIP_CONTROL_MASTER_KEY \
     "${ZEROSHIP_CONTROL_MASTER_KEY:-}" || return 1
   _e2e_keep_or_generate ZEROSHIP_WORKER_KEY "${ZEROSHIP_WORKER_KEY:-}" || return 1

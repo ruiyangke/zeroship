@@ -246,7 +246,7 @@ echo "  auth=$AUTH_URL control=$CONTROL_URL gateway=$GATE_URL pg=:$PG_PORT"
 echo "  platform issuer: $ZEROSHIP_AUTH_PLATFORM_ISSUER"
 echo "  platform mint URL: $ZEROSHIP_AUTH_PLATFORM_MINT_URL"
 
-"$BIN/zeroship-auth" \
+e2e_with_platform_mint_key "$BIN/zeroship-auth" \
   --addr "0.0.0.0:$AUTH_PORT" --public-url "$AUTH_URL" \
   --control-url "$CONTROL_URL" \
   --signing-key-file "$ZEROSHIP_AUTH_SIGNING_KEY_FILE" \
@@ -262,7 +262,7 @@ curl -sf "$AUTH_URL/oauth2/.well-known/jwks.json" >/dev/null 2>&1 \
   && pass "auth (platform OP) healthy" \
   || { fail "auth never came up"; tail -30 "$WORK/auth.log"; exit 1; }
 
-"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
+e2e_with_platform_mint_key "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
   --app-base-domain "localhost" \
   --migrated-url "$MIGRATED_URL" \

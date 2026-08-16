@@ -22,6 +22,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "$ROOT/tests/lib/e2e_stack.sh"
 
 T=0; BAD=0
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
 check() { # check <label> <expected> <actual>
   T=$((T+1))
   if [ "$2" = "$3" ]; then
@@ -73,6 +75,26 @@ check "known-fails alone stay green (unchanged)" 0 "$NEW"
 SKIPPED=0
 e2e_skipped "probe" >/dev/null
 check "e2e_skipped increments SKIPPED" 1 "$SKIPPED"
+
+# 7. The platform mint credential is shell-local after provisioning. This
+# drives real child environments: an ordinary child gets no key, while the
+# explicit auth/control launcher gets the exact generated material. Then
+# deliberately export it and prove the non-consumer wrapper still scrubs it.
+e2e_export_runtime_secrets "$WORK" >/dev/null || {
+  echo "  FAIL runtime secret provisioning failed"
+  exit 1
+}
+MINT_SENTINEL="$ZEROSHIP_AUTH_PLATFORM_MINT_KEY"
+PLAIN_CHILD_SEES_MINT="$(sh -c \
+  'printf %s "${ZEROSHIP_AUTH_PLATFORM_MINT_KEY-unset}"')"
+CONTROL_SEES_MINT="$(e2e_with_platform_mint_key sh -c \
+  'printf %s "${ZEROSHIP_AUTH_PLATFORM_MINT_KEY-unset}"')"
+export ZEROSHIP_AUTH_PLATFORM_MINT_KEY
+WORKER_SEES_MINT="$(e2e_without_platform_mint_key sh -c \
+  'printf %s "${ZEROSHIP_AUTH_PLATFORM_MINT_KEY-unset}"')"
+check "ordinary child inherits no platform mint key" "unset" "$PLAIN_CHILD_SEES_MINT"
+check "worker child receives no platform mint key" "unset" "$WORKER_SEES_MINT"
+check "auth/control child receives the platform mint key" "$MINT_SENTINEL" "$CONTROL_SEES_MINT"
 
 echo ""
 echo "  $T checks, $BAD failed"

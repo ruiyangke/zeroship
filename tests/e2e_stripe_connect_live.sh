@@ -298,7 +298,7 @@ ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$ZEROSHIP_CONTROL_SIGNING_KEY_FILE"
 e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DBURL"
 ZEROSHIP_CONTROL_STRIPE_SECRET_KEY="$SK" ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET="$WEBHOOK_SECRET" \
-"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
+e2e_with_platform_mint_key "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
   --stripe-base-url "https://api.stripe.com" \
  > "$WORK/control.log" 2>&1 &
