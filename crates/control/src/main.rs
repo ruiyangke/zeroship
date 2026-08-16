@@ -1777,7 +1777,7 @@ mod tests {
     }
 
     #[test]
-    fn a_configured_issuer_requires_nonempty_platform_mint_key_material() {
+    fn a_configured_issuer_requires_strong_platform_mint_key_material() {
         let empty = Secret::supplied(SourceKind::Env, Some(String::new()));
         let err = validate_platform_mint_key(
             "https://auth.zeroship.test/oauth2",
@@ -1793,7 +1793,15 @@ mod tests {
         validate_platform_mint_key("https://auth.zeroship.test/oauth2", &whitespace)
             .expect_err("a whitespace-only mint key must fail closed");
 
-        let present = Secret::supplied(SourceKind::Env, Some("mint-key".to_owned()));
+        let short = Secret::supplied(SourceKind::Env, Some("too-short".to_owned()));
+        let err = validate_platform_mint_key("https://auth.zeroship.test/oauth2", &short)
+            .expect_err("a short mint key must fail closed");
+        assert!(err.contains("minimum 32 bytes"), "{err}");
+
+        let present = Secret::supplied(
+            SourceKind::Env,
+            Some("platform-mint-key-at-least-32-bytes".to_owned()),
+        );
         validate_platform_mint_key("https://auth.zeroship.test/oauth2", &present)
             .expect("nonempty resolved material is accepted");
 
