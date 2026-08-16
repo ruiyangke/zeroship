@@ -1,7 +1,8 @@
 import { useState, type ReactNode } from "react";
 import { useClearQuery, useNumericQueryParam, useQueryParam } from "../lib/query-state";
-import { Dialog, FilterBar, PageHeader } from "@zeroship/ui";
+import { FilterBar, PageHeader } from "@zeroship/ui";
 import { Checkbox } from "../ui/Checkbox";
+import { Dialog } from "../ui/Dialog";
 import { Select } from "../ui/Select";
 import { Card } from "../ui/Card";
 import { Button } from "../ui/Button";
