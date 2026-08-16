@@ -5,6 +5,7 @@ use ed25519_dalek::SigningKey;
 use jsonwebtoken::decode_header;
 use serde_json::{json, Value};
 use std::sync::Mutex;
+use std::time::Duration;
 use uuid::Uuid;
 use zeroship_auth::cron::signing_key_retention;
 use zeroship_auth::oidc::metadata::jwks_document;
@@ -58,6 +59,24 @@ async fn seed_key(
     )
     .await
     .unwrap_or_else(|err| panic!("seed signing key {kid}: {err}"));
+}
+
+async fn seed_key_without_watermark(
+    db: &Client,
+    kid: &str,
+    public_jwk: &Value,
+    retiring_age_secs: i64,
+) {
+    db.execute(
+        "INSERT INTO zeroship.signing_keys \
+            (kid, alg, public_jwk, status, activated_at, retiring_at, \
+             max_issued_expires_at) \
+         VALUES ($1, 'EdDSA', $2, 'retiring', NOW() - INTERVAL '2 days', \
+                 NOW() - ($3::BIGINT * INTERVAL '1 second'), NULL)",
+        &[&kid, &public_jwk, &retiring_age_secs],
+    )
+    .await
+    .unwrap_or_else(|err| panic!("seed signing key without watermark {kid}: {err}"));
 }
 
 async fn cleanup_key(db: &Client, kid: &str) {
@@ -181,6 +200,45 @@ async fn active_and_next_keys_are_never_pruned_regardless_of_age() {
 
 #[allow(clippy::await_holding_lock, clippy::future_not_send)]
 #[compio::test]
+async fn missing_watermark_uses_full_horizon_from_retiring_at() {
+    let Some(db) = pg().await else {
+        zeroship_test_support::skip("skipping signing_key_retention_test (no AUTH_DB_URL)");
+        return;
+    };
+    let _guard = RETENTION_TEST_LOCK.lock().expect("retention test lock");
+
+    let inside_kid = format!("retiring-null-fresh-{}", Uuid::new_v4());
+    let past_kid = format!("retiring-null-stale-{}", Uuid::new_v4());
+    seed_key_without_watermark(
+        &db,
+        &inside_kid,
+        &test_jwk(&inside_kid),
+        signing_key_retention::RETENTION_HORIZON_SECS - 1,
+    )
+    .await;
+    seed_key_without_watermark(
+        &db,
+        &past_kid,
+        &test_jwk(&past_kid),
+        signing_key_retention::RETENTION_HORIZON_SECS + 1,
+    )
+    .await;
+
+    let report = signing_key_retention::tick(&db).await.expect("retention tick");
+
+    assert!(jwks_contains(&db, &inside_kid).await);
+    assert_eq!(key_status(&db, &inside_kid).await.0, "retiring");
+    assert!(report.retired.iter().all(|retired| retired.kid != inside_kid));
+    assert!(!jwks_contains(&db, &past_kid).await);
+    assert_eq!(key_status(&db, &past_kid).await.0, "retired");
+    assert!(report.retired.iter().any(|retired| retired.kid == past_kid));
+
+    cleanup_key(&db, &inside_kid).await;
+    cleanup_key(&db, &past_kid).await;
+}
+
+#[allow(clippy::await_holding_lock, clippy::future_not_send)]
+#[compio::test]
 async fn issuance_and_prune_never_return_a_token_without_its_published_key() {
     let Some(db) = pg().await else {
         zeroship_test_support::skip("skipping signing_key_retention_test (no AUTH_DB_URL)");
@@ -250,6 +308,142 @@ async fn issuance_and_prune_never_return_a_token_without_its_published_key() {
             assert!(report.retired.iter().any(|retired| retired.kid == kid));
         }
     }
+
+    cleanup_key(&db, &kid).await;
+}
+
+#[allow(clippy::await_holding_lock, clippy::future_not_send)]
+#[compio::test]
+async fn concurrent_retirement_cannot_be_undone_by_signer_startup() {
+    let Some(db) = pg().await else {
+        zeroship_test_support::skip("skipping signing_key_retention_test (no AUTH_DB_URL)");
+        return;
+    };
+    let Some(publish_db) = pg().await else {
+        unreachable!("the same AUTH_DB_URL disappeared")
+    };
+    let Some(prune_db) = pg().await else {
+        unreachable!("the same AUTH_DB_URL disappeared")
+    };
+    let _guard = RETENTION_TEST_LOCK.lock().expect("retention test lock");
+
+    let random = *Uuid::new_v4().as_bytes();
+    let mut secret = [0u8; 32];
+    secret[..16].copy_from_slice(&random);
+    secret[16..].copy_from_slice(&random);
+    let signing = SigningKey::from_bytes(&secret);
+    let issuer = Issuer::from_signing_key(
+        &signing,
+        [23u8; 32],
+        "https://auth.zeroship.test/oauth2".to_string(),
+    )
+    .expect("issuer");
+    let kid = issuer.kid().to_string();
+    let past_horizon_secs = signing_key_retention::RETENTION_AFTER_EXPIRY_SECS + 1;
+    seed_key(
+        &db,
+        &kid,
+        issuer.public_jwk(),
+        "retiring",
+        past_horizon_secs,
+    )
+    .await;
+
+    let suffix = Uuid::new_v4().simple().to_string();
+    let function_name = format!("test_pause_signing_key_activation_{suffix}");
+    let trigger_name = format!("test_pause_signing_key_activation_{suffix}");
+    let application_name = format!("retention-publisher-{suffix}");
+    let lock_id = 8_264_731_i64;
+    db.query_one("SELECT pg_advisory_lock($1)", &[&lock_id])
+        .await
+        .expect("hold test activation lock");
+    db.execute(
+        &format!(
+            "CREATE FUNCTION zeroship.{function_name}() RETURNS trigger \
+             LANGUAGE plpgsql AS $$ \
+             BEGIN \
+               IF current_setting('application_name') = '{application_name}' THEN \
+                 PERFORM pg_advisory_xact_lock({lock_id}); \
+               END IF; \
+               RETURN NULL; \
+             END \
+             $$"
+        ),
+        &[],
+    )
+    .await
+    .expect("create activation pause function");
+    db.execute(
+        &format!(
+            "CREATE TRIGGER {trigger_name} BEFORE UPDATE ON zeroship.signing_keys \
+             FOR EACH STATEMENT EXECUTE FUNCTION zeroship.{function_name}()"
+        ),
+        &[],
+    )
+    .await
+    .expect("create activation pause trigger");
+    publish_db
+        .execute(
+            "SELECT set_config('application_name', $1, false)",
+            &[&application_name],
+        )
+        .await
+        .expect("name publisher connection");
+
+    let publish = issuer.publish_active_key(&publish_db);
+    let retire_then_release = async {
+        let mut publisher_blocked = false;
+        for _ in 0..500 {
+            let row = db
+                .query_one(
+                    "SELECT EXISTS ( \
+                         SELECT 1 FROM pg_stat_activity \
+                         WHERE application_name = $1 \
+                           AND wait_event_type = 'Lock' \
+                           AND wait_event = 'advisory' \
+                           AND query LIKE 'UPDATE zeroship.signing_keys%' \
+                     ) AS blocked",
+                    &[&application_name],
+                )
+                .await
+                .expect("observe blocked publisher");
+            publisher_blocked = row.get("blocked");
+            if publisher_blocked {
+                break;
+            }
+            compio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(publisher_blocked, "publisher did not reach the forced race window");
+        let report = signing_key_retention::tick(&prune_db)
+            .await
+            .expect("retire while publisher is paused");
+        let unlocked: bool = db
+            .query_one("SELECT pg_advisory_unlock($1) AS unlocked", &[&lock_id])
+            .await
+            .expect("release test activation lock")
+            .get("unlocked");
+        assert!(unlocked, "test activation lock was not held");
+        report
+    };
+    let (publish_result, report) = futures::join!(publish, retire_then_release);
+
+    db.execute(
+        &format!("DROP TRIGGER {trigger_name} ON zeroship.signing_keys"),
+        &[],
+    )
+    .await
+    .expect("drop activation pause trigger");
+    db.execute(
+        &format!("DROP FUNCTION zeroship.{function_name}()"),
+        &[],
+    )
+    .await
+    .expect("drop activation pause function");
+
+    assert!(publish_result.is_err(), "retired key was reactivated");
+    assert!(report.retired.iter().any(|retired| retired.kid == kid));
+    assert_eq!(key_status(&db, &kid).await.0, "retired");
+    assert!(!jwks_contains(&db, &kid).await);
 
     cleanup_key(&db, &kid).await;
 }
