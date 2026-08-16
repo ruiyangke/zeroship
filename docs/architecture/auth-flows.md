@@ -951,8 +951,8 @@ scopes, and timestamps; no credential is issued
                               |
                               v
 +------------------------------------------------------------+
-| Auth readers reject access JWTs older than the marker      |
-| Gateway cookie reader does; raw bearer is Finding 1        |
+| Auth and Gateway reject credentials older than the marker  |
+| Raw bearer and cookie readers use the same pairwise key     |
 +------------------------------------------------------------+
                               |
                               v
@@ -993,8 +993,8 @@ VERIFIED walk-through:
    `crates/gateway/src/router/auth.rs:89-139`,
    `crates/auth/src/oidc/userinfo.rs:73-166`,
    `crates/auth/src/oidc/introspect.rs:97-153`). Gateway's raw OP bearer path
-   currently derives the marker key from an already pairwise subject, so that
-   reader is the separate Finding 1.
+   validates the issuer-projected subject and uses it unchanged as the marker
+   key (`crates/gateway/src/router/auth.rs:625-670`).
 4. The transaction touches neither Auth refresh rows nor Gateway
    `app_session_anchors`. A rejected cookie falls through to a still-live
    anchor, Gateway decrypts its refresh credential and sends it to Auth, Auth
@@ -1387,9 +1387,10 @@ VERIFIED walk-through:
    `crates/gateway/src/oidc_rp.rs:673-780`). It then requires the route client ID
    and `app:{app_id}` resource audience before the optional DB-backed marker
    check and identity projection (`crates/gateway/src/router/auth.rs:654-825`).
-3. The current projection derives a second pairwise subject from an already
-   pairwise `sub`; this is Finding 1. The same complete function has no user-row
-   lifecycle lookup; that is the first known in-progress item, not a new finding.
+3. Gateway requires the verified `sub` to have the exact pairwise shape, uses
+   it unchanged for lifecycle and family-marker checks, and forwards that same
+   value to Worker (`crates/gateway/src/router/auth.rs:625-692`). It does not
+   derive a second subject.
 4. A successful arm constructs the same request-bound HMAC header and reaches
    Worker and `env.auth` exactly as in section 3.2
    (`crates/gateway/src/router/auth.rs:795-819`,
@@ -2350,30 +2351,37 @@ findings.
 
 ## FINDINGS
 
-### 1. HIGH: Raw OP access tokens are pairwise twice
+### 1. RESOLVED: Raw OP access tokens keep the issuer projection
 
-VERIFIED: Auth's native app access-token helper always calls
-`Issuer::issue_access_token`, which first derives the subject from the global
-UUID and the client sector
-(`crates/auth/src/oidc/authorization_code.rs:1387-1405`,
+The audit snapshot originally found a second pairwise derivation in Gateway.
+Commit `290c85e0a` removed that path before the auth-suite diagnosis on
+2026-08-16. Auth derives the app access-token subject from the global UUID and
+client sector (`crates/auth/src/oidc/authorization_code.rs:1430-1475`,
 `crates/auth/src/oidc/issuer.rs:410-429`,
-`crates/auth/src/oidc/issuer.rs:847-851`). The Gateway raw-bearer arm instead
-documents and treats that `claims.sub` as a global UUID, derives a new `pws_` for
-the family marker, then calls `project_pairwise` and derives it again
-(`crates/gateway/src/router/auth.rs:736-819`). `derive_pairwise` hashes a non-UUID
-input verbatim (`crates/core/src/auth/mod.rs:304-319`), and the mapping and relay
-lookup run only when the input parses as a UUID
-(`crates/gateway/src/router/auth.rs:513-570`).
+`crates/auth/src/oidc/issuer.rs:847-851`). Gateway now requires the verified
+`claims.sub` to have the exact pairwise shape, copies it unchanged for the
+lifecycle and family-marker checks, and emits that same value in
+`ZeroShip-User` (`crates/gateway/src/router/auth.rs:625-692`). The former
+`project_pairwise` helper no longer exists. `derive_pairwise` still hashes a
+non-UUID input verbatim (`crates/core/src/auth/mod.rs:302-318`), but the raw
+bearer path no longer calls it.
 
-Search method: `rg 'issue_access_token\(|mint_access_token\(' crates/auth/src
---glob '*.rs'` found authorization-code, refresh, and device issuance converging
-on the same helper. The real-OP E2E checks only HTTP 200, not projected identity
-(`crates/gateway/tests/oidc_rp_e2e.rs:574-631`), while raw-bearer unit fixtures
-use a global UUID subject (`crates/gateway/src/router/auth.rs:1396-1449`).
+The real-OP E2E now sends the access token through a local Worker boundary,
+verifies the request-bound `ZeroShip-User` header there, and asserts that its
+`id` equals Auth's one projection from the global UUID and sector
+(`crates/gateway/tests/oidc_rp_e2e.rs`). The Gateway fixture deliberately uses
+a different pairwise salt, so a second Gateway derivation cannot satisfy the
+assertion.
 
-INFERRED impact: raw bearer and cookie authentication assign different app user
-IDs to the same human; raw bearer skips reverse mapping and relay lookup, and,
-when DB is configured, checks revocation under the wrong family key.
+The nine deterministic suite failures observed at `e62b60dc7` were two stale
+fixtures, not this resolved production path. For the eight Gateway failures,
+instrumentation measured a stored
+`pws_seed_8ed3d71548e04205832647f488c5a77e` against the requested
+`pws_6LttJUCDnqZy1AhlkD9k`: the relay fixture fabricated the former while the
+cookie mint computed the latter through `auth_token::pairwise_sub`. The strict
+immutable-binding guard correctly refused the swap. The remaining Auth failure
+constructed a logout-token issuer without publishing its key, so registered
+token issuance correctly refused it as untrusted for issuance.
 
 ### 2. HIGH: App-session revoke deletes a row Gateway does not authorize from
 
@@ -2488,8 +2496,9 @@ a newly minted post-marker token active
 `crates/auth/src/oidc/introspect.rs:97-153`).
 
 The Gateway BFF path makes the gap directly exploitable on current code without
-depending on Finding 1. A marked cookie falls through to anchor recovery; the
-still-live anchor drives an Auth refresh, and Gateway signs the rotated facts
+depending on the now-resolved Finding 1. A marked cookie falls through to
+anchor recovery; the still-live anchor drives an Auth refresh, and Gateway
+signs the rotated facts
 into a new cookie
 (`crates/gateway/src/auth_token.rs:740-949`,
 `crates/gateway/src/auth_token.rs:1060-1101`). The authoritative post-refresh
