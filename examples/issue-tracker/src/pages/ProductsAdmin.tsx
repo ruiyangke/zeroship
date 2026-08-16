@@ -1,14 +1,14 @@
 import { useMemo, useState, type ComponentPropsWithoutRef } from "react";
 import { Banner,
-  Checkbox,
   Dialog,
   Drawer,
   FilterBar,
   ListView,
   PageHeader,
   Pagination,
-  Tabs,
 } from "@zeroship/ui";
+import { Checkbox } from "../ui/Checkbox";
+import { Tabs } from "../ui/Tabs";
 import { Select } from "../ui/Select";
 import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";

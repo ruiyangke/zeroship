@@ -1,8 +1,8 @@
 import { useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { Checkbox } from "@zeroship/ui";
 import { Avatar } from "../../ui/Avatar";
 import { Button } from "../../ui/Button";
+import { Checkbox } from "../../ui/Checkbox";
 
 import { RichText, RichTextEditor, hasText } from "../RichText";
 import { FieldError, Muted } from "../AppPrimitives";

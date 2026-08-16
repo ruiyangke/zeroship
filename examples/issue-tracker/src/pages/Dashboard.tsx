@@ -1,7 +1,8 @@
 import { useMemo } from "react";
 import { Link } from "react-router-dom";
-import { PageHeader, Tabs } from "@zeroship/ui";
+import { PageHeader } from "@zeroship/ui";
 import { Badge } from "../ui/Badge";
+import { Tabs } from "../ui/Tabs";
 import { ALL_ISSUE_COLUMNS, IssueResultsTable } from "../components/IssueResultsTable";
 import { DashboardSection } from "../components/DashboardSection";
 import { NotificationsPanel } from "../components/NotificationsPanel";

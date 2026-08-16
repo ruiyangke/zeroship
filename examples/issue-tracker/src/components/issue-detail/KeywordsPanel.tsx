@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Checkbox } from "@zeroship/ui";
+import { Checkbox } from "../../ui/Checkbox";
 import { Button } from "../../ui/Button";
 import { Input } from "../../ui/Input";
 import { Tag } from "../../ui/Tag";

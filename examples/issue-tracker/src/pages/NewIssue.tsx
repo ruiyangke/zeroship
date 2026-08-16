@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
-import { Checkbox } from "@zeroship/ui";
+import { Checkbox } from "../ui/Checkbox";
 import { Select } from "../ui/Select";
 import { Button } from "../ui/Button";
 import { Field } from "../ui/Field";
