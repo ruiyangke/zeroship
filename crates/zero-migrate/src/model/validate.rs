@@ -2876,6 +2876,7 @@ fn validate_no_name_is_claimed_twice(
     // treating absent as a value would collapse two ordinary anonymous
     // constraints into one repeated name.
     let track_constraint_names = !matches!(target_dialect, Dialect::Sqlite);
+    let index_shares_relation_namespace = !matches!(target_dialect, Dialect::Mysql);
     let mut constraint_names: BTreeMap<Key, BTreeSet<&str>> = BTreeMap::new();
 
     for (op_index, op) in ir.ops.iter().enumerate() {
@@ -3012,6 +3013,41 @@ fn validate_no_name_is_claimed_twice(
                 relations.insert(key, "view");
             }
             Op::DropView { name, schema, .. } => {
+                relations.remove(&(schema.as_deref(), name.as_str()));
+            }
+            // INDEXES ARE IN THE SAME NAMESPACE on PostgreSQL (everything is
+            // pg_class) and on SQLite ("there is already a table named a"), but
+            // NOT on MySQL, which scopes index names per table. Measured on all
+            // three; this is the exact inverse of the constraint-name split, so
+            // neither could be inferred from the other.
+            Op::CreateIndex {
+                name: Some(name),
+                schema,
+                ..
+            } if index_shares_relation_namespace => {
+                let key: Key = (schema.as_deref(), name.as_str());
+                match relations.get(&key) {
+                    // Index-vs-index belongs to `validate_index_names_across_ops`,
+                    // whose message explains that the second render is
+                    // `CREATE INDEX IF NOT EXISTS` and is silently SKIPPED. Step
+                    // aside so that better message survives.
+                    Some(&"index") | None => {
+                        relations.insert(key, "index");
+                    }
+                    Some(held_by) => {
+                        return Err(refuse(
+                            op_index,
+                            &format!(
+                                "this createIndex claims the name {name:?}, but an earlier \
+                                 operation in this migration already created a {held_by} \
+                                 with that name and nothing dropped it in between"
+                            ),
+                            "drop the existing relation first, or use a different name",
+                        ));
+                    }
+                }
+            }
+            Op::DropIndex { name, schema, .. } if index_shares_relation_namespace => {
                 relations.remove(&(schema.as_deref(), name.as_str()));
             }
             Op::CreateSequence { name, schema, .. } => {
