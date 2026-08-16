@@ -51,20 +51,36 @@ fn an_index_on_a_dropped_column_is_refused() {
     );
 }
 
+/// Assert the refusal names THIS op, not merely that a column went missing.
+///
+/// Both sites here produced an identical message until the rule was taught to
+/// name its operation, so the setColumnNotNull test was satisfied by the
+/// addConstraint refusal and neither could be pinned.
+fn expect_named_op_refusal(ops: &str, op_name: &str, what: &str) {
+    let refusal = verdict(ops).expect_err(what);
+    let expected = format!("this {op_name} names column");
+    assert!(
+        refusal.contains(&expected),
+        "{expected:?} is missing, so a sibling refusal satisfies this test: {refusal}"
+    );
+}
+
 #[test]
 fn altering_a_dropped_column_is_refused() {
-    verdict(
+    expect_named_op_refusal(
         r#"{"op":"dropColumn","table":"a","column":"v"},{"op":"setColumnNotNull","table":"a","column":"v"}"#,
-    )
-    .expect_err("setColumnNotNull names a column the drop removed");
+        "setColumnNotNull",
+        "setColumnNotNull names a column the drop removed",
+    );
 }
 
 #[test]
 fn a_unique_constraint_over_a_dropped_column_is_refused() {
-    verdict(
+    expect_named_op_refusal(
         r#"{"op":"dropColumn","table":"a","column":"v"},{"op":"addConstraint","table":"a","constraint":{"kind":{"kind":"unique","columns":["v"]}}}"#,
-    )
-    .expect_err("the constraint names a column the drop removed");
+        "addConstraint",
+        "the constraint names a column the drop removed",
+    );
 }
 
 #[test]
