@@ -4,6 +4,7 @@
 //! is a security-sensitive DB protocol: skipping would hide migration/crypto/
 //! one-time-redemption regressions.
 
+use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -33,13 +34,16 @@ use zeroship_core::auth_provider::{
     ProviderAuthz, SupabaseConfig, SupabaseProvider,
 };
 use zeroship_core::config::OriginScheme;
-use zeroship_core::device_grant;
+use zeroship_core::device_grant::{
+    self, PLATFORM_CLI_CLIENT_ID, PLATFORM_TOKEN_MAX_TTL_SECS,
+};
 use zeroship_authz::{Action, Resource};
 
 mod common;
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 const TEST_CONTROL_KEY: &str = "test-control-key";
+const TEST_PLATFORM_MINT_KEY: &str = "test-platform-mint-key";
 const SUPABASE_ANON_KEY: &str = "test-anon-key";
 const SUPABASE_SERVICE_ROLE_KEY: &str = "test-service-role-key";
 const SUPABASE_JWT_SECRET: &str = "test-supabase-jwt-secret-at-least-32-bytes";
@@ -182,8 +186,8 @@ struct MockPlatformAuth {
 }
 
 impl MockPlatformAuth {
-    fn start() -> Self {
-        Self::start_advertising(None)
+    fn start(db_url: &str) -> Self {
+        Self::start_advertising(None, db_url)
     }
 
     /// Start a mock whose tokens carry `issuer` in `iss`, while it still LISTENS
@@ -194,11 +198,11 @@ impl MockPlatformAuth {
     /// unresolvable name and any code that dials the issuer instead of the
     /// configured mint URL fails with the same `Connect` error the live
     /// deployment produced.
-    fn start_advertising_public_issuer(issuer: &str) -> Self {
-        Self::start_advertising(Some(issuer.to_owned()))
+    fn start_advertising_public_issuer(issuer: &str, db_url: &str) -> Self {
+        Self::start_advertising(Some(issuer.to_owned()), db_url)
     }
 
-    fn start_advertising(public_issuer: Option<String>) -> Self {
+    fn start_advertising(public_issuer: Option<String>, db_url: &str) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind platform auth mock");
         listener
             .set_nonblocking(true)
@@ -206,16 +210,11 @@ impl MockPlatformAuth {
         let base = format!("http://{}", listener.local_addr().expect("platform auth addr"));
         let signing = SigningKey::from_bytes(&[41u8; 32]);
         // The configured `platform_issuer` must end in `device_grant::OP_PATH_PREFIX`
-        // ("/oauth2"), because `mint_platform_deploy_token` and `verification_uri`
-        // both derive their target from `device_grant::op_public_url(platform_issuer)`,
-        // which returns `None` for an issuer with no such suffix. The real auth
-        // service issuer already carries this suffix (its doc comment: "The auth
-        // service builds its issuer as `{public_url}{OP_PATH_PREFIX}`"); this mock
-        // must match that shape or `/api/device/auth` fails closed with a 500
-        // before this suite ever reaches the parts it means to test. The mint
-        // itself is still served at `{base}/internal/platform-token` (root, no
-        // `/oauth2`), matching how `handle_platform_auth_request` below routes it -
-        // `op_public_url` strips the suffix back off before the mint call.
+        // ("/oauth2"), because `verification_uri` derives the browser-visible
+        // page from `device_grant::op_public_url(platform_issuer)`, which returns
+        // `None` for an issuer with no such suffix. The mint uses its separately
+        // configured internal route and is served at
+        // `{base}/internal/platform-token` (root, no `/oauth2`).
         let issuer_url =
             public_issuer.unwrap_or_else(|| format!("{base}{}", device_grant::OP_PATH_PREFIX));
         let issuer = Arc::new(
@@ -224,13 +223,18 @@ impl MockPlatformAuth {
         );
         let (shutdown_tx, shutdown_rx) = mpsc::channel();
         let thread_issuer = issuer.clone();
+        let thread_db_url = db_url.to_owned();
         let thread = thread::spawn(move || {
             loop {
                 if shutdown_rx.try_recv().is_ok() {
                     break;
                 }
                 match listener.accept() {
-                    Ok((mut stream, _)) => handle_platform_auth_request(&mut stream, &thread_issuer),
+                    Ok((mut stream, _)) => handle_platform_auth_request(
+                        &mut stream,
+                        &thread_issuer,
+                        &thread_db_url,
+                    ),
                     Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(std::time::Duration::from_millis(10));
                     }
@@ -319,16 +323,15 @@ struct MockHttpRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MockMintRequest {
     principal_id: String,
-    audience: String,
-    client_id: String,
     #[serde(default)]
     scopes: Vec<String>,
     ttl_secs: Option<i64>,
 }
 
-fn handle_platform_auth_request(stream: &mut TcpStream, issuer: &Issuer) {
+fn handle_platform_auth_request(stream: &mut TcpStream, issuer: &Issuer, db_url: &str) {
     let request = read_mock_http_request(stream);
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/.well-known/jwks.json") => {
@@ -339,19 +342,26 @@ fn handle_platform_auth_request(stream: &mut TcpStream, issuer: &Issuer) {
                 .headers
                 .iter()
                 .find(|(name, _)| name == "authorization")
-                .is_some_and(|(_, value)| value == &format!("Bearer {TEST_CONTROL_KEY}"));
+                .is_some_and(|(_, value)| {
+                    value == &format!("Bearer {TEST_PLATFORM_MINT_KEY}")
+                });
             if !authorized {
                 write_mock_json(stream, 401, &json!({"error": "unauthorized"}));
                 return;
             }
             let body: MockMintRequest =
                 serde_json::from_slice(&request.body).expect("mock mint body json");
+            let scopes = platform_scopes_visible_to_auth(
+                db_url,
+                &body.principal_id,
+                &body.scopes,
+            );
             let token = issuer
                 .issue_principal_access_token(&PrincipalAccessTokenMint {
                     principal_id: &body.principal_id,
-                    audience: &body.audience,
-                    client_id: &body.client_id,
-                    scopes: &body.scopes,
+                    audience: "control.zeroship.ai",
+                    client_id: PLATFORM_CLI_CLIENT_ID,
+                    scopes: &scopes,
                     ttl_secs: body.ttl_secs,
                 })
                 .expect("mock mint token");
@@ -362,13 +372,60 @@ fn handle_platform_auth_request(stream: &mut TcpStream, issuer: &Issuer) {
                     "access_token": token,
                     "token_type": "Bearer",
                     "expires_in": body.ttl_secs.unwrap_or(ACCESS_TOKEN_TTL_SECS),
-                    "scope": body.scopes.join(" "),
+                    "scope": scopes.join(" "),
                     "provider": "platform",
+                    "client_id": PLATFORM_CLI_CLIENT_ID,
                 }),
             );
         }
         _ => write_mock_json(stream, 404, &json!({"error": "not_found"})),
     }
+}
+
+fn platform_scopes_visible_to_auth(
+    db_url: &str,
+    principal_id: &str,
+    requested: &[String],
+) -> Vec<String> {
+    let principal_id = Uuid::parse_str(principal_id).expect("mock mint principal UUID");
+    let db_url = db_url.to_owned();
+    let granted = compio::runtime::Runtime::new()
+        .expect("mock auth compio runtime")
+        .block_on(async move {
+            let (client, connection) = connect(&db_url, NoTls)
+                .await
+                .expect("mock auth database connection");
+            compio::runtime::spawn(async move {
+                connection.run().await.expect("mock auth database driver");
+            })
+            .detach();
+            client
+                .execute("SET ROLE zeroship_auth", &[])
+                .await
+                .expect("mock auth database role");
+            client
+                .query(
+                    "SELECT pg.grant_name \
+                     FROM zeroship.users u \
+                     LEFT JOIN zeroship.principal_grants pg ON pg.principal_id = u.id \
+                     WHERE u.id = $1 \
+                       AND u.disabled_at IS NULL \
+                       AND u.anonymized_at IS NULL \
+                       AND (u.locked_until IS NULL OR u.locked_until <= NOW())",
+                    &[&principal_id],
+                )
+                .await
+                .expect("mock auth principal grant lookup")
+                .iter()
+                .filter_map(|row| row.get::<_, Option<String>>("grant_name"))
+                .collect::<HashSet<_>>()
+        });
+
+    requested
+        .iter()
+        .filter(|scope| granted.contains(scope.as_str()))
+        .cloned()
+        .collect()
 }
 
 fn read_mock_http_request(stream: &mut TcpStream) -> MockHttpRequest {
@@ -537,9 +594,11 @@ impl Fixture {
         let mock_supabase = MockSupabase::start();
         let mock_platform = match topology {
             PlatformTopology::PublicIssuer(issuer) => {
-                MockPlatformAuth::start_advertising_public_issuer(issuer)
+                MockPlatformAuth::start_advertising_public_issuer(issuer, &db_url)
             }
-            PlatformTopology::Colocated | PlatformTopology::NoMintUrl => MockPlatformAuth::start(),
+            PlatformTopology::Colocated | PlatformTopology::NoMintUrl => {
+                MockPlatformAuth::start(&db_url)
+            }
         };
         let issuer = mock_supabase.issuer();
         let (control_pg_client, control_pg_conn) =
@@ -600,6 +659,7 @@ impl Fixture {
             blob_store,
             workflow_blob_store,
             control_key: SecretString::new(TEST_CONTROL_KEY.to_string()),
+            auth_platform_mint_key: SecretString::new(TEST_PLATFORM_MINT_KEY.to_string()),
             master_key: SecretString::new(TEST_MASTER_KEY.to_string()),
             stripe_webhook_secret: SecretString::new(String::new()),
             stripe_secret_key: SecretString::new(String::new()),
@@ -1268,7 +1328,10 @@ async fn dual_issuer_gotrue_device_flow_enforces_hashing_auth_and_one_time_use()
         approved_body["scope"],
         "apps:deploy apps:read apps:write secrets:read"
     );
-    assert!(approved_body["expires_in"].as_u64().expect("expires_in") > 0);
+    assert_eq!(
+        approved_body["expires_in"].as_i64(),
+        Some(PLATFORM_TOKEN_MAX_TTL_SECS)
+    );
     let deploy_token = approved_body["access_token"]
         .as_str()
         .expect("access_token")
@@ -1285,6 +1348,7 @@ async fn dual_issuer_gotrue_device_flow_enforces_hashing_auth_and_one_time_use()
         .await
         .expect("platform token verifies through DualIssuer/PlatformProvider");
     assert_eq!(verified.provider_subject, principal_id.to_string());
+    assert_eq!(verified.client_id.as_deref(), Some(PLATFORM_CLI_CLIENT_ID));
     assert_eq!(
         verified.provider_authz,
         ProviderAuthz::OAuthScope(
@@ -1945,16 +2009,13 @@ async fn a_bearer_for_another_audience_cannot_approve_a_device_grant() {
 ///
 /// Fails on the pre-fix code: the approval returned 204.
 ///
-/// WHAT THIS TEST DOES NOT PROVE, and it matters: that any production code path
-/// ever writes the marker this test inserts by hand. It does not. The only
-/// writer of `zeroship.token_revocations` is
-/// `crates/control/src/oauth_grants_handlers.rs`, which keys the row on a
-/// PAIRWISE subject derived for a per-app RP client, while the token reaching
-/// this handler carries a raw principal UUID as its `sub`. So the check is
-/// correct and it agrees with `authn`, but on today's tree no operator action
-/// can arm it for this family. Fixing that is a separate change; this test is
-/// written so it exercises the check rather than passing because the check is
-/// unreachable.
+/// WHAT THIS TEST DOES NOT PROVE, and it matters: that a supported production
+/// action writes this exact family marker. Control's disconnect path writes a
+/// per-app client and pairwise subject. Auth's RFC 7009 path can also write the
+/// table, but only after authenticating the registered client being revoked.
+/// This test inserts its mock (`client_id`, raw principal UUID) pair by hand so
+/// it exercises the shared read-side check without making a claim about either
+/// writer's reachability.
 #[compio::test]
 async fn a_revoked_bearer_cannot_approve_a_device_grant() {
     let mut fx = Fixture::new_with_provider(FixtureProvider::Platform).await;

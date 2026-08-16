@@ -25,7 +25,8 @@ const SECRET_FILES: [&str; 7] = [
 // Sorted, and every one is a canonical `ZEROSHIP_` name that some binary
 // declares. `GATEWAY_OIDC_SECRET` was dropped rather than renamed: nothing in
 // the tree reads it, so generating it only made an unread slot look configured.
-const ENV_KEYS: [&str; 8] = [
+const ENV_KEYS: [&str; 9] = [
+    "ZEROSHIP_AUTH_PLATFORM_MINT_KEY",
     "ZEROSHIP_AUTH_STASH_SIGNING_KEY",
     "ZEROSHIP_AUTH_TOTP_ENC_KEY",
     "ZEROSHIP_CONTROL_KEY",
@@ -326,7 +327,6 @@ fn compose_preserves_shared_secret_topology_and_has_no_weak_literals() {
         ("control", control),
         ("gateway", gateway),
         ("worker", worker),
-        ("auth", auth),
     ] {
         assert!(
             block.contains(required_control),
@@ -341,8 +341,29 @@ fn compose_preserves_shared_secret_topology_and_has_no_weak_literals() {
         compose
             .matches("${ZEROSHIP_CONTROL_KEY:?run zeroship dev init}")
             .count(),
-        5,
-        "all five native services must consume one generated control key"
+        4,
+        "only control, gateway, worker, and migrated consume the control key"
+    );
+    assert!(
+        !auth.contains(required_control),
+        "auth must not receive the control key"
+    );
+
+    let required_mint = concat!(
+        "ZEROSHIP_AUTH_PLATFORM_MINT_KEY: ",
+        "${ZEROSHIP_AUTH_PLATFORM_MINT_KEY:?run zeroship dev init}"
+    );
+    assert!(control.contains(required_mint));
+    assert!(auth.contains(required_mint));
+    assert!(!gateway.contains(required_mint));
+    assert!(!worker.contains(required_mint));
+    assert!(!migrated.contains(required_mint));
+    assert_eq!(
+        compose
+            .matches("${ZEROSHIP_AUTH_PLATFORM_MINT_KEY:?run zeroship dev init}")
+            .count(),
+        2,
+        "only control and auth consume the generated platform mint key"
     );
 
     // Stripe is OPTIONAL: only Stripe can issue a webhook secret that verifies,

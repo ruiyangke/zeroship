@@ -71,6 +71,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 REMOTE="$ROOT/deploy/scripts/deploy-remote.sh"
 APPDEP="$ROOT/deploy/scripts/deploy-app.sh"
 REAL_COMPOSE="$ROOT/deploy/compose/docker-compose.yml"
+REAL_OVERLAY="$ROOT/deploy/ops/zeroship.example.toml"
 
 echo "============================================"
 echo "  deploy scripts: extraction, pairing, arguments"
@@ -229,6 +230,18 @@ if [ -f "$REAL_COMPOSE" ]; then
   [ -z "$FLAG_FILES" ] \
     && pass "no secret path is passed as a command flag in the shipped compose, so --check-config sees every one of them" \
     || fail "these secret paths are passed as command flags and are therefore invisible to the pre-roll --check-config: $(echo $FLAG_FILES). Move them to their canonical ZEROSHIP_*_FILE environment name"
+fi
+
+# The operator overlay is shared with services that must never possess the
+# platform mint credential. A file reference here leaks the raw key through
+# their shared config or secret-directory mounts even if the binary ignores
+# the setting.
+if [ -f "$REAL_OVERLAY" ]; then
+  if grep -Eq '^[[:space:]]*platform_mint_key[[:space:]]*=' "$REAL_OVERLAY"; then
+    fail "the shared operator overlay contains auth.platform_mint_key"
+  else
+    pass "the shared operator overlay contains no platform mint credential"
+  fi
 fi
 
 # THE DRIFT CHECK, and the actual defect this whole area is about: two lists,
@@ -1034,7 +1047,7 @@ seen "$CAP" "--entrypoint zeroship $FAKE_IMAGE dev init" \
   && pass "secrets are provisioned by the deployed image's own 'zeroship dev init', which owns BOTH the env list and the file list" \
   || fail "provisioning does not run the image's zeroship dev init; it is keeping a second list that cannot cover the secret FILES"
 seen "$CAP" '### openssl' \
-  && fail "provisioning still generates values with 'openssl rand'; that path only ever produced the eight env-shaped secrets and no key files" \
+  && fail "provisioning still generates values with 'openssl rand'; that path only ever produced env-shaped secrets and no key files" \
   || pass "provisioning no longer hand-rolls values with openssl"
 
 # --- D3: the snapshot covers every member, under ONE stamp -----------------
@@ -1207,11 +1220,12 @@ if [ ! -x "$CTL_BIN" ]; then
   echo "  note $CTL_BIN is not built; skipping (cargo build --bin zeroship-control)"
 else
   ovl_env=(
+    ZEROSHIP_AUTH_PLATFORM_MINT_KEY=3333333333333333333333333333333333333333333333333333333333333333
     ZEROSHIP_CONTROL_DATABASE_URL=postgres://u:p@postgres:5432/z
-    ZEROSHIP_CONTROL_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-    ZEROSHIP_WORKER_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-    ZEROSHIP_PAIRWISE_SALT=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-    ZEROSHIP_CONTROL_MASTER_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    ZEROSHIP_CONTROL_KEY=1111111111111111111111111111111111111111111111111111111111111111
+    ZEROSHIP_WORKER_KEY=2222222222222222222222222222222222222222222222222222222222222222
+    ZEROSHIP_PAIRWISE_SALT=4444444444444444444444444444444444444444444444444444444444444444
+    ZEROSHIP_CONTROL_MASTER_KEY=5555555555555555555555555555555555555555555555555555555555555555
     ZEROSHIP_CONTROL_SIGNING_KEY_FILE=/etc/zeroship/secrets/control-signing.pem
     ZEROSHIP_AUTH_PLATFORM_ISSUER=https://auth.example.com/oauth2
     # The issuer above is the PUBLIC name a token's `iss` carries; this is the

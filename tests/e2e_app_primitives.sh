@@ -191,7 +191,7 @@ ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$ZEROSHIP_CONTROL_SIGNING_KEY_FILE"
 ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
 e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DBURL"
-"$BIN/zeroship-control" --port $ZEROSHIP_CONTROL_PORT \
+e2e_with_platform_mint_key "$BIN/zeroship-control" --port $ZEROSHIP_CONTROL_PORT \
   --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
   --migrated-url "http://localhost:$ZEROSHIP_MIGRATED_PORT" \
  > "$WORK/control.log" 2>&1 &

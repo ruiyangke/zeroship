@@ -33,6 +33,7 @@ const COMPOSE_FILE: &str = "deploy/compose/docker-compose.yml";
 /// all. Generating a secret nothing consumes is the set-but-unread shape this
 /// migration exists to remove, and it is not made better by a canonical name.
 const ENV_KEYS: &[&str] = &[
+    "ZEROSHIP_AUTH_PLATFORM_MINT_KEY",
     "ZEROSHIP_CONTROL_KEY",
     "ZEROSHIP_CONTROL_MASTER_KEY",
     "ZEROSHIP_WORKER_KEY",
@@ -495,7 +496,9 @@ fn validate_env_value(name: &str, value: &str) -> Result<(), String> {
             zeroship_core::config::validate_stash_key(name, value)
         }
         "ZEROSHIP_PAIRWISE_SALT" => zeroship_core::config::validate_pairwise_salt(name, value),
-        "ZEROSHIP_CONTROL_KEY" | "ZEROSHIP_MIGRATED_POLICY_SEAL_KEY" => Ok(()),
+        "ZEROSHIP_AUTH_PLATFORM_MINT_KEY"
+        | "ZEROSHIP_CONTROL_KEY"
+        | "ZEROSHIP_MIGRATED_POLICY_SEAL_KEY" => Ok(()),
         _ => Err(format!("unknown generated environment key {name}")),
     }
 }

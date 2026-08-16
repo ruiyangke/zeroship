@@ -1016,7 +1016,9 @@ fn print_usage() {
     eprintln!("  zeroship whoami");
     eprintln!("                   Show the signed-in account.");
     eprintln!("  zeroship logout");
-    eprintln!("                   Revoke and delete local CLI credentials.");
+    eprintln!(
+        "                   Delete local CLI credentials; no server-side token revocation is performed."
+    );
     eprintln!("  zeroship dev init [--secrets-dir=PATH] [--env-file=PATH]");
     eprintln!("                   Provision stable, strong local platform secrets.");
     eprintln!("  zeroship secret   set|list|rm|expose|unexpose|expose-list  --app=<uuid> [--control=URL] [--token=PAT]");

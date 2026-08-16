@@ -19,9 +19,9 @@
 # trusted_origins = ["https://console.zeroship.ai", "http://localhost:3000"]
 
 # Platform-global secrets, at the ROOT because several binaries read the one
-# value: control_key (control, gateway, worker, migrated, auth), worker_key
-# (control, gateway, worker), pairwise_salt (control, gateway). Root keys must
-# precede the first table header, or TOML puts them inside it.
+# value: control_key (control, gateway, worker, migrated), worker_key (control,
+# gateway, worker), pairwise_salt (control, gateway). Root keys must precede the
+# first table header, or TOML puts them inside it.
 control_key = "urn:zeroship:file:/etc/zeroship/secrets/control_key"
 worker_key = "urn:zeroship:file:/etc/zeroship/secrets/worker_key"
 pairwise_salt = "urn:zeroship:file:/etc/zeroship/secrets/pairwise_salt"
@@ -39,8 +39,9 @@ pairwise_salt = "urn:zeroship:file:/etc/zeroship/secrets/pairwise_salt"
 #                           `iss` claim must equal. PUBLIC, always - it is what
 #                           the OP stamps and what every verifier compares.
 #   auth.platform_mint_url  OUTBOUND. Where control POSTs the deploy-token mint
-#                           (`{url}/internal/platform-token`) carrying
-#                           control_key. Must be an address CONTROL can reach.
+#                           (`{url}/internal/platform-token`) carrying the
+#                           dedicated platform_mint_key. Must be an address
+#                           CONTROL can reach.
 #   auth.platform_jwks_url  OUTBOUND. Where control FETCHES the OP's signing
 #                           keys. Same reasoning; defaults to
 #                           `{issuer}/.well-known/jwks.json`, which is only
@@ -91,6 +92,16 @@ trusted_oauth_clients = []
 # 'none'). Empty/omitted => single-origin / dev (no immersive iframe).
 # frame_ancestor_origins = ["https://console.zeroship.ai"]
 frame_ancestor_origins = []
+
+# Do not put the platform mint credential in this shared overlay or shared
+# secrets directory. This file is mounted into non-consumers including the
+# worker; the shared secrets directory is mounted into gateway and migrated.
+# Inject
+# ZEROSHIP_AUTH_PLATFORM_MINT_KEY only into auth and control, or mount one
+# dedicated key file only into those two services and pass auth
+# --platform-mint-key-file and control --auth-platform-mint-key-file. Both
+# services need the same bytes. The value must not equal a control or worker
+# credential.
 
 [observability]
 # Tracing filter passed to Rust tracing subscribers (EnvFilter syntax).

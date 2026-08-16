@@ -227,7 +227,7 @@ pub struct ControlSettings {
     pub auth_platform_jwks_url: Operational<String>,
 
     /// Base URL control POSTs the platform deploy-token mint to
-    /// (`{mint_url}/internal/platform-token`), under `control_key`.
+    /// (`{mint_url}/internal/platform-token`), under the dedicated mint key.
     ///
     /// THIS IS NOT THE ISSUER, and the two cannot be folded back into one
     /// value. They answer different questions:
@@ -237,9 +237,9 @@ pub struct ControlSettings {
     ///     stamps into its tokens and by what every other verifier already
     ///     trusts. It is a NAME, and it must be the public one.
     ///   * this is an OUTBOUND DESTINATION. It is where this process opens a
-    ///     socket and sends `control_key`, so it is fixed by what this process
-    ///     can actually reach. It is a ROUTE, and it should be the internal
-    ///     service address.
+    ///     socket and sends the platform mint key, so it is fixed by what this
+    ///     process can actually reach. It is a ROUTE, and it should be the
+    ///     internal service address.
     ///
     /// A deployment whose OP is fronted by an edge that only accepts traffic
     /// from outside makes them different values by force, and that is not an
@@ -325,9 +325,16 @@ pub struct ControlSettings {
     #[config(name = "control.database_url")]
     pub database_url: Secret<String>,
 
-    /// Admin/control API shared secret, read by five binaries.
+    /// Admin/control API shared secret, read by four binaries.
     #[config(shared = CONTROL_KEY)]
     pub control_key: Secret<String>,
+
+    /// Dedicated credential for the auth service's platform-token mint.
+    ///
+    /// Only control and auth receive this value. In particular, a worker's
+    /// control-plane credential cannot authorize token issuance.
+    #[config(shared = AUTH_PLATFORM_MINT_KEY)]
+    pub auth_platform_mint_key: Secret<String>,
 
     /// Shared secret for worker admin endpoints.
     #[config(shared = WORKER_KEY)]

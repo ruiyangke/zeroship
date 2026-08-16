@@ -203,8 +203,12 @@ set -a
 . "$ENV_FILE"
 set +a
 : "${ZEROSHIP_CONTROL_KEY:?zeroship dev init omitted ZEROSHIP_CONTROL_KEY}"
+: "${ZEROSHIP_AUTH_PLATFORM_MINT_KEY:?zeroship dev init omitted the platform mint key}"
 : "${ZEROSHIP_AUTH_STASH_SIGNING_KEY:?zeroship dev init omitted the auth stash key}"
 : "${ZEROSHIP_AUTH_TOTP_ENC_KEY:?zeroship dev init omitted the auth TOTP key}"
+# Keep the mint credential out of the Node and Playwright children below. Auth
+# receives it explicitly at its launch boundary.
+export -n ZEROSHIP_AUTH_PLATFORM_MINT_KEY
 
 AUTH_PORT="$(node -e '
 const net = require("node:net");
@@ -220,19 +224,21 @@ BASE_URL="http://127.0.0.1:$AUTH_PORT"
 step "Boot the real native zeroship-auth binary on $BASE_URL"
 unset ZEROSHIP_CONFIG || true
 export ZEROSHIP_AUTH_DATABASE_URL="$DSN"
-"$BIN/zeroship-auth" \
-  --no-config \
-  --provider native \
-  --addr "127.0.0.1:$AUTH_PORT" \
-  --public-url "$BASE_URL" \
-  --signing-key-file "$SECRETS_DIR/auth-signing.pem" \
-  --pairwise-salt-file "$SECRETS_DIR/pairwise-salt" \
-  --broker-secret-file "$SECRETS_DIR/broker-secret" \
-  --refresh-hash-key-file "$SECRETS_DIR/refresh-hash-key" \
-  --refresh-idem-key-file "$SECRETS_DIR/refresh-idem-key" \
-  --mailer stdout \
-  --relay-forward-mailer stdout \
-  >"$AUTH_LOG" 2>&1 &
+(
+  export ZEROSHIP_AUTH_PLATFORM_MINT_KEY
+  exec "$BIN/zeroship-auth" \
+    --no-config \
+    --provider native \
+    --addr "127.0.0.1:$AUTH_PORT" \
+    --public-url "$BASE_URL" \
+    --signing-key-file "$SECRETS_DIR/auth-signing.pem" \
+    --pairwise-salt-file "$SECRETS_DIR/pairwise-salt" \
+    --broker-secret-file "$SECRETS_DIR/broker-secret" \
+    --refresh-hash-key-file "$SECRETS_DIR/refresh-hash-key" \
+    --refresh-idem-key-file "$SECRETS_DIR/refresh-idem-key" \
+    --mailer stdout \
+    --relay-forward-mailer stdout
+) >"$AUTH_LOG" 2>&1 &
 AUTH_PID=$!
 
 ready=0

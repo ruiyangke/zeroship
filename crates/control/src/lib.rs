@@ -443,6 +443,8 @@ pub struct AppState {
     /// artifacts.
     pub workflow_blob_store: Arc<dyn WorkflowBlobStore>,
     pub control_key: SecretString,
+    /// Dedicated credential sent only to the auth platform-token mint.
+    pub auth_platform_mint_key: SecretString,
     pub master_key: SecretString,
     /// Stripe webhook signing secret. An empty value makes every webhook fail
     /// closed; it never disables verification.
@@ -538,9 +540,9 @@ pub struct AppState {
     /// boot REFUSES the combination "issuer configured, mint URL empty".
     ///
     /// Separate from `auth_provider.platform_issuer()` on purpose: that string
-    /// is the trust anchor a token's `iss` must equal, this one is where
-    /// `control_key` is sent. See the declaration in `config.rs` for why they
-    /// cannot be one value.
+    /// is the trust anchor a token's `iss` must equal, this one is where the
+    /// dedicated platform mint key is sent. See the declaration in `config.rs`
+    /// for why they cannot be one value.
     pub platform_mint_url: Option<String>,
     /// Provider factories available in this process. Boot registers built-ins
     /// explicitly, then builds the role-addressed billing stack below.

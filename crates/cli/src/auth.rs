@@ -6,8 +6,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use zeroship_core::device_grant::PLATFORM_CLI_CLIENT_ID;
 
-const CLIENT_ID: &str = "zeroship-cli";
 const SCOPE: &str = "openid offline_access apps:deploy apps:read apps:write secrets:read";
 const TOKEN_EXPIRY_SKEW_SECS: u64 = 60;
 
@@ -167,7 +167,7 @@ fn login_control_device_flow(control_url: &str, print_prompt: bool) -> Result<()
     let resp = post_json(
         &device_url,
         &serde_json::json!({
-            "client_id": CLIENT_ID,
+            "client_id": PLATFORM_CLI_CLIENT_ID,
             "scope": SCOPE,
         }),
     )?;
@@ -207,7 +207,7 @@ fn login_control_device_flow(control_url: &str, print_prompt: bool) -> Result<()
         refresh_token: String::new(),
         expires_at,
         auth_url: control_url.to_string(),
-        client_id: CLIENT_ID.to_string(),
+        client_id: PLATFORM_CLI_CLIENT_ID.to_string(),
         provider: "platform".to_string(),
         control_url: Some(control_url.to_string()),
         token_endpoint: None,

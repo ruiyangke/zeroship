@@ -65,11 +65,12 @@ fn source_chain(err: &dyn StdError) -> Option<String> {
 /// them for a principal it just created. A PLATFORM principal has no such
 /// moment: `zeroship.users` rows are written by the auth service
 /// (`crates/auth/src/store/users.rs`, `crates/auth/src/identity/linker.rs`),
-/// which holds no privilege on `zeroship.principal_grants` at all - grants.ts
-/// gives that table to `zeroship_control` only. So a creator who signed up
-/// through the platform OP reached device approval with an EMPTY grant set,
-/// `deploy_scopes_for_principal` intersected to nothing, and the deploy token
-/// minted with `scope: ""` for a `zeroship deploy` that then 403s.
+/// which has SELECT but no write privilege on `zeroship.principal_grants`.
+/// Auth uses that read to cap platform-token issuance independently, while
+/// grants.ts reserves grant mutation for `zeroship_control`. So a creator who
+/// signed up through the platform OP reached device approval with an EMPTY
+/// grant set, `deploy_scopes_for_principal` intersected to nothing, and the
+/// deploy token minted with `scope: ""` for a `zeroship deploy` that then 403s.
 ///
 /// The `identity_links` row is the marker, not a count of existing grants: a
 /// principal whose grants an operator has REVOKED must not have them restored

@@ -12,7 +12,7 @@ export function up() {
   grant({ privileges: ["select", "insert", "update", "delete"], on: { kind: "table", schema: "zeroship", names: ["users", "idp_sessions", "magic_links", "magic_completions", "email_verifications", "totp_credentials", "totp_backup_codes", "oauth_refresh_tokens", "oauth_authorization_codes", "device_grants", "signing_keys", "oidc_session_clients"] }, to: ["zeroship_auth"] });
   grant({ privileges: ["select", "insert", "delete"], on: { kind: "table", schema: "zeroship", names: ["federated_identities", "jwk_key_state", "rate_limits", "audit_events"] }, to: ["zeroship_auth"] });
   grant({ privileges: ["select", "insert", "update"], on: { kind: "table", schema: "zeroship", names: ["oauth_grants", "oauth_clients", "token_revocations"] }, to: ["zeroship_auth"] });
-  grant({ privileges: ["select"], on: { kind: "table", schema: "zeroship", names: ["app_scope_defs"] }, to: ["zeroship_auth"] });
+  grant({ privileges: ["select"], on: { kind: "table", schema: "zeroship", names: ["app_scope_defs", "principal_grants"] }, to: ["zeroship_auth"] });
   grant({ privileges: ["select", "insert"], on: { kind: "table", schema: "zeroship", names: ["email_suppressions", "cron_state"] }, to: ["zeroship_auth"] });
   grant({ privileges: ["select", "update"], on: { kind: "table", schema: "zeroship", names: ["app_user_identities", "app_session_anchors"] }, to: ["zeroship_auth"] });
   grant({ privileges: ["select", "delete"], on: { kind: "table", schema: "zeroship", names: ["gateway_sessions"] }, to: ["zeroship_auth"] });

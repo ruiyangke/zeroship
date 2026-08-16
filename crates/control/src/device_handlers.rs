@@ -16,9 +16,10 @@
 //!    `zeroship.users` id both services share), and `/api/device/approve` for a
 //!    Supabase deployment, where the browser holds a GoTrue bearer instead of a
 //!    zeroship session.
-//! 3. `/api/device/token` mints. The CLI's poll is what resolves the
-//!    principal's `zeroship.principal_grants`, caps the requested scopes to
-//!    them, asks the OP for a platform access token and hands it over.
+//! 3. `/api/device/token` mints. The CLI's poll resolves the principal's
+//!    `zeroship.principal_grants`, caps the requested scopes to them, and asks
+//!    the OP for a platform access token. The OP independently loads the same
+//!    principal and grants and caps the scopes again before issuance.
 //!
 //! Minting at poll time rather than at approval time is what lets a browser
 //! approve without being able to mint: the approving vehicle needs no control
@@ -47,7 +48,9 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use zeroship_core::auth::extract_bearer;
 use zeroship_core::auth_provider::{ProviderAuthz, VerifiedToken, VerifyTokenError};
-use zeroship_core::device_grant::{self, PLATFORM_PROVIDER};
+use zeroship_core::device_grant::{
+    self, PLATFORM_CLI_CLIENT_ID, PLATFORM_PROVIDER, PLATFORM_TOKEN_MAX_TTL_SECS,
+};
 
 use crate::{identity_bridge, AppState};
 
@@ -77,11 +80,13 @@ const DEPLOY_TOKEN_SCOPES: [&str; 4] = [
 /// gateway and app runtime do not accept it; its scope is capped to the
 /// principal's stored grants intersected with [`DEPLOY_TOKEN_SCOPES`], so it
 /// carries no admin or billing authority; and the CLI writes it 0600. What
-/// does NOT bound it is server-side revocation: `zeroship.token_revocations`
-/// is only ever written for per-app RP clients with a pairwise subject
-/// (`crates/control/src/oauth_grants_handlers.rs`), never for `zeroship-cli`
-/// with a principal subject, so nothing can kill this token early today.
-const DEPLOY_TOKEN_TTL_SECS: i64 = 12 * 60 * 60;
+/// does NOT currently bound it is a supported server-side revocation action.
+/// The bearer read path honors `zeroship.token_revocations`, but disconnecting
+/// an app writes a per-app client and pairwise subject. Auth's generic RFC 7009
+/// writer requires an authenticated registered client, while `zeroship-cli`
+/// is deliberately unregistered. No supported path writes the
+/// (`zeroship-cli`, principal UUID) marker this token needs, so the shared
+/// 12-hour issuance ceiling is its effective recall bound today.
 
 #[derive(Debug, Deserialize)]
 pub struct DeviceAuthRequest {
@@ -124,8 +129,6 @@ pub struct DeviceTokenResponse {
 #[derive(Debug, Serialize)]
 struct PlatformMintRequest<'a> {
     principal_id: &'a str,
-    audience: &'a str,
-    client_id: &'a str,
     scopes: &'a [String],
     ttl_secs: Option<i64>,
 }
@@ -137,6 +140,7 @@ struct PlatformMintResponse {
     scope: String,
     token_type: String,
     provider: String,
+    client_id: String,
 }
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
@@ -444,19 +448,14 @@ pub async fn device_token(
             // grants are seeded once, marked by the identity link, so an
             // operator who later revokes one does not get it back on the next
             // login.
-            if let Err(resp) = identity_bridge::ensure_platform_creator_grants(&tx, principal_id)
-                .await
-                .map_err(|err| {
-                    tracing::error!(
-                        error = %err,
-                        principal_id = %principal_id,
-                        "control: creator grant provisioning failed"
-                    );
-                    internal_error()
-                })
-            {
+            if let Err(err) = ensure_platform_creator_grants_committed(&state, principal_id).await {
+                tracing::error!(
+                    error = %err,
+                    principal_id = %principal_id,
+                    "control: creator grant provisioning failed"
+                );
                 let _ = tx.rollback().await;
-                return resp;
+                return internal_error();
             }
 
             let scopes = match deploy_scopes_for_principal(
@@ -474,9 +473,10 @@ pub async fn device_token(
             };
             // The mint is a bounded local call to the OP made while this row is
             // still locked, so the grant stays exactly-once: a second poll
-            // blocks until this transaction resolves, and a failed mint rolls
-            // back to `approved` for the CLI's next poll rather than burning
-            // the grant.
+            // blocks until this transaction resolves, and a failed mint leaves
+            // the grant `approved` for the CLI's next poll rather than burning
+            // it. Creator grants were committed on a separate connection above,
+            // so auth's independent lookup can see the same authority set.
             let minted = match mint_platform_deploy_token(&state, principal_id, &scopes).await {
                 Ok(minted) => minted,
                 Err(resp) => {
@@ -484,9 +484,12 @@ pub async fn device_token(
                     return resp;
                 }
             };
-            if minted.expires_in == 0 || minted.scope != scopes.join(" ") {
+            if minted.expires_in != PLATFORM_TOKEN_MAX_TTL_SECS as u64
+                || minted.scope != scopes.join(" ")
+            {
                 tracing::error!(
                     expires_in = minted.expires_in,
+                    expected_expires_in = PLATFORM_TOKEN_MAX_TTL_SECS,
                     response_scope = %minted.scope,
                     expected_scope = %scopes.join(" "),
                     "control: platform token mint response metadata mismatch"
@@ -544,9 +547,9 @@ pub async fn device_token(
 ///
 /// Everything downstream is platform-shaped: the grant row is written with
 /// `provider = 'platform'`, `mint_platform_deploy_token` posts to
-/// `{platform_mint_url}/internal/platform-token` under `control_key`, and the
-/// minted token is verified back through `platform_issuer`. Those three values
-/// are the whole precondition.
+/// `{platform_mint_url}/internal/platform-token` under the dedicated platform
+/// mint key, and the minted token is verified back through `platform_issuer`.
+/// Those three values are the whole precondition.
 ///
 /// The mint URL is checked HERE, not only at the mint, because the alternative
 /// is that a human reads a code out of the CLI, opens the page, approves, and
@@ -577,13 +580,41 @@ pub async fn device_token(
 /// stopped being GoTrue-bound.
 fn ensure_platform_device_provider(state: &AppState) -> Result<(), web::HttpResponse> {
     if state.auth_provider.platform_issuer().is_some()
-        && !state.control_key.is_empty()
+        && !state.auth_platform_mint_key.is_empty()
         && state.platform_mint_url.is_some()
     {
         Ok(())
     } else {
         Err(unsupported_provider())
     }
+}
+
+async fn ensure_platform_creator_grants_committed(
+    state: &AppState,
+    principal_id: uuid::Uuid,
+) -> Result<(), String> {
+    let mut conn = state
+        .registry
+        .conn()
+        .await
+        .map_err(|err| format!("creator grant DB connect: {err}"))?;
+    let tx = conn
+        .transaction()
+        .await
+        .map_err(|err| format!("creator grant transaction begin: {err}"))?;
+    if let Err(err) = identity_bridge::ensure_platform_creator_grants(&tx, principal_id).await {
+        if let Err(rollback_err) = tx.rollback().await {
+            tracing::error!(
+                error = %rollback_err,
+                principal_id = %principal_id,
+                "control: creator grant transaction rollback failed"
+            );
+        }
+        return Err(err.to_string());
+    }
+    tx.commit()
+        .await
+        .map_err(|err| format!("creator grant transaction commit: {err}"))
 }
 
 async fn deploy_scopes_for_principal(
@@ -668,10 +699,8 @@ async fn mint_platform_deploy_token(
     let principal_id_string = principal_id.to_string();
     let body = PlatformMintRequest {
         principal_id: &principal_id_string,
-        audience: &state.expected_oauth_audience,
-        client_id: "zeroship-cli",
         scopes,
-        ttl_secs: Some(DEPLOY_TOKEN_TTL_SECS),
+        ttl_secs: Some(PLATFORM_TOKEN_MAX_TTL_SECS),
     };
     let body = serde_json::to_vec(&body).map_err(|err| {
         tracing::error!(error = %err, "control: platform token mint request encode failed");
@@ -691,7 +720,10 @@ async fn mint_platform_deploy_token(
         })?
         .header(
             "authorization",
-            &format!("Bearer {}", state.control_key.expose_secret()),
+            &format!(
+                "Bearer {}",
+                state.auth_platform_mint_key.expose_secret()
+            ),
         )
         .map_err(|err| {
             tracing::error!(error = %err, "control: platform token mint auth header failed");
@@ -724,10 +756,14 @@ async fn mint_platform_deploy_token(
         tracing::error!(error = %err, "control: platform token mint response parse failed");
         internal_error()
     })?;
-    if minted.provider != "platform" || !minted.token_type.eq_ignore_ascii_case("Bearer") {
+    if minted.provider != "platform"
+        || !minted.token_type.eq_ignore_ascii_case("Bearer")
+        || minted.client_id != PLATFORM_CLI_CLIENT_ID
+    {
         tracing::error!(
             provider = %minted.provider,
             token_type = %minted.token_type,
+            client_id = %minted.client_id,
             "control: platform token mint response had invalid shape"
         );
         return Err(internal_error());
@@ -760,11 +796,13 @@ async fn verify_minted_platform_deploy_token(
         &verified.provider_authz,
         ProviderAuthz::OAuthScope(raw_scope) if raw_scope == &expected_scope
     );
-    if verified.provider_subject != expected_subject || !audience_ok || !scope_ok {
+    let client_ok = verified.client_id.as_deref() == Some(PLATFORM_CLI_CLIENT_ID);
+    if verified.provider_subject != expected_subject || !audience_ok || !scope_ok || !client_ok {
         tracing::error!(
             subject = %verified.provider_subject,
             expected_subject = %expected_subject,
             audience_ok,
+            client_ok,
             authz = ?verified.provider_authz,
             expected_scope = %expected_scope,
             "control: minted platform token claims did not match device approval"
