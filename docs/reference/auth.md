@@ -178,6 +178,33 @@ All token operations are native to `crates/auth`.
 - **Authorization code:** single-use, PKCE-bound, 60 s TTL.
 - **Device code:** 10 min TTL, polling interval enforced by the OP.
 
+### CLI platform tokens
+
+The device flow exchanges an approved grant for a platform access token through
+`POST /internal/platform-token`. That mint is deliberately narrower than the
+other internal control APIs:
+
+- Only auth and control receive `auth.platform_mint_key`. The worker still
+  needs `control_key` for its normal control-plane calls, but that key is not
+  accepted by the mint.
+- Auth rejects an unknown `principal_id`, loads that principal's grants from
+  Postgres itself, and issues only the intersection of stored grants and the
+  requested scopes. The caller cannot establish entitlement by naming a
+  principal or scope in the request. The auth database role has SELECT-only
+  access to `zeroship.principal_grants`; it cannot mutate grants.
+- Auth chooses the server-configured platform audience and the fixed
+  `zeroship-cli` client ID. Neither value is caller-controlled.
+- The requested lifetime must be positive and no more than 12 hours.
+
+Control's bearer verification path honors a
+`zeroship.token_revocations` marker for `zeroship-cli`, but the product has no
+supported operation that writes that marker for a CLI platform token. The CLI
+client is not registered for RFC 7009 client authentication, and
+`zeroship logout` deletes only the local credential. A token therefore cannot
+currently be recalled before expiry through a supported flow; that is why the
+12-hour ceiling is part of the authorization boundary rather than an unrelated
+default.
+
 ## OAuth Clients
 
 OAuth clients live in `zeroship.oauth_clients`; per-app clients additionally
@@ -214,6 +241,7 @@ platform corpus applied through `zeroship-platform-migrate`:
 | `zeroship.oauth_authorization_codes` | Pending authorization codes |
 | `zeroship.oauth_refresh_tokens` | Refresh-token family state |
 | `zeroship.device_grants` | Device authorization grants |
+| `zeroship.principal_grants` | Platform grants; auth has SELECT-only access for CLI mint capping |
 | `zeroship.signing_keys` | Published public JWK metadata |
 | `zeroship.magic_links`, `zeroship.magic_completions` | Magic-link and reset flows |
 | `zeroship.email_verifications`, `zeroship.email_suppressions` | Email verification and suppression |
@@ -236,6 +264,7 @@ at minimum:
 - `REFRESH_IDEM_KEY_FILE`
 - `AUTH_STASH_SIGNING_KEY`
 - `AUTH_TOTP_ENC_KEY`
+- `ZEROSHIP_AUTH_PLATFORM_MINT_KEY`
 
 Run platform migrations before booting services:
 

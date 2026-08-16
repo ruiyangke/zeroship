@@ -18,7 +18,9 @@ End user -> gateway -> zeroship-auth (native OIDC OP + login UI, :9092)
 files. Run any number of replicas behind the auth host after the platform
 migrations have completed. All replicas for one environment must use the same
 issuer URL and the same signing, broker, pairwise, refresh, stash, and TOTP
-secret material.
+secret material. They must also use the same platform mint key as the control
+replicas that call the internal mint. Never deliver that key to worker,
+gateway, migrated, or creator-app processes.
 
 ## Required Configuration
 
@@ -32,6 +34,7 @@ var.
 | `ZEROSHIP_AUTH_ADDR` | `127.0.0.1:9092` | no | Bind address. Keep loopback unless a reverse proxy or orchestrator needs a pod/network bind. |
 | `ZEROSHIP_AUTH_DATABASE_URL` | unset | yes | DSN for the `zeroship_auth` role against the migrated platform database. |
 | `ZEROSHIP_AUTH_PUBLIC_URL` | `http://localhost:9092` | yes in prod | Public auth origin. The issuer is `${ZEROSHIP_AUTH_PUBLIC_URL}/oauth2`. |
+| `ZEROSHIP_AUTH_PLATFORM_MINT_KEY` | unset | yes | Dedicated bearer for the internal platform-token mint. Supply at least 32 random bytes through service-specific env injection or auth `--platform-mint-key-file`; configure the same bytes on control through its env or `--auth-platform-mint-key-file`. Never share it with worker or the broader control key. |
 | `ZEROSHIP_AUTH_SIGNING_KEY_FILE` | unset | yes in prod | Ed25519 private key, PEM/PKCS#8 or DER. Public JWK metadata is published to Postgres at boot. |
 | `ZEROSHIP_AUTH_PAIRWISE_SALT_FILE` | unset | yes in prod | Permanent pairwise-subject salt. Do not rotate without a migration. |
 | `ZEROSHIP_AUTH_BROKER_SECRET_FILE` | unset | yes in prod | Master secret used to derive per-client broker secrets. |
@@ -103,12 +106,19 @@ The command creates exactly these seven files, with a mode of 0600 on Unix (and
 `control-signing.pem` `gateway-signing.pem` `auth-signing.pem` `broker-secret`
 `pairwise-salt` `refresh-hash-key` `refresh-idem-key`
 
-It also adds eight 32-byte random hex values to the env overlay:
+It also adds nine 32-byte random hex values to the env overlay:
 
-`ZEROSHIP_CONTROL_KEY` `ZEROSHIP_CONTROL_MASTER_KEY` `ZEROSHIP_WORKER_KEY`
+`ZEROSHIP_AUTH_PLATFORM_MINT_KEY` `ZEROSHIP_CONTROL_KEY`
+`ZEROSHIP_CONTROL_MASTER_KEY` `ZEROSHIP_WORKER_KEY`
 `ZEROSHIP_MIGRATED_POLICY_SEAL_KEY` `ZEROSHIP_GATEWAY_STASH_SIGNING_KEY`
 `ZEROSHIP_PAIRWISE_SALT` `ZEROSHIP_AUTH_STASH_SIGNING_KEY`
 `ZEROSHIP_AUTH_TOTP_ENC_KEY`
+
+The generated overlay is convenient for local compose, but production must
+not mount or export it wholesale. Inject `ZEROSHIP_AUTH_PLATFORM_MINT_KEY`
+only into auth and control. If using a file, mount the dedicated file only
+into those two service containers; a shared secrets-directory mount defeats
+the isolation even when other binaries ignore the setting.
 
 Generation is idempotent. A rerun validates and keeps every existing value,
 creates only missing entries, and refuses to replace invalid or mismatched
@@ -118,17 +128,21 @@ For manual provisioning, use the same formats:
 
 ```bash
 S=/path/to/secrets
+AUTH_CONTROL_S=/path/to/auth-control-only-secrets
 umask 077
-mkdir -p "$S" && chmod 0700 "$S"
+mkdir -p "$S" "$AUTH_CONTROL_S"
+chmod 0700 "$S" "$AUTH_CONTROL_S"
 openssl genpkey -algorithm ed25519 -out "$S/auth-signing.pem"
 openssl genpkey -algorithm ed25519 -out "$S/gateway-signing.pem"
 openssl genpkey -algorithm ed25519 -out "$S/control-signing.pem"
 openssl rand -base64 48 > "$S/broker-secret"
+openssl rand -hex 32 > "$AUTH_CONTROL_S/platform-mint-key"
 printf '1:%s\n' "$(openssl rand -hex 48)" > "$S/refresh-hash-key"
 openssl rand -base64 48 > "$S/refresh-idem-key"
 ZEROSHIP_PAIRWISE_SALT="$(openssl rand -hex 32)"
 printf '%s' "$ZEROSHIP_PAIRWISE_SALT" > "$S/pairwise-salt"
 chmod 0600 "$S"/*
+chmod 0600 "$AUTH_CONTROL_S/platform-mint-key"
 ```
 
 `refresh-hash-key` is a keyring, not an unadorned random string. Each nonempty
@@ -179,8 +193,15 @@ or base64url encoded.
    ZEROSHIP_AUTH_STASH_SIGNING_KEY="$ZEROSHIP_AUTH_STASH_SIGNING_KEY" \
    ZEROSHIP_AUTH_TOTP_ENC_KEY="$ZEROSHIP_AUTH_TOTP_ENC_KEY" \
    ZEROSHIP_AUTH_MAILER=smtp ZEROSHIP_AUTH_SMTP_HOST=smtp.example.com \
-   zeroship-auth --addr 0.0.0.0:9092
+   zeroship-auth --addr 0.0.0.0:9092 \
+     --platform-mint-key-file /run/auth-control-secrets/platform-mint-key
    ```
+
+Mount the auth-control-only directory only into auth and control. Start every
+control replica with the same bytes, using either
+`ZEROSHIP_AUTH_PLATFORM_MINT_KEY` or `--auth-platform-mint-key-file` with
+`/run/auth-control-secrets/platform-mint-key`. Do not mount that directory
+into worker, gateway, migrated, or app containers.
 
 On boot, the service loads the signing key, publishes the matching public JWK
 metadata, initializes the refresh-token key material, and serves discovery at
@@ -249,13 +270,16 @@ Back up the platform database and all auth secret material together:
 - `ZEROSHIP_AUTH_REFRESH_IDEM_KEY_FILE`
 - `ZEROSHIP_AUTH_STASH_SIGNING_KEY`
 - `ZEROSHIP_AUTH_TOTP_ENC_KEY`
+- `ZEROSHIP_AUTH_PLATFORM_MINT_KEY` or its dedicated file
 
 Restore order:
 
 1. Restore PostgreSQL.
-2. Restore the same secret files and env secrets.
-3. Start `zeroship-auth`.
-4. Verify discovery, JWKS, `/readyz`, login, refresh, and logout.
+2. Restore the same secret files and env secrets, including the platform mint
+   key on auth and control only.
+3. Start `zeroship-auth` and control with the same restored mint key.
+4. Verify discovery, JWKS, `/readyz`, login, refresh, logout, and the CLI
+   device-token exchange.
 
 Losing the signing key invalidates outstanding ID/access tokens. Losing refresh
 key material invalidates refresh families. Losing the pairwise salt rekeys every

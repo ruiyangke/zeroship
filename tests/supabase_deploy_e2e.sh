@@ -346,7 +346,7 @@ prepare_auth_native_op_secrets() {
 start_auth_service() {
   prepare_auth_native_op_secrets
   ZEROSHIP_AUTH_GOTRUE_EMAIL_HOOK_SECRET="$GOTRUE_EMAIL_HOOK_SECRET" \
-  "$BIN/zeroship-auth" \
+  e2e_with_platform_mint_key "$BIN/zeroship-auth" \
     --addr "0.0.0.0:$AUTH_PORT" \
     --public-url "http://localhost:$AUTH_PORT" \
     --signing-key-file "$ZEROSHIP_AUTH_SIGNING_KEY_FILE" \
@@ -540,7 +540,7 @@ start_zeroship_stack() {
     export ZEROSHIP_AUTH_SUPABASE_JWT_SECRET="$JWT_SECRET"
   fi
 
-  "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
+  e2e_with_platform_mint_key "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
     --blob-store "$WORK/blobs" \
     --auth-provider supabase \
     --auth-supabase-url "$ZEROSHIP_AUTH_SUPABASE_URL" \

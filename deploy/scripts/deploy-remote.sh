@@ -572,7 +572,7 @@ main() {
   #
   # RUN THE IMAGE'S OWN PROVISIONER. This used to be a shell loop over a list
   # scraped out of `crates/cli/src/dev.rs` with sed, and that list is
-  # `ENV_KEYS` -- eight env-shaped names. The servers also require seven secret
+  # `ENV_KEYS` -- env-shaped names. The servers also require seven secret
   # FILES, which appear in `secret_specs()` a hundred lines further down the
   # same file and were in nobody's list, so nothing ever created them and
   # control refused to start on a missing --signing-key-file.

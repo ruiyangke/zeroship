@@ -228,7 +228,8 @@ ZEROSHIP_PAIRWISE_SALT=<openssl rand -hex 32>
 
 `zeroship dev init` already added these generated values to the same file:
 
-`ZEROSHIP_CONTROL_KEY` `ZEROSHIP_CONTROL_MASTER_KEY` `ZEROSHIP_WORKER_KEY`
+`ZEROSHIP_AUTH_PLATFORM_MINT_KEY` `ZEROSHIP_CONTROL_KEY`
+`ZEROSHIP_CONTROL_MASTER_KEY` `ZEROSHIP_WORKER_KEY`
 `ZEROSHIP_MIGRATED_POLICY_SEAL_KEY` `ZEROSHIP_GATEWAY_STASH_SIGNING_KEY`
 `ZEROSHIP_PAIRWISE_SALT` `ZEROSHIP_AUTH_STASH_SIGNING_KEY`
 `ZEROSHIP_AUTH_TOTP_ENC_KEY`
@@ -241,9 +242,11 @@ unless this deployment accepts Stripe webhooks; then set it to the
 rejects every delivery to `/internal/webhooks/stripe` with 500 - which is
 the correct answer for a deployment Stripe cannot reach anyway.
 
-Do not replace them with shared examples or per-service values. In particular,
-one `ZEROSHIP_CONTROL_KEY` now supplies control, gateway, worker, migrated, and
-auth together. `chmod 600 .env`; the generator applies that mode on Unix too.
+Do not replace them with shared examples or per-service values. The generated
+`ZEROSHIP_CONTROL_KEY` supplies control, gateway, worker, and migrated. The
+independent `ZEROSHIP_AUTH_PLATFORM_MINT_KEY` supplies only control and auth, so
+the worker's key cannot authorize token minting. `chmod 600 .env`; the generator
+applies that mode on Unix too.
 
 ### Control plane access
 
@@ -391,9 +394,9 @@ docker compose pull
 docker compose up -d
 ```
 
-Every service must come up together. `ZEROSHIP_CONTROL_KEY` is shared, so a
-partial or rolling restart leaves two halves that cannot authenticate to each
-other.
+The control key is shared by control, gateway, worker, and migrated. The
+platform mint key is a separate auth/control credential. Provision both before
+starting the stack; never copy one value into the other slot.
 
 ## Deploying a creator app
 

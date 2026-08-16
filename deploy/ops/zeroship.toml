@@ -44,6 +44,9 @@ trusted_oauth_clients = ["oac_2gEz9tHlodeyWPNRtQsLsT"]
 # origins only - NO wildcards. This compose serves the console at the Caddy host.
 frame_ancestor_origins = ["http://console.zeroship.localhost"]
 
+# The control -> auth token-mint bearer is supplied by compose through
+# ZEROSHIP_AUTH_PLATFORM_MINT_KEY. Auth does not receive ZEROSHIP_CONTROL_KEY.
+
 [observability]
 log_filter = "info,zeroship_=debug"
 log_format = "json"
