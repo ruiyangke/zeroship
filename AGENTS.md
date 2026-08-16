@@ -14,6 +14,8 @@ This file is the AI-agent landing page. Read the **task router** below first.
 
 This is a deliberate stance — not a limitation. Pre-launch is the moment to get shapes right. Building back-compat infrastructure for users that don't exist is wasted work.
 
+**What this does NOT license.** This section is about *back-compat obligations*, nothing else. "We are pre-launch" is never a reason to defer security, correctness, or a design done properly. We are closing the gaps *to* production, not deferring them past it. For anything a launch would freeze - credential and trust models, wire formats, schema shapes - the argument above runs the *other* way: changing them afterwards means migrating live tenants and coordinating rollout across every deployment, so now is when it is cheapest, not when it is most deferrable. Build the end state; do not build two intermediate versions and throw both away. Sequencing work by real dependencies is right; sequencing it by "later, because pre-launch" is not.
+
 **Implications for any change you propose:**
 
 - **No `@deprecated` aliases.** Rename the symbol. Delete the old name. One PR.
