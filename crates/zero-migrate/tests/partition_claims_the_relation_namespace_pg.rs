@@ -242,3 +242,50 @@ fn detaching_then_dropping_the_parent_does_not_free_the_detached_name() {
     ))
     .expect_err("a detached partition survives its former parent, so its name is still taken");
 }
+
+/// ATTACH is the mirror of detach, and the last lifecycle event that can touch
+/// the parentage map.
+///
+/// Attaching an existing table makes it a dependent: dropping the parent now
+/// drops it too. Measured live - after `ATTACH PARTITION att.t` and
+/// `DROP TABLE att.par`, `information_schema` reports no `t` and the name is
+/// reusable.
+///
+/// REACHABILITY, measured rather than assumed: `attachPartition` is NOT portable
+/// core. `vendor_capabilities` lists `createPartition`, `detachPartition` and
+/// `dropPartition` as requiring no capability, while attach requires
+/// `partition` - absorbing an EXISTING table is privileged in a way creating a
+/// fresh one is not. So a confined migration cannot reach this at all, and the
+/// test authorises itself with the operator charter to exercise the path a
+/// privileged migration takes.
+///
+/// That gating is why this is the last of the four events to be fixed and the
+/// only one a confined-profile probe could never have surfaced.
+#[test]
+fn attaching_a_table_makes_it_a_dependent_of_the_parent() {
+    use zero_migrate::model::validate::{validate_ir_authorized, VendorAuthority};
+
+    let policy = support::operator_charter("public");
+    let check = |ops: &str| {
+        let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{ops}]}}"#);
+        let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
+        let authority = VendorAuthority {
+            effective: &policy,
+            default_schema: "public",
+        };
+        validate_ir_authorized(&ir, Dialect::Postgres, &[], None, Some(authority))
+            .map_err(|e| format!("{}: {}", e.code, e.reason))
+    };
+
+    let attach = r#"{"op":"attachPartition","parent":"par","name":"t","bound":{"kind":"range","from":[{"kind":"int","value":0}],"to":[{"kind":"int","value":10}]}}"#;
+    let t = tbl("t");
+
+    check(&format!(
+        r#"{PARENT},{t},{attach},{{"op":"dropTable","table":"par"}},{t}"#
+    ))
+    .expect("the attached table went with its parent, so the name is free");
+
+    // THE CONTROL: without the drop the attached table is still there.
+    check(&format!(r#"{PARENT},{t},{attach},{t}"#))
+        .expect_err("the attached table is still live, so its name is still taken");
+}

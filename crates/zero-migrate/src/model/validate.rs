@@ -3112,6 +3112,26 @@ fn validate_no_name_is_claimed_twice(
                     .or_default()
                     .push(key);
             }
+            // ATTACH is the mirror of detach and the last lifecycle event that
+            // touches this map: an attached table BECOMES a dependent, so a later
+            // drop of the parent takes it too. Measured live — after ATTACH and
+            // DROP TABLE par, `information_schema` reports no `t`.
+            //
+            // Reachable only under a granting profile: `attachPartition` requires
+            // the `partition` capability, while create/detach/drop partition are
+            // portable core. Absorbing an EXISTING table is privileged in a way
+            // creating a fresh one is not.
+            Op::AttachPartition {
+                name,
+                parent,
+                schema,
+                ..
+            } => {
+                dependents_of
+                    .entry((schema.as_deref(), parent.as_str()))
+                    .or_default()
+                    .push((schema.as_deref(), name.as_str()));
+            }
             // A DETACHED partition becomes a standalone table: its name stays
             // taken (F722 pins that), but it is no longer a DEPENDENT, so a later
             // drop of its former parent must not release it.
