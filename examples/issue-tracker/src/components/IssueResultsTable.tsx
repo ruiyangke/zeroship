@@ -1,9 +1,11 @@
 // Shared results table used by the issue list, advanced/quick search results,
 // and the "my dashboard" sections. Presentation only -- callers own data
 // fetching, filtering, and (for the issue list) which columns are visible.
-import { DataTable, type DataTableColumn, type DataTableSort } from "@zeroship/ui";
+import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
+import { EmptyState } from "../ui/EmptyState";
+import { Skeleton } from "../ui/Skeleton";
 import { KindBadge, PriorityBadge, ResolutionBadge, SeverityBadge, StatusBadge } from "./Badges";
 import type { Issue } from "./types";
 import { useIssueLookups } from "./useIssueLookups";
@@ -65,14 +67,17 @@ function formatDate(ms: number): string {
 }
 
 /**
- * Built on the design system's DataTable rather than a hand-rolled `<table>`.
- *
  * The status column is a BADGE, not a select. Every row used to carry an
  * always-live dropdown, so a screen of twelve issues was twelve form controls
  * and the eye had nowhere to rest -- the control competed with the data it
  * described. Changing status is a deliberate act and belongs on the issue page,
  * which is also the only place that can ask for the resolution a close
  * requires.
+ *
+ * The table itself is deliberately plain HTML. Filtering, sorting and paging
+ * all happen on the server, so a client table engine would own no row math at
+ * this only call site; the useful contract is the header button beside the
+ * column it orders and the rows exactly as the server returned them.
  */
 /**
  * Which columns the SERVER can order by. A header is only clickable when the
@@ -88,6 +93,51 @@ const SERVER_SORTABLE: Partial<Record<IssueColumnKey, string>> = {
   updated: "updated_at",
 };
 
+export interface IssueTableSort {
+  key: string;
+  direction: "asc" | "desc";
+}
+
+interface IssueTableColumn {
+  key: IssueColumnKey;
+  header: string;
+  cell: (issue: Issue) => ReactNode;
+}
+
+function SortGlyph({ state }: { state: "ascending" | "descending" | "none" }) {
+  const path =
+    state === "ascending"
+      ? ["m18 15-6-6-6 6"]
+      : state === "descending"
+        ? ["m6 9 6 6 6-6"]
+        : ["m7 15 5 5 5-5", "m7 9 5-5 5 5"];
+
+  return (
+    <span
+      aria-hidden="true"
+      className={`inline-flex size-3 flex-none items-center justify-center ${
+        state === "none" ? "text-ink-disabled" : "text-accent-strong"
+      }`}
+    >
+      <svg
+        aria-hidden="true"
+        className="size-full"
+        fill="none"
+        focusable="false"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="2"
+        viewBox="0 0 24 24"
+      >
+        {path.map((d) => (
+          <path key={d} d={d} />
+        ))}
+      </svg>
+    </span>
+  );
+}
+
 export function IssueResultsTable({
   issues,
   columns,
@@ -102,8 +152,8 @@ export function IssueResultsTable({
   /** Marks the table busy IN PLACE during a refetch, rather than the caller
    *  unmounting it and leaving a hole where the rows were. */
   loading?: boolean;
-  sort?: DataTableSort | null;
-  onSortChange?: (sort: DataTableSort) => void;
+  sort?: IssueTableSort | null;
+  onSortChange?: (sort: IssueTableSort) => void;
 }) {
   // Resolved HERE rather than passed in. These were props, and three of the
   // four call sites left them out, so those tables printed raw ids with
@@ -111,7 +161,7 @@ export function IssueResultsTable({
   // are on screen.
   const { productsById, productKeysById, usersById } = useIssueLookups(issues);
 
-  const byKey: Record<IssueColumnKey, DataTableColumn<Issue>> = {
+  const byKey: Record<IssueColumnKey, IssueTableColumn> = {
     id: {
       key: "id",
       header: "ID",
@@ -179,9 +229,8 @@ export function IssueResultsTable({
 
   // Two different states, deliberately not conflated.
   //
-  // DataTable resolves state as error > loading > empty > data, so its
-  // `loading` REPLACES the rows with skeletons. That is right when there is
-  // nothing yet and wrong for a refetch, which is the common case here: every
+  // Skeleton rows are right when there is nothing yet and wrong for a refetch,
+  // which is the common case here: every
   // filter change, sort and page turn reloads, and swapping 25 rows for 5
   // skeletons is the same hole the unmounting used to leave, just shorter.
   //
@@ -196,33 +245,110 @@ export function IssueResultsTable({
     <div
       aria-busy={refetching || undefined}
       className={
-        refetching ? "opacity-55 transition-opacity duration-[120ms] ease-out" : undefined
+        refetching
+          ? "opacity-55 transition-opacity duration-[var(--it-motion-fast)] ease-out"
+          : undefined
       }
     >
-      <DataTable
-        columns={columns.map((key) => ({
-          ...byKey[key],
-          sortable: onSortChange ? Boolean(SERVER_SORTABLE[key]) : false,
-        }))}
-        data={[...issues]}
-        rowKey={(issue) => issue.id}
-        // The SERVER filters, sorts and pages -- searchIssues takes text, sortBy
-        // and limit/offset. Leaving the managed engine on gave the page two
-        // search boxes and two paginators disagreeing with each other: the
-        // built-in one showing "1-10 of 25" over a set the server had already
-        // narrowed to 25 of hundreds.
-        searchable={false}
-        paginated={false}
-        manualSorting
-        manualFiltering
-        manualPagination
-        loading={firstLoad}
-        sort={sort ?? null}
-        onSortChange={onSortChange}
-        // A caption or an aria-label is REQUIRED -- the component dev-warns and
-        // the table is left unnamed for a screen reader without one.
-        aria-label={caption ?? "Issues"}
-      />
+      <div className="flex w-full min-w-0 flex-col overflow-hidden rounded border border-line bg-surface text-ink">
+        <div className="min-h-0 w-full min-w-0 overflow-auto bg-surface">
+          <table
+            aria-label={caption ?? "Issues"}
+            className="w-full border-separate border-spacing-0 bg-surface text-base leading-[var(--it-leading-snug)] text-ink"
+          >
+            <thead>
+              <tr>
+                {columns.map((key) => {
+                  const column = byKey[key];
+                  const sortable = onSortChange != null && Boolean(SERVER_SORTABLE[key]);
+                  const sortState = sortable
+                    ? sort?.key === key
+                      ? sort.direction === "asc"
+                        ? "ascending"
+                        : "descending"
+                      : "none"
+                    : undefined;
+
+                  return (
+                    <th
+                      key={key}
+                      scope="col"
+                      data-column={key}
+                      aria-sort={sortState}
+                      className="h-8 whitespace-nowrap border-b border-line-strong bg-surface-sunken px-3 py-0 text-left text-xs font-semibold tracking-[var(--it-tracking-wide)] text-ink-muted"
+                    >
+                      {sortable ? (
+                        <button
+                          type="button"
+                          className="inline-flex min-h-6 w-full cursor-pointer items-center justify-start gap-1 rounded border-0 bg-transparent p-0 text-inherit hover:text-ink"
+                          onClick={() =>
+                            onSortChange({
+                              key,
+                              direction:
+                                sort?.key === key && sort.direction === "asc" ? "desc" : "asc",
+                            })
+                          }
+                        >
+                          <span className="min-w-0 truncate">{column.header}</span>
+                          <SortGlyph state={sortState ?? "none"} />
+                        </button>
+                      ) : (
+                        <span className="min-w-0 truncate">{column.header}</span>
+                      )}
+                    </th>
+                  );
+                })}
+              </tr>
+            </thead>
+            <tbody className="bg-surface">
+              {firstLoad
+                ? Array.from({ length: 5 }, (_, rowIndex) => (
+                    <tr key={`skeleton-${rowIndex}`} className="bg-surface">
+                      {columns.map((key) => (
+                        <td
+                          key={key}
+                          className={`h-8 border-b border-line px-3 py-0 align-middle${
+                            rowIndex === 4 ? " border-b-0!" : ""
+                          }`}
+                        >
+                          <Skeleton />
+                        </td>
+                      ))}
+                    </tr>
+                  ))
+                : issues.length === 0
+                  ? (
+                      <tr className="bg-surface">
+                        <td colSpan={columns.length} className="px-3 py-12">
+                          <EmptyState
+                            title="No data"
+                            description="There's nothing to show here yet."
+                          />
+                        </td>
+                      </tr>
+                    )
+                  : issues.map((issue, rowIndex) => (
+                      <tr
+                        key={issue.id}
+                        className="bg-surface transition-colors duration-[var(--it-motion-fast)] ease-out hover:bg-surface-hover motion-reduce:transition-none"
+                      >
+                        {columns.map((key) => (
+                          <td
+                            key={key}
+                            data-column={key}
+                            className={`h-8 border-b border-line px-3 py-0 align-middle tabular-nums${
+                              rowIndex === issues.length - 1 ? " border-b-0!" : ""
+                            }`}
+                          >
+                            {byKey[key].cell(issue)}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
   );
 }
