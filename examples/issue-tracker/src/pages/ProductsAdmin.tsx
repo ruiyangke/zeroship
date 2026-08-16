@@ -1,10 +1,11 @@
 import { useMemo, useState, type ComponentPropsWithoutRef } from "react";
-import { Banner,
+import {
   FilterBar,
   ListView,
   Pagination,
 } from "@zeroship/ui";
 import { Checkbox } from "../ui/Checkbox";
+import { Banner } from "../ui/Banner";
 import { Dialog } from "../ui/Dialog";
 import { Drawer } from "../ui/Drawer";
 import { Tabs } from "../ui/Tabs";
