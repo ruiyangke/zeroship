@@ -1,0 +1,14 @@
+[data-slot~="stack"] {
+  display: flex;
+  flex-direction: var(--stack-direction, column);
+  flex-wrap: var(--stack-wrap, nowrap);
+  gap: var(--stack-gap, 0);
+  align-items: var(--stack-align, stretch);
+  justify-content: var(--stack-justify, flex-start);
+  min-inline-size: 0;
+}
+
+[data-slot~="stack"] > * {
+  min-inline-size: 0;
+  min-block-size: 0;
+}

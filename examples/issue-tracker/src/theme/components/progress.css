@@ -1,0 +1,91 @@
+[data-slot~="progress"] {
+  display: flex;
+  inline-size: 100%;
+  flex-direction: column;
+  gap: var(--it-space-1);
+  color: var(--it-ink-secondary);
+  font-size: var(--it-text-sm);
+}
+
+[data-slot~="progress-header"] {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--it-space-2);
+}
+
+[data-slot~="progress-label"] {
+  color: var(--it-ink);
+  font-weight: var(--it-weight-medium);
+}
+
+[data-slot~="progress-value"] {
+  color: var(--it-ink-secondary);
+  font-family: var(--it-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+[data-slot~="progress-track"] {
+  position: relative;
+  overflow: hidden;
+  inline-size: 100%;
+  block-size: var(--it-space-1);
+  border-radius: var(--it-radius);
+  background: var(--it-grey-200);
+}
+
+[data-slot~="progress"][data-size="lg"] [data-slot~="progress-track"] {
+  block-size: var(--it-space-2);
+}
+
+[data-slot~="progress-indicator"] {
+  block-size: 100%;
+  border-radius: inherit;
+  background: var(--it-accent-500);
+  transition:
+    inline-size var(--it-motion) var(--it-ease),
+    background-color var(--it-motion-fast) var(--it-ease);
+}
+
+[data-slot~="progress"][data-status="complete"]
+  [data-slot~="progress-indicator"],
+[data-slot~="progress-indicator"][data-complete] {
+  background: var(--it-green-500);
+}
+
+[data-slot~="progress"][data-status="progressing"]
+  [data-slot~="progress-indicator"],
+[data-slot~="progress-indicator"][data-progressing] {
+  background: var(--it-accent-500);
+}
+
+[data-slot~="progress"][data-status="indeterminate"]
+  [data-slot~="progress-indicator"],
+[data-slot~="progress-indicator"][data-indeterminate] {
+  inline-size: 40%;
+  animation: it-progress-indeterminate
+    calc(
+      var(--it-motion) + var(--it-motion) + var(--it-motion) + var(--it-motion) +
+        var(--it-motion) + var(--it-motion) + var(--it-motion) + var(--it-motion)
+    )
+    var(--it-ease) infinite alternate;
+  background: var(--it-accent-500);
+}
+
+@keyframes it-progress-indeterminate {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(250%); }
+}
+
+[data-slot~="progress"]:dir(rtl)[data-status="indeterminate"]
+  [data-slot~="progress-indicator"],
+[data-slot~="progress-indicator"]:dir(rtl)[data-indeterminate] {
+  animation-direction: alternate-reverse;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-slot~="progress-indicator"] {
+    animation: none;
+    transition: none;
+  }
+}

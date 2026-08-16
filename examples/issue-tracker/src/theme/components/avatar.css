@@ -1,0 +1,87 @@
+/* Identity stays neutral so status colours remain meaningful elsewhere. */
+[data-slot~="avatar"] {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  inline-size: var(--it-control-h-md);
+  block-size: var(--it-control-h-md);
+  overflow: hidden;
+  border: thin solid var(--it-line);
+  border-radius: var(--it-radius-full);
+  background: var(--it-surface-sunken);
+  color: var(--it-ink-secondary);
+  font-size: var(--it-text-sm);
+  font-weight: var(--it-weight-semibold);
+  line-height: var(--it-leading-tight);
+  letter-spacing: var(--it-tracking-wide);
+  vertical-align: middle;
+}
+
+[data-slot~="avatar"][data-size="xs"] {
+  inline-size: var(--it-space-4);
+  block-size: var(--it-space-4);
+  font-size: var(--it-text-xs);
+}
+
+[data-slot~="avatar"][data-size="sm"] {
+  inline-size: var(--it-control-h-sm);
+  block-size: var(--it-control-h-sm);
+  font-size: var(--it-text-xs);
+}
+
+[data-slot~="avatar"][data-size="md"] {
+  inline-size: var(--it-control-h-md);
+  block-size: var(--it-control-h-md);
+}
+
+[data-slot~="avatar"][data-size="lg"] {
+  inline-size: var(--it-control-h-lg);
+  block-size: var(--it-control-h-lg);
+  font-size: var(--it-text-base);
+}
+
+[data-slot~="avatar"][data-size="xl"] {
+  inline-size: var(--it-space-7);
+  block-size: var(--it-space-7);
+  font-size: var(--it-text-md);
+}
+
+[data-slot~="avatar"][data-shape="circle"] {
+  border-radius: var(--it-radius-full);
+}
+
+[data-slot~="avatar"][data-shape="square"] {
+  border-radius: 0;
+}
+
+[data-slot~="avatar"][data-shape="rounded"] {
+  border-radius: var(--it-radius);
+}
+
+[data-slot~="avatar-image"],
+[data-slot~="avatar-fallback"] {
+  position: absolute;
+  inset: 0;
+  inline-size: 100%;
+  block-size: 100%;
+}
+
+[data-slot~="avatar-image"] {
+  display: block;
+  object-fit: cover;
+}
+
+[data-slot~="avatar-fallback"] {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--it-surface-sunken);
+  color: inherit;
+}
+
+[data-slot~="avatar"][data-position="overlap"] {
+  margin-inline-start: calc(var(--it-space-2) * -1);
+  border-color: var(--it-surface);
+}

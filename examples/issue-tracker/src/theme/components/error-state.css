@@ -1,0 +1,60 @@
+[data-slot~="error-state"] {
+  display: grid;
+  min-block-size: var(--it-row-h);
+  place-items: center;
+  padding: var(--it-space-5) var(--it-space-4);
+  color: var(--it-ink-secondary);
+  text-align: center;
+}
+
+[data-slot~="error-state-column"] {
+  display: flex;
+  min-inline-size: 0;
+  max-inline-size: 100%;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--it-space-3);
+}
+
+[data-slot~="error-state-icon"] {
+  display: inline-flex;
+  inline-size: var(--it-control-h-lg);
+  block-size: var(--it-control-h-lg);
+  align-items: center;
+  justify-content: center;
+}
+
+[data-slot~="error-state-icon"] > svg {
+  inline-size: var(--it-control-h-sm);
+  block-size: var(--it-control-h-sm);
+}
+
+[data-slot~="error-state"][data-intent="warning"]
+  [data-slot~="error-state-icon"] {
+  color: var(--it-amber-700);
+}
+
+[data-slot~="error-state"][data-intent="danger"]
+  [data-slot~="error-state-icon"] {
+  color: var(--it-red-700);
+}
+
+[data-slot~="error-state-title"] {
+  color: var(--it-ink);
+  font-size: var(--it-text-lg);
+  font-weight: var(--it-weight-semibold);
+  line-height: var(--it-leading-tight);
+}
+
+[data-slot~="error-state-description"] {
+  color: var(--it-ink-secondary);
+  font-size: var(--it-text-sm);
+}
+
+[data-slot~="error-state-actions"] {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--it-space-2);
+}

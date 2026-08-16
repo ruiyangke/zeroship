@@ -1,0 +1,246 @@
+[data-slot~="menu-backdrop"] {
+  position: fixed;
+  inset: 0;
+  background: var(--it-overlay);
+  opacity: 1;
+  transition: opacity var(--it-motion) var(--it-ease);
+}
+
+[data-slot~="menu-backdrop"][data-starting-style],
+[data-slot~="menu-backdrop"][data-ending-style] {
+  opacity: 0;
+}
+
+[data-slot~="menu-positioner"] {
+  outline: none;
+}
+
+:is([data-slot~="menu-popup"], [data-slot~="menu-popup-submenu"]) {
+  display: flex;
+  flex-direction: column;
+  gap: var(--it-space-1);
+  inline-size: max-content;
+  max-inline-size: calc(100dvw - var(--it-space-6));
+  max-block-size: calc(100dvh - var(--it-space-6));
+  padding: var(--it-space-1);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  isolation: isolate;
+  outline: none;
+  border-radius: var(--it-radius);
+  background: var(--it-surface);
+  color: var(--it-ink);
+  font-family: var(--it-font);
+  font-size: var(--it-text-base);
+  line-height: var(--it-leading-snug);
+  box-shadow: var(--it-shadow-popup);
+  opacity: 1;
+  translate: 0 0;
+  transition:
+    opacity var(--it-motion-fast) var(--it-ease),
+    translate var(--it-motion-fast) var(--it-ease);
+}
+
+:is([data-slot~="menu-popup"], [data-slot~="menu-popup-submenu"])[data-starting-style],
+:is([data-slot~="menu-popup"], [data-slot~="menu-popup-submenu"])[data-ending-style] {
+  opacity: 0;
+  translate: 0 var(--it-space-1);
+}
+
+[data-slot~="menu-arrow"] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: var(--it-space-4);
+  block-size: var(--it-space-2);
+  color: var(--it-surface);
+}
+
+[data-slot~="menu-arrow"] > svg {
+  display: block;
+  inline-size: 100%;
+  block-size: 100%;
+}
+
+:is(
+    [data-slot~="menu-checkbox-item"],
+    [data-slot~="menu-item"],
+    [data-slot~="menu-link-item"],
+    [data-slot~="menu-radio-item"],
+    [data-slot~="menu-submenu-trigger"]
+  ) {
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--it-space-4) minmax(0, 1fr) auto;
+  column-gap: var(--it-space-2);
+  align-items: center;
+  min-block-size: var(--it-control-h-md);
+  padding-inline: var(--it-space-2);
+  border: 0;
+  border-radius: var(--it-radius-sm);
+  outline: none;
+  background: transparent;
+  color: var(--it-ink);
+  font: inherit;
+  text-align: start;
+  text-decoration: none;
+  cursor: pointer;
+  user-select: none;
+  transition:
+    background-color var(--it-motion-fast) var(--it-ease),
+    color var(--it-motion-fast) var(--it-ease);
+}
+
+:is(
+    [data-slot~="menu-checkbox-item"],
+    [data-slot~="menu-item"],
+    [data-slot~="menu-link-item"],
+    [data-slot~="menu-radio-item"],
+    [data-slot~="menu-submenu-trigger"]
+  )[data-highlighted]:not([data-disabled]),
+[data-slot~="menu-submenu-trigger"][data-popup-open]:not([data-disabled]) {
+  background: var(--it-surface-active);
+  color: var(--it-ink);
+}
+
+:is(
+    [data-slot~="menu-checkbox-item"],
+    [data-slot~="menu-item"],
+    [data-slot~="menu-link-item"],
+    [data-slot~="menu-radio-item"],
+    [data-slot~="menu-submenu-trigger"]
+  )[data-disabled] {
+  color: var(--it-ink-disabled);
+  cursor: not-allowed;
+}
+
+[data-slot~="menu-item-indicator"] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: var(--it-space-4);
+  block-size: var(--it-space-4);
+  color: var(--it-accent-600);
+}
+
+[data-slot~="menu-item-indicator-glyph"] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 100%;
+  block-size: 100%;
+  opacity: 0;
+  transition: opacity var(--it-motion-fast) var(--it-ease);
+}
+
+[data-slot~="menu-item-indicator-glyph"] > svg {
+  display: block;
+  inline-size: 100%;
+  block-size: 100%;
+}
+
+[data-slot~="menu-checkbox-item"][data-checked]
+  [data-slot~="menu-item-indicator-glyph"],
+[data-slot~="menu-radio-item"][data-checked]
+  [data-slot~="menu-item-indicator-glyph"] {
+  opacity: 1;
+}
+
+[data-slot~="menu-checkbox-item"][data-checked]
+  [data-slot~="menu-item-indicator"] {
+  border-radius: var(--it-radius-sm);
+  background: var(--it-accent-600);
+  color: var(--it-ink-on-accent);
+}
+
+[data-slot~="menu-radio-item"][data-checked]
+  [data-slot~="menu-item-indicator"] {
+  color: var(--it-accent-600);
+}
+
+[data-slot~="menu-item-text"] {
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+[data-slot~="menu-item-shortcut"] {
+  justify-self: end;
+  margin-inline-start: var(--it-space-4);
+  color: var(--it-ink-muted);
+  font-family: var(--it-font-mono);
+  font-size: var(--it-text-xs);
+  white-space: nowrap;
+}
+
+[data-slot~="menu-link-item"],
+[data-slot~="menu-link-item"]:visited {
+  color: inherit;
+}
+
+[data-slot~="menu-submenu-trigger-chevron"] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  justify-self: end;
+  inline-size: var(--it-space-3);
+  block-size: var(--it-space-3);
+  color: var(--it-ink-secondary);
+}
+
+[data-slot~="menu-submenu-trigger-chevron"] > svg {
+  display: block;
+  inline-size: 100%;
+  block-size: 100%;
+}
+
+[dir="rtl"] [data-slot~="menu-submenu-trigger-chevron"] > svg {
+  transform: scaleX(-1);
+}
+
+[data-slot~="menu-group"],
+[data-slot~="menu-radio-group"] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--it-space-1);
+}
+
+[data-slot~="menu-group"] + [data-slot~="menu-group"] {
+  margin-block-start: var(--it-space-1);
+}
+
+[data-slot~="menu-group-label"] {
+  padding-block: var(--it-space-1);
+  padding-inline-start: calc(
+    var(--it-space-2) + var(--it-space-4) + var(--it-space-2)
+  );
+  padding-inline-end: var(--it-space-2);
+  color: var(--it-ink-muted);
+  font-size: var(--it-text-xs);
+  line-height: var(--it-leading-snug);
+  font-weight: var(--it-weight-medium);
+}
+
+[data-slot~="menu-separator"] {
+  block-size: 1px;
+  margin-block: var(--it-space-1);
+  margin-inline: var(--it-space-1);
+  border: 0;
+  background: var(--it-line);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-slot~="menu-backdrop"],
+  :is([data-slot~="menu-popup"], [data-slot~="menu-popup-submenu"]),
+  :is(
+      [data-slot~="menu-checkbox-item"],
+      [data-slot~="menu-item"],
+      [data-slot~="menu-link-item"],
+      [data-slot~="menu-radio-item"],
+      [data-slot~="menu-submenu-trigger"]
+    ),
+  [data-slot~="menu-item-indicator-glyph"] {
+    transition: none;
+  }
+}

@@ -1,0 +1,152 @@
+[data-slot~="checkbox-field"] {
+  display: inline-flex;
+  align-items: center;
+  min-block-size: var(--it-control-h-md);
+  gap: var(--it-space-2);
+  color: var(--it-ink);
+  cursor: pointer;
+}
+
+[data-slot~="checkbox-field"][data-size="sm"] {
+  min-block-size: var(--it-control-h-sm);
+  font-size: var(--it-text-sm);
+}
+
+[data-slot~="checkbox-field"][data-size="lg"] {
+  min-block-size: var(--it-control-h-lg);
+  font-size: var(--it-text-md);
+}
+
+[data-slot~="checkbox-field"][data-disabled] {
+  color: var(--it-ink-disabled);
+  cursor: not-allowed;
+}
+
+[data-slot~="checkbox-field-text"] {
+  min-inline-size: 0;
+  line-height: var(--it-leading-snug);
+}
+
+[data-slot~="checkbox"] {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  inline-size: var(--it-space-4);
+  block-size: var(--it-space-4);
+  border: thin solid var(--it-line-strong);
+  border-radius: var(--it-radius);
+  background: var(--it-surface);
+  color: var(--it-grey-0);
+  cursor: pointer;
+  transition:
+    background-color var(--it-motion-fast) var(--it-ease),
+    border-color var(--it-motion-fast) var(--it-ease),
+    box-shadow var(--it-motion-fast) var(--it-ease);
+}
+
+/* The visual chip stays compact while the hit area follows control sizes. */
+[data-slot~="checkbox"]::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  inline-size: var(--it-control-h-md);
+  block-size: var(--it-control-h-md);
+  transform: translate(-50%, -50%);
+}
+
+[data-slot~="checkbox"][data-size="sm"] {
+  inline-size: var(--it-space-3);
+  block-size: var(--it-space-3);
+}
+
+[data-slot~="checkbox"][data-size="sm"]::before {
+  inline-size: var(--it-control-h-sm);
+  block-size: var(--it-control-h-sm);
+}
+
+[data-slot~="checkbox"][data-size="lg"] {
+  inline-size: var(--it-space-5);
+  block-size: var(--it-space-5);
+}
+
+[data-slot~="checkbox"][data-size="lg"]::before {
+  inline-size: var(--it-control-h-lg);
+  block-size: var(--it-control-h-lg);
+}
+
+[data-slot~="checkbox"][data-variant="tinted"] {
+  background: var(--it-surface-sunken);
+  border-color: var(--it-line);
+}
+
+@media (hover: hover) {
+  [data-slot~="checkbox"]:not([data-disabled]):not([data-readonly]):not([data-checked]):not([data-indeterminate]):hover {
+    background: var(--it-surface-hover);
+    border-color: var(--it-line-strong);
+  }
+
+  [data-slot~="checkbox"]:not([data-disabled]):not([data-readonly])[data-checked]:hover,
+  [data-slot~="checkbox"]:not([data-disabled]):not([data-readonly])[data-indeterminate]:hover {
+    background: var(--it-accent-600);
+    border-color: var(--it-accent-600);
+  }
+}
+
+[data-slot~="checkbox"][data-checked],
+[data-slot~="checkbox"][data-indeterminate] {
+  background: var(--it-accent-500);
+  border-color: var(--it-accent-500);
+}
+
+[data-slot~="checkbox"][data-focused],
+[data-slot~="checkbox"]:focus-visible {
+  box-shadow: var(--it-focus-ring);
+}
+
+[data-slot~="checkbox"][data-invalid] {
+  border-color: var(--it-red-500);
+}
+
+[data-slot~="checkbox"][data-readonly] {
+  cursor: default;
+}
+
+[data-slot~="checkbox"][data-disabled] {
+  background: var(--it-surface-sunken);
+  border-color: var(--it-line-subtle);
+  color: var(--it-ink-disabled);
+  cursor: not-allowed;
+}
+
+[data-slot~="checkbox"][data-disabled][data-checked],
+[data-slot~="checkbox"][data-disabled][data-indeterminate] {
+  background: var(--it-grey-300);
+  border-color: var(--it-grey-300);
+  color: var(--it-grey-600);
+}
+
+[data-slot~="checkbox-indicator"] {
+  position: relative;
+  display: inline-grid;
+  inline-size: 100%;
+  block-size: 100%;
+  place-items: center;
+  pointer-events: none;
+}
+
+[data-slot~="checkbox-indicator"] [data-glyph] {
+  display: none;
+  inline-size: 100%;
+  block-size: 100%;
+}
+
+[data-slot~="checkbox"][data-checked]:not([data-indeterminate]) [data-slot~="checkbox-indicator"] [data-glyph="check"] {
+  display: block;
+}
+
+[data-slot~="checkbox"][data-indeterminate] [data-slot~="checkbox-indicator"] [data-glyph="minus"] {
+  display: block;
+}

@@ -1,0 +1,252 @@
+[data-slot~="number-field"] {
+  position: relative;
+  display: inline-block;
+  inline-size: 100%;
+  min-inline-size: 0;
+  font-family: var(--it-font);
+}
+
+[data-slot~="number-field-group"] {
+  display: inline-flex;
+  align-items: stretch;
+  inline-size: 100%;
+  block-size: var(--it-control-h-md);
+  border: thin solid var(--it-line-strong);
+  border-radius: var(--it-radius);
+  background: var(--it-surface-sunken);
+  color: var(--it-ink);
+  transition:
+    background-color var(--it-motion-fast) var(--it-ease),
+    border-color var(--it-motion-fast) var(--it-ease),
+    box-shadow var(--it-motion-fast) var(--it-ease);
+}
+
+[data-slot~="number-field"][data-size="sm"] [data-slot~="number-field-group"] {
+  block-size: var(--it-control-h-sm);
+}
+
+[data-slot~="number-field"][data-size="md"] [data-slot~="number-field-group"] {
+  block-size: var(--it-control-h-md);
+}
+
+[data-slot~="number-field"][data-size="lg"] [data-slot~="number-field-group"] {
+  block-size: var(--it-control-h-lg);
+}
+
+[data-slot~="number-field"][data-variant="outline"] [data-slot~="number-field-group"] {
+  background: var(--it-surface);
+}
+
+@media (hover: hover) {
+  [data-slot~="number-field"]:not([data-disabled]):not([data-readonly]):not([data-focused]) [data-slot~="number-field-group"]:hover {
+    background: var(--it-surface-hover);
+    border-color: var(--it-line-strong);
+  }
+}
+
+[data-slot~="number-field"][data-focused] [data-slot~="number-field-group"] {
+  background: var(--it-surface);
+  border-color: var(--it-accent-500);
+  box-shadow: var(--it-focus-ring);
+}
+
+[data-slot~="number-field"][data-invalid] [data-slot~="number-field-group"] {
+  border-color: var(--it-red-500);
+}
+
+[data-slot~="number-field"][data-invalid][data-focused] [data-slot~="number-field-group"] {
+  border-color: var(--it-red-500);
+}
+
+[data-slot~="number-field"][data-filled] [data-slot~="number-field-input"] {
+  color: var(--it-ink);
+}
+
+[data-slot~="number-field"][data-readonly] [data-slot~="number-field-group"] {
+  background: var(--it-surface-hover);
+  border-color: var(--it-line);
+  color: var(--it-ink-secondary);
+}
+
+[data-slot~="number-field"][data-disabled] [data-slot~="number-field-group"] {
+  background: var(--it-surface-sunken);
+  border-color: var(--it-line-subtle);
+  color: var(--it-ink-disabled);
+  box-shadow: none;
+  cursor: not-allowed;
+}
+
+[data-slot~="number-field-input"] {
+  flex: 1 1 auto;
+  min-inline-size: 0;
+  inline-size: 100%;
+  block-size: 100%;
+  margin: 0;
+  padding-inline: var(--it-space-2);
+  border: 0;
+  border-radius: 0;
+  outline: none;
+  background: transparent;
+  box-shadow: none;
+  color: inherit;
+  font: inherit;
+  font-size: var(--it-text-base);
+  line-height: var(--it-leading-snug);
+  text-align: center;
+}
+
+[data-slot~="number-field-input"]:focus,
+[data-slot~="number-field-input"]:focus-visible {
+  border: 0;
+  outline: none;
+  box-shadow: none;
+}
+
+[data-slot~="number-field"][data-size="sm"] [data-slot~="number-field-input"] {
+  padding-inline: var(--it-space-1);
+  font-size: var(--it-text-sm);
+}
+
+[data-slot~="number-field"][data-size="lg"] [data-slot~="number-field-input"] {
+  font-size: var(--it-text-md);
+}
+
+[data-slot~="number-field-input"]::placeholder {
+  color: var(--it-ink-muted);
+}
+
+[data-slot~="number-field-input"]::-webkit-outer-spin-button,
+[data-slot~="number-field-input"]::-webkit-inner-spin-button {
+  margin: 0;
+  -webkit-appearance: none;
+}
+
+[data-slot~="number-field-step-dec"],
+[data-slot~="number-field-step-inc"] {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  inline-size: var(--it-control-h-md);
+  block-size: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  outline: none;
+  background: transparent;
+  box-shadow: none;
+  color: var(--it-ink-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+
+[data-slot~="number-field-step-dec"] {
+  border-inline-end: thin solid var(--it-line);
+}
+
+[data-slot~="number-field-step-inc"] {
+  border-inline-start: thin solid var(--it-line);
+}
+
+[data-slot~="number-field"][data-size="sm"] [data-slot~="number-field-step-dec"],
+[data-slot~="number-field"][data-size="sm"] [data-slot~="number-field-step-inc"] {
+  inline-size: var(--it-control-h-sm);
+}
+
+[data-slot~="number-field"][data-size="lg"] [data-slot~="number-field-step-dec"],
+[data-slot~="number-field"][data-size="lg"] [data-slot~="number-field-step-inc"] {
+  inline-size: var(--it-control-h-lg);
+}
+
+[data-slot~="number-field-step-dec"] > svg,
+[data-slot~="number-field-step-inc"] > svg {
+  inline-size: var(--it-space-4);
+  block-size: var(--it-space-4);
+}
+
+@media (hover: hover) {
+  [data-slot~="number-field-step-dec"]:not([data-disabled]):hover,
+  [data-slot~="number-field-step-inc"]:not([data-disabled]):hover {
+    background: var(--it-surface-hover);
+    color: var(--it-ink);
+  }
+}
+
+[data-slot~="number-field-step-dec"]:not([data-disabled]):active,
+[data-slot~="number-field-step-inc"]:not([data-disabled]):active {
+  background: var(--it-surface-active);
+}
+
+[data-slot~="number-field-step-dec"]:focus-visible,
+[data-slot~="number-field-step-inc"]:focus-visible {
+  box-shadow: var(--it-focus-ring-tight);
+  border-radius: var(--it-radius-sm);
+}
+
+[data-slot~="number-field-step-dec"][data-disabled],
+[data-slot~="number-field-step-inc"][data-disabled],
+[data-slot~="number-field"][data-disabled] [data-slot~="number-field-input"] {
+  color: var(--it-ink-disabled);
+  cursor: not-allowed;
+}
+
+[data-slot~="number-field"][data-readonly] [data-slot~="number-field-step-dec"],
+[data-slot~="number-field"][data-readonly] [data-slot~="number-field-step-inc"] {
+  color: var(--it-ink-disabled);
+  cursor: default;
+}
+
+[data-slot~="number-field-scrub"] {
+  position: absolute;
+  inset-block-start: 50%;
+  inset-inline-start: calc(var(--it-space-5) * -1);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: var(--it-space-4);
+  block-size: var(--it-control-h-sm);
+  border: thin solid var(--it-line-strong);
+  border-radius: var(--it-radius);
+  background: var(--it-surface);
+  color: var(--it-ink-secondary);
+  cursor: ew-resize;
+  touch-action: none;
+  transform: translateY(-50%);
+  user-select: none;
+}
+
+[data-slot~="number-field-scrub"]::before {
+  content: "";
+  inline-size: var(--it-space-2);
+  border-block-start: thin solid currentColor;
+}
+
+[data-slot~="number-field"][data-scrubbing] [data-slot~="number-field-scrub"] {
+  background: var(--it-surface-selected);
+  border-color: var(--it-accent-500);
+  color: var(--it-accent-700);
+}
+
+[data-slot~="number-field"][data-disabled] [data-slot~="number-field-scrub"],
+[data-slot~="number-field"][data-readonly] [data-slot~="number-field-scrub"] {
+  background: var(--it-surface-sunken);
+  border-color: var(--it-line-subtle);
+  color: var(--it-ink-disabled);
+  cursor: not-allowed;
+}
+
+[data-slot~="number-field-scrub-cursor"] {
+  position: fixed;
+  padding: var(--it-space-1);
+  border: thin solid var(--it-line);
+  border-radius: var(--it-radius);
+  background: var(--it-surface);
+  color: var(--it-ink);
+  pointer-events: none;
+}
+
+[data-slot~="number-field-scrub-cursor"] > svg {
+  display: block;
+  inline-size: var(--it-space-5);
+  block-size: var(--it-space-3);
+}

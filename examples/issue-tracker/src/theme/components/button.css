@@ -1,0 +1,188 @@
+[data-slot~="button"] {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-inline-size: 0;
+  block-size: var(--it-control-h-md);
+  padding-inline: var(--it-space-3);
+  border: thin solid var(--it-grey-900);
+  border-radius: var(--it-radius);
+  background: var(--it-grey-900);
+  color: var(--it-grey-0);
+  font-family: var(--it-font);
+  font-size: var(--it-text-base);
+  font-weight: var(--it-weight-medium);
+  line-height: var(--it-leading-tight);
+  text-align: center;
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+  transition:
+    background-color var(--it-motion-fast) var(--it-ease),
+    border-color var(--it-motion-fast) var(--it-ease),
+    color var(--it-motion-fast) var(--it-ease),
+    box-shadow var(--it-motion-fast) var(--it-ease);
+}
+
+[data-slot~="button"]:focus-visible {
+  box-shadow: var(--it-focus-ring);
+}
+
+[data-slot~="button-inner"] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-inline-size: 0;
+  gap: var(--it-space-1);
+}
+
+[data-slot~="button-label"] {
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+[data-slot~="button-start"],
+[data-slot~="button-end"] {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  inline-size: var(--it-space-4);
+  block-size: var(--it-space-4);
+}
+
+[data-slot~="button-start"] svg,
+[data-slot~="button-end"] svg {
+  inline-size: 100%;
+  block-size: 100%;
+}
+
+[data-slot~="button"][data-size="sm"] {
+  block-size: var(--it-control-h-sm);
+  padding-inline: var(--it-space-2);
+  font-size: var(--it-text-sm);
+}
+
+[data-slot~="button"][data-size="md"] {
+  block-size: var(--it-control-h-md);
+  padding-inline: var(--it-space-3);
+}
+
+[data-slot~="button"][data-size="lg"] {
+  block-size: var(--it-control-h-lg);
+  padding-inline: var(--it-space-4);
+  font-size: var(--it-text-md);
+}
+
+[data-slot~="button"][data-variant="filled"]:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+  background: var(--it-grey-800);
+  border-color: var(--it-grey-800);
+}
+
+[data-slot~="button"][data-variant="filled"]:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+  background: var(--it-grey-700);
+  border-color: var(--it-grey-700);
+}
+
+[data-slot~="button"][data-variant="tinted"] {
+  background: var(--it-surface-active);
+  border-color: var(--it-line);
+  color: var(--it-ink);
+}
+
+[data-slot~="button"][data-variant="tinted"]:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
+[data-slot~="button"][data-variant="gray"]:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
+[data-slot~="button"][data-variant="plain"]:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+  background: var(--it-surface-hover);
+  border-color: var(--it-line-strong);
+  color: var(--it-ink);
+}
+
+[data-slot~="button"][data-variant="tinted"]:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
+[data-slot~="button"][data-variant="gray"]:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
+[data-slot~="button"][data-variant="plain"]:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+  background: var(--it-surface-active);
+  border-color: var(--it-line-strong);
+}
+
+[data-slot~="button"][data-variant="gray"] {
+  background: var(--it-surface);
+  border-color: var(--it-line-strong);
+  color: var(--it-ink);
+}
+
+[data-slot~="button"][data-variant="plain"] {
+  background: transparent;
+  border-color: transparent;
+  color: var(--it-ink-secondary);
+}
+
+/* Destructive is the only button intent that adds hue. */
+[data-slot~="button"][data-intent="destructive"][data-variant="filled"] {
+  background: var(--it-red-500);
+  border-color: var(--it-red-500);
+  color: var(--it-grey-0);
+}
+
+[data-slot~="button"][data-intent="destructive"][data-variant="filled"]:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
+[data-slot~="button"][data-intent="destructive"][data-variant="filled"]:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+  background: var(--it-red-700);
+  border-color: var(--it-red-700);
+}
+
+[data-slot~="button"][data-intent="destructive"][data-variant="tinted"] {
+  background: var(--it-red-50);
+  border-color: var(--it-red-500);
+  color: var(--it-red-700);
+}
+
+[data-slot~="button"][data-intent="destructive"][data-variant="gray"],
+[data-slot~="button"][data-intent="destructive"][data-variant="plain"] {
+  color: var(--it-red-700);
+}
+
+[data-slot~="button"][data-intent="destructive"][data-variant="tinted"]:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
+[data-slot~="button"][data-intent="destructive"][data-variant="gray"]:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]),
+[data-slot~="button"][data-intent="destructive"][data-variant="plain"]:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+  background: var(--it-red-50);
+  border-color: var(--it-red-500);
+  color: var(--it-red-700);
+}
+
+[data-slot~="button"]:disabled,
+[data-slot~="button"][aria-disabled="true"],
+[data-slot~="button"][aria-busy="true"] {
+  background: var(--it-surface-sunken);
+  border-color: var(--it-line-subtle);
+  color: var(--it-ink-disabled);
+  cursor: not-allowed;
+}
+
+[data-slot~="button"][data-variant="plain"]:disabled,
+[data-slot~="button"][data-variant="plain"][aria-disabled="true"],
+[data-slot~="button"][data-variant="plain"][aria-busy="true"] {
+  background: transparent;
+  border-color: transparent;
+}
+
+[data-slot~="button"][aria-busy="true"] [data-slot~="button-inner"] {
+  visibility: hidden;
+}
+
+[data-slot~="button-spinner"] {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: currentColor;
+}
+
+[data-slot~="button-spinner"] svg {
+  inline-size: var(--it-space-4);
+  block-size: var(--it-space-4);
+  fill: none;
+  stroke: currentColor;
+}

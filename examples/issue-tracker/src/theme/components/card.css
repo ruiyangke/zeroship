@@ -1,0 +1,231 @@
+[data-slot~="card"] {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  flex-direction: column;
+  min-inline-size: 0;
+  overflow: hidden;
+  color: var(--it-ink);
+  font-family: var(--it-font);
+  text-decoration: none;
+}
+
+/* The variant attribute is always present and keeps later app classes from
+   restoring the old rounded, shadowed card treatment. */
+[data-slot~="card"][data-variant] {
+  border: 1px solid var(--it-line);
+  border-radius: var(--it-radius-lg);
+  background: var(--it-surface);
+  box-shadow: none;
+}
+
+[data-slot~="card"][data-size="sm"] {
+  gap: var(--it-space-2);
+  padding: var(--it-space-3);
+  border-radius: var(--it-radius);
+}
+
+[data-slot~="card"][data-size="md"] {
+  gap: var(--it-space-3);
+  padding: var(--it-space-4);
+}
+
+[data-slot~="card"][data-size="lg"] {
+  gap: var(--it-space-4);
+  padding: var(--it-space-5);
+}
+
+[data-slot~="card"][data-variant="elevated"],
+[data-slot~="card"][data-variant="outline"] {
+  border-color: var(--it-line-strong);
+}
+
+[data-slot~="card"][data-variant="ghost"] {
+  border-color: transparent;
+  background: transparent;
+}
+
+[data-slot~="card"][data-interactive] {
+  cursor: pointer;
+  transition:
+    background-color var(--it-motion-fast) var(--it-ease),
+    border-color var(--it-motion-fast) var(--it-ease);
+}
+
+@media (hover: hover) {
+  [data-slot~="card"][data-interactive]:not([aria-disabled="true"]):hover {
+    border-color: var(--it-line-strong);
+    background: var(--it-surface-hover);
+  }
+}
+
+[data-slot~="card"][data-interactive]:not([aria-disabled="true"]):active {
+  background: var(--it-surface-active);
+}
+
+[data-slot~="card"][data-interactive][aria-disabled="true"],
+[data-slot~="card"][data-interactive]:disabled {
+  color: var(--it-ink-disabled);
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+[data-slot~="card-header"] {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  column-gap: var(--it-space-3);
+  row-gap: var(--it-space-1);
+  align-items: start;
+}
+
+[data-slot~="card-header"]:has(> [data-slot~="card-action"]) {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+[data-slot~="card-header"] > [data-slot~="card-title"],
+[data-slot~="card-header"] > [data-slot~="card-description"] {
+  grid-column: 1;
+  min-inline-size: 0;
+}
+
+[data-slot~="card-header"] > [data-slot~="card-action"] {
+  grid-column: 2;
+  grid-row: 1 / -1;
+  align-self: center;
+}
+
+[data-slot~="card-title"] {
+  margin: 0;
+  color: var(--it-ink);
+  font-size: var(--it-text-lg);
+  line-height: var(--it-leading-tight);
+  font-weight: var(--it-weight-semibold);
+}
+
+[data-slot~="card"][data-size="sm"] [data-slot~="card-title"] {
+  font-size: var(--it-text-md);
+}
+
+[data-slot~="card"][data-size="lg"] [data-slot~="card-title"] {
+  font-size: var(--it-text-xl);
+}
+
+[data-slot~="card-description"] {
+  margin: 0;
+  color: var(--it-ink-secondary);
+  font-size: var(--it-text-sm);
+  line-height: var(--it-leading-snug);
+}
+
+[data-slot~="card"][aria-disabled="true"]
+  :is(
+    [data-slot~="card-title"],
+    [data-slot~="card-description"],
+    [data-slot~="card-content"],
+    [data-slot~="card-action"]
+  ) {
+  color: var(--it-ink-disabled);
+}
+
+[data-slot~="card-action"] {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--it-space-2);
+}
+
+[data-slot~="card-media"] {
+  display: block;
+  overflow: hidden;
+  background: var(--it-surface-sunken);
+}
+
+[data-slot~="card-media"] :is(img, picture, video) {
+  display: block;
+  inline-size: 100%;
+  block-size: auto;
+  object-fit: cover;
+}
+
+[data-slot~="card"][data-size="sm"]
+  > [data-slot~="card-media"][data-side="top"] {
+  margin: calc(-1 * var(--it-space-3)) calc(-1 * var(--it-space-3)) 0;
+}
+
+[data-slot~="card"][data-size="md"]
+  > [data-slot~="card-media"][data-side="top"] {
+  margin: calc(-1 * var(--it-space-4)) calc(-1 * var(--it-space-4)) 0;
+}
+
+[data-slot~="card"][data-size="lg"]
+  > [data-slot~="card-media"][data-side="top"] {
+  margin: calc(-1 * var(--it-space-5)) calc(-1 * var(--it-space-5)) 0;
+}
+
+[data-slot~="card"][data-size="sm"]
+  > [data-slot~="card-media"][data-side="bottom"] {
+  margin: 0 calc(-1 * var(--it-space-3)) calc(-1 * var(--it-space-3));
+}
+
+[data-slot~="card"][data-size="md"]
+  > [data-slot~="card-media"][data-side="bottom"] {
+  margin: 0 calc(-1 * var(--it-space-4)) calc(-1 * var(--it-space-4));
+}
+
+[data-slot~="card"][data-size="lg"]
+  > [data-slot~="card-media"][data-side="bottom"] {
+  margin: 0 calc(-1 * var(--it-space-5)) calc(-1 * var(--it-space-5));
+}
+
+[data-slot~="card-media"][data-side="fill"] {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  pointer-events: none;
+}
+
+[data-slot~="card"] > :not([data-slot~="card-media"]) {
+  position: relative;
+  z-index: 1;
+}
+
+[data-slot~="card-content"] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--it-space-3);
+  min-inline-size: 0;
+  color: var(--it-ink);
+}
+
+[data-slot~="card-content"] > :first-child {
+  margin-block-start: 0;
+}
+
+[data-slot~="card-content"] > :last-child {
+  margin-block-end: 0;
+}
+
+[data-slot~="card-footer"] {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--it-space-2);
+  align-items: center;
+  justify-content: flex-end;
+}
+
+[data-slot~="card-footer"][data-align="start"] {
+  justify-content: flex-start;
+}
+
+[data-slot~="card-footer"][data-align="between"] {
+  justify-content: space-between;
+}
+
+[data-slot~="card-footer"][data-align="end"] {
+  justify-content: flex-end;
+}
+
+[data-slot~="card-footer"][data-divider="top"] {
+  margin-block-start: var(--it-space-2);
+  padding-block-start: var(--it-space-3);
+  border-block-start: 1px solid var(--it-line);
+}

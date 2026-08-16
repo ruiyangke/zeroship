@@ -1,0 +1,167 @@
+/*
+ * The compatibility variable is consumed as a complete shadow layer by the
+ * app's two custom fields. Normalize that app-only bridge here; Input writes
+ * the equivalent flat layer directly with the new theme tokens below.
+ */
+.app-field-shell {
+  --zeroship-input-surface-edge: inset 0 0 0 0 transparent;
+}
+
+.app-field-shell [contenteditable]:focus-visible {
+  box-shadow: none;
+}
+
+[data-slot~="input"] {
+  display: flex;
+  align-items: center;
+  min-inline-size: 0;
+  inline-size: 100%;
+  block-size: var(--it-control-h-md);
+  gap: var(--it-space-1);
+  padding-inline: var(--it-space-2);
+  border: 0;
+  border-radius: var(--it-radius);
+  background: var(--it-surface);
+  color: var(--it-ink);
+  font-family: var(--it-font);
+  font-size: var(--it-text-base);
+  line-height: var(--it-leading-snug);
+  box-shadow:
+    inset 0 0 0 0 transparent,
+    inset 0 0 0 var(--zeroship-input-border-width) var(--it-line-strong),
+    0 0 0 0 transparent;
+  transition:
+    background-color var(--it-motion-fast) var(--it-ease),
+    border-color var(--it-motion-fast) var(--it-ease),
+    box-shadow var(--it-motion-fast) var(--it-ease);
+}
+
+[data-slot~="input"][data-size="sm"] {
+  block-size: var(--it-control-h-sm);
+  padding-inline: var(--it-space-2);
+  font-size: var(--it-text-sm);
+}
+
+[data-slot~="input"][data-size="md"] {
+  block-size: var(--it-control-h-md);
+}
+
+[data-slot~="input"][data-size="lg"] {
+  block-size: var(--it-control-h-lg);
+  padding-inline: var(--it-space-3);
+  font-size: var(--it-text-md);
+}
+
+[data-slot~="input"][data-variant="filled"] {
+  background: var(--it-surface-sunken);
+}
+
+[data-slot~="input"][data-variant="plain"] {
+  background: transparent;
+}
+
+@media (hover: hover) {
+  [data-slot~="input"]:not([data-disabled]):not([data-readonly]):not([data-focused]):not(:focus-within):hover {
+    background: var(--it-surface-hover);
+  }
+}
+
+[data-slot~="input"][data-focused],
+[data-slot~="input"]:focus-within {
+  background: var(--it-surface);
+  box-shadow:
+    inset 0 0 0 0 transparent,
+    inset 0 0 0 var(--zeroship-input-border-width) var(--it-accent-500),
+    0 0 0 var(--zeroship-focus-ring-width) var(--zeroship-input-focus-ring-color);
+}
+
+[data-slot~="input"][data-invalid] {
+  box-shadow:
+    inset 0 0 0 0 transparent,
+    inset 0 0 0 var(--zeroship-input-border-width) var(--it-red-500),
+    0 0 0 0 transparent;
+}
+
+[data-slot~="input"][data-invalid][data-focused],
+[data-slot~="input"][data-invalid]:focus-within {
+  box-shadow:
+    inset 0 0 0 0 transparent,
+    inset 0 0 0 var(--zeroship-input-border-width) var(--it-red-500),
+    0 0 0 var(--zeroship-focus-ring-width) var(--zeroship-input-focus-ring-color);
+}
+
+[data-slot~="input"][data-filled] [data-slot~="input-control"] {
+  color: var(--it-ink);
+}
+
+[data-slot~="input"][data-readonly] {
+  background: var(--it-surface-hover);
+  color: var(--it-ink-secondary);
+}
+
+[data-slot~="input"][data-disabled] {
+  background: var(--it-surface-sunken);
+  color: var(--it-ink-disabled);
+  cursor: not-allowed;
+  box-shadow:
+    inset 0 0 0 0 transparent,
+    inset 0 0 0 var(--zeroship-input-border-width) var(--it-line-subtle),
+    0 0 0 0 transparent;
+}
+
+[data-slot~="input-control"] {
+  flex: 1 1 auto;
+  min-inline-size: 0;
+  inline-size: 100%;
+  block-size: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  outline: none;
+  background: transparent;
+  box-shadow: none;
+  color: inherit;
+  font: inherit;
+  line-height: inherit;
+}
+
+[data-slot~="input-control"]:focus,
+[data-slot~="input-control"]:focus-visible {
+  border: 0;
+  outline: none;
+  box-shadow: none;
+}
+
+[data-slot~="input-control"]::placeholder {
+  color: var(--it-ink-muted);
+}
+
+[data-slot~="input"][data-disabled] [data-slot~="input-control"] {
+  color: var(--it-ink-disabled);
+  cursor: not-allowed;
+}
+
+[data-slot~="input"][data-readonly] [data-slot~="input-control"] {
+  cursor: default;
+}
+
+[data-slot~="input-slot-start"],
+[data-slot~="input-slot-end"] {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  color: var(--it-ink-muted);
+}
+
+[data-slot~="input-slot-start"] svg,
+[data-slot~="input-slot-end"] svg {
+  inline-size: var(--it-space-4);
+  block-size: var(--it-space-4);
+}
+
+[data-slot~="input"][data-disabled] [data-slot~="input-slot-start"],
+[data-slot~="input"][data-disabled] [data-slot~="input-slot-end"] {
+  color: var(--it-ink-disabled);
+}

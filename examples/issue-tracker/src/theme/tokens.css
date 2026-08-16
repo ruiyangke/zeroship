@@ -1,0 +1,258 @@
+/*
+ * Issue tracker theme - tokens.
+ *
+ * A dense product tool, not a dashboard. The premise: someone has this open
+ * all day and scans hundreds of rows, so the chrome should be quiet and the
+ * information should be tight. Everything below follows from that.
+ *
+ * THREE RULES this theme holds itself to:
+ *
+ *   1. Colour carries meaning, never decoration. The chrome is greyscale.
+ *      Hue appears only where it says something a reader must act on:
+ *      severity, status, an unread count. If a surface is coloured, that
+ *      colour is a claim.
+ *   2. Separation by hairline, not by shadow. Shadows imply layers floating
+ *      above a page; a tool is flat and dense. Shadows are reserved for
+ *      things that genuinely float (menus, dialogs) and stay shallow.
+ *   3. Density is a scale, not a value. Rows are 32px because that is what
+ *      fits ~20 issues on a laptop without crowding; every control height
+ *      and pad derives from the same 4px grid so nothing lands off-rhythm.
+ *
+ * The old theme was airy, warm-tinted and generously rounded - a marketing
+ * surface. That reads as friendly on a landing page and as wasted space on a
+ * table of 500 issues.
+ */
+
+:root {
+  /* --- Neutrals --------------------------------------------------------
+   * A single cool-grey ramp. Slightly blue rather than pure grey so the
+   * greys do not look muddy next to the accent. */
+  --it-grey-0: #ffffff;
+  --it-grey-25: #fcfcfd;
+  --it-grey-50: #f8f9fb;
+  --it-grey-100: #f1f3f6;
+  --it-grey-150: #e8ebf0;
+  --it-grey-200: #dfe3ea;
+  --it-grey-300: #c7cdd8;
+  --it-grey-400: #a3abba;
+  --it-grey-500: #7c8697;
+  --it-grey-600: #5d6675;
+  --it-grey-700: #434a56;
+  --it-grey-800: #2c3138;
+  --it-grey-900: #1a1d22;
+  --it-grey-950: #101216;
+
+  /* --- Accent ----------------------------------------------------------
+   * Exactly one hue, used for focus, links and the current selection. Not
+   * for primary buttons-as-decoration: an accent everywhere is an accent
+   * nowhere. */
+  --it-accent-50: #eef2ff;
+  --it-accent-100: #dfe6ff;
+  --it-accent-300: #a5b6ff;
+  --it-accent-500: #4f6bed;
+  --it-accent-600: #3d55d1;
+  --it-accent-700: #3145a8;
+
+  /* --- Status hues -----------------------------------------------------
+   * Deliberately desaturated. On a dense list, saturated status chips
+   * vibrate against each other and the eye stops trusting any of them. */
+  --it-red-50: #fdf0f0;
+  --it-red-500: #c8453f;
+  --it-red-700: #9a322d;
+  --it-amber-50: #fdf5e8;
+  --it-amber-500: #b57d1a;
+  --it-amber-700: #8c5f11;
+  --it-green-50: #eef6f0;
+  --it-green-500: #3f8a58;
+  --it-green-700: #2f6942;
+  --it-blue-50: #eef3fa;
+  --it-blue-500: #3d6ba3;
+  --it-blue-700: #2d5180;
+  --it-violet-50: #f3f0fb;
+  --it-violet-500: #6d55b8;
+
+  /* --- Semantic surfaces --------------------------------------------- */
+  --it-canvas: var(--it-grey-50);
+  --it-surface: var(--it-grey-0);
+  --it-surface-sunken: var(--it-grey-100);
+  --it-surface-hover: var(--it-grey-50);
+  --it-surface-active: var(--it-grey-100);
+  --it-surface-selected: var(--it-accent-50);
+  --it-overlay: color-mix(in oklab, var(--it-grey-950) 40%, transparent);
+
+  /* --- Semantic ink ----------------------------------------------------
+   * Four steps only. More than four and nobody can tell them apart, which
+   * defeats the point of a hierarchy. */
+  --it-ink: var(--it-grey-900);
+  --it-ink-secondary: var(--it-grey-600);
+  --it-ink-muted: var(--it-grey-500);
+  --it-ink-disabled: var(--it-grey-400);
+  --it-ink-on-accent: var(--it-grey-0);
+  --it-link: var(--it-accent-600);
+
+  /* --- Lines -----------------------------------------------------------
+   * Hairline is the default separator. The strong variant is for a real
+   * boundary (a table head, a rail edge), not emphasis. */
+  --it-line: var(--it-grey-200);
+  --it-line-strong: var(--it-grey-300);
+  --it-line-subtle: var(--it-grey-150);
+
+  /* --- Type ------------------------------------------------------------
+   * 13px base. Small enough to fit a dense table, large enough to read for
+   * hours. IDs and timestamps are tabular mono so columns align and digits
+   * do not jitter between rows. */
+  --it-font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --it-font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+
+  --it-text-xs: 0.6875rem;   /* 11px - meta, column heads */
+  --it-text-sm: 0.75rem;     /* 12px - secondary, chips */
+  --it-text-base: 0.8125rem; /* 13px - body, table cells */
+  --it-text-md: 0.875rem;    /* 14px - emphasis in body */
+  --it-text-lg: 1.0625rem;   /* 17px - card + section titles */
+  --it-text-xl: 1.375rem;    /* 22px - page title */
+  --it-text-2xl: 1.75rem;    /* 28px - stat values */
+
+  --it-leading-tight: 1.2;
+  --it-leading-snug: 1.35;
+  --it-leading-normal: 1.5;
+
+  --it-weight-normal: 400;
+  --it-weight-medium: 500;
+  --it-weight-semibold: 600;
+
+  /* Column heads and status text: small caps-ish without the fake caps. */
+  --it-tracking-wide: 0.04em;
+
+  /* --- Space: a strict 4px grid -------------------------------------- */
+  --it-space-1: 0.25rem;  /* 4  */
+  --it-space-2: 0.5rem;   /* 8  */
+  --it-space-3: 0.75rem;  /* 12 */
+  --it-space-4: 1rem;     /* 16 */
+  --it-space-5: 1.5rem;   /* 24 */
+  --it-space-6: 2rem;     /* 32 */
+  --it-space-7: 3rem;     /* 48 */
+
+  /* --- Density ---------------------------------------------------------
+   * 32px rows fit about twenty issues on a laptop viewport without the list
+   * feeling packed. Controls come in just under the row so a control inside
+   * a row never grows it. */
+  --it-row-h: 2rem;         /* 32 */
+  --it-control-h-sm: 1.5rem;  /* 24 */
+  --it-control-h-md: 1.75rem; /* 28 */
+  --it-control-h-lg: 2rem;    /* 32 */
+
+  /* --- Radius ----------------------------------------------------------
+   * 3px: enough to avoid looking like a 1995 form, small enough that a
+   * dense grid of controls does not read as a bag of pills. */
+  --it-radius-sm: 0.125rem; /* 2 */
+  --it-radius: 0.1875rem;   /* 3 */
+  --it-radius-lg: 0.375rem; /* 6 - dialogs, cards */
+  --it-radius-full: 999px;  /* avatars only */
+
+  /* --- Elevation -------------------------------------------------------
+   * Only for things that genuinely float. Shallow and tight; a big soft
+   * shadow makes a menu look like it is hovering a foot off the page. */
+  --it-shadow-popup:
+    0 0 0 1px var(--it-line),
+    0 4px 12px -2px color-mix(in oklab, var(--it-grey-950) 12%, transparent);
+  --it-shadow-dialog:
+    0 0 0 1px var(--it-line),
+    0 12px 32px -8px color-mix(in oklab, var(--it-grey-950) 22%, transparent);
+
+  /* --- Focus -----------------------------------------------------------
+   * One ring, everywhere, never suppressed. Keyboard users navigate this
+   * app row by row; a missing ring is a broken tool. */
+  --it-focus-ring: 0 0 0 2px var(--it-surface), 0 0 0 4px var(--it-accent-500);
+  --it-focus-ring-tight: 0 0 0 2px var(--it-accent-500);
+
+  /* --- Motion ----------------------------------------------------------
+   * Fast enough to feel like a native tool. Anything slower than 150ms on
+   * a hover reads as lag when you are moving down a list quickly. */
+  --it-motion-fast: 90ms;
+  --it-motion: 140ms;
+  --it-ease: cubic-bezier(0.2, 0, 0.2, 1);
+
+  /* --- Compatibility shims ---------------------------------------------
+   * src/styles.css still names twelve --zeroship-* tokens from the old
+   * theme. Rather than rewrite that file in the same change, map them here
+   * so this theme is a drop-in replacement and the diff stays readable.
+   * They are aliases, not a second vocabulary; new CSS uses --it-*. */
+  --zeroship-input-bg: var(--it-surface);
+  --zeroship-input-bg-focus: var(--it-surface);
+  --zeroship-input-border: var(--it-line-strong);
+  --zeroship-input-border-focus: var(--it-accent-500);
+  --zeroship-input-border-width: 1px;
+  --zeroship-input-ink: var(--it-ink);
+  --zeroship-input-surface-edge: var(--it-line);
+  --zeroship-input-focus-ring-color: color-mix(
+    in oklab,
+    var(--it-accent-500) 30%,
+    transparent
+  );
+  --zeroship-control-radius-md: var(--it-radius);
+  --zeroship-focus-ring-width: 2px;
+  --zeroship-motion-fast: var(--it-motion-fast);
+  --zeroship-motion-ease: var(--it-ease);
+}
+
+/*
+ * Dark mode: a real inversion, not a filter.
+ *
+ * The canvas is lifted off pure black (#101216, not #000) because a true
+ * black canvas with white text on an LCD smears on scroll. Status hues get
+ * lighter, less saturated variants so they stay legible on a dark surface
+ * without glowing.
+ */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --it-grey-0: #16191e;
+    --it-grey-25: #191c22;
+    --it-grey-50: #1a1d22;
+    --it-grey-100: #22262d;
+    --it-grey-150: #292e36;
+    --it-grey-200: #333944;
+    --it-grey-300: #444c59;
+    --it-grey-400: #626c7d;
+    --it-grey-500: #8792a3;
+    --it-grey-600: #a6b0be;
+    --it-grey-700: #c4ccd7;
+    --it-grey-800: #dee3ea;
+    --it-grey-900: #eef1f5;
+    --it-grey-950: #ffffff;
+
+    --it-accent-50: #1e2440;
+    --it-accent-100: #26305a;
+    --it-accent-300: #4a5da8;
+    --it-accent-500: #7d92f5;
+    --it-accent-600: #93a5f8;
+    --it-accent-700: #b0befa;
+
+    --it-red-50: #2e1d1d;
+    --it-red-500: #e8817b;
+    --it-red-700: #f0a29d;
+    --it-amber-50: #2c2415;
+    --it-amber-500: #d9a441;
+    --it-amber-700: #e5bb8f;
+    --it-green-50: #17281d;
+    --it-green-500: #63b07d;
+    --it-green-700: #86c69b;
+    --it-blue-50: #182534;
+    --it-blue-500: #6b9bd6;
+    --it-blue-700: #92b8e4;
+    --it-violet-50: #241f36;
+    --it-violet-500: #9c86e0;
+
+    --it-canvas: #101216;
+    --it-overlay: color-mix(in oklab, #000 62%, transparent);
+  }
+}
+
+/* An explicit toggle wins over the media query in both directions. */
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}

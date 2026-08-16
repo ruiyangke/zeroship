@@ -1,0 +1,131 @@
+[data-slot~="field"] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--it-space-2);
+  min-inline-size: 0;
+  color: var(--it-ink);
+  font-family: var(--it-font);
+}
+
+[data-slot~="field"][data-size="sm"] {
+  gap: var(--it-space-1);
+}
+
+[data-slot~="field"][data-size="lg"] {
+  gap: var(--it-space-3);
+}
+
+[data-slot~="field"][data-orientation="horizontal"] {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  column-gap: var(--it-space-3);
+  row-gap: var(--it-space-1);
+  align-items: center;
+}
+
+[data-slot~="field"][data-orientation="horizontal"]
+  > [data-slot~="field-label"] {
+  grid-column: 1;
+}
+
+[data-slot~="field"][data-orientation="horizontal"]
+  > :not([data-slot~="field-label"]) {
+  grid-column: 2;
+  min-inline-size: 0;
+}
+
+[data-slot~="field-label"] {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--it-space-1);
+  color: var(--it-ink-secondary);
+  font-size: var(--it-text-sm);
+  line-height: var(--it-leading-snug);
+  font-weight: var(--it-weight-medium);
+}
+
+[data-slot~="field"][data-disabled] > [data-slot~="field-label"],
+[data-slot~="field-label"][data-disabled] {
+  color: var(--it-ink-disabled);
+}
+
+[data-slot~="field-description"] {
+  margin: 0;
+  color: var(--it-ink-muted);
+  font-size: var(--it-text-sm);
+  line-height: var(--it-leading-snug);
+}
+
+[data-slot~="field-error"] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--it-space-1);
+  color: var(--it-red-700);
+  font-size: var(--it-text-sm);
+  line-height: var(--it-leading-snug);
+}
+
+:is([data-slot~="field-required"], [data-slot~="field-required-fallback"]) {
+  font-size: var(--it-text-sm);
+  line-height: var(--it-leading-snug);
+}
+
+[data-slot~="field-required"] {
+  color: var(--it-red-700);
+  font-weight: var(--it-weight-semibold);
+}
+
+[data-slot~="field-required-fallback"] {
+  margin-inline-start: var(--it-space-1);
+  color: var(--it-ink-muted);
+  font-weight: var(--it-weight-normal);
+}
+
+[data-slot~="field-item"] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--it-space-1);
+  min-inline-size: 0;
+}
+
+/* Bare Field.Control follows the same dense control contract as Input. */
+[data-slot~="field-control"] {
+  inline-size: 100%;
+  block-size: var(--it-control-h-md);
+  min-inline-size: 0;
+  padding-inline: var(--it-space-2);
+  border: 1px solid var(--it-line-strong);
+  border-radius: var(--it-radius);
+  outline: none;
+  background: var(--it-surface);
+  color: var(--it-ink);
+  font-size: var(--it-text-base);
+}
+
+[data-slot~="field"][data-size="sm"] [data-slot~="field-control"] {
+  block-size: var(--it-control-h-sm);
+  font-size: var(--it-text-sm);
+}
+
+[data-slot~="field"][data-size="lg"] [data-slot~="field-control"] {
+  block-size: var(--it-control-h-lg);
+  font-size: var(--it-text-md);
+}
+
+[data-slot~="field-control"]:focus-visible,
+[data-slot~="field"][data-focused] [data-slot~="field-control"] {
+  border-color: var(--it-accent-500);
+  box-shadow: var(--it-focus-ring-tight);
+}
+
+[data-slot~="field"][data-invalid] [data-slot~="field-control"],
+[data-slot~="field-control"][aria-invalid="true"] {
+  border-color: var(--it-red-500);
+}
+
+[data-slot~="field"][data-disabled] [data-slot~="field-control"],
+[data-slot~="field-control"]:disabled {
+  background: var(--it-surface-sunken);
+  color: var(--it-ink-disabled);
+  cursor: not-allowed;
+}

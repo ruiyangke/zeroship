@@ -1,0 +1,185 @@
+/* The drawer is a flat edge panel. Its backdrop supplies the depth cue. */
+[data-slot~="drawer-backdrop"] {
+  position: fixed;
+  inset: 0;
+  background: var(--it-overlay);
+  opacity: 1;
+  transition: opacity var(--it-motion) var(--it-ease);
+}
+
+[data-slot~="drawer-backdrop"][data-starting-style],
+[data-slot~="drawer-backdrop"][data-ending-style] {
+  opacity: 0;
+}
+
+[data-slot~="drawer-content"] {
+  position: fixed;
+  display: flex;
+  max-inline-size: 100%;
+  max-block-size: 100%;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--it-line-strong);
+  background: var(--it-surface);
+  color: var(--it-ink);
+  transition:
+    opacity var(--it-motion) var(--it-ease),
+    transform var(--it-motion) var(--it-ease);
+}
+
+[data-slot~="drawer-content"][data-side="start"],
+[data-slot~="drawer-content"][data-side="end"] {
+  inset-block: 0;
+  inline-size: max-content;
+  block-size: 100%;
+}
+
+[data-slot~="drawer-content"][data-side="start"] {
+  inset-inline-start: 0;
+  border-inline-start: 0;
+}
+
+[data-slot~="drawer-content"][data-side="end"] {
+  inset-inline-end: 0;
+  border-inline-end: 0;
+}
+
+[data-slot~="drawer-content"][data-side="top"],
+[data-slot~="drawer-content"][data-side="bottom"] {
+  inset-inline: 0;
+  inline-size: 100%;
+  block-size: max-content;
+}
+
+[data-slot~="drawer-content"][data-side="top"] {
+  inset-block-start: 0;
+  border-block-start: 0;
+}
+
+[data-slot~="drawer-content"][data-side="bottom"] {
+  inset-block-end: 0;
+  border-block-end: 0;
+}
+
+[data-slot~="drawer-content"][data-size="full"] {
+  inline-size: 100%;
+  block-size: 100%;
+}
+
+[data-slot~="drawer-content"][data-side="start"][data-starting-style],
+[data-slot~="drawer-content"][data-side="start"][data-ending-style] {
+  transform: translateX(-100%);
+}
+
+[data-slot~="drawer-content"][data-side="end"][data-starting-style],
+[data-slot~="drawer-content"][data-side="end"][data-ending-style] {
+  transform: translateX(100%);
+}
+
+[data-slot~="drawer-content"][data-side="top"][data-starting-style],
+[data-slot~="drawer-content"][data-side="top"][data-ending-style] {
+  transform: translateY(-100%);
+}
+
+[data-slot~="drawer-content"][data-side="bottom"][data-starting-style],
+[data-slot~="drawer-content"][data-side="bottom"][data-ending-style] {
+  transform: translateY(100%);
+}
+
+[data-slot~="drawer-content"][data-side="start"]:dir(rtl)[data-starting-style],
+[data-slot~="drawer-content"][data-side="start"]:dir(rtl)[data-ending-style] {
+  transform: translateX(100%);
+}
+
+[data-slot~="drawer-content"][data-side="end"]:dir(rtl)[data-starting-style],
+[data-slot~="drawer-content"][data-side="end"]:dir(rtl)[data-ending-style] {
+  transform: translateX(-100%);
+}
+
+[data-slot~="drawer-header"] {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-start;
+  gap: var(--it-space-3);
+  border-block-end: 1px solid var(--it-line);
+  padding: var(--it-space-4);
+}
+
+[data-slot~="drawer-header-content"] {
+  display: flex;
+  min-inline-size: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--it-space-1);
+}
+
+[data-slot~="drawer-header-close"] {
+  appearance: none;
+  flex: 0 0 auto;
+  display: inline-flex;
+  inline-size: var(--it-control-h-md);
+  block-size: var(--it-control-h-md);
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--it-radius);
+  background: transparent;
+  color: var(--it-ink-secondary);
+  cursor: pointer;
+}
+
+[data-slot~="drawer-header-close"] [data-slot~="icon"] {
+  display: inline-flex;
+  inline-size: var(--it-space-4);
+  block-size: var(--it-space-4);
+}
+
+[data-slot~="drawer-header-close"] [data-slot~="icon"] > svg {
+  inline-size: 100%;
+  block-size: 100%;
+}
+
+[data-slot~="drawer-header-close"]:hover {
+  background: var(--it-surface-hover);
+  color: var(--it-ink);
+}
+
+[data-slot~="drawer-title"] {
+  color: var(--it-ink);
+  font-size: var(--it-text-lg);
+  font-weight: var(--it-weight-semibold);
+  line-height: var(--it-leading-tight);
+}
+
+[data-slot~="drawer-description"] {
+  margin: 0;
+  color: var(--it-ink-secondary);
+  font-size: var(--it-text-sm);
+}
+
+[data-slot~="drawer-body"] {
+  min-block-size: 0;
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: var(--it-space-4);
+}
+
+[data-slot~="drawer-footer"] {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--it-space-2);
+  border-block-start: 1px solid var(--it-line);
+  padding: var(--it-space-3) var(--it-space-4);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-slot~="drawer-backdrop"],
+  [data-slot~="drawer-content"] {
+    transition: none;
+  }
+}

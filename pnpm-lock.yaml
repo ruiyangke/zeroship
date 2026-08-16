@@ -698,9 +698,6 @@ importers:
       '@zeroship/ui':
         specifier: workspace:*
         version: link:../../sdks/ui
-      '@zeroship/ui-theme':
-        specifier: workspace:*
-        version: link:../../sdks/ui-theme
       react:
         specifier: 'catalog:'
         version: 19.2.5

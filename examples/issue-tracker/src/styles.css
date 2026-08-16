@@ -5,37 +5,52 @@
    a table fast without reading every cell.
    --------------------------------------------------------------------- */
 
+/*
+ * These names are ALIASES onto the theme in ./theme, not a second palette.
+ *
+ * This file used to define its own eighteen tokens -- a warm #fafaf7 canvas,
+ * a green accent, 10px radii, a soft drop shadow. That was a parallel design
+ * system, and because this file is imported after the theme it quietly WON:
+ * the theme could restyle every component and the page would still be warm
+ * and green. Two sources of truth, and the losing one was the deliberate one.
+ *
+ * Keeping the names means the ~400 uses below do not all have to change in
+ * one commit. Each now resolves to the theme, so there is exactly one place
+ * a colour or a radius is decided.
+ *
+ * Do not add a raw hex here. If something needs a value the theme lacks, add
+ * it to ./theme/tokens.css where the rest of the design can see it.
+ */
 :root {
-  --bg: #fafaf7;
-  --surface: #ffffff;
-  --surface-2: #f4f4f0;
-  --ink: #18181b;
-  --ink-2: #55555f;
-  --ink-faint: #9a9aa3;
-  --line: rgba(24, 24, 27, 0.08);
-  --line-2: rgba(24, 24, 27, 0.14);
-  --accent: #1a7f50;
-  --accent-soft: rgba(26, 127, 80, 0.1);
-  --blue: #2461c7;
-  --amber: #c2820a;
-  --red: #c8402f;
-  --purple: #7a4fd1;
-  --radius: 10px;
-  --shadow: 0 1px 2px rgba(24, 24, 27, 0.04), 0 8px 24px -16px rgba(24, 24, 27, 0.2);
-  --font: ui-sans-serif, system-ui, "Segoe UI", sans-serif;
-  --mono: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --bg: var(--it-canvas);
+  --surface: var(--it-surface);
+  --surface-2: var(--it-surface-sunken);
+  --ink: var(--it-ink);
+  --ink-2: var(--it-ink-secondary);
+  --ink-faint: var(--it-ink-muted);
+  --line: var(--it-line);
+  --line-2: var(--it-line-strong);
+  --accent: var(--it-accent-600);
+  --accent-soft: var(--it-accent-50);
+  --blue: var(--it-blue-500);
+  --amber: var(--it-amber-500);
+  --red: var(--it-red-500);
+  --purple: var(--it-violet-500);
+  /* 10px belonged to the airy look. The tool radius is 3px, and the large
+     variant is for panels that genuinely read as cards. */
+  --radius: var(--it-radius-lg);
+  --shadow: var(--it-shadow-popup);
+  --font: var(--it-font);
+  --mono: var(--it-font-mono);
 }
 
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; }
+/* Body type and colour belong to ./theme/base.css. Restating them here is
+   what kept the page at 14px on a warm canvas while the theme said 13px on a
+   cool one -- this file is imported second, so a duplicate silently wins. */
 body {
   margin: 0;
-  background: var(--bg);
-  color: var(--ink);
-  font-family: var(--font);
-  font-size: 14px;
-  line-height: 1.5;
-  -webkit-font-smoothing: antialiased;
 }
 h1, h2, h3, h4 { margin: 0 0 0.6rem; font-weight: 600; letter-spacing: -0.01em; }
 h1 { font-size: 1.4rem; }

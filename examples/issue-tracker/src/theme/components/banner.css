@@ -1,0 +1,113 @@
+/* Dense inline status message. Hue is reserved for the banner's intent. */
+[data-slot~="banner"] {
+  border: 1px solid var(--it-line);
+  border-inline-start-width: var(--it-space-1);
+  border-radius: var(--it-radius);
+  background: var(--it-surface);
+  color: var(--it-ink);
+  font-size: var(--it-text-base);
+}
+
+[data-slot~="banner"][data-intent="info"] {
+  border-inline-start-color: var(--it-blue-500);
+  background: var(--it-blue-50);
+}
+
+[data-slot~="banner"][data-intent="success"] {
+  border-inline-start-color: var(--it-green-500);
+  background: var(--it-green-50);
+}
+
+[data-slot~="banner"][data-intent="warning"] {
+  border-inline-start-color: var(--it-amber-500);
+  background: var(--it-amber-50);
+}
+
+[data-slot~="banner"][data-intent="danger"] {
+  border-inline-start-color: var(--it-red-500);
+  background: var(--it-red-50);
+}
+
+[data-slot~="banner-row"] {
+  min-block-size: var(--it-row-h);
+  gap: var(--it-space-3);
+  padding: var(--it-space-2) var(--it-space-3);
+}
+
+[data-slot~="banner-icon"] {
+  display: inline-flex;
+  flex: 0 0 auto;
+  inline-size: var(--it-space-4);
+  block-size: var(--it-space-4);
+  align-items: center;
+  justify-content: center;
+}
+
+[data-slot~="banner-icon"] > svg {
+  inline-size: 100%;
+  block-size: 100%;
+}
+
+[data-slot~="banner"][data-intent="info"] [data-slot~="banner-icon"] {
+  color: var(--it-blue-700);
+}
+
+[data-slot~="banner"][data-intent="success"] [data-slot~="banner-icon"] {
+  color: var(--it-green-700);
+}
+
+[data-slot~="banner"][data-intent="warning"] [data-slot~="banner-icon"] {
+  color: var(--it-amber-700);
+}
+
+[data-slot~="banner"][data-intent="danger"] [data-slot~="banner-icon"] {
+  color: var(--it-red-700);
+}
+
+[data-slot~="banner-text"] {
+  flex: 1 1 auto;
+  min-inline-size: 0;
+  gap: var(--it-space-1);
+}
+
+[data-slot~="banner-title"] {
+  color: var(--it-ink);
+  font-weight: var(--it-weight-semibold);
+  line-height: var(--it-leading-snug);
+}
+
+[data-slot~="banner-description"] {
+  color: var(--it-ink-secondary);
+  font-size: var(--it-text-sm);
+}
+
+[data-slot~="banner-actions"] {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--it-space-2);
+  padding-block-start: var(--it-space-1);
+}
+
+[data-slot~="banner-dismiss"] {
+  display: inline-flex;
+  flex: 0 0 auto;
+  inline-size: var(--it-control-h-sm);
+  block-size: var(--it-control-h-sm);
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--it-radius);
+  background: transparent;
+  color: var(--it-ink-secondary);
+  cursor: pointer;
+}
+
+@media (hover: hover) {
+  [data-slot~="banner-dismiss"]:hover {
+    background: var(--it-surface-hover);
+    color: var(--it-ink);
+  }
+}

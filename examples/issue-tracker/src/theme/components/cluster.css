@@ -1,0 +1,22 @@
+/*
+ * The headless layout components still pass their governed gap props through
+ * the public --zeroship-space-* interface. These are aliases into this
+ * theme's existing scale, not another spacing scale.
+ */
+:root {
+  --zeroship-space-0: 0;
+  --zeroship-space-1: var(--it-space-1);
+  --zeroship-space-2: var(--it-space-2);
+  --zeroship-space-3: var(--it-space-3);
+  --zeroship-space-4: var(--it-space-4);
+}
+
+[data-slot~="cluster"] {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: var(--cluster-gap, var(--it-space-2));
+  align-items: var(--cluster-align, center);
+  justify-content: var(--cluster-justify, flex-start);
+  min-inline-size: 0;
+}

@@ -1,0 +1,188 @@
+/*
+ * Issue tracker theme - base layer.
+ *
+ * Document defaults, the focus contract, and the handful of primitives that
+ * every page leans on. Component slots live in ./components/.
+ *
+ * This layer is deliberately small. A base that styles too much becomes a
+ * second place to look when a component is wrong.
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  /* 16px root keeps rem math honest; the theme scales down from there via
+     the type tokens rather than by shrinking the root, which would also
+     shrink the user's own browser zoom preference. */
+  font-size: 100%;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--it-canvas);
+  color: var(--it-ink);
+  font-family: var(--it-font);
+  font-size: var(--it-text-base);
+  line-height: var(--it-leading-snug);
+  font-weight: var(--it-weight-normal);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Headings carry no margin of their own. Spacing between blocks is the
+   layout's job; a heading that brings its own margin fights every container
+   it is dropped into. */
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+p,
+figure,
+blockquote,
+dl,
+dd {
+  margin: 0;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-weight: var(--it-weight-semibold);
+  line-height: var(--it-leading-tight);
+  letter-spacing: -0.01em;
+}
+
+h1 { font-size: var(--it-text-xl); }
+h2 { font-size: var(--it-text-lg); }
+h3 { font-size: var(--it-text-md); }
+h4 { font-size: var(--it-text-base); }
+
+a {
+  color: var(--it-link);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+/* Controls inherit type by default. Browsers do not, and every design
+   system that forgets this ends up with one stray 13.333px select. */
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+/*
+ * The focus contract.
+ *
+ * One ring, applied on :focus-visible only, never removed. This app is
+ * navigated row by row from the keyboard, so a suppressed ring is a broken
+ * tool rather than a cosmetic nit. Anything that needs a different ring
+ * overrides the token, not the rule.
+ */
+:focus-visible {
+  outline: none;
+  box-shadow: var(--it-focus-ring);
+  border-radius: var(--it-radius);
+}
+
+/* Tabular numerals everywhere digits are compared down a column: issue ids,
+   counts, dates. Proportional digits make a column of numbers ripple. */
+[data-slot~="data-table-cell"],
+[data-slot~="badge-label"],
+[data-slot~="stat-card-value"],
+time,
+code,
+kbd {
+  font-variant-numeric: tabular-nums;
+}
+
+code,
+kbd,
+samp {
+  font-family: var(--it-font-mono);
+  font-size: 0.95em;
+}
+
+::selection {
+  background: var(--it-accent-100);
+  color: var(--it-ink);
+}
+
+/* Scrollbars: thin and quiet. A dense tool has many scroll regions and the
+   default chrome bars are visually louder than the content they hold. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--it-grey-300) transparent;
+}
+*::-webkit-scrollbar {
+  width: 0.5rem;
+  height: 0.5rem;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--it-grey-300);
+  border-radius: var(--it-radius-full);
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/*
+ * Respect a reduced-motion preference by removing motion, not by shortening
+ * it. A 1ms transition still triggers transitionend handlers, which is the
+ * behaviour some components rely on to sequence work.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Screen-reader-only, used by the library's visually-hidden slot and by the
+   app's own skip link. */
+[data-slot~="visually-hidden"] {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* The skip link is invisible until focused, then lands as a real control in
+   the top-left rather than shifting the layout. */
+[data-slot~="skip-link"] {
+  position: absolute;
+  z-index: 100;
+  inset-block-start: var(--it-space-2);
+  inset-inline-start: var(--it-space-2);
+  padding: var(--it-space-2) var(--it-space-3);
+  background: var(--it-surface);
+  border-radius: var(--it-radius);
+  box-shadow: var(--it-shadow-popup);
+  font-weight: var(--it-weight-medium);
+  transform: translateY(-200%);
+}
+[data-slot~="skip-link"]:focus-visible {
+  transform: none;
+}

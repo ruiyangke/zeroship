@@ -4,13 +4,10 @@ import { AuthProvider } from "@zeroship/auth/react";
 import { BrowserRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "@zeroship/ui";
-// The design system ships its stylesheet as a separate export. Importing only
-// the module gets you the components with no chrome at all -- the AppShell
-// rendered as a bare stack of links until this line existed.
-import "@zeroship/ui-theme/styles.css";
+// The component library is headless. This app owns its complete visual layer.
+import "./theme/index.css";
 import { App } from "./App";
-// After the design system, so the app sheet can override tokens rather than
-// be overridden by them.
+// App-specific composition follows the component theme.
 import "./styles.css";
 import { isUnauthenticated } from "./components/rpc";
 

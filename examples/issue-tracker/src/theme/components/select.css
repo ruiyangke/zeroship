@@ -1,0 +1,243 @@
+[data-slot~="select-trigger"] {
+  display: inline-flex;
+  align-items: center;
+  inline-size: 100%;
+  min-inline-size: 0;
+  block-size: var(--it-control-h-md);
+  gap: var(--it-space-1);
+  padding-inline: var(--it-space-2);
+  border: thin solid var(--it-line-strong);
+  border-radius: var(--it-radius);
+  background: var(--it-surface-sunken);
+  color: var(--it-ink);
+  font-family: var(--it-font);
+  font-size: var(--it-text-base);
+  font-weight: var(--it-weight-normal);
+  line-height: var(--it-leading-snug);
+  text-align: start;
+  cursor: pointer;
+  user-select: none;
+  transition:
+    background-color var(--it-motion-fast) var(--it-ease),
+    border-color var(--it-motion-fast) var(--it-ease),
+    box-shadow var(--it-motion-fast) var(--it-ease);
+}
+
+[data-slot~="select-trigger"][data-size="sm"] {
+  block-size: var(--it-control-h-sm);
+  font-size: var(--it-text-sm);
+}
+
+[data-slot~="select-trigger"][data-size="md"] {
+  block-size: var(--it-control-h-md);
+}
+
+[data-slot~="select-trigger"][data-size="lg"] {
+  block-size: var(--it-control-h-lg);
+  padding-inline: var(--it-space-3);
+  font-size: var(--it-text-md);
+}
+
+[data-slot~="select-trigger"][data-variant="outline"] {
+  background: var(--it-surface);
+}
+
+@media (hover: hover) {
+  [data-slot~="select-trigger"]:not([disabled]):not([data-disabled]):not([data-popup-open]):not([data-readonly]):hover {
+    background: var(--it-surface-hover);
+    border-color: var(--it-line-strong);
+  }
+}
+
+[data-slot~="select-trigger"][data-focused],
+[data-slot~="select-trigger"]:focus-visible,
+[data-slot~="select-trigger"][data-popup-open] {
+  background: var(--it-surface);
+  border-color: var(--it-accent-500);
+  box-shadow: var(--it-focus-ring);
+}
+
+[data-slot~="select-trigger"][data-invalid] {
+  border-color: var(--it-red-500);
+}
+
+[data-slot~="select-trigger"][data-readonly] {
+  background: var(--it-surface-hover);
+  border-color: var(--it-line);
+  color: var(--it-ink-secondary);
+  cursor: default;
+}
+
+[data-slot~="select-trigger"][disabled],
+[data-slot~="select-trigger"][data-disabled] {
+  background: var(--it-surface-sunken);
+  border-color: var(--it-line-subtle);
+  color: var(--it-ink-disabled);
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+[data-slot~="select-trigger-value"] {
+  display: inline-flex;
+  flex: 1 1 auto;
+  align-items: center;
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+[data-slot~="select-trigger"][data-placeholder] [data-slot~="select-trigger-value"] {
+  color: var(--it-ink-muted);
+}
+
+[data-slot~="select-trigger-icon"] {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  inline-size: var(--it-space-4);
+  block-size: var(--it-space-4);
+  color: var(--it-ink-muted);
+}
+
+[data-slot~="select-trigger-icon"] > svg {
+  inline-size: 100%;
+  block-size: 100%;
+}
+
+[data-slot~="select-trigger"][data-popup-open] [data-slot~="select-trigger-icon"] {
+  color: var(--it-accent-600);
+}
+
+[data-slot~="select-positioner"] {
+  outline: none;
+}
+
+[data-slot~="select-popup"] {
+  min-inline-size: var(--anchor-width);
+  max-block-size: calc(100dvh - var(--it-space-7));
+  overflow: hidden;
+  border-radius: var(--it-radius);
+  outline: none;
+  background: var(--it-surface);
+  color: var(--it-ink);
+  box-shadow: var(--it-shadow-popup);
+  font-family: var(--it-font);
+  font-size: var(--it-text-base);
+  line-height: var(--it-leading-snug);
+}
+
+[data-slot~="select-popup"][data-size="sm"] {
+  font-size: var(--it-text-sm);
+}
+
+[data-slot~="select-popup"][data-size="lg"] {
+  font-size: var(--it-text-md);
+}
+
+[data-slot~="select-list"] {
+  display: flex;
+  flex-direction: column;
+  max-block-size: inherit;
+  padding: var(--it-space-1);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  outline: none;
+}
+
+[data-slot~="select-item"] {
+  display: grid;
+  grid-template-columns: var(--it-space-4) minmax(0, 1fr);
+  align-items: center;
+  min-block-size: var(--it-control-h-md);
+  gap: var(--it-space-1);
+  padding-inline: var(--it-space-2);
+  border-radius: var(--it-radius);
+  outline: none;
+  color: var(--it-ink);
+  cursor: pointer;
+  user-select: none;
+}
+
+[data-slot~="select-item"][data-size="sm"] {
+  min-block-size: var(--it-control-h-sm);
+  font-size: var(--it-text-sm);
+}
+
+[data-slot~="select-item"][data-size="md"] {
+  min-block-size: var(--it-control-h-md);
+}
+
+[data-slot~="select-item"][data-size="lg"] {
+  min-block-size: var(--it-control-h-lg);
+  font-size: var(--it-text-md);
+}
+
+[data-slot~="select-item-indicator"] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: var(--it-space-4);
+  block-size: var(--it-space-4);
+  visibility: hidden;
+  color: var(--it-accent-600);
+}
+
+[data-slot~="select-item-indicator"] > svg {
+  inline-size: 100%;
+  block-size: 100%;
+}
+
+[data-slot~="select-item"][data-selected] [data-slot~="select-item-indicator"] {
+  visibility: visible;
+}
+
+[data-slot~="select-item-text"] {
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+[data-slot~="select-item"][data-highlighted]:not([data-disabled]) {
+  background: var(--it-surface-hover);
+}
+
+[data-slot~="select-item"][data-selected]:not([data-disabled]) {
+  background: var(--it-surface-selected);
+  color: var(--it-accent-700);
+}
+
+[data-slot~="select-item"][data-highlighted][data-selected]:not([data-disabled]) {
+  background: var(--it-accent-100);
+}
+
+[data-slot~="select-item"][data-disabled] {
+  color: var(--it-ink-disabled);
+  cursor: not-allowed;
+}
+
+[data-slot~="select-group"] {
+  display: flex;
+  flex-direction: column;
+}
+
+[data-slot~="select-group"] + [data-slot~="select-group"] {
+  margin-block-start: var(--it-space-1);
+}
+
+[data-slot~="select-group-label"] {
+  min-block-size: var(--it-control-h-sm);
+  padding-inline: var(--it-space-2);
+  color: var(--it-ink-muted);
+  font-size: var(--it-text-xs);
+  font-weight: var(--it-weight-semibold);
+  line-height: var(--it-control-h-sm);
+  letter-spacing: var(--it-tracking-wide);
+}
+
+[data-slot~="select-separator"] {
+  margin-block: var(--it-space-1);
+  border-block-start: thin solid var(--it-line);
+}
