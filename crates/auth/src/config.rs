@@ -114,15 +114,16 @@ pub struct AuthSettings {
     #[config(shared = CONTROL_URL, default = "http://localhost:9090".to_owned())]
     pub control_url: Operational<String>,
 
-    /// Shared internal control-plane bearer key. Auth uses this only to gate
-    /// control -> auth internal OP mint calls; it is never exposed to browser
-    /// flows.
+    /// Audience fixed onto access tokens minted for the platform CLI.
+    #[config(shared = OAUTH_AUDIENCE, default = "control.zeroship.ai".to_owned())]
+    pub oauth_audience: Operational<String>,
+
+    /// Dedicated bearer key for control -> auth platform-token mint calls.
     ///
-    /// SHARED: one key authenticates the whole internal control surface, so
-    /// every consumer reads the same `ZEROSHIP_CONTROL_KEY` and the same
-    /// root-level overlay path.
-    #[config(shared = CONTROL_KEY)]
-    pub control_key: Secret<String>,
+    /// Auth deliberately does not consume the broader control key. A worker
+    /// compromise therefore does not authorize this mint endpoint.
+    #[config(shared = AUTH_PLATFORM_MINT_KEY)]
+    pub platform_mint_key: Secret<String>,
 
     /// HMAC key (>=32 bytes) used to sign the short-lived federation stash
     /// cookie (`__Host-zsidp_google_stash` etc.). A weak or absent value lets an
@@ -967,6 +968,11 @@ mod tests {
         // Shared identities keep their unprefixed canonical names, so auth,
         // gateway and worker read ONE variable for the control-plane URL.
         assert!(envs.contains(&"ZEROSHIP_CONTROL_URL".to_owned()));
+        assert!(envs.contains(&"ZEROSHIP_AUTH_PLATFORM_MINT_KEY".to_owned()));
+        assert!(
+            !envs.contains(&"ZEROSHIP_CONTROL_KEY".to_owned()),
+            "auth must not consume the worker-shared control key"
+        );
 
         // The whole command line, not just the settings carrier: after the
         // secret conversion there is no second flatten to hide an old name in,
@@ -1014,7 +1020,7 @@ mod tests {
             ("database-url", "database-url-file"),
             ("stash-signing-key", "stash-signing-key-file"),
             ("totp-enc-key", "totp-enc-key-file"),
-            ("control-key", "control-key-file"),
+            ("platform-mint-key", "platform-mint-key-file"),
             ("google-client-secret", "google-client-secret-file"),
             ("github-client-secret", "github-client-secret-file"),
             ("smtp-password", "smtp-password-file"),
@@ -1633,7 +1639,7 @@ frame_ancestor_origins = ["http://localhost:5173", "https://console.zeroship.ai"
         cfg.settings.database_url = supplied(SENTINEL);
         cfg.settings.stash_signing_key = supplied(SENTINEL);
         cfg.settings.totp_enc_key = supplied(SENTINEL);
-        cfg.settings.control_key = supplied(SENTINEL);
+        cfg.settings.platform_mint_key = supplied(SENTINEL);
         cfg.settings.google_client_secret = supplied(SENTINEL);
         cfg.settings.smtp_password = supplied(SENTINEL);
         let rendered = format!("{cfg:?}");

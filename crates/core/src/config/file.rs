@@ -409,11 +409,13 @@ pub struct AuthSection {
     pub platform_issuer: Option<String>,
     /// Platform OP JWKS URL. Defaults to `{platform_issuer}/.well-known/jwks.json`.
     pub platform_jwks_url: Option<String>,
+    /// Dedicated bearer accepted by auth for the platform-token mint.
+    pub platform_mint_key: Option<String>,
     /// Base URL control POSTs the platform deploy-token mint to.
     ///
     /// Distinct from `platform_issuer` on purpose: that is the `iss` a token
-    /// must carry (a NAME, always public), this is where `control_key` is sent
-    /// (a ROUTE, which must be reachable from control). See
+    /// must carry (a NAME, always public), this is where `platform_mint_key` is
+    /// sent (a ROUTE, which must be reachable from control). See
     /// `ControlSettings::auth_platform_mint_url`.
     pub platform_mint_url: Option<String>,
     /// First-party OAuth client IDs trusted by the platform.
@@ -604,6 +606,7 @@ mod tests {
         assert!(config.auth.supabase_anon_key.is_none());
         assert!(config.auth.platform_issuer.is_none());
         assert!(config.auth.platform_jwks_url.is_none());
+        assert!(config.auth.platform_mint_key.is_none());
         assert!(config.auth.platform_mint_url.is_none());
         assert!(config.auth.trusted_oauth_clients.is_none());
         assert!(config.auth.frame_ancestor_origins.is_none());
@@ -651,6 +654,7 @@ supabase_url = "https://project.supabase.test"
 supabase_anon_key = "anon-test-key"
 platform_issuer = "https://auth.zeroship.ai"
 platform_jwks_url = "https://auth.zeroship.ai/.well-known/jwks.json"
+platform_mint_key = "mint-test-key"
 platform_mint_url = "http://auth:9092"
 trusted_oauth_clients = ["zeroship-builder", "zeroship-console"]
 
@@ -690,6 +694,10 @@ log_format = "json"
         assert_eq!(
             config.auth.platform_jwks_url.as_deref(),
             Some("https://auth.zeroship.ai/.well-known/jwks.json")
+        );
+        assert_eq!(
+            config.auth.platform_mint_key.as_deref(),
+            Some("mint-test-key")
         );
         // The address, which the overlay must be able to carry SEPARATELY from
         // the issuer above. A schema that accepted only the issuer would force
@@ -742,6 +750,7 @@ log_format = "json"
         assert!(config.control_key.is_some(), "control_key must be a root key");
         assert!(config.worker_key.is_some());
         assert!(config.pairwise_salt.is_some());
+        assert!(config.auth.platform_mint_key.is_some());
         // A per-binary secret sits in that binary's table.
         assert!(config.control.master_key.is_some());
         assert!(config.gateway.stash_signing_key.is_some());

@@ -31,6 +31,16 @@ pub const OP_PROVIDER: &str = "op";
 /// `zeroship.device_grants.provider` for control's platform deploy-token grant.
 pub const PLATFORM_PROVIDER: &str = "platform";
 
+/// OAuth client id fixed onto access tokens issued to `zeroship login`.
+pub const PLATFORM_CLI_CLIENT_ID: &str = "zeroship-cli";
+
+/// Maximum lifetime of a platform CLI token, in seconds.
+///
+/// There is no supported early-recall operation for these tokens today, so
+/// expiry is the effective revocation bound. Keep this no longer than the
+/// token-revocation marker retention horizon.
+pub const PLATFORM_TOKEN_MAX_TTL_SECS: i64 = 12 * 60 * 60;
+
 /// Path the OP mounts its protocol endpoints under, relative to the auth
 /// service's public URL.
 ///
@@ -74,9 +84,9 @@ pub fn op_public_url(issuer: &str) -> Option<&str> {
 /// `ControlSettings::auth_platform_mint_url` for why the trust anchor and the
 /// route cannot be one string.
 ///
-/// The rules exist because the request this URL addresses carries `control_key`
-/// in an `Authorization` header, so whatever this names receives that
-/// credential. What the rules bound:
+/// The rules exist because the request this URL addresses carries the dedicated
+/// platform-mint key in an `Authorization` header, so whatever this names
+/// receives that credential. What the rules bound:
 ///
 ///   * ABSOLUTE http/https only. A relative or scheme-less value cannot be
 ///     resolved against anything here, and `auth:9092` - which reads as a
