@@ -378,6 +378,46 @@ async fn gotrue_authenticated_token_resolves_linked_principal_and_deploy_grant()
 }
 
 #[compio::test]
+async fn gotrue_token_linked_to_anonymized_user_returns_401() {
+    let Some(mut fx) = Fixture::new("anonymized-owner").await else {
+        return;
+    };
+    let subject = Uuid::new_v4().to_string();
+    let principal_id = fx
+        .seed_linked_principal(&subject, &["apps:deploy"])
+        .await;
+    let app_id = fx
+        .create_owned_app(principal_id, "supabase-anonymized")
+        .await;
+    let app = init_control!(fx);
+    let token = gotrue_token(&subject, "authenticated");
+
+    fx.state
+        .control_pg
+        .execute(
+            "UPDATE zeroship.users \
+             SET disabled_at = NOW(), anonymized_at = NOW(), \
+                 credential_version = credential_version + 1 \
+             WHERE id = $1",
+            &[&principal_id],
+        )
+        .await
+        .expect("anonymize GoTrue principal");
+    let req = test::TestRequest::post()
+        .uri(&format!("/raw-app/{app_id}/deploy-check"))
+        .header("authorization", bearer(&token))
+        .to_request();
+    let status = test::call_service(&app, req).await.status();
+
+    fx.cleanup().await;
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[compio::test]
 async fn gotrue_unlinked_subject_is_unauthorized() {
     let Some(fx) = Fixture::new("unlinked").await else {
         return;

@@ -22,6 +22,7 @@ use zeroship_auth::oidc::{
 use zeroship_auth::server;
 use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::store::sessions as session_store;
+use zeroship_auth::store::users;
 
 use common::{location, pkce_challenge_s256, pkce_verifier, test_auth_config};
 
@@ -451,6 +452,45 @@ async fn expired_authorization_code_is_rejected() {
     assert_error(token, "invalid_grant").await;
 
     fx.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn credential_bump_rejects_code_after_deletion_is_cancelled() {
+    let Some(fx) = Fixture::boot().await else {
+        return;
+    };
+    let verifier = pkce_verifier();
+    let nonce = format!("nc-{}", Uuid::new_v4().simple());
+    let authorize = send_authorize(&fx, REDIRECT_URI, &verifier, Some(&nonce), None)
+        .await
+        .expect("authorize response");
+    let code = query_param(&location(&authorize), "code").expect("code");
+
+    users::request_deletion(fx.db.as_ref(), fx.user_id, 30)
+        .await
+        .expect("request account deletion")
+        .expect("authorization code owner exists");
+    assert!(
+        users::cancel_deletion(fx.db.as_ref(), fx.user_id)
+            .await
+            .expect("cancel account deletion"),
+        "deletion request must be cancellable"
+    );
+
+    let token = token_request(&fx, &code, REDIRECT_URI, &verifier)
+        .await
+        .expect("token response after credential bump");
+    let status = token.status().as_u16();
+    let body = token
+        .json::<Value>()
+        .await
+        .expect("token rejection json");
+
+    fx.cleanup().await;
+
+    assert_eq!(status, 400);
+    assert_eq!(body["error"], "invalid_grant");
 }
 
 fn db_url() -> Option<String> {
