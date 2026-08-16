@@ -9,7 +9,10 @@ use std::time::Duration;
 use uuid::Uuid;
 use zeroship_auth::cron::signing_key_retention;
 use zeroship_auth::oidc::metadata::jwks_document;
-use zeroship_auth::oidc::{AccessTokenMint, Issuer};
+use zeroship_auth::oidc::{
+    AccessTokenMint, IdTokenMint, Issuer, LogoutTokenMint, PrincipalAccessTokenMint,
+    PrincipalIdTokenMint,
+};
 
 static RETENTION_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -95,6 +98,26 @@ async fn key_status(db: &Client, kid: &str) -> (String, Option<String>) {
         .await
         .unwrap_or_else(|err| panic!("load signing key {kid}: {err}"));
     (row.get("status"), row.get("retired_at"))
+}
+
+async fn watermark_exists(db: &Client, kid: &str) -> bool {
+    db.query_one(
+        "SELECT max_issued_expires_at IS NOT NULL AS present \
+         FROM zeroship.signing_keys WHERE kid = $1",
+        &[&kid],
+    )
+    .await
+    .unwrap_or_else(|err| panic!("load signing key watermark {kid}: {err}"))
+    .get("present")
+}
+
+async fn clear_watermark(db: &Client, kid: &str) {
+    db.execute(
+        "UPDATE zeroship.signing_keys SET max_issued_expires_at = NULL WHERE kid = $1",
+        &[&kid],
+    )
+    .await
+    .unwrap_or_else(|err| panic!("clear signing key watermark {kid}: {err}"));
 }
 
 async fn jwks_contains(db: &Client, kid: &str) -> bool {
@@ -308,6 +331,152 @@ async fn issuance_and_prune_never_return_a_token_without_its_published_key() {
             assert!(report.retired.iter().any(|retired| retired.kid == kid));
         }
     }
+
+    cleanup_key(&db, &kid).await;
+}
+
+#[allow(clippy::await_holding_lock, clippy::future_not_send)]
+#[compio::test]
+async fn every_production_token_kind_advances_the_key_watermark() {
+    let Some(db) = pg().await else {
+        zeroship_test_support::skip("skipping signing_key_retention_test (no AUTH_DB_URL)");
+        return;
+    };
+    let _guard = RETENTION_TEST_LOCK.lock().expect("retention test lock");
+
+    let random = *Uuid::new_v4().as_bytes();
+    let mut secret = [0u8; 32];
+    secret[..16].copy_from_slice(&random);
+    secret[16..].copy_from_slice(&random);
+    let signing = SigningKey::from_bytes(&secret);
+    let issuer = Issuer::from_signing_key(
+        &signing,
+        [29u8; 32],
+        "https://auth.zeroship.test/oauth2".to_string(),
+    )
+    .expect("issuer");
+    let kid = issuer.kid().to_string();
+    seed_key(&db, &kid, issuer.public_jwk(), "active", 1).await;
+    clear_watermark(&db, &kid).await;
+
+    let user_id = Uuid::new_v4().to_string();
+    let scopes = vec!["openid".to_string()];
+    let access_token = issuer
+        .issue_access_token(
+            &db,
+            &AccessTokenMint {
+                user_id: &user_id,
+                sector: "https://app.zeroship.test",
+                audience: "app:00000000-0000-0000-0000-000000000001",
+                client_id: "oac_retention_kinds",
+                scopes: &scopes,
+                ttl_secs: Some(60),
+            },
+        )
+        .await
+        .expect("issue access token");
+    assert!(watermark_exists(&db, &kid).await);
+
+    clear_watermark(&db, &kid).await;
+    issuer
+        .issue_principal_access_token(
+            &db,
+            &PrincipalAccessTokenMint {
+                principal_id: &user_id,
+                audience: "control.zeroship.test",
+                client_id: "zeroship-cli",
+                scopes: &scopes,
+                ttl_secs: Some(60),
+            },
+        )
+        .await
+        .expect("issue principal access token");
+    assert!(watermark_exists(&db, &kid).await);
+
+    clear_watermark(&db, &kid).await;
+    issuer
+        .issue_id_token(
+            &db,
+            &IdTokenMint {
+                user_id: &user_id,
+                sector: "https://app.zeroship.test",
+                client_id: "oac_retention_kinds",
+                sid: "sid-retention-kinds",
+                nonce: "nonce-retention-kinds",
+                access_token: &access_token,
+                auth_time: None,
+                amr: None,
+                acr: None,
+                email: None,
+                email_verified: None,
+                name: None,
+                picture: None,
+                ttl_secs: Some(60),
+            },
+        )
+        .await
+        .expect("issue ID token");
+    assert!(watermark_exists(&db, &kid).await);
+
+    clear_watermark(&db, &kid).await;
+    issuer
+        .issue_principal_id_token(
+            &db,
+            &PrincipalIdTokenMint {
+                principal_id: &user_id,
+                client_id: "oac_retention_kinds",
+                sid: "sid-retention-kinds",
+                nonce: "nonce-retention-kinds",
+                access_token: &access_token,
+                auth_time: None,
+                amr: None,
+                acr: None,
+                email: None,
+                email_verified: None,
+                name: None,
+                picture: None,
+                ttl_secs: Some(60),
+            },
+        )
+        .await
+        .expect("issue principal ID token");
+    assert!(watermark_exists(&db, &kid).await);
+
+    clear_watermark(&db, &kid).await;
+    issuer
+        .issue_logout_token(
+            &db,
+            &LogoutTokenMint {
+                client_id: "oac_retention_kinds",
+                sub: Some(&user_id),
+                sid: None,
+                ttl_secs: Some(60),
+            },
+        )
+        .await
+        .expect("issue logout token");
+    assert!(watermark_exists(&db, &kid).await);
+
+    db.execute(
+        "UPDATE zeroship.signing_keys SET status = 'retired' WHERE kid = $1",
+        &[&kid],
+    )
+    .await
+    .expect("retire signing key");
+    let refused = issuer
+        .issue_access_token(
+            &db,
+            &AccessTokenMint {
+                user_id: &user_id,
+                sector: "https://app.zeroship.test",
+                audience: "app:00000000-0000-0000-0000-000000000001",
+                client_id: "oac_retention_kinds",
+                scopes: &scopes,
+                ttl_secs: Some(60),
+            },
+        )
+        .await;
+    assert!(refused.is_err(), "terminal retired key issued a token");
 
     cleanup_key(&db, &kid).await;
 }
