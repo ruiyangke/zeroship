@@ -729,26 +729,7 @@ pub async fn revoke_user_refresh_families(
         lock_refresh_user_xact(&tx, user_id)
             .await
             .map_err(|err| format!("refresh user revoke lock: {err}"))?;
-        tx.execute(
-            "WITH fam AS ( \
-                 SELECT DISTINCT client_id, sub \
-                 FROM zeroship.oauth_refresh_tokens \
-                 WHERE user_id = $1 AND revoked_at IS NULL \
-             ), upd AS ( \
-                 UPDATE zeroship.oauth_refresh_tokens \
-                 SET revoked_at = NOW() \
-                 WHERE user_id = $1 AND revoked_at IS NULL \
-                 RETURNING 1 \
-             ) \
-             INSERT INTO zeroship.token_revocations (client_id, sub, revoked_after) \
-             SELECT client_id, sub, NOW() FROM fam \
-             ON CONFLICT (client_id, sub) \
-               DO UPDATE SET revoked_after = EXCLUDED.revoked_after",
-            &[&user_id],
-        )
-        .await
-        .map(|_| ())
-        .map_err(|err| format!("refresh user revoke families ({reason}): {err}"))
+        revoke_user_refresh_families_in_transaction(&tx, user_id, reason).await
     }
     .await;
     match result {
@@ -763,6 +744,38 @@ pub async fn revoke_user_refresh_families(
     }
     tracing::info!(user_id = %user_id, reason, "refresh families revoked for user");
     Ok(())
+}
+
+/// Revoke every refresh family for a user inside the caller's transaction.
+///
+/// The caller must first hold [`lock_refresh_user_xact`] on this transaction.
+/// Keeping the row updates and access-token family markers in one statement
+/// makes either both effects commit or neither effect commit.
+pub(crate) async fn revoke_user_refresh_families_in_transaction(
+    db: &(impl GenericClient + ?Sized),
+    user_id: Uuid,
+    reason: &'static str,
+) -> Result<(), String> {
+    db.execute(
+        "WITH fam AS ( \
+             SELECT DISTINCT client_id, sub \
+             FROM zeroship.oauth_refresh_tokens \
+             WHERE user_id = $1 AND revoked_at IS NULL \
+         ), upd AS ( \
+             UPDATE zeroship.oauth_refresh_tokens \
+             SET revoked_at = NOW() \
+             WHERE user_id = $1 AND revoked_at IS NULL \
+             RETURNING 1 \
+         ) \
+         INSERT INTO zeroship.token_revocations (client_id, sub, revoked_after) \
+         SELECT client_id, sub, NOW() FROM fam \
+         ON CONFLICT (client_id, sub) \
+           DO UPDATE SET revoked_after = EXCLUDED.revoked_after",
+        &[&user_id],
+    )
+    .await
+    .map(|_| ())
+    .map_err(|err| format!("refresh user revoke families ({reason}): {err}"))
 }
 
 pub async fn sweep_refresh_tokens(refresh_pool: &RefreshSessionPool) -> Result<(u64, u64), String> {

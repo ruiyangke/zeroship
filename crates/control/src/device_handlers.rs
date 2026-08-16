@@ -257,6 +257,18 @@ pub async fn device_approve(
         Ok(principal_id) => principal_id,
         Err(resp) => return resp,
     };
+    if let Err(err) = state
+        .bearer_verifier()
+        .require_active_principal(principal_id)
+        .await
+    {
+        tracing::warn!(
+            error = %err,
+            principal_id = %principal_id,
+            "control: device approval principal is not active"
+        );
+        return unauthorized();
+    }
 
     let updated = match state
         .control_pg
@@ -412,6 +424,20 @@ pub async fn device_token(
                 return internal_error();
             };
             let requested_scope: Option<String> = row.get("scope");
+
+            if let Err(err) = state
+                .bearer_verifier()
+                .require_active_principal(principal_id)
+                .await
+            {
+                tracing::warn!(
+                    error = %err,
+                    principal_id = %principal_id,
+                    "control: device token principal is not active"
+                );
+                let _ = tx.rollback().await;
+                return oauth_error(StatusCode::BAD_REQUEST, "access_denied");
+            }
 
             // A principal reaching this point has completed an interactive
             // approval, which is the platform's definition of a creator. The

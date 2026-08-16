@@ -1597,6 +1597,81 @@ async fn platform_only_provider_completes_the_control_device_flow() {
     common::drain_pg().await;
 }
 
+#[compio::test]
+async fn approved_device_code_cannot_mint_for_anonymized_principal() {
+    let mut fx = Fixture::new_with_provider(FixtureProvider::Platform).await;
+    let principal_id = fx.create_platform_principal().await;
+    let app = test::init_service(
+        web::App::new()
+            .state(fx.state.clone())
+            .configure(device_handlers::configure),
+    )
+    .await;
+
+    let auth_req = test::TestRequest::post()
+        .uri("/api/device/auth")
+        .set_json(&json!({
+            "client_id": "zeroship-cli",
+            "scope": "apps:deploy apps:read"
+        }))
+        .to_request();
+    let auth_resp = test::call_service(&app, auth_req).await;
+    assert_eq!(auth_resp.status(), StatusCode::OK);
+    let auth_body: Value =
+        serde_json::from_slice(&test::read_body(auth_resp).await).expect("auth body json");
+    let device_code = auth_body["device_code"]
+        .as_str()
+        .expect("device_code")
+        .to_string();
+    let user_code = auth_body["user_code"]
+        .as_str()
+        .expect("user_code")
+        .to_string();
+    fx.track_hash(&device_code);
+
+    let approval_token = fx._mock_platform.issue_access_token(principal_id, &[]);
+    let approve_req = test::TestRequest::post()
+        .uri("/api/device/approve")
+        .header("authorization", bearer(&approval_token))
+        .set_json(&json!({ "user_code": user_code }))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, approve_req).await.status(),
+        StatusCode::NO_CONTENT
+    );
+
+    fx.state
+        .control_pg
+        .execute(
+            "UPDATE zeroship.users \
+             SET disabled_at = NOW(), anonymized_at = NOW(), \
+                 credential_version = credential_version + 1 \
+             WHERE id = $1",
+            &[&principal_id],
+        )
+        .await
+        .expect("anonymize approved device principal");
+    let token_req = test::TestRequest::post()
+        .uri("/api/device/token")
+        .set_json(&json!({
+            "device_code": device_code,
+            "grant_type": "urn:ietf:params:oauth:grant-type:device_code"
+        }))
+        .to_request();
+    let token_resp = test::call_service(&app, token_req).await;
+    let status = token_resp.status();
+    let body: Value =
+        serde_json::from_slice(&test::read_body(token_resp).await).expect("token body json");
+
+    fx.cleanup().await;
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "access_denied");
+}
+
 /// The mint is POSTed to the CONFIGURED address, and the token it returns still
 /// verifies against the PUBLIC issuer.
 ///
@@ -1940,6 +2015,59 @@ async fn a_revoked_bearer_cannot_approve_a_device_grant() {
     drop(app);
     drop(fx);
     common::drain_pg().await;
+}
+
+#[compio::test]
+async fn an_anonymized_principal_cannot_approve_a_device_grant() {
+    let mut fx = Fixture::new_with_provider(FixtureProvider::Platform).await;
+    let principal_id = fx.create_platform_principal().await;
+    let user_code = random_user_code();
+    let device_code_hash = format!("{:064x}", rand::random::<u128>());
+    fx.insert_pending_platform_grant(&device_code_hash, &user_code)
+        .await;
+    let token = fx._mock_platform.issue_access_token(principal_id, &[]);
+
+    fx.state
+        .control_pg
+        .execute(
+            "UPDATE zeroship.users \
+             SET disabled_at = NOW(), anonymized_at = NOW(), \
+                 credential_version = credential_version + 1 \
+             WHERE id = $1",
+            &[&principal_id],
+        )
+        .await
+        .expect("anonymize device approval principal");
+    let app = test::init_service(
+        web::App::new()
+            .state(fx.state.clone())
+            .configure(device_handlers::configure),
+    )
+    .await;
+    let approve_req = test::TestRequest::post()
+        .uri("/api/device/approve")
+        .header("authorization", bearer(&token))
+        .set_json(&json!({ "user_code": user_code }))
+        .to_request();
+    let status = test::call_service(&app, approve_req).await.status();
+    let grant_status = fx
+        .state
+        .control_pg
+        .query_one(
+            "SELECT status FROM zeroship.device_grants WHERE device_code_hash = $1",
+            &[&device_code_hash],
+        )
+        .await
+        .expect("device grant remains")
+        .get::<_, String>("status");
+
+    fx.cleanup().await;
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(grant_status, "pending");
 }
 
 /// A GoTrue bearer must still be refused when the provider has no Supabase.
