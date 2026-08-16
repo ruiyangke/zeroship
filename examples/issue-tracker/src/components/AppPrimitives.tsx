@@ -25,13 +25,15 @@ export function Hint({
   as: Component = "p",
   children,
   className = "",
+  flush = false,
 }: {
   as?: "p" | "span";
   children: ReactNode;
   className?: string;
+  flush?: boolean;
 }) {
   return (
-    <Component className={`mb-2 text-md text-ink-muted ${className}`}>
+    <Component className={`${flush ? "m-0" : "mb-2"} text-md text-ink-muted ${className}`}>
       {children}
     </Component>
   );
@@ -76,4 +78,8 @@ export function Page({
 /** Fixed-width slot for selects that share a wrapping filter row. */
 export function FilterControl({ children }: { children: ReactNode }) {
   return <div className="w-44 flex-none">{children}</div>;
+}
+
+export function FieldRow({ children }: { children: ReactNode }) {
+  return <div className="my-2 flex flex-wrap items-end gap-4">{children}</div>;
 }

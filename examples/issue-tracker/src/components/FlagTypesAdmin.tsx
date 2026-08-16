@@ -6,6 +6,7 @@ import { createFlagType } from "../api";
 import { invalidatedBy } from "../lib/query-keys";
 import { useAppMutation, useFlagTypes, useProducts } from "../lib/queries";
 import { errorMessage } from "./rpc";
+import { FieldError, Hint, InlineForm, Muted } from "./AppPrimitives";
 
 /**
  * Flag type administration.
@@ -64,14 +65,14 @@ export function FlagTypesAdmin() {
   return (
     <section className="flag-types-admin">
       <h2>Flag types</h2>
-      <p className="state-hint small">
+      <Hint>
         A flag is a named request or sign-off on an issue or an attachment. Until a type exists
         here, the Flags panel on every issue stays empty.
-      </p>
+      </Hint>
       {denied ? (
-        <p className="state-hint small">Only an administrator can define flag types.</p>
+        <Hint>Only an administrator can define flag types.</Hint>
       ) : null}
-      <div className="inline-form">
+      <InlineForm>
         <Field>
           <Field.Label>New flag type</Field.Label>
           <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="review" />
@@ -108,17 +109,17 @@ export function FlagTypesAdmin() {
         >
           Create
         </Button>
-      </div>
-      {displayedError ? <p className="field-error">{displayedError}</p> : null}
+      </InlineForm>
+      {displayedError ? <FieldError>{displayedError}</FieldError> : null}
       {types === undefined ? (
-        <p className="state-hint small">Loading flag types...</p>
+        <Hint>Loading flag types...</Hint>
       ) : types.length === 0 ? (
-        <p className="state-hint small">No flag types defined yet.</p>
+        <Hint>No flag types defined yet.</Hint>
       ) : (
         <ul className="flag-type-list">
           {types.map((type) => (
             <li key={type.id}>
-              <b>{type.name}</b> <span className="dim">({type.targetType})</span>
+              <b>{type.name}</b> <Muted>({type.targetType})</Muted>
             </li>
           ))}
         </ul>

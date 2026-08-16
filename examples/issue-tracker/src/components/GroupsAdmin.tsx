@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ComponentPropsWithoutRef } from "react";
 import { Button, Field, Input, Select } from "@zeroship/ui";
 
 import {
@@ -18,6 +18,17 @@ import {
   useUserSearch,
 } from "../lib/queries";
 import { errorMessage } from "./rpc";
+import { MemberList, MemberListItem } from "./MemberList";
+import { FieldError, FieldRow, Hint, Muted } from "./AppPrimitives";
+
+function AdminSection(props: Omit<ComponentPropsWithoutRef<"section">, "className">) {
+  return (
+    <section
+      {...props}
+      className="groups-admin mb-5 rounded-lg border border-line bg-surface p-4"
+    />
+  );
+}
 
 /**
  * Group administration: create a group and put people in it.
@@ -124,13 +135,13 @@ export function GroupsAdmin() {
 
   if (denied) {
     return (
-      <section className="admin-section groups-admin">
+      <AdminSection>
         <h2>Groups</h2>
-        <p className="state-hint small">
+        <Hint>
           Only an administrator can manage groups. The first account to exist becomes the
           administrator.
-        </p>
-      </section>
+        </Hint>
+      </AdminSection>
     );
   }
 
@@ -144,14 +155,14 @@ export function GroupsAdmin() {
   };
 
   return (
-    <section className="admin-section groups-admin">
+    <AdminSection>
       <h2>Groups</h2>
-      <p className="state-hint small">
+      <Hint>
         A group restricts what its members can see. Restrict a whole product, or one
         confidential issue inside an otherwise readable one.
-      </p>
+      </Hint>
 
-      <div className="field-row">
+      <FieldRow>
         <Field>
           <Field.Label>New group</Field.Label>
           <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="security" />
@@ -159,12 +170,12 @@ export function GroupsAdmin() {
         <Button variant="filled" size="sm" disabled={busy || !name.trim()} onClick={() => void create()}>
           Create
         </Button>
-      </div>
+      </FieldRow>
 
       {groups === undefined ? (
-        <p className="state-hint small">Loading groups...</p>
+        <Hint>Loading groups...</Hint>
       ) : groups.length === 0 ? (
-        <p className="state-hint small">No groups yet.</p>
+        <Hint>No groups yet.</Hint>
       ) : (
         <>
           {/* Counted and BOUNDED. This was an unbounded bulleted list, so a
@@ -173,14 +184,14 @@ export function GroupsAdmin() {
               administration" -- the groups section is not even its subject.
               The count is stated because a scroll container hides how much is
               in it. */}
-          <p className="state-hint small">
+          <Hint>
             {groups.length} {groups.length === 1 ? "group" : "groups"}
-          </p>
-          <ul className="group-list">
+          </Hint>
+          <ul className="group-list mb-3 mt-1 max-h-48 overflow-y-auto rounded-lg border border-line py-2 pl-4">
             {groups.map((group) => (
               <li key={group.id}>
                 <strong>{group.name}</strong>
-                {group.description ? <span className="dim"> {group.description}</span> : null}
+                {group.description ? <Muted> {group.description}</Muted> : null}
                 {/* Named per group. A list of identical "Delete" buttons is
                     ambiguous to a screen reader, and this one destroys an
                     access-control object. */}
@@ -201,7 +212,7 @@ export function GroupsAdmin() {
       )}
 
       {groups && groups.length > 0 ? (
-        <div className="field-row">
+        <FieldRow>
           <Field>
             <Field.Label>Add member to</Field.Label>
             <Select
@@ -231,7 +242,7 @@ export function GroupsAdmin() {
           <Button variant="gray" size="sm" onClick={search}>
             Search
           </Button>
-        </div>
+        </FieldRow>
       ) : null}
 
       {/* Who is already in the chosen group, and a way out.
@@ -243,11 +254,11 @@ export function GroupsAdmin() {
         <div>
           <h3>Members</h3>
           {members.length === 0 ? (
-            <p className="state-hint small">Nobody is in this group yet.</p>
+            <Hint>Nobody is in this group yet.</Hint>
           ) : (
-            <ul className="member-list">
+            <MemberList>
               {members.map((member) => (
-                <li key={member.id}>
+                <MemberListItem key={member.id}>
                   <span>{member.name ?? member.handle}</span>
                   <Button
                     variant="gray"
@@ -258,9 +269,9 @@ export function GroupsAdmin() {
                   >
                     Remove
                   </Button>
-                </li>
+                </MemberListItem>
               ))}
-            </ul>
+            </MemberList>
           )}
         </div>
       ) : null}
@@ -269,7 +280,7 @@ export function GroupsAdmin() {
         <ul>
           {matches.map((user) => (
             <li key={user.id}>
-              {user.name} <span className="dim">@{user.handle}</span>
+              {user.name} <Muted>@{user.handle}</Muted>
               <Button variant="gray" size="sm"
                 disabled={busy || !memberGroup}
                 onClick={() => void add(user.id)}
@@ -283,8 +294,8 @@ export function GroupsAdmin() {
 
       {groups && groups.length > 0 ? <ProductRestrictions groups={groups} /> : null}
 
-      {displayedError ? <p className="field-error">{displayedError}</p> : null}
-    </section>
+      {displayedError ? <FieldError>{displayedError}</FieldError> : null}
+    </AdminSection>
   );
 }
 
@@ -342,7 +353,7 @@ function ProductRestrictions({
   return (
     <div>
       <h3>Product visibility</h3>
-      <div className="field-row">
+      <FieldRow>
         <Field>
           <Field.Label>Product</Field.Label>
           <Select
@@ -387,9 +398,9 @@ function ProductRestrictions({
         >
           Remove
         </Button>
-      </div>
-      {note ? <p className="state-hint small">{note}</p> : null}
-      {displayedError ? <p className="field-error">{displayedError}</p> : null}
+      </FieldRow>
+      {note ? <Hint>{note}</Hint> : null}
+      {displayedError ? <FieldError>{displayedError}</FieldError> : null}
     </div>
   );
 }

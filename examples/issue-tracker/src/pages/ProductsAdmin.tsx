@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ComponentPropsWithoutRef } from "react";
 import { Cluster,
   Badge,
   Banner,
@@ -38,6 +38,14 @@ import { AsyncSection } from "../components/StateViews";
 import { errorMessage } from "../components/rpc";
 import { isSignedIn, isVisitor, useSession } from "../components/session";
 import type { Product, ProductDetail, ReportByComponent } from "../components/types";
+import {
+  FieldError,
+  FilterControl,
+  Hint,
+  InlineForm,
+  Muted,
+  Page,
+} from "../components/AppPrimitives";
 
 /** How many products a page of the list holds. */
 const PAGE_SIZE = 25;
@@ -81,18 +89,40 @@ const EMPTY_ROLLUP: Rollup = { open: 0, components: [] };
 /** How many component chips fit a row before the rest become "+N more". */
 const CHIPS_PER_ROW = 3;
 
+function ProductAdminColumn(props: Omit<ComponentPropsWithoutRef<"div">, "className">) {
+  return (
+    <div
+      {...props}
+      className="rounded-lg border border-line bg-surface p-3"
+    />
+  );
+}
+
+function ProductAdminList(props: Omit<ComponentPropsWithoutRef<"ul">, "className">) {
+  return (
+    <ul
+      {...props}
+      className="mx-0 mt-0 mb-2 flex list-none flex-col gap-1 p-0 text-md"
+    />
+  );
+}
+
+function ProductAdminListItem(props: Omit<ComponentPropsWithoutRef<"li">, "className">) {
+  return <li {...props} className="flex items-center justify-between gap-2" />;
+}
+
 function ComponentChips({ rollup }: { rollup: Rollup }) {
   if (rollup.components.length === 0) return null;
   const shown = rollup.components.slice(0, CHIPS_PER_ROW);
   const rest = rollup.components.length - shown.length;
   return (
-    <span className="product-components">
+    <span className="inline-flex max-w-88 flex-wrap items-center justify-end gap-1">
       {shown.map((component) => (
         <Badge key={component.name} intent="neutral" variant="soft" size="sm">
           {component.name} {component.count}
         </Badge>
       ))}
-      {rest > 0 ? <span className="dim small">+{rest} more</span> : null}
+      {rest > 0 ? <Muted className="text-sm">+{rest} more</Muted> : null}
     </span>
   );
 }
@@ -209,7 +239,7 @@ function NewProductDialog() {
                     label="Allows UNCONFIRMED"
                   />
                   {create.error ? (
-                    <p className="field-error">{errorMessage(create.error)}</p>
+                    <FieldError>{errorMessage(create.error)}</FieldError>
                   ) : null}
                 </Stack>
               </form>
@@ -295,7 +325,7 @@ function ProductBrowser({
   const selectedProduct = selected ? products.find((p) => p.id === selected) ?? null : null;
 
   return (
-    <div className="product-browser">
+    <div className="flex flex-col gap-3">
       <FilterBar
         search={search}
         onSearchChange={(next) => {
@@ -314,42 +344,45 @@ function ProductBrowser({
             had one; here the toolbar is a search field and one picker, and a
             "Sort" label over the picker alone would be the same asymmetry the
             other way round. The value states what it is instead. */}
-        <Select
-          value={sort}
-          onValueChange={(next) => setSort((next as SortKey) ?? "name")}
-          aria-label="Sort products"
-          className="filter-select"
-          renderValue={(value) => (value === "open" ? "Sort: open issues" : "Sort: name")}
-        >
-          <Select.Item value="name">Name</Select.Item>
-          <Select.Item value="open">Open issues</Select.Item>
-        </Select>
+        <FilterControl>
+          <Select
+            value={sort}
+            onValueChange={(next) => setSort((next as SortKey) ?? "name")}
+            aria-label="Sort products"
+            renderValue={(value) => (value === "open" ? "Sort: open issues" : "Sort: name")}
+          >
+            <Select.Item value="name">Name</Select.Item>
+            <Select.Item value="open">Open issues</Select.Item>
+          </Select>
+        </FilterControl>
       </FilterBar>
 
       {/* Says how many of how many, because a filtered list that finds nothing
           and a tracker with no products are different facts. */}
-      <p className="state-hint small">
+      <Hint flush>
         {matches.length === products.length
           ? `${products.length} ${products.length === 1 ? "product" : "products"}`
           : `${matches.length} of ${products.length} products match`}
-      </p>
+      </Hint>
 
       {matches.length === 0 ? (
-        <p className="state-hint">No product matches that search.</p>
+        <Hint flush>No product matches that search.</Hint>
       ) : (
         <>
           <ListView
             // Compact: this is a scanning list of 100+ rows, and the roomy
             // default spends a third more page on the same two lines.
             density="compact"
-            className={refreshing ? "product-list is-refetching" : "product-list"}
+            className={`overflow-hidden rounded-lg border border-line bg-surface${
+              refreshing ? " opacity-55 transition-opacity duration-[120ms]" : ""
+            }`}
             items={visible.map((product) => {
               const rollup = rollups.get(product.id) ?? EMPTY_ROLLUP;
               return {
                 id: product.id,
                 title: (
-                  <span className="product-title">
-                    <span className="product-name">{product.name}</span>
+                  <span className="inline-flex flex-wrap items-center gap-2">
+                    <span className="font-semibold">{product.name}</span>
                     <Badge intent="neutral" variant="outline" size="sm">
                       {product.key}
                     </Badge>
@@ -504,7 +537,7 @@ function ProductEditorBody({ detail }: { detail: ProductDetail }) {
             Save product
           </Button>
         </div>
-        {error ? <p className="field-error">{errorMessage(error)}</p> : null}
+        {error ? <FieldError>{errorMessage(error)}</FieldError> : null}
 
         {/* Apart from Save, and quieter than it. A destructive action sitting
             next to the primary one at the same weight is how it gets pressed
@@ -536,7 +569,7 @@ function ProductEditorBody({ detail }: { detail: ProductDetail }) {
                   cannot see is the interface describing itself rather than
                   their choice. The count, which is the part that matters,
                   stays. */}
-              <p className="field-error">{confirming.replace(/\s*Pass deleteIssues to confirm\.?$/, "")}</p>
+              <FieldError>{confirming.replace(/\s*Pass deleteIssues to confirm\.?$/, "")}</FieldError>
               <Cluster gap={2}>
                 <Button
                   variant="filled"
@@ -559,7 +592,7 @@ function ProductEditorBody({ detail }: { detail: ProductDetail }) {
       {/* Stacked, not three columns. The 3-up grid was laid out for the width
           of a page; here each one is a short list over a one-field form and
           reads down the panel. */}
-      <div className="admin-grid">
+      <div className="mt-4 grid grid-cols-1 gap-4">
         <ComponentsAdmin productId={product.id} components={components} />
         <VersionsAdmin productId={product.id} versions={versions} />
         <MilestonesAdmin productId={product.id} milestones={milestones} />
@@ -597,16 +630,16 @@ function ComponentsAdmin({
   };
 
   return (
-    <div className="admin-col">
+    <ProductAdminColumn>
       <h3>Components</h3>
       {components.length === 0 ? (
-        <p className="state-hint small">None yet.</p>
+        <Hint>None yet.</Hint>
       ) : (
-        <ul>
+        <ProductAdminList>
           {components.map((c) => (
-            <li key={c.id}>
+            <ProductAdminListItem key={c.id}>
               <span>
-                {c.name} {!c.isActive ? <span className="dim">(inactive)</span> : null}
+                {c.name} {!c.isActive ? <Muted>(inactive)</Muted> : null}
               </span>
               <Button
                 variant="gray"
@@ -616,18 +649,18 @@ function ComponentsAdmin({
               >
                 {c.isActive ? "Deactivate" : "Activate"}
               </Button>
-            </li>
+            </ProductAdminListItem>
           ))}
-        </ul>
+        </ProductAdminList>
       )}
-      <div className="inline-form">
+      <InlineForm>
         <Input aria-label="New component" placeholder="New component" value={name} onChange={(e) => setName(e.target.value)} />
         <Button variant="gray" size="sm" disabled={busy || !name.trim()} onClick={submitAdd}>
           Add
         </Button>
-      </div>
-      {error ? <p className="field-error">{errorMessage(error)}</p> : null}
-    </div>
+      </InlineForm>
+      {error ? <FieldError>{errorMessage(error)}</FieldError> : null}
+    </ProductAdminColumn>
   );
 }
 
@@ -653,26 +686,26 @@ function VersionsAdmin({
   };
 
   return (
-    <div className="admin-col">
+    <ProductAdminColumn>
       <h3>Versions</h3>
       {versions.length === 0 ? (
-        <p className="state-hint small">None yet.</p>
+        <Hint>None yet.</Hint>
       ) : (
-        <ul>
+        <ProductAdminList>
           {versions.map((v) => (
-            <li key={v.id}>{v.name}</li>
+            <ProductAdminListItem key={v.id}>{v.name}</ProductAdminListItem>
           ))}
-        </ul>
+        </ProductAdminList>
       )}
-      <div className="inline-form">
+      <InlineForm>
         <Input aria-label="New version" placeholder="New version" value={name} onChange={(e) => setName(e.target.value)} />
         <Button variant="gray" size="sm" disabled={busy || !name.trim()} onClick={submitAdd}>
           Add
         </Button>
-      </div>
-      {error ? <p className="field-error">{errorMessage(error)}</p> : null}
-      <p className="state-hint small">No versions.update RPC exists yet -- versions can be created but not edited.</p>
-    </div>
+      </InlineForm>
+      {error ? <FieldError>{errorMessage(error)}</FieldError> : null}
+      <Hint>No versions.update RPC exists yet -- versions can be created but not edited.</Hint>
+    </ProductAdminColumn>
   );
 }
 
@@ -698,26 +731,26 @@ function MilestonesAdmin({
   };
 
   return (
-    <div className="admin-col">
+    <ProductAdminColumn>
       <h3>Milestones</h3>
       {milestones.length === 0 ? (
-        <p className="state-hint small">None yet.</p>
+        <Hint>None yet.</Hint>
       ) : (
-        <ul>
+        <ProductAdminList>
           {milestones.map((m) => (
-            <li key={m.id}>{m.name}</li>
+            <ProductAdminListItem key={m.id}>{m.name}</ProductAdminListItem>
           ))}
-        </ul>
+        </ProductAdminList>
       )}
-      <div className="inline-form">
+      <InlineForm>
         <Input aria-label="New milestone" placeholder="New milestone" value={name} onChange={(e) => setName(e.target.value)} />
         <Button variant="gray" size="sm" disabled={busy || !name.trim()} onClick={submitAdd}>
           Add
         </Button>
-      </div>
-      {error ? <p className="field-error">{errorMessage(error)}</p> : null}
-      <p className="state-hint small">No milestones.update RPC exists yet -- milestones can be created but not edited.</p>
-    </div>
+      </InlineForm>
+      {error ? <FieldError>{errorMessage(error)}</FieldError> : null}
+      <Hint>No milestones.update RPC exists yet -- milestones can be created but not edited.</Hint>
+    </ProductAdminColumn>
   );
 }
 
@@ -774,7 +807,7 @@ export function ProductsAdminPage() {
   );
 
   return (
-    <div className="page">
+    <Page>
       {/* "Products", not "Products administration". The page is named for what
           most visits do on it, which is browse -- administering one is a
           drawer you open from a row, and the tracker-wide administration is
@@ -824,6 +857,6 @@ export function ProductsAdminPage() {
       ) : (
         browser
       )}
-    </div>
+    </Page>
   );
 }

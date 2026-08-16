@@ -390,7 +390,7 @@ tbody tr:hover { background: var(--surface-2); }
 
 /* ── relations / flags / keywords / cc ──────────────────────────────── */
 .relation-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
-.relation-columns ul, .cc-list, .flag-request-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.35rem; }
+.relation-columns ul, .cc-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.35rem; }
 .relation-link { display: inline-flex; align-items: center; gap: 0.4rem; }
 .flag-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; }
 .flag-row { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; font-size: 0.85rem; }
@@ -437,7 +437,6 @@ tbody tr:hover { background: var(--surface-2); }
    twice over now: those two moved to their own tab, and the list itself is
    searched and paged, so its height is bounded by construction rather than by
    clipping. Nothing here sets a height. */
-.product-browser { display: flex; flex-direction: column; gap: 0.8rem; }
 /* The search cap is the DESIGN SYSTEM's job again.
    A local override lived here because FilterBar's own 24rem cap landed on the
    wrong element: it passed its class to Input as `className`, which Input
@@ -445,38 +444,16 @@ tbody tr:hover { background: var(--surface-2); }
    Measured then: a 480px control inside a 1392px wrapper, so a three-control
    toolbar wrapped onto two lines. Fixed at the source -- FilterBar now passes
    `wrapperClassName` -- and this override is gone with the cause. */
-.product-browser > .state-hint { margin: 0; }
 /* Card chrome, like every other list surface in this app (.table-wrap,
    .dashboard-section, .report-section). ListView paints its own rows and
    dividers but no container, so on its own it floated on the page background
    as the only ungrouped block in the app. */
-.product-list {
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  overflow: hidden;
-}
-/* ListView paints the rows; this is only the title lockup inside one. */
-.product-title { display: inline-flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
-.product-name { font-weight: 600; }
 /* The component breakdown rides in ListView's meta slot, which is a single
    trailing-aligned cell -- so the chips wrap within it rather than pushing the
    open-count badge off the row. */
-.product-components {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  max-inline-size: 22rem;
-}
 /* Stacked, not the 3-up grid it was on the page. The editor lives in a 32rem
    drawer now, and three columns of a name list over a one-field form inside
    that is three columns of about 9rem each. */
-.admin-grid { display: grid; grid-template-columns: 1fr; gap: 1rem; margin-top: 1rem; }
-.admin-col { border: 1px solid var(--line); border-radius: var(--radius); padding: 0.8rem; background: var(--surface); }
-.admin-col ul { list-style: none; margin: 0 0 0.5rem; padding: 0; display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; }
-.admin-col li { display: flex; align-items: center; gap: 0.4rem; justify-content: space-between; }
 
 /* ── responsive ──────────────────────────────────────────────────────── */
 /* 1100px, not 900: the four-across breakdowns and the two paired reports run
@@ -564,35 +541,6 @@ tbody tr:hover { background: var(--surface-2); }
   margin-block-end: 0.25rem;
 }
 
-/* The group list is bounded and scrolls in place. Unbounded, thirty groups
-   pushed every other section of the products admin page below the fold -- and
-   groups are not that page's subject. */
-.group-list {
-  max-block-size: 12rem;
-  overflow-y: auto;
-  margin-block: 0.25rem 0.75rem;
-  padding-inline-start: 1.1rem;
-  border: 1px solid var(--line);
-  border-radius: 0.5rem;
-  padding-block: 0.5rem;
-}
-
-/* Group members: one row each, name against its Remove. */
-.member-list {
-  list-style: none;
-  margin: 0.4rem 0 0;
-  padding: 0;
-  display: grid;
-  gap: 0.35rem;
-}
-.member-list li {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  max-inline-size: 22rem;
-}
-
 /* ---------------------------------------------------------------------------
    Rich text (tiptap).
    --------------------------------------------------------------------------- */
@@ -653,48 +601,6 @@ tbody tr:hover { background: var(--surface-2); }
    row loses its own vertical margin so the row stays on one baseline. */
 .new-comment-row > * { margin-block: 0; }
 
-/* ── dashboard ───────────────────────────────────────────────────────── */
-/* Card chrome, matching the bug page's panels. These sections were the only
-   grouped content in the app rendered as bare text on the page background. */
-/* Absorbed an earlier definition of this selector; the values below are
-   the ones that were already winning by source order. */
-.dashboard-section {
-  margin-bottom: 1.6rem;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 1rem;
-}
-/* BOUNDED, for the same reason the group list is: an unbounded inbox pushes
-   the rest of the dashboard -- my bugs, the people I watch, saved searches --
-   off the bottom of the page. Fifty notifications is a screen and a half of
-   bullets before anything else begins. The count is stated because a scroll
-   container hides how much is inside it. */
-.notification-list {
-  max-block-size: 22rem;
-  overflow-y: auto;
-}
-/* NO row chrome here. The rows are a ListView now, which paints the padding,
-   the dividers and the four-slot lockup; the block this replaced drew its own
-   flex row, its own 7px radius and a 1px border that was transparent on a read
-   row and visible on an unread one. That box was the loudest difference
-   between the two states and the least useful -- it changed the row's whole
-   silhouette to say one bit. The bit is the dot below, and nothing else moves. */
-.notification-dot {
-  display: block;
-  inline-size: 0.45rem;
-  block-size: 0.45rem;
-  border-radius: 50%;
-  background: var(--accent);
-  margin-block-start: 0.4rem;
-}
-/* Read keeps the dot's SPACE and loses its ink, so the titles stay in one
-   column down the list instead of shifting by the dot's width per row. */
-.notification-dot.is-read { background: transparent; }
-/* The second and last signal: read fades back. */
-.notification-title.is-read { color: var(--ink-faint); }
-.notification-title.is-read a { color: var(--ink-2); }
-
 /* The filing steps, shown before you are in them. */
 .form-steps {
   list-style: none;
@@ -737,37 +643,6 @@ tbody tr:hover { background: var(--surface-2); }
   border: 1px solid var(--line);
   border-radius: var(--radius);
   padding: 1rem;
-}
-
-/* A notification is a preview, not the document. Clamp it so a long comment
-   or one with a heading cannot turn an inbox row into a page. */
-/* Absorbed an earlier definition of this selector; the values below are
-   the ones that were already winning by source order. */
-/* LINE-CLAMPED, not height-clipped.
-   `max-block-size: 3.2em; overflow: hidden` cut wherever 3.2em happened to
-   fall, which at 1440px was almost always a line boundary and at 390px was
-   almost never one: the third line was sliced in half, leaving a row of
-   half-glyphs under the text with nothing to say it continued. Clamping by
-   LINES cuts at a line by construction and ellipsizes, at any width. */
-.notification-body {
-  margin: 0;
-  font-size: 0.82rem;
-  color: var(--ink-2);
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  overflow: hidden;
-}
-.notification-body .rich-text > * { margin-block: 0; font-size: 0.82rem; }
-
-/* Admin sections get the same card chrome as every other grouped surface. */
-.admin-section {
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 1rem;
-  margin-block-end: 1.25rem;
 }
 
 /* ── bug history, as a timeline ──────────────────────────────────────── */

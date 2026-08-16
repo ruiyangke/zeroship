@@ -5,6 +5,8 @@ import { invalidatedBy } from "../lib/query-keys";
 import { useAppMutation, useNotifications } from "../lib/queries";
 import { RichText } from "./RichText";
 import { AsyncSection } from "./StateViews";
+import { DashboardSection } from "./DashboardSection";
+import { Hint } from "./AppPrimitives";
 
 /**
  * The notification inbox.
@@ -42,7 +44,7 @@ export function NotificationsPanel() {
   );
 
   return (
-    <section className="dashboard-section notifications-panel">
+    <DashboardSection className="notifications-panel">
       <h2>Notifications</h2>
       <AsyncSection
         query={notificationsQ}
@@ -57,12 +59,12 @@ export function NotificationsPanel() {
                 full inbox from a nearly empty one, and the fetch caps at 50
                 anyway, which is worth admitting rather than implying the
                 inbox is exactly this long. */}
-            <p className="state-hint small">
+            <Hint>
               {rows.filter((row) => !row.isRead).length} unread of {rows.length} shown
               {rows.length >= 50 ? " (most recent 50)" : ""}
-            </p>
+            </Hint>
             <ListView
-              className="notification-list"
+              className="max-h-88 overflow-y-auto"
               density="compact"
               items={rows.map((row) => ({
                 id: row.id,
@@ -70,12 +72,14 @@ export function NotificationsPanel() {
                 // the titles below it stay aligned whether or not it is there.
                 leading: (
                   <span
-                    className={row.isRead ? "notification-dot is-read" : "notification-dot"}
+                    className={`mt-2 block size-2 rounded-full ${
+                      row.isRead ? "bg-transparent" : "bg-accent-strong"
+                    }`}
                     aria-hidden="true"
                   />
                 ),
                 title: (
-                  <span className={row.isRead ? "notification-title is-read" : "notification-title"}>
+                  <span className={row.isRead ? "text-ink-muted [&_a]:text-ink-secondary" : undefined}>
                     {row.issueId ? (
                       <Link to={`/issues/${row.issueId}`}>{row.title}</Link>
                     ) : (
@@ -90,7 +94,7 @@ export function NotificationsPanel() {
                 // renderer as the thread, so the same schema decides what a
                 // notification may contain.
                 description: row.body ? (
-                  <div className="notification-body">
+                  <div className="m-0 line-clamp-2 text-base text-ink-secondary [&_.rich-text>*]:m-0 [&_.rich-text>*]:text-base">
                     <RichText markdown={row.body} />
                   </div>
                 ) : undefined,
@@ -108,6 +112,6 @@ export function NotificationsPanel() {
           </>
         )}
       </AsyncSection>
-    </section>
+    </DashboardSection>
   );
 }

@@ -6,6 +6,9 @@ import { invalidatedBy } from "../lib/query-keys";
 import { useAppMutation, useWatchers } from "../lib/queries";
 import { errorMessage } from "./rpc";
 import { UserPicker } from "./UserPicker";
+import { DashboardSection } from "./DashboardSection";
+import { MemberList, MemberListItem } from "./MemberList";
+import { FieldError, Hint } from "./AppPrimitives";
 
 /**
  * Bugzilla's user watching: you also hear about issues the watched person is
@@ -58,19 +61,19 @@ export function WatchingPanel() {
   };
 
   return (
-    <section className="dashboard-section watching-panel">
+    <DashboardSection className="watching-panel">
       <h2>People I watch</h2>
-      <p className="state-hint small">
+      <Hint>
         You are notified about issues they report, are assigned, or are CC'd on.
-      </p>
+      </Hint>
 
       {watching.length === 0 ? (
-        <p className="state-hint small">Not watching anyone.</p>
+        <Hint>Not watching anyone.</Hint>
       ) : (
         <Stack gap={1}>
-          <ul className="member-list">
+          <MemberList>
             {watching.map((row) => (
-              <li key={row.id}>
+              <MemberListItem key={row.id}>
                 <span>{row.watched?.name ?? row.watched?.handle ?? row.watchedId}</span>
                 <Button
                   variant="gray"
@@ -81,9 +84,9 @@ export function WatchingPanel() {
                 >
                   Stop watching
                 </Button>
-              </li>
+              </MemberListItem>
             ))}
-          </ul>
+          </MemberList>
         </Stack>
       )}
 
@@ -91,7 +94,7 @@ export function WatchingPanel() {
         {picking ? "Cancel" : "Watch someone"}
       </Button>
       {picking ? <UserPicker onPick={(user) => void watch(user.id)} /> : null}
-      {shownError ? <p className="field-error">{shownError}</p> : null}
-    </section>
+      {shownError ? <FieldError>{shownError}</FieldError> : null}
+    </DashboardSection>
   );
 }

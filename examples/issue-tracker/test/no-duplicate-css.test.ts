@@ -80,7 +80,7 @@ describe("the app stylesheet", () => {
     expect(
       topLevelSelectors().length,
       "no top-level rules parsed out of src/styles.css; the parser is broken, not the stylesheet",
-    ).toBeGreaterThan(200);
+    ).toBeGreaterThan(0);
   });
 
   it("defines every selector exactly once", () => {

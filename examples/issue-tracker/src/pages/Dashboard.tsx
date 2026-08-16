@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { Link } from "react-router-dom";
 import { Badge, Grid, PageHeader, Tabs } from "@zeroship/ui";
 import { ALL_ISSUE_COLUMNS, IssueResultsTable } from "../components/IssueResultsTable";
+import { DashboardSection } from "../components/DashboardSection";
 import { NotificationsPanel } from "../components/NotificationsPanel";
 import { WatchingPanel } from "../components/WatchingPanel";
 import { AsyncSection, SignInRequired, type QueryLike } from "../components/StateViews";
@@ -14,6 +15,7 @@ import {
   useMyVotes,
 } from "../lib/queries";
 import type { Issue, FlagRequestEntry } from "../components/types";
+import { Hint, Muted, Page } from "../components/AppPrimitives";
 
 const COLUMNS = ALL_ISSUE_COLUMNS.map((c) => c.key).filter((c) => c !== "reporter");
 
@@ -87,16 +89,16 @@ function FlagRequestList({ entries, emptyLabel }: { entries: FlagRequestEntry[];
       emptyTone="inline"
     >
       {(rows) => (
-        <ul className="flag-request-list">
+        <ul className="m-0 flex list-none flex-col gap-1 p-0">
           {rows.map(({ entry, issue }) => (
             <li key={entry.flag.id}>
-              <span className="chip">
+              <Badge intent="neutral" variant="outline" size="sm">
                 {entry.flagType?.name ?? entry.flag.flagTypeId} {entry.flag.status}
-              </span>
+              </Badge>
               {issue ? (
                 <Link to={`/issues/${issue.id}`}>{issue.summary}</Link>
               ) : (
-                <span className="dim">on an attachment</span>
+                <Muted>on an attachment</Muted>
               )}
             </li>
           ))}
@@ -121,15 +123,15 @@ export function DashboardPage() {
   return (
     <RequireSession
       pending={
-        <div className="page dashboard-page">
+        <Page className="dashboard-page">
           <DashboardHeader />
-        </div>
+        </Page>
       }
       fallback={
-        <div className="page dashboard-page">
+        <Page className="dashboard-page">
           <DashboardHeader />
           <SignInRequired />
-        </div>
+        </Page>
       }
     >
       <DashboardBody />
@@ -200,7 +202,7 @@ function DashboardBody() {
   // in and the page rendered "Assigned to me (0)", telling a visitor they have
   // no issues when the truth is that we did not know who they were yet.
   return (
-    <div className="page dashboard-page">
+    <Page className="dashboard-page">
       <PageHeader>
         <PageHeader.Title>My dashboard</PageHeader.Title>
         <PageHeader.Description>
@@ -211,13 +213,13 @@ function DashboardBody() {
       <NotificationsPanel />
 
       {me && !me.isProvisioned ? (
-        <p className="state-hint">
+        <Hint>
           No app activity yet for this identity -- your profile is created the first time you
           file, comment, or otherwise write something.
-        </p>
+        </Hint>
       ) : null}
 
-      <section className="dashboard-section my-work">
+      <DashboardSection className="my-work">
         <h2>My work</h2>
         {/* keepMounted is deliberately NOT set: the panels hold issue tables of
             up to fifty rows each, and mounting all four would put three
@@ -269,24 +271,24 @@ function DashboardBody() {
             />
           </Tabs.Panel>
         </Tabs>
-      </section>
+      </DashboardSection>
 
       {/* Three short lists across the page rather than three more full-width
           bands down it. None of them is ever more than a handful of lines, and
           stacked they were what pushed the tables above them out of reach. */}
       <Grid minColWidth="24rem" gap={4}>
-        <section className="dashboard-section">
+        <DashboardSection>
           <h2>Requests waiting on me</h2>
           <FlagRequestList entries={requestedOfMe} emptyLabel="No open flag requests directed at you." />
-        </section>
+        </DashboardSection>
 
-        <section className="dashboard-section">
+        <DashboardSection>
           <h2>My open flag requests</h2>
           <FlagRequestList entries={setByMe} emptyLabel="You have not requested any flags." />
-        </section>
+        </DashboardSection>
 
         <WatchingPanel />
       </Grid>
-    </div>
+    </Page>
   );
 }
