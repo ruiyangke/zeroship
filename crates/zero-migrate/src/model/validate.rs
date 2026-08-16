@@ -2877,6 +2877,41 @@ fn validate_no_name_is_claimed_twice(
     // constraints into one repeated name.
     let track_constraint_names = !matches!(target_dialect, Dialect::Sqlite);
     let index_shares_relation_namespace = !matches!(target_dialect, Dialect::Mysql);
+
+    // POSTGRESQL'S SECOND NAMESPACE. Enums and domains are types; every table and
+    // view also creates a composite row type of its own name. Measured on a live
+    // server, both directions for every pair - WITH ONE EXCEPTION that decides the
+    // shape of this:
+    //
+    //     CREATE TYPE n; CREATE SEQUENCE n   ->  type "n" already exists
+    //     CREATE SEQUENCE n; CREATE TYPE n   ->  ACCEPTED
+    //
+    // So a sequence CHECKS this namespace without CLAIMING it, and folding types
+    // into `relations` - the obvious implementation - would refuse a shape
+    // PostgreSQL accepts. That asymmetry was re-measured in isolation before being
+    // built on. Other dialects emulate enums and domains rather than declaring
+    // them, so there is no second namespace there.
+    let track_type_namespace = matches!(target_dialect, Dialect::Postgres);
+    let mut types: BTreeMap<Key, &str> = BTreeMap::new();
+
+    macro_rules! type_name_must_be_free {
+        ($key:expr, $op_index:expr, $what:expr, $name:expr) => {
+            if track_type_namespace {
+                if let Some(held_by) = types.get(&$key) {
+                    return Err(refuse(
+                        $op_index,
+                        &format!(
+                            "this {} claims the name {:?}, but an earlier operation in this \
+                             migration already created a {held_by} with that name, and \
+                             PostgreSQL keeps both in one type namespace",
+                            $what, $name
+                        ),
+                        "drop the existing object first, or use a different name",
+                    ));
+                }
+            }
+        };
+    }
     let mut constraint_names: BTreeMap<Key, BTreeSet<&str>> = BTreeMap::new();
 
     for (op_index, op) in ir.ops.iter().enumerate() {
@@ -2916,7 +2951,11 @@ fn validate_no_name_is_claimed_twice(
                         ));
                     }
                 }
+                type_name_must_be_free!(key, op_index, "createTable", name);
                 relations.insert(key, "table");
+                if track_type_namespace {
+                    types.insert(key, "table");
+                }
                 columns.insert(key, cols.iter().map(|c| c.name.as_str()).collect());
                 if track_constraint_names {
                     let mut named: BTreeSet<&str> = BTreeSet::new();
@@ -2941,6 +2980,8 @@ fn validate_no_name_is_claimed_twice(
             Op::DropTable { table, schema, .. } => {
                 let key: Key = (schema.as_deref(), table.as_str());
                 relations.remove(&key);
+                // The composite row type goes with the table.
+                types.remove(&key);
                 columns.remove(&key);
                 constraint_names.remove(&key);
             }
@@ -2963,6 +3004,9 @@ fn validate_no_name_is_claimed_twice(
                 // The name moves, and so does everything scoped to it.
                 if let Some(kind) = relations.remove(&from_key) {
                     relations.insert(to_key, kind);
+                }
+                if let Some(kind) = types.remove(&from_key) {
+                    types.insert(to_key, kind);
                 }
                 if let Some(moved) = columns.remove(&from_key) {
                     columns.insert(to_key, moved);
@@ -3010,10 +3054,16 @@ fn validate_no_name_is_claimed_twice(
                         "drop the existing relation first, or use a different name",
                     ));
                 }
+                type_name_must_be_free!(key, op_index, "createView", name);
                 relations.insert(key, "view");
+                if track_type_namespace {
+                    types.insert(key, "view");
+                }
             }
             Op::DropView { name, schema, .. } => {
-                relations.remove(&(schema.as_deref(), name.as_str()));
+                let key: Key = (schema.as_deref(), name.as_str());
+                relations.remove(&key);
+                types.remove(&key);
             }
             // INDEXES ARE IN THE SAME NAMESPACE on PostgreSQL (everything is
             // pg_class) and on SQLite ("there is already a table named a"), but
@@ -3063,10 +3113,31 @@ fn validate_no_name_is_claimed_twice(
                         "drop the existing relation first, or use a different name",
                     ));
                 }
+                type_name_must_be_free!(key, op_index, "createSequence", name);
                 relations.insert(key, "sequence");
             }
             Op::DropSequence { name, schema, .. } => {
                 relations.remove(&(schema.as_deref(), name.as_str()));
+            }
+            // Enums and domains claim the type namespace only. Note they do NOT
+            // consult `relations`: an enum named after a live SEQUENCE is accepted
+            // by PostgreSQL, measured and re-measured, and refusing it would
+            // reject a migration the server runs.
+            Op::CreateEnum { name, schema, .. } if track_type_namespace => {
+                let key: Key = (schema.as_deref(), name.as_str());
+                type_name_must_be_free!(key, op_index, "createEnum", name);
+                types.insert(key, "enum");
+            }
+            Op::DropEnum { name, schema, .. } if track_type_namespace => {
+                types.remove(&(schema.as_deref(), name.as_str()));
+            }
+            Op::CreateDomain { name, schema, .. } if track_type_namespace => {
+                let key: Key = (schema.as_deref(), name.as_str());
+                type_name_must_be_free!(key, op_index, "createDomain", name);
+                types.insert(key, "domain");
+            }
+            Op::DropDomain { name, schema, .. } if track_type_namespace => {
+                types.remove(&(schema.as_deref(), name.as_str()));
             }
             Op::AddConstraint {
                 table,
