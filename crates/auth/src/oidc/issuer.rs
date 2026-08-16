@@ -5,13 +5,15 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use compio_postgres::Client;
+use chrono::{DateTime, Utc};
+use compio_postgres::{Client, GenericClient};
 use jsonwebtoken::{
     decode, decode_header, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation,
 };
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha512};
+use zeroship_core::device_grant::PLATFORM_TOKEN_MAX_TTL_SECS;
 
 use crate::advisory_lock::{with_advisory_lock, OP_SIGNING_KEY_BOOTSTRAP_LOCK};
 use crate::error::{AuthError, Result};
@@ -222,6 +224,12 @@ pub struct Issuer {
     broker_secrets: Option<BrokerSecrets>,
 }
 
+/// A token held behind the persisted-expiry fence; never return it directly.
+struct SignedJwt {
+    token: String,
+    expires_at: i64,
+}
+
 impl std::fmt::Debug for Issuer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("oidc::Issuer")
@@ -285,7 +293,10 @@ impl Issuer {
     /// Reconcile the file-backed public key into `zeroship.signing_keys`.
     ///
     /// The table stores only public JWK metadata. The private key stays in this
-    /// process from `AUTH_SIGNING_KEY_FILE`.
+    /// process from `AUTH_SIGNING_KEY_FILE`. A `retiring` or `retired` row is
+    /// not reactivated, which fences a stale signer that restarts during or
+    /// after rotation. An already-running retiring signer remains safe because
+    /// every returned token advances the row's maximum issued expiry.
     pub async fn publish_active_key(&self, db: &Client) -> Result<()> {
         with_advisory_lock(db, OP_SIGNING_KEY_BOOTSTRAP_LOCK, || async {
             self.publish_active_key_locked(db).await
@@ -316,19 +327,46 @@ impl Issuer {
     }
 
     async fn reconcile_active_key(&self, db: &Client) -> Result<()> {
-        let rows = db
+        // Activation is one conditional write so terminal retirement cannot
+        // win between a status read and this process reactivating the row.
+        let activated = db
             .query(
-                "SELECT alg, public_jwk, status \
-                 FROM zeroship.signing_keys \
-                 WHERE kid = $1",
-                &[&self.kid],
+                "UPDATE zeroship.signing_keys \
+                 SET status = 'active', activated_at = COALESCE(activated_at, NOW()) \
+                 WHERE kid = $1 \
+                   AND alg = 'EdDSA' \
+                   AND public_jwk = $2 \
+                   AND status IN ('active', 'next') \
+                 RETURNING kid",
+                &[&self.kid, &self.public_jwk],
             )
             .await
-            .map_err(|e| AuthError::Db(format!("select signing key {}: {e}", self.kid)))?;
+            .map_err(|e| AuthError::Db(format!("activate signing key {}: {e}", self.kid)))?;
 
-        if let Some(row) = rows.first() {
+        if activated.is_empty() {
+            let rows = db
+                .query(
+                    "SELECT alg, public_jwk, status \
+                     FROM zeroship.signing_keys \
+                     WHERE kid = $1",
+                    &[&self.kid],
+                )
+                .await
+                .map_err(|e| AuthError::Db(format!("select signing key {}: {e}", self.kid)))?;
+            let Some(row) = rows.first() else {
+                db.execute(
+                    "INSERT INTO zeroship.signing_keys \
+                        (kid, alg, public_jwk, status, activated_at) \
+                     VALUES ($1, 'EdDSA', $2, 'active', NOW())",
+                    &[&self.kid, &self.public_jwk],
+                )
+                .await
+                .map_err(|e| AuthError::Db(format!("insert signing key {}: {e}", self.kid)))?;
+                return self.retire_replaced_signing_keys(db).await;
+            };
             let alg: String = row.get("alg");
             let public_jwk: serde_json::Value = row.get("public_jwk");
+            let status: String = row.get("status");
             if alg != "EdDSA" {
                 return Err(AuthError::Config(format!(
                     "signing_keys row {} has alg {alg:?}, expected EdDSA",
@@ -341,25 +379,22 @@ impl Issuer {
                     self.kid
                 )));
             }
-            db.execute(
-                "UPDATE zeroship.signing_keys \
-                 SET status = 'active', activated_at = COALESCE(activated_at, NOW()) \
-                 WHERE kid = $1 AND status <> 'active'",
-                &[&self.kid],
-            )
-            .await
-            .map_err(|e| AuthError::Db(format!("activate signing key {}: {e}", self.kid)))?;
-        } else {
-            db.execute(
-                "INSERT INTO zeroship.signing_keys \
-                    (kid, alg, public_jwk, status, activated_at) \
-                 VALUES ($1, 'EdDSA', $2, 'active', NOW())",
-                &[&self.kid, &self.public_jwk],
-            )
-            .await
-            .map_err(|e| AuthError::Db(format!("insert signing key {}: {e}", self.kid)))?;
+            if status == "retired" {
+                return Err(AuthError::Config(format!(
+                    "signing key {} is terminally retired and cannot be reactivated",
+                    self.kid
+                )));
+            }
+            return Err(AuthError::Config(format!(
+                "signing key {} has non-activatable status {status:?}",
+                self.kid
+            )));
         }
 
+        self.retire_replaced_signing_keys(db).await
+    }
+
+    async fn retire_replaced_signing_keys(&self, db: &Client) -> Result<()> {
         db.execute(
             "UPDATE zeroship.signing_keys \
              SET status = 'retiring', retiring_at = COALESCE(retiring_at, NOW()) \
@@ -372,42 +407,97 @@ impl Issuer {
         Ok(())
     }
 
-    /// Issue an RFC 9068 JWT access token.
-    pub fn issue_access_token(&self, mint: &AccessTokenMint<'_>) -> Result<String> {
+    /// Issue an RFC 9068 JWT access token and reserve its expiry before return.
+    #[allow(clippy::future_not_send)]
+    pub async fn issue_access_token(
+        &self,
+        db: &(impl GenericClient + ?Sized),
+        mint: &AccessTokenMint<'_>,
+    ) -> Result<String> {
+        validate_registered_ttl(
+            mint.ttl_secs.unwrap_or(ACCESS_TOKEN_TTL_SECS),
+            "access token",
+        )?;
         let subject = self.pairwise_subject(mint.user_id, mint.sector);
-        self.issue_access_token_with_subject(
+        let signed = self.build_access_token_with_subject(
+            &subject,
+            mint.audience,
+            mint.client_id,
+            mint.scopes,
+            mint.ttl_secs,
+        )?;
+        self.register_signed_token(db, signed).await
+    }
+
+    /// Sign an unregistered access token in debug-only fixture code.
+    ///
+    /// Protocol code must use [`Self::issue_access_token`] so a stale process
+    /// cannot release a token after its registry row becomes `retired`.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn sign_unregistered_access_token_fixture(
+        &self,
+        mint: &AccessTokenMint<'_>,
+    ) -> Result<String> {
+        let subject = self.pairwise_subject(mint.user_id, mint.sector);
+        self.build_access_token_with_subject(
             &subject,
             mint.audience,
             mint.client_id,
             mint.scopes,
             mint.ttl_secs,
         )
+        .map(|signed| signed.token)
     }
 
     /// Issue an RFC 9068 access token for a platform principal. This is used by
     /// first-party resource servers such as control where `sub` is the global
     /// principal UUID, not an end-user pairwise app subject.
-    pub fn issue_principal_access_token(
+    #[allow(clippy::future_not_send)]
+    pub async fn issue_principal_access_token(
+        &self,
+        db: &(impl GenericClient + ?Sized),
+        mint: &PrincipalAccessTokenMint<'_>,
+    ) -> Result<String> {
+        validate_registered_ttl(
+            mint.ttl_secs.unwrap_or(ACCESS_TOKEN_TTL_SECS),
+            "principal access token",
+        )?;
+        let signed = self.build_access_token_with_subject(
+            mint.principal_id,
+            mint.audience,
+            mint.client_id,
+            mint.scopes,
+            mint.ttl_secs,
+        )?;
+        self.register_signed_token(db, signed).await
+    }
+
+    /// Sign an unregistered principal token in debug-only fixture code.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn sign_unregistered_principal_access_token_fixture(
         &self,
         mint: &PrincipalAccessTokenMint<'_>,
     ) -> Result<String> {
-        self.issue_access_token_with_subject(
+        self.build_access_token_with_subject(
             mint.principal_id,
             mint.audience,
             mint.client_id,
             mint.scopes,
             mint.ttl_secs,
         )
+        .map(|signed| signed.token)
     }
 
-    fn issue_access_token_with_subject(
+    fn build_access_token_with_subject(
         &self,
         subject: &str,
         audience: &str,
         client_id: &str,
         scopes: &[String],
         ttl_secs: Option<i64>,
-    ) -> Result<String> {
+    ) -> Result<SignedJwt> {
         if subject.trim().is_empty() {
             return Err(AuthError::Internal("missing access-token subject".into()));
         }
@@ -425,11 +515,14 @@ impl Issuer {
 
         let now = unix_timestamp()?;
         let ttl = ttl_secs.unwrap_or(ACCESS_TOKEN_TTL_SECS);
+        let expires_at = now
+            .checked_add(ttl)
+            .ok_or_else(|| AuthError::Internal("access-token expiry overflow".into()))?;
         let claims = AccessTokenClaims {
             iss: self.issuer.clone(),
             sub: subject.to_string(),
             aud: audience.to_string(),
-            exp: now + ttl,
+            exp: expires_at,
             iat: now,
             jti: new_jti(),
             client_id: client_id.to_string(),
@@ -440,13 +533,44 @@ impl Issuer {
         header.typ = Some(ACCESS_TOKEN_TYP.into());
         header.kid = Some(self.kid.clone());
         let key = EncodingKey::from_ed_der(&self.private_der);
-        encode(&header, &claims, &key).map_err(|e| AuthError::Internal(format!("jwt encode: {e}")))
+        let token = encode(&header, &claims, &key)
+            .map_err(|e| AuthError::Internal(format!("jwt encode: {e}")))?;
+        Ok(SignedJwt { token, expires_at })
     }
 
-    /// Issue an OIDC Core ID token paired with an access token.
-    pub fn issue_id_token(&self, mint: &IdTokenMint<'_>) -> Result<String> {
+    /// Issue an OIDC Core ID token and reserve its expiry before return.
+    #[allow(clippy::future_not_send)]
+    pub async fn issue_id_token(
+        &self,
+        db: &(impl GenericClient + ?Sized),
+        mint: &IdTokenMint<'_>,
+    ) -> Result<String> {
+        validate_registered_ttl(mint.ttl_secs.unwrap_or(ID_TOKEN_TTL_SECS), "ID token")?;
         let subject = self.pairwise_subject(mint.user_id, mint.sector);
-        self.issue_id_token_with_subject(
+        let signed = self.build_id_token_with_subject(
+            &subject,
+            mint.client_id,
+            mint.sid,
+            mint.nonce,
+            mint.access_token,
+            mint.auth_time,
+            mint.amr,
+            mint.acr,
+            mint.email,
+            mint.email_verified,
+            mint.name,
+            mint.picture,
+            mint.ttl_secs,
+        )?;
+        self.register_signed_token(db, signed).await
+    }
+
+    /// Sign an unregistered ID token in debug-only fixture code.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn sign_unregistered_id_token_fixture(&self, mint: &IdTokenMint<'_>) -> Result<String> {
+        let subject = self.pairwise_subject(mint.user_id, mint.sector);
+        self.build_id_token_with_subject(
             &subject,
             mint.client_id,
             mint.sid,
@@ -461,13 +585,23 @@ impl Issuer {
             mint.picture,
             mint.ttl_secs,
         )
+        .map(|signed| signed.token)
     }
 
     /// Issue an OIDC Core ID token for a platform principal. This is used only
     /// by gateway-brokered login after the broker secret has authenticated the
     /// code exchange; app-facing access tokens remain pairwise.
-    pub fn issue_principal_id_token(&self, mint: &PrincipalIdTokenMint<'_>) -> Result<String> {
-        self.issue_id_token_with_subject(
+    #[allow(clippy::future_not_send)]
+    pub async fn issue_principal_id_token(
+        &self,
+        db: &(impl GenericClient + ?Sized),
+        mint: &PrincipalIdTokenMint<'_>,
+    ) -> Result<String> {
+        validate_registered_ttl(
+            mint.ttl_secs.unwrap_or(ID_TOKEN_TTL_SECS),
+            "principal ID token",
+        )?;
+        let signed = self.build_id_token_with_subject(
             mint.principal_id,
             mint.client_id,
             mint.sid,
@@ -481,7 +615,8 @@ impl Issuer {
             mint.name,
             mint.picture,
             mint.ttl_secs,
-        )
+        )?;
+        self.register_signed_token(db, signed).await
     }
 
     // Private helper shared by `issue_id_token` / `issue_principal_id_token`,
@@ -491,7 +626,7 @@ impl Issuer {
     // refactor, not a mechanical lint fix - not doing that as part of a lint
     // sweep.
     #[allow(clippy::too_many_arguments)]
-    fn issue_id_token_with_subject(
+    fn build_id_token_with_subject(
         &self,
         subject: &str,
         client_id: &str,
@@ -506,7 +641,7 @@ impl Issuer {
         name: Option<&str>,
         picture: Option<&str>,
         ttl_secs: Option<i64>,
-    ) -> Result<String> {
+    ) -> Result<SignedJwt> {
         if subject.trim().is_empty() {
             return Err(AuthError::Internal("missing id-token subject".into()));
         }
@@ -525,11 +660,14 @@ impl Issuer {
 
         let now = unix_timestamp()?;
         let ttl = ttl_secs.unwrap_or(ID_TOKEN_TTL_SECS);
+        let expires_at = now
+            .checked_add(ttl)
+            .ok_or_else(|| AuthError::Internal("id-token expiry overflow".into()))?;
         let claims = IdTokenClaims {
             iss: self.issuer.clone(),
             sub: subject.to_string(),
             aud: client_id.to_string(),
-            exp: now + ttl,
+            exp: expires_at,
             iat: now,
             sid: sid.to_string(),
             nonce: nonce.to_string(),
@@ -547,11 +685,37 @@ impl Issuer {
         header.typ = Some(ID_TOKEN_TYP.into());
         header.kid = Some(self.kid.clone());
         let key = EncodingKey::from_ed_der(&self.private_der);
-        encode(&header, &claims, &key).map_err(|e| AuthError::Internal(format!("jwt encode: {e}")))
+        let token = encode(&header, &claims, &key)
+            .map_err(|e| AuthError::Internal(format!("jwt encode: {e}")))?;
+        Ok(SignedJwt { token, expires_at })
     }
 
-    /// Issue an OIDC Back-Channel Logout 1.0 logout token.
-    pub fn issue_logout_token(&self, mint: &LogoutTokenMint<'_>) -> Result<String> {
+    /// Issue a logout token and reserve its expiry before return.
+    #[allow(clippy::future_not_send)]
+    pub async fn issue_logout_token(
+        &self,
+        db: &(impl GenericClient + ?Sized),
+        mint: &LogoutTokenMint<'_>,
+    ) -> Result<String> {
+        validate_registered_ttl(
+            mint.ttl_secs.unwrap_or(LOGOUT_TOKEN_TTL_SECS),
+            "logout token",
+        )?;
+        let signed = self.build_logout_token(mint)?;
+        self.register_signed_token(db, signed).await
+    }
+
+    /// Sign an unregistered logout token in debug-only fixture code.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn sign_unregistered_logout_token_fixture(
+        &self,
+        mint: &LogoutTokenMint<'_>,
+    ) -> Result<String> {
+        self.build_logout_token(mint).map(|signed| signed.token)
+    }
+
+    fn build_logout_token(&self, mint: &LogoutTokenMint<'_>) -> Result<SignedJwt> {
         if mint.client_id.trim().is_empty() {
             return Err(AuthError::Internal(
                 "missing logout-token aud/client_id".into(),
@@ -571,6 +735,9 @@ impl Issuer {
 
         let now = unix_timestamp()?;
         let ttl = mint.ttl_secs.unwrap_or(LOGOUT_TOKEN_TTL_SECS);
+        let expires_at = now
+            .checked_add(ttl)
+            .ok_or_else(|| AuthError::Internal("logout-token expiry overflow".into()))?;
         let mut events = BTreeMap::new();
         events.insert(
             zeroship_core::logout_token::BCL_EVENT.to_string(),
@@ -581,7 +748,7 @@ impl Issuer {
             sub: mint.sub.map(str::to_string),
             aud: mint.client_id.to_string(),
             iat: now,
-            exp: now + ttl,
+            exp: expires_at,
             jti: new_jti(),
             events,
             sid: mint.sid.map(str::to_string),
@@ -591,7 +758,44 @@ impl Issuer {
         header.typ = Some(LOGOUT_TOKEN_TYP.into());
         header.kid = Some(self.kid.clone());
         let key = EncodingKey::from_ed_der(&self.private_der);
-        encode(&header, &claims, &key).map_err(|e| AuthError::Internal(format!("jwt encode: {e}")))
+        let token = encode(&header, &claims, &key)
+            .map_err(|e| AuthError::Internal(format!("jwt encode: {e}")))?;
+        Ok(SignedJwt { token, expires_at })
+    }
+
+    #[allow(clippy::future_not_send)]
+    async fn register_signed_token(
+        &self,
+        db: &(impl GenericClient + ?Sized),
+        signed: SignedJwt,
+    ) -> Result<String> {
+        let expires_at =
+            DateTime::<Utc>::from_timestamp(signed.expires_at, 0).ok_or_else(|| {
+                AuthError::Internal("signed-token expiry is outside PostgreSQL range".into())
+            })?;
+        let updated = db
+            .execute(
+                "UPDATE zeroship.signing_keys \
+                 SET max_issued_expires_at = GREATEST( \
+                     COALESCE(max_issued_expires_at, $2), $2 \
+                 ) \
+                 WHERE kid = $1 AND status IN ('active', 'retiring')",
+                &[&self.kid, &expires_at],
+            )
+            .await
+            .map_err(|err| {
+                AuthError::Db(format!(
+                    "reserve signing key {} issued expiry: {err}",
+                    self.kid
+                ))
+            })?;
+        if updated != 1 {
+            return Err(AuthError::Internal(format!(
+                "signing key {} is no longer trusted for issuance",
+                self.kid
+            )));
+        }
+        Ok(signed.token)
     }
 
     /// Verify this OP's own RFC 9068 JWT access token.
@@ -677,6 +881,15 @@ impl Issuer {
 pub fn oidc_at_hash(access_token: &str) -> String {
     let digest = Sha512::digest(access_token.as_bytes());
     URL_SAFE_NO_PAD.encode(&digest[..32])
+}
+
+fn validate_registered_ttl(ttl_secs: i64, token_kind: &str) -> Result<()> {
+    if ttl_secs <= 0 || ttl_secs > PLATFORM_TOKEN_MAX_TTL_SECS {
+        return Err(AuthError::Internal(format!(
+            "{token_kind} ttl must be between 1 and {PLATFORM_TOKEN_MAX_TTL_SECS} seconds"
+        )));
+    }
+    Ok(())
 }
 
 fn unix_timestamp() -> Result<i64> {

@@ -579,7 +579,7 @@ async fn exchange_refresh_token_inner(
         OAuthError::server_error("refresh rotation unavailable")
     })?;
 
-    let access_token = mint_access_token(issuer, &client, row.user_id, &new_scopes)?;
+    let access_token = mint_access_token(db, issuer, &client, row.user_id, &new_scopes).await?;
     Ok(TokenResponse {
         access_token,
         id_token: None,
@@ -871,7 +871,7 @@ async fn replay_lost_response(
         return Ok(None);
     };
     let scopes = parse_scopes(&cached.scope);
-    let access_token = mint_access_token(issuer, client, successor.user_id, &scopes)?;
+    let access_token = mint_access_token(db, issuer, client, successor.user_id, &scopes).await?;
     tracing::info!(
         family_id = %row.refresh_family_id,
         client_id = %row.client_id,

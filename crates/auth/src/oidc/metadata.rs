@@ -10,8 +10,16 @@ use crate::config::AuthConfig;
 use crate::error::{AuthError, Result};
 
 const DISCOVERY_CACHE_CONTROL: &str = "public, max-age=300";
-const JWKS_CACHE_CONTROL: &str = "public, max-age=300, stale-while-revalidate=300";
+pub(crate) const JWKS_MAX_AGE_SECS: i64 = 5 * 60;
+pub(crate) const JWKS_STALE_WHILE_REVALIDATE_SECS: i64 = 5 * 60;
 const NO_STORE: &str = "no-store";
+
+fn jwks_cache_control() -> String {
+    format!(
+        "public, max-age={JWKS_MAX_AGE_SECS}, \
+         stale-while-revalidate={JWKS_STALE_WHILE_REVALIDATE_SECS}"
+    )
+}
 
 #[web::get("/.well-known/jwks.json")]
 #[allow(clippy::future_not_send)]
@@ -19,7 +27,7 @@ pub async fn jwks(db: web::types::State<Arc<Client>>) -> HttpResponse {
     match jwks_document(db.as_ref()).await {
         Ok(doc) => HttpResponse::Ok()
             .content_type("application/json")
-            .header("cache-control", JWKS_CACHE_CONTROL)
+            .header("cache-control", jwks_cache_control())
             .json(&doc),
         Err(e) => {
             tracing::error!(error = %e, "JWKS unavailable");
