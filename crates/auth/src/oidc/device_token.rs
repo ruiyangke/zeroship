@@ -15,6 +15,7 @@ use uuid::Uuid;
 use zeroship_authz::Scope;
 use zeroship_core::auth::{extract_bearer, validate_control_key};
 
+use crate::advisory_lock::lock_refresh_user_xact;
 use crate::config::AuthConfig;
 use crate::oidc::authorization_code::{
     load_client, mint_access_token, oauth_error_response, parse_scopes, required_param,
@@ -427,6 +428,41 @@ async fn exchange_device_code_locked(
                 return Err(OAuthError::server_error("device grant is incomplete"));
             };
             let auth_credential_version: i64 = row.get("auth_credential_version");
+            lock_refresh_user_xact(db, user_id)
+                .await
+                .map_err(|err| {
+                    tracing::error!(
+                        error = %err,
+                        user_id = %user_id,
+                        "device token: user lock failed"
+                    );
+                    OAuthError::server_error("device token validation unavailable")
+                })?;
+            let owner = db
+                .query(
+                    "SELECT 1 FROM zeroship.users \
+                     WHERE id = $1 \
+                       AND credential_version = $2 \
+                       AND disabled_at IS NULL \
+                       AND deletion_requested_at IS NULL \
+                       AND anonymized_at IS NULL",
+                    &[&user_id, &auth_credential_version],
+                )
+                .await
+                .map_err(|err| {
+                    tracing::error!(
+                        error = %err,
+                        user_id = %user_id,
+                        "device token: owner validation failed"
+                    );
+                    OAuthError::server_error("device token validation unavailable")
+                })?;
+            if owner.is_empty() {
+                return Err(device_error(
+                    "access_denied",
+                    "device authorization is no longer valid",
+                ));
+            }
             let requested_scopes = row
                 .get::<_, Option<String>>("scope")
                 .map(|scope| parse_scopes(&scope))
