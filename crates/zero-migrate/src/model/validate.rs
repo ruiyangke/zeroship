@@ -2755,7 +2755,7 @@ fn validate_no_column_uses_a_dropped_named_object(
 
     let mut dropped: BTreeSet<(&'static str, &str)> = BTreeSet::new();
 
-    for (op_index, op) in ir.ops.iter().enumerate() {
+    for (op_index, op) in effective_ops(&ir.ops, target_dialect) {
         // Recreating an object restores the name, so creates are handled first.
         match op {
             Op::CreateEnum { name, .. } => {
@@ -3150,7 +3150,7 @@ fn validate_no_name_is_claimed_twice(
     let mut roles: BTreeSet<&str> = BTreeSet::new();
     let mut policy_names: BTreeMap<Key, BTreeSet<&str>> = BTreeMap::new();
 
-    for (op_index, op) in ir.ops.iter().enumerate() {
+    for (op_index, op) in effective_ops(&ir.ops, target_dialect) {
         match op {
             Op::CreateTable {
                 name,
@@ -3983,16 +3983,9 @@ fn expression_column_references<'a>(
                 )
                 .collect()
         }
-        // A dialectal container's nested ops, for the leg this dialect emits.
-        Op::Dialectal {
-            default,
-            pg,
-            sqlite,
-            mysql,
-        } => dialectal_leg(target_dialect, default, pg, sqlite, mysql)
-            .iter()
-            .flat_map(|nested| expression_column_references(nested, target_dialect))
-            .collect(),
+        // A container names nothing itself; see the sibling accessor. Callers
+        // reach it already expanded by `effective_ops`.
+        Op::Dialectal { .. } => Vec::new(),
         // EXHAUSTIVE, for the reason given on the sibling accessor: a catch-all
         // reads a new variant's silence as "no column references", and that is
         // what shipped F761 through F764. The guarded `createView` arm above
@@ -4051,10 +4044,7 @@ fn expression_column_references<'a>(
     }
 }
 
-fn plain_column_references<'a>(
-    op: &'a crate::model::ir::Op,
-    target_dialect: Dialect,
-) -> Vec<(&'a str, &'a str)> {
+fn plain_column_references<'a>(op: &'a crate::model::ir::Op) -> Vec<(&'a str, &'a str)> {
     use crate::model::ir::{
         AlterPrimaryKeyAction, CommentTarget, IndexElement, IrConstraintKind, Op,
     };
@@ -4155,19 +4145,12 @@ fn plain_column_references<'a>(
         // `pg_get_serial_sequence('a','v')` is `column "v" of relation "a" does
         // not exist`.
         Op::SynchronizeIdentity { table, column, .. } => pair(table, column),
-        // A DIALECTAL OP IS A CONTAINER, and its nested ops were invisible to
-        // every walk in this file. Only the leg the target dialect actually
-        // emits is descended into: refusing on a leg that will not run would
-        // reject a migration the server never sees.
-        Op::Dialectal {
-            default,
-            pg,
-            sqlite,
-            mysql,
-        } => dialectal_leg(target_dialect, default, pg, sqlite, mysql)
-            .iter()
-            .flat_map(|nested| plain_column_references(nested, target_dialect))
-            .collect(),
+        // A DIALECTAL OP IS A CONTAINER: it names nothing itself. Callers reach
+        // it already expanded by `effective_ops`, which is the single place the
+        // leg is chosen, so descending again here would duplicate that decision
+        // in a second location - the way it was briefly written before the
+        // expansion existed.
+        Op::Dialectal { .. } => Vec::new(),
         // EXHAUSTIVE FROM HERE, and that is the point of this arm rather than a
         // `_`. Four consecutive defects (F761-F764) were ops that named a column
         // and were absent from a closed match ending in a catch-all, where a new
@@ -4218,6 +4201,52 @@ fn plain_column_references<'a>(
     }
 }
 
+/// The ops a migration EFFECTIVELY runs on one dialect, each paired with the
+/// top-level index to report it under.
+///
+/// A [`Op::Dialectal`] is a CONTAINER: it names nothing itself and holds ops that
+/// do. F765 taught the two column accessors to look inside one, which fixed
+/// reading references out of a leg - and left every walk's STATE blind, because a
+/// `dropTable` or `dropColumn` nested in a leg still arrived as an opaque
+/// `Dialectal` and mutated nothing. The container was transparent for reads and
+/// opaque for writes, which is the worst of both.
+///
+/// Expanding once, here, fixes both directions for every walk that uses it, and
+/// keeps the choice of leg in a single place. Nesting is handled recursively
+/// because a leg may hold another container.
+///
+/// THE INDEX IS THE CONTAINER'S. A nested op has no top-level position of its
+/// own, and the author's envelope shows the `dialectal` op at that index, so that
+/// is the honest thing to point at.
+fn effective_ops(
+    ops: &[crate::model::ir::Op],
+    target_dialect: Dialect,
+) -> Vec<(usize, &crate::model::ir::Op)> {
+    use crate::model::ir::Op;
+
+    fn push<'a>(out: &mut Vec<(usize, &'a Op)>, index: usize, op: &'a Op, target_dialect: Dialect) {
+        if let Op::Dialectal {
+            default,
+            pg,
+            sqlite,
+            mysql,
+        } = op
+        {
+            for nested in dialectal_leg(target_dialect, default, pg, sqlite, mysql) {
+                push(out, index, nested, target_dialect);
+            }
+        } else {
+            out.push((index, op));
+        }
+    }
+
+    let mut out = Vec::new();
+    for (index, op) in ops.iter().enumerate() {
+        push(&mut out, index, op, target_dialect);
+    }
+    out
+}
+
 /// The nested op sequence a [`Op::Dialectal`] container actually emits for one
 /// target dialect: the dialect's own leg when present, and the `default` leg
 /// otherwise.
@@ -4265,7 +4294,7 @@ fn validate_no_op_references_a_dropped_column(
 
     let mut dropped: BTreeSet<(&str, &str)> = BTreeSet::new();
 
-    for (op_index, op) in ir.ops.iter().enumerate() {
+    for (op_index, op) in effective_ops(&ir.ops, target_dialect) {
         // An `addColumn` brings the name back, and a `createTable` redefines the
         // whole table, so both are handled before the check.
         match op {
@@ -4278,7 +4307,7 @@ fn validate_no_op_references_a_dropped_column(
             _ => {}
         }
 
-        let referenced = plain_column_references(op, target_dialect)
+        let referenced = plain_column_references(op)
             .into_iter()
             .map(|(table, column)| (table, column.to_string()))
             .chain(expression_column_references(op, target_dialect));
@@ -4411,7 +4440,7 @@ fn validate_no_op_targets_a_renamed_away_table(
     // operations naming a relation the server will not find.
     let mut vacated: BTreeMap<&str, Option<&str>> = BTreeMap::new();
 
-    for (op_index, op) in ir.ops.iter().enumerate() {
+    for (op_index, op) in effective_ops(&ir.ops, target_dialect) {
         // A `createTable` RECLAIMS the name rather than requiring it to be there,
         // so it is handled before the check — `touched_table` reports the table an
         // op operates on, and for a create that is the name being defined.
@@ -4565,7 +4594,7 @@ fn validate_index_names_across_ops(
         Ok(())
     }
 
-    for (op_index, op) in ir.ops.iter().enumerate() {
+    for (op_index, op) in effective_ops(&ir.ops, target_dialect) {
         match op {
             Op::CreateTable {
                 name,
