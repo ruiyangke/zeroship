@@ -1,12 +1,26 @@
+/*
+ * The LIST owns the columns, and items inherit them through subgrid.
+ *
+ * Each item used to be its own grid with a `max-content` term column, so every
+ * row sized that column to its own label: in the issue rail, Product,
+ * Component, Reporter and QA contact each started their value at a different
+ * x. Reading down the rail the value column moved four times inside one
+ * section, which is what made it look broken. Per-item grids cannot align with
+ * each other -- that is the whole reason subgrid exists.
+ *
+ * The item stays a real grid box rather than `display: contents` because it
+ * carries the divider border, and a contents box cannot be painted.
+ */
 [data-slot~="description-list"] {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: minmax(var(--it-space-7), max-content) minmax(0, 2fr);
   color: var(--it-ink);
 }
 
 [data-slot~="description-list-item"] {
   display: grid;
-  grid-template-columns: minmax(var(--it-space-7), max-content) minmax(0, 2fr);
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
   gap: var(--it-space-3);
   min-block-size: var(--it-row-h);
   align-items: center;
@@ -19,6 +33,13 @@
   border-block-start: 1px solid var(--it-line);
 }
 
+/* Vertical stacks term over detail, so the shared column the horizontal form
+   needs would be a second empty track. Collapse the LIST as well as the item;
+   leaving the list at two columns put every stacked row inside a phantom
+   value column. */
+[data-slot~="description-list"][data-orientation="vertical"] {
+  grid-template-columns: minmax(0, 1fr);
+}
 [data-slot~="description-list"][data-orientation="vertical"]
   > [data-slot~="description-list-item"] {
   grid-template-columns: minmax(0, 1fr);
