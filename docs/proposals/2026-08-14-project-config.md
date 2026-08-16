@@ -259,7 +259,7 @@ and each subcommand. Nine subcommands: `serve`, `deploy`, `migrate`, `login`,
 **`dev init` is an OPERATOR command, not a creator one.** It provisions the local
 Docker Compose stack: `--secrets-dir` default `deploy/compose/secrets`, `--env-file`
 default `deploy/compose/.env` (`crates/cli/src/dev.rs:13-14,110-112`), and it
-generates the eight platform secrets in `ENV_KEYS` (`crates/cli/src/dev.rs:35-44`).
+generates the platform secrets in `ENV_KEYS` (`crates/cli/src/dev.rs`).
 It is out of scope for a creator project file entirely.
 
 **Three commands have no unknown-flag gate at all.** `secret`, `var`, and `login`

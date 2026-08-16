@@ -45,9 +45,10 @@ The secret directory contains exactly seven files:
 `control-signing.pem` `gateway-signing.pem` `auth-signing.pem` `broker-secret`
 `pairwise-salt` `refresh-hash-key` `refresh-idem-key`
 
-The env overlay contains eight generated scalar values:
+The env overlay contains nine generated scalar values:
 
-`ZEROSHIP_CONTROL_KEY` `ZEROSHIP_CONTROL_MASTER_KEY` `ZEROSHIP_WORKER_KEY`
+`ZEROSHIP_AUTH_PLATFORM_MINT_KEY` `ZEROSHIP_CONTROL_KEY`
+`ZEROSHIP_CONTROL_MASTER_KEY` `ZEROSHIP_WORKER_KEY`
 `ZEROSHIP_MIGRATED_POLICY_SEAL_KEY` `ZEROSHIP_GATEWAY_STASH_SIGNING_KEY`
 `ZEROSHIP_PAIRWISE_SALT` `ZEROSHIP_AUTH_STASH_SIGNING_KEY`
 `ZEROSHIP_AUTH_TOTP_ENC_KEY`
@@ -306,8 +307,9 @@ defined ONCE instead of being repeated as per-service flags:
 
 For local compose, the referenced scalar secret values come from the gitignored
 `.env` written by `zeroship dev init`. In particular, one generated
-`ZEROSHIP_CONTROL_KEY` is interpolated into all five consumers together; there
-is no per-service fallback that can move auth alone.
+`ZEROSHIP_CONTROL_KEY` is interpolated into control, gateway, worker, and
+migrated. The separate `ZEROSHIP_AUTH_PLATFORM_MINT_KEY` is interpolated only
+into control and auth; the worker cannot authenticate to the token mint.
 
 Precedence is CLI/env-flag > `[secrets]`/`[auth]` file reference > default, so a
 leftover literal flag would silently WIN and defeat the file - keep config-covered

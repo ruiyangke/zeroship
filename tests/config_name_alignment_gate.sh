@@ -120,7 +120,7 @@ compose_service_env() {
             sub(/^[^:]*:[[:space:]]*/, "", val)
             sub(/[[:space:]]+$/, "", val)
             # Accept every Compose modifier, not just `:-`: the file uses
-            # `${VAR:?msg}` for the fifteen values `zeroship dev init` must
+            # `${VAR:?msg}` for the values `zeroship dev init` must
             # supply, and a pattern that saw only `:-` would silently check a
             # third of the surface and call it clean.
             alias = ""

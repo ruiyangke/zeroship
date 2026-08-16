@@ -269,11 +269,14 @@ services:
       # `https://auth.<domain>/healthz` -> 000, so every `zeroship login`
       # approval ended in `{"error":"internal error"}`.
       #
-      # The mint URL carries ZEROSHIP_CONTROL_KEY in an Authorization header,
-      # so it is a credential destination; control validates it at boot (bare
-      # http/https origin, no userinfo, no path) and refuses to start without it
-      # whenever an issuer is set.
+      # The mint URL carries ZEROSHIP_AUTH_PLATFORM_MINT_KEY in an Authorization
+      # header, so it is a credential destination; control validates it at boot
+      # (bare http/https origin, no userinfo, no path) and refuses to start
+      # without it whenever an issuer is set.
       ZEROSHIP_AUTH_PLATFORM_MINT_URL: http://auth:9092
+      # Dedicated to control -> auth platform-token mint calls. The worker does
+      # not receive this key, so its control-plane bearer cannot invoke mint.
+      ZEROSHIP_AUTH_PLATFORM_MINT_KEY: ${ZEROSHIP_AUTH_PLATFORM_MINT_KEY:?run zeroship dev init}
       # Same split for the key fetch, using the setting that already existed:
       # the JWKS is FETCHED, so it needs a reachable address, while the `iss`
       # it validates stays the public issuer above. Without this the mint would
@@ -729,9 +732,9 @@ services:
       # Native OP issuer base; discovery/JWKS and token `iss` use
       # `${ZEROSHIP_AUTH_PUBLIC_URL}/oauth2`.
       ZEROSHIP_AUTH_PUBLIC_URL: ${ZEROSHIP_ORIGIN_SCHEME:-http}://auth.${ZEROSHIP_DOMAIN:-zeroship.localhost}
-      # ONE internal control key, ONE name, five consumers - auth included.
-      # Auth uses it ONLY to gate control -> auth internal OP mint calls.
-      ZEROSHIP_CONTROL_KEY: ${ZEROSHIP_CONTROL_KEY:?run zeroship dev init}
+      # Dedicated to control -> auth platform-token mint calls. Auth does not
+      # receive the broader control API key.
+      ZEROSHIP_AUTH_PLATFORM_MINT_KEY: ${ZEROSHIP_AUTH_PLATFORM_MINT_KEY:?run zeroship dev init}
       # Auth has independent stash-cookie and TOTP-at-rest keys. Both are
       # generated once and retained across restarts by the dev overlay.
       ZEROSHIP_AUTH_STASH_SIGNING_KEY: ${ZEROSHIP_AUTH_STASH_SIGNING_KEY:?run zeroship dev init}

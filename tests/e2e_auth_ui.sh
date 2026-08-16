@@ -203,6 +203,7 @@ set -a
 . "$ENV_FILE"
 set +a
 : "${ZEROSHIP_CONTROL_KEY:?zeroship dev init omitted ZEROSHIP_CONTROL_KEY}"
+: "${ZEROSHIP_AUTH_PLATFORM_MINT_KEY:?zeroship dev init omitted the platform mint key}"
 : "${ZEROSHIP_AUTH_STASH_SIGNING_KEY:?zeroship dev init omitted the auth stash key}"
 : "${ZEROSHIP_AUTH_TOTP_ENC_KEY:?zeroship dev init omitted the auth TOTP key}"
 

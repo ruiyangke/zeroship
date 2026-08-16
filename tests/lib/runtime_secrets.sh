@@ -114,6 +114,8 @@ e2e_export_runtime_secrets() {
   mkdir -p "$secret_dir"
 
   _e2e_keep_or_generate ZEROSHIP_CONTROL_KEY "${ZEROSHIP_CONTROL_KEY:-}" || return 1
+  _e2e_keep_or_generate ZEROSHIP_AUTH_PLATFORM_MINT_KEY \
+    "${ZEROSHIP_AUTH_PLATFORM_MINT_KEY:-}" || return 1
   _e2e_keep_or_generate_hex_key ZEROSHIP_CONTROL_MASTER_KEY \
     "${ZEROSHIP_CONTROL_MASTER_KEY:-}" || return 1
   _e2e_keep_or_generate ZEROSHIP_WORKER_KEY "${ZEROSHIP_WORKER_KEY:-}" || return 1
@@ -140,9 +142,9 @@ e2e_export_runtime_secrets() {
   ZEROSHIP_AUTH_PLATFORM_ISSUER="${ZEROSHIP_AUTH_PLATFORM_ISSUER:-http://localhost:${AUTH_PORT:-9092}/oauth2}"
   # The address control POSTs the deploy-token mint to, which is a DIFFERENT
   # setting from the issuer above: that one is the `iss` a token must carry,
-  # this one is where control_key is sent. Control refuses to start with an
-  # issuer and no mint URL, so every harness that configures the former needs
-  # the latter.
+  # this one is where the dedicated platform mint key is sent. Control refuses
+  # to start with an issuer and no mint URL, so every harness that configures
+  # the former needs the latter.
   #
   # The default here happens to be the issuer's own origin, because a local
   # harness runs everything on one loopback host. That degenerate agreement is

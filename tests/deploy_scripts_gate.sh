@@ -1034,7 +1034,7 @@ seen "$CAP" "--entrypoint zeroship $FAKE_IMAGE dev init" \
   && pass "secrets are provisioned by the deployed image's own 'zeroship dev init', which owns BOTH the env list and the file list" \
   || fail "provisioning does not run the image's zeroship dev init; it is keeping a second list that cannot cover the secret FILES"
 seen "$CAP" '### openssl' \
-  && fail "provisioning still generates values with 'openssl rand'; that path only ever produced the eight env-shaped secrets and no key files" \
+  && fail "provisioning still generates values with 'openssl rand'; that path only ever produced env-shaped secrets and no key files" \
   || pass "provisioning no longer hand-rolls values with openssl"
 
 # --- D3: the snapshot covers every member, under ONE stamp -----------------
@@ -1207,6 +1207,7 @@ if [ ! -x "$CTL_BIN" ]; then
   echo "  note $CTL_BIN is not built; skipping (cargo build --bin zeroship-control)"
 else
   ovl_env=(
+    ZEROSHIP_AUTH_PLATFORM_MINT_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
     ZEROSHIP_CONTROL_DATABASE_URL=postgres://u:p@postgres:5432/z
     ZEROSHIP_CONTROL_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
     ZEROSHIP_WORKER_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
