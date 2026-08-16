@@ -7,9 +7,9 @@ import {
 
 export type MenuProps = BaseMenu.Root.Props;
 
-function MenuRoot({ modal = false, ...props }: MenuProps) {
+const MenuRoot = ({ modal = false, ...props }: MenuProps) => {
   return <BaseMenu.Root {...props} modal={modal} />;
-}
+};
 
 const MenuTrigger = forwardRef<HTMLElement, BaseMenu.Trigger.Props>(
   function MenuTrigger(props, ref) {
@@ -22,9 +22,9 @@ const MenuTrigger = forwardRef<HTMLElement, BaseMenu.Trigger.Props>(
   },
 );
 
-function MenuPortal(props: BaseMenu.Portal.Props) {
+const MenuPortal = (props: BaseMenu.Portal.Props) => {
   return <BaseMenu.Portal {...props} />;
-}
+};
 
 export interface MenuPopupProps extends BaseMenu.Popup.Props {
   side?: BaseMenu.Positioner.Props["side"];

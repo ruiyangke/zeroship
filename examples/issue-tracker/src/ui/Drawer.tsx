@@ -10,13 +10,13 @@ export type DrawerSize = "sm" | "md" | "lg" | "full";
 
 export type DrawerProps = BaseDrawer.Root.Props;
 
-function DrawerRoot({ swipeDirection = "right", ...props }: DrawerProps) {
+const DrawerRoot = ({ swipeDirection = "right", ...props }: DrawerProps) => {
   return <BaseDrawer.Root {...props} swipeDirection={swipeDirection} />;
-}
+};
 
-function DrawerPortal(props: BaseDrawer.Portal.Props) {
+const DrawerPortal = (props: BaseDrawer.Portal.Props) => {
   return <BaseDrawer.Portal {...props} />;
-}
+};
 
 const DrawerBackdrop = forwardRef<
   HTMLDivElement,
@@ -105,15 +105,15 @@ const DrawerHeader = forwardRef<HTMLDivElement, DrawerHeaderProps>(
   },
 );
 
-function DrawerTitle(props: BaseDrawer.Title.Props) {
+const DrawerTitle = (props: BaseDrawer.Title.Props) => {
   return <BaseDrawer.Title {...props} data-slot="drawer-title" />;
-}
+};
 
-function DrawerDescription(props: BaseDrawer.Description.Props) {
+const DrawerDescription = (props: BaseDrawer.Description.Props) => {
   return (
     <BaseDrawer.Description {...props} data-slot="drawer-description" />
   );
-}
+};
 
 const DrawerBody = forwardRef<
   HTMLDivElement,

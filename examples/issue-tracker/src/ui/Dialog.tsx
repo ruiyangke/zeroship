@@ -23,12 +23,12 @@ export interface DialogProps extends Omit<
   dismissible?: boolean;
 }
 
-function DialogRoot({
+const DialogRoot = ({
   dismissible = true,
   modal = true,
   onOpenChange,
   ...props
-}: DialogProps) {
+}: DialogProps) => {
   const handleOpenChange = (open: boolean, details: OpenChangeDetails) => {
     if (
       !dismissible &&
@@ -49,7 +49,7 @@ function DialogRoot({
       onOpenChange={handleOpenChange}
     />
   );
-}
+};
 
 const DialogTrigger = forwardRef<HTMLElement, BaseDialog.Trigger.Props>(
   function DialogTrigger(props, ref) {
@@ -62,9 +62,9 @@ const DialogTrigger = forwardRef<HTMLElement, BaseDialog.Trigger.Props>(
   },
 );
 
-function DialogPortal(props: BaseDialog.Portal.Props) {
+const DialogPortal = (props: BaseDialog.Portal.Props) => {
   return <BaseDialog.Portal {...props} />;
-}
+};
 
 export interface DialogBackdropProps extends BaseDialog.Backdrop.Props {
   tint?: DialogBackdropTint;
