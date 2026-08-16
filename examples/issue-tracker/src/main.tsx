@@ -3,7 +3,6 @@ import { createRoot } from "react-dom/client";
 import { AuthProvider } from "@zeroship/auth/react";
 import { BrowserRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { ThemeProvider } from "@zeroship/ui";
 // The component library is headless. This app owns its complete visual layer.
 import "./theme/index.css";
 import { App } from "./App";
@@ -46,7 +45,6 @@ if (!el) throw new Error("missing #root");
 createRoot(el).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
-    <ThemeProvider>
       {/* The app had no way in. Every signed-out state said "sign in through
           the platform and reload" and nothing anywhere performed a sign-in --
           the only route to an identity was minting the dev session cookie by
@@ -57,7 +55,6 @@ createRoot(el).render(
           <App />
         </BrowserRouter>
       </AuthProvider>
-    </ThemeProvider>
     </QueryClientProvider>
   </React.StrictMode>,
 );
