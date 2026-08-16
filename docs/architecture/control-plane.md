@@ -87,7 +87,12 @@ create them.
 
 ## Route and version feeds
 
-`Registry::get_routes()` builds `RouteMap<Uuid, RouteEntry>` for the gateway. If `manifest_json` is missing, unparsable, or fails `Manifest::validate()`, the registry falls back to `Manifest::passthrough()` and logs a warning.
+`Registry::get_gateway_snapshot()` builds the gateway feed: a
+`RouteMap<Uuid, RouteEntry>` plus lifecycle rows for disabled, anonymized, or
+deletion-pending principals. The gateway uses that pushed state to invalidate
+stateless app credentials without a per-request database lookup. If
+`manifest_json` is missing, unparsable, or fails `Manifest::validate()`, the
+registry falls back to `Manifest::passthrough()` and logs an error.
 
 `Registry::get_versions()` builds `VersionMap<Uuid, AppVersionInfo>` for workers. The manifest in that feed is optional, so undeployed apps can still appear in the version map with `manifest = None`.
 

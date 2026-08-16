@@ -4,6 +4,40 @@ use compio_postgres::Client;
 
 use crate::error::{AuthError, Result};
 
+const CREATE_SESSION_SQL: &str =
+    "INSERT INTO zeroship.idp_sessions \
+        (user_id, auth_method, amr, acr, credential_version, idle_expires_at, abs_expires_at) \
+     SELECT id, $2, $3, $4, credential_version, \
+            NOW() + ($5::text || ' minutes')::interval, \
+            NOW() + ($6::text || ' hours')::interval \
+     FROM zeroship.users \
+     WHERE id = $1 \
+       AND ($7::BIGINT IS NULL OR credential_version = $7::BIGINT) \
+       AND disabled_at IS NULL \
+       AND anonymized_at IS NULL \
+       AND deletion_requested_at IS NULL \
+       AND deletion_scheduled_for IS NULL \
+       AND (locked_until IS NULL OR locked_until <= NOW()) \
+     RETURNING id, user_id, auth_method, amr, acr, credential_version, \
+               idle_expires_at, abs_expires_at";
+
+const VALIDATE_SESSION_SQL: &str =
+    "UPDATE zeroship.idp_sessions \
+     SET idle_expires_at = NOW() + ($2::text || ' minutes')::interval \
+     FROM zeroship.users \
+     WHERE zeroship.idp_sessions.id = $1 \
+       AND zeroship.users.id = zeroship.idp_sessions.user_id \
+       AND zeroship.idp_sessions.credential_version = zeroship.users.credential_version \
+       AND zeroship.users.disabled_at IS NULL \
+       AND zeroship.users.anonymized_at IS NULL \
+       AND zeroship.users.deletion_requested_at IS NULL \
+       AND zeroship.users.deletion_scheduled_for IS NULL \
+       AND zeroship.idp_sessions.revoked_at IS NULL \
+       AND zeroship.idp_sessions.idle_expires_at > NOW() \
+       AND zeroship.idp_sessions.abs_expires_at > NOW() \
+     RETURNING zeroship.idp_sessions.id, zeroship.idp_sessions.user_id, auth_method, amr, acr, \
+               zeroship.idp_sessions.credential_version, idle_expires_at, abs_expires_at";
+
 #[derive(Debug, Clone)]
 pub struct Session {
     pub id: uuid::Uuid,
@@ -35,16 +69,7 @@ pub struct CreateSession<'a> {
 pub async fn create(conn: &Client, params: &CreateSession<'_>) -> Result<Session> {
     let rows = conn
         .query(
-            "INSERT INTO zeroship.idp_sessions \
-                (user_id, auth_method, amr, acr, credential_version, idle_expires_at, abs_expires_at) \
-             SELECT id, $2, $3, $4, credential_version, \
-                    NOW() + ($5::text || ' minutes')::interval, \
-                    NOW() + ($6::text || ' hours')::interval \
-             FROM zeroship.users \
-             WHERE id = $1 \
-               AND ($7::BIGINT IS NULL OR credential_version = $7::BIGINT) \
-             RETURNING id, user_id, auth_method, amr, acr, credential_version, \
-                       idle_expires_at, abs_expires_at",
+            CREATE_SESSION_SQL,
             &[
                 &params.user_id,
                 &params.auth_method,
@@ -87,17 +112,7 @@ pub async fn create(conn: &Client, params: &CreateSession<'_>) -> Result<Session
 pub async fn validate(conn: &Client, id: uuid::Uuid) -> Result<Option<Session>> {
     let rows = conn
         .query(
-            "UPDATE zeroship.idp_sessions \
-             SET idle_expires_at = NOW() + ($2::text || ' minutes')::interval \
-             FROM zeroship.users \
-             WHERE zeroship.idp_sessions.id = $1 \
-               AND zeroship.users.id = zeroship.idp_sessions.user_id \
-               AND zeroship.idp_sessions.credential_version = zeroship.users.credential_version \
-               AND zeroship.idp_sessions.revoked_at IS NULL \
-               AND zeroship.idp_sessions.idle_expires_at > NOW() \
-               AND zeroship.idp_sessions.abs_expires_at > NOW() \
-             RETURNING zeroship.idp_sessions.id, zeroship.idp_sessions.user_id, auth_method, amr, acr, \
-                       zeroship.idp_sessions.credential_version, idle_expires_at, abs_expires_at",
+            VALIDATE_SESSION_SQL,
             &[
                 &id,
                 &crate::sessions::login::IDLE_MINUTES.to_string(),
@@ -286,4 +301,35 @@ pub async fn revoke(conn: &Client, id: uuid::Uuid) -> Result<()> {
     .await
     .map_err(|e| AuthError::Db(format!("sessions revoke: {e}")))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    fn asserts_hard_lifecycle(sql: &str) {
+        for column in [
+            "disabled_at",
+            "anonymized_at",
+            "deletion_requested_at",
+            "deletion_scheduled_for",
+        ] {
+            assert!(
+                sql.contains(&format!("{column} IS NULL")),
+                "missing active lifecycle predicate for {column}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_create_blocks_hard_lifecycle_and_active_lockout() {
+        asserts_hard_lifecycle(CREATE_SESSION_SQL);
+        assert!(CREATE_SESSION_SQL.contains("locked_until"));
+    }
+
+    #[test]
+    fn session_validation_blocks_hard_lifecycle_but_not_soft_lockout() {
+        asserts_hard_lifecycle(VALIDATE_SESSION_SQL);
+        assert!(!VALIDATE_SESSION_SQL.contains("locked_until"));
+    }
 }

@@ -299,9 +299,15 @@ fn build_gateway_state(auth_base: &str, app_id: Uuid, client_id: &str) -> Arc<Ga
             account_state: zeroship_core::types::AccountState::Active,
         },
     );
-    state
-        .routes
-        .update(routes, &state.rate_limiters, &state.concurrency);
+    state.routes.update_snapshot(
+        zeroship_core::types::GatewaySnapshot {
+            routes,
+            principal_lifecycle: Vec::new(),
+            family_revocations: Vec::new(),
+        },
+        &state.rate_limiters,
+        &state.concurrency,
+    );
 
     state
 }

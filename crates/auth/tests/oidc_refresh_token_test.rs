@@ -23,7 +23,7 @@ use zeroship_auth::store::users;
 use zeroship_core::auth::hash_api_key;
 use zeroship_authz::wrapper_revocation;
 
-use common::{location, pkce_challenge_s256, pkce_verifier, test_auth_config};
+use common::{dedicated_test_db, location, pkce_challenge_s256, pkce_verifier, test_auth_config};
 
 const ISSUER: &str = "https://auth.zeroship.test/oauth2";
 const REDIRECT_URI: &str = "http://127.0.0.1:9998/cb";
@@ -243,7 +243,8 @@ async fn deletion_revokes_refresh_family_even_after_cancellation() {
         .expect("successor refresh token");
     let family_id = refresh_family_id(&fx).await;
 
-    users::request_deletion(fx.db.as_ref(), fx.user_id, 30)
+    let mut deletion = dedicated_test_db(&db_url().expect("test database URL")).await;
+    users::request_deletion(&mut deletion, fx.user_id, 30)
         .await
         .expect("request account deletion")
         .expect("refresh owner exists");

@@ -4,8 +4,6 @@ use std::collections::HashSet;
 use std::net::IpAddr;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::OnceLock;
-use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
@@ -19,9 +17,7 @@ use serde_json::json;
 use uuid::Uuid;
 use zeroship_authz as authz;
 use zeroship_core::auth_provider::{AuthProvider, ProviderAuthz, VerifyTokenError};
-use zeroship_authz::wrapper_revocation::{
-    family_revoked_at, revoked_after_for, RevocationCache, REVOCATION_CACHE_MAX_ENTRIES,
-};
+use zeroship_authz::wrapper_revocation::{family_revoked_at, revoked_after_for};
 
 pub type HttpRejection = web::Error;
 
@@ -276,18 +272,16 @@ impl BearerVerifier {
         Ok(principal)
     }
 
-    async fn cached_revoked_after_for(
+    async fn platform_revoked_after_for(
         &self,
         client_id: &str,
         sub: &str,
     ) -> Result<Option<i64>, HttpRejection> {
-        let cache = control_revocation_cache();
-        let now = Instant::now();
-        if let Some(cached) = cache.get(client_id, sub, now) {
-            return Ok(cached);
-        }
-
-        let revoked_after = revoked_after_for(&self.control_pg, client_id, sub)
+        // Control already performs a user-row lookup for every bearer. Read the
+        // family marker in the same request rather than caching it: deletion
+        // cancellation must never revive an older platform token through a
+        // stale negative or earlier-positive cache entry.
+        revoked_after_for(&self.control_pg, client_id, sub)
             .await
             .map_err(|err| {
                 tracing::error!(
@@ -297,9 +291,7 @@ impl BearerVerifier {
                     "control: token revocation lookup failed"
                 );
                 unauthorized_json("revocation_check_failed")
-            })?;
-        cache.store(client_id, sub, revoked_after, now);
-        Ok(revoked_after)
+            })
     }
 
     /// Refuse a platform bearer whose token family has been revoked.
@@ -328,7 +320,7 @@ impl BearerVerifier {
         };
         let iat =
             i64::try_from(iat).map_err(|_| web::error::ErrorUnauthorized("invalid token iat"))?;
-        let revoked_after = self.cached_revoked_after_for(client_id, sub).await?;
+        let revoked_after = self.platform_revoked_after_for(client_id, sub).await?;
         if family_revoked_at(revoked_after, iat) {
             return Err(unauthorized_json("token_revoked"));
         }
@@ -352,14 +344,7 @@ impl BearerVerifier {
     ) -> Result<(), HttpRejection> {
         let rows = self
             .control_pg
-            .query(
-                "SELECT 1 FROM zeroship.users \
-                 WHERE id = $1 \
-                   AND disabled_at IS NULL \
-                   AND deletion_requested_at IS NULL \
-                   AND anonymized_at IS NULL",
-                &[&principal_id],
-            )
+            .query(ACTIVE_PRINCIPAL_SQL, &[&principal_id])
             .await
             .map_err(|err| {
                 tracing::error!(
@@ -555,18 +540,13 @@ fn jwk_thumbprint(key: &ed25519_dalek::SigningKey) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
 }
 
-const CONTROL_REVOCATION_CACHE_TTL_SECS: u64 = 10;
-
-static CONTROL_REVOCATION_CACHE: OnceLock<RevocationCache> = OnceLock::new();
-
-fn control_revocation_cache() -> &'static RevocationCache {
-    CONTROL_REVOCATION_CACHE.get_or_init(|| {
-        RevocationCache::with_ttl_and_capacity(
-            CONTROL_REVOCATION_CACHE_TTL_SECS,
-            REVOCATION_CACHE_MAX_ENTRIES,
-        )
-    })
-}
+const ACTIVE_PRINCIPAL_SQL: &str =
+    "SELECT 1 FROM zeroship.users \
+     WHERE id = $1 \
+       AND disabled_at IS NULL \
+       AND deletion_requested_at IS NULL \
+       AND deletion_scheduled_for IS NULL \
+       AND anonymized_at IS NULL";
 
 #[cfg(test)]
 mod tests {
@@ -581,5 +561,21 @@ mod tests {
             first.kid, second.kid,
             "ephemeral PAT issuers must not share one constant signing key"
         );
+    }
+
+    #[test]
+    fn active_principal_query_blocks_every_hard_lifecycle_state() {
+        for column in [
+            "disabled_at",
+            "anonymized_at",
+            "deletion_requested_at",
+            "deletion_scheduled_for",
+        ] {
+            assert!(
+                ACTIVE_PRINCIPAL_SQL.contains(&format!("{column} IS NULL")),
+                "missing active lifecycle predicate for {column}"
+            );
+        }
+        assert!(!ACTIVE_PRINCIPAL_SQL.contains("locked_until"));
     }
 }

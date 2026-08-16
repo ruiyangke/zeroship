@@ -185,11 +185,10 @@ pub fn verify_hmac_sha256_hex(key: &[u8], payload: &[u8], expected_hex: &str) ->
 /// avoid collisions while keeping the id compact (auth-sdk §6.2).
 pub const PAIRWISE_SUB_BODY_LEN: usize = 20;
 
-/// The fixed prefix every per-app pairwise subject carries (`pws_…`). The
-/// gateway-issued wrapper token's `sub` is ALWAYS one of these (auth-sdk
-/// §6.2/G4) — the self-describing-subject invariant (Batch A fix 2) lets the
-/// wrapper fast-paths reject, defense-in-depth, any wrapper whose `sub` is the
-/// global user UUID rather than a projected pairwise pseudonym.
+/// The fixed prefix every per-app pairwise subject carries. App access tokens
+/// and gateway session cookies use this shape so their verification paths can
+/// reject, as defense in depth, any credential whose subject is an unprojected
+/// global user UUID.
 pub const PAIRWISE_SUB_PREFIX: &str = "pws_";
 
 /// Whether `sub` has the EXACT shape [`derive_pairwise`] mints: the `pws_`
@@ -211,10 +210,9 @@ pub const PAIRWISE_SUB_PREFIX: &str = "pws_";
 ///   gateway itself signed — so the `sub` is already trusted; this predicate is
 ///   a defense-in-depth minter-bug containment check (reject a wrapper a mint
 ///   bug failed to project), never the thing that decides trust.
-/// - The Bearer arm NEVER consumes an inbound `pws_` as identity at all:
-///   it re-derives it with [`derive_pairwise`] from the verified global
-///   subject. There is no path where an attacker-supplied `pws_` is trusted for
-///   an authz/lookup decision on the strength of its shape.
+/// - The Bearer arm authenticates the exact pairwise subject signed by the OP,
+///   then binds the token to its client and resource audience. The shape check
+///   remains defense in depth and is never the source of trust.
 ///
 /// Anchoring on the EXACT minted shape (prefix + fixed length + base62
 /// alphabet) rather than a loose `pws_<anything>` closes the gap where a
@@ -540,10 +538,9 @@ mod tests {
     /// [`PAIRWISE_SUB_BODY_LEN`] base62 chars — so a `pws_`-SHAPED string that
     /// `derive_pairwise` could never have minted (wrong length, or a non-base62
     /// byte) is rejected. This is hardening only: at every production call site
-    /// the predicate runs DOWNSTREAM of cryptographic authentication (the
-    /// session-cookie signature) and the gateway never trusts an inbound `pws_`
-    /// for an authz/lookup decision — it always re-derives via `derive_pairwise`
-    /// from the verified global subject. But making the predicate an exact
+    /// the predicate runs DOWNSTREAM of cryptographic authentication (the OP or
+    /// session-cookie signature) and client/audience binding. Making the
+    /// predicate an exact
     /// shape-inverse closes the "any `pws_<anything>` passes" gap so the check
     /// cannot silently wave through a malformed/forged-shape subject.
     #[test]

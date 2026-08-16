@@ -114,7 +114,11 @@ The default store in `main.rs` is `InMemoryIdempotencyStore`.
 
 ## Route cache updates
 
-Gateway polls `/internal/routes` every 5 seconds. `RouteCache::update` validates each manifest again and falls back to `Manifest::passthrough()` on validation failure before compiling the route.
+Gateway polls `/internal/routes` every 5 seconds. The required
+`GatewaySnapshot` carries both routes and principal lifecycle denials. The
+gateway consumes global IDs and persisted per-app pairwise subjects and rejects
+app credentials when the snapshot is missing or stale. `RouteCache::update`
+validates each manifest before compiling the route.
 
 ## Where to start
 

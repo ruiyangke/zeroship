@@ -136,7 +136,7 @@ pub fn configure(
                     .route(web::post().to(ui::sessions::revoke)),
             )
             // ISS-12: account deletion (GDPR Art. 17). `/me/delete` begins the
-            // request (soft-disable + 30-day schedule + confirm email);
+            // request (non-authenticating state + 30-day schedule + email);
             // `/me/delete/cancel` reverses it within the grace window. The
             // irreversible erasure runs later in `cron::account_reaper`.
             .service(
@@ -334,8 +334,8 @@ async fn style() -> web::HttpResponse {
 ///   (sub-spec §5.2a). Built from `--relay-forward-mailer` (SMTP/stdout,
 ///   never Resend) with its own `AUTH_RELAY_SMTP_*` identity. A newtype so
 ///   `State<RelayForwardMailer>` is distinct from the transactional state.
-/// - `RefreshSessionPool` — bounded dedicated-session pool config for OP
-///   refresh-family transactions. The concrete compio-postgres pool is cached
+/// - `RefreshSessionPool` - bounded dedicated-session pool config for auth
+///   transactions that need an exclusive connection. The concrete pool is cached
 ///   per ntex worker thread because it is `!Send`.
 ///
 /// # Errors

@@ -326,18 +326,19 @@ pub struct DeletionRequest {
 
 /// Begin an account-deletion request (ISS-12 / GDPR Art. 17), atomically:
 ///
-///   1. soft-disable the account (`disabled_at = NOW()`) so the existing
-///      login/eligibility gates reject it immediately,
-///   2. stamp `deletion_requested_at = NOW()` and
+///   1. stamp `deletion_requested_at = NOW()` and
 ///      `deletion_scheduled_for = NOW() + grace_days`,
-///   3. bump `credential_version` so already-issued IdP sessions that bind the
-///      version stop validating (gateway invalidation is enforced separately),
-///   4. revoke every refresh family and its access-token family marker, and
+///   2. bump `credential_version` so already-issued IdP sessions that bind the
+///      version stop validating (the gateway's pulled lifecycle snapshot
+///      separately denies stateless app credentials),
+///   3. revoke every refresh family and every mapped app token family,
+///   4. revoke every app-session recovery anchor, and
 ///   5. mark every live `idp_sessions` / `gateway_sessions` row revoked.
 ///
 /// Idempotent on an already-requested row: it leaves an existing
 /// `deletion_requested_at` untouched (the schedule does not slide) but still
-/// re-asserts the disable + revocation. Returns `Ok(None)` if no such user.
+/// re-asserts the lifecycle state and revocation. Returns `Ok(None)` if no such
+/// user.
 ///
 /// External logout fanout is NOT done here, so this function stays a pure DB
 /// transaction.
@@ -346,23 +347,24 @@ pub struct DeletionRequest {
 ///
 /// Returns `AuthError::Db` on PG failure (the transaction is rolled back).
 pub async fn request_deletion(
-    conn: &Client,
+    conn: &mut Client,
     id: uuid::Uuid,
     grace_days: i64,
 ) -> Result<Option<DeletionRequest>> {
-    conn.execute("BEGIN", &[])
+    let tx = conn
+        .transaction()
         .await
         .map_err(|e| AuthError::Db(format!("request_deletion begin: {e}")))?;
-    let result = request_deletion_tx(conn, id, grace_days).await;
+    let result = request_deletion_tx(&tx, id, grace_days).await;
     match result {
         Ok(value) => {
-            conn.execute("COMMIT", &[])
+            tx.commit()
                 .await
                 .map_err(|e| AuthError::Db(format!("request_deletion commit: {e}")))?;
             Ok(value)
         }
         Err(e) => {
-            if let Err(rb) = conn.execute("ROLLBACK", &[]).await {
+            if let Err(rb) = tx.rollback().await {
                 tracing::error!(error = %rb, "request_deletion rollback failed");
             }
             Err(e)
@@ -371,7 +373,7 @@ pub async fn request_deletion(
 }
 
 async fn request_deletion_tx(
-    conn: &Client,
+    conn: &(impl GenericClient + ?Sized),
     id: uuid::Uuid,
     grace_days: i64,
 ) -> Result<Option<DeletionRequest>> {
@@ -381,8 +383,7 @@ async fn request_deletion_tx(
     let rows = conn
         .query(
             "UPDATE zeroship.users \
-             SET disabled_at = COALESCE(disabled_at, NOW()), \
-                 deletion_requested_at = COALESCE(deletion_requested_at, NOW()), \
+             SET deletion_requested_at = COALESCE(deletion_requested_at, NOW()), \
                  deletion_scheduled_for = COALESCE( \
                      deletion_scheduled_for, NOW() + make_interval(days => $2::int)), \
                  credential_version = credential_version + 1, \
@@ -400,6 +401,7 @@ async fn request_deletion_tx(
     revoke_user_refresh_families_in_transaction(conn, id, "account_deletion")
         .await
         .map_err(|e| AuthError::Db(format!("request_deletion revoke refresh families: {e}")))?;
+    revoke_user_app_credentials_in_transaction(conn, id).await?;
     let email: String = row.get("email");
     let name: String = row.get("name");
     let scheduled_for: chrono::DateTime<chrono::Utc> = row.get("deletion_scheduled_for");
@@ -437,11 +439,45 @@ async fn request_deletion_tx(
     }))
 }
 
+async fn revoke_user_app_credentials_in_transaction(
+    conn: &(impl GenericClient + ?Sized),
+    user_id: uuid::Uuid,
+) -> Result<()> {
+    conn.execute(
+        "WITH stamp AS ( \
+             SELECT clock_timestamp() AS revoked_after \
+         ), revoked_anchors AS ( \
+             UPDATE zeroship.app_session_anchors \
+             SET revoked_at = (SELECT revoked_after FROM stamp) \
+             WHERE global_user_id = $1 AND revoked_at IS NULL \
+             RETURNING 1 \
+         ), families AS ( \
+             SELECT 'zeroship-cli'::text AS client_id, \
+                    $1::text AS sub, revoked_after \
+             FROM stamp \
+             UNION ALL \
+             SELECT aui.app_client_id, aui.pairwise_sub, stamp.revoked_after \
+             FROM zeroship.app_user_identities aui CROSS JOIN stamp \
+             WHERE aui.global_user_id = $1 \
+         ) \
+         INSERT INTO zeroship.token_revocations (client_id, sub, revoked_after) \
+         SELECT client_id, sub, revoked_after FROM families \
+         ON CONFLICT (client_id, sub) \
+           DO UPDATE SET revoked_after = \
+             GREATEST(zeroship.token_revocations.revoked_after, EXCLUDED.revoked_after)",
+        &[&user_id],
+    )
+    .await
+    .map(|_| ())
+    .map_err(|e| AuthError::Db(format!("request_deletion revoke app credentials: {e}")))
+}
+
 /// Cancel an in-flight account-deletion request within the grace window
-/// (ISS-12): clear `disabled_at`, `deletion_requested_at`, and
-/// `deletion_scheduled_for`, re-enabling the account. Returns `true` if a
-/// pending request was cancelled, `false` if there was nothing to cancel
-/// (no request in flight, or the account is already anonymized — terminal).
+/// (ISS-12): clear `deletion_requested_at` and `deletion_scheduled_for`.
+/// `disabled_at` is an independent administrative state and is not changed.
+/// Returns `true` if a pending request was cancelled, `false` if there was
+/// nothing to cancel (no request in flight, or the account is already
+/// anonymized and terminal).
 ///
 /// Sessions are NOT restored — the user signs in fresh, exactly as after a
 /// password reset.
@@ -453,8 +489,7 @@ pub async fn cancel_deletion(conn: &Client, id: uuid::Uuid) -> Result<bool> {
     let n = conn
         .execute(
             "UPDATE zeroship.users \
-             SET disabled_at = NULL, \
-                 deletion_requested_at = NULL, \
+             SET deletion_requested_at = NULL, \
                  deletion_scheduled_for = NULL, \
                  updated_at = NOW() \
              WHERE id = $1 \

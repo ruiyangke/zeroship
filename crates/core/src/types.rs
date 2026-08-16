@@ -199,10 +199,9 @@ pub struct RouteEntry {
     /// stays loadable.
     #[serde(default)]
     pub oauth_client_id: Option<String>,
-    /// Per-app apex origin used for pairwise/relay subject scoping
-    /// (`derive_pairwise(sub, sector_identifier)`). `Option`: `None`
-    /// until provisioned, in which case the pairwise projection
-    /// hard-fails closed (no `pws_` derivation, no header emitted).
+    /// Per-app apex origin used by auth access-token issuance and gateway
+    /// browser-session minting for pairwise subject scoping. `Option`: `None`
+    /// until the OAuth client is fully provisioned; minting then fails closed.
     #[serde(default)]
     pub sector_identifier: Option<String>,
     /// Current spend-enforcement state for the app, JOINed from
@@ -229,6 +228,103 @@ pub type VersionMap = HashMap<Uuid, AppVersionInfo>;
 
 /// Map of app id → route entry for fast lookup.
 pub type RouteMap = HashMap<Uuid, RouteEntry>;
+
+/// Authentication lifecycle state pushed to gateways with the route table.
+///
+/// Gateways validate app credentials offline, so this is the control-plane
+/// answer to account erasure and administrative disablement without adding a
+/// database lookup to every request. `locked_until` is deliberately absent:
+/// anonymous failed-login attempts can set it, so using it to invalidate live
+/// credentials would let an attacker force-log-out another user.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatewayPrincipalLifecycle {
+    pub user_id: Uuid,
+    pub disabled: bool,
+    pub anonymized: bool,
+    pub deletion_requested: bool,
+    pub deletion_scheduled: bool,
+    /// Pairwise subjects already issued for this principal. Persisted mappings
+    /// keep denials valid after a route is removed and avoid a users-by-routes
+    /// expansion at every gateway pull.
+    pub pairwise_subjects: Vec<String>,
+}
+
+impl GatewayPrincipalLifecycle {
+    #[must_use]
+    pub fn blocks_authentication(&self) -> bool {
+        self.disabled
+            || self.anonymized
+            || self.deletion_requested
+            || self.deletion_scheduled
+    }
+
+    #[must_use]
+    pub fn disabled(user_id: Uuid, pairwise_subjects: Vec<String>) -> Self {
+        Self {
+            user_id,
+            disabled: true,
+            anonymized: false,
+            deletion_requested: false,
+            deletion_scheduled: false,
+            pairwise_subjects,
+        }
+    }
+
+    #[must_use]
+    pub fn anonymized(user_id: Uuid, pairwise_subjects: Vec<String>) -> Self {
+        Self {
+            user_id,
+            disabled: false,
+            anonymized: true,
+            deletion_requested: false,
+            deletion_scheduled: false,
+            pairwise_subjects,
+        }
+    }
+
+    #[must_use]
+    pub fn deletion_requested(user_id: Uuid, pairwise_subjects: Vec<String>) -> Self {
+        Self {
+            user_id,
+            disabled: false,
+            anonymized: false,
+            deletion_requested: true,
+            deletion_scheduled: false,
+            pairwise_subjects,
+        }
+    }
+
+    #[must_use]
+    pub fn deletion_scheduled(user_id: Uuid, pairwise_subjects: Vec<String>) -> Self {
+        Self {
+            user_id,
+            disabled: false,
+            anonymized: false,
+            deletion_requested: false,
+            deletion_scheduled: true,
+            pairwise_subjects,
+        }
+    }
+}
+
+/// Durable token-family cutoff pushed to gateways with the route table.
+/// A credential is rejected when its whole-second `iat` predates this value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatewayFamilyRevocation {
+    pub client_id: String,
+    pub subject: String,
+    pub revoked_after: i64,
+}
+
+/// Complete gateway pull payload. The lifecycle field is required on the wire:
+/// accepting a route-only response would silently turn account invalidation
+/// off while still advancing route-sync freshness.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewaySnapshot {
+    pub routes: RouteMap,
+    pub principal_lifecycle: Vec<GatewayPrincipalLifecycle>,
+    pub family_revocations: Vec<GatewayFamilyRevocation>,
+}
 
 /// Per-application usage counters for a billing interval.
 ///

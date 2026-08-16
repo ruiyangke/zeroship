@@ -168,8 +168,8 @@ pub async fn get_routes(
     if let Some(resp) = check_auth(&req, &state) {
         return resp;
     }
-    match state.registry.get_routes().await {
-        Ok(routes) => web::HttpResponse::Ok().json(&routes),
+    match state.registry.get_gateway_snapshot().await {
+        Ok(snapshot) => web::HttpResponse::Ok().json(&snapshot),
         Err(e) => web::HttpResponse::InternalServerError()
             .json(&serde_json::json!({"error": e.to_string()})),
     }

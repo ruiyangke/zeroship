@@ -31,6 +31,7 @@ struct MintResponse {
 struct Fixture {
     srv: ntex::web::test::TestServer,
     base_url: String,
+    db_url: String,
     admin_pg: Arc<compio_postgres::Client>,
     issuer: Arc<Issuer>,
     http: cyper::Client,
@@ -86,7 +87,8 @@ impl Fixture {
         let cfg_state = cfg.clone();
         let pg_state = auth_pg.clone();
         let issuer_state = issuer.clone();
-        let refresh_pool_state = zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url, 4);
+        let refresh_pool_state =
+            zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url.clone(), 4);
         let srv = web::test::server(move || {
             let cfg_state = cfg_state.clone();
             let pg_state = pg_state.clone();
@@ -108,6 +110,7 @@ impl Fixture {
         Some(Self {
             srv,
             base_url,
+            db_url,
             admin_pg,
             issuer,
             http: cyper::Client::new(),
@@ -373,5 +376,87 @@ async fn platform_mint_rejects_the_shared_control_key_over_http() {
         .await;
 
     assert_eq!(status, 401, "platform mint response: {raw_body}");
+    drop(fx.srv);
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn platform_mint_holds_the_user_lock_until_the_token_is_signed() {
+    let Some(fx) = Fixture::boot().await else {
+        zeroship_test_support::skip(
+            "[platform_token_mint] skip (need AUTH_DB_URL or CONTROL_TEST_DB)",
+        );
+        return;
+    };
+    let principal_id = fx.create_principal(&["apps:read"]).await;
+    let (mut blocker, blocker_connection) =
+        compio_postgres::connect(&fx.db_url, compio_postgres::NoTls)
+            .await
+            .expect("connect lock blocker");
+    compio::runtime::spawn(async move {
+        let _ = blocker_connection.run().await;
+    })
+    .detach();
+    let blocker_tx = blocker.transaction().await.expect("begin lock blocker");
+    blocker_tx
+        .execute(
+            "SELECT pg_advisory_xact_lock(2052390913::INT4, hashtext($1::text))",
+            &[&principal_id.to_string()],
+        )
+        .await
+        .expect("hold user lock");
+
+    let url = format!("{}/internal/platform-token", fx.base_url);
+    let request_body = serde_json::to_vec(&mint_body(
+        principal_id,
+        &["apps:read"],
+        ACCESS_TOKEN_TTL_SECS,
+    ))
+    .expect("encode mint request");
+    let mint_task = compio::runtime::spawn(async move {
+        let response = cyper::Client::new()
+            .request(http::Method::POST, url)
+            .expect("build platform mint request")
+            .header("content-type", "application/json")
+            .expect("content type")
+            .header("authorization", format!("Bearer {TEST_PLATFORM_MINT_KEY}"))
+            .expect("authorization")
+            .body(request_body)
+            .send()
+            .await
+            .expect("send platform mint request");
+        response.status().as_u16()
+    });
+
+    let mut observed_wait = false;
+    for _ in 0..200 {
+        let waiting: bool = fx
+            .admin_pg
+            .query_one(
+                "SELECT EXISTS ( \
+                   SELECT 1 FROM pg_stat_activity \
+                   WHERE datname = current_database() \
+                     AND wait_event_type = 'Lock' \
+                     AND wait_event = 'advisory' \
+                     AND query LIKE 'SELECT pg_advisory_xact_lock%')",
+                &[],
+            )
+            .await
+            .expect("inspect platform mint wait")
+            .get(0);
+        if waiting {
+            observed_wait = true;
+            break;
+        }
+        compio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(
+        observed_wait,
+        "platform mint signed without waiting for the user lifecycle lock"
+    );
+    blocker_tx.rollback().await.expect("release user lock");
+    assert_eq!(mint_task.await.expect("join platform mint"), 200);
+
+    fx.delete_principal(principal_id).await;
     drop(fx.srv);
 }

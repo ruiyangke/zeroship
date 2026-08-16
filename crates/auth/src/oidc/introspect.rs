@@ -16,6 +16,21 @@ use crate::oidc::refresh::{
 use crate::oidc::{AccessTokenClaims, Issuer};
 use zeroship_authz::wrapper_revocation;
 
+const ACCESS_PRINCIPAL_ACTIVE_SQL: &str =
+    "SELECT 1 \
+     FROM zeroship.users owner \
+     WHERE owner.disabled_at IS NULL \
+       AND owner.anonymized_at IS NULL \
+       AND owner.deletion_requested_at IS NULL \
+       AND owner.deletion_scheduled_for IS NULL \
+       AND (owner.id::text = $1 OR EXISTS ( \
+           SELECT 1 FROM zeroship.app_user_identities aui \
+           WHERE aui.global_user_id = owner.id \
+             AND aui.pairwise_sub = $1 \
+             AND aui.revoked_at IS NULL \
+       )) \
+     LIMIT 1";
+
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(web::resource("/introspect").route(web::post().to(introspect_post)));
 }
@@ -123,6 +138,20 @@ async fn introspect_access(
     if revoked {
         return Ok(Some(json!({ "active": false })));
     }
+    let rows = db
+        .query(ACCESS_PRINCIPAL_ACTIVE_SQL, &[&claims.sub])
+        .await
+        .map_err(|err| {
+            tracing::error!(
+                error = %err,
+                sub = %claims.sub,
+                "introspection access-token lifecycle lookup failed"
+            );
+            OAuthError::server_error("principal lifecycle unavailable")
+        })?;
+    if rows.is_empty() {
+        return Ok(Some(json!({ "active": false })));
+    }
     Ok(Some(access_response(claims)))
 }
 
@@ -166,3 +195,23 @@ fn access_response(claims: AccessTokenClaims) -> Value {
     })
 }
 
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn access_introspection_uses_hard_lifecycle_without_soft_lockout() {
+        for column in [
+            "disabled_at",
+            "anonymized_at",
+            "deletion_requested_at",
+            "deletion_scheduled_for",
+        ] {
+            assert!(
+                ACCESS_PRINCIPAL_ACTIVE_SQL.contains(&format!("{column} IS NULL")),
+                "missing active lifecycle predicate for {column}"
+            );
+        }
+        assert!(!ACCESS_PRINCIPAL_ACTIVE_SQL.contains("locked_until"));
+    }
+}
