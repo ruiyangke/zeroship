@@ -57,30 +57,56 @@ fn a_backfill_reading_a_dropped_column_is_refused() {
     );
 }
 
+/// Assert the op and the column. The three sites below are all `backfill` on the
+/// same table, so the column name is the only thing separating the write case
+/// from the cursor and filter cases - and the op name, added when this rule was
+/// taught to identify itself, is what separates them from every other rule.
+///
+/// The cursor and filter cases share a message legitimately: same op, same
+/// column, different position in the statement. That is as far as the text goes.
+fn expect_backfill_refusal(ops: &str, column: &str, what: &str) {
+    let refusal = verdict(ops).expect_err(what);
+    let expected = format!("this backfill names column {column:?}");
+    assert!(
+        refusal.contains(&expected),
+        "{expected:?} is missing, so another rule or another column is satisfying \
+         this test: {refusal}"
+    );
+}
+
 #[test]
 fn a_backfill_writing_a_dropped_column_is_refused() {
-    verdict(&format!(
-        r#"{A},{{"op":"dropColumn","table":"a","column":"w"}},{}"#,
-        backfill("w", "v", "c0")
-    ))
-    .expect_err("the backfill writes a column the drop removed");
+    expect_backfill_refusal(
+        &format!(
+            r#"{A},{{"op":"dropColumn","table":"a","column":"w"}},{}"#,
+            backfill("w", "v", "c0")
+        ),
+        "w",
+        "the backfill writes a column the drop removed",
+    );
 }
 
 #[test]
 fn a_backfill_cursoring_on_a_dropped_column_is_refused() {
-    verdict(&format!(
-        r#"{A},{{"op":"dropColumn","table":"a","column":"v"}},{}"#,
-        backfill("w", "c0", "v")
-    ))
-    .expect_err("the cursor column was dropped");
+    expect_backfill_refusal(
+        &format!(
+            r#"{A},{{"op":"dropColumn","table":"a","column":"v"}},{}"#,
+            backfill("w", "c0", "v")
+        ),
+        "v",
+        "the cursor column was dropped",
+    );
 }
 
 #[test]
 fn a_backfill_filtering_on_a_dropped_column_is_refused() {
-    verdict(&format!(
-        r#"{A},{{"op":"dropColumn","table":"a","column":"v"}},{{"op":"backfill","table":"a","name":"bf","cursorColumns":["c0"],"cursorStability":{{"mode":"guardUpdates"}},"batchSize":100,"set":{{"w":{{"node":"literal","value":1}}}},"filter":{{"node":"binOp","op":"gt","lhs":{{"node":"colRef","name":"v"}},"rhs":{{"node":"literal","value":0}}}}}}"#
-    ))
-    .expect_err("the filter reads a column the drop removed");
+    expect_backfill_refusal(
+        &format!(
+            r#"{A},{{"op":"dropColumn","table":"a","column":"v"}},{{"op":"backfill","table":"a","name":"bf","cursorColumns":["c0"],"cursorStability":{{"mode":"guardUpdates"}},"batchSize":100,"set":{{"w":{{"node":"literal","value":1}}}},"filter":{{"node":"binOp","op":"gt","lhs":{{"node":"colRef","name":"v"}},"rhs":{{"node":"literal","value":0}}}}}}"#
+        ),
+        "v",
+        "the filter reads a column the drop removed",
+    );
 }
 
 // ---------------------------------------------------------------------------
