@@ -139,36 +139,6 @@ legend { padding: 0 0.4rem; color: var(--ink-2); font-weight: 600; font-size: 0.
 .dim { color: var(--ink-faint); }
 .small { font-size: 0.78rem; }
 
-/* ── shell / nav ───────────────────────────────────────────────────────
-   The frame itself is AppShell's (see components/Shell.tsx); what is left
-   here is the chrome of the things the app puts INSIDE the header band. The
-   `.shell`, `.nav`, `.nav-links` and `.content` rules that used to sit here
-   were the hand-rolled frame from before AppShell, matched by nothing since,
-   and their `.nav-links a.active` rule in particular described a nav state
-   this app stopped spelling that way. */
-.brand { font-weight: 700; color: var(--ink); font-size: 1rem; letter-spacing: -0.01em; }
-.brand:hover { text-decoration: none; color: var(--accent); }
-.unread-badge {
-  display: inline-flex;
-  margin-left: 0.3rem;
-  background: var(--red);
-  color: #fff;
-  border-radius: 999px;
-  padding: 0.02rem 0.4rem;
-  font-size: 0.68rem;
-  font-weight: 700;
-}
-.user-chip { font-size: 0.8rem; color: var(--ink-2); white-space: nowrap; }
-.user-chip.warn { color: var(--amber); }
-.user-chip em { font-style: normal; color: var(--ink-faint); }
-
-/* ── generic states ──────────────────────────────────────────────────── */
-.state { padding: 1.4rem 0.4rem; color: var(--ink-2); }
-.state-hint { color: var(--ink-faint); font-size: 0.85rem; margin: 0 0 0.5rem; }
-.state-loading { display: flex; align-items: center; gap: 0.6rem; }
-@keyframes spin { to { transform: rotate(360deg); } }
-.field-error { color: var(--red); font-size: 0.8rem; margin: 0.2rem 0; }
-
 /* ── buttons ─────────────────────────────────────────────────────────── */
 .btn {
   border: 1px solid var(--line-2);
@@ -481,54 +451,6 @@ tbody tr:hover { background: var(--surface-2); }
 .is-refetching {
   opacity: 0.55;
   transition: opacity 120ms ease-out;
-}
-
-/* ---------------------------------------------------------------------------
-   Shell layers.
-
-   Reviewed against a measured layout: at the time that was header 1440 /
-   sidebar 256 / main 1184, no document overflow, table contained in its own
-   scroller. The frame was right and every layer inside it was unstyled. The
-   rail is gone since, so main now has the whole 1440 and the nav sits in the
-   header band.
-   --------------------------------------------------------------------------- */
-
-/* The header nav. These were rail rows in a 240px column and are now four
-   links in the header band, so they are sized as links rather than as full-row
-   targets: tighter padding, secondary ink, and no growing to fill a width they
-   no longer have. The hover/current chip stays -- it is what made the page you
-   are ON distinguishable from the ones you are not, which bare anchors never
-   were. */
-.nav-link {
-  display: inline-flex;
-  align-items: center;
-  padding: 0.3rem 0.55rem;
-  border-radius: 0.5rem;
-  color: var(--ink-2);
-  text-decoration: none;
-  font-size: 0.85rem;
-  font-weight: 500;
-  line-height: 1.3;
-  white-space: nowrap;
-}
-.nav-link:hover {
-  color: var(--ink);
-  background: color-mix(in oklab, currentColor 8%, transparent);
-  text-decoration: none;
-}
-/* Bound to the ACCESSIBLE state, not a separate `active` class, so the
-   styling and what a screen reader announces cannot drift apart. */
-.nav-link[aria-current="page"] {
-  color: var(--ink);
-  background: color-mix(in oklab, currentColor 12%, transparent);
-  font-weight: 600;
-}
-
-/* Main had no padding, so the heading and the search field ran flush into
-   both viewport edges -- the search input in particular reached x=1440 with
-   nothing between it and the window. */
-[data-slot="app-shell-main"] {
-  padding: 1.25rem 1.5rem 2rem;
 }
 
 /* Vertical rhythm. The h1, the filter row and the table were stacked with no

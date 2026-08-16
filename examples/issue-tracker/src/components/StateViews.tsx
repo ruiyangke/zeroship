@@ -11,10 +11,17 @@ import {
 } from "@zeroship/ui";
 
 import { errorCode, errorMessage, isUnauthenticated } from "./rpc";
+import { Hint } from "./AppPrimitives";
 
 export function Loading({ label = "Loading..." }: { label?: string }) {
   return (
-    <Stack className="state state-loading" gap={2} align="center" role="status" aria-live="polite">
+    <Stack
+      className="px-2 py-6 text-ink-secondary"
+      gap={2}
+      align="center"
+      role="status"
+      aria-live="polite"
+    >
       <Spinner />
       <span>{label}</span>
     </Stack>
@@ -43,10 +50,10 @@ export function EmptyState({
 }) {
   if (tone === "inline") {
     return (
-      <p className="state-hint small">
+      <Hint>
         {title}
         {hint ? <> {hint}</> : null}
-      </p>
+      </Hint>
     );
   }
   // Ergonomic props only. The block composes rather than suppresses, so

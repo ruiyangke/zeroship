@@ -3,7 +3,6 @@ import { Link, NavLink } from "react-router-dom";
 import { AppShell, Button, Cluster } from "@zeroship/ui";
 
 import { UnreadBadge, UserChip } from "./SessionChips";
-import type { CurrentUser } from "./types";
 import type { Session } from "./session";
 
 /**
@@ -69,7 +68,10 @@ export function Shell({
       <AppShell.Header>
         <Cluster justify="between" align="center" style={{ inlineSize: "100%" }}>
           <Cluster align="center" gap={4}>
-            <Link to="/issues" className="brand">
+            <Link
+              to="/issues"
+              className="text-lg font-bold tracking-[-0.01em] text-ink no-underline hover:text-accent-strong hover:no-underline"
+            >
               Issue Tracker
             </Link>
             {/* asChild: the nav landmark IS the row, so there is no wrapper
@@ -80,7 +82,7 @@ export function Shell({
                   <NavLink
                     key={link.href}
                     to={link.href}
-                    className="nav-link"
+                    className="inline-flex items-center whitespace-nowrap rounded-lg px-2 py-1 text-md leading-[1.3] font-medium text-ink-secondary no-underline hover:bg-current/8 hover:text-ink hover:no-underline aria-[current=page]:bg-current/12 aria-[current=page]:font-semibold aria-[current=page]:text-ink"
                     // NavLink sets aria-current="page" itself, so the styling
                     // rule and the accessible state cannot drift apart -- and
                     // the app no longer threads a route name down here to work
@@ -113,7 +115,7 @@ export function Shell({
         </Cluster>
       </AppShell.Header>
 
-      <AppShell.Main>{children}</AppShell.Main>
+      <AppShell.Main className="pt-5!">{children}</AppShell.Main>
     </AppShell>
   );
 }

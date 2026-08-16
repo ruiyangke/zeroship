@@ -6,11 +6,9 @@
 // orphan QuickSearchBox became. The rail is gone now and the links are back in
 // the header, but they did NOT come back here: navigation lives in Shell.tsx,
 // which is the one place that knows what the frame is.
-import { useEffect, useState } from "react";
 import { useAuth } from "@zeroship/auth/react";
 import { Button, Menu } from "@zeroship/ui";
-import { errorMessage, isUnauthenticated, toPromise } from "./rpc";
-import type { CurrentUser } from "./types";
+import { errorMessage } from "./rpc";
 import type { Session } from "./session";
 import { useUnreadNotificationCount } from "../lib/queries";
 
@@ -47,7 +45,7 @@ function SignInAction() {
 
 export function UserChip({ session }: { session: Session }) {
   if (session.status === "loading") {
-    return <span className="user-chip dim">checking session...</span>;
+    return <span className="dim whitespace-nowrap text-base text-ink-muted">checking session...</span>;
   }
   if (session.status === "out") {
     return <SignInAction />;
@@ -57,7 +55,7 @@ export function UserChip({ session }: { session: Session }) {
     // "nobody", and offering sign-in here would explain an empty page with a
     // reason that is not the reason.
     return (
-      <span className="user-chip warn" title={errorMessage(session.error)}>
+      <span className="warn whitespace-nowrap text-base text-warning" title={errorMessage(session.error)}>
         session unavailable
       </span>
     );
@@ -96,9 +94,9 @@ function AccountMenu({
           the name reads as text you can press rather than a second action
           competing with the primary one. */}
       <Menu.Trigger render={<Button variant="plain" size="sm" />}>
-        <span className="user-chip" title={email ?? undefined}>
+        <span className="whitespace-nowrap text-base text-ink-secondary" title={email ?? undefined}>
           {name}
-          {!provisioned ? <em> (no activity yet)</em> : null}
+          {!provisioned ? <em className="text-ink-muted not-italic"> (no activity yet)</em> : null}
         </span>
       </Menu.Trigger>
       <Menu.Portal>
@@ -141,5 +139,9 @@ export function UnreadBadge({ signedIn }: { signedIn: boolean }) {
   const count = signedIn && query.isSuccess ? query.data.count : null;
 
   if (count === null || count === 0) return null;
-  return <span className="unread-badge">{count}</span>;
+  return (
+    <span className="ml-1 inline-flex rounded-full bg-danger px-2 text-xs font-bold text-white">
+      {count}
+    </span>
+  );
 }
