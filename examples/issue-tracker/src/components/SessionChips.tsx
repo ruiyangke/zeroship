@@ -7,7 +7,7 @@
 // the header, but they did NOT come back here: navigation lives in Shell.tsx,
 // which is the one place that knows what the frame is.
 import { useAuth } from "@zeroship/auth/react";
-import { Menu } from "@zeroship/ui";
+import { Menu } from "../ui/Menu";
 import { errorMessage } from "./rpc";
 import type { Session } from "./session";
 import { useUnreadNotificationCount } from "../lib/queries";
