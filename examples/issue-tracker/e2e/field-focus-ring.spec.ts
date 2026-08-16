@@ -104,7 +104,15 @@ test("the app's own fields wear the design system's focus ring", async ({ page, 
   await page.locator("input[data-slot~=\"input-control\"]").first().waitFor();
   const ds = await shadows(page, "[data-slot~=\"input\"]", "input[data-slot~=\"input-control\"]");
   expect(ds.rest, "the reference Input actually changes on focus").not.toBe(ds.focus);
-  expect(ds.focus, "and specifically paints the 3px halo").toMatch(/0px 0px 0px 3px/);
+  // A visible ring exists -- but its WIDTH is the theme's to choose. This
+  // asserted /0px 0px 0px 3px/ until the tracker got its own theme, which
+  // paints a tighter 2px ring; the spec then failed for a design decision
+  // rather than a defect. Every check below compares an app field to this
+  // same live reference, so parity is what the spec actually guards and the
+  // exact geometry never needs restating here.
+  expect(ds.focus, "and paints a ring of some visible width").toMatch(
+    /0px 0px 0px [1-9]\d*px/,
+  );
 
   // 1. The comment composer -- a contenteditable, so focus lands on a CHILD of
   //    the shell. A rule keyed on the shell itself never fires, which is the

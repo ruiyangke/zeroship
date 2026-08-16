@@ -95,8 +95,17 @@ test("the app adds no edge of its own to a design-system field", async ({ page, 
   // so with a pointer still over the field a broken guard leaves the hover
   // colour in place and "something changed" would pass while the ring is
   // absent.
+  // What separates the ring from the hover tint is that the ring is an OUTER
+  // shadow: the wrapper's border and any hover treatment are inset, so a
+  // non-inset component with real spread can only be the focus ring.
+  //
+  // This matched /0px 0px 0px 3px/ until the tracker got its own theme, whose
+  // ring is 2px. Pinning the width made the spec assert a specific design
+  // rather than the property it cares about, and it failed on a deliberate
+  // change. Every theme's focus ring is an outer ring; not every theme's is
+  // three pixels.
   expect(
     focused.wrapperShadow,
-    "the ring is the focus ring (a 3px halo), not the hover hairline",
-  ).toMatch(/0px 0px 0px 3px/);
+    "the ring is the focus ring (an outer ring), not the hover hairline",
+  ).toMatch(/0px 0px 0px [1-9]\d*px(?!\s+inset)/);
 });
