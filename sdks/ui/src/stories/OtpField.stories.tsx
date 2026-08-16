@@ -148,7 +148,7 @@ export const AllSizes: Story = {
     await userEvent.click(firstCell);
     await userEvent.type(firstCell, "123456");
     await waitFor(() =>
-      expect(firstCell.closest(".zs-otp-field")).toHaveAttribute(
+      expect(firstCell.closest("[data-slot~=otp-field]")).toHaveAttribute(
         "data-complete",
         "",
       ),

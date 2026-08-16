@@ -2,17 +2,17 @@
  * StatsBand — a horizontal band of headline metrics.
  *
  * Anatomy:
- *   [data-slot="stats-band"]                  — the <section>; generous vertical
+ *   [data-slot~="stats-band"]                  — the <section>; generous vertical
  *                                     padding, NO heavy background (composable)
- *   [data-slot="stats-band-header"]          — optional eyebrow + title + desc band
- *   [data-slot="stats-band-eyebrow"]         — small label above the title (accent)
- *   [data-slot="stats-band-title"]           — the optional section lead-in <h2>
- *   [data-slot="stats-band-description"]      — muted lead-in <p>
- *   [data-slot="stats-band-items"]            — the responsive Grid of stats
- *   [data-slot="stats-band-stat"]             — each stat cell (a group)
- *   [data-slot="stats-band-stat-value"]       — the large metric value (plain text)
- *   [data-slot="stats-band-stat-label"]       — the muted label (plain text)
- *   [data-slot="stats-band-stat-description"] — the optional small supporting line
+ *   [data-slot~="stats-band-header"]          — optional eyebrow + title + desc band
+ *   [data-slot~="stats-band-eyebrow"]         — small label above the title (accent)
+ *   [data-slot~="stats-band-title"]           — the optional section lead-in <h2>
+ *   [data-slot~="stats-band-description"]      — muted lead-in <p>
+ *   [data-slot~="stats-band-items"]            — the responsive Grid of stats
+ *   [data-slot~="stats-band-stat"]             — each stat cell (a group)
+ *   [data-slot~="stats-band-stat-value"]       — the large metric value (plain text)
+ *   [data-slot~="stats-band-stat-label"]       — the muted label (plain text)
+ *   [data-slot~="stats-band-stat-description"] — the optional small supporting line
  *
  * Layout discipline:
  *   - The section sets only its vertical rhythm; the composed Container owns
@@ -32,7 +32,7 @@
  * Motion: none of its own, so there is nothing to disable.
  */
 
-[data-slot="stats-band"] {
+[data-slot~="stats-band"] {
   /* Local single-knob custom property (the house idiom, cf.
      --zeroship-feature-grid-header-measure): the centered header's readable measure. */
   --zeroship-stats-band-header-measure: 40rem;
@@ -48,26 +48,26 @@
 }
 
 /* ─── Header — optional eyebrow + title + description ─────────────────────── */
-[data-slot="stats-band-header"] {
+[data-slot~="stats-band-header"] {
   max-inline-size: var(--zeroship-stats-band-header-measure);
   /* Tighter than the airier bands' space-9 — the proof bar's header sits
      closer to its values so the strip reads as one compact unit. */
   margin-block-end: var(--zeroship-space-7);
 }
 
-[data-slot="stats-band"][data-align="center"] [data-slot="stats-band-header"] {
+[data-slot~="stats-band"][data-align="center"] [data-slot~="stats-band-header"] {
   margin-inline: auto;
   text-align: center;
 }
 
-[data-slot="stats-band"][data-align="start"] [data-slot="stats-band-header"] {
+[data-slot~="stats-band"][data-align="start"] [data-slot~="stats-band-header"] {
   text-align: start;
 }
 
-/* The eyebrow styling is the shared `[data-slot="cta-eyebrow"], [data-slot="faq-eyebrow"], [data-slot="feature-grid-eyebrow"], [data-slot="hero-eyebrow"], [data-slot="section-header-eyebrow"], [data-slot="stats-band-eyebrow"]` (defined once in
+/* The eyebrow styling is the shared `[data-slot~="cta-eyebrow"], [data-slot~="faq-eyebrow"], [data-slot~="feature-grid-eyebrow"], [data-slot~="hero-eyebrow"], [data-slot~="section-header-eyebrow"], [data-slot~="stats-band-eyebrow"]` (defined once in
    _section-tone.css); this BEM hook remains only as a stable consumer target. */
 
-[data-slot="stats-band-title"] {
+[data-slot~="stats-band-title"] {
   margin-block: 0;
   /* Marketing display-3 — a confident section <h2>. */
   font-size: var(--zeroship-text-display-3-size);
@@ -78,7 +78,7 @@
   text-wrap: balance;
 }
 
-[data-slot="stats-band-description"] {
+[data-slot~="stats-band-description"] {
   margin-block: 0;
   font-size: var(--zeroship-text-title-3-size);
   line-height: var(--zeroship-text-title-3-line);
@@ -88,20 +88,20 @@
 }
 
 /* ─── Stat — value → label → description ──────────────────────────────────── */
-[data-slot="stats-band-stat"] {
+[data-slot~="stats-band-stat"] {
   display: flex;
   flex-direction: column;
   gap: var(--zeroship-space-1);
 }
 
 /* Centered band: center each stat's text. */
-[data-slot="stats-band"][data-align="center"] [data-slot="stats-band-stat"] {
+[data-slot~="stats-band"][data-align="center"] [data-slot~="stats-band-stat"] {
   align-items: center;
   text-align: center;
 }
 
 /* Start band: hug the inline-start edge. */
-[data-slot="stats-band"][data-align="start"] [data-slot="stats-band-stat"] {
+[data-slot~="stats-band"][data-align="start"] [data-slot~="stats-band-stat"] {
   align-items: flex-start;
   text-align: start;
 }
@@ -122,7 +122,7 @@
  * mirrors --zeroship-bp-md (custom properties cannot appear in an @media query); the
  * token name is the documented source. */
 @media (min-width: 48rem) {
-  [data-slot="stats-band-stat"] {
+  [data-slot~="stats-band-stat"] {
     border-inline-start: var(--zeroship-selection-hairline) solid var(--zeroship-separator);
     /* Pad the value off the rule so the hairline sits in the Grid gutter
        rather than crowding the number. */
@@ -133,9 +133,9 @@
      grid-auto-flow column index. We can't know N in CSS, so the band stamps
      the column count on the items wrapper (data-columns); the :nth-child
      reset keys off it. The 1st, (N+1)th, … stats start a row → no rule. */
-  [data-slot="stats-band-items"][data-columns="2"] [data-slot="stats-band-stat"]:nth-child(2n + 1),
-  [data-slot="stats-band-items"][data-columns="3"] [data-slot="stats-band-stat"]:nth-child(3n + 1),
-  [data-slot="stats-band-items"][data-columns="4"] [data-slot="stats-band-stat"]:nth-child(4n + 1) {
+  [data-slot~="stats-band-items"][data-columns="2"] [data-slot~="stats-band-stat"]:nth-child(2n + 1),
+  [data-slot~="stats-band-items"][data-columns="3"] [data-slot~="stats-band-stat"]:nth-child(3n + 1),
+  [data-slot~="stats-band-items"][data-columns="4"] [data-slot~="stats-band-stat"]:nth-child(4n + 1) {
     border-inline-start: 0;
     padding-inline-start: 0;
   }
@@ -145,7 +145,7 @@
    marketing scale (~2.75rem) so the number is the loudest element on the band.
    A hero-stat variant (data-hero) bumps a single headline metric to the top
    display-1 step. The accent ink keeps the number reading as the proof figure. */
-[data-slot="stats-band-stat-value"] {
+[data-slot~="stats-band-stat-value"] {
   margin-block: 0;
   font-size: var(--zeroship-text-display-2-size);
   line-height: var(--zeroship-text-display-2-line);
@@ -155,14 +155,14 @@
 }
 
 /* Hero stat — a single billboard metric at the top display-1 step. */
-[data-slot="stats-band"][data-hero] [data-slot="stats-band-stat-value"] {
+[data-slot~="stats-band"][data-hero] [data-slot~="stats-band-stat-value"] {
   font-size: var(--zeroship-text-display-1-size);
   line-height: var(--zeroship-text-display-1-line);
   font-weight: var(--zeroship-text-display-1-weight);
   letter-spacing: var(--zeroship-text-display-1-tracking);
 }
 
-[data-slot="stats-band-stat-label"] {
+[data-slot~="stats-band-stat-label"] {
   margin-block: 0;
   font-size: var(--zeroship-text-headline-size);
   line-height: var(--zeroship-text-headline-line);
@@ -170,7 +170,7 @@
   color: var(--zeroship-label);
 }
 
-[data-slot="stats-band-stat-description"] {
+[data-slot~="stats-band-stat-description"] {
   margin-block: 0;
   font-size: var(--zeroship-text-subheadline-size);
   line-height: var(--zeroship-text-subheadline-line);
@@ -184,19 +184,19 @@
  * the painted text so the value (accent) resolves to CanvasText along with the
  * rest of the text. */
 @media (forced-colors: active) {
-  [data-slot="stats-band"],
-  [data-slot="stats-band-eyebrow"],
-  [data-slot="stats-band-title"],
-  [data-slot="stats-band-description"],
-  [data-slot="stats-band-stat-value"],
-  [data-slot="stats-band-stat-label"],
-  [data-slot="stats-band-stat-description"] {
+  [data-slot~="stats-band"],
+  [data-slot~="stats-band-eyebrow"],
+  [data-slot~="stats-band-title"],
+  [data-slot~="stats-band-description"],
+  [data-slot~="stats-band-stat-value"],
+  [data-slot~="stats-band-stat-label"],
+  [data-slot~="stats-band-stat-description"] {
     color: CanvasText;
   }
   /* The hairline dividers' --zeroship-separator token drops out — re-pin them to a
      system color so the multi-column rhythm survives a forced palette. */
   @media (min-width: 48rem) {
-    [data-slot="stats-band-stat"] {
+    [data-slot~="stats-band-stat"] {
       border-inline-start-color: CanvasText;
     }
   }
@@ -206,7 +206,7 @@
    the accent fill; remap it to the translucent accent-ink so the columns stay
    delineated on the bold band. */
 @media (min-width: 48rem) {
-  [data-section-band][data-tone="accent"] [data-slot="stats-band-stat"] {
+  [data-section-band][data-tone="accent"] [data-slot~="stats-band-stat"] {
     border-inline-start-color: var(--zeroship-section-ink-secondary);
   }
 }

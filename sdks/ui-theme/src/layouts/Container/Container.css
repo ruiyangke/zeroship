@@ -2,7 +2,7 @@
  * Container — the page-width authority.
  *
  * Anatomy:
- *   [data-slot="container"]   — the constrained, centered content column
+ *   [data-slot~="container"]   — the constrained, centered content column
  *
  * Driven by inline custom properties set from props:
  *   --container-max-width       --zeroship-container-* | none  (default lg token)
@@ -18,7 +18,7 @@
  * Motion: none.
  */
 
-[data-slot="container"] {
+[data-slot~="container"] {
   inline-size: 100%;
   min-inline-size: 0;
   box-sizing: border-box;

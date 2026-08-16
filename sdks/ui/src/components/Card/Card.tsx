@@ -142,8 +142,8 @@ export interface CardProps extends ComponentPropsWithoutRef<"div"> {
 
   /**
    * Root `data-slot` value. Defaults to `"card"`. A composing block
-   * (e.g. `StatCard`) can override it so consumers can target the outer
-   * element via the block's own slot vocabulary.
+   * (e.g. `StatCard`) can add its own token so both slot vocabularies
+   * remain available.
    */
   "data-slot"?: string;
 }
@@ -160,16 +160,15 @@ const CardRoot = forwardRef<HTMLElement, CardProps>(function CardRoot(
     children,
     onClick,
     onKeyDown,
-    "data-slot": dataSlot = "card",
+    "data-slot": dataSlot,
     ...rest
   },
   ref,
 ) {
 
-  // `data-slot` defaults to `"card"` but a composing block (e.g.
-  // StatCard) can override the root slot so consumers can target the
-  // outer element via its own slot vocabulary. Card's own stories pass
-  // no `data-slot`, so the default `"card"` is unchanged.
+  // `data-slot` always includes `"card"`; a composing block (e.g.
+  // StatCard) adds its root slot so both components retain their styling
+  // hooks. Card's own stories pass no `data-slot`, so they emit `"card"`.
   const dataProps = {
     "data-variant": variant,
     "data-size": size,
@@ -274,7 +273,7 @@ const CardRoot = forwardRef<HTMLElement, CardProps>(function CardRoot(
         {...dataProps}
         ref={ref as Ref<unknown>}
         className={className}
-        data-slot={dataSlot}
+        data-slot={["card", dataSlot].filter(Boolean).join(" ")}
         onClick={handleClick}
         onKeyDown={onKeyDown}
       >
@@ -300,7 +299,7 @@ const CardRoot = forwardRef<HTMLElement, CardProps>(function CardRoot(
       {...interactiveAriaProps}
       ref={ref as Ref<HTMLDivElement>}
       className={className}
-      data-slot={dataSlot}
+      data-slot={["card", dataSlot].filter(Boolean).join(" ")}
       tabIndex={ownsActivation ? 0 : undefined}
       onClick={handleClick}
       onKeyDown={handleKeyDown}

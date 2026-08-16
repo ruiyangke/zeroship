@@ -60,7 +60,10 @@ export const Default: Story = {
   ),
   play: async ({ canvasElement }) => {
     const cluster = within(canvasElement).getByTestId("cluster-default");
-    await expect(cluster).toHaveAttribute("data-slot", "cluster");
+    await expect(cluster).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)cluster(?:\s|$)/),
+    );
     await expect(getComputedStyle(cluster).flexWrap).toBe("wrap");
   },
 };
@@ -118,6 +121,9 @@ export const AsChild: Story = {
   play: async ({ canvasElement }) => {
     const ul = within(canvasElement).getByTestId("cluster-aschild");
     await expect(ul.tagName).toBe("UL");
-    await expect(ul).toHaveClass("zs-cluster");
+    await expect(ul).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)cluster(?:\s|$)/),
+    );
   },
 };

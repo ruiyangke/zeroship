@@ -391,11 +391,15 @@ export const TriggerAsChild: Story = {
       name: /show advanced options \(aschild\)/i,
     });
 
-    // Consumer className lands on the rendered element (Slot's
-    // mergeProps concatenates "zs-collapsible-trigger" with the
-    // consumer's "zeroship-collapsible-aschild-target").
+    // Consumer className lands on the rendered element. The library
+    // contributes no class of its own now, so Slot's mergeProps carries only
+    // the consumer's "zeroship-collapsible-aschild-target" -- which is what
+    // makes the passthrough worth asserting: it is the whole className.
     await expect(trigger).toHaveClass("zeroship-collapsible-aschild-target");
-    await expect(trigger).toHaveClass("zs-collapsible-trigger");
+    await expect(trigger).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)collapsible-trigger(?:\s|$)/),
+    );
     await expect(trigger).toHaveAttribute("aria-expanded", "false");
 
     await userEvent.click(trigger);
@@ -412,7 +416,7 @@ export const TriggerAsChild: Story = {
 /* ─── 7. PanelAsChild — Slot drops the inner padding wrapper ───────── *
  *
  * Wave 10 fix #1 regression for the Panel side of asChild. The Panel
- * default path injects a `<div class="zs-collapsible-panel-inner">`
+ * default path injects a `<div data-slot="collapsible-panel-inner">`
  * wrapper for padding. `asChild` MUST drop that wrapper — the
  * consumer's element becomes the panel itself. The story renders an
  * `<section data-testid="..." class="zeroship-collapsible-aschild-section">`
@@ -420,7 +424,7 @@ export const TriggerAsChild: Story = {
  *   - `tagName === "SECTION"` on the rendered panel,
  *   - the consumer's `className` is present,
  *   - the consumer-supplied content is reachable via the panel
- *     element directly (no `.zs-collapsible-panel-inner` ancestor),
+ *     element directly (no `[data-slot~=collapsible-panel-inner]` ancestor),
  *   - and `aria-controls` on the Trigger still points at this panel.
  * Pre-fix this story would not type-check (`asChild` was not in the
  * Panel props surface). */
@@ -431,7 +435,7 @@ export const PanelAsChild: Story = {
       description: {
         story:
           "`<Collapsible.Panel asChild>` swaps the outer `<div>` AND " +
-          "drops the `.zs-collapsible-panel-inner` padding wrapper. The " +
+          "drops the `[data-slot~=collapsible-panel-inner]` padding wrapper. The " +
           "consumer-supplied element becomes the panel, so it owns its " +
           "own padding semantics. Base UI's `data-open` / measurement " +
           "machinery stays attached via Slot's prop merge.",
@@ -472,11 +476,14 @@ export const PanelAsChild: Story = {
 
     await expect(section.tagName).toBe("SECTION");
     await expect(section).toHaveClass("zeroship-collapsible-aschild-section");
-    await expect(section).toHaveClass("zs-collapsible-panel");
+    await expect(section).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)collapsible-panel(?:\s|$)/),
+    );
     // No inner padding wrapper got injected — the asChild element IS
     // the panel.
     await expect(
-      section.querySelector(".zs-collapsible-panel-inner"),
+      section.querySelector('[data-slot~="collapsible-panel-inner"]'),
     ).toBeNull();
     // aria-controls on the Trigger references the asChild section's
     // id so screen readers still associate the disclosure with its

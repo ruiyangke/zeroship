@@ -32,7 +32,7 @@
   max-inline-size: 100%;
 }
 
-.docs-story .zs-scroll-rail {
+.docs-story [data-slot~="scroll-rail"] {
   --zeroship-scroll-rail-edge: var(--zeroship-scroll-rail-pad, var(--zeroship-space-6));
 
   inline-size: 100%;

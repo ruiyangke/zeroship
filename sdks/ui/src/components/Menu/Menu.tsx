@@ -195,6 +195,8 @@ export interface MenuPopupProps extends BasePopupProps {
   align?: MenuAlign;
   /** Pixel offset between trigger and popup. Default `6`. */
   sideOffset?: number;
+  /** Additional slot token appended to the popup's `menu-popup` token. */
+  "data-slot"?: string;
 }
 
 const MenuPopup = forwardRef<HTMLElement, MenuPopupProps>(function MenuPopup(
@@ -204,6 +206,7 @@ const MenuPopup = forwardRef<HTMLElement, MenuPopupProps>(function MenuPopup(
     sideOffset = 6,
     className,
     children,
+    "data-slot": dataSlot,
     ...rest
   },
   ref,
@@ -219,7 +222,7 @@ const MenuPopup = forwardRef<HTMLElement, MenuPopupProps>(function MenuPopup(
         {...rest}
         ref={ref as Ref<HTMLDivElement>}
         className={className}
-        data-slot="menu-popup"
+        data-slot={["menu-popup", dataSlot].filter(Boolean).join(" ")}
       >
         {children}
       </BaseMenu.Popup>
@@ -285,6 +288,8 @@ function ArrowGlyph() {
 
 type BaseItemProps = ComponentPropsWithoutRef<typeof BaseMenu.Item>;
 export interface MenuItemProps extends BaseItemProps {
+  /** Additional slot token appended to the item's `menu-item` token. */
+  "data-slot"?: string;
   /** Trailing keyboard-shortcut hint (e.g. `"⌘X"`). Presentational
    *  only — Base UI's text-navigation matches the row's label, not the
    *  shortcut text. */
@@ -292,7 +297,14 @@ export interface MenuItemProps extends BaseItemProps {
 }
 
 const MenuItem = forwardRef<HTMLElement, MenuItemProps>(function MenuItem(
-  { className, children, shortcut, label, ...rest },
+  {
+    className,
+    children,
+    shortcut,
+    label,
+    "data-slot": dataSlot,
+    ...rest
+  },
   ref,
 ) {
   // Base UI's typeahead falls back to the item's `textContent` when
@@ -311,7 +323,7 @@ const MenuItem = forwardRef<HTMLElement, MenuItemProps>(function MenuItem(
     <BaseMenu.Item
       ref={ref as Ref<HTMLDivElement>}
       className={className}
-      data-slot="menu-item"
+      data-slot={["menu-item", dataSlot].filter(Boolean).join(" ")}
       label={autoLabel}
       {...rest}
     >

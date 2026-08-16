@@ -2,12 +2,12 @@
  * EmptyState — "nothing here yet" panel.
  *
  * Anatomy:
- *   [data-slot="empty-state"]                  — outer region (paints nothing itself)
+ *   [data-slot~="empty-state"]                  — outer region (paints nothing itself)
  *     └─ Center → Stack column        — both-axes centering + governed gap
- *         ├─ [data-slot="empty-state-icon"]         — decorative glyph (aria-hidden)
- *         ├─ [data-slot="empty-state-title"]        — heading (h2 by default)
- *         ├─ [data-slot="empty-state-description"]  — muted supporting copy
- *         └─ [data-slot="empty-state-actions"]      — action row (e.g. a Button)
+ *         ├─ [data-slot~="empty-state-icon"]         — decorative glyph (aria-hidden)
+ *         ├─ [data-slot~="empty-state-title"]        — heading (h2 by default)
+ *         ├─ [data-slot~="empty-state-description"]  — muted supporting copy
+ *         └─ [data-slot~="empty-state-actions"]      — action row (e.g. a Button)
  *
  * The centering + gap come from the composed Center/Stack primitives;
  * this file only paints the parts and sets the generous padding.
@@ -15,7 +15,7 @@
  * Motion: none.
  */
 
-[data-slot="empty-state"] {
+[data-slot~="empty-state"] {
   /* Generous breathing room so the panel reads as a deliberate "empty"
      surface rather than a collapsed container. Logical padding so RTL /
      vertical writing modes inset correctly. */
@@ -25,7 +25,7 @@
   color: var(--zeroship-label);
 }
 
-[data-slot="empty-state-column"] {
+[data-slot~="empty-state-column"] {
   /* Cap the measure so long descriptions wrap into a readable column
      instead of stretching the full region width. */
   max-inline-size: 28rem;
@@ -38,7 +38,7 @@
   margin-inline: auto;
 }
 
-[data-slot="empty-state-icon"] {
+[data-slot~="empty-state-icon"] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -49,12 +49,12 @@
   line-height: 1;
 }
 
-[data-slot="empty-state-icon"] svg {
+[data-slot~="empty-state-icon"] svg {
   inline-size: 1em;
   block-size: 1em;
 }
 
-[data-slot="empty-state-title"] {
+[data-slot~="empty-state-title"] {
   margin: 0;
   color: var(--zeroship-label);
   font-size: var(--zeroship-text-title-3-size);
@@ -62,7 +62,7 @@
   font-weight: 600;
 }
 
-[data-slot="empty-state-description"] {
+[data-slot~="empty-state-description"] {
   margin: 0;
   /* Softer than the title via SIZE (footnote), but kept at
      --zeroship-label-secondary for color: tertiary is ~4.46:1 on --zeroship-surface
@@ -79,7 +79,7 @@
   margin-block-start: calc(-1 * var(--zeroship-space-1));
 }
 
-[data-slot="empty-state-actions"] {
+[data-slot~="empty-state-actions"] {
   display: inline-flex;
   flex-wrap: wrap;
   align-items: center;
@@ -92,13 +92,13 @@
 
 /* ─── forced-colors (Windows High Contrast / macOS Increase Contrast) ─── */
 @media (forced-colors: active) {
-  [data-slot="empty-state-title"] {
+  [data-slot~="empty-state-title"] {
     color: CanvasText;
   }
-  [data-slot="empty-state-description"] {
+  [data-slot~="empty-state-description"] {
     color: CanvasText;
   }
-  [data-slot="empty-state-icon"] {
+  [data-slot~="empty-state-icon"] {
     color: CanvasText;
     forced-color-adjust: none;
   }

@@ -52,12 +52,23 @@ export const Sizes: Story = {
     const sm = canvas.getByTestId("icon-sm");
     const md = canvas.getByTestId("icon-md");
     const lg = canvas.getByTestId("icon-lg");
-    await expect(sm).toHaveClass("zs-icon", "zs-icon--sm");
-    await expect(md).toHaveClass("zs-icon", "zs-icon--md");
-    await expect(lg).toHaveClass("zs-icon", "zs-icon--lg");
+    await expect(sm).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)icon(?:\s|$)/),
+    );
+    await expect(sm).toHaveAttribute("data-size", "sm");
+    await expect(md).toHaveAttribute("data-size", "md");
+    await expect(lg).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)icon(?:\s|$)/),
+    );
+    await expect(lg).toHaveAttribute("data-size", "lg");
     // Decorative by default — no label passed.
     await expect(md).toHaveAttribute("aria-hidden", "true");
-    await expect(md).toHaveAttribute("data-slot", "icon");
+    await expect(md).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)icon(?:\s|$)/),
+    );
     await expect(md).toHaveAttribute("focusable", "false");
   },
 };
@@ -93,7 +104,10 @@ export const InlineWithText: Story = {
     const canvas = within(canvasElement);
     const icon = canvas.getByTestId("icon-inline");
     await expect(icon).toHaveAttribute("aria-hidden", "true");
-    await expect(icon).toHaveAttribute("data-slot", "icon");
+    await expect(icon).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)icon(?:\s|$)/),
+    );
   },
 };
 
@@ -135,7 +149,10 @@ export const InAButton: Story = {
     const canvas = within(canvasElement);
     const icon = canvas.getByTestId("icon-button");
     await expect(icon).toHaveAttribute("aria-hidden", "true");
-    await expect(icon).toHaveAttribute("data-slot", "icon");
+    await expect(icon).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)icon(?:\s|$)/),
+    );
     // The accessible name of the button comes from its text, not the icon.
     await expect(
       canvas.getByRole("button", { name: "Search" }),
@@ -177,7 +194,10 @@ export const Labelled: Story = {
     await expect(labelled).toHaveAttribute("role", "img");
     await expect(labelled).toHaveAttribute("aria-label", "Notifications");
     await expect(labelled).not.toHaveAttribute("aria-hidden");
-    await expect(labelled).toHaveAttribute("data-slot", "icon");
+    await expect(labelled).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)icon(?:\s|$)/),
+    );
     // Resolves through the accessibility tree by its name.
     await expect(
       canvas.getByRole("img", { name: "Notifications" }),
@@ -187,6 +207,9 @@ export const Labelled: Story = {
     const decorative = canvas.getByTestId("icon-decorative");
     await expect(decorative).toHaveAttribute("aria-hidden", "true");
     await expect(decorative).not.toHaveAttribute("role");
-    await expect(decorative).toHaveAttribute("data-slot", "icon");
+    await expect(decorative).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)icon(?:\s|$)/),
+    );
   },
 };

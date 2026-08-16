@@ -2,12 +2,12 @@
  * ErrorState — "something went wrong" panel.
  *
  * Anatomy:
- *   [data-slot="error-state"]                  — outer region (paints nothing itself)
+ *   [data-slot~="error-state"]                  — outer region (paints nothing itself)
  *     └─ Center → Stack column
- *         ├─ [data-slot="error-state-icon"]         — alert glyph, tinted by intent
- *         ├─ [data-slot="error-state-title"]        — heading (h2 by default)
- *         ├─ [data-slot="error-state-description"]  — muted supporting copy
- *         └─ [data-slot="error-state-actions"]      — action row (Retry Button)
+ *         ├─ [data-slot~="error-state-icon"]         — alert glyph, tinted by intent
+ *         ├─ [data-slot~="error-state-title"]        — heading (h2 by default)
+ *         ├─ [data-slot~="error-state-description"]  — muted supporting copy
+ *         └─ [data-slot~="error-state-actions"]      — action row (Retry Button)
  *
  * Modifier classes (intent):
  *   --danger   → icon tinted system-red   (default)
@@ -20,7 +20,7 @@
  * Motion: none.
  */
 
-[data-slot="error-state"] {
+[data-slot~="error-state"] {
   padding-block: var(--zeroship-space-8);
   padding-inline: var(--zeroship-space-6);
   font-family: var(--zeroship-font-system);
@@ -30,11 +30,11 @@
   --zeroship-error-state-icon-color: var(--zeroship-system-red);
 }
 
-[data-slot="error-state"][data-intent="warning"] {
+[data-slot~="error-state"][data-intent="warning"] {
   --zeroship-error-state-icon-color: var(--zeroship-system-orange);
 }
 
-[data-slot="error-state-column"] {
+[data-slot~="error-state-column"] {
   max-inline-size: 28rem;
   text-align: center;
   /* Center the capped column within the (block-level) region. The merged
@@ -44,7 +44,7 @@
   margin-inline: auto;
 }
 
-[data-slot="error-state-icon"] {
+[data-slot~="error-state-icon"] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -57,10 +57,10 @@
 
 /* The glyph is a Lucide CircleAlert (rendered as an <svg> by the Icon
    primitive); this class+element rule still matches and keeps the prior 1em
-   footprint (it wins on specificity over the [data-slot="icon"][data-size="md"] size rule).
+   footprint (it wins on specificity over the [data-slot~="icon"][data-size="md"] size rule).
    Lucide's mark is fully stroked in currentColor — the alert dot is a short
    stroked line, not a filled circle, so no per-shape fill override remains. */
-[data-slot="error-state-icon"] svg {
+[data-slot~="error-state-icon"] svg {
   inline-size: 1em;
   block-size: 1em;
   fill: none;
@@ -72,7 +72,7 @@
   stroke-linejoin: round;
 }
 
-[data-slot="error-state-title"] {
+[data-slot~="error-state-title"] {
   margin: 0;
   color: var(--zeroship-label);
   font-size: var(--zeroship-text-title-3-size);
@@ -80,7 +80,7 @@
   font-weight: 600;
 }
 
-[data-slot="error-state-description"] {
+[data-slot~="error-state-description"] {
   margin: 0;
   /* Softer than the title via SIZE (footnote), but kept at
      --zeroship-label-secondary for color: tertiary is ~4.46:1 on --zeroship-surface
@@ -93,7 +93,7 @@
   margin-block-start: calc(-1 * var(--zeroship-space-1));
 }
 
-[data-slot="error-state-actions"] {
+[data-slot~="error-state-actions"] {
   display: inline-flex;
   flex-wrap: wrap;
   align-items: center;
@@ -107,12 +107,12 @@
  * CanvasText so it stays visible (the glyph shape carries the alert
  * meaning under HCM, not the color). */
 @media (forced-colors: active) {
-  [data-slot="error-state-icon"] {
+  [data-slot~="error-state-icon"] {
     color: CanvasText;
     forced-color-adjust: none;
   }
-  [data-slot="error-state-title"],
-  [data-slot="error-state-description"] {
+  [data-slot~="error-state-title"],
+  [data-slot~="error-state-description"] {
     color: CanvasText;
   }
 }

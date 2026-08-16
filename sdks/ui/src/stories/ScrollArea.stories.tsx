@@ -80,7 +80,7 @@ export const BasicVertical: Story = {
     // of asserting eagerly.
     await waitFor(() => {
       const verticalBar = root.querySelector(
-        '[data-orientation="vertical"].zs-scrollarea__scrollbar',
+        '[data-orientation="vertical"][data-slot~=scrollarea-scrollbar]',
       );
       expect(verticalBar).not.toBeNull();
     });
@@ -149,7 +149,7 @@ export const BasicHorizontal: Story = {
     const root = canvas.getByTestId("scrollarea-basic-horizontal");
     await waitFor(() => {
       const horizontalBar = root.querySelector(
-        '[data-orientation="horizontal"].zs-scrollarea__scrollbar',
+        '[data-orientation="horizontal"][data-slot~=scrollarea-scrollbar]',
       );
       expect(horizontalBar).not.toBeNull();
     });
@@ -157,7 +157,7 @@ export const BasicHorizontal: Story = {
     // horizontal-only, so the shorthand doesn't render a vertical
     // Scrollbar at all.
     const verticalBar = root.querySelector(
-      '[data-orientation="vertical"].zs-scrollarea__scrollbar',
+      '[data-orientation="vertical"][data-slot~=scrollarea-scrollbar]',
     );
     await expect(verticalBar).toBeNull();
   },
@@ -232,12 +232,12 @@ export const Both: Story = {
     const root = canvas.getByTestId("scrollarea-both");
     await waitFor(() => {
       const vertical = root.querySelector(
-        '[data-orientation="vertical"].zs-scrollarea__scrollbar',
+        '[data-orientation="vertical"][data-slot~=scrollarea-scrollbar]',
       );
       const horizontal = root.querySelector(
-        '[data-orientation="horizontal"].zs-scrollarea__scrollbar',
+        '[data-orientation="horizontal"][data-slot~=scrollarea-scrollbar]',
       );
-      const corner = root.querySelector(".zs-scrollarea__corner");
+      const corner = root.querySelector('[data-slot~="scrollarea-corner"]');
       expect(vertical).not.toBeNull();
       expect(horizontal).not.toBeNull();
       expect(corner).not.toBeNull();
@@ -350,7 +350,7 @@ export const HoverOnly: Story = {
     // so the bar element is in the DOM at resting opacity 0.
     await waitFor(() => {
       const bar = root.querySelector(
-        '[data-orientation="vertical"].zs-scrollarea__scrollbar',
+        '[data-orientation="vertical"][data-slot~=scrollarea-scrollbar]',
       );
       expect(bar).not.toBeNull();
     });
@@ -403,7 +403,7 @@ export const LongList: Story = {
     const canvas = within(canvasElement);
     const root = canvas.getByTestId("scrollarea-long-list");
     await waitFor(() => {
-      const thumb = root.querySelector(".zs-scrollarea__thumb");
+      const thumb = root.querySelector('[data-slot~="scrollarea-thumb"]');
       expect(thumb).not.toBeNull();
     });
   },
@@ -595,7 +595,7 @@ export const RTL: Story = {
     // poll for both the element and its PHYSICAL position.
     await waitFor(() => {
       const bar = root.querySelector(
-        '[data-orientation="vertical"].zs-scrollarea__scrollbar',
+        '[data-orientation="vertical"][data-slot~=scrollarea-scrollbar]',
       );
       expect(bar).not.toBeNull();
       // Under RTL the vertical bar is pinned to inline-start, which is

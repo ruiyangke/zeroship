@@ -75,7 +75,7 @@ test("the rail spells absence one way, and never spells it while loading", async
   // The rail's async groups (CC, dependencies, duplicates, see-also) each
   // resolve on their own request. Wait for the placeholders to clear, or the
   // absence assertions below would race the very Skeletons this spec is about.
-  await expect(rail.locator("[data-slot=\"skeleton\"]")).toHaveCount(0, { timeout: 10_000 });
+  await expect(rail.locator("[data-slot~=\"skeleton\"]")).toHaveCount(0, { timeout: 10_000 });
 
   const text = (await rail.innerText()).toLowerCase();
 
@@ -158,7 +158,7 @@ test("a rail group shows a skeleton before its answer, not an absence", async ({
     "the CC request was actually held open, so this run tests the loading state",
   ).toBeGreaterThan(0);
   await expect(
-    cc.locator("[data-slot=\"skeleton\"]"),
+    cc.locator("[data-slot~=\"skeleton\"]"),
     "an unanswered CC list shows a placeholder, not a claim that nobody is on it",
   ).toBeVisible();
 
@@ -168,7 +168,7 @@ test("a rail group shows a skeleton before its answer, not an absence", async ({
   // resolved -- and correctly empty -- list. Two true statements about
   // different instants do not compose into a statement about one instant.
   const snapshot = await cc.evaluate((el) => ({
-    hasSkeleton: el.querySelector("[data-slot=\"skeleton\"]") !== null,
+    hasSkeleton: el.querySelector("[data-slot~=\"skeleton\"]") !== null,
     text: (el as HTMLElement).innerText,
   }));
   expect(snapshot.hasSkeleton, "still loading at the moment of the read").toBe(true);

@@ -112,7 +112,7 @@ export const Fallback: Story = {
     // accessible name — captioning is on the caller. So the wrapper
     // must NOT stamp aria-hidden / role=img / aria-label on it (those
     // belong to the substitute-for-image branches only).
-    const fallback = root.querySelector(".zs-avatar__fallback");
+    const fallback = root.querySelector('[data-slot~="avatar-fallback"]');
     await expect(fallback).not.toBeNull();
     await expect(fallback).not.toHaveAttribute("aria-hidden");
     await expect(fallback).not.toHaveAttribute("role", "img");
@@ -167,7 +167,7 @@ export const FallbackOnError: Story = {
     // must mirror the image's accessible name. Pre-fix the fallback
     // was a plain <span> whose initials text leaked to AT instead of
     // the documented `alt` contract.
-    const fallback = root.querySelector(".zs-avatar__fallback");
+    const fallback = root.querySelector('[data-slot~="avatar-fallback"]');
     await expect(fallback).not.toBeNull();
     await expect(fallback).toHaveAttribute("role", "img");
     await expect(fallback).toHaveAttribute("aria-label", "Broken portrait");
@@ -217,7 +217,7 @@ export const DecorativeFallback: Story = {
     );
     // Regression for 🔴 fix: the fallback must be aria-hidden when the
     // caller asked for decorative semantics via `alt=""`.
-    const fallback = root.querySelector(".zs-avatar__fallback");
+    const fallback = root.querySelector('[data-slot~="avatar-fallback"]');
     await expect(fallback).not.toBeNull();
     await expect(fallback).toHaveAttribute("aria-hidden", "true");
     // And it must NOT carry the identity-path aria-label.

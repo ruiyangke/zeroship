@@ -142,7 +142,7 @@ export const AsChildLink: Story = {
  *
  * A long label in a narrow container must CLAMP with an ellipsis, not
  * hard-clip. `text-overflow: ellipsis` is inert on the inline-flex root,
- * so the clamp lives on the inner `.zs-badge__label` block span. This
+ * so the clamp lives on the inner `[data-slot~=badge-label]` block span. This
  * guard fails pre-fix (when the clamp sat on the flex root). */
 export const LongLabelEllipsis: Story = {
   name: "Long label ellipsizes",
@@ -151,7 +151,7 @@ export const LongLabelEllipsis: Story = {
       description: {
         story:
           "A long label in a narrow container clamps with an ellipsis via " +
-          "the inner `.zs-badge__label` block span — `text-overflow` is " +
+          "the inner `[data-slot~=badge-label]` block span — `text-overflow` is " +
           "ignored on the inline-flex root, so the clamp must live on a " +
           "block descendant (mirrors Tag).",
       },
@@ -167,7 +167,7 @@ export const LongLabelEllipsis: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const badge = canvas.getByTestId("badge-long");
-    const label = badge.querySelector<HTMLElement>(".zs-badge__label");
+    const label = badge.querySelector<HTMLElement>("[data-slot~=badge-label]");
     await expect(label).not.toBeNull();
     if (!label) return;
 
@@ -194,7 +194,7 @@ export const AsChildLongLinkEllipsis: Story = {
       description: {
         story:
           "`asChild` routes the Badge class onto the child element, so " +
-          "there is no inner `.zs-badge__label` span. The routed root " +
+          "there is no inner `[data-slot~=badge-label]` span. The routed root " +
           "must still clamp long plain-text links inside narrow containers.",
       },
     },

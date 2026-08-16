@@ -89,7 +89,7 @@ export const MultiLineText: Story = {
     await expect(container).toHaveAttribute("data-lines", "4");
     await expect(container).toHaveAttribute("aria-hidden", "true");
     // Four bars rendered.
-    const bars = container.querySelectorAll('[data-slot="skeleton-line"]');
+    const bars = container.querySelectorAll('[data-slot~="skeleton-line"]');
     await expect(bars).toHaveLength(4);
   },
 };

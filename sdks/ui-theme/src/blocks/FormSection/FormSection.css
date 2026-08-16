@@ -2,14 +2,14 @@
  * FormSection — governed settings/form section.
  *
  * Anatomy:
- *   [data-slot="form-section"]                     <section> root (aria-labelledby title)
- *     ├─ [data-slot="form-section-header"]        <div> — title + description region
- *     │   ├─ [data-slot="form-section-title"]       <h3> — relevelable heading
- *     │   └─ [data-slot="form-section-description"] <p>  — muted supporting copy
- *     ├─ [data-slot="form-section-body"]          <div> — vertical stack of fields
- *     └─ [data-slot="form-section-footer"]        <div> — separator + action row
- *         ├─ [data-slot="form-section-footer-divider"]  the hairline Separator
- *         └─ [data-slot="form-section-actions"]   <div> — right-aligned Cluster of Buttons
+ *   [data-slot~="form-section"]                     <section> root (aria-labelledby title)
+ *     ├─ [data-slot~="form-section-header"]        <div> — title + description region
+ *     │   ├─ [data-slot~="form-section-title"]       <h3> — relevelable heading
+ *     │   └─ [data-slot~="form-section-description"] <p>  — muted supporting copy
+ *     ├─ [data-slot~="form-section-body"]          <div> — vertical stack of fields
+ *     └─ [data-slot~="form-section-footer"]        <div> — separator + action row
+ *         ├─ [data-slot~="form-section-footer-divider"]  the hairline Separator
+ *         └─ [data-slot~="form-section-actions"]   <div> — right-aligned Cluster of Buttons
  *
  * The section paints NO surface of its own — it sits inside whatever
  * panel/Card/page region the consumer provides. It only arranges the
@@ -35,7 +35,7 @@
  *   None. The reduced-motion gate exists for parity with the surface.
  */
 
-[data-slot="form-section"] {
+[data-slot~="form-section"] {
   /* Token knobs a consumer can retune per-section via inline custom
      properties without forking the CSS. */
   --zeroship-form-section-gap: var(--zeroship-space-6);
@@ -59,13 +59,13 @@
 
 /* ─── header ──────────────────────────────────────────────────────────
  * Title + description stacked with a tight gap. */
-[data-slot="form-section-header"] {
+[data-slot~="form-section-header"] {
   display: flex;
   flex-direction: column;
   gap: var(--zeroship-form-section-header-gap);
 }
 
-[data-slot="form-section-title"] {
+[data-slot~="form-section-title"] {
   margin: 0;
   color: var(--zeroship-label);
   font-size: var(--zeroship-text-headline-size);
@@ -73,7 +73,7 @@
   font-weight: 600;
 }
 
-[data-slot="form-section-description"] {
+[data-slot~="form-section-description"] {
   margin: 0;
   color: var(--zeroship-label-secondary);
   font-size: var(--zeroship-text-subheadline-size);
@@ -84,7 +84,7 @@
 /* ─── body ────────────────────────────────────────────────────────────
  * A vertical stack of the consumer's fields. Layout-only (no role). The
  * rhythm between fields comes from the body gap token. */
-[data-slot="form-section-body"] {
+[data-slot~="form-section-body"] {
   display: flex;
   flex-direction: column;
   gap: var(--zeroship-form-section-body-gap);
@@ -97,13 +97,13 @@
  * The action band: a hairline Separator (when enabled) above a row of
  * Buttons. The Separator owns no outer margin (house rule); the band gap
  * comes from the footer's own flex gap. */
-[data-slot="form-section-footer"] {
+[data-slot~="form-section-footer"] {
   display: flex;
   flex-direction: column;
   gap: var(--zeroship-space-4);
 }
 
-[data-slot="form-section-actions"] {
+[data-slot~="form-section-actions"] {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -113,21 +113,21 @@
   justify-content: flex-end;
 }
 
-[data-slot="form-section-footer"][data-align="start"] [data-slot="form-section-actions"] {
+[data-slot~="form-section-footer"][data-align="start"] [data-slot~="form-section-actions"] {
   justify-content: flex-start;
 }
 
-[data-slot="form-section-footer"][data-align="between"] [data-slot="form-section-actions"] {
+[data-slot~="form-section-footer"][data-align="between"] [data-slot~="form-section-actions"] {
   justify-content: space-between;
 }
 
-[data-slot="form-section-footer"][data-align="end"] [data-slot="form-section-actions"] {
+[data-slot~="form-section-footer"][data-align="end"] [data-slot~="form-section-actions"] {
   justify-content: flex-end;
 }
 
 /* ─── stacked (default) ───────────────────────────────────────────────
  * Single column: header / body / footer, separated by the section gap. */
-[data-slot="form-section"][data-orientation="stacked"] {
+[data-slot~="form-section"][data-orientation="stacked"] {
   grid-template-columns: 1fr;
   row-gap: var(--zeroship-form-section-gap);
 }
@@ -139,7 +139,7 @@
  * Named grid areas keep the placement readable regardless of source
  * order: the root emits header → body → footer, and the areas re-place
  * them into the two-column arrangement. */
-[data-slot="form-section"][data-orientation="aside"] {
+[data-slot~="form-section"][data-orientation="aside"] {
   grid-template-columns: var(--zeroship-form-section-aside-col) 1fr;
   /* The footer SPANS both columns (full-width action band under the
      two-column header/body), matching the file-header contract. The
@@ -152,15 +152,15 @@
   row-gap: var(--zeroship-form-section-gap);
 }
 
-[data-slot="form-section"][data-orientation="aside"] > [data-slot="form-section-header"] {
+[data-slot~="form-section"][data-orientation="aside"] > [data-slot~="form-section-header"] {
   grid-area: header;
 }
 
-[data-slot="form-section"][data-orientation="aside"] > [data-slot="form-section-body"] {
+[data-slot~="form-section"][data-orientation="aside"] > [data-slot~="form-section-body"] {
   grid-area: body;
 }
 
-[data-slot="form-section"][data-orientation="aside"] > [data-slot="form-section-footer"] {
+[data-slot~="form-section"][data-orientation="aside"] > [data-slot~="form-section-footer"] {
   grid-area: footer;
 }
 
@@ -173,7 +173,7 @@
  * panel) or wide inside a narrow one. Custom properties can't appear in
  * the @container condition, so the literal 48rem mirrors --zeroship-bp-md. */
 @media (max-width: 47.999rem) {
-  [data-slot="form-section"][data-orientation="aside"] {
+  [data-slot~="form-section"][data-orientation="aside"] {
     grid-template-columns: 1fr;
     grid-template-areas:
       "header"
@@ -189,8 +189,8 @@
  * header/description text resolve to the system text color so the section
  * reads coherently in forced-colors mode. */
 @media (forced-colors: active) {
-  [data-slot="form-section-title"],
-  [data-slot="form-section-description"] {
+  [data-slot~="form-section-title"],
+  [data-slot~="form-section-description"] {
     color: CanvasText;
   }
 }
@@ -199,7 +199,7 @@
  * No-op — FormSection has no transitions. The gate exists for parity
  * with the rest of the surface. */
 @media (prefers-reduced-motion: reduce) {
-  [data-slot="form-section"] {
+  [data-slot~="form-section"] {
     /* nothing to disable; placeholder for surface parity */
   }
 }

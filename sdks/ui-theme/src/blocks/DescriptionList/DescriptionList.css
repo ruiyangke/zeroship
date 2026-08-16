@@ -2,10 +2,10 @@
  * DescriptionList — semantic key→value list.
  *
  * Anatomy:
- *   [data-slot="description-list"]                  <dl> root (paints no surface)
- *     └─ [data-slot="description-list-item"]       <div> grouping a term/detail pair
- *         ├─ [data-slot="description-list-term"]     <dt> — the key, secondary label
- *         └─ [data-slot="description-list-detail"]   <dd> — the value, primary label
+ *   [data-slot~="description-list"]                  <dl> root (paints no surface)
+ *     └─ [data-slot~="description-list-item"]       <div> grouping a term/detail pair
+ *         ├─ [data-slot~="description-list-term"]     <dt> — the key, secondary label
+ *         └─ [data-slot~="description-list-detail"]   <dd> — the value, primary label
  *
  * Layout:
  *   --horizontal (default): each item is a two-column grid — term in a
@@ -21,7 +21,7 @@
  * so it flips correctly under RTL.
  */
 
-[data-slot="description-list"] {
+[data-slot~="description-list"] {
   /* Width of the term column in horizontal mode. A token so a consumer
      can retune it per-list via inline `--zeroship-dl-term-w: …`. */
   --zeroship-dl-term-w: 10rem;
@@ -32,23 +32,23 @@
 }
 
 /* ─── item ────────────────────────────────────────────────────────────── */
-[data-slot="description-list-item"] {
+[data-slot~="description-list-item"] {
   /* The block-axis gap between consecutive rows. */
   padding-block: var(--zeroship-space-2);
 }
 
-[data-slot="description-list-item"]:first-child {
+[data-slot~="description-list-item"]:first-child {
   padding-block-start: 0;
 }
 
-[data-slot="description-list-item"]:last-child {
+[data-slot~="description-list-item"]:last-child {
   padding-block-end: 0;
 }
 
 /* ─── term / detail typography ─────────────────────────────────────────
  * Term is the quieter secondary label; detail carries the primary label
  * weight so the value reads as the answer. */
-[data-slot="description-list-term"] {
+[data-slot~="description-list-term"] {
   margin: 0;
   color: var(--zeroship-label-secondary);
   font-size: var(--zeroship-text-subheadline-size);
@@ -56,7 +56,7 @@
   font-weight: 500;
 }
 
-[data-slot="description-list-detail"] {
+[data-slot~="description-list-detail"] {
   /* Reset the UA default <dd> indent (a ~2.5rem inline-start margin). */
   margin: 0;
   color: var(--zeroship-label);
@@ -74,7 +74,7 @@
 /* ─── horizontal (default) ─────────────────────────────────────────────
  * Two-column grid: a fixed-ish term track, then the detail filling the
  * rest. align-items:baseline keeps the term/value sitting on one line. */
-[data-slot="description-list"][data-orientation="horizontal"] [data-slot="description-list-item"] {
+[data-slot~="description-list"][data-orientation="horizontal"] [data-slot~="description-list-item"] {
   display: grid;
   /* minmax(0, 1fr) instead of 1fr: a bare 1fr track has an implicit
      min-width:auto, so a long unbreakable detail value forces the track
@@ -87,7 +87,7 @@
 
 /* ─── vertical ─────────────────────────────────────────────────────────
  * Term caption stacked above the detail value. */
-[data-slot="description-list"][data-orientation="vertical"] [data-slot="description-list-term"] {
+[data-slot~="description-list"][data-orientation="vertical"] [data-slot~="description-list-term"] {
   font-size: var(--zeroship-text-footnote-size);
   line-height: var(--zeroship-text-footnote-line);
   margin-block-end: var(--zeroship-space-half);
@@ -95,7 +95,7 @@
 
 /* ─── divider ──────────────────────────────────────────────────────────
  * Logical block-start hairline on every item after the first. */
-[data-slot="description-list"][data-divided] [data-slot="description-list-item"] + [data-slot="description-list-item"] {
+[data-slot~="description-list"][data-divided] [data-slot~="description-list-item"] + [data-slot~="description-list-item"] {
   border-block-start: var(--zeroship-selection-hairline) solid var(--zeroship-separator);
 }
 
@@ -103,9 +103,9 @@
  * The separator color has no system slot; map the divider to CanvasText
  * so the row delineation survives HCM. */
 @media (forced-colors: active) {
-  [data-slot="description-list"][data-divided]
-    [data-slot="description-list-item"]
-    + [data-slot="description-list-item"] {
+  [data-slot~="description-list"][data-divided]
+    [data-slot~="description-list-item"]
+    + [data-slot~="description-list-item"] {
     border-block-start-color: CanvasText;
   }
 }

@@ -67,6 +67,9 @@ export type FormActions = BaseForm.Actions;
 export interface FormProps<
   FormValues extends object = Record<string, unknown>,
 > extends Omit<BaseFormElementProps, "render" | "className" | "onFormSubmit"> {
+  /** Additional slot token appended to the root's `form-card` token. */
+  "data-slot"?: string;
+
   /**
    * Validation errors returned from a server / form action. Keys MUST
    * match the `name` attribute on the corresponding `<Field>` /
@@ -133,6 +136,7 @@ function FormRoot<FormValues extends object = Record<string, unknown>>(
     variant = "default",
     className,
     onFormSubmit,
+    "data-slot": dataSlot,
     ...rest
   }: FormProps<FormValues>,
   ref: React.ForwardedRef<HTMLFormElement>,
@@ -149,7 +153,7 @@ function FormRoot<FormValues extends object = Record<string, unknown>>(
       ref={ref}
       onFormSubmit={baseOnFormSubmit}
       className={className}
-      data-slot="form-card"
+      data-slot={["form-card", dataSlot].filter(Boolean).join(" ")}
       data-variant={variant}
       {...rest}
     />

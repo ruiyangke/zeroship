@@ -2,9 +2,9 @@
  * Avatar — identity lockup (image with fallback).
  *
  * Anatomy:
- *   [data-slot="avatar"]                       — Root span (the content-box)
- *     ├─ [data-slot="avatar-image"]           — <img> when src loaded
- *     └─ [data-slot="avatar-fallback"]        — <span> initials / icon
+ *   [data-slot~="avatar"]                       — Root span (the content-box)
+ *     ├─ [data-slot~="avatar-image"]           — <img> when src loaded
+ *     └─ [data-slot~="avatar-fallback"]        — <span> initials / icon
  *
  * Modifier classes:
  *   size:    --xs | --sm | --md | --lg | --xl
@@ -35,7 +35,7 @@
  * Motion: none. Avatar carries no transitions.
  */
 
-[data-slot="avatar"] {
+[data-slot~="avatar"] {
   /* Default token-driven sizing — overridden per `--<size>` modifier. */
   --zeroship-avatar-size: 2.5rem;
   --zeroship-avatar-text-size: var(--zeroship-text-headline-size);
@@ -66,31 +66,31 @@
 
 /* ─── Size scale ────────────────────────────────────────────────────── */
 
-[data-slot="avatar"][data-size="xs"] {
+[data-slot~="avatar"][data-size="xs"] {
   --zeroship-avatar-size: 1.5rem;
   --zeroship-avatar-text-size: var(--zeroship-text-caption-2-size);
   --zeroship-avatar-text-line: var(--zeroship-text-caption-2-line);
   --zeroship-avatar-text-weight: 600;
 }
-[data-slot="avatar"][data-size="sm"] {
+[data-slot~="avatar"][data-size="sm"] {
   --zeroship-avatar-size: 2rem;
   --zeroship-avatar-text-size: var(--zeroship-text-caption-1-size);
   --zeroship-avatar-text-line: var(--zeroship-text-caption-1-line);
   --zeroship-avatar-text-weight: 600;
 }
-[data-slot="avatar"][data-size="md"] {
+[data-slot~="avatar"][data-size="md"] {
   --zeroship-avatar-size: 2.5rem;
   --zeroship-avatar-text-size: var(--zeroship-text-footnote-size);
   --zeroship-avatar-text-line: var(--zeroship-text-footnote-line);
   --zeroship-avatar-text-weight: 600;
 }
-[data-slot="avatar"][data-size="lg"] {
+[data-slot~="avatar"][data-size="lg"] {
   --zeroship-avatar-size: 3rem;
   --zeroship-avatar-text-size: var(--zeroship-text-callout-size);
   --zeroship-avatar-text-line: var(--zeroship-text-callout-line);
   --zeroship-avatar-text-weight: 600;
 }
-[data-slot="avatar"][data-size="xl"] {
+[data-slot~="avatar"][data-size="xl"] {
   --zeroship-avatar-size: 4rem;
   --zeroship-avatar-text-size: var(--zeroship-text-headline-size);
   --zeroship-avatar-text-line: var(--zeroship-text-headline-line);
@@ -99,19 +99,19 @@
 
 /* ─── Shape scale ───────────────────────────────────────────────────── */
 
-[data-slot="avatar"][data-shape="circle"] {
+[data-slot~="avatar"][data-shape="circle"] {
   --zeroship-avatar-radius: var(--zeroship-radius-full);
 }
-[data-slot="avatar"][data-shape="square"] {
+[data-slot~="avatar"][data-shape="square"] {
   --zeroship-avatar-radius: 0;
 }
-[data-slot="avatar"][data-shape="rounded"] {
+[data-slot~="avatar"][data-shape="rounded"] {
   --zeroship-avatar-radius: var(--zeroship-radius-2);
 }
 
 /* ─── Image ─────────────────────────────────────────────────────────── */
 
-[data-slot="avatar-image"] {
+[data-slot~="avatar-image"] {
   display: block;
   inline-size: 100%;
   block-size: 100%;
@@ -124,7 +124,7 @@
 
 /* ─── Fallback ──────────────────────────────────────────────────────── */
 
-[data-slot="avatar-fallback"] {
+[data-slot~="avatar-fallback"] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -146,7 +146,7 @@
  * `box-shadow` ring around overlap-tagged Avatars separates them from
  * the lockup below — uses the canvas-mix so it inherits the parent
  * surface color (light theme on dark surface still reads). */
-[data-slot="avatar"][data-position="overlap"] {
+[data-slot~="avatar"][data-position="overlap"] {
   margin-inline-start: calc(-1 * var(--zeroship-avatar-size) / 3);
   box-shadow:
     inset 0 0 0 var(--zeroship-selection-hairline)
@@ -161,15 +161,15 @@
  * CanvasText. The image is left untouched (forced-color-adjust:
  * auto by default) so photographic content still renders. */
 @media (forced-colors: active) {
-  [data-slot="avatar"] {
+  [data-slot~="avatar"] {
     background: Canvas;
     box-shadow: inset 0 0 0 0.0625rem CanvasText;
     forced-color-adjust: none;
   }
-  [data-slot="avatar-fallback"] {
+  [data-slot~="avatar-fallback"] {
     color: CanvasText;
   }
-  [data-slot="avatar"][data-position="overlap"] {
+  [data-slot~="avatar"][data-position="overlap"] {
     box-shadow:
       inset 0 0 0 0.0625rem CanvasText,
       0 0 0 0.125rem Canvas;
@@ -182,9 +182,9 @@
  * parity with the rest of the surface so a future maintainer adding a
  * fade-in on Fallback mount has the gate already in place. */
 @media (prefers-reduced-motion: reduce) {
-  [data-slot="avatar"],
-  [data-slot="avatar-image"],
-  [data-slot="avatar-fallback"] {
+  [data-slot~="avatar"],
+  [data-slot~="avatar-image"],
+  [data-slot~="avatar-fallback"] {
     transition: none;
     animation: none;
   }

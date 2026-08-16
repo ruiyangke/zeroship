@@ -2,19 +2,19 @@
  * FeatureGrid — the marketing "features" band.
  *
  * Anatomy:
- *   [data-slot="feature-grid"]                  — the <section>; generous vertical
+ *   [data-slot~="feature-grid"]                  — the <section>; generous vertical
  *                                       padding, NO heavy background
  *                                       (composable — the consumer paints
  *                                       the page backdrop)
- *   [data-slot="feature-grid-header"]          — optional eyebrow + title + desc band
- *   [data-slot="feature-grid-eyebrow"]         — small label above the title (muted)
- *   [data-slot="feature-grid-title"]           — the optional section lead-in <h2>
- *   [data-slot="feature-grid-description"]      — muted lead-in <p>
- *   [data-slot="feature-grid-items"]            — the responsive Grid of items
- *   [data-slot="feature-grid-item"]             — each feature cell (icon → h3 → desc)
- *   [data-slot="feature-grid-item-icon"]        — the tinted icon badge
- *   [data-slot="feature-grid-item-title"]       — the feature title <h3>
- *   [data-slot="feature-grid-item-description"] — the muted supporting line
+ *   [data-slot~="feature-grid-header"]          — optional eyebrow + title + desc band
+ *   [data-slot~="feature-grid-eyebrow"]         — small label above the title (muted)
+ *   [data-slot~="feature-grid-title"]           — the optional section lead-in <h2>
+ *   [data-slot~="feature-grid-description"]      — muted lead-in <p>
+ *   [data-slot~="feature-grid-items"]            — the responsive Grid of items
+ *   [data-slot~="feature-grid-item"]             — each feature cell (icon → h3 → desc)
+ *   [data-slot~="feature-grid-item-icon"]        — the tinted icon badge
+ *   [data-slot~="feature-grid-item-title"]       — the feature title <h3>
+ *   [data-slot~="feature-grid-item-description"] — the muted supporting line
  *
  * Layout discipline:
  *   - The section sets only its vertical rhythm; the composed Container
@@ -35,7 +35,7 @@
  * carries no motion), so there is nothing here to disable.
  */
 
-[data-slot="feature-grid"] {
+[data-slot~="feature-grid"] {
   /* Local single-knob custom properties (the house idiom, cf.
      --zeroship-pricing-lead-measure / --zeroship-hero-measure): named, tunable handles
      for the band's calibrated literals so the intent is legible and a
@@ -62,7 +62,7 @@
 }
 
 /* ─── Header — optional eyebrow + title + description ─────────────────────── */
-[data-slot="feature-grid-header"] {
+[data-slot~="feature-grid-header"] {
   /* Cap the header to a readable measure above the grid. Centered when the
      band is centered (the composed Stack `align="center"` already centers
      the inline children); start-aligned otherwise. */
@@ -70,20 +70,20 @@
   margin-block-end: var(--zeroship-space-9);
 }
 
-[data-slot="feature-grid"][data-align="center"] [data-slot="feature-grid-header"] {
+[data-slot~="feature-grid"][data-align="center"] [data-slot~="feature-grid-header"] {
   margin-inline: auto;
   text-align: center;
 }
 
-[data-slot="feature-grid"][data-align="start"] [data-slot="feature-grid-header"] {
+[data-slot~="feature-grid"][data-align="start"] [data-slot~="feature-grid-header"] {
   text-align: start;
 }
 
-/* The eyebrow styling is the shared `[data-slot="cta-eyebrow"], [data-slot="faq-eyebrow"], [data-slot="feature-grid-eyebrow"], [data-slot="hero-eyebrow"], [data-slot="section-header-eyebrow"], [data-slot="stats-band-eyebrow"]` (accent pill,
+/* The eyebrow styling is the shared `[data-slot~="cta-eyebrow"], [data-slot~="faq-eyebrow"], [data-slot~="feature-grid-eyebrow"], [data-slot~="hero-eyebrow"], [data-slot~="section-header-eyebrow"], [data-slot~="stats-band-eyebrow"]` (accent pill,
    footnote, 600, 0.04em, uppercase) defined once in _section-tone.css; this
    BEM hook remains only as a stable consumer target. */
 
-[data-slot="feature-grid-title"] {
+[data-slot~="feature-grid-title"] {
   margin-block: 0;
   /* Marketing display-3 — a confident section <h2> so the band header
      carries real weight. */
@@ -95,7 +95,7 @@
   text-wrap: balance;
 }
 
-[data-slot="feature-grid-description"] {
+[data-slot~="feature-grid-description"] {
   margin-block: 0;
   font-size: var(--zeroship-text-title-3-size);
   line-height: var(--zeroship-text-title-3-line);
@@ -112,7 +112,7 @@
    no local collapse override. */
 
 /* ─── Item — icon badge → title → description ────────────────────────────── */
-[data-slot="feature-grid-item"] {
+[data-slot~="feature-grid-item"] {
   display: flex;
   flex-direction: column;
   /* The title→description pair sits on a tight gap; the icon badge gets a
@@ -123,13 +123,13 @@
 }
 
 /* Centered band: center the icon badge + text within each cell. */
-[data-slot="feature-grid"][data-align="center"] [data-slot="feature-grid-item"] {
+[data-slot~="feature-grid"][data-align="center"] [data-slot~="feature-grid-item"] {
   align-items: center;
   text-align: center;
 }
 
 /* Start band: hug the inline-start edge. */
-[data-slot="feature-grid"][data-align="start"] [data-slot="feature-grid-item"] {
+[data-slot~="feature-grid"][data-align="start"] [data-slot~="feature-grid-item"] {
   align-items: flex-start;
   text-align: start;
 }
@@ -139,7 +139,7 @@
    Badge's soft variant) so it tracks the accent token and stays token-pure.
    The Icon inside paints with currentColor → we set the badge ink to the
    accent so the glyph reads as an accent-tinted mark. */
-[data-slot="feature-grid-item-icon"] {
+[data-slot~="feature-grid-item-icon"] {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -160,16 +160,16 @@
 }
 
 /* Size the glyph UP inside the bigger badge. The composed Icon sets its own
-   `--zeroship-icon-*` box via `[data-slot="icon"][data-size="lg"]` (0,1,0); this descendant rule (0,2,0)
+   `--zeroship-icon-*` box via `[data-slot~="icon"][data-size="lg"]` (0,1,0); this descendant rule (0,2,0)
    outranks it regardless of stylesheet concat order, so the badge owns the
    glyph size — the same scoping idiom the Accordion chevron uses. The svg fills
    to the badge's glyph token. */
-[data-slot="feature-grid-item-icon"] [data-slot="icon"] {
+[data-slot~="feature-grid-item-icon"] [data-slot~="icon"] {
   inline-size: var(--zeroship-feature-grid-icon-glyph);
   block-size: var(--zeroship-feature-grid-icon-glyph);
 }
 
-[data-slot="feature-grid-item-title"] {
+[data-slot~="feature-grid-item-title"] {
   margin-block: 0;
   font-size: var(--zeroship-text-headline-size);
   line-height: var(--zeroship-text-headline-line);
@@ -179,7 +179,7 @@
   text-wrap: balance;
 }
 
-[data-slot="feature-grid-item-description"] {
+[data-slot~="feature-grid-item-description"] {
   margin-block: 0;
   font-size: var(--zeroship-text-subheadline-size);
   line-height: var(--zeroship-text-subheadline-line);
@@ -195,18 +195,18 @@
  * drops out). The composed Icon paints with currentColor, so it follows the
  * badge ink automatically — no extra rule needed. */
 @media (forced-colors: active) {
-  [data-slot="feature-grid"],
-  [data-slot="feature-grid-eyebrow"],
-  [data-slot="feature-grid-title"],
-  [data-slot="feature-grid-description"],
-  [data-slot="feature-grid-item-title"],
-  [data-slot="feature-grid-item-description"] {
+  [data-slot~="feature-grid"],
+  [data-slot~="feature-grid-eyebrow"],
+  [data-slot~="feature-grid-title"],
+  [data-slot~="feature-grid-description"],
+  [data-slot~="feature-grid-item-title"],
+  [data-slot~="feature-grid-item-description"] {
     color: CanvasText;
   }
   /* The badge's tinted surface drops out; give it a system border so it
      stays a visible mark, and resolve its ink to CanvasText so the glyph
      stays legible. */
-  [data-slot="feature-grid-item-icon"] {
+  [data-slot~="feature-grid-item-icon"] {
     border: var(--zeroship-selection-hairline) solid CanvasText;
     color: CanvasText;
   }

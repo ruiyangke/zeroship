@@ -51,7 +51,10 @@ export const Column: Story = {
   ),
   play: async ({ canvasElement }) => {
     const stack = within(canvasElement).getByTestId("stack-column");
-    await expect(stack).toHaveAttribute("data-slot", "stack");
+    await expect(stack).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)stack(?:\s|$)/),
+    );
     await expect(getComputedStyle(stack).flexDirection).toBe("column");
   },
 };
@@ -158,7 +161,10 @@ export const AsChild: Story = {
   play: async ({ canvasElement }) => {
     const nav = within(canvasElement).getByTestId("stack-aschild");
     await expect(nav.tagName).toBe("NAV");
-    await expect(nav).toHaveClass("zs-stack");
+    await expect(nav).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)stack(?:\s|$)/),
+    );
   },
 };
 

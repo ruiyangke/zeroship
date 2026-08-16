@@ -2,9 +2,9 @@
  * Split — fixed rail + fluid main, compound primitive.
  *
  * Anatomy:
- *   [data-slot="split"]          — the flex row (rail + main)
- *   [data-slot="split-side"]    — the fixed-width rail
- *   [data-slot="split-main"]    — the fluid main region
+ *   [data-slot~="split"]          — the flex row (rail + main)
+ *   [data-slot~="split-side"]    — the fixed-width rail
+ *   [data-slot~="split-main"]    — the fluid main region
  *
  * Driven by inline custom properties / data-attributes set from props:
  *   --split-side-width   length          (default 16rem)
@@ -34,7 +34,7 @@
  * Motion: none.
  */
 
-[data-slot="split"] {
+[data-slot~="split"] {
   box-sizing: border-box;
   display: flex;
   flex-direction: row;
@@ -45,11 +45,11 @@
 
 /* side="end" — rail on the trailing inline edge without reordering the
  * DOM. row-reverse is writing-direction-aware so this is correct in RTL. */
-[data-slot="split"][data-side="end"] {
+[data-slot~="split"][data-side="end"] {
   flex-direction: row-reverse;
 }
 
-[data-slot="split-side"] {
+[data-slot~="split-side"] {
   /* Rail at its configured width, but allowed to shrink (flex-shrink 1)
    * and floored at the container width via `min(…, 100%)`. A rigid
    * `0 0 <width>` rail would overflow — and starve Main to zero — when
@@ -59,7 +59,7 @@
   min-inline-size: 0;
 }
 
-[data-slot="split-main"] {
+[data-slot~="split-main"] {
   flex: 1;
   /* Logical min-size so overflowing content shrinks/scrolls instead of
    * blowing out the row. `min-width: 0` is the classic fix; the logical
@@ -76,28 +76,28 @@
  * reads first when stacked) and the rail goes full-width since a fixed
  * inline width no longer makes sense in a column. */
 @media (max-width: 39.999rem) { /* below --zeroship-bp-sm (40rem) */
-  [data-slot="split"][data-collapse="sm"] {
+  [data-slot~="split"][data-collapse="sm"] {
     flex-direction: column;
   }
-  [data-slot="split"][data-collapse="sm"] > [data-slot="split-side"] {
+  [data-slot~="split"][data-collapse="sm"] > [data-slot~="split-side"] {
     flex: 0 0 auto;
   }
 }
 
 @media (max-width: 47.999rem) { /* below --zeroship-bp-md (48rem) */
-  [data-slot="split"][data-collapse="md"] {
+  [data-slot~="split"][data-collapse="md"] {
     flex-direction: column;
   }
-  [data-slot="split"][data-collapse="md"] > [data-slot="split-side"] {
+  [data-slot~="split"][data-collapse="md"] > [data-slot~="split-side"] {
     flex: 0 0 auto;
   }
 }
 
 @media (max-width: 63.999rem) { /* below --zeroship-bp-lg (64rem) */
-  [data-slot="split"][data-collapse="lg"] {
+  [data-slot~="split"][data-collapse="lg"] {
     flex-direction: column;
   }
-  [data-slot="split"][data-collapse="lg"] > [data-slot="split-side"] {
+  [data-slot~="split"][data-collapse="lg"] > [data-slot~="split-side"] {
     flex: 0 0 auto;
   }
 }

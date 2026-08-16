@@ -312,10 +312,10 @@ export const CompoundPartsInFragment: Story = {
     // The Header region exists and is NOT a descendant of the body slot
     // (pre-fix the Fragment was double-wrapped in the implicit body).
     const header = region.querySelector<HTMLElement>(
-      '[data-slot="form-section-header"]',
+      '[data-slot~="form-section-header"]',
     );
     const body = region.querySelector<HTMLElement>(
-      '[data-slot="form-section-body"]',
+      '[data-slot~="form-section-body"]',
     );
     await expect(header).not.toBeNull();
     await expect(body).not.toBeNull();
@@ -323,7 +323,7 @@ export const CompoundPartsInFragment: Story = {
 
     // Exactly one body slot (no implicit Body wrapping the explicit one).
     await expect(
-      region.querySelectorAll('[data-slot="form-section-body"]'),
+      region.querySelectorAll('[data-slot~="form-section-body"]'),
     ).toHaveLength(1);
 
     // The heading still resolves the labelledby relationship.
@@ -374,7 +374,7 @@ export const NoFooter: Story = {
 
     // No footer region rendered.
     await expect(
-      region.querySelector('[data-slot="form-section-footer"]'),
+      region.querySelector('[data-slot~="form-section-footer"]'),
     ).toBeNull();
   },
 };

@@ -2,16 +2,16 @@
  * PageHeader — page title band composition.
  *
  * Anatomy:
- *   [data-slot="page-header"]                    — wrapping row (text column ↔ actions)
- *   [data-slot="page-header-text"]              — the start-side Stack column
- *   [data-slot="page-header-breadcrumbs"]       — composed Breadcrumbs block
+ *   [data-slot~="page-header"]                    — wrapping row (text column ↔ actions)
+ *   [data-slot~="page-header-text"]              — the start-side Stack column
+ *   [data-slot~="page-header-breadcrumbs"]       — composed Breadcrumbs block
  *                                        (<nav aria-label="Breadcrumb">);
  *                                        the block owns the <ol> reset,
  *                                        crumb colors, separators, and
  *                                        forced-colors handling
- *   [data-slot="page-header-title"]             — <h1> (or relevelled via asChild)
- *   [data-slot="page-header-description"]       — muted <p>
- *   [data-slot="page-header-actions"]           — end-aligned Cluster of controls
+ *   [data-slot~="page-header-title"]             — <h1> (or relevelled via asChild)
+ *   [data-slot~="page-header-description"]       — muted <p>
+ *   [data-slot~="page-header-actions"]           — end-aligned Cluster of controls
  *
  * Layout discipline:
  *   - The root is a flex ROW that wraps (`flex-wrap: wrap`) with
@@ -30,7 +30,7 @@
  * Motion: none.
  */
 
-[data-slot="page-header"] {
+[data-slot~="page-header"] {
   display: flex;
   flex-direction: row;
   flex-wrap: wrap;
@@ -42,7 +42,7 @@
 /* The text column grows to take the row's free space so a long title +
  * description don't get squeezed by the actions; `min-inline-size: 0`
  * lets long words wrap instead of forcing the row wider. */
-[data-slot="page-header-text"] {
+[data-slot~="page-header-text"] {
   flex: 1 1 auto;
   min-inline-size: 0;
 }
@@ -50,10 +50,10 @@
 /* The breadcrumb region is now the composed Breadcrumbs block — it owns
  * the <ol> reset, crumb type/colors, separators, focus rings, and
  * forced-colors handling. PageHeader only carries the
- * `[data-slot="page-header-breadcrumbs"]` hook (no extra rules needed today). */
+ * `[data-slot~="page-header-breadcrumbs"]` hook (no extra rules needed today). */
 
 /* ─── Title — page heading ────────────────────────────────────────────── */
-[data-slot="page-header-title"] {
+[data-slot~="page-header-title"] {
   margin-block: 0;
   font-size: var(--zeroship-text-title-1-size);
   line-height: var(--zeroship-text-title-1-line);
@@ -63,7 +63,7 @@
 }
 
 /* ─── Description — muted supporting copy ─────────────────────────────── */
-[data-slot="page-header-description"] {
+[data-slot~="page-header-description"] {
   margin-block: 0;
   font-size: var(--zeroship-text-subheadline-size);
   line-height: var(--zeroship-text-subheadline-line);
@@ -72,7 +72,7 @@
 }
 
 /* ─── Actions — end-aligned; do not grow (the text column takes slack) ─── */
-[data-slot="page-header-actions"] {
+[data-slot~="page-header-actions"] {
   flex: 0 0 auto;
 }
 
@@ -81,8 +81,8 @@
  * The authored label tokens are dropped in a forced-colors pass; mirror
  * the painted text so each region resolves to a system color. */
 @media (forced-colors: active) {
-  [data-slot="page-header-description"],
-  [data-slot="page-header-title"] {
+  [data-slot~="page-header-description"],
+  [data-slot~="page-header-title"] {
     color: CanvasText;
   }
 }

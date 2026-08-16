@@ -73,6 +73,8 @@ export interface IconProps extends Omit<
    * (e.g. `style={{ inlineSize: "2rem", blockSize: "2rem" }}`).
    */
   size?: IconSize;
+  /** Additional slot token appended to the root's `icon` token. */
+  "data-slot"?: string;
   /**
    * Accessible name. When provided, the icon is treated as meaningful:
    * it gets `role="img"` + `aria-label={label}` so assistive tech
@@ -93,7 +95,14 @@ export interface IconProps extends Omit<
  * labelled, meaningful icon).
  */
 export const Icon = forwardRef<SVGSVGElement, IconProps>(function Icon(
-  { as: Component, size = "md", label, className, ...rest },
+  {
+    as: Component,
+    size = "md",
+    label,
+    className,
+    "data-slot": dataSlot,
+    ...rest
+  },
   ref,
 ) {
 
@@ -104,7 +113,7 @@ export const Icon = forwardRef<SVGSVGElement, IconProps>(function Icon(
       {...rest}
       ref={ref as Ref<SVGSVGElement>}
       className={className}
-      data-slot="icon"
+      data-slot={["icon", dataSlot].filter(Boolean).join(" ")}
       data-size={size}
       focusable="false"
       // a11y decision, reasserted after the spread so caller props can't

@@ -2,13 +2,13 @@
  * NumberField — text input + stepper buttons + optional scrub area.
  *
  * Anatomy:
- *   [data-slot="number-field"]                       — Root (positioning context, scrub-area anchor)
- *     ├─ [data-slot="number-field-scrub"]           — drag-to-scrub area (optional)
- *     │   └─ [data-slot="number-field-scrub-cursor"]  — pointer-locked cursor glyph
- *     └─ [data-slot="number-field-group"]           — the bordered shell (focus ring lives here)
- *         ├─ [data-slot="number-field-step-dec"]   — stepper "-" button
- *         ├─ [data-slot="number-field-input"]       — native <input>
- *         └─ [data-slot="number-field-step-inc"]   — stepper "+" button
+ *   [data-slot~="number-field"]                       — Root (positioning context, scrub-area anchor)
+ *     ├─ [data-slot~="number-field-scrub"]           — drag-to-scrub area (optional)
+ *     │   └─ [data-slot~="number-field-scrub-cursor"]  — pointer-locked cursor glyph
+ *     └─ [data-slot~="number-field-group"]           — the bordered shell (focus ring lives here)
+ *         ├─ [data-slot~="number-field-step-dec"]   — stepper "-" button
+ *         ├─ [data-slot~="number-field-input"]       — native <input>
+ *         └─ [data-slot~="number-field-step-inc"]   — stepper "+" button
  *
  * Modifier classes (one of each axis):
  *   variant: --default | --outline
@@ -33,7 +33,7 @@
  */
 
 /* ─── Root — positioning context for the scrub area ────────────────── */
-[data-slot="number-field"] {
+[data-slot~="number-field"] {
   position: relative;
   display: inline-block;
   inline-size: 100%;
@@ -41,7 +41,7 @@
 }
 
 /* ─── Group — the bordered shell (focus ring sits here) ────────────── */
-[data-slot="number-field-group"] {
+[data-slot~="number-field-group"] {
   position: relative;
   display: inline-flex;
   align-items: stretch;
@@ -61,11 +61,11 @@
 }
 
 /* ─── Sizes ────────────────────────────────────────────────────────── */
-[data-slot="number-field"][data-size="sm"] [data-slot="number-field-group"] {
+[data-slot~="number-field"][data-size="sm"] [data-slot~="number-field-group"] {
   block-size: var(--zeroship-control-h-sm);
   border-radius: var(--zeroship-control-radius-sm);
 }
-[data-slot="number-field"][data-size="lg"] [data-slot="number-field-group"] {
+[data-slot~="number-field"][data-size="lg"] [data-slot~="number-field-group"] {
   block-size: var(--zeroship-control-h-lg);
   border-radius: var(--zeroship-control-radius-lg);
 }
@@ -76,10 +76,10 @@
  * to `--zeroship-input-bg` (Crystal: ~6% alpha — visually indistinguishable
  * from the transparent `--outline`). Promote default to the FILLED
  * surface so the two variants read as distinct material vs. rim. */
-[data-slot="number-field"][data-variant="default"] [data-slot="number-field-group"] {
+[data-slot~="number-field"][data-variant="default"] [data-slot~="number-field-group"] {
   background-color: var(--zeroship-input-bg-filled);
 }
-[data-slot="number-field"][data-variant="outline"] [data-slot="number-field-group"] {
+[data-slot~="number-field"][data-variant="outline"] [data-slot~="number-field-group"] {
   background: transparent;
 }
 
@@ -95,23 +95,23 @@
  * no per-variant hover treatment; it falls through to the generic
  * `--zeroship-input-bg-hover`. */
 @media (hover: hover) {
-  [data-slot="number-field"]:not([data-disabled]):not([data-readonly]):not([data-focused])
-    [data-slot="number-field-group"]:hover {
+  [data-slot~="number-field"]:not([data-disabled]):not([data-readonly]):not([data-focused])
+    [data-slot~="number-field-group"]:hover {
     background: var(--zeroship-input-bg-hover);
     box-shadow:
       inset 0 0 0 0.0625rem var(--zeroship-input-border-hover),
       0 0 0 0 transparent;
   }
-  [data-slot="number-field"][data-variant="default"]:not([data-disabled]):not([data-readonly]):not(
+  [data-slot~="number-field"][data-variant="default"]:not([data-disabled]):not([data-readonly]):not(
       [data-focused]
     )
-    [data-slot="number-field-group"]:hover {
+    [data-slot~="number-field-group"]:hover {
     background-color: var(--zeroship-input-bg-filled-hover);
   }
 }
 
 /* ─── Focused — group owns the ring so input + buttons share it ────── */
-[data-slot="number-field"][data-focused] [data-slot="number-field-group"] {
+[data-slot~="number-field"][data-focused] [data-slot~="number-field-group"] {
   background: var(--zeroship-input-bg-focus);
   box-shadow:
     inset 0 0 0 0.0625rem var(--zeroship-input-border-focus),
@@ -119,12 +119,12 @@
 }
 
 /* ─── Invalid ──────────────────────────────────────────────────────── */
-[data-slot="number-field"][data-invalid] [data-slot="number-field-group"] {
+[data-slot~="number-field"][data-invalid] [data-slot~="number-field-group"] {
   box-shadow:
     inset 0 0 0 0.0625rem var(--zeroship-input-border-invalid),
     0 0 0 0 transparent;
 }
-[data-slot="number-field"][data-invalid][data-focused] [data-slot="number-field-group"] {
+[data-slot~="number-field"][data-invalid][data-focused] [data-slot~="number-field-group"] {
   box-shadow:
     inset 0 0 0 0.0625rem var(--zeroship-input-border-invalid),
     0 0 0 var(--zeroship-focus-ring-width)
@@ -132,24 +132,24 @@
 }
 
 /* ─── Readonly ─────────────────────────────────────────────────────── */
-[data-slot="number-field"][data-readonly] [data-slot="number-field-group"] {
+[data-slot~="number-field"][data-readonly] [data-slot~="number-field-group"] {
   background: var(--zeroship-input-bg-readonly);
   color: var(--zeroship-input-ink-readonly);
 }
 
 /* ─── Disabled ─────────────────────────────────────────────────────── */
-[data-slot="number-field"][data-disabled] [data-slot="number-field-group"] {
+[data-slot~="number-field"][data-disabled] [data-slot~="number-field-group"] {
   background: var(--zeroship-input-bg-disabled);
   color: var(--zeroship-input-ink-disabled);
   cursor: not-allowed;
 }
-[data-slot="number-field"][data-disabled] [data-slot="number-field-input"],
-[data-slot="number-field"][data-disabled] :is([data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"]) {
+[data-slot~="number-field"][data-disabled] [data-slot~="number-field-input"],
+[data-slot~="number-field"][data-disabled] :is([data-slot~="number-field-step-dec"], [data-slot~="number-field-step-inc"]) {
   cursor: not-allowed;
 }
 
 /* ─── The native input ─────────────────────────────────────────────── */
-[data-slot="number-field-input"] {
+[data-slot~="number-field-input"] {
   flex: 1 1 auto;
   min-inline-size: 0;
   inline-size: 100%;
@@ -171,23 +171,23 @@
      subheadline token) but the text inside renders at the 16-device-unit
      floor on focus. Same trick Input uses. */
 }
-[data-slot="number-field"][data-size="sm"] [data-slot="number-field-input"] {
+[data-slot~="number-field"][data-size="sm"] [data-slot~="number-field-input"] {
   font-size: max(1rem, var(--zeroship-text-subheadline-size));
   line-height: var(--zeroship-text-subheadline-line);
 }
-[data-slot="number-field"][data-size="lg"] [data-slot="number-field-input"] {
+[data-slot~="number-field"][data-size="lg"] [data-slot~="number-field-input"] {
   font-size: var(--zeroship-text-headline-size);
   line-height: var(--zeroship-text-headline-line);
 }
-[data-slot="number-field-input"]::placeholder {
+[data-slot~="number-field-input"]::placeholder {
   color: var(--zeroship-input-placeholder);
   opacity: 1;
 }
 
 /* The native spinner UI conflicts with our explicit stepper buttons —
    hide it (same trick Input uses for `type="number"` inputs). */
-[data-slot="number-field-input"]::-webkit-outer-spin-button,
-[data-slot="number-field-input"]::-webkit-inner-spin-button {
+[data-slot~="number-field-input"]::-webkit-outer-spin-button,
+[data-slot~="number-field-input"]::-webkit-inner-spin-button {
   -webkit-appearance: none;
   margin: 0;
 }
@@ -202,7 +202,7 @@
  * The inline-size is the hit-target floor, NOT the icon's intrinsic
  * width — keeping the button square at every size so it never crowds
  * the input. */
-:is([data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"]) {
+:is([data-slot~="number-field-step-dec"], [data-slot~="number-field-step-inc"]) {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
@@ -224,7 +224,7 @@
     background-color var(--zeroship-motion-fast) var(--zeroship-motion-ease),
     color var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
-:is([data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"]) > svg {
+:is([data-slot~="number-field-step-dec"], [data-slot~="number-field-step-inc"]) > svg {
   inline-size: 1em;
   block-size: 1em;
   flex: 0 0 auto;
@@ -232,11 +232,11 @@
 
 /* Per-size button widths — md / lg slightly wider so the glyph breathes
    alongside the bigger control height. The 1.75rem floor stays on sm. */
-[data-slot="number-field"][data-size="md"] :is([data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"]) {
+[data-slot~="number-field"][data-size="md"] :is([data-slot~="number-field-step-dec"], [data-slot~="number-field-step-inc"]) {
   inline-size: 2rem;
   min-inline-size: 1.75rem;
 }
-[data-slot="number-field"][data-size="lg"] :is([data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"]) {
+[data-slot~="number-field"][data-size="lg"] :is([data-slot~="number-field-step-dec"], [data-slot~="number-field-step-inc"]) {
   inline-size: 2.5rem;
   min-inline-size: 2rem;
 }
@@ -251,14 +251,14 @@
 
    Specificity note: the `--sm` / `--md` / `--lg` size variants above
    set `min-inline-size` at TWO-class specificity
-   (`[data-slot="number-field"] [data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"]`), so the coarse-
+   (`[data-slot~="number-field"] [data-slot~="number-field-step-dec"], [data-slot~="number-field-step-inc"]`), so the coarse-
    pointer mirror MUST also be two-class — otherwise the variant rule
    pins the per-size floor (1.75rem / 2rem) and the coarse-pointer
    floor never applies. We re-emit per variant to match. */
 @media (pointer: coarse) {
-  [data-slot="number-field"][data-size="sm"] :is([data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"]),
-  [data-slot="number-field"][data-size="md"] :is([data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"]),
-  [data-slot="number-field"][data-size="lg"] :is([data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"]) {
+  [data-slot~="number-field"][data-size="sm"] :is([data-slot~="number-field-step-dec"], [data-slot~="number-field-step-inc"]),
+  [data-slot~="number-field"][data-size="md"] :is([data-slot~="number-field-step-dec"], [data-slot~="number-field-step-inc"]),
+  [data-slot~="number-field"][data-size="lg"] :is([data-slot~="number-field-step-dec"], [data-slot~="number-field-step-inc"]) {
     min-inline-size: var(--zeroship-hit-min);
     min-block-size: var(--zeroship-hit-min);
   }
@@ -268,28 +268,28 @@
      fills the group via flex stretch so it grows in lock-step. Match
      the variant + size combination's specificity for the same reason
      the step rule does. */
-  [data-slot="number-field"][data-size="sm"] [data-slot="number-field-group"],
-  [data-slot="number-field"][data-size="md"] [data-slot="number-field-group"],
-  [data-slot="number-field"][data-size="lg"] [data-slot="number-field-group"] {
+  [data-slot~="number-field"][data-size="sm"] [data-slot~="number-field-group"],
+  [data-slot~="number-field"][data-size="md"] [data-slot~="number-field-group"],
+  [data-slot~="number-field"][data-size="lg"] [data-slot~="number-field-group"] {
     min-block-size: var(--zeroship-hit-min);
   }
 }
 
 @media (hover: hover) {
-  :is([data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"]):not([data-disabled]):hover {
+  :is([data-slot~="number-field-step-dec"], [data-slot~="number-field-step-inc"]):not([data-disabled]):hover {
     background-color: color-mix(in oklch, var(--zeroship-label) 8%, transparent);
     color: var(--zeroship-label);
   }
 }
-:is([data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"]):not([data-disabled]):active {
+:is([data-slot~="number-field-step-dec"], [data-slot~="number-field-step-inc"]):not([data-disabled]):active {
   background-color: color-mix(in oklch, var(--zeroship-label) 14%, transparent);
 }
-:is([data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"]):focus-visible {
+:is([data-slot~="number-field-step-dec"], [data-slot~="number-field-step-inc"]):focus-visible {
   /* Inset outline so the ring stays inside the shell's overflow. */
   outline: 0.125rem solid var(--zeroship-input-border-focus);
   outline-offset: -0.125rem;
 }
-:is([data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"])[data-disabled] {
+:is([data-slot~="number-field-step-dec"], [data-slot~="number-field-step-inc"])[data-disabled] {
   cursor: not-allowed;
   color: var(--zeroship-label-tertiary);
 }
@@ -300,7 +300,7 @@
  * so even with the ScrubAreaCursor hidden (Safari pointer-lock denial)
  * the affordance reads. While scrubbing, the Root gets `data-scrubbing`
  * and the cursor element pops in over the page. */
-[data-slot="number-field-scrub"] {
+[data-slot~="number-field-scrub"] {
   /* The scrub lives at the leading edge of the Root, OUTSIDE the group's
      bordered shell so it doesn't crowd the input. We use a negative
      inline-start offset relative to the Root; consumers reserve room by
@@ -335,7 +335,7 @@
     color var(--zeroship-motion-fast) var(--zeroship-motion-ease),
     box-shadow var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
-[data-slot="number-field-scrub"]::before {
+[data-slot~="number-field-scrub"]::before {
   content: "";
   display: block;
   inline-size: 0.625rem;
@@ -345,7 +345,7 @@
   mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath d='M1 5 L3 3 L3 7 Z M9 5 L7 3 L7 7 Z' fill='black'/%3E%3C/svg%3E") center/contain no-repeat;
 }
 @media (hover: hover) {
-  [data-slot="number-field-scrub"]:hover {
+  [data-slot~="number-field-scrub"]:hover {
     color: var(--zeroship-accent-active);
     box-shadow: inset 0 0 0 var(--zeroship-selection-hairline)
       var(--zeroship-input-border-hover);
@@ -354,11 +354,11 @@
 /* The fixed-position ScrubAreaCursor's SVG sizing (used during
    pointer-lock drag, not at rest). The resting affordance is the
    ::before SVG-mask glyph above. */
-[data-slot="number-field-scrub-cursor"] > svg {
+[data-slot~="number-field-scrub-cursor"] > svg {
   inline-size: 1.625rem;
   block-size: 0.875rem;
 }
-[data-slot="number-field-scrub-cursor"] {
+[data-slot~="number-field-scrub-cursor"] {
   position: fixed;
   z-index: 1000;
   pointer-events: none;
@@ -373,14 +373,14 @@
  *
  * Wave-9 review item 3: every selector above that declares a
  * `transition` must be silenced under `prefers-reduced-motion: reduce`.
- * Pre-fix only `[data-slot="number-field-group"]` and `[data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"]`
+ * Pre-fix only `[data-slot~="number-field-group"]` and `[data-slot~="number-field-step-dec"], [data-slot~="number-field-step-inc"]`
  * were covered; the scrub affordance still animated `color` and
- * `box-shadow` on hover. Add `[data-slot="number-field-scrub"]` so the mirror
+ * `box-shadow` on hover. Add `[data-slot~="number-field-scrub"]` so the mirror
  * is complete. */
 @media (prefers-reduced-motion: reduce) {
-  [data-slot="number-field-group"],
-  :is([data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"]),
-  [data-slot="number-field-scrub"] {
+  [data-slot~="number-field-group"],
+  :is([data-slot~="number-field-step-dec"], [data-slot~="number-field-step-inc"]),
+  [data-slot~="number-field-scrub"] {
     transition: none;
   }
 }
@@ -390,7 +390,7 @@
  * Slice 5/6 lesson reapplied (Slice-7 review item 3): every non-forced
  * state selector mirrored inside the @media block at EQUAL specificity
  * so the system palette wins the cascade. The bare
- * `[data-slot="number-field-group"]` reset is one attribute selector --
+ * `[data-slot~="number-field-group"]` reset is one attribute selector --
  * variant (`[data-variant="default"]` / `"outline"`) and per-state
  * (`[data-readonly]`) rules above are two and would otherwise outrank
  * the reset. Attribute selectors weigh the same as classes, so the
@@ -399,12 +399,12 @@
  * `forced-color-adjust: none` opts the GROUP surface out of automatic
  * platform re-tinting so the explicit Field / CanvasText / Highlight
  * mappings below survive Chromium's forced-colors emulation pass. We
- * keep it on `[data-slot="number-field-group"]` and `[data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"]`
+ * keep it on `[data-slot~="number-field-group"]` and `[data-slot~="number-field-step-dec"], [data-slot~="number-field-step-inc"]`
  * (both have explicit system-token mappings) but NOT on variant
  * selectors — those should inherit the parent's adjusted paint, not
  * blanket-lock another color. */
 @media (forced-colors: active) {
-  [data-slot="number-field-group"] {
+  [data-slot~="number-field-group"] {
     background: Field;
     color: FieldText;
     box-shadow:
@@ -417,60 +417,60 @@
      Both variants collapse to the same Field/CanvasText canvas under
      forced-colors; the variant distinction is a brand-tone choice that
      has no equivalent in the system palette. */
-  [data-slot="number-field"][data-variant="default"] [data-slot="number-field-group"],
-  [data-slot="number-field"][data-variant="outline"] [data-slot="number-field-group"] {
+  [data-slot~="number-field"][data-variant="default"] [data-slot~="number-field-group"],
+  [data-slot~="number-field"][data-variant="outline"] [data-slot~="number-field-group"] {
     background: Field;
     color: FieldText;
     box-shadow:
       inset 0 0 0 0.0625rem CanvasText,
       0 0 0 0 transparent;
   }
-  [data-slot="number-field"][data-focused] [data-slot="number-field-group"] {
+  [data-slot~="number-field"][data-focused] [data-slot~="number-field-group"] {
     background: Field;
     box-shadow:
       inset 0 0 0 0.0625rem Highlight,
       0 0 0 0.125rem Highlight;
   }
-  [data-slot="number-field"][data-invalid] [data-slot="number-field-group"] {
+  [data-slot~="number-field"][data-invalid] [data-slot~="number-field-group"] {
     box-shadow:
       inset 0 0 0 0.0625rem Mark,
       0 0 0 0 transparent;
   }
-  [data-slot="number-field"][data-invalid][data-focused] [data-slot="number-field-group"] {
+  [data-slot~="number-field"][data-invalid][data-focused] [data-slot~="number-field-group"] {
     box-shadow:
       inset 0 0 0 0.0625rem Mark,
       0 0 0 0.125rem Highlight;
   }
   /* Readonly mirror — the base-block readonly rule
-     (`[data-slot="number-field"][data-readonly] [data-slot="number-field-group"]`) is
+     (`[data-slot~="number-field"][data-readonly] [data-slot~="number-field-group"]`) is
      double-spec and would otherwise outrank the single-class reset. */
-  [data-slot="number-field"][data-readonly] [data-slot="number-field-group"] {
+  [data-slot~="number-field"][data-readonly] [data-slot~="number-field-group"] {
     background: Field;
     color: GrayText;
   }
-  [data-slot="number-field"][data-disabled] [data-slot="number-field-group"] {
+  [data-slot~="number-field"][data-disabled] [data-slot~="number-field-group"] {
     color: GrayText;
     box-shadow:
       inset 0 0 0 0.0625rem GrayText,
       0 0 0 0 transparent;
   }
-  [data-slot="number-field-input"]::placeholder {
+  [data-slot~="number-field-input"]::placeholder {
     color: GrayText;
   }
-  :is([data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"]) {
+  :is([data-slot~="number-field-step-dec"], [data-slot~="number-field-step-inc"]) {
     color: CanvasText;
     background-color: Field;
     forced-color-adjust: none;
   }
-  /* Per-button-disabled mirror — `[data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"][data-disabled]`
+  /* Per-button-disabled mirror — `[data-slot~="number-field-step-dec"], [data-slot~="number-field-step-inc"][data-disabled]`
      in the non-forced block is double-spec (class + attribute) and
      paints `color: var(--zeroship-label-tertiary)`. Mirror at equal spec so
      GrayText wins. */
-  :is([data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"])[data-disabled] {
+  :is([data-slot~="number-field-step-dec"], [data-slot~="number-field-step-inc"])[data-disabled] {
     color: GrayText;
     background-color: Field;
   }
-  [data-slot="number-field"][data-disabled] :is([data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"]) {
+  [data-slot~="number-field"][data-disabled] :is([data-slot~="number-field-step-dec"], [data-slot~="number-field-step-inc"]) {
     color: GrayText;
   }
 
@@ -478,42 +478,42 @@
      the system palette wins under forced-colors emulation. Mirrors the
      Slice 5 / Slice 6 forced-colors specificity fix. */
   @media (hover: hover) {
-    [data-slot="number-field"]:not([data-disabled]):not([data-readonly]):not([data-focused])
-      [data-slot="number-field-group"]:hover {
+    [data-slot~="number-field"]:not([data-disabled]):not([data-readonly]):not([data-focused])
+      [data-slot~="number-field-group"]:hover {
       background: Field;
       box-shadow:
         inset 0 0 0 0.0625rem CanvasText,
         0 0 0 0 transparent;
     }
-    :is([data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"]):not([data-disabled]):hover {
+    :is([data-slot~="number-field-step-dec"], [data-slot~="number-field-step-inc"]):not([data-disabled]):hover {
       background-color: Highlight;
       color: HighlightText;
     }
   }
-  :is([data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"]):not([data-disabled]):active {
+  :is([data-slot~="number-field-step-dec"], [data-slot~="number-field-step-inc"]):not([data-disabled]):active {
     background-color: Highlight;
     color: HighlightText;
   }
-  :is([data-slot="number-field-step-dec"], [data-slot="number-field-step-inc"]):focus-visible {
+  :is([data-slot~="number-field-step-dec"], [data-slot~="number-field-step-inc"]):focus-visible {
     outline-color: Highlight;
   }
-  [data-slot="number-field-scrub"] {
+  [data-slot~="number-field-scrub"] {
     color: CanvasText;
     background: Canvas;
     box-shadow: inset 0 0 0 0.0625rem CanvasText;
   }
   /* Hover mirror — the non-forced rule
-     (`[data-slot="number-field-scrub"]:hover`) paints token color + token
+     (`[data-slot~="number-field-scrub"]:hover`) paints token color + token
      shadow at one-class + :hover specificity. Mirror at equal
      specificity (inside the @media block) so the system palette wins
      on hover under forced-colors. Wave-9 review item 4. */
   @media (hover: hover) {
-    [data-slot="number-field-scrub"]:hover {
+    [data-slot~="number-field-scrub"]:hover {
       color: Highlight;
       box-shadow: inset 0 0 0 0.0625rem Highlight;
     }
   }
-  [data-slot="number-field-scrub-cursor"] {
+  [data-slot~="number-field-scrub-cursor"] {
     background: Canvas;
     color: CanvasText;
     box-shadow: 0 0 0 0.0625rem CanvasText;

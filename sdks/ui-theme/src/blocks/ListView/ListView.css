@@ -2,17 +2,17 @@
  * ListView — governed stacked list of item rows.
  *
  * Anatomy:
- *   ul[data-slot="list-view"]                     — the list (list semantics)
- *     └─ li[data-slot="list-view-item"]           — one row (flex: main · aside)
- *         ├─ [data-slot="list-view-main"]          — leading + content column
+ *   ul[data-slot~="list-view"]                     — the list (list semantics)
+ *     └─ li[data-slot~="list-view-item"]           — one row (flex: main · aside)
+ *         ├─ [data-slot~="list-view-main"]          — leading + content column
  *         │   (rendered as <a>/<button>/<div> per interactivity)
- *         │   ├─ [data-slot="list-view-leading"]       — avatar / icon
- *         │   └─ [data-slot="list-view-content"]        — title + description column
- *         │       ├─ [data-slot="list-view-title"]
- *         │       └─ [data-slot="list-view-description"]
- *         └─ [data-slot="list-view-aside"]          — meta + trailing (OUTSIDE main)
- *             ├─ [data-slot="list-view-meta"]
- *             └─ [data-slot="list-view-trailing"]
+ *         │   ├─ [data-slot~="list-view-leading"]       — avatar / icon
+ *         │   └─ [data-slot~="list-view-content"]        — title + description column
+ *         │       ├─ [data-slot~="list-view-title"]
+ *         │       └─ [data-slot~="list-view-description"]
+ *         └─ [data-slot~="list-view-aside"]          — meta + trailing (OUTSIDE main)
+ *             ├─ [data-slot~="list-view-meta"]
+ *             └─ [data-slot~="list-view-trailing"]
  *
  * The row is a flex row: `main` grows to fill, `aside` hugs the end.
  * `main` itself is a nested flex row (leading · content). The
@@ -24,7 +24,7 @@
  * between rows.
  */
 
-[data-slot="list-view"] {
+[data-slot~="list-view"] {
   /* The list paints nothing of its own beyond resetting UA list styling;
      rows carry the padding and dividers. */
   margin: 0;
@@ -34,7 +34,7 @@
   color: var(--zeroship-label);
 }
 
-[data-slot="list-view-item"] {
+[data-slot~="list-view-item"] {
   display: flex;
   align-items: center;
   gap: var(--zeroship-space-3);
@@ -43,13 +43,13 @@
 /* Divider: a logical hairline between rows. Drawn as a block-start
    border on every row except the first so the list reads as a grouped
    set without a leading or trailing rule. */
-[data-slot="list-view"][data-divided] [data-slot="list-view-item"] + [data-slot="list-view-item"] {
+[data-slot~="list-view"][data-divided] [data-slot~="list-view-item"] + [data-slot~="list-view-item"] {
   border-block-start: 0.0625rem solid var(--zeroship-separator);
 }
 
 /* ─── main area (the row's clickable content) ──────────────────────────── */
 
-[data-slot="list-view-main"] {
+[data-slot~="list-view-main"] {
   /* Grows to fill the row; lays leading · content out inline. The block
      padding here is the row's vertical rhythm so the hover/focus
      affordance fills the row height edge-to-edge on the inline-start
@@ -74,7 +74,7 @@
 /* Interactive main (the <a>/<button> path) gets the pointer + hover tint
    + a focus-visible ring. The non-interactive <div> path carries no
    data-interactive, so none of this applies. */
-[data-slot="list-view-main"][data-interactive] {
+[data-slot~="list-view-main"][data-interactive] {
   cursor: pointer;
   border-radius: var(--zeroship-radius-2);
   /* Pull the rounded hover/focus surface a hair past the text so the
@@ -92,19 +92,19 @@
 }
 
 @media (hover: hover) {
-  [data-slot="list-view-main"][data-interactive]:hover {
+  [data-slot~="list-view-main"][data-interactive]:hover {
     background-color: var(--zeroship-card-hover-tint);
   }
 }
 
-[data-slot="list-view-main"][data-interactive]:focus-visible {
+[data-slot~="list-view-main"][data-interactive]:focus-visible {
   outline: var(--zeroship-focus-ring-width) solid var(--zeroship-focus-ring-color);
   outline-offset: var(--zeroship-focus-ring-offset);
 }
 
 /* ─── leading ──────────────────────────────────────────────────────────── */
 
-[data-slot="list-view-leading"] {
+[data-slot~="list-view-leading"] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -114,14 +114,14 @@
 
 /* ─── content column ───────────────────────────────────────────────────── */
 
-[data-slot="list-view-content"] {
+[data-slot~="list-view-content"] {
   display: flex;
   flex-direction: column;
   gap: var(--zeroship-space-1);
   min-inline-size: 0; /* enable truncation of long titles/descriptions */
 }
 
-[data-slot="list-view-title"] {
+[data-slot~="list-view-title"] {
   color: var(--zeroship-label);
   font-size: var(--zeroship-text-callout-size);
   line-height: var(--zeroship-text-callout-line);
@@ -132,7 +132,7 @@
   white-space: nowrap;
 }
 
-[data-slot="list-view-description"] {
+[data-slot~="list-view-description"] {
   color: var(--zeroship-label-secondary);
   font-size: var(--zeroship-text-footnote-size);
   line-height: var(--zeroship-text-footnote-line);
@@ -143,7 +143,7 @@
 
 /* ─── aside (meta + trailing — outside the row link) ───────────────────── */
 
-[data-slot="list-view-aside"] {
+[data-slot~="list-view-aside"] {
   display: inline-flex;
   align-items: center;
   gap: var(--zeroship-space-3);
@@ -153,14 +153,14 @@
   padding-block: var(--zeroship-list-view-padding-block);
 }
 
-[data-slot="list-view-meta"] {
+[data-slot~="list-view-meta"] {
   color: var(--zeroship-label-tertiary);
   font-size: var(--zeroship-text-footnote-size);
   line-height: var(--zeroship-text-footnote-line);
   white-space: nowrap;
 }
 
-[data-slot="list-view-trailing"] {
+[data-slot~="list-view-trailing"] {
   display: inline-flex;
   align-items: center;
   gap: var(--zeroship-space-2);
@@ -169,40 +169,40 @@
 
 /* ─── density (block padding only) ─────────────────────────────────────── */
 
-[data-slot="list-view"][data-density="comfortable"] {
+[data-slot~="list-view"][data-density="comfortable"] {
   --zeroship-list-view-padding-block: var(--zeroship-space-3);
 }
 
-[data-slot="list-view"][data-density="compact"] {
+[data-slot~="list-view"][data-density="compact"] {
   --zeroship-list-view-padding-block: var(--zeroship-space-2);
 }
 
 /* ─── reduced motion ───────────────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
-  [data-slot="list-view-main"][data-interactive] {
+  [data-slot~="list-view-main"][data-interactive] {
     transition: none;
   }
 }
 
 /* ─── forced-colors (Windows High Contrast / macOS Increase Contrast) ──── */
 @media (forced-colors: active) {
-  [data-slot="list-view"][data-divided] [data-slot="list-view-item"] + [data-slot="list-view-item"] {
+  [data-slot~="list-view"][data-divided] [data-slot~="list-view-item"] + [data-slot~="list-view-item"] {
     border-block-start-color: CanvasText;
   }
-  [data-slot="list-view-title"],
-  [data-slot="list-view-description"],
-  [data-slot="list-view-meta"],
-  [data-slot="list-view-leading"],
-  [data-slot="list-view-trailing"] {
+  [data-slot~="list-view-title"],
+  [data-slot~="list-view-description"],
+  [data-slot~="list-view-meta"],
+  [data-slot~="list-view-leading"],
+  [data-slot~="list-view-trailing"] {
     color: CanvasText;
   }
   /* The hover tint is invisible in forced-colors; lean on the native
      link/button highlight instead, and keep the focus ring visible. */
-  [data-slot="list-view-main"][data-interactive]:hover {
+  [data-slot~="list-view-main"][data-interactive]:hover {
     background-color: Highlight;
     color: HighlightText;
   }
-  [data-slot="list-view-main"][data-interactive]:focus-visible {
+  [data-slot~="list-view-main"][data-interactive]:focus-visible {
     outline-color: Highlight;
   }
 }

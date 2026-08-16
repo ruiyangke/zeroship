@@ -51,7 +51,7 @@ test("the primary nav lives in the header band, not in a rail", async ({ page, b
     "nothing left to toggle",
   ).toHaveCount(0);
   await expect(
-    page.locator('[data-slot="app-shell-sidebar"]'),
+    page.locator('[data-slot~="app-shell-sidebar"]'),
     "AppShell renders no sidebar rail",
   ).toHaveCount(0);
 

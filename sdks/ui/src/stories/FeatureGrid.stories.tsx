@@ -89,7 +89,10 @@ export const ThreeUp: Story = {
     const canvas = within(canvasElement);
     const root = canvas.getByTestId("fg-three");
     await expect(root.tagName).toBe("SECTION");
-    await expect(root).toHaveAttribute("data-slot", "feature-grid");
+    await expect(root).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)feature-grid(?:\s|$)/),
+    );
 
     // With a `title`, the section IS labelled by that real <h2>.
     const sectionTitle = canvas.getByRole("heading", {
@@ -311,7 +314,7 @@ export const Headerless: Story = {
     // No header → no dangling aria-labelledby.
     await expect(root.hasAttribute("aria-labelledby")).toBe(false);
     // No section <h2> rendered; only the item <h3>s.
-    await expect(root.querySelector('[data-slot="feature-grid-title"]')).toBeNull();
+    await expect(root.querySelector('[data-slot~="feature-grid-title"]')).toBeNull();
     await expect(canvas.queryAllByRole("heading", { level: 2 }).length).toBe(0);
     await expect(canvas.getAllByRole("heading", { level: 3 }).length).toBe(3);
   },

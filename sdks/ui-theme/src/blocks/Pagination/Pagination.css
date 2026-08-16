@@ -8,19 +8,19 @@
  * type, the decorative ellipsis, and the few button overrides that make a
  * dense numeric row read evenly.
  *
- *   [data-slot="pagination"]               <nav> — flex row, wraps on narrow widths
- *     ├─ [data-slot="pagination-summary"]       "Showing 1–10 of 57" — footnote
- *     ├─ [data-slot="pagination-page-size"]     "Rows per page" + <Select>
- *     │    └─ [data-slot="pagination-page-size-label"]
- *     └─ [data-slot="pagination-pages"]         the button row
- *          ├─ [data-slot="pagination-next"], [data-slot="pagination-page"], [data-slot="pagination-prev"]   Prev / Next / page (extends [data-slot="button"])
- *          └─ [data-slot="pagination-ellipsis"] decorative gap, aria-hidden
+ *   [data-slot~="pagination"]               <nav> — flex row, wraps on narrow widths
+ *     ├─ [data-slot~="pagination-summary"]       "Showing 1–10 of 57" — footnote
+ *     ├─ [data-slot~="pagination-page-size"]     "Rows per page" + <Select>
+ *     │    └─ [data-slot~="pagination-page-size-label"]
+ *     └─ [data-slot~="pagination-pages"]         the button row
+ *          ├─ [data-slot~="pagination-next"], [data-slot~="pagination-page"], [data-slot~="pagination-prev"]   Prev / Next / page (extends [data-slot~="button"])
+ *          └─ [data-slot~="pagination-ellipsis"] decorative gap, aria-hidden
  *
  * Motion: none of our own; Button owns its hover transition (and its
  * reduced-motion handling).
  */
 
-[data-slot="pagination"] {
+[data-slot~="pagination"] {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -46,12 +46,12 @@
  * collapses to chevron-only so the page-number track keeps room; the
  * aria-label on the Button carries the meaning regardless. */
 
-[data-slot="pagination-edge-label"] {
+[data-slot~="pagination-edge-label"] {
   display: inline;
 }
 
 @container (max-width: 30rem) {
-  [data-slot="pagination-edge-label"] {
+  [data-slot~="pagination-edge-label"] {
     /* Hidden, not removed: the Button's aria-label still announces
        "Go to previous/next page", so AT is unaffected. */
     display: none;
@@ -60,7 +60,7 @@
 
 /* ─── summary ──────────────────────────────────────────────────────────── */
 
-[data-slot="pagination-summary"] {
+[data-slot~="pagination-summary"] {
   margin: 0;
   color: var(--zeroship-label-secondary);
   font-size: var(--zeroship-text-footnote-size);
@@ -74,7 +74,7 @@
  * Inline label + <Select>. The label rides the footnote rhythm so it
  * reads as a quiet companion to the control, not a form field title. */
 
-[data-slot="pagination-page-size"] {
+[data-slot~="pagination-page-size"] {
   display: inline-flex;
   align-items: center;
   gap: var(--zeroship-space-2);
@@ -83,7 +83,7 @@
   margin-inline-start: auto;
 }
 
-[data-slot="pagination-page-size-label"] {
+[data-slot~="pagination-page-size-label"] {
   color: var(--zeroship-label-secondary);
   font-size: var(--zeroship-text-footnote-size);
   line-height: var(--zeroship-text-footnote-line);
@@ -96,7 +96,7 @@
  * When it is absent the page row itself takes the auto margin to drift to
  * the end, away from the start-anchored summary. */
 
-[data-slot="pagination-pages"] {
+[data-slot~="pagination-pages"] {
   display: inline-flex;
   flex-wrap: wrap;
   align-items: center;
@@ -115,7 +115,7 @@
    auto-margins would instead SPLIT the free space and scatter the two
    controls, so drop the page row's auto-margin in that case — the page
    row then trails the page-size with only the flex gap between them. */
-[data-slot="pagination-page-size"] + [data-slot="pagination-pages"] {
+[data-slot~="pagination-page-size"] + [data-slot~="pagination-pages"] {
   margin-inline-start: 0;
 }
 
@@ -125,7 +125,7 @@
  * the same footprint. The edge (Prev/Next) buttons keep their label and
  * so size to content. */
 
-[data-slot="pagination-page"] {
+[data-slot~="pagination-page"] {
   /* Match the small/medium control heights for a square numeric chip. */
   min-inline-size: var(--zeroship-control-h-md);
   padding-inline: var(--zeroship-space-2);
@@ -134,11 +134,11 @@
   font-variant-numeric: tabular-nums;
 }
 
-[data-slot="pagination"][data-size="sm"] [data-slot="pagination-page"] {
+[data-slot~="pagination"][data-size="sm"] [data-slot~="pagination-page"] {
   min-inline-size: var(--zeroship-control-h-sm);
 }
 
-[data-slot="pagination-chevron"] {
+[data-slot~="pagination-chevron"] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -152,7 +152,7 @@
  * A non-actionable elided range. Sized to the page-button track so it sits
  * on the same baseline, centered, with no interactive affordance. */
 
-[data-slot="pagination-ellipsis"] {
+[data-slot~="pagination-ellipsis"] {
   display: inline-flex;
   align-items: flex-end;
   justify-content: center;
@@ -165,7 +165,7 @@
   user-select: none;
 }
 
-[data-slot="pagination"][data-size="sm"] [data-slot="pagination-ellipsis"] {
+[data-slot~="pagination"][data-size="sm"] [data-slot~="pagination-ellipsis"] {
   block-size: var(--zeroship-control-h-sm);
   font-size: var(--zeroship-text-subheadline-size);
 }
@@ -175,11 +175,11 @@
  * decorative text legible under a forced palette. */
 
 @media (forced-colors: active) {
-  [data-slot="pagination-summary"],
-  [data-slot="pagination-page-size-label"] {
+  [data-slot~="pagination-summary"],
+  [data-slot~="pagination-page-size-label"] {
     color: CanvasText;
   }
-  [data-slot="pagination-ellipsis"] {
+  [data-slot~="pagination-ellipsis"] {
     color: GrayText;
     forced-color-adjust: none;
   }

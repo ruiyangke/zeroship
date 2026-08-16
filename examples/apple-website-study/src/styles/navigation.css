@@ -46,7 +46,7 @@
   white-space: nowrap;
 }
 
-.apple-demo [data-slot="button"].country-banner__continue {
+.apple-demo [data-slot~="button"].country-banner__continue {
   height: 36px;
   min-height: 36px;
   border: 0;
@@ -166,7 +166,7 @@
   display: none;
 }
 
-.apple-demo [data-slot="button"].apple-demo-nav-icon {
+.apple-demo [data-slot~="button"].apple-demo-nav-icon {
   width: 28px;
   min-width: 28px;
   height: 28px;
@@ -177,7 +177,7 @@
   color: rgb(29 29 31 / 0.82);
 }
 
-.apple-demo [data-slot="button"].apple-demo-nav-icon:hover {
+.apple-demo [data-slot~="button"].apple-demo-nav-icon:hover {
   background: rgb(29 29 31 / 0.06);
   color: #000;
 }
@@ -355,13 +355,13 @@
 }
 
 .apple-demo-ribbon a,
-.apple-demo [data-slot="button"] {
+.apple-demo [data-slot~="button"] {
   color: #0066cc;
 }
 
 .apple-demo-ribbon a,
-.apple-demo [data-slot="button"] > [data-slot="button-inner"] > [data-slot="button-label"],
-.apple-demo [data-slot="button"] [data-slot="button-label"] > a {
+.apple-demo [data-slot~="button"] > [data-slot~="button-inner"] > [data-slot~="button-label"],
+.apple-demo [data-slot~="button"] [data-slot~="button-label"] > a {
   display: inline-flex;
   align-items: center;
   gap: 2px;

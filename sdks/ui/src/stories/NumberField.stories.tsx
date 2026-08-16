@@ -478,7 +478,7 @@ export const BareFocus: Story = {
     const canvas = within(canvasElement);
     // Base UI 1.5 NumberField.Input is a `textbox`, not a `spinbutton`.
     const input = canvas.getByRole("textbox", { name: /quantity/i });
-    const root = input.closest(".zs-number-field");
+    const root = input.closest("[data-slot~=number-field]");
 
     await userEvent.click(input);
     await waitFor(() => expect(root).toHaveAttribute("data-focused"));

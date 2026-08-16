@@ -44,9 +44,8 @@ export interface CenterProps extends ComponentPropsWithoutRef<"div"> {
   asChild?: boolean;
   /**
    * Root `data-slot` value. Defaults to `"center"`. A composing block
-   * (e.g. `ErrorState`/`EmptyState` centering their column) overrides it
-   * so consumers can target the outer element via the block's own slot
-   * vocabulary. Mirrors Stack/Card.
+   * (e.g. `ErrorState`/`EmptyState` centering their column) adds its own
+   * token so both slot vocabularies remain available. Mirrors Stack/Card.
    */
   "data-slot"?: string;
 }
@@ -63,7 +62,7 @@ export const Center = forwardRef<HTMLDivElement, CenterProps>(function Center(
     className,
     style,
     children,
-    "data-slot": dataSlot = "center",
+    "data-slot": dataSlot,
     ...rest
   },
   ref,
@@ -91,7 +90,7 @@ export const Center = forwardRef<HTMLDivElement, CenterProps>(function Center(
     <Comp
       {...rest}
       ref={ref as Ref<HTMLDivElement>}
-      data-slot={dataSlot}
+      data-slot={["center", dataSlot].filter(Boolean).join(" ")}
       data-inline={inline ? "" : undefined}
       className={className}
       style={layoutVars}

@@ -65,26 +65,24 @@ export const Full: Story = {
     // justified to the end so actions hug the trailing edge. The composed
     // part now owns the semantic data-slot vocabulary (pre-fix it read
     // "cluster").
-    const actions = canvasElement.querySelector(".zs-page-header__actions");
+    const actions = canvasElement.querySelector('[data-slot~="page-header-actions"]');
     await expect(actions).not.toBeNull();
-    await expect(actions!.getAttribute("data-slot")).toBe(
-      "page-header-actions",
+    await expect(actions!.getAttribute("data-slot")).toMatch(
+      /(?:^|\s)page-header-actions(?:\s|$)/,
     );
     await expect(getComputedStyle(actions as Element).justifyContent).toBe(
       "flex-end",
     );
-    // The text column stacks: PageHeader.Text is a column Stack carrying
-    // the semantic slot (pre-fix it read "stack"), and Title renders as a
-    // block ABOVE Description (vertical stacking, not inline). Regression
-    // guard for the text-column contract + data-slot override.
+    // The text column stacks: PageHeader.Text retains both its semantic
+    // token and Stack's token, and Title renders above Description.
     const text = canvasElement.querySelector(
-      '[data-slot="page-header-text"]',
+      '[data-slot~="page-header-text"]',
     ) as HTMLElement;
     await expect(text).not.toBeNull();
     await expect(getComputedStyle(text).flexDirection).toBe("column");
     const titleRect = heading.getBoundingClientRect();
     const desc = canvasElement.querySelector(
-      ".zs-page-header__description",
+      "[data-slot~=page-header-description]",
     ) as HTMLElement;
     await expect(desc).not.toBeNull();
     const descRect = desc.getBoundingClientRect();
@@ -149,7 +147,10 @@ export const RelevelledTitle: Story = {
       name: /section heading/i,
     });
     await expect(heading.tagName).toBe("H2");
-    await expect(heading).toHaveClass("zs-page-header__title");
+    await expect(heading).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)page-header-title(?:\s|$)/),
+    );
   },
 };
 
@@ -176,9 +177,12 @@ export const AsChildRoot: Story = {
   ),
   play: async ({ canvasElement }) => {
     const root = canvasElement.querySelector(
-      '[data-slot="page-header"]',
+      '[data-slot~="page-header"]',
     ) as HTMLElement;
     await expect(root.tagName).toBe("SECTION");
-    await expect(root).toHaveClass("zs-page-header");
+    await expect(root).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)page-header(?:\s|$)/),
+    );
   },
 };

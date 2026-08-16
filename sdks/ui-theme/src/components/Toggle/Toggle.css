@@ -2,9 +2,9 @@
  * Toggle + ToggleGroup — pressable two-state button + segmented control.
  *
  * Anatomy:
- *   [data-slot="toggle-group"]               — Base UI's <div>, segmented track
- *     ├─ [data-slot="toggle"] (data-pressed) — pressed segment / standalone Toggle
- *     ├─ [data-slot="toggle"]                — unpressed segment
+ *   [data-slot~="toggle-group"]               — Base UI's <div>, segmented track
+ *     ├─ [data-slot~="toggle"] (data-pressed) — pressed segment / standalone Toggle
+ *     ├─ [data-slot~="toggle"]                — unpressed segment
  *     └─ … repeated …
  *
  * Modifier classes (group):
@@ -30,7 +30,7 @@
  *      lit-up rectangle within the rail.
  *
  *   3. Standalone Toggle (no group) hovers like Button's `--gray`. The
- *      `[data-slot="toggle-group"] [data-slot="toggle"]` selector strips the standalone
+ *      `[data-slot~="toggle-group"] [data-slot~="toggle"]` selector strips the standalone
  *      surface so inside-a-group renders the unified track, not a row
  *      of independent buttons.
  *
@@ -65,7 +65,7 @@
  * --zeroship-control-h-* tokens so a Toggle next to either reads coherent.
  * Inline padding matches the Button equivalents so icon-only toggles
  * end up square (h == padded-w with a 1em glyph). */
-[data-slot="toggle"] {
+[data-slot~="toggle"] {
   --zeroship-toggle-h-sm: var(--zeroship-control-h-sm);          /* 2rem */
   --zeroship-toggle-h-md: var(--zeroship-control-h-md);          /* 2.5rem (default) */
   --zeroship-toggle-h-lg: var(--zeroship-control-h-lg);          /* 3rem */
@@ -116,7 +116,7 @@
 }
 
 /* ─── the standalone toggle ─────────────────────────────────────────── */
-[data-slot="toggle"] {
+[data-slot~="toggle"] {
   position: relative;
   display: inline-flex;
   align-items: center;
@@ -145,7 +145,7 @@
 /* Icon sizing — force consumer-supplied SVG to a 1em square so glyphs
  * stay coherent across sizes. Brief contingency: SVGs with intrinsic
  * width/height attributes otherwise pop out of scale at sm vs lg. */
-[data-slot="toggle"] > svg {
+[data-slot~="toggle"] > svg {
   inline-size: 1em;
   block-size: 1em;
   flex: 0 0 auto;
@@ -170,14 +170,14 @@
  * Browser support: `:has()` is Chrome 105+ / Safari 15.4+ / Firefox 121+
  * — all modern. Older browsers fall back to the text-button padding
  * (acceptable). */
-[data-slot="toggle"][aria-label]:has(> svg:only-child) {
+[data-slot~="toggle"][aria-label]:has(> svg:only-child) {
   inline-size: var(--zeroship-toggle-h-md);
   padding-inline: var(--zeroship-space-0);
 }
-[data-slot="toggle"][data-size="sm"][aria-label]:has(> svg:only-child) {
+[data-slot~="toggle"][data-size="sm"][aria-label]:has(> svg:only-child) {
   inline-size: var(--zeroship-toggle-h-sm);
 }
-[data-slot="toggle"][data-size="lg"][aria-label]:has(> svg:only-child) {
+[data-slot~="toggle"][data-size="lg"][aria-label]:has(> svg:only-child) {
   inline-size: var(--zeroship-toggle-h-lg);
 }
 
@@ -186,12 +186,12 @@
  * tuned for text-only segments; once an icon joins the label the
  * 8-unit gap reads mechanically separated. Scope via `:has(> svg)` so
  * text-only segments keep the roomier rhythm. */
-[data-slot="toggle"]:has(> svg) {
+[data-slot~="toggle"]:has(> svg) {
   gap: var(--zeroship-space-1);
 }
 
 /* ─── sizes ─────────────────────────────────────────────────────────── */
-[data-slot="toggle"][data-size="sm"] {
+[data-slot~="toggle"][data-size="sm"] {
   block-size: var(--zeroship-toggle-h-sm);
   padding-inline: var(--zeroship-toggle-px-sm);
   border-radius: var(--zeroship-toggle-radius-sm);
@@ -199,7 +199,7 @@
   line-height: 1;
   gap: var(--zeroship-toggle-gap-sm);
 }
-[data-slot="toggle"][data-size="lg"] {
+[data-slot~="toggle"][data-size="lg"] {
   block-size: var(--zeroship-toggle-h-lg);
   padding-inline: var(--zeroship-toggle-px-lg);
   border-radius: var(--zeroship-toggle-radius-lg);
@@ -212,16 +212,16 @@
  *
  * Matches Button's `--gray` rest surface (8% label-tinted mix). Hover
  * deepens to 12%, active to 16%. */
-[data-slot="toggle"][data-variant="default"] {
+[data-slot~="toggle"][data-variant="default"] {
   background-color: color-mix(in oklch, var(--zeroship-label) 8%, transparent);
   color: var(--zeroship-label);
 }
 @media (hover: hover) {
-  [data-slot="toggle"][data-variant="default"]:not([data-disabled]):not([data-pressed]):hover {
+  [data-slot~="toggle"][data-variant="default"]:not([data-disabled]):not([data-pressed]):hover {
     background-color: color-mix(in oklch, var(--zeroship-label) 12%, transparent);
   }
 }
-[data-slot="toggle"][data-variant="default"]:not([data-disabled]):not([data-pressed]):active {
+[data-slot~="toggle"][data-variant="default"]:not([data-disabled]):not([data-pressed]):active {
   background-color: color-mix(in oklch, var(--zeroship-label) 16%, transparent);
 }
 
@@ -230,16 +230,16 @@
  * No surface at rest. Hover paints the same 8% wash `default` rests on
  * — i.e. a plain Toggle "fills in" to default on hover, then to accent
  * on press. */
-[data-slot="toggle"][data-variant="plain"] {
+[data-slot~="toggle"][data-variant="plain"] {
   background-color: transparent;
   color: var(--zeroship-label);
 }
 @media (hover: hover) {
-  [data-slot="toggle"][data-variant="plain"]:not([data-disabled]):not([data-pressed]):hover {
+  [data-slot~="toggle"][data-variant="plain"]:not([data-disabled]):not([data-pressed]):hover {
     background-color: color-mix(in oklch, var(--zeroship-label) 8%, transparent);
   }
 }
-[data-slot="toggle"][data-variant="plain"]:not([data-disabled]):not([data-pressed]):active {
+[data-slot~="toggle"][data-variant="plain"]:not([data-disabled]):not([data-pressed]):active {
   background-color: color-mix(in oklch, var(--zeroship-label) 12%, transparent);
 }
 
@@ -257,16 +257,16 @@
  * Hover / active deepen the surface in step with Button's hover/active
  * mix (22% / 30%); the pressed state inherits the standalone pressed
  * pill above (solid `--zeroship-accent` + `--zeroship-accent-ink`). */
-[data-slot="toggle"][data-variant="tinted"] {
+[data-slot~="toggle"][data-variant="tinted"] {
   background-color: color-mix(in oklch, var(--zeroship-accent) 18%, transparent);
   color: var(--zeroship-accent-active);
 }
 @media (hover: hover) {
-  [data-slot="toggle"][data-variant="tinted"]:not([data-disabled]):not([data-pressed]):hover {
+  [data-slot~="toggle"][data-variant="tinted"]:not([data-disabled]):not([data-pressed]):hover {
     background-color: color-mix(in oklch, var(--zeroship-accent) 22%, transparent);
   }
 }
-[data-slot="toggle"][data-variant="tinted"]:not([data-disabled]):not([data-pressed]):active {
+[data-slot~="toggle"][data-variant="tinted"]:not([data-disabled]):not([data-pressed]):active {
   background-color: color-mix(in oklch, var(--zeroship-accent) 30%, transparent);
 }
 
@@ -291,37 +291,37 @@
  * `forced-colors` block below mirrors per-variant pressed → `Highlight`/
  * `HighlightText`; tinted retains the inset edge so the variant cue
  * survives high-contrast emulation. */
-[data-slot="toggle"][data-pressed] {
+[data-slot~="toggle"][data-pressed] {
   background-color: var(--zeroship-toggle-pressed-bg);
   color: var(--zeroship-toggle-pressed-ink);
 }
-[data-slot="toggle"][data-variant="plain"][data-pressed] {
+[data-slot~="toggle"][data-variant="plain"][data-pressed] {
   background-color: var(--zeroship-toggle-plain-pressed-bg);
   color: var(--zeroship-toggle-plain-pressed-ink);
 }
-[data-slot="toggle"][data-variant="tinted"][data-pressed] {
+[data-slot~="toggle"][data-variant="tinted"][data-pressed] {
   background-color: var(--zeroship-toggle-tinted-pressed-bg);
   color: var(--zeroship-accent-ink);
   box-shadow: inset 0 0 0 var(--zeroship-selection-hairline) var(--zeroship-toggle-tinted-pressed-edge);
 }
 @media (hover: hover) {
-  [data-slot="toggle"][data-pressed]:not([data-disabled]):hover {
+  [data-slot~="toggle"][data-pressed]:not([data-disabled]):hover {
     background-color: var(--zeroship-accent-hover);
   }
-  [data-slot="toggle"][data-variant="plain"][data-pressed]:not([data-disabled]):hover {
+  [data-slot~="toggle"][data-variant="plain"][data-pressed]:not([data-disabled]):hover {
     background-color: color-mix(in oklch, var(--zeroship-accent) 22%, transparent);
   }
-  [data-slot="toggle"][data-variant="tinted"][data-pressed]:not([data-disabled]):hover {
+  [data-slot~="toggle"][data-variant="tinted"][data-pressed]:not([data-disabled]):hover {
     background-color: var(--zeroship-accent-active);
   }
 }
-[data-slot="toggle"][data-pressed]:not([data-disabled]):active {
+[data-slot~="toggle"][data-pressed]:not([data-disabled]):active {
   background-color: var(--zeroship-accent-active);
 }
-[data-slot="toggle"][data-variant="plain"][data-pressed]:not([data-disabled]):active {
+[data-slot~="toggle"][data-variant="plain"][data-pressed]:not([data-disabled]):active {
   background-color: color-mix(in oklch, var(--zeroship-accent) 30%, transparent);
 }
-[data-slot="toggle"][data-variant="tinted"][data-pressed]:not([data-disabled]):active {
+[data-slot~="toggle"][data-variant="tinted"][data-pressed]:not([data-disabled]):active {
   background-color: var(--zeroship-accent-active);
 }
 
@@ -330,18 +330,18 @@
  * Brief principle 6: the ring must escape the group's inset rim and
  * surrounding overflow. `outline` does that for free; `box-shadow`
  * would clip. */
-[data-slot="toggle"]:focus-visible {
+[data-slot~="toggle"]:focus-visible {
   outline: 0.125rem solid var(--zeroship-button-focus-ring-color);
   outline-offset: var(--zeroship-focus-ring-offset);
 }
 
 /* ─── disabled ──────────────────────────────────────────────────────── */
-[data-slot="toggle"][data-disabled] {
+[data-slot~="toggle"][data-disabled] {
   cursor: not-allowed;
   color: var(--zeroship-label-tertiary);
   background-color: color-mix(in oklch, var(--zeroship-label) 4%, transparent);
 }
-[data-slot="toggle"][data-disabled][data-pressed] {
+[data-slot~="toggle"][data-disabled][data-pressed] {
   /* Polish item 4: desaturated lavender fill + hairline inset edge.
    *
    * Pre-polish, the 30% accent mix read close enough to an enabled tinted
@@ -358,7 +358,7 @@
 }
 
 /* ─── group container ───────────────────────────────────────────────── */
-[data-slot="toggle-group"] {
+[data-slot~="toggle-group"] {
   display: inline-grid;
   grid-auto-flow: column;
   /* Equal-width default — the children fill the grid track. */
@@ -374,16 +374,16 @@
   min-inline-size: 0;
 }
 
-[data-slot="toggle-group"][data-orientation="vertical"] {
+[data-slot~="toggle-group"][data-orientation="vertical"] {
   grid-auto-flow: row;
   grid-auto-rows: minmax(0, auto);
   grid-auto-columns: auto;
 }
 
-[data-slot="toggle-group"][data-size="sm"] {
+[data-slot~="toggle-group"][data-size="sm"] {
   border-radius: var(--zeroship-toggle-radius-sm);
 }
-[data-slot="toggle-group"][data-size="lg"] {
+[data-slot~="toggle-group"][data-size="lg"] {
   border-radius: var(--zeroship-toggle-radius-lg);
 }
 
@@ -391,19 +391,19 @@
  * toolbars where icon-only segments mix with text-only ones (brief
  * principle 3). The columns become `auto` so each segment sizes to
  * its own content. */
-[data-slot="toggle-group"][data-orientation="vertical"][data-equal-width="false"]:not() {
+[data-slot~="toggle-group"][data-orientation="vertical"][data-equal-width="false"]:not() {
   grid-auto-columns: auto;
 }
 
 /* Vertical groups force each segment to fit its content (brief
  * contingency: avoid unnatural stretching). */
-[data-slot="toggle-group"][data-orientation="vertical"] [data-slot="toggle"] {
+[data-slot~="toggle-group"][data-orientation="vertical"] [data-slot~="toggle"] {
   inline-size: max-content;
   justify-self: stretch;
 }
 /* When equalWidth is true on a vertical group, segments share a column
  * width via 100% so the rail reads as one rail. */
-[data-slot="toggle-group"][data-orientation="vertical"][data-equal-width="true"] [data-slot="toggle"] {
+[data-slot~="toggle-group"][data-orientation="vertical"][data-equal-width="true"] [data-slot~="toggle"] {
   inline-size: 100%;
 }
 
@@ -414,30 +414,30 @@
  * NB: rules below restrict to `:not([data-pressed])` so the pressed-
  * pill rule defined ABOVE retains the accent fill regardless of group
  * specificity. Without that guard, the descendant selector
- * `[data-slot="toggle-group"] [data-slot="toggle"]` would override the standalone pressed
+ * `[data-slot~="toggle-group"] [data-slot~="toggle"]` would override the standalone pressed
  * rule (same specificity, later wins) and leave pressed segments
  * painted transparent over the rail — exactly the axe color-contrast
  * failure caught during slice-5 review. */
-[data-slot="toggle-group"] [data-slot="toggle"]:not([data-pressed]) {
+[data-slot~="toggle-group"] [data-slot~="toggle"]:not([data-pressed]) {
   background-color: transparent;
 }
 
 /* Group child radius keys off the CHILD's resolved data-size, not the
- * group modifier class. Item 4 fix: previously `[data-slot="toggle-group"]
- * [data-slot="toggle"]` overrode any child explicit `size="lg"`, breaking the
+ * group modifier class. Item 4 fix: previously `[data-slot~="toggle-group"]
+ * [data-slot~="toggle"]` overrode any child explicit `size="lg"`, breaking the
  * documented cascade contract (child prop > group context > default).
  * Both the default <button> and asChild Slot stamp `data-size={size}`
  * (item 8 fix in Toggle.tsx) so these selectors catch every render path.
  *
  * The radius is slightly tighter than the standalone so the pressed pill
  * nests inside the group's rim with a small breathing margin. */
-[data-slot="toggle-group"] [data-slot="toggle"][data-size="sm"] {
+[data-slot~="toggle-group"] [data-slot~="toggle"][data-size="sm"] {
   border-radius: calc(var(--zeroship-toggle-radius-sm) - 0.0625rem);
 }
-[data-slot="toggle-group"] [data-slot="toggle"][data-size="md"] {
+[data-slot~="toggle-group"] [data-slot~="toggle"][data-size="md"] {
   border-radius: calc(var(--zeroship-toggle-radius-md) - 0.125rem);
 }
-[data-slot="toggle-group"] [data-slot="toggle"][data-size="lg"] {
+[data-slot~="toggle-group"] [data-slot~="toggle"][data-size="lg"] {
   /* Polish item 5: keep the full lg radius — subtracting 0.125rem made the
    * pressed pill read tab-like (sharp shoulders at the larger size). The
    * group's `--zeroship-space-1` padding already insets the pill from the rim;
@@ -448,27 +448,27 @@
 }
 
 @media (hover: hover) {
-  [data-slot="toggle-group"] [data-slot="toggle"]:not([data-disabled]):not([data-pressed]):hover {
+  [data-slot~="toggle-group"] [data-slot~="toggle"]:not([data-disabled]):not([data-pressed]):hover {
     background-color: color-mix(in oklch, var(--zeroship-label) 6%, transparent);
   }
 }
-[data-slot="toggle-group"] [data-slot="toggle"]:not([data-disabled]):not([data-pressed]):active {
+[data-slot~="toggle-group"] [data-slot~="toggle"]:not([data-disabled]):not([data-pressed]):active {
   background-color: color-mix(in oklch, var(--zeroship-label) 10%, transparent);
 }
 
 /* Plain group: drop the track surface; segments become a row of
  * independent (but still focus-grouped) buttons. */
-[data-slot="toggle-group"][data-variant="plain"] {
+[data-slot~="toggle-group"][data-variant="plain"] {
   background-color: transparent;
   box-shadow: none;
   padding: 0;
   gap: var(--zeroship-space-1);
 }
-[data-slot="toggle-group"][data-variant="plain"] [data-slot="toggle"]:not([data-pressed]) {
+[data-slot~="toggle-group"][data-variant="plain"] [data-slot~="toggle"]:not([data-pressed]) {
   background-color: transparent;
 }
 @media (hover: hover) {
-  [data-slot="toggle-group"][data-variant="plain"] [data-slot="toggle"]:not([data-disabled]):not([data-pressed]):hover {
+  [data-slot~="toggle-group"][data-variant="plain"] [data-slot~="toggle"]:not([data-disabled]):not([data-pressed]):hover {
     background-color: color-mix(in oklch, var(--zeroship-label) 8%, transparent);
   }
 }
@@ -481,32 +481,32 @@
  * resolved variant is also `tinted` — without that, a tinted group with
  * an explicit `<Toggle variant="plain">` child would still get the
  * accent-tinted text from the group, breaking the prop-wins cascade. */
-[data-slot="toggle-group"][data-variant="tinted"] {
+[data-slot~="toggle-group"][data-variant="tinted"] {
   background-color: color-mix(in oklch, var(--zeroship-accent) 10%, transparent);
 }
-[data-slot="toggle-group"][data-variant="tinted"] [data-slot="toggle"][data-variant="tinted"]:not([data-pressed]) {
+[data-slot~="toggle-group"][data-variant="tinted"] [data-slot~="toggle"][data-variant="tinted"]:not([data-pressed]) {
   color: var(--zeroship-accent);
 }
 
 /* Pressed segments inside a group keep the accent fill (the standalone
- * `[data-slot="toggle"][data-pressed]` rule above already paints accent on the
+ * `[data-slot~="toggle"][data-pressed]` rule above already paints accent on the
  * pill — same specificity, but the unpressed-only group rule above
  * lets it win). z-index lifts the pill over the group's track so the
  * focus outline isn't clipped. */
-[data-slot="toggle-group"] [data-slot="toggle"][data-pressed] {
+[data-slot~="toggle-group"] [data-slot~="toggle"][data-pressed] {
   z-index: 1;
 }
 
 /* Group disabled cascade — Base UI propagates disabled to each child,
  * but the group root also paints a faded surface so the rail itself
  * reads inactive. */
-[data-slot="toggle-group"][data-disabled] {
+[data-slot~="toggle-group"][data-disabled] {
   background-color: color-mix(in oklch, var(--zeroship-fill-secondary) 60%, transparent);
 }
 
 /* ─── reduced motion ────────────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
-  [data-slot="toggle"] {
+  [data-slot~="toggle"] {
     transition: none;
   }
 }
@@ -518,7 +518,7 @@
  * Highlight outline so the ring stays visible against either Canvas
  * or Highlight backgrounds. */
 @media (forced-colors: active) {
-  [data-slot="toggle"] {
+  [data-slot~="toggle"] {
     background-color: Canvas;
     color: CanvasText;
     forced-color-adjust: none;
@@ -527,7 +527,7 @@
      * forced-colors. */
     box-shadow: inset 0 0 0 0.0625rem CanvasText;
   }
-  [data-slot="toggle"][data-pressed] {
+  [data-slot~="toggle"][data-pressed] {
     background-color: Highlight;
     color: HighlightText;
     box-shadow: inset 0 0 0 0.0625rem Highlight;
@@ -538,21 +538,21 @@
    * inset-edge variant cue is replaced with the same Highlight ring used
    * by the base rule, so we re-stamp it for specificity parity with the
    * oklch tinted-pressed rule. */
-  [data-slot="toggle"][data-variant="plain"][data-pressed],
-  [data-slot="toggle"][data-variant="tinted"][data-pressed] {
+  [data-slot~="toggle"][data-variant="plain"][data-pressed],
+  [data-slot~="toggle"][data-variant="tinted"][data-pressed] {
     background-color: Highlight;
     color: HighlightText;
     box-shadow: inset 0 0 0 0.0625rem Highlight;
   }
-  [data-slot="toggle"]:focus-visible {
+  [data-slot~="toggle"]:focus-visible {
     outline-color: Highlight;
   }
-  [data-slot="toggle"][data-disabled] {
+  [data-slot~="toggle"][data-disabled] {
     /* Item-C fix: re-stamp `background-color: Canvas` inside the
      * forced-colors disabled mirror. The base oklch rule
-     * `[data-slot="toggle"][data-disabled]` paints a token-derived
+     * `[data-slot~="toggle"][data-disabled]` paints a token-derived
      * `color-mix(in oklch, var(--zeroship-label) 4%, transparent)` background
-     * with higher specificity than the bare `[data-slot="toggle"] { background:
+     * with higher specificity than the bare `[data-slot~="toggle"] { background:
      * Canvas }` reset at the top of this @media block. Without the
      * explicit Canvas paint here, a disabled unpressed Toggle under
      * high-contrast mode keeps the token mix instead of resolving to
@@ -561,27 +561,27 @@
     color: GrayText;
     box-shadow: inset 0 0 0 0.0625rem GrayText;
   }
-  [data-slot="toggle"][data-disabled][data-pressed] {
+  [data-slot~="toggle"][data-disabled][data-pressed] {
     background-color: Canvas;
     color: GrayText;
     box-shadow: inset 0 0 0 0.0625rem GrayText;
   }
-  [data-slot="toggle-group"] {
+  [data-slot~="toggle-group"] {
     background-color: Canvas;
     box-shadow: inset 0 0 0 0.0625rem CanvasText;
   }
   /* Inside a group, suppress the per-segment border so the group rim
    * carries the only visible edge. */
-  [data-slot="toggle-group"] [data-slot="toggle"]:not([data-pressed]) {
+  [data-slot~="toggle-group"] [data-slot~="toggle"]:not([data-pressed]) {
     box-shadow: none;
   }
 
   /* ─── Item 1 fix: mirror every STATE selector inside forced-colors so
    * the system colors win over the oklch token rules at every state.
    *
-   * Pre-fix, selectors like `[data-slot="toggle"]:not([data-disabled])
+   * Pre-fix, selectors like `[data-slot~="toggle"]:not([data-disabled])
    * :not([data-pressed]):hover` had higher specificity than the bare
-   * `[data-slot="toggle"]` reset block above, so under high-contrast emulation,
+   * `[data-slot~="toggle"]` reset block above, so under high-contrast emulation,
    * hovering an unpressed Toggle would re-paint the oklch label-tinted
    * background. We re-emit each state selector with EQUAL specificity
    * inside the forced-colors media so the system colors take the cascade.
@@ -589,54 +589,54 @@
    * Verify with Playwright `emulateMedia({ forcedColors: 'active' })` —
    * computed background-color must equal `Canvas` or `Highlight`. */
   @media (hover: hover) {
-    [data-slot="toggle"][data-variant="default"]:not([data-disabled]):not([data-pressed]):hover,
-    [data-slot="toggle"][data-variant="plain"]:not([data-disabled]):not([data-pressed]):hover,
-    [data-slot="toggle"][data-variant="tinted"]:not([data-disabled]):not([data-pressed]):hover {
+    [data-slot~="toggle"][data-variant="default"]:not([data-disabled]):not([data-pressed]):hover,
+    [data-slot~="toggle"][data-variant="plain"]:not([data-disabled]):not([data-pressed]):hover,
+    [data-slot~="toggle"][data-variant="tinted"]:not([data-disabled]):not([data-pressed]):hover {
       background-color: Canvas;
       color: CanvasText;
     }
-    [data-slot="toggle"][data-pressed]:not([data-disabled]):hover {
+    [data-slot~="toggle"][data-pressed]:not([data-disabled]):hover {
       background-color: Highlight;
       color: HighlightText;
     }
     /* Group + per-variant hover surfaces — same equal-specificity dance.
      * Without these the group descendant rules at `:339`/`:359` would
-     * outrank the forced-colors reset on `[data-slot="toggle"]`. */
-    [data-slot="toggle-group"] [data-slot="toggle"]:not([data-disabled]):not([data-pressed]):hover,
-    [data-slot="toggle-group"][data-variant="plain"] [data-slot="toggle"]:not([data-disabled]):not([data-pressed]):hover {
+     * outrank the forced-colors reset on `[data-slot~="toggle"]`. */
+    [data-slot~="toggle-group"] [data-slot~="toggle"]:not([data-disabled]):not([data-pressed]):hover,
+    [data-slot~="toggle-group"][data-variant="plain"] [data-slot~="toggle"]:not([data-disabled]):not([data-pressed]):hover {
       background-color: Canvas;
       color: CanvasText;
     }
   }
 
   /* Active (mouse-down) states across every variant + the group track. */
-  [data-slot="toggle"][data-variant="default"]:not([data-disabled]):not([data-pressed]):active,
-  [data-slot="toggle"][data-variant="plain"]:not([data-disabled]):not([data-pressed]):active,
-  [data-slot="toggle"][data-variant="tinted"]:not([data-disabled]):not([data-pressed]):active {
+  [data-slot~="toggle"][data-variant="default"]:not([data-disabled]):not([data-pressed]):active,
+  [data-slot~="toggle"][data-variant="plain"]:not([data-disabled]):not([data-pressed]):active,
+  [data-slot~="toggle"][data-variant="tinted"]:not([data-disabled]):not([data-pressed]):active {
     background-color: Canvas;
     color: CanvasText;
   }
-  [data-slot="toggle"][data-pressed]:not([data-disabled]):active {
+  [data-slot~="toggle"][data-pressed]:not([data-disabled]):active {
     background-color: Highlight;
     color: HighlightText;
   }
-  [data-slot="toggle-group"] [data-slot="toggle"]:not([data-disabled]):not([data-pressed]):active {
+  [data-slot~="toggle-group"] [data-slot~="toggle"]:not([data-disabled]):not([data-pressed]):active {
     background-color: Canvas;
     color: CanvasText;
   }
 
-  /* Group-disabled cascade — the original [data-slot="toggle-group"][data-disabled]
+  /* Group-disabled cascade — the original [data-slot~="toggle-group"][data-disabled]
    * rule paints a faded oklch fill. Re-emit to Canvas under forced-colors
    * so the rail reads system-neutral, and stamp GrayText on every child
    * so the disabled cascade is visible. */
-  [data-slot="toggle-group"][data-disabled] {
+  [data-slot~="toggle-group"][data-disabled] {
     background-color: Canvas;
   }
-  [data-slot="toggle-group"][data-disabled] [data-slot="toggle"] {
+  [data-slot~="toggle-group"][data-disabled] [data-slot~="toggle"] {
     background-color: Canvas;
     color: GrayText;
   }
-  [data-slot="toggle-group"][data-disabled] [data-slot="toggle"][data-pressed] {
+  [data-slot~="toggle-group"][data-disabled] [data-slot~="toggle"][data-pressed] {
     background-color: Canvas;
     color: GrayText;
     box-shadow: inset 0 0 0 0.0625rem GrayText;

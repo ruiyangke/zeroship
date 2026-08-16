@@ -2,12 +2,12 @@
  * AppShell — application frame composition.
  *
  * Anatomy:
- *   [data-slot="app-shell"]            — the full-height flex column (Header / body / Footer)
- *   [data-slot="app-shell-header"]    — top band (<header>): raised surface + bottom hairline
- *   [data-slot="app-shell-body"]      — the body row (a `Split`: Sidebar rail + Main)
- *   [data-slot="app-shell-sidebar"]   — the fixed-width rail (<aside> / <nav>)
- *   [data-slot="app-shell-main"]      — the fluid main region (<main>)
- *   [data-slot="app-shell-footer"]    — optional bottom band (<footer>)
+ *   [data-slot~="app-shell"]            — the full-height flex column (Header / body / Footer)
+ *   [data-slot~="app-shell-header"]    — top band (<header>): raised surface + bottom hairline
+ *   [data-slot~="app-shell-body"]      — the body row (a `Split`: Sidebar rail + Main)
+ *   [data-slot~="app-shell-sidebar"]   — the fixed-width rail (<aside> / <nav>)
+ *   [data-slot~="app-shell-main"]      — the fluid main region (<main>)
+ *   [data-slot~="app-shell-footer"]    — optional bottom band (<footer>)
  *
  * Driven by inline custom properties / data-attributes set from props:
  *   --app-shell-sidebar-width   length (default 16rem) — rail inline-size
@@ -47,7 +47,7 @@
  * Theme: the shell MUST NOT set `data-theme` — the theme host is <html>.
  */
 
-[data-slot="app-shell"] {
+[data-slot~="app-shell"] {
   display: flex;
   flex-direction: column;
   /* The shell ALWAYS fills its container's inline-size — its width must
@@ -73,13 +73,13 @@
 /* Fallback for engines without dynamic-viewport-unit support: a definite
  * 100vh so the frame still has a fixed height for Main to scroll within. */
 @supports not (height: 100dvh) {
-  [data-slot="app-shell"] {
+  [data-slot~="app-shell"] {
     block-size: 100vh;
   }
 }
 
 /* ─── Header — raised band + bottom hairline ──────────────────────────── */
-[data-slot="app-shell-header"] {
+[data-slot~="app-shell-header"] {
   flex: 0 0 auto;
   /* A real bar: a comfortable minimum height + vertically-centered content
    * so a brand lockup and actions sit on a baseline rather than collapsing
@@ -99,7 +99,7 @@
 }
 
 /* ─── Body — the Split row fills the remaining block-size ─────────────── */
-[data-slot="app-shell-body"] {
+[data-slot~="app-shell-body"] {
   flex: 1 1 auto;
   min-block-size: 0;
 }
@@ -117,7 +117,7 @@
  * Open width comes from the Split.Side `flex-basis` (sideWidth wires
  * `--app-shell-sidebar-width`), so this rule owns only the surface,
  * the divider, padding, overflow, and the collapse transition. */
-[data-slot="app-shell-sidebar"] {
+[data-slot~="app-shell-sidebar"] {
   overflow: hidden auto;
   background: var(--zeroship-shell-sidebar-bg, var(--zeroship-surface-sunken));
   backdrop-filter: var(--zeroship-material-thin);
@@ -134,10 +134,10 @@
  * it to inline-start. We key off the shell root's `[data-sidebar-side]`
  * (the side attr the root always carries) rather than the rail element,
  * which does not. */
-[data-slot="app-shell"][data-sidebar-side="start"] [data-slot="app-shell-sidebar"] {
+[data-slot~="app-shell"][data-sidebar-side="start"] [data-slot~="app-shell-sidebar"] {
   border-inline-end: var(--zeroship-selection-hairline) solid var(--zeroship-separator);
 }
-[data-slot="app-shell"][data-sidebar-side="end"] [data-slot="app-shell-sidebar"] {
+[data-slot~="app-shell"][data-sidebar-side="end"] [data-slot~="app-shell-sidebar"] {
   border-inline-start: var(--zeroship-selection-hairline) solid var(--zeroship-separator);
 }
 
@@ -150,7 +150,7 @@
  * Removal from the AT tree + focus order is handled by `inert` +
  * `aria-hidden` on the rail element (set from AppShell.tsx when closed),
  * which is the animation-safe equivalent of dropping it via display. */
-[data-slot="app-shell-body"]:not([data-sidebar-open]) > [data-slot="app-shell-sidebar"] {
+[data-slot~="app-shell-body"]:not([data-sidebar-open]) > [data-slot~="app-shell-sidebar"] {
   flex-basis: 0;
   inline-size: 0;
   min-inline-size: 0;
@@ -159,13 +159,13 @@
 }
 
 /* ─── Main — fluid; arrange-only (no paint of its own) ────────────────── */
-[data-slot="app-shell-main"] {
+[data-slot~="app-shell-main"] {
   min-inline-size: 0;
   overflow: auto;
 }
 
 /* ─── Footer — muted footnote band, top hairline ──────────────────────── */
-[data-slot="app-shell-footer"] {
+[data-slot~="app-shell-footer"] {
   flex: 0 0 auto;
   /* A quiet footnote band: vertically centered, muted secondary label
    * colour, footnote type scale, with the page content centered on the
@@ -185,7 +185,7 @@
 
 /* ─── prefers-reduced-motion — drop the rail collapse transition ──────── */
 @media (prefers-reduced-motion: reduce) {
-  [data-slot="app-shell-sidebar"] {
+  [data-slot~="app-shell-sidebar"] {
     transition: none;
   }
 }
@@ -196,27 +196,27 @@
  * dropped; mirror the painted bands so the Header/Footer keep a visible
  * system-color edge against the page. */
 @media (forced-colors: active) {
-  [data-slot="app-shell"] {
+  [data-slot~="app-shell"] {
     background: Canvas;
     color: CanvasText;
   }
-  [data-slot="app-shell-header"] {
+  [data-slot~="app-shell-header"] {
     background: Canvas;
     border-block-end-color: CanvasText;
   }
   /* The sunken rail surface is dropped in a forced-colors pass; mirror the
    * dividing hairline so the rail keeps a visible system-color edge against
    * Main on whichever side it sits. */
-  [data-slot="app-shell-sidebar"] {
+  [data-slot~="app-shell-sidebar"] {
     background: Canvas;
   }
-  [data-slot="app-shell"][data-sidebar-side="start"] [data-slot="app-shell-sidebar"] {
+  [data-slot~="app-shell"][data-sidebar-side="start"] [data-slot~="app-shell-sidebar"] {
     border-inline-end-color: CanvasText;
   }
-  [data-slot="app-shell"][data-sidebar-side="end"] [data-slot="app-shell-sidebar"] {
+  [data-slot~="app-shell"][data-sidebar-side="end"] [data-slot~="app-shell-sidebar"] {
     border-inline-start-color: CanvasText;
   }
-  [data-slot="app-shell-footer"] {
+  [data-slot~="app-shell-footer"] {
     border-block-start-color: CanvasText;
   }
 }

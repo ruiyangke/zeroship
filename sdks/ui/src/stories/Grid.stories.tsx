@@ -47,7 +47,10 @@ export const Intrinsic: Story = {
   ),
   play: async ({ canvasElement }) => {
     const grid = within(canvasElement).getByTestId("grid-intrinsic");
-    await expect(grid).toHaveAttribute("data-slot", "grid");
+    await expect(grid).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)grid(?:\s|$)/),
+    );
     await expect(getComputedStyle(grid).display).toBe("grid");
   },
 };
@@ -154,7 +157,10 @@ export const AsChild: Story = {
   play: async ({ canvasElement }) => {
     const section = within(canvasElement).getByTestId("grid-aschild");
     await expect(section.tagName).toBe("SECTION");
-    await expect(section).toHaveClass("zs-grid");
+    await expect(section).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)grid(?:\s|$)/),
+    );
   },
 };
 

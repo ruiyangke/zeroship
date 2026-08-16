@@ -2,13 +2,13 @@
  * Faq — a frequently-asked-questions band.
  *
  * Anatomy:
- *   [data-slot="faq"]             — the <section>; generous vertical padding, NO heavy
+ *   [data-slot~="faq"]             — the <section>; generous vertical padding, NO heavy
  *                         background (composable)
- *   [data-slot="faq-header"]     — optional eyebrow + title + desc band
- *   [data-slot="faq-eyebrow"]    — small label above the title (accent)
- *   [data-slot="faq-title"]      — the optional section lead-in <h2>
- *   [data-slot="faq-description"] — muted lead-in <p>
- *   [data-slot="faq-list"]       — the composed Accordion wrapper (constrained measure)
+ *   [data-slot~="faq-header"]     — optional eyebrow + title + desc band
+ *   [data-slot~="faq-eyebrow"]    — small label above the title (accent)
+ *   [data-slot~="faq-title"]      — the optional section lead-in <h2>
+ *   [data-slot~="faq-description"] — muted lead-in <p>
+ *   [data-slot~="faq-list"]       — the composed Accordion wrapper (constrained measure)
  *
  * Layout discipline:
  *   - The section sets only its vertical rhythm; the composed Container owns
@@ -24,7 +24,7 @@
  * reduced-motion. Nothing here to disable.
  */
 
-[data-slot="faq"] {
+[data-slot~="faq"] {
   /* Local single-knob custom property (the house idiom): the readable measure
      the header + Q/A list are capped to. */
   --zeroship-faq-measure: 44rem;
@@ -37,16 +37,16 @@
 }
 
 /* ─── Header — optional eyebrow + title + description ─────────────────────── */
-[data-slot="faq-header"] {
+[data-slot~="faq-header"] {
   max-inline-size: var(--zeroship-faq-measure);
   margin-block-end: var(--zeroship-space-8);
   text-align: start;
 }
 
-/* The eyebrow styling is the shared `[data-slot="cta-eyebrow"], [data-slot="faq-eyebrow"], [data-slot="feature-grid-eyebrow"], [data-slot="hero-eyebrow"], [data-slot="section-header-eyebrow"], [data-slot="stats-band-eyebrow"]` (defined once in
+/* The eyebrow styling is the shared `[data-slot~="cta-eyebrow"], [data-slot~="faq-eyebrow"], [data-slot~="feature-grid-eyebrow"], [data-slot~="hero-eyebrow"], [data-slot~="section-header-eyebrow"], [data-slot~="stats-band-eyebrow"]` (defined once in
    _section-tone.css); this BEM hook remains only as a stable consumer target. */
 
-[data-slot="faq-title"] {
+[data-slot~="faq-title"] {
   margin-block: 0;
   /* Marketing display-3 — a confident section <h2>. */
   font-size: var(--zeroship-text-display-3-size);
@@ -57,7 +57,7 @@
   text-wrap: balance;
 }
 
-[data-slot="faq-description"] {
+[data-slot~="faq-description"] {
   margin-block: 0;
   font-size: var(--zeroship-text-title-3-size);
   line-height: var(--zeroship-text-title-3-line);
@@ -67,7 +67,7 @@
 }
 
 /* ─── List — the composed Accordion, capped to the readable measure ──────── */
-[data-slot="faq-list"] {
+[data-slot~="faq-list"] {
   max-inline-size: var(--zeroship-faq-measure);
   /* The Accordion owns its own internal chrome (rows, dividers, chevron,
      panel animation). This band only constrains its inline measure. */
@@ -79,10 +79,10 @@
  * the painted header text to system colors. The composed Accordion handles its
  * own forced-colors treatment for the trigger/panel/dividers. */
 @media (forced-colors: active) {
-  [data-slot="faq"],
-  [data-slot="faq-eyebrow"],
-  [data-slot="faq-title"],
-  [data-slot="faq-description"] {
+  [data-slot~="faq"],
+  [data-slot~="faq-eyebrow"],
+  [data-slot~="faq-title"],
+  [data-slot~="faq-description"] {
     color: CanvasText;
   }
 }

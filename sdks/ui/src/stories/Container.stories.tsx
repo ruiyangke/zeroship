@@ -46,7 +46,10 @@ export const Default: Story = {
   ),
   play: async ({ canvasElement }) => {
     const c = within(canvasElement).getByTestId("container-default");
-    await expect(c).toHaveAttribute("data-slot", "container");
+    await expect(c).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)container(?:\s|$)/),
+    );
     await expect(c).toHaveAttribute("data-size", "lg");
   },
 };
@@ -154,6 +157,9 @@ export const AsChild: Story = {
   play: async ({ canvasElement }) => {
     const el = within(canvasElement).getByTestId("container-aschild");
     await expect(el.tagName).toBe("SECTION");
-    await expect(el).toHaveClass("zs-container");
+    await expect(el).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)container(?:\s|$)/),
+    );
   },
 };

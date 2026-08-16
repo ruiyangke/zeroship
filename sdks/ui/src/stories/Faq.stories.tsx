@@ -79,7 +79,10 @@ export const Default: Story = {
     const canvas = within(canvasElement);
     const root = canvas.getByTestId("faq-default");
     await expect(root.tagName).toBe("SECTION");
-    await expect(root).toHaveAttribute("data-slot", "faq");
+    await expect(root).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)faq(?:\s|$)/),
+    );
 
     // Labelled by the real <h2>.
     const title = canvas.getByRole("heading", {

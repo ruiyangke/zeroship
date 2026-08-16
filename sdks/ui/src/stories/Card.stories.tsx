@@ -733,7 +733,7 @@ export const TitleAsChildAndMediaOverride: Story = {
         </Card.Header>
         <Card.Content>Subpart render-as behavior.</Card.Content>
         <Card.Footer align="between" divider="top">
-          <Button size="sm" variant="plain">
+          <Button size="sm" variant="filled">
             Back
           </Button>
           <Button size="sm">Continue</Button>
@@ -748,11 +748,11 @@ export const TitleAsChildAndMediaOverride: Story = {
       level: 2,
     });
     const footer = heading
-      .closest("[data-slot='card']")
-      ?.querySelector("[data-slot='card-footer']");
+      .closest("[data-slot~='card']")
+      ?.querySelector("[data-slot~='card-footer']");
     const media = heading
-      .closest("[data-slot='card']")
-      ?.querySelector("[data-slot='card-media']");
+      .closest("[data-slot~='card']")
+      ?.querySelector("[data-slot~='card-media']");
 
     await expect(heading.tagName).toBe("H2");
     await expect(footer).toHaveAttribute("data-align", "between");

@@ -120,7 +120,7 @@ export const WarningCompound: Story = {
 /* ─── WideCentering (centering guard) ───────────────────────────────────
  * Regression for the off-center column: on a WIDE surface the capped
  * `__column` must sit horizontally centered, not hug the inline-start
- * edge. The fix is `margin-inline:auto` on `.zs-error-state__column`.
+ * edge. The fix is `margin-inline:auto` on `[data-slot~=error-state-column]`.
  * Pre-fix the column hugs left and this assertion fails. */
 export const WideCentering: Story = {
   name: "Wide container (centering guard)",
@@ -146,7 +146,7 @@ export const WideCentering: Story = {
     const canvas = within(canvasElement);
     const region = canvas.getByTestId("error-wide");
     const column = region.querySelector(
-      "[data-slot='error-state-column']",
+      "[data-slot~='error-state-column']",
     ) as HTMLElement;
     await expect(column).not.toBeNull();
     const r = region.getBoundingClientRect();

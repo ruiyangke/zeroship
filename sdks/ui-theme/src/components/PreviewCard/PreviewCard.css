@@ -2,10 +2,10 @@
  * PreviewCard — hover-anchored rich preview surface.
  *
  * Anatomy:
- *   [data-slot="preview-card-backdrop"]      optional scrim layer (opt-in only).
- *   [data-slot="preview-card-positioner"]    Base UI's Floating UI anchored layer
- *     └─ [data-slot="preview-card-popup"]    opaque sheet with --zeroship-shadow-popover
- *           ├─ [data-slot="preview-card-arrow"]      optional 16×8 SVG triangle
+ *   [data-slot~="preview-card-backdrop"]      optional scrim layer (opt-in only).
+ *   [data-slot~="preview-card-positioner"]    Base UI's Floating UI anchored layer
+ *     └─ [data-slot~="preview-card-popup"]    opaque sheet with --zeroship-shadow-popover
+ *           ├─ [data-slot~="preview-card-arrow"]      optional 16×8 SVG triangle
  *           └─ children                    free composition (img, h*, p, …)
  *
  * Base UI emits `data-starting-style` / `data-ending-style` on Popup
@@ -43,20 +43,20 @@
  * The default Base UI trigger renders an `<a>`. We don't repaint it —
  * the link inherits the consumer's styling — but we offer the class
  * hook as a stable selector for hover affordances. */
-[data-slot="preview-card-trigger"] {
+[data-slot~="preview-card-trigger"] {
   /* Focus ring participates in the global focus model rather than the
    * link's own browser default. Inline-styled because no token currently
    * captures the "focus on hovered surface" shape; the focus ring tokens
    * are sized for buttons / form controls. */
   border-radius: var(--zeroship-radius-1);
 }
-[data-slot="preview-card-trigger"]:focus-visible {
+[data-slot~="preview-card-trigger"]:focus-visible {
   outline: var(--zeroship-focus-ring-width) solid var(--zeroship-focus-ring-color);
   outline-offset: var(--zeroship-focus-ring-offset);
 }
 
 /* ─── Backdrop (opt-in) ────────────────────────────────────────────── */
-[data-slot="preview-card-backdrop"] {
+[data-slot~="preview-card-backdrop"] {
   position: fixed;
   inset: 0;
   z-index: var(--zeroship-z-modal);
@@ -64,8 +64,8 @@
   opacity: 1;
   transition: opacity var(--zeroship-motion-base) var(--zeroship-motion-ease);
 }
-[data-slot="preview-card-backdrop"][data-starting-style],
-[data-slot="preview-card-backdrop"][data-ending-style] {
+[data-slot~="preview-card-backdrop"][data-starting-style],
+[data-slot~="preview-card-backdrop"][data-ending-style] {
   opacity: 0;
 }
 
@@ -75,13 +75,13 @@
  * paint it; it carries Floating UI's transform / x / y inline styles.
  * Stack above modal sheets with a small bump above --zeroship-z-modal so a
  * preview card floats over a dialog if both happen to mount. */
-[data-slot="preview-card-positioner"] {
+[data-slot~="preview-card-positioner"] {
   z-index: calc(var(--zeroship-z-modal) + 15);
   outline: none;
 }
 
 /* ─── Popup ────────────────────────────────────────────────────────── */
-[data-slot="preview-card-popup"] {
+[data-slot~="preview-card-popup"] {
   /* Computable background-color + active material/rim tokens. */
   background-color: var(--zeroship-surface);
   color: var(--zeroship-label);
@@ -135,19 +135,19 @@
 
 /* Per-size max-inline-size presets. Sizes match the brief: sm 16rem,
  * md 22rem (default), lg 28rem. Logical so RTL is correct. */
-[data-slot="preview-card-popup"][data-size="sm"] {
+[data-slot~="preview-card-popup"][data-size="sm"] {
   max-inline-size: min(16rem, calc(100dvw - var(--zeroship-space-6) * 2));
 }
-[data-slot="preview-card-popup"][data-size="md"] {
+[data-slot~="preview-card-popup"][data-size="md"] {
   max-inline-size: min(22rem, calc(100dvw - var(--zeroship-space-6) * 2));
 }
-[data-slot="preview-card-popup"][data-size="lg"] {
+[data-slot~="preview-card-popup"][data-size="lg"] {
   max-inline-size: min(28rem, calc(100dvw - var(--zeroship-space-6) * 2));
 }
 
 /* Default styling for common children — these are presentational only,
  * and every property is composable via the consumer's own class. */
-[data-slot="preview-card-popup"] img {
+[data-slot~="preview-card-popup"] img {
   display: block;
   inline-size: 100%;
   block-size: auto;
@@ -155,12 +155,12 @@
   /* Drop the bottom of the image flush against the title gap above. */
   margin-block-end: var(--zeroship-space-1);
 }
-[data-slot="preview-card-popup"] h1,
-[data-slot="preview-card-popup"] h2,
-[data-slot="preview-card-popup"] h3,
-[data-slot="preview-card-popup"] h4,
-[data-slot="preview-card-popup"] h5,
-[data-slot="preview-card-popup"] h6 {
+[data-slot~="preview-card-popup"] h1,
+[data-slot~="preview-card-popup"] h2,
+[data-slot~="preview-card-popup"] h3,
+[data-slot~="preview-card-popup"] h4,
+[data-slot~="preview-card-popup"] h5,
+[data-slot~="preview-card-popup"] h6 {
   margin: 0;
   font-size: var(--zeroship-text-headline-size);
   line-height: var(--zeroship-text-headline-line);
@@ -168,7 +168,7 @@
   letter-spacing: var(--zeroship-text-headline-tracking);
   color: var(--zeroship-label);
 }
-[data-slot="preview-card-popup"] p {
+[data-slot~="preview-card-popup"] p {
   margin: 0;
   font-size: var(--zeroship-text-subheadline-size);
   line-height: var(--zeroship-text-subheadline-line);
@@ -182,29 +182,29 @@
  * on the popup automatically. The starting / ending state is a slight
  * `translateY` based on side plus a `scale(0.96)` — opacity 0→1 carries
  * the fade. */
-[data-slot="preview-card-popup"][data-side="top"] {
+[data-slot~="preview-card-popup"][data-side="top"] {
   transform-origin: bottom center;
 }
-[data-slot="preview-card-popup"][data-side="bottom"] {
+[data-slot~="preview-card-popup"][data-side="bottom"] {
   transform-origin: top center;
 }
-[data-slot="preview-card-popup"][data-side="left"] {
+[data-slot~="preview-card-popup"][data-side="left"] {
   transform-origin: center right;
 }
-[data-slot="preview-card-popup"][data-side="right"] {
+[data-slot~="preview-card-popup"][data-side="right"] {
   transform-origin: center left;
 }
-[data-slot="preview-card-popup"][data-starting-style],
-[data-slot="preview-card-popup"][data-ending-style] {
+[data-slot~="preview-card-popup"][data-starting-style],
+[data-slot~="preview-card-popup"][data-ending-style] {
   opacity: 0;
   transform: scale(0.96);
 }
-[data-slot="preview-card-popup"][data-side="top"][data-starting-style],
-[data-slot="preview-card-popup"][data-side="top"][data-ending-style] {
+[data-slot~="preview-card-popup"][data-side="top"][data-starting-style],
+[data-slot~="preview-card-popup"][data-side="top"][data-ending-style] {
   transform: scale(0.96) translateY(var(--zeroship-space-half));
 }
-[data-slot="preview-card-popup"][data-side="bottom"][data-starting-style],
-[data-slot="preview-card-popup"][data-side="bottom"][data-ending-style] {
+[data-slot~="preview-card-popup"][data-side="bottom"][data-starting-style],
+[data-slot~="preview-card-popup"][data-side="bottom"][data-ending-style] {
   transform: scale(0.96) translateY(calc(-1 * var(--zeroship-space-half)));
 }
 
@@ -216,17 +216,17 @@
  * teleport in — visually jarring even for reduced-motion users — so we
  * keep an opacity fade and only neutralize transform. */
 @media (prefers-reduced-motion: reduce) {
-  [data-slot="preview-card-popup"],
-  [data-slot="preview-card-popup"][data-starting-style],
-  [data-slot="preview-card-popup"][data-ending-style],
-  [data-slot="preview-card-popup"][data-side="top"][data-starting-style],
-  [data-slot="preview-card-popup"][data-side="top"][data-ending-style],
-  [data-slot="preview-card-popup"][data-side="bottom"][data-starting-style],
-  [data-slot="preview-card-popup"][data-side="bottom"][data-ending-style] {
+  [data-slot~="preview-card-popup"],
+  [data-slot~="preview-card-popup"][data-starting-style],
+  [data-slot~="preview-card-popup"][data-ending-style],
+  [data-slot~="preview-card-popup"][data-side="top"][data-starting-style],
+  [data-slot~="preview-card-popup"][data-side="top"][data-ending-style],
+  [data-slot~="preview-card-popup"][data-side="bottom"][data-starting-style],
+  [data-slot~="preview-card-popup"][data-side="bottom"][data-ending-style] {
     transition: opacity var(--zeroship-motion-base) var(--zeroship-motion-ease);
     transform: none;
   }
-  [data-slot="preview-card-backdrop"] {
+  [data-slot~="preview-card-backdrop"] {
     transition: opacity var(--zeroship-motion-base) var(--zeroship-motion-ease);
   }
 }
@@ -244,7 +244,7 @@
  *
  * `color` paints the SVG `fill` via `currentColor`, so the arrow
  * always picks up the popup's themed surface color. */
-[data-slot="preview-card-arrow"] {
+[data-slot~="preview-card-arrow"] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -256,28 +256,28 @@
   color: var(--zeroship-surface);
   /* Sit behind the popup chrome so the rectangle of the arrow wrapper
    * doesn't paint over the popup body. `isolation: isolate` on
-   * [data-slot="preview-card-popup"] establishes the stacking context. */
+   * [data-slot~="preview-card-popup"] establishes the stacking context. */
   z-index: -1;
   filter: drop-shadow(
     0 var(--zeroship-selection-hairline) var(--zeroship-space-half)
       color-mix(in oklch, var(--zeroship-label) 24%, transparent)
   );
 }
-[data-slot="preview-card-arrow"] > svg {
+[data-slot~="preview-card-arrow"] > svg {
   display: block;
   inline-size: 100%;
   block-size: 100%;
 }
-[data-slot="preview-card-arrow"][data-side="top"] > svg {
+[data-slot~="preview-card-arrow"][data-side="top"] > svg {
   transform: rotate(0deg);
 }
-[data-slot="preview-card-arrow"][data-side="right"] > svg {
+[data-slot~="preview-card-arrow"][data-side="right"] > svg {
   transform: rotate(90deg);
 }
-[data-slot="preview-card-arrow"][data-side="bottom"] > svg {
+[data-slot~="preview-card-arrow"][data-side="bottom"] > svg {
   transform: rotate(180deg);
 }
-[data-slot="preview-card-arrow"][data-side="left"] > svg {
+[data-slot~="preview-card-arrow"][data-side="left"] > svg {
   transform: rotate(270deg);
 }
 
@@ -289,7 +289,7 @@
  * fall-through would paint a translucent panel against the system
  * Canvas, which collapses to invisible. */
 @media (forced-colors: active) {
-  [data-slot="preview-card-popup"] {
+  [data-slot~="preview-card-popup"] {
     background-color: Canvas;
     color: CanvasText;
     box-shadow: inset 0 0 0 0.0625rem CanvasText;
@@ -297,25 +297,25 @@
     -webkit-backdrop-filter: none;
     forced-color-adjust: none;
   }
-  [data-slot="preview-card-popup"] h1,
-  [data-slot="preview-card-popup"] h2,
-  [data-slot="preview-card-popup"] h3,
-  [data-slot="preview-card-popup"] h4,
-  [data-slot="preview-card-popup"] h5,
-  [data-slot="preview-card-popup"] h6 {
+  [data-slot~="preview-card-popup"] h1,
+  [data-slot~="preview-card-popup"] h2,
+  [data-slot~="preview-card-popup"] h3,
+  [data-slot~="preview-card-popup"] h4,
+  [data-slot~="preview-card-popup"] h5,
+  [data-slot~="preview-card-popup"] h6 {
     color: CanvasText;
   }
-  [data-slot="preview-card-popup"] p {
+  [data-slot~="preview-card-popup"] p {
     color: CanvasText;
   }
-  [data-slot="preview-card-backdrop"] {
+  [data-slot~="preview-card-backdrop"] {
     background-color: color-mix(in oklch, CanvasText 40%, transparent);
   }
-  [data-slot="preview-card-arrow"] {
+  [data-slot~="preview-card-arrow"] {
     color: Canvas;
     filter: none;
   }
-  [data-slot="preview-card-trigger"]:focus-visible {
+  [data-slot~="preview-card-trigger"]:focus-visible {
     outline-color: Highlight;
   }
 }

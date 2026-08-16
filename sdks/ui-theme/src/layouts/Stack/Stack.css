@@ -2,8 +2,8 @@
  * Stack — one-dimensional flex arrangement.
  *
  * Anatomy:
- *   [data-slot="stack"]    — the flex container
- *   [data-slot="stack"] > * — children (min-inline-size/min-block-size: 0 so a long
+ *   [data-slot~="stack"]    — the flex container
+ *   [data-slot~="stack"] > * — children (min-inline-size/min-block-size: 0 so a long
  *                   token or wide <pre> can shrink instead of overflowing)
  *
  * Driven by inline custom properties set from props:
@@ -24,7 +24,7 @@
  * Motion: none. Stack carries no transitions.
  */
 
-[data-slot="stack"] {
+[data-slot~="stack"] {
   display: flex;
   flex-direction: var(--stack-direction, column);
   gap: var(--stack-gap, var(--zeroship-space-0));
@@ -38,7 +38,7 @@
  * forces the flex item to its min-content width and blows the Stack out
  * past its parent; the logical min-sizes keep RTL + vertical writing modes
  * correct. */
-[data-slot="stack"] > * {
+[data-slot~="stack"] > * {
   min-inline-size: 0;
   min-block-size: 0;
 }

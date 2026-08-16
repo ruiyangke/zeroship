@@ -92,6 +92,8 @@ export interface SeparatorProps extends Omit<
   decorative?: boolean;
   /** Optional class hook on the line. */
   className?: string;
+  /** Additional slot token appended to the root's `separator` token. */
+  "data-slot"?: string;
 }
 
 /**
@@ -107,6 +109,7 @@ export const Separator = forwardRef<HTMLDivElement, SeparatorProps>(
       variant = "hairline",
       decorative = true,
       className,
+      "data-slot": dataSlot,
       ...rest
     },
     ref,
@@ -163,7 +166,7 @@ export const Separator = forwardRef<HTMLDivElement, SeparatorProps>(
           {...(restLocked as React.HTMLAttributes<HTMLDivElement>)}
           ref={ref}
           className={className}
-          data-slot="separator"
+          data-slot={["separator", dataSlot].filter(Boolean).join(" ")}
           data-orientation={orientation}
           data-variant={variant}
           role="none"
@@ -188,7 +191,7 @@ export const Separator = forwardRef<HTMLDivElement, SeparatorProps>(
         ref={ref as Ref<HTMLDivElement>}
         orientation={orientation}
         className={className}
-        data-slot="separator"
+        data-slot={["separator", dataSlot].filter(Boolean).join(" ")}
         data-orientation={orientation}
         data-variant={variant}
         aria-hidden={undefined}

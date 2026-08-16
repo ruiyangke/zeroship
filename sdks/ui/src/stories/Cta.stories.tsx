@@ -54,7 +54,10 @@ export const Default: Story = {
     const canvas = within(canvasElement);
     const root = canvas.getByTestId("cta-default");
     await expect(root.tagName).toBe("SECTION");
-    await expect(root).toHaveAttribute("data-slot", "cta");
+    await expect(root).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)cta(?:\s|$)/),
+    );
 
     // The title is a real <h2> and the section is labelled by it.
     const title = canvas.getByRole("heading", { name: "Ship your idea today" });
@@ -95,7 +98,7 @@ export const Tinted: Story = {
     const root = canvas.getByTestId("cta-tinted");
     await expect(root).toHaveAttribute("data-variant", "tinted");
     // The panel carries the tinted treatment marker.
-    const panel = root.querySelector('[data-slot="cta-panel"]');
+    const panel = root.querySelector('[data-slot~="cta-panel"]');
     await expect(panel).toHaveAttribute("data-variant", "tinted");
     const title = canvas.getByRole("heading", { name: "Join the waitlist" });
     await expect(root.getAttribute("aria-labelledby")).toBe(title.id);
@@ -169,7 +172,7 @@ export const Accent: Story = {
     // Labelled by the real <h2>; the eyebrow carries the shared class.
     const title = canvas.getByRole("heading", { name: "Ship your idea today" });
     await expect(root.getAttribute("aria-labelledby")).toBe(title.id);
-    await expect(root.querySelector(".zs-section-eyebrow")).not.toBeNull();
+    await expect(root.querySelector("[data-slot~=cta-eyebrow]")).not.toBeNull();
     // The CTA Button is present + enabled.
     const cta = canvas.getByRole("button", { name: "Get started" });
     await userEvent.click(cta);
@@ -279,8 +282,8 @@ export const Minimal: Story = {
     ).toBeInTheDocument();
     // No description/eyebrow rendered.
     await expect(
-      root.querySelector('[data-slot="cta-description"]'),
+      root.querySelector('[data-slot~="cta-description"]'),
     ).toBeNull();
-    await expect(root.querySelector('[data-slot="cta-eyebrow"]')).toBeNull();
+    await expect(root.querySelector('[data-slot~="cta-eyebrow"]')).toBeNull();
   },
 };

@@ -263,7 +263,7 @@ export const Loading: Story = {
   ),
   play: async ({ canvasElement }) => {
     const rows = canvasElement.querySelectorAll(
-      '[data-slot="data-table-loading-row"]',
+      '[data-slot~="data-table-loading-row"]',
     );
     expect(rows.length).toBe(4);
   },
@@ -276,7 +276,7 @@ export const StickyHeader: Story = {
       description: {
         story:
           "`stickyHeader` pins the header so rows scroll under it. The " +
-          "DataTable owns the scroll region (`.zs-data-table__scroll`); " +
+          "DataTable owns the scroll region (`[data-slot~=data-table-scroll]`); " +
           "the consumer sizes its block-size. The header paints an opaque " +
           "background so rows don't bleed through. Pagination is forced " +
           "off here so the full dataset scrolls.",
@@ -318,11 +318,11 @@ export const StickyHeader: Story = {
   // body read `getRowModel()` which always paginates → only 10 rows + no
   // footer, leaving 14 rows unreachable in the supposedly-full scroll view.
   play: async ({ canvasElement }) => {
-    const rows = canvasElement.querySelectorAll('[data-slot="data-table-row"]');
+    const rows = canvasElement.querySelectorAll('[data-slot~="data-table-row"]');
     expect(rows.length).toBe(24);
     // No pagination footer is rendered when paginated={false}.
     expect(
-      canvasElement.querySelector('[data-slot="data-table-pagination"]'),
+      canvasElement.querySelector('[data-slot~="data-table-pagination"]'),
     ).toBeNull();
   },
 };
@@ -396,11 +396,11 @@ export const Managed: Story = {
     const canvas = within(canvasElement);
 
     const rowCount = () =>
-      canvasElement.querySelectorAll('[data-slot="data-table-row"]').length;
+      canvasElement.querySelectorAll('[data-slot~="data-table-row"]').length;
     const names = () =>
       Array.from(
         canvasElement.querySelectorAll(
-          '[data-slot="data-table-row"] [data-column="name"]',
+          '[data-slot~="data-table-row"] [data-column="name"]',
         ),
       ).map((el) => el.textContent ?? "");
 
@@ -629,7 +629,7 @@ export const ManualServerSide: Story = {
     const names = () =>
       Array.from(
         canvasElement.querySelectorAll(
-          '[data-slot="data-table-row"] [data-column="name"]',
+          '[data-slot~="data-table-row"] [data-column="name"]',
         ),
       ).map((el) => el.textContent);
 
@@ -738,7 +738,7 @@ export const ColumnFilters: Story = {
   },
   play: async ({ canvasElement }) => {
     const rowCount = () =>
-      canvasElement.querySelectorAll('[data-slot="data-table-row"]').length;
+      canvasElement.querySelectorAll('[data-slot~="data-table-row"]').length;
     const canvas = within(canvasElement);
 
     expect(rowCount()).toBe(4);
@@ -779,7 +779,7 @@ export const PageClamp: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const rowCount = () =>
-      canvasElement.querySelectorAll('[data-slot="data-table-row"]').length;
+      canvasElement.querySelectorAll('[data-slot~="data-table-row"]').length;
 
     // The body is NON-EMPTY — it shows the clamped last page (page 3 → the
     // final 5 of 25 rows), not an empty slice for the out-of-range page 9.
@@ -836,7 +836,7 @@ export const NonFilterableIgnored: Story = {
   },
   play: async ({ canvasElement }) => {
     const rowCount = () =>
-      canvasElement.querySelectorAll('[data-slot="data-table-row"]').length;
+      canvasElement.querySelectorAll('[data-slot~="data-table-row"]').length;
     // All 4 rows remain — the filter on the non-filterable `role` is ignored.
     expect(rowCount()).toBe(4);
   },
@@ -897,7 +897,7 @@ export const GlobalSearchNonString: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const rowCount = () =>
-      canvasElement.querySelectorAll('[data-slot="data-table-row"]').length;
+      canvasElement.querySelectorAll('[data-slot~="data-table-row"]').length;
 
     // All 3 events show first.
     expect(rowCount()).toBe(3);
@@ -946,7 +946,7 @@ export const FractionalPageSize: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const rowCount = () =>
-      canvasElement.querySelectorAll('[data-slot="data-table-row"]').length;
+      canvasElement.querySelectorAll('[data-slot~="data-table-row"]').length;
 
     // 12.5 floors to 12 → page 1 shows exactly 12 rows (NOT 13, NOT NaN/0).
     expect(rowCount()).toBe(12);
@@ -1054,7 +1054,7 @@ export const BooleanAndDangerInk: Story = {
 
     // The "true" boolean glyph carries data-value="true" and is tinted green.
     const glyph = canvasElement.querySelector(
-      '.zs-data-table__bool-glyph[data-value="true"]',
+      '[data-slot~=data-table-bool-glyph][data-value="true"]',
     ) as HTMLElement;
     expect(glyph).toBeTruthy();
     expect(norm(getComputedStyle(glyph).color)).toBe(norm(expectGreen));
@@ -1066,7 +1066,10 @@ export const BooleanAndDangerInk: Story = {
     const deleteItem = (await body.findByTestId(
       "ink-action-delete",
     )) as HTMLElement;
-    expect(deleteItem).toHaveClass("zs-data-table__row-action--danger");
+    expect(deleteItem).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)data-table-row-action-danger(?:\s|$)/),
+    );
     expect(norm(getComputedStyle(deleteItem).color)).toBe(norm(expectRed));
 
     // Close the menu so Base UI's transient focus-guard spans (tabindex=0 +
@@ -1148,7 +1151,7 @@ export const StickyTwoRowHeaderOffset: Story = {
       'thead tr:first-child',
     ) as HTMLElement;
     const filterRow = canvasElement.querySelector(
-      '[data-slot="data-table-filter-row"]',
+      '[data-slot~="data-table-filter-row"]',
     ) as HTMLElement;
     expect(headerRow).toBeTruthy();
     expect(filterRow).toBeTruthy();
@@ -1174,7 +1177,7 @@ export const StickyTwoRowHeaderOffset: Story = {
 /* ─── 20. TruncateClamps (🟠 4 regression) ──────────────────────────────
  * A truncating column with a long value in a width-constrained column must
  * clip to an ellipsis, not overflow / grow the column. Pre-fix the
- * `.zs-data-table__td--truncate` class had NO rule and the table used auto
+ * `[data-slot~=data-table-cell]` class had NO rule and the table used auto
  * layout, so the inner span's `max-inline-size:100%` had no bound and the
  * long value grew the column (no ellipsis). Post-fix the truncate cell
  * collapses (`max-inline-size:0`) so the `<col>` width bounds it and the
@@ -1227,12 +1230,15 @@ export const TruncateClamps: Story = {
   play: async ({ canvasElement }) => {
     // The first row's truncate cell must NOT overflow its box.
     const cell = canvasElement.querySelector(
-      '[data-slot="data-table-row"] .zs-data-table__td--truncate',
+      '[data-slot~="data-table-row"] [data-slot~=data-table-cell]',
     ) as HTMLElement;
     expect(cell).toBeTruthy();
-    expect(cell).toHaveClass("zs-data-table__td--truncate");
+    expect(cell).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)data-table-cell(?:\s|$)/),
+    );
 
-    const span = cell.querySelector(".zs-data-table__truncate") as HTMLElement;
+    const span = cell.querySelector('[data-slot~="data-table-truncate"]') as HTMLElement;
     expect(span).toBeTruthy();
 
     await waitFor(() => {

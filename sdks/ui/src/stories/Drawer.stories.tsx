@@ -803,7 +803,9 @@ function CloseAsChildStory() {
               >
                 <button
                   type="button"
-                  className="zs-button zs-button--gray zs-button--medium"
+                  data-slot="button"
+                  data-variant="gray"
+                  data-size="md"
                   data-testid="drawer-close-aschild-target"
                   onClick={() => {
                     countsRef.current.child += 1;

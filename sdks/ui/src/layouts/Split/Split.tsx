@@ -60,8 +60,8 @@ export interface SplitProps extends ComponentPropsWithoutRef<"div"> {
   asChild?: boolean;
   /**
    * Root `data-slot` value. Defaults to `"split"`. A composing block
-   * (e.g. `AppShell.Body`) overrides it so consumers can target the
-   * outer element via the block's own slot vocabulary. Mirrors Card.
+   * (e.g. `AppShell.Body`) adds its own token so both slot vocabularies
+   * remain available. Mirrors Card.
    */
   "data-slot"?: string;
 }
@@ -71,7 +71,7 @@ export type SplitSideProps = ComponentPropsWithoutRef<"div"> & {
   asChild?: boolean;
   /**
    * `data-slot` value. Defaults to `"split-side"`. A composing block
-   * (e.g. `AppShell.Sidebar`) overrides it. Mirrors Card.
+   * (e.g. `AppShell.Sidebar`) adds its own token. Mirrors Card.
    */
   "data-slot"?: string;
 };
@@ -80,7 +80,7 @@ export type SplitMainProps = ComponentPropsWithoutRef<"div"> & {
   asChild?: boolean;
   /**
    * `data-slot` value. Defaults to `"split-main"`. A composing block
-   * (e.g. `AppShell.Main`) overrides it. Mirrors Card.
+   * (e.g. `AppShell.Main`) adds its own token. Mirrors Card.
    */
   "data-slot"?: string;
 };
@@ -97,7 +97,7 @@ const SplitRoot = forwardRef<HTMLDivElement, SplitProps>(function SplitRoot(
     className,
     style,
     children,
-    "data-slot": dataSlot = "split",
+    "data-slot": dataSlot,
     ...rest
   },
   ref,
@@ -126,7 +126,7 @@ const SplitRoot = forwardRef<HTMLDivElement, SplitProps>(function SplitRoot(
     <Comp
       {...rest}
       ref={ref as Ref<HTMLDivElement>}
-      data-slot={dataSlot}
+      data-slot={["split", dataSlot].filter(Boolean).join(" ")}
       data-side={side}
       data-collapse={collapseBelow}
       className={className}
@@ -146,7 +146,7 @@ const SplitSideEl = forwardRef<HTMLDivElement, SplitSideProps>(
       asChild = false,
       className,
       children,
-      "data-slot": dataSlot = "split-side",
+      "data-slot": dataSlot,
       ...rest
     },
     ref,
@@ -166,7 +166,7 @@ const SplitSideEl = forwardRef<HTMLDivElement, SplitSideProps>(
       <Comp
         {...rest}
         ref={ref as Ref<HTMLDivElement>}
-        data-slot={dataSlot}
+        data-slot={["split-side", dataSlot].filter(Boolean).join(" ")}
         className={className}
       >
         {children}
@@ -182,7 +182,7 @@ const SplitMainEl = forwardRef<HTMLDivElement, SplitMainProps>(
       asChild = false,
       className,
       children,
-      "data-slot": dataSlot = "split-main",
+      "data-slot": dataSlot,
       ...rest
     },
     ref,
@@ -202,7 +202,7 @@ const SplitMainEl = forwardRef<HTMLDivElement, SplitMainProps>(
       <Comp
         {...rest}
         ref={ref as Ref<HTMLDivElement>}
-        data-slot={dataSlot}
+        data-slot={["split-main", dataSlot].filter(Boolean).join(" ")}
         className={className}
       >
         {children}

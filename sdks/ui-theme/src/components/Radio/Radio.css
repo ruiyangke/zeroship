@@ -2,9 +2,9 @@
  * Radio + RadioGroup — mutually-exclusive choice primitive.
  *
  * Anatomy:
- *   [data-slot="radio-group"]           — Base UI's <div> with the group context
- *     ├─ [data-slot="radio"]            — visible chip (Base UI's <span>, focusable)
- *     │   └─ [data-slot="radio-indicator"] — inner dot (Base UI Indicator)
+ *   [data-slot~="radio-group"]           — Base UI's <div> with the group context
+ *     ├─ [data-slot~="radio"]            — visible chip (Base UI's <span>, focusable)
+ *     │   └─ [data-slot~="radio-indicator"] — inner dot (Base UI Indicator)
  *     │  (and a hidden <input> Base UI emits beside the chip)
  *     └─ … repeated …
  *
@@ -35,7 +35,7 @@
  *      the chip — a bare chip still meets ≥ 1.75rem / 2.75rem
  *      (slice-4 review fix item 3).
  *
- *   5. Focus ring lives on the chip ROOT (`[data-slot="radio"]:focus-visible`)
+ *   5. Focus ring lives on the chip ROOT (`[data-slot~="radio"]:focus-visible`)
  *      so the canonical Field pattern paints a ring without needing
  *      the in-component label-row wrapper (slice-4 review fix item 2).
  *
@@ -45,7 +45,7 @@
  */
 
 /* ─── component-local tokens ────────────────────────────────────────── */
-[data-slot="radio"] {
+[data-slot~="radio"] {
   /* Derived from --zeroship-control-h-{sm,md,lg} (half-height) so the chip
      scales with the Input rhythm rather than living as a separate
      hand-tuned scale — slice-4 visual-polish item 5. Earlier the chip
@@ -66,7 +66,7 @@
 }
 
 /* ─── group container ───────────────────────────────────────────────── */
-[data-slot="radio-group"] {
+[data-slot~="radio-group"] {
   display: flex;
   flex-direction: column;
   gap: var(--zeroship-space-2);
@@ -74,7 +74,7 @@
   font-family: var(--zeroship-font-system);
   color: var(--zeroship-label);
 }
-[data-slot="radio-group"][data-orientation="horizontal"] {
+[data-slot~="radio-group"][data-orientation="horizontal"] {
   flex-direction: row;
   flex-wrap: wrap;
   gap: var(--zeroship-space-4);
@@ -82,7 +82,7 @@
 }
 
 /* ─── the chip ──────────────────────────────────────────────────────── */
-[data-slot="radio"] {
+[data-slot~="radio"] {
   position: relative;
   display: inline-flex;
   flex: 0 0 auto;
@@ -107,7 +107,7 @@
  * without changing the visible chip size. `pointer-events: auto`
  * (default for pseudos) lets clicks on the overlay register against
  * the chip itself (pseudo-elements hit-test as part of the parent). */
-[data-slot="radio"]::before {
+[data-slot~="radio"]::before {
   content: "";
   position: absolute;
   inset-block-start: 50%;
@@ -120,24 +120,24 @@
   pointer-events: auto;
 }
 @media (pointer: coarse) {
-  [data-slot="radio"]::before {
+  [data-slot~="radio"]::before {
     --zeroship-hit-target: var(--zeroship-hit-min);
   }
 }
 
 /* ─── sizes ─────────────────────────────────────────────────────────── */
-[data-slot="radio"][data-size="sm"] {
+[data-slot~="radio"][data-size="sm"] {
   inline-size: var(--zeroship-radio-size-sm);
   block-size: var(--zeroship-radio-size-sm);
 }
-[data-slot="radio"][data-size="lg"] {
+[data-slot~="radio"][data-size="lg"] {
   inline-size: var(--zeroship-radio-size-lg);
   block-size: var(--zeroship-radio-size-lg);
 }
 
 /* ─── hover ─────────────────────────────────────────────────────────── */
 @media (hover: hover) {
-  [data-slot="radio"]:not([data-disabled]):not([data-checked]):hover {
+  [data-slot~="radio"]:not([data-disabled]):not([data-checked]):hover {
     background-color: var(--zeroship-radio-bg-hover);
     box-shadow:
       inset 0 0 0 0.0625rem var(--zeroship-radio-border-hover),
@@ -146,7 +146,7 @@
 }
 
 /* ─── checked: thicker accent ring + inner dot ──────────────────────── */
-[data-slot="radio"][data-checked] {
+[data-slot~="radio"][data-checked] {
   background-color: var(--zeroship-radio-bg);
   box-shadow:
     inset 0 0 0 0.125rem var(--zeroship-radio-border-checked),
@@ -154,13 +154,13 @@
 }
 
 /* ─── focus ring on the chip itself ─────────────────────────────────── */
-[data-slot="radio"]:focus-visible {
+[data-slot~="radio"]:focus-visible {
   outline: 0.125rem solid var(--zeroship-button-focus-ring-color);
   outline-offset: var(--zeroship-focus-ring-offset);
 }
 
 /* ─── disabled ──────────────────────────────────────────────────────── */
-[data-slot="radio"][data-disabled] {
+[data-slot~="radio"][data-disabled] {
   background-color: var(--zeroship-input-bg-disabled);
   cursor: not-allowed;
   box-shadow:
@@ -180,7 +180,7 @@
  * to `--zeroship-label-tertiary` (the same strength the disabled Checkbox
  * glyph uses). The escalation is local to this rule and the dot
  * rule below. */
-[data-slot="radio"][data-disabled][data-checked] {
+[data-slot~="radio"][data-disabled][data-checked] {
   box-shadow:
     inset 0 0 0 0.125rem var(--zeroship-label-quaternary),
     0 0 0 0 transparent;
@@ -192,19 +192,19 @@
  * use — readonly-surface tone behind the chip, accent hairline ring +
  * accent dot when checked (no full accent fill). Slice-4 visual-
  * polish item 2. */
-[data-slot="radio"][data-readonly] {
+[data-slot~="radio"][data-readonly] {
   cursor: default;
 }
-[data-slot="radio"][data-readonly]:not([data-checked]) {
+[data-slot~="radio"][data-readonly]:not([data-checked]) {
   background-color: var(--zeroship-selection-bg-readonly);
 }
-[data-slot="radio"][data-readonly][data-checked] {
+[data-slot~="radio"][data-readonly][data-checked] {
   background-color: var(--zeroship-selection-bg-readonly);
   box-shadow:
     inset 0 0 0 var(--zeroship-selection-hairline) var(--zeroship-accent),
     0 0 0 0 transparent;
 }
-[data-slot="radio"][data-readonly][data-checked] [data-slot="radio-indicator"] {
+[data-slot~="radio"][data-readonly][data-checked] [data-slot~="radio-indicator"] {
   background-color: var(--zeroship-accent);
 }
 
@@ -214,7 +214,7 @@
  * span; CSS draws it via `background-color`. Reduced-motion users
  * get an instant on/off; everyone else gets a tiny scale-in.
  */
-[data-slot="radio-indicator"] {
+[data-slot~="radio-indicator"] {
   display: inline-block;
   inline-size: 50%;
   block-size: 50%;
@@ -226,7 +226,7 @@
     scale var(--zeroship-motion-fast) var(--zeroship-motion-ease),
     background-color var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
-[data-slot="radio"][data-checked] [data-slot="radio-indicator"] {
+[data-slot~="radio"][data-checked] [data-slot~="radio-indicator"] {
   scale: 1;
 }
 /* Same strengthening as the disabled-selected ring above — the dot
@@ -235,21 +235,21 @@
  * disabled-selected indicators. Contingency: escalate to --zeroship-label-
  * tertiary in lockstep with the ring if capture shows it still too
  * faint. Slice-4 visual-polish item 4. */
-[data-slot="radio"][data-disabled] [data-slot="radio-indicator"] {
+[data-slot~="radio"][data-disabled] [data-slot~="radio-indicator"] {
   background-color: var(--zeroship-label-quaternary);
 }
 
 /* ─── reduced motion ────────────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
-  [data-slot="radio"],
-  [data-slot="radio-indicator"] {
+  [data-slot~="radio"],
+  [data-slot~="radio-indicator"] {
     transition: none;
   }
 }
 
 /* ─── forced-colors ─────────────────────────────────────────────────── *
  *
- * Because `[data-slot="radio"]` carries `forced-color-adjust: none` (the chip is a
+ * Because `[data-slot~="radio"]` carries `forced-color-adjust: none` (the chip is a
  * non-native surface, not a `<input type=radio>`), browsers will NOT
  * auto-substitute system colors. Every selector that paints a token
  * outside this block (hover, checked, disabled, readonly + combinations)
@@ -257,10 +257,10 @@
  * Windows High Contrast / forced-colors users see system colors, not
  * brand tokens. Slice-8 review red #1: the pre-fix block only mirrored
  * base/checked/disabled selectors — the hover + readonly + readonly-
- * checked rules outranked the unconditional `[data-slot="radio"]` reset on
+ * checked rules outranked the unconditional `[data-slot~="radio"]` reset on
  * specificity and leaked `--zeroship-*` tokens through. */
 @media (forced-colors: active) {
-  [data-slot="radio"] {
+  [data-slot~="radio"] {
     background-color: Canvas;
     box-shadow:
       inset 0 0 0 0.0625rem CanvasText,
@@ -270,34 +270,34 @@
   /* Hover (normal-mode specificity 0,4,1 — mirror it to system tone so
    * the hover hairline stays CanvasText and the bg stays Canvas under
    * forced-colors). */
-  [data-slot="radio"]:not([data-disabled]):not([data-checked]):hover {
+  [data-slot~="radio"]:not([data-disabled]):not([data-checked]):hover {
     background-color: Canvas;
     box-shadow:
       inset 0 0 0 0.0625rem CanvasText,
       0 0 0 0 transparent;
   }
-  [data-slot="radio"][data-checked] {
+  [data-slot~="radio"][data-checked] {
     box-shadow:
       inset 0 0 0 0.125rem Highlight,
       0 0 0 0 transparent;
   }
-  [data-slot="radio-indicator"] {
+  [data-slot~="radio-indicator"] {
     background-color: Highlight;
   }
-  [data-slot="radio"]:focus-visible {
+  [data-slot~="radio"]:focus-visible {
     outline-color: Highlight;
   }
-  [data-slot="radio"][data-disabled] {
+  [data-slot~="radio"][data-disabled] {
     box-shadow:
       inset 0 0 0 0.0625rem GrayText,
       0 0 0 0 transparent;
   }
-  [data-slot="radio"][data-disabled][data-checked] {
+  [data-slot~="radio"][data-disabled][data-checked] {
     box-shadow:
       inset 0 0 0 0.125rem GrayText,
       0 0 0 0 transparent;
   }
-  [data-slot="radio"][data-disabled] [data-slot="radio-indicator"] {
+  [data-slot~="radio"][data-disabled] [data-slot~="radio-indicator"] {
     background-color: GrayText;
   }
   /* Readonly mirrors (normal-mode specificities 0,2,1 / 0,3,1 / 0,3,1 /
@@ -307,22 +307,22 @@
    * separate "presented, not editable" tone, and the cursor change is
    * already non-color. The `[data-readonly]` mirror keeps the cursor
    * declaration so the specificity ladder matches normal mode. */
-  [data-slot="radio"][data-readonly] {
+  [data-slot~="radio"][data-readonly] {
     cursor: default;
   }
-  [data-slot="radio"][data-readonly]:not([data-checked]) {
+  [data-slot~="radio"][data-readonly]:not([data-checked]) {
     background-color: Canvas;
   }
-  [data-slot="radio"][data-readonly][data-checked] {
+  [data-slot~="radio"][data-readonly][data-checked] {
     background-color: Canvas;
     box-shadow:
       inset 0 0 0 0.125rem Highlight,
       0 0 0 0 transparent;
   }
-  [data-slot="radio"][data-readonly][data-checked] [data-slot="radio-indicator"] {
+  [data-slot~="radio"][data-readonly][data-checked] [data-slot~="radio-indicator"] {
     background-color: Highlight;
   }
-  :is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-disabled] {
+  :is([data-slot~="checkbox-field"], [data-slot~="radio-field"], [data-slot~="switch-field"])[data-disabled] {
     color: GrayText;
   }
 }

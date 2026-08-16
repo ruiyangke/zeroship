@@ -238,7 +238,7 @@ export const WithArrow: Story = {
     await hoverToOpen(trigger, "tooltip-arrow-popup");
     await expect(await body.findByText("With arrow pointer")).toBeInTheDocument();
     await expect(
-      canvasElement.ownerDocument.body.querySelector(".zs-tooltip-arrow"),
+      canvasElement.ownerDocument.body.querySelector('[data-slot~="tooltip-arrow"]'),
     ).toBeInTheDocument();
   },
 };

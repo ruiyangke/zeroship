@@ -159,7 +159,7 @@ export const WithArrow: Story = {
     );
     const dialog = await body.findByRole("dialog", { name: /tip/i });
     await expect(dialog).toHaveTextContent(/relationship reads/i);
-    await expect(dialog.querySelector(".zs-popover-arrow")).toBeInTheDocument();
+    await expect(dialog.querySelector('[data-slot~="popover-arrow"]')).toBeInTheDocument();
   },
 };
 

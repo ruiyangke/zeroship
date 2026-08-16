@@ -876,8 +876,8 @@ export const RTL: Story = {
  * hover the unpressed segment, and verify computed background-color is
  * the system value `Canvas` (rather than the oklch token mix that wins
  * outside forced-colors). Pre-fix, the state selectors
- * `.zs-toggle--default:not([data-disabled]):not([data-pressed]):hover`
- * outranked the forced-colors `.zs-toggle` block and the hover would
+ * `[data-slot~=toggle]:not([data-disabled]):not([data-pressed]):hover`
+ * outranked the forced-colors `[data-slot~=toggle]` block and the hover would
  * stay tinted with `--zeroship-label`. The mirrored selectors inside the
  * `@media (forced-colors: active)` block restore the cascade. */
 export const ForcedColorsHover: Story = {

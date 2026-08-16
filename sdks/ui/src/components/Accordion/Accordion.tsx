@@ -219,6 +219,8 @@ export type AccordionRootProps = (
   className?: string;
   /** Accordion children — `<Accordion.Item>` blocks. */
   children: ReactNode;
+  /** Additional slot token appended to the root's `accordion` token. */
+  "data-slot"?: string;
 } & Omit<
     BaseAccordionRootProps,
     | "render"
@@ -243,6 +245,7 @@ function AccordionRootInner(
     keepMounted = false,
     className,
     children,
+    "data-slot": dataSlot,
     ...rest
   } = props;
 
@@ -316,7 +319,7 @@ function AccordionRootInner(
           disabled={disabled}
           keepMounted={keepMounted}
           className={className}
-          data-slot="accordion"
+          data-slot={["accordion", dataSlot].filter(Boolean).join(" ")}
           data-orientation={orientation}
         >
           {children}
@@ -354,7 +357,7 @@ function AccordionRootInner(
         disabled={disabled}
         keepMounted={keepMounted}
         className={className}
-        data-slot="accordion"
+        data-slot={["accordion", dataSlot].filter(Boolean).join(" ")}
         data-orientation={orientation}
       >
         {children}
@@ -379,17 +382,22 @@ export interface AccordionItemProps extends Omit<
   value: string;
   /** Optional class hook on the item container. */
   className?: string;
+  /** Additional slot token appended to the `accordion-item` token. */
+  "data-slot"?: string;
 }
 
 const AccordionItem = forwardRef<HTMLDivElement, AccordionItemProps>(
-  function AccordionItem({ className, ...rest }, ref) {
+  function AccordionItem(
+    { className, "data-slot": dataSlot, ...rest },
+    ref,
+  ) {
     const { orientation } = useAccordionContext();
     return (
       <BaseAccordion.Item
         {...rest}
         ref={ref}
         className={className}
-        data-slot="accordion-item"
+        data-slot={["accordion-item", dataSlot].filter(Boolean).join(" ")}
         data-orientation={orientation}
       />
     );

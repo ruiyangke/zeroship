@@ -49,7 +49,7 @@ export const Basic: Story = {
 
     // An ellipsis exists and is hidden from AT (so it is NOT a button).
     const nav = canvas.getByRole("navigation", { name: "Pagination" });
-    const ellipsis = nav.querySelector('[data-slot="pagination-ellipsis"]');
+    const ellipsis = nav.querySelector('[data-slot~="pagination-ellipsis"]');
     await expect(ellipsis).not.toBeNull();
     await expect(ellipsis).toHaveAttribute("aria-hidden", "true");
 
@@ -94,7 +94,7 @@ export const FewPages: Story = {
     const nav = canvas.getByRole("navigation", { name: "Pagination" });
 
     // No ellipsis when nothing is skipped.
-    const ellipsis = nav.querySelector('[data-slot="pagination-ellipsis"]');
+    const ellipsis = nav.querySelector('[data-slot~="pagination-ellipsis"]');
     await expect(ellipsis).toBeNull();
 
     // Prev is disabled at the lower bound and does not fire.
@@ -236,7 +236,7 @@ export const EdgeNumericProps: Story = {
     const nav = canvas.getByRole("navigation", { name: "Pagination" });
 
     // Every rendered page button label is an integer string — no "2.5".
-    const pageButtons = nav.querySelectorAll('[data-slot="pagination-page"]');
+    const pageButtons = nav.querySelectorAll('[data-slot~="pagination-page"]');
     await expect(pageButtons.length).toBeGreaterThan(0);
     for (const btn of Array.from(pageButtons)) {
       const label = btn.textContent?.trim() ?? "";
@@ -244,7 +244,7 @@ export const EdgeNumericProps: Story = {
     }
 
     // The summary carries no "NaN".
-    const summary = nav.querySelector('[data-slot="pagination-summary"]');
+    const summary = nav.querySelector('[data-slot~="pagination-summary"]');
     await expect(summary).not.toBeNull();
     await expect(summary?.textContent ?? "").not.toMatch(/NaN/);
   },
@@ -283,7 +283,7 @@ export const NoBoundary: Story = {
     // AND a trailing one for the unrepresented 7–10 tail. Pre-fix only the
     // leading ellipsis rendered — the trailing range was dropped silently.
     const ellipses = nav.querySelectorAll(
-      '[data-slot="pagination-ellipsis"]',
+      '[data-slot~="pagination-ellipsis"]',
     );
     await expect(ellipses.length).toBe(2);
     const last = ellipses[ellipses.length - 1];

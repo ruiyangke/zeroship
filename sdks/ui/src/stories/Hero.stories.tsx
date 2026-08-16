@@ -108,7 +108,10 @@ export const Centered: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const root = canvas.getByTestId("hero-centered");
-    await expect(root).toHaveAttribute("data-slot", "hero");
+    await expect(root).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)hero(?:\s|$)/),
+    );
     await expect(root.tagName).toBe("SECTION");
     await expect(root).toHaveAttribute("data-layout", "single");
 
@@ -171,9 +174,9 @@ export const Split: Story = {
     await expect(root).toHaveAttribute("data-layout", "split");
 
     // Both regions render: the text column and the media column.
-    const text = root.querySelector("[data-slot='hero-text']");
+    const text = root.querySelector("[data-slot~='hero-text']");
     await expect(text).not.toBeNull();
-    const media = root.querySelector("[data-slot='hero-media']");
+    const media = root.querySelector("[data-slot~='hero-media']");
     await expect(media).not.toBeNull();
     // The media wrapper is decorative.
     await expect(media).toHaveAttribute("aria-hidden", "true");
@@ -272,7 +275,7 @@ export const Compound: Story = {
     await expect(heading.id).toBe(root.getAttribute("aria-labelledby"));
 
     // Media column present + decorative.
-    const media = root.querySelector("[data-slot='hero-media']");
+    const media = root.querySelector("[data-slot~='hero-media']");
     await expect(media).not.toBeNull();
     await expect(media).toHaveAttribute("aria-hidden", "true");
 
@@ -309,17 +312,17 @@ export const MediaAdditive: Story = {
     const root = canvas.getByTestId("hero-media-additive");
     await expect(root).toHaveAttribute("data-layout", "split");
 
-    const mediaRegion = root.querySelector("[data-slot='hero-media']");
+    const mediaRegion = root.querySelector("[data-slot~='hero-media']");
     await expect(mediaRegion).not.toBeNull();
-    const textRegion = root.querySelector("[data-slot='hero-text']");
+    const textRegion = root.querySelector("[data-slot~='hero-text']");
     await expect(textRegion).not.toBeNull();
 
     // All three media sources render inside a media region (collected
     // additively); none appear inside the text column.
     for (const id of ["prop-media", "child-media-a", "child-media-b"]) {
       const el = canvas.getByTestId(id);
-      await expect(el.closest("[data-slot='hero-media']")).not.toBeNull();
-      await expect(el.closest("[data-slot='hero-text']")).toBeNull();
+      await expect(el.closest("[data-slot~='hero-media']")).not.toBeNull();
+      await expect(el.closest("[data-slot~='hero-text']")).toBeNull();
     }
   },
 };
@@ -346,7 +349,7 @@ export const FragmentMedia: Story = {
     const root = canvas.getByTestId("hero-fragment-media");
     await expect(root).toHaveAttribute("data-layout", "split");
     const fragMedia = canvas.getByTestId("frag-media");
-    await expect(fragMedia.closest("[data-slot='hero-media']")).not.toBeNull();
+    await expect(fragMedia.closest("[data-slot~='hero-media']")).not.toBeNull();
   },
 };
 
@@ -374,7 +377,7 @@ export const DualTitleNoDuplicateId: Story = {
 
     // …and it is the primary headline (the `title` prop, by precedence).
     const labelled = matches[0] as HTMLElement;
-    await expect(labelled.getAttribute("data-slot")).toBe("hero-title");
+    await expect(labelled.getAttribute("data-slot")).toMatch(/(?:^|\s)hero-title(?:\s|$)/);
     await expect(labelled.textContent).toBe("Prop headline");
   },
 };
@@ -455,7 +458,7 @@ export const AsChildFragmentRejected: Story = {
       const canvas = within(canvasElement);
       const root = canvas.getByTestId("hero-aschild-fragment");
       // No heading element is produced…
-      await expect(root.querySelector("[data-slot='hero-title']")).toBeNull();
+      await expect(root.querySelector("[data-slot~='hero-title']")).toBeNull();
       await expect(root.querySelector("h1,h2,h3,h4,h5,h6")).toBeNull();
       // …and the Fragment's content never leaks into the DOM (pre-fix, Slot
       // renders the Fragment children bare → the marker text would appear).

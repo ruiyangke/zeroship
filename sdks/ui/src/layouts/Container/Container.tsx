@@ -47,8 +47,8 @@ export interface ContainerProps extends ComponentPropsWithoutRef<"div"> {
   asChild?: boolean;
   /**
    * Root `data-slot` value. Defaults to `"container"`. A composing block
-   * can override it so consumers target the outer element via the block's
-   * own slot vocabulary. Mirrors Stack/Card.
+   * can add its own token so both slot vocabularies remain available.
+   * Mirrors Stack/Card.
    */
   "data-slot"?: string;
 }
@@ -80,7 +80,7 @@ export const Container = forwardRef<HTMLDivElement, ContainerProps>(
       className,
       style,
       children,
-      "data-slot": dataSlot = "container",
+      "data-slot": dataSlot,
       ...rest
     },
     ref,
@@ -110,7 +110,7 @@ export const Container = forwardRef<HTMLDivElement, ContainerProps>(
       <Comp
         {...rest}
         ref={ref as Ref<HTMLDivElement>}
-        data-slot={dataSlot}
+        data-slot={["container", dataSlot].filter(Boolean).join(" ")}
         data-size={size}
         className={className}
         style={layoutVars}

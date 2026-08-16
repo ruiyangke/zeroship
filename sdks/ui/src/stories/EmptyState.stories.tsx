@@ -48,11 +48,13 @@ export const Default: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const root = canvas.getByTestId("empty-default");
-    await expect(root).toHaveAttribute("data-slot", "empty-state");
-    // The centered column carries the block's own slot label (the Center
-    // asChild-merges `empty-state-column` onto the rendered column node) —
-    // NOT the generic `center`/`stack` it would read pre-relabel.
-    const column = root.querySelector("[data-slot='empty-state-column']");
+    await expect(root).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)empty-state(?:\s|$)/),
+    );
+    // The centered column carries the block, Center, and Stack tokens on
+    // the same node so each composition layer keeps its styling hook.
+    const column = root.querySelector("[data-slot~='empty-state-column']");
     await expect(column).not.toBeNull();
     // Title is a real h2 heading; icon is not in the AT tree.
     const heading = canvas.getByRole("heading", { name: /no messages yet/i });
@@ -129,7 +131,7 @@ export const Compound: Story = {
 /* ─── WideCentering (centering guard) ───────────────────────────────────
  * Regression for the off-center column: on a WIDE surface the capped
  * `__column` must sit horizontally centered, not hug the inline-start
- * edge. The fix is `margin-inline:auto` on `.zs-empty-state__column`.
+ * edge. The fix is `margin-inline:auto` on `[data-slot~=empty-state-column]`.
  * Pre-fix the column hugs left and this assertion fails. */
 export const WideCentering: Story = {
   name: "Wide container (centering guard)",
@@ -157,7 +159,7 @@ export const WideCentering: Story = {
     const canvas = within(canvasElement);
     const region = canvas.getByTestId("empty-wide");
     const column = region.querySelector(
-      "[data-slot='empty-state-column']",
+      "[data-slot~='empty-state-column']",
     ) as HTMLElement;
     await expect(column).not.toBeNull();
     const r = region.getBoundingClientRect();

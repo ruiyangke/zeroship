@@ -154,7 +154,7 @@ export const ReducedMotion: Story = {
     // The status region + accessible name persist with motion off; the
     // ring is still painted (it carries a border, never display:none).
     const status = canvas.getByRole("status", { name: /loading content/i });
-    const ring = status.querySelector(".zs-spinner__ring");
+    const ring = status.querySelector('[data-slot~="spinner-ring"]');
     await expect(ring).not.toBeNull();
     await expect(getComputedStyle(ring as Element).display).not.toBe("none");
   },

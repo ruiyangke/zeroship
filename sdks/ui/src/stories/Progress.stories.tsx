@@ -333,7 +333,7 @@ export const WithLabel: Story = {
  * quaternary)` on the track) — not the reduced-motion indeterminate
  * placeholder color-mix.
  *
- * Pre-fix the base `[data-disabled] .zs-progress__indicator` rule
+ * Pre-fix the base `[data-disabled] [data-slot~=progress-indicator]` rule
  * lived above an equal-specificity rule inside `@media (prefers-
  * reduced-motion: reduce)` that re-painted the indicator to a dim
  * accent for indeterminate progress. Equal specificity + later source

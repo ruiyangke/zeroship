@@ -167,7 +167,7 @@ export const WithError: Story = {
     await expect(alert).toHaveTextContent(/incorrect/i);
 
     // The block's slot wrapper carries `auth-form-error`.
-    const slot = canvasElement.querySelector('[data-slot="auth-form-error"]');
+    const slot = canvasElement.querySelector('[data-slot~="auth-form-error"]');
     await expect(slot).not.toBeNull();
     await expect(slot).toContainElement(alert);
   },
@@ -279,10 +279,10 @@ export const FullPageCentering: Story = {
   args: { mode: "signIn" },
   play: async ({ canvasElement }) => {
     const center = canvasElement.querySelector(
-      "[data-slot='auth-form-center']",
+      "[data-slot~='auth-form-center']",
     ) as HTMLElement;
     const card = canvasElement.querySelector(
-      "[data-slot='auth-form']",
+      "[data-slot~='auth-form']",
     ) as HTMLElement;
     await expect(center).not.toBeNull();
     await expect(card).not.toBeNull();

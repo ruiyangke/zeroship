@@ -122,7 +122,7 @@ export const Button = forwardRef<HTMLElement, ButtonProps>(function Button(
     endSlot,
     children,
     className,
-    "data-slot": dataSlot = "button",
+    "data-slot": dataSlot,
     disabled,
     type,
     asChild = false,
@@ -249,7 +249,7 @@ export const Button = forwardRef<HTMLElement, ButtonProps>(function Button(
         {...rest}
         ref={localRef as Ref<unknown>}
         className={className}
-        data-slot={dataSlot}
+        data-slot={["button", dataSlot].filter(Boolean).join(" ")}
         data-variant={variant}
         data-intent={intent}
         data-size={size}
@@ -282,7 +282,7 @@ export const Button = forwardRef<HTMLElement, ButtonProps>(function Button(
       ref={localRef as Ref<HTMLButtonElement>}
       type={type ?? "button"}
       className={className}
-      data-slot={dataSlot}
+      data-slot={["button", dataSlot].filter(Boolean).join(" ")}
       data-variant={variant}
       data-intent={intent}
       data-size={size}

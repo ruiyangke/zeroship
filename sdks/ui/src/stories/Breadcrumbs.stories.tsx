@@ -54,7 +54,7 @@ export const Basic: Story = {
     const home = canvas.getByRole("link", { name: "Home" });
     await expect(home.tagName).toBe("A");
     // Separators are aria-hidden / presentation (skipped by AT).
-    const seps = nav.querySelectorAll('[data-slot="breadcrumbs-separator"]');
+    const seps = nav.querySelectorAll('[data-slot~="breadcrumbs-separator"]');
     await expect(seps.length).toBe(3);
     seps.forEach((s) => {
       expect(s.getAttribute("aria-hidden")).toBe("true");
@@ -93,7 +93,7 @@ export const Compound: Story = {
     const canvas = within(canvasElement);
     const nav = canvas.getByRole("navigation", { name: /breadcrumb/i });
     // Two auto-inserted separators between three items.
-    const seps = nav.querySelectorAll('[data-slot="breadcrumbs-separator"]');
+    const seps = nav.querySelectorAll('[data-slot~="breadcrumbs-separator"]');
     await expect(seps.length).toBe(2);
     // The current page is a span with aria-current, not a link.
     const current = canvas.getByText("Data");
@@ -141,10 +141,10 @@ export const CompoundFragment: Story = {
     const canvas = within(canvasElement);
     const nav = canvas.getByRole("navigation", { name: /breadcrumb/i });
     // Three Items inside a Fragment → two auto-inserted separators.
-    const seps = nav.querySelectorAll('[data-slot="breadcrumbs-separator"]');
+    const seps = nav.querySelectorAll('[data-slot~="breadcrumbs-separator"]');
     await expect(seps.length).toBe(2);
     // All three crumb labels render in order inside the <ol>.
-    const items = nav.querySelectorAll('[data-slot="breadcrumbs-item"]');
+    const items = nav.querySelectorAll('[data-slot~="breadcrumbs-item"]');
     await expect(items.length).toBe(3);
     const current = canvas.getByText("Data");
     await expect(current.getAttribute("aria-current")).toBe("page");
@@ -181,7 +181,7 @@ export const CustomSeparator: Story = {
     const canvas = within(canvasElement);
     const nav = canvas.getByTestId("breadcrumbs-slash");
     const separator = nav.querySelector<HTMLElement>(
-      ".zs-breadcrumbs__separator",
+      "[data-slot~=breadcrumbs-separator]",
     );
     await expect(separator).not.toBeNull();
     if (!separator) return;
@@ -385,8 +385,11 @@ export const RouterLinkStory: Story = {
     // composed href AND the breadcrumb link class.
     await expect(home.getAttribute("data-router-link")).toBe("");
     await expect(home.getAttribute("href")).toBe("/home");
-    await expect(home).toHaveClass("zs-breadcrumbs__link");
-    await expect(home.getAttribute("data-slot")).toBe("breadcrumbs-link");
+    await expect(home).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)breadcrumbs-link(?:\s|$)/),
+    );
+    await expect(home.getAttribute("data-slot")).toMatch(/(?:^|\s)breadcrumbs-link(?:\s|$)/);
   },
 };
 

@@ -79,7 +79,7 @@
  * in CSS without leaning on the internal BEM class names):
  *   pricing-table        — the <section> root (overridable)
  *   pricing-table-title  — the optional section lead-in heading
- *   pricing-tier         — each tier <Card> (relabels Card's "card")
+ *   pricing-tier         — each tier <Card> (alongside Card's "card")
  *   pricing-tier-header  — the badge + name + price + description region
  *   pricing-price        — the price line (amount + muted period)
  *   pricing-features     — the feature <ul>

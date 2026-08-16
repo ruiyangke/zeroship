@@ -2,17 +2,17 @@
  * Select — popover-anchored dropdown from a fixed option list.
  *
  * Anatomy:
- *   [data-slot="select-trigger"]              — Base UI's <button>, reads like Input
- *     ├─ [data-slot="select-trigger-value"]  — selected value or placeholder
- *     └─ [data-slot="select-trigger-icon"]   — chevron
- *   [data-slot="select-positioner"]           — Floating UI anchored layer
- *     └─ [data-slot="select-popup"]           — opaque sheet with --zeroship-shadow-dialog
- *          └─ [data-slot="select-list"]       — vertical option list
- *               ├─ [data-slot="select-group"] + [data-slot="select-group-label"]
- *               ├─ [data-slot="select-item"]
- *               │   ├─ [data-slot="select-item-indicator"] (checkmark gutter)
- *               │   └─ [data-slot="select-item-text"]
- *               └─ [data-slot="select-separator"]
+ *   [data-slot~="select-trigger"]              — Base UI's <button>, reads like Input
+ *     ├─ [data-slot~="select-trigger-value"]  — selected value or placeholder
+ *     └─ [data-slot~="select-trigger-icon"]   — chevron
+ *   [data-slot~="select-positioner"]           — Floating UI anchored layer
+ *     └─ [data-slot~="select-popup"]           — opaque sheet with --zeroship-shadow-dialog
+ *          └─ [data-slot~="select-list"]       — vertical option list
+ *               ├─ [data-slot~="select-group"] + [data-slot~="select-group-label"]
+ *               ├─ [data-slot~="select-item"]
+ *               │   ├─ [data-slot~="select-item-indicator"] (checkmark gutter)
+ *               │   └─ [data-slot~="select-item-text"]
+ *               └─ [data-slot~="select-separator"]
  *
  * Modifier classes:
  *   trigger:  --default | --outline · --sm | --md | --lg
@@ -30,7 +30,7 @@
  * Forced-colors: every state selector below is mirrored inside
  * `@media (forced-colors: active)` per the Slice-5 lesson — pre-mirror
  * the `:hover` / `[data-highlighted]` selectors had higher specificity
- * than a bare `[data-slot="select-item"]` reset and the high-contrast mode would
+ * than a bare `[data-slot~="select-item"]` reset and the high-contrast mode would
  * leak through the oklch token tints.
  *
  * Backdrop: NO Backdrop primitive — Select is a popover, not a modal.
@@ -39,7 +39,7 @@
  */
 
 /* ─── trigger — reads like Input ───────────────────────────────────── */
-[data-slot="select-trigger"] {
+[data-slot~="select-trigger"] {
   position: relative;
   display: inline-flex;
   align-items: center;
@@ -68,14 +68,14 @@
 }
 
 /* ─── sizes ────────────────────────────────────────────────────────── */
-[data-slot="select-trigger"][data-size="sm"] {
+[data-slot~="select-trigger"][data-size="sm"] {
   block-size: var(--zeroship-control-h-sm);
   padding-inline: var(--zeroship-control-px-sm);
   border-radius: var(--zeroship-control-radius-sm);
   font-size: var(--zeroship-text-subheadline-size);
   line-height: var(--zeroship-text-subheadline-line);
 }
-[data-slot="select-trigger"][data-size="lg"] {
+[data-slot~="select-trigger"][data-size="lg"] {
   block-size: var(--zeroship-control-h-lg);
   padding-inline: var(--zeroship-control-px-lg);
   border-radius: var(--zeroship-control-radius-lg);
@@ -84,13 +84,13 @@
 }
 
 @media (pointer: coarse) {
-  [data-slot="select-trigger"][data-size="sm"] {
+  [data-slot~="select-trigger"][data-size="sm"] {
     min-block-size: var(--zeroship-hit-min);
   }
 }
 
 /* ─── variants ─────────────────────────────────────────────────────── */
-[data-slot="select-trigger"][data-variant="outline"] {
+[data-slot~="select-trigger"][data-variant="outline"] {
   background: transparent;
   box-shadow:
     inset 0 0 0 0.0625rem var(--zeroship-input-border),
@@ -99,13 +99,13 @@
 
 /* ─── hover ────────────────────────────────────────────────────────── */
 @media (hover: hover) {
-  [data-slot="select-trigger"]:not([disabled]):not([data-popup-open]):hover {
+  [data-slot~="select-trigger"]:not([disabled]):not([data-popup-open]):hover {
     background: var(--zeroship-input-bg-hover);
     box-shadow:
       inset 0 0 0 0.0625rem var(--zeroship-input-border-hover),
       0 0 0 0 transparent;
   }
-  [data-slot="select-trigger"][data-variant="outline"]:not([disabled]):not([data-popup-open]):hover {
+  [data-slot~="select-trigger"][data-variant="outline"]:not([disabled]):not([data-popup-open]):hover {
     background: transparent;
     box-shadow:
       inset 0 0 0 0.0625rem var(--zeroship-input-border-hover),
@@ -114,16 +114,16 @@
 }
 
 /* ─── focus / open ─────────────────────────────────────────────────── */
-[data-slot="select-trigger"]:focus-visible,
-[data-slot="select-trigger"][data-popup-open] {
+[data-slot~="select-trigger"]:focus-visible,
+[data-slot~="select-trigger"][data-popup-open] {
   background: var(--zeroship-input-bg-focus);
   box-shadow:
     inset 0 0 0 0.0625rem var(--zeroship-input-border-focus),
     0 0 0 var(--zeroship-focus-ring-width) var(--zeroship-input-focus-ring-color);
   outline: none;
 }
-[data-slot="select-trigger"][data-variant="outline"]:focus-visible,
-[data-slot="select-trigger"][data-variant="outline"][data-popup-open] {
+[data-slot~="select-trigger"][data-variant="outline"]:focus-visible,
+[data-slot~="select-trigger"][data-variant="outline"][data-popup-open] {
   background: transparent;
   box-shadow:
     inset 0 0 0 0.0625rem var(--zeroship-input-border-focus),
@@ -140,21 +140,21 @@
  * `[data-invalid]` with EQUAL specificity (single class + attribute
  * selectors) so they outrank the bare `[data-invalid]` reset AND keep
  * the invalid border colour on the inner shadow slot. */
-[data-slot="select-trigger"][data-invalid] {
+[data-slot~="select-trigger"][data-invalid] {
   box-shadow:
     inset 0 0 0 0.0625rem var(--zeroship-input-border-invalid),
     0 0 0 0 transparent;
 }
-[data-slot="select-trigger"][data-invalid]:focus-visible,
-[data-slot="select-trigger"][data-invalid][data-popup-open] {
+[data-slot~="select-trigger"][data-invalid]:focus-visible,
+[data-slot~="select-trigger"][data-invalid][data-popup-open] {
   background: var(--zeroship-input-bg-focus);
   box-shadow:
     inset 0 0 0 0.0625rem var(--zeroship-input-border-invalid),
     0 0 0 var(--zeroship-focus-ring-width) var(--zeroship-input-focus-ring-color);
   outline: none;
 }
-[data-slot="select-trigger"][data-variant="outline"][data-invalid]:focus-visible,
-[data-slot="select-trigger"][data-variant="outline"][data-invalid][data-popup-open] {
+[data-slot~="select-trigger"][data-variant="outline"][data-invalid]:focus-visible,
+[data-slot~="select-trigger"][data-variant="outline"][data-invalid][data-popup-open] {
   background: transparent;
   box-shadow:
     inset 0 0 0 0.0625rem var(--zeroship-input-border-invalid),
@@ -162,8 +162,8 @@
 }
 
 /* ─── disabled ─────────────────────────────────────────────────────── */
-[data-slot="select-trigger"][disabled],
-[data-slot="select-trigger"][data-disabled] {
+[data-slot~="select-trigger"][disabled],
+[data-slot~="select-trigger"][data-disabled] {
   background: var(--zeroship-input-bg-disabled);
   color: var(--zeroship-input-ink-disabled);
   cursor: not-allowed;
@@ -173,7 +173,7 @@
 }
 
 /* ─── trigger children ─────────────────────────────────────────────── */
-[data-slot="select-trigger-value"] {
+[data-slot~="select-trigger-value"] {
   flex: 1 1 auto;
   min-inline-size: 0;
   display: inline-flex;
@@ -193,10 +193,10 @@
  * hint without dropping below the contrast floor. Mirrors Input's
  * ::placeholder color choice but lifts one rung to compensate for
  * axe seeing the foreground color directly. */
-[data-slot="select-trigger"][data-placeholder] [data-slot="select-trigger-value"] {
+[data-slot~="select-trigger"][data-placeholder] [data-slot~="select-trigger-value"] {
   color: var(--zeroship-label-secondary);
 }
-[data-slot="select-trigger-icon"] {
+[data-slot~="select-trigger-icon"] {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
@@ -204,11 +204,11 @@
   color: var(--zeroship-label-secondary);
   transition: transform var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
-[data-slot="select-trigger-icon"] > svg {
+[data-slot~="select-trigger-icon"] > svg {
   inline-size: 1em;
   block-size: 1em;
 }
-[data-slot="select-trigger"][data-popup-open] [data-slot="select-trigger-icon"] {
+[data-slot~="select-trigger"][data-popup-open] [data-slot~="select-trigger-icon"] {
   /* Quiet rotate cue mirrors the Dialog header chevron in detail panels.
    * Reduced-motion overrides --zeroship-motion-fast to 1ms so the rotate
    * happens instantly. */
@@ -221,13 +221,13 @@
  * Floating UI's transform-origin / x / y inline styles). Stack above
  * dialogs via the same `--zeroship-z-modal` z-token plus a small bump so
  * popovers float over an open dialog when both are mounted. */
-[data-slot="select-positioner"] {
+[data-slot~="select-positioner"] {
   z-index: calc(var(--zeroship-z-modal) + 10);
   outline: none;
 }
 
 /* ─── popup — opaque sheet, dialog-shadow ──────────────────────────── */
-[data-slot="select-popup"] {
+[data-slot~="select-popup"] {
   /* Computable background-color + active material/rim tokens. */
   background-color: var(--zeroship-surface);
   color: var(--zeroship-label);
@@ -253,23 +253,23 @@
   outline: none;
   isolation: isolate;
 }
-[data-slot="select-popup"][data-size="sm"] {
+[data-slot~="select-popup"][data-size="sm"] {
   font-size: var(--zeroship-text-subheadline-size);
   line-height: var(--zeroship-text-subheadline-line);
 }
-[data-slot="select-popup"][data-size="lg"] {
+[data-slot~="select-popup"][data-size="lg"] {
   font-size: var(--zeroship-text-headline-size);
   line-height: var(--zeroship-text-headline-line);
 }
 
 /* The Trigger's width is exposed by Base UI as a CSS variable on the
  * positioner so the popup matches the trigger's inline-size at minimum. */
-[data-slot="select-positioner"] {
+[data-slot~="select-positioner"] {
   --anchor-width: var(--anchor-width-fallback, 12rem);
 }
 
 /* ─── list (scrollable) ────────────────────────────────────────────── */
-[data-slot="select-list"] {
+[data-slot~="select-list"] {
   display: flex;
   flex-direction: column;
   gap: var(--zeroship-space-half);
@@ -281,7 +281,7 @@
 }
 
 /* ─── item ─────────────────────────────────────────────────────────── */
-[data-slot="select-item"] {
+[data-slot~="select-item"] {
   position: relative;
   display: grid;
   grid-template-columns: var(--zeroship-space-4) 1fr;
@@ -300,18 +300,18 @@
     background-color var(--zeroship-motion-fast) var(--zeroship-motion-ease),
     color var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
-[data-slot="select-item"][data-size="sm"] {
+[data-slot~="select-item"][data-size="sm"] {
   min-block-size: 1.75rem;
   font-size: var(--zeroship-text-subheadline-size);
   line-height: var(--zeroship-text-subheadline-line);
 }
-[data-slot="select-item"][data-size="lg"] {
+[data-slot~="select-item"][data-size="lg"] {
   min-block-size: 2.25rem;
   font-size: var(--zeroship-text-headline-size);
   line-height: var(--zeroship-text-headline-line);
 }
 
-[data-slot="select-item-indicator"] {
+[data-slot~="select-item-indicator"] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -320,14 +320,14 @@
   color: var(--zeroship-accent);
   opacity: 0;
 }
-[data-slot="select-item-indicator"] > svg {
+[data-slot~="select-item-indicator"] > svg {
   inline-size: 1em;
   block-size: 1em;
 }
-[data-slot="select-item"][data-selected] [data-slot="select-item-indicator"] {
+[data-slot~="select-item"][data-selected] [data-slot~="select-item-indicator"] {
   opacity: 1;
 }
-[data-slot="select-item-text"] {
+[data-slot~="select-item-text"] {
   min-inline-size: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -335,32 +335,32 @@
 }
 
 /* Highlight (keyboard roving / pointer hover via Base UI). */
-[data-slot="select-item"][data-highlighted]:not([data-disabled]) {
+[data-slot~="select-item"][data-highlighted]:not([data-disabled]) {
   background-color: var(--zeroship-fill-tertiary);
   color: var(--zeroship-label);
 }
-[data-slot="select-item"][data-highlighted][data-selected]:not([data-disabled]) {
+[data-slot~="select-item"][data-highlighted][data-selected]:not([data-disabled]) {
   background-color: color-mix(in oklch, var(--zeroship-accent) 14%, transparent);
   color: var(--zeroship-accent-active);
 }
-[data-slot="select-item"][data-selected]:not([data-highlighted]):not([data-disabled]) {
+[data-slot~="select-item"][data-selected]:not([data-highlighted]):not([data-disabled]) {
   color: var(--zeroship-accent-active);
 }
-[data-slot="select-item"][data-disabled] {
+[data-slot~="select-item"][data-disabled] {
   color: var(--zeroship-label-tertiary);
   cursor: not-allowed;
 }
 
 /* ─── group + group label ──────────────────────────────────────────── */
-[data-slot="select-group"] {
+[data-slot~="select-group"] {
   display: flex;
   flex-direction: column;
   gap: var(--zeroship-space-half);
 }
-[data-slot="select-group"] + [data-slot="select-group"] {
+[data-slot~="select-group"] + [data-slot~="select-group"] {
   margin-block-start: var(--zeroship-space-1);
 }
-[data-slot="select-group-label"] {
+[data-slot~="select-group-label"] {
   padding-block: var(--zeroship-space-half);
   padding-inline: var(--zeroship-space-2);
   font-size: var(--zeroship-text-caption-1-size);
@@ -372,7 +372,7 @@
 }
 
 /* ─── separator ────────────────────────────────────────────────────── */
-[data-slot="select-separator"] {
+[data-slot~="select-separator"] {
   block-size: 0.0625rem;
   background-color: var(--zeroship-separator);
   margin-block: var(--zeroship-space-half);
@@ -381,9 +381,9 @@
 
 /* ─── reduced motion ───────────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
-  [data-slot="select-trigger"],
-  [data-slot="select-trigger-icon"],
-  [data-slot="select-item"] {
+  [data-slot~="select-trigger"],
+  [data-slot~="select-trigger-icon"],
+  [data-slot~="select-item"] {
     transition: none;
   }
 }
@@ -393,14 +393,14 @@
  * Mirror every state selector that paints background / color / box-shadow
  * inside the forced-colors media so the system palette wins over the
  * oklch token mixes. Slice-5 lesson: the per-state selectors outrank a
- * bare `[data-slot="select-item"]` reset block, so we re-emit each rule at equal
+ * bare `[data-slot~="select-item"]` reset block, so we re-emit each rule at equal
  * (or higher) specificity. Pay particular attention to `:hover` rules
  * gated by `:not([disabled])` — those carry higher specificity than a
  * single-class trigger reset, so they MUST be mirrored at equal
  * specificity inside the forced-colors block (otherwise the oklch
  * background-color leaks through under high-contrast mode). */
 @media (forced-colors: active) {
-  [data-slot="select-trigger"] {
+  [data-slot~="select-trigger"] {
     background: Field;
     color: FieldText;
     box-shadow: inset 0 0 0 0.0625rem CanvasText;
@@ -411,65 +411,65 @@
    * palette wins. Both `--default` and `--outline` variants paint into
    * the same Field/CanvasText system surface; the variant distinction
    * collapses under forced-colors. */
-  [data-slot="select-trigger"]:not([disabled]):not([data-popup-open]):hover,
-  [data-slot="select-trigger"][data-variant="outline"]:not([disabled]):not([data-popup-open]):hover {
+  [data-slot~="select-trigger"]:not([disabled]):not([data-popup-open]):hover,
+  [data-slot~="select-trigger"][data-variant="outline"]:not([disabled]):not([data-popup-open]):hover {
     background: Field;
     color: FieldText;
     box-shadow: inset 0 0 0 0.0625rem Highlight;
   }
-  [data-slot="select-trigger"][data-popup-open],
-  [data-slot="select-trigger"]:focus-visible,
-  [data-slot="select-trigger"][data-variant="outline"][data-popup-open],
-  [data-slot="select-trigger"][data-variant="outline"]:focus-visible {
+  [data-slot~="select-trigger"][data-popup-open],
+  [data-slot~="select-trigger"]:focus-visible,
+  [data-slot~="select-trigger"][data-variant="outline"][data-popup-open],
+  [data-slot~="select-trigger"][data-variant="outline"]:focus-visible {
     background: Field;
     color: FieldText;
     box-shadow:
       inset 0 0 0 0.0625rem Highlight,
       0 0 0 0.125rem Highlight;
   }
-  [data-slot="select-trigger"][disabled],
-  [data-slot="select-trigger"][data-disabled] {
+  [data-slot~="select-trigger"][disabled],
+  [data-slot~="select-trigger"][data-disabled] {
     color: GrayText;
     box-shadow: inset 0 0 0 0.0625rem GrayText;
   }
-  [data-slot="select-trigger"][data-placeholder] [data-slot="select-trigger-value"] {
+  [data-slot~="select-trigger"][data-placeholder] [data-slot~="select-trigger-value"] {
     color: GrayText;
   }
-  [data-slot="select-trigger-icon"] {
+  [data-slot~="select-trigger-icon"] {
     color: CanvasText;
   }
 
-  [data-slot="select-popup"] {
+  [data-slot~="select-popup"] {
     background-color: Canvas;
     color: CanvasText;
     box-shadow: inset 0 0 0 0.0625rem CanvasText;
     forced-color-adjust: none;
   }
 
-  [data-slot="select-item"] {
+  [data-slot~="select-item"] {
     background-color: Canvas;
     color: CanvasText;
   }
-  [data-slot="select-item"][data-highlighted]:not([data-disabled]),
-  [data-slot="select-item"][data-highlighted][data-selected]:not([data-disabled]) {
+  [data-slot~="select-item"][data-highlighted]:not([data-disabled]),
+  [data-slot~="select-item"][data-highlighted][data-selected]:not([data-disabled]) {
     background-color: Highlight;
     color: HighlightText;
   }
-  [data-slot="select-item"][data-selected]:not([data-highlighted]):not([data-disabled]) {
+  [data-slot~="select-item"][data-selected]:not([data-highlighted]):not([data-disabled]) {
     background-color: Canvas;
     color: HighlightText;
     box-shadow: inset 0 0 0 0.0625rem Highlight;
   }
-  [data-slot="select-item"][data-disabled] {
+  [data-slot~="select-item"][data-disabled] {
     color: GrayText;
   }
-  [data-slot="select-item-indicator"] {
+  [data-slot~="select-item-indicator"] {
     color: Highlight;
   }
-  [data-slot="select-group-label"] {
+  [data-slot~="select-group-label"] {
     color: GrayText;
   }
-  [data-slot="select-separator"] {
+  [data-slot~="select-separator"] {
     background-color: GrayText;
   }
 }

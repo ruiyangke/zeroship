@@ -75,7 +75,7 @@ export const Horizontal: Story = {
     await expect(details).toHaveLength(ROWS.length);
 
     // Each pair is grouped in a <div> item (valid dl grouping).
-    const firstItem = root.querySelector('[data-slot="description-list-item"]');
+    const firstItem = root.querySelector('[data-slot~="description-list-item"]');
     await expect(firstItem?.tagName).toBe("DIV");
     await expect(firstItem?.querySelector("dt")).toHaveTextContent("Status");
     await expect(firstItem?.querySelector("dd")).toHaveTextContent("Active");

@@ -54,7 +54,10 @@ export const ThreeStats: Story = {
     const canvas = within(canvasElement);
     const root = canvas.getByTestId("sb-three");
     await expect(root.tagName).toBe("SECTION");
-    await expect(root).toHaveAttribute("data-slot", "stats-band");
+    await expect(root).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)stats-band(?:\s|$)/),
+    );
 
     // Labelled by the real <h2>.
     const title = canvas.getByRole("heading", { name: "Trusted at scale" });
@@ -62,7 +65,7 @@ export const ThreeStats: Story = {
     await expect(root.getAttribute("aria-labelledby")).toBe(title.id);
 
     // Three stat groups, each value + label rendering as plain text.
-    const groups = root.querySelectorAll('[data-slot="stats-band-stat"]');
+    const groups = root.querySelectorAll('[data-slot~="stats-band-stat"]');
     await expect(groups.length).toBe(3);
     await expect(canvas.getByText("12k+")).toBeInTheDocument();
     await expect(canvas.getByText("Apps shipped")).toBeInTheDocument();
@@ -121,7 +124,7 @@ export const FourStats: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const root = canvas.getByTestId("sb-four");
-    const groups = root.querySelectorAll('[data-slot="stats-band-stat"]');
+    const groups = root.querySelectorAll('[data-slot~="stats-band-stat"]');
     await expect(groups.length).toBe(4);
     // The descriptions render.
     await expect(canvas.getByText("Across every region.")).toBeInTheDocument();
@@ -159,7 +162,7 @@ export const Compound: Story = {
 
     // Three stat groups: prop item (12k+) FIRST, then the two compound items.
     const values = Array.from(
-      root.querySelectorAll('[data-slot="stats-band-stat-value"]'),
+      root.querySelectorAll('[data-slot~="stats-band-stat-value"]'),
     ).map((el) => el.textContent);
     await expect(values).toEqual(["12k+", "99.99%", "<50ms"]);
 
@@ -199,7 +202,7 @@ export const Muted: Story = {
     const root = canvas.getByTestId("sb-muted");
     await expect(root).toHaveAttribute("data-tone", "muted");
     // The eyebrow carries the shared section-eyebrow class.
-    const eyebrow = root.querySelector(".zs-section-eyebrow");
+    const eyebrow = root.querySelector("[data-slot~=stats-band-eyebrow]");
     await expect(eyebrow).not.toBeNull();
     const title = canvas.getByRole("heading", { name: "Trusted at scale" });
     await expect(root.getAttribute("aria-labelledby")).toBe(title.id);
@@ -244,7 +247,7 @@ export const Accent: Story = {
     await expect(window.innerWidth).toBeGreaterThanOrEqual(768);
 
     const stats = root.querySelectorAll<HTMLElement>(
-      '[data-slot="stats-band-stat"]',
+      '[data-slot~="stats-band-stat"]',
     );
     await expect(stats.length).toBe(3);
 
@@ -279,7 +282,7 @@ export const Accent: Story = {
     // ancestor must NOT pick up the accent divider remap ────────────────────
     //
     // Build a standalone accent wrapper around a stat element and append it to
-    // the canvas. The base `.zs-stats-band__stat` divider rule (min-width:
+    // the canvas. The base `[data-slot~=stats-band-stat]` divider rule (min-width:
     // 48rem) still applies — that's the shared separator, fine — but the
     // ACCENT remap (`--zeroship-section-ink-secondary`) must NOT, because the
     // selector requires `[data-section-band]`. So the bare wrapper never even
@@ -287,7 +290,6 @@ export const Accent: Story = {
     const bareWrap = document.createElement("div");
     bareWrap.setAttribute("data-tone", "accent");
     const bareStat = document.createElement("div");
-    bareStat.className = "zs-stats-band__stat";
     bareStat.setAttribute("data-slot", "stats-band-stat");
     bareWrap.appendChild(bareStat);
     canvasElement.appendChild(bareWrap);
@@ -329,7 +331,7 @@ export const Headerless: Story = {
     // No section <h2>; the stat values are plain text, never headings.
     await expect(canvas.queryAllByRole("heading").length).toBe(0);
     await expect(
-      root.querySelector('[data-slot="stats-band-title"]'),
+      root.querySelector('[data-slot~="stats-band-title"]'),
     ).toBeNull();
   },
 };

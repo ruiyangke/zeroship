@@ -64,7 +64,7 @@ function render(cls) {
   // instance, which is composition rather than a part it declares.
   if (cls === "zs-filter-bar__search") return ".zeroship-filter-bar__search";
 
-  // Modifier first. Collapsing `.zs-icon--md` to [data-slot="icon"] drops the
+  // Modifier first. Collapsing `.zs-icon--md` to [data-slot~="icon"] drops the
   // size and documents something false -- the partial run did exactly that
   // once, which is why this path is checked before the direct lookup.
   const m = cls.match(/^(.+?)--([a-z0-9-]+)$/);
@@ -78,7 +78,7 @@ function render(cls) {
         : EXPLICIT[value];
       if (pair) {
         const [attr, v] = pair;
-        const sel = slots.map((s) => `[data-slot="${s}"]`).join(", ");
+        const sel = slots.map((s) => `[data-slot~="${s}"]`).join(", ");
         const tail = v === null ? `[data-${attr}]` : `[data-${attr}="${v}"]`;
         return slots.length === 1 ? sel + tail : `:is(${sel})${tail}`;
       }
@@ -91,8 +91,8 @@ function render(cls) {
     return null;
   }
   return slots.length === 1
-    ? `[data-slot="${slots[0]}"]`
-    : slots.map((s) => `[data-slot="${s}"]`).join(", ");
+    ? `[data-slot~="${slots[0]}"]`
+    : slots.map((s) => `[data-slot~="${s}"]`).join(", ");
 }
 
 const files = execFileSync("git", ["ls-files", "sdks/ui-theme"], {

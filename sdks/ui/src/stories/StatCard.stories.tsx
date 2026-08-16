@@ -52,11 +52,16 @@ export const Up: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const root = canvas.getByTestId("statcard-up");
-    // Regression: StatCard overrides the Card root data-slot. Pre-fix
-    // Card spread its own `data-slot="card"` after `...rest`, clobbering
-    // this to "card"; post-fix Card honors the consumer-supplied value.
-    await expect(root).toHaveAttribute("data-slot", "stat-card");
-    const delta = root.querySelector('[data-slot="stat-card-delta"]');
+    // Regression: StatCard and Card retain both root slot tokens.
+    await expect(root).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)stat-card(?:\s|$)/),
+    );
+    await expect(root).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)card(?:\s|$)/),
+    );
+    const delta = root.querySelector('[data-slot~="stat-card-delta"]');
     await expect(delta).toHaveAttribute("data-direction", "up");
     // Direction is conveyed beyond color: the SR word is present.
     await expect(delta).toHaveTextContent(/increased/i);

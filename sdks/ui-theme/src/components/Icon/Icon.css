@@ -9,23 +9,23 @@
  * `currentColor`, so the icon follows the surrounding text color and
  * maps correctly under `forced-colors: active` with no extra rule.
  */
-[data-slot="icon"] {
+[data-slot~="icon"] {
   display: inline-block;
   flex: 0 0 auto;
   vertical-align: middle;
 }
 
-[data-slot="icon"][data-size="sm"] {
+[data-slot~="icon"][data-size="sm"] {
   inline-size: var(--zeroship-icon-sm);
   block-size: var(--zeroship-icon-sm);
 }
 
-[data-slot="icon"][data-size="md"] {
+[data-slot~="icon"][data-size="md"] {
   inline-size: var(--zeroship-icon-md);
   block-size: var(--zeroship-icon-md);
 }
 
-[data-slot="icon"][data-size="lg"] {
+[data-slot~="icon"][data-size="lg"] {
   inline-size: var(--zeroship-icon-lg);
   block-size: var(--zeroship-icon-lg);
 }

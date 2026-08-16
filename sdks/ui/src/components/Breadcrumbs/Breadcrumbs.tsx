@@ -115,8 +115,8 @@ export interface BreadcrumbsProps extends Omit<
   "aria-label"?: string;
   /**
    * Root `data-slot` value. Defaults to `"breadcrumbs"`. A composing
-   * layout (e.g. `PageHeader.Breadcrumbs`) overrides it so consumers can
-   * target the outer element via its own slot vocabulary.
+   * layout (e.g. `PageHeader.Breadcrumbs`) adds its own token so both slot
+   * vocabularies remain available.
    */
   "data-slot"?: string;
   /** Compound parts. Mutually exclusive with `items`. */
@@ -390,7 +390,7 @@ const BreadcrumbsRoot = forwardRef<HTMLElement, BreadcrumbsProps>(
       className,
       children,
       "aria-label": ariaLabel = "Breadcrumb",
-      "data-slot": dataSlot = "breadcrumbs",
+      "data-slot": dataSlot,
       ...rest
     },
     ref,
@@ -501,7 +501,7 @@ const BreadcrumbsRoot = forwardRef<HTMLElement, BreadcrumbsProps>(
       <nav
         {...rest}
         ref={ref as Ref<HTMLElement>}
-        data-slot={dataSlot}
+        data-slot={["breadcrumbs", dataSlot].filter(Boolean).join(" ")}
         aria-label={ariaLabel}
         className={className}
       >

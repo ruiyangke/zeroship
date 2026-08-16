@@ -45,7 +45,10 @@ export const BothAxes: Story = {
   ),
   play: async ({ canvasElement }) => {
     const c = within(canvasElement).getByTestId("center-both");
-    await expect(c).toHaveAttribute("data-slot", "center");
+    await expect(c).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)center(?:\s|$)/),
+    );
     const cs = getComputedStyle(c);
     await expect(cs.alignItems).toBe("center");
     await expect(cs.justifyContent).toBe("center");
@@ -101,7 +104,10 @@ export const AsChild: Story = {
   play: async ({ canvasElement }) => {
     const section = within(canvasElement).getByTestId("center-aschild");
     await expect(section.tagName).toBe("SECTION");
-    await expect(section).toHaveClass("zs-center");
+    await expect(section).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)center(?:\s|$)/),
+    );
   },
 };
 

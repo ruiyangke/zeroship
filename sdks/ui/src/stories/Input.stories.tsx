@@ -809,7 +809,7 @@ export const FieldDisabledPropagation: Story = {
  * to focus) the disabled input.
  *
  * Post-fix: the inline `<Field>` receives `disabled={props.disabled}`
- * so `data-disabled=""` sits on `.zs-field`, the label takes the
+ * so `data-disabled=""` sits on `[data-slot~=field]`, the label takes the
  * disabled fill via Field.css, and Base UI's Field.Root reports
  * `state.disabled === true` to the auto-bound `<Field.Label>`.
  *
@@ -870,11 +870,11 @@ export const CombinedDisabledPropagation: Story = {
       "input-combined-enabled-wrapper",
     );
 
-    // The inline Field root is `.zs-field` and Base UI's Field.Root
+    // The inline Field root is `[data-slot~=field]` and Base UI's Field.Root
     // mirrors `disabled` to `data-disabled`. Pre-fix this attribute
     // was missing on the disabled cell — the regression target.
-    const disabledFieldRoot = disabledWrapper.querySelector(".zs-field");
-    const enabledFieldRoot = enabledWrapper.querySelector(".zs-field");
+    const disabledFieldRoot = disabledWrapper.querySelector('[data-slot~="field"]');
+    const enabledFieldRoot = enabledWrapper.querySelector('[data-slot~="field"]');
     await expect(disabledFieldRoot).not.toBeNull();
     await expect(enabledFieldRoot).not.toBeNull();
     await expect(disabledFieldRoot).toHaveAttribute("data-disabled");
@@ -889,9 +889,9 @@ export const CombinedDisabledPropagation: Story = {
     await expect(enabledInput).not.toBeDisabled();
 
     // The auto-bound Field.Label takes the disabled fill via the
-    // `.zs-field[data-disabled] > .zs-field__label` rule. Verify the
+    // `[data-slot~=field][data-disabled] > [data-slot~=field-label]` rule. Verify the
     // label sits inside the disabled field root.
-    const disabledLabel = disabledWrapper.querySelector(".zs-field__label");
+    const disabledLabel = disabledWrapper.querySelector('[data-slot~="field-label"]');
     await expect(disabledLabel).not.toBeNull();
     await expect(
       disabledFieldRoot?.contains(disabledLabel as Node),

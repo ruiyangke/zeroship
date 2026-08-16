@@ -2,11 +2,11 @@
  * Skeleton — loading placeholder.
  *
  * Anatomy:
- *   [data-slot="skeleton"], [data-slot="skeleton-line"]                  — a single placeholder block
+ *   [data-slot~="skeleton"], [data-slot~="skeleton-line"]                  — a single placeholder block
  *     --text   : text-line bar (block-size keyed to a body line)
  *     --rect   : rectangle, --zeroship-radius-2 corners
  *     --circle : full-radius circle, square aspect
- *   [data-slot="skeleton"]            — container for multi-line text (N bars)
+ *   [data-slot~="skeleton"]            — container for multi-line text (N bars)
  *
  * Paint: a base fill (--zeroship-fill-tertiary) with a diagonal shimmer
  * sweep painted in --zeroship-fill-quaternary via a moving gradient. The base
@@ -19,7 +19,7 @@
  * sets `animation: none` and the static base fill remains.
  */
 
-:is([data-slot="skeleton"], [data-slot="skeleton-line"]) {
+:is([data-slot~="skeleton"], [data-slot~="skeleton-line"]) {
   display: block;
   /* Base placeholder fill — always visible, even with motion off. One
      step lighter than secondary so the placeholder reads soft/warm
@@ -42,7 +42,7 @@
 }
 
 /* ─── variants ─────────────────────────────────────────────────────── */
-:is([data-slot="skeleton"], [data-slot="skeleton-line"])[data-variant="text"] {
+:is([data-slot~="skeleton"], [data-slot~="skeleton-line"])[data-variant="text"] {
   /* A single line of body text. Default inline-size fills the column;
      callers override via the `width` prop. */
   inline-size: 100%;
@@ -50,14 +50,14 @@
   border-radius: var(--zeroship-radius-1);
 }
 
-:is([data-slot="skeleton"], [data-slot="skeleton-line"])[data-variant="rect"] {
+:is([data-slot~="skeleton"], [data-slot~="skeleton-line"])[data-variant="rect"] {
   /* Defaults; consumers pass width/height. A floor keeps an unsized
      rect visible. */
   inline-size: 100%;
   block-size: var(--zeroship-space-10);
 }
 
-:is([data-slot="skeleton"], [data-slot="skeleton-line"])[data-variant="circle"] {
+:is([data-slot~="skeleton"], [data-slot~="skeleton-line"])[data-variant="circle"] {
   /* Square aspect forced to a circle. Default size keyed to a typical
      avatar. A consumer can pass just `width` (or just `height`) and the
      `aspect-ratio: 1` keeps it round — the unconstrained axis derives
@@ -71,7 +71,7 @@
 }
 
 /* ─── multi-line text ──────────────────────────────────────────────── */
-[data-slot="skeleton"] {
+[data-slot~="skeleton"] {
   display: flex;
   flex-direction: column;
   gap: var(--zeroship-space-2);
@@ -80,7 +80,7 @@
 
 /* The last bar is shortened so the block reads as a finished paragraph
    rather than a solid rectangle. */
-[data-slot="skeleton"] :is([data-slot="skeleton"], [data-slot="skeleton-line"]):last-child:not(:only-child) {
+[data-slot~="skeleton"] :is([data-slot~="skeleton"], [data-slot~="skeleton-line"]):last-child:not(:only-child) {
   inline-size: 50%;
 }
 
@@ -95,7 +95,7 @@
 
 /* RTL — sweep the highlight the opposite direction so the motion reads
    with the writing direction. */
-:is([data-slot="skeleton"], [data-slot="skeleton-line"]):dir(rtl) {
+:is([data-slot~="skeleton"], [data-slot~="skeleton-line"]):dir(rtl) {
   animation-name: zeroship-skeleton-shimmer-rtl;
 }
 @keyframes zeroship-skeleton-shimmer-rtl {
@@ -113,7 +113,7 @@
  * Mirror of Progress/Meter. Drop the gradient image too so no frozen
  * half-swept highlight lingers. */
 @media (prefers-reduced-motion: reduce) {
-  :is([data-slot="skeleton"], [data-slot="skeleton-line"]) {
+  :is([data-slot~="skeleton"], [data-slot~="skeleton-line"]) {
     animation: none;
     background-image: none;
   }
@@ -123,7 +123,7 @@
  * Token fills collapse under forced-colors; paint a bordered Canvas box
  * so the placeholder stays visible as a distinct region. */
 @media (forced-colors: active) {
-  :is([data-slot="skeleton"], [data-slot="skeleton-line"]) {
+  :is([data-slot~="skeleton"], [data-slot~="skeleton-line"]) {
     animation: none;
     background-image: none;
     background-color: Canvas;

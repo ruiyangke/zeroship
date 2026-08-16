@@ -2,7 +2,7 @@
 /**
  * Every element the library styles must be addressable by attribute.
  *
- * A theme targets `[data-slot="input-control"]`. An element carrying a `zs-*`
+ * A theme targets `[data-slot~="input-control"]`. An element carrying a `zs-*`
  * class but no `data-slot` is reachable only by class name, so a theme written
  * against attributes cannot touch it. This includes interpolated templates
  * whose block name is dynamic, such as `zs-${base}-field`. The classes are on
@@ -90,6 +90,100 @@ function expandTemplate(node, checker) {
   return names;
 }
 
+/** Split resolved data-slot values into the whitespace-delimited slot names. */
+function splitSlotNames(values) {
+  return values.flatMap((value) => value.split(/\s+/).filter(Boolean));
+}
+
+/**
+ * Whether an expression is the caller-provided `data-slot` prop.
+ *
+ * Component-owned slots deliberately merge this dynamic value with their own
+ * literal slot. It is safe to omit the caller half here: JSX call sites are
+ * scanned independently, while the component's literal half is the contract
+ * this script must retain. Other dynamic expressions remain unresolvable.
+ */
+function isCallerSlotReference(node, checker) {
+  if (
+    ts.isElementAccessExpression(node) &&
+    ts.isIdentifier(node.expression) &&
+    node.argumentExpression &&
+    (ts.isStringLiteral(node.argumentExpression) ||
+      ts.isNoSubstitutionTemplateLiteral(node.argumentExpression)) &&
+    node.argumentExpression.text === "data-slot" &&
+    (checker.getSymbolAtLocation(node.expression)?.declarations ?? []).some(
+      (decl) => ts.isParameter(decl),
+    )
+  ) {
+    return true;
+  }
+
+  if (!ts.isIdentifier(node)) return false;
+  const symbol = checker.getSymbolAtLocation(node);
+  return (symbol?.declarations ?? []).some(
+    (decl) =>
+      ts.isBindingElement(decl) &&
+      decl.initializer == null &&
+      decl.propertyName != null &&
+      (ts.isStringLiteral(decl.propertyName) ||
+        ts.isNoSubstitutionTemplateLiteral(decl.propertyName)) &&
+      decl.propertyName.text === "data-slot",
+  );
+}
+
+/**
+ * Resolve the canonical multi-value merge:
+ *
+ *   ["component-slot", props["data-slot"]].filter(Boolean).join(" ")
+ *
+ * Only literal members and the caller's own data-slot reference are accepted.
+ */
+function mergedSlotNamesOf(expr, checker) {
+  if (
+    !ts.isCallExpression(expr) ||
+    !ts.isPropertyAccessExpression(expr.expression) ||
+    expr.expression.name.text !== "join" ||
+    expr.arguments.length !== 1 ||
+    !ts.isStringLiteral(expr.arguments[0]) ||
+    expr.arguments[0].text !== " "
+  ) {
+    return null;
+  }
+
+  const filterCall = expr.expression.expression;
+  if (
+    !ts.isCallExpression(filterCall) ||
+    !ts.isPropertyAccessExpression(filterCall.expression) ||
+    filterCall.expression.name.text !== "filter" ||
+    filterCall.arguments.length !== 1 ||
+    !ts.isIdentifier(filterCall.arguments[0]) ||
+    filterCall.arguments[0].text !== "Boolean"
+  ) {
+    return null;
+  }
+
+  const array = filterCall.expression.expression;
+  if (!ts.isArrayLiteralExpression(array)) return null;
+
+  const names = [];
+  let callerSlots = 0;
+  for (const element of array.elements) {
+    if (
+      ts.isStringLiteral(element) ||
+      ts.isNoSubstitutionTemplateLiteral(element)
+    ) {
+      names.push(element.text);
+      continue;
+    }
+    if (isCallerSlotReference(element, checker) && callerSlots === 0) {
+      callerSlots++;
+      continue;
+    }
+    return null;
+  }
+  return names.length > 0 ? names : null;
+}
+
 /**
  * The concrete name(s) a `data-slot` can take, or null if it cannot be pinned.
  *
@@ -125,6 +219,9 @@ function slotNamesOf(initializer, checker, source) {
     }
     return names;
   }
+
+  const merged = mergedSlotNamesOf(expr, checker);
+  if (merged) return merged;
 
   if (ts.isIdentifier(expr)) {
     const symbol = checker.getSymbolAtLocation(expr);
@@ -166,7 +263,7 @@ function tagsOf(file) {
         if (name === "data-slot") {
           slots++;
           const resolved = slotNamesOf(attr.initializer, checker, source);
-          if (resolved) names.push(...resolved);
+          if (resolved) names.push(...splitSlotNames(resolved));
           else unresolved.push(attr.getText(source).replace(/\s+/g, " "));
         }
         if (name !== "className" || !attr.initializer) continue;

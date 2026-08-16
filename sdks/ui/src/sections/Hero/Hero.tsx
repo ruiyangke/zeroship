@@ -369,8 +369,8 @@ const HeroRoot = forwardRef<HTMLElement, HeroProps>(function HeroRoot(
   const effectiveAlign: HeroAlign = hasMedia ? "start" : align;
 
   // The text column: eyebrow → headline → description → actions. A vertical
-  // Stack governs the gap; the `data-slot="hero-text"` relabels the Stack
-  // so consumers target the column. Ergonomic-prop content renders first,
+  // Stack governs the gap; the `data-slot="hero-text"` token supplements
+  // Stack's own token so consumers can target either layer. Prop content renders first,
   // then any remaining compound children fall through after it inside the
   // same Stack. With a media split the text column always start-aligns
   // (the split balances the two columns); without media, `align="center"`
@@ -542,9 +542,8 @@ const HeroActions = forwardRef<HTMLDivElement, HeroActionsProps>(
   function HeroActions({ className, children, ...rest }, ref) {
     const { align } = useHeroContext("Actions");
     // Compose the Cluster primitive (wrapping inline group). It mirrors the
-    // band alignment so a centered hero has centered CTAs. Cluster honors a
-    // consumer data-slot (defaulting to "cluster"); we relabel it to the
-    // band's own vocabulary and pass the consumer className through.
+    // band alignment so a centered hero has centered CTAs. Cluster retains
+    // its own token and appends the band's token; className passes through.
     return (
       <Cluster
         {...rest}

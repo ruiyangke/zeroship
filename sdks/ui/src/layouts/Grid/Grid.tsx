@@ -84,8 +84,8 @@ export interface GridProps extends ComponentPropsWithoutRef<"div"> {
   asChild?: boolean;
   /**
    * Root `data-slot` value. Defaults to `"grid"`. A composing block can
-   * override it so consumers target the outer element via the block's own
-   * slot vocabulary. Mirrors Stack/Card.
+   * add its own token so both slot vocabularies remain available. Mirrors
+   * Stack/Card.
    */
   "data-slot"?: string;
 }
@@ -112,7 +112,7 @@ export const Grid = forwardRef<HTMLDivElement, GridProps>(function Grid(
     className,
     style,
     children,
-    "data-slot": dataSlot = "grid",
+    "data-slot": dataSlot,
     ...rest
   },
   ref,
@@ -170,7 +170,7 @@ export const Grid = forwardRef<HTMLDivElement, GridProps>(function Grid(
     <Comp
       {...rest}
       ref={ref as Ref<HTMLDivElement>}
-      data-slot={dataSlot}
+      data-slot={["grid", dataSlot].filter(Boolean).join(" ")}
       data-explicit={!intrinsic || undefined}
       data-intrinsic={intrinsic || undefined}
       data-responsive={responsive ? "" : undefined}

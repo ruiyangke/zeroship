@@ -42,7 +42,7 @@ img {
   max-width: 100%;
 }
 
-[data-slot="theme-root"] {
+[data-slot~="theme-root"] {
   min-height: 100vh;
 }
 

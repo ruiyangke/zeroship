@@ -128,7 +128,10 @@ export const Default: Story = {
 
     // The root is a real <footer> — the contentinfo landmark.
     await expect(root.tagName).toBe("FOOTER");
-    await expect(root).toHaveAttribute("data-slot", "footer");
+    await expect(root).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)footer(?:\s|$)/),
+    );
     // It surfaces as the contentinfo landmark role.
     const contentinfo = canvas.getByRole("contentinfo");
     await expect(contentinfo).toBe(root);
@@ -258,12 +261,12 @@ export const ProductLegal: Story = {
     await expect(root.tagName).toBe("FOOTER");
     await expect(root).toHaveAttribute("data-tone", "muted");
 
-    const footnotes = root.querySelector("[data-slot='footer-footnotes']");
+    const footnotes = root.querySelector("[data-slot~='footer-footnotes']");
     await expect(footnotes).not.toBeNull();
     await expect(canvas.getByRole("link", { name: "zeroship legal" }))
       .toHaveAttribute("href", "/legal");
 
-    const legalLinks = root.querySelector("[data-slot='footer-legal-links']");
+    const legalLinks = root.querySelector("[data-slot~='footer-legal-links']");
     await expect(legalLinks).not.toBeNull();
     await expect(canvas.getByRole("link", { name: "Privacy Policy" }))
       .toHaveAttribute("href", "/privacy");

@@ -2,14 +2,14 @@
  * Banner — inline page-level message.
  *
  * Anatomy:
- *   [data-slot="banner"]                    opaque tinted shell (per intent)
- *     └─ [data-slot="banner-row"]          row Stack: icon + text column + dismiss
- *         ├─ [data-slot="banner-icon"]        intent glyph, tinted, aria-hidden
- *         ├─ [data-slot="banner-text"]        Stack: title / description / parts
- *         │   ├─ [data-slot="banner-title"]       headline
- *         │   ├─ [data-slot="banner-description"] supporting copy
- *         │   └─ [data-slot="banner-actions"]     action row
- *         └─ [data-slot="banner-dismiss"]      real <button aria-label="Dismiss">
+ *   [data-slot~="banner"]                    opaque tinted shell (per intent)
+ *     └─ [data-slot~="banner-row"]          row Stack: icon + text column + dismiss
+ *         ├─ [data-slot~="banner-icon"]        intent glyph, tinted, aria-hidden
+ *         ├─ [data-slot~="banner-text"]        Stack: title / description / parts
+ *         │   ├─ [data-slot~="banner-title"]       headline
+ *         │   ├─ [data-slot~="banner-description"] supporting copy
+ *         │   └─ [data-slot~="banner-actions"]     action row
+ *         └─ [data-slot~="banner-dismiss"]      real <button aria-label="Dismiss">
  *
  * Glass / axe-contrast invariant: the shell paints an OPAQUE tinted
  * background — the intent color blended INTO the opaque `--zeroship-surface`
@@ -24,7 +24,7 @@
  * saturated panel.
  */
 
-[data-slot="banner"] {
+[data-slot~="banner"] {
   /* intent locals — overridden per intent below. Default = info. */
   --zeroship-banner-bg: color-mix(in oklch, var(--zeroship-accent) 12%, var(--zeroship-surface));
   --zeroship-banner-icon: var(--zeroship-accent);
@@ -40,22 +40,22 @@
 /* ─── intent palettes ─────────────────────────────────────────────────
  * Each blends the intent tint INTO --zeroship-surface so the base stays opaque
  * for axe's contrast walk. */
-[data-slot="banner"][data-intent="info"] {
+[data-slot~="banner"][data-intent="info"] {
   --zeroship-banner-bg: color-mix(in oklch, var(--zeroship-accent) 12%, var(--zeroship-surface));
   --zeroship-banner-icon: var(--zeroship-accent);
 }
 
-[data-slot="banner"][data-intent="success"] {
+[data-slot~="banner"][data-intent="success"] {
   --zeroship-banner-bg: color-mix(in oklch, var(--zeroship-system-green) 14%, var(--zeroship-surface));
   --zeroship-banner-icon: color-mix(in oklab, var(--zeroship-system-green) 70%, var(--zeroship-label));
 }
 
-[data-slot="banner"][data-intent="warning"] {
+[data-slot~="banner"][data-intent="warning"] {
   --zeroship-banner-bg: color-mix(in oklch, var(--zeroship-system-orange) 16%, var(--zeroship-surface));
   --zeroship-banner-icon: color-mix(in oklab, var(--zeroship-system-orange) 64%, var(--zeroship-label));
 }
 
-[data-slot="banner"][data-intent="danger"] {
+[data-slot~="banner"][data-intent="danger"] {
   --zeroship-banner-bg: color-mix(in oklch, var(--zeroship-system-red) 12%, var(--zeroship-surface));
   --zeroship-banner-icon: var(--zeroship-system-red);
 }
@@ -63,17 +63,17 @@
 /* ─── layout ──────────────────────────────────────────────────────────
  * The row Stack handles the gap; the text column flexes to fill so the
  * dismiss button is pushed to the inline end. */
-[data-slot="banner-row"] {
+[data-slot~="banner-row"] {
   inline-size: 100%;
 }
 
-[data-slot="banner-text"] {
+[data-slot~="banner-text"] {
   /* Fill the row between the icon and the dismiss affordance. */
   flex: 1 1 auto;
   min-inline-size: 0;
 }
 
-[data-slot="banner-icon"] {
+[data-slot~="banner-icon"] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -87,11 +87,11 @@
 
 /* The glyph is a Lucide icon (rendered as an <svg> by the Icon primitive);
    this descendant rule still matches and keeps the prior 1em footprint
-   (the [data-slot="icon"][data-size="md"] size rule loses on specificity to this class+element
+   (the [data-slot~="icon"][data-size="md"] size rule loses on specificity to this class+element
    selector). Lucide glyphs are fully stroked in currentColor — both the
    circled check (success) and the circled alert (info/warning/danger) carry
    their full mark as strokes, so no per-shape fill override is needed. */
-[data-slot="banner-icon"] svg {
+[data-slot~="banner-icon"] svg {
   inline-size: 1em;
   block-size: 1em;
   fill: none;
@@ -101,21 +101,21 @@
   stroke-linejoin: round;
 }
 
-[data-slot="banner-title"] {
+[data-slot~="banner-title"] {
   color: var(--zeroship-label);
   font-size: var(--zeroship-text-headline-size);
   line-height: var(--zeroship-text-headline-line);
   font-weight: var(--zeroship-text-headline-weight);
 }
 
-[data-slot="banner-description"] {
+[data-slot~="banner-description"] {
   margin: 0;
   color: var(--zeroship-label-secondary);
   font-size: var(--zeroship-text-footnote-size);
   line-height: var(--zeroship-text-footnote-line);
 }
 
-[data-slot="banner-actions"] {
+[data-slot~="banner-actions"] {
   display: inline-flex;
   flex-wrap: wrap;
   align-items: center;
@@ -125,7 +125,7 @@
 
 /* ─── dismiss button ──────────────────────────────────────────────────
  * A real <button> — quiet by default, tinting on hover. */
-[data-slot="banner-dismiss"] {
+[data-slot~="banner-dismiss"] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -147,13 +147,13 @@
     color var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 
-[data-slot="banner-dismiss"]:hover {
+[data-slot~="banner-dismiss"]:hover {
   /* Layer a translucent label tint — the shell base stays opaque. */
   background-color: color-mix(in oklch, var(--zeroship-label) 8%, transparent);
   color: var(--zeroship-label);
 }
 
-[data-slot="banner-dismiss"]:focus-visible {
+[data-slot~="banner-dismiss"]:focus-visible {
   outline: var(--zeroship-focus-ring-width) solid var(--zeroship-focus-ring-color);
   outline-offset: var(--zeroship-focus-ring-offset);
 }
@@ -162,7 +162,7 @@
  * The motion tokens already collapse to 1ms under reduce; pin the
  * transition off entirely so no hover tween runs at all. */
 @media (prefers-reduced-motion: reduce) {
-  [data-slot="banner-dismiss"] {
+  [data-slot~="banner-dismiss"] {
     transition: none;
   }
 }
@@ -171,17 +171,17 @@
  * No system color slots under HCM; defer the icon + dismiss to
  * CanvasText. The glyph shapes + copy carry the meaning. */
 @media (forced-colors: active) {
-  [data-slot="banner"] {
+  [data-slot~="banner"] {
     border: var(--zeroship-selection-hairline) solid CanvasText;
   }
-  [data-slot="banner-icon"] {
+  [data-slot~="banner-icon"] {
     color: CanvasText;
     forced-color-adjust: none;
   }
-  [data-slot="banner-dismiss"] {
+  [data-slot~="banner-dismiss"] {
     color: CanvasText;
   }
-  [data-slot="banner-dismiss"]:hover {
+  [data-slot~="banner-dismiss"]:hover {
     background-color: Highlight;
     color: HighlightText;
   }

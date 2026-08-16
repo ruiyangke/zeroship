@@ -2,12 +2,12 @@
  * Tag — interactive chip (removable / static, or filter toggle).
  *
  * Anatomy:
- *   [data-slot="tag"]                       — root (span in removable/static mode,
+ *   [data-slot~="tag"]                       — root (span in removable/static mode,
  *                                   button in filter mode)
- *     ├─ [data-slot="tag-icon"]            — optional decorative leading slot
- *     ├─ [data-slot="tag-label"]           — the text token
- *     └─ [data-slot="tag-remove"]          — trailing remove button (removable
- *                                   mode only); [data-slot="tag-remove-glyph"]
+ *     ├─ [data-slot~="tag-icon"]            — optional decorative leading slot
+ *     ├─ [data-slot~="tag-label"]           — the text token
+ *     └─ [data-slot~="tag-remove"]          — trailing remove button (removable
+ *                                   mode only); [data-slot~="tag-remove-glyph"]
  *                                   holds the aria-hidden × glyph
  *
  * Glass / axe-contrast invariant: the resting chip paints an OPAQUE
@@ -21,7 +21,7 @@
  * tap-target uses the standard active-scale guarded the same way.
  */
 
-[data-slot="tag"] {
+[data-slot~="tag"] {
   display: inline-flex;
   align-items: center;
   gap: var(--zeroship-space-1);
@@ -41,14 +41,14 @@
 }
 
 /* ─── sizes ────────────────────────────────────────────────────────────── */
-[data-slot="tag"][data-size="sm"] {
+[data-slot~="tag"][data-size="sm"] {
   padding-block: var(--zeroship-space-half);
   padding-inline: var(--zeroship-space-2);
   font-size: var(--zeroship-text-caption-1-size);
   line-height: var(--zeroship-text-caption-1-line);
 }
 
-[data-slot="tag"][data-size="md"] {
+[data-slot~="tag"][data-size="md"] {
   padding-block: var(--zeroship-space-1);
   padding-inline: var(--zeroship-space-3);
   font-size: var(--zeroship-text-footnote-size);
@@ -57,25 +57,25 @@
 
 /* Tighten the trailing edge when a remove button rides along so the ×
    doesn't sit too far from the chip edge. */
-[data-slot="tag"][data-removable][data-size="sm"] {
+[data-slot~="tag"][data-removable][data-size="sm"] {
   padding-inline-end: var(--zeroship-space-1);
 }
-[data-slot="tag"][data-removable][data-size="md"] {
+[data-slot~="tag"][data-removable][data-size="md"] {
   padding-inline-end: var(--zeroship-space-2);
 }
 
-[data-slot="tag-icon"] {
+[data-slot~="tag-icon"] {
   display: inline-flex;
   align-items: center;
   font-size: 1em;
   line-height: 1;
 }
-[data-slot="tag-icon"] svg {
+[data-slot~="tag-icon"] svg {
   inline-size: 1em;
   block-size: 1em;
 }
 
-[data-slot="tag-label"] {
+[data-slot~="tag-label"] {
   display: block;
   min-inline-size: 0;
   overflow: hidden;
@@ -87,7 +87,7 @@
  * trailing edge. The glyph is centered; the button grows a subtle
  * hover/active wash so the affordance reads.
  */
-[data-slot="tag-remove"] {
+[data-slot~="tag-remove"] {
   /* Relative so the invisible hit-area `::before` centers on the button. */
   position: relative;
   display: inline-flex;
@@ -107,17 +107,17 @@
   transition: background-color var(--zeroship-motion-fast) var(--zeroship-motion-ease),
     opacity var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
-[data-slot="tag-remove"][data-size="sm"] {
+[data-slot~="tag-remove"][data-size="sm"] {
   inline-size: 1rem;
   block-size: 1rem;
   font-size: var(--zeroship-text-footnote-size);
 }
-[data-slot="tag-remove"][data-size="md"] {
+[data-slot~="tag-remove"][data-size="md"] {
   inline-size: 1.25rem;
   block-size: 1.25rem;
   font-size: var(--zeroship-text-callout-size);
 }
-[data-slot="tag-remove-glyph"] {
+[data-slot~="tag-remove-glyph"] {
   line-height: 1;
 }
 /* 44pt minimum tap target. The visible button stays small (1–1.25rem) so
@@ -127,7 +127,7 @@
    Mirrors Button.css's coarse-pointer hit-target trick, applied on every
    pointer here because the × is too small to reliably hit even with a
    mouse. */
-[data-slot="tag-remove"]::before {
+[data-slot~="tag-remove"]::before {
   content: "";
   position: absolute;
   inset-block-start: 50%;
@@ -139,15 +139,15 @@
   pointer-events: auto;
 }
 @media (hover: hover) {
-  [data-slot="tag-remove"]:hover {
+  [data-slot~="tag-remove"]:hover {
     opacity: 1;
     background: color-mix(in oklch, var(--zeroship-label) 14%, transparent);
   }
 }
-[data-slot="tag-remove"]:active {
+[data-slot~="tag-remove"]:active {
   background: color-mix(in oklch, var(--zeroship-label) 20%, transparent);
 }
-[data-slot="tag-remove"]:focus-visible {
+[data-slot~="tag-remove"]:focus-visible {
   outline: var(--zeroship-focus-ring-width) solid var(--zeroship-focus-ring-color);
   outline-offset: var(--zeroship-focus-ring-offset);
   opacity: 1;
@@ -157,25 +157,25 @@
  * Root is a <button aria-pressed>. Unselected reads like the neutral
  * resting chip; selected swaps to the opaque accent fill.
  */
-[data-slot="tag"][data-filter] {
+[data-slot~="tag"][data-filter] {
   cursor: pointer;
 }
 @media (hover: hover) {
-  [data-slot="tag"][data-filter]:hover:not([data-selected]) {
+  [data-slot~="tag"][data-filter]:hover:not([data-selected]) {
     background: color-mix(in oklch, var(--zeroship-label) 12%, var(--zeroship-surface));
   }
 }
-[data-slot="tag"][data-filter]:focus-visible {
+[data-slot~="tag"][data-filter]:focus-visible {
   outline: var(--zeroship-focus-ring-width) solid var(--zeroship-focus-ring-color);
   outline-offset: var(--zeroship-focus-ring-offset);
 }
-[data-slot="tag"][data-filter][data-selected] {
+[data-slot~="tag"][data-filter][data-selected] {
   background: var(--zeroship-accent);
   color: var(--zeroship-accent-ink);
   border-color: var(--zeroship-accent);
 }
 @media (hover: hover) {
-  [data-slot="tag"][data-filter][data-selected]:hover {
+  [data-slot~="tag"][data-filter][data-selected]:hover {
     background: var(--zeroship-accent-hover);
     border-color: var(--zeroship-accent-hover);
   }
@@ -187,47 +187,47 @@
  * filter state maps to the Highlight pair.
  */
 @media (forced-colors: active) {
-  [data-slot="tag"] {
+  [data-slot~="tag"] {
     forced-color-adjust: none;
     background: Canvas;
     color: CanvasText;
     border-color: CanvasText;
   }
-  [data-slot="tag-remove"] {
+  [data-slot~="tag-remove"] {
     color: CanvasText;
     opacity: 1;
   }
-  [data-slot="tag-remove"]:hover,
-  [data-slot="tag-remove"]:active {
+  [data-slot~="tag-remove"]:hover,
+  [data-slot~="tag-remove"]:active {
     background: transparent;
   }
-  [data-slot="tag"][data-filter][data-selected] {
+  [data-slot~="tag"][data-filter][data-selected] {
     background: Highlight;
     color: HighlightText;
     border-color: Highlight;
   }
   /* Specificity mirror (wave-2b 🔴). The normal-mode filter hover
-     selectors `[data-slot="tag"][data-filter]:hover:not([data-selected])` and
-     `[data-slot="tag"][data-filter][data-selected]:hover` outrank the plain
-     `[data-slot="tag"]` / `[data-slot="tag"][data-filter][data-selected]` system-color rules
+     selectors `[data-slot~="tag"][data-filter]:hover:not([data-selected])` and
+     `[data-slot~="tag"][data-filter][data-selected]:hover` outrank the plain
+     `[data-slot~="tag"]` / `[data-slot~="tag"][data-filter][data-selected]` system-color rules
      above, so without a same-shape mirror a HOVERED filter chip would
      paint the OKLCH `--zeroship-label`/`--zeroship-accent-hover` mix instead of the
      system colors. Each mirror reuses the SAME selector shape so
      specificity ties and source order (this block is last) wins. */
-  [data-slot="tag"][data-filter]:hover:not([data-selected]) {
+  [data-slot~="tag"][data-filter]:hover:not([data-selected]) {
     forced-color-adjust: none;
     background: Canvas;
     color: CanvasText;
     border-color: CanvasText;
   }
-  [data-slot="tag"][data-filter][data-selected]:hover {
+  [data-slot~="tag"][data-filter][data-selected]:hover {
     forced-color-adjust: none;
     background: Highlight;
     color: HighlightText;
     border-color: Highlight;
   }
-  [data-slot="tag"][data-filter]:focus-visible,
-  [data-slot="tag-remove"]:focus-visible {
+  [data-slot~="tag"][data-filter]:focus-visible,
+  [data-slot~="tag-remove"]:focus-visible {
     outline-color: CanvasText;
   }
 }

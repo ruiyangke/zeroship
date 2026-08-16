@@ -2,7 +2,7 @@
  * ScrollRail — full-width horizontal rail aligned to a governed container.
  */
 
-[data-slot="scroll-rail"] {
+[data-slot~="scroll-rail"] {
   --zeroship-scroll-rail-edge: max(
     var(--zeroship-scroll-rail-pad, var(--zeroship-space-6)),
     calc((100vw - var(--zeroship-scroll-rail-max-width, var(--zeroship-container-wide))) / 2)
@@ -23,20 +23,20 @@
   scrollbar-width: none;
 }
 
-[data-slot="scroll-rail"]::-webkit-scrollbar {
+[data-slot~="scroll-rail"]::-webkit-scrollbar {
   display: none;
 }
 
-[data-slot="scroll-rail"][data-snap="start"] {
+[data-slot~="scroll-rail"][data-snap="start"] {
   scroll-snap-type: inline proximity;
 }
 
-[data-slot="scroll-rail"][data-snap="start"] > * {
+[data-slot~="scroll-rail"][data-snap="start"] > * {
   scroll-snap-align: start;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  [data-slot="scroll-rail"] {
+  [data-slot~="scroll-rail"] {
     scroll-behavior: auto;
   }
 }

@@ -2,8 +2,8 @@
  * Switch — binary state primitive (on / off, immediate effect).
  *
  * Anatomy:
- *   [data-slot="switch"]                 — track (Base UI's <span>, focusable)
- *     └─ [data-slot="switch-thumb"]     — sliding pip (Base UI's <span>)
+ *   [data-slot~="switch"]                 — track (Base UI's <span>, focusable)
+ *     └─ [data-slot~="switch-thumb"]     — sliding pip (Base UI's <span>)
  *   (Base UI also emits a hidden <input> beside the track for form
  *    submission; we don't style it.)
  *
@@ -53,7 +53,7 @@
  */
 
 /* ─── component-local tokens ────────────────────────────────────────── */
-[data-slot="switch"] {
+[data-slot~="switch"] {
   /* Track sizes — width slightly more than 2x the thumb so the slide
      reads as a deliberate trip, not a snap. */
   --zeroship-switch-track-w-sm: 1.5rem;     /* 24 */
@@ -84,7 +84,7 @@
 }
 
 /* ─── track ─────────────────────────────────────────────────────────── */
-[data-slot="switch"] {
+[data-slot~="switch"] {
   position: relative;
   display: inline-block;
   flex: 0 0 auto;
@@ -113,7 +113,7 @@
  * The thumb inside is positioned absolutely too, so the overlay
  * doesn't block it — both stack at z-index auto and the thumb's
  * inset positioning keeps it above. */
-[data-slot="switch"]::before {
+[data-slot~="switch"]::before {
   content: "";
   position: absolute;
   inset-block-start: 50%;
@@ -126,44 +126,44 @@
   pointer-events: auto;
 }
 @media (pointer: coarse) {
-  [data-slot="switch"]::before {
+  [data-slot~="switch"]::before {
     --zeroship-hit-target: var(--zeroship-hit-min);
   }
 }
 
-[data-slot="switch"][data-size="sm"] {
+[data-slot~="switch"][data-size="sm"] {
   inline-size: var(--zeroship-switch-track-w-sm);
   block-size: var(--zeroship-switch-track-h-sm);
 }
-[data-slot="switch"][data-size="lg"] {
+[data-slot~="switch"][data-size="lg"] {
   inline-size: var(--zeroship-switch-track-w-lg);
   block-size: var(--zeroship-switch-track-h-lg);
 }
 
 /* ─── hover ─────────────────────────────────────────────────────────── */
 @media (hover: hover) {
-  [data-slot="switch"]:not([data-disabled]):not([data-checked]):hover {
+  [data-slot~="switch"]:not([data-disabled]):not([data-checked]):hover {
     background-color: var(--zeroship-switch-track-bg-hover);
   }
-  [data-slot="switch"]:not([data-disabled])[data-checked]:hover {
+  [data-slot~="switch"]:not([data-disabled])[data-checked]:hover {
     background-color: var(--zeroship-switch-track-bg-checked-hover);
   }
 }
 
 /* ─── checked ───────────────────────────────────────────────────────── */
-[data-slot="switch"][data-checked] {
+[data-slot~="switch"][data-checked] {
   background-color: var(--zeroship-switch-track-bg-checked);
   box-shadow: inset 0 0 0 0.0625rem transparent;
 }
 
 /* ─── focus ring on the track itself ────────────────────────────────── */
-[data-slot="switch"]:focus-visible {
+[data-slot~="switch"]:focus-visible {
   outline: 0.125rem solid var(--zeroship-button-focus-ring-color);
   outline-offset: var(--zeroship-focus-ring-offset);
 }
 
 /* ─── disabled ──────────────────────────────────────────────────────── */
-[data-slot="switch"][data-disabled] {
+[data-slot~="switch"][data-disabled] {
   background-color: var(--zeroship-fill-tertiary);
   box-shadow: inset 0 0 0 0.0625rem var(--zeroship-fill-tertiary);
   cursor: not-allowed;
@@ -171,7 +171,7 @@
 /* Mix the accent INTO an opaque fill (not transparent) so the
  * glass-surface invariant holds — same gray-with-accent-hint pattern
  * the destructive-button-disabled fix used (slice-4 review fix item 4). */
-[data-slot="switch"][data-disabled][data-checked] {
+[data-slot~="switch"][data-disabled][data-checked] {
   background-color: color-mix(in oklch, var(--zeroship-accent) 45%, var(--zeroship-fill-secondary));
 }
 
@@ -184,17 +184,17 @@
  * readable, but the heavier accent fill of the editable on-state is
  * traded for the same hairline-on-readonly-surface signal the
  * Checkbox uses (slice-4 visual-polish item 2). */
-[data-slot="switch"][data-readonly] {
+[data-slot~="switch"][data-readonly] {
   cursor: default;
 }
-[data-slot="switch"][data-readonly]:not([data-checked]) {
+[data-slot~="switch"][data-readonly]:not([data-checked]) {
   background-color: var(--zeroship-selection-bg-readonly);
 }
-[data-slot="switch"][data-readonly][data-checked] {
+[data-slot~="switch"][data-readonly][data-checked] {
   background-color: var(--zeroship-selection-bg-readonly);
   box-shadow: inset 0 0 0 var(--zeroship-selection-hairline) var(--zeroship-accent);
 }
-[data-slot="switch"][data-readonly][data-checked] [data-slot="switch-thumb"] {
+[data-slot~="switch"][data-readonly][data-checked] [data-slot~="switch-thumb"] {
   background-color: var(--zeroship-accent);
 }
 
@@ -209,7 +209,7 @@
  * Reduced-motion users get an instant move; everyone else gets a
  * gentle ease.
  */
-[data-slot="switch-thumb"] {
+[data-slot~="switch-thumb"] {
   position: absolute;
   inset-block-start: var(--zeroship-switch-inset);
   inset-inline-start: var(--zeroship-switch-inset);
@@ -223,11 +223,11 @@
     inline-size var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 
-[data-slot="switch"][data-size="sm"] [data-slot="switch-thumb"] {
+[data-slot~="switch"][data-size="sm"] [data-slot~="switch-thumb"] {
   inline-size: var(--zeroship-switch-thumb-sm);
   block-size: var(--zeroship-switch-thumb-sm);
 }
-[data-slot="switch"][data-size="lg"] [data-slot="switch-thumb"] {
+[data-slot~="switch"][data-size="lg"] [data-slot~="switch-thumb"] {
   inline-size: var(--zeroship-switch-thumb-lg);
   block-size: var(--zeroship-switch-thumb-lg);
 }
@@ -240,20 +240,20 @@
  * LTR moves positive (toward the end / right), RTL moves negative
  * (toward the end / left).
  */
-[data-slot="switch"][data-checked] [data-slot="switch-thumb"] {
+[data-slot~="switch"][data-checked] [data-slot~="switch-thumb"] {
   /* md track: 2rem − 0.875rem − 2·0.125rem = 0.875rem */
   --zeroship-switch-thumb-offset: calc(
     var(--zeroship-switch-track-w-md) - var(--zeroship-switch-thumb-md) - (2 * var(--zeroship-switch-inset))
   );
   translate: var(--zeroship-switch-thumb-offset) 0;
 }
-[data-slot="switch"][data-size="sm"][data-checked] [data-slot="switch-thumb"] {
+[data-slot~="switch"][data-size="sm"][data-checked] [data-slot~="switch-thumb"] {
   --zeroship-switch-thumb-offset: calc(
     var(--zeroship-switch-track-w-sm) - var(--zeroship-switch-thumb-sm) - (2 * var(--zeroship-switch-inset))
   );
   translate: var(--zeroship-switch-thumb-offset) 0;
 }
-[data-slot="switch"][data-size="lg"][data-checked] [data-slot="switch-thumb"] {
+[data-slot~="switch"][data-size="lg"][data-checked] [data-slot~="switch-thumb"] {
   --zeroship-switch-thumb-offset: calc(
     var(--zeroship-switch-track-w-lg) - var(--zeroship-switch-thumb-lg) - (2 * var(--zeroship-switch-inset))
   );
@@ -267,48 +267,48 @@
  * doesn't track direction itself, so the inline-end semantic lives
  * here in the stylesheet.
  */
-[dir="rtl"] [data-slot="switch"][data-checked] [data-slot="switch-thumb"],
-[data-slot="switch"][dir="rtl"][data-checked] [data-slot="switch-thumb"] {
+[dir="rtl"] [data-slot~="switch"][data-checked] [data-slot~="switch-thumb"],
+[data-slot~="switch"][dir="rtl"][data-checked] [data-slot~="switch-thumb"] {
   translate: calc(-1 * var(--zeroship-switch-thumb-offset)) 0;
 }
 
 /* ─── reduced motion ────────────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
-  [data-slot="switch"],
-  [data-slot="switch-thumb"] {
+  [data-slot~="switch"],
+  [data-slot~="switch-thumb"] {
     transition: none;
   }
 }
 
 /* ─── forced-colors ─────────────────────────────────────────────────── */
 @media (forced-colors: active) {
-  [data-slot="switch"] {
+  [data-slot~="switch"] {
     background-color: Canvas;
     box-shadow: inset 0 0 0 0.0625rem CanvasText;
     forced-color-adjust: none;
   }
-  [data-slot="switch"][data-checked] {
+  [data-slot~="switch"][data-checked] {
     background-color: Highlight;
     box-shadow: inset 0 0 0 0.0625rem Highlight;
   }
-  [data-slot="switch-thumb"] {
+  [data-slot~="switch-thumb"] {
     background-color: CanvasText;
     box-shadow: none;
   }
-  [data-slot="switch"][data-checked] [data-slot="switch-thumb"] {
+  [data-slot~="switch"][data-checked] [data-slot~="switch-thumb"] {
     background-color: HighlightText;
   }
-  [data-slot="switch"]:focus-visible {
+  [data-slot~="switch"]:focus-visible {
     outline-color: Highlight;
   }
-  [data-slot="switch"][data-disabled] {
+  [data-slot~="switch"][data-disabled] {
     background-color: Canvas;
     box-shadow: inset 0 0 0 0.0625rem GrayText;
   }
-  [data-slot="switch"][data-disabled] [data-slot="switch-thumb"] {
+  [data-slot~="switch"][data-disabled] [data-slot~="switch-thumb"] {
     background-color: GrayText;
   }
-  :is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-disabled] {
+  :is([data-slot~="checkbox-field"], [data-slot~="radio-field"], [data-slot~="switch-field"])[data-disabled] {
     color: GrayText;
   }
 
@@ -316,7 +316,7 @@
    * selectors below (hover-with-:not-:hover at lines 145/148, disabled-
    * checked at line 174, readonly-unchecked at line 190, readonly-checked
    * at lines 193+197) WIN inside forced-colors mode because they have
-   * more selectors than the bare `[data-slot="switch"][data-checked]` rule above,
+   * more selectors than the bare `[data-slot~="switch"][data-checked]` rule above,
    * and `background-color: var(--zeroship-…)` would override the `Highlight`/
    * `Canvas`/`GrayText` system colors. Mirror each higher-specificity
    * rule with the matching forced-colors paint so the system-color
@@ -325,26 +325,26 @@
    * `forced-color-adjust: none` is already set on the base selector
    * above; it cascades to these matching selectors. */
   @media (hover: hover) {
-    [data-slot="switch"]:not([data-disabled]):not([data-checked]):hover {
+    [data-slot~="switch"]:not([data-disabled]):not([data-checked]):hover {
       background-color: Canvas;
     }
-    [data-slot="switch"]:not([data-disabled])[data-checked]:hover {
+    [data-slot~="switch"]:not([data-disabled])[data-checked]:hover {
       background-color: Highlight;
     }
   }
-  [data-slot="switch"][data-disabled][data-checked] {
+  [data-slot~="switch"][data-disabled][data-checked] {
     background-color: Canvas;
     box-shadow: inset 0 0 0 0.0625rem GrayText;
   }
-  [data-slot="switch"][data-readonly]:not([data-checked]) {
+  [data-slot~="switch"][data-readonly]:not([data-checked]) {
     background-color: Canvas;
     box-shadow: inset 0 0 0 0.0625rem GrayText;
   }
-  [data-slot="switch"][data-readonly][data-checked] {
+  [data-slot~="switch"][data-readonly][data-checked] {
     background-color: Canvas;
     box-shadow: inset 0 0 0 0.0625rem Highlight;
   }
-  [data-slot="switch"][data-readonly][data-checked] [data-slot="switch-thumb"] {
+  [data-slot~="switch"][data-readonly][data-checked] [data-slot~="switch-thumb"] {
     background-color: Highlight;
   }
 }

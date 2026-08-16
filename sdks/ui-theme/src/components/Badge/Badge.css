@@ -29,7 +29,7 @@
  *     ink clears 4.5:1 on the light tinted base.
  */
 
-[data-slot="badge"] {
+[data-slot~="badge"] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -45,7 +45,7 @@
      transparent same-width border so the box size is identical across
      variants (no layout shift when a consumer swaps variant). */
   border: var(--zeroship-selection-hairline) solid transparent;
-  /* Long-label safety lives on the inner `[data-slot="badge-label"]` span — a flex
+  /* Long-label safety lives on the inner `[data-slot~="badge-label"]` span — a flex
      container ignores `text-overflow`, so the clamp must sit on a block
      descendant (mirrors Tag). The root keeps `min-inline-size: 0` so the
      flex item is allowed to shrink below its content size and the label
@@ -55,7 +55,7 @@
 
 /* `asChild` has no inner label span, so apply the clamp to the routed root.
    This primarily covers plain-text anchors used as linked badges. */
-[data-slot="badge"][data-as-child] {
+[data-slot~="badge"][data-as-child] {
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -64,7 +64,7 @@
    `text-overflow: ellipsis` effective (it is inert on the inline-flex
    root). Leading/trailing icons stay OUTSIDE this span so only the text
    clamps. */
-[data-slot="badge-label"] {
+[data-slot~="badge-label"] {
   display: block;
   min-inline-size: 0;
   overflow: hidden;
@@ -72,14 +72,14 @@
 }
 
 /* ─── sizes ────────────────────────────────────────────────────────────── */
-[data-slot="badge"][data-size="sm"] {
+[data-slot~="badge"][data-size="sm"] {
   padding-block: var(--zeroship-space-half);
   padding-inline: var(--zeroship-space-2);
   font-size: var(--zeroship-text-caption-1-size);
   line-height: var(--zeroship-text-caption-1-line);
 }
 
-[data-slot="badge"][data-size="md"] {
+[data-slot~="badge"][data-size="md"] {
   padding-block: var(--zeroship-space-1);
   padding-inline: var(--zeroship-space-3);
   font-size: var(--zeroship-text-footnote-size);
@@ -93,7 +93,7 @@
  */
 
 /* neutral — label/fill greys. */
-[data-slot="badge"][data-intent="neutral"] {
+[data-slot~="badge"][data-intent="neutral"] {
   --zeroship-badge-solid-bg: var(--zeroship-label-secondary);
   --zeroship-badge-solid-ink: var(--zeroship-accent-ink);
   --zeroship-badge-soft-bg: color-mix(in oklch, var(--zeroship-label) 10%, var(--zeroship-surface));
@@ -102,7 +102,7 @@
 }
 
 /* info — accent palette. */
-[data-slot="badge"][data-intent="info"] {
+[data-slot~="badge"][data-intent="info"] {
   --zeroship-badge-solid-bg: var(--zeroship-accent);
   --zeroship-badge-solid-ink: var(--zeroship-accent-ink);
   --zeroship-badge-soft-bg: color-mix(in oklch, var(--zeroship-accent) 14%, var(--zeroship-surface));
@@ -111,7 +111,7 @@
 }
 
 /* success — system-green. Solid fill deepened so near-white ink clears AA. */
-[data-slot="badge"][data-intent="success"] {
+[data-slot~="badge"][data-intent="success"] {
   /* Deepening toward --zeroship-label uses rectangular oklab so the hue stays
      green (polar oklch would rotate it toward teal). */
   --zeroship-badge-solid-bg: color-mix(in oklab, var(--zeroship-system-green) 78%, var(--zeroship-label));
@@ -122,7 +122,7 @@
 }
 
 /* warning — system-orange. Lightest intent; solid fill deepened most. */
-[data-slot="badge"][data-intent="warning"] {
+[data-slot~="badge"][data-intent="warning"] {
   /* Deepening toward --zeroship-label uses rectangular oklab so the hue stays
      orange (polar oklch would rotate it toward magenta/red). */
   --zeroship-badge-solid-bg: color-mix(in oklab, var(--zeroship-system-orange) 64%, var(--zeroship-label));
@@ -133,7 +133,7 @@
 }
 
 /* danger — system-red. */
-[data-slot="badge"][data-intent="danger"] {
+[data-slot~="badge"][data-intent="danger"] {
   --zeroship-badge-solid-bg: var(--zeroship-system-red);
   --zeroship-badge-solid-ink: var(--zeroship-accent-ink);
   --zeroship-badge-soft-bg: color-mix(in oklch, var(--zeroship-system-red) 14%, var(--zeroship-surface));
@@ -144,17 +144,17 @@
 /* ─── variants ───────────────────────────────────────────────────────────
  * Each consumes the intent locals. Backgrounds are always opaque.
  */
-[data-slot="badge"][data-variant="solid"] {
+[data-slot~="badge"][data-variant="solid"] {
   background: var(--zeroship-badge-solid-bg);
   color: var(--zeroship-badge-solid-ink);
 }
 
-[data-slot="badge"][data-variant="soft"] {
+[data-slot~="badge"][data-variant="soft"] {
   background: var(--zeroship-badge-soft-bg);
   color: var(--zeroship-badge-soft-ink);
 }
 
-[data-slot="badge"][data-variant="outline"] {
+[data-slot~="badge"][data-variant="outline"] {
   /* Opaque surface base so axe always has something to measure against;
      the intent shows through the border + ink, not via alpha. */
   background: var(--zeroship-surface);
@@ -170,17 +170,17 @@
  * the chip shape survives.
  */
 @media (forced-colors: active) {
-  [data-slot="badge"] {
+  [data-slot~="badge"] {
     forced-color-adjust: none;
     border-color: CanvasText;
   }
-  [data-slot="badge"][data-variant="solid"] {
+  [data-slot~="badge"][data-variant="solid"] {
     background: Highlight;
     color: HighlightText;
     border-color: Highlight;
   }
-  [data-slot="badge"][data-variant="soft"],
-  [data-slot="badge"][data-variant="outline"] {
+  [data-slot~="badge"][data-variant="soft"],
+  [data-slot~="badge"][data-variant="outline"] {
     background: Canvas;
     color: CanvasText;
     border-color: CanvasText;

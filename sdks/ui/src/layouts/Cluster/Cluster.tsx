@@ -50,8 +50,8 @@ export interface ClusterProps extends ComponentPropsWithoutRef<"div"> {
   asChild?: boolean;
   /**
    * Root `data-slot` value. Defaults to `"cluster"`. A composing block
-   * (e.g. `PageHeader.Actions`) overrides it so consumers can target the
-   * outer element via the block's own slot vocabulary. Mirrors Card.
+   * (e.g. `PageHeader.Actions`) adds its own token so both slot
+   * vocabularies remain available. Mirrors Card.
    */
   "data-slot"?: string;
 }
@@ -71,7 +71,7 @@ export const Cluster = forwardRef<HTMLDivElement, ClusterProps>(
       className,
       style,
       children,
-      "data-slot": dataSlot = "cluster",
+      "data-slot": dataSlot,
       ...rest
     },
     ref,
@@ -101,7 +101,7 @@ export const Cluster = forwardRef<HTMLDivElement, ClusterProps>(
       <Comp
         {...rest}
         ref={ref as Ref<HTMLDivElement>}
-        data-slot={dataSlot}
+        data-slot={["cluster", dataSlot].filter(Boolean).join(" ")}
         className={className}
         style={layoutVars}
       >

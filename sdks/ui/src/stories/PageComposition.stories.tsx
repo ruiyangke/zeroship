@@ -117,14 +117,20 @@ export const ProductRail: Story = {
       name: /build polished product pages/i,
     });
     await expect(heading.tagName).toBe("H2");
-    await expect(heading).toHaveAttribute("data-slot", "section-header-title");
+    await expect(heading).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)section-header-title(?:\s|$)/),
+    );
 
     const rail = canvas.getByTestId("composition-rail");
-    await expect(rail).toHaveAttribute("data-slot", "scroll-rail");
+    await expect(rail).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)scroll-rail(?:\s|$)/),
+    );
     await expect(rail).toHaveAttribute("data-size", "wide");
     await expect(rail.children.length).toBe(products.length);
 
-    const pictures = rail.querySelectorAll("[data-slot='responsive-picture']");
+    const pictures = rail.querySelectorAll("[data-slot~='responsive-picture']");
     await expect(pictures.length).toBe(products.length);
     await expect(pictures[0]).toHaveAttribute("data-ratio", "product");
     await expect(pictures[0]).toHaveAttribute("data-fit", "cover");
@@ -165,7 +171,7 @@ export const ResponsiveMedia: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const picture = canvasElement.querySelector(
-      "[data-slot='responsive-picture']",
+      "[data-slot~='responsive-picture']",
     );
     await expect(picture).not.toBeNull();
     if (picture == null) throw new Error("responsive picture not found");

@@ -64,7 +64,7 @@ test("the rail holds its place and its groups do not overlap", async ({ page, ba
   // The page itself does not scroll; the shell's main does. Scrolling the
   // window here would move nothing and the test would pass without testing.
   const scrolled = await page.evaluate(() => {
-    const main = document.querySelector("main[data-slot=\"app-shell-main\"]") as HTMLElement | null;
+    const main = document.querySelector("main[data-slot~=\"app-shell-main\"]") as HTMLElement | null;
     if (!main || main.scrollHeight <= main.clientHeight + 40) return false;
     main.scrollTop = main.scrollHeight;
     return true;

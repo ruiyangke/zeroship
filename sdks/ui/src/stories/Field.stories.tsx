@@ -73,7 +73,10 @@ export const RequiredFallbackAndControl: Story = {
     const alias = canvas.getByRole("textbox", { name: /team alias/i });
 
     await expect(email).toHaveAttribute("aria-required", "true");
-    await expect(optional).toHaveClass("zs-field__required--fallback");
+    await expect(optional).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)field-required-fallback(?:\s|$)/),
+    );
 
     await userEvent.type(alias, "console");
     await expect(alias).toHaveValue("console");
@@ -224,13 +227,19 @@ export const CallbackClassParts: Story = {
     const canvas = within(canvasElement);
     const email = canvas.getByRole("textbox", { name: /support email/i });
 
-    await expect(email).toHaveClass("zs-field__control");
+    await expect(email).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)field-control(?:\s|$)/),
+    );
     await expect(email).toHaveClass("field-control-callback");
     await userEvent.type(email, "not-email");
     await userEvent.tab();
 
     const alert = await canvas.findByRole("alert");
-    await expect(alert).toHaveClass("zs-field__error");
+    await expect(alert).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)field-error(?:\s|$)/),
+    );
     await expect(alert).toHaveClass("field-error-callback");
   },
 };

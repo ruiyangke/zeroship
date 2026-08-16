@@ -526,27 +526,31 @@ export const FullShell: Story = {
     // a harness artifact; we scope to the shell's `data-slot` to assert
     // the SHELL renders a single main landmark.)
     const shellMains = canvasElement.querySelectorAll(
-      "main.zs-app-shell__main",
+      "main[data-slot~=app-shell-main]",
     );
     await expect(shellMains.length).toBe(1);
     const main = shellMains[0] as HTMLElement;
     // The baked-in skip link targets the shell Main's id.
     const skip = canvasElement.querySelector<HTMLAnchorElement>(
-      "a.zs-skip-link",
+      "a[data-slot~=skip-link]",
     );
     await expect(skip).not.toBeNull();
     await expect(main.id).toBeTruthy();
     await expect(skip!.getAttribute("href")).toBe(`#${main.id}`);
-    // Composed parts own their semantic data-slot vocabulary (the
-    // primitives honor a consumer data-slot; pre-fix Main read
-    // "split-main"). Regression guard for the data-slot-override fix.
-    await expect(main.getAttribute("data-slot")).toBe("app-shell-main");
-    await expect(
-      canvasElement.querySelector('[data-slot="app-shell-body"]'),
-    ).not.toBeNull();
-    await expect(
-      canvasElement.querySelector('[data-slot="app-shell-sidebar"]'),
-    ).not.toBeNull();
+    // Composed parts retain both slot vocabularies so primitive layout
+    // styling and AppShell-specific styling apply to the same elements.
+    await expect(main.getAttribute("data-slot")).toMatch(/(?:^|\s)app-shell-main(?:\s|$)/);
+    await expect(main.getAttribute("data-slot")).toMatch(/(?:^|\s)split-main(?:\s|$)/);
+    const body = canvasElement.querySelector('[data-slot~="app-shell-body"]');
+    await expect(body).not.toBeNull();
+    await expect(body?.getAttribute("data-slot")).toMatch(/(?:^|\s)split(?:\s|$)/);
+    const sidebar = canvasElement.querySelector(
+      '[data-slot~="app-shell-sidebar"]',
+    );
+    await expect(sidebar).not.toBeNull();
+    await expect(sidebar?.getAttribute("data-slot")).toMatch(
+      /(?:^|\s)split-side(?:\s|$)/,
+    );
     // Sidebar nav landmark is present.
     await expect(
       canvas.getByRole("navigation", { name: /primary/i }),
@@ -699,7 +703,7 @@ export const ToggleRoundTrip: Story = {
     const toggle = canvas.getByRole("button", { name: /toggle sidebar/i });
     // Open initially: nav landmark present, exactly one shell <main>.
     await expect(
-      canvasElement.querySelectorAll("main.zs-app-shell__main").length,
+      canvasElement.querySelectorAll("main[data-slot~=app-shell-main]").length,
     ).toBe(1);
     await expect(
       canvas.getByRole("navigation", { name: /primary/i }),
@@ -826,10 +830,10 @@ export const ScrollFrame: Story = {
   ),
   play: async ({ canvasElement }) => {
     const main = canvasElement.querySelector<HTMLElement>(
-      "main.zs-app-shell__main",
+      "main[data-slot~=app-shell-main]",
     );
     const header = canvasElement.querySelector<HTMLElement>(
-      ".zs-app-shell__header",
+      "[data-slot~=app-shell-header]",
     );
     await expect(main).not.toBeNull();
     await expect(header).not.toBeNull();

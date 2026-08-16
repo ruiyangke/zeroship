@@ -556,12 +556,12 @@ export const PlacementSide: Story = {
     // Each side popup carries the wrapper class — wait on the generic
     // class hook rather than text content since multiple triggers share
     // the "side = X" pattern.
-    await hoverToOpen(trigger, ".zs-preview-card-popup");
+    await hoverToOpen(trigger, "[data-slot~=preview-card-popup]");
     await waitFor(
       () =>
         expect(
           canvasElement.ownerDocument.body.querySelector(
-            ".zs-preview-card-popup",
+            "[data-slot~=preview-card-popup]",
           ),
         ).not.toBeNull(),
       { timeout: 3000 },

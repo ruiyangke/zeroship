@@ -5,11 +5,11 @@
  * Card's — StatCard adds NO surface paint of its own. These rules only
  * style the three interior rows StatCard injects:
  *
- *   [data-slot="stat-card-head"]      label row (label + optional decorative icon)
- *     ├─ [data-slot="stat-card-label"]    metric name — secondary label, small
- *     └─ [data-slot="stat-card-icon"]     decorative glyph, aria-hidden
- *   [data-slot="stat-card-value"]     the metric value — large title scale
- *   [data-slot="stat-card-delta"]     the change row — glyph + value, tinted by
+ *   [data-slot~="stat-card-head"]      label row (label + optional decorative icon)
+ *     ├─ [data-slot~="stat-card-label"]    metric name — secondary label, small
+ *     └─ [data-slot~="stat-card-icon"]     decorative glyph, aria-hidden
+ *   [data-slot~="stat-card-value"]     the metric value — large title scale
+ *   [data-slot~="stat-card-delta"]     the change row — glyph + value, tinted by
  *                            [data-direction] (up/down/flat)
  *
  * Card's flex-column already governs the gap between these rows, so we
@@ -23,28 +23,28 @@
  * Motion: none.
  */
 
-[data-slot="stat-card"] {
+[data-slot~="stat-card"] {
   /* Tighten the inter-row gap below Card's content rhythm so label →
      value → delta read as one coherent metric unit rather than three
      loosely-spaced blocks. */
   gap: var(--zeroship-space-2);
 }
 
-[data-slot="stat-card-head"] {
+[data-slot~="stat-card-head"] {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: var(--zeroship-space-2);
 }
 
-[data-slot="stat-card-label"] {
+[data-slot~="stat-card-label"] {
   color: var(--zeroship-label-secondary);
   font-size: var(--zeroship-text-subheadline-size);
   line-height: var(--zeroship-text-subheadline-line);
   font-weight: 500;
 }
 
-[data-slot="stat-card-icon"] {
+[data-slot~="stat-card-icon"] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -56,12 +56,12 @@
   line-height: 1;
 }
 
-[data-slot="stat-card-icon"] svg {
+[data-slot~="stat-card-icon"] svg {
   inline-size: 1em;
   block-size: 1em;
 }
 
-[data-slot="stat-card-value"] {
+[data-slot~="stat-card-value"] {
   color: var(--zeroship-label);
   /* The hero number — title-1 scale so it dominates the tile. */
   font-size: var(--zeroship-text-title-1-size);
@@ -77,7 +77,7 @@
   overflow-wrap: break-word;
 }
 
-[data-slot="stat-card-delta"] {
+[data-slot~="stat-card-delta"] {
   display: inline-flex;
   align-items: baseline;
   gap: var(--zeroship-space-1);
@@ -89,7 +89,7 @@
   color: var(--zeroship-label-secondary);
 }
 
-[data-slot="stat-card-delta-glyph"] {
+[data-slot~="stat-card-delta-glyph"] {
   /* The glyph rides the text size; it is the SHAPE signal that pairs
      with the tint so direction never depends on color alone. */
   font-size: 0.85em;
@@ -106,15 +106,15 @@
  * — the same treatment Badge uses for its green/orange ink. system-red is
  * already deep enough (the crystal red is L≈0.52); using the -active step
  * gives a comfortable margin. */
-[data-slot="stat-card-delta"][data-direction="up"] {
+[data-slot~="stat-card-delta"][data-direction="up"] {
   color: color-mix(in oklab, var(--zeroship-system-green) 60%, var(--zeroship-label));
 }
 
-[data-slot="stat-card-delta"][data-direction="down"] {
+[data-slot~="stat-card-delta"][data-direction="down"] {
   color: var(--zeroship-system-red-active);
 }
 
-[data-slot="stat-card-delta"][data-direction="flat"] {
+[data-slot~="stat-card-delta"][data-direction="flat"] {
   color: var(--zeroship-label-secondary);
 }
 
@@ -123,11 +123,11 @@
  * CanvasText so it stays legible. The glyph shape + the (now-visible-to-
  * AT) direction word carry the meaning, not the color. */
 @media (forced-colors: active) {
-  [data-slot="stat-card-delta"] {
+  [data-slot~="stat-card-delta"] {
     color: CanvasText;
     forced-color-adjust: none;
   }
-  [data-slot="stat-card-icon"] {
+  [data-slot~="stat-card-icon"] {
     color: CanvasText;
   }
 }

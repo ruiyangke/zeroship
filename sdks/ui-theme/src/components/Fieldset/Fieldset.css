@@ -3,11 +3,11 @@
  * visible label (Legend) and a shared `disabled` cascade.
  *
  * Anatomy:
- *   [data-slot="fieldset"]             the root <fieldset> element (Base UI
+ *   [data-slot~="fieldset"]             the root <fieldset> element (Base UI
  *                             auto-wires aria-labelledby to the legend's
  *                             id; the legend itself can sit anywhere
  *                             inside the fieldset).
- *     └─ [data-slot="fieldset-legend"]  the visible group label (Base UI
+ *     └─ [data-slot~="fieldset-legend"]  the visible group label (Base UI
  *                              renders a <div>, not a <legend> — see
  *                              Fieldset.tsx header for the rationale).
  *
@@ -34,7 +34,7 @@
  * via the RTL story.
  */
 
-[data-slot="fieldset"] {
+[data-slot~="fieldset"] {
   /* Reset the UA stylesheet's default fieldset chrome. The native
      border + padding combo doesn't match our token system, and the
      `min-inline-size: min-content` quirk blocks Form-level shrink. */
@@ -52,12 +52,12 @@
 }
 
 /* ─── sizes ───────────────────────────────────────────────────────── */
-[data-slot="fieldset"][data-size="sm"] {
+[data-slot~="fieldset"][data-size="sm"] {
   padding-block: var(--zeroship-space-3);
   padding-inline: var(--zeroship-space-3);
   gap: var(--zeroship-space-3);
 }
-[data-slot="fieldset"][data-size="lg"] {
+[data-slot~="fieldset"][data-size="lg"] {
   padding-block: var(--zeroship-space-5);
   padding-inline: var(--zeroship-space-5);
   gap: var(--zeroship-space-5);
@@ -75,7 +75,7 @@
  * story places the legend at the bottom of the fieldset via `order:
  * 999` on a wrapping class; the underlying contract (aria-labelledby
  * tracks the legend by id, regardless of DOM order) is unaffected. */
-[data-slot="fieldset-legend"] {
+[data-slot~="fieldset-legend"] {
   margin: 0;
   padding: 0;
   font-size: var(--zeroship-text-subheadline-size);
@@ -104,7 +104,7 @@
  * disabled cascade already greys every interactive descendant; the
  * legend keeping label-secondary reads as "section is disabled"
  * without the AA shortfall. */
-/* Descendant matcher — not `> [data-slot="fieldset-legend"]`. The Fieldset
+/* Descendant matcher — not `> [data-slot~="fieldset-legend"]`. The Fieldset
  * contract (Fieldset.tsx file-header) says the Legend can sit
  * anywhere inside the fieldset, including wrapped in a layout div
  * (e.g. for CustomLegendPosition / Form-card layouts). A
@@ -112,8 +112,8 @@
  * aria-wiring still works (Base UI binds by id, not DOM nesting),
  * but the disabled greying wouldn't fire. Mirror in forced-colors
  * below. */
-[data-slot="fieldset"][data-disabled] [data-slot="fieldset-legend"],
-[data-slot="fieldset"]:disabled [data-slot="fieldset-legend"] {
+[data-slot~="fieldset"][data-disabled] [data-slot~="fieldset-legend"],
+[data-slot~="fieldset"]:disabled [data-slot~="fieldset-legend"] {
   color: var(--zeroship-label-secondary);
 }
 
@@ -127,14 +127,14 @@
  * GrayText is the system color for inactive content; CanvasText for
  * default text. */
 @media (forced-colors: active) {
-  [data-slot="fieldset"] {
+  [data-slot~="fieldset"] {
     color: CanvasText;
   }
-  [data-slot="fieldset-legend"] {
+  [data-slot~="fieldset-legend"] {
     color: CanvasText;
   }
-  [data-slot="fieldset"][data-disabled] [data-slot="fieldset-legend"],
-  [data-slot="fieldset"]:disabled [data-slot="fieldset-legend"] {
+  [data-slot~="fieldset"][data-disabled] [data-slot~="fieldset-legend"],
+  [data-slot~="fieldset"]:disabled [data-slot~="fieldset-legend"] {
     color: GrayText;
   }
 }
@@ -145,7 +145,7 @@
  * reduced-motion contract is visible in the stylesheet for future
  * audits. */
 @media (prefers-reduced-motion: reduce) {
-  [data-slot="fieldset"] {
+  [data-slot~="fieldset"] {
     /* explicit no-op — descendants handle their own motion via
        --zeroship-motion-* tokens which are already reduced. */
   }

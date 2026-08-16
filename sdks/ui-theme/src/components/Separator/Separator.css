@@ -2,7 +2,7 @@
  * Separator — visual divider.
  *
  * Anatomy:
- *   [data-slot="separator"]                    — the line element
+ *   [data-slot~="separator"]                    — the line element
  *
  * Modifier classes:
  *   orientation: --horizontal | --vertical
@@ -21,7 +21,7 @@
  * Motion: none. Separator carries no transitions.
  */
 
-[data-slot="separator"] {
+[data-slot~="separator"] {
   /* Color is theme-token only — no `color` prop on the component. */
   --zeroship-separator-color: var(--zeroship-separator);
   /* Hairline weight resolves to one device-pixel via the foundation token.
@@ -36,11 +36,11 @@
 
 /* ─── Variants ──────────────────────────────────────────────────────── */
 
-[data-slot="separator"][data-variant="hairline"] {
+[data-slot~="separator"][data-variant="hairline"] {
   --zeroship-separator-weight: var(--zeroship-selection-hairline);
 }
 
-[data-slot="separator"][data-variant="thick"] {
+[data-slot~="separator"][data-variant="thick"] {
   --zeroship-separator-weight: var(--zeroship-space-1);
 }
 
@@ -50,7 +50,7 @@
  * line sits at the bottom of the element box (lets a consumer give the
  * Separator a tiny block-size for hit-test-friendly placement, while
  * the visible line stays a single device pixel). */
-[data-slot="separator"][data-orientation="horizontal"] {
+[data-slot~="separator"][data-orientation="horizontal"] {
   inline-size: 100%;
   block-size: 0;
   border-block-end-width: var(--zeroship-separator-weight);
@@ -59,7 +59,7 @@
 /* Vertical: full block-size; border on the inline-end edge so the line
  * sits at the trailing edge (RTL flips automatically via logical
  * properties — no separate rule needed). */
-[data-slot="separator"][data-orientation="vertical"] {
+[data-slot~="separator"][data-orientation="vertical"] {
   inline-size: 0;
   /* Sensible visible default: --zeroship-space-5 block-size lets a vertical
      Separator render in a row whose parent doesn't stretch (e.g. a
@@ -81,14 +81,14 @@
  * reads as the heavier divider; it just paints in CanvasText instead
  * of the token color. */
 @media (forced-colors: active) {
-  [data-slot="separator"] {
+  [data-slot~="separator"] {
     border-color: CanvasText;
     forced-color-adjust: none;
   }
-  [data-slot="separator"][data-orientation="horizontal"] {
+  [data-slot~="separator"][data-orientation="horizontal"] {
     border-block-end-width: var(--zeroship-separator-weight);
   }
-  [data-slot="separator"][data-orientation="vertical"] {
+  [data-slot~="separator"][data-orientation="vertical"] {
     border-inline-end-width: var(--zeroship-separator-weight);
   }
 }
@@ -99,7 +99,7 @@
  * with the rest of the surface so a future maintainer adding (e.g.) a
  * draw-in animation finds the hook pre-wired. */
 @media (prefers-reduced-motion: reduce) {
-  [data-slot="separator"] {
+  [data-slot~="separator"] {
     transition: none;
     animation: none;
   }

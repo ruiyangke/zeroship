@@ -2,14 +2,14 @@
  * Breadcrumbs — navigational trail.
  *
  * Anatomy:
- *   [data-slot="breadcrumbs"]               — root <nav aria-label="Breadcrumb">
- *     └─ [data-slot="breadcrumbs-list"]    — the <ol> (inline wrapping row)
- *        ├─ [data-slot="breadcrumbs-item"]        — <li> crumb wrapper
- *        │   ├─ [data-slot="breadcrumbs-link"]    — <a> (or asChild) crumb link
- *        │   ├─ [data-slot="breadcrumbs-page"]    — <span aria-current="page">
- *        │   ├─ [data-slot="breadcrumbs-text"]    — plain (non-link, non-current)
- *        │   └─ [data-slot="breadcrumbs-ellipsis"] — collapse <button>
- *        └─ [data-slot="breadcrumbs-separator"]   — <li aria-hidden> glyph
+ *   [data-slot~="breadcrumbs"]               — root <nav aria-label="Breadcrumb">
+ *     └─ [data-slot~="breadcrumbs-list"]    — the <ol> (inline wrapping row)
+ *        ├─ [data-slot~="breadcrumbs-item"]        — <li> crumb wrapper
+ *        │   ├─ [data-slot~="breadcrumbs-link"]    — <a> (or asChild) crumb link
+ *        │   ├─ [data-slot~="breadcrumbs-page"]    — <span aria-current="page">
+ *        │   ├─ [data-slot~="breadcrumbs-text"]    — plain (non-link, non-current)
+ *        │   └─ [data-slot~="breadcrumbs-ellipsis"] — collapse <button>
+ *        └─ [data-slot~="breadcrumbs-separator"]   — <li aria-hidden> glyph
  *
  * Colors (live crystal set):
  *   link text          --zeroship-label
@@ -24,11 +24,11 @@
  * re-render (keeps the reduced-motion story trivial).
  */
 
-[data-slot="breadcrumbs"] {
+[data-slot~="breadcrumbs"] {
   font-family: var(--zeroship-font-system);
 }
 
-[data-slot="breadcrumbs-list"] {
+[data-slot~="breadcrumbs-list"] {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -43,7 +43,7 @@
 
 /* Each crumb is an inline-flex box so its link/page/text centers with the
    adjacent separator glyph. */
-[data-slot="breadcrumbs-item"] {
+[data-slot~="breadcrumbs-item"] {
   display: inline-flex;
   align-items: center;
   min-inline-size: 0;
@@ -54,7 +54,7 @@
  * accent. The underline is reserved for hover/focus so the resting trail
  * stays quiet.
  */
-[data-slot="breadcrumbs-link"] {
+[data-slot~="breadcrumbs-link"] {
   display: inline-block;
   max-inline-size: 100%;
   overflow: hidden;
@@ -66,12 +66,12 @@
   transition: color var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 @media (hover: hover) {
-  [data-slot="breadcrumbs-link"]:hover {
+  [data-slot~="breadcrumbs-link"]:hover {
     color: var(--zeroship-accent);
     text-decoration: underline;
   }
 }
-[data-slot="breadcrumbs-link"]:focus-visible {
+[data-slot~="breadcrumbs-link"]:focus-visible {
   outline: var(--zeroship-focus-ring-width) solid var(--zeroship-focus-ring-color);
   outline-offset: var(--zeroship-focus-ring-offset);
   color: var(--zeroship-accent);
@@ -81,7 +81,7 @@
  * Not a link; recedes to the secondary label so the trail reads "you are
  * here" without competing with the upstream links.
  */
-[data-slot="breadcrumbs-page"] {
+[data-slot~="breadcrumbs-page"] {
   display: inline-block;
   max-inline-size: 100%;
   overflow: hidden;
@@ -92,7 +92,7 @@
 }
 
 /* ─── plain (non-link, non-current) text crumb ───────────────────────────── */
-[data-slot="breadcrumbs-text"] {
+[data-slot~="breadcrumbs-text"] {
   display: inline-block;
   max-inline-size: 100%;
   overflow: hidden;
@@ -104,7 +104,7 @@
 /* ─── separator ──────────────────────────────────────────────────────────
  * Decorative glyph between crumbs; quietest token so it never competes.
  */
-[data-slot="breadcrumbs-separator"] {
+[data-slot~="breadcrumbs-separator"] {
   display: inline-flex;
   align-items: center;
   /* Never shrink — a custom Icon separator must keep its intrinsic size
@@ -119,10 +119,10 @@
  * pill-clipped, hover/focus wash so the affordance reads. The glyph is
  * aria-hidden; the accessible name comes from aria-label.
  */
-[data-slot="breadcrumbs-item"][data-ellipsis] {
+[data-slot~="breadcrumbs-item"][data-ellipsis] {
   align-items: center;
 }
-[data-slot="breadcrumbs-ellipsis"] {
+[data-slot~="breadcrumbs-ellipsis"] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -139,20 +139,20 @@
     color var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 @media (hover: hover) {
-  [data-slot="breadcrumbs-ellipsis"]:hover {
+  [data-slot~="breadcrumbs-ellipsis"]:hover {
     color: var(--zeroship-label);
     background: color-mix(in oklch, var(--zeroship-label) 10%, transparent);
   }
 }
-[data-slot="breadcrumbs-ellipsis"]:active {
+[data-slot~="breadcrumbs-ellipsis"]:active {
   background: color-mix(in oklch, var(--zeroship-label) 16%, transparent);
 }
-[data-slot="breadcrumbs-ellipsis"]:focus-visible {
+[data-slot~="breadcrumbs-ellipsis"]:focus-visible {
   outline: var(--zeroship-focus-ring-width) solid var(--zeroship-focus-ring-color);
   outline-offset: var(--zeroship-focus-ring-offset);
   color: var(--zeroship-label);
 }
-[data-slot="breadcrumbs-ellipsis-glyph"] {
+[data-slot~="breadcrumbs-ellipsis-glyph"] {
   line-height: 1;
 }
 
@@ -161,30 +161,30 @@
  * system colors so the trail stays legible in a forced-colors pass.
  */
 @media (forced-colors: active) {
-  [data-slot="breadcrumbs-link"] {
+  [data-slot~="breadcrumbs-link"] {
     color: LinkText;
   }
-  [data-slot="breadcrumbs-link"]:hover,
-  [data-slot="breadcrumbs-link"]:focus-visible {
+  [data-slot~="breadcrumbs-link"]:hover,
+  [data-slot~="breadcrumbs-link"]:focus-visible {
     color: LinkText;
   }
-  [data-slot="breadcrumbs-page"],
-  [data-slot="breadcrumbs-text"] {
+  [data-slot~="breadcrumbs-page"],
+  [data-slot~="breadcrumbs-text"] {
     color: CanvasText;
   }
-  [data-slot="breadcrumbs-separator"] {
+  [data-slot~="breadcrumbs-separator"] {
     color: CanvasText;
   }
-  [data-slot="breadcrumbs-ellipsis"] {
+  [data-slot~="breadcrumbs-ellipsis"] {
     color: ButtonText;
   }
-  [data-slot="breadcrumbs-ellipsis"]:hover,
-  [data-slot="breadcrumbs-ellipsis"]:active {
+  [data-slot~="breadcrumbs-ellipsis"]:hover,
+  [data-slot~="breadcrumbs-ellipsis"]:active {
     background: transparent;
     color: ButtonText;
   }
-  [data-slot="breadcrumbs-link"]:focus-visible,
-  [data-slot="breadcrumbs-ellipsis"]:focus-visible {
+  [data-slot~="breadcrumbs-link"]:focus-visible,
+  [data-slot~="breadcrumbs-ellipsis"]:focus-visible {
     outline-color: CanvasText;
   }
 }

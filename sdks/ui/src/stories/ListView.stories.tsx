@@ -125,9 +125,9 @@ export const Interactive: Story = {
     await expect(firstLink).toHaveTextContent("Ada Lovelace");
 
     // The trailing control must be OUTSIDE the link (not a descendant).
-    const li = firstLink.closest('[data-slot="list-view-item"]');
+    const li = firstLink.closest('[data-slot~="list-view-item"]');
     await expect(li).not.toBeNull();
-    const trailing = li!.querySelector('[data-slot="list-view-trailing"]');
+    const trailing = li!.querySelector('[data-slot~="list-view-trailing"]');
     await expect(trailing).not.toBeNull();
     await expect(firstLink.contains(trailing)).toBe(false);
     // And it is a sibling under the same <li>, not under the link.
@@ -206,8 +206,8 @@ export const WithActions: Story = {
     const invite = within(list).getAllByRole("button", { name: "Invite" })[0];
     // The action button must NOT be inside the row's main button.
     const rowButton = invite
-      .closest('[data-slot="list-view-item"]')!
-      .querySelector('[data-slot="list-view-main"]');
+      .closest('[data-slot~="list-view-item"]')!
+      .querySelector('[data-slot~="list-view-main"]');
     await expect(rowButton!.contains(invite)).toBe(false);
 
     await userEvent.click(invite);
@@ -277,10 +277,10 @@ export const Compound: Story = {
     const items = within(list).getAllByRole("listitem");
     await expect(items).toHaveLength(2);
     await expect(
-      list.querySelector('[data-slot="list-view-title"]'),
+      list.querySelector('[data-slot~="list-view-title"]'),
     ).toHaveTextContent("Ada Lovelace");
     await expect(
-      list.querySelector('[data-slot="list-view-trailing"]'),
+      list.querySelector('[data-slot~="list-view-trailing"]'),
     ).not.toBeNull();
   },
 };

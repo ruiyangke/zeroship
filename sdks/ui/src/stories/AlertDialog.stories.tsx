@@ -547,7 +547,9 @@ function CancelAsChildStory() {
               <AlertDialog.Cancel asChild>
                 <button
                   type="button"
-                  className="zs-button zs-button--gray zs-button--medium"
+                  data-slot="button"
+                  data-variant="gray"
+                  data-size="md"
                   data-testid="alertdialog-cancel-aschild-target"
                   onClick={() => setClicked("child-onclick-ran")}
                 >
@@ -947,7 +949,9 @@ function CancelAsChildSingleFireStory() {
               <AlertDialog.Cancel asChild>
                 <button
                   type="button"
-                  className="zs-button zs-button--gray zs-button--medium"
+                  data-slot="button"
+                  data-variant="gray"
+                  data-size="md"
                   data-testid="alertdialog-singlefire-target"
                   onClick={() => setCount((value) => value + 1)}
                 >
@@ -985,7 +989,7 @@ export const CancelAsChildSingleFire: Story = {
 
 /* ─── ForcedColors — wave-7 focused-review 🔴 #2 ───────────────────────── *
  *
- * Regression for the wave-7 focused-review 🔴: `.zs-alertdialog-popup`
+ * Regression for the wave-7 focused-review 🔴: `[data-slot~=alertdialog-popup]`
  * sets `box-shadow: var(--zeroship-shadow-4)` and is imported AFTER
  * Dialog.css, so it equals-specificity-wins against Dialog's
  * `@media (forced-colors: active)` mirror that paints the popup with

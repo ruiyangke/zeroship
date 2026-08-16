@@ -2,21 +2,21 @@
  * Footer — the site footer band (contentinfo landmark).
  *
  * Anatomy:
- *   [data-slot="footer"]              — the <footer> landmark; generous vertical
+ *   [data-slot~="footer"]              — the <footer> landmark; generous vertical
  *                             padding, NO heavy background (composable)
- *   [data-slot="footer-top"]         — the top row: brand block beside link columns
- *   [data-slot="footer-brand-block"] — the brand + description stack
- *   [data-slot="footer-brand"]       — the brand / wordmark slot
- *   [data-slot="footer-description"]  — short blurb under the brand (muted)
- *   [data-slot="footer-columns"]      — the link-group Grid
- *   [data-slot="footer-column"]       — each link group
- *   [data-slot="footer-column-title"] — the column <h3>
- *   [data-slot="footer-links"]        — the column's <ul> of links
- *   [data-slot="footer-link"]         — a single <a> (house link treatment)
- *   [data-slot="footer-footnotes-separator"], [data-slot="footer-separator"]    — the composed Separator above the bottom bar
- *   [data-slot="footer-bottom"]       — the bottom bar (copyright + actions)
- *   [data-slot="footer-copyright"]    — bottom-bar inline-start
- *   [data-slot="footer-actions"]      — bottom-bar inline-end (social / secondary slot)
+ *   [data-slot~="footer-top"]         — the top row: brand block beside link columns
+ *   [data-slot~="footer-brand-block"] — the brand + description stack
+ *   [data-slot~="footer-brand"]       — the brand / wordmark slot
+ *   [data-slot~="footer-description"]  — short blurb under the brand (muted)
+ *   [data-slot~="footer-columns"]      — the link-group Grid
+ *   [data-slot~="footer-column"]       — each link group
+ *   [data-slot~="footer-column-title"] — the column <h3>
+ *   [data-slot~="footer-links"]        — the column's <ul> of links
+ *   [data-slot~="footer-link"]         — a single <a> (house link treatment)
+ *   [data-slot~="footer-footnotes-separator"], [data-slot~="footer-separator"]    — the composed Separator above the bottom bar
+ *   [data-slot~="footer-bottom"]       — the bottom bar (copyright + actions)
+ *   [data-slot~="footer-copyright"]    — bottom-bar inline-start
+ *   [data-slot~="footer-actions"]      — bottom-bar inline-end (social / secondary slot)
  *
  * Layout discipline:
  *   - The section sets only its vertical rhythm; the composed Container owns
@@ -37,7 +37,7 @@
  * the hover/focus ink change arrives instantly.
  */
 
-[data-slot="footer"] {
+[data-slot~="footer"] {
   /* Local single-knob custom property (the house idiom): the inline size the
      brand block holds before the link columns take the remaining space. */
   --zeroship-footer-brand-size: 18rem;
@@ -53,7 +53,7 @@
 }
 
 /* ─── Footnotes — fine print above the directory ─────────────────────────── */
-[data-slot="footer-footnotes"] {
+[data-slot~="footer-footnotes"] {
   display: flex;
   flex-direction: column;
   gap: var(--zeroship-space-2);
@@ -62,28 +62,28 @@
   line-height: var(--zeroship-text-footnote-line);
 }
 
-[data-slot="footer-footnotes"] :where(p, ol, ul) {
+[data-slot~="footer-footnotes"] :where(p, ol, ul) {
   margin-block: 0;
 }
 
-[data-slot="footer-footnotes"] :where(ol, ul) {
+[data-slot~="footer-footnotes"] :where(ol, ul) {
   padding-inline-start: 1.25em;
 }
 
-[data-slot="footer-footnotes"] :where(a) {
+[data-slot~="footer-footnotes"] :where(a) {
   color: inherit;
   text-decoration: underline;
   text-underline-offset: 0.125em;
 }
 
-[data-slot="footer-footnotes"] :where(a:focus-visible) {
+[data-slot~="footer-footnotes"] :where(a:focus-visible) {
   outline: var(--zeroship-focus-ring-width) solid var(--zeroship-focus-ring-color);
   outline-offset: var(--zeroship-focus-ring-offset);
   border-radius: var(--zeroship-radius-2);
 }
 
 /* ─── Top row — brand block beside the link columns ──────────────────────── */
-[data-slot="footer-top"] {
+[data-slot~="footer-top"] {
   display: flex;
   flex-wrap: wrap;
   gap: var(--zeroship-space-9);
@@ -102,7 +102,7 @@
 
 /* The brand block holds a comfortable inline size; the columns block takes the
    remaining space. Both wrap to a full row below the breakpoint. */
-[data-slot="footer-brand-block"] {
+[data-slot~="footer-brand-block"] {
   flex: 1 1 var(--zeroship-footer-brand-size);
   min-inline-size: 0;
   display: flex;
@@ -110,7 +110,7 @@
   gap: var(--zeroship-space-3);
 }
 
-[data-slot="footer-columns"] {
+[data-slot~="footer-columns"] {
   /* The link-group Grid takes the remaining inline space beside the brand. */
   flex: 2 1 var(--zeroship-footer-brand-size);
   min-inline-size: 0;
@@ -119,13 +119,13 @@
 /* Below --zeroship-bp-md the top row stacks the brand over the columns (each takes
    the full row). The Grid already collapses to one column on its own. */
 @media (max-width: 47.999rem) {
-  [data-slot="footer-brand-block"],
-  [data-slot="footer-columns"] {
+  [data-slot~="footer-brand-block"],
+  [data-slot~="footer-columns"] {
     flex-basis: 100%;
   }
 }
 
-[data-slot="footer-brand"] {
+[data-slot~="footer-brand"] {
   /* Stronger brand anchoring (R2): the wordmark reads at the title-2 scale,
      bolder and weightier than the former headline step so the footer has a
      clear brand anchor at its top-start rather than a quiet label. */
@@ -136,7 +136,7 @@
   color: var(--zeroship-label);
 }
 
-[data-slot="footer-description"] {
+[data-slot~="footer-description"] {
   margin-block: 0;
   font-size: var(--zeroship-text-subheadline-size);
   line-height: var(--zeroship-text-subheadline-line);
@@ -145,13 +145,13 @@
 }
 
 /* ─── Column — <h3> title + <ul> of links ────────────────────────────────── */
-[data-slot="footer-column"] {
+[data-slot~="footer-column"] {
   display: flex;
   flex-direction: column;
   gap: var(--zeroship-space-3);
 }
 
-[data-slot="footer-column-title"] {
+[data-slot~="footer-column-title"] {
   margin-block: 0;
   font-size: var(--zeroship-text-footnote-size);
   line-height: var(--zeroship-text-footnote-line);
@@ -161,7 +161,7 @@
   letter-spacing: var(--zeroship-text-footnote-tracking);
 }
 
-[data-slot="footer-links"] {
+[data-slot~="footer-links"] {
   /* Reset the list chrome — the rows are styled, not bulleted. */
   list-style: none;
   margin-block: 0;
@@ -171,19 +171,19 @@
   gap: var(--zeroship-space-2);
 }
 
-[data-slot="footer-link-item"] {
+[data-slot~="footer-link-item"] {
   margin: 0;
 }
 
 /* House link treatment: muted by default, label ink on hover/focus, with a
    token-driven focus ring so keyboard users get a visible target.
-   Applied via the DESCENDANT selector `[data-slot="footer-links"] a` so BOTH authoring
+   Applied via the DESCENDANT selector `[data-slot~="footer-links"] a` so BOTH authoring
    modes render identically: the ergonomic `links`-array path (which stamps the
-   `[data-slot="footer-link"]` class on each `<a>`) AND the compound `<Footer.Column>`
+   `[data-slot~="footer-link"]` class on each `<a>`) AND the compound `<Footer.Column>`
    raw-children path (where the consumer supplies bare `<a>` anchors with no
    house class). Without this, raw children fell back to browser-default blue
    underlined anchors — inconsistent with the gray array links. */
-[data-slot="footer-links"] a {
+[data-slot~="footer-links"] a {
   color: var(--zeroship-label-secondary);
   text-decoration: none;
   font-size: var(--zeroship-text-subheadline-size);
@@ -192,23 +192,23 @@
   transition: color var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 
-[data-slot="footer-links"] a:hover {
+[data-slot~="footer-links"] a:hover {
   color: var(--zeroship-label);
   text-decoration: underline;
 }
 
-[data-slot="footer-links"] a:focus-visible {
+[data-slot~="footer-links"] a:focus-visible {
   outline: var(--zeroship-focus-ring-width) solid var(--zeroship-focus-ring-color);
   outline-offset: var(--zeroship-focus-ring-offset);
   color: var(--zeroship-label);
 }
 
 /* ─── Separator + bottom bar ─────────────────────────────────────────────── */
-:is([data-slot="footer-footnotes-separator"], [data-slot="footer-separator"]) {
+:is([data-slot~="footer-footnotes-separator"], [data-slot~="footer-separator"]) {
   margin-block: var(--zeroship-space-7);
 }
 
-[data-slot="footer-bottom"] {
+[data-slot~="footer-bottom"] {
   display: flex;
   flex-wrap: wrap;
   gap: var(--zeroship-space-4);
@@ -216,8 +216,8 @@
   justify-content: space-between;
 }
 
-[data-slot="footer-bottom-start"],
-[data-slot="footer-bottom-end"] {
+[data-slot~="footer-bottom-start"],
+[data-slot~="footer-bottom-end"] {
   min-inline-size: 0;
   display: flex;
   flex-wrap: wrap;
@@ -225,17 +225,17 @@
   gap: var(--zeroship-space-3) var(--zeroship-space-4);
 }
 
-[data-slot="footer-bottom-end"] {
+[data-slot~="footer-bottom-end"] {
   justify-content: flex-end;
 }
 
-[data-slot="footer-copyright"] {
+[data-slot~="footer-copyright"] {
   font-size: var(--zeroship-text-footnote-size);
   line-height: var(--zeroship-text-footnote-line);
   color: var(--zeroship-label-secondary);
 }
 
-[data-slot="footer-legal-links"] {
+[data-slot~="footer-legal-links"] {
   list-style: none;
   margin-block: 0;
   padding-inline-start: 0;
@@ -245,12 +245,12 @@
   gap: var(--zeroship-space-2) var(--zeroship-space-4);
 }
 
-[data-slot="footer-legal-link-item"] {
+[data-slot~="footer-legal-link-item"] {
   margin: 0;
 }
 
-[data-slot="footer-legal-links"] a,
-[data-slot="footer-locale"] a {
+[data-slot~="footer-legal-links"] a,
+[data-slot~="footer-locale"] a {
   color: var(--zeroship-label-secondary);
   text-decoration: none;
   font-size: var(--zeroship-text-footnote-size);
@@ -259,26 +259,26 @@
   transition: color var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 
-[data-slot="footer-legal-links"] a:hover,
-[data-slot="footer-locale"] a:hover {
+[data-slot~="footer-legal-links"] a:hover,
+[data-slot~="footer-locale"] a:hover {
   color: var(--zeroship-label);
   text-decoration: underline;
 }
 
-[data-slot="footer-legal-links"] a:focus-visible,
-[data-slot="footer-locale"] a:focus-visible {
+[data-slot~="footer-legal-links"] a:focus-visible,
+[data-slot~="footer-locale"] a:focus-visible {
   outline: var(--zeroship-focus-ring-width) solid var(--zeroship-focus-ring-color);
   outline-offset: var(--zeroship-focus-ring-offset);
   color: var(--zeroship-label);
 }
 
-[data-slot="footer-locale"] {
+[data-slot~="footer-locale"] {
   color: var(--zeroship-label-secondary);
   font-size: var(--zeroship-text-footnote-size);
   line-height: var(--zeroship-text-footnote-line);
 }
 
-[data-slot="footer-actions"] {
+[data-slot~="footer-actions"] {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -291,34 +291,34 @@
  * colors so every text region + link resolves to CanvasText, and links keep a
  * visible link affordance. The composed Separator handles its own hairline. */
 @media (forced-colors: active) {
-  [data-slot="footer"],
-  [data-slot="footer-brand"],
-  [data-slot="footer-description"],
-  [data-slot="footer-column-title"],
-  [data-slot="footer-footnotes"],
-  [data-slot="footer-locale"],
-  [data-slot="footer-copyright"] {
+  [data-slot~="footer"],
+  [data-slot~="footer-brand"],
+  [data-slot~="footer-description"],
+  [data-slot~="footer-column-title"],
+  [data-slot~="footer-footnotes"],
+  [data-slot~="footer-locale"],
+  [data-slot~="footer-copyright"] {
     color: CanvasText;
   }
 
-  [data-slot="footer-links"] a,
-  [data-slot="footer-legal-links"] a,
-  [data-slot="footer-locale"] a {
+  [data-slot~="footer-links"] a,
+  [data-slot~="footer-legal-links"] a,
+  [data-slot~="footer-locale"] a {
     color: LinkText;
   }
 
-  [data-slot="footer-links"] a:hover,
-  [data-slot="footer-links"] a:focus-visible,
-  [data-slot="footer-legal-links"] a:hover,
-  [data-slot="footer-legal-links"] a:focus-visible,
-  [data-slot="footer-locale"] a:hover,
-  [data-slot="footer-locale"] a:focus-visible {
+  [data-slot~="footer-links"] a:hover,
+  [data-slot~="footer-links"] a:focus-visible,
+  [data-slot~="footer-legal-links"] a:hover,
+  [data-slot~="footer-legal-links"] a:focus-visible,
+  [data-slot~="footer-locale"] a:hover,
+  [data-slot~="footer-locale"] a:focus-visible {
     color: LinkText;
   }
 
-  [data-slot="footer-links"] a:focus-visible,
-  [data-slot="footer-legal-links"] a:focus-visible,
-  [data-slot="footer-locale"] a:focus-visible {
+  [data-slot~="footer-links"] a:focus-visible,
+  [data-slot~="footer-legal-links"] a:focus-visible,
+  [data-slot~="footer-locale"] a:focus-visible {
     outline-color: Highlight;
   }
 }
@@ -327,9 +327,9 @@
  * The only motion is the link color transition; flatten it so the hover/focus
  * ink change arrives instantly. */
 @media (prefers-reduced-motion: reduce) {
-  [data-slot="footer-links"] a,
-  [data-slot="footer-legal-links"] a,
-  [data-slot="footer-locale"] a {
+  [data-slot~="footer-links"] a,
+  [data-slot~="footer-legal-links"] a,
+  [data-slot~="footer-locale"] a {
     transition: none;
   }
 }

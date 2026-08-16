@@ -133,6 +133,9 @@ export interface BannerProps extends Omit<
 
   /** Banner contents — compound parts and/or arbitrary children. */
   children?: ReactNode;
+
+  /** Additional slot token appended to the root's `banner` token. */
+  "data-slot"?: string;
 }
 
 /* ─── focus restoration ──────────────────────────────────────────────── */
@@ -198,6 +201,7 @@ const BannerRoot = forwardRef<HTMLDivElement, BannerProps>(function BannerRoot(
     description,
     className,
     children,
+    "data-slot": dataSlot,
     ...rest
   },
   ref,
@@ -300,7 +304,7 @@ const BannerRoot = forwardRef<HTMLDivElement, BannerProps>(function BannerRoot(
       {...dataProps}
       ref={composedRef}
       className={className}
-      data-slot="banner"
+      data-slot={["banner", dataSlot].filter(Boolean).join(" ")}
     >
       {body}
     </div>

@@ -48,16 +48,19 @@ export const SideStart: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const root = canvas.getByTestId("split-start");
-    await expect(root).toHaveAttribute("data-slot", "split");
+    await expect(root).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)split(?:\s|$)/),
+    );
     await expect(root).toHaveAttribute("data-side", "start");
     await expect(getComputedStyle(root).flexDirection).toBe("row");
     await expect(canvas.getByTestId("split-start-side")).toHaveAttribute(
       "data-slot",
-      "split-side",
+      expect.stringMatching(/(?:^|\s)split-side(?:\s|$)/),
     );
     await expect(canvas.getByTestId("split-start-main")).toHaveAttribute(
       "data-slot",
-      "split-main",
+      expect.stringMatching(/(?:^|\s)split-main(?:\s|$)/),
     );
   },
 };
@@ -147,10 +150,16 @@ export const AsChildParts: Story = {
     const canvas = within(canvasElement);
     const side = canvas.getByTestId("split-aschild-side");
     await expect(side.tagName).toBe("NAV");
-    await expect(side).toHaveClass("zs-split__side");
+    await expect(side).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)split-side(?:\s|$)/),
+    );
     const main = canvas.getByTestId("split-aschild-main");
     await expect(main.tagName).toBe("SECTION");
-    await expect(main).toHaveClass("zs-split__main");
+    await expect(main).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)split-main(?:\s|$)/),
+    );
   },
 };
 
@@ -164,7 +173,7 @@ export const AsChildRoot: Story = {
           "The Split root also accepts `asChild`: render the split " +
           "container as the single child element (here a `<section>`) " +
           "via `Slot`, with the Side/Main parts nested inside — no wrapper " +
-          "`<div>`. The `play()` asserts the root tag swap + `zs-split` " +
+          "`<div>`. The `play()` asserts the root tag swap + `[data-slot~=split]` " +
           "class.",
       },
     },
@@ -180,7 +189,10 @@ export const AsChildRoot: Story = {
   play: async ({ canvasElement }) => {
     const root = within(canvasElement).getByTestId("split-aschild-root");
     await expect(root.tagName).toBe("SECTION");
-    await expect(root).toHaveClass("zs-split");
+    await expect(root).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)split(?:\s|$)/),
+    );
   },
 };
 

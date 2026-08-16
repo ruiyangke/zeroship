@@ -2,12 +2,12 @@
  * Field — form-frame.
  *
  * Anatomy:
- *   [data-slot="field"]                  — the root (Base UI Field.Root → <div>)
- *     ├─ [data-slot="field-label"]      — Base UI Field.Label → <label>
- *     │   └─ [data-slot="field-required"], [data-slot="field-required-fallback"] (or [data-slot="field-required-fallback"])
+ *   [data-slot~="field"]                  — the root (Base UI Field.Root → <div>)
+ *     ├─ [data-slot~="field-label"]      — Base UI Field.Label → <label>
+ *     │   └─ [data-slot~="field-required"], [data-slot~="field-required-fallback"] (or [data-slot~="field-required-fallback"])
  *     ├─ <Input>               — see Input.css
- *     ├─ [data-slot="field-description"] — Base UI Field.Description → <p>
- *     └─ [data-slot="field-error"]      — Base UI Field.Error → <div>
+ *     ├─ [data-slot~="field-description"] — Base UI Field.Description → <p>
+ *     └─ [data-slot~="field-error"]      — Base UI Field.Error → <div>
  *
  * Modifier classes (one of each axis):
  *   orientation:  --vertical | --horizontal
@@ -21,7 +21,7 @@
  * (margin-inline-*, padding-inline-*). Tested via the RTL story.
  */
 
-[data-slot="field"] {
+[data-slot~="field"] {
   display: flex;
   flex-direction: column;
   gap: var(--zeroship-field-gap);
@@ -37,24 +37,24 @@
  * brief (replaces the broken flex-wrap approach that left description +
  * error inline with the control rather than stacking below).
  */
-[data-slot="field"][data-orientation="horizontal"] {
+[data-slot~="field"][data-orientation="horizontal"] {
   display: grid;
   grid-template-columns: var(--zeroship-field-horizontal-label-w) 1fr;
   column-gap: var(--zeroship-space-4);
   row-gap: var(--zeroship-field-gap);
   align-items: start;
 }
-[data-slot="field"][data-orientation="horizontal"] > [data-slot="field-label"] {
+[data-slot~="field"][data-orientation="horizontal"] > [data-slot~="field-label"] {
   grid-column: 1;
   padding-block-start: var(--zeroship-space-2);  /* visually center w/ control */
 }
-[data-slot="field"][data-orientation="horizontal"] > [data-slot="field-label"]:not() {
+[data-slot~="field"][data-orientation="horizontal"] > [data-slot~="field-label"]:not() {
   grid-column: 2;
   min-inline-size: 0;
 }
 
 /* ─── Label ───────────────────────────────────────────────────────────── */
-[data-slot="field-label"] {
+[data-slot~="field-label"] {
   display: inline-flex;
   align-items: baseline;
   gap: var(--zeroship-field-label-gap);
@@ -66,13 +66,13 @@
 
 /* When the enclosing Field is disabled, the auto-bound label takes the
    disabled label color so the entire row reads grayed-out together. */
-[data-slot="field"][data-disabled] > [data-slot="field-label"],
-[data-slot="field-label"][data-disabled] {
+[data-slot~="field"][data-disabled] > [data-slot~="field-label"],
+[data-slot~="field-label"][data-disabled] {
   color: var(--zeroship-label-tertiary);
 }
 
 /* ─── Description ─────────────────────────────────────────────────────── */
-[data-slot="field-description"] {
+[data-slot~="field-description"] {
   margin: 0;
   font-size: var(--zeroship-text-footnote-size);
   line-height: var(--zeroship-text-footnote-line);
@@ -82,7 +82,7 @@
 /* ─── Error ───────────────────────────────────────────────────────────── */
 /* Multiple <Field.Error match="…"> can render at once (e.g. valueMissing
    + typeMismatch). Stack them with a small gap so the row stays legible. */
-[data-slot="field-error"] {
+[data-slot~="field-error"] {
   font-size: var(--zeroship-text-footnote-size);
   line-height: var(--zeroship-text-footnote-line);
   color: var(--zeroship-field-error-ink);
@@ -92,7 +92,7 @@
 }
 
 /* ─── Required indicator ──────────────────────────────────────────────── */
-:is([data-slot="field-required"], [data-slot="field-required-fallback"]) {
+:is([data-slot~="field-required"], [data-slot~="field-required-fallback"]) {
   color: var(--zeroship-field-required-ink);
   font-weight: 700;
   font-size: var(--zeroship-text-subheadline-size);
@@ -108,7 +108,7 @@
    (WCAG 1.4.3). Item 8 contingency fires: keep color on
    --zeroship-label-secondary and let the size + spacing carry the recede.
    Same fallback the Card-polish commit made for Description. */
-[data-slot="field-required-fallback"] {
+[data-slot~="field-required-fallback"] {
   color: var(--zeroship-label-secondary);
   font-weight: 400;
   font-size: var(--zeroship-text-caption-1-size);
@@ -118,17 +118,17 @@
 
 /* ─── forced-colors / Windows High Contrast ───────────────────────────── */
 @media (forced-colors: active) {
-  [data-slot="field-label"] {
+  [data-slot~="field-label"] {
     color: CanvasText;
   }
-  [data-slot="field-description"] {
+  [data-slot~="field-description"] {
     color: GrayText;
   }
-  [data-slot="field-error"],
-  :is([data-slot="field-required"], [data-slot="field-required-fallback"]) {
+  [data-slot~="field-error"],
+  :is([data-slot~="field-required"], [data-slot~="field-required-fallback"]) {
     color: Mark;
   }
-  [data-slot="field-required-fallback"] {
+  [data-slot~="field-required-fallback"] {
     color: GrayText;
   }
 }

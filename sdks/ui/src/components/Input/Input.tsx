@@ -86,6 +86,9 @@ export interface InputProps extends Omit<
   /** Visual variant. Defaults to `outline`. */
   variant?: InputVariant;
 
+  /** Additional slot token appended to the native control's token. */
+  "data-slot"?: string;
+
   /** Leading adornment INSIDE the bordered shell (icon, prefix). */
   startSlot?: ReactNode;
 
@@ -191,6 +194,7 @@ const InputInner = forwardRef<HTMLInputElement, InnerProps>(function InputInner(
     wrapperStyle,
     required: requiredProp,
     disabled: disabledProp,
+    "data-slot": dataSlot,
     ...rest
   },
   ref,
@@ -296,7 +300,9 @@ const InputInner = forwardRef<HTMLInputElement, InnerProps>(function InputInner(
               ref={composeRefs(ref, controlProps.ref)}
               aria-describedby={mergedDescribedBy}
               className={classnames(className, controlProps.className)}
-              data-slot="input-control"
+              data-slot={["input-control", dataSlot]
+                .filter(Boolean)
+                .join(" ")}
               aria-invalid={
                 isInvalid || controlProps["aria-invalid"] || undefined
               }

@@ -1013,7 +1013,7 @@ export const AsChildRefAttach: Story = {
 
 /* ─── 12. IconRotationRegression ────────────────────────────────────── *
  *
- * Wave10 review 🔴 #2 — `.zs-navmenu-icon[data-open]` never matched.
+ * Wave10 review 🔴 #2 — `[data-slot~=navmenu-icon][data-open]` never matched.
  * Base UI's `NavigationMenu.Icon` uses `triggerOpenStateMapping`,
  * which stamps `data-popup-open` (NOT `data-open`) on the rendered
  * `<span>`. The chevron stayed upright when the mega-menu opened.
@@ -1077,7 +1077,7 @@ export const IconRotation: Story = {
 
 /* ─── 13. PopupMinWidthClampRegression ──────────────────────────────── *
  *
- * Wave10 review 🔴 #3 — `.zs-navmenu-popup` had `min-inline-size:
+ * Wave10 review 🔴 #3 — `[data-slot~=navmenu-popup]` had `min-inline-size:
  * 18rem` (= 288px) and `max-inline-size: min(56rem, calc(100dvw -
  * var(--zeroship-space-6) * 2))`. On a narrow viewport (≤ ~320px after the
  * gutter) the un-clamped minimum overrode the viewport-capped maximum,

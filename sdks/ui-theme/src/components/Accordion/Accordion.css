@@ -2,14 +2,14 @@
  * Accordion — Root + Item + Header + Trigger + Panel.
  *
  * Anatomy:
- *   [data-slot="accordion"]                    — root container; data-orientation
- *     ├─ [data-slot="accordion-item"]          — Item wrapper (separator paint)
- *     │   ├─ [data-slot="accordion-header"]    — <h3> wrapper around the trigger
- *     │   │   └─ [data-slot="accordion-trigger"]
- *     │   │       ├─ [data-slot="accordion-trigger-label"]
- *     │   │       └─ [data-slot="accordion-trigger-chevron"]
- *     │   └─ [data-slot="accordion-panel"]     — Panel; height-animated container
- *     │       └─ [data-slot="accordion-panel-inner"] — content padding lives here
+ *   [data-slot~="accordion"]                    — root container; data-orientation
+ *     ├─ [data-slot~="accordion-item"]          — Item wrapper (separator paint)
+ *     │   ├─ [data-slot~="accordion-header"]    — <h3> wrapper around the trigger
+ *     │   │   └─ [data-slot~="accordion-trigger"]
+ *     │   │       ├─ [data-slot~="accordion-trigger-label"]
+ *     │   │       └─ [data-slot~="accordion-trigger-chevron"]
+ *     │   └─ [data-slot~="accordion-panel"]     — Panel; height-animated container
+ *     │       └─ [data-slot~="accordion-panel-inner"] — content padding lives here
  *
  * The Panel uses Base UI's `--accordion-panel-height` custom property
  * (emitted on panels carrying `data-open` / `data-starting-style` /
@@ -27,7 +27,7 @@
  */
 
 /* ─── component-local tokens ────────────────────────────────────────── */
-[data-slot="accordion"] {
+[data-slot~="accordion"] {
   /* Item separator hairline — same family Slice 4 uses for selection
      edges; sits between rows so the stack reads as a discrete list
      without competing with the trigger labels for ink. */
@@ -50,7 +50,7 @@
 }
 
 /* ─── root ──────────────────────────────────────────────────────────── */
-[data-slot="accordion"] {
+[data-slot~="accordion"] {
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
@@ -62,7 +62,7 @@
   line-height: var(--zeroship-text-body-line);
 }
 
-[data-slot="accordion"][data-orientation="horizontal"] {
+[data-slot~="accordion"][data-orientation="horizontal"] {
   flex-direction: row;
   align-items: stretch;
 }
@@ -76,7 +76,7 @@
  *
  * Horizontal orientation rotates the separator to the trailing inline
  * edge instead. */
-[data-slot="accordion-item"] {
+[data-slot~="accordion-item"] {
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
@@ -85,16 +85,16 @@
   border-block-end: var(--zeroship-selection-hairline) solid
     var(--zeroship-accordion-separator);
 }
-[data-slot="accordion-item"]:last-of-type {
+[data-slot~="accordion-item"]:last-of-type {
   border-block-end: 0;
 }
 
-[data-slot="accordion-item"][data-orientation="horizontal"] {
+[data-slot~="accordion-item"][data-orientation="horizontal"] {
   border-block-end: 0;
   border-inline-end: var(--zeroship-selection-hairline) solid
     var(--zeroship-accordion-separator);
 }
-[data-slot="accordion-item"][data-orientation="horizontal"]:last-of-type {
+[data-slot~="accordion-item"][data-orientation="horizontal"]:last-of-type {
   border-inline-end: 0;
 }
 
@@ -103,7 +103,7 @@
  * Base UI renders an <h3> by default; we strip the user-agent margin and
  * default font-weight so the heading sits flush — the Trigger inside
  * paints the actual visual weight. */
-[data-slot="accordion-header"] {
+[data-slot~="accordion-header"] {
   inline-size: 100%;
   margin: 0;
   font-size: inherit;
@@ -115,7 +115,7 @@
  * The full-width row a consumer clicks. Visually the trigger reads like
  * a heading — left-aligned label, trailing chevron — but it's a button
  * so the focus ring + keyboard interactions work natively. */
-[data-slot="accordion-trigger"] {
+[data-slot~="accordion-trigger"] {
   position: relative;
   box-sizing: border-box;
   display: flex;
@@ -141,7 +141,7 @@
     color var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 
-[data-slot="accordion-trigger-label"] {
+[data-slot~="accordion-trigger-label"] {
   flex: 1 1 auto;
   min-inline-size: 0;
 }
@@ -149,12 +149,12 @@
 /* Hover — quiet fill that signals tappability without competing with
    the focus ring. Disabled triggers do NOT receive the hover treatment. */
 @media (hover: hover) {
-  [data-slot="accordion-trigger"]:not([data-disabled]):hover {
+  [data-slot~="accordion-trigger"]:not([data-disabled]):hover {
     background-color: color-mix(in oklch, var(--zeroship-fill) 50%, transparent);
   }
 }
 
-[data-slot="accordion-trigger"]:not([data-disabled]):active {
+[data-slot~="accordion-trigger"]:not([data-disabled]):active {
   background-color: color-mix(in oklch, var(--zeroship-fill) 80%, transparent);
 }
 
@@ -172,11 +172,11 @@
    `border-inline-start` would reflow the padding box and shift the label.
    The `::before` pins to `inset-inline-start` (logical → RTL-correct) and
    sits as an overlay, so it adds no layout. */
-[data-slot="accordion-trigger"][data-panel-open] {
+[data-slot~="accordion-trigger"][data-panel-open] {
   background-color: color-mix(in oklch, var(--zeroship-accent) 7%, transparent);
   color: var(--zeroship-label);
 }
-[data-slot="accordion-trigger"][data-panel-open]::before {
+[data-slot~="accordion-trigger"][data-panel-open]::before {
   content: "";
   position: absolute;
   inset-block: 0;
@@ -188,7 +188,7 @@
 }
 
 @media (hover: hover) {
-  [data-slot="accordion-trigger"][data-panel-open]:not([data-disabled]):hover {
+  [data-slot~="accordion-trigger"][data-panel-open]:not([data-disabled]):hover {
     /* Keep the open tint reading on hover (a hair stronger) rather than
        letting the base hover fill flatten the open cue. */
     background-color: color-mix(in oklch, var(--zeroship-accent) 11%, transparent);
@@ -199,7 +199,7 @@
    Tabs/Toggle use. It stays VISUALLY DISTINCT from the open-state tint above:
    the open row is a soft fill + an inline-start accent rule, the focus ring is
    a crisp full-perimeter outline. */
-[data-slot="accordion-trigger"]:focus-visible {
+[data-slot~="accordion-trigger"]:focus-visible {
   outline: 0.125rem solid var(--zeroship-button-focus-ring-color);
   outline-offset: calc(var(--zeroship-focus-ring-offset) * -1);
   /* Pull the outline INSIDE the trigger box so it doesn't overlap with
@@ -207,7 +207,7 @@
 }
 
 /* Disabled — quiet. Cursor changes to not-allowed; ink fades. */
-[data-slot="accordion-trigger"][data-disabled] {
+[data-slot~="accordion-trigger"][data-disabled] {
   cursor: not-allowed;
   color: var(--zeroship-label-quaternary);
 }
@@ -220,32 +220,32 @@
  * transition (the flip still happens, just instantly). */
 /* The chevron is the governed `Icon` (a Lucide chevron-down svg) carrying
    `zs-icon` + `zs-icon--md` alongside this class. We scope the sizing
-   under the trigger so this rule (0,2,0) outranks `[data-slot="icon"]` (0,1,0)
+   under the trigger so this rule (0,2,0) outranks `[data-slot~="icon"]` (0,1,0)
    regardless of stylesheet concat order — the chevron stays at the
    accordion token size, not the default Icon md box. */
-[data-slot="accordion-trigger"] [data-slot="accordion-trigger-chevron"] {
+[data-slot~="accordion-trigger"] [data-slot~="accordion-trigger-chevron"] {
   inline-size: var(--zeroship-accordion-chevron-size);
   block-size: var(--zeroship-accordion-chevron-size);
 }
-[data-slot="accordion-trigger-chevron"] {
+[data-slot~="accordion-trigger-chevron"] {
   flex: 0 0 auto;
   color: var(--zeroship-label-secondary);
   transform-origin: 50% 50%;
   transition: transform var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 
-[data-slot="accordion-trigger"][data-panel-open] [data-slot="accordion-trigger-chevron"] {
+[data-slot~="accordion-trigger"][data-panel-open] [data-slot~="accordion-trigger-chevron"] {
   transform: rotate(0.5turn);
 }
 
 /* Horizontal orientation — the chevron rotates 90° at rest so it points
    inline-end, then to inline-start when open. Logical-properties keep
    RTL automatic via the inset model on the parent. */
-[data-slot="accordion-trigger"][data-orientation="horizontal"] [data-slot="accordion-trigger-chevron"] {
+[data-slot~="accordion-trigger"][data-orientation="horizontal"] [data-slot~="accordion-trigger-chevron"] {
   transform: rotate(-0.25turn);
 }
-[data-slot="accordion-trigger"][data-orientation="horizontal"][data-panel-open]
-  [data-slot="accordion-trigger-chevron"] {
+[data-slot~="accordion-trigger"][data-orientation="horizontal"][data-panel-open]
+  [data-slot~="accordion-trigger-chevron"] {
   transform: rotate(0.25turn);
 }
 
@@ -269,7 +269,7 @@
  * Per-orientation scoping is load-bearing: the vertical rules only
  * touch `block-size`, and the horizontal rules only touch
  * `inline-size`. An earlier shape had a generic
- * `[data-slot="accordion-panel"][data-starting-style], [data-ending-style] {
+ * `[data-slot~="accordion-panel"][data-starting-style], [data-ending-style] {
  * block-size: 0 }` rule that ran on ALL panels regardless of
  * orientation — and there was no later horizontal override for
  * `block-size`, so horizontal panels collapsed on the BLOCK axis
@@ -280,7 +280,7 @@
  * The inner wrapper carries the padding so the 0-length state stays
  * clean (padding on the outer would create a visible step at the end
  * of the transition). */
-[data-slot="accordion-panel"] {
+[data-slot~="accordion-panel"] {
   overflow: hidden;
   color: var(--zeroship-label-secondary);
   font-size: var(--zeroship-text-body-size);
@@ -288,38 +288,38 @@
 }
 
 /* Vertical (default) — block-size animates between 0 and measured. */
-[data-slot="accordion-panel"][data-orientation="vertical"] {
+[data-slot~="accordion-panel"][data-orientation="vertical"] {
   block-size: var(--accordion-panel-height);
   transition: block-size var(--zeroship-motion-base) var(--zeroship-motion-ease);
 }
-[data-slot="accordion-panel"][data-orientation="vertical"][data-starting-style],
-[data-slot="accordion-panel"][data-orientation="vertical"][data-ending-style] {
+[data-slot~="accordion-panel"][data-orientation="vertical"][data-starting-style],
+[data-slot~="accordion-panel"][data-orientation="vertical"][data-ending-style] {
   block-size: 0;
 }
 
 /* Horizontal — inline-size animates between 0 and measured. Block-size
    stays content-driven so the row keeps its full height across every
    frame of the transition. */
-[data-slot="accordion-panel"][data-orientation="horizontal"] {
+[data-slot~="accordion-panel"][data-orientation="horizontal"] {
   inline-size: var(--accordion-panel-width);
   transition: inline-size var(--zeroship-motion-base) var(--zeroship-motion-ease);
 }
-[data-slot="accordion-panel"][data-orientation="horizontal"][data-starting-style],
-[data-slot="accordion-panel"][data-orientation="horizontal"][data-ending-style] {
+[data-slot~="accordion-panel"][data-orientation="horizontal"][data-starting-style],
+[data-slot~="accordion-panel"][data-orientation="horizontal"][data-ending-style] {
   inline-size: 0;
 }
 
-[data-slot="accordion-panel-inner"] {
+[data-slot~="accordion-panel-inner"] {
   padding-block: var(--zeroship-accordion-panel-pad-block);
   padding-inline: var(--zeroship-accordion-panel-pad-inline);
 }
 
 /* ─── reduced motion ────────────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
-  [data-slot="accordion-trigger"],
-  [data-slot="accordion-trigger-chevron"],
-  [data-slot="accordion-panel"][data-orientation="vertical"],
-  [data-slot="accordion-panel"][data-orientation="horizontal"] {
+  [data-slot~="accordion-trigger"],
+  [data-slot~="accordion-trigger-chevron"],
+  [data-slot~="accordion-panel"][data-orientation="vertical"],
+  [data-slot~="accordion-panel"][data-orientation="horizontal"] {
     transition: none;
   }
 }
@@ -333,57 +333,57 @@
  * in the base layer would win the cascade over the system-color base
  * rule (same fix pattern Toggle applied in Slice 5). */
 @media (forced-colors: active) {
-  [data-slot="accordion-item"] {
+  [data-slot~="accordion-item"] {
     border-color: CanvasText;
   }
-  [data-slot="accordion-item"][data-orientation="horizontal"] {
+  [data-slot~="accordion-item"][data-orientation="horizontal"] {
     border-color: CanvasText;
   }
-  [data-slot="accordion-trigger"] {
+  [data-slot~="accordion-trigger"] {
     forced-color-adjust: none;
     color: CanvasText;
     background-color: Canvas;
   }
   @media (hover: hover) {
-    [data-slot="accordion-trigger"]:not([data-disabled]):hover {
+    [data-slot~="accordion-trigger"]:not([data-disabled]):hover {
       color: CanvasText;
       background-color: Canvas;
     }
   }
-  [data-slot="accordion-trigger"]:not([data-disabled]):active {
+  [data-slot~="accordion-trigger"]:not([data-disabled]):active {
     color: CanvasText;
     background-color: Canvas;
   }
-  [data-slot="accordion-trigger"][data-disabled] {
+  [data-slot~="accordion-trigger"][data-disabled] {
     color: GrayText;
   }
-  [data-slot="accordion-trigger"][data-panel-open] {
+  [data-slot~="accordion-trigger"][data-panel-open] {
     color: HighlightText;
     background-color: Highlight;
   }
   /* The open marker `::before` paints `--zeroship-accent`, which collapses under
      forced-colors; map it to HighlightText so the inline-start rule stays
      visible against the Highlight fill. */
-  [data-slot="accordion-trigger"][data-panel-open]::before {
+  [data-slot~="accordion-trigger"][data-panel-open]::before {
     background-color: HighlightText;
   }
   @media (hover: hover) {
-    [data-slot="accordion-trigger"][data-panel-open]:not([data-disabled]):hover {
+    [data-slot~="accordion-trigger"][data-panel-open]:not([data-disabled]):hover {
       color: HighlightText;
       background-color: Highlight;
     }
   }
-  [data-slot="accordion-trigger"][data-panel-open]:not([data-disabled]):active {
+  [data-slot~="accordion-trigger"][data-panel-open]:not([data-disabled]):active {
     color: HighlightText;
     background-color: Highlight;
   }
-  [data-slot="accordion-trigger"][data-panel-open] [data-slot="accordion-trigger-chevron"] {
+  [data-slot~="accordion-trigger"][data-panel-open] [data-slot~="accordion-trigger-chevron"] {
     color: HighlightText;
   }
-  [data-slot="accordion-trigger"]:focus-visible {
+  [data-slot~="accordion-trigger"]:focus-visible {
     outline-color: Highlight;
   }
-  [data-slot="accordion-panel"] {
+  [data-slot~="accordion-panel"] {
     color: CanvasText;
     background-color: Canvas;
   }

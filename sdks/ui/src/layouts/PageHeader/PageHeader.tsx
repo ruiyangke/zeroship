@@ -236,9 +236,8 @@ const PageHeaderActions = forwardRef<HTMLDivElement, PageHeaderActionsProps>(
   function PageHeaderActions({ className, children, ...rest }, ref) {
     // Compose the Cluster primitive directly (wrapping inline group,
     // justified to the end). Cluster owns the layout; we pass the semantic
-    // `data-slot="page-header-actions"` (Cluster honors a consumer
-    // data-slot, defaulting to `"cluster"`) so the composed part owns its
-    // slot vocabulary and the band's CSS can target the actions group.
+    // `data-slot="page-header-actions"`; Cluster keeps its own `cluster`
+    // token and appends this one so both layers retain their styling hooks.
     return (
       <Cluster
         {...rest}
@@ -266,9 +265,8 @@ const PageHeaderText = forwardRef<HTMLDivElement, PageHeaderTextProps>(
   function PageHeaderText({ className, children, ...rest }, ref) {
     // Compose the Stack primitive directly (the start-side text column).
     // Stack owns the layout; we pass the semantic
-    // `data-slot="page-header-text"` (Stack honors a consumer data-slot,
-    // defaulting to `"stack"`) so the composed part owns its slot
-    // vocabulary.
+    // `data-slot="page-header-text"`; Stack keeps its own `stack` token and
+    // appends this one so both layers retain their styling hooks.
     return (
       <Stack
         {...rest}

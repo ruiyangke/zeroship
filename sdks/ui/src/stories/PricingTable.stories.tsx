@@ -82,7 +82,7 @@ const threeTiers: PricingTier[] = [
       { label: "SSO & audit logs" },
     ],
     cta: (
-      <Button variant="gray" className="zs-pricing__cta-button">
+      <Button variant="gray" data-slot="pricing-cta-button">
         Contact sales
       </Button>
     ),
@@ -114,7 +114,10 @@ export const ThreeTiers: Story = {
     const canvas = within(canvasElement);
     const root = canvas.getByTestId("pricing-three");
     await expect(root.tagName).toBe("SECTION");
-    await expect(root).toHaveAttribute("data-slot", "pricing-table");
+    await expect(root).toHaveAttribute(
+      "data-slot",
+      expect.stringMatching(/(?:^|\s)pricing-table(?:\s|$)/),
+    );
     // No section-level headline → no dangling aria-labelledby.
     await expect(root).not.toHaveAttribute("aria-labelledby");
 
@@ -189,7 +192,7 @@ export const Compound: Story = {
         featured
         badge="Most popular"
         description="For growing teams."
-        cta={<Button className="zs-pricing__cta-button">Upgrade</Button>}
+        cta={<Button data-slot="pricing-cta-button">Upgrade</Button>}
       >
         <PricingTable.Feature>Unlimited projects</PricingTable.Feature>
         <PricingTable.Feature note="100 GB">Storage</PricingTable.Feature>
@@ -200,7 +203,7 @@ export const Compound: Story = {
         price="Custom"
         description="For large organizations."
         cta={
-          <Button variant="gray" className="zs-pricing__cta-button">
+          <Button variant="gray" data-slot="pricing-cta-button">
             Contact sales
           </Button>
         }
@@ -457,7 +460,7 @@ export const KeyCollision: Story = {
         name="Compound Pro"
         price="$29"
         period="/mo"
-        cta={<Button className="zs-pricing__cta-button">Upgrade</Button>}
+        cta={<Button data-slot="pricing-cta-button">Upgrade</Button>}
       >
         <PricingTable.Feature>Unlimited projects</PricingTable.Feature>
       </PricingTable.Tier>
@@ -525,7 +528,7 @@ export const FalseTitleNoLabel: Story = {
     await expect(root.hasAttribute("aria-labelledby")).toBe(false);
     // No empty title heading rendered.
     await expect(
-      root.querySelector('[data-slot="pricing-table-title"]'),
+      root.querySelector('[data-slot~="pricing-table-title"]'),
     ).toBeNull();
   },
 };

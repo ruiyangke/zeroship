@@ -2,7 +2,7 @@
  * CheckboxGroup — layout-only primitive.
  *
  * Anatomy:
- *   [data-slot="checkbox-group"]           — Base UI's <div> (CheckboxGroupContext)
+ *   [data-slot~="checkbox-group"]           — Base UI's <div> (CheckboxGroupContext)
  *     └─ <Checkbox /> children — each paints its own chip + (optional) label
  *
  * Modifier classes:
@@ -41,7 +41,7 @@
  */
 
 /* ─── group container ───────────────────────────────────────────────── */
-[data-slot="checkbox-group"] {
+[data-slot~="checkbox-group"] {
   display: flex;
   flex-direction: column;
   gap: var(--zeroship-space-2);
@@ -50,7 +50,7 @@
   color: var(--zeroship-label);
 }
 
-[data-slot="checkbox-group"][data-orientation="horizontal"] {
+[data-slot~="checkbox-group"][data-orientation="horizontal"] {
   flex-direction: row;
   flex-wrap: wrap;
   gap: var(--zeroship-space-4);

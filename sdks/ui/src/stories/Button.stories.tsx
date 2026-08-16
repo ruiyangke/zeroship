@@ -239,7 +239,7 @@ export const LongLabel: Story = {
         story:
           "When the parent layout constrains the button width, the label " +
           "should ellipsize gracefully via `min-width: 0` + `overflow: " +
-          "hidden` + `text-overflow: ellipsis` on `.zs-button__label`. " +
+          "hidden` + `text-overflow: ellipsis` on `[data-slot~=button-label]`. " +
           "The button itself has no `max-width`; consumers decide " +
           "constraints.",
       },

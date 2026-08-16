@@ -10,7 +10,7 @@
  * what opens the popup (right-click / Shift+F10 / long-press).
  */
 
-[data-slot="contextmenu-trigger"] {
+[data-slot~="contextmenu-trigger"] {
   position: relative;
   display: block;
   /* No padding / margin — the trigger is a wrapper; layout pressure
@@ -22,14 +22,14 @@
   transition: box-shadow var(--zeroship-motion-fast) var(--zeroship-motion-ease);
 }
 
-[data-slot="contextmenu-trigger"]:focus-visible {
+[data-slot~="contextmenu-trigger"]:focus-visible {
   box-shadow:
     0 0 0 var(--zeroship-focus-ring-width) var(--zeroship-input-focus-ring-color);
 }
 
 /* ─── Forced-colors mirror ─────────────────────────────────────────── */
 @media (forced-colors: active) {
-  [data-slot="contextmenu-trigger"]:focus-visible {
+  [data-slot~="contextmenu-trigger"]:focus-visible {
     box-shadow:
       0 0 0 0.125rem Highlight;
     forced-color-adjust: none;
@@ -43,7 +43,7 @@
  * instantly. Matching selector specificity so this override wins
  * deterministically against the base rule above. */
 @media (prefers-reduced-motion: reduce) {
-  [data-slot="contextmenu-trigger"] {
+  [data-slot~="contextmenu-trigger"] {
     transition: none;
   }
 }

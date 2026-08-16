@@ -12,12 +12,12 @@
  *
  * The three primitives' rows are visually identical — same gap, same
  * cursor, same disabled tint. Per-primitive overrides (if any future
- * slice needs them) can extend `[data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"]`, `[data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"]`,
- * `[data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"]` in their own CSS.
+ * slice needs them) can extend `[data-slot~="checkbox-field"], [data-slot~="radio-field"], [data-slot~="switch-field"]`, `[data-slot~="checkbox-field"], [data-slot~="radio-field"], [data-slot~="switch-field"]`,
+ * `[data-slot~="checkbox-field"], [data-slot~="radio-field"], [data-slot~="switch-field"]` in their own CSS.
  */
-:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"]),
-:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"]),
-:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"]) {
+:is([data-slot~="checkbox-field"], [data-slot~="radio-field"], [data-slot~="switch-field"]),
+:is([data-slot~="checkbox-field"], [data-slot~="radio-field"], [data-slot~="switch-field"]),
+:is([data-slot~="checkbox-field"], [data-slot~="radio-field"], [data-slot~="switch-field"]) {
   display: inline-flex;
   align-items: center;
   gap: var(--zeroship-space-2);
@@ -26,9 +26,9 @@
   cursor: pointer;
 }
 
-:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-disabled],
-:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-disabled],
-:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-disabled] {
+:is([data-slot~="checkbox-field"], [data-slot~="radio-field"], [data-slot~="switch-field"])[data-disabled],
+:is([data-slot~="checkbox-field"], [data-slot~="radio-field"], [data-slot~="switch-field"])[data-disabled],
+:is([data-slot~="checkbox-field"], [data-slot~="radio-field"], [data-slot~="switch-field"])[data-disabled] {
   cursor: not-allowed;
   color: var(--zeroship-label-tertiary);
 }
@@ -37,9 +37,9 @@
  * shape (`zs-X-field__text`) so the row layout and the chip stay
  * decoupled. Default sits at body-text size so a default-sized row
  * matches the surrounding body type rhythm. */
-[data-slot="checkbox-field-text"],
-[data-slot="switch-field-text"],
-[data-slot="radio-field-text"] {
+[data-slot~="checkbox-field-text"],
+[data-slot~="switch-field-text"],
+[data-slot~="radio-field-text"] {
   font-size: var(--zeroship-text-body-size);
   line-height: var(--zeroship-text-body-line);
   color: inherit;
@@ -59,25 +59,25 @@
  *     regular — see styles.css for the type-scale tokens).
  * That makes the size axis a real "scale the WHOLE control" axis, not
  * a "swap a slightly bigger chip" cosmetic. */
-:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="sm"],
-:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="sm"],
-:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="sm"] {
+:is([data-slot~="checkbox-field"], [data-slot~="radio-field"], [data-slot~="switch-field"])[data-size="sm"],
+:is([data-slot~="checkbox-field"], [data-slot~="radio-field"], [data-slot~="switch-field"])[data-size="sm"],
+:is([data-slot~="checkbox-field"], [data-slot~="radio-field"], [data-slot~="switch-field"])[data-size="sm"] {
   gap: var(--zeroship-space-1);
 }
-:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="lg"],
-:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="lg"],
-:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="lg"] {
+:is([data-slot~="checkbox-field"], [data-slot~="radio-field"], [data-slot~="switch-field"])[data-size="lg"],
+:is([data-slot~="checkbox-field"], [data-slot~="radio-field"], [data-slot~="switch-field"])[data-size="lg"],
+:is([data-slot~="checkbox-field"], [data-slot~="radio-field"], [data-slot~="switch-field"])[data-size="lg"] {
   gap: var(--zeroship-space-3);
 }
-:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="sm"] [data-slot="checkbox-field-text"],
-:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="sm"] [data-slot="switch-field-text"],
-:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="sm"] [data-slot="radio-field-text"] {
+:is([data-slot~="checkbox-field"], [data-slot~="radio-field"], [data-slot~="switch-field"])[data-size="sm"] [data-slot~="checkbox-field-text"],
+:is([data-slot~="checkbox-field"], [data-slot~="radio-field"], [data-slot~="switch-field"])[data-size="sm"] [data-slot~="switch-field-text"],
+:is([data-slot~="checkbox-field"], [data-slot~="radio-field"], [data-slot~="switch-field"])[data-size="sm"] [data-slot~="radio-field-text"] {
   font-size: var(--zeroship-text-subheadline-size);
   line-height: var(--zeroship-text-subheadline-line);
 }
-:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="lg"] [data-slot="checkbox-field-text"],
-:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="lg"] [data-slot="switch-field-text"],
-:is([data-slot="checkbox-field"], [data-slot="radio-field"], [data-slot="switch-field"])[data-size="lg"] [data-slot="radio-field-text"] {
+:is([data-slot~="checkbox-field"], [data-slot~="radio-field"], [data-slot~="switch-field"])[data-size="lg"] [data-slot~="checkbox-field-text"],
+:is([data-slot~="checkbox-field"], [data-slot~="radio-field"], [data-slot~="switch-field"])[data-size="lg"] [data-slot~="switch-field-text"],
+:is([data-slot~="checkbox-field"], [data-slot~="radio-field"], [data-slot~="switch-field"])[data-size="lg"] [data-slot~="radio-field-text"] {
   font-size: var(--zeroship-text-headline-size);
   line-height: var(--zeroship-text-headline-line);
 }

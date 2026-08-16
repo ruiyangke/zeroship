@@ -51,7 +51,7 @@ export const Horizontal: Story = {
     await expect(root.tagName).toBe("OL");
     await expect(root).toHaveAttribute("data-orientation", "horizontal");
 
-    const steps = root.querySelectorAll('[data-slot="stepper-step"]');
+    const steps = root.querySelectorAll('[data-slot~="stepper-step"]');
     await expect(steps).toHaveLength(4);
 
     // Status derivation: index < 1 complete, === 1 current, > 1 upcoming.
@@ -66,7 +66,7 @@ export const Horizontal: Story = {
 
     // Color-not-alone: the complete step renders the Check glyph (a shape)
     // AND a visually-hidden "completed" word (the AT-announced signal).
-    const check = steps[0].querySelector('[data-slot="icon"]');
+    const check = steps[0].querySelector('[data-slot~="icon"]');
     await expect(check).toBeInTheDocument();
     await expect(check).toHaveAttribute("aria-hidden", "true");
     await expect(steps[0]).toHaveTextContent(/completed/i);
@@ -75,13 +75,13 @@ export const Horizontal: Story = {
 
     // Connectors are decorative.
     const connector = steps[0].querySelector(
-      '[data-slot="stepper-connector"]',
+      '[data-slot~="stepper-connector"]',
     );
     await expect(connector).toHaveAttribute("aria-hidden", "true");
 
     // Static (non-clickable) — no buttons.
     await expect(
-      root.querySelectorAll("button.zs-stepper__trigger"),
+      root.querySelectorAll("button[data-slot~=stepper-trigger]"),
     ).toHaveLength(0);
   },
 };
@@ -115,19 +115,19 @@ export const HorizontalConnectorGeometry: Story = {
     const canvas = within(canvasElement);
     const root = canvas.getByTestId("stepper");
     const steps = Array.from(
-      root.querySelectorAll('[data-slot="stepper-step"]'),
+      root.querySelectorAll('[data-slot~="stepper-step"]'),
     );
 
     for (let i = 0; i < steps.length - 1; i++) {
       const connector = steps[i].querySelector(
-        '[data-slot="stepper-connector"]',
+        '[data-slot~="stepper-connector"]',
       ) as HTMLElement;
       await expect(connector).not.toBeNull();
       const thisInd = steps[i].querySelector(
-        '[data-slot="stepper-indicator"]',
+        '[data-slot~="stepper-indicator"]',
       ) as HTMLElement;
       const nextInd = steps[i + 1].querySelector(
-        '[data-slot="stepper-indicator"]',
+        '[data-slot~="stepper-indicator"]',
       ) as HTMLElement;
 
       const conn = connector.getBoundingClientRect();
@@ -171,7 +171,7 @@ export const Vertical: Story = {
     const canvas = within(canvasElement);
     const root = canvas.getByTestId("stepper");
     await expect(root).toHaveAttribute("data-orientation", "vertical");
-    const steps = root.querySelectorAll('[data-slot="stepper-step"]');
+    const steps = root.querySelectorAll('[data-slot~="stepper-step"]');
     await expect(steps[1]).toHaveAttribute("data-status", "complete");
     await expect(steps[2]).toHaveAttribute("data-status", "current");
     await expect(steps[2]).toHaveAttribute("aria-current", "step");
@@ -207,7 +207,7 @@ export const Clickable: Story = {
     const root = canvas.getByTestId("stepper");
 
     // Clickable a11y: every step's trigger is a real <button type="button">.
-    const buttons = root.querySelectorAll("button.zs-stepper__trigger");
+    const buttons = root.querySelectorAll("button[data-slot~=stepper-trigger]");
     await expect(buttons).toHaveLength(4);
     for (const btn of Array.from(buttons)) {
       await expect(btn).toHaveAttribute("type", "button");
@@ -254,7 +254,7 @@ export const StatusOverride: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const root = canvas.getByTestId("stepper");
-    const steps = root.querySelectorAll('[data-slot="stepper-step"]');
+    const steps = root.querySelectorAll('[data-slot~="stepper-step"]');
     // Pinned statuses win over derivation: index 1 is upcoming, not complete.
     await expect(steps[1]).toHaveAttribute("data-status", "upcoming");
     await expect(steps[3]).toHaveAttribute("data-status", "current");

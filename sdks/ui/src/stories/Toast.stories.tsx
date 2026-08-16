@@ -98,7 +98,7 @@ async function findToastByTitle(
  * "the toast's headline is on screen." */
 function expectToastShown(toast: HTMLElement) {
   expect(toast).toBeInTheDocument();
-  const title = toast.querySelector(".zs-toast-title") as HTMLElement | null;
+  const title = toast.querySelector('[data-slot~="toast-title"]') as HTMLElement | null;
   expect(title).not.toBeNull();
   expect(title as HTMLElement).toBeVisible();
 }
@@ -121,7 +121,7 @@ async function waitForToastGone(
  * that expands the stack (focus is the keyboard equivalent). */
 async function expandViewport(canvasElement: HTMLElement) {
   const viewport = canvasElement.ownerDocument.querySelector(
-    ".zs-toast-viewport",
+    "[data-slot~=toast-viewport]",
   );
   if (!(viewport instanceof HTMLElement)) return;
   viewport.dispatchEvent(
@@ -133,7 +133,7 @@ async function expandViewport(canvasElement: HTMLElement) {
   // Base UI's expansion logic flips on next frame — wait for it.
   await waitFor(() => {
     const close = canvasElement.ownerDocument.querySelector(
-      ".zs-toast-close",
+      "[data-slot~=toast-close]",
     );
     expect(close?.getAttribute("aria-hidden")).not.toBe("true");
   });
@@ -723,7 +723,7 @@ export const ImperativeUpdate: Story = {
     // instead of mounting a second toast), so the stack must still
     // contain EXACTLY one root after the second emit.
     const rootCount = canvasElement.ownerDocument.querySelectorAll(
-      ".zs-toast-root",
+      "[data-slot~=toast-root]",
     ).length;
     await expect(rootCount).toBe(1);
   },
@@ -772,7 +772,7 @@ export const Stacked: Story = {
     // both faithful to how every other Toast story queries:
     //   1. Base UI mirrors each toast's title into a visually-hidden
     //      aria-live announcer, so `getByText("Third")` matches BOTH the
-    //      visible `<h2 class="zs-toast-title">` and the hidden announcer
+    //      visible `<h2 data-slot="toast-title">` and the hidden announcer
     //      node — an ambiguous-match throw. `findToastByTitle` scopes to
     //      the `[role="status"]` toast surface.
     //   2. It waits out the enter motion (data-starting-style → resting
@@ -1029,7 +1029,7 @@ export const AriaOverrideAttempt: Story = {
                 "aria-live": "off",
               } as unknown as Record<string, never>)}
             >
-              <div className="zs-toast-content">
+              <div data-slot="toast-content">
                 {entry.title ? (
                   <Toast.Title>{entry.title}</Toast.Title>
                 ) : null}
@@ -1127,7 +1127,7 @@ export const CloseLabelDefault: Story = {
         <>
           {manager.toasts.map((entry: ToastPayload) => (
             <Toast.Root key={entry.id} toast={entry}>
-              <div className="zs-toast-content">
+              <div data-slot="toast-content">
                 {entry.title ? (
                   <Toast.Title>{entry.title}</Toast.Title>
                 ) : null}

@@ -506,7 +506,7 @@ export const WithIcons: Story = {
         story:
           "Menu items can carry a leading icon for a stronger affordance. " +
           "Icons sit inside the item as a child; the gap is owned by " +
-          ".zs-menu-item so spacing stays consistent.",
+          "the menu-item slots so spacing stays consistent.",
       },
     },
   },

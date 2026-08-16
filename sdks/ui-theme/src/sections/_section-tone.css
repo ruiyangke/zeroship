@@ -13,7 +13,7 @@
  * (e.g. AlertDialog's Action/Cancel buttons, which stamp `data-tone` for
  * their own intent styling) is NEVER matched — only true section bands are.
  * The shared
- * `[data-slot="cta-eyebrow"], [data-slot="faq-eyebrow"], [data-slot="feature-grid-eyebrow"], [data-slot="hero-eyebrow"], [data-slot="section-header-eyebrow"], [data-slot="stats-band-eyebrow"]` class (defined at the foot of this sheet) is the
+ * `[data-slot~="cta-eyebrow"], [data-slot~="faq-eyebrow"], [data-slot~="feature-grid-eyebrow"], [data-slot~="hero-eyebrow"], [data-slot~="section-header-eyebrow"], [data-slot~="stats-band-eyebrow"]` class (defined at the foot of this sheet) is the
  * single cohesive eyebrow style applied across every section's lead-in
  * label, so the eyebrows read as ONE confident family rather than seven
  * near-duplicate one-offs.
@@ -39,7 +39,7 @@
  * The remap targets the section ink hooks via a SHARED selector list so the
  * accent treatment is keyed off `[data-section-band][data-tone="accent"]`
  * once rather than re-declared inside each section sheet. The shared eyebrow class
- * `[data-slot="cta-eyebrow"], [data-slot="faq-eyebrow"], [data-slot="feature-grid-eyebrow"], [data-slot="hero-eyebrow"], [data-slot="section-header-eyebrow"], [data-slot="stats-band-eyebrow"]` (see the per-section sheets) is one of those hooks.
+ * `[data-slot~="cta-eyebrow"], [data-slot~="faq-eyebrow"], [data-slot~="feature-grid-eyebrow"], [data-slot~="hero-eyebrow"], [data-slot~="section-header-eyebrow"], [data-slot~="stats-band-eyebrow"]` (see the per-section sheets) is one of those hooks.
  *
  * forced-colors: an accent band cannot rely on the painted accent fill (it
  * drops out under a forced palette). The block re-pins the band to
@@ -110,37 +110,37 @@
  * single place the per-section BEM classes are coupled to the tone system. */
 
 /* Primary ink — titles, eyebrows, headings, billboard values. */
-[data-section-band][data-tone="accent"] :is([data-slot="cta-eyebrow"], [data-slot="faq-eyebrow"], [data-slot="feature-grid-eyebrow"], [data-slot="hero-eyebrow"], [data-slot="section-header-eyebrow"], [data-slot="stats-band-eyebrow"]),
-[data-section-band][data-tone="accent"] [data-slot="section-header-title"],
-[data-section-band][data-tone="accent"] [data-slot="hero-title"],
-[data-section-band][data-tone="accent"] [data-slot="pricing-table-title"],
-[data-section-band][data-tone="accent"] [data-slot="feature-grid-title"],
-[data-section-band][data-tone="accent"] [data-slot="feature-grid-item-title"],
-[data-section-band][data-tone="accent"] [data-slot="cta-title"],
-[data-section-band][data-tone="accent"] [data-slot="stats-band-title"],
-[data-section-band][data-tone="accent"] [data-slot="stats-band-stat-value"],
-[data-section-band][data-tone="accent"] [data-slot="faq-title"],
-[data-section-band][data-tone="accent"] [data-slot="footer-brand"],
-[data-section-band][data-tone="accent"] [data-slot="footer-link"],
-[data-section-band][data-tone="accent"] [data-slot="footer-link"]:hover,
-[data-section-band][data-tone="accent"] [data-slot="footer-link"]:focus-visible {
+[data-section-band][data-tone="accent"] :is([data-slot~="cta-eyebrow"], [data-slot~="faq-eyebrow"], [data-slot~="feature-grid-eyebrow"], [data-slot~="hero-eyebrow"], [data-slot~="section-header-eyebrow"], [data-slot~="stats-band-eyebrow"]),
+[data-section-band][data-tone="accent"] [data-slot~="section-header-title"],
+[data-section-band][data-tone="accent"] [data-slot~="hero-title"],
+[data-section-band][data-tone="accent"] [data-slot~="pricing-table-title"],
+[data-section-band][data-tone="accent"] [data-slot~="feature-grid-title"],
+[data-section-band][data-tone="accent"] [data-slot~="feature-grid-item-title"],
+[data-section-band][data-tone="accent"] [data-slot~="cta-title"],
+[data-section-band][data-tone="accent"] [data-slot~="stats-band-title"],
+[data-section-band][data-tone="accent"] [data-slot~="stats-band-stat-value"],
+[data-section-band][data-tone="accent"] [data-slot~="faq-title"],
+[data-section-band][data-tone="accent"] [data-slot~="footer-brand"],
+[data-section-band][data-tone="accent"] [data-slot~="footer-link"],
+[data-section-band][data-tone="accent"] [data-slot~="footer-link"]:hover,
+[data-section-band][data-tone="accent"] [data-slot~="footer-link"]:focus-visible {
   color: var(--zeroship-section-ink);
 }
 
 /* Secondary ink — descriptions, supporting lines, the muted chrome. */
-[data-section-band][data-tone="accent"] [data-slot="hero-description"],
-[data-section-band][data-tone="accent"] [data-slot="section-header-description"],
-[data-section-band][data-tone="accent"] [data-slot="pricing-lead-description"],
-[data-section-band][data-tone="accent"] [data-slot="feature-grid-description"],
-[data-section-band][data-tone="accent"] [data-slot="feature-grid-item-description"],
-[data-section-band][data-tone="accent"] [data-slot="cta-description"],
-[data-section-band][data-tone="accent"] [data-slot="stats-band-description"],
-[data-section-band][data-tone="accent"] [data-slot="stats-band-stat-label"],
-[data-section-band][data-tone="accent"] [data-slot="stats-band-stat-description"],
-[data-section-band][data-tone="accent"] [data-slot="faq-description"],
-[data-section-band][data-tone="accent"] [data-slot="footer-description"],
-[data-section-band][data-tone="accent"] [data-slot="footer-column-title"],
-[data-section-band][data-tone="accent"] [data-slot="footer-copyright"] {
+[data-section-band][data-tone="accent"] [data-slot~="hero-description"],
+[data-section-band][data-tone="accent"] [data-slot~="section-header-description"],
+[data-section-band][data-tone="accent"] [data-slot~="pricing-lead-description"],
+[data-section-band][data-tone="accent"] [data-slot~="feature-grid-description"],
+[data-section-band][data-tone="accent"] [data-slot~="feature-grid-item-description"],
+[data-section-band][data-tone="accent"] [data-slot~="cta-description"],
+[data-section-band][data-tone="accent"] [data-slot~="stats-band-description"],
+[data-section-band][data-tone="accent"] [data-slot~="stats-band-stat-label"],
+[data-section-band][data-tone="accent"] [data-slot~="stats-band-stat-description"],
+[data-section-band][data-tone="accent"] [data-slot~="faq-description"],
+[data-section-band][data-tone="accent"] [data-slot~="footer-description"],
+[data-section-band][data-tone="accent"] [data-slot~="footer-column-title"],
+[data-section-band][data-tone="accent"] [data-slot~="footer-copyright"] {
   color: var(--zeroship-section-ink-secondary);
 }
 
@@ -175,25 +175,25 @@
  * inherits the button color, so the single `color` swap carries the inversion.
  * This keeps the contract simple: the consumer drops the default `<Button>`
  * (filled) into an accent CTA and it reads as the bold inverse button. */
-[data-section-band][data-tone="accent"] [data-slot="button"][data-variant="filled"] {
+[data-section-band][data-tone="accent"] [data-slot~="button"][data-variant="filled"] {
   background: var(--zeroship-accent-ink);
   color: var(--zeroship-accent);
 }
 @media (hover: hover) {
-  [data-section-band][data-tone="accent"] [data-slot="button"][data-variant="filled"]:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+  [data-section-band][data-tone="accent"] [data-slot~="button"][data-variant="filled"]:hover:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
     /* Slightly recede the inverse chip on hover (a touch of accent mixed into
        the ink) while keeping the accent text well clear of AA. */
     background: color-mix(in oklch, var(--zeroship-accent-ink) 88%, var(--zeroship-accent));
   }
 }
-[data-section-band][data-tone="accent"] [data-slot="button"][data-variant="filled"]:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
+[data-section-band][data-tone="accent"] [data-slot~="button"][data-variant="filled"]:active:not(:disabled):not([aria-disabled="true"]):not([aria-busy="true"]) {
   background: color-mix(in oklch, var(--zeroship-accent-ink) 80%, var(--zeroship-accent));
 }
 
 /* forced-colors: the inverse chip's painted ink/accent both drop out — pin it
    to a ButtonFace/ButtonText pair so the inverse button stays a real button. */
 @media (forced-colors: active) {
-  [data-section-band][data-tone="accent"] [data-slot="button"][data-variant="filled"] {
+  [data-section-band][data-tone="accent"] [data-slot~="button"][data-variant="filled"] {
     background: ButtonFace;
     color: ButtonText;
     border: var(--zeroship-selection-hairline) solid ButtonText;
@@ -214,7 +214,7 @@
  * start) because the pill is the inline child. The accent-tint background is
  * the house `color-mix` idiom (cf. FeatureGrid's icon badge / Cta's tinted
  * panel) so it tracks the accent token and stays token-pure. */
-:is([data-slot="cta-eyebrow"], [data-slot="faq-eyebrow"], [data-slot="feature-grid-eyebrow"], [data-slot="hero-eyebrow"], [data-slot="section-header-eyebrow"], [data-slot="stats-band-eyebrow"]) {
+:is([data-slot~="cta-eyebrow"], [data-slot~="faq-eyebrow"], [data-slot~="feature-grid-eyebrow"], [data-slot~="hero-eyebrow"], [data-slot~="section-header-eyebrow"], [data-slot~="stats-band-eyebrow"]) {
   margin-block: 0;
   /* Hug the text — the pill is sized to content, not the column. */
   display: inline-block;
@@ -247,7 +247,7 @@
    on the accent fill (the primary-ink remap above), which is the same
    accent-ink-on-accent pairing Button.filled ships axe-clean. The padding is
    removed so the label sits flush as a lead-in rather than an empty chip. */
-[data-section-band][data-tone="accent"] :is([data-slot="cta-eyebrow"], [data-slot="faq-eyebrow"], [data-slot="feature-grid-eyebrow"], [data-slot="hero-eyebrow"], [data-slot="section-header-eyebrow"], [data-slot="stats-band-eyebrow"]) {
+[data-section-band][data-tone="accent"] :is([data-slot~="cta-eyebrow"], [data-slot~="faq-eyebrow"], [data-slot~="feature-grid-eyebrow"], [data-slot~="hero-eyebrow"], [data-slot~="section-header-eyebrow"], [data-slot~="stats-band-eyebrow"]) {
   background: transparent;
   padding-block: 0;
   padding-inline: 0;
@@ -257,7 +257,7 @@
    Give the eyebrow a visible system edge so the pill still reads as a chip,
    with its text on CanvasText. */
 @media (forced-colors: active) {
-  :is([data-slot="cta-eyebrow"], [data-slot="faq-eyebrow"], [data-slot="feature-grid-eyebrow"], [data-slot="hero-eyebrow"], [data-slot="section-header-eyebrow"], [data-slot="stats-band-eyebrow"]) {
+  :is([data-slot~="cta-eyebrow"], [data-slot~="faq-eyebrow"], [data-slot~="feature-grid-eyebrow"], [data-slot~="hero-eyebrow"], [data-slot~="section-header-eyebrow"], [data-slot~="stats-band-eyebrow"]) {
     color: CanvasText;
     border: var(--zeroship-selection-hairline) solid CanvasText;
     background: Canvas;

@@ -3,18 +3,18 @@
  *
  * Anatomy:
  *
- *   [data-slot="scrollarea"]                  Root — relative-positioned shell.
+ *   [data-slot~="scrollarea"]                  Root — relative-positioned shell.
  *                                    data-visibility = auto|always|scroll|hover
  *                                    data-orientation = vertical|horizontal|both
  *
- *     [data-slot="scrollarea-viewport"]      Real overflow container (Base UI's
+ *     [data-slot~="scrollarea-viewport"]      Real overflow container (Base UI's
  *                                    pattern: overflow:hidden here, the
  *                                    actual scroll happens on the inner
  *                                    Content wrapper Base UI manages).
  *
- *       [data-slot="scrollarea-content"]     Block wrapper for the user payload.
+ *       [data-slot~="scrollarea-content"]     Block wrapper for the user payload.
  *
- *     [data-slot="scrollarea-scrollbar"]     Decorative bar track. Two variants:
+ *     [data-slot~="scrollarea-scrollbar"]     Decorative bar track. Two variants:
  *       --vertical                  pinned inline-end (the logical-
  *                                    property cascade flips this to
  *                                    the physical LEFT edge under RTL
@@ -22,9 +22,9 @@
  *                                    `[dir="rtl"]` override needed).
  *       --horizontal                pinned block-end.
  *
- *       [data-slot="scrollarea-thumb"]       Draggable pill handle inside the bar.
+ *       [data-slot~="scrollarea-thumb"]       Draggable pill handle inside the bar.
  *
- *     [data-slot="scrollarea-corner"]        L-intersection square (only painted
+ *     [data-slot~="scrollarea-corner"]        L-intersection square (only painted
  *                                    when both bars are visible).
  *
  * Visibility policy (data-visibility on Root drives the CSS):
@@ -46,7 +46,7 @@
  */
 
 /* ─── Root ─────────────────────────────────────────────────────────────── */
-[data-slot="scrollarea"] {
+[data-slot~="scrollarea"] {
   position: relative;
   overflow: hidden;
   /* The Root inherits its sizing from the parent — ScrollArea is a
@@ -58,7 +58,7 @@
 }
 
 /* ─── Viewport (overflow container) ────────────────────────────────────── */
-[data-slot="scrollarea-viewport"] {
+[data-slot~="scrollarea-viewport"] {
   position: relative;
   inline-size: 100%;
   block-size: 100%;
@@ -70,12 +70,12 @@
   border-radius: inherit;
 }
 
-[data-slot="scrollarea-viewport"]:focus-visible {
+[data-slot~="scrollarea-viewport"]:focus-visible {
   outline: var(--zeroship-focus-ring-width) solid var(--zeroship-focus-ring-color);
 }
 
 /* ─── Content wrapper (block flow) ─────────────────────────────────────── */
-[data-slot="scrollarea-content"] {
+[data-slot~="scrollarea-content"] {
   display: block;
   /* The inner content is laid out by the consumer. We avoid forcing a
    * min-block-size so prose, lists, grids, and tables all behave
@@ -97,7 +97,7 @@
  * `pointer-events: auto` so the bar accepts thumb drags and track
  * clicks when (and only when) it is actually visible.
  */
-[data-slot="scrollarea-scrollbar"] {
+[data-slot~="scrollarea-scrollbar"] {
   position: absolute;
   display: flex;
   /* Above the content but never above modal layers (Dialog/Drawer set
@@ -133,7 +133,7 @@
 }
 
 /* Vertical bar — pinned to the inline-end edge, full block height. */
-[data-slot="scrollarea-scrollbar"][data-orientation="vertical"] {
+[data-slot~="scrollarea-scrollbar"][data-orientation="vertical"] {
   inset-block-start: 0;
   inset-block-end: 0;
   inset-inline-end: 0;
@@ -144,7 +144,7 @@
 }
 
 /* Horizontal bar — pinned to the block-end edge, full inline width. */
-[data-slot="scrollarea-scrollbar"][data-orientation="horizontal"] {
+[data-slot~="scrollarea-scrollbar"][data-orientation="horizontal"] {
   inset-inline-start: 0;
   inset-inline-end: 0;
   inset-block-end: 0;
@@ -173,7 +173,7 @@
  * Every visible-state selector also sets `pointer-events: auto` so the
  * bar accepts thumb drags and track clicks only when it is actually on
  * screen. Hidden states keep the base `pointer-events: none` set on
- * `[data-slot="scrollarea-scrollbar"]` above.
+ * `[data-slot~="scrollarea-scrollbar"]` above.
  */
 
 /* type=auto — visible by default, fades after the hide-delay.
@@ -183,14 +183,14 @@
  * DISCRETE-type property — under the default `transition-behavior:
  * normal` it would swap instantly at the start of the transition,
  * regardless of `transition-delay`. With `transition-behavior:
- * allow-discrete` (set on `[data-slot="scrollarea-scrollbar"]` above), the
+ * allow-discrete` (set on `[data-slot~="scrollarea-scrollbar"]` above), the
  * discrete swap is deferred to the END of `duration + delay`. We
  * align the `pointer-events` delay with the opacity fade so the
  * hit-test surface stays `auto` for the FULL hide-delay + fade window
  * then flips to `none` exactly when the bar finishes fading. Without
  * this, the bar would be visibly present but refuse thumb drags and
  * track clicks during the hide-delay window. */
-[data-slot="scrollarea"][data-visibility="auto"] [data-slot="scrollarea-scrollbar"] {
+[data-slot~="scrollarea"][data-visibility="auto"] [data-slot~="scrollarea-scrollbar"] {
   opacity: 1;
   pointer-events: auto;
   transition:
@@ -200,8 +200,8 @@
     pointer-events 0s linear 0s;
   transition-behavior: allow-discrete;
 }
-[data-slot="scrollarea"][data-visibility="auto"][data-scrolling]
-  [data-slot="scrollarea-scrollbar"] {
+[data-slot~="scrollarea"][data-visibility="auto"][data-scrolling]
+  [data-slot~="scrollarea-scrollbar"] {
   opacity: 1;
   pointer-events: auto;
   /* While actively scrolling, drop the delay — keep the bar visible
@@ -212,8 +212,8 @@
     pointer-events 0s linear 0s;
   transition-behavior: allow-discrete;
 }
-[data-slot="scrollarea"][data-visibility="auto"]:not([data-scrolling])
-  [data-slot="scrollarea-scrollbar"] {
+[data-slot~="scrollarea"][data-visibility="auto"]:not([data-scrolling])
+  [data-slot~="scrollarea-scrollbar"] {
   /* Fade out when not scrolling. The delayed transition produces the
    * hide-delay behavior — bar stays at opacity 1 through the delay
    * window then fades over motion-base. `pointer-events` swaps to
@@ -233,32 +233,32 @@
 }
 
 /* type=always — bar is always visible. */
-[data-slot="scrollarea"][data-visibility="always"] [data-slot="scrollarea-scrollbar"] {
+[data-slot~="scrollarea"][data-visibility="always"] [data-slot~="scrollarea-scrollbar"] {
   opacity: 1;
   pointer-events: auto;
 }
 
 /* type=scroll — visible only while actively scrolling. */
-[data-slot="scrollarea"][data-visibility="scroll"] [data-slot="scrollarea-scrollbar"] {
+[data-slot~="scrollarea"][data-visibility="scroll"] [data-slot~="scrollarea-scrollbar"] {
   opacity: 0;
   pointer-events: none;
 }
-[data-slot="scrollarea"][data-visibility="scroll"][data-scrolling]
-  [data-slot="scrollarea-scrollbar"] {
+[data-slot~="scrollarea"][data-visibility="scroll"][data-scrolling]
+  [data-slot~="scrollarea-scrollbar"] {
   opacity: 1;
   pointer-events: auto;
 }
 
 /* type=hover — visible while pointer hovers the Root or the bar
  * itself, or while actively scrolling. */
-[data-slot="scrollarea"][data-visibility="hover"] [data-slot="scrollarea-scrollbar"] {
+[data-slot~="scrollarea"][data-visibility="hover"] [data-slot~="scrollarea-scrollbar"] {
   opacity: 0;
   pointer-events: none;
 }
-[data-slot="scrollarea"][data-visibility="hover"] [data-slot="scrollarea-scrollbar"][data-hovering],
-[data-slot="scrollarea"][data-visibility="hover"]:hover [data-slot="scrollarea-scrollbar"],
-[data-slot="scrollarea"][data-visibility="hover"][data-scrolling]
-  [data-slot="scrollarea-scrollbar"] {
+[data-slot~="scrollarea"][data-visibility="hover"] [data-slot~="scrollarea-scrollbar"][data-hovering],
+[data-slot~="scrollarea"][data-visibility="hover"]:hover [data-slot~="scrollarea-scrollbar"],
+[data-slot~="scrollarea"][data-visibility="hover"][data-scrolling]
+  [data-slot~="scrollarea-scrollbar"] {
   opacity: 1;
   pointer-events: auto;
 }
@@ -277,14 +277,14 @@
  * plus two attributes) so cascade order doesn't matter: when there is
  * no overflow on the axis, the bar is hidden no matter which
  * visibility selector tried to lift it. */
-[data-slot="scrollarea"][data-visibility="always"]
-  [data-slot="scrollarea-scrollbar"][data-orientation="vertical"]:not([data-has-overflow-y]),
-[data-slot="scrollarea"][data-visibility="always"]
-  [data-slot="scrollarea-scrollbar"][data-orientation="horizontal"]:not([data-has-overflow-x]),
-[data-slot="scrollarea"][data-visibility="hover"]
-  [data-slot="scrollarea-scrollbar"][data-orientation="vertical"]:not([data-has-overflow-y]),
-[data-slot="scrollarea"][data-visibility="hover"]
-  [data-slot="scrollarea-scrollbar"][data-orientation="horizontal"]:not([data-has-overflow-x]) {
+[data-slot~="scrollarea"][data-visibility="always"]
+  [data-slot~="scrollarea-scrollbar"][data-orientation="vertical"]:not([data-has-overflow-y]),
+[data-slot~="scrollarea"][data-visibility="always"]
+  [data-slot~="scrollarea-scrollbar"][data-orientation="horizontal"]:not([data-has-overflow-x]),
+[data-slot~="scrollarea"][data-visibility="hover"]
+  [data-slot~="scrollarea-scrollbar"][data-orientation="vertical"]:not([data-has-overflow-y]),
+[data-slot~="scrollarea"][data-visibility="hover"]
+  [data-slot~="scrollarea-scrollbar"][data-orientation="horizontal"]:not([data-has-overflow-x]) {
   opacity: 0;
   pointer-events: none;
 }
@@ -299,7 +299,7 @@
  * the relevant axis; we enforce a minimum so a thumb on a very long
  * list stays grabbable.
  */
-[data-slot="scrollarea-thumb"] {
+[data-slot~="scrollarea-thumb"] {
   background-color: color-mix(in oklch, var(--zeroship-label) 32%, transparent);
   border-radius: var(--zeroship-radius-full);
   transition: background-color var(--zeroship-motion-fast) var(--zeroship-motion-ease);
@@ -308,27 +308,27 @@
   flex-shrink: 0;
 }
 
-[data-slot="scrollarea-scrollbar"][data-orientation="vertical"] [data-slot="scrollarea-thumb"] {
+[data-slot~="scrollarea-scrollbar"][data-orientation="vertical"] [data-slot~="scrollarea-thumb"] {
   inline-size: 100%;
   min-block-size: var(--zeroship-space-6);
 }
-[data-slot="scrollarea-scrollbar"][data-orientation="horizontal"] [data-slot="scrollarea-thumb"] {
+[data-slot~="scrollarea-scrollbar"][data-orientation="horizontal"] [data-slot~="scrollarea-thumb"] {
   block-size: 100%;
   min-inline-size: var(--zeroship-space-6);
 }
 
 @media (hover: hover) {
-  [data-slot="scrollarea-scrollbar"]:hover [data-slot="scrollarea-thumb"] {
+  [data-slot~="scrollarea-scrollbar"]:hover [data-slot~="scrollarea-thumb"] {
     background-color: color-mix(in oklch, var(--zeroship-label) 50%, transparent);
   }
 }
-[data-slot="scrollarea-thumb"][data-dragging],
-[data-slot="scrollarea-thumb"]:active {
+[data-slot~="scrollarea-thumb"][data-dragging],
+[data-slot~="scrollarea-thumb"]:active {
   background-color: color-mix(in oklch, var(--zeroship-label) 64%, transparent);
 }
 
 /* ─── Corner ───────────────────────────────────────────────────────────── */
-[data-slot="scrollarea-corner"] {
+[data-slot~="scrollarea-corner"] {
   position: absolute;
   inset-inline-end: 0;
   inset-block-end: 0;
@@ -361,15 +361,15 @@
  * overrides — same `data-visibility="auto"` selector weight.
  */
 @media (prefers-reduced-motion: reduce) {
-  [data-slot="scrollarea-scrollbar"],
-  [data-slot="scrollarea"][data-visibility="auto"] [data-slot="scrollarea-scrollbar"],
-  [data-slot="scrollarea"][data-visibility="auto"][data-scrolling]
-    [data-slot="scrollarea-scrollbar"],
-  [data-slot="scrollarea"][data-visibility="scroll"] [data-slot="scrollarea-scrollbar"],
-  [data-slot="scrollarea"][data-visibility="hover"] [data-slot="scrollarea-scrollbar"] {
+  [data-slot~="scrollarea-scrollbar"],
+  [data-slot~="scrollarea"][data-visibility="auto"] [data-slot~="scrollarea-scrollbar"],
+  [data-slot~="scrollarea"][data-visibility="auto"][data-scrolling]
+    [data-slot~="scrollarea-scrollbar"],
+  [data-slot~="scrollarea"][data-visibility="scroll"] [data-slot~="scrollarea-scrollbar"],
+  [data-slot~="scrollarea"][data-visibility="hover"] [data-slot~="scrollarea-scrollbar"] {
     transition: none;
   }
-  [data-slot="scrollarea-thumb"] {
+  [data-slot~="scrollarea-thumb"] {
     transition: none;
   }
 }
@@ -381,25 +381,25 @@
  * above so the override pins to the same cascade rung.
  */
 @media (forced-colors: active) {
-  [data-slot="scrollarea-scrollbar"],
-  [data-slot="scrollarea"][data-visibility="auto"] [data-slot="scrollarea-scrollbar"],
-  [data-slot="scrollarea"][data-visibility="always"] [data-slot="scrollarea-scrollbar"],
-  [data-slot="scrollarea"][data-visibility="scroll"][data-scrolling]
-    [data-slot="scrollarea-scrollbar"],
-  [data-slot="scrollarea"][data-visibility="hover"]:hover [data-slot="scrollarea-scrollbar"] {
+  [data-slot~="scrollarea-scrollbar"],
+  [data-slot~="scrollarea"][data-visibility="auto"] [data-slot~="scrollarea-scrollbar"],
+  [data-slot~="scrollarea"][data-visibility="always"] [data-slot~="scrollarea-scrollbar"],
+  [data-slot~="scrollarea"][data-visibility="scroll"][data-scrolling]
+    [data-slot~="scrollarea-scrollbar"],
+  [data-slot~="scrollarea"][data-visibility="hover"]:hover [data-slot~="scrollarea-scrollbar"] {
     background-color: ButtonFace;
     border: var(--zeroship-selection-hairline) solid ButtonText;
   }
-  [data-slot="scrollarea-thumb"],
-  [data-slot="scrollarea-thumb"][data-dragging],
-  [data-slot="scrollarea-thumb"]:active {
+  [data-slot~="scrollarea-thumb"],
+  [data-slot~="scrollarea-thumb"][data-dragging],
+  [data-slot~="scrollarea-thumb"]:active {
     background-color: ButtonText;
   }
-  [data-slot="scrollarea-corner"] {
+  [data-slot~="scrollarea-corner"] {
     background-color: ButtonFace;
     border: var(--zeroship-selection-hairline) solid ButtonText;
   }
-  [data-slot="scrollarea-viewport"]:focus-visible {
+  [data-slot~="scrollarea-viewport"]:focus-visible {
     outline-color: Highlight;
   }
 }

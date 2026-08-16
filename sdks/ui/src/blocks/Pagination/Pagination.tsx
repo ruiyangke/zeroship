@@ -102,6 +102,8 @@ export interface PaginationProps extends Omit<
   disabled?: boolean;
   /** Accessible label on the wrapping `<nav>`. Default `"Pagination"`. */
   "aria-label"?: string;
+  /** Additional slot token appended to the root's `pagination` token. */
+  "data-slot"?: string;
 }
 
 /* ─── page-range model ─────────────────────────────────────────────────── */
@@ -210,6 +212,7 @@ const PaginationRoot = forwardRef<HTMLElement, PaginationProps>(
       disabled = false,
       className,
       "aria-label": ariaLabel = "Pagination",
+      "data-slot": dataSlot,
       ...rest
     },
     ref,
@@ -265,7 +268,7 @@ const PaginationRoot = forwardRef<HTMLElement, PaginationProps>(
       <nav
         {...rest}
         ref={ref as Ref<HTMLElement>}
-        data-slot="pagination"
+        data-slot={["pagination", dataSlot].filter(Boolean).join(" ")}
         data-size={size}
         aria-label={ariaLabel}
         className={className}
