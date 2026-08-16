@@ -366,7 +366,7 @@ fn check_control_auth(
     match token {
         Some(key)
             if !state.control_key.is_empty()
-                && zeroship_core::auth::validate_control_key(
+                && zeroship_core::auth::constant_time_eq(
                     key,
                     state.control_key.expose_secret(),
                 ) =>

@@ -25,7 +25,7 @@ fn check_auth(req: &web::HttpRequest, state: &AppState) -> Option<web::HttpRespo
         // GET to /internal/* could leak decrypted secrets to the network.
         Some(key)
             if !state.control_key.is_empty()
-                && zeroship_core::auth::validate_control_key(key, state.control_key.expose_secret()) =>
+                && zeroship_core::auth::constant_time_eq(key, state.control_key.expose_secret()) =>
         {
             None
         }

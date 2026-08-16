@@ -14,7 +14,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zeroship_authz::Scope;
-use zeroship_core::auth::{extract_bearer, validate_control_key};
+use zeroship_core::auth::{constant_time_eq, extract_bearer};
 use zeroship_core::device_grant::{
     PLATFORM_CLI_CLIENT_ID, PLATFORM_CLI_ISSUABLE_SCOPES, PLATFORM_TOKEN_MAX_TTL_SECS,
 };
@@ -738,7 +738,7 @@ fn authenticated_platform_mint_caller(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
     extract_bearer(header)
-        .filter(|provided| validate_control_key(provided, expected))
+        .filter(|provided| constant_time_eq(provided, expected))
         .map(|_| &CONTROL_MINT_CALLER)
 }
 

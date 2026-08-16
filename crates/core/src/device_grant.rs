@@ -320,7 +320,7 @@ mod tests {
     }
 
     #[test]
-    fn a_mint_url_that_could_redirect_the_control_key_is_refused() {
+    fn a_mint_url_that_could_redirect_the_platform_mint_key_is_refused() {
         // Each case is a way the resolved destination could differ from the
         // host an operator reading the value would name.
         assert_eq!(platform_mint_base_url(""), Err(MintUrlError::Missing));

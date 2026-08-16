@@ -14,7 +14,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 
-use crate::auth::validate_control_key;
+use crate::auth::constant_time_eq;
 
 /// Generate a 32-byte CSPRNG verifier, base64url-encoded (no padding).
 #[must_use]
@@ -36,7 +36,7 @@ pub fn s256_challenge(verifier: &str) -> String {
 pub fn verify_s256(verifier: &str, expected_challenge: &str) -> bool {
     is_valid_verifier(verifier)
         && is_valid_s256_challenge(expected_challenge)
-        && validate_control_key(&s256_challenge(verifier), expected_challenge)
+        && constant_time_eq(&s256_challenge(verifier), expected_challenge)
 }
 
 /// RFC 7636 §4.1 verifier syntax: 43-128 unreserved ASCII characters.
