@@ -17,8 +17,9 @@ convergence → R5**. Commit-only.
 > the eventual target — the knowledge is not lost, only postponed.
 
 The console / app-builder becomes a **regular zeroship app on the standard dev+prod runtime** —
-authored with `@zeroship/{db,rpc,kv,ui}`, built by `@zeroship/vite-plugin` into a `.zship`, deployed
-to blob storage, route-synced, dispatched by the gateway, run in the V8 worker — with its
+authored with `@zeroship/{db,rpc,kv}` and app-local UI components, built by
+`@zeroship/vite-plugin` into a `.zship`, deployed to blob storage, route-synced,
+dispatched by the gateway, run in the V8 worker — with its
 creator/control-plane authority granted **only** through a narrowly-gated, BFF-minted, identity-bound
 capability that no ordinary creator app can obtain. Shorthand: *"regular app on the standard runtime,
 first-party privilege tier."* Not *"regular app that magically inherits control-plane power."*
@@ -31,8 +32,9 @@ capabilities** promoted to its prerequisite.
 
 The console is *already* authored to the ZS-standard contract — `apps/zeroship-builder/src/server.ts`
 is discovered by the vite-plugin (`export { builderFetch as fetch }` + `"use server"` modules), already
-uses `@zeroship/kv` + `@zeroship/ui`, and `package.json` already has `"deploy": "vite build && zeroship
-deploy"`. Its heavy subsystems (sandbox, AI codegen) are already network-bound RPC procedures proxying
+uses `@zeroship/kv`, owns its UI components locally, and has `"deploy": "vite build && zeroship
+deploy"` in `package.json`. Its heavy subsystems (sandbox, AI codegen) are
+already network-bound RPC procedures proxying
 over `fetch` to the external `zeroship-sandbox` controller + LLM APIs (chat is SSE). Nothing spawns
 processes or touches the filesystem inside the worker. **So this is a cutover, not a port** — the
 authoring/dev side is essentially done; the work is the privilege layer, the kernel skew, the bootstrap

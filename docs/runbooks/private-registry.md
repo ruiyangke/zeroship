@@ -65,7 +65,10 @@ The script builds the SDK workspace first, then publishes the SDK package set in
 Published packages:
 
 - `@zeroship/types`
+- `@zeroship/control`
+- `@zeroship/mcp`
 - `@zeroship/db`
+- `@zeroship/migrate`
 - `@zeroship/bootstrap`
 - `@zeroship/auth`
 - `@zeroship/kv`
@@ -73,7 +76,6 @@ Published packages:
 - `@zeroship/rpc`
 - `@zeroship/server`
 - `@zeroship/react`
-- `@zeroship/ui`
 - `@zeroship/payments`
 - `@zeroship/eslint-config`
 - `@zeroship/vite-plugin`
@@ -86,7 +88,6 @@ Skipped package:
 ## Verify Registry Resolution
 
 ```bash
-npm view @zeroship/ui version --registry http://localhost:4873
 npm view @zeroship/db version --registry http://localhost:4873
 npm view @zeroship/rpc version --registry http://localhost:4873
 ```
@@ -98,8 +99,8 @@ TMPDIR="$(mktemp -d)"
 cd "$TMPDIR"
 printf '{"name":"zeroship-registry-smoke","version":"0.0.0","private":true,"type":"module"}\n' > package.json
 printf '@zeroship:registry=http://localhost:4873\n' > .npmrc
-pnpm add @zeroship/ui
-node --input-type=module -e "console.log(import.meta.resolve('@zeroship/ui'))"
+pnpm add @zeroship/db
+node --input-type=module -e "console.log(import.meta.resolve('@zeroship/db'))"
 ```
 
 The resolved path should point inside the throwaway directory's `node_modules`, not back into the monorepo.
@@ -115,8 +116,8 @@ generated app workspace as `.npmrc` whenever `ZEROSHIP_SDK_REGISTRY` is set:
 
 Do not put publish credentials in generated apps or sandbox workspaces. The
 workspace `.npmrc` intentionally sets only the `@zeroship` scope; the default
-registry remains npmjs so public dependencies such as React, Vite, and Base UI
-continue to resolve normally.
+registry remains npmjs so public dependencies such as React, Vite, Base UI, and
+Tailwind continue to resolve normally.
 
 Local Builder env:
 
@@ -158,12 +159,10 @@ registry left with the sandbox backend: both it and the sandbox bring-up script
 it called now live in the standalone `zeroship-sandbox` project. Run it from
 that checkout, pointed at the Verdaccio started above.
 
-What it covers there, for reference: publish the SDKs to Verdaccio, create a
-sandbox through the real backend client, and run `pnpm install` plus `pnpm build`
-for a minimal Vite app importing from `@zeroship/ui` - asserting that the sandbox
-workspace `.npmrc` carries only the scoped `@zeroship` line, that
-`pnpm config get @zeroship:registry` resolves to Verdaccio, and that the build
-output contains ZeroShip UI classes such as `zs-theme-root` or `zs-button`.
+What it covers there, for reference: publish the current SDK set to Verdaccio,
+create a sandbox through the real backend client, verify its workspace uses the
+scoped registry, and run `pnpm install` plus `pnpm build` for the fixture. The
+harness asserts that SDK packages resolve from Verdaccio inside the sandbox.
 
 The registry side of that flow is exercisable from this repo alone with the
 `pnpm publish:sdks` and throwaway-consumer steps above.

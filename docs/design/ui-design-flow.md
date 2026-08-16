@@ -47,13 +47,14 @@ surface owns it).
 - **zeroship owner:** **PM** agent (plan canvas) + the data-brief the Wizard emits.
 
 ### 3. Design
-- **Purpose:** turn requirements into interfaces — **composed from a design system**, not
-  hand-drawn.
+- **Purpose:** turn requirements into interfaces composed through an app-owned
+  component layer built on accessible headless parts, not one-off controls.
 - **Artifacts:** user flows → wireframes → hi-fi mockups → prototypes. Every screen
   specifies all **states** (empty / loading / error / success / partial), **responsive**
   breakpoints, **content / UX writing**, motion, **accessibility**, theming, i18n.
-- **zeroship owner:** **Builder** agent, composing from the design-system substrate (see
-  §3). The agent must *compose governed primitives*, never re-roll buttons/inputs/layout.
+- **zeroship owner:** **Builder** agent, composing Base UI parts through local
+  components and applying Tailwind where the markup is rendered (see §3). The
+  agent reuses the app's component layer instead of re-rolling controls.
 
 ### 4. Validate
 - **Purpose:** prove it's good before it ships — gated.
@@ -64,8 +65,8 @@ surface owns it).
 
 ### 5. Build / handoff
 - **Purpose:** implement with parity to the design.
-- **Artifacts:** design tokens + component library + Storybook + redlines; component-driven
-  implementation; design QA on the built artifact.
+- **Artifacts:** design tokens, app-local components, interaction examples, and
+  redlines; component-driven implementation; design QA on the built artifact.
 - **zeroship owner:** **Builder** (writes files in the sandbox) → **deploy tool**
   (Reviewer-gated build → `.zship` → deploy).
 
@@ -81,9 +82,9 @@ surface owns it).
 The stages above are universal. These pillars are what make the flow enterprise-grade —
 and each is a design lever for zeroship:
 
-1. **Design system = single source of truth.** Carbon (IBM), Polaris (Shopify), Fluent
+1. **UI conventions = single source of truth.** Carbon (IBM), Polaris (Shopify), Fluent
    (MS), Lightning (Salesforce): tokens → primitives → patterns → page templates.
-   Consistency + velocity at scale; compose, don't redraw.
+   In zeroship apps that source lives with the app: compose, don't redraw.
 2. **Multi-role and gated.** PM, research, product design, content design, a11y, design
    ops, eng — with **hard gates** (design crit, a11y audit, brand/legal, security) before
    ship.
@@ -102,7 +103,7 @@ define → design → validate → ship → measure, collapsed to minutes and on
 
 | Enterprise pillar | zeroship-builder mechanism |
 |---|---|
-| Design system = source of truth | `@zeroship/ui` + `@zeroship/ui/styles.css` + `ThemeProvider` are baked into generated React apps; Builder composes governed primitives (`Button`, `Card`, `Dialog`, `Select`, `Tabs`, `Input`, `Field`, `DataTable`, `Badge`, `Toast`, `EmptyState`, `Spinner`, `Checkbox`, `Switch`, `RadioGroup`, `Tooltip`, `Popover`, `Menu`, `Accordion`, `Separator`) and semantic `--zs-*` tokens, never hand-rolls covered controls |
+| UI system = source of truth | Apps compose Base UI parts through local components and apply Tailwind where rendered. `examples/issue-tracker/src/ui/` is the current example; zeroship injects no UI SDK or external theme stylesheet. |
 | Gated, multi-role | Critic dimension keys (`composed-from-system`, `states`, `responsive`, `accessibility`, `content`, `correctness`, `security`, `performance`, `code_health`) → Reviewer hard gate |
 | Research / definition | Wizard (discovery) + PM (IA / plan) |
 | States + a11y + responsive by default | Scaffold templates ship empty/loading/error states, WCAG defaults, breakpoints — the agent *inherits* them |
@@ -111,9 +112,9 @@ define → design → validate → ship → measure, collapsed to minutes and on
 **The pattern, per generated app:**
 1. **Wizard** clarifies the brief + success intent (Discover).
 2. **PM** sets scope + IA (Define).
-3. **Builder** composes the UI from the `@zeroship/ui` design system + templates, imports
-   `@zeroship/ui/styles.css` once, wraps the root in `ThemeProvider`, and fills in all
-   states, responsive, a11y, content (Design + Build).
+3. **Builder** composes Base UI through the app's local component layer,
+   applies Tailwind at render sites, and fills in all states, responsive,
+   a11y, and content requirements (Design + Build).
 4. **Critic** runs the validation dimensions in a loop with the Builder; **Reviewer**
    hard-gates before deploy with blocker kinds `secrets_in_client`, `injection`, `xss`,
    `dangerous_html_user_content`, `missing_critical_states`, `serious_accessibility`,
@@ -121,12 +122,11 @@ define → design → validate → ship → measure, collapsed to minutes and on
    and `correctness` (Validate).
 5. **Deploy tool** ships the built artifact; **SRE** + scorecard measure (Measure).
 
-**The highest-leverage gap to close (today):** pillar #1 — the generated apps are written
-largely from scratch each prompt, so quality is LLM-variable. Giving the Builder a governed
-**design-system substrate** (tokens + primitives + page templates) to compose from is what
-turns "functional but inconsistent" into "polished by default" — the enterprise
-"consistency at scale" pillar applied to AI generation. This is the moat: *every creator's
-app looks pro by default.*
+**The highest-leverage gap to close (today):** generated apps are still written
+largely from scratch each prompt, so quality is LLM-variable. The Builder needs
+coherent app-local tokens, components, and page patterns. Base UI supplies
+accessible parts and state attributes; Tailwind keeps visual rules at the
+render site. Templates can seed that structure without making it a platform SDK.
 
 ---
 
@@ -134,7 +134,8 @@ app looks pro by default.*
 
 A generated app should not deploy until it clears these — the Critic/Reviewer enforce them:
 
-- [ ] **Composed from the design system** (no ad-hoc primitives where a system component exists).
+- [ ] **Composed through the app's UI layer** (reuse local components and
+      accessible headless parts instead of duplicating controls).
 - [ ] **All states present** — empty, loading, error, success, partial.
 - [ ] **Responsive** — works at mobile / tablet / desktop breakpoints.
 - [ ] **Accessible** — WCAG AA: semantics, focus order, contrast, keyboard, labels; no
@@ -148,10 +149,10 @@ A generated app should not deploy until it clears these — the Critic/Reviewer 
 
 ## 5 · Maintenance
 
-Living doc. The `@zeroship/ui` design-system substrate is the generated-app UI contract:
-generated React apps declare `@zeroship/ui` + `react` + `react-dom`, import
-`@zeroship/ui/styles.css` once, wrap the root in `ThemeProvider`, and compose the primitives
-listed in §3 with semantic `--zs-*` tokens.
+Living doc. zeroship publishes no UI SDK or external theme contract. Generated
+React apps own their UI dependencies, local components, tokens, and styles. The
+issue tracker is the current reference: it uses Base UI 1.5.0 in `src/ui/` and
+styles the app with Tailwind.
 
 Current Critic dimension keys: `composed-from-system`, `states`, `responsive`,
 `accessibility`, `content`, `correctness`, `security`, `performance`, `code_health`.
