@@ -39,6 +39,8 @@
     "typescript": "catalog:",
     "vite": "catalog:",
     "vitest": "^4.1.7",
-    "zeroship": "workspace:*"
+    "zeroship": "workspace:*",
+    "tailwindcss": "catalog:",
+    "@tailwindcss/vite": "catalog:"
   }
 }

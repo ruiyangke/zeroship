@@ -1,0 +1,84 @@
+/*
+ * Tailwind, wired to THIS theme's tokens.
+ *
+ * `@theme inline` makes every utility resolve to an existing custom property
+ * rather than defining a parallel value. `bg-canvas` compiles to
+ * `background-color: var(--it-canvas)`, so the token file stays the only place
+ * a colour is decided and the two cannot drift.
+ *
+ * That is the whole reason this file exists. Writing a Tailwind scale beside
+ * the tokens would recreate the bug this app already had: src/styles.css
+ * defined eighteen rival tokens and, because it was imported second, quietly
+ * beat the theme -- the deliberate design lost to the accidental one. A
+ * duplicated scale is the same trap with a build step in front of it.
+ *
+ * SCOPE: utilities are for the app's OWN markup. Library components render
+ * their internals inside @zeroship/ui, so the app cannot put a class on them;
+ * those are styled by [data-slot~="..."] rules in ./components. Do not reach
+ * for @apply inside those selectors -- it would be Tailwind in name only and
+ * would give up the co-location that makes utilities worth having.
+ */
+@import "tailwindcss";
+
+@theme inline {
+  /* Surfaces and ink. Named for their role, not their colour, so a utility
+     reads as intent: bg-surface, text-ink-muted. */
+  --color-canvas: var(--it-canvas);
+  --color-surface: var(--it-surface);
+  --color-surface-sunken: var(--it-surface-sunken);
+  --color-surface-hover: var(--it-surface-hover);
+  --color-surface-selected: var(--it-surface-selected);
+
+  --color-ink: var(--it-ink);
+  --color-ink-secondary: var(--it-ink-secondary);
+  --color-ink-muted: var(--it-ink-muted);
+  --color-ink-disabled: var(--it-ink-disabled);
+
+  --color-line: var(--it-line);
+  --color-line-strong: var(--it-line-strong);
+  --color-line-subtle: var(--it-line-subtle);
+
+  --color-accent: var(--it-accent-500);
+  --color-accent-strong: var(--it-accent-600);
+  --color-accent-soft: var(--it-accent-50);
+
+  /* Status hues. Only these carry meaning; there is deliberately no full
+     palette here, because a utility like `text-purple-300` would let the
+     chrome pick up colour the design says it must not have. */
+  --color-danger: var(--it-red-500);
+  --color-danger-soft: var(--it-red-50);
+  --color-warning: var(--it-amber-500);
+  --color-warning-soft: var(--it-amber-50);
+  --color-success: var(--it-green-500);
+  --color-success-soft: var(--it-green-50);
+  --color-info: var(--it-blue-500);
+  --color-info-soft: var(--it-blue-50);
+
+  /* Type. The scale stops at the sizes the design actually uses, so there is
+     no text-9xl to reach for on a dense tool. */
+  --font-sans: var(--it-font);
+  --font-mono: var(--it-font-mono);
+
+  --text-xs: var(--it-text-xs);
+  --text-sm: var(--it-text-sm);
+  --text-base: var(--it-text-base);
+  --text-md: var(--it-text-md);
+  --text-lg: var(--it-text-lg);
+  --text-xl: var(--it-text-xl);
+  --text-2xl: var(--it-text-2xl);
+
+  /* Space. Tailwind multiplies --spacing by the numeric suffix, so a 4px base
+     gives p-1 = 4px, p-2 = 8px, p-4 = 16px -- the same 4px grid the tokens
+     define, expressed the way Tailwind users expect. */
+  --spacing: 0.25rem;
+
+  --radius-sm: var(--it-radius-sm);
+  --radius: var(--it-radius);
+  --radius-lg: var(--it-radius-lg);
+  --radius-full: var(--it-radius-full);
+
+  --shadow-popup: var(--it-shadow-popup);
+  --shadow-dialog: var(--it-shadow-dialog);
+
+  --ease-out: var(--it-ease);
+}

@@ -65,6 +65,30 @@ h2 { font-size: var(--it-text-lg); }
 h3 { font-size: var(--it-text-md); }
 h4 { font-size: var(--it-text-base); }
 
+/*
+ * Authored content keeps its list markers.
+ *
+ * Tailwind's preflight sets `ol, ul, menu { list-style: none }` and zeroes
+ * their padding, which is right for chrome -- a nav is a list of links, not a
+ * bulleted list -- and wrong for prose. Comments and descriptions are written
+ * in the rich-text editor, whose toolbar offers bullet and numbered lists, so
+ * without this a list a person deliberately made renders as flat paragraphs
+ * and the numbers they typed are gone.
+ *
+ * Scoped to the containers that hold authored markup rather than reverting
+ * preflight globally, because everywhere else the reset is what we want.
+ */
+.rich-text ul,
+.rich-text-input ul {
+  list-style: disc;
+  padding-inline-start: var(--it-space-5);
+}
+.rich-text ol,
+.rich-text-input ol {
+  list-style: decimal;
+  padding-inline-start: var(--it-space-5);
+}
+
 a {
   color: var(--it-link);
   text-decoration: none;

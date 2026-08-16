@@ -1,4 +1,8 @@
 @import "./tokens.css";
+/* Tailwind sits BETWEEN tokens and components: it needs the tokens to exist
+   for @theme inline, and the component slot rules should still win over a
+   stray utility on a wrapper. */
+@import "./tailwind.css";
 @import "./base.css";
 
 /* Foundations first; composed components follow their primitives. */

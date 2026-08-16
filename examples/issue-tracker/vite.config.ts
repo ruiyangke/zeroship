@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
 import { zeroship } from "@zeroship/vite-plugin";
 
 // Dev-runtime port. Every example defaults to 3001 and they collide OPAQUELY
@@ -19,7 +20,7 @@ const webPort = Number(process.env.ISSUE_TRACKER_WEB_PORT ?? 5183);
 export default defineConfig({
   // Migration-first build: the plugin reads `migrations/` and the generated
   // descriptor artifacts. No schema plugin option is needed.
-  plugins: [react(), zeroship({ devServerPort })],
+  plugins: [tailwindcss(), react(), zeroship({ devServerPort })],
   resolve: {
     // ONE React instance, always.
     //

@@ -711,6 +711,9 @@ importers:
       '@playwright/test':
         specifier: 1.58.2
         version: 1.58.2
+      '@tailwindcss/vite':
+        specifier: 'catalog:'
+        version: 4.2.4(vite@8.0.10(@types/node@22.19.17)(esbuild@0.28.0)(jiti@2.6.1)(tsx@4.21.0)(yaml@2.8.4))
       '@types/react':
         specifier: 'catalog:'
         version: 19.2.14
@@ -729,6 +732,9 @@ importers:
       jsdom:
         specifier: ^29.1.1
         version: 29.1.1(@noble/hashes@1.8.0)
+      tailwindcss:
+        specifier: 'catalog:'
+        version: 4.2.4
       typescript:
         specifier: 'catalog:'
         version: 5.9.3
