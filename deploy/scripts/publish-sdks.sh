@@ -22,7 +22,6 @@ publish_packages=(
   "sdks/rpc"
   "sdks/server"
   "sdks/react"
-  "sdks/ui"
   "sdks/payments"
   "sdks/eslint-config"
   "sdks/vite-plugin"
