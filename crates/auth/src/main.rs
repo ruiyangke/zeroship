@@ -8,8 +8,8 @@ use std::sync::Arc;
 use clap::Parser;
 use compio_postgres::{connect, NoTls};
 use zeroship_core::config::{
-    bootstrap_or_exit, require_nonempty, validate_master_key_material, validate_secret_material,
-    validate_stash_key, CheckConfigReport, CheckValue,
+    bootstrap_or_exit, validate_master_key_material, validate_platform_mint_key,
+    validate_secret_material, validate_stash_key, CheckConfigReport, CheckValue,
 };
 use zeroship_core::oidc_verify::JwksCache;
 
@@ -317,7 +317,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// Propagates the first validator's message unchanged.
 fn validate_startup_secrets(cfg: &AuthConfig) -> Result<(), String> {
     validate_secret_material(&cfg.settings.platform_mint_key, |value| {
-        require_nonempty(PLATFORM_MINT_KEY_LABEL, value.trim())
+        validate_platform_mint_key(PLATFORM_MINT_KEY_LABEL, value)
     })?;
     validate_secret_material(&cfg.settings.stash_signing_key, |value| {
         validate_stash_key(STASH_SIGNING_KEY_LABEL, value)
