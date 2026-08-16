@@ -1,4 +1,4 @@
-import { Button, Cluster, Input } from "@zeroship/ui";
+import { Button, Input } from "@zeroship/ui";
 import { EditorContent, useEditor, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
@@ -211,7 +211,7 @@ function LinkControl({ editor }: { editor: Editor }) {
         }}
       />
       {open ? (
-        <Cluster gap={1} align="center">
+        <div className="flex min-w-0 flex-row flex-wrap items-center justify-start gap-1">
           <Input
             aria-label="Link URL"
             placeholder="https://example.com"
@@ -233,7 +233,7 @@ function LinkControl({ editor }: { editor: Editor }) {
               That link was refused. Use http, https or mailto.
             </FieldError>
           ) : null}
-        </Cluster>
+        </div>
       ) : null}
     </>
   );
@@ -293,10 +293,7 @@ export function RichTextEditor({
       {/* Shown once the editor has focus or content. A blurred, empty
           composer needs no formatting controls. */}
       {!collapsible || focused || hasText(value) ? (
-      <Cluster
-        gap={1}
-        className="border-b border-line bg-surface-sunken px-1 py-1"
-      >
+      <div className="flex min-w-0 flex-row flex-wrap items-center justify-start gap-1 border-b border-line bg-surface-sunken px-1 py-1">
         <ToolbarButton
           editor={editor}
           label="B"
@@ -380,7 +377,7 @@ export function RichTextEditor({
           disabled={!editor.can().redo()}
           onClick={() => editor.chain().focus().redo().run()}
         />
-      </Cluster>
+      </div>
       ) : null}
       <RichTextContent editor={editor} />
     </AppFieldShell>

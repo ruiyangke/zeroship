@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Button, Stack } from "@zeroship/ui";
+import { Button } from "@zeroship/ui";
 
 import { addWatcher, removeWatcher } from "../api";
 import { invalidatedBy } from "../lib/query-keys";
@@ -70,7 +70,7 @@ export function WatchingPanel() {
       {watching.length === 0 ? (
         <Hint>Not watching anyone.</Hint>
       ) : (
-        <Stack gap={1}>
+        <div className="flex min-w-0 flex-col flex-nowrap items-stretch justify-start gap-1 [&>*]:min-h-0 [&>*]:min-w-0">
           <MemberList>
             {watching.map((row) => (
               <MemberListItem key={row.id}>
@@ -87,7 +87,7 @@ export function WatchingPanel() {
               </MemberListItem>
             ))}
           </MemberList>
-        </Stack>
+        </div>
       )}
 
       <Button variant="gray" size="sm" disabled={busy} onClick={() => setPicking((v) => !v)}>

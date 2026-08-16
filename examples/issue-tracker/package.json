@@ -13,6 +13,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@base-ui/react": "^1.5.0",
     "@tanstack/react-query": "catalog:",
     "@tiptap/extensions": "3.30.0",
     "@tiptap/markdown": "3.30.0",

@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { Link, NavLink } from "react-router-dom";
-import { AppShell, Button, Cluster } from "@zeroship/ui";
+import { AppShell, Button } from "@zeroship/ui";
 
 import { UnreadBadge, UserChip } from "./SessionChips";
 import type { Session } from "./session";
@@ -66,36 +66,40 @@ export function Shell({
   return (
     <AppShell>
       <AppShell.Header>
-        <Cluster justify="between" align="center" style={{ inlineSize: "100%" }}>
-          <Cluster align="center" gap={4}>
+        <div
+          className="flex min-w-0 flex-row flex-wrap items-center justify-between gap-2"
+          style={{ inlineSize: "100%" }}
+        >
+          <div className="flex min-w-0 flex-row flex-wrap items-center justify-start gap-4">
             <Link
               to="/issues"
               className="text-[1rem] font-bold tracking-[-0.01em] text-ink! no-underline! hover:text-accent-strong! hover:no-underline!"
             >
               Issue Tracker
             </Link>
-            {/* asChild: the nav landmark IS the row, so there is no wrapper
-                div between <nav> and the links it labels. */}
-            <Cluster asChild align="center" gap={1}>
-              <nav aria-label="Primary">
-                {LINKS.filter((link) => signedIn || !link.identity).map((link) => (
-                  <NavLink
-                    key={link.href}
-                    to={link.href}
-                    className="inline-flex items-center whitespace-nowrap rounded-lg px-2 py-1 text-md leading-[1.3] font-medium text-ink-secondary! no-underline! hover:bg-current/8! hover:text-ink! hover:no-underline! aria-[current=page]:bg-current/12! aria-[current=page]:font-semibold aria-[current=page]:text-ink!"
-                    // NavLink sets aria-current="page" itself, so the styling
-                    // rule and the accessible state cannot drift apart -- and
-                    // the app no longer threads a route name down here to work
-                    // out which link is current.
-                  >
-                    <span>{link.label}</span>
-                    {link.href === "/dashboard" ? <UnreadBadge signedIn={signedIn} /> : null}
-                  </NavLink>
-                ))}
-              </nav>
-            </Cluster>
-          </Cluster>
-          <Cluster align="center" gap={2}>
+            {/* The nav landmark is the row, with no wrapper between it and the
+                links it labels. */}
+            <nav
+              aria-label="Primary"
+              className="flex min-w-0 flex-row flex-wrap items-center justify-start gap-1"
+            >
+              {LINKS.filter((link) => signedIn || !link.identity).map((link) => (
+                <NavLink
+                  key={link.href}
+                  to={link.href}
+                  className="inline-flex items-center whitespace-nowrap rounded-lg px-2 py-1 text-md leading-[1.3] font-medium text-ink-secondary! no-underline! hover:bg-current/8! hover:text-ink! hover:no-underline! aria-[current=page]:bg-current/12! aria-[current=page]:font-semibold aria-[current=page]:text-ink!"
+                  // NavLink sets aria-current="page" itself, so the styling
+                  // rule and the accessible state cannot drift apart -- and
+                  // the app no longer threads a route name down here to work
+                  // out which link is current.
+                >
+                  <span>{link.label}</span>
+                  {link.href === "/dashboard" ? <UnreadBadge signedIn={signedIn} /> : null}
+                </NavLink>
+              ))}
+            </nav>
+          </div>
+          <div className="flex min-w-0 flex-row flex-wrap items-center justify-start gap-2">
             {/* asChild, not render: this library composes onto the child element,
                 so the button styling lands on a real anchor and "New issue"
                 stays a link you can middle-click.
@@ -111,8 +115,8 @@ export function Shell({
               </Button>
             ) : null}
             <UserChip session={session} />
-          </Cluster>
-        </Cluster>
+          </div>
+        </div>
       </AppShell.Header>
 
       <AppShell.Main className="pt-5!">{children}</AppShell.Main>

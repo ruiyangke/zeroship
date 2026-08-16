@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { Link } from "react-router-dom";
-import { Badge, Grid, PageHeader, Tabs } from "@zeroship/ui";
+import { Badge, PageHeader, Tabs } from "@zeroship/ui";
 import { ALL_ISSUE_COLUMNS, IssueResultsTable } from "../components/IssueResultsTable";
 import { DashboardSection } from "../components/DashboardSection";
 import { NotificationsPanel } from "../components/NotificationsPanel";
@@ -276,7 +276,7 @@ function DashboardBody() {
       {/* Three short lists across the page rather than three more full-width
           bands down it. None of them is ever more than a handful of lines, and
           stacked they were what pushed the tables above them out of reach. */}
-      <Grid minColWidth="24rem" gap={4}>
+      <div className="grid min-w-0 grid-flow-row grid-cols-[repeat(auto-fit,minmax(min(24rem,100%),1fr))] items-stretch gap-4 [&>*]:min-w-0">
         <DashboardSection>
           <SectionHeading>Requests waiting on me</SectionHeading>
           <FlagRequestList entries={requestedOfMe} emptyLabel="No open flag requests directed at you." />
@@ -288,7 +288,7 @@ function DashboardBody() {
         </DashboardSection>
 
         <WatchingPanel />
-      </Grid>
+      </div>
     </Page>
   );
 }

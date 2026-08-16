@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { Avatar, Button, Checkbox, Cluster, Tag } from "@zeroship/ui";
+import { Avatar, Button, Checkbox, Tag } from "@zeroship/ui";
 
 import { RichText, RichTextEditor, hasText } from "../RichText";
 import { FieldError, Muted } from "../AppPrimitives";
@@ -189,7 +189,7 @@ function CommentRow({
       {editing ? (
         <div className="flex flex-col gap-2">
           <RichTextEditor value={draft} onChange={setDraft} ariaLabel="Edit comment" />
-          <Cluster gap={2} align="center">
+          <div className="flex min-w-0 flex-row flex-wrap items-center justify-start gap-2">
             <Button variant="filled" size="sm" disabled={busy} onClick={() => void save()}>
               Save
             </Button>
@@ -202,7 +202,7 @@ function CommentRow({
             >
               Cancel
             </Button>
-          </Cluster>
+          </div>
         </div>
       ) : (
         <div className="m-0 [&_.rich-text>*]:my-2 [&_.rich-text>*:first-child]:mt-0 [&_.rich-text>*:last-child]:mb-0">

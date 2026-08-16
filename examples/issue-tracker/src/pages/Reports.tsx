@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { Badge, Cluster, Field, NumberField, PageHeader, Progress, Select, StatCard } from "@zeroship/ui";
+import { Badge, Field, NumberField, PageHeader, Progress, Select, StatCard } from "@zeroship/ui";
 import {
   useProducts,
   useReportByAssignee,
@@ -125,11 +125,11 @@ function SummarySection({ productId }: { productId: string }) {
           {/* StatCards rather than hand-rolled stat divs. Three of them: the
               closed count was derivable from the other two and a reader should
               not have to do the subtraction to answer "how are we doing". */}
-          <Cluster gap={3}>
+          <div className="flex min-w-0 flex-row flex-wrap items-center justify-start gap-3">
             <StatCard label="Total" value={summary.total} />
             <StatCard label="Open" value={summary.open} />
             <StatCard label="Closed" value={summary.total - summary.open} />
-          </Cluster>
+          </div>
           <div className="mt-2 grid grid-cols-1 gap-5 min-[901px]:grid-cols-2 min-[1101px]:grid-cols-4">
             <CountBreakdown title="By status" counts={summary.byStatus} />
             {/* Kind sits BESIDE severity, not folded into it. While a feature
@@ -313,11 +313,11 @@ function TimeToResolveSection({ productId, days }: { productId: string; days: nu
                 summary had already replaced. The heading also names its
                 window, because these three are the only numbers on the page
                 that are NOT all-time and nothing said so. */}
-            <Cluster gap={3}>
+            <div className="flex min-w-0 flex-row flex-wrap items-center justify-start gap-3">
               <StatCard label="Resolved" value={data.resolvedCount} />
               <StatCard label="Average" value={humanMs(data.averageMs ?? 0)} />
               <StatCard label="Median" value={humanMs(data.medianMs ?? 0)} />
-            </Cluster>
+            </div>
           </ReportSection>
         )
       }

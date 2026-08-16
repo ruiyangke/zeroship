@@ -1,6 +1,5 @@
 import { useMemo, useState, type ComponentPropsWithoutRef } from "react";
-import { Cluster,
-  Badge,
+import { Badge,
   Banner,
   Button,
   Checkbox,
@@ -13,7 +12,6 @@ import { Cluster,
   PageHeader,
   Pagination,
   Select,
-  Stack,
   Tabs,
 } from "@zeroship/ui";
 import {
@@ -198,7 +196,7 @@ function NewProductDialog() {
                   submit();
                 }}
               >
-                <Stack gap={3}>
+                <div className="flex min-w-0 flex-col flex-nowrap items-stretch justify-start gap-3 [&>*]:min-h-0 [&>*]:min-w-0">
                   <Field>
                     <Field.Label>Name</Field.Label>
                     <Input value={name} onChange={(e) => setName(e.target.value)} required />
@@ -242,7 +240,7 @@ function NewProductDialog() {
                   {create.error ? (
                     <FieldError>{errorMessage(create.error)}</FieldError>
                   ) : null}
-                </Stack>
+                </div>
               </form>
             </Dialog.Body>
             <Dialog.Footer>
@@ -495,11 +493,11 @@ function ProductEditorBody({ detail }: { detail: ProductDetail }) {
   );
 
   return (
-    <Stack gap={4}>
+    <div className="flex min-w-0 flex-col flex-nowrap items-stretch justify-start gap-4 [&>*]:min-h-0 [&>*]:min-w-0">
       {/* LABELLED. These two were bare <Input>s with neither a label nor a
           placeholder -- the only thing distinguishing the name field from the
           description field was which one had more text in it. */}
-      <Stack gap={3}>
+      <div className="flex min-w-0 flex-col flex-nowrap items-stretch justify-start gap-3 [&>*]:min-h-0 [&>*]:min-w-0">
         <Field>
           <Field.Label>Name</Field.Label>
           <Input value={name} onChange={(e) => setName(e.target.value)} />
@@ -562,7 +560,7 @@ function ProductEditorBody({ detail }: { detail: ProductDetail }) {
               Delete product
             </Button>
           ) : (
-            <Stack gap={2}>
+            <div className="flex min-w-0 flex-col flex-nowrap items-stretch justify-start gap-2 [&>*]:min-h-0 [&>*]:min-w-0">
               {/* The server refusal minus its last sentence. That sentence tells
                   an API caller to pass `deleteIssues`, which is right for a
                   script and wrong here: the buttons below ARE the
@@ -571,7 +569,7 @@ function ProductEditorBody({ detail }: { detail: ProductDetail }) {
                   their choice. The count, which is the part that matters,
                   stays. */}
               <FieldError>{confirming.replace(/\s*Pass deleteIssues to confirm\.?$/, "")}</FieldError>
-              <Cluster gap={2}>
+              <div className="flex min-w-0 flex-row flex-wrap items-center justify-start gap-2">
                 <Button
                   variant="filled"
                   intent="destructive"
@@ -584,11 +582,11 @@ function ProductEditorBody({ detail }: { detail: ProductDetail }) {
                 <Button variant="plain" size="sm" onClick={() => setConfirming(null)}>
                   Keep it
                 </Button>
-              </Cluster>
-            </Stack>
+              </div>
+            </div>
           )}
         </div>
-      </Stack>
+      </div>
 
       {/* Stacked, not three columns. The 3-up grid was laid out for the width
           of a page; here each one is a short list over a one-field form and
@@ -598,7 +596,7 @@ function ProductEditorBody({ detail }: { detail: ProductDetail }) {
         <VersionsAdmin productId={product.id} versions={versions} />
         <MilestonesAdmin productId={product.id} milestones={milestones} />
       </div>
-    </Stack>
+    </div>
   );
 }
 

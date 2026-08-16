@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Badge, Banner, Button, Cluster, Input, Tabs } from "@zeroship/ui";
+import { Badge, Banner, Button, Input, Tabs } from "@zeroship/ui";
 import { KindBadge, PriorityBadge, ResolutionBadge, SeverityBadge, StatusBadge } from "../components/Badges";
 import { updateIssue } from "../api";
 import { invalidatedBy } from "../lib/query-keys";
@@ -96,14 +96,14 @@ function TitleEditor({
           if (event.key === "Escape") onDone();
         }}
       />
-      <Cluster gap={2} align="center">
+      <div className="flex min-w-0 flex-row flex-wrap items-center justify-start gap-2">
         <Button variant="filled" size="sm" disabled={busy || !draft.trim()} onClick={save}>
           Save
         </Button>
         <Button variant="plain" size="sm" disabled={busy} onClick={onDone}>
           Cancel
         </Button>
-      </Cluster>
+      </div>
       {rename.error ? <FieldError>{errorMessage(rename.error)}</FieldError> : null}
     </div>
   );
@@ -223,7 +223,7 @@ export function IssueDetailPage({
         {editingTitle ? (
           <TitleEditor issue={detail.issue} onDone={() => setEditingTitle(false)} />
         ) : (
-          <Cluster gap={2} align="center" className="group/title">
+          <div className="group/title flex min-w-0 flex-row flex-wrap items-center justify-start gap-2">
             <h1 className="m-0 max-w-[46ch] text-[1.5rem] leading-[1.25] tracking-[-0.02em]">
               {detail.issue.summary}
             </h1>
@@ -238,9 +238,9 @@ export function IssueDetailPage({
                 Edit
               </Button>
             )}
-          </Cluster>
+          </div>
         )}
-        <Cluster gap={2} align="center" className="mt-0">
+        <div className="mt-0 flex min-w-0 flex-row flex-wrap items-center justify-start gap-2">
           <StatusBadge status={detail.issue.status} />
           <ResolutionBadge resolution={detail.issue.resolution ?? null} />
           {/* Before severity, because it qualifies it: "blocker" answers how
@@ -254,7 +254,7 @@ export function IssueDetailPage({
             {detail.product ? detail.product.name : null}
             {detail.component ? ` / ${detail.component.name}` : null}
           </span>
-        </Cluster>
+        </div>
       </div>
 
       {/* Said once, at the top, rather than discovered one 401 at a time.

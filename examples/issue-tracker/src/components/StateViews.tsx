@@ -7,7 +7,6 @@ import {
   EmptyState as UiEmptyState,
   ErrorState as UiErrorState,
   Spinner,
-  Stack,
 } from "@zeroship/ui";
 
 import { errorCode, errorMessage, isUnauthenticated } from "./rpc";
@@ -15,16 +14,14 @@ import { Hint } from "./AppPrimitives";
 
 export function Loading({ label = "Loading..." }: { label?: string }) {
   return (
-    <Stack
-      className="px-2 py-6 text-ink-secondary"
-      gap={2}
-      align="center"
+    <div
+      className="flex min-w-0 flex-col flex-nowrap items-center justify-start gap-2 px-2 py-6 text-ink-secondary [&>*]:min-h-0 [&>*]:min-w-0"
       role="status"
       aria-live="polite"
     >
       <Spinner />
       <span>{label}</span>
-    </Stack>
+    </div>
   );
 }
 

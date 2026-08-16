@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { useClearQuery, useNumericQueryParam, useQueryParam } from "../lib/query-state";
-import { Button, Card, Checkbox, Cluster, Dialog, FilterBar, PageHeader, Select } from "@zeroship/ui";
+import { Button, Card, Checkbox, Dialog, FilterBar, PageHeader, Select } from "@zeroship/ui";
 import {
   ALL_ISSUE_COLUMNS,
   IssueResultsTable,
@@ -105,7 +105,7 @@ function ColumnPicker({
       </Button>
       {open ? (
         <ColumnPickerMenu>
-          <Cluster gap={3}>
+          <div className="flex min-w-0 flex-row flex-wrap items-center justify-start gap-3">
             {availableColumns.map((col) => (
               <Checkbox
                 key={col.key}
@@ -115,7 +115,7 @@ function ColumnPicker({
                 label={col.label}
               />
             ))}
-          </Cluster>
+          </div>
         </ColumnPickerMenu>
       ) : null}
     </div>
@@ -378,7 +378,7 @@ export function IssueListPage() {
         activeFilters={activeFilters}
         onClearFilters={activeFilters.length > 0 ? resetFilters : undefined}
         actions={
-          <Cluster gap={2} align="center">
+          <div className="flex min-w-0 flex-row flex-wrap items-center justify-start gap-2">
             <Button variant="gray" size="sm" onClick={applyFilters}>
               Apply
             </Button>
@@ -407,7 +407,7 @@ export function IssueListPage() {
               onOpenChange={setPickerOpen}
               onToggle={toggleColumn}
             />
-          </Cluster>
+          </div>
         }
       >
         <FilterControl>
@@ -519,7 +519,7 @@ export function IssueListPage() {
           {/* Says what you are looking at and how to leave it. A results set
               that silently replaced the list would be indistinguishable from
               a filter that happened to match those rows. */}
-          <Cluster gap={2} align="center">
+          <div className="flex min-w-0 flex-row flex-wrap items-center justify-start gap-2">
             <Hint as="span" flush>
               Showing {advanced.length} result{advanced.length === 1 ? "" : "s"} from advanced
               search
@@ -527,7 +527,7 @@ export function IssueListPage() {
             <Button variant="plain" size="sm" onClick={() => setAdvanced(null)}>
               Back to filters
             </Button>
-          </Cluster>
+          </div>
           <IssueResultsTable issues={advanced} columns={visibleColumns} caption="Advanced search results" />
         </>
       ) : (

@@ -665,6 +665,9 @@ importers:
 
   examples/issue-tracker:
     dependencies:
+      '@base-ui/react':
+        specifier: ^1.5.0
+        version: 1.5.0(@date-fns/tz@1.4.1)(@types/react@19.2.14)(date-fns@4.1.0)(react-dom@19.2.5(react@19.2.5))(react@19.2.5)
       '@tanstack/react-query':
         specifier: 'catalog:'
         version: 5.100.8(react@19.2.5)
