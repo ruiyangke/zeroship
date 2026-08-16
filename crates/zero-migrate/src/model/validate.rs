@@ -2893,6 +2893,7 @@ fn validate_no_name_is_claimed_twice(
     // them, so there is no second namespace there.
     let track_type_namespace = matches!(target_dialect, Dialect::Postgres);
     let mut types: BTreeMap<Key, &str> = BTreeMap::new();
+    let mut trigger_names: BTreeMap<Key, BTreeSet<&str>> = BTreeMap::new();
 
     macro_rules! type_name_must_be_free {
         ($key:expr, $op_index:expr, $what:expr, $name:expr) => {
@@ -2984,6 +2985,7 @@ fn validate_no_name_is_claimed_twice(
                 types.remove(&key);
                 columns.remove(&key);
                 constraint_names.remove(&key);
+                trigger_names.remove(&key);
             }
             Op::RenameTable {
                 table, to, schema, ..
@@ -3017,6 +3019,9 @@ fn validate_no_name_is_claimed_twice(
                 }
                 if let Some(moved) = constraint_names.remove(&from_key) {
                     constraint_names.insert(to_key, moved);
+                }
+                if let Some(moved) = trigger_names.remove(&from_key) {
+                    trigger_names.insert(to_key, moved);
                 }
             }
             Op::AddColumn {
@@ -3122,6 +3127,46 @@ fn validate_no_name_is_claimed_twice(
             }
             Op::DropSequence { name, schema, .. } => {
                 relations.remove(&(schema.as_deref(), name.as_str()));
+            }
+            // TRIGGER NAMES ARE PER TABLE, measured: PostgreSQL rejects a repeat
+            // on one relation with `trigger "tg" for relation "a" already exists`
+            // and ACCEPTS the same name on another table. One audit trigger name
+            // across many tables is an ordinary pattern, so a schema-scoped rule
+            // would be wrong. Same shape as constraint names, not the relation or
+            // type namespaces. PostgreSQL only - the other dialects scope trigger
+            // names differently and are not covered here.
+            Op::CreateTrigger {
+                name,
+                table,
+                schema,
+                ..
+            } if track_type_namespace => {
+                let key: Key = (schema.as_deref(), table.as_str());
+                if trigger_names
+                    .get(&key)
+                    .is_some_and(|live| live.contains(name.as_str()))
+                {
+                    return Err(refuse(
+                        op_index,
+                        &format!(
+                            "this createTrigger claims the name {name:?} on table \
+                             {table:?}, but an earlier operation in this migration already \
+                             gave a trigger that name and nothing dropped it in between"
+                        ),
+                        "drop the existing trigger first, or use a different name",
+                    ));
+                }
+                trigger_names.entry(key).or_default().insert(name.as_str());
+            }
+            Op::DropTrigger {
+                name,
+                table,
+                schema,
+                ..
+            } => {
+                if let Some(live) = trigger_names.get_mut(&(schema.as_deref(), table.as_str())) {
+                    live.remove(name.as_str());
+                }
             }
             // Enums and domains claim the type namespace only. Note they do NOT
             // consult `relations`: an enum named after a live SEQUENCE is accepted
