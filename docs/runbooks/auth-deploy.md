@@ -128,18 +128,21 @@ For manual provisioning, use the same formats:
 
 ```bash
 S=/path/to/secrets
+AUTH_CONTROL_S=/path/to/auth-control-only-secrets
 umask 077
-mkdir -p "$S" && chmod 0700 "$S"
+mkdir -p "$S" "$AUTH_CONTROL_S"
+chmod 0700 "$S" "$AUTH_CONTROL_S"
 openssl genpkey -algorithm ed25519 -out "$S/auth-signing.pem"
 openssl genpkey -algorithm ed25519 -out "$S/gateway-signing.pem"
 openssl genpkey -algorithm ed25519 -out "$S/control-signing.pem"
 openssl rand -base64 48 > "$S/broker-secret"
-openssl rand -hex 32 > "$S/platform-mint-key"
+openssl rand -hex 32 > "$AUTH_CONTROL_S/platform-mint-key"
 printf '1:%s\n' "$(openssl rand -hex 48)" > "$S/refresh-hash-key"
 openssl rand -base64 48 > "$S/refresh-idem-key"
 ZEROSHIP_PAIRWISE_SALT="$(openssl rand -hex 32)"
 printf '%s' "$ZEROSHIP_PAIRWISE_SALT" > "$S/pairwise-salt"
 chmod 0600 "$S"/*
+chmod 0600 "$AUTH_CONTROL_S/platform-mint-key"
 ```
 
 `refresh-hash-key` is a keyring, not an unadorned random string. Each nonempty
@@ -191,15 +194,14 @@ or base64url encoded.
    ZEROSHIP_AUTH_TOTP_ENC_KEY="$ZEROSHIP_AUTH_TOTP_ENC_KEY" \
    ZEROSHIP_AUTH_MAILER=smtp ZEROSHIP_AUTH_SMTP_HOST=smtp.example.com \
    zeroship-auth --addr 0.0.0.0:9092 \
-     --platform-mint-key-file /run/secrets/platform-mint-key
+     --platform-mint-key-file /run/auth-control-secrets/platform-mint-key
    ```
 
-Mount `/run/secrets/platform-mint-key` only into auth and control. Start every
+Mount the auth-control-only directory only into auth and control. Start every
 control replica with the same bytes, using either
-`ZEROSHIP_AUTH_PLATFORM_MINT_KEY` or
-`--auth-platform-mint-key-file /run/secrets/platform-mint-key`. Do not place
-the file in a directory mounted into worker, gateway, migrated, or app
-containers.
+`ZEROSHIP_AUTH_PLATFORM_MINT_KEY` or `--auth-platform-mint-key-file` with
+`/run/auth-control-secrets/platform-mint-key`. Do not mount that directory
+into worker, gateway, migrated, or app containers.
 
 On boot, the service loads the signing key, publishes the matching public JWK
 metadata, initializes the refresh-token key material, and serves discovery at
