@@ -1,7 +1,6 @@
 import { useMemo, useState, type ComponentPropsWithoutRef } from "react";
 import {
   FilterBar,
-  ListView,
   Pagination,
 } from "@zeroship/ui";
 import { Checkbox } from "../ui/Checkbox";
@@ -14,6 +13,7 @@ import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
 import { Field } from "../ui/Field";
 import { Input } from "../ui/Input";
+import { ListView } from "../ui/ListView";
 import { PageHeader } from "../ui/PageHeader";
 import {
   createComponent,

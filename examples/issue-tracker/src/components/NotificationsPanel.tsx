@@ -1,9 +1,9 @@
 import { markNotificationRead } from "../api";
 import { Link } from "react-router-dom";
-import { ListView } from "@zeroship/ui";
 import { invalidatedBy } from "../lib/query-keys";
 import { useAppMutation, useNotifications } from "../lib/queries";
 import { Button } from "../ui/Button";
+import { ListView } from "../ui/ListView";
 import { RichText } from "./RichText";
 import { AsyncSection } from "./StateViews";
 import { DashboardSection } from "./DashboardSection";
