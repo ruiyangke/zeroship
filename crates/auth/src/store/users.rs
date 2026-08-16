@@ -330,8 +330,8 @@ pub struct DeletionRequest {
 ///      login/eligibility gates reject it immediately,
 ///   2. stamp `deletion_requested_at = NOW()` and
 ///      `deletion_scheduled_for = NOW() + grace_days`,
-///   3. bump `credential_version` so any already-issued IdP/gateway session
-///      (which binds the version) stops validating, and
+///   3. bump `credential_version` so already-issued IdP sessions that bind the
+///      version stop validating (gateway invalidation is enforced separately),
 ///   4. revoke every refresh family and its access-token family marker, and
 ///   5. mark every live `idp_sessions` / `gateway_sessions` row revoked.
 ///

@@ -22,10 +22,10 @@
 //!    principal and grants and caps the scopes again before issuance.
 //!
 //! Minting at poll time rather than at approval time is what lets a browser
-//! approve without being able to mint: the approving vehicle needs no control
-//! credential, no master key, and no way to reach the OP's internal mint. It
-//! also means no access token is ever written to a row, so the grant table
-//! holds no secret at rest.
+//! approve without being able to mint: the approving vehicle has neither the
+//! platform mint credential nor authority to invoke the internal mint. Network
+//! isolation is defense in depth, not the authorization boundary. No access
+//! token is ever written to a row, so the grant table holds no secret at rest.
 //!
 //! This is NOT the OP's own device grant. `crates/auth/src/oidc/device_token.rs`
 //! implements RFC 8628 natively over the same `zeroship.device_grants` table

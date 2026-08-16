@@ -205,10 +205,10 @@ impl BrokerSecrets {
     #[must_use]
     pub fn verify_client_secret(&self, client_id: &str, presented: &str) -> bool {
         let current = zeroship_core::auth::derive_broker_secret(&self.current, client_id);
-        let current_ok = zeroship_core::auth::validate_control_key(presented, &current);
+        let current_ok = zeroship_core::auth::constant_time_eq(presented, &current);
         let previous_ok = self.previous.as_ref().is_some_and(|previous| {
             let expected = zeroship_core::auth::derive_broker_secret(previous, client_id);
-            zeroship_core::auth::validate_control_key(presented, &expected)
+            zeroship_core::auth::constant_time_eq(presented, &expected)
         });
         current_ok || previous_ok
     }
