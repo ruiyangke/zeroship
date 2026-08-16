@@ -52,13 +52,15 @@ fn tbl(n: &str) -> String {
 /// Added when this fixture was audited against F768's rule. Every test below had
 /// a bare `expect_err`, and two of them turned out to be decided by a DIFFERENT
 /// rule than the one their message claimed - see the two `createPartition` tests.
-fn expect_refusal_mentioning(ops: &str, needle: &str, what: &str) -> String {
+fn expect_refusal_mentioning(ops: &str, needles: &[&str], what: &str) -> String {
     let refusal = verdict(ops).expect_err(what);
-    assert!(
-        refusal.contains(needle),
-        "the refusal must be the {needle:?} one this test names, not another rule \
-         that happens to fire first: {refusal}"
-    );
+    for needle in needles {
+        assert!(
+            refusal.contains(needle),
+            "the refusal must be the one this test names and {needle:?} is missing, \
+             so a sibling rule is satisfying it instead: {refusal}"
+        );
+    }
     refusal
 }
 
@@ -78,7 +80,11 @@ fn the_same_partition_name_twice_is_refused() {
     // entirely would have left this test green.
     expect_refusal_mentioning(
         &format!("{PARENT},{},{}", part("p1", 0, 10), part("p1", 10, 20)),
-        TYPE_NS,
+        &[
+            TYPE_NS,
+            "this createPartition claims",
+            "already created a partition",
+        ],
         "the second createPartition retakes the name",
     );
 }
@@ -90,8 +96,12 @@ fn a_partition_may_not_take_a_live_table_name() {
     // type is what the partition collides with first.
     expect_refusal_mentioning(
         &format!("{PARENT},{},{}", tbl("b"), part("b", 0, 10)),
-        TYPE_NS,
-        "a partition may not take a live table's name",
+        &[
+            TYPE_NS,
+            "this createPartition claims",
+            "already created a table",
+        ],
+        "a partition may not take a live table name",
     );
 }
 
@@ -103,7 +113,11 @@ fn a_table_may_not_take_a_live_partition_name() {
     // tests above were wrongly believed to be doing.
     expect_refusal_mentioning(
         &format!("{PARENT},{},{}", part("p1", 0, 10), tbl("p1")),
-        RELATION_NS,
+        &[
+            RELATION_NS,
+            "this createTable claims",
+            "already created a partition",
+        ],
         "a partition occupies the name against a later table",
     );
 }
@@ -115,7 +129,11 @@ fn a_partition_may_not_take_a_live_enum_name() {
             r#"{PARENT},{{"op":"createEnum","name":"e","values":["a"]}},{}"#,
             part("e", 0, 10)
         ),
-        TYPE_NS,
+        &[
+            TYPE_NS,
+            "this createPartition claims",
+            "already created a enum",
+        ],
         "a partition has a composite row type, so it needs the type name free",
     );
 }
@@ -127,8 +145,12 @@ fn an_enum_may_not_take_a_live_partition_name() {
             r#"{PARENT},{},{{"op":"createEnum","name":"p1","values":["a"]}}"#,
             part("p1", 0, 10)
         ),
-        TYPE_NS,
-        "the partition's row type occupies the type namespace",
+        &[
+            TYPE_NS,
+            "this createEnum claims",
+            "already created a partition",
+        ],
+        "the partition row type occupies the type namespace",
     );
 }
 
@@ -167,7 +189,11 @@ fn detaching_a_partition_does_not_free_its_name() {
             part("p1", 0, 10),
             tbl("p1")
         ),
-        RELATION_NS,
+        &[
+            RELATION_NS,
+            "this createTable claims",
+            "already created a partition",
+        ],
         "a detached partition still occupies its name as a standalone table",
     );
 }
@@ -238,7 +264,11 @@ fn dropping_an_unrelated_table_does_not_free_a_partition_name() {
         ),
         // The later op is a createPartition, so the type rule answers - the same
         // asymmetry the two headline tests document.
-        TYPE_NS,
+        &[
+            TYPE_NS,
+            "this createPartition claims",
+            "already created a partition",
+        ],
         "an unrelated drop must not release a live partition name",
     );
 }
@@ -288,7 +318,11 @@ fn detaching_then_dropping_the_parent_does_not_free_the_detached_name() {
             part("p1", 0, 10),
             tbl("p1")
         ),
-        RELATION_NS,
+        &[
+            RELATION_NS,
+            "this createTable claims",
+            "already created a partition",
+        ],
         "a detached partition survives its former parent, so its name is still taken",
     );
 }
