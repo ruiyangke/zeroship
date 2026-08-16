@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { Avatar, Button, Checkbox, Cluster, Tag } from "@zeroship/ui";
 
 import { RichText, RichTextEditor, hasText } from "../RichText";
+import { FieldError, Muted } from "../AppPrimitives";
 import { addComment, editComment, setCommentPrivate, uploadAttachment } from "../../api";
 import { MAX_ATTACHMENT_BYTES, fileToBase64, formatBytes } from "./attachments";
 import { AsyncSection } from "../StateViews";
@@ -14,6 +15,8 @@ import type { Activity, Attachment, Comment } from "../types";
 import { buildTimeline } from "./timeline";
 import { displayValue, fieldLabel, personLabel } from "./activity";
 import type { PeopleMap } from "./people";
+import { Badge } from "./Badge";
+import { TimelineBody, TimelineList, TimelineRow } from "./TimelinePrimitives";
 
 function formatDate(ms: number): string {
   return new Date(ms).toLocaleString();
@@ -114,14 +117,10 @@ function CommentRow({
   };
 
   return (
-    <li
-      className={[
-        "comment",
-        comment.isPrivate ? "private" : "",
-        comment.commentNumber === 0 ? "is-description" : "",
-      ]
-        .filter(Boolean)
-        .join(" ")}
+    <TimelineRow
+      kind="comment"
+      isPrivate={comment.isPrivate}
+      isDescription={comment.commentNumber === 0}
       id={`comment-${comment.commentNumber}`}
     >
       {/* Identity leads. Previously the loudest things in this row were the
@@ -130,22 +129,24 @@ function CommentRow({
           author. The avatar and name come first now and the actions wait for
           a hover or a keyboard focus. */}
       <Avatar size="sm" fallback={initials(author)} aria-hidden="true" />
-      <div className="comment-body-column">
-      <div className="comment-head">
+      <TimelineBody
+        tone={comment.isPrivate ? "private" : comment.commentNumber === 0 ? "description" : "plain"}
+      >
+      <div className="mb-1 flex flex-wrap items-baseline gap-2 text-sm text-ink-muted">
         {/* Comment 0 IS the description -- `issues.create` writes the description
             as the first comment, the way Bugzilla does, so there is no separate
             description row to render. Presenting it as an anonymous "#0" bubble
             hid that: the one piece of text stating what the issue IS looked like
             the first reply to it. Named rather than restyled, so it reads
             correctly to a screen reader too. */}
-        <span className="comment-author">{author}</span>
+        <span className="comment-author text-md font-semibold text-ink">{author}</span>
         {comment.commentNumber === 0 ? (
           <Tag size="sm">Description</Tag>
         ) : null}
         <span title={formatDate(comment.created_at)}>
           {timeAgo(comment.created_at)}
         </span>
-        {comment.isPrivate ? <span className="badge private-badge">private</span> : null}
+        {comment.isPrivate ? <Badge tone="danger">private</Badge> : null}
         {/* A ROUTE, not a bare fragment. "#comment-3" reads like an anchor
             and is one in a normal page, but this app routes on the hash, so
             clicking it replaced the route and landed on "No page here.
@@ -153,14 +154,14 @@ function CommentRow({
             thread. The <li> keeps its id so the page can scroll to it. */}
         {comment.commentNumber > 0 ? (
           <Link
-            className="comment-number"
+            className="font-mono text-ink-muted no-underline hover:text-accent"
             to={`/issues/${comment.issueId}/c/${comment.commentNumber}`}
           >
             #{comment.commentNumber}
           </Link>
         ) : null}
         {readOnly ? null : (
-        <span className="comment-actions">
+        <span className="ms-auto inline-flex gap-1 opacity-0 transition-opacity duration-[120ms] ease-out group-hover/comment:opacity-100 group-focus-within/comment:opacity-100 [@media(hover:none)]:opacity-100">
           <Button
             variant="plain"
             size="sm"
@@ -186,7 +187,7 @@ function CommentRow({
         )}
       </div>
       {editing ? (
-        <div className="comment-edit">
+        <div className="flex flex-col gap-2">
           <RichTextEditor value={draft} onChange={setDraft} ariaLabel="Edit comment" />
           <Cluster gap={2} align="center">
             <Button variant="filled" size="sm" disabled={busy} onClick={() => void save()}>
@@ -204,7 +205,7 @@ function CommentRow({
           </Cluster>
         </div>
       ) : (
-        <div className="comment-body">
+        <div className="m-0 [&_.rich-text>*]:my-2 [&_.rich-text>*:first-child]:mt-0 [&_.rich-text>*:last-child]:mb-0">
           {/* Rendered THROUGH tiptap, not with dangerouslySetInnerHTML. The
               body is arbitrary text over RPC, so parsing it back through the
               schema that writes it is what keeps a crafted comment from
@@ -213,9 +214,9 @@ function CommentRow({
         </div>
       )}
       {attachments.length > 0 ? (
-        <ul className="comment-attachments">
+        <ul className="comment-attachments mt-2 flex list-none flex-col gap-1 p-0">
           {attachments.map((file) => (
-            <li key={file.id}>
+            <li key={file.id} className="text-base">
               {/* A button. It was an anchor to
                   "/issues/<id>?attachment=<fileId>", which is not a deep link
                   in a hash-routed app: the hash splits on "/", so the query
@@ -225,7 +226,7 @@ function CommentRow({
                   point at -- downloading IS the action. */}
               <button
                 type="button"
-                className="comment-attachment"
+                className="font-mono text-base"
                 onClick={() => {
                   downloadAttachment(file.id, file.filename).catch((err: unknown) =>
                     setError(errorMessage(err)),
@@ -234,14 +235,14 @@ function CommentRow({
               >
                 {file.filename}
               </button>
-              <span className="dim small"> {formatBytes(file.sizeBytes)}</span>
+              <Muted className="text-base"> {formatBytes(file.sizeBytes)}</Muted>
             </li>
           ))}
         </ul>
       ) : null}
-      {error ? <p className="field-error">{error}</p> : null}
-      </div>
-    </li>
+      {error ? <FieldError>{error}</FieldError> : null}
+      </TimelineBody>
+    </TimelineRow>
   );
 }
 
@@ -323,10 +324,10 @@ function NewCommentForm({ issueId }: { issueId: string }) {
         ariaLabel="Add a comment"
         collapsible
       />
-      {/* A Cluster, not a bare flex row. Checkbox renders its own label
-          BELOW its box in this row and it landed on top of the next field's
-          label -- two labels overlapping reads as a rendering fault. */}
-      <Cluster gap={3} align="center" className="new-comment-row" justify="between">
+      {/* A deliberately aligned wrapping row. Checkbox renders its own label;
+          without the shared baseline its label landed on top of the next
+          field's and two labels overlapping read as a rendering fault. */}
+      <div className="relative mt-2 mb-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-3 [&>label]:my-0 [&>*]:my-0 [&>*:last-child]:ms-auto">
         {/* Checkbox owns its own label, so the wrapping <label> that used to
             associate a bare input is gone rather than nested inside it. */}
         <Checkbox
@@ -359,7 +360,7 @@ function NewCommentForm({ issueId }: { issueId: string }) {
           ref={fileRef}
           type="file"
           multiple
-          className="visually-hidden"
+          className="sr-only"
           aria-label="Attach files to this comment"
           onChange={(event) =>
             setFileNames(Array.from(event.target.files ?? []).map((file) => file.name))
@@ -375,14 +376,14 @@ function NewCommentForm({ issueId }: { issueId: string }) {
         >
           Comment
         </Button>
-      </Cluster>
+      </div>
       {fileNames.length > 0 ? (
-        <p className="comment-attach-queue small">
+        <p className="mt-1 text-base text-ink-secondary">
           {fileNames.length === 1 ? "Attaching" : "Attaching " + fileNames.length + " files:"}{" "}
           {fileNames.join(", ")}
         </p>
       ) : null}
-      {error ? <p className="field-error">{error}</p> : null}
+      {error ? <FieldError>{error}</FieldError> : null}
     </div>
   );
 }
@@ -437,7 +438,7 @@ export function CommentsPanel({
         emptyTitle="No comments yet."
       >
         {(comments) => (
-          <ul className="comment-list">
+          <TimelineList kind="comments">
             {buildTimeline(comments, activities).map((item, index) =>
               item.kind === "comment" ? (
                 <CommentRow
@@ -447,15 +448,18 @@ export function CommentsPanel({
                   attachments={filesByComment.get(item.comment.id) ?? []}
                 />
               ) : (
-                <li key={"event-" + index} className="timeline-event">
-                  <span className="timeline-dot" aria-hidden="true" />
-                  <p className="timeline-event-text">
-                    <span className="timeline-actor">{personLabel(item.actorId, people)}</span>{" "}
+                <TimelineRow key={"event-" + index} kind="activity">
+                  <span
+                    className="mt-2 ms-3 size-2 rounded-full bg-line-strong shadow-[0_0_0_3px_var(--it-canvas)]"
+                    aria-hidden="true"
+                  />
+                  <p className="m-0 text-base leading-normal text-ink-muted">
+                    <span className="font-semibold text-ink-secondary">{personLabel(item.actorId, people)}</span>{" "}
                     {item.changes.map((change, i) => (
                       <span key={i}>
                         {i > 0 ? ", " : ""}
-                        set <span className="timeline-field">{fieldLabel(change.fieldName)}</span> to{" "}
-                        <span className="timeline-value">{displayValue(change.newValue, labels) || "nothing"}</span>
+                        set <span className="text-ink-secondary">{fieldLabel(change.fieldName)}</span> to{" "}
+                        <span className="font-medium text-ink">{displayValue(change.newValue, labels) || "nothing"}</span>
                       </span>
                     ))}
                     <span title={formatDate(item.at)}>
@@ -463,10 +467,10 @@ export function CommentsPanel({
                       {timeAgo(item.at)}
                     </span>
                   </p>
-                </li>
+                </TimelineRow>
               ),
             )}
-          </ul>
+          </TimelineList>
         )}
       </AsyncSection>
       {readOnly ? null : <NewCommentForm issueId={issueId} />}

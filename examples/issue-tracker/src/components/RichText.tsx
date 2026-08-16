@@ -5,6 +5,9 @@ import { Markdown } from "@tiptap/markdown";
 import { Placeholder } from "@tiptap/extensions";
 import { useEffect, useState } from "react";
 
+import { AppFieldShell } from "./AppFieldShell";
+import { FieldError } from "./AppPrimitives";
+
 /**
  * Rich text for issue descriptions and comments, on tiptap.
  *
@@ -113,7 +116,17 @@ export function RichText({ markdown }: { markdown: string }) {
     [markdown],
   );
   if (!editor) return null;
-  return <EditorContent editor={editor} className="rich-text" />;
+  return <RichTextContent editor={editor} className="rich-text" />;
+}
+
+/** Typography shared by the read-only renderer and the writing surface. */
+function RichTextContent({ editor, className = "" }: { editor: Editor; className?: string }) {
+  return (
+    <EditorContent
+      editor={editor}
+      className={`[&_p:first-child]:mt-0 [&_p:last-child]:mb-0 [&_pre]:overflow-x-auto [&_pre]:rounded-lg [&_pre]:bg-surface-sunken [&_pre]:px-3 [&_pre]:py-2 [&_blockquote]:mx-0 [&_blockquote]:border-s-[3px] [&_blockquote]:border-line-strong [&_blockquote]:ps-3 [&_blockquote]:text-ink-secondary ${className}`}
+    />
+  );
 }
 
 function ToolbarButton({
@@ -216,9 +229,9 @@ function LinkControl({ editor }: { editor: Editor }) {
             Apply
           </Button>
           {refused ? (
-            <span role="alert" className="field-error">
+            <FieldError as="span" role="alert">
               That link was refused. Use http, https or mailto.
-            </span>
+            </FieldError>
           ) : null}
         </Cluster>
       ) : null}
@@ -255,7 +268,8 @@ export function RichTextEditor({
     immediatelyRender: false,
     editorProps: {
       attributes: {
-        class: "rich-text-input",
+        class:
+          "rich-text-input min-h-24 px-3 py-2 outline-none empty:before:pointer-events-none empty:before:float-start empty:before:h-0 empty:before:text-ink-muted empty:before:content-[attr(data-placeholder)] [&_p.is-editor-empty:first-child]:before:pointer-events-none [&_p.is-editor-empty:first-child]:before:float-start [&_p.is-editor-empty:first-child]:before:h-0 [&_p.is-editor-empty:first-child]:before:text-ink-muted [&_p.is-editor-empty:first-child]:before:content-[attr(data-placeholder)]",
         "aria-label": ariaLabel,
         ...(placeholder ? { "data-placeholder": placeholder } : {}),
       },
@@ -275,11 +289,14 @@ export function RichTextEditor({
   if (!editor) return null;
 
   return (
-    <div className="app-field-shell rich-text-editor">
+    <AppFieldShell className="rich-text-editor overflow-hidden">
       {/* Shown once the editor has focus or content. A blurred, empty
           composer needs no formatting controls. */}
       {!collapsible || focused || hasText(value) ? (
-      <Cluster gap={1} className="rich-text-toolbar">
+      <Cluster
+        gap={1}
+        className="border-b border-line bg-surface-sunken px-1 py-1"
+      >
         <ToolbarButton
           editor={editor}
           label="B"
@@ -365,7 +382,7 @@ export function RichTextEditor({
         />
       </Cluster>
       ) : null}
-      <EditorContent editor={editor} />
-    </div>
+      <RichTextContent editor={editor} />
+    </AppFieldShell>
   );
 }

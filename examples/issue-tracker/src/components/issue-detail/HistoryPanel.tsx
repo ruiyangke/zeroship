@@ -5,14 +5,16 @@
 // different thing: this tab is the raw log, unmodified.)
 import { Avatar } from "@zeroship/ui";
 
+import { Muted } from "../AppPrimitives";
 import { EmptyState } from "../StateViews";
 import type { Activity } from "../types";
 import { personName, type PeopleMap } from "./people";
 import { displayValue, fieldLabel } from "./activity";
+import { TimelineBody, TimelineList, TimelineRow } from "./TimelinePrimitives";
 
 function name(value: string | null | undefined, labels: Record<string, string>) {
   if (value === null || value === undefined || value === "") {
-    return <span className="dim">unset</span>;
+    return <Muted>unset</Muted>;
   }
   return labels[value] ?? displayValue(value);
 }
@@ -76,6 +78,31 @@ function groupIntoEvents(activities: readonly Activity[]): Event[] {
   return events;
 }
 
+function HistoryChangeList({
+  changes,
+  labels,
+}: {
+  changes: readonly Activity[];
+  labels: Record<string, string>;
+}) {
+  return (
+    <ul className="history-changes m-0 flex list-none flex-col gap-1 p-0">
+      {changes.map((change, changeIndex) => (
+        <li key={changeIndex} className="flex flex-wrap items-baseline gap-2 text-md">
+          <span className="min-w-28 font-semibold text-ink-secondary">
+            {fieldLabel(change.fieldName)}
+          </span>
+          <span className="text-ink-muted line-through">{name(change.oldValue, labels)}</span>
+          <span className="text-sm text-ink-muted" aria-hidden="true">
+            to
+          </span>
+          <span className="font-medium text-ink">{name(change.newValue, labels)}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 /**
  * `labels` maps an id to the name it stands for.
  *
@@ -102,7 +129,7 @@ export function HistoryPanel({
   const events = groupIntoEvents(activities);
 
   return (
-    <ol className="history-timeline">
+    <TimelineList kind="history">
       {events.map((event, index) => {
         const who = personName(event.actorId, people, "Someone");
         /**
@@ -114,44 +141,30 @@ export function HistoryPanel({
          * all came from nothing is the creation.
          */
         const isCreation = index === 0 && event.changes.every((c) => !c.oldValue);
-        const changeList = (
-              <ul className="history-changes">
-                {event.changes.map((change, changeIndex) => (
-                  <li key={changeIndex}>
-                    <span className="history-field">{fieldLabel(change.fieldName)}</span>
-                    <span className="history-from">{name(change.oldValue, labels)}</span>
-                    <span className="history-arrow" aria-hidden="true">
-                      to
-                    </span>
-                    <span className="history-to">{name(change.newValue, labels)}</span>
-                  </li>
-                ))}
-              </ul>
-        );
         return (
-          <li key={index} className="history-event">
+          <TimelineRow key={index} kind="history">
             <Avatar size="sm" fallback={initials(who)} aria-hidden="true" />
-            <div className="history-event-body">
-              <p className="history-event-head">
-                <span className="history-actor">{who}</span>
+            <TimelineBody>
+              <p className="m-0 mb-1 flex items-baseline gap-2 text-sm text-ink-muted">
+                <span className="history-actor text-md font-semibold text-ink">{who}</span>
                 <span title={formatDate(event.changedAt)}>
                   {isCreation ? "filed this issue" : null} {timeAgo(event.changedAt)}
                 </span>
               </p>
               {isCreation ? (
-                <details className="history-creation">
+                <details className="history-creation [&>summary]:cursor-pointer [&>summary]:list-outside [&>summary]:text-base [&>summary]:text-ink-muted [&>summary:hover]:text-accent [&[open]>summary]:mb-2">
                   <summary>
                     {event.changes.length} fields set on creation
                   </summary>
-                  {changeList}
+                  <HistoryChangeList changes={event.changes} labels={labels} />
                 </details>
               ) : (
-                changeList
+                <HistoryChangeList changes={event.changes} labels={labels} />
               )}
-            </div>
-          </li>
+            </TimelineBody>
+          </TimelineRow>
         );
       })}
-    </ol>
+    </TimelineList>
   );
 }

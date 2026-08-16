@@ -8,6 +8,9 @@ import { errorMessage } from "../rpc";
 import { useAppMutation, useAttachments } from "../../lib/queries";
 import { invalidatedBy } from "../../lib/query-keys";
 import type { Attachment } from "../types";
+import { FieldError, Hint, Muted } from "../AppPrimitives";
+import { Badge } from "./Badge";
+import { DetailPanel } from "./DetailPanel";
 
 function AttachmentRow({ attachment }: { attachment: Attachment }) {
   const [error, setError] = useState<string | null>(null);
@@ -57,15 +60,17 @@ function AttachmentRow({ attachment }: { attachment: Attachment }) {
   };
 
   return (
-    <li className={`attachment ${attachment.isObsolete ? "obsolete" : ""}`}>
-      <div className="attachment-head">
+    <li
+      className={`border-t border-line py-1 first:border-t-0 ${attachment.isObsolete ? "opacity-[0.55]" : ""}`}
+    >
+      <div className="flex flex-wrap items-center gap-2 text-base">
         <Button variant="gray" size="sm" disabled={downloading} onClick={() => void download()}>
           {downloading ? "..." : attachment.filename}
         </Button>
-        <span className="dim">{formatBytes(attachment.sizeBytes)}</span>
-        <span className="dim">{attachment.contentType}</span>
-        {attachment.isPatch ? <span className="badge patch-badge">patch</span> : null}
-        {attachment.isObsolete ? <span className="badge obsolete-badge">obsolete</span> : null}
+        <Muted>{formatBytes(attachment.sizeBytes)}</Muted>
+        <Muted>{attachment.contentType}</Muted>
+        {attachment.isPatch ? <Badge tone="info">patch</Badge> : null}
+        {attachment.isObsolete ? <Badge tone="muted">obsolete</Badge> : null}
         <Button variant="gray" size="sm" disabled={busy} onClick={() => void toggleObsolete()}>
           {attachment.isObsolete ? "Un-obsolete" : "Mark obsolete"}
         </Button>
@@ -78,8 +83,10 @@ function AttachmentRow({ attachment }: { attachment: Attachment }) {
           Delete
         </Button>
       </div>
-      {attachment.description ? <p className="attachment-description">{attachment.description}</p> : null}
-      {error ? <p className="field-error">{error}</p> : null}
+      {attachment.description ? (
+        <p className="mt-1 text-base text-ink-secondary">{attachment.description}</p>
+      ) : null}
+      {error ? <FieldError>{error}</FieldError> : null}
     </li>
   );
 }
@@ -106,8 +113,7 @@ export function AttachmentsPanel({ issueId }: { issueId: string }) {
   const attachmentsQ = useAttachments(issueId);
 
   return (
-    <section className="attachments-panel">
-      <h3>Files</h3>
+    <DetailPanel locator="attachments-panel" title="Files">
       <AsyncSection
         query={attachmentsQ}
         loadingLabel="Loading attachments..."
@@ -116,7 +122,7 @@ export function AttachmentsPanel({ issueId }: { issueId: string }) {
         emptyTone="inline"
       >
         {(attachments: Attachment[]) => (
-          <ul className="attachment-list">
+          <ul className="mb-3 flex list-none flex-col gap-2 p-0">
             {attachments.map((attachment) => (
               <AttachmentRow key={attachment.id} attachment={attachment} />
             ))}
@@ -124,8 +130,8 @@ export function AttachmentsPanel({ issueId }: { issueId: string }) {
         )}
       </AsyncSection>
       {attachmentsQ.data && attachmentsQ.data.length > 0 ? (
-        <p className="state-hint small">Attach files by adding a comment.</p>
+        <Hint>Attach files by adding a comment.</Hint>
       ) : null}
-    </section>
+    </DetailPanel>
   );
 }
