@@ -3112,6 +3112,25 @@ fn validate_no_name_is_claimed_twice(
                     .or_default()
                     .push(key);
             }
+            // A DETACHED partition becomes a standalone table: its name stays
+            // taken (F722 pins that), but it is no longer a DEPENDENT, so a later
+            // drop of its former parent must not release it.
+            //
+            // Measured: detach p1, drop par, then `CREATE TABLE p1` is
+            // `relation "p1" already exists` on the server — the engine accepted
+            // it until this arm forgot the parentage.
+            Op::DetachPartition {
+                name,
+                parent,
+                schema,
+                ..
+            } => {
+                let parent_key: Key = (schema.as_deref(), parent.as_str());
+                let child_key: Key = (schema.as_deref(), name.as_str());
+                if let Some(children) = dependents_of.get_mut(&parent_key) {
+                    children.retain(|c| *c != child_key);
+                }
+            }
             Op::DropPartition { name, schema, .. } => {
                 let key: Key = (schema.as_deref(), name.as_str());
                 relations.remove(&key);

@@ -210,3 +210,35 @@ fn a_rename_carries_the_partition_parentage_so_a_later_drop_still_frees_it() {
     ))
     .expect("the partition went with the renamed parent when it was dropped");
 }
+
+/// A DETACHED partition stops being a dependent, so dropping its former parent
+/// must NOT free its name.
+///
+/// The opposite polarity to the three defects before it. F753-F755 were false
+/// REFUSALS - the engine forbidding what the database allows. This is a false
+/// ACCEPT: the engine permitting an envelope the server rejects.
+///
+/// Measured live:
+///
+///     ALTER TABLE det.par DETACH PARTITION det.p1;
+///     DROP TABLE det.par;
+///     -- information_schema still reports p1: it is a standalone table now
+///     CREATE TABLE det.p1 (c0 int);   -- ERROR: relation "p1" already exists
+///
+/// `detachPartition` already avoided releasing the name from the relation map -
+/// F722 pinned that. What it did not do was remove the partition from its
+/// parent's DEPENDENTS, so the later `dropTable` released a name the database
+/// still holds.
+///
+/// The dependents map introduced this: before it existed there was nothing for a
+/// detach to forget. Each of the three preceding fixes made the next one
+/// possible, and this is the fourth in that chain.
+#[test]
+fn detaching_then_dropping_the_parent_does_not_free_the_detached_name() {
+    verdict(&format!(
+        r#"{PARENT},{},{{"op":"detachPartition","parent":"par","name":"p1"}},{{"op":"dropTable","table":"par"}},{}"#,
+        part("p1", 0, 10),
+        tbl("p1")
+    ))
+    .expect_err("a detached partition survives its former parent, so its name is still taken");
+}
