@@ -5,8 +5,13 @@ use compio_postgres::{connect, Client, NoTls};
 use ed25519_dalek::SigningKey;
 use jsonwebtoken::decode_header;
 use serde_json::{json, Value};
-use std::sync::Mutex;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tracing::field::{Field, Visit};
+use tracing::{Event, Subscriber};
+use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+use tracing_subscriber::registry::LookupSpan;
 use uuid::Uuid;
 use zeroship_auth::cron::signing_key_retention;
 use zeroship_auth::oidc::metadata::jwks_document;
@@ -16,6 +21,40 @@ use zeroship_auth::oidc::{
 };
 
 static RETENTION_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[derive(Default)]
+struct LogVisitor {
+    fields: HashMap<String, String>,
+}
+
+impl Visit for LogVisitor {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.fields.insert(field.name().to_string(), value.to_string());
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        self.fields
+            .insert(field.name().to_string(), format!("{value:?}"));
+    }
+}
+
+struct LogCapture {
+    events: Arc<Mutex<Vec<HashMap<String, String>>>>,
+}
+
+impl<S> Layer<S> for LogCapture
+where
+    S: Subscriber + for<'lookup> LookupSpan<'lookup>,
+{
+    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+        let mut visitor = LogVisitor::default();
+        event.record(&mut visitor);
+        self.events
+            .lock()
+            .expect("retention log buffer mutex")
+            .push(visitor.fields);
+    }
+}
 
 async fn pg() -> Option<Client> {
     let dsn = zeroship_core::declared_env!(
@@ -178,13 +217,28 @@ async fn key_past_horizon_leaves_jwks_with_reason_and_idempotently_keeps_audit_r
     let past_horizon_secs = signing_key_retention::RETENTION_AFTER_EXPIRY_SECS + 60;
     seed_key(&db, &kid, &test_jwk(&kid), "retiring", past_horizon_secs).await;
 
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::registry().with(LogCapture {
+        events: Arc::clone(&events),
+    });
+    let trace_guard = tracing::subscriber::set_default(subscriber);
     let first = signing_key_retention::tick(&db).await.expect("first retention tick");
+    drop(trace_guard);
     let retired = first
         .retired
         .iter()
         .find(|retired| retired.kid == kid)
         .expect("stale key retired on first tick");
     assert_eq!(retired.reason, signing_key_retention::RETIREMENT_REASON);
+    assert!(events
+        .lock()
+        .expect("retention log buffer mutex")
+        .iter()
+        .any(|event| {
+            event.get("kid") == Some(&kid)
+                && event.get("reason").map(String::as_str)
+                    == Some(signing_key_retention::RETIREMENT_REASON)
+        }), "retirement log must identify the key and structured reason");
     assert!(!jwks_contains(&db, &kid).await, "retired key must leave JWKS");
     let (status, retired_at) = key_status(&db, &kid).await;
     assert_eq!(status, "retired");
