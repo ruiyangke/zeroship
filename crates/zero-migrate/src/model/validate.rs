@@ -3485,6 +3485,39 @@ fn validate_no_op_targets_a_renamed_away_table(
         // not one it requires. Without this arm, `dropTable b` followed by
         // `createPartition b` was refused as a use-after-drop — measured against
         // live PostgreSQL, which accepts it, so the refusal was wrong.
+        // THE PARENT IS A SECOND NAME, and this walk compares only one per op, so
+        // nothing asked about it. `createPartition p of par` after `dropTable par`
+        // reaches the server as `CREATE TABLE p PARTITION OF par` against a
+        // relation that is gone — measured, `relation "par" does not exist`.
+        // Checked BEFORE the create exemption below, which would otherwise skip
+        // the op entirely.
+        if let Op::CreatePartition { of, .. } = op {
+            if let Some(fate) = vacated.get(of.as_str()) {
+                let (what, fix) = match fate {
+                    Some(new_name) => (
+                        format!("an earlier renameTable renamed it to {new_name:?}"),
+                        format!("partition {new_name:?} instead, or move this before the rename"),
+                    ),
+                    None => (
+                        "an earlier dropTable in this migration removed it".to_string(),
+                        "recreate the parent first, or move this before the drop".to_string(),
+                    ),
+                };
+                return Err(AuthoringError {
+                    code: CODE_OP_INVALID.to_string(),
+                    kind: Some(UnsupportedKind::Op),
+                    op_index,
+                    ts_location: ts_locations.get(op_index).cloned().flatten(),
+                    dialect: target_dialect,
+                    reason: format!(
+                        "this createPartition names parent table {of:?}, but {what}, so the \
+                         parent will not exist under that name when this runs"
+                    ),
+                    suggested_fix: Some(fix),
+                });
+            }
+        }
+
         if let Op::CreateTable { name, .. } | Op::CreatePartition { name, .. } = op {
             vacated.remove(name.as_str());
             continue;
