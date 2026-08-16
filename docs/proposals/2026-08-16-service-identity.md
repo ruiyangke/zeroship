@@ -612,10 +612,33 @@ Neither is optional and neither was in the original sketch:
 | # | Prerequisite | Why it blocks | Evidence |
 | --- | --- | --- | --- |
 | P1 | The worker must lose its PostgreSQL superuser DSN | No HTTP allowlist means anything while the worker can write `zeroship.device_grants` and friends directly | I3 finding 1; independently found by the phase-0 reviewer |
-| P2 | `compio-postgres` and `compio-redis` must support TLS | S2 is "TLS everywhere". These drivers **cannot enable it at all** today, so it is a driver change, not configuration | I3 finding 6 |
+| P2 | `compio-postgres` and `compio-redis` must support TLS | S2 is "TLS everywhere" | I3 finding 6, REFINED below |
 
-P1 is in flight on branch `fix/phase0-revise` as
-`fix(worker): constrain database authority`.
+**P1 IS CLEARED (2026-08-16, merged `b63e8e22a`).** `deploy/compose/docker-compose.yml`
+now gives the worker `postgres://zeroship_worker:zeroship_worker@...`, a
+dedicated least-privilege login, and the migration revokes the whole `zeroship`
+schema plus future default privileges before restoring three read-only
+projections. **S1 is therefore UNBLOCKED.**
+
+**P2 IS SMALLER THAN I3 REPORTED.** I3 said the pools "cannot enable TLS at
+all", which reads as absent infrastructure. VERIFIED at `ab93d1401`, what is
+actually true:
+
+- `libs/compio-postgres/src/tls.rs` already defines `TlsConnect` and
+  `MakeTlsConnect`, and `connect_tls` performs the negotiation.
+- `compio-tls` is already a declared dependency of `compio-postgres`.
+- **`NoTls` is the only concrete implementation** (`tls.rs:85-90`), and the pool
+  hardcodes it (`pool.rs:35`, `:51`).
+- The pool **fails CLOSED**: `reject_unsatisfiable_tls` (`pool.rs:239`) errors on
+  `sslmode=require` rather than silently downgrading to cleartext (`:244`).
+
+So the work is: implement `MakeTlsConnect` over `compio-tls`/rustls and let the
+pool accept a connector, NOT build TLS into a bespoke driver. The abstraction,
+the negotiation path and the dependency are all present.
+
+`libs/compio-redis` has NO `compio-tls` dependency, so it is the larger half.
+**NOT CHECKED** whether Redis is on a cross-host hop in the target topology; if
+it is core-local only, it may not be on S2's critical path at all.
 
 ### 9.1 Build order
 
@@ -790,3 +813,148 @@ behalf*.
   per-connection while the trait is invoked per-request. Also VERIFIED that
   rustls 0.23 is already in the dependency graph via cyper and compio-tls, and
   that no client-certificate plumbing exists anywhere in the tree.
+- 2026-08-16, blockers re-measured: **P1 CLEARED** by merge `b63e8e22a` - the
+  worker now runs on a dedicated `zeroship_worker` login, so **S1 is unblocked
+  and is the next thing to build**. **P2 refined**: I3's "the pools cannot
+  enable TLS at all" overstates it. `compio-postgres` already has the
+  `TlsConnect`/`MakeTlsConnect` abstraction, the `connect_tls` negotiation path
+  and `compio-tls` as a dependency; what is missing is a concrete rustls
+  implementation, since `NoTls` is the only one and the pool hardcodes it. The
+  pool also already fails CLOSED on `sslmode=require`. `compio-redis` has no
+  `compio-tls` dependency and is the larger half; whether Redis is even on a
+  cross-host hop is NOT CHECKED.
+
+---
+
+## 12. SCALE 2026-08-16: replica count is a blast-radius choice, not an infra requirement
+
+The operator states the target is roughly **1000 replicas per service**. That
+invalidates a load-bearing assumption in sections 6 and 9, and the correction is
+structural rather than a tuning change.
+
+### 12.1 What actually breaks, and what does not
+
+**Correction to the first draft of this section**, which claimed self-signed
+assertions "do not survive 1000 replicas". That is WRONG as stated, and the
+distinction matters for planning:
+
+- **Per-SERVICE keys are infrastructure-free at ANY replica count.** Five
+  keypairs, five bundle entries, the key ships with the service image or config.
+  A thousand gateway replicas all sign with the same gateway key and the bundle
+  stays at five. No issuer, no CA, no SPIRE. Replica count is simply irrelevant
+  here.
+- **What breaks is per-REPLICA self-signed identity.** There the signer and the
+  subject are the same entity, so N identities need N public keys: a 5000-entry
+  bundle that churns with autoscaling, and every new replica must get its key
+  INTO the bundle - the enrollment problem at a scale where hand-provisioning is
+  impossible.
+
+So the mechanism does not force infrastructure. **The granularity of identity
+does**, and that is a blast-radius decision, not a scale requirement.
+
+### 12.2 The three real options
+
+| | bundle size | revocation granularity | verdict |
+| --- | --- | --- | --- |
+| per-service key | 5 | rotate for all 1000 or none | a shared secret again - narrower than today's one-key-four-services, still shared |
+| per-point-of-presence key | dozens | cut off one site | workable interim; matches the blast radius that actually matters |
+| per-replica, short-lived, centrally issued | the ISSUER's keys only | expiry, in minutes | **this is SPIFFE** |
+
+### 12.3 The principle
+
+**Separate the signer from the subject.** SPIFFE JWT-SVIDs are signed by the
+SPIRE server, not by the workload, so one signing key covers unlimited
+identities and the bundle stays small; identity lives in the `sub` claim.
+Self-signed assertions cannot do this by construction.
+
+### 12.4 What this changes
+
+- **The trait and `authorize()` are UNAFFECTED.** This is exactly why the seam
+  was built first: the mechanism changes underneath it, the authorization model
+  does not. 9.1's claim that S1 is durable survives the correction.
+- **Per-service keys are explicitly INTERIM**, not the target. Section 6.5.1 and
+  section 9 should be read with that qualifier.
+- **S3 (attestation) is not forced by replica count.** Per-service or
+  per-point-of-presence keys carry the design at any scale with zero
+  infrastructure. S3 becomes necessary only when the threat model requires
+  revoking a SINGLE replica without rotating its peers - which is a judgement
+  about how much a compromised process should cost, not something the fleet size
+  decides.
+- **The attestation source depends on the runtime**, and this is now urgent
+  rather than deferrable: Kubernetes provides projected service-account tokens
+  as a ready-made attestation source; bare metal means running SPIRE.
+
+### 12.5 The open question that decides the interim
+
+**Are the replicas long-lived or churning?** A fixed provisioned fleet can live
+with per-point-of-presence keys for a long time. Autoscaled replicas with
+minutes-to-hours lifetimes make central issuance mandatory almost immediately,
+because there is no provisioning window at all. NOT ANSWERED.
+
+### 12.6 Terminology correction
+
+This document says "RFC 7523" throughout. That RFC profiles JWT use for OAuth
+**client authentication to an authorization server's token endpoint**. We are
+adapting its shape to direct service-to-service calls, where there is no token
+endpoint and `aud` is the callee rather than the AS. The accurate name is
+**self-signed JWT service assertions**, or `private_key_jwt`-style service
+authentication. Calling it RFC 7523 implies conformance to a profile we are
+adapting, not implementing - and per this codebase's own standard, a claim that
+overstates what the code does is a defect.
+
+### 12.7 Restated plainly: what needs infrastructure
+
+| rung | infra needed | keys to distribute | revoke granularity |
+| --- | --- | --- | --- |
+| per-service key | **none** | 5 private, 5 public | the whole service |
+| per-point-of-presence key | **none** | one per site | one site |
+| per-replica, centrally issued | issuer + attestation | issuer keys only | one process |
+
+The first two are config distribution, which every deployment already does for
+its database URL. Only the third is a system to operate.
+
+**So the "no infrastructure" claim in section 1 stands** - for the rungs we are
+actually proposing to build. It would be false only if we committed to
+per-replica identity, and we are not.
+
+---
+
+## 13. OPERATOR DECISION 2026-08-16: JWT assertions only, mTLS deferred
+
+> "don't support mtls now, support only jwt profile now, we'll defer mtls"
+
+**What this settles.** Sections 6.3 and 6.5.1 already recommended self-signed JWT
+service assertions as the single shipped implementation. This makes it a ruling
+rather than a recommendation, and removes the TLS-termination question (12.5,
+task 6) from the critical path - it was only ever a gate on the mechanism choice.
+
+**What NOT to build, and why it matters.** No mTLS arm. No stub adapter. No
+`Mtls` variant behind the trait "ready for later". The OSS survey's sharpest
+operational finding applies directly: Keycloak's optional
+`cache-embedded-mtls-enabled` flag **silently did nothing for two version lines**
+(CVE-2024-10973), because optional hardening is untested hardening. A speculative
+half-built adapter is worse than no adapter - it reads as a supported path while
+never being exercised.
+
+**What preserves the option.** The trait itself (6.6), which is why it is a SEAM
+and not a mode. `authorize()` is mechanism-independent and built once; adding
+mTLS later replaces `IdentityVerifier` and touches no authorization code. The
+naming convention costs nothing today and keeps the door open: use SPIFFE-shaped
+identifiers (`spiffe://zeroship.ai/svc/gateway`) in `iss` now, and they carry
+unchanged into X.509 SANs later.
+
+**What must be answered before mTLS is revisited**, recorded so it is not lost:
+does anything terminate TLS between a point of presence and a core region?
+`deploy/ops/Caddyfile:55` already reverse-proxies `control:9090`, so control's
+traffic passes through a terminating proxy today. If points of presence reach
+control on that same hostname, mTLS identity dies at Caddy - and the
+`X-Forwarded-Client-Cert` workaround makes control trust the proxy's assertion
+about who called, which is the confused-deputy shape this whole programme removed
+from the mint. mTLS in that topology needs a separate direct network path, which
+is real work and a second surface to secure.
+
+**Consequence for the build order.** Task 7 is now blocked only by task 5. S2's
+transport half (TLS on cross-host hops, and task 8's `MakeTlsConnect` for
+compio-postgres) is UNAFFECTED - server-side TLS is required for confidentiality
+regardless of how identity is proven, and JWT assertions in cleartext would be
+capturable and replayable inside their `exp`.
