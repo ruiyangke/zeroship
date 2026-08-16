@@ -41,6 +41,22 @@ fn verdict(tail: &str) -> Result<(), String> {
 
 const DROP_V: &str = r#"{"op":"dropColumn","table":"a","column":"v"}"#;
 
+/// Assert the op that named the column, so the CHECK-body sites and the
+/// generated-column site cannot cover for each other.
+///
+/// Two of the three here are addConstraint and one is addColumn; all three name
+/// the same column on the same table, so the op is the only discriminator the
+/// message carries - and it carries it only because this rule was taught to name
+/// its operation while this audit was running.
+fn expect_expr_refusal(ops: &str, op_name: &str, what: &str) {
+    let refusal = verdict(ops).expect_err(what);
+    let expected = format!("this {op_name} names column");
+    assert!(
+        refusal.contains(&expected),
+        "{expected:?} is missing, so a sibling op is satisfying this test: {refusal}"
+    );
+}
+
 #[test]
 fn a_check_body_naming_a_dropped_column_is_refused() {
     let refusal = verdict(&format!(
@@ -55,10 +71,13 @@ fn a_check_body_naming_a_dropped_column_is_refused() {
 
 #[test]
 fn a_generated_column_naming_a_dropped_column_is_refused() {
-    verdict(&format!(
-        r#"{DROP_V},{{"op":"addColumn","table":"a","column":"g","type":"int","nullable":true,"generated":{{"expr":{{"node":"binOp","op":"add","lhs":{{"node":"colRef","name":"v"}},"rhs":{{"node":"literal","value":1}}}},"stored":true}}}}"#
-    ))
-    .expect_err("the generated expression names a column the drop removed");
+    expect_expr_refusal(
+        &format!(
+            r#"{DROP_V},{{"op":"addColumn","table":"a","column":"g","type":"int","nullable":true,"generated":{{"expr":{{"node":"binOp","op":"add","lhs":{{"node":"colRef","name":"v"}},"rhs":{{"node":"literal","value":1}}}},"stored":true}}}}"#
+        ),
+        "addColumn",
+        "the generated expression names a column the drop removed",
+    );
 }
 
 #[test]
@@ -66,10 +85,13 @@ fn a_column_buried_deep_in_the_expression_is_still_found() {
     // Not a duplicate of the first test: it pins that the walk RECURSES rather
     // than peeking at the top node. A check that only looked at the outermost
     // node would pass the first test and miss this.
-    verdict(&format!(
-        r#"{DROP_V},{{"op":"addConstraint","table":"a","constraint":{{"name":"ck","kind":{{"kind":"check","expr":{{"node":"binOp","op":"or","lhs":{{"node":"binOp","op":"gt","lhs":{{"node":"colRef","name":"c0"}},"rhs":{{"node":"literal","value":0}}}},"rhs":{{"node":"case","branches":[{{"when":{{"node":"binOp","op":"gt","lhs":{{"node":"colRef","name":"v"}},"rhs":{{"node":"literal","value":0}}}},"then":{{"node":"literal","value":true}}}}],"else":{{"node":"literal","value":false}}}}}}}}}}}}"#
-    ))
-    .expect_err("a column reference nested inside CASE inside OR must still be found");
+    expect_expr_refusal(
+        &format!(
+            r#"{DROP_V},{{"op":"addConstraint","table":"a","constraint":{{"name":"ck","kind":{{"kind":"check","expr":{{"node":"binOp","op":"or","lhs":{{"node":"binOp","op":"gt","lhs":{{"node":"colRef","name":"c0"}},"rhs":{{"node":"literal","value":0}}}},"rhs":{{"node":"case","branches":[{{"when":{{"node":"binOp","op":"gt","lhs":{{"node":"colRef","name":"v"}},"rhs":{{"node":"literal","value":0}}}},"then":{{"node":"literal","value":true}}}}],"else":{{"node":"literal","value":false}}}}}}}}}}}}"#
+        ),
+        "addConstraint",
+        "a column reference nested inside CASE inside OR must still be found",
+    );
 }
 
 // ---------------------------------------------------------------------------
