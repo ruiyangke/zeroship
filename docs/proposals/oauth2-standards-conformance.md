@@ -142,7 +142,7 @@ Flat MUST-do list, grouped by endpoint, each tagged with its spec §. Treat unch
 
 ### JWKS + discovery
 - [ ] `jwks_uri` serves the public JWK Set; each key has `kid`, `use:sig`, `alg`, `kty`. — RFC 7517 §4, §5
-- [ ] Support key rotation: publish new key before signing with it; keep retired keys until all tokens expire. — RFC 7517 §5 (operational)
+- [x] Support key rotation: publish before use; keep `retiring` keys through maximum issued expiry plus the complete JWKS cache and skew allowance; then preserve a terminal `retired` audit row. - RFC 7517 Section 5 (operational)
 - [ ] `/.well-known/oauth-authorization-server` with `issuer`, `authorization_endpoint`, `token_endpoint`, `jwks_uri`, `response_types_supported`, `grant_types_supported`, `code_challenge_methods_supported`, `revocation_endpoint`. — RFC 8414 §2, §3
 - [ ] `/.well-known/openid-configuration` with `subject_types_supported` (incl. `pairwise`), `id_token_signing_alg_values_supported`, `userinfo_endpoint`, `device_authorization_endpoint`, `end_session`/`backchannel_logout_supported`. — OIDC Discovery §3
 - [ ] `issuer` is an `https` URL with no query/fragment and **exactly matches** the value used to fetch the metadata, the `iss` in tokens, and the RFC 9207 `iss` param. — RFC 8414 §2, §3.3; RFC 9207 §2
