@@ -1,6 +1,5 @@
 import { useMemo, useState, type ComponentPropsWithoutRef } from "react";
-import { Badge,
-  Banner,
+import { Banner,
   Button,
   Checkbox,
   Dialog,
@@ -14,6 +13,7 @@ import { Badge,
   Select,
   Tabs,
 } from "@zeroship/ui";
+import { Badge } from "../ui/Badge";
 import {
   createComponent,
   createMilestone,

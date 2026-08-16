@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
-import { Button, Checkbox, Tag, Input } from "@zeroship/ui";
+import { Button, Checkbox, Input } from "@zeroship/ui";
+import { Tag } from "../../ui/Tag";
 import { attachKeyword, createKeyword, detachKeyword } from "../../api";
 import { FieldError, InlineForm, Muted } from "../AppPrimitives";
 import { deriveNamedSet } from "../activity";

@@ -9,7 +9,7 @@
 // problems are gone and the caveat that used to sit at the bottom of this panel
 // is deleted rather than reworded.
 import { useState } from "react";
-import { Button, Badge, Select } from "@zeroship/ui";
+import { Button, Select } from "@zeroship/ui";
 
 import { clearFlag, setFlag } from "../../api";
 import { invalidatedBy } from "../../lib/query-keys";
@@ -21,6 +21,7 @@ import { UserPicker } from "../UserPicker";
 import { Absent } from "./Absent";
 import { DetailPanel } from "./DetailPanel";
 import { RailList } from "./RailList";
+import { Badge } from "../../ui/Badge";
 
 type FlagStatus = "+" | "-" | "?";
 const FLAG_STATUSES: FlagStatus[] = ["+", "-", "?"];

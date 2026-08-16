@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { useClearQuery, useNumericQueryParam, useQueryParam } from "../lib/query-state";
-import { Button, Card, Checkbox, Dialog, FilterBar, PageHeader, Select } from "@zeroship/ui";
+import { Button, Checkbox, Dialog, FilterBar, PageHeader, Select } from "@zeroship/ui";
+import { Card } from "../ui/Card";
 import {
   ALL_ISSUE_COLUMNS,
   IssueResultsTable,
@@ -68,9 +69,8 @@ function loadColumns(): IssueColumnKey[] {
 
 /**
  * Popup chrome belongs to the picker rather than to every call site that
- * happens to render a Card. Card's slot theme intentionally outranks normal
- * utilities, so the few properties that make this Card a popup are explicit
- * important overrides instead of silently losing the cascade.
+ * happens to render a Card. The few properties that make this Card a popup
+ * remain explicit important overrides instead of silently losing the cascade.
  */
 function ColumnPickerMenu({ children }: { children: ReactNode }) {
   return (

@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from "react";
-import { Badge, Field, NumberField, PageHeader, Progress, Select, StatCard } from "@zeroship/ui";
+import { Field, NumberField, PageHeader, Progress, Select, StatCard } from "@zeroship/ui";
+import { Badge } from "../ui/Badge";
 import {
   useProducts,
   useReportByAssignee,

@@ -1,4 +1,4 @@
-import { Skeleton } from "@zeroship/ui";
+import { Skeleton } from "../../ui/Skeleton";
 
 /**
  * One token for "there is no value here", and a DIFFERENT one for "the value

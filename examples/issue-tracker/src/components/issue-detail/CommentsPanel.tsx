@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { Avatar, Button, Checkbox, Tag } from "@zeroship/ui";
+import { Avatar, Button, Checkbox } from "@zeroship/ui";
 
 import { RichText, RichTextEditor, hasText } from "../RichText";
 import { FieldError, Muted } from "../AppPrimitives";
@@ -15,7 +15,8 @@ import type { Activity, Attachment, Comment } from "../types";
 import { buildTimeline } from "./timeline";
 import { displayValue, fieldLabel, personLabel } from "./activity";
 import type { PeopleMap } from "./people";
-import { Badge } from "./Badge";
+import { Badge } from "../../ui/Badge";
+import { Tag } from "../../ui/Tag";
 import { TimelineBody, TimelineList, TimelineRow } from "./TimelinePrimitives";
 
 function formatDate(ms: number): string {

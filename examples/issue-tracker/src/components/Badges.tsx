@@ -1,4 +1,4 @@
-import { Badge } from "@zeroship/ui";
+import { Badge } from "../ui/Badge";
 
 import type { IssueKind, IssuePriority, IssueSeverity } from "../lib/quicksearch";
 

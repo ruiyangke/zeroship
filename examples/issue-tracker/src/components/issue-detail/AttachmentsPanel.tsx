@@ -9,7 +9,7 @@ import { useAppMutation, useAttachments } from "../../lib/queries";
 import { invalidatedBy } from "../../lib/query-keys";
 import type { Attachment } from "../types";
 import { FieldError, Hint, Muted } from "../AppPrimitives";
-import { Badge } from "./Badge";
+import { Badge } from "../../ui/Badge";
 import { DetailPanel } from "./DetailPanel";
 
 function AttachmentRow({ attachment }: { attachment: Attachment }) {

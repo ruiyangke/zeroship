@@ -6,8 +6,8 @@ import {
   Button,
   EmptyState as UiEmptyState,
   ErrorState as UiErrorState,
-  Spinner,
 } from "@zeroship/ui";
+import { Spinner } from "../ui/Spinner";
 
 import { errorCode, errorMessage, isUnauthenticated } from "./rpc";
 import { Hint } from "./AppPrimitives";
