@@ -33,7 +33,6 @@ const COMPOSE_FILE: &str = "deploy/compose/docker-compose.yml";
 /// all. Generating a secret nothing consumes is the set-but-unread shape this
 /// migration exists to remove, and it is not made better by a canonical name.
 const ENV_KEYS: &[&str] = &[
-    "ZEROSHIP_AUTH_PLATFORM_MINT_KEY",
     "ZEROSHIP_CONTROL_KEY",
     "ZEROSHIP_CONTROL_MASTER_KEY",
     "ZEROSHIP_WORKER_KEY",
@@ -220,7 +219,7 @@ type SecretSpec = (
     fn(&[u8]) -> Result<(), String>,
 );
 
-fn secret_specs() -> [SecretSpec; 6] {
+fn secret_specs() -> [SecretSpec; 7] {
     [
         (
             "auth-signing.pem",
@@ -251,6 +250,11 @@ fn secret_specs() -> [SecretSpec; 6] {
             "refresh-idem-key",
             generate_base64_secret,
             validate_base64_secret,
+        ),
+        (
+            "platform-mint-key",
+            generate_platform_mint_key,
+            validate_platform_mint_key,
         ),
     ]
 }
@@ -496,9 +500,7 @@ fn validate_env_value(name: &str, value: &str) -> Result<(), String> {
             zeroship_core::config::validate_stash_key(name, value)
         }
         "ZEROSHIP_PAIRWISE_SALT" => zeroship_core::config::validate_pairwise_salt(name, value),
-        "ZEROSHIP_AUTH_PLATFORM_MINT_KEY"
-        | "ZEROSHIP_CONTROL_KEY"
-        | "ZEROSHIP_MIGRATED_POLICY_SEAL_KEY" => Ok(()),
+        "ZEROSHIP_CONTROL_KEY" | "ZEROSHIP_MIGRATED_POLICY_SEAL_KEY" => Ok(()),
         _ => Err(format!("unknown generated environment key {name}")),
     }
 }
@@ -611,6 +613,16 @@ fn validate_base64_secret(bytes: &[u8]) -> Result<(), String> {
 
 fn generate_refresh_hash_key() -> Result<Vec<u8>, String> {
     Ok(format!("1:{}\n", random_hex(48)?).into_bytes())
+}
+
+fn generate_platform_mint_key() -> Result<Vec<u8>, String> {
+    Ok(random_hex(32)?.into_bytes())
+}
+
+fn validate_platform_mint_key(bytes: &[u8]) -> Result<(), String> {
+    let value = std::str::from_utf8(bytes)
+        .map_err(|error| format!("platform mint key must be UTF-8: {error}"))?;
+    zeroship_core::config::validate_platform_mint_key("platform-mint-key", value)
 }
 
 fn validate_refresh_hash_key(bytes: &[u8]) -> Result<(), String> {

@@ -77,11 +77,10 @@ of the process environment. Each terminal below only adds the settings that
 are NOT in the generated overlay (database DSNs, key-material file paths, and
 other operational flags).
 
-One generated value is deliberately limited to two services:
-`ZEROSHIP_AUTH_PLATFORM_MINT_KEY` belongs only in control and auth. A setting
-that a worker binary ignores is still readable from that worker's process
-environment after a native or V8 escape. Keep the value in terminals 1 and 4,
-and remove it before starting worker, gateway, or migrated processes.
+One generated file is deliberately limited to two services:
+`platform-mint-key` belongs only in control and auth. Pass its file reference
+only in terminals 1 and 4. The worker never receives the raw value or a path to
+the file.
 
 Terminal 1:
 
@@ -89,6 +88,7 @@ Terminal 1:
 ZEROSHIP_CONTROL_DATABASE_URL=postgres://localhost:5432/zeroship \
 ZEROSHIP_AUTH_PLATFORM_ISSUER="http://localhost:9092/oauth2" \
 ZEROSHIP_AUTH_PLATFORM_MINT_URL="http://localhost:9092" \
+ZEROSHIP_AUTH_PLATFORM_MINT_KEY="urn:zeroship:file:$PWD/deploy/compose/secrets/platform-mint-key" \
 ./target/release/zeroship-control \
   --port 9090 \
   --blob-store ./bundles \
@@ -114,7 +114,6 @@ listener at this control instance.
 Terminal 2:
 
 ```bash
-unset ZEROSHIP_AUTH_PLATFORM_MINT_KEY
 ZEROSHIP_WORKER_DATABASE_URL=postgres://localhost:5432/zeroship \
 ./target/release/zeroship-worker \
   --port 8080 \
@@ -126,7 +125,6 @@ ZEROSHIP_WORKER_DATABASE_URL=postgres://localhost:5432/zeroship \
 Terminal 3:
 
 ```bash
-unset ZEROSHIP_AUTH_PLATFORM_MINT_KEY
 ZEROSHIP_GATEWAY_DATABASE_URL=postgres://localhost:5432/zeroship \
 ./target/release/zeroship-gate \
   --port 8000 \
@@ -143,6 +141,7 @@ Terminal 4:
 
 ```bash
 ZEROSHIP_AUTH_DATABASE_URL=postgres://localhost:5432/zeroship \
+ZEROSHIP_AUTH_PLATFORM_MINT_KEY="urn:zeroship:file:$PWD/deploy/compose/secrets/platform-mint-key" \
 ./target/release/zeroship-auth \
   --addr 127.0.0.1:9092 \
   --public-url http://localhost:9092 \
@@ -169,17 +168,18 @@ Notes:
 - `zeroship-worker` binds `127.0.0.1` by default (loopback, as above). Only add
   `--bind 0.0.0.0` together with `ZEROSHIP_WORKER_KEY` if another host must
   reach it.
-- `--config <path>` or `ZEROSHIP_CONFIG=<path>` loads the optional TOML
+- Except for the worker, `--config <path>` or `ZEROSHIP_CONFIG=<path>` loads the optional TOML
   overlay; add `--check-config` to the normal command for a read-only dry run
   that validates CLI/env/file config and the startup guards, then exits before
   binding a port. `--check-config --check-config-format json` emits the resolved
   non-secret config as JSON instead of text.
-- Absent an explicit `--config`/`ZEROSHIP_CONFIG`, the binaries auto-discover the
+- Absent an explicit `--config`/`ZEROSHIP_CONFIG`, those binaries auto-discover the
   fixed well-known path `/etc/zeroship/zeroship.toml` (the only auto-discovered
   location — no CWD/env redirect). Pass `--no-config` to disable discovery and
   use compiled defaults even if that file exists (`ZEROSHIP_NO_CONFIG=1` does the
-  same). All five server binaries answer `--check-config`, including
-  `zeroship-migrated`. A missing well-known file is
+  same). The worker exposes neither selector and never discovers an overlay;
+  this prevents it from reading operator credentials. All five server binaries
+  answer `--check-config`, including `zeroship-migrated`. A missing well-known file is
   fine (defaults apply); a present-but-broken one is a hard startup error. Dev
   usually just passes `--config deploy/ops/zeroship.toml` or sets `ZEROSHIP_CONFIG`
   rather than installing into `/etc`.

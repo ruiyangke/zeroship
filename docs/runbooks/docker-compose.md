@@ -40,15 +40,14 @@ command. It defaults to the gitignored `deploy/compose/secrets` directory and
 the sibling `deploy/compose/.env` file. The deployment runbook covers custom
 paths because Compose must receive both the custom env-file and mount path.
 
-The secret directory contains exactly seven files:
+The secret directory contains exactly eight files:
 
 `control-signing.pem` `gateway-signing.pem` `auth-signing.pem` `broker-secret`
-`pairwise-salt` `refresh-hash-key` `refresh-idem-key`
+`pairwise-salt` `platform-mint-key` `refresh-hash-key` `refresh-idem-key`
 
-The env overlay contains nine generated scalar values:
+The env overlay contains eight generated scalar values:
 
-`ZEROSHIP_AUTH_PLATFORM_MINT_KEY` `ZEROSHIP_CONTROL_KEY`
-`ZEROSHIP_CONTROL_MASTER_KEY` `ZEROSHIP_WORKER_KEY`
+`ZEROSHIP_CONTROL_KEY` `ZEROSHIP_CONTROL_MASTER_KEY` `ZEROSHIP_WORKER_KEY`
 `ZEROSHIP_MIGRATED_POLICY_SEAL_KEY` `ZEROSHIP_GATEWAY_STASH_SIGNING_KEY`
 `ZEROSHIP_PAIRWISE_SALT` `ZEROSHIP_AUTH_STASH_SIGNING_KEY`
 `ZEROSHIP_AUTH_TOTP_ENC_KEY`
@@ -308,16 +307,17 @@ defined ONCE instead of being repeated as per-service flags:
 For local compose, the referenced scalar secret values come from the gitignored
 `.env` written by `zeroship dev init`. In particular, one generated
 `ZEROSHIP_CONTROL_KEY` is interpolated into control, gateway, worker, and
-migrated. The separate `ZEROSHIP_AUTH_PLATFORM_MINT_KEY` is interpolated only
-into control and auth; the worker cannot authenticate to the token mint.
+migrated. The separate `platform-mint-key` file is mounted only into control
+and auth; the worker cannot read the key or authenticate to the token mint.
 
 Precedence is CLI/env-flag > `[secrets]`/`[auth]` file reference > default, so a
 leftover literal flag would silently WIN and defeat the file - keep config-covered
 values OFF the command lines. Copy `deploy/ops/zeroship.example.toml` to
 `deploy/ops/zeroship.toml` when customizing an environment. The file itself stays
 secret-free: it carries only `urn:`/`arn:` references, never a plaintext secret
-(a literal in `[secrets]` is rejected at resolve). The actual secret VALUES live
-in the generated compose `.env` (local dev) or a real secret store (prod).
+(a literal in `[secrets]` is rejected at resolve). The actual secret values live
+in the generated compose `.env` and narrowly mounted files (local dev), or a
+real secret store (prod).
 
 Validate a web binary's resolved config by adding `--check-config` to the
 normal command. It runs the same startup guards, so include the same required

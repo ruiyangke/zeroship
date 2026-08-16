@@ -477,9 +477,9 @@ fn main() -> std::io::Result<()> {
         .unwrap_or_else(|| bind_addr.to_string());
     let meter_source = format!("{worker_base}-{}", uuid::Uuid::new_v4());
     let meter = Arc::new(zeroship_metering::Meter::with_source(meter_source.clone()));
-    // Resolve the usage-stream producer config: env wins, the `[metering]` file
-    // overlay back-fills (so the billing stream is fully configurable in
-    // zeroship.toml, not env-only).
+    // Resolve the usage-stream producer config from the environment. Worker
+    // overlay loading is disabled as a credential boundary, so `fm` contains
+    // only compiled defaults.
     let fm = &boot.overlay.config.metering;
     let stream_settings = zeroship_metering::UsageStreamSettings::from_env().or(
         zeroship_metering::UsageStreamSettings {

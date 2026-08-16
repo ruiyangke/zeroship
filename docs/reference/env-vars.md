@@ -403,8 +403,7 @@ conflict fails without rotating either side.
 32 random bytes as lowercase hex. Rerunning keeps an existing valid value rather
 than rotating it. Here the `.env` name and the container name coincide:
 
-`ZEROSHIP_AUTH_PLATFORM_MINT_KEY` `ZEROSHIP_CONTROL_KEY`
-`ZEROSHIP_CONTROL_MASTER_KEY` `ZEROSHIP_WORKER_KEY`
+`ZEROSHIP_CONTROL_KEY` `ZEROSHIP_CONTROL_MASTER_KEY` `ZEROSHIP_WORKER_KEY`
 `ZEROSHIP_GATEWAY_STASH_SIGNING_KEY` `ZEROSHIP_PAIRWISE_SALT`
 `ZEROSHIP_AUTH_STASH_SIGNING_KEY` `ZEROSHIP_AUTH_TOTP_ENC_KEY`
 `ZEROSHIP_MIGRATED_POLICY_SEAL_KEY`
@@ -412,8 +411,9 @@ than rotating it. Here the `.env` name and the container name coincide:
 Compose uses required `${VAR:?run zeroship dev init}` interpolation for these
 values rather than built-in weak defaults. One generated value therefore moves
 every consumer together. `ZEROSHIP_CONTROL_KEY` reaches control, gateway,
-worker, and migrated. The independent `ZEROSHIP_AUTH_PLATFORM_MINT_KEY` reaches
-only control and auth.
+worker, and migrated. The independent `platform-mint-key` file is mounted only
+into control and auth, where its file reference is supplied through
+`ZEROSHIP_AUTH_PLATFORM_MINT_KEY`.
 
 ### Database DSNs an operator may override
 

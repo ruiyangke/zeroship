@@ -136,7 +136,7 @@ docker run --rm \
 
 The explicit paths are necessary because the CLI's repository-local defaults
 are `deploy/compose/secrets` and `deploy/compose/.env`. The command creates
-exactly seven files:
+exactly eight files:
 
 `control-signing.pem` `gateway-signing.pem` `auth-signing.pem` `broker-secret`
 `pairwise-salt` `refresh-hash-key` `refresh-idem-key`
@@ -228,8 +228,7 @@ ZEROSHIP_PAIRWISE_SALT=<openssl rand -hex 32>
 
 `zeroship dev init` already added these generated values to the same file:
 
-`ZEROSHIP_AUTH_PLATFORM_MINT_KEY` `ZEROSHIP_CONTROL_KEY`
-`ZEROSHIP_CONTROL_MASTER_KEY` `ZEROSHIP_WORKER_KEY`
+`ZEROSHIP_CONTROL_KEY` `ZEROSHIP_CONTROL_MASTER_KEY` `ZEROSHIP_WORKER_KEY`
 `ZEROSHIP_MIGRATED_POLICY_SEAL_KEY` `ZEROSHIP_GATEWAY_STASH_SIGNING_KEY`
 `ZEROSHIP_PAIRWISE_SALT` `ZEROSHIP_AUTH_STASH_SIGNING_KEY`
 `ZEROSHIP_AUTH_TOTP_ENC_KEY`
@@ -244,9 +243,9 @@ the correct answer for a deployment Stripe cannot reach anyway.
 
 Do not replace them with shared examples or per-service values. The generated
 `ZEROSHIP_CONTROL_KEY` supplies control, gateway, worker, and migrated. The
-independent `ZEROSHIP_AUTH_PLATFORM_MINT_KEY` supplies only control and auth, so
-the worker's key cannot authorize token minting. `chmod 600 .env`; the generator
-applies that mode on Unix too.
+independent `platform-mint-key` file is mounted only into control and auth, so
+the worker cannot read material that authorizes token minting. `chmod 600 .env`;
+the generator applies that mode on Unix too.
 
 ### Control plane access
 
