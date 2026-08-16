@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
-import { Checkbox, Select } from "@zeroship/ui";
+import { Checkbox } from "@zeroship/ui";
+import { Select } from "../ui/Select";
 import { Button } from "../ui/Button";
 import { Field } from "../ui/Field";
 import { Input } from "../ui/Input";
@@ -195,7 +196,10 @@ export function NewIssuePage() {
                   onValueChange={(next) => pickProduct(next ?? "")}
                   placeholder="Select a product"
                   aria-label="Product"
-                  renderValue={(id) => products.find((p) => p.id === id)?.name ?? id}
+                  items={products.map((product) => ({
+                    value: product.id,
+                    label: product.name,
+                  }))}
                 >
                   {products.map((p) => (
                     <Select.Item key={p.id} value={p.id}>
@@ -217,7 +221,10 @@ export function NewIssuePage() {
                       onValueChange={(next) => setComponentId(next ?? "")}
                       placeholder="Select a component"
                       aria-label="Component"
-                      renderValue={(id) => productDetail.components.find((c) => c.id === id)?.name ?? id}
+                      items={productDetail.components.map((component) => ({
+                        value: component.id,
+                        label: component.name,
+                      }))}
                     >
                       {productDetail.components.map((c) => (
                         <Select.Item key={c.id} value={c.id}>
@@ -261,7 +268,10 @@ export function NewIssuePage() {
                           onValueChange={(next) => setVersionId(next ?? "")}
                           placeholder="unspecified"
                           aria-label="Version"
-                          renderValue={(id) => productDetail.versions.find((v) => v.id === id)?.name ?? id}
+                          items={productDetail.versions.map((version) => ({
+                            value: version.id,
+                            label: version.name,
+                          }))}
                         >
                           {productDetail.versions.map((v) => (
                             <Select.Item key={v.id} value={v.id}>
@@ -277,9 +287,10 @@ export function NewIssuePage() {
                           onValueChange={(next) => setMilestoneId(next ?? "")}
                           placeholder="unspecified"
                           aria-label="Milestone"
-                          renderValue={(id) =>
-                            productDetail.milestones.find((m) => m.id === id)?.name ?? id
-                          }
+                          items={productDetail.milestones.map((milestone) => ({
+                            value: milestone.id,
+                            label: milestone.name,
+                          }))}
                         >
                           {productDetail.milestones.map((m) => (
                             <Select.Item key={m.id} value={m.id}>

@@ -1,5 +1,5 @@
 import { useState, type ComponentPropsWithoutRef } from "react";
-import { Select } from "@zeroship/ui";
+import { Select } from "../ui/Select";
 
 import {
   addGroupMember,
@@ -224,7 +224,10 @@ export function GroupsAdmin() {
               }}
               placeholder="Select a group"
               aria-label="Add member to"
-              renderValue={(id) => (groups ?? []).find((x) => x.id === id)?.name ?? id}
+              items={(groups ?? []).map((group) => ({
+                value: group.id,
+                label: group.name,
+              }))}
             >
               {(groups ?? []).map((group) => (
                 <Select.Item key={group.id} value={group.id}>
@@ -362,7 +365,10 @@ function ProductRestrictions({
             onValueChange={(next) => setProductId(next ?? "")}
             placeholder="Select a product"
             aria-label="Product"
-            renderValue={(id) => (products ?? []).find((x) => x.id === id)?.name ?? id}
+            items={(products ?? []).map((product) => ({
+              value: product.id,
+              label: product.name,
+            }))}
           >
             {(products ?? []).map((p) => (
               <Select.Item key={p.id} value={p.id}>
@@ -378,7 +384,10 @@ function ProductRestrictions({
             onValueChange={(next) => setGroupId(next ?? "")}
             placeholder="Select a group"
             aria-label="Group"
-            renderValue={(id) => (groups ?? []).find((x) => x.id === id)?.name ?? id}
+            items={(groups ?? []).map((group) => ({
+              value: group.id,
+              label: group.name,
+            }))}
           >
             {(groups ?? []).map((group) => (
               <Select.Item key={group.id} value={group.id}>

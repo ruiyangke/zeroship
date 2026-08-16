@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import { Select } from "@zeroship/ui";
+import { Select } from "../ui/Select";
 
 import { createFlagType } from "../api";
 import { invalidatedBy } from "../lib/query-keys";
@@ -82,7 +82,13 @@ export function FlagTypesAdmin() {
         </Field.Root>
         <Field.Root>
           <Field.Label>Product</Field.Label>
-          <Select value={productId} onValueChange={(v) => setProductId(v ?? "")} placeholder="All products" aria-label="Product" renderValue={(id) => products.find((p) => p.id === id)?.name ?? id}>
+          <Select
+            value={productId}
+            onValueChange={(v) => setProductId(v ?? "")}
+            placeholder="All products"
+            aria-label="Product"
+            items={products.map((p) => ({ value: p.id, label: p.name }))}
+          >
             {/* A type with no product applies to EVERY product, which is
                 Bugzilla behaviour and worth choosing rather than defaulting
                 into: the first version of this panel always created global

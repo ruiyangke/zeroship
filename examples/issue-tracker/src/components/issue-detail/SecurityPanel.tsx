@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Select } from "@zeroship/ui";
+import { Select } from "../../ui/Select";
 import { Button } from "../../ui/Button";
 import { Field } from "../../ui/Field";
 
@@ -94,7 +94,10 @@ export function SecurityPanel({ issueId }: { issueId: string }) {
               onValueChange={(next) => setSelected(next ?? "")}
               placeholder="Select a group"
               aria-label="Group"
-              renderValue={(id) => groups.find((g) => g.id === id)?.name ?? id}
+              items={groups.map((group) => ({
+                value: group.id,
+                label: group.name,
+              }))}
             >
               {groups.map((group) => (
                 <Select.Item key={group.id} value={group.id}>

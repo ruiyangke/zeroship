@@ -9,7 +9,7 @@
 // problems are gone and the caveat that used to sit at the bottom of this panel
 // is deleted rather than reworded.
 import { useState } from "react";
-import { Select } from "@zeroship/ui";
+import { Select } from "../../ui/Select";
 import { Button } from "../../ui/Button";
 
 import { clearFlag, setFlag } from "../../api";

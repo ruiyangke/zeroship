@@ -6,7 +6,7 @@
 // without a second box. Leaving the component here exported and unrendered is
 // how it became unreachable in the first place.
 import { useState } from "react";
-import { Select } from "@zeroship/ui";
+import { Select } from "../../ui/Select";
 import { Badge } from "../../ui/Badge";
 import { Button } from "../../ui/Button";
 import { Input } from "../../ui/Input";

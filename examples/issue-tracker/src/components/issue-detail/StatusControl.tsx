@@ -4,7 +4,7 @@
 // a duplicate are their own dedicated actions, not options folded into the
 // status dropdown.
 import { useState } from "react";
-import { Select } from "@zeroship/ui";
+import { Select } from "../../ui/Select";
 import { Button } from "../../ui/Button";
 import { Field } from "../../ui/Field";
 import { Input } from "../../ui/Input";

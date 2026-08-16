@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { useClearQuery, useNumericQueryParam, useQueryParam } from "../lib/query-state";
-import { Checkbox, Dialog, FilterBar, PageHeader, Select } from "@zeroship/ui";
+import { Checkbox, Dialog, FilterBar, PageHeader } from "@zeroship/ui";
+import { Select } from "../ui/Select";
 import { Card } from "../ui/Card";
 import { Button } from "../ui/Button";
 import {
@@ -469,7 +470,10 @@ export function IssueListPage() {
             value={productId}
             onValueChange={(v) => setProductId(v ?? "")}
             placeholder="Any product"
-            renderValue={(id) => products.find((p) => p.id === id)?.name ?? id}
+            items={products.map((product) => ({
+              value: product.id,
+              label: product.name,
+            }))}
           >
             {products.map((p) => (
               <Select.Item key={p.id} value={p.id}>

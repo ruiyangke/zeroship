@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from "react";
-import { NumberField, PageHeader, Progress, Select, StatCard } from "@zeroship/ui";
+import { NumberField, PageHeader, Progress, StatCard } from "@zeroship/ui";
+import { Select } from "../ui/Select";
 import { Badge } from "../ui/Badge";
 import { Field } from "../ui/Field";
 import {
@@ -352,7 +353,10 @@ export function ReportsPage() {
               onValueChange={(next) => setProductId(next ?? "")}
               placeholder="All products"
               aria-label="Product"
-              renderValue={(id) => products.find((p) => p.id === id)?.name ?? id}
+              items={products.map((product) => ({
+                value: product.id,
+                label: product.name,
+              }))}
             >
               {products.map((p) => (
                 <Select.Item key={p.id} value={p.id}>

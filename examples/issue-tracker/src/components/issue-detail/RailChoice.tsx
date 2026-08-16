@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Select } from "@zeroship/ui";
+import { Select } from "../../ui/Select";
 
 import { RailProperty } from "./RailProperty";
 
@@ -48,9 +48,7 @@ export function RailChoice({
             if (next != null && next !== value) await onChange(next);
             done();
           }}
-          renderValue={(current) =>
-            options.find((option) => option.value === current)?.label ?? String(current ?? "")
-          }
+          items={options}
         >
           {options.map((option) => (
             <Select.Item key={option.value} value={option.value}>

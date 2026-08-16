@@ -7,9 +7,9 @@ import { Banner,
   ListView,
   PageHeader,
   Pagination,
-  Select,
   Tabs,
 } from "@zeroship/ui";
+import { Select } from "../ui/Select";
 import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
 import { Field } from "../ui/Field";

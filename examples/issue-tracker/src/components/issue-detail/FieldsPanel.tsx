@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Select } from "@zeroship/ui";
+import { Select } from "../../ui/Select";
 import { Button } from "../../ui/Button";
 import { Field } from "../../ui/Field";
 import { Input } from "../../ui/Input";
@@ -224,7 +224,10 @@ function MoveControl({
               onValueChange={(next) => pickProduct(next ?? "")}
               placeholder="Select a product"
               aria-label="Target product"
-              renderValue={(id) => products.find((p) => p.id === id)?.name ?? id}
+              items={products.map((product) => ({
+                value: product.id,
+                label: product.name,
+              }))}
             >
               {products.map((p) => (
                 <Select.Item key={p.id} value={p.id}>
@@ -241,7 +244,10 @@ function MoveControl({
               onValueChange={(next) => setTargetComponentId(next ?? "")}
               placeholder="Select a component"
               aria-label="Target component"
-              renderValue={(id) => components?.find((c) => c.id === id)?.name ?? id}
+              items={(components ?? []).map((component) => ({
+                value: component.id,
+                label: component.name,
+              }))}
             >
               {components?.map((c) => (
                 <Select.Item key={c.id} value={c.id}>
