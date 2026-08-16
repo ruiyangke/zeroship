@@ -93,14 +93,32 @@ _e2e_secret_file() {
 
 # e2e_export_database_urls <dsn>
 #
-# One DSN, five canonical names. The services' database roles are DISTINCT
+# One admin DSN, seven canonical names. The services' database roles are DISTINCT
 # settings - control writes the registry, the gateway only reads sessions, the
 # worker runs creator SQL - so each has its own identity and there is no shared
 # middle name to point them all at. A harness that runs the whole stack against
 # one ephemeral Postgres says so once, here, instead of restating a `--db` on
-# every launch line. Pass a per-service DSN by setting that one name after this
-# call; the assignments below are plain and unconditional so a caller can see
-# what it is overriding.
+# every launch line. The worker is the exception: app code runs in its process,
+# so this helper always replaces the admin userinfo with its constrained role.
+# Pass another per-service DSN by setting that name after this call.
+_e2e_database_url_for_role() {
+  local dsn="$1" role="$2" password="$3" scheme rest host_and_path
+  case "$dsn" in
+    postgres://*|postgresql://*) ;;
+    *)
+      echo "e2e_export_database_urls: expected a postgres:// DSN" >&2
+      return 1
+      ;;
+  esac
+  scheme="${dsn%%://*}"
+  rest="${dsn#*://}"
+  host_and_path="${rest#*@}"
+  if [ "$host_and_path" = "$rest" ]; then
+    host_and_path="$rest"
+  fi
+  printf '%s://%s:%s@%s' "$scheme" "$role" "$password" "$host_and_path"
+}
+
 e2e_export_database_urls() {
   local dsn="${1:-}"
   [ -n "$dsn" ] || {
@@ -109,7 +127,7 @@ e2e_export_database_urls() {
   }
   ZEROSHIP_CONTROL_DATABASE_URL="$dsn"
   ZEROSHIP_GATEWAY_DATABASE_URL="$dsn"
-  ZEROSHIP_WORKER_DATABASE_URL="$dsn"
+  ZEROSHIP_WORKER_DATABASE_URL="$(_e2e_database_url_for_role "$dsn" zeroship_worker zeroship_worker)" || return 1
   ZEROSHIP_AUTH_DATABASE_URL="$dsn"
   ZEROSHIP_MIGRATED_DATABASE_URL="$dsn"
   ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL="$dsn"

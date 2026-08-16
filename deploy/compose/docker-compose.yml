@@ -559,18 +559,11 @@ services:
     # the gateway's ZEROSHIP_WORKER_KEY.
     # No secret is a flag; each arrives under its own canonical ZEROSHIP_ name
     # in the `environment:` block below. ZEROSHIP_WORKER_KEY must match the
-    # gateway's. NOTE on the worker's DSN: ZEROSHIP_WORKER_DATABASE_URL is
-    # plugin-db's PROVISIONING connection, NOT a constrained system-table role.
-    # plugin-db's register_model creates per-app PG roles + schemas
-    # (CREATEROLE/CREATEDB) and manages the WAL replication slot, so this
-    # connection MUST stay a privileged principal (the postgres superuser here in
-    # dev) - a DIFFERENT role than control/gateway's least-priv DSNs, which is
-    # exactly why the four services have four canonical DSN names rather than one
-    # shared reference. The `zeroship_worker` role from changeset 0025 exists (and owns
-    # ZERO zeroship.* system-table grants), but it is NOT the worker's login role
-    # - the worker never touches the system tables; its per-app tenant access is
-    # gated by plugin-db's own `SET LOCAL ROLE <per-app role>` mechanism, a
-    # separate trust boundary.
+    # gateway's. The worker logs in as the constrained zeroship_worker role.
+    # zeroship-migrated creates app roles, workflow schemas, and publications;
+    # the worker receives only runtime-role membership, its narrow workflow
+    # owner membership, and REPLICATION for per-worker logical slots. It has no
+    # write privilege on any zeroship system relation.
     command:
       - zeroship-worker
       - --port
@@ -604,10 +597,9 @@ services:
       retries: 5
       start_period: 40s
     environment:
-      # Worker DSN = privileged provisioning superuser (see NOTE above); a
-      # DIFFERENT role from control's and the gateway's, and therefore its own
-      # canonical name rather than a shared one they could disagree about.
-      ZEROSHIP_WORKER_DATABASE_URL: ${ZEROSHIP_WORKER_DATABASE_URL:-postgres://postgres:zeroship@postgres:5432/zeroship}
+      # Dedicated constrained worker login. Startup rejects a DSN whose
+      # effective database privileges exceed this role's narrow posture.
+      ZEROSHIP_WORKER_DATABASE_URL: ${ZEROSHIP_WORKER_DATABASE_URL:-postgres://zeroship_worker:zeroship_worker@postgres:5432/zeroship}
       # env.kv backend. Secret-classed: a Redis URL admits userinfo, so it has
       # no value flag and arrives here instead of on the command line.
       ZEROSHIP_WORKER_KV_URL: ${ZEROSHIP_WORKER_KV_URL:-redis://redis:6379}

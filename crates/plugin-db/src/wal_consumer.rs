@@ -338,7 +338,7 @@ impl WalConsumer {
     }
 
     /// Resume from a specific LSN on the controlled consumer. Pass the value
-    /// returned by [`crate::replication::ensure_publication_and_worker_slot`].
+    /// returned by [`crate::replication::ensure_worker_slot`].
     pub(crate) fn with_start_lsn(mut self, lsn: impl Into<String>) -> Self {
         self.start_lsn = lsn.into();
         self

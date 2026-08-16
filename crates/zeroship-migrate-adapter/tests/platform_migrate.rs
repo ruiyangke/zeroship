@@ -39,7 +39,7 @@ mod platform_cli {
     /// How many files `db/migrations-ts` holds. Asserted rather than derived so
     /// that a discovery bug which silently drops a file fails loudly instead of
     /// agreeing with itself. Adding a migration updates this one constant.
-    const PLATFORM_MIGRATION_FILES: usize = 12;
+    const PLATFORM_MIGRATION_FILES: usize = 21;
 
     const DURABLE_WORKFLOW_JOURNAL_TABLES: [&str; 10] = [
         "app_deploys",
@@ -609,6 +609,75 @@ mod platform_cli {
         .await
         {
             return Err("no table grants to role 'zeroship_control'".to_string());
+        }
+
+        // (6) The app-code worker login is a replication consumer, never a
+        // platform-schema writer. Check effective table, column, sequence, and
+        // schema authority so role membership cannot hide a write grant.
+        if !scalar_bool(
+            &probe,
+            "SELECT NOT rolsuper AND NOT rolcreaterole AND NOT rolcreatedb \
+                    AND rolreplication AND rolbypassrls \
+               FROM pg_roles WHERE rolname = 'zeroship_worker'",
+        )
+        .await
+        {
+            return Err("zeroship_worker has unsafe role attributes".to_string());
+        }
+        if !scalar_bool(
+            &probe,
+            "SELECT pg_has_role('zeroship_worker', 'zeroship_workflow_owner', 'MEMBER') \
+                    AND NOT has_schema_privilege('zeroship_worker', 'zeroship', 'CREATE') \
+                    AND NOT has_database_privilege('zeroship_worker', current_database(), 'CREATE')",
+        )
+        .await
+        {
+            return Err("zeroship_worker has unsafe ownership or schema authority".to_string());
+        }
+        if !scalar_bool(
+            &probe,
+            "SELECT NOT EXISTS ( \
+                 SELECT 1 \
+                   FROM pg_class relation \
+                   JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace \
+                   CROSS JOIN (VALUES ('INSERT'), ('UPDATE'), ('DELETE'), ('TRUNCATE'), \
+                                      ('REFERENCES'), ('TRIGGER')) privilege(name) \
+                  WHERE namespace.nspname = 'zeroship' \
+                    AND relation.relkind IN ('r', 'p', 'v', 'm', 'f') \
+                    AND has_table_privilege('zeroship_worker', relation.oid, privilege.name) \
+               ) AND NOT EXISTS ( \
+                 SELECT 1 \
+                   FROM pg_class relation \
+                   JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace \
+                   CROSS JOIN (VALUES ('INSERT'), ('UPDATE'), ('REFERENCES')) privilege(name) \
+                  WHERE namespace.nspname = 'zeroship' \
+                    AND relation.relkind IN ('r', 'p', 'v', 'm', 'f') \
+                    AND has_any_column_privilege('zeroship_worker', relation.oid, privilege.name) \
+               ) AND NOT EXISTS ( \
+                 SELECT 1 \
+                   FROM pg_class relation \
+                   JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace \
+                   CROSS JOIN (VALUES ('USAGE'), ('UPDATE')) privilege(name) \
+                  WHERE namespace.nspname = 'zeroship' \
+                    AND relation.relkind = 'S' \
+                    AND has_sequence_privilege('zeroship_worker', relation.oid, privilege.name) \
+               )",
+        )
+        .await
+        {
+            return Err("zeroship_worker can write a platform relation".to_string());
+        }
+        if !scalar_bool(
+            &probe,
+            "SELECT NOT has_table_privilege('zeroship_worker', 'zeroship.device_grants', 'INSERT') \
+                    AND NOT has_column_privilege('zeroship_worker', 'zeroship.apps', 'api_key', 'SELECT') \
+                    AND has_column_privilege('zeroship_worker', 'zeroship.apps', 'id', 'SELECT') \
+                    AND has_column_privilege('zeroship_worker', 'zeroship.plans', 'runtime_limits_json', 'SELECT') \
+                    AND has_column_privilege('zeroship_worker', 'zeroship.app_deploys', 'manifest_json', 'SELECT')",
+        )
+        .await
+        {
+            return Err("zeroship_worker column grants exceed the workflow projection".to_string());
         }
 
         Ok(())

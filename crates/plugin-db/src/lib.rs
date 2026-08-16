@@ -822,9 +822,9 @@ pub async fn init_pool_async() -> Result<(), String> {
 ///
 /// The worker's process-wide version poller calls this after an app disappears
 /// from the control-plane registry. It closes local subscriptions, stops this
-/// process's consumer, then drops every worker slot and the shared publication.
-/// The Postgres teardown is idempotent so every worker container may observe
-/// the same deletion safely.
+/// process's consumer, then drops every worker slot. Publication membership
+/// remains owned by the migration service. The Postgres teardown is idempotent
+/// so every worker container may observe the same deletion safely.
 pub async fn deprovision_app_cdc(db_url: &str, app_id: &str) -> Result<(), DbError> {
     cdc_lifecycle::shutdown_app(app_id).await;
     broker::drop_app(Some(app_id));
@@ -835,7 +835,7 @@ pub async fn deprovision_app_cdc(db_url: &str, app_id: &str) -> Result<(), DbErr
             let pool = Pool::connect(db_url, 2).await.map_err(|error| DbError::Transient {
                 message: format!("db CDC app-delete connection failed: {error}"),
             })?;
-            replication::drop_publication_and_slots(&pool, app_id).await
+            replication::drop_worker_slots(&pool, app_id).await
         }
     }
 }

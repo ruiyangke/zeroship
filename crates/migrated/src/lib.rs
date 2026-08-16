@@ -12,6 +12,7 @@ pub mod migration_store;
 pub mod policy;
 pub mod policy_store;
 pub mod provisioning;
+pub mod publication;
 
 use std::path::PathBuf;
 use std::sync::Arc;

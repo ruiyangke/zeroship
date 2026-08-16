@@ -1,13 +1,9 @@
 //! Postgres publication and replication-slot lifecycle for reactive
 //! queries.
 //!
-//! This module ships a reduced scope: it provisions and
-//! manages the Postgres-side objects that the broker depends on — the
-//! per-app `PUBLICATION` and per-worker logical-decoding `REPLICATION
-//! SLOT`, plus the operational sweepers (watchdog + abandoned-slot GC).
-//! All of these are regular SQL: `CREATE PUBLICATION`,
-//! `pg_create_logical_replication_slot()`, `pg_replication_slots`,
-//! `pg_drop_replication_slot()`.
+//! The migration service owns each per-app `PUBLICATION`. Workers only
+//! verify that publication exists and manage their own logical-decoding
+//! `REPLICATION SLOT`, plus the slot watchdog and abandoned-slot GC.
 //!
 //! ## Naming convention
 //!
@@ -34,6 +30,7 @@
 
 use compio_postgres::Pool;
 use sha2::{Digest, Sha256};
+use zeroship_core::replication_names::{self, ReplicationNameError};
 
 use crate::error::{first_row_or_internal, prefix_message, DbError};
 
@@ -41,7 +38,7 @@ use crate::error::{first_row_or_internal, prefix_message, DbError};
 /// Picked deliberately short (4 chars + `_`) so the watchdog query's
 /// `LIKE '__zs_%'` stays selective and the names fit inside Postgres's
 /// 63-character `NAMEDATALEN` budget alongside even a long app_id.
-pub(crate) const OBJECT_PREFIX: &str = "__zs_";
+pub(crate) const OBJECT_PREFIX: &str = replication_names::OBJECT_PREFIX;
 
 // ---------------------------------------------------------------------------
 // Naming
@@ -92,8 +89,13 @@ fn stable_token(value: &str, bytes: usize) -> String {
 
 /// Compose the shared per-app publication name.
 pub fn publication_name(app_id: &str) -> Result<String, DbError> {
-    validate_app_id(app_id)?;
-    Ok(format!("{OBJECT_PREFIX}pub_{}", stable_token(app_id, 14)))
+    replication_names::publication_name(app_id).map_err(|err| {
+        let message = match err {
+            ReplicationNameError::EmptyAppId => "replication: app_id must not be empty",
+            ReplicationNameError::NulAppId => "replication: app_id must not contain NUL",
+        };
+        DbError::validation("invalid_app_id", message)
+    })
 }
 
 /// Compose the per-worker replication slot for an app.
@@ -128,66 +130,37 @@ pub(crate) fn worker_slot_name_prefix(app_id: &str) -> Result<String, DbError> {
 // Provisioning
 // ---------------------------------------------------------------------------
 
-/// Idempotently ensure the per-app publication and replication slot
-/// exist on the connected Postgres instance.
+/// Verify the migration-owned publication and idempotently ensure this
+/// worker's replication slot exists on the connected Postgres instance.
 ///
 /// Returns the slot's `confirmed_flush_lsn` (current safe-to-restart
 /// point) as a `String` — see [`SetupOutcome`].
 ///
 /// ## Idempotency model
 ///
-/// - The publication uses `CREATE PUBLICATION IF NOT EXISTS`. If the
-///   publication exists with a different table set (e.g. created by a
-///   prior version of the platform), we leave it alone — the
-///   maintenance cron's reconciler will rebuild it. Re-creating it
-///   here would drop the slot's tracking of in-flight transactions.
+/// - The publication is a precondition. A missing publication fails
+///   closed because only the migration service may decide its table set.
 /// - The slot uses a precondition SELECT against `pg_replication_slots`;
 ///   if absent, `pg_create_logical_replication_slot()` is called.
 ///   The race between SELECT and create is benign because the create
 ///   throws `duplicate_object` (SQLSTATE 42710) which we treat as
 ///   success.
 ///
-/// ## Schema scope
-///
-/// The publication is created with `FOR ALL TABLES IN SCHEMA "<app_id>"`.
-/// This bounds the WAL feed to the app's schema; platform-managed
-/// tables in `__zeroship_*` schemas do not appear. Inside the app
-/// schema, we additionally `ALTER PUBLICATION ... DROP TABLE` for
-/// known-platform tables (`__zeroship_migrations`,
-/// `__zeroship_migration_dead_letter_overflow`, etc.) so the broker
-/// never receives its own audit-row writes as invalidation events.
-///
-/// On Postgres < 15 `FOR ALL TABLES IN SCHEMA` is unsupported; we
-/// fall back to listing tables explicitly via
-/// `pg_class JOIN pg_namespace`. We target Postgres 15+ and surface a
-/// `replication: server too old` error otherwise — the proposal
-/// version-pins at 16+.
-pub async fn ensure_publication_and_worker_slot(
+pub async fn ensure_worker_slot(
     pool: &Pool,
     app_id: &str,
     worker_id: &str,
 ) -> Result<SetupOutcome, DbError> {
     let pub_name = publication_name(app_id)?;
     let slot = worker_slot_name(app_id, worker_id)?;
-    // Object names use hash tokens, but the schema itself uses the
-    // original app id. Quote it to preserve case and punctuation.
-    let schema_ref = crate::query::quote_ident(app_id);
 
-    // ---- 1. publication ----
-    //
-    // Schema-scoped (FOR ALL TABLES IN SCHEMA) so adding a new
-    // collection picks up automatically without an ALTER. The
-    // platform tables are then explicitly dropped — even if a future
-    // migration creates a new `__zeroship_*` table, the watchdog (not
-    // here) will reconcile.
-    let pub_sql = format!(
-        r#"CREATE PUBLICATION "{pub_name}" FOR TABLES IN SCHEMA {schema_ref};"#
-    );
-    // `IF NOT EXISTS` is not supported by `CREATE PUBLICATION` in PG 16
-    // (only PG 17+). Probe pg_publication first.
+    // Publication membership is an authorization decision: it determines
+    // which app relations the worker may observe through WAL. The migrated
+    // service creates and reconciles it while holding table-owner authority;
+    // a worker may only prove the object exists.
     let exists: bool = !pool
         .query_text_params(
-            "SELECT 1 FROM pg_publication WHERE pubname = $1",
+            publication_probe_sql(),
             &[&pub_name],
         )
         .await
@@ -198,26 +171,16 @@ pub async fn ensure_publication_and_worker_slot(
         })?
         .is_empty();
     if !exists {
-        // Tolerate 42710 (duplicate_object) — benign race with another
-        // worker creating the same publication. Surface anything else
-        // with the operator-facing prefix. Reads the SQLSTATE via
-        // `as_db_error()?.code()` against `SqlState::DUPLICATE_OBJECT`;
-        // substring-matching the message body was the same fragility
-        // class fixed in `auth/session.rs::classify_p0001_detail` —
-        // locale- and formatter-agnostic.
-        if let Err(e) = pool.execute(&pub_sql, &[]).await {
-            let is_duplicate_object = e
-                .as_db_error()
-                .map(|db| {
-                    db.code() == &compio_postgres::error::SqlState::DUPLICATE_OBJECT
-                })
-                .unwrap_or(false);
-            if !is_duplicate_object {
-                let mut err = DbError::from_pg(&e);
-                prefix_message(&mut err, "replication: CREATE PUBLICATION: ");
-                return Err(err);
-            }
-        }
+        return Err(DbError::Configuration {
+            code: "replication_publication_missing",
+            message: format!(
+                "replication: publication {pub_name} is missing for app {app_id}"
+            ),
+            hint: Some(
+                "apply the app migrations so zeroship-migrated reconciles the publication"
+                    .to_string(),
+            ),
+        });
     }
 
     // ---- 2. slot ----
@@ -310,7 +273,11 @@ pub async fn ensure_publication_and_worker_slot(
     })
 }
 
-/// Result of [`ensure_publication_and_worker_slot`].
+const fn publication_probe_sql() -> &'static str {
+    "SELECT 1 FROM pg_publication WHERE pubname = $1"
+}
+
+/// Result of [`ensure_worker_slot`].
 #[derive(Debug, Clone)]
 pub struct SetupOutcome {
     /// Final publication name (after sanitisation).
@@ -479,7 +446,7 @@ pub fn watchdog_to_json(slots: &[SlotHealth]) -> String {
 /// the slot itself. An app whose subscribers all disconnected for a
 /// week should not retain a slot that consumes Postgres's per-slot
 /// metadata; full drop is correct. The app's first reconnect after
-/// drop re-runs [`ensure_publication_and_worker_slot`] and gets a fresh slot
+/// drop re-runs [`ensure_worker_slot`] and gets a fresh slot
 /// at the current WAL head.
 ///
 /// ## `inactive_seconds` policy
@@ -591,7 +558,7 @@ pub async fn drop_abandoned_slots(
     Ok(dropped)
 }
 
-// Drop-namespace teardown (§17.7 PG steps — slot + publication)
+// Worker-owned slot teardown
 // ---------------------------------------------------------------------------
 
 /// Default grace before the drop sequence force-terminates the slot's
@@ -599,42 +566,6 @@ pub async fn drop_abandoned_slots(
 #[cfg(any(test, feature = "test-helpers"))]
 pub const DROP_TERMINATE_GRACE_SECS: u64 = 5;
 
-/// Tear down the per-app publication + replication slot, in the §17.7
-/// PG order. Idempotent — each step is a no-op when its precondition is
-/// already met (slot/publication absent ⇒ skip), so it is safe to retry
-/// after a partial failure.
-///
-/// Steps (the consumer-cancellation courtesy of §17.7 step 2 happens in
-/// the caller's [`crate::backend::ChangeStream::deprovision`]; by the
-/// time we run, the consumer has been asked to exit):
-///
-/// 1. **Force the slot inactive.** `pg_drop_replication_slot` refuses an
-///    active slot and there is no FORCE flag. If a replication backend is
-///    still attached (the consumer's connection hasn't closed within the
-///    grace), `pg_terminate_backend(active_pid)` against the slot's
-///    listed backend forces the connection closed. "Killed" means
-///    `pg_terminate_backend`, NOT OS SIGKILL (§17.7) — only the one
-///    replication connection dies, never the worker process.
-/// 2. **`pg_drop_replication_slot(slot)`** — now EXPECTED inactive, not
-///    guaranteed. Two gaps keep the still-attached case reachable: the
-///    terminate is skipped when `active_pid` is NULL even though
-///    `active` is true (a race, see the arm below), and
-///    `pg_terminate_backend` returning true means the signal was SENT,
-///    not that the backend detached. So this step can still raise
-///    `55006 object_in_use`, which the handler below surfaces as
-///    `LockContention` ("slot still active (retry)") for the caller to
-///    retry from step 3. Best-effort terminate plus retry-on-contention
-///    is the actual mechanism.
-/// 3. **`DROP PUBLICATION <pub>`** — after the slot, so nothing is
-///    decoding the publication when it disappears.
-///
-/// `terminate_grace` is honoured by the CALLER (it awaits the consumer
-/// exit + grace before invoking this). We re-check `active` here and
-/// terminate only if still attached, so a slow consumer exit doesn't
-/// wedge the drop.
-///
-/// Runs under the platform-role `pool` (§17.5) — the only role that may
-/// terminate a replication backend and drop a slot.
 /// Drop one worker's slot while retaining the app publication.
 ///
 /// This is the normal last-local-subscriber teardown. Other worker
@@ -649,13 +580,14 @@ pub async fn drop_worker_slot(
     drop_slot(pool, &slot).await
 }
 
-/// Drop every worker slot for an app, then its shared publication.
+/// Drop every worker slot for an app while retaining its publication.
 ///
-/// This is the app-deletion path. The exact `__` delimiter and
+/// Publication ownership stays with the migration service. A worker
+/// must not be able to alter or drop the table-membership decision.
+/// The exact `__` delimiter and
 /// `left(...)=...` comparison ensure one app token cannot prefix-match
 /// another app's slots.
-pub async fn drop_publication_and_slots(pool: &Pool, app_id: &str) -> Result<(), DbError> {
-    let pub_name = publication_name(app_id)?;
+pub async fn drop_worker_slots(pool: &Pool, app_id: &str) -> Result<(), DbError> {
     let slot_prefix = worker_slot_name_prefix(app_id)?;
     let rows = pool
         .query_text_params(
@@ -674,17 +606,6 @@ pub async fn drop_publication_and_slots(pool: &Pool, app_id: &str) -> Result<(),
         let slot: String = row.get("slot_name");
         drop_slot(pool, &slot).await?;
     }
-
-    pool.query_text_params(&format!("DROP PUBLICATION IF EXISTS {pub_name}"), &[])
-        .await
-        .map_err(|e| {
-            let mut err = DbError::from_pg(&e);
-            prefix_message(
-                &mut err,
-                &format!("replication: drop: DROP PUBLICATION {pub_name}: "),
-            );
-            err
-        })?;
 
     Ok(())
 }
@@ -815,6 +736,33 @@ fn err_is_undefined_object(e: &compio_postgres::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_setup_only_probes_for_the_migrated_publication() {
+        let sql = publication_probe_sql();
+        assert!(sql.contains("FROM pg_publication"));
+        for forbidden in ["CREATE PUBLICATION", "ALTER PUBLICATION", "DROP PUBLICATION"] {
+            assert!(
+                !sql.contains(forbidden),
+                "worker publication probe must not carry publication DDL: {sql}"
+            );
+        }
+
+        let source = include_str!("replication.rs");
+        let setup = source
+            .split_once("pub async fn ensure_worker_slot")
+            .expect("worker setup function")
+            .1
+            .split_once("const fn publication_probe_sql")
+            .expect("publication probe boundary")
+            .0;
+        for forbidden in ["CREATE PUBLICATION", "ALTER PUBLICATION", "DROP PUBLICATION"] {
+            assert!(
+                !setup.contains(forbidden),
+                "worker setup must contain no publication DDL: {setup}"
+            );
+        }
+    }
 
     #[test]
     fn app_id_validation_accepts_production_uuid() {
@@ -980,7 +928,7 @@ mod tests {
     //
     // These pin the `.code` the SDK branches on for the validation paths
     // through `publication_name` and `worker_slot_name`.
-    // The pool-bound helpers (`ensure_publication_and_worker_slot`,
+    // The pool-bound helpers (`ensure_worker_slot`,
     // `watchdog_query`, `drop_abandoned_slots`) can only be reached via
     // a live Postgres connection; their typed-error mapping is exercised
     // by `tests/integration.rs::b8c_*` against pg-test.
