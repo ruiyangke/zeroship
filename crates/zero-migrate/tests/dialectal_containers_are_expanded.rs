@@ -51,11 +51,22 @@ fn verdict(ops: &str) -> Result<(), String> {
     verdict_on(Dialect::Postgres, ops)
 }
 
-fn expect_refusal(ops: &str, what: &str) {
+/// Assert WHICH refusal, not merely that the capability gate was not the one.
+///
+/// The first version of this helper checked only that the message was not
+/// VENDOR_OP_DENIED - which nearly every refusal in the engine satisfies, so all
+/// seven tests below were mutually satisfiable. It was written before the audit
+/// established that a guard every sibling passes is not a guard, and not revised
+/// when that standard arrived.
+fn expect_refusal(ops: &str, needle: &str, what: &str) {
     let refusal = verdict(ops).expect_err(what);
     assert!(
         !refusal.contains("VENDOR_OP_DENIED"),
         "this must be refused by the walk, not by the capability gate: {refusal}"
+    );
+    assert!(
+        refusal.contains(needle),
+        "{needle:?} is missing, so a different rule is satisfying this test: {refusal}"
     );
 }
 
@@ -79,6 +90,7 @@ fn a_nested_drop_table_vacates_the_name() {
             r#"{A},{},{ADD_Z}"#,
             pg_leg(r#"{"op":"dropTable","table":"a"}"#)
         ),
+        "will not exist under that name",
         "the nested drop removed the table",
     );
 }
@@ -90,6 +102,7 @@ fn a_nested_rename_vacates_the_old_name() {
             r#"{A},{},{ADD_Z}"#,
             pg_leg(r#"{"op":"renameTable","table":"a","to":"a2"}"#)
         ),
+        "will not exist under that name",
         "the nested rename moved the table",
     );
 }
@@ -101,6 +114,7 @@ fn a_nested_drop_column_registers() {
             r#"{A},{},{IX}"#,
             pg_leg(r#"{"op":"dropColumn","table":"a","column":"v"}"#)
         ),
+        "names column",
         "the nested drop removed the column",
     );
 }
@@ -112,6 +126,7 @@ fn a_nested_drop_enum_registers() {
             r#"{{"op":"createEnum","name":"e","values":["a","b"]}},{A},{},{{"op":"addColumn","table":"a","column":"z","type":{{"enum":{{"name":"e"}}}},"nullable":true}}"#,
             pg_leg(r#"{"op":"dropEnum","name":"e"}"#)
         ),
+        "depends on enum",
         "the nested drop removed the enum",
     );
 }
@@ -123,6 +138,7 @@ fn a_nested_drop_role_registers() {
             r#"{{"op":"createRole","name":"r"}},{A},{},{{"op":"grant","privileges":["select"],"on":{{"kind":"table","names":["a"]}},"to":["r"]}}"#,
             pg_leg(r#"{"op":"dropRole","name":"r"}"#)
         ),
+        "names grantee",
         "the nested drop removed the role",
     );
 }
@@ -135,6 +151,7 @@ fn a_nested_drop_role_registers() {
 fn a_nested_create_table_claims_the_name() {
     expect_refusal(
         &format!("{A},{}", pg_leg(A)),
+        "this createTable claims",
         "the nested createTable retakes a live name",
     );
 }
@@ -143,6 +160,7 @@ fn a_nested_create_table_claims_the_name() {
 fn a_nested_create_index_claims_the_index_name() {
     expect_refusal(
         &format!("{A},{IX},{}", pg_leg(IX)),
+        "created twice in this migration",
         "the nested createIndex retakes a live index name",
     );
 }
