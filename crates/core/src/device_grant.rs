@@ -37,8 +37,9 @@ pub const PLATFORM_CLI_CLIENT_ID: &str = "zeroship-cli";
 /// Maximum lifetime of a platform CLI token, in seconds.
 ///
 /// There is no supported early-recall operation for these tokens today, so
-/// expiry is the effective revocation bound. Keep this no longer than the
-/// token-revocation marker retention horizon.
+/// expiry is the effective revocation bound. Token-family markers are retained
+/// for 24 hours, so a marker written while a token is live outlasts this
+/// 12-hour maximum remaining lifetime by at least 12 hours.
 pub const PLATFORM_TOKEN_MAX_TTL_SECS: i64 = 12 * 60 * 60;
 
 /// Path the OP mounts its protocol endpoints under, relative to the auth
