@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { Field, Input, Select } from "@zeroship/ui";
+import { Input, Select } from "@zeroship/ui";
 import { Button } from "../../ui/Button";
+import { Field } from "../../ui/Field";
 import {
   moveIssue,
   reassignIssue,
@@ -215,7 +216,7 @@ function MoveControl({
       </div>
       {open ? (
         <InlineForm className="col-span-full">
-          <Field orientation="horizontal">
+          <Field.Root className="flex-row items-center gap-3">
             <Field.Label>Target product</Field.Label>
             <Select
               value={targetProductId}
@@ -230,8 +231,8 @@ function MoveControl({
                 </Select.Item>
               ))}
             </Select>
-          </Field>
-          <Field orientation="horizontal">
+          </Field.Root>
+          <Field.Root className="flex-row items-center gap-3">
             <Field.Label>Target component</Field.Label>
             <Select
               value={targetComponentId}
@@ -247,7 +248,7 @@ function MoveControl({
                 </Select.Item>
               ))}
             </Select>
-          </Field>
+          </Field.Root>
           <Button variant="filled"
             disabled={busy || !targetProductId || !targetComponentId}
             onClick={() => void move()}

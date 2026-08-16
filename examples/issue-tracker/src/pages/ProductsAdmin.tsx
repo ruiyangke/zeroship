@@ -3,7 +3,6 @@ import { Banner,
   Checkbox,
   Dialog,
   Drawer,
-  Field,
   FilterBar,
   Input,
   ListView,
@@ -14,6 +13,7 @@ import { Banner,
 } from "@zeroship/ui";
 import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
+import { Field } from "../ui/Field";
 import {
   createComponent,
   createMilestone,
@@ -197,11 +197,11 @@ function NewProductDialog() {
                 }}
               >
                 <div className="flex min-w-0 flex-col flex-nowrap items-stretch justify-start gap-3 [&>*]:min-h-0 [&>*]:min-w-0">
-                  <Field>
+                  <Field.Root>
                     <Field.Label>Name</Field.Label>
                     <Input value={name} onChange={(e) => setName(e.target.value)} required />
-                  </Field>
-                  <Field>
+                  </Field.Root>
+                  <Field.Root>
                     <Field.Label>Key</Field.Label>
                     {/* Uppercased as you type rather than rejected afterwards:
                         the server's rule is a leading letter then up to nine
@@ -217,21 +217,21 @@ function NewProductDialog() {
                       Half of every issue identifier -- PARSER-12. Derived from the name
                       when left blank, and not changeable afterwards.
                     </Field.Description>
-                  </Field>
-                  <Field>
+                  </Field.Root>
+                  <Field.Root>
                     <Field.Label>Description</Field.Label>
                     <Input
                       value={description}
                       onChange={(e) => setDescription(e.target.value)}
                     />
-                  </Field>
-                  <Field>
+                  </Field.Root>
+                  <Field.Root>
                     <Field.Label>Classification</Field.Label>
                     <Input
                       value={classification}
                       onChange={(e) => setClassification(e.target.value)}
                     />
-                  </Field>
+                  </Field.Root>
                   <Checkbox
                     checked={allowsUnconfirmed}
                     onCheckedChange={(next) => setAllowsUnconfirmed(next === true)}
@@ -498,14 +498,14 @@ function ProductEditorBody({ detail }: { detail: ProductDetail }) {
           placeholder -- the only thing distinguishing the name field from the
           description field was which one had more text in it. */}
       <div className="flex min-w-0 flex-col flex-nowrap items-stretch justify-start gap-3 [&>*]:min-h-0 [&>*]:min-w-0">
-        <Field>
+        <Field.Root>
           <Field.Label>Name</Field.Label>
           <Input value={name} onChange={(e) => setName(e.target.value)} />
-        </Field>
-        <Field>
+        </Field.Root>
+        <Field.Root>
           <Field.Label>Description</Field.Label>
           <Input value={description} onChange={(e) => setDescription(e.target.value)} />
-        </Field>
+        </Field.Root>
         <Checkbox
           checked={isActive}
           onCheckedChange={(next) => setIsActive(next === true)}

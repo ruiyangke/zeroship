@@ -4,8 +4,9 @@
 // a duplicate are their own dedicated actions, not options folded into the
 // status dropdown.
 import { useState } from "react";
-import { Field, Input, Select } from "@zeroship/ui";
+import { Input, Select } from "@zeroship/ui";
 import { Button } from "../../ui/Button";
+import { Field } from "../../ui/Field";
 import { changeIssueStatus, markIssueDuplicate, reopenIssue, resolveIssue } from "../../api";
 import {
   ISSUE_RESOLUTIONS,
@@ -76,7 +77,7 @@ export function StatusControl({ issue }: { issue: IssueDetail["issue"] }) {
     <div className="col-span-full mt-3 mb-1 border-0 bg-transparent p-0">
       <RailSection title="Status" />
       <div className="flex flex-wrap gap-2">
-        <Field>
+        <Field.Root>
           <Select
             value={issue.status}
             disabled={busy || targets.length === 0}
@@ -96,7 +97,7 @@ export function StatusControl({ issue }: { issue: IssueDetail["issue"] }) {
               </Select.Item>
             ))}
           </Select>
-        </Field>
+        </Field.Root>
         {/* A VALUE, not a disabled input. Resolution is never typed here --
             it is chosen in the Resolve flow below, which also enforces the
             pairing with status. A greyed-out text box holding "--" says "you
@@ -130,7 +131,7 @@ export function StatusControl({ issue }: { issue: IssueDetail["issue"] }) {
 
       {showResolve ? (
         <InlineForm>
-          <Field>
+          <Field.Root>
             <Field.Label>Resolution (required to resolve)</Field.Label>
             <Select
               value={resolution}
@@ -143,7 +144,7 @@ export function StatusControl({ issue }: { issue: IssueDetail["issue"] }) {
                 </Select.Item>
               ))}
             </Select>
-          </Field>
+          </Field.Root>
           <Button variant="filled"
             disabled={busy}
             onClick={() => void run(() => resolve.mutateAsync(resolution))}
@@ -155,14 +156,14 @@ export function StatusControl({ issue }: { issue: IssueDetail["issue"] }) {
 
       {showDuplicate ? (
         <InlineForm>
-          <Field>
+          <Field.Root>
             <Field.Label>Duplicate of</Field.Label>
             <Input
               value={duplicateOf}
               onChange={(e) => setDuplicateOf(e.target.value)}
               placeholder="PARSER-12"
             />
-          </Field>
+          </Field.Root>
           <Button variant="filled"
             disabled={busy || !duplicateOf.trim()}
             onClick={() => void run(() => markDuplicate.mutateAsync(duplicateOf.trim()))}

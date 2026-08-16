@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { Field, Select } from "@zeroship/ui";
+import { Select } from "@zeroship/ui";
 import { Button } from "../../ui/Button";
+import { Field } from "../../ui/Field";
 
 import { restrictIssue, unrestrictIssue } from "../../api";
 import { useAppMutation, useGroups } from "../../lib/queries";
@@ -81,7 +82,7 @@ export function SecurityPanel({ issueId }: { issueId: string }) {
         </Hint>
       ) : (
         <>
-          <Field>
+          <Field.Root>
             <Field.Label>Group</Field.Label>
             {/* The design system Select. The native one rendered its options
                 with the surrounding JSX whitespace, so selecting by label
@@ -101,7 +102,7 @@ export function SecurityPanel({ issueId }: { issueId: string }) {
                 </Select.Item>
               ))}
             </Select>
-          </Field>
+          </Field.Root>
           <Button variant="gray"
             disabled={changeRestriction.isPending || !selected}
             onClick={() => void apply("restrict")}

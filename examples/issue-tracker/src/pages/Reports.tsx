@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
-import { Field, NumberField, PageHeader, Progress, Select, StatCard } from "@zeroship/ui";
+import { NumberField, PageHeader, Progress, Select, StatCard } from "@zeroship/ui";
 import { Badge } from "../ui/Badge";
+import { Field } from "../ui/Field";
 import {
   useProducts,
   useReportByAssignee,
@@ -343,7 +344,7 @@ export function ReportsPage() {
           the bar had one labelled control and one bare box whose meaning you
           inferred from its placeholder. */}
       <InlineForm>
-        <Field className="flex-none">
+        <Field.Root className="flex-none">
           <Field.Label>Product</Field.Label>
           <FilterControl>
             <Select
@@ -360,8 +361,8 @@ export function ReportsPage() {
               ))}
             </Select>
           </FilterControl>
-        </Field>
-        <Field className="flex-none">
+        </Field.Root>
+        <Field.Root className="flex-none">
           <Field.Label>Window (days)</Field.Label>
           <NumberField
             min={1}
@@ -369,7 +370,7 @@ export function ReportsPage() {
             value={days}
             onValueChange={(next) => setDays(Math.min(365, Math.max(1, next ?? 30)))}
           />
-        </Field>
+        </Field.Root>
       </InlineForm>
       <SummarySection productId={productId} />
       {/* Paired across the page rather than stacked down it. Every one of these

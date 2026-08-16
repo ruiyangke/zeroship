@@ -1,7 +1,8 @@
 import { useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
-import { Checkbox, Field, Input, Select } from "@zeroship/ui";
+import { Checkbox, Input, Select } from "@zeroship/ui";
 import { Button } from "../ui/Button";
+import { Field } from "../ui/Field";
 import { createIssue } from "../api";
 import { invalidatedBy } from "../lib/query-keys";
 import { useAppMutation, useProduct, useProducts } from "../lib/queries";
@@ -186,7 +187,7 @@ export function NewIssuePage() {
                 submit();
               }}
             >
-              <Field>
+              <Field.Root>
                 <Field.Label>Product</Field.Label>
                 <Select
                   value={productId}
@@ -201,14 +202,14 @@ export function NewIssuePage() {
                     </Select.Item>
                   ))}
                 </Select>
-              </Field>
+              </Field.Root>
               {productQ.isError ? (
                 <FieldError>{errorMessage(productQ.error)}</FieldError>
               ) : null}
 
               {productDetail ? (
                 <>
-                  <Field>
+                  <Field.Root>
                     <Field.Label>Component</Field.Label>
                     <Select
                       value={componentId}
@@ -223,18 +224,18 @@ export function NewIssuePage() {
                         </Select.Item>
                       ))}
                     </Select>
-                  </Field>
+                  </Field.Root>
 
                   <fieldset
                     className="my-2 flex flex-col gap-3 rounded-lg border border-dashed border-line-strong p-4 disabled:opacity-50"
                     disabled={!componentId}
                   >
                     <legend className="px-2 text-base font-semibold text-ink-secondary">Details</legend>
-                    <Field>
+                    <Field.Root>
                       <Field.Label>Summary</Field.Label>
                       <Input value={summary} onChange={(e) => setSummary(e.target.value)} maxLength={500} required />
-                    </Field>
-                    <Field>
+                    </Field.Root>
+                    <Field.Root>
                       <Field.Label htmlFor="new-issue-description">Description</Field.Label>
                       <AppFieldShell
                         as="textarea"
@@ -245,9 +246,9 @@ export function NewIssuePage() {
                         rows={6}
                         required
                       />
-                    </Field>
+                    </Field.Root>
                     <FieldRow>
-                      <Field>
+                      <Field.Root>
                         <Field.Label>Version</Field.Label>
                         {/* Optional, like Milestone beside it. "Version found in"
                             is a defect concept: a feature request is not found
@@ -267,8 +268,8 @@ export function NewIssuePage() {
                             </Select.Item>
                           ))}
                         </Select>
-                      </Field>
-                      <Field>
+                      </Field.Root>
+                      <Field.Root>
                         <Field.Label>Milestone</Field.Label>
                         <Select
                           value={milestoneId}
@@ -285,7 +286,7 @@ export function NewIssuePage() {
                             </Select.Item>
                           ))}
                         </Select>
-                      </Field>
+                      </Field.Root>
                     </FieldRow>
                     <FieldRow>
                       {/* Kind before Severity: "what is this" is the question
@@ -293,7 +294,7 @@ export function NewIssuePage() {
                           about a defect. It used to be answerable only by
                           picking `enhancement` as a SEVERITY, which is why a
                           critical feature request was unsayable. */}
-                      <Field>
+                      <Field.Root>
                         <Field.Label>Kind</Field.Label>
                         <Select
                           value={kind}
@@ -306,8 +307,8 @@ export function NewIssuePage() {
                             </Select.Item>
                           ))}
                         </Select>
-                      </Field>
-                      <Field>
+                      </Field.Root>
+                      <Field.Root>
                         <Field.Label>Severity</Field.Label>
                         <Select
                           value={severity}
@@ -320,8 +321,8 @@ export function NewIssuePage() {
                             </Select.Item>
                           ))}
                         </Select>
-                      </Field>
-                      <Field>
+                      </Field.Root>
+                      <Field.Root>
                         <Field.Label>Priority</Field.Label>
                         <Select
                           value={priority}
@@ -334,26 +335,26 @@ export function NewIssuePage() {
                             </Select.Item>
                           ))}
                         </Select>
-                      </Field>
+                      </Field.Root>
                     </FieldRow>
                     <FieldRow>
-                      <Field>
+                      <Field.Root>
                         <Field.Label>OS</Field.Label>
                         <Input value={opSys} onChange={(e) => setOpSys(e.target.value)} />
-                      </Field>
-                      <Field>
+                      </Field.Root>
+                      <Field.Root>
                         <Field.Label>Platform</Field.Label>
                         <Input value={platform} onChange={(e) => setPlatform(e.target.value)} />
-                      </Field>
+                      </Field.Root>
                     </FieldRow>
-                    <Field>
+                    <Field.Root>
                       <Field.Label>Whiteboard</Field.Label>
                       <Input value={whiteboard} onChange={(e) => setWhiteboard(e.target.value)} />
-                    </Field>
-                    <Field>
+                    </Field.Root>
+                    <Field.Root>
                       <Field.Label>URL</Field.Label>
                       <Input value={url} onChange={(e) => setUrl(e.target.value)} />
-                    </Field>
+                    </Field.Root>
                     {productDetail.product.allowsUnconfirmed ? (
                       <Checkbox
                         checked={confirmed}

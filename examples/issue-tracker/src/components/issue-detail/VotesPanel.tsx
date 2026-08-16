@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { Field, NumberField } from "@zeroship/ui";
+import { NumberField } from "@zeroship/ui";
 import { Button } from "../../ui/Button";
+import { Field } from "../../ui/Field";
 
 import { castVote } from "../../api";
 import { invalidatedBy } from "../../lib/query-keys";
@@ -63,7 +64,7 @@ export function VotesPanel({
         <Hint>Voting is not enabled for this product.</Hint>
       ) : (
         <>
-          <Field>
+          <Field.Root>
                         {/* The design system's NumberField, deliberately.
                 This was briefly swapped for a native <input type="number">
                 because the voting spec's `.fill("2")` produced "12" -- but
@@ -81,7 +82,7 @@ export function VotesPanel({
               value={count}
               onValueChange={(next) => setCount(Math.max(0, next ?? 0))}
             />
-          </Field>
+          </Field.Root>
           <Button variant="gray" disabled={vote.isPending} onClick={() => void submit()}>
             {vote.isPending ? "Voting..." : "Vote"}
           </Button>

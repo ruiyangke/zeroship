@@ -1,5 +1,5 @@
 import { useState, type ComponentPropsWithoutRef } from "react";
-import { Field, Input, Select } from "@zeroship/ui";
+import { Input, Select } from "@zeroship/ui";
 
 import {
   addGroupMember,
@@ -11,6 +11,7 @@ import {
 } from "../api";
 import { invalidatedBy } from "../lib/query-keys";
 import { Button } from "../ui/Button";
+import { Field } from "../ui/Field";
 import {
   useAppMutation,
   useGroupMembers,
@@ -164,10 +165,10 @@ export function GroupsAdmin() {
       </Hint>
 
       <FieldRow>
-        <Field>
+        <Field.Root>
           <Field.Label>New group</Field.Label>
           <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="security" />
-        </Field>
+        </Field.Root>
         <Button variant="filled" disabled={busy || !name.trim()} onClick={() => void create()}>
           Create
         </Button>
@@ -213,7 +214,7 @@ export function GroupsAdmin() {
 
       {groups && groups.length > 0 ? (
         <FieldRow>
-          <Field>
+          <Field.Root>
             <Field.Label>Add member to</Field.Label>
             <Select
               value={memberGroup}
@@ -230,15 +231,15 @@ export function GroupsAdmin() {
                 </Select.Item>
               ))}
             </Select>
-          </Field>
-          <Field>
+          </Field.Root>
+          <Field.Root>
             <Field.Label>Find user</Field.Label>
             <Input
               value={memberQuery}
               onChange={(e) => setMemberQuery(e.target.value)}
               placeholder="name or email"
             />
-          </Field>
+          </Field.Root>
           <Button variant="gray" onClick={search}>
             Search
           </Button>
@@ -353,7 +354,7 @@ function ProductRestrictions({
     <div>
       <SectionHeading level={3}>Product visibility</SectionHeading>
       <FieldRow>
-        <Field>
+        <Field.Root>
           <Field.Label>Product</Field.Label>
           <Select
             value={productId}
@@ -368,8 +369,8 @@ function ProductRestrictions({
               </Select.Item>
             ))}
           </Select>
-        </Field>
-        <Field>
+        </Field.Root>
+        <Field.Root>
           <Field.Label>Group</Field.Label>
           <Select
             value={groupId}
@@ -384,7 +385,7 @@ function ProductRestrictions({
               </Select.Item>
             ))}
           </Select>
-        </Field>
+        </Field.Root>
         <Button variant="gray"
           disabled={busy || !productId || !groupId}
           onClick={() => void apply("restrict")}

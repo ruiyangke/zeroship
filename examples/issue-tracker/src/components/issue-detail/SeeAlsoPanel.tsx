@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { Field, Input } from "@zeroship/ui";
+import { Input } from "@zeroship/ui";
 import { Button } from "../../ui/Button";
+import { Field } from "../../ui/Field";
 
 import { addSeeAlso, removeSeeAlso } from "../../api";
 import { useAppMutation, useSeeAlso } from "../../lib/queries";
@@ -94,14 +95,14 @@ export function SeeAlsoPanel({ issueId }: { issueId: string }) {
         </ul>
       )}
       <FieldRow>
-        <Field>
+        <Field.Root>
           <Field.Label>Link</Field.Label>
           <Input
             value={url}
             onChange={(e) => setUrl(e.target.value)}
             placeholder="https://bugzilla.example.org/show_bug.cgi?id=1"
           />
-        </Field>
+        </Field.Root>
         <Button variant="gray" disabled={busy || !url.trim()} onClick={() => void add()}>
           Add
         </Button>

@@ -1,11 +1,12 @@
 import { useState } from "react";
 
-import { Field, Input, Select } from "@zeroship/ui";
+import { Input, Select } from "@zeroship/ui";
 
 import { createFlagType } from "../api";
 import { invalidatedBy } from "../lib/query-keys";
 import { useAppMutation, useFlagTypes, useProducts } from "../lib/queries";
 import { Button } from "../ui/Button";
+import { Field } from "../ui/Field";
 import { errorMessage } from "./rpc";
 import { FieldError, Hint, InlineForm, Muted, SectionHeading } from "./AppPrimitives";
 
@@ -74,11 +75,11 @@ export function FlagTypesAdmin() {
         <Hint>Only an administrator can define flag types.</Hint>
       ) : null}
       <InlineForm>
-        <Field>
+        <Field.Root>
           <Field.Label>New flag type</Field.Label>
           <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="review" />
-        </Field>
-        <Field>
+        </Field.Root>
+        <Field.Root>
           <Field.Label>Product</Field.Label>
           <Select value={productId} onValueChange={(v) => setProductId(v ?? "")} placeholder="All products" aria-label="Product" renderValue={(id) => products.find((p) => p.id === id)?.name ?? id}>
             {/* A type with no product applies to EVERY product, which is
@@ -92,8 +93,8 @@ export function FlagTypesAdmin() {
               </Select.Item>
             ))}
           </Select>
-        </Field>
-        <Field>
+        </Field.Root>
+        <Field.Root>
           <Field.Label>Applies to</Field.Label>
           <Select
             value={targetType}
@@ -103,7 +104,7 @@ export function FlagTypesAdmin() {
             <Select.Item value="issue">issue</Select.Item>
             <Select.Item value="attachment">attachment</Select.Item>
           </Select>
-        </Field>
+        </Field.Root>
         <Button variant="filled"
           disabled={busy || !name.trim()}
           onClick={() => void create()}
