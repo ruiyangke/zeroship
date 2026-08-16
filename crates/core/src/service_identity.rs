@@ -297,42 +297,95 @@ pub fn verify_identity(
 
 /// A platform HTTP endpoint protected by service authorization.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct ServiceEndpoint(&'static str);
+pub struct ServiceEndpoint {
+    destination: &'static str,
+    method: &'static str,
+    path_template: &'static str,
+}
+
+impl ServiceEndpoint {
+    const fn new(
+        destination: &'static str,
+        method: &'static str,
+        path_template: &'static str,
+    ) -> Self {
+        Self {
+            destination,
+            method,
+            path_template,
+        }
+    }
+
+    /// Return the destination service that owns this endpoint.
+    #[must_use]
+    pub const fn destination(self) -> &'static str {
+        self.destination
+    }
+
+    /// Return the exact HTTP method required by this endpoint.
+    #[must_use]
+    pub const fn method(self) -> &'static str {
+        self.method
+    }
+
+    /// Return the exact route template registered by the destination.
+    #[must_use]
+    pub const fn path_template(self) -> &'static str {
+        self.path_template
+    }
+}
 
 /// Service endpoints named by destination and operation.
 pub mod endpoints {
     use super::ServiceEndpoint;
 
     pub const AUTH_PLATFORM_TOKEN: ServiceEndpoint =
-        ServiceEndpoint("auth POST /internal/platform-token");
-    pub const MIGRATED_APPLY_MIGRATIONS: ServiceEndpoint =
-        ServiceEndpoint("migrated POST /v1/apps/{app}/migrations/apply");
+        ServiceEndpoint::new("auth", "POST", "/internal/platform-token");
+    pub const MIGRATED_APPLY_MIGRATIONS: ServiceEndpoint = ServiceEndpoint::new(
+        "migrated",
+        "POST",
+        "/v1/apps/{app_id}/migrations/apply",
+    );
     pub const GATEWAY_BACKCHANNEL_LOGOUT: ServiceEndpoint =
-        ServiceEndpoint("gateway POST /oidc/backchannel-logout");
-    pub const GATEWAY_WORKFLOW_ADVANCE: ServiceEndpoint =
-        ServiceEndpoint("gateway POST workflow advance");
+        ServiceEndpoint::new("gateway", "POST", "/oidc/backchannel-logout");
+    pub const GATEWAY_WORKFLOW_ADVANCE: ServiceEndpoint = ServiceEndpoint::new(
+        "gateway",
+        "POST",
+        "/__zeroship/internal/workflow-advance",
+    );
     pub const CONTROL_ROUTES: ServiceEndpoint =
-        ServiceEndpoint("control GET /internal/routes");
-    pub const CONTROL_WORKFLOW_SIGNAL_INGRESS: ServiceEndpoint =
-        ServiceEndpoint("control POST /internal/workflows/signals/ingress");
+        ServiceEndpoint::new("control", "GET", "/internal/routes");
+    pub const CONTROL_WORKFLOW_SIGNAL_INGRESS: ServiceEndpoint = ServiceEndpoint::new(
+        "control",
+        "POST",
+        "/internal/workflows/signals/ingress",
+    );
     pub const CONTROL_VERSIONS: ServiceEndpoint =
-        ServiceEndpoint("control GET /internal/versions");
+        ServiceEndpoint::new("control", "GET", "/internal/versions");
     pub const CONTROL_APP: ServiceEndpoint =
-        ServiceEndpoint("control GET /internal/apps/{app}");
+        ServiceEndpoint::new("control", "GET", "/internal/apps/{app_id}");
     pub const CONTROL_APP_ENV: ServiceEndpoint =
-        ServiceEndpoint("control GET /internal/apps/{app}/env");
+        ServiceEndpoint::new("control", "GET", "/internal/apps/{app_id}/env");
     pub const CONTROL_BILLING_RECONCILE: ServiceEndpoint =
-        ServiceEndpoint("control POST billing reconcile");
+        ServiceEndpoint::new("control", "POST", "/internal/billing/reconcile");
     pub const CONTROL_SPEND_RECONCILE: ServiceEndpoint =
-        ServiceEndpoint("control POST spend reconcile");
+        ServiceEndpoint::new("control", "POST", "/internal/spend/reconcile");
     pub const WORKER_DISPATCH: ServiceEndpoint =
-        ServiceEndpoint("worker POST /dispatch/{app}");
-    pub const WORKER_WORKFLOW_ADVANCE: ServiceEndpoint =
-        ServiceEndpoint("worker POST workflow advance");
-    pub const WORKER_APP_LOGS: ServiceEndpoint = ServiceEndpoint("worker app logs");
+        ServiceEndpoint::new("worker", "POST", "/dispatch/{app_id}");
+    pub const WORKER_WORKFLOW_ADVANCE: ServiceEndpoint = ServiceEndpoint::new(
+        "worker",
+        "POST",
+        "/workflow-advance-unsigned/{app_id}",
+    );
+    pub const WORKER_APP_LOGS: ServiceEndpoint =
+        ServiceEndpoint::new("worker", "GET", "/logs/{app_id}");
 }
 
-/// One individual service principal and its complete endpoint grants.
+/// One individual principal and its machine-identity endpoint grants.
+///
+/// A row is one necessary authorization dimension. Delegated creator grants,
+/// app-scoped capabilities, and registered third-party targets remain separate
+/// mandatory checks at the endpoint that owns them.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ServiceAuthorization {
     principal: ServicePrincipal,
@@ -360,7 +413,7 @@ impl ServiceAuthorization {
     }
 }
 
-/// Return the measured service-to-service authorization table.
+/// Return the measured service-to-service machine-identity table.
 #[must_use]
 pub fn service_allowlist() -> &'static [ServiceAuthorization] {
     static ALLOWLIST: OnceLock<[ServiceAuthorization; 5]> = OnceLock::new();
@@ -374,6 +427,7 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                 principal("svc/control"),
                 &[
                     endpoints::AUTH_PLATFORM_TOKEN,
+                    // Migrated also requires delegated creator AppsDeploy.
                     endpoints::MIGRATED_APPLY_MIGRATIONS,
                     endpoints::GATEWAY_WORKFLOW_ADVANCE,
                     endpoints::WORKER_APP_LOGS,
@@ -381,6 +435,7 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
             ),
             ServiceAuthorization::new(
                 principal("svc/auth"),
+                // Registered third-party BCL targets are checked dynamically.
                 &[endpoints::GATEWAY_BACKCHANNEL_LOGOUT],
             ),
             ServiceAuthorization::new(principal("svc/migrated"), &[]),
@@ -397,6 +452,7 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                 principal("svc/worker"),
                 &[
                     endpoints::CONTROL_VERSIONS,
+                    // App and env reads also require the existing app scope.
                     endpoints::CONTROL_APP,
                     endpoints::CONTROL_APP_ENV,
                 ],
@@ -405,7 +461,10 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
     })
 }
 
-/// Return whether an individual verified service may call an endpoint.
+/// Return whether a verified service has the machine grant for an endpoint.
+///
+/// A true result does not replace any delegated-user or resource-scope check
+/// required by that endpoint.
 #[must_use]
 pub fn authorize(identity: &ServiceIdentity, endpoint: ServiceEndpoint) -> bool {
     service_allowlist()
