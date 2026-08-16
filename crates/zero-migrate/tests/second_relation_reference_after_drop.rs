@@ -165,3 +165,45 @@ fn an_unrelated_drop_does_not_block_any_of_them() {
     ))
     .expect("dropping an unrelated table must not block a view or a foreign key");
 }
+
+// ---------------------------------------------------------------------------
+// WHY THIS CHECK IS DIALECT-UNIFORM, measured rather than defaulted.
+// ---------------------------------------------------------------------------
+
+/// The sibling fixtures in this session establish a house rule: DO NOT REFUSE
+/// WHAT THE DATABASE ACCEPTS. `duplicate_constraint_name_on_one_table.rs` exempts
+/// SQLite on those grounds, and `index_shares_the_relation_namespace.rs` exempts
+/// MySQL.
+///
+/// Applied mechanically, that rule says this check should exempt SQLite too:
+///
+///     CREATE TABLE s (c0 int); DROP TABLE s;
+///     CREATE VIEW v AS SELECT c0 FROM s;      -- SQLite ACCEPTS this
+///
+/// MEASURED FURTHER, and this is what settles it. SQLite accepts the statement
+/// and the view appears in `sqlite_master` - but querying it fails:
+///
+///     SELECT * FROM v   ->   no such table: main.s
+///
+/// So the acceptance is DEFERRED FAILURE, not success. The migration reports
+/// success and leaves a permanently broken view that fails at first read, which
+/// is strictly worse for an operator than being told at authoring time.
+///
+/// THE HOUSE RULE THEREFORE NEEDS ITS QUALIFIER STATED: do not refuse what the
+/// database accepts AND THEN HONOURS. Where a dialect accepts a statement by
+/// postponing the error to read time, matching it would be matching the letter of
+/// the behaviour against the point of the check.
+///
+/// This test exists so the uniformity is a RECORDED DECISION rather than an
+/// unexamined default - a future reader applying the house rule mechanically
+/// would otherwise exempt SQLite here and reintroduce broken views.
+#[test]
+fn sqlite_is_refused_too_because_its_acceptance_is_only_deferred_failure() {
+    let bytes = format!(
+        r#"{{"ir_version":1,"name":"n","ops":[{A},{{"op":"dropTable","table":"a"}},{}]}}"#,
+        view_from("a")
+    );
+    let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
+    validate_ir(&ir, Dialect::Sqlite, &[])
+        .expect_err("SQLite accepts this DDL but the view it creates can never be read");
+}
