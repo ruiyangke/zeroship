@@ -93,12 +93,9 @@ trusted_oauth_clients = []
 # frame_ancestor_origins = ["https://console.zeroship.ai"]
 frame_ancestor_origins = []
 
-# Do not put the platform mint credential in this shared overlay or shared
-# secrets directory. This file is mounted into non-consumers including the
-# worker; the shared secrets directory is mounted into gateway and migrated.
-# Inject
-# ZEROSHIP_AUTH_PLATFORM_MINT_KEY only into auth and control, or mount one
-# dedicated key file only into those two services and pass auth
+# Do not put the platform mint credential in this shared overlay. The worker
+# cannot load overlays, but gateway and migrated still load this file. Mount one
+# dedicated key file only into auth and control and pass auth
 # --platform-mint-key-file and control --auth-platform-mint-key-file. Both
 # services need the same bytes. The value must not equal a control or worker
 # credential.

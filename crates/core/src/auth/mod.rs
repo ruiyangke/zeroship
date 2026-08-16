@@ -1,5 +1,5 @@
-//! Auth utilities: control key validation, API key hashing, bearer extraction,
-//! HMAC signing for cross-service identity propagation.
+//! Auth utilities: constant-time secret comparison, API key hashing, bearer
+//! extraction, and HMAC signing for cross-service identity propagation.
 
 pub mod trusted_clients;
 
@@ -33,8 +33,8 @@ const BROKER_SECRET_HKDF_SALT: &[u8] = b"zeroship:broker-secret:v1";
 /// (which is not secret) and never on the attacker-controlled `provided.len()`.
 /// A length mismatch folds into the accumulator instead of short-circuiting.
 #[must_use]
-pub fn validate_control_key(provided: &str, expected: &str) -> bool {
-    let (equal, _iterations) = control_key_compare(provided.as_bytes(), expected.as_bytes());
+pub fn constant_time_eq(provided: &str, expected: &str) -> bool {
+    let (equal, _iterations) = constant_time_compare(provided.as_bytes(), expected.as_bytes());
     equal
 }
 
@@ -51,7 +51,7 @@ pub fn validate_control_key(provided: &str, expected: &str) -> bool {
 ///   path as a wrong-content input of the right length.
 /// - Indexing uses `.get()` (no panic) instead of slice indexing, so an empty
 ///   or short `provided` cannot panic.
-fn control_key_compare(provided: &[u8], expected: &[u8]) -> (bool, usize) {
+fn constant_time_compare(provided: &[u8], expected: &[u8]) -> (bool, usize) {
     let len_mismatch: u8 = u8::from(provided.len() != expected.len());
 
     let mut diff: u8 = 0;
@@ -77,7 +77,7 @@ pub fn hash_api_key(key: &str) -> String {
 /// Constant-time validation of a provided API key against its stored SHA-256 hash.
 pub fn validate_api_key(provided: &str, stored_hash: &str) -> bool {
     let computed = hash_api_key(provided);
-    validate_control_key(&computed, stored_hash)
+    constant_time_eq(&computed, stored_hash)
 }
 
 /// Derive the gateway-presented per-client broker secret from the platform
@@ -170,14 +170,14 @@ pub fn derive_app_scoped_control_token(control_key: &str, app_id: &str) -> Strin
 #[must_use]
 pub fn validate_app_scoped_control_token(provided: &str, control_key: &str, app_id: &str) -> bool {
     let expected = derive_app_scoped_control_token(control_key, app_id);
-    validate_control_key(provided, &expected)
+    constant_time_eq(provided, &expected)
 }
 
 /// Constant-time verify of `expected_hex` against `payload` HMAC-signed with `key`.
 #[must_use]
 pub fn verify_hmac_sha256_hex(key: &[u8], payload: &[u8], expected_hex: &str) -> bool {
     let computed = hmac_sha256_hex(key, payload);
-    validate_control_key(&computed, expected_hex)
+    constant_time_eq(&computed, expected_hex)
 }
 
 /// Length of the base62 body of a `pws_…` pairwise subject (after the
@@ -185,11 +185,10 @@ pub fn verify_hmac_sha256_hex(key: &[u8], payload: &[u8], expected_hex: &str) ->
 /// avoid collisions while keeping the id compact (auth-sdk §6.2).
 pub const PAIRWISE_SUB_BODY_LEN: usize = 20;
 
-/// The fixed prefix every per-app pairwise subject carries (`pws_…`). The
-/// gateway-issued wrapper token's `sub` is ALWAYS one of these (auth-sdk
-/// §6.2/G4) — the self-describing-subject invariant (Batch A fix 2) lets the
-/// wrapper fast-paths reject, defense-in-depth, any wrapper whose `sub` is the
-/// global user UUID rather than a projected pairwise pseudonym.
+/// The fixed prefix every per-app pairwise subject carries. App access tokens
+/// and gateway session cookies use this shape so their verification paths can
+/// reject, as defense in depth, any credential whose subject is an unprojected
+/// global user UUID.
 pub const PAIRWISE_SUB_PREFIX: &str = "pws_";
 
 /// Whether `sub` has the EXACT shape [`derive_pairwise`] mints: the `pws_`
@@ -211,10 +210,9 @@ pub const PAIRWISE_SUB_PREFIX: &str = "pws_";
 ///   gateway itself signed — so the `sub` is already trusted; this predicate is
 ///   a defense-in-depth minter-bug containment check (reject a wrapper a mint
 ///   bug failed to project), never the thing that decides trust.
-/// - The Bearer arm NEVER consumes an inbound `pws_` as identity at all:
-///   it re-derives it with [`derive_pairwise`] from the verified global
-///   subject. There is no path where an attacker-supplied `pws_` is trusted for
-///   an authz/lookup decision on the strength of its shape.
+/// - The Bearer arm authenticates the exact pairwise subject signed by the OP,
+///   then binds the token to its client and resource audience. The shape check
+///   remains defense in depth and is never the source of trust.
 ///
 /// Anchoring on the EXACT minted shape (prefix + fixed length + base62
 /// alphabet) rather than a loose `pws_<anything>` closes the gap where a
@@ -453,8 +451,14 @@ mod tests {
     }
 
     #[test]
-    fn control_key_equal() {
-        assert!(validate_control_key("secret", "secret"));
+    fn equal_secrets_match() {
+        assert!(constant_time_eq("secret", "secret"));
+    }
+
+    #[test]
+    fn generic_constant_time_comparison_is_not_named_for_one_credential() {
+        assert!(constant_time_eq("secret", "secret"));
+        assert!(!constant_time_eq("wrong", "secret"));
     }
 
     #[test]
@@ -534,10 +538,9 @@ mod tests {
     /// [`PAIRWISE_SUB_BODY_LEN`] base62 chars — so a `pws_`-SHAPED string that
     /// `derive_pairwise` could never have minted (wrong length, or a non-base62
     /// byte) is rejected. This is hardening only: at every production call site
-    /// the predicate runs DOWNSTREAM of cryptographic authentication (the
-    /// session-cookie signature) and the gateway never trusts an inbound `pws_`
-    /// for an authz/lookup decision — it always re-derives via `derive_pairwise`
-    /// from the verified global subject. But making the predicate an exact
+    /// the predicate runs DOWNSTREAM of cryptographic authentication (the OP or
+    /// session-cookie signature) and client/audience binding. Making the
+    /// predicate an exact
     /// shape-inverse closes the "any `pws_<anything>` passes" gap so the check
     /// cannot silently wave through a malformed/forged-shape subject.
     #[test]
@@ -693,14 +696,14 @@ mod tests {
     }
 
     #[test]
-    fn control_key_different() {
-        assert!(!validate_control_key("wrong", "secret"));
+    fn different_secrets_do_not_match() {
+        assert!(!constant_time_eq("wrong", "secret"));
     }
 
     #[test]
-    fn control_key_length_mismatch() {
-        assert!(!validate_control_key("sec", "secret"));
-        assert!(!validate_control_key("secretextra", "secret"));
+    fn secret_length_mismatch_does_not_match() {
+        assert!(!constant_time_eq("sec", "secret"));
+        assert!(!constant_time_eq("secretextra", "secret"));
     }
 
     /// I10 regression: the comparison must iterate a FIXED number of times —
@@ -713,7 +716,7 @@ mod tests {
     /// input. This asserts the count is constant across short / exact / long /
     /// empty provided inputs.
     #[test]
-    fn control_key_iteration_count_is_independent_of_provided_length() {
+    fn comparison_iteration_count_is_independent_of_provided_length() {
         let expected = b"secret-of-known-length";
         let n = expected.len();
 
@@ -727,7 +730,7 @@ mod tests {
             expected.as_slice(),
             b"secret-of-known-length-and-then-some-extra".as_slice(),
         ] {
-            let (_equal, iterations) = control_key_compare(provided, expected);
+            let (_equal, iterations) = constant_time_compare(provided, expected);
             assert_eq!(
                 iterations, n,
                 "iteration count must equal expected.len()={n} regardless of \
@@ -740,19 +743,19 @@ mod tests {
     /// I10 correctness: the constant-time comparison still accepts the exact
     /// key and rejects every wrong / wrong-length input.
     #[test]
-    fn control_key_constant_time_preserves_correctness() {
-        assert!(validate_control_key("secret", "secret"));
-        assert!(validate_control_key("", ""));
+    fn constant_time_comparison_preserves_correctness() {
+        assert!(constant_time_eq("secret", "secret"));
+        assert!(constant_time_eq("", ""));
         // Wrong content, right length.
-        assert!(!validate_control_key("secreX", "secret"));
+        assert!(!constant_time_eq("secreX", "secret"));
         // Shorter.
-        assert!(!validate_control_key("sec", "secret"));
+        assert!(!constant_time_eq("sec", "secret"));
         // Longer (prefix-equal — the classic length-extension trap).
-        assert!(!validate_control_key("secretX", "secret"));
+        assert!(!constant_time_eq("secretX", "secret"));
         // Empty provided against a non-empty key.
-        assert!(!validate_control_key("", "secret"));
+        assert!(!constant_time_eq("", "secret"));
         // Non-empty provided against an empty key.
-        assert!(!validate_control_key("secret", ""));
+        assert!(!constant_time_eq("secret", ""));
     }
 
     #[test]

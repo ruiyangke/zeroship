@@ -221,10 +221,9 @@ pub struct GateState {
     /// family never leaves the gateway in plaintext — neither to the
     /// browser nor at rest in PG.
     pub anchor_enc_key: [u8; 32],
-    /// Platform-wide pairwise salt for the per-app `pws_…` subject
-    /// projection. The gateway uses this salt to derive the pairwise subject
-    /// before emitting the worker header or browser identity projection, so
-    /// neither receives the global user UUID. A `[u8; 32]` (`Send + Sync`),
+    /// Platform-wide pairwise salt for the per-app `pws_` subject projection.
+    /// The gateway derives browser-session subjects; auth uses the same salt
+    /// for access tokens. A `[u8; 32]` (`Send + Sync`),
     /// derived once at boot from a stable server secret via
     /// `zeroship_core::crypto::derive_key`. Rotating it rotates every app's
     /// subjects (a deliberate break-glass).

@@ -582,16 +582,17 @@ fn op_base_url(auth_ui_url: &str) -> String {
 }
 
 /// Decoded claims of a raw OP access JWT (RFC 9068). The Bearer arm
-/// reads `client_id`/`aud` for per-app binding, `sub` for identity, and
-/// the profile fields for the `ZeroShip-User` header.
+/// reads `client_id`/`aud` for per-app binding and `sub` for identity.
+/// Optional profile claims are decoded but are not trusted as an app-facing
+/// email projection.
 ///
 /// `aud` per RFC 7519 may be a string OR an array of strings; the helper
 /// normalizes both into a `Vec<String>` so the caller can enforce the route's
 /// resource-server audience uniformly.
 #[derive(Debug, Clone)]
 pub struct AccessClaims {
-    /// Subject. The raw-OP Bearer path treats this as the global OP user UUID
-    /// and projects it to a per-app `pws_` before building the worker header.
+    /// Issuer-projected per-app pairwise subject. The raw-OP Bearer path
+    /// requires the `pws_` shape and forwards it unchanged.
     pub sub: String,
     /// The OAuth `client_id` claim (RFC 9068 §3 mandates it; OP emits it).
     /// The Bearer arm's per-app authorized-party binding.
@@ -946,10 +947,9 @@ impl Stash {
 //
 // Two cookies live on the per-app origin (`{app}.zeroship.ai`):
 //
-// - `__Host-zeroship_app_session` — opaque session id minted after a successful
-//   OIDC dance. 12 h max-age, set on `/__zeroship/auth/callback`, cleared on
-//   `/__zeroship/auth/logout`. The gateway looks this up server-side to resolve
-//   `ZeroShip-User` on every request.
+// - `__Host-zeroship_app_session` is a short-lived gateway-signed identity JWT.
+//   The gateway verifies it locally and applies pushed lifecycle plus family
+//   revocation before resolving `ZeroShip-User`.
 // - `__Host-zs_oidc_stash` — the signed PKCE+state stash. 10 min max-age,
 //   set on the redirect to op, cleared on callback.
 //

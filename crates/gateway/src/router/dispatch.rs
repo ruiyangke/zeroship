@@ -2664,14 +2664,9 @@ fn unauthenticated_response(
     }
 }
 
-/// `503 client_not_provisioned` — a request resolved a real authenticated
-/// user, but the route has no `sector_identifier` yet, so the gateway
-/// CANNOT derive the per-app pairwise `pws_…`.
-/// We fail CLOSED — never project the global UUID into `ZeroShip-User.id`
-/// — and answer 503 with the same retryable `client_not_provisioned`
-/// shape the browser-token endpoints use (`auth_token.rs`). Once control
-/// finishes provisioning the app's OAuth client + sector, the retry
-/// succeeds.
+/// `503 client_not_provisioned`: a raw OP bearer resolved a real user, but the
+/// route is missing its sector and is not fully provisioned for OAuth. Once
+/// control finishes provisioning the client and sector, the retry succeeds.
 fn client_not_provisioned_response() -> HttpResponse {
     HttpResponse::ServiceUnavailable()
         .header("cache-control", "no-store")
@@ -2867,6 +2862,7 @@ async fn handle_auth_callback(
         &client_id,
         sector_identifier.as_deref(),
         global_user_id,
+        claims.iat,
         claims.name.as_deref(),
         claims.picture.as_deref(),
         claims.email_verified,
@@ -3247,9 +3243,15 @@ mod tests {
         entry.account_state = account_state;
         let mut routes = zeroship_core::types::RouteMap::new();
         routes.insert(app_id, entry);
-        state
-            .routes
-            .update(routes, &state.rate_limiters, &state.concurrency);
+        state.routes.update_snapshot(
+            zeroship_core::types::GatewaySnapshot {
+                routes,
+                principal_lifecycle: Vec::new(),
+                family_revocations: Vec::new(),
+            },
+            &state.rate_limiters,
+            &state.concurrency,
+        );
     }
 
     #[ntex::test]
@@ -5344,9 +5346,15 @@ mod tests {
 
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
         routes.insert(app_id, worker_spend_route(SpendState::Block));
-        state
-            .routes
-            .update(routes, &state.rate_limiters, &state.concurrency);
+        state.routes.update_snapshot(
+            zeroship_core::types::GatewaySnapshot {
+                routes,
+                principal_lifecycle: Vec::new(),
+                family_revocations: Vec::new(),
+            },
+            &state.rate_limiters,
+            &state.concurrency,
+        );
 
         let req = ntex::web::test::TestRequest::default()
             .uri("/__zeroship/v1/ping")
@@ -6647,9 +6655,15 @@ mod tests {
             Uuid::new_v4(),
             authenticated_idempotent_route(TEST_ANON_HOST, AuthLevel::Anon),
         );
-        state
-            .routes
-            .update(routes, &state.rate_limiters, &state.concurrency);
+        state.routes.update_snapshot(
+            zeroship_core::types::GatewaySnapshot {
+                routes,
+                principal_lifecycle: Vec::new(),
+                family_revocations: Vec::new(),
+            },
+            &state.rate_limiters,
+            &state.concurrency,
+        );
         (state, issuer)
     }
 
@@ -6667,6 +6681,7 @@ mod tests {
             .issue(&crate::session_token::SessionMint {
                 app: TEST_OAUTH_CLIENT,
                 sub: &sub,
+                credential_iat: 1_700_000_000,
                 auth_time: None,
                 amr: &[],
                 email: "u@test.invalid",

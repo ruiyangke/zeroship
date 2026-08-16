@@ -2349,8 +2349,29 @@ async fn c1_cleanup(pool: &Pool, app: &str) {
     }
 }
 
+async fn c1_create_publication(pool: &Pool, app: &str) {
+    c1_create_publication_for_tables(pool, app, &[]).await;
+}
+
+async fn c1_create_publication_for_tables(pool: &Pool, app: &str, tables: &[&str]) {
+    let pub_name = zeroship_plugin_db::replication::publication_name(app).unwrap();
+    let membership = tables
+        .iter()
+        .map(|table| format!(r#""{app}"."{table}""#))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = if membership.is_empty() {
+        format!(r#"CREATE PUBLICATION "{pub_name}""#)
+    } else {
+        format!(r#"CREATE PUBLICATION "{pub_name}" FOR TABLE {membership}"#)
+    };
+    pool.execute(&sql, &[])
+        .await
+        .expect("create migration-owned test publication");
+}
+
 #[compio::test]
-async fn c1_setup_creates_publication_and_slot_idempotently() {
+async fn c1_setup_requires_publication_and_creates_slot_idempotently() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
@@ -2363,9 +2384,10 @@ async fn c1_setup_creates_publication_and_slot_idempotently() {
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
         .await
         .unwrap();
+    c1_create_publication(&pool, app).await;
 
-    // First call creates.
-    let first = zeroship_plugin_db::replication::ensure_publication_and_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
+    // The migration service created the publication; the worker creates its slot.
+    let first = zeroship_plugin_db::replication::ensure_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
         .await
         .unwrap();
     assert!(first.created);
@@ -2379,11 +2401,40 @@ async fn c1_setup_creates_publication_and_slot_idempotently() {
     );
 
     // Second call must observe the existing slot and return created=false.
-    let second = zeroship_plugin_db::replication::ensure_publication_and_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
+    let second = zeroship_plugin_db::replication::ensure_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
         .await
         .unwrap();
     assert!(!second.created);
     assert_eq!(second.slot, first.slot);
+
+    c1_cleanup(&pool, app).await;
+    release_pg(pool).await;
+}
+
+#[compio::test]
+async fn c1_setup_refuses_to_create_a_missing_publication() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+    let app = "c1_missing_pub_app";
+    c1_cleanup(&pool, app).await;
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+        .await
+        .unwrap();
+
+    let err = zeroship_plugin_db::replication::ensure_worker_slot(
+        &pool,
+        app,
+        CDC_TEST_WORKER_ID,
+    )
+    .await
+    .expect_err("worker must not create a missing publication");
+    assert!(matches!(
+        err,
+        zeroship_plugin_db::error::DbError::Configuration {
+            code: "replication_publication_missing",
+            ..
+        }
+    ));
 
     c1_cleanup(&pool, app).await;
     release_pg(pool).await;
@@ -2403,7 +2454,8 @@ async fn c1_watchdog_reports_new_slot() {
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
         .await
         .unwrap();
-    zeroship_plugin_db::replication::ensure_publication_and_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
+    c1_create_publication(&pool, app).await;
+    zeroship_plugin_db::replication::ensure_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
         .await
         .unwrap();
 
@@ -2442,7 +2494,8 @@ async fn c1_drop_abandoned_reaps_inactive_slot() {
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
         .await
         .unwrap();
-    let setup = zeroship_plugin_db::replication::ensure_publication_and_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
+    c1_create_publication(&pool, app).await;
+    let setup = zeroship_plugin_db::replication::ensure_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
         .await
         .unwrap();
     assert!(setup.created);
@@ -2472,7 +2525,7 @@ async fn c1_drop_abandoned_reaps_inactive_slot() {
 async fn c1_setup_resumes_at_existing_lsn_across_restart() {
     // "Worker restart" is simulated by tearing down the Pool (closes
     // all connections — equivalent to a worker process exit) and
-    // re-running `ensure_publication_and_slot`. The slot survives
+    // re-running `ensure_worker_slot`. The slot survives
     // and reports the same `confirmed_flush_lsn`.
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
@@ -2486,8 +2539,9 @@ async fn c1_setup_resumes_at_existing_lsn_across_restart() {
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
         .await
         .unwrap();
+    c1_create_publication(&pool, app).await;
 
-    let first = zeroship_plugin_db::replication::ensure_publication_and_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
+    let first = zeroship_plugin_db::replication::ensure_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
         .await
         .unwrap();
     assert!(first.created);
@@ -2496,7 +2550,7 @@ async fn c1_setup_resumes_at_existing_lsn_across_restart() {
     // Simulate worker restart by dropping the pool and opening a new one.
     drop(pool);
     let pool2 = Pool::connect(&url, 2).await.unwrap();
-    let resumed = zeroship_plugin_db::replication::ensure_publication_and_worker_slot(&pool2, app, CDC_TEST_WORKER_ID)
+    let resumed = zeroship_plugin_db::replication::ensure_worker_slot(&pool2, app, CDC_TEST_WORKER_ID)
         .await
         .unwrap();
     assert!(!resumed.created, "second call after 'restart' must observe existing slot");
@@ -2514,8 +2568,8 @@ async fn c1_setup_resumes_at_existing_lsn_across_restart() {
 // compio-postgres which we have not yet exercised under load — the
 // notice can block subsequent `setup()` calls inside the same test
 // process. The publication-creation code path is exercised by the
-// `c1_setup_creates_publication_and_slot_idempotently` test on a
-// logical-WAL server. Re-introduce this test alongside a
+// `c1_setup_requires_publication_and_creates_slot_idempotently` test on
+// a logical-WAL server. Re-introduce this test alongside a
 // compio-postgres notice-handling audit (separate work).
 
 #[compio::test]
@@ -2742,6 +2796,7 @@ async fn p8a2_consumer_publishes_wal_event_to_broker() {
     )
     .await
     .unwrap();
+    c1_create_publication_for_tables(&pool, app, &["events"]).await;
 
     // Clean broker; subscribe to the collection we're about to insert
     // into.
@@ -3768,6 +3823,7 @@ async fn p8a2_supervised_consumer_reconnects_after_kill() {
     )
     .await
     .unwrap();
+    c1_create_publication_for_tables(&pool, app, &["events"]).await;
 
     zeroship_plugin_db::broker::drop_app(None);
     let sub = zeroship_plugin_db::broker::subscribe(app, "events");
@@ -7159,14 +7215,13 @@ async fn wal_connection_stays_platform_role() {
 }
 
 // ---------------------------------------------------------------------------
-// Drop-namespace sequencing (§17.7 PG ordering + CRITICAL #4).
+// Drop-namespace slot sequencing.
 //
-// `drop_namespace` runs the §17.7 PG teardown: subscription
-// gate → broker drain → slot/publication teardown (via
-// ChangeStream::deprovision) → DROP SCHEMA CASCADE → DROP ROLE. These
+// `drop_namespace` runs subscription gate, broker drain, slot teardown
+// through ChangeStream::deprovision, DROP SCHEMA CASCADE, then DROP ROLE. These
 // tests provision a full app (schema + slot + publication + per-app role)
 // and verify the ordering, the subscription gate (defer vs --force),
-// idempotency of steps 4-7, and retry-from-step-3 on partial failure.
+// idempotency of steps 3-5, and retry-from-step-3 on partial failure.
 //
 // Slot-dependent tests skip when wal_level != logical (CI's pg-test runs
 // with -c wal_level=logical).
@@ -7303,7 +7358,7 @@ async fn drop_namespace_force_fires_subscription_app_dropped() {
 }
 
 #[compio::test]
-async fn drop_namespace_pg_ordering_slot_before_publication_before_schema() {
+async fn drop_namespace_pg_drops_slots_but_retains_migration_publication() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
@@ -7313,10 +7368,11 @@ async fn drop_namespace_pg_ordering_slot_before_publication_before_schema() {
     let app = "p6a_drop_order";
     c1_cleanup(&pool, app).await;
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[]).await.unwrap();
-    // Provision slot + publication.
-    zeroship_plugin_db::replication::ensure_publication_and_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
+    c1_create_publication(&pool, app).await;
+    // Provision the worker slot against the migration-owned publication.
+    zeroship_plugin_db::replication::ensure_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
         .await
-        .expect("provision slot + publication");
+        .expect("provision worker slot");
     assert!(slot_exists(&pool, app).await, "slot provisioned");
     assert!(publication_exists(&pool, app).await, "publication provisioned");
 
@@ -7331,15 +7387,11 @@ async fn drop_namespace_pg_ordering_slot_before_publication_before_schema() {
     .expect("drop_namespace");
     assert_eq!(outcome, DropNamespaceOutcome::Completed);
 
-    // End state: slot, publication, AND schema all gone. The ordering
-    // (slot → publication → schema) is enforced inside
-    // `drop_publication_and_slot` + the orchestrator; the end-state check
-    // proves the full teardown ran. CRITICAL #4: the publication (which
-    // references the schema via FOR TABLES IN SCHEMA) is dropped BEFORE
-    // the schema, so DROP SCHEMA never tears out a publication's tracked
-    // tables.
+    // Worker teardown removes slots and the schema but leaves publication
+    // ownership with the migration service. Dropping the schema removes its
+    // relation memberships, so the retained publication is empty.
     assert!(!slot_exists(&pool, app).await, "slot must be dropped");
-    assert!(!publication_exists(&pool, app).await, "publication must be dropped");
+    assert!(publication_exists(&pool, app).await, "publication must be retained");
     assert!(!schema_exists(&pool, app).await, "schema must be dropped");
 
     c1_cleanup(&pool, app).await;
@@ -7384,7 +7436,7 @@ async fn drop_namespace_drops_per_app_role_last() {
     .expect("drop_namespace");
     assert_eq!(outcome, DropNamespaceOutcome::Completed);
 
-    // Both schema and role gone — role dropped AFTER schema (step 7).
+    // Both schema and role are gone; the role was dropped after schema (step 5).
     assert!(!schema_exists(&pool, app).await, "schema dropped");
     assert!(!role_exists(&pool, app).await, "per-app role dropped last");
 
@@ -7394,7 +7446,7 @@ async fn drop_namespace_drops_per_app_role_last() {
 }
 
 #[compio::test]
-async fn drop_namespace_idempotent_steps_4_to_7() {
+async fn drop_namespace_idempotent_steps_3_to_5() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
@@ -7408,7 +7460,8 @@ async fn drop_namespace_idempotent_steps_4_to_7() {
     zeroship_plugin_db::auth::ensure_admin_schema(&pool).await.unwrap();
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[]).await.unwrap();
     zeroship_plugin_db::auth::ensure_admin_schema(&pool).await.unwrap();
-    zeroship_plugin_db::replication::ensure_publication_and_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
+    c1_create_publication(&pool, app).await;
+    zeroship_plugin_db::replication::ensure_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
         .await
         .unwrap();
     zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
@@ -7422,11 +7475,11 @@ async fn drop_namespace_idempotent_steps_4_to_7() {
     let first = drop_namespace(&backend, &pool, app, &opts).await.expect("first drop");
     assert_eq!(first, DropNamespaceOutcome::Completed);
     assert!(!slot_exists(&pool, app).await);
-    assert!(!publication_exists(&pool, app).await);
+    assert!(publication_exists(&pool, app).await);
     assert!(!schema_exists(&pool, app).await);
     assert!(!role_exists(&pool, app).await);
 
-    // Second drop on the already-torn-down app: every step (4-7) is a
+    // Second drop on the already-torn-down app: every step (3-5) is a
     // no-op, returns Completed, no error.
     let second = drop_namespace(&backend, &pool, app, &opts)
         .await
@@ -7444,11 +7497,11 @@ async fn drop_namespace_idempotent_steps_4_to_7() {
 
 #[compio::test]
 async fn drop_namespace_retries_from_step_3_on_partial_failure() {
-    // §17.7: "retry from step 3 on partial failure; steps 4-7 idempotent."
-    // We simulate a partial failure by dropping the publication+slot
-    // first (leaving the schema + role), then running drop_namespace —
+    // Retry from step 3 on partial failure; steps 3-5 are idempotent.
+    // We simulate a partial failure by dropping the slots first (leaving
+    // the publication, schema, and role), then running drop_namespace -
     // step 3 (deprovision) finds nothing to do (idempotent), and steps
-    // 6-7 finish the teardown. This proves a re-run after a crash that
+    // 4-5 finish the teardown. This proves a re-run after a crash that
     // got partway through completes cleanly.
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
@@ -7463,24 +7516,25 @@ async fn drop_namespace_retries_from_step_3_on_partial_failure() {
     zeroship_plugin_db::auth::ensure_admin_schema(&pool).await.unwrap();
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[]).await.unwrap();
     zeroship_plugin_db::auth::ensure_admin_schema(&pool).await.unwrap();
-    zeroship_plugin_db::replication::ensure_publication_and_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
+    c1_create_publication(&pool, app).await;
+    zeroship_plugin_db::replication::ensure_worker_slot(&pool, app, CDC_TEST_WORKER_ID)
         .await
         .unwrap();
     zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
         .await
         .unwrap();
 
-    // Simulate a crash AFTER step 3 (slot+publication dropped) but BEFORE
-    // steps 6-7 (schema + role still present).
-    zeroship_plugin_db::replication::drop_publication_and_slots(&pool, app)
+    // Simulate a crash AFTER step 3 (slots dropped) but BEFORE
+    // steps 4-5 (schema + role still present).
+    zeroship_plugin_db::replication::drop_worker_slots(&pool, app)
         .await
-        .expect("partial: drop slot+publication");
+        .expect("partial: drop worker slots");
     assert!(!slot_exists(&pool, app).await, "slot gone after partial");
-    assert!(!publication_exists(&pool, app).await, "publication gone after partial");
+    assert!(publication_exists(&pool, app).await, "publication retained after partial");
     assert!(schema_exists(&pool, app).await, "schema still present after partial");
     assert!(role_exists(&pool, app).await, "role still present after partial");
 
-    // Retry: step 3 is a no-op (nothing to deprovision), steps 6-7 finish.
+    // Retry: step 3 is a no-op (nothing to deprovision), steps 4-5 finish.
     let backend = pg_backend_handle(&pool, &url);
     let outcome = drop_namespace(
         &backend,

@@ -755,8 +755,9 @@ fn main() -> std::io::Result<()> {
     // `PAIRWISE_SALT` secret (NOT the stash key), via the SHARED helper, so
     // control's disconnect-app revocation writes the family marker on the SAME
     // `(client_id, pws_)` key the gateway arms read (Batch A fix 4). The SAME
-    // `PAIRWISE_SALT` value must be configured on gateway + control, and is the
-    // PERMANENT per-app identity anchor (never rotate without a migration).
+    // `PAIRWISE_SALT` value must be configured on auth + gateway + control. It
+    // is the PERMANENT per-app identity anchor (never rotate without a
+    // migration).
     let pairwise_salt = zeroship_core::auth::derive_pairwise_salt(pairwise_salt.as_bytes());
     // Control plane is a pure API resource server: no console OIDC RP. The
     // selected auth provider still drives the OAuth-bearer arm of the

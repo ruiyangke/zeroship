@@ -25,7 +25,7 @@ fn check_auth(req: &web::HttpRequest, state: &AppState) -> Option<web::HttpRespo
         // GET to /internal/* could leak decrypted secrets to the network.
         Some(key)
             if !state.control_key.is_empty()
-                && zeroship_core::auth::validate_control_key(key, state.control_key.expose_secret()) =>
+                && zeroship_core::auth::constant_time_eq(key, state.control_key.expose_secret()) =>
         {
             None
         }
@@ -168,8 +168,8 @@ pub async fn get_routes(
     if let Some(resp) = check_auth(&req, &state) {
         return resp;
     }
-    match state.registry.get_routes().await {
-        Ok(routes) => web::HttpResponse::Ok().json(&routes),
+    match state.registry.get_gateway_snapshot().await {
+        Ok(snapshot) => web::HttpResponse::Ok().json(&snapshot),
         Err(e) => web::HttpResponse::InternalServerError()
             .json(&serde_json::json!({"error": e.to_string()})),
     }

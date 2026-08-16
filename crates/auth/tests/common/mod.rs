@@ -105,6 +105,20 @@ pub fn test_secret(material: &str) -> Secret<String> {
     Secret::supplied(SourceKind::Env, Some(material.to_owned()))
 }
 
+#[allow(clippy::future_not_send)]
+pub async fn dedicated_test_db(db_url: &str) -> compio_postgres::Client {
+    let (client, connection) = compio_postgres::connect(db_url, compio_postgres::NoTls)
+        .await
+        .expect("connect dedicated test database session");
+    compio::runtime::spawn(async move {
+        if let Err(e) = connection.run().await {
+            eprintln!("dedicated test database connection error: {e}");
+        }
+    })
+    .detach();
+    client
+}
+
 // ─── PKCE ────────────────────────────────────────────────────────────────
 //
 // Canonical implementations live in `zeroship_core::pkce` so the gateway

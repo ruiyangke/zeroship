@@ -431,6 +431,8 @@ pub type RotationResult = std::result::Result<RotationOk, RotationError>;
 #[derive(Debug, Clone)]
 pub struct RotationOk {
     pub global_user_id: Uuid,
+    /// Issuance time of the verified access token returned by the rotation.
+    pub credential_iat: i64,
     pub granted_scopes: Vec<String>,
     pub email_verified: Option<bool>,
     pub name: Option<String>,
@@ -653,6 +655,7 @@ mod tests {
         let fut: super::SharedRotationFuture = (Box::pin(async {
             Ok(RotationOk {
                 global_user_id: Uuid::new_v4(),
+                credential_iat: 1_700_000_000,
                 sid: None,
                 granted_scopes: vec!["openid".into()],
                 email_verified: Some(true),

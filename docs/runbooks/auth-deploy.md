@@ -100,25 +100,24 @@ zeroship dev init \
   --env-file=/path/to/.env
 ```
 
-The command creates exactly these seven files, with a mode of 0600 on Unix (and
+The command creates exactly these eight files, with a mode of 0600 on Unix (and
 0700 on the directory):
 
 `control-signing.pem` `gateway-signing.pem` `auth-signing.pem` `broker-secret`
-`pairwise-salt` `refresh-hash-key` `refresh-idem-key`
+`pairwise-salt` `platform-mint-key` `refresh-hash-key` `refresh-idem-key`
 
-It also adds nine 32-byte random hex values to the env overlay:
+It also adds eight 32-byte random hex values to the env overlay:
 
-`ZEROSHIP_AUTH_PLATFORM_MINT_KEY` `ZEROSHIP_CONTROL_KEY`
-`ZEROSHIP_CONTROL_MASTER_KEY` `ZEROSHIP_WORKER_KEY`
+`ZEROSHIP_CONTROL_KEY` `ZEROSHIP_CONTROL_MASTER_KEY` `ZEROSHIP_WORKER_KEY`
 `ZEROSHIP_MIGRATED_POLICY_SEAL_KEY` `ZEROSHIP_GATEWAY_STASH_SIGNING_KEY`
 `ZEROSHIP_PAIRWISE_SALT` `ZEROSHIP_AUTH_STASH_SIGNING_KEY`
 `ZEROSHIP_AUTH_TOTP_ENC_KEY`
 
 The generated overlay is convenient for local compose, but production must
-not mount or export it wholesale. Inject `ZEROSHIP_AUTH_PLATFORM_MINT_KEY`
-only into auth and control. If using a file, mount the dedicated file only
-into those two service containers; a shared secrets-directory mount defeats
-the isolation even when other binaries ignore the setting.
+not mount or export it wholesale. Mount `platform-mint-key` only into auth and
+control and pass its file reference through `ZEROSHIP_AUTH_PLATFORM_MINT_KEY`.
+A shared secrets-directory mount defeats the isolation even when other
+binaries ignore the setting.
 
 Generation is idempotent. A rerun validates and keeps every existing value,
 creates only missing entries, and refuses to replace invalid or mismatched

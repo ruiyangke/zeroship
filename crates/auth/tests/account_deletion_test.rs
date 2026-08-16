@@ -70,8 +70,8 @@ async fn cleanup(db: &Client, ids: &[Uuid]) {
 }
 
 #[compio::test]
-async fn request_soft_disables_and_schedules() {
-    let Some(db) = pg().await else {
+async fn request_marks_deletion_and_schedules() {
+    let Some(mut db) = pg().await else {
         zeroship_test_support::skip("skipping account_deletion_test (no AUTH_DB_URL/PG_TEST_URL)");
         return;
     };
@@ -79,7 +79,7 @@ async fn request_soft_disables_and_schedules() {
     let email = format!("acctdel-req-{tag}@zeroship.test");
     let user = users::create(&db, &email, "Req User", Some("phc")).await.unwrap();
 
-    let req = users::request_deletion(&db, user.id, account_reaper::GRACE_DAYS)
+    let req = users::request_deletion(&mut db, user.id, account_reaper::GRACE_DAYS)
         .await
         .expect("request_deletion")
         .expect("user existed");
@@ -87,7 +87,8 @@ async fn request_soft_disables_and_schedules() {
     // The request returns the contact details the confirm/undo email needs.
     assert_eq!(req.email, email);
 
-    // Re-read: soft-disabled + scheduled.
+    // Re-read: deletion requested and scheduled, without changing an
+    // independent administrative disable.
     let row = db
         .query_one(
             "SELECT disabled_at, deletion_requested_at, deletion_scheduled_for, anonymized_at \
@@ -100,7 +101,7 @@ async fn request_soft_disables_and_schedules() {
     let requested: Option<chrono::DateTime<chrono::Utc>> = row.get("deletion_requested_at");
     let scheduled: Option<chrono::DateTime<chrono::Utc>> = row.get("deletion_scheduled_for");
     let anonymized: Option<chrono::DateTime<chrono::Utc>> = row.get("anonymized_at");
-    assert!(disabled.is_some(), "request must soft-disable the account");
+    assert!(disabled.is_none(), "request must not set an administrative disable");
     assert!(requested.is_some(), "deletion_requested_at must be set");
     let scheduled = scheduled.expect("scheduled set");
     assert!(anonymized.is_none(), "not yet anonymized");
@@ -117,14 +118,14 @@ async fn request_soft_disables_and_schedules() {
 
 #[compio::test]
 async fn cancel_within_grace_restores_account() {
-    let Some(db) = pg().await else {
+    let Some(mut db) = pg().await else {
         return;
     };
     let tag = Uuid::new_v4().simple().to_string();
     let email = format!("acctdel-cancel-{tag}@zeroship.test");
     let user = users::create(&db, &email, "Cancel User", Some("phc")).await.unwrap();
 
-    users::request_deletion(&db, user.id, account_reaper::GRACE_DAYS)
+    users::request_deletion(&mut db, user.id, account_reaper::GRACE_DAYS)
         .await
         .unwrap()
         .unwrap();
@@ -142,10 +143,179 @@ async fn cancel_within_grace_restores_account() {
     let disabled: Option<chrono::DateTime<chrono::Utc>> = row.get("disabled_at");
     let requested: Option<chrono::DateTime<chrono::Utc>> = row.get("deletion_requested_at");
     let scheduled: Option<chrono::DateTime<chrono::Utc>> = row.get("deletion_scheduled_for");
-    assert!(disabled.is_none(), "cancel must re-enable the account");
+    assert!(disabled.is_none(), "cancel must leave the administrative state unchanged");
     assert!(requested.is_none() && scheduled.is_none(), "cancel clears the schedule");
 
     cleanup(&db, &[user.id]).await;
+}
+
+#[compio::test]
+async fn cancellation_preserves_an_independent_administrative_disable() {
+    let Some(mut db) = pg().await else {
+        return;
+    };
+    let tag = Uuid::new_v4().simple().to_string();
+    let user = users::create(
+        &db,
+        &format!("acctdel-disabled-{tag}@zeroship.test"),
+        "Disabled User",
+        Some("phc"),
+    )
+    .await
+    .unwrap();
+    db.execute(
+        "UPDATE zeroship.users SET disabled_at = NOW() - INTERVAL '1 day' WHERE id = $1",
+        &[&user.id],
+    )
+    .await
+    .unwrap();
+
+    users::request_deletion(&mut db, user.id, account_reaper::GRACE_DAYS)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(users::cancel_deletion(&db, user.id).await.unwrap());
+
+    let disabled: bool = db
+        .query_one(
+            "SELECT disabled_at IS NOT NULL FROM zeroship.users WHERE id = $1",
+            &[&user.id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(
+        disabled,
+        "cancelling deletion must not erase an administrative disable"
+    );
+
+    cleanup(&db, &[user.id]).await;
+}
+
+#[compio::test]
+async fn cancellation_does_not_restore_pre_deletion_app_credentials() {
+    let Some(mut db) = pg().await else {
+        return;
+    };
+    let tag = Uuid::new_v4().simple().to_string();
+    let user = users::create(
+        &db,
+        &format!("acctdel-recall-{tag}@zeroship.test"),
+        "Recall User",
+        Some("phc"),
+    )
+    .await
+    .unwrap();
+    let app_id = Uuid::new_v4();
+    let client_id = format!("oac_acctdel_{tag}");
+    let pairwise_sub = format!("pws_acctdel_{tag}");
+
+    db.execute(
+        "INSERT INTO zeroship.plans \
+            (id, name, runtime_limits_json, assignable_by_creator) \
+         VALUES ('free', 'Free', '{}'::jsonb, TRUE) \
+         ON CONFLICT (id) DO NOTHING",
+        &[],
+    )
+    .await
+    .unwrap();
+    db.execute(
+        "INSERT INTO zeroship.apps (id, name, plan_id, api_key) \
+         VALUES ($1, $2, 'free', $3)",
+        &[&app_id, &format!("acctdel-app-{tag}"), &"key"],
+    )
+    .await
+    .unwrap();
+    db.execute(
+        "INSERT INTO zeroship.oauth_clients \
+            (client_id, client_name, redirect_uris, scopes) \
+         VALUES ($1, $2, $3, $4)",
+        &[
+            &client_id,
+            &format!("Account deletion {tag}"),
+            &vec![format!("https://acctdel-{tag}.test/callback")],
+            &vec!["openid".to_string()],
+        ],
+    )
+    .await
+    .unwrap();
+    db.execute(
+        "INSERT INTO zeroship.app_user_identities \
+            (app_client_id, global_user_id, pairwise_sub) \
+         VALUES ($1, $2, $3)",
+        &[&client_id, &user.id, &pairwise_sub],
+    )
+    .await
+    .unwrap();
+    let anchor_id = Uuid::new_v4();
+    db.execute(
+        "INSERT INTO zeroship.app_session_anchors \
+            (id, app_id, client_id, global_user_id, refresh_token_enc, \
+             refresh_family_id, abs_expires_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, NOW() + INTERVAL '30 days')",
+        &[
+            &anchor_id,
+            &app_id,
+            &client_id,
+            &user.id,
+            &b"enc-refresh".to_vec(),
+            &format!("rfam_{tag}"),
+        ],
+    )
+    .await
+    .unwrap();
+
+    users::request_deletion(&mut db, user.id, account_reaper::GRACE_DAYS)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(users::cancel_deletion(&db, user.id).await.unwrap());
+
+    let marker = db
+        .query(
+            "SELECT 1 FROM zeroship.token_revocations \
+             WHERE client_id = $1 AND sub = $2",
+            &[&client_id, &pairwise_sub],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        marker.len(),
+        1,
+        "deletion must durably revoke access tokens without refresh families"
+    );
+    let platform_marker = db
+        .query(
+            "SELECT 1 FROM zeroship.token_revocations \
+             WHERE client_id = 'zeroship-cli' AND sub = $1",
+            &[&user.id.to_string()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        platform_marker.len(),
+        1,
+        "deletion must durably revoke platform tokens after cancellation"
+    );
+    let anchor_revoked: bool = db
+        .query_one(
+            "SELECT revoked_at IS NOT NULL FROM zeroship.app_session_anchors \
+             WHERE id = $1",
+            &[&anchor_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(anchor_revoked, "deletion must durably revoke recovery anchors");
+
+    cleanup(&db, &[user.id]).await;
+    let _ = db.execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id]).await;
+    let _ = db
+        .execute(
+            "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
+            &[&client_id],
+        )
+        .await;
 }
 
 // REAPER_LOCK guards `Mutex<()>` - a pure test-serialization token (see the
@@ -156,7 +326,7 @@ async fn cancel_within_grace_restores_account() {
 #[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn reaper_hard_deletes_non_billing_user_and_cascades() {
-    let Some(db) = pg().await else {
+    let Some(mut db) = pg().await else {
         return;
     };
     let _reaper = REAPER_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -173,13 +343,13 @@ async fn reaper_hard_deletes_non_billing_user_and_cascades() {
     .await
     .unwrap();
 
-    users::request_deletion(&db, user.id, account_reaper::GRACE_DAYS)
+    users::request_deletion(&mut db, user.id, account_reaper::GRACE_DAYS)
         .await
         .unwrap()
         .unwrap();
     backdate_schedule(&db, user.id).await;
 
-    let report = account_reaper::tick(&db).await.expect("reaper tick");
+    let report = account_reaper::tick(&mut db).await.expect("reaper tick");
     assert_eq!(report.hard_deleted, 1, "non-billing user is hard-deleted");
     assert_eq!(report.anonymized, 0);
 
@@ -204,7 +374,7 @@ async fn reaper_hard_deletes_non_billing_user_and_cascades() {
 #[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn reaper_anonymizes_creator_with_billing_and_retains_financials() {
-    let Some(db) = pg().await else {
+    let Some(mut db) = pg().await else {
         return;
     };
     let _reaper = REAPER_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -229,13 +399,13 @@ async fn reaper_anonymizes_creator_with_billing_and_retains_financials() {
     .await
     .unwrap();
 
-    users::request_deletion(&db, user.id, account_reaper::GRACE_DAYS)
+    users::request_deletion(&mut db, user.id, account_reaper::GRACE_DAYS)
         .await
         .unwrap()
         .unwrap();
     backdate_schedule(&db, user.id).await;
 
-    let report = account_reaper::tick(&db).await.expect("reaper tick");
+    let report = account_reaper::tick(&mut db).await.expect("reaper tick");
     assert_eq!(report.anonymized, 1, "creator-with-billing is anonymized, not deleted");
     assert_eq!(report.hard_deleted, 0);
 
@@ -285,7 +455,7 @@ async fn reaper_anonymizes_creator_with_billing_and_retains_financials() {
 #[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn reaper_sets_null_attribution_fk_pointing_at_deleted_user() {
-    let Some(db) = pg().await else {
+    let Some(mut db) = pg().await else {
         return;
     };
     let _reaper = REAPER_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -322,13 +492,13 @@ async fn reaper_sets_null_attribution_fk_pointing_at_deleted_user() {
     .await
     .unwrap();
 
-    users::request_deletion(&db, victim.id, account_reaper::GRACE_DAYS)
+    users::request_deletion(&mut db, victim.id, account_reaper::GRACE_DAYS)
         .await
         .unwrap()
         .unwrap();
     backdate_schedule(&db, victim.id).await;
 
-    let report = account_reaper::tick(&db).await.expect("reaper tick");
+    let report = account_reaper::tick(&mut db).await.expect("reaper tick");
     assert_eq!(report.hard_deleted, 1, "victim hard-deleted (no billing)");
 
     // victim gone; the bystander's attribution FK was SET NULL, not blocking.
@@ -357,7 +527,7 @@ async fn reaper_sets_null_attribution_fk_pointing_at_deleted_user() {
 #[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn reaper_skips_cancelled_request() {
-    let Some(db) = pg().await else {
+    let Some(mut db) = pg().await else {
         return;
     };
     let _reaper = REAPER_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -365,7 +535,7 @@ async fn reaper_skips_cancelled_request() {
     let email = format!("acctdel-skip-{tag}@zeroship.test");
     let user = users::create(&db, &email, "Skip User", Some("phc")).await.unwrap();
 
-    users::request_deletion(&db, user.id, account_reaper::GRACE_DAYS)
+    users::request_deletion(&mut db, user.id, account_reaper::GRACE_DAYS)
         .await
         .unwrap()
         .unwrap();
@@ -374,7 +544,7 @@ async fn reaper_skips_cancelled_request() {
     // the past, the reaper must not touch a cancelled request.
     users::cancel_deletion(&db, user.id).await.unwrap();
 
-    let report = account_reaper::tick(&db).await.expect("reaper tick");
+    let report = account_reaper::tick(&mut db).await.expect("reaper tick");
     assert_eq!(report.hard_deleted, 0, "cancelled request is skipped");
     assert_eq!(report.anonymized, 0);
 
@@ -384,6 +554,48 @@ async fn reaper_skips_cancelled_request() {
         .unwrap();
     assert_eq!(remaining.len(), 1, "user survives a cancelled request");
 
+    cleanup(&db, &[user.id]).await;
+}
+
+// See the allow on `reaper_hard_deletes_non_billing_user_and_cascades` above.
+#[allow(clippy::await_holding_lock)]
+#[compio::test]
+async fn reaper_ignores_a_schedule_without_a_deletion_request() {
+    let Some(mut db) = pg().await else {
+        return;
+    };
+    let _reaper = REAPER_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tag = Uuid::new_v4().simple().to_string();
+    let user = users::create(
+        &db,
+        &format!("acctdel-schedule-only-{tag}@zeroship.test"),
+        "Schedule Only",
+        Some("phc"),
+    )
+    .await
+    .unwrap();
+    db.execute(
+        "UPDATE zeroship.users \
+         SET deletion_scheduled_for = NOW() - INTERVAL '1 minute' \
+         WHERE id = $1",
+        &[&user.id],
+    )
+    .await
+    .unwrap();
+
+    account_reaper::tick(&mut db).await.unwrap();
+
+    let still_exists = db
+        .query("SELECT 1 FROM zeroship.users WHERE id = $1", &[&user.id])
+        .await
+        .unwrap();
+    assert_eq!(
+        still_exists.len(),
+        1,
+        "a schedule alone is a deny state, not erasure authorization"
+    );
     cleanup(&db, &[user.id]).await;
 }
 
@@ -400,7 +612,7 @@ async fn reaper_skips_cancelled_request() {
 #[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn reaper_anonymizes_invoiced_creator_with_no_connect_account() {
-    let Some(db) = pg().await else {
+    let Some(mut db) = pg().await else {
         return;
     };
     let _reaper = REAPER_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -425,13 +637,13 @@ async fn reaper_anonymizes_invoiced_creator_with_no_connect_account() {
     .await
     .unwrap();
 
-    users::request_deletion(&db, user.id, account_reaper::GRACE_DAYS)
+    users::request_deletion(&mut db, user.id, account_reaper::GRACE_DAYS)
         .await
         .unwrap()
         .unwrap();
     backdate_schedule(&db, user.id).await;
 
-    let report = account_reaper::tick(&db).await.expect("reaper tick");
+    let report = account_reaper::tick(&mut db).await.expect("reaper tick");
     assert_eq!(
         report.anonymized, 1,
         "an invoiced creator (no Connect account) is ANONYMIZED, not hard-deleted",

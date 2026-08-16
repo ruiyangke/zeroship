@@ -1,8 +1,8 @@
 //! Live-PG test for the email-claim swap SOURCE used by the cookie /
 //! raw OP Bearer arms (relay sub-spec §7).
 //!
-//! `identities::lookup_relay_email` is what `project_pairwise` reads to swap
-//! the real email for the relay alias on every pairwise-projecting arm. The
+//! `identities::lookup_relay_email` supplies the trusted relay alias used by
+//! gateway session minting. The
 //! invariant it enforces is the whole point of the swap:
 //!
 //!   - active alias (relay_email NOT NULL, revoked_at NULL) ⇒ returns the alias

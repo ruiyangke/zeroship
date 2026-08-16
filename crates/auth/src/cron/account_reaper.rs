@@ -1,9 +1,9 @@
 //! Account-erasure reaper (ISS-12 / GDPR Art. 17).
 //!
 //! The companion to the `/me/delete` request flow (`store::users::request_deletion`,
-//! `ui::account_deletion`). A user who asked to be deleted is soft-disabled and
-//! given a grace window ([`GRACE_DAYS`]); this periodic task is what actually
-//! erases the account once that window elapses and the request was not
+//! `ui::account_deletion`). A user who asked to be deleted is marked
+//! non-authenticating and given a grace window ([`GRACE_DAYS`]); this periodic
+//! task erases the account once that window elapses and the request was not
 //! cancelled.
 //!
 //! It mirrors `token_sweep`'s `loop { tick; sleep }` shape and runs on the same
@@ -46,7 +46,6 @@
 //! these cross-table writes in any RLS / least-privilege hardening pass
 //! (`0025_roles_rls.sql`).
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use compio_postgres::{Client, GenericClient};
@@ -97,17 +96,28 @@ pub struct ReaperReport {
 /// A failing tick is logged and swallowed so a transient PG hiccup doesn't kill
 /// the task (mirrors `token_sweep::run`). The sleep is one hour.
 //
-// `compio_postgres::Client` is `!Send`; the lint is structural (mirrors the
-// other cron tasks).
+// The per-thread connection pool is `!Send`; the lint is structural.
 #[allow(clippy::future_not_send)]
-pub async fn run(db: Arc<Client>) {
+pub async fn run(refresh_pool: crate::oidc::refresh::RefreshSessionPool) {
     tracing::info!(
         interval_secs = INTERVAL_SECS,
         grace_days = GRACE_DAYS,
         "account_reaper cron starting"
     );
     loop {
-        match tick(&db).await {
+        let result = async {
+            let pool = refresh_pool
+                .checkout_pool("account reaper")
+                .await
+                .map_err(|e| AuthError::Db(format!("account_reaper pool: {e}")))?;
+            let mut conn = pool
+                .get()
+                .await
+                .map_err(|e| AuthError::Db(format!("account_reaper checkout: {e}")))?;
+            tick(&mut conn).await
+        }
+        .await;
+        match result {
             Ok(report) => {
                 if report.hard_deleted + report.anonymized > 0 {
                     tracing::info!(
@@ -134,7 +144,7 @@ pub async fn run(db: Arc<Client>) {
 /// failure is logged and skipped (so one poison row doesn't stall the queue);
 /// the next tick retries it.
 #[doc(hidden)]
-pub async fn tick(db: &Client) -> Result<ReaperReport> {
+pub async fn tick(db: &mut Client) -> Result<ReaperReport> {
     let due = find_due(db).await?;
     let mut report = ReaperReport::default();
     for user_id in due {
@@ -148,6 +158,7 @@ pub async fn tick(db: &Client) -> Result<ReaperReport> {
                     report.anonymized += 1;
                     report.attribution_fks_nulled += attribution_fks_nulled;
                 }
+                EraseOutcome::Skipped => {}
             },
             Err(e) => {
                 tracing::error!(error = %e, user_id = %user_id, "account_reaper erase failed; skipping");
@@ -157,14 +168,15 @@ pub async fn tick(db: &Client) -> Result<ReaperReport> {
     Ok(report)
 }
 
-/// Users whose erasure is due: a schedule in the past AND not already
-/// anonymized. A CANCELLED request has `deletion_scheduled_for = NULL`, so it
-/// is structurally excluded (the `IS NOT NULL` predicate), never erased.
+/// Users whose erasure is due: an explicit request, a schedule in the past,
+/// and not already anonymized. A schedule alone denies authentication but is
+/// not authority to erase the account.
 async fn find_due(db: &Client) -> Result<Vec<Uuid>> {
     let rows = db
         .query(
             "SELECT id FROM zeroship.users \
-             WHERE deletion_scheduled_for IS NOT NULL \
+             WHERE deletion_requested_at IS NOT NULL \
+               AND deletion_scheduled_for IS NOT NULL \
                AND deletion_scheduled_for <= NOW() \
                AND anonymized_at IS NULL",
             &[],
@@ -178,25 +190,33 @@ async fn find_due(db: &Client) -> Result<Vec<Uuid>> {
 enum EraseOutcome {
     HardDeleted { attribution_fks_nulled: u64 },
     Anonymized { attribution_fks_nulled: u64 },
+    Skipped,
 }
 
 /// Erase one due user inside a single transaction. SET-NULLs the attribution
 /// FKs first (so a hard DELETE is never blocked), then branches on the
 /// billing-retention policy ([`user_has_financial_history`]).
-async fn erase_one(conn: &Client, user_id: Uuid) -> Result<EraseOutcome> {
-    conn.execute("BEGIN", &[])
+async fn erase_one(conn: &mut Client, user_id: Uuid) -> Result<EraseOutcome> {
+    let tx = conn
+        .transaction()
         .await
         .map_err(|e| AuthError::Db(format!("account_reaper begin: {e}")))?;
-    let result = erase_one_tx(conn, user_id).await;
+    let result = erase_one_tx(&tx, user_id).await;
     match result {
+        Ok(EraseOutcome::Skipped) => {
+            tx.rollback()
+                .await
+                .map_err(|e| AuthError::Db(format!("account_reaper rollback skip: {e}")))?;
+            Ok(EraseOutcome::Skipped)
+        }
         Ok(outcome) => {
-            conn.execute("COMMIT", &[])
+            tx.commit()
                 .await
                 .map_err(|e| AuthError::Db(format!("account_reaper commit: {e}")))?;
             Ok(outcome)
         }
         Err(e) => {
-            if let Err(rb) = conn.execute("ROLLBACK", &[]).await {
+            if let Err(rb) = tx.rollback().await {
                 tracing::error!(error = %rb, "account_reaper rollback failed");
             }
             Err(e)
@@ -205,6 +225,26 @@ async fn erase_one(conn: &Client, user_id: Uuid) -> Result<EraseOutcome> {
 }
 
 async fn erase_one_tx(conn: &(impl GenericClient + Sync), user_id: Uuid) -> Result<EraseOutcome> {
+    // Serialize against cancellation and recheck the complete erasure
+    // authority after the due scan. The row lock makes cancellation either
+    // win first (this returns Skipped) or wait for the committed erasure.
+    let due = conn
+        .query(
+            "SELECT 1 FROM zeroship.users \
+             WHERE id = $1 \
+               AND deletion_requested_at IS NOT NULL \
+               AND deletion_scheduled_for IS NOT NULL \
+               AND deletion_scheduled_for <= NOW() \
+               AND anonymized_at IS NULL \
+             FOR UPDATE",
+            &[&user_id],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("account_reaper lock due user: {e}")))?;
+    if due.is_empty() {
+        return Ok(EraseOutcome::Skipped);
+    }
+
     // 1. Clear the NON-cascade attribution references so a hard DELETE is not
     //    blocked (and so an anonymized creator is no longer credited as the
     //    actor on others' rows).

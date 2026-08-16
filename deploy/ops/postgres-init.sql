@@ -13,8 +13,7 @@
 -- exist yet - it's created by the platform migration runner on first
 -- boot) gives every connection the right resolution order.
 --
--- This covers `postgres` only - the role the `migrate` service
--- (and the worker's plugin-db PROVISIONING connection) connects as. The
+-- This covers `postgres` only - the role the `migrate` service connects as. The
 -- per-service login roles (zeroship_{auth,control,gateway}; sandbox_{app,
 -- audit,gdpr}) get their OWN `ALTER ROLE ... SET search_path = zeroship, public`
 -- inside migrations V0025/V0026, since those roles do not exist yet at
