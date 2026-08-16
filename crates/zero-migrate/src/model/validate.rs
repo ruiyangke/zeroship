@@ -3463,6 +3463,51 @@ fn validate_no_op_references_a_dropped_column(
 /// away and then CREATING a fresh one under the freed name is legitimate, and the
 /// recreated table can be operated on normally afterwards, so a `createTable`
 /// restores the name.
+/// Relations an op names IN ADDITION to the one `touched_table` reports, with a
+/// phrase describing the role each plays.
+///
+/// `touched_table` answers "which relation is this op about", and for every op
+/// below there is a second one it also requires. A walk built on one name per op
+/// cannot see these by construction — that is the boundary of that walk, not a
+/// defect in it.
+///
+/// Every entry was measured: each lowers to SQL naming the second relation, and a
+/// live server rejects it when that relation is gone.
+///
+/// FORWARD REFERENCES ARE NOT AFFECTED. The caller only refuses a name this
+/// migration VACATED, never one it simply has not created yet, so a foreign key
+/// pointing at a table defined later in the envelope stays legal.
+fn second_relation_references(op: &crate::model::ir::Op) -> Vec<(&str, &'static str)> {
+    use crate::model::ir::{IrConstraintKind, Op, ViewQuery};
+
+    match op {
+        Op::CreatePartition { of, .. } => vec![(of.as_str(), "parent table")],
+        Op::AttachPartition { parent, .. }
+        | Op::DetachPartition { parent, .. }
+        | Op::DropPartition { parent, .. } => vec![(parent.as_str(), "parent table")],
+        Op::AddConstraint { constraint, .. } => match &constraint.kind {
+            IrConstraintKind::Fk {
+                references_table, ..
+            } => vec![(references_table.as_str(), "referenced table")],
+            _ => Vec::new(),
+        },
+        // A view's body names the tables it reads. Structured only: a raw body is
+        // opaque SQL text, and parsing it is a different job with its own risks.
+        Op::CreateView {
+            query: ViewQuery::Structured { select },
+            ..
+        } => std::iter::once((select.from.name.as_str(), "source table"))
+            .chain(
+                select
+                    .joins
+                    .iter()
+                    .map(|join| (join.table.name.as_str(), "joined table")),
+            )
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn validate_no_op_targets_a_renamed_away_table(
     ir: &crate::model::ir::MigrationIr,
     target_dialect: Dialect,
@@ -3485,22 +3530,25 @@ fn validate_no_op_targets_a_renamed_away_table(
         // not one it requires. Without this arm, `dropTable b` followed by
         // `createPartition b` was refused as a use-after-drop — measured against
         // live PostgreSQL, which accepts it, so the refusal was wrong.
-        // THE PARENT IS A SECOND NAME, and this walk compares only one per op, so
-        // nothing asked about it. `createPartition p of par` after `dropTable par`
-        // reaches the server as `CREATE TABLE p PARTITION OF par` against a
-        // relation that is gone — measured, `relation "par" does not exist`.
+        // SECOND NAMES. This walk compares ONE name per op, via `touched_table`,
+        // so a relation an op names in addition to its own target was asked about
+        // by nothing at all. Each of these lowers to SQL naming a relation that is
+        // gone, and each was measured against a live server.
+        //
         // Checked BEFORE the create exemption below, which would otherwise skip
-        // the op entirely.
-        if let Op::CreatePartition { of, .. } = op {
-            if let Some(fate) = vacated.get(of.as_str()) {
+        // `createPartition` entirely.
+        for (referenced, role) in second_relation_references(op) {
+            if let Some(fate) = vacated.get(referenced) {
                 let (what, fix) = match fate {
                     Some(new_name) => (
-                        format!("an earlier renameTable renamed it to {new_name:?}"),
-                        format!("partition {new_name:?} instead, or move this before the rename"),
+                        format!(
+                            "an earlier renameTable in this migration renamed it to {new_name:?}"
+                        ),
+                        format!("name {new_name:?} instead, or move this before the rename"),
                     ),
                     None => (
                         "an earlier dropTable in this migration removed it".to_string(),
-                        "recreate the parent first, or move this before the drop".to_string(),
+                        "recreate it first, or move this operation before the drop".to_string(),
                     ),
                 };
                 return Err(AuthoringError {
@@ -3510,8 +3558,8 @@ fn validate_no_op_targets_a_renamed_away_table(
                     ts_location: ts_locations.get(op_index).cloned().flatten(),
                     dialect: target_dialect,
                     reason: format!(
-                        "this createPartition names parent table {of:?}, but {what}, so the \
-                         parent will not exist under that name when this runs"
+                        "this operation names {role} {referenced:?}, but {what}, so it will \
+                         not exist under that name when this runs"
                     ),
                     suggested_fix: Some(fix),
                 });
