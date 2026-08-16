@@ -1502,6 +1502,13 @@ async fn token_exchange_swaps_email_for_relay_alias() {
 
     let body: serde_json::Value = read_json(resp).await;
 
+    let expected_pws = test_pairwise_subject(user_id, APP_HOST);
+    assert_eq!(
+        body["user"]["id"],
+        serde_json::json!(expected_pws),
+        "relay projection must preserve the route's deterministic pairwise identity"
+    );
+
     // The user projection carries the relay ALIAS, never the real email.
     assert_eq!(body["user"]["email"], serde_json::json!(relay_email));
     assert_ne!(body["user"]["email"], serde_json::json!(REAL_EMAIL));
