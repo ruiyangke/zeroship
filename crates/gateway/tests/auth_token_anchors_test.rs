@@ -1248,6 +1248,11 @@ async fn seed_relay_alias_for(dsn: &str, client_id: &str, user_id: Uuid, relay_e
     })
     .detach();
     let pairwise_sub = format!("pws_seed_{}", user_id.simple());
+    eprintln!(
+        "pairwise instrumentation: stored_pairwise_sub={pairwise_sub} \
+         origin=auth_token_anchors_test::seed_relay_alias_for \
+         client_id={client_id} global_user_id={user_id}"
+    );
     client
         .execute(
             "INSERT INTO zeroship.app_user_identities \

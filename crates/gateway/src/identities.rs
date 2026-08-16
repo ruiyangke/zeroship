@@ -70,6 +70,23 @@ pub async fn upsert(
     .await
     .map_err(|e| GatewayError::Db(format!("app_user_identities upsert: {e}")))?;
     if mapped != 1 {
+        let stored_pairwise_sub: Option<String> = tx
+            .query(
+                "SELECT pairwise_sub FROM zeroship.app_user_identities \
+                 WHERE app_client_id = $1 AND global_user_id = $2",
+                &[&app_client_id, &global_user_id],
+            )
+            .await
+            .ok()
+            .and_then(|rows| rows.first().map(|row| row.get("pairwise_sub")));
+        tracing::error!(
+            app_client_id = %app_client_id,
+            global_user_id = %global_user_id,
+            stored_pairwise_sub = ?stored_pairwise_sub,
+            recomputed_pairwise_sub = %pairwise_sub,
+            recomputed_origin = "gateway caller supplied pairwise projection",
+            "app_user_identities immutable pairwise binding mismatch"
+        );
         return Err(GatewayError::Db(
             "app_user_identities pairwise binding changed".to_string(),
         ));
