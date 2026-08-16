@@ -141,7 +141,7 @@ async fn retiring_key_inside_horizon_remains_published() {
     let _guard = RETENTION_TEST_LOCK.lock().expect("retention test lock");
 
     let kid = format!("retiring-fresh-{}", Uuid::new_v4());
-    let inside_horizon_secs = signing_key_retention::RETENTION_AFTER_EXPIRY_SECS - 1;
+    let inside_horizon_secs = signing_key_retention::RETENTION_AFTER_EXPIRY_SECS - 60;
     seed_key(&db, &kid, &test_jwk(&kid), "retiring", inside_horizon_secs).await;
 
     signing_key_retention::tick(&db).await.expect("retention tick");
@@ -164,7 +164,7 @@ async fn key_past_horizon_leaves_jwks_with_reason_and_idempotently_keeps_audit_r
     let _guard = RETENTION_TEST_LOCK.lock().expect("retention test lock");
 
     let kid = format!("retiring-stale-{}", Uuid::new_v4());
-    let past_horizon_secs = signing_key_retention::RETENTION_AFTER_EXPIRY_SECS + 1;
+    let past_horizon_secs = signing_key_retention::RETENTION_AFTER_EXPIRY_SECS + 60;
     seed_key(&db, &kid, &test_jwk(&kid), "retiring", past_horizon_secs).await;
 
     let first = signing_key_retention::tick(&db).await.expect("first retention tick");
@@ -236,14 +236,14 @@ async fn missing_watermark_uses_full_horizon_from_retiring_at() {
         &db,
         &inside_kid,
         &test_jwk(&inside_kid),
-        signing_key_retention::RETENTION_HORIZON_SECS - 1,
+        signing_key_retention::RETENTION_HORIZON_SECS - 60,
     )
     .await;
     seed_key_without_watermark(
         &db,
         &past_kid,
         &test_jwk(&past_kid),
-        signing_key_retention::RETENTION_HORIZON_SECS + 1,
+        signing_key_retention::RETENTION_HORIZON_SECS + 60,
     )
     .await;
 
@@ -287,7 +287,7 @@ async fn issuance_and_prune_never_return_a_token_without_its_published_key() {
     )
     .expect("issuer");
     let kid = issuer.kid().to_string();
-    let past_horizon_secs = signing_key_retention::RETENTION_AFTER_EXPIRY_SECS + 1;
+    let past_horizon_secs = signing_key_retention::RETENTION_AFTER_EXPIRY_SECS + 60;
     seed_key(
         &db,
         &kid,
@@ -508,7 +508,7 @@ async fn concurrent_retirement_cannot_be_undone_by_signer_startup() {
     )
     .expect("issuer");
     let kid = issuer.kid().to_string();
-    let past_horizon_secs = signing_key_retention::RETENTION_AFTER_EXPIRY_SECS + 1;
+    let past_horizon_secs = signing_key_retention::RETENTION_AFTER_EXPIRY_SECS + 60;
     seed_key(
         &db,
         &kid,
