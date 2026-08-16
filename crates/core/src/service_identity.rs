@@ -112,35 +112,72 @@ impl ServiceIdentity {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PeerCredentials<'a> {
     bearer_assertion: Option<&'a str>,
+    tls_peer: Option<TlsPeerInfo<'a>>,
     expected_audience: &'a str,
 }
 
 impl<'a> PeerCredentials<'a> {
-    /// Record the assertion observed by a transport and the expected audience.
+    /// Record all credentials observed by a transport and the expected audience.
     #[must_use]
-    pub fn new(bearer_assertion: Option<&'a str>, expected_audience: &'a str) -> Self {
+    pub fn new(
+        bearer_assertion: Option<&'a str>,
+        tls_peer: Option<TlsPeerInfo<'a>>,
+        expected_audience: &'a str,
+    ) -> Self {
         Self {
             bearer_assertion,
+            tls_peer,
             expected_audience,
         }
     }
 }
 
+/// Peer certificate observations supplied by a TLS transport.
+///
+/// This is only a transport carrier. It is not an mTLS verifier or adapter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TlsPeerInfo<'a> {
+    certificate_chain_der: &'a [&'a [u8]],
+}
+
+impl<'a> TlsPeerInfo<'a> {
+    /// Construct a TLS observation from a non-empty certificate chain.
+    #[must_use]
+    pub fn new(certificate_chain_der: &'a [&'a [u8]]) -> Option<Self> {
+        (!certificate_chain_der.is_empty()).then_some(Self {
+            certificate_chain_der,
+        })
+    }
+
+    /// Return the certificate chain exactly as observed by the transport.
+    #[must_use]
+    pub fn certificate_chain_der(&self) -> &'a [&'a [u8]] {
+        self.certificate_chain_der
+    }
+}
+
 /// Presence-proven credentials passed to a verifier implementation.
 ///
-/// Its fields are private and it has no public constructor, so an
-/// implementation can never receive an absent or empty assertion.
+/// Its state is private and it has no public constructor. The bearer assertion
+/// is non-optional, so an implementation can never receive no credential.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PresentedCredentials<'a> {
     bearer_assertion: &'a str,
+    tls_peer: Option<TlsPeerInfo<'a>>,
     expected_audience: &'a str,
 }
 
 impl PresentedCredentials<'_> {
-    /// Return the non-empty bearer assertion observed by the transport.
+    /// Return the non-empty bearer assertion observed by the transport, if any.
     #[must_use]
-    pub fn bearer_assertion(&self) -> &str {
-        self.bearer_assertion
+    pub fn bearer_assertion(&self) -> Option<&str> {
+        Some(self.bearer_assertion)
+    }
+
+    /// Return the TLS peer observation supplied by the transport, if any.
+    #[must_use]
+    pub fn tls_peer(&self) -> Option<&TlsPeerInfo<'_>> {
+        self.tls_peer.as_ref()
     }
 
     /// Return the audience the verifier must require.
@@ -205,18 +242,19 @@ impl IdentityVerifier for StubIdentityVerifier {
 ///
 /// # Errors
 ///
-/// Returns [`AuthError::NoCredentialPresented`] for a missing or empty bearer
-/// assertion. Other errors come from the selected verifier implementation.
+/// Returns [`AuthError::NoCredentialPresented`] when the transport supplied no
+/// usable credential. Other errors come from the verifier implementation.
 pub fn verify_identity(
     verifier: &(impl IdentityVerifier + ?Sized),
     observed: &PeerCredentials<'_>,
 ) -> Result<ServiceIdentity, AuthError> {
     let bearer_assertion = observed
         .bearer_assertion
-        .filter(|assertion| !assertion.is_empty())
+        .filter(|value| !value.is_empty())
         .ok_or(AuthError::NoCredentialPresented)?;
     let presented = PresentedCredentials {
         bearer_assertion,
+        tls_peer: observed.tls_peer,
         expected_audience: observed.expected_audience,
     };
     verifier.verify(&presented)
