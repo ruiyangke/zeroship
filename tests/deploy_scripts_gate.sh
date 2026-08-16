@@ -71,7 +71,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 REMOTE="$ROOT/deploy/scripts/deploy-remote.sh"
 APPDEP="$ROOT/deploy/scripts/deploy-app.sh"
 REAL_COMPOSE="$ROOT/deploy/compose/docker-compose.yml"
-REAL_OVERLAY="$ROOT/deploy/ops/zeroship.example.toml"
+REAL_OVERLAY="$ROOT/deploy/ops/zeroship.toml"
 
 echo "============================================"
 echo "  deploy scripts: extraction, pairing, arguments"
@@ -242,6 +242,8 @@ if [ -f "$REAL_OVERLAY" ]; then
   else
     pass "the shared operator overlay contains no platform mint credential"
   fi
+else
+  fail "the shipped operator overlay is missing: $REAL_OVERLAY"
 fi
 
 # THE DRIFT CHECK, and the actual defect this whole area is about: two lists,
@@ -588,7 +590,7 @@ chmod +x "$STUB"/*
 # this file would never notice.
 ROLL_FILES="$(printf '%s\n' $SNAPSHOT_MEMBERS | grep -v '^secrets\.tar$' | tr '\n' ' ')"
 
-# The seven secret files the shipped compose references. Derived, for the same
+# The eight secret files the shipped compose references. Derived, for the same
 # reason: this gate must not carry its own copy of a list the script reads.
 SECRET_NAMES="$(secret_files "$REAL_COMPOSE" | tr '\n' ' ')"
 

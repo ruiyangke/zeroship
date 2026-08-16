@@ -6,15 +6,17 @@ use base64::Engine as _;
 use ed25519_dalek::pkcs8::DecodePrivateKey as _;
 use ed25519_dalek::SigningKey;
 use zeroship_core::config::{
-    validate_master_key_material, validate_pairwise_salt, validate_stash_key, validate_worker_key,
+    validate_master_key_material, validate_pairwise_salt, validate_platform_mint_key,
+    validate_stash_key, validate_worker_key,
 };
 
-const SECRET_FILES: [&str; 7] = [
+const SECRET_FILES: [&str; 8] = [
     "auth-signing.pem",
     "broker-secret",
     "control-signing.pem",
     "gateway-signing.pem",
     "pairwise-salt",
+    "platform-mint-key",
     "refresh-hash-key",
     "refresh-idem-key",
 ];
@@ -25,8 +27,7 @@ const SECRET_FILES: [&str; 7] = [
 // Sorted, and every one is a canonical `ZEROSHIP_` name that some binary
 // declares. `GATEWAY_OIDC_SECRET` was dropped rather than renamed: nothing in
 // the tree reads it, so generating it only made an unread slot look configured.
-const ENV_KEYS: [&str; 9] = [
-    "ZEROSHIP_AUTH_PLATFORM_MINT_KEY",
+const ENV_KEYS: [&str; 8] = [
     "ZEROSHIP_AUTH_STASH_SIGNING_KEY",
     "ZEROSHIP_AUTH_TOTP_ENC_KEY",
     "ZEROSHIP_CONTROL_KEY",
@@ -84,6 +85,12 @@ fn dev_init_generates_the_complete_private_deployment_secret_set() {
     assert_base64_file(&secrets_dir.join("broker-secret"), 48);
     assert_base64_file(&secrets_dir.join("refresh-idem-key"), 48);
 
+    let platform_mint_key =
+        std::fs::read_to_string(secrets_dir.join("platform-mint-key"))
+            .expect("read platform-mint-key");
+    validate_platform_mint_key("platform-mint-key", &platform_mint_key)
+        .expect("generated platform mint key must pass the production boot guard");
+
     let refresh_hash = std::fs::read_to_string(secrets_dir.join("refresh-hash-key"))
         .expect("read refresh-hash-key");
     assert!(refresh_hash.ends_with('\n'));
@@ -102,6 +109,7 @@ fn dev_init_generates_the_complete_private_deployment_secret_set() {
         overlay.keys().map(String::as_str).collect::<Vec<_>>(),
         ENV_KEYS
     );
+    assert!(!overlay.contains_key("ZEROSHIP_AUTH_PLATFORM_MINT_KEY"));
     let mut env_values = BTreeSet::new();
     for (name, value) in &overlay {
         let decoded =
@@ -308,12 +316,11 @@ fn compose_preserves_shared_secret_topology_and_has_no_weak_literals() {
         compose
             .matches("/etc/zeroship/secrets/broker-secret")
             .count(),
-        2,
-        "gateway and auth must read the same single broker-secret path"
+        4,
+        "gateway and auth must each declare and mount the broker-secret path"
     );
     let shared_mount = "${ZEROSHIP_SECRETS_DIR:-./secrets}:/etc/zeroship/secrets:ro";
-    assert!(gateway.contains(shared_mount));
-    assert!(auth.contains(shared_mount));
+    assert!(!compose.contains(shared_mount));
 
     let required_pairwise =
         "ZEROSHIP_PAIRWISE_SALT: ${ZEROSHIP_PAIRWISE_SALT:?run zeroship dev init}";
@@ -349,22 +356,20 @@ fn compose_preserves_shared_secret_topology_and_has_no_weak_literals() {
         "auth must not receive the control key"
     );
 
-    let required_mint = concat!(
-        "ZEROSHIP_AUTH_PLATFORM_MINT_KEY: ",
-        "${ZEROSHIP_AUTH_PLATFORM_MINT_KEY:?run zeroship dev init}"
-    );
+    let required_mint = "ZEROSHIP_AUTH_PLATFORM_MINT_KEY: urn:zeroship:file:/etc/zeroship/secrets/platform-mint-key";
+    let required_mint_mount = "${ZEROSHIP_SECRETS_DIR:-./secrets}/platform-mint-key:/etc/zeroship/secrets/platform-mint-key:ro";
     assert!(control.contains(required_mint));
     assert!(auth.contains(required_mint));
     assert!(!gateway.contains(required_mint));
     assert!(!worker.contains(required_mint));
     assert!(!migrated.contains(required_mint));
     assert_eq!(
-        compose
-            .matches("${ZEROSHIP_AUTH_PLATFORM_MINT_KEY:?run zeroship dev init}")
-            .count(),
+        compose.matches(required_mint).count(),
         2,
         "only control and auth consume the generated platform mint key"
     );
+    assert_eq!(compose.matches(required_mint_mount).count(), 2);
+    assert!(!worker.contains("../ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro"));
 
     // Stripe is OPTIONAL: only Stripe can issue a webhook secret that verifies,
     // so compose must render without one rather than force a Stripe-less

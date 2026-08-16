@@ -6,9 +6,9 @@
 //! Every input the worker takes is declared here, credentials included. A
 //! `Secret<T>` field generates only a `--<name>-file PATH` flag, so no worker
 //! credential can reach argv; the value tiers are the canonical `ZEROSHIP_*`
-//! environment name and the canonical TOML path.
+//! environment name. The worker deliberately has no TOML overlay source.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use zeroship_core::config::{
     zeroship_config, BootstrapControl, CheckFormat, CommandControl, ObservabilityControls,
@@ -33,15 +33,6 @@ pub fn default_worker_threads() -> usize {
 #[zeroship_config(binary = "zeroship-worker", scope = "worker")]
 #[derive(Debug)]
 pub struct WorkerSettings {
-    /// Optional shared config overlay path.
-    #[config(shared = CONFIG)]
-    pub config: BootstrapControl<Option<PathBuf>>,
-
-    /// Disable auto-discovery of the well-known overlay path; use compiled
-    /// defaults even if `/etc/zeroship/zeroship.toml` exists (O5).
-    #[config(shared = NO_CONFIG)]
-    pub no_config: BootstrapControl<bool>,
-
     /// Validate config (CLI + overlay + guards) and print the resolved non-secret
     /// config, then exit without starting the server.
     #[config(shared = CHECK_CONFIG)]
@@ -171,11 +162,11 @@ pub struct WorkerSettings {
 
 impl OverlaySelector for WorkerSettingsSources {
     fn overlay_path(&self) -> Option<&Path> {
-        self.config.as_deref()
+        None
     }
 
     fn allow_discovery(&self) -> bool {
-        !self.no_config
+        false
     }
 }
 
@@ -192,9 +183,25 @@ impl ObservabilityControls for WorkerSettings {
 #[cfg(test)]
 mod tests {
     use clap::{CommandFactory, Parser};
-    use zeroship_core::config::GeneratedConfig;
+    use zeroship_core::config::{GeneratedConfig, OverlaySelector};
 
     use super::{default_worker_threads, WorkerSettings, WorkerSettingsSources};
+
+    #[test]
+    fn worker_cannot_select_or_discover_a_shared_overlay() {
+        let command = WorkerSettingsSources::command();
+        let longs = command
+            .get_arguments()
+            .filter_map(clap::Arg::get_long)
+            .collect::<Vec<_>>();
+        assert!(!longs.contains(&"config"), "{longs:?}");
+        assert!(!longs.contains(&"no-config"), "{longs:?}");
+
+        let sources =
+            WorkerSettingsSources::try_parse_from(["zeroship-worker"]).expect("bare parse");
+        assert!(sources.overlay_path().is_none());
+        assert!(!sources.allow_discovery());
+    }
 
     #[test]
     fn unsigned_workflow_advance_has_no_environment_or_overlay_source() {
