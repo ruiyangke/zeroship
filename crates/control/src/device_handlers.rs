@@ -448,19 +448,14 @@ pub async fn device_token(
             // grants are seeded once, marked by the identity link, so an
             // operator who later revokes one does not get it back on the next
             // login.
-            if let Err(resp) = identity_bridge::ensure_platform_creator_grants(&tx, principal_id)
-                .await
-                .map_err(|err| {
-                    tracing::error!(
-                        error = %err,
-                        principal_id = %principal_id,
-                        "control: creator grant provisioning failed"
-                    );
-                    internal_error()
-                })
-            {
+            if let Err(err) = ensure_platform_creator_grants_committed(&state, principal_id).await {
+                tracing::error!(
+                    error = %err,
+                    principal_id = %principal_id,
+                    "control: creator grant provisioning failed"
+                );
                 let _ = tx.rollback().await;
-                return resp;
+                return internal_error();
             }
 
             let scopes = match deploy_scopes_for_principal(
@@ -478,9 +473,10 @@ pub async fn device_token(
             };
             // The mint is a bounded local call to the OP made while this row is
             // still locked, so the grant stays exactly-once: a second poll
-            // blocks until this transaction resolves, and a failed mint rolls
-            // back to `approved` for the CLI's next poll rather than burning
-            // the grant.
+            // blocks until this transaction resolves, and a failed mint leaves
+            // the grant `approved` for the CLI's next poll rather than burning
+            // it. Creator grants were committed on a separate connection above,
+            // so auth's independent lookup can see the same authority set.
             let minted = match mint_platform_deploy_token(&state, principal_id, &scopes).await {
                 Ok(minted) => minted,
                 Err(resp) => {
@@ -591,6 +587,34 @@ fn ensure_platform_device_provider(state: &AppState) -> Result<(), web::HttpResp
     } else {
         Err(unsupported_provider())
     }
+}
+
+async fn ensure_platform_creator_grants_committed(
+    state: &AppState,
+    principal_id: uuid::Uuid,
+) -> Result<(), String> {
+    let mut conn = state
+        .registry
+        .conn()
+        .await
+        .map_err(|err| format!("creator grant DB connect: {err}"))?;
+    let tx = conn
+        .transaction()
+        .await
+        .map_err(|err| format!("creator grant transaction begin: {err}"))?;
+    if let Err(err) = identity_bridge::ensure_platform_creator_grants(&tx, principal_id).await {
+        if let Err(rollback_err) = tx.rollback().await {
+            tracing::error!(
+                error = %rollback_err,
+                principal_id = %principal_id,
+                "control: creator grant transaction rollback failed"
+            );
+        }
+        return Err(err.to_string());
+    }
+    tx.commit()
+        .await
+        .map_err(|err| format!("creator grant transaction commit: {err}"))
 }
 
 async fn deploy_scopes_for_principal(
