@@ -139,7 +139,7 @@ fn pg_only_expr_nodes_render_on_pg_and_refuse_off_pg_at_validate() {
         let kind = pg_only_expr_kind(&expr).expect("sample must be PG-only");
         assert!(seen.insert(kind), "{kind} sampled twice");
 
-        validate_expr(&expr, Dialect::Postgres, &scope, 0, None)
+        validate_expr(&expr, Dialect::Postgres, &scope, 0)
             .unwrap_or_else(|err| panic!("{kind} must validate on Postgres: {err:?}"));
         let mut set = BTreeMap::new();
         set.insert("out".to_string(), IrValue::Expr(expr.clone()));
@@ -151,7 +151,7 @@ fn pg_only_expr_nodes_render_on_pg_and_refuse_off_pg_at_validate() {
         );
 
         for dialect in [Dialect::Sqlite, Dialect::Mysql] {
-            let err = validate_expr(&expr, dialect, &scope, 0, None)
+            let err = validate_expr(&expr, dialect, &scope, 0)
                 .expect_err("PG-only expression must refuse off Postgres");
             let expected_code = if kind == "UuidV7" {
                 CODE_EXPR_NOT_PORTABLE
@@ -179,7 +179,7 @@ fn regex_match_renders_on_pg_and_mysql_and_refuses_sqlite_at_validate() {
         (Dialect::Postgres, SqlDialect::Postgres),
         (Dialect::Mysql, SqlDialect::Mysql),
     ] {
-        validate_expr(&expr, validator_dialect, &scope, 0, None)
+        validate_expr(&expr, validator_dialect, &scope, 0)
             .unwrap_or_else(|err| panic!("regex must validate on {validator_dialect:?}: {err:?}"));
         let mut set = BTreeMap::new();
         set.insert("out".to_string(), IrValue::Expr(expr.clone()));
@@ -191,7 +191,7 @@ fn regex_match_renders_on_pg_and_mysql_and_refuses_sqlite_at_validate() {
         );
     }
 
-    let err = validate_expr(&expr, Dialect::Sqlite, &scope, 0, None)
+    let err = validate_expr(&expr, Dialect::Sqlite, &scope, 0)
         .expect_err("regex must fail closed on SQLite");
     assert_eq!(err.code, CODE_DIALECT_UNSUPPORTED);
     assert_eq!(err.dialect, Dialect::Sqlite);
@@ -451,9 +451,9 @@ fn pg_vendor_ops_render_on_pg_and_refuse_off_pg_at_validate() {
         assert!(seen.insert(kind), "{kind} sampled twice");
 
         let ir = ir_with(op.clone());
-        validate_ir_scoped(&ir, Dialect::Postgres, &[], Some(&platform_scope)).unwrap_or_else(
-            |err| panic!("{kind} must validate on PG under platform scope: {err:?}"),
-        );
+        validate_ir_scoped(&ir, Dialect::Postgres, Some(&platform_scope)).unwrap_or_else(|err| {
+            panic!("{kind} must validate on PG under platform scope: {err:?}")
+        });
 
         // The operator charter GRANTS the vendor capability each sample needs; the
         // platform scope beside it only says which schemas are in bounds.
@@ -473,7 +473,7 @@ fn pg_vendor_ops_render_on_pg_and_refuse_off_pg_at_validate() {
             "{kind} PG lower produced no SQL"
         );
 
-        let confined_err = validate_ir_scoped(&ir, Dialect::Postgres, &[], Some(&confined_scope))
+        let confined_err = validate_ir_scoped(&ir, Dialect::Postgres, Some(&confined_scope))
             .expect_err("confined PG scope must refuse vendor ops by capability");
         assert_eq!(
             confined_err.code, CODE_VENDOR_OP_DENIED,
@@ -481,7 +481,7 @@ fn pg_vendor_ops_render_on_pg_and_refuse_off_pg_at_validate() {
         );
 
         for dialect in [Dialect::Sqlite, Dialect::Mysql] {
-            let err = validate_ir_scoped(&ir, dialect, &[], Some(&platform_scope))
+            let err = validate_ir_scoped(&ir, dialect, Some(&platform_scope))
                 .expect_err("PG vendor op must refuse off Postgres");
             assert_eq!(
                 err.code, CODE_UNSUPPORTED,

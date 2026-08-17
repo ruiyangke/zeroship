@@ -33,7 +33,7 @@ fn live() -> BTreeMap<String, Vec<String>> {
 }
 
 fn refusal(op: &Op) -> Option<String> {
-    validate_op_resolved(op, Dialect::Postgres, &live(), 0, None)
+    validate_op_resolved(op, Dialect::Postgres, &live(), 0)
         .err()
         .map(|error| format!("{} {}", error.code, error.reason))
 }

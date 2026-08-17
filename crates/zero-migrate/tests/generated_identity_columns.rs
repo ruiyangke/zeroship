@@ -51,12 +51,7 @@ fn validate_platform(
     ir: &MigrationIr,
     dialect: ValidatorDialect,
 ) -> Result<(), zero_migrate::AuthoringError> {
-    zero_migrate::model::validate::validate_ir_scoped(
-        ir,
-        dialect,
-        &[],
-        Some(&SchemaScope::Unconfined),
-    )
+    zero_migrate::model::validate::validate_ir_scoped(ir, dialect, Some(&SchemaScope::Unconfined))
 }
 
 fn col(name: &str, ty: ColType) -> IrColumn {
@@ -174,12 +169,8 @@ fn sqlite_generated_stored_and_virtual_columns_render_exact_create_table_ddl() {
 
 #[test]
 fn pg_virtual_generated_column_is_unsupported() {
-    let err = validate_ir(
-        &ir(generated_create(false)),
-        ValidatorDialect::Postgres,
-        &[],
-    )
-    .expect_err("Postgres supports generated columns only as STORED");
+    let err = validate_ir(&ir(generated_create(false)), ValidatorDialect::Postgres)
+        .expect_err("Postgres supports generated columns only as STORED");
     assert_eq!(err.code, CODE_UNSUPPORTED, "got: {err}");
     assert_eq!(err.kind, Some(UnsupportedKind::VirtualColumn));
 }
@@ -202,7 +193,6 @@ fn generated_column_cannot_also_have_default() {
             None,
         )),
         ValidatorDialect::Postgres,
-        &[],
     )
     .expect_err("generated + default is a column-facet conflict");
     assert_eq!(err.code, CODE_COLUMN_FACET_CONFLICT, "got: {err}");
@@ -271,10 +261,10 @@ fn identity_always_is_postgres_only() {
     id.identity = Some(IdentityCol { always: true });
     let op = create_table(vec![id], pk_id());
 
-    validate_ir(&ir(op.clone()), ValidatorDialect::Postgres, &[])
+    validate_ir(&ir(op.clone()), ValidatorDialect::Postgres)
         .expect("Postgres supports identity({ always:true })");
     for dialect in [ValidatorDialect::Sqlite, ValidatorDialect::Mysql] {
-        let err = validate_ir(&ir(op.clone()), dialect, &[])
+        let err = validate_ir(&ir(op.clone()), dialect)
             .expect_err("identity({ always:true }) must be PostgreSQL-only");
         assert_eq!(err.code, CODE_UNSUPPORTED, "got: {err}");
         assert_eq!(err.kind, Some(UnsupportedKind::Identity), "got: {err}");

@@ -34,7 +34,7 @@ const TABLE: &str = r#"{"op":"createTable","name":"a","columns":[{"name":"c0","t
 fn verdict(tail: &str) -> Result<(), String> {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{TABLE},{tail}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
-    validate_ir(&ir, Dialect::Postgres, &[]).map_err(|e| format!("{}: {}", e.code, e.reason))
+    validate_ir(&ir, Dialect::Postgres).map_err(|e| format!("{}: {}", e.code, e.reason))
 }
 
 #[test]

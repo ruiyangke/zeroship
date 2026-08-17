@@ -37,7 +37,7 @@ use zero_migrate::model::validate::{validate_ir, Dialect};
 fn verdict(ops: &str) -> Result<(), String> {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{ops}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
-    validate_ir(&ir, Dialect::Postgres, &[]).map_err(|e| format!("{}: {}", e.code, e.reason))
+    validate_ir(&ir, Dialect::Postgres).map_err(|e| format!("{}: {}", e.code, e.reason))
 }
 
 /// `a` has primary key `(c0)` and a plain column `k`.

@@ -56,7 +56,7 @@ fn pg_sql(op: Op) -> Vec<String> {
 }
 
 fn validates(op: Op, dialect: Dialect) -> bool {
-    validate_ir_scoped(&ir(op), dialect, &[], Some(&SchemaScope::Unconfined)).is_ok()
+    validate_ir_scoped(&ir(op), dialect, Some(&SchemaScope::Unconfined)).is_ok()
 }
 
 fn fk_not_valid(not_valid: Option<bool>) -> Op {

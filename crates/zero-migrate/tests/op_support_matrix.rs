@@ -170,7 +170,6 @@ fn validate_current(op: &Op, dialect: Dialect) -> bool {
     validate_ir_scoped(
         &one_op_ir(op.clone()),
         dialect,
-        &[],
         Some(&SchemaScope::Unconfined),
     )
     .is_ok()
@@ -613,7 +612,6 @@ fn partitioned_create_table_validates_pg_and_refuses_sqlite_mysql() {
         let err = validate_ir_scoped(
             &one_op_ir(op.clone()),
             dialect,
-            &[],
             Some(&SchemaScope::Unconfined),
         )
         .expect_err("partitioned createTable must fail closed off PostgreSQL");

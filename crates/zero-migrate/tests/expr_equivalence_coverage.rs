@@ -316,7 +316,7 @@ fn assert_validates_and_renders_on_all_three(expr: &Expr, variant: &str) {
     let columns = scope_columns();
     let scope = TargetScope::new("t", &columns);
     for (validator_dialect, sql_dialect) in dialect_pairs() {
-        validate_expr(expr, validator_dialect, &scope, 0, None).unwrap_or_else(|err| {
+        validate_expr(expr, validator_dialect, &scope, 0).unwrap_or_else(|err| {
             panic!("{variant} must validate on {validator_dialect:?}: {err:?}")
         });
 

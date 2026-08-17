@@ -325,7 +325,7 @@ async fn collapse_affirmed_events_apply_as_plain_table_on_sqlite() {
 
     let ops = collapse_events_ops();
     let migration_ir = ir_ops(ops);
-    validate_ir_scoped(&migration_ir, Dialect::Sqlite, &[], None)
+    validate_ir_scoped(&migration_ir, Dialect::Sqlite, None)
         .expect("collapse-affirmed partition recording validates on SQLite");
 
     let steps = IrAuthor::new(
@@ -770,7 +770,7 @@ fn pg_vendor_index_features_refused_fail_closed_off_pg() {
     for (label, op) in cases {
         let migration = ir(op);
         for dialect in [Dialect::Sqlite, Dialect::Mysql] {
-            let err = validate_ir(&migration, dialect, &[None])
+            let err = validate_ir(&migration, dialect)
                 .expect_err(&format!("{label} must be refused on {dialect:?}"));
             assert_eq!(
                 err.code, CODE_UNSUPPORTED,
@@ -778,7 +778,7 @@ fn pg_vendor_index_features_refused_fail_closed_off_pg() {
             );
         }
         // The same op validates cleanly on PostgreSQL.
-        validate_ir(&migration, Dialect::Postgres, &[None])
+        validate_ir(&migration, Dialect::Postgres)
             .unwrap_or_else(|e| panic!("{label} must validate on Postgres: {e:?}"));
     }
 }
@@ -847,7 +847,7 @@ fn attach_partition_refused_fail_closed_off_pg() {
         int_bound(200),
     ));
     for dialect in [Dialect::Sqlite, Dialect::Mysql] {
-        let err = validate_ir_scoped(&migration, dialect, &[], None)
+        let err = validate_ir_scoped(&migration, dialect, None)
             .expect_err(&format!("attachPartition must be refused on {dialect:?}"));
         assert!(
             matches!(err.code.as_str(), CODE_UNSUPPORTED | CODE_VENDOR_OP_DENIED),

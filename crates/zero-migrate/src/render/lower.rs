@@ -620,7 +620,6 @@ impl LiveSchema {
         crate::model::validate::validate_column_references_for_lower(
             ir,
             target,
-            &[],
             &self.logical_columns,
             project_schema,
             default_schema,
@@ -629,7 +628,6 @@ impl LiveSchema {
         crate::model::validate::validate_table_foreign_keys_for_lower(
             ir,
             target,
-            &[],
             &self.logical_columns,
             project_schema,
             default_schema,
@@ -638,7 +636,6 @@ impl LiveSchema {
         self.logical_columns = crate::model::validate::validate_per_row_destinations_for_lower(
             ir,
             target,
-            &[],
             &self.logical_columns,
             project_schema,
             default_schema,
@@ -693,7 +690,6 @@ impl LiveSchema {
         self.logical_columns = crate::model::validate::accumulate_logical_declarations_for_lower(
             ir,
             target,
-            &[],
             &self.logical_columns,
             project_schema,
             default_schema,
@@ -3354,7 +3350,6 @@ impl IrAuthor {
         let logical_columns = crate::model::validate::validate_per_row_destinations_for_lower(
             ir,
             self.validation_dialect(),
-            &[],
             &live.logical_columns,
             &self.project_schema,
             self.default_schema.as_deref(),
@@ -3366,7 +3361,6 @@ impl IrAuthor {
         crate::model::validate::validate_column_references_for_lower(
             ir,
             self.validation_dialect(),
-            &[],
             &live.logical_columns,
             &self.project_schema,
             self.default_schema.as_deref(),
@@ -3376,7 +3370,6 @@ impl IrAuthor {
         crate::model::validate::validate_table_foreign_keys_for_lower(
             ir,
             self.validation_dialect(),
-            &[],
             &live.logical_columns,
             &self.project_schema,
             self.default_schema.as_deref(),
@@ -3425,12 +3418,8 @@ impl IrAuthor {
     /// Reported through the existing validation carrier so no new public error variant
     /// is introduced.
     fn validate_authored_identifier_lengths(&self, ir: &MigrationIr) -> Result<(), IrLowerError> {
-        crate::model::validate::validate_authored_identifier_lengths(
-            ir,
-            self.validation_dialect(),
-            &[],
-        )
-        .map_err(|error| IrLowerError::DmlValidate(Box::new(error)))
+        crate::model::validate::validate_authored_identifier_lengths(ir, self.validation_dialect())
+            .map_err(|error| IrLowerError::DmlValidate(Box::new(error)))
     }
 
     const fn validation_dialect(&self) -> crate::model::validate::Dialect {
@@ -4118,7 +4107,6 @@ impl IrAuthor {
             code: crate::model::validate::CODE_OP_INVALID.to_string(),
             kind: Some(crate::model::validate::UnsupportedKind::Op),
             op_index: site.op_index,
-            ts_location: None,
             dialect: self.validation_dialect(),
             reason: format!(
                 "table-level foreign key {}.{} is incompatible with the live catalog: {reason}",
@@ -4144,7 +4132,6 @@ impl IrAuthor {
             code: crate::model::validate::CODE_OP_INVALID.to_string(),
             kind: Some(crate::model::validate::UnsupportedKind::Op),
             op_index: site.op_index,
-            ts_location: None,
             dialect: self.validation_dialect(),
             reason: format!(
                 "typed reference {}.{} -> {}.{} is incompatible with the live catalog: {reason}",
@@ -6110,7 +6097,7 @@ impl IrAuthor {
         // Structural gate (a)/(b)/(d) BEFORE assembly. op_index 0 is a local
         // attribution; the loader's `validate_ir` already ran with the true op
         // index for the production path — this is the lower-time defense-in-depth.
-        crate::model::validate::validate_op(op, target, 0, None)
+        crate::model::validate::validate_op(op, target, 0)
             .map_err(|e| IrLowerError::DmlValidate(Box::new(e)))?;
 
         // RULE (c) — resolved ColRef gate at the apply/render seam.
@@ -6121,7 +6108,7 @@ impl IrAuthor {
         // table absent from the live snapshot keeps the structural-only scope (the
         // (c) check is skipped; see the fn doc).
         let live_columns = live_schema.dml_live_columns();
-        crate::model::validate::validate_op_resolved(op, target, &live_columns, 0, None)
+        crate::model::validate::validate_op_resolved(op, target, &live_columns, 0)
             .map_err(|e| IrLowerError::DmlValidate(Box::new(e)))?;
 
         match op {
@@ -6486,7 +6473,6 @@ impl IrAuthor {
         let logical_columns = crate::model::validate::validate_per_row_destinations_for_lower(
             ir,
             self.validation_dialect(),
-            &[],
             &live.logical_columns,
             &self.project_schema,
             self.default_schema.as_deref(),
@@ -6498,7 +6484,6 @@ impl IrAuthor {
         crate::model::validate::validate_column_references_for_lower(
             ir,
             self.validation_dialect(),
-            &[],
             &live.logical_columns,
             &self.project_schema,
             self.default_schema.as_deref(),
@@ -6508,7 +6493,6 @@ impl IrAuthor {
         crate::model::validate::validate_table_foreign_keys_for_lower(
             ir,
             self.validation_dialect(),
-            &[],
             &live.logical_columns,
             &self.project_schema,
             self.default_schema.as_deref(),
@@ -8717,7 +8701,7 @@ fn render_view_query(
                 SqlDialect::Sqlite => crate::model::validate::Dialect::Sqlite,
                 SqlDialect::Mysql => crate::model::validate::Dialect::Mysql,
             };
-            crate::model::validate::validate_raw_view_body_sql(sql, target, 0, None, scope)
+            crate::model::validate::validate_raw_view_body_sql(sql, target, 0, scope)
                 .map_err(|e| IrLowerError::DmlValidate(Box::new(e)))?;
             Ok(sql.trim().trim_end_matches(';').trim().to_string())
         }
@@ -11031,12 +11015,8 @@ mod tests {
         }))
         .expect("backfill-only IR parses");
 
-        crate::model::validate::validate_ir(
-            &backfill,
-            crate::model::validate::Dialect::Postgres,
-            &[],
-        )
-        .expect("load-time validation defers a declaration from an earlier artifact");
+        crate::model::validate::validate_ir(&backfill, crate::model::validate::Dialect::Postgres)
+            .expect("load-time validation defers a declaration from an earlier artifact");
 
         let author = test_ir_author("app", "app_a", SqlDialect::Postgres);
         let error = author
@@ -11456,7 +11436,6 @@ mod tests {
         crate::model::validate::validate_ir_scoped(
             ir,
             dialect,
-            &[],
             Some(&crate::model::policy::SchemaScope::Unconfined),
         )
     }
@@ -14150,7 +14129,7 @@ columns = [
             preconditions: vec![],
             checksum: None,
         };
-        validate_ir(&ir_add, Dialect::Postgres, &[])
+        validate_ir(&ir_add, Dialect::Postgres)
             .expect("an addColumn synth default validates on PG");
         let add_migrations = test_ir_author("app", "app_a", SqlDialect::Postgres)
             .lower(&ir_add, &LiveSchema::default())
@@ -14226,7 +14205,7 @@ columns = [
             checksum: None,
         };
 
-        let err = validate_ir(&ir, Dialect::Postgres, &[])
+        let err = validate_ir(&ir, Dialect::Postgres)
             .expect_err("setColumnType.using must be refused before render");
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert_eq!(err.kind, Some(UnsupportedKind::Expr));
@@ -14259,8 +14238,7 @@ columns = [
             preconditions: vec![],
             checksum: None,
         };
-        validate_ir(&literal_ir, Dialect::Postgres, &[])
-            .expect("literal setColumnDefault validates");
+        validate_ir(&literal_ir, Dialect::Postgres).expect("literal setColumnDefault validates");
         let migrations = test_ir_author("app", "app_a", SqlDialect::Postgres)
             .lower(&literal_ir, &LiveSchema::default())
             .expect("literal setColumnDefault lowers");
@@ -14292,8 +14270,7 @@ columns = [
             preconditions: vec![],
             checksum: None,
         };
-        validate_ir(&synth_ir, Dialect::Postgres, &[])
-            .expect("synth expr setColumnDefault validates");
+        validate_ir(&synth_ir, Dialect::Postgres).expect("synth expr setColumnDefault validates");
         let migrations = test_ir_author("app", "app_a", SqlDialect::Postgres)
             .lower(&synth_ir, &LiveSchema::default())
             .expect("synth expr setColumnDefault lowers");

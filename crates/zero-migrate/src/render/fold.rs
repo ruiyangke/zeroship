@@ -5373,7 +5373,7 @@ mod tests {
             preconditions: Vec::new(),
             checksum: None,
         };
-        validate_ir_scoped(&ir, dialect, &[], Some(&SchemaScope::Unconfined)).unwrap_err()
+        validate_ir_scoped(&ir, dialect, Some(&SchemaScope::Unconfined)).unwrap_err()
     }
 
     fn assert_validate_ops_ok(ops: Vec<Op>, dialect: Dialect) {
@@ -5390,8 +5390,7 @@ mod tests {
             preconditions: Vec::new(),
             checksum: None,
         };
-        validate_ir_scoped(&ir, dialect, &[], Some(&SchemaScope::Unconfined))
-            .expect("ops validate");
+        validate_ir_scoped(&ir, dialect, Some(&SchemaScope::Unconfined)).expect("ops validate");
     }
 
     fn col(name: &str, ty: ColType, nullable: bool) -> IrColumn {

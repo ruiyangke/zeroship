@@ -48,7 +48,7 @@ fn verdict(ops: &str) -> Result<(), String> {
         effective: &policy,
         default_schema: "public",
     };
-    validate_ir_authorized(&ir, Dialect::Postgres, &[], None, Some(authority))
+    validate_ir_authorized(&ir, Dialect::Postgres, None, Some(authority))
         .map_err(|e| format!("{}: {}", e.code, e.reason))
 }
 

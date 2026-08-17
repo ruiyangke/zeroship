@@ -34,7 +34,7 @@ use zero_migrate::{validate_ir, ValidatorDialect};
 fn refusal(ops_json: &str, dialect: ValidatorDialect) -> Option<String> {
     let raw = format!(r#"{{"ir_version":1,"name":"parts","ops":{ops_json}}}"#);
     let ir: MigrationIr = serde_json::from_str(&raw).expect("the partition test IR parses");
-    validate_ir(&ir, dialect, &[]).err().map(|e| e.to_string())
+    validate_ir(&ir, dialect).err().map(|e| e.to_string())
 }
 
 /// A `createPartition` whose parent nothing created. PostgreSQL tolerates an unknown

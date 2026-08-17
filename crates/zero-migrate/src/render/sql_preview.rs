@@ -414,7 +414,7 @@ fn render_ir_envelope_rendered(
         SqlDialect::Sqlite => crate::model::validate::Dialect::Sqlite,
         SqlDialect::Mysql => crate::model::validate::Dialect::Mysql,
     };
-    crate::model::validate::validate_ir(&ir, target, &[])
+    crate::model::validate::validate_ir(&ir, target)
         .map_err(|e| format!("validate IR envelope: {e}"))?;
 
     // The general/Trusted operator preview renders into the chosen default schema:

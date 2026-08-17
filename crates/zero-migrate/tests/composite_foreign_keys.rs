@@ -306,7 +306,7 @@ fn an_exact_ordered_composite_unique_index_is_a_candidate_key_on_every_dialect()
     );
 
     for dialect in [SqlDialect::Postgres, SqlDialect::Mysql, SqlDialect::Sqlite] {
-        validate_ir(&ir, validator_dialect(dialect), &[]).unwrap_or_else(|error| {
+        validate_ir(&ir, validator_dialect(dialect)).unwrap_or_else(|error| {
             panic!("ordered unique candidate must validate on {dialect:?}: {error}")
         });
         IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect, &no_inject_policy())
@@ -428,7 +428,7 @@ fn ordered_unique_creation_is_visible_to_a_later_composite_fk_on_every_dialect()
     let constraint_ir = lifecycle_ir("ordered_unique_constraint_then_fk", constraint_ops);
 
     for dialect in [SqlDialect::Postgres, SqlDialect::Mysql, SqlDialect::Sqlite] {
-        validate_ir(&index_ir, validator_dialect(dialect), &[]).unwrap_or_else(|error| {
+        validate_ir(&index_ir, validator_dialect(dialect)).unwrap_or_else(|error| {
             panic!("create unique index then FK must validate on {dialect:?}: {error}")
         });
         IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect, &no_inject_policy())
@@ -459,7 +459,7 @@ fn ordered_unique_creation_is_visible_to_a_later_composite_fk_on_every_dialect()
         // SQLite has no native ALTER TABLE ADD UNIQUE lifecycle operation, but
         // its ordered logical replay must still recognize the candidate-key state;
         // executable all-target coverage is provided by the unique-index artifact.
-        validate_ir(&constraint_ir, validator_dialect(dialect), &[]).unwrap_or_else(|error| {
+        validate_ir(&constraint_ir, validator_dialect(dialect)).unwrap_or_else(|error| {
             panic!("add UNIQUE constraint then FK must validate on {dialect:?}: {error}")
         });
         if dialect != SqlDialect::Sqlite {
@@ -528,7 +528,7 @@ fn dropping_the_only_ordered_candidate_key_before_a_composite_fk_is_rejected_eve
             ("drop unique index", &index_ir),
             ("drop UNIQUE constraint", &constraint_ir),
         ] {
-            let error = validate_ir(ir, dialect, &[])
+            let error = validate_ir(ir, dialect)
                 .expect_err("dropping the only candidate key before its FK must fail");
             assert!(
                 error
@@ -850,7 +850,7 @@ fn assert_rejected_on_every_dialect(label: &str, ir: &MigrationIr) {
         ValidatorDialect::Mysql,
         ValidatorDialect::Sqlite,
     ] {
-        let Err(error) = validate_ir(ir, dialect, &[]) else {
+        let Err(error) = validate_ir(ir, dialect) else {
             panic!("{label} must be rejected on {dialect:?}");
         };
         assert!(

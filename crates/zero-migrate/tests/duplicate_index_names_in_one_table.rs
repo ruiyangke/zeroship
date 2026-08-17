@@ -34,7 +34,7 @@ use zero_migrate::model::validate::{validate_ir, Dialect};
 fn verdict(op: &str, dialect: Dialect) -> Result<(), String> {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{op}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
-    validate_ir(&ir, dialect, &[]).map_err(|e| format!("{}: {}", e.code, e.reason))
+    validate_ir(&ir, dialect).map_err(|e| format!("{}: {}", e.code, e.reason))
 }
 
 const TWO_INDEXES_ONE_NAME: &str = r#"{"op":"createTable","name":"a","columns":[{"name":"c","type":"int","nullable":false},{"name":"d","type":"int","nullable":true}],"primaryKey":["c"],"indexes":[{"name":"ix","columns":[{"kind":"column","name":"c"}]},{"name":"ix","columns":[{"kind":"column","name":"d"}]}]}"#;
@@ -86,7 +86,7 @@ fn one_index_is_still_allowed() {
 fn verdict_envelope(ops: &str, dialect: Dialect) -> Result<(), String> {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{ops}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
-    validate_ir(&ir, dialect, &[]).map_err(|e| format!("{}: {}", e.code, e.reason))
+    validate_ir(&ir, dialect).map_err(|e| format!("{}: {}", e.code, e.reason))
 }
 
 const TABLE: &str = r#"{"op":"createTable","name":"a","columns":[{"name":"c","type":"int","nullable":false},{"name":"d","type":"int","nullable":true}],"primaryKey":["c"]}"#;

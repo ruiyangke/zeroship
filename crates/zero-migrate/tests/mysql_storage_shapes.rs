@@ -100,13 +100,13 @@ fn create_index(table: &str, name: &str, column: &str) -> Op {
 }
 
 fn refused(migration: &MigrationIr, dialect: Dialect, what: &str) -> String {
-    let error = validate_ir(migration, dialect, &[]).expect_err(what);
+    let error = validate_ir(migration, dialect).expect_err(what);
     assert_eq!(error.dialect, dialect, "{what}: {error}");
     format!("{error}")
 }
 
 fn accepted(migration: &MigrationIr, dialect: Dialect, what: &str) {
-    validate_ir(migration, dialect, &[])
+    validate_ir(migration, dialect)
         .unwrap_or_else(|error| panic!("{what} should validate on {dialect:?}: {error}"));
 }
 

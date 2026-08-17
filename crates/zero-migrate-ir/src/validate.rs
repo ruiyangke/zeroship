@@ -405,9 +405,6 @@ pub struct AuthoringError {
     pub kind: Option<UnsupportedKind>,
     /// The 0-based index of the offending op in the migration's op list.
     pub op_index: usize,
-    /// The `.ts` source-map location (e.g. `migrations/0007_split.ts:9`), if the
-    /// recorder attributed one. Carried through from the validator caller.
-    pub ts_location: Option<String>,
     /// The dialect the rejection pertains to.
     pub dialect: Dialect,
     /// A precise human-readable reason.
@@ -436,9 +433,6 @@ impl AuthoringError {
             );
         }
         map.insert("op_index".into(), serde_json::Value::from(self.op_index));
-        if let Some(loc) = &self.ts_location {
-            map.insert("ts_location".into(), serde_json::Value::String(loc.clone()));
-        }
         map.insert(
             "dialect".into(),
             serde_json::Value::String(self.dialect.as_str().into()),
@@ -548,8 +542,8 @@ impl<'a> TargetScope<'a> {
 /// Validate one expression-AST tree structurally for a `target_dialect` against a
 /// `scope`. Returns the first [`AuthoringError`] or `Ok(())`.
 ///
-/// `op_index` / `ts_location` are stamped onto any emitted error so the AI loop
-/// gets the structured-error payload.
+/// `op_index` is stamped onto any emitted error so the AI loop gets the
+/// structured-error payload.
 ///
 /// # Errors
 /// Returns an [`AuthoringError`] for an out-of-envelope `splitPart` (b), a
@@ -560,13 +554,11 @@ pub fn validate_expr(
     target_dialect: Dialect,
     scope: &TargetScope<'_>,
     op_index: usize,
-    ts_location: Option<&str>,
 ) -> Result<(), AuthoringError> {
     let ctx = Ctx {
         target_dialect,
         scope,
         op_index,
-        ts_location,
     };
     ctx.walk(expr)
 }
@@ -781,9 +773,8 @@ pub fn validate_immutable_expr_context(
     context: &str,
     target_dialect: Dialect,
     op_index: usize,
-    ts_location: Option<&str>,
 ) -> Result<(), AuthoringError> {
-    validate_no_aggregate_expr_context(expr, context, target_dialect, op_index, ts_location)?;
+    validate_no_aggregate_expr_context(expr, context, target_dialect, op_index)?;
     let Some(function_name) = first_volatile_function(expr) else {
         return Ok(());
     };
@@ -791,7 +782,6 @@ pub fn validate_immutable_expr_context(
         code: CODE_IMMUTABLE_CONTEXT_VOLATILE.to_string(),
         kind: Some(UnsupportedKind::Expr),
         op_index,
-        ts_location: ts_location.map(str::to_string),
         dialect: target_dialect,
         reason: format!(
             "{context} requires an immutable expression, but contains volatile function {function_name}()"
@@ -807,7 +797,6 @@ pub fn validate_no_aggregate_expr_context(
     context: &str,
     target_dialect: Dialect,
     op_index: usize,
-    ts_location: Option<&str>,
 ) -> Result<(), AuthoringError> {
     let Some(aggregate_name) = first_aggregate(expr) else {
         return Ok(());
@@ -816,7 +805,6 @@ pub fn validate_no_aggregate_expr_context(
         code: CODE_AGGREGATE_IN_SCALAR_CONTEXT.to_string(),
         kind: Some(UnsupportedKind::Expr),
         op_index,
-        ts_location: ts_location.map(str::to_string),
         dialect: target_dialect,
         reason: format!(
             "{context} requires a scalar expression, but contains aggregate {aggregate_name}()"
@@ -844,7 +832,6 @@ struct Ctx<'a> {
     target_dialect: Dialect,
     scope: &'a TargetScope<'a>,
     op_index: usize,
-    ts_location: Option<&'a str>,
 }
 
 impl Ctx<'_> {
@@ -860,7 +847,6 @@ impl Ctx<'_> {
             code: code.to_string(),
             kind,
             op_index: self.op_index,
-            ts_location: self.ts_location.map(str::to_string),
             dialect,
             reason,
             suggested_fix,
@@ -1095,7 +1081,6 @@ impl Ctx<'_> {
             target_dialect,
             scope: self.scope,
             op_index: self.op_index,
-            ts_location: self.ts_location,
         }
     }
 

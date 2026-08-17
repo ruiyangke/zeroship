@@ -43,7 +43,7 @@ fn verdict_on(dialect: Dialect, ops: &str) -> Result<(), String> {
         effective: &policy,
         default_schema: "public",
     };
-    validate_ir_authorized(&ir, dialect, &[], None, Some(authority))
+    validate_ir_authorized(&ir, dialect, None, Some(authority))
         .map_err(|e| format!("{}: {}", e.code, e.reason))
 }
 

@@ -31,7 +31,7 @@ use zero_migrate::model::validate::{validate_ir, Dialect};
 fn verdict(ops: &str) -> Result<(), String> {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{ops}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
-    validate_ir(&ir, Dialect::Postgres, &[]).map_err(|e| format!("{}: {}", e.code, e.reason))
+    validate_ir(&ir, Dialect::Postgres).map_err(|e| format!("{}: {}", e.code, e.reason))
 }
 
 const PARENT: &str = r#"{"op":"createTable","name":"par","columns":[{"name":"c0","type":"int","nullable":false}],"primaryKey":["c0"],"partitionBy":{"kind":"range","columns":["c0"]}}"#;
@@ -357,7 +357,7 @@ fn attaching_a_table_makes_it_a_dependent_of_the_parent() {
             effective: &policy,
             default_schema: "public",
         };
-        validate_ir_authorized(&ir, Dialect::Postgres, &[], None, Some(authority))
+        validate_ir_authorized(&ir, Dialect::Postgres, None, Some(authority))
             .map_err(|e| format!("{}: {}", e.code, e.reason))
     };
 

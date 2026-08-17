@@ -37,7 +37,7 @@ use zero_migrate::model::validate::{validate_ir, Dialect};
 fn verdict(d: Dialect, ops: &str) -> Result<(), String> {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{ops}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
-    validate_ir(&ir, d, &[]).map_err(|e| format!("{}: {}", e.code, e.reason))
+    validate_ir(&ir, d).map_err(|e| format!("{}: {}", e.code, e.reason))
 }
 
 /// Assert the refusal is the one the test names, not merely that one happened.

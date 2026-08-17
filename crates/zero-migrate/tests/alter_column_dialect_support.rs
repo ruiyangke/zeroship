@@ -60,7 +60,7 @@ const REFUSED: &[(&str, &[Dialect], &str)] = &[
 fn gate(op: &str, dialect: Dialect) -> Result<(), String> {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{op}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("envelope parses");
-    validate_ir(&ir, dialect, &[]).map_err(|e| e.code)
+    validate_ir(&ir, dialect).map_err(|e| e.code)
 }
 
 #[test]

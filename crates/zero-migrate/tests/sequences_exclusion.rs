@@ -220,7 +220,7 @@ fn postgres_renders_valid_descending_sequence() {
 #[test]
 fn sqlite_and_mysql_fail_closed_on_sequences() {
     for dialect in [Dialect::Sqlite, Dialect::Mysql] {
-        let err = validate_ir(&ir(vec![create_sequence_op()]), dialect, &[]).unwrap_err();
+        let err = validate_ir(&ir(vec![create_sequence_op()]), dialect).unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert_eq!(err.kind, Some(UnsupportedKind::Op));
         assert!(err.reason.contains("sequence"));
@@ -246,13 +246,8 @@ fn nextval_default_rejects_non_integer_and_non_postgres() {
     // Validate under the platform profile (author-PK allowed → the createTable
     // table-shape gate returns Ok), so validation reaches the column-default-type
     // check — the realistic profile, since nextval defaults are used on the platform.
-    let err = validate_ir_scoped(
-        &ir(vec![text_nextval.clone()]),
-        Dialect::Postgres,
-        &[],
-        None,
-    )
-    .unwrap_err();
+    let err =
+        validate_ir_scoped(&ir(vec![text_nextval.clone()]), Dialect::Postgres, None).unwrap_err();
     assert_eq!(
         err.code,
         zero_migrate::model::validate::CODE_COLUMN_DEFAULT_TYPE
@@ -264,8 +259,7 @@ fn nextval_default_rejects_non_integer_and_non_postgres() {
     for dialect in [Dialect::Sqlite, Dialect::Mysql] {
         // Platform profile so the createTable table-shape gate does not pre-empt the
         // dialect-level unsupported check (nextval defaults are PostgreSQL-only).
-        let err =
-            validate_ir_scoped(&ir(vec![text_nextval.clone()]), dialect, &[], None).unwrap_err();
+        let err = validate_ir_scoped(&ir(vec![text_nextval.clone()]), dialect, None).unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert_eq!(err.kind, Some(UnsupportedKind::Op));
         assert!(err.reason.contains("nextval"));
@@ -395,7 +389,6 @@ fn sqlite_and_mysql_fail_closed_on_comment_on() {
                 comment: Some("Users".into()),
             }]),
             dialect,
-            &[],
         )
         .unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED);
@@ -601,7 +594,6 @@ fn mysql_fail_closes_on_expression_index_elements() {
             nulls_not_distinct: None,
         }]),
         Dialect::Mysql,
-        &[],
     )
     .unwrap_err();
     assert_eq!(err.code, CODE_UNSUPPORTED);
@@ -629,7 +621,6 @@ fn mysql_fail_closes_on_partial_index_predicate() {
             nulls_not_distinct: None,
         }]),
         Dialect::Mysql,
-        &[],
     )
     .unwrap_err();
     assert_eq!(err.code, CODE_UNSUPPORTED);
@@ -749,7 +740,6 @@ fn sqlite_and_mysql_fail_closed_on_exclusion_constraints() {
                 existence_guard: None,
             }]),
             dialect,
-            &[],
         )
         .unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED);
@@ -813,7 +803,7 @@ fn an_over_long_index_name_is_refused() {
         nulls_not_distinct: None,
         existence_guard: None,
     };
-    let err = validate_ir(&ir(vec![op]), Dialect::Postgres, &[])
+    let err = validate_ir(&ir(vec![op]), Dialect::Postgres)
         .expect_err("an index name past the identifier cap must be refused");
     assert!(
         err.reason.contains("truncates identifiers"),
@@ -844,6 +834,6 @@ fn an_over_long_index_name_is_refused() {
         nulls_not_distinct: None,
         existence_guard: None,
     };
-    validate_ir(&ir(vec![op_ok]), Dialect::Postgres, &[])
+    validate_ir(&ir(vec![op_ok]), Dialect::Postgres)
         .expect("an index name within the cap stays valid");
 }

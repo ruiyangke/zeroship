@@ -89,7 +89,7 @@ pub fn load_ir_document_authorized(
     //    threaded through a `PolicyProfile` here — that conformance is owned by the
     //    injection resolver `resolve_create_table_policy`, which the server runs
     //    over the operator's `EffectivePolicy` before this load.)
-    validate_ir_authorized(&ir, target_dialect, &[], schema_scope, authority)?;
+    validate_ir_authorized(&ir, target_dialect, schema_scope, authority)?;
 
     // 3a. the data-migration protocol. The envelope has no phase marker, so the
     //    engine classifies the FORWARD ops themselves: DML requires exactly one
@@ -108,7 +108,7 @@ pub fn load_ir_document_authorized(
             checksum: None,
             ..ir.clone()
         };
-        validate_ir_authorized(&inverse, target_dialect, &[], schema_scope, authority)
+        validate_ir_authorized(&inverse, target_dialect, schema_scope, authority)
             .map_err(|source| IrLoadError::InvalidInverse { source })?;
     }
 

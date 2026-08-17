@@ -445,7 +445,7 @@ fn assert_declared_mismatch(ir: &MigrationIr, expected: &[&str]) {
         ValidatorDialect::Mysql,
         ValidatorDialect::Sqlite,
     ] {
-        let error = validate_ir(ir, dialect, &[])
+        let error = validate_ir(ir, dialect)
             .expect_err("each dialect must reject the declared reference mismatch");
         let rendered = error.to_string();
         for expected in expected {
@@ -538,14 +538,14 @@ fn declared_reference_targets_must_be_single_column_keys() {
             ValidatorDialect::Mysql,
             ValidatorDialect::Sqlite,
         ] {
-            validate_ir(&ir, dialect, &[]).unwrap_or_else(|error| {
+            validate_ir(&ir, dialect).unwrap_or_else(|error| {
                 panic!("{name} must be a valid reference key on {dialect:?}: {error}")
             });
         }
     }
     let ir = reference_target_ir("table_unique_key", table_unique_parent);
     for dialect in [ValidatorDialect::Postgres, ValidatorDialect::Mysql] {
-        validate_ir(&ir, dialect, &[]).unwrap_or_else(|error| {
+        validate_ir(&ir, dialect).unwrap_or_else(|error| {
             panic!("table UNIQUE must be a valid reference key on {dialect:?}: {error}")
         });
     }

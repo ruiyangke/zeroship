@@ -268,7 +268,7 @@ fn validate_rejects_empty_and_nested_dialectal_ops() {
             mysql: None,
         }],
     );
-    let err = validate_ir(&empty, Dialect::Postgres, &[]).unwrap_err();
+    let err = validate_ir(&empty, Dialect::Postgres).unwrap_err();
     assert_eq!(err.code, CODE_OP_INVALID);
 
     let nested = ir(
@@ -285,6 +285,6 @@ fn validate_rejects_empty_and_nested_dialectal_ops() {
             mysql: None,
         }],
     );
-    let err = validate_ir(&nested, Dialect::Postgres, &[]).unwrap_err();
+    let err = validate_ir(&nested, Dialect::Postgres).unwrap_err();
     assert_eq!(err.code, CODE_OP_INVALID);
 }

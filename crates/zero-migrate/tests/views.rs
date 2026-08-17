@@ -287,7 +287,6 @@ fn structured_select_allows_aggregates_in_projection_and_having() {
     validate_ir_scoped(
         &ir(grouped_order_totals_view()),
         Dialect::Postgres,
-        &[],
         Some(&trusted),
     )
     .expect("projection and HAVING are grouped SELECT contexts and allow aggregates");
@@ -306,7 +305,6 @@ fn pg_first_aggregate_view_renders_on_postgres_and_refuses_off_pg() {
         let err = validate_ir_scoped(
             &ir(pg_first_aggregate_rollup_view()),
             dialect,
-            &[],
             Some(&trusted),
         )
         .unwrap_err();
@@ -331,7 +329,7 @@ fn structured_select_rejects_aggregate_group_by_item() {
     select.group_by = vec![count(Expr::col("id"))];
 
     let trusted = SchemaScope::Unconfined;
-    let err = validate_ir_scoped(&ir(op), Dialect::Postgres, &[], Some(&trusted)).unwrap_err();
+    let err = validate_ir_scoped(&ir(op), Dialect::Postgres, Some(&trusted)).unwrap_err();
     assert_eq!(err.code, CODE_AGGREGATE_IN_SCALAR_CONTEXT);
     assert!(
         err.reason.contains("GROUP BY") && err.reason.contains("count"),
@@ -392,7 +390,6 @@ fn materialized_view_renders_on_pg_and_is_unsupported_on_sqlite() {
     let err = validate_ir_scoped(
         &ir(create_structured_view(None, Some(true))),
         Dialect::Sqlite,
-        &[],
         Some(&trusted),
     )
     .unwrap_err();
@@ -410,7 +407,6 @@ fn replace_plus_materialized_is_rejected_on_pg_not_silently_dropped() {
     let err = validate_ir_scoped(
         &ir(create_structured_view(Some(true), Some(true))),
         Dialect::Postgres,
-        &[],
         Some(&trusted),
     )
     .unwrap_err();
@@ -434,7 +430,7 @@ fn replace_plus_materialized_is_rejected_on_pg_not_silently_dropped() {
 fn plain_structured_view_is_confined_core_but_raw_view_is_capability_gated() {
     let structured = ir(create_structured_view(None, None));
     let confined = SchemaScope::Single(SCHEMA.to_string());
-    validate_ir_scoped(&structured, Dialect::Postgres, &[], Some(&confined)).unwrap();
+    validate_ir_scoped(&structured, Dialect::Postgres, Some(&confined)).unwrap();
 
     let guard_cfg = GuardConfig::from_policy(support::no_inject(SCHEMA), SqlDialect::Postgres);
     IrAuthor::new(
@@ -447,7 +443,7 @@ fn plain_structured_view_is_confined_core_but_raw_view_is_capability_gated() {
     .expect("plain structured view is core under confined lower_guarded");
 
     let raw = ir(raw_view("SELECT id FROM app.users", None));
-    let err = validate_ir_scoped(&raw, Dialect::Postgres, &[], Some(&confined)).unwrap_err();
+    let err = validate_ir_scoped(&raw, Dialect::Postgres, Some(&confined)).unwrap_err();
     assert_eq!(err.code, CODE_VENDOR_OP_DENIED);
 
     let err = IrAuthor::new(
@@ -467,7 +463,7 @@ fn plain_structured_view_is_confined_core_but_raw_view_is_capability_gated() {
     ));
 
     let operator = SchemaScope::Allowlist(vec![SCHEMA.to_string()]);
-    validate_ir_scoped(&raw, Dialect::Postgres, &[], Some(&operator)).unwrap();
+    validate_ir_scoped(&raw, Dialect::Postgres, Some(&operator)).unwrap();
     // The `sql.raw_view_body` GRANT is what admits this at lower - the same charter
     // the guard above would compose, not the widened scope beside it.
     IrAuthor::new(
@@ -485,13 +481,8 @@ fn plain_structured_view_is_confined_core_but_raw_view_is_capability_gated() {
 fn raw_view_body_must_be_single_top_level_select_even_with_capability() {
     let operator = SchemaScope::Allowlist(vec![SCHEMA.to_string()]);
     for sql in ["DROP TABLE x", "SELECT 1; DROP TABLE x"] {
-        let err = validate_ir_scoped(
-            &ir(raw_view(sql, None)),
-            Dialect::Postgres,
-            &[],
-            Some(&operator),
-        )
-        .unwrap_err();
+        let err = validate_ir_scoped(&ir(raw_view(sql, None)), Dialect::Postgres, Some(&operator))
+            .unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert!(
             err.reason.contains("single top-level SELECT")
@@ -507,7 +498,6 @@ fn raw_view_body_runs_function_body_deny_list_scan() {
     let err = validate_ir_scoped(
         &ir(raw_view("SELECT pg_read_file('/etc/passwd')", None)),
         Dialect::Postgres,
-        &[],
         Some(&operator),
     )
     .unwrap_err();

@@ -32,7 +32,7 @@ use zero_migrate::model::validate::{validate_ir, Dialect};
 fn verdict(op: &str, dialect: Dialect) -> Result<(), String> {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{op}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
-    validate_ir(&ir, dialect, &[]).map_err(|e| format!("{}: {}", e.code, e.reason))
+    validate_ir(&ir, dialect).map_err(|e| format!("{}: {}", e.code, e.reason))
 }
 
 #[test]

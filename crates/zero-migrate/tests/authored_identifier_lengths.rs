@@ -71,7 +71,7 @@ fn ir(ops: Vec<Op>) -> MigrationIr {
 }
 
 fn validate(op: Op, dialect: Dialect) -> Result<(), AuthoringError> {
-    validate_ir_scoped(&ir(vec![op]), dialect, &[], Some(&SchemaScope::Unconfined))
+    validate_ir_scoped(&ir(vec![op]), dialect, Some(&SchemaScope::Unconfined))
 }
 
 /// A name of exactly `bytes` ASCII bytes, opening with a letter.

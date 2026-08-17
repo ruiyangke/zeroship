@@ -49,7 +49,7 @@ fn refusal_for(op: Op) -> Option<String> {
         preconditions: Vec::new(),
         checksum: None,
     };
-    validate_ir_scoped(&ir, Dialect::Postgres, &[], Some(&SchemaScope::Unconfined))
+    validate_ir_scoped(&ir, Dialect::Postgres, Some(&SchemaScope::Unconfined))
         .err()
         .map(|error| format!("{} {}", error.code, error.reason))
 }
