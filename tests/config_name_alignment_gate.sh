@@ -22,6 +22,8 @@
 #   6c command argv      no `command:`/`entrypoint:` item carries a credential
 #   7 ops TOML           every leaf in deploy/ops/*.toml is a generated overlay
 #                        path with a real consumer
+#   8 tracked secrets    no secret-classed leaf in ANY tracked *.toml holds a
+#                        plaintext literal (proposal Section 4.7)
 #
 # WHY THE EXPECTED SETS ARE NOT IN THIS FILE. Checks 6 and 7 join against
 # `zeroship-config-contract contract`, which prints the COMPILED registry. A
@@ -42,9 +44,14 @@
 # (CONTROL_DATABASE_URL -> ZEROSHIP_CONTROL_DATABASE_URL and seven siblings)
 # were renamed so both sides spell the canonical name.
 #
-# Run `tests/config_name_alignment_gate.sh --self-test` to prove checks 6 and 7
-# still FAIL on a planted violation. A gate that accepts everything and a gate
-# that is broken print the same thing.
+# Check 8 was armed on 2026-08-17. It is the static half of a trade the
+# 2026-08-12 amendment made and only half executed: the runtime refusal of a
+# plaintext overlay secret was deleted on the understanding that this gate
+# would replace it, and until now it did not exist. See its own header.
+#
+# Run `tests/config_name_alignment_gate.sh --self-test` to prove checks 6, 7
+# and 8 still FAIL on a planted violation. A gate that accepts everything and a
+# gate that is broken print the same thing.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -190,6 +197,45 @@ compose_command_items() {
             sub(/[[:space:]]+$/, "", line)
             if (line == "" || line ~ /^#/ || line ~ /^[>|][-+]?$/) next
             print svc "\t" NR "\t" line
+        }
+    ' "$1"
+}
+
+# Emit `line<TAB>section.leaf<TAB>value` for every scalar assignment in a TOML
+# file. The VALUE half is what `toml_leaves` below throws away, and throwing it
+# away is why no check in this script could see a secret sitting in a tracked
+# overlay until check 8 was written.
+#
+# A quoted scalar ends at its closing quote - BOTH TOML quote forms, basic `"`
+# and literal `'` - so a `#` INSIDE the value stays part of the value. Getting
+# that wrong would truncate a secret at its first `#`. Handling `'` matters in
+# the other direction too: without it a legitimate `'urn:zeroship:file:/x'`
+# keeps its opening quote, fails the prefix test and reads as a violation.
+toml_assignments() {
+    awk '
+        /^[[:space:]]*#/ { next }
+        /^[[:space:]]*\[/ {
+            sec = $0
+            sub(/#.*$/, "", sec)
+            gsub(/[][[:space:]]/, "", sec)
+            next
+        }
+        /^[[:space:]]*[A-Za-z_"][A-Za-z0-9_."-]*[[:space:]]*=/ {
+            key = $0
+            sub(/=.*$/, "", key)
+            gsub(/[[:space:]"]/, "", key)
+            val = $0
+            sub(/^[^=]*=[[:space:]]*/, "", val)
+            quote = substr(val, 1, 1)
+            if (quote == "\"" || quote == "'\''") {
+                val = substr(val, 2)
+                q = index(val, quote)
+                if (q > 0) val = substr(val, 1, q - 1)
+            } else {
+                sub(/[[:space:]]*#.*$/, "", val)
+                sub(/[[:space:]]+$/, "", val)
+            }
+            print NR "\t" (sec == "" ? key : sec "." key) "\t" val
         }
     ' "$1"
 }
@@ -423,6 +469,114 @@ check_ops_toml() {
     return 0
 }
 
+# Proposal Section 4.7: no plaintext secret in a TRACKED file.
+#
+# WHY THIS EXISTS, and why its absence was a NET LOSS. Until 2026-08-12 a
+# secret literal in the TOML overlay was refused at runtime. The 2026-08-12
+# amendment (`2d31a4bc5`) deleted that refusal deliberately - the overlay may
+# itself BE a mounted Kubernetes Secret, and forbidding a literal by mounted
+# file while permitting one by environment had no principled basis - and moved
+# the guarantee to a repository gate against the artifact that actually needs
+# it. The gate was never written, so for five days the tree was weaker than it
+# had been before the trade: nothing at all stopped
+# `[control] master_key = "..."` from being committed.
+#
+# WHAT IT ASSERTS. For every TRACKED `*.toml`, a leaf whose canonical identity
+# the COMPILED contract classes `secret` must hold a `urn:`/`arn:` reference
+# and nothing else. The classification comes from the registry, so a new
+# secret is covered the moment it is declared and nobody edits this file.
+#
+# NO EXCEPTION LIST, and there must never be one. An allowlist naming the
+# secrets that are allowed to be literals is an allowlist for the exact thing
+# the check exists to catch, which reads as coverage while providing none.
+# There is no empty-value carve-out either: `master_key = ""` is a literal.
+#
+# WHY IT SCANS EVERY TRACKED `*.toml` AND NOT `deploy/ops/*.toml`. A file list
+# is a thing to forget when the next overlay lands somewhere else. Leaves that
+# do not join a secret-classed contract row are skipped, so the 40-odd
+# `Cargo.toml` files cost a join and contribute nothing.
+#
+# WHAT IT DOES NOT CHECK, so a green is not over-read:
+#
+#   - UNTRACKED overlays. Deliberate, and the whole point of the amendment: a
+#     mounted Kubernetes Secret never enters git. The gate says nothing about
+#     files it cannot see.
+#
+#   - Compose `environment:` values. MEASURED 2026-08-17 on
+#     deploy/compose/docker-compose.yml: 24 secret-classed keys, of which 2
+#     carry a `urn:zeroship:file:` reference, 13 are `${NAME:?...}`, 1 is
+#     `${NAME:-}`, and 8 carry an inline `${NAME:-<default>}`. SIX of those
+#     defaults are DSNs with userinfo - lines 257, 431, 435, 517, 610 and 731 -
+#     so they ARE plaintext credentials in a tracked file by the same
+#     userinfo-grammar rule check 6c applies to argv. They are not gated here
+#     because the only non-arbitrary fix is to make all six required inputs,
+#     and `zeroship dev init` does not write a single DSN
+#     (crates/cli/src/dev.rs:36-43), so `docker compose up` would stop working
+#     for every local developer. Line 435's superuser DSN is the subject of its
+#     own queued task. This is a KNOWN, COUNTED hole, not an unexamined one.
+#
+#   - Values with no canonical identity. `POSTGRES_PASSWORD: zeroship` at
+#     deploy/compose/docker-compose.yml:108 is a plaintext credential in a
+#     tracked file, and no registry-driven gate can see it: the postgres
+#     image's own variable has no ConfigSpec to classify. Detecting it would
+#     need a name heuristic, which Section 4.7 rules out by design.
+#
+#   - Tracked `*.env` files. `git ls-files '*.env'` returns NOTHING (measured
+#     2026-08-17), so an arm for them would scan zero files and pass on
+#     nothing. It is left unwritten rather than written and hollow.
+check_tracked_secret_literals() {
+    local label="$1" contract="$2"
+    shift 2
+    local secret_paths bad=0 resolved=0 file line leaf value
+
+    secret_paths="$(awk -F'\t' 'NR > 1 && $3 == "secret" && $6 != "" { print $6 }' \
+        "$contract" | sort -u)"
+    if [ -z "$secret_paths" ]; then
+        fail "$label: the contract declares no secret-classed overlay path; nothing could be checked"
+        return 1
+    fi
+    if [ "$#" -eq 0 ]; then
+        fail "$label: no tracked TOML files were passed; the file enumeration stopped matching"
+        return 1
+    fi
+
+    for file in "$@"; do
+        [ -f "$file" ] || continue
+        while IFS=$'\t' read -r line leaf value; do
+            [ -n "$leaf" ] || continue
+            printf '%s\n' "$secret_paths" | grep -qxF "$leaf" || continue
+            resolved=$((resolved + 1))
+            case "$value" in
+                urn:*|arn:*) ;;
+                *)
+                    # The value is NOT echoed: this runs in CI, and printing the
+                    # material would publish it a second time.
+                    echo "  $file:$line $leaf is secret-classed and holds a plaintext literal;"
+                    echo "      a tracked file may hold only a urn:/arn: reference"
+                    bad=$((bad + 1))
+                    ;;
+            esac
+        done < <(toml_assignments "$file")
+    done
+
+    # Anti-hollow: every arm above passes at zero if the extractor, the join or
+    # the file enumeration stops matching, and that failure is indistinguishable
+    # from a tree with no secrets in it.
+    # MEASURED on a clean tree 2026-08-17: 17, all in deploy/ops/zeroship.example.toml.
+    local min_resolved="${TRACKED_SECRET_MIN_RESOLVED:-12}"
+    if [ "$resolved" -lt "$min_resolved" ]; then
+        fail "$label: only $resolved secret-classed leaves resolved, expected at least $min_resolved"
+        echo "      The extraction or the contract join stopped matching, so a clean result would mean nothing."
+        return 1
+    fi
+    if [ "$bad" -ne 0 ]; then
+        fail "$label: $bad secret-classed leaf/leaves hold a plaintext literal in a tracked file"
+        return 1
+    fi
+    pass "$label: all $resolved secret-classed leaves in tracked TOML are urn:/arn: references"
+    return 0
+}
+
 # ---------------------------------------------------------------------------
 # Drive
 # ---------------------------------------------------------------------------
@@ -449,6 +603,10 @@ if [ "$CONTRACT_ROWS" -lt 150 ]; then
     exit 1
 fi
 pass "compiled contract dumped: $CONTRACT_ROWS projections"
+
+# Every tracked TOML, for check 8. Enumerated from git rather than listed, so a
+# new overlay is covered wherever it lands.
+mapfile -t TRACKED_TOML < <(git ls-files '*.toml')
 
 if [ "${1:-}" = "--self-test" ]; then
     echo ""
@@ -532,12 +690,34 @@ if [ "${1:-}" = "--self-test" ]; then
         fail "self-test: the ops-toml check PASSED a leaf no declaration produces"
     fi
 
+    # Check 8: a secret-classed leaf holding a literal in a TRACKED file. This
+    # is the exact shape the deleted runtime refusal used to catch and that
+    # nothing caught between 2026-08-12 and this arm: the reference is replaced
+    # by material, the leaf still joins the contract, and every other check is
+    # blind to it because none of them read a value.
+    sed 's|^master_key = .*|master_key = "PLANTED-LITERAL-NOT-A-REFERENCE"|' \
+        deploy/ops/zeroship.example.toml >"$TMP/self/secret_literal.toml"
+    if ! grep -q '^master_key = "PLANTED-LITERAL-NOT-A-REFERENCE"$' "$TMP/self/secret_literal.toml"; then
+        fail "self-test: the secret-literal mutation did not apply; the run below proves nothing"
+        exit 1
+    fi
+    before=$FAIL
+    check_tracked_secret_literals "secret-literal self-test" "$TMP/contract.tsv" \
+        "$TMP/self/secret_literal.toml" >/dev/null 2>&1
+    if [ "$FAIL" -gt "$before" ]; then
+        FAIL=$before
+        pass "self-test: a secret-classed leaf holding a plaintext literal is rejected"
+    else
+        fail "self-test: the tracked-secret check PASSED a secret written as a literal"
+    fi
+
     # And the one-variable partner: the SAME checks on the real inputs must pass,
     # or the mutations above proved only that the checks reject everything.
     check_compose "$COMPOSE" "compose control" "$TMP/contract.tsv"
     check_compose_alias_equality "$COMPOSE" "alias control"
     check_compose_command_secrets "$COMPOSE" "command control" "$TMP/contract.tsv"
     check_ops_toml "deploy/ops/zeroship.toml" "ops-toml control" "$TMP/contract.tsv"
+    check_tracked_secret_literals "tracked-secret control" "$TMP/contract.tsv" "${TRACKED_TOML[@]}"
 
     echo ""
     echo "Self-test summary: $PASS passed, $FAIL failed"
@@ -601,6 +781,10 @@ for file in deploy/ops/zeroship.toml deploy/ops/zeroship.example.toml; do
 done
 
 echo ""
+echo "=== 8. No tracked file carries a plaintext secret ==="
+check_tracked_secret_literals "tracked secret literals" "$TMP/contract.tsv" "${TRACKED_TOML[@]}"
+
+echo ""
 echo "============================================"
 echo "Summary: $PASS passed, $FAIL failed"
 echo "============================================"
@@ -609,8 +793,9 @@ echo "============================================"
 
 # ANTI-HOLLOW FLOOR. Every check above passes at zero if its extraction stops
 # matching, and this catches the case where several do at once. MEASURED on a
-# clean tree 2026-08-13: 9, then 10 once check 6b was armed, then 11 once 6c was.
-CONFIG_GATE_MIN_PASSED="${CONFIG_GATE_MIN_PASSED:-11}"
+# clean tree 2026-08-13: 9, then 10 once check 6b was armed, then 11 once 6c
+# was, then 12 once check 8 was.
+CONFIG_GATE_MIN_PASSED="${CONFIG_GATE_MIN_PASSED:-12}"
 if [ "$PASS" -lt "$CONFIG_GATE_MIN_PASSED" ]; then
     echo "" >&2
     echo "FLOOR: only $PASS checks passed, expected at least $CONFIG_GATE_MIN_PASSED." >&2
