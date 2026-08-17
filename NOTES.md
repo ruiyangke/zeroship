@@ -192,3 +192,29 @@ same wall, unreached only because the run is truncated first.
 The production behaviour is correct: a retiring signer must not reactivate.
 The fixtures are wrong to share one OP identity across binaries that each act
 as their own OP.
+
+## A third fabricated pairwise subject, on the Auth side
+
+Giving every binary its own key took `oidc_login_consent_test` from 0/17 to
+16/17 and exposed the last one:
+
+```text
+[ERROR zeroship_auth::oidc::authorization_code] token: pairwise identity binding changed client_id=oac_3VEiRlBnyOZxu1HOW3JVfW user_id=8175a0ae-40fd-4909-9fc0-90983b6e34f3
+thread 'end_to_end_native_authorize_login_consent_token_flow' panicked at crates/auth/tests/oidc_login_consent_test.rs:1082:5:
+assertion `left == right` failed: token status
+  left: 500
+ right: 200
+```
+
+Same defect as the Gateway relay fixture, in Auth's half of the same
+invariant. `crates/auth/src/oidc/authorization_code.rs:1431-1464` recomputes
+the pairwise subject and refuses to mint when the stored row disagrees, and
+`seed_user_client` was inserting `pws_test_<uuid>`. The two neighbouring
+fixtures that seed the same table already do it correctly - both call
+`Issuer::pairwise_subject` (`oidc_userinfo_test.rs:421`,
+`oidc_refresh_token_test.rs:1248`) - so the fix is to match them, not to
+invent a fourth spelling.
+
+Three fixtures, one production invariant, three different invented `pws_`
+formats: `pws_seed_`, `pws_test_`, and an unpublished signing key. Each failed
+closed exactly as designed.
