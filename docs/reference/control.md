@@ -56,7 +56,28 @@ await control.env.setSecret(appId, { key: "OPENAI_API_KEY", value: "sk-..." });
 await control.env.setExpose(appId, { keys: ["OPENAI_API_KEY"] });
 await control.env.listAudit(appId, { limit: 100 });
 
+await control.netGrants.grant(appId, { host: "db.example.com", port: 5432 });
+await control.netGrants.list(appId);
+await control.netGrants.revoke(appId, { host: "db.example.com", port: 5432 });
 ```
+
+### `netGrants` is the raw-TCP allowlist
+
+An app cannot open a `node:net` socket to anywhere until it holds a grant, and
+these three calls are how you add one. They carry the same authority as `env`
+(`env:read` to list, `env:write` to change) because both change what a running
+app does without redeploying it.
+
+`grant` names one `host:port`. The server refuses a bare `*`, a malformed
+wildcard, a registry-level suffix such as `*.co.uk`, and a wildcard over shared
+hosting (`*.workers.dev`) - an exact host under any of those is fine, because
+naming one destination is not the same as reaching every tenant on it. Your plan
+caps how many grants an app may hold; `list` returns that ceiling and the count
+in use alongside the grants themselves.
+
+`fetch` is unaffected. It reaches any public host with no grant at all - the
+allowlist narrows raw TCP, which is a blast-radius control on your
+dependencies, not a boundary on your own code.
 
 ### Why `setExpose` follows `setSecret`
 
