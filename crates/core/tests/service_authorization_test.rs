@@ -1,9 +1,36 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use zeroship_core::service_identity::{
     authorize, endpoints, service_allowlist, MechanismTag, ServiceEndpoint, ServiceIdentity,
     ServiceName, ServicePrincipal, TrustDomain,
 };
+
+/// Every operation the catalog names, in one place for the table-wide guards.
+const CATALOG: [ServiceEndpoint; 14] = [
+    endpoints::AUTH_PLATFORM_TOKEN,
+    endpoints::MIGRATED_APPLY_MIGRATIONS,
+    endpoints::GATEWAY_BACKCHANNEL_LOGOUT,
+    endpoints::GATEWAY_WORKFLOW_ADVANCE,
+    endpoints::CONTROL_ROUTES,
+    endpoints::CONTROL_WORKFLOW_SIGNAL_INGRESS,
+    endpoints::CONTROL_VERSIONS,
+    endpoints::CONTROL_APP,
+    endpoints::CONTROL_APP_ENV,
+    endpoints::CONTROL_BILLING_RECONCILE,
+    endpoints::CONTROL_SPEND_RECONCILE,
+    endpoints::WORKER_DISPATCH,
+    endpoints::WORKER_WORKFLOW_ADVANCE,
+    endpoints::WORKER_APP_LOGS,
+];
+
+/// The principals the table grants to, which must each own exactly one row.
+const PRINCIPALS: [&str; 5] = [
+    "svc/control",
+    "svc/auth",
+    "svc/migrated",
+    "svc/gateway",
+    "svc/worker",
+];
 
 fn identity(trust_domain: &str, name: &str) -> ServiceIdentity {
     ServiceIdentity::new(
@@ -135,22 +162,7 @@ fn endpoint_catalog_records_exact_measured_operations() {
 
 #[test]
 fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
-    let all = [
-        endpoints::AUTH_PLATFORM_TOKEN,
-        endpoints::MIGRATED_APPLY_MIGRATIONS,
-        endpoints::GATEWAY_BACKCHANNEL_LOGOUT,
-        endpoints::GATEWAY_WORKFLOW_ADVANCE,
-        endpoints::CONTROL_ROUTES,
-        endpoints::CONTROL_WORKFLOW_SIGNAL_INGRESS,
-        endpoints::CONTROL_VERSIONS,
-        endpoints::CONTROL_APP,
-        endpoints::CONTROL_APP_ENV,
-        endpoints::CONTROL_BILLING_RECONCILE,
-        endpoints::CONTROL_SPEND_RECONCILE,
-        endpoints::WORKER_DISPATCH,
-        endpoints::WORKER_WORKFLOW_ADVANCE,
-        endpoints::WORKER_APP_LOGS,
-    ];
+    let all = CATALOG;
 
     assert_eq!(service_allowlist().len(), 5);
     assert_allowlist_row(
@@ -204,6 +216,33 @@ fn authorization_keys_on_individual_compound_identity() {
         &wrong_domain,
         endpoints::AUTH_PLATFORM_TOKEN
     ));
+}
+
+/// `authorize` resolves a principal to the FIRST matching row, so a second row
+/// for the same principal would silently discard every grant below it. Nothing
+/// in the type of the table prevents that, and the table is expected to grow.
+#[test]
+fn each_principal_owns_exactly_one_allowlist_row() {
+    for name in PRINCIPALS {
+        let identity = identity("zeroship.ai", name);
+        let rows = service_allowlist()
+            .iter()
+            .filter(|row| row.applies_to(&identity))
+            .count();
+
+        assert_eq!(rows, 1, "{name} must own exactly one allowlist row");
+    }
+    assert_eq!(service_allowlist().len(), PRINCIPALS.len());
+}
+
+/// Endpoints are matched by value, not by constant, so two catalog entries
+/// carrying the same destination, method and path template would be one
+/// operation under two names: granting either would silently grant both.
+#[test]
+fn catalog_operations_are_pairwise_distinct() {
+    let distinct: BTreeSet<ServiceEndpoint> = CATALOG.iter().copied().collect();
+
+    assert_eq!(distinct.len(), CATALOG.len());
 }
 
 #[test]
