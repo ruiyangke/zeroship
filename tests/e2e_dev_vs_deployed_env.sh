@@ -318,19 +318,19 @@ fi
 stack_up || { fail "stack bring-up failed"; exit 1; }   # stack_up resets $WORK
 cp "$DEV_WORK/dev.json" "$WORK/dev.json"
 cp "$DEV_WORK/dev.log"  "$WORK/dev.log" 2>/dev/null || true
-mint_admin_pat || exit 1
+mint_admin_bearer || exit 1
 
 # Create the app FIRST so the vars land before the worker ever loads a bundle
 # (the worker builds its isolate from the env snapshot at load time).
 APP_JSON="$(curl -s -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" \
-  -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" \
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" \
   -d "{\"name\":\"$APP_SLUG\"}")"
 APP_ID="$(printf '%s' "$APP_JSON" | _stk_jget '.id')"
 [ -n "$APP_ID" ] && pass "created app $APP_ID" || { fail "create app: $APP_JSON"; exit 1; }
 
 # The POSITIVE CONTROL: a legitimately-deployed app var.
 vc="$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$APP_ID/vars" \
-  -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" \
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" \
   -d "{\"key\":\"$CONTROL_VAR_KEY\",\"value\":\"$CONTROL_VAL\"}")"
 [ "$vc" = "204" ] && pass "deployed app var $CONTROL_VAR_KEY (HTTP $vc)" \
   || { fail "could not set app var $CONTROL_VAR_KEY (HTTP $vc) -- the positive control is unavailable"; }
@@ -339,13 +339,13 @@ vc="$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://localhost:$ZEROSHIP
 # not. Setting a secret is not the same as exposing it.
 for k in "$SECRET_EXPOSED_KEY" "$SECRET_HIDDEN_KEY"; do
   sc="$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$APP_ID/secrets" \
-    -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" \
+    -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" \
     -d "{\"key\":\"$k\",\"value\":\"secret-value-for-$k\"}")"
   [ "$sc" = "204" ] && pass "stored secret $k (HTTP $sc)" \
     || fail "could not store secret $k (HTTP $sc) -- the secret-layer arms below are vacuous"
 done
 xc="$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$APP_ID/env/expose" \
-  -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" \
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" \
   -d "{\"keys\":[\"$SECRET_EXPOSED_KEY\"]}")"
 [ "$xc" = "200" ] || [ "$xc" = "204" ] \
   && pass "opted $SECRET_EXPOSED_KEY into the expose list, left $SECRET_HIDDEN_KEY out (HTTP $xc)" \
@@ -358,7 +358,7 @@ if [ "$MUTATE" = "shadow-app-id" ]; then
   # win. Deploying one and reading it back is the only way to know whether the
   # documented precedence is the real precedence.
   sc="$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$APP_ID/vars" \
-    -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" \
+    -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" \
     -d "{\"key\":\"APP_ID\",\"value\":\"zs-shadowed-app-id\"}")"
   echo "  MUTATED: a creator var named APP_ID is deployed (HTTP $sc) -- reported below, not asserted"
 fi
@@ -367,12 +367,12 @@ if [ "$MUTATE" = "deploy-canary" ]; then
   # RED-BEFORE-GREEN for the ABSOLUTE half. ONE variable: the canary's
   # deployment status. Same name, same value, same probe, same assertion.
   mc="$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$APP_ID/vars" \
-    -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" \
+    -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" \
     -d "{\"key\":\"$CANARY_KEY\",\"value\":\"$CANARY_VAL\"}")"
   echo "  MUTATED: $CANARY_KEY is ALSO deployed as an app var (HTTP $mc) -- the leak assertions must go RED"
 fi
 
-dep="$("$BIN/zeroship" deploy "$ZSHIP" --app="$APP_ID" --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$PAT" 2>&1)"
+dep="$("$BIN/zeroship" deploy "$ZSHIP" --app="$APP_ID" --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$ADMIN_TOKEN" 2>&1)"
 echo "$dep" | grep -q "deploy_hash" && pass "deployed env-probe" \
   || { fail "deploy failed: $dep"; exit 1; }
 
@@ -649,7 +649,7 @@ console.log(JSON.stringify(r,null,1).split("\n").map(l=>"  "+l).join("\n"));
 #    1  dev tier IS the CLI serve vector
 #    1  the dev child HAS the canary
 #    7  tests/lib/e2e_stack.sh `_stk_ok` sites (PG, init.sql, migrations,
-#       control, worker, gateway, pat+jwt) -- these live in a SHARED library and
+#       control, worker, gateway, at+jwt) -- these live in a SHARED library and
 #       are the reason a naive `grep -c 'pass "' ` on this file alone under-counts
 #    1  created app
 #    1  deployed app var
