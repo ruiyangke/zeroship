@@ -20,18 +20,18 @@ const INTENT_CLASSES: Record<BadgeVariant, Record<BadgeIntent, string>> = {
   soft: {
     neutral: "border-line bg-surface-sunken text-ink-secondary",
     muted: "border-line bg-surface-sunken text-ink-muted",
-    info: "border-info bg-info-soft text-info text-info-strong!",
-    success: "border-success bg-success-soft text-success text-success-strong!",
-    warning: "border-warning bg-warning-soft text-warning text-warning-strong!",
-    danger: "border-danger bg-danger-soft text-danger text-danger-strong!",
+    info: "border-info bg-info-soft text-info text-info-strong",
+    success: "border-success bg-success-soft text-success text-success-strong",
+    warning: "border-warning bg-warning-soft text-warning text-warning-strong",
+    danger: "border-danger bg-danger-soft text-danger text-danger-strong",
   },
   outline: {
     neutral: "border-line-strong bg-surface text-ink-secondary",
     muted: "border-line-strong bg-surface text-ink-muted",
-    info: "border-info bg-surface text-info text-info-strong!",
-    success: "border-success bg-surface text-success text-success-strong!",
-    warning: "border-warning bg-surface text-warning text-warning-strong!",
-    danger: "border-danger bg-surface text-danger text-danger-strong!",
+    info: "border-info bg-surface text-info text-info-strong",
+    success: "border-success bg-surface text-success text-success-strong",
+    warning: "border-warning bg-surface text-warning text-warning-strong",
+    danger: "border-danger bg-surface text-danger text-danger-strong",
   },
 };
 

@@ -103,7 +103,7 @@ export function Pagination({
         <Button
           type="button"
           variant="plain"
-          className="h-7! px-3!"
+          className="h-7 px-3"
           aria-label="Go to previous page"
           disabled={currentPage <= 1}
           onClick={() => goTo(currentPage - 1)}
@@ -129,9 +129,9 @@ export function Pagination({
               type="button"
               variant="plain"
               className={cn(
-                "h-7! min-w-6! px-1! font-mono tabular-nums",
+                "h-7 min-w-6 px-1 font-mono tabular-nums",
                 item.page === currentPage &&
-                  "border-line! bg-surface-sunken! text-accent-strong!",
+                  "border-line bg-surface-sunken text-accent-strong!",
               )}
               aria-label={`Go to page ${item.page}`}
               aria-current={item.page === currentPage ? "page" : undefined}
@@ -145,7 +145,7 @@ export function Pagination({
         <Button
           type="button"
           variant="plain"
-          className="h-7! px-3!"
+          className="h-7 px-3"
           aria-label="Go to next page"
           disabled={currentPage >= pageCount}
           onClick={() => goTo(currentPage + 1)}

@@ -74,12 +74,12 @@ function loadColumns(): IssueColumnKey[] {
 
 /**
  * Popup chrome belongs to the picker rather than to every call site that
- * happens to render a Card. The few properties that make this Card a popup
- * remain explicit important overrides instead of silently losing the cascade.
+ * happens to render a Card. Card merges these caller-owned values after its
+ * defaults, so the popup does not depend on generated stylesheet order.
  */
 function ColumnPickerMenu({ children }: { children: ReactNode }) {
   return (
-    <Card className="column-picker-menu absolute! right-0 top-[calc(100%+0.25rem)]! z-20 min-w-40! gap-1! border-line-strong! bg-surface! px-3! py-2! shadow-popup!">
+    <Card className="column-picker-menu absolute right-0 top-[calc(100%+0.25rem)] z-20 min-w-40 gap-1 border-line-strong bg-surface px-3 py-2 shadow-popup">
       {children}
     </Card>
   );

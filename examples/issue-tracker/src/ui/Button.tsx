@@ -12,11 +12,11 @@ export interface ButtonProps extends BaseButton.Props {
 }
 
 const BASE_CLASSES =
-  "relative inline-flex h-6 min-w-0 cursor-pointer select-none items-center justify-center whitespace-nowrap rounded border px-2 text-center font-sans text-sm font-medium leading-tight no-underline! transition-colors hover:no-underline!";
+  "relative inline-flex h-6 min-w-0 cursor-pointer select-none items-center justify-center whitespace-nowrap rounded border px-2 text-center font-sans text-sm font-medium leading-tight no-underline transition-colors hover:no-underline!";
 
 const VARIANT_CLASSES: Record<ButtonVariant, string> = {
   filled:
-    "border-ink bg-ink text-surface! hover:border-ink-secondary hover:bg-ink-secondary active:border-ink-muted active:bg-ink-muted hover:border-action-filled-hover! hover:bg-action-filled-hover! active:border-action-filled-active! active:bg-action-filled-active!",
+    "border-ink bg-ink text-surface! hover:border-ink-secondary hover:bg-ink-secondary active:border-ink-muted active:bg-ink-muted hover:border-action-filled-hover hover:bg-action-filled-hover active:border-action-filled-active active:bg-action-filled-active",
   gray:
     "border-line-strong bg-surface text-ink! hover:border-line-strong hover:bg-surface-hover active:border-line-strong active:bg-surface-sunken",
   plain:
@@ -28,11 +28,11 @@ const PRESSED_PLAIN_CLASSES =
 
 const DESTRUCTIVE_CLASSES: Record<ButtonVariant, string> = {
   filled:
-    "border-danger bg-danger text-surface! hover:border-danger hover:bg-danger active:border-danger active:bg-danger hover:border-danger-strong! hover:bg-danger-strong! active:border-danger-strong! active:bg-danger-strong!",
+    "border-danger bg-danger text-surface! hover:border-danger hover:bg-danger active:border-danger active:bg-danger hover:border-danger-strong hover:bg-danger-strong active:border-danger-strong active:bg-danger-strong",
   gray:
-    "border-line-strong bg-surface text-danger! hover:border-danger hover:bg-danger-soft hover:text-danger! active:border-danger active:bg-surface-sunken active:text-danger!",
+    "border-line-strong bg-surface text-danger! hover:border-danger hover:bg-danger-soft hover:text-danger active:border-danger active:bg-surface-sunken active:text-danger",
   plain:
-    "border-transparent bg-transparent text-danger! hover:border-danger hover:bg-danger-soft hover:text-danger! active:border-danger active:bg-surface-sunken active:text-danger!",
+    "border-transparent bg-transparent text-danger! hover:border-danger hover:bg-danger-soft hover:text-danger active:border-danger active:bg-surface-sunken active:text-danger",
 };
 
 function visualClasses(

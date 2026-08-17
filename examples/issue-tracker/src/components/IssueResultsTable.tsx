@@ -6,6 +6,7 @@ import { Link } from "react-router-dom";
 
 import { EmptyState } from "../ui/EmptyState";
 import { Skeleton } from "../ui/Skeleton";
+import { cn } from "../ui/cn";
 import { KindBadge, PriorityBadge, ResolutionBadge, SeverityBadge, StatusBadge } from "./Badges";
 import type { Issue } from "./types";
 import { useIssueLookups } from "./useIssueLookups";
@@ -314,9 +315,10 @@ export function IssueResultsTable({
                       {columns.map((key) => (
                         <td
                           key={key}
-                          className={`h-8 border-b border-line px-3 py-0 align-middle${
-                            rowIndex === 4 ? " border-b-0!" : ""
-                          }`}
+                          className={cn(
+                            "h-8 border-b border-line px-3 py-0 align-middle",
+                            rowIndex === 4 && "border-b-0",
+                          )}
                         >
                           <Skeleton />
                         </td>
@@ -343,9 +345,10 @@ export function IssueResultsTable({
                           <td
                             key={key}
                             data-column={key}
-                            className={`h-8 whitespace-nowrap border-b border-line px-3 py-0 align-middle tabular-nums${
-                              rowIndex === issues.length - 1 ? " border-b-0!" : ""
-                            }`}
+                            className={cn(
+                              "h-8 whitespace-nowrap border-b border-line px-3 py-0 align-middle tabular-nums",
+                              rowIndex === issues.length - 1 && "border-b-0",
+                            )}
                           >
                             {byKey[key].cell(issue)}
                           </td>

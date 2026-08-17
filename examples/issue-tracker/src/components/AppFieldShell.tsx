@@ -1,5 +1,7 @@
 import type { ComponentPropsWithoutRef, ElementType } from "react";
 
+import { cn } from "../ui/cn";
+
 type AppFieldShellProps<T extends ElementType> = {
   as?: T;
   className?: string;
@@ -21,7 +23,10 @@ export function AppFieldShell<T extends ElementType = "div">({
   return (
     <Component
       {...props}
-      className={`app-field-shell field-edge rounded border-0 bg-surface text-ink transition duration-fast ease-out focus-within:bg-surface focus-within:field-edge-focus! ${className}`}
+      className={cn(
+        "app-field-shell field-edge rounded border-0 bg-surface text-ink transition duration-fast ease-out focus-within:bg-surface focus-within:field-edge-focus!",
+        className,
+      )}
     />
   );
 }
