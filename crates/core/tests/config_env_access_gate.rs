@@ -191,3 +191,69 @@ pub fn get(key: TestEnvKey) -> Option<String> {
     )
     .expect("the sealed accessor shape is permitted");
 }
+
+/// Whether the line directly above `fn_signature` is the exact
+/// `#[allow(clippy::disallowed_methods)]` attribute.
+///
+/// Line-adjacency, not a syn attribute walk: the three functions this checks
+/// are named and their shape (one doc comment, one attribute, then the `fn`
+/// line) is fixed by convention in `crates/core/src/config/env.rs` itself, so
+/// a textual check is exact and does not need a second parser dependency.
+fn fn_immediately_preceded_by_allow(source: &str, fn_signature: &str) -> bool {
+    let lines: Vec<&str> = source.lines().collect();
+    let Some(fn_line) = lines.iter().position(|line| line.contains(fn_signature)) else {
+        panic!("signature {fn_signature:?} not found in source; the check target moved");
+    };
+    fn_line > 0 && lines[fn_line - 1].trim() == "#[allow(clippy::disallowed_methods)]"
+}
+
+/// The regression this guard exists for: `ba6edcd88` made
+/// `crates/core/src/config/env.rs` the sole raw-environment boundary and
+/// documented it as clippy-exempt, but never added the attribute clippy
+/// itself requires to grant that exemption. `35bd1598d`, the commit that
+/// landed the `disallowed_methods` deny nine minutes later, added the
+/// matching allow to every `libs/*/tests/common/env.rs` sealed accessor but
+/// never touched this file - so main's `cargo clippy -p zeroship-core
+/// --all-targets` was red from that commit forward and nothing local caught
+/// it: `cargo test` never runs clippy, and the source gate above only
+/// forbids the attribute OUTSIDE this file, never requires it INSIDE.
+///
+/// This closes that gap without shelling out to `cargo clippy` (slow, and a
+/// second copy of the compiler's own check): it asserts the textual shape
+/// that makes the suppression effective, on the three functions that are the
+/// only place `std::env::var`, `var_os` and `vars` may legally appear.
+#[test]
+fn central_accessor_functions_carry_the_disallowed_methods_allow() {
+    let path =
+        workspace_root().join(zeroship_config_contract::raw_env::CENTRAL_ACCESSOR);
+    let source = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+
+    for fn_signature in [
+        "fn raw_var(key: &str) -> Result<Option<String>, ()> {",
+        "fn raw_var_os(key: &str) -> Option<OsString> {",
+        "fn raw_vars() -> Vec<(String, String)> {",
+    ] {
+        assert!(
+            fn_immediately_preceded_by_allow(&source, fn_signature),
+            "{} is missing `#[allow(clippy::disallowed_methods)]` on the line \
+             directly above `{fn_signature}` - this is the exempted raw-env \
+             boundary and clippy denies the call without it",
+            path.display()
+        );
+    }
+}
+
+/// The one-variable partner: prove the detector says NO for the exact shape
+/// that caused the regression (attribute absent), not just YES for the
+/// current file. Without this, `fn_immediately_preceded_by_allow` could
+/// return `true` unconditionally and the test above would still pass.
+#[test]
+fn the_allow_detector_rejects_a_missing_attribute() {
+    let with_allow = "/// doc\n#[allow(clippy::disallowed_methods)]\npub(crate) fn raw_var(key: &str) -> Result<Option<String>, ()> {\n";
+    let without_allow = "/// doc\npub(crate) fn raw_var(key: &str) -> Result<Option<String>, ()> {\n";
+    let signature = "fn raw_var(key: &str) -> Result<Option<String>, ()> {";
+
+    assert!(fn_immediately_preceded_by_allow(with_allow, signature));
+    assert!(!fn_immediately_preceded_by_allow(without_allow, signature));
+}
