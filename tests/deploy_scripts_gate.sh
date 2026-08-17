@@ -226,11 +226,47 @@ fi
 # -- a false refusal, which is how a gate gets switched off. Control's
 # `--signing-key-file` was the last one and is now
 # ZEROSHIP_CONTROL_SIGNING_KEY_FILE.
+#
+# SCOPED TO THE SERVICES THE PRE-ROLL ACTUALLY DRY-RUNS, which is the rule
+# matching its own reason rather than an exception carved out of it. The set is
+# CHECK_SERVICES, read from the sourced deploy-remote.sh, so it cannot drift
+# from the loop that consumes it and nothing here carries its own list. A
+# service the pre-roll never runs cannot have a flag hidden from a dry run that
+# does not happen: `migrate` is absent from CHECK_SERVICES on purpose
+# (deploy/scripts/deploy-remote.sh: "zeroship-platform-migrate has no
+# --check-config and mounts no overlay"), and its DSN path is a flag precisely
+# so the credential stays out of both argv and the container environment.
 if [ -f "$REAL_COMPOSE" ]; then
-  FLAG_FILES="$(grep -vE '^[[:space:]]*#' "$REAL_COMPOSE" | grep -oE -- '--[a-z-]+-file' | sort -u)"
-  [ -z "$FLAG_FILES" ] \
-    && pass "no secret path is passed as a command flag in the shipped compose, so --check-config sees every one of them" \
-    || fail "these secret paths are passed as command flags and are therefore invisible to the pre-roll --check-config: $(echo $FLAG_FILES). Move them to their canonical ZEROSHIP_*_FILE environment name"
+  DRY_RUN_SERVICES=""
+  for svc in $CHECK_SERVICES; do DRY_RUN_SERVICES="$DRY_RUN_SERVICES ${svc%%:*}"; done
+  # `<service>\t<flag>` for every `--<name>-file` on a live line, attributed to
+  # the service block it sits in.
+  FLAG_FILES="$(
+    awk '
+      /^  [a-z][a-z0-9_-]*:[[:space:]]*$/ { svc = $1; sub(/:$/, "", svc); next }
+      /^[[:space:]]*#/ { next }
+      svc != "" && match($0, /--[a-z-]+-file/) {
+        print svc "\t" substr($0, RSTART, RLENGTH)
+      }
+    ' "$REAL_COMPOSE" | sort -u | while IFS=$'\t' read -r s f; do
+      case " $DRY_RUN_SERVICES " in *" $s "*) echo "$s $f" ;; esac
+    done
+  )"
+  # Anti-hollow: the walk is worthless if it stops attributing lines to
+  # services, and that looks exactly like compliance. Every dry-run service
+  # must be visible to it.
+  SEEN_SERVICES="$(awk '/^  [a-z][a-z0-9_-]*:[[:space:]]*$/ { s=$1; sub(/:$/,"",s); print s }' "$REAL_COMPOSE" | sort -u)"
+  MISSING_SEEN=""
+  for s in $DRY_RUN_SERVICES; do
+    echo "$SEEN_SERVICES" | grep -qx "$s" || MISSING_SEEN="$MISSING_SEEN $s"
+  done
+  if [ -n "$MISSING_SEEN" ]; then
+    fail "the service walk did not see$MISSING_SEEN, so a clean result below would mean nothing"
+  elif [ -z "$FLAG_FILES" ]; then
+    pass "no dry-run service passes a secret path as a command flag, so --check-config sees every one of them"
+  else
+    fail "these secret paths are passed as command flags on a service the pre-roll dry-runs, and are therefore invisible to --check-config: $(echo $FLAG_FILES). Move them to their canonical ZEROSHIP_*_FILE environment name"
+  fi
 fi
 
 # The operator overlay is shared with services that must never possess the
