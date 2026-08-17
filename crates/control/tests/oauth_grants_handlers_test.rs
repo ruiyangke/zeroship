@@ -99,7 +99,7 @@ impl Fixture {
             static_policies: zeroship_authz::load_platform_policies()
                 .expect("bundled authz policies parse"),
             pat_issuer: Arc::new(zeroship_authn::PatIssuer::generate_ephemeral()),
-            auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
+            auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some(common::platform_jwks_url())),
             // A real, non-zero pairwise salt so the disconnect-app cascade
             // writes a `token_revocations` marker under a `pws_` the test can
             // re-derive with the SAME salt + sector (Batch A fix 4).
@@ -1257,7 +1257,7 @@ async fn app_delete_returns_200_atomic() {
     )
     .await;
 
-    let pat = common::authz_fixture::admin_pat(&fx.state).await;
+    let pat = common::authz_fixture::admin_principal(&fx.state).await;
     let req = test::TestRequest::delete()
         .uri(&format!("/api/apps/{app_id}"))
         .header("authorization", pat.bearer())
