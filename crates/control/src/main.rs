@@ -53,7 +53,7 @@ fn build_billing_mailer(
                 password: settings.smtp_password.expose_secret().cloned(),
                 tls: SmtpTls::Starttls,
             })
-            .map_(|e| format!("smtp mailer: {e}"))?;
+            .map_err(|e| format!("smtp mailer: {e}"))?;
             Ok(Arc::new(driver))
         }
         "resend" => {
