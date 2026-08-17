@@ -283,21 +283,6 @@ services:
       # service used to carry it and nothing consumed it.
       ZEROSHIP_CONTROL_KEY: ${ZEROSHIP_CONTROL_KEY:?run zeroship dev init}
       ZEROSHIP_CONTROL_MASTER_KEY: ${ZEROSHIP_CONTROL_MASTER_KEY:?run zeroship dev init}
-      # The PAT signing key, under its canonical env name rather than the
-      # `--signing-key-file` flag it used to be. Three reasons, and the third is
-      # the one that cost a deploy:
-      #   - migrated, gateway and auth all name their key files this way. One
-      #     service spelling it differently is the split this file keeps closing.
-      #   - the comment above says no secret is passed as a flag. This was the
-      #     exception, and an exception nobody remembers is just a bug waiting.
-      #   - `docker compose run --entrypoint zeroship-control control
-      #     --check-config` replaces the service COMMAND, so a dry run could not
-      #     see a path supplied as a flag and reported the key missing. As an
-      #     env var the dry run is faithful, which is what lets deploy-remote.sh
-      #     validate this service before it restarts anything.
-      # migrated verifies against this SAME file: that is what lets a
-      # control-issued creator PAT authorize a migration apply.
-      ZEROSHIP_CONTROL_SIGNING_KEY_FILE: /etc/zeroship/secrets/control-signing.pem
       # Where `POST /api/apps/{id}/migrations/apply` forwards. This is the
       # compose-network address of the `migrated` service below, NOT the
       # loopback publish (`127.0.0.1:9091`) an operator tunnels to - control
@@ -363,9 +348,6 @@ services:
     volumes:
       - bundles:/data/bundles
       - ../../data:/data
-      # Control mints PATs, so it reads the signing key that migrated also
-      # verifies.
-      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/control-signing.pem:/etc/zeroship/secrets/control-signing.pem:ro
       # mounted at the well-known path => auto-discovered, no --config needed
       - ../ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
     security_opt:
@@ -419,9 +401,6 @@ services:
       # migrations means CREATE SCHEMA "<app_id>" + CREATE ROLE migrator_<app_id>,
       # which the least-priv role above cannot do.
       ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL: ${ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL:-postgres://postgres:zeroship@postgres:5432/zeroship}
-      # MUST be the same file control signs with, or a control-issued creator PAT
-      # will not verify here and every apply is 401.
-      ZEROSHIP_MIGRATED_SIGNING_KEY_FILE: /etc/zeroship/secrets/control-signing.pem
       # The SAME internal key every other service reads, under the SAME name.
       # It used to be spelled differently here, which is precisely the split
       # this migration removed.
@@ -440,7 +419,6 @@ services:
       # `{issuer}/.well-known/jwks.json` and sent it out through the edge.
       ZEROSHIP_AUTH_PLATFORM_JWKS_URL: http://auth:9092/oauth2/.well-known/jwks.json
     volumes:
-      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/control-signing.pem:/etc/zeroship/secrets/control-signing.pem:ro
       - ../ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
     # compio/io_uring, same as every other native service here.
     security_opt:

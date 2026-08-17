@@ -32,7 +32,6 @@ use zeroship_core::config::{
 const SECRET_FILES: [&str; 8] = [
     "auth-signing.pem",
     "broker-secret",
-    "control-signing.pem",
     "gateway-signing.pem",
     "migrate-dsn",
     "pairwise-salt",
@@ -86,7 +85,6 @@ fn dev_init_generates_the_complete_private_deployment_secret_set() {
     for name in [
         "auth-signing.pem",
         "gateway-signing.pem",
-        "control-signing.pem",
     ] {
         let pem = std::fs::read_to_string(secrets_dir.join(name))
             .unwrap_or_else(|error| panic!("read {name}: {error}"));
