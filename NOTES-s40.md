@@ -51,3 +51,29 @@ comment at :63-72 describes for the withheld-SELECT case.
 
 => Option (c) REJECTED on evidence. Proceeding to option (a): move the table out
 of the `zeroship` schema.
+
+## Finding 3: the second failure does NOT share the cause - it is a stale literal
+
+`ordered_runner_retains_authored_fk_formats_across_catalog_refresh` fails inside
+`run_logical_column_retention_assertions`, at
+`crates/zeroship-migrate-adapter/tests/platform_migrate.rs:848`:
+
+    if report.files != 12 {
+
+That helper runs `run_platform_migrations` over the FULL `migrations_dir()`, so
+`report.files` is the whole corpus. `db/migrations-ts/` holds 23 files today.
+
+The literal was CORRECT when written: `abd1e70d7` (2026-08-06,
+"test(migrate-adapter): cover authored fk formats across a refresh") and
+`git ls-tree --name-only abd1e70d7 db/migrations-ts/ | wc -l` = 12. Eleven files
+have landed since. The same file already has the maintained constant
+`PLATFORM_MIGRATION_FILES = 23` (:42) which every other count-check uses; this
+one call site duplicated the value as a literal and rotted.
+
+So of the three platform_migrate failures the brief measured, at most one is the
+grant collision. Fix is `PLATFORM_MIGRATION_FILES` in place of the literal, so
+there is no second copy left to rot.
+
+Third failure (`platform_migrate_applies_only_newly_appended_file`) uses
+`PLATFORM_MIGRATION_FILES` throughout and has no stale literal; cause still to be
+measured against a live DSN.
