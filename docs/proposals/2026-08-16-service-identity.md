@@ -971,8 +971,31 @@ in would have made this one unreviewable.
 | --- | --- |
 | Issuer identifiers, minter, verifier, `ReplayStore` trait, in-memory store | `crates/core/src/service_assertion.rs` |
 | Postgres `jti` store | `crates/authn/src/service_replay.rs` |
-| The replay table and its grants | `db/migrations-ts/20260816000100_service_assertion_replay.ts` |
+| The replay table and its grants, in the `service_authn` schema | `db/migrations-ts/20260816000100_service_assertion_replay.ts` |
 | Security-property tests | `crates/core/tests/service_assertion_test.rs` (27), `crates/authn/tests/service_replay_pg_test.rs` (4, live PG) |
+
+### 14.0 CORRECTED 2026-08-17: the replay table is not in the `zeroship` schema
+
+It shipped there and collided with P1 head-on. `crates/zeroship-migrate-adapter/
+tests/platform_migrate.rs` asserts a BLANKET invariant - `zeroship_worker`, the
+login a process running creator code holds, has no INSERT/UPDATE/DELETE/TRUNCATE/
+REFERENCES/TRIGGER on ANY relation in `zeroship`, no column-level equivalent, and
+nothing on a sequence there. That is 9.0's P1 written down as a test. The
+migration granted the worker writes on the replay table, and the suite failed
+with `zeroship_worker can write a platform relation`.
+
+Both sides were right. 5.2 has the gateway calling `worker POST /dispatch/{app}`,
+so the worker is a CALLEE, a callee is what verifies, and a verifier must claim
+the `jti` in a store every replica shares. So the grant was not removable.
+
+The resolution is that `zeroship` was carrying two trust zones. It holds platform
+STATE - apps, users, deploys, grants, billing - written by the control plane, and
+authority over it is authority over the platform. The replay table holds none of
+that: two columns, a key and an expiry, conferring nothing, written by every
+service that authenticates. It now lives in `service_authn`, the invariant stays
+blanket, and the new schema is bounded by its own assertion to exactly that one
+table so the escape hatch cannot grow. Narrowing the invariant instead would have
+left it reading "the worker writes nothing except the things it writes".
 
 ### 14.1 The trust bundle is STATICALLY CONFIGURED, not JWKS-over-TLS
 
