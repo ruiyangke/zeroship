@@ -34,7 +34,7 @@ test("no issue table falls back to raw product or user ids", async ({ page, base
     return (await res.json()).json;
   };
 
-  const productName = `Tables ${RUN}`;
+  const productName = `Tables with a deliberately long product name ${RUN}`;
   const product = await rpc("products.create", { name: productName, description: "tables" });
   const component = await rpc("components.create", {
     productId: product.id,
@@ -46,7 +46,7 @@ test("no issue table falls back to raw product or user ids", async ({ page, base
     productId: product.id,
     componentId: component.id,
     versionId: version.id,
-    summary: `Table row ${RUN}`,
+    summary: `Table row with a deliberately long summary that must remain one line ${RUN}`,
     description: "row",
   });
   const me = await rpc("users.me", {});
@@ -58,6 +58,7 @@ test("no issue table falls back to raw product or user ids", async ({ page, base
   const tableOf = (page_: typeof page) => page_.locator("table").first();
 
   // The issue list, filtered to this run so the assertion is about this row.
+  await page.setViewportSize({ width: 900, height: 800 });
   await page.goto("/issues");
   await page.getByPlaceholder("Search, or type").fill(RUN);
   await page.getByRole("button", { name: "Apply" }).click();
@@ -66,6 +67,18 @@ test("no issue table falls back to raw product or user ids", async ({ page, base
     ((await tableOf(page).textContent()) ?? "").match(RAW_ID)?.[0] ?? null,
     "the issue list should not print raw ids",
   ).toBeNull();
+  const resultRow = tableOf(page).locator("tbody tr").filter({ hasText: RUN });
+  await expect(resultRow, "the density probe row rendered").toHaveCount(1);
+  expect(
+    Math.round((await resultRow.boundingBox())?.height ?? 0),
+    "long values scroll horizontally rather than growing a dense result row",
+  ).toBe(32);
+  expect(
+    await tableOf(page)
+      .locator("..")
+      .evaluate((scrollport) => scrollport.scrollWidth > scrollport.clientWidth),
+    "the one-line table exposes its extra width through its own scrollport",
+  ).toBe(true);
 
   // The dashboard. Its three tables are the ones that were rendering ids, and
   // they are unfiltered, so this checks every row rather than just ours --

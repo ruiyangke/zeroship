@@ -290,14 +290,14 @@ export function IssueDetailPage({
         </Tabs.List>
 
         <Tabs.Panel value="details">
-          <div className="grid grid-cols-[minmax(0,1fr)_22rem] items-start gap-0 max-desktop:grid-cols-1">
+          <div className="grid grid-cols-[minmax(0,1fr)_22rem] items-start gap-0 max-desktop:grid-cols-1 max-wide:grid-cols-1!">
           {/* The conversation IS the issue. It used to sit under a screen of
               editable fields -- summary, status, severity, priority,
               assignee, product, component, version, whiteboard, OS, platform,
               URL -- so the description, which is what the issue actually says,
               started below the fold. Fields are metadata and metadata goes in
               the rail. */}
-          <div className="issue-detail-main flex min-w-0 flex-col gap-5 pr-10">
+          <div className="issue-detail-main flex min-w-0 flex-col gap-5 pr-10 max-wide:pr-0!">
             {/* No `attachments` / `onAttachmentsChanged` props: the thread and
                 the roll-up below now ask `useAttachments(issueId)` for
                 themselves. Same key, so it is still ONE request -- what the
@@ -374,7 +374,7 @@ export function IssueDetailPage({
               ) : null}
             </div>
           </div>
-          <div className="issue-detail-side flex min-w-0 flex-col gap-5 border-l border-line pt-1 pl-7 [&_*]:max-w-full [&>*]:shrink-0 desktop:sticky desktop:top-0 desktop:max-h-[calc(100dvh-4rem)] desktop:self-start desktop:overflow-y-auto desktop:overscroll-contain desktop:pb-4">
+          <div className="issue-detail-side flex min-w-0 flex-col gap-5 border-l border-line pt-1 pl-7 [&_*]:max-w-full [&>*]:shrink-0 desktop:sticky desktop:top-0 desktop:max-h-[calc(100dvh-4rem)] desktop:self-start desktop:overflow-y-auto desktop:overscroll-contain desktop:pb-4 max-wide:mt-5 max-wide:static! max-wide:top-auto! max-wide:max-h-none! max-wide:self-auto! max-wide:overflow-visible! max-wide:overscroll-auto! max-wide:border-t max-wide:border-l-0! max-wide:pt-5! max-wide:pb-0! max-wide:pl-0!">
             <FieldsPanel
               issue={detail.issue}
               people={detail.people}

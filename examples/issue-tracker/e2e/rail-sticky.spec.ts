@@ -104,4 +104,37 @@ test("the rail holds its place and its groups do not overlap", async ({ page, ba
   expect(overlaps, `rail groups are painted on top of each other:\n${overlaps.join("\n")}`).toEqual(
     [],
   );
+
+  // The rail only becomes a second column once its fixed width leaves a useful
+  // conversation column beside it. At the 901px desktop boundary it stacks;
+  // at the 1101px wide boundary it gains the dividing edge and sticky rail.
+  const detailLayout = () =>
+    page.evaluate(() => {
+      const main = document.querySelector(".issue-detail-main") as HTMLElement;
+      const side = document.querySelector(".issue-detail-side") as HTMLElement;
+      const mainStyle = getComputedStyle(main);
+      const sideStyle = getComputedStyle(side);
+      return {
+        mainPaddingRight: mainStyle.paddingRight,
+        sideBorderTop: sideStyle.borderTopWidth,
+        sideBorderLeft: sideStyle.borderLeftWidth,
+        sidePosition: sideStyle.position,
+      };
+    });
+
+  await page.setViewportSize({ width: 901, height: 800 });
+  expect(await detailLayout(), "the rail stacks cleanly at the desktop boundary").toEqual({
+    mainPaddingRight: "0px",
+    sideBorderTop: "1px",
+    sideBorderLeft: "0px",
+    sidePosition: "static",
+  });
+
+  await page.setViewportSize({ width: 1101, height: 800 });
+  expect(await detailLayout(), "the rail becomes a divided sticky column at wide").toEqual({
+    mainPaddingRight: "40px",
+    sideBorderTop: "0px",
+    sideBorderLeft: "1px",
+    sidePosition: "sticky",
+  });
 });

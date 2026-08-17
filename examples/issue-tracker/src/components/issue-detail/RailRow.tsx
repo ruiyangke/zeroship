@@ -24,8 +24,8 @@ export function RailRow({
     <div
       className={
         editing
-          ? "rail-choice is-editing group/rail-row col-span-full my-2 grid min-h-[1.9rem] grid-cols-subgrid items-center gap-y-1"
-          : "rail-choice group/rail-row col-span-full my-2 grid min-h-[1.9rem] grid-cols-subgrid items-center"
+          ? "rail-choice is-editing group/rail-row col-span-full my-2 my-1! grid min-h-[1.9rem] min-h-8! grid-cols-subgrid items-center gap-y-1"
+          : "rail-choice group/rail-row col-span-full my-2 my-1! grid min-h-[1.9rem] min-h-8! grid-cols-subgrid items-center"
       }
     >
       <span className={wide ? "col-span-full text-base font-medium text-ink-muted" : "text-base font-medium text-ink-muted"}>

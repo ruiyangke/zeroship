@@ -168,7 +168,7 @@ export function IssueResultsTable({
       cell: (issue) => (
         <Link
           to={`/issues/${issue.id}`}
-          className="issue-link font-mono text-base"
+          className="issue-link inline-flex whitespace-nowrap rounded-sm font-mono text-base focus-visible:focus-ring-tight"
           title={issue.id}
         >
           {issueLabel(issue, productKeysById)}
@@ -203,13 +203,20 @@ export function IssueResultsTable({
       // a second request, so falling back to the raw value meant every row
       // flashed prod_0346En6o4bMYRunhVm0mmX before the names landed -- brief
       // when idle, long enough to read on a loaded machine.
-      cell: (issue) => productsById[issue.productId] ?? "--",
+      cell: (issue) => (
+        <span className="block max-w-52 truncate">
+          {productsById[issue.productId] ?? "--"}
+        </span>
+      ),
     },
     summary: {
       key: "summary",
       header: "Summary",
       cell: (issue) => (
-        <Link to={`/issues/${issue.id}`} className="text-ink! hover:text-accent-strong!">
+        <Link
+          to={`/issues/${issue.id}`}
+          className="block max-w-80 truncate rounded-sm text-ink! hover:text-accent-strong! focus-visible:focus-ring-tight"
+        >
           {issue.summary}
         </Link>
       ),
@@ -330,13 +337,13 @@ export function IssueResultsTable({
                   : issues.map((issue, rowIndex) => (
                       <tr
                         key={issue.id}
-                        className="bg-surface transition-colors duration-fast ease-out hover:bg-surface-hover motion-reduce:transition-none"
+                        className="bg-surface transition-colors duration-fast ease-out hover:bg-surface-hover focus-within:bg-surface-selected motion-reduce:transition-none"
                       >
                         {columns.map((key) => (
                           <td
                             key={key}
                             data-column={key}
-                            className={`h-8 border-b border-line px-3 py-0 align-middle tabular-nums${
+                            className={`h-8 whitespace-nowrap border-b border-line px-3 py-0 align-middle tabular-nums${
                               rowIndex === issues.length - 1 ? " border-b-0!" : ""
                             }`}
                           >
