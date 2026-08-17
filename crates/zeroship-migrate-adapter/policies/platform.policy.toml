@@ -5,8 +5,20 @@
 # verbatim). This charter is the single source for both the lowering guard and executor
 # posture, including the privileged vendor set, extension allowlist, namespace
 # authority, and raw-island role relaxation (`GuardMode::Enforced` + `access.role`).
-# The adapter binds the project-schema placeholder below before loading the charter;
-# `public` remains the only cross-schema peer.
+# The adapter binds the project-schema placeholder below before loading the charter.
+#
+# Two cross-schema peers, and they are peers for different reasons. `public` holds
+# the extensions. `service_authn` holds the state of the service-to-service
+# authentication MECHANISM -- today exactly `service_assertion_replay` -- and it is
+# a separate namespace because every service that VERIFIES an assertion writes
+# there, including the worker, while `zeroship` holds platform state no worker may
+# write at all. See db/migrations-ts/20260816000100_service_assertion_replay.ts.
+#
+# Widening this list widens what a platform migration may create. The counterweight
+# is in crates/zeroship-migrate-adapter/tests/platform_migrate.rs, which asserts
+# `service_authn` holds exactly the replay table and that no service role can add
+# to it; without that, a later migration could put a platform table in the new
+# namespace and hand the worker writes on it.
 
 policy_version = 1
 
@@ -68,17 +80,17 @@ scope = "all"
 [[grant]]
 key = "schema.cross_schema"
 value = true
-scope = { include = ["__ZEROSHIP_PROJECT_SCHEMA__", "public"] }
+scope = { include = ["__ZEROSHIP_PROJECT_SCHEMA__", "public", "service_authn"] }
 
 [[grant]]
 key = "schema.create_table"
 value = true
-scope = { include = ["__ZEROSHIP_PROJECT_SCHEMA__", "public"] }
+scope = { include = ["__ZEROSHIP_PROJECT_SCHEMA__", "public", "service_authn"] }
 
 [[grant]]
 key = "schema.rename"
 value = true
-scope = { include = ["__ZEROSHIP_PROJECT_SCHEMA__", "public"] }
+scope = { include = ["__ZEROSHIP_PROJECT_SCHEMA__", "public", "service_authn"] }
 
 [[grant]]
 key = "safety.destructive_ops"

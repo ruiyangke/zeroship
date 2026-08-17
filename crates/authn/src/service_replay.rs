@@ -45,12 +45,17 @@ use zeroship_core::service_assertion::{ClaimFuture, ReplayClaim, ReplayStore, Re
 /// condition whether or not a row is returned. It needs select, insert and
 /// update; the sweep below needs select and delete. All four are granted in
 /// `db/migrations-ts/20260816000100_service_assertion_replay.ts`.
-const CLAIM_SQL: &str = "INSERT INTO zeroship.service_assertion_replay (replay_key, expires_at) \
+///
+/// The table is in `service_authn`, not `zeroship`, and every statement here is
+/// schema-qualified because no role carries that schema on its `search_path`.
+const CLAIM_SQL: &str =
+    "INSERT INTO service_authn.service_assertion_replay (replay_key, expires_at) \
      VALUES ($1, to_timestamp($2::double precision)) \
      ON CONFLICT (replay_key) DO UPDATE SET expires_at = excluded.expires_at \
      WHERE service_assertion_replay.expires_at <= now()";
 
-const PURGE_SQL: &str = "DELETE FROM zeroship.service_assertion_replay WHERE expires_at <= now()";
+const PURGE_SQL: &str =
+    "DELETE FROM service_authn.service_assertion_replay WHERE expires_at <= now()";
 
 /// Render a driver error with the server's own words.
 ///
@@ -69,12 +74,16 @@ fn describe(error: &compio_postgres::Error) -> String {
     )
 }
 
-/// A [`ReplayStore`] backed by `zeroship.service_assertion_replay`.
+/// A [`ReplayStore`] backed by `service_authn.service_assertion_replay`.
 ///
 /// The table is established by
 /// `db/migrations-ts/20260816000100_service_assertion_replay.ts`. This type
 /// never creates it: a service that could `CREATE TABLE` would hold a privilege
 /// the role split exists to withhold.
+///
+/// It lives in `service_authn` rather than the platform schema because the
+/// worker writes here - a callee that verifies an assertion must record its
+/// `jti` - and the worker holds no write privilege anywhere in `zeroship`.
 #[derive(Debug)]
 pub struct PostgresReplayStore<C> {
     client: C,
