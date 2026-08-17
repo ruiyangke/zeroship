@@ -660,6 +660,7 @@ pub struct ServiceAssertionVerifier {
     replay: Arc<dyn ReplayStore>,
     max_lifetime: Duration,
     leeway: Duration,
+    store_skew: Duration,
 }
 
 impl fmt::Debug for ServiceAssertionVerifier {
@@ -669,6 +670,7 @@ impl fmt::Debug for ServiceAssertionVerifier {
             .field("bundle", &self.bundle)
             .field("max_lifetime", &self.max_lifetime)
             .field("leeway", &self.leeway)
+            .field("store_skew", &self.store_skew)
             .finish_non_exhaustive()
     }
 }
@@ -686,6 +688,7 @@ impl ServiceAssertionVerifier {
             replay,
             max_lifetime: MAX_ASSERTION_LIFETIME,
             leeway: CLOCK_SKEW_TOLERANCE,
+            store_skew: MAX_REPLAY_STORE_CLOCK_SKEW,
         }
     }
 
@@ -825,13 +828,20 @@ impl IdentityVerifier for ServiceAssertionVerifier {
                 }
             };
 
-            // Retention runs to `exp` plus the same skew the acceptance window
-            // uses, so a claim is never evicted while the assertion it covers
-            // can still be accepted. A shorter TTL would make the assertion
-            // replayable the moment the record went away.
+            // Retention runs past the last instant ANY clock still accepts the
+            // assertion. Two clocks are involved and they are not the same one:
+            // acceptance is decided here, where the last accepting instant is
+            // `exp + leeway`, and reclaimability is decided by the store, which
+            // may be running up to `store_skew` ahead. Retaining to exactly
+            // `exp + leeway` therefore leaves a window of `store_skew` in which
+            // the row is already reclaimable and this verifier still says yes -
+            // a replay admitted. See [`MAX_REPLAY_STORE_CLOCK_SKEW`].
             let retain_until = UNIX_EPOCH
                 + Duration::from_secs(
-                    u64::try_from(claims.exp).unwrap_or(0).saturating_add(self.leeway.as_secs()),
+                    u64::try_from(claims.exp)
+                        .unwrap_or(0)
+                        .saturating_add(self.leeway.as_secs())
+                        .saturating_add(self.store_skew.as_secs()),
                 );
             // Scoped by issuer so one service cannot burn another service's
             // `jti`, and so the store is safe to share across callees.
