@@ -423,7 +423,8 @@ mod tests {
     use crate::config::{Secret, SourceKind};
 
     use super::{
-        decoded_master_key_len, is_loopback_url, parse_secret_ref, require_nonempty,
+        decoded_master_key_len, enforce_owner_only, is_loopback_url, parse_secret_ref,
+        read_secret_file, require_nonempty,
         validate_platform_mint_key, validate_secret_material,
         resolve_secret, validate_master_key_material, validate_pairwise_salt, validate_secret_ref,
         validate_stash_key, validate_worker_key, SecretError, SecretRef, KNOWN_WEAK_MASTER_KEYS,
@@ -847,6 +848,100 @@ mod tests {
                 other => panic!("expected Malformed (resolve) for {bad:?}, got {other:?}"),
             }
         }
+    }
+
+    /// THE READ-SIDE DEFECT. Nothing in this platform permission-checked a
+    /// secret file on READ. `zeroship dev init` writes 0600 and no later reader
+    /// re-verified it, so a chmod, a restore from backup, a checkout, or a
+    /// docker bind mount with permissive host modes silently downgraded every
+    /// credential in the deployment with no signal at all.
+    ///
+    /// The policy is REFUSE, not warn. It is what ssh does with a private key,
+    /// it is what the two loaders in this tree that already check
+    /// (`crates/gateway/src/signing.rs` and `crates/auth/src/oidc/refresh.rs`,
+    /// both `mode & 0o077 != 0`) already do, and a warning in a boot log is a
+    /// signal nobody reads.
+    #[cfg(unix)]
+    #[test]
+    fn a_group_or_world_accessible_secret_file_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = std::env::temp_dir().join(format!("zs_secret_mode_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("tempdir");
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(dir.clone());
+
+        let write = |name: &str, mode: u32| -> String {
+            let path = dir.join(name);
+            std::fs::write(&path, b"file-secret-value\n").expect("write secret");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))
+                .expect("chmod");
+            path.to_str().expect("utf8 path").to_owned()
+        };
+
+        // Every mode that lets a second local account read the credential.
+        for mode in [0o644, 0o640, 0o604, 0o666, 0o660, 0o606, 0o700 | 0o004] {
+            let path = write(&format!("insecure_{mode:o}"), mode);
+            match read_secret_file(&path) {
+                Err(SecretError::InsecurePermissions { path: p, mode: m }) => {
+                    assert_eq!(p, path);
+                    assert_eq!(m & 0o777, mode, "the refusal must report the real mode");
+                }
+                other => panic!("mode {mode:o} must be refused, got {other:?}"),
+            }
+        }
+
+        // THE ONE-VARIABLE PARTNER: the same file, the same content, the same
+        // reader, only the mode differs - and owner-only is accepted with the
+        // contents intact. Without this the loop above would also pass if
+        // `read_secret_file` had simply started failing on everything.
+        let ok = write("owner_only", 0o600);
+        assert_eq!(read_secret_file(&ok).expect("0600 is accepted"), "file-secret-value");
+        let ok_x = write("owner_only_exec", 0o700);
+        assert_eq!(read_secret_file(&ok_x).expect("0700 is accepted"), "file-secret-value");
+
+        // The refusal reaches the two public entry points, not just the helper.
+        let insecure = write("insecure_via_urn", 0o644);
+        assert!(matches!(
+            resolve_secret(&format!("urn:zeroship:file:{insecure}")),
+            Err(SecretError::InsecurePermissions { .. })
+        ));
+
+        // Does NOT cover the DIRECTORY holding the file: a 0600 secret under a
+        // 0777 directory is still accepted here, because directory mode governs
+        // rename/unlink rather than read of an existing file.
+    }
+
+    /// THE TRAP. A mode check that quietly does nothing where the mode cannot
+    /// be determined is worse than no check, because it reads as coverage.
+    /// `enforce_owner_only` therefore FAILS CLOSED on `None` - the value the
+    /// non-unix arm of `file_mode` produces - rather than returning `Ok`.
+    ///
+    /// The decision is split out from the platform layer precisely so this arm
+    /// is reachable from a unix test run. Every other permission check in this
+    /// tree has a `#[cfg(not(unix))] fn ... { Ok(()) }` arm that nothing
+    /// exercises; this one is asserted.
+    #[test]
+    fn an_undeterminable_mode_fails_closed() {
+        match enforce_owner_only("/some/secret", None) {
+            Err(SecretError::UndeterminableMode { path }) => assert_eq!(path, "/some/secret"),
+            other => panic!("an undeterminable mode must be refused, got {other:?}"),
+        }
+
+        // The one-variable partners: same call, same path, only the mode
+        // differs. A determinable owner-only mode passes and a determinable
+        // group-readable mode is refused, so the assertion above cannot be
+        // passing because the function refuses everything.
+        enforce_owner_only("/some/secret", Some(0o100_600)).expect("owner-only passes");
+        assert!(matches!(
+            enforce_owner_only("/some/secret", Some(0o100_640)),
+            Err(SecretError::InsecurePermissions { .. })
+        ));
     }
 
     #[test]
