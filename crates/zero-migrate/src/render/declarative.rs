@@ -1193,7 +1193,25 @@ fn sqlite_auto_increment_identity_pk(c: &ColumnSnapshot, inline_pk: bool) -> boo
         )
 }
 
-fn column_type_for_render(c: &ColumnSnapshot, dialect: SqlDialect, inline_pk: bool) -> String {
+/// Whether `data_type` is one of the three types PostgreSQL lets an IDENTITY
+/// column have.
+///
+/// MEASURED on PostgreSQL 18.4, and the set is exactly three: `numeric(10,0)` is
+/// refused, and so is a DOMAIN over `integer` — the server checks the type itself,
+/// not what it is built on. So this compares the catalog spelling the snapshot
+/// carries rather than trying to reason about a type's underlying family.
+pub(crate) fn pg_identity_type(data_type: &str) -> bool {
+    matches!(
+        data_type.trim().to_ascii_lowercase().as_str(),
+        "smallint" | "integer" | "bigint" | "int2" | "int4" | "int8"
+    )
+}
+
+pub(crate) fn column_type_for_render(
+    c: &ColumnSnapshot,
+    dialect: SqlDialect,
+    inline_pk: bool,
+) -> String {
     if let Some(ty) = &c.ddl_type_override {
         ty.clone()
     } else if matches!(c.case_sensitive, Some(false)) && c.data_type.eq_ignore_ascii_case("text") {
@@ -4846,6 +4864,30 @@ pub enum DeclarativeError {
         /// Which facet moved, so the message names the change and not just the site.
         change: &'static str,
     },
+    /// A declared IDENTITY column's type moved off the three types PostgreSQL lets
+    /// an identity column have.
+    ///
+    /// The differ's half of
+    /// [`IrLowerError::IdentityColumnTypeUnsupported`](crate::render::lower::IrLowerError),
+    /// refused for the same measured reason: the server answers `identity column
+    /// type must be smallint, integer, or bigint` and rejects the `ALTER` outright,
+    /// so a plan carrying it dies partway through applying. Widening and narrowing
+    /// WITHIN the three stay legal and are not refused here.
+    #[error(
+        "cannot change column {table}.{column} to {to_type}: it is an IDENTITY column \
+         and PostgreSQL confines one to smallInt, int or bigInt (`identity column type \
+         must be smallint, integer, or bigint`). The ALTER is refused by the server, so \
+         the migration would fail partway through applying. Declare it within those \
+         three, or drop the identity property first."
+    )]
+    IdentityColumnTypeUnsupported {
+        /// The table holding the identity column.
+        table: String,
+        /// The identity column whose declared type moved.
+        column: String,
+        /// The rendered spelling of the type the declaration asked for.
+        to_type: String,
+    },
     /// A declared field used a DSL type token the differ does not map. This
     /// covers both out-of-scope parameterised/extension types
     /// (`vector`/`geoPoint`/`encrypted`) AND typos / wrong spellings
@@ -5967,6 +6009,20 @@ impl DeclarativeAuthor {
                             });
                         }
                         if lc.data_type != c.data_type || lc.case_sensitive != c.case_sensitive {
+                            // The differ's half of the identity rule. It keys on the
+                            // LIVE identity property, not the desired one: the
+                            // statement about to be rendered runs against the column
+                            // as it is now, and that is what the server checks.
+                            if lc.identity.is_some()
+                                && !pg_identity_type(&c.data_type)
+                                && self.dialect == SqlDialect::Postgres
+                            {
+                                return Err(DeclarativeError::IdentityColumnTypeUnsupported {
+                                    table: table.clone(),
+                                    column: c.name.clone(),
+                                    to_type: column_type_for_render(c, self.dialect, false),
+                                });
+                            }
                             out.push(self.render_alter_column_type(table, c));
                         }
                         if lc.nullable != c.nullable {
@@ -7825,15 +7881,36 @@ impl DeclarativeAuthor {
     /// cast may not round-trip — `double precision` → `integer` loses the
     /// fraction), so there is no structural down. A re-diff after applying it is
     /// clean because live then matches desired.
+    ///
+    /// A GENERATED column takes NO `USING`, and this is the server's rule rather
+    /// than a preference. MEASURED on PostgreSQL 18.4: the cast this method used to
+    /// attach unconditionally is answered with `cannot specify USING when altering
+    /// type of generated column` — for `int → bigint` as much as for anything else,
+    /// so the clause made even the otherwise-legal widening undeployable. WITHOUT
+    /// it the same `ALTER` is ACCEPTED and `pg_attribute.attgenerated` survives:
+    /// the server recomputes the expression under the new type, which is exactly
+    /// why it will not take a cast of the old value. Dropping the clause is
+    /// therefore the whole fix — refusing the op would deny a migration the
+    /// database accepts and honours.
+    ///
+    /// The predicate is [`is_engine_computed_column`], the same one the SQLite
+    /// rebuild uses to keep a generated column out of its value-copy list, so both
+    /// carriers count: the emission body (`generated`, from the descriptor compiler
+    /// and the fold) and the structural kind (`generated_kind`, from the fold and
+    /// the PostgreSQL catalog read).
     fn render_alter_column_type(&self, table: &str, c: &ColumnSnapshot) -> Migration {
         let ty = column_type_for_render(c, self.dialect, false);
+        let using = if is_engine_computed_column(c) {
+            String::new()
+        } else {
+            format!(" USING {}::{}", quote_ident(&c.name), ty)
+        };
         let up = format!(
-            "ALTER TABLE {} ALTER COLUMN {} TYPE {} USING {}::{}",
+            "ALTER TABLE {} ALTER COLUMN {} TYPE {}{}",
             self.qualified(table),
             quote_ident(&c.name),
             ty,
-            quote_ident(&c.name),
-            ty,
+            using,
         );
         self.make(
             &format!("alter_column_type_{table}_{}", c.name),

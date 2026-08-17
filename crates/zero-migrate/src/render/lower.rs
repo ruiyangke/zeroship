@@ -354,6 +354,121 @@ pub struct LiveSchema {
     /// text, a TypeID (and which prefix), or a ULID. The ordered-envelope lowerer
     /// advances it from each resolved IR artifact before lowering the next one.
     pub logical_columns: crate::model::validate::LogicalColumnContracts,
+    /// Generation contracts for columns THIS ENVELOPE has declared, keyed by
+    /// `(table, column)` — the half of [`Self::column_generation`] no catalog can
+    /// answer yet.
+    ///
+    /// WHAT THIS ADDS OVER [`Self::table_snapshots`], measured rather than assumed,
+    /// because the two overlap and the overlap is not the point. The lower's
+    /// `createTable` arm ALREADY publishes the whole desired `TableSnapshot` into
+    /// `table_snapshots` as it lowers, so a create-then-retype envelope is answered
+    /// by the live map even with no live database. `addColumn` publishes NOTHING —
+    /// and neither do `dropColumn`, `renameColumn`, `renameTable` or `dropTable`,
+    /// each of which leaves `table_snapshots` describing a shape the envelope has
+    /// already moved past. Neutering this map alone leaves every create-then-retype
+    /// test passing and fails exactly one: an identity column ADDED and then
+    /// retyped, which lowered an `ALTER` PostgreSQL refuses.
+    ///
+    /// So the redundancy for `createTable` is real and deliberate: both sources
+    /// derive the same two bits from the same authored `IrColumn`, and keeping the
+    /// declared side complete is what lets [`Self::column_generation`] state one
+    /// rule ("declared, else live") instead of a per-op rule about which map
+    /// happens to know.
+    ///
+    /// It carries only what an op DECLARED, never what one inferred, and it is
+    /// advanced by [`Self::advance_declared_column_generation`] as each op lowers —
+    /// so a column dropped and re-added in the same envelope reads as the shape the
+    /// LAST declaration gave it, not the first.
+    pub declared_column_generation: std::collections::BTreeMap<(String, String), ColumnGeneration>,
+}
+
+/// The two column facets PostgreSQL enforces when a column's TYPE changes, as
+/// distinct from the facets it merely carries across the change.
+///
+/// Both are spelled `GENERATED` in DDL and neither is an ordinary column property:
+/// each makes the server rather than a writer decide the column's values, and each
+/// puts its own rule on `ALTER COLUMN … TYPE`. They are modelled together because
+/// the retype seam has to ask both questions about the same column at the same
+/// moment, and because a column can be neither but never both.
+///
+/// This is deliberately NOT the expression or the sequence options: those are
+/// emission detail the retype does not consult. Only the two bits the server's
+/// rules key on are here, so a producer that knows a column is generated without
+/// being able to render its expression can still answer honestly.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ColumnGeneration {
+    /// `GENERATED { ALWAYS | BY DEFAULT } AS IDENTITY`. PostgreSQL confines such a
+    /// column to `smallint` / `integer` / `bigint` and refuses any other target
+    /// outright (`identity column type must be smallint, integer, or bigint`) — a
+    /// domain over `integer` included, measured.
+    pub identity: bool,
+    /// `GENERATED ALWAYS AS (expr) { STORED | VIRTUAL }`, carrying the STORAGE the
+    /// producer reported. PostgreSQL retypes such a column happily but refuses a
+    /// `USING` clause on it (`cannot specify USING when altering type of generated
+    /// column`), because it recomputes the expression under the new type instead of
+    /// casting the stored value.
+    ///
+    /// `None` means NOT generated. It is never
+    /// `Some(GeneratedKindSnapshot::NotGenerated)`: the storage variant is
+    /// meaningful only once the column is known to be generated at all, and
+    /// collapsing the two spellings of "no" keeps a reader from having to ask which
+    /// one a producer meant.
+    pub generated: Option<crate::model::snapshot::GeneratedKindSnapshot>,
+}
+
+impl ColumnGeneration {
+    /// The contract a column snapshot records.
+    ///
+    /// Both facets come from the carriers PostgreSQL introspection fills in
+    /// (`pg_attribute.attidentity` and `attgenerated`) and the offline fold sets
+    /// alongside them, so a column reaches this from a live catalog and from a
+    /// folded history by the same route.
+    ///
+    /// The generated half asks [`is_engine_computed_column`] first — the predicate
+    /// the SQLite rebuild already uses, so both carriers count — and only then
+    /// picks which storage to report, preferring the structural `generated_kind`
+    /// over the emission body's `stored` flag because that is the one a catalog
+    /// read populates.
+    ///
+    /// [`is_engine_computed_column`]: crate::render::declarative::is_engine_computed_column
+    fn of_snapshot(column: &crate::model::snapshot::ColumnSnapshot) -> Self {
+        use crate::model::snapshot::GeneratedKindSnapshot;
+        let generated = if crate::render::declarative::is_engine_computed_column(column) {
+            Some(match column.generated_kind {
+                Some(kind @ (GeneratedKindSnapshot::Stored | GeneratedKindSnapshot::Virtual)) => {
+                    kind
+                }
+                _ if column.generated.as_ref().is_some_and(|g| g.stored) => {
+                    GeneratedKindSnapshot::Stored
+                }
+                _ => GeneratedKindSnapshot::Virtual,
+            })
+        } else {
+            None
+        };
+        Self {
+            identity: column.identity.is_some(),
+            generated,
+        }
+    }
+
+    /// The contract an authored column DECLARES, for a column no catalog has seen.
+    fn of_declaration(
+        identity: Option<crate::model::ir::IdentityCol>,
+        generated: Option<&crate::model::ir::GeneratedCol>,
+    ) -> Self {
+        use crate::model::snapshot::GeneratedKindSnapshot;
+        Self {
+            identity: identity.is_some(),
+            generated: generated.map(|generated| {
+                if generated.stored {
+                    GeneratedKindSnapshot::Stored
+                } else {
+                    GeneratedKindSnapshot::Virtual
+                }
+            }),
+        }
+    }
 }
 
 impl LiveSchema {
@@ -392,6 +507,7 @@ impl LiveSchema {
             triggers: live.triggers,
             schemas: live.schemas,
             logical_columns: crate::model::validate::LogicalColumnContracts::new(),
+            declared_column_generation: std::collections::BTreeMap::new(),
         }
     }
 
@@ -416,6 +532,7 @@ impl LiveSchema {
             triggers: std::collections::BTreeMap::new(),
             schemas: std::collections::BTreeMap::new(),
             logical_columns: crate::model::validate::LogicalColumnContracts::new(),
+            declared_column_generation: std::collections::BTreeMap::new(),
         }
     }
 
@@ -504,6 +621,7 @@ impl LiveSchema {
             triggers: desired.snapshot.triggers,
             schemas: desired.snapshot.schemas,
             logical_columns: crate::model::validate::LogicalColumnContracts::new(),
+            declared_column_generation: std::collections::BTreeMap::new(),
         })
     }
 
@@ -590,7 +708,148 @@ impl LiveSchema {
             triggers: live.triggers,
             schemas: live.schemas,
             logical_columns: crate::model::validate::LogicalColumnContracts::new(),
+            declared_column_generation: std::collections::BTreeMap::new(),
         })
+    }
+
+    /// Whether `table`.`column` is an identity column, a generated column, or
+    /// neither — over BOTH routes a generation contract can reach the lower.
+    ///
+    /// [`Self::declared_column_generation`] is consulted FIRST because it is the
+    /// more recent of the two: it records what an op in the envelope being lowered
+    /// declared, which is by definition newer than anything the catalog holds. Only
+    /// then does this fall back to [`Self::table_snapshots`], where PostgreSQL
+    /// introspection records `attidentity` and `attgenerated` for a column an
+    /// EARLIER migration created — the ordinary case, and the one an
+    /// envelope-only replay cannot see at all.
+    ///
+    /// An unknown column reads as neither. That is the honest default and not a
+    /// fail-open: every rule keyed on this answer is a rule that RESTRICTS what
+    /// a retype may do, so treating an unknown column as ordinary preserves
+    /// exactly the behaviour that existed before this facet, while a column the
+    /// engine really does know about gets the server's rule applied. The op's own
+    /// existence guard, not this map, is what proves the column is there.
+    #[must_use]
+    pub fn column_generation(&self, table: &str, column: &str) -> ColumnGeneration {
+        if let Some(declared) = self
+            .declared_column_generation
+            .get(&(table.to_string(), column.to_string()))
+        {
+            return *declared;
+        }
+        self.table_snapshots
+            .get(table)
+            .and_then(|snapshot| snapshot.columns.iter().find(|c| c.name == column))
+            .map(ColumnGeneration::of_snapshot)
+            .unwrap_or_default()
+    }
+
+    /// Record what one op DECLARES about its columns' generation contracts, so a
+    /// later op in the same envelope can be decided against it.
+    ///
+    /// Called as each op lowers rather than over the whole envelope up front,
+    /// because the answer is positional: a column dropped and re-added in one
+    /// envelope has two different contracts at two different points in the same op
+    /// list, and only the one in force where the retype sits is the right one.
+    ///
+    /// The lifecycle ops are here for the same reason: a table renamed out from
+    /// under its own declarations would leave them keyed on a name nothing refers
+    /// to any more, and a dropped table's would answer for a table that has to be
+    /// re-created before it can be retyped. `setColumnType` itself deliberately
+    /// records NOTHING: measured on PostgreSQL 18.4, a retype leaves both
+    /// `attidentity` and `attgenerated` exactly as they were, so the contract in
+    /// force after it is the one that was in force before it.
+    ///
+    /// `dialect` selects which `dialectal` leg is descended, through the fold's own
+    /// selector rather than a second own-then-default rule written here. A leg that
+    /// does not run against this target declares nothing, and recording its columns
+    /// would answer for a table it never creates. The IR lower reaches this only
+    /// with already-selected inner ops, so the descent is the preview's path; both
+    /// callers get the same answer either way.
+    pub(crate) fn advance_declared_column_generation(&mut self, op: &Op, dialect: SqlDialect) {
+        if let Op::Dialectal {
+            default,
+            pg,
+            sqlite,
+            mysql,
+        } = op
+        {
+            if let Some(leg) =
+                crate::render::fold::selected_dialectal_leg(dialect, default, pg, sqlite, mysql)
+            {
+                for inner in leg {
+                    self.advance_declared_column_generation(inner, dialect);
+                }
+            }
+            return;
+        }
+        let mut declare = |table: &str, column: &str, generation: ColumnGeneration| {
+            self.declared_column_generation
+                .insert((table.to_string(), column.to_string()), generation);
+        };
+        match op {
+            Op::CreateTable { name, columns, .. } => {
+                for column in columns {
+                    declare(
+                        name,
+                        &column.name,
+                        ColumnGeneration::of_declaration(
+                            column.identity,
+                            column.generated.as_ref(),
+                        ),
+                    );
+                }
+            }
+            Op::AddColumn {
+                table,
+                column,
+                generated,
+                identity,
+                ..
+            } => declare(
+                table,
+                column,
+                ColumnGeneration::of_declaration(*identity, generated.as_ref()),
+            ),
+            Op::DropColumn { table, column, .. } => {
+                self.declared_column_generation
+                    .remove(&(table.clone(), column.clone()));
+            }
+            Op::RenameColumn {
+                table, from, to, ..
+            } => {
+                let moved = self
+                    .declared_column_generation
+                    .remove(&(table.clone(), from.clone()));
+                // Only a DECLARED contract moves. A live column's contract stays
+                // where `table_snapshots` holds it, under its old name — which is
+                // the pre-existing behaviour of every other live fact across a
+                // rename in this lane, not a new gap this facet opens.
+                if let Some(moved) = moved {
+                    self.declared_column_generation
+                        .insert((table.clone(), to.clone()), moved);
+                }
+            }
+            Op::RenameTable { table, to, .. } => {
+                let moved: Vec<((String, String), ColumnGeneration)> = self
+                    .declared_column_generation
+                    .range((table.clone(), String::new())..)
+                    .take_while(|((name, _), _)| name == table)
+                    .map(|(key, value)| (key.clone(), *value))
+                    .collect();
+                for ((_, column), generation) in moved {
+                    self.declared_column_generation
+                        .remove(&(table.clone(), column.clone()));
+                    self.declared_column_generation
+                        .insert((to.clone(), column), generation);
+                }
+            }
+            Op::DropTable { table, .. } => {
+                self.declared_column_generation
+                    .retain(|(name, _), _| name != table);
+            }
+            _ => {}
+        }
     }
 
     /// Advance the cumulative logical project schema through one resolved
@@ -1407,6 +1666,35 @@ pub enum IrLowerError {
          Author the change as an explicit migration with the SQL you want."
     )]
     MysqlAlterColumnUnsupported(&'static str),
+    /// A `setColumnType` on an IDENTITY column named a target PostgreSQL will not
+    /// let an identity column have.
+    ///
+    /// MEASURED on PostgreSQL 18.4 through the engine's own emitted SQL: the
+    /// server answers `identity column type must be smallint, integer, or bigint`
+    /// and refuses the `ALTER` outright. The op cleared `validate` AND `preview`
+    /// before this refusal existed, so the operator met the verdict mid-deploy,
+    /// with the migration's earlier statements already applied.
+    ///
+    /// The permitted set is exactly the server's three, and exactly them: a DOMAIN
+    /// over `integer` is refused by PostgreSQL too, measured, so it is refused
+    /// here. Widening and narrowing WITHIN the set stay legal — `int → bigint` and
+    /// `int → smallint` both apply with `attidentity` intact — because a refusal
+    /// broader than the server's would deny a migration the database honours.
+    #[error(
+        "setColumnType on {table:?}.{column:?} names {to_type}, but that column is an \
+         IDENTITY column and PostgreSQL confines one to smallInt, int or bigInt \
+         (`identity column type must be smallint, integer, or bigint`). The ALTER is \
+         refused by the server, so the migration would fail partway through applying. \
+         Retype it within those three, or drop the identity property first."
+    )]
+    IdentityColumnTypeUnsupported {
+        /// Target table.
+        table: String,
+        /// The identity column the op names.
+        column: String,
+        /// The rendered spelling of the type the op asked for.
+        to_type: String,
+    },
     /// A `createIndex` whose name already exists LIVE with a DIFFERENT shape.
     ///
     /// The emitters render `CREATE INDEX IF NOT EXISTS` whether or not the author
@@ -4352,6 +4640,12 @@ impl IrAuthor {
         // constructor-pinned `Single(project_schema)`, which stays the fail-closed
         // default.
         let confinement = confinement_scope.unwrap_or(&self.scope);
+        // What THIS op declares about its columns' generation contracts, recorded
+        // before the arms run so a `createTable` and the `setColumnType` on one of
+        // its own columns can be lowered in one envelope. No arm below reads its
+        // own op's entry, and `setColumnType` records nothing, so recording first
+        // cannot answer a question with the change the answer is about to decide.
+        live_schema.advance_declared_column_generation(op, self.dialect);
         let live_unique_indexes = live_schema.unique_indexes.clone();
         // The DDL arms advance / read the working table set under the short name
         // `live` (the name the fragment logic already uses).
@@ -5176,6 +5470,13 @@ impl IrAuthor {
                         "validated setColumnType.using reached lower",
                     ));
                 }
+                // THE COLUMN'S GENERATION CONTRACT, which the op itself does not
+                // carry: `Op::SetColumnType` names a table, a column and a target
+                // type and nothing else. Both of PostgreSQL's rules for a retype key
+                // on it, and both were unenforced until this point — each one a plan
+                // that cleared validate and preview and then died partway through
+                // apply, which is the worst failure this engine can produce.
+                let generation = live_schema.column_generation(table, column);
                 // Build the desired `ColumnSnapshot` via the SHARED builder (a
                 // one-field descriptor) so the emitted `data_type` is byte-identical
                 // to the differ's type mapping — never re-spelled.
@@ -5237,6 +5538,36 @@ impl IrAuthor {
                             )?;
                         }
                     }
+                }
+                // AN IDENTITY COLUMN may only become one of PostgreSQL's three
+                // identity types. Refused here, after the named-type arm, so the
+                // spelling in the message is the one the statement would have
+                // carried. See `IrLowerError::IdentityColumnTypeUnsupported` for the
+                // server's own words and for why the permitted set is exactly three.
+                if generation.identity
+                    && !matches!(to_type, ColType::SmallInt | ColType::Int | ColType::BigInt)
+                {
+                    return Err(IrLowerError::IdentityColumnTypeUnsupported {
+                        table: table.clone(),
+                        column: column.clone(),
+                        to_type: crate::render::declarative::column_type_for_render(
+                            &col,
+                            self.dialect,
+                            false,
+                        ),
+                    });
+                }
+                // A GENERATED column takes no `USING`, and the renderer decides that
+                // from the snapshot it is handed. The one this arm builds describes
+                // the TARGET type, which is all `setColumnType` carries, so the
+                // source column's generation contract has to be carried onto it
+                // explicitly — otherwise every retype looks ordinary to the renderer
+                // and the cast it emits makes even `int → bigint` undeployable.
+                // `generated_kind` is the structural half of the fact and the only
+                // half that is knowable here: the EXPRESSION stays where it is,
+                // untouched by the retype, and is deliberately not invented.
+                if let Some(kind) = generation.generated {
+                    col.generated_kind = Some(kind);
                 }
                 // setColumnType ifExists: the SOURCE column must
                 // EXIST (presence-only — an alter intentionally CHANGES the shape, so

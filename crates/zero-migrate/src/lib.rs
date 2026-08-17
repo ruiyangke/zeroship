@@ -299,8 +299,8 @@ pub use model::load::{
 // checked `MigrationIr` to migrations, reusing the SHARED snapshot-builder +
 // declarative render seam so its SQL is byte-identical to the differ's path.
 pub use render::lower::{
-    FragmentGuardDenied, GuardedFragment, IrAuthor, IrGuardedLowerError, IrLowerError, LiveSchema,
-    LoadAndLowerError, LoadAndLowerGuardedError, LoweredArtifact,
+    ColumnGeneration, FragmentGuardDenied, GuardedFragment, IrAuthor, IrGuardedLowerError,
+    IrLowerError, LiveSchema, LoadAndLowerError, LoadAndLowerGuardedError, LoweredArtifact,
 };
 // The closed expression AST the IR's transform/predicate positions
 // carry. Constructed in JS, serialized as data, NEVER parsed from text.

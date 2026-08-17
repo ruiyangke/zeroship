@@ -112,6 +112,10 @@ fn live_schema_for(descriptors: &[CollectionDescriptor]) -> LiveSchema {
         sqlite_schemas: desired.sqlite_schemas,
         table_ownership,
         logical_columns: Default::default(),
+        // No op in this fixture declares an identity or generated column, so the
+        // retype seam's generation contracts start empty here exactly as they do
+        // for a unit lower with no live catalog.
+        declared_column_generation: Default::default(),
     }
 }
 

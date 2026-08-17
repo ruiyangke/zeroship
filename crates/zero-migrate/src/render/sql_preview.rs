@@ -446,8 +446,19 @@ fn render_ir_envelope_rendered(
 /// `BackfillCursorUnavailable` is the second kind. It is only ever raised when the
 /// cursor table's snapshot IS known, so reaching it means the checker had the
 /// facts and the answer was no.
+///
+/// `IdentityColumnTypeUnsupported` is the third, and reaches this list for the
+/// same reason: it is raised only when the column's identity contract IS known, so
+/// the checker had the facts and PostgreSQL's answer is already decided. Labeling
+/// it would turn `identity column type must be smallint, integer, or bigint` — the
+/// verdict apply delivers mid-deploy — into a line of prose the migration passes
+/// lint with.
 const fn is_author_error(error: &IrLowerError) -> bool {
-    matches!(error, IrLowerError::BackfillCursorUnavailable { .. })
+    matches!(
+        error,
+        IrLowerError::BackfillCursorUnavailable { .. }
+            | IrLowerError::IdentityColumnTypeUnsupported { .. }
+    )
 }
 
 /// Per-op lowering for the IR envelope path: lower each op in isolation so a single
@@ -499,6 +510,14 @@ fn render_ir_ops(
         // dependent operations still degrade to a labeled preview line.
         let _ = working_live.advance_logical_columns(&one, dialect, project_schema, None);
         advance_preview_table_presence(op, dialect, &mut working_live.tables);
+        // The same reason, for the same envelope: a `createTable` here is what tells
+        // a later `setColumnType` that the column it names is an identity or a
+        // generated column, and those two facts decide whether the op is REFUSED and
+        // whether the rendered statement carries a `USING` cast. Without this the
+        // preview would print an ordinary-column retype for a shape apply lowers
+        // differently, which is exactly the preview/apply divergence this function's
+        // per-op tolerance is careful not to introduce.
+        working_live.advance_declared_column_generation(op, dialect);
     }
     Ok(out)
 }
