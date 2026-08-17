@@ -381,8 +381,6 @@ impl ServiceEndpoint {
 pub mod endpoints {
     use super::ServiceEndpoint;
 
-    pub const AUTH_PLATFORM_TOKEN: ServiceEndpoint =
-        ServiceEndpoint::new("auth", "POST", "/internal/platform-token");
     pub const MIGRATED_APPLY_MIGRATIONS: ServiceEndpoint = ServiceEndpoint::new(
         "migrated",
         "POST",
@@ -468,7 +466,6 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
             ServiceAuthorization::new(
                 principal("svc/control"),
                 &[
-                    endpoints::AUTH_PLATFORM_TOKEN,
                     // Migrated also requires delegated creator AppsDeploy.
                     endpoints::MIGRATED_APPLY_MIGRATIONS,
                     endpoints::GATEWAY_WORKFLOW_ADVANCE,

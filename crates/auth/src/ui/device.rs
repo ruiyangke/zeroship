@@ -1,24 +1,19 @@
 //! `/device` GET + POST handlers for OAuth 2.0 Device Authorization Grant
 //! user-code entry (RFC 8628).
 //!
-//! This page is the human end of BOTH device flows that share
-//! `zeroship.device_grants`, and it dispatches on the pending row's `provider`
-//! rather than on how the process is configured:
+//! This page is the human end of the OP's own device grant: the browser types
+//! the code the CLI printed, the signed-in user is bound to the pending row,
+//! and the CLI redeems it at `/oauth2/token`.
 //!
-//! * an `op` row is the auth service's own grant, redeemed at `/oauth2/token`;
-//! * a `platform` row is control's deploy grant, the one `zeroship login`
-//!   drives, redeemed at control's `/api/device/token`.
-//!
-//! Approval is the same write for both - bind the signed-in user to the row -
-//! because `principal_id` is a `zeroship.users` id in both. That is what lets
-//! this page approve a control-plane grant while holding no control credential.
-//!
-//! It did not used to. The page rendered the control-approving form only under
-//! `AuthProviderKind::Supabase` and otherwise drove the OP grant, which filtered
-//! `provider = 'op'`; control writes `provider = 'platform'`. On the shipped
-//! platform-only default the code `zeroship login` printed was invisible to the
-//! page `zeroship login` told the human to open, and every attempt read
-//! "invalid or expired code".
+//! It used to serve a second audience. Control ran a parallel device flow
+//! whose rows carried `provider = 'platform'`, and under
+//! `AuthProviderKind::Supabase` this page rendered a GoTrue sign-in that
+//! posted the resulting bearer to control's `/api/device/approve` instead of
+//! writing the row itself. Control's flow is gone - `zeroship login` drives
+//! the OP grant - so that page had nothing left to post to and was removed
+//! with it. Supabase survives as an upstream social login
+//! (`docs/decisions/2026-06-30-self-contained-auth-replace-hydra.md`, line 13);
+//! what retired is its DEPLOY path, which line 32 of the same ADR supersedes.
 
 use std::sync::Arc;
 
@@ -38,9 +33,8 @@ use crate::oidc::device_token::{self, DeviceApproval};
 use crate::ratelimit::{self, Bucket, RateLimitDecision};
 use crate::sessions::login as session_cookie;
 use crate::store::sessions;
-use crate::ui::{DevicePage, DeviceScopeView, SupabaseDevicePage};
+use crate::ui::{DevicePage, DeviceScopeView};
 use zeroship_authz::Scope;
-use zeroship_core::config::AuthProviderKind;
 
 #[derive(Debug, Deserialize)]
 pub struct DeviceForm {
@@ -68,10 +62,6 @@ pub async fn get(
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
-    if cfg.auth_provider() == AuthProviderKind::Supabase {
-        let user_code = query.user_code.as_deref().unwrap_or("").trim();
-        return render_supabase_form(cfg.as_ref(), user_code, None, StatusCode::OK);
-    }
     let user_code = query.user_code.as_deref().unwrap_or("").trim();
     if user_code.is_empty() {
         return render_form("", None, StatusCode::OK, None);
@@ -127,7 +117,7 @@ async fn rate_limit_failed_get_user_code_attempt(
     rate_limit_failed_user_code_attempt(db, req, session.as_ref()).await
 }
 
-/// `/device` POST — approve a pending device grant, of either flow. Anonymous
+/// `/device` POST - approve a pending device grant. Anonymous
 /// browsers are sent into the normal sign-in route; already-signed-in browsers
 /// complete the matching grant.
 #[allow(clippy::future_not_send)]
@@ -137,15 +127,6 @@ pub async fn post(
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
-    if cfg.auth_provider() == AuthProviderKind::Supabase {
-        return render_supabase_form(
-            cfg.as_ref(),
-            form.user_code.trim(),
-            Some("device approval is completed in the browser"),
-            StatusCode::METHOD_NOT_ALLOWED,
-        );
-    }
-
     // CSRF double-submit — enforced FIRST, before any state change, exactly
     // like the login/signup/consent/reset siblings.
     if !csrf_valid(&req, &form) {
@@ -459,104 +440,6 @@ fn render_device_approved() -> HttpResponse {
         )
 }
 
-fn render_supabase_form(
-    cfg: &AuthConfig,
-    user_code: &str,
-    error: Option<&str>,
-    status: StatusCode,
-) -> HttpResponse {
-    let script_nonce = csrf::generate_token();
-    let supabase_auth_url = format!(
-        "{}/auth/v1",
-        cfg.supabase_url().unwrap_or("").trim_end_matches('/')
-    );
-    let control_approve_url = format!(
-        "{}/api/device/approve",
-        cfg.control_url().trim_end_matches('/')
-    );
-    let supabase_auth_url_json = json_for_script(&supabase_auth_url);
-    let supabase_anon_key_json = json_for_script(cfg.supabase_anon_key().unwrap_or(""));
-    let control_approve_url_json = json_for_script(&control_approve_url);
-    let page = SupabaseDevicePage {
-        user_code,
-        error,
-        script_nonce: &script_nonce,
-        supabase_auth_url_json: &supabase_auth_url_json,
-        supabase_anon_key_json: &supabase_anon_key_json,
-        control_approve_url_json: &control_approve_url_json,
-    };
-    let body = page
-        .render()
-        .unwrap_or_else(|_| "<h1>device authorization</h1>".to_string());
-    let mut resp = HttpResponse::build(status);
-    resp.content_type("text/html; charset=utf-8");
-    let csp = supabase_device_csp(&script_nonce, &supabase_auth_url, &control_approve_url);
-    if let Ok(value) = HeaderValue::from_str(&csp) {
-        resp.header("Content-Security-Policy", value);
-    } else {
-        resp.header(
-            "Content-Security-Policy",
-            headers::content_security_policy_with_script_nonce(&script_nonce),
-        );
-    }
-    resp.body(body)
-}
-
-fn json_for_script(value: &str) -> String {
-    serde_json::to_string(value)
-        .expect("serialize script string")
-        .replace('<', "\\u003c")
-        .replace('>', "\\u003e")
-        .replace('&', "\\u0026")
-        .replace('\u{2028}', "\\u2028")
-        .replace('\u{2029}', "\\u2029")
-}
-
-fn supabase_device_csp(nonce: &str, supabase_auth_url: &str, control_approve_url: &str) -> String {
-    let mut connect = vec!["'self'".to_string()];
-    for source in [
-        csp_source_origin(supabase_auth_url),
-        csp_source_origin(control_approve_url),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        if !connect.iter().any(|existing| existing == &source) {
-            connect.push(source);
-        }
-    }
-    format!(
-        "default-src 'self'; \
-         script-src 'self' 'nonce-{nonce}'; \
-         style-src 'self'; \
-         img-src 'self' data: https://*.zeroship.ai \
-                       https://lh3.googleusercontent.com \
-                       https://avatars.githubusercontent.com; \
-         connect-src {}; \
-         form-action 'self'; \
-         frame-ancestors 'none'; \
-         base-uri 'none'; \
-         object-src 'none'; \
-         upgrade-insecure-requests",
-        connect.join(" ")
-    )
-}
-
-fn csp_source_origin(raw_url: &str) -> Option<String> {
-    let parsed = url::Url::parse(raw_url).ok()?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return None;
-    }
-    let host = parsed.host_str()?;
-    let host = if host.contains(':') && !host.starts_with('[') {
-        format!("[{host}]")
-    } else {
-        host.to_string()
-    };
-    let port = parsed.port().map_or_else(String::new, |port| format!(":{port}"));
-    Some(format!("{}://{}{}", parsed.scheme(), host, port))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -569,44 +452,6 @@ mod tests {
         assert!(!device_token::valid_user_code(&"A".repeat(32)));
         assert!(!device_token::valid_user_code(""));
         assert!(!device_token::valid_user_code(&"A".repeat(33)));
-    }
-
-    #[test]
-    fn supabase_device_template_renders_gotrue_approval_page() {
-        let supabase_auth_url = "https://project.supabase.test/auth/v1";
-        let control_approve_url = "https://control.zeroship.test/api/device/approve";
-        let body = SupabaseDevicePage {
-            user_code: "BCDF-GHJK-LMNP",
-            error: None,
-            script_nonce: "script-nonce",
-            supabase_auth_url_json: &json_for_script(supabase_auth_url),
-            supabase_anon_key_json: &json_for_script("anon-test-key"),
-            control_approve_url_json: &json_for_script(control_approve_url),
-        }
-        .render()
-        .expect("render supabase device template");
-        assert!(body.contains("Authorize device"), "{body}");
-        assert!(body.contains(r#"name="user_code" value="BCDF-GHJK-LMNP""#), "{body}");
-        assert!(!body.contains(r#"name="csrf""#), "{body}");
-        assert!(body.contains("https://project.supabase.test/auth/v1"), "{body}");
-        assert!(
-            body.contains("https://control.zeroship.test/api/device/approve"),
-            "{body}"
-        );
-        assert!(!body.contains("x-zeroship-csrf"), "{body}");
-        assert!(
-            !body.contains("/oauth2/device/verify"),
-            "Supabase render must not reference native device verification: {body}"
-        );
-
-        let csp = supabase_device_csp("script-nonce", supabase_auth_url, control_approve_url);
-        assert!(csp.contains("script-src 'self' 'nonce-script-nonce'"), "{csp}");
-        assert!(
-            csp.contains(
-                "connect-src 'self' https://project.supabase.test https://control.zeroship.test"
-            ),
-            "{csp}"
-        );
     }
 
     #[test]
