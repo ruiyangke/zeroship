@@ -2050,7 +2050,10 @@ async fn real_delegating_authenticator_rejects_malformed_bearer() {
         .verify_bearer("not-a-jwt", Uuid::now_v7(), Scope::AppsDeploy, "test-request-id")
         .await
         .expect_err("malformed bearer must be denied");
-    assert!(matches!(err, AuthError::Unauthorized));
+    assert!(
+        matches!(err, AuthError::Unauthorized),
+        "a malformed bearer is an authentication failure, not an infrastructure one: {err:?}"
+    );
 }
 
 /// The authz audit row records the request id the caller sent, so a denial can
