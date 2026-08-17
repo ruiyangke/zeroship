@@ -589,16 +589,16 @@ TOKEN_ISS="$(jwt_claim "$TOKEN" iss)"
   && pass "the token carries the PUBLIC issuer ($TOKEN_ISS)" \
   || fail "token iss '$TOKEN_ISS' != configured issuer '$ZEROSHIP_AUTH_PLATFORM_ISSUER'"
 
-# FINDING, asserted rather than described so it cannot rot into a claim.
-# `zeroship.principal_grants` is the entitlement store, and the OP device grant
-# does not consult it: the token above carries four resource scopes for a
-# principal that still holds zero grant rows. Control's `/api/device/token` is
-# the only writer (`identity_bridge::ensure_platform_creator_grants`), and it is
-# no longer on the login path.
+# Login is an OP-only conversation, so control has still never seen this
+# principal and the grant table is still empty. That is not the gap it used to
+# be: the token's scope is the client REGISTRATION, a coarse ceiling, and the
+# entitlement intersection happens in control at request time. The two steps
+# below are what close the loop - materialization on control's first sight of
+# the principal, then narrowing.
 GRANTS_AFTER="$(psql_q "SELECT count(*) FROM zeroship.principal_grants WHERE principal_id = '$USER_ID'")"
 [ "$GRANTS_AFTER" = "0" ] \
-  && pass "KNOWN GAP confirmed: a full-scope token was issued against 0 stored grants" \
-  || fail "grants appeared after login ($GRANTS_AFTER); the finding above is stale, re-check it"
+  && pass "login alone still writes no grants (the OP cannot; it has SELECT only)" \
+  || fail "grants appeared during login ($GRANTS_AFTER); only control may write them"
 
 # ---------------------------------------------------------------------------
 step "Deploy with that token, and serve it"
@@ -606,6 +606,16 @@ APP_ID="$(curl -sS -X POST "$CONTROL_URL/api/apps" -H "Authorization: Bearer $TO
   -H 'content-type: application/json' -d "{\"name\":\"$APP_SLUG\"}" | jget '.id')"
 [ -n "$APP_ID" ] && pass "created app $APP_SLUG ($APP_ID) with the login token" \
   || { fail "app create rejected the login token"; exit 1; }
+
+# That request was control's FIRST sight of this principal, and it had to
+# succeed against an empty grant table - an unseeded principal is treated as
+# holding the default CLI set, because intersecting with nothing would 403
+# every creator's first command. Control materializes the defaults on the way
+# through, which is what gives an operator rows to delete below.
+GRANTS_MATERIALIZED="$(psql_q "SELECT string_agg(grant_name, ',' ORDER BY grant_name) FROM zeroship.principal_grants WHERE principal_id = '$USER_ID'")"
+[ "$GRANTS_MATERIALIZED" = "apps:deploy,apps:read,apps:write,secrets:read" ] \
+  && pass "control materialized the default CLI grants on first contact" \
+  || fail "expected the four default grants after the first control request, got '$GRANTS_MATERIALIZED'"
 
 DEPLOY_OUT="$("$BIN/zeroship" deploy "$ZSHIP" --app="$APP_ID" --control="$CONTROL_URL" 2>&1)"
 DEPLOY_RC=$?
@@ -615,6 +625,30 @@ echo "-------------------------------------------------------------"
 [ "$DEPLOY_RC" = "0" ] && grep -q 'deploy_hash:' <<<"$DEPLOY_OUT" \
   && pass "zeroship deploy succeeded on the saved login credential" \
   || { fail "deploy failed (rc=$DEPLOY_RC)"; exit 1; }
+
+# The capability this harness exists to guard: an operator DELETE against
+# `zeroship.principal_grants` narrows what the credential already in the
+# creator's hand can do. No new login, no new token - the SAME saved
+# credential, which still carries `apps:deploy` in its `scope` claim, because
+# the entitlement check is control's and it reads the table per request.
+step "Revoke apps:deploy and confirm the saved credential is narrowed"
+psql_q "DELETE FROM zeroship.principal_grants WHERE principal_id = '$USER_ID' AND grant_name = 'apps:deploy'" >/dev/null
+NARROWED_OUT="$("$BIN/zeroship" deploy "$ZSHIP" --app="$APP_ID" --control="$CONTROL_URL" 2>&1)"
+NARROWED_RC=$?
+echo "--- zeroship deploy after the grant was revoked: ---"
+sed 's/^/  | /' <<<"$NARROWED_OUT"
+echo "----------------------------------------------------"
+[ "$NARROWED_RC" != "0" ] \
+  && pass "revoking apps:deploy narrowed the token already issued (rc=$NARROWED_RC)" \
+  || { fail "deploy still succeeded after apps:deploy was revoked; narrowing is not enforced"; exit 1; }
+
+# Restore it: later steps run on this same credential, and leaving it revoked
+# would make an unrelated failure look like a narrowing bug.
+psql_q "INSERT INTO zeroship.principal_grants (principal_id, grant_name) VALUES ('$USER_ID', 'apps:deploy') ON CONFLICT DO NOTHING" >/dev/null
+RESTORED="$(psql_q "SELECT count(*) FROM zeroship.principal_grants WHERE principal_id = '$USER_ID' AND grant_name = 'apps:deploy'")"
+[ "$RESTORED" = "1" ] \
+  && pass "apps:deploy restored for the remainder of the harness" \
+  || fail "could not restore apps:deploy (count=$RESTORED)"
 
 # The gateway routes by Host (`<slug>.<app-base-domain>`), and auth-probe is an
 # RPC app with no index route, so "it serves" is checked by calling a procedure

@@ -169,12 +169,44 @@ async fn guard_from_bearer(
     let Some(raw) = zeroship_core::auth::extract_bearer(header) else {
         return Ok(None);
     };
-    state
+    let verified = state
         .bearer_verifier()
         .verify_bearer(raw, request_ip, request_id)
+        .await?;
+
+    // Control's first sight of a platform-native creator. Login is an OP-only
+    // conversation now, so nothing before this point could have written the
+    // principal's grant rows - and until they exist an operator has nothing to
+    // delete, which is the whole narrowing mechanism.
+    //
+    // The request itself was already authorized against the default CLI set,
+    // so this is materialization, not authorization, and it runs at most once
+    // per principal: `ensure_platform_creator_grants` is guarded on the
+    // `zeroship.identity_links` marker, so the steady state is a pure read.
+    if verified.seed_platform_cli_grants {
+        if let Err(err) = crate::device_handlers::ensure_platform_creator_grants_committed(
+            state,
+            verified.principal_id,
+        )
         .await
-        .map(AuthzGuard::from)
-        .map(Some)
+        {
+            // Loud but non-fatal, and the two halves of that are deliberate.
+            // Failing the request would lock a creator out over a table they
+            // have never heard of, for a request the entitlement rules already
+            // permit. But while this keeps failing the marker is never written,
+            // so the principal stays on the default-set fallback and an
+            // operator's DELETE will not narrow them - which is a silent loss
+            // of the capability, hence `error` and not `warn`.
+            tracing::error!(
+                error = %err,
+                principal_id = %verified.principal_id,
+                "control: materializing default platform CLI grants failed; \
+                 operator narrowing will not take effect for this principal"
+            );
+        }
+    }
+
+    Ok(Some(AuthzGuard::from(verified)))
 }
 
 fn request_id(req: &HttpRequest) -> String {
