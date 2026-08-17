@@ -21,6 +21,13 @@ was not demonstrated by an executed end-to-end test. File references are
 scoped search and the positive route, caller, or state-machine inventory that
 was inspected; an empty search alone is never treated as proof.
 
+ONE EXCEPTION to that pinned HEAD, and it is deliberate. Section 4.1, findings
+3, 4, 16 and 30, the credential and trust-boundary tables, and every bearer list
+that used to name a personal access token were re-read against the tree AFTER
+personal access tokens were deleted, which is later than the pinned commit. Do
+not resolve their evidence at that commit - the surfaces they describe as gone
+are still present there.
+
 In diagrams, a process "holds" a secret when its configuration loads or uses
 that value. Shipped container-readable filesystem custody is broader than this
 process-level map and is called out separately in Finding 6.
@@ -2557,7 +2564,7 @@ decrypted app environment data and other broad internal Control endpoints
 (`crates/control/src/internal.rs:82-263`).
 
 This is not isolated to `control_key`. Control also forwards the creator's
-raw OAuth or PAT bearer to Migrated over an HTTP-default service URL
+raw OAuth bearer to Migrated over an HTTP-default service URL
 (`deploy/compose/docker-compose.yml:305-316`,
 `crates/control/src/migrations_api.rs:147-196`).
 
