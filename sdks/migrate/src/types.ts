@@ -1094,7 +1094,19 @@ export interface TableRuntimeOptions {
  *    the emitter; refused fail-closed rather than silently dropped).
  *  - `foreignKeys` can name one or more local columns and one or more referenced
  *    columns. Composite/non-`id` forms are PostgreSQL-only in the current engine.
- *  - `checks` lower from the closed `Expr` AST through the engine renderer.
+ *  - `checks` lower from the closed `Expr` AST through the engine renderer, and
+ *    are POSTGRES-ONLY. A table-level check on SQLite or MySQL is refused
+ *    fail-closed (`PG_ONLY_TABLE_LEVEL_CHECK`,
+ *    zero-migrate/src/model/support.rs), so an app whose dev backend is SQLite
+ *    cannot author one at all. Measured 2026-08-17 against the issue-tracker
+ *    example: even `expr: (col) => col("number").gt(0)` is refused with
+ *    `UNSUPPORTED kind=expr dialect=sqlite`. The line above said `checks`
+ *    lowered "through the engine renderer" with no carve-out, which read as a
+ *    portability the engine does not have. A COLUMN-level closed set is
+ *    portable and is the construct to reach for instead: `t.enum(name)` with a
+ *    matching `enumType(name).create({ values })` renders a native enum on
+ *    Postgres, `ENUM(...)` on MySQL, and `TEXT` + inline `CHECK (col IN (...))`
+ *    on SQLite.
  *    Partial-index `where` renders on PostgreSQL and SQLite; MySQL refuses it
  *    fail-closed because MySQL has no partial indexes.
  *  - `primaryKey` (composite) and a column's `.primaryKey()` are represented in
