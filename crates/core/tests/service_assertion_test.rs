@@ -561,10 +561,31 @@ async fn a_replay_store_that_cannot_answer_rejects_the_assertion() {
     let fixture = Fixture::with_replay_store(Arc::new(BrokenReplayStore));
     let assertion = fixture.minter.mint(&issuer(CALLEE)).expect("mint");
 
-    assert_eq!(
-        fixture.verify(&assertion).await,
-        Err(AuthError::CredentialRejected),
+    // FAIL CLOSED, and say which failure it was. The refusal is the property
+    // that matters and is asserted first; the variant is asserted because an
+    // operator paged for a store outage and one alerted on a rise in rejected
+    // credentials are looking at different incidents.
+    let outcome = fixture.verify(&assertion).await;
+    assert!(
+        outcome.is_err(),
         "a store that errored has not said the assertion is fresh"
+    );
+    assert_eq!(
+        outcome,
+        Err(AuthError::StoreUnavailable),
+        "a store outage must not be indistinguishable from a rejected credential"
+    );
+
+    // CONTROL: the same verifier shape over a store that answers refuses a
+    // REPLAY with the other variant, so the two are really distinguished and
+    // not merely renamed.
+    let working = Fixture::new();
+    let assertion = working.minter.mint(&issuer(CALLEE)).expect("mint");
+    assert!(working.verify(&assertion).await.is_ok());
+    assert_eq!(
+        working.verify(&assertion).await,
+        Err(AuthError::CredentialRejected),
+        "a replayed jti is a rejected credential, not an unavailable store"
     );
 }
 

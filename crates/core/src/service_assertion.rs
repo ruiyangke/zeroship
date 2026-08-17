@@ -36,9 +36,15 @@
 //!    within the ceiling the CALLEE sets.
 //! 7. `jti` is claimed atomically in the replay store, and the claim wins.
 //!
-//! Any failure returns [`AuthError::CredentialRejected`] and nothing else, so
-//! the error is not an oracle telling a prober which check it tripped. The
-//! reason is emitted at `debug` for operators.
+//! Every check above returns [`AuthError::CredentialRejected`] and nothing
+//! else, so the error is not an oracle telling a prober which check it tripped.
+//! The reason is emitted at `debug` for operators.
+//!
+//! The one verdict spelled differently is [`AuthError::StoreUnavailable`],
+//! raised when step 7 could not be settled at all. It is the same refusal - the
+//! request is denied - and it says nothing about which check the credential
+//! would have failed; it exists so a Postgres outage, which refuses every
+//! caller at once, is distinguishable from an attack by the operator watching.
 //!
 //! # What lives elsewhere
 //!
@@ -872,9 +878,12 @@ impl IdentityVerifier for ServiceAssertionVerifier {
                 }
                 Err(error) => {
                     // Fail closed. A store that cannot answer has not told us
-                    // the assertion is fresh.
+                    // the assertion is fresh. The verdict is the same refusal a
+                    // rejected credential gets; the ERROR differs, because a
+                    // store outage refuses every caller at once and is an
+                    // operator's problem, not an attack.
                     tracing::warn!(%error, "service assertion replay store unavailable");
-                    return Err(AuthError::CredentialRejected);
+                    return Err(AuthError::StoreUnavailable);
                 }
             }
 

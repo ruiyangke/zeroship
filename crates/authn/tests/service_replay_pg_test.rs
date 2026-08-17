@@ -454,10 +454,20 @@ async fn a_role_without_the_grant_fails_closed_rather_than_admitting_the_asserti
         .claim(&key, SystemTime::now() + Duration::from_secs(120))
         .await
         .expect_err("a role without the grant cannot claim");
-    assert!(
-        error.to_string().contains("permission denied"),
-        "the store must surface the driver's refusal, not swallow it: {error}"
-    );
+    // `compio_postgres::Error` displays a server-side failure as the bare
+    // string `db error`, so a store that forwarded `error.to_string()` would
+    // log a total inbound-auth outage as three uninformative words. Both the
+    // server's message and its SQLSTATE have to survive.
+    let rendered = error.to_string();
+    for expected in [
+        "permission denied for table service_assertion_replay",
+        "42501",
+    ] {
+        assert!(
+            rendered.contains(expected),
+            "the store must surface the driver's own {expected:?}: {rendered}"
+        );
+    }
 
     // And the verifier turns that into a refusal rather than a free pass.
     let signing = ServiceSigningKey::generate();
@@ -472,9 +482,14 @@ async fn a_role_without_the_grant_fails_closed_rather_than_admitting_the_asserti
         .expect("trust the caller's key");
     let verifier = ServiceAssertionVerifier::new(bundle, Arc::new(store));
     let observed = PeerCredentials::new(Some(assertion.as_str()), None, CALLEE);
-    assert_eq!(
-        verify_identity(&verifier, &observed).await,
-        Err(AuthError::CredentialRejected),
+    let outcome = verify_identity(&verifier, &observed).await;
+    assert!(
+        outcome.is_err(),
         "a store that could not answer has not said the assertion is fresh"
+    );
+    assert_eq!(
+        outcome,
+        Err(AuthError::StoreUnavailable),
+        "and the outage is reported as one, not as a rejected credential"
     );
 }

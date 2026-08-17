@@ -225,14 +225,39 @@ impl PresentedCredentials<'_> {
 }
 
 /// Failure to establish a service identity.
+///
+/// Every variant means the same thing to the request: it is refused. They
+/// differ in what the operator should DO about it, which is why the outage case
+/// is not folded into [`AuthError::CredentialRejected`] - a page for a database
+/// outage and an alert on a rise in rejected credentials are different
+/// responses to different incidents, and a caller that cannot tell them apart
+/// gets to choose one of them wrongly.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum AuthError {
     /// The transport supplied no non-empty bearer for the supported mechanism.
     #[error("no service credential presented")]
     NoCredentialPresented,
     /// A presented credential did not pass mechanism-specific verification.
+    ///
+    /// This is the only variant that says anything about the CREDENTIAL, and it
+    /// says exactly one thing: no. It never reports which check tripped, so it
+    /// is not an oracle for a prober.
     #[error("service credential rejected")]
     CredentialRejected,
+    /// A store the mechanism must consult before admitting a credential could
+    /// not be reached, so the credential was refused without being judged.
+    ///
+    /// FAIL CLOSED, identically to [`AuthError::CredentialRejected`]: a store
+    /// that cannot answer has not said the credential is fresh, and this
+    /// variant exists to change what the caller can OBSERVE and log, never
+    /// which requests are admitted.
+    ///
+    /// It does tell a prober that a backing store is unavailable. That is a
+    /// fact about the deployment rather than about their credential - it is
+    /// the same signal a 503 carries - and it does not narrow which check a
+    /// credential would have failed.
+    #[error("service credential store unavailable")]
+    StoreUnavailable,
 }
 
 /// The future a verifier returns from [`IdentityVerifier::verify`].
