@@ -1224,7 +1224,7 @@ mod tests {
     /// The one env-name scanner, shared with every other binary's copy of this
     /// test. Local copies would be four things to keep in step.
     use zeroship_core::config::env_like_tokens;
-    use zeroship_core::config::{GeneratedConfig, OriginScheme, Secret, SourceKind};
+    use zeroship_core::config::{GeneratedConfig, OriginScheme};
 
     static CONFIG_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
