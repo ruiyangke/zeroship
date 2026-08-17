@@ -4436,6 +4436,15 @@ pub fn fold_to_field_defs(
     // the brand cannot express, `IrColumn.references`) recovers through
     // `ir_column_to_field` and needs no lift.
     let mut fks: BTreeMap<String, Vec<RecoveredFk>> = BTreeMap::new();
+    // The named-type definitions the column types only NAME. `ColType::Enum` carries
+    // `{ name, schema }` and nothing else, so the members a `t.enum("x")` column is
+    // closed over are not on the column at all - they arrive in a separate
+    // `Op::CreateEnum`. This is the SAME registry the DDL lower
+    // (`apply_named_type_column_metadata`) and the snapshot fold
+    // (`apply_fold_named_type_column_metadata`) resolve those names through, reused
+    // rather than re-spelled so the three replays cannot disagree about which
+    // definition a name resolves to after a drop-and-recreate.
+    let mut named_types = NamedTypeRegistry::default();
 
     let replay_ops = flatten_dialectal_ops(ops, dialect)?;
     for op in replay_ops {
@@ -4459,10 +4468,9 @@ pub fn fold_to_field_defs(
                     let in_resolved_id_primary_key = idx < injected_prefix_len
                         && c.name == "id"
                         && resolved_inject.owns_id_primary_key();
-                    cols.insert(
-                        c.name.clone(),
-                        fold_create_column_to_field(c, in_resolved_id_primary_key),
-                    );
+                    let mut field = fold_create_column_to_field(c, in_resolved_id_primary_key);
+                    lift_named_enum_membership(&mut field, &c.ty, &named_types);
+                    cols.insert(c.name.clone(), field);
                 }
                 tables.insert(name.clone(), cols);
                 for c in constraints {
@@ -4577,7 +4585,7 @@ pub fn fold_to_field_defs(
                     // `mask` facets, so the reconstructed descriptor for an added vector /
                     // masked column round-trips the metric opclass / `zero-migrate:mask` mask
                     // through the offline fold.
-                    let field = ir_column_to_field(&IrColumn {
+                    let mut field = ir_column_to_field(&IrColumn {
                         name: column.clone(),
                         ty: ty.clone(),
                         nullable: *nullable,
@@ -4593,6 +4601,7 @@ pub fn fold_to_field_defs(
                         generated: generated.clone(),
                         identity: *identity,
                     });
+                    lift_named_enum_membership(&mut field, ty, &named_types);
                     cols.insert(column.clone(), field);
                 }
             }
@@ -4632,6 +4641,12 @@ pub fn fold_to_field_defs(
             } => {
                 if let Some(field) = tables.get_mut(table).and_then(|c| c.get_mut(column)) {
                     crate::render::lower::retype_field_descriptor(field, to_type);
+                    // `retype_field_descriptor` CLEARS `enum_values` - the old type's
+                    // membership is a contract over storage the column no longer has.
+                    // A retype INTO a named enum re-earns it from the target type's
+                    // own definition, so a retype to `T` and a create of `T` still
+                    // describe the same column.
+                    lift_named_enum_membership(field, to_type, &named_types);
                 }
             }
             Op::SetColumnNotNull { table, column, .. } => {
@@ -4773,6 +4788,30 @@ pub fn fold_to_field_defs(
                     }
                 }
             }
+            // THE ENUM'S MEMBERS, which no column carries.
+            //
+            // `ColType::Enum { name, schema }` is a NAME. The closed set a
+            // `t.enum("issue_status")` column is validated against arrives here, in a
+            // separate op, and used to be dropped on the catch-all - so `envDbTs`
+            // emitted `t.enum("issue_status")` while `runtimeJson`, folded from the
+            // same op stream in the same call, described the column as a bare
+            // `{"type":"string"}`. The database enforced the set (a native
+            // `CREATE TYPE` on PostgreSQL, an inlined `CHECK (... IN (...))` on SQLite,
+            // an inlined `ENUM(...)` on MySQL) and only the artifact the deployed app
+            // installs `env.db` from forgot it.
+            //
+            // Registering the definition does NOT put a CHECK in the DDL: this replay
+            // ends at `descriptor_to_sdk_schema`, and the membership becomes the wire
+            // `FieldDef`'s `enum` key. The DDL comes from `fold_ops` / the lower,
+            // which resolve the same registry into the storage each dialect wants.
+            Op::CreateEnum { name, values, .. } => {
+                named_types
+                    .create_enum(name, project_schema, values)
+                    .map_err(fold_named_type_error)?;
+            }
+            Op::DropEnum { name, .. } => {
+                named_types.drop_enum(name);
+            }
             // Every other op (DML, index, type/nullability alters, drop*) does not
             // change the reconstructed column-facet shape.
             // EXHAUSTIVE FROM HERE, and that is the point of this arm rather than a
@@ -4818,8 +4857,6 @@ pub fn fold_to_field_defs(
             | Op::Backfill { .. }
             // Named-type and vendor objects: they live outside the per-table
             // column map this replay builds.
-            | Op::CreateEnum { .. }
-            | Op::DropEnum { .. }
             | Op::CreateDomain { .. }
             | Op::DropDomain { .. }
             | Op::CreateSchema { .. }
@@ -4894,6 +4931,55 @@ pub fn fold_to_field_defs(
         );
     }
     Ok(out)
+}
+
+/// Lift a NAMED enum type's members onto the column descriptor that only names it.
+///
+/// # Why this is not a line in `col_type_to_token`
+///
+/// `ColType::Enum { name, schema }` carries the name and nothing else, so no
+/// function whose whole input is one [`IrColumn`] can populate `enum_values` - the
+/// members live in [`Op::CreateEnum`]. This runs where the op stream is in scope
+/// and the registry has already seen the definition.
+///
+/// # Absent beats wrong
+///
+/// An unresolvable name leaves `enum_values` untouched rather than guessing. The
+/// case is real and dialect-specific: `genArtifacts` is DB-free by contract and
+/// never reads a live catalog, so a column whose `createEnum` is not in the folded
+/// stream has no provable membership. PostgreSQL still folds it (the native type
+/// reference needs only the NAME, so `apply_fold_named_type_column_metadata`
+/// succeeds), which is exactly the case where a fabricated set would ship as fact.
+/// SQLite and MySQL INLINE the value list into the column's storage, so their folds
+/// already fail closed before reaching here.
+///
+/// # Not through `ColType::Encrypted`
+///
+/// Deliberately no recursion into the wrapped type. An encrypted column stores
+/// ciphertext; a membership over the plaintext domain is not a contract its stored
+/// bytes satisfy, and `field_check_constraints` would turn it into a CHECK no row
+/// could pass. `ColType::Domain` is excluded for its own reason: a domain's
+/// constraint is an arbitrary predicate, not a closed value set, and `enum_values`
+/// asserts a closed set.
+fn lift_named_enum_membership(
+    field: &mut crate::render::declarative::FieldDescriptor,
+    ty: &ColType,
+    named_types: &NamedTypeRegistry,
+) {
+    let ColType::Enum { name, .. } = ty else {
+        return;
+    };
+    let Ok(def) = named_types.enum_def(name) else {
+        return;
+    };
+    // DECLARATION order, not sorted: PostgreSQL's enum declaration order IS its
+    // sort order, and the SQLite/MySQL inlined value lists preserve it too.
+    field.enum_values = Some(
+        def.values
+            .iter()
+            .map(|value| serde_json::Value::String(value.clone()))
+            .collect(),
+    );
 }
 
 fn fold_create_column_to_field(
