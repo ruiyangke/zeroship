@@ -279,7 +279,9 @@ mod tests {
         //
         // What this does NOT catch: a diagnostic naming a variable migrated
         // does read but which is the wrong one for the failure, and any
-        // diagnostic outside the three driven below.
+        // diagnostic outside the two driven below. It drove three until the
+        // PAT signing key was deleted; the loop is unchanged, it has one fewer
+        // subject.
         let readable = env_names_migrated_reads();
         assert!(
             readable.contains("ZEROSHIP_AUTH_PLATFORM_ISSUER"),
