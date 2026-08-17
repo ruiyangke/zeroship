@@ -298,9 +298,84 @@ is also the faithful restoration rather than a widening: the behaviour
 control's CLI device flow. Restoring exactly that and nothing more is the
 smaller and better-supported change.
 
-I caught this from an existing test rather than by reasoning:
+I caught this from an existing test rather than by reasoning (see 6.2 for the
+one I nearly did not catch):
 `user_without_admin_role_oauth_scope_does_not_grant_apps_delete` mints
 `apps:delete`, which is outside the CLI set, and would have started passing for
 the wrong reason - a 403 from an emptied policy instead of from the role check
 it exists to test. It now seeds that grant explicitly so the assertion still
 measures what its name claims.
+
+---
+
+## 6. Verification
+
+### 6.1 Results
+
+Every target the brief names, plus the red proof.
+
+| Gate | Target | Result |
+| --- | --- | --- |
+| `tests/run_auth_suite.sh` | 647, floor 595 | **647 passed**, 0 unexpected skips, 1 allowlisted |
+| `cargo test -p zeroship-auth --lib` | 221 | **221 passed** |
+| `cargo test -p zeroship-control --lib` | 224 | **224 passed** |
+| `cargo test -p zeroship` | 98 across 6 targets | **99 across 6 targets** |
+| `authz_guard_oauth_test` (live-db-tests) | 17 | **19 passed** (17 + the 2 added) |
+| `tests/commit_msg_gate.sh --range main..HEAD` | 0 rejected | **0 rejected**, 5 checked |
+
+The `zeroship` crate is 99 rather than 98: 71 + 1 + 12 + 8 + 3 + 4 over
+`main.rs`, `deploy_test`, `dev_init_test`, `login_test`, `parent_death_test`,
+`secrets_test`. Six targets, none missing, and the delta is one MORE test than
+the brief expected - main moved to `e510933d2` (secret-file permissions) after
+the brief was written.
+
+`tests/e2e_device_login.sh` is edited but NOT run here: it needs the full
+compose stack. Its assertions are stated in section 4.5.
+
+### 6.2 The red proof, and why it nearly did not happen
+
+Both new tests were confirmed to FAIL without the fix, by reverting
+`crates/authn/src/lib.rs`, `crates/control/src/authz_guard.rs` and
+`crates/control/src/device_handlers.rs` and re-running the same binary:
+
+```
+17 passed; 2 failed        (fix reverted)
+19 passed; 0 failed        (fix applied)
+```
+
+- `an_operator_deleting_a_grant_row_narrows_the_next_cli_request`: got 200,
+  expected 403. That IS the regression, reproduced.
+- `a_first_cli_request_is_authorized_and_materializes_the_default_grants`: got
+  `[]`, expected the four defaults.
+
+Worth recording: in that reverted run the FIRST assertion of the second test -
+the deploy-check returning 200 - passed anyway. It has to. Old behaviour also
+authorized that request, just without narrowing anything ever after. A test
+asserting only "the first request works" would have been green on both sides of
+the fix and proved nothing.
+
+My first two attempts at a red run never compiled (missing submodule sources,
+then missing `sdks/*/dist`), and both exited non-zero with no test output. Had I
+run the fix first and skipped the control, I would have had a green with no
+evidence the tests could ever fail.
+
+### 6.3 A corrupted incremental cache fakes a broad, plausible failure
+
+The first full auth-suite run reported `only 80 auth tests passed` with
+FAILURES in `zeroship-authz` and `zeroship-gateway` - crates this change cannot
+reach. The cause was not the code:
+
+```
+error: failed to move dependency graph from .../incremental/zeroship_auth-.../dep-graph.part.bin
+error: could not compile `zeroship-auth` (lib) due to 2 previous errors
+```
+
+`zeroship-auth` failed to BUILD, so its whole test set silently vanished from
+the total, and the unrelated crates failed for their own cache reasons.
+`rm -rf target/debug/incremental` and re-running gave 647/0. Nothing about the
+80 pointed at the cache; it read exactly like a real, broad regression.
+
+The structural check that settled it before the re-run: `zeroship-authn` is
+named in only two `Cargo.toml` files (`crates/control`, `crates/migrated`), and
+neither `crates/gateway` nor `crates/authz` depends on `authn` or `control`. So
+those failures were not reachable from this diff whatever their cause.
