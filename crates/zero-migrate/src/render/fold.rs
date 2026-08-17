@@ -4120,6 +4120,14 @@ fn recover_enum_chain(expr: &crate::model::expr::Expr) -> Option<(String, Vec<se
 struct RecoveredFk {
     /// The single referencing column the policy attaches to.
     column: String,
+    /// The constraint this policy came from, when it was authored with a name.
+    ///
+    /// Carried so a later `dropConstraint` can un-lift exactly this policy.
+    /// Matching on the COLUMN instead would be wrong: two constraints can touch
+    /// one column, and dropping either would strip the other one policy.
+    /// `None` for an unnamed inline constraint, which `dropConstraint` cannot
+    /// target anyway.
+    name: Option<String>,
     /// `ON DELETE` policy token (`restrict`/`cascade`/…), if set.
     on_delete: Option<String>,
     /// `ON UPDATE` policy token, if set.
@@ -4139,6 +4147,8 @@ fn recover_fk_policy(
     }
     Some(RecoveredFk {
         column: columns[0].clone(),
+        // Filled in by the caller, which is where the constraint name is in scope.
+        name: None,
         on_delete: on_delete.map(|a| a.as_token().to_string()),
         on_update: on_update.map(|a| a.as_token().to_string()),
     })
@@ -4247,9 +4257,10 @@ pub fn fold_to_field_defs(
                             on_update,
                             ..
                         } => {
-                            if let Some(recovered) =
+                            if let Some(mut recovered) =
                                 recover_fk_policy(columns, *on_delete, *on_update)
                             {
+                                recovered.name = c.name.clone();
                                 fks.entry(name.clone()).or_default().push(recovered);
                             }
                         }
@@ -4385,6 +4396,15 @@ pub fn fold_to_field_defs(
                     field.default = None;
                 }
             }
+            // UN-LIFT the FK policy the dropped constraint granted. addConstraint
+            // was already replayed (it FEEDS the lift); its inverse was not, so the
+            // policy outlived the constraint and gen-types kept emitting an
+            // ON DELETE the database no longer has.
+            Op::DropConstraint { table, name, .. } => {
+                if let Some(recovered) = fks.get_mut(table) {
+                    recovered.retain(|fk| fk.name.as_deref() != Some(name.as_str()));
+                }
+            }
             Op::RenameColumn {
                 table, from, to, ..
             } => {
@@ -4462,7 +4482,9 @@ pub fn fold_to_field_defs(
                     ..
                 } = &constraint.kind
                 {
-                    if let Some(recovered) = recover_fk_policy(columns, *on_delete, *on_update) {
+                    if let Some(mut recovered) = recover_fk_policy(columns, *on_delete, *on_update)
+                    {
+                        recovered.name = constraint.name.clone();
                         fks.entry(table.clone()).or_default().push(recovered);
                     }
                 }
