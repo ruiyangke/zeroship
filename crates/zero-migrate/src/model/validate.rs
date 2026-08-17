@@ -952,14 +952,23 @@ fn alter_primary_key_candidate_key(
             {
                 sources.primary_key = Some(columns.clone());
             }
+            // A REPLACE HAS TWO HALVES WITH DIFFERENT CERTAINTIES, and requiring
+            // both left the old key in place when only the new one was unprovable.
+            // Once the expectedColumns precondition matches, REMOVING the old key
+            // is certain - the op does it unconditionally at apply, exactly as the
+            // Drop arm below already models with no `has_alternate` requirement.
+            // INSTALLING the new one stays conservative: an offline replay must
+            // never invent a key it cannot prove.
+            //
+            // Keeping the stale key admitted a foreign key whose target had
+            // stopped being a candidate key - measured, and the dangerous half of
+            // the defect, since the FK then fails at apply.
             AlterPrimaryKeyAction::Replace {
                 expected_columns,
                 columns,
                 ..
-            } if sources.primary_key.as_ref() == Some(expected_columns)
-                && has_alternate(columns) =>
-            {
-                sources.primary_key = Some(columns.clone());
+            } if sources.primary_key.as_ref() == Some(expected_columns) => {
+                sources.primary_key = has_alternate(columns).then(|| columns.clone());
             }
             AlterPrimaryKeyAction::Drop {
                 expected_columns, ..
