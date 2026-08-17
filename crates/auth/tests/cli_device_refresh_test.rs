@@ -544,28 +544,34 @@ async fn the_refresh_family_and_its_replay_window_are_bounded() {
     fx.cleanup().await;
 }
 
-/// KNOWN GAP, pinned so that changing it is a visible diff.
+/// The OP issues a COARSE ceiling: the client registration, and nothing else.
 ///
-/// `zeroship.principal_grants` is the entitlement store. Control's parallel
-/// mint intersects with it (`crates/control/src/device_handlers.rs`,
-/// `deploy_scopes_for_principal`) and so does the internal platform mint
-/// (`crates/auth/src/oidc/device_token.rs`, `mint_platform_token`). This
-/// grant does NOT: it caps only to the client registration, so the scope a
-/// login-issued token carries is independent of the principal's stored
-/// grants.
+/// This assertion is unchanged from when it was filed as a KNOWN GAP, and the
+/// reframing is the point - the behaviour it measures is now deliberate rather
+/// than missing, so read it as the issuer half of a two-part contract:
 ///
-/// The fixture user is created with no grant rows at all, which is the whole
-/// measurement - if the intersection existed, the scope below would be empty.
+/// * here, the OP caps the scope to the registration without consulting
+///   `zeroship.principal_grants`. It cannot do otherwise:
+///   `db/migrations-ts/20260702000900_grants.ts:55` gives `zeroship_auth`
+///   SELECT only on that table, and nothing in `crates/auth` may write it.
+/// * control then intersects that scope with the principal's LIVE grants on
+///   every bearer request (`crates/authn/src/lib.rs`,
+///   `platform_cli_entitlement`), which is where an operator's narrowing takes
+///   effect. Pinned by
+///   `an_operator_deleting_a_grant_row_narrows_the_next_cli_request` in
+///   `crates/control/tests/authz_guard_oauth_test.rs`.
 ///
-/// It cannot simply be added here. Nothing provisions grants for a
-/// platform-native creator except control's `/api/device/token`
-/// (`identity_bridge::ensure_platform_creator_grants`, its only call site),
-/// and `db/migrations-ts/20260702000900_grants.ts` gives `zeroship_auth`
-/// SELECT only on that table. Intersecting without moving provisioning first
-/// would mint `scope: ""` on every first login.
+/// So a wide scope HERE is not authority. Asserting it stays wide is what
+/// stops someone "fixing" the gap in this function, which would mint
+/// `scope: ""` on every first login: the fixture user holds no grant rows, and
+/// auth has no way to provision them.
+///
+/// What this does NOT show: that narrowing works. Only the control-side test
+/// named above shows that, and this one passes identically whether or not it
+/// does.
 #[ntex::test]
 #[allow(clippy::future_not_send)]
-async fn the_cli_device_grant_does_not_consult_stored_principal_grants() {
+async fn the_cli_device_grant_caps_scope_to_the_client_registration_only() {
     let Some(fx) = Fixture::boot().await else {
         return;
     };
@@ -587,7 +593,7 @@ async fn the_cli_device_grant_does_not_consult_stored_principal_grants() {
     let (token, _device_code) = fx.login().await;
     assert_eq!(
         token.scope, "apps:deploy apps:read offline_access",
-        "a grant this principal does not hold was issued anyway"
+        "the OP narrowed the registration ceiling; entitlement is control's job, not the issuer's"
     );
 
     fx.cleanup().await;
