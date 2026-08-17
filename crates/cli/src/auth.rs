@@ -294,12 +294,15 @@ fn login_device_flow(control_url: &str, print_prompt: bool) -> Result<(), String
     // refresh family backs it; storing one without the family would silently
     // hand the human a session that dies mid-deploy, and the failure would
     // surface far from its cause.
-    let refresh_token = bound.refresh_token.filter(|token| !token.is_empty()).ok_or_else(|| {
-        format!(
-            "{issuer} issued no refresh token for scope '{scope}'; the access token alone \
-             is too short-lived to be a session"
-        )
-    })?;
+    let refresh_token = bound
+        .refresh_token
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "{issuer} issued no refresh token for scope '{scope}'; the access token \
+                 alone is too short-lived to be a session"
+            )
+        })?;
     // The OP answers with a plain RFC 6749 body and no principal field, so the
     // identity comes out of the token's own `sub` - which is the platform
     // principal UUID for this client.
