@@ -535,9 +535,10 @@ are internally accessed; end-users hit it indirectly via HTTP.
 ## 10. Control plane (crates/control)
 
 The creator/admin API server: app CRUD, deploy ingest, env/secrets, route and version feeds,
-billing/Stripe Connect, platform admin, Cedar authz, PAT issuance, OAuth client management,
+billing/Stripe Connect, platform admin, Cedar authz, OAuth client management,
 audit, and crons. It is a pure REST resource server (no OIDC RP of its own after R5); every
-caller authenticates via a PAT (Ed25519/JWT) or an OAuth access token introspected via the native OP.
+caller authenticates with an OAuth access token introspected via the native OP; the platform has
+no second issuance authority.
 `@zeroship/control` wraps the HTTP surface for platform-owned code.
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
@@ -556,8 +557,7 @@ caller authenticates via a PAT (Ed25519/JWT) or an OAuth access token introspect
 | Secret key rotation (re-encrypt) | 🟢 | internal (EnvStore::rotate_app) | `crates/control/src/env_store.rs` | — | — | No HTTP endpoint to trigger yet. |
 | Secret process.env exposure list | 🟢 | GET/PUT /api/apps/{id}/env/expose | `crates/control/src/env_handlers.rs`, `env_store.rs` | `docs/reference/control.md` | — | Atomic; audited. |
 | Audit log read (per-app) | 🟢 | GET /api/apps/{id}/audit | `crates/control/src/env_handlers.rs`, `audit.rs` | `docs/reference/control.md` | — | Append-only with tamper trigger. |
-| Cedar-backed authorization (AuthzGuard) | 🟢 | internal | `crates/control/src/authz_guard.rs` | — | `crates/control/tests/authz_guard_oauth_test.rs` | PAT first, then native OP introspection. |
-| Personal Access Token (PAT) issuance | 🟢 | POST/GET /api/me/tokens, DELETE /{id} | `crates/control/src/token_handlers.rs` | — | `crates/control/tests/token_handlers_test.rs` | Grant-subset; no PAT-chains; 365d max. |
+| Cedar-backed authorization (AuthzGuard) | 🟢 | internal | `crates/control/src/authz_guard.rs` | — | `crates/control/tests/authz_guard_oauth_test.rs` | Native OP introspection is the only bearer path. |
 | Platform admin role management | 🟢 | POST/DELETE/GET /api/admin/users/{id}/role | `crates/control/src/admin_handlers.rs` | — | `crates/control/tests/admin_handlers_test.rs` | Invalidates EntityCache. |
 | Platform Cedar policy CRUD | 🟢 | GET/PUT/DELETE /api/admin/platform-policies | `crates/control/src/admin_handlers.rs` | — | `crates/control/tests/admin_handlers_test.rs` | Validated before write; audit diff. |
 | App audit-lock | 🟢 | POST /api/admin/apps/{id}/audit-lock | `crates/control/src/admin_handlers.rs` | — | — | Flag stored; not yet enforced in sweep. |
@@ -578,7 +578,7 @@ caller authenticates via a PAT (Ed25519/JWT) or an OAuth access token introspect
 | Rate limiting (per-IP token bucket) | 🟢 | internal | `crates/control/src/rate_limit.rs`, `http_util.rs` | — | — | In-memory per-process; DB-backed for multi-node. |
 | Metering aggregation / period snapshots | 🟢 | internal | `crates/control/src/metering/mod.rs`, `metering/provider/` | `docs/reference/billing-metering.md` | `crates/control/tests/billing_pipeline_redpanda_e2e.rs` | No longer a stub: `UsageEvent`s arrive on the durable stream and the spend-recompute cron overwrites `zeroship.usage_aggregates` as an idempotent period snapshot; `record_direct` for trusted control-plane work; dev fallback does an immediate `+=`. |
 | Control health + readiness | 🟢 | GET /healthz, GET /readyz | `crates/control/src/internal.rs` | — | `crates/control/tests/health_endpoints_test.rs` | /healthz is a constant 200 (liveness); /readyz probes the shared Postgres client, cached 2s. |
-| TypeScript control client (@zeroship/control) | 🟢 | `@zeroship/control` npm | `sdks/control/src/index.ts` | `docs/reference/control.md` | — | Auth namespace removed (R5); missing admin/PAT wrappers. |
+| TypeScript control client (@zeroship/control) | 🟢 | `@zeroship/control` npm | `sdks/control/src/index.ts` | `docs/reference/control.md` | — | Auth namespace removed (R5); missing admin wrappers. |
 | Config validation (--check-config) | 🟢 | --check-config [--format] | `crates/control/src/main.rs` | — | — | Text/JSON; prod startup guards. |
 
 ---
@@ -587,7 +587,7 @@ caller authenticates via a PAT (Ed25519/JWT) or an OAuth access token introspect
 
 A Cedar-backed policy engine (`crates/authz`) wired into the control plane via an ntex
 extractor (AuthzGuard). P9 shipped the platform RBAC half (engine, static platform+creator
-policies, PAT issuance with TOKEN⊂USER enforcement, OAuth scope mapping, consent gate, admin
+policies, TOKEN⊂USER enforcement, OAuth scope mapping, consent gate, admin
 policy CRUD, audit). P10 (toggle-matrix UI), P11 (orgs, analyzer, incident lock), and P12
 (end-user authz in worker via plugin-authz + @zeroship/permissions) are documented with **zero
 code on disk**.
@@ -603,11 +603,8 @@ code on disk**.
 | Static platform + creator Cedar policies | 🟢 | internal | `deploy/policies/platform/`, `deploy/policies/creator/`, `crates/authz/src/engine.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/platform_policies_test.rs` | 10 policies; build.rs parses at compile. |
 | Entity assembly + LRU cache | 🟢 | internal | `crates/authz/src/entities.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/two_call_test.rs` | 30s TTL; default role 'none' (C1 fix). |
 | enforce() — two-call TOKEN⊂USER | 🟢 | internal | `crates/authz/src/eval.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/two_call_test.rs` | Both must allow; 100% audited (no sampling). |
-| is_authorized_anywhere() | 🟢 | internal | `crates/authz/src/eval.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/anywhere_uuid_regression_test.rs` | Consent gate + PAT mint. |
-| AuthzGuard ntex extractor | 🟢 | internal | `crates/control/src/authz_guard.rs` | `docs/proposals/authorization.md` | `crates/control/src/token_handlers.rs` | Bearer-only (R5); MFA context always false. |
-| PAT issuance (POST /me/tokens) | 🟢 | HTTP endpoint | `crates/control/src/token_handlers.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/two_call_test.rs` | No PAT-chains; MFA rejected at mint. |
-| PAT listing (GET /me/tokens) | 🟢 | HTTP endpoint | `crates/control/src/token_handlers.rs` | — | — | No pagination/per-token audit view. |
-| PAT revocation (DELETE /me/tokens/{id}) | 🟢 | HTTP endpoint | `crates/control/src/token_handlers.rs` | — | — | Owner-only; EntityCache invalidate. |
+| is_authorized_anywhere() | 🟢 | internal | `crates/authz/src/eval.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/anywhere_uuid_regression_test.rs` | Consent gate + creator self-scope probe. |
+| AuthzGuard ntex extractor | 🟢 | internal | `crates/control/src/authz_guard.rs` | `docs/proposals/authorization.md` | `crates/control/tests/authz_guard_oauth_test.rs` | Bearer-only (R5); MFA context always false. |
 | OAuth scope vocabulary (Scope enum) | 🟢 | internal | `crates/authz/src/scope.rs` | `docs/proposals/authorization.md` | `crates/authz/src/scope.rs` | 16-scope 1:1 with Action; no PlatformPoliciesWrite scope. |
 | OAuth consent UI with authz gate | 🟢 | internal | `crates/auth/src/ui/consent.rs` | `docs/proposals/authorization.md` | — | Identity scopes bypass gate. |
 | Platform RBAC role management | 🟢 | HTTP endpoint | `crates/control/src/admin_handlers.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/two_call_test.rs` | admin grants; admin+support read. |
@@ -618,12 +615,11 @@ code on disk**.
 | Authorization audit log | 🟢 | internal | `crates/authz/src/eval.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/two_call_test.rs` | Fire-and-forget; 100% audited. |
 | Build-time Cedar lint (build.rs) | 🟢 | internal | `crates/authz/build.rs` | `docs/proposals/authorization.md` | — | Panics on invalid Cedar. |
 | DEFAULT_PLATFORM_ROLE ('none') | 🟢 | internal | `crates/authz/src/entities.rs` | — | `crates/authz/tests/platform_policies_test.rs` | Zero-privilege default (C1 IDOR fix). |
-| PAT EdDSA JWT signing (PatIssuer) | 🟢 | internal | `crates/control/src/token_handlers.rs` | `docs/proposals/authorization.md` | `crates/control/src/token_handlers.rs` | Unix perm check; JWK thumbprint kid. |
 | OAuth native OP introspection in AuthzGuard | 🟢 | internal | `crates/control/src/authz_guard.rs` | `docs/proposals/authorization.md` | — | Audience check; unknown scope → 401. |
 | OAuth Device Authorization Grant UI | 🟢 | HTTP endpoint | `crates/auth/src/ui/device.rs` | `docs/proposals/authorization.md` | — | CSRF; emits device_grant_accepted. |
 | OAuth client registration (admin) | 🟢 | HTTP endpoint | `crates/control/src/oauth_handlers.rs` | — | — | Scope validation; DB transactional. |
 | User OAuth grant listing/revocation | 🟢 | HTTP endpoint | `crates/control/src/oauth_grants_handlers.rs` | — | — | Deletes consent grants and revokes token families. |
-| P10: Toggle-matrix UI for PAT policies | 🔵 | internal | — | `docs/proposals/authorization.md` | — | No dashboard route; no cedar-wasm. |
+| P10: Toggle-matrix UI for token policies | 🔵 | internal | — | `docs/proposals/authorization.md` | — | No dashboard route; no cedar-wasm. |
 | P11: Orgs + analyzer + incident lock | 🔵 | internal | — | `docs/proposals/authorization.md` | — | No org CRUD/table/analyzer/lock policy. |
 | P12: End-user authz in worker (env.authz) | 🔵 | `env.authz.*` / `@zeroship/permissions` | — | `docs/proposals/authorization.md` | — | No plugin-authz crate; no SDK; no manifest field. |
 | P12: Creator policies.cedar in .zship | 🔵 | vite-plugin / manifest | — | `docs/proposals/authorization.md` | — | No authz manifest field; no authz.ts. |
@@ -1141,9 +1137,9 @@ recount and run low):
 - 🔵 Presigned URLs, image transform, per-app storage quota — no code (quota is open finding ST-2).
 
 **Authorization P10–P12 are documented but unbuilt:**
-- 🔵 P10 toggle-matrix PAT UI, 🔵 P11 orgs + Cedar analyzer + incident lock, 🔵 P12 end-user `env.authz` (no `plugin-authz` crate, no `@zeroship/permissions`, no manifest `authz` field), 🔵 CLI `zeroship policy edit`.
+- 🔵 P10 toggle-matrix token-policy UI, 🔵 P11 orgs + Cedar analyzer + incident lock, 🔵 P12 end-user `env.authz` (no `plugin-authz` crate, no `@zeroship/permissions`, no manifest `authz` field), 🔵 CLI `zeroship policy edit`.
 - 🟡 Operator platform-policy CRUD — rows persist but are **not merged into the running Cedar engine** (no hot-reload).
-- 🟡 MFA Cedar conditions (`RequireMfa`/`MfaWithin`) — lowered correctly but rejected at PAT mint and never populated from session state; `TimeWindow` is UTC-only.
+- 🟡 MFA Cedar conditions (`RequireMfa`/`MfaWithin`) — lowered correctly but never populated from session state; `TimeWindow` is UTC-only.
 
 **Runtime / Node gaps:**
 - 🔵 `env.assets.*` native primitive, 🔵 `structuredClone` transfer, 🔵 streaming fetch request body.
@@ -1225,12 +1221,12 @@ PG pool, RLS GUC tenant isolation, the `x-wall-time-ms` header, global rate limi
 limiting config, insecure-dev semantics, Ed25519 key rotation, and the Redis idempotency-store
 backend contract.
 
-**Control plane:** per-app OAuth client lifecycle, PAT issuance/policy model, the platform admin
+**Control plane:** per-app OAuth client lifecycle, the platform admin
 surface (roles, Cedar policies, suspension, audit-lock), OAuth grant management, the two crons,
 console bootstrap, secret key rotation, app suspension, rate-limit config, trust-proxy, and the
-Cedar AuthzGuard dual-bearer path.
+Cedar AuthzGuard bearer path.
 
-**Authorization:** PAT list/revoke endpoints, app suspension + audit-lock policies, OAuth client
+**Authorization:** app suspension + audit-lock policies, OAuth client
 registration, user OAuth grant endpoints, the `DEFAULT_PLATFORM_ROLE='none'` invariant (C1 IDOR
 fix), operator platform-policy CRUD (+ its unimplemented hot-reload), and the MFA / TimeWindow
 condition limitations — all documented only in proposal/code comments.

@@ -3,7 +3,7 @@
 //!
 //! Shape:
 //!   zeroship migrate [path-to-migrations.ir.json] [--app=<name|uuid>]
-//!                    [--control=URL] [--token=PAT] [--config=PATH] [--env=NAME] [--yes]
+//!                    [--control=URL] [--token=TOKEN] [--config=PATH] [--env=NAME] [--yes]
 //!
 //! The path comes from `zeroship.jsonc`'s `migrations.out` unless a positional
 //! overrides it. There is NO compiled default: the build decides where it
@@ -185,7 +185,7 @@ pub(crate) fn check_unknown_migrate_flags(args: &[String]) -> Result<(), String>
                  falling back to its default would apply migrations to \
                  http://localhost:9090 instead of the control plane you named. \
                  Usage: zeroship migrate [path-to-migrations.ir.json] \
-                 [--app=<name|uuid>] [--control=<url>] [--token=<PAT>] \
+                 [--app=<name|uuid>] [--control=<url>] [--token=<token>] \
                  [--config=<path>] [--env=<name>] [--yes]"
             ));
         }

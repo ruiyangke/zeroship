@@ -2,10 +2,10 @@
 //!
 //! Commands:
 //!   zeroship serve   <file-or-dir> [--port=3000] [--workers=0]
-//!   zeroship deploy  [<path-to-.zship>] [--app=<name>] [--control=URL] [--token=PAT]
+//!   zeroship deploy  [<path-to-.zship>] [--app=<name>] [--control=URL] [--token=TOKEN]
 //!                    [--no-create] [--config=PATH] [--env=NAME]
 //!   zeroship migrate [<path-to-migrations.ir.json>] [--app=<name|uuid>]
-//!                    [--control=URL] [--token=PAT] [--config=PATH] [--env=NAME] [--yes]
+//!                    [--control=URL] [--token=TOKEN] [--config=PATH] [--env=NAME] [--yes]
 //!   zeroship config show [--config=PATH] [--env=NAME]
 //!   zeroship config path [--config=PATH]
 //!   zeroship login [--control=URL] [--config=PATH] [--env=NAME]
@@ -15,7 +15,7 @@
 //! the canonical build path is now `@zeroship/vite-plugin`, which emits
 //! `.zship` archives. `deploy` uploads those archives directly to the
 //! control plane. Deploy/secret/var commands read the bearer token from
-//! `--token=PAT`, `ZEROSHIP_TOKEN`, or credentials saved by `zeroship login`.
+//! `--token=TOKEN`, `ZEROSHIP_TOKEN`, or credentials saved by `zeroship login`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -498,7 +498,7 @@ fn deploy_target(args: &[String]) -> Result<DeployTarget, String> {
             None => {
                 return Err(
                     "Usage: zeroship deploy <path-to-.zship> --app=<name> \
-                     [--control=<url>] [--token=<PAT>] [--no-create]\n\
+                     [--control=<url>] [--token=<token>] [--no-create]\n\
                      With a zeroship.jsonc the path, app and control all come from the file \
                      and `zeroship deploy` takes no arguments."
                         .to_string(),
@@ -999,10 +999,10 @@ fn print_usage() {
     eprintln!("Usage:");
     eprintln!("  zeroship serve    <file> [--port=3000] [--workers=0]");
     eprintln!("                   Run a single JS file with the V8 runtime.");
-    eprintln!("  zeroship deploy   [<path-to-.zship>] [--app=<name>] [--control=URL] [--token=PAT] [--no-create] [--config=PATH] [--env=NAME]");
+    eprintln!("  zeroship deploy   [<path-to-.zship>] [--app=<name>] [--control=URL] [--token=TOKEN] [--no-create] [--config=PATH] [--env=NAME]");
     eprintln!("                   Upload a pre-built .zship to the control plane.");
     eprintln!("                   Token source: --token, ZEROSHIP_TOKEN, or zeroship login.");
-    eprintln!("  zeroship migrate  [<path-to-migrations.ir.json>] [--app=<name|uuid>] [--control=URL] [--token=PAT] [--config=PATH] [--env=NAME] [--yes]");
+    eprintln!("  zeroship migrate  [<path-to-migrations.ir.json>] [--app=<name|uuid>] [--control=URL] [--token=TOKEN] [--config=PATH] [--env=NAME] [--yes]");
     eprintln!("                   Apply the app's committed migrations to its DEPLOYED database.");
     eprintln!("                   Without a path, reads <migrations.out>/migrations.ir.json from");
     eprintln!("                   zeroship.jsonc; without either, the command errors.");
@@ -1021,11 +1021,11 @@ fn print_usage() {
     );
     eprintln!("  zeroship dev init [--secrets-dir=PATH] [--env-file=PATH]");
     eprintln!("                   Provision stable, strong local platform secrets.");
-    eprintln!("  zeroship secret   set|list|rm|expose|unexpose|expose-list  --app=<uuid> [--control=URL] [--token=PAT]");
+    eprintln!("  zeroship secret   set|list|rm|expose|unexpose|expose-list  --app=<uuid> [--control=URL] [--token=TOKEN]");
     eprintln!("                   Encrypted at rest. Always readable as env.KEY; reaches");
     eprintln!("                   process.env (where any npm dependency can read it) only");
     eprintln!("                   via `secret set KEY=v --expose` or `secret expose KEY`.");
-    eprintln!("  zeroship var      set|list|rm  --app=<uuid> [--control=URL] [--token=PAT]");
+    eprintln!("  zeroship var      set|list|rm  --app=<uuid> [--control=URL] [--token=TOKEN]");
     eprintln!("                   PLAINTEXT config, always in both env and process.env.");
     eprintln!("                   Never put a credential in a var; use a secret.");
     eprintln!();
@@ -1155,7 +1155,7 @@ pub(crate) fn check_unknown_deploy_flags(args: &[String]) -> Result<(), String> 
                  `--control` falling back to its default would deploy to \
                  http://localhost:9090 instead of the control plane you named. \
                  Usage: zeroship deploy [<path-to-.zship>] [--app=<name>] \
-                 [--control=<url>] [--token=<PAT>] [--no-create] \
+                 [--control=<url>] [--token=<token>] [--no-create] \
                  [--config=<path>] [--env=<name>]"
             ));
         }
@@ -1173,7 +1173,7 @@ pub(crate) fn flag_str(args: &[String], prefix: &str) -> Option<String> {
 }
 
 const MISSING_TOKEN_HINT: &str =
-    "no API token found; run `zeroship login`, pass `--token=<PAT>`, or set ZEROSHIP_TOKEN";
+    "no API token found; run `zeroship login`, pass `--token=<token>`, or set ZEROSHIP_TOKEN";
 
 pub(crate) fn resolve_bearer_token(args: &[String]) -> Result<String, String> {
     resolve_bearer_token_from(
@@ -1758,6 +1758,6 @@ mod tests {
             .expect_err("missing token should fail");
 
         assert!(err.contains("zeroship login"), "{err}");
-        assert!(err.contains("--token=<PAT>"), "{err}");
+        assert!(err.contains("--token=<token>"), "{err}");
     }
 }

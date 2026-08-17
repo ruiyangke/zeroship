@@ -105,7 +105,7 @@ The deploy command ships the pre-built artifact. The artifact path, the app and
 the control plane come from `zeroship.jsonc` in this directory, and `deploy`
 prints each resolved value and its source before it uploads. `--app=<id>`,
 `--control=<url>` and a positional `.zship` path still override the file, and
-`--token=<PAT>` (or `ZEROSHIP_TOKEN`) replaces `zeroship login`.
+`--token=<token>` (or `ZEROSHIP_TOKEN`) replaces `zeroship login`.
 
 This directory's `zeroship.jsonc` has no `app` key yet. The first deploy falls
 back to the project `name`, creates that app, and appends its id to the file;
