@@ -1478,8 +1478,8 @@ principal's `principal_grants` rather than from anything in the token. Both
 converge on the same active-principal lifecycle check.
 
 Both arms therefore hand `authz::enforce` a wrapper policy built out of the
-closed OAuth scope vocabulary, and nothing else can now supply one. Two Cedar
-actions are outside that vocabulary; see Finding 30.
+closed OAuth scope vocabulary, and nothing else can now supply one. One Cedar
+action is outside that vocabulary; see Finding 30.
 
 ### 4.2 Delegated creator bearer for migration apply
 
@@ -2109,7 +2109,7 @@ INFERRED consequences appear only where explicitly labeled in FINDINGS.
 | Auth | Human identity, lifecycle result, consent, OP claims, social-link policy, OP private key, provider secrets | Password/TOTP or upstream protocol, live session/user, client/redirect/scope/PKCE, consent, and signing-key issuance eligibility (`crates/auth/src/identity/credentials.rs:81-344`, `crates/auth/src/oidc/authorization_code.rs:283-861`, `crates/auth/src/oidc/issuer.rs:766-799`) |
 | Google/GitHub | Provider subject and selected profile facts | Auth must verify their protocol response and apply its stricter email policy (`crates/auth/src/identity/oauth/google.rs:67-210`, `crates/auth/src/identity/oauth/github.rs:65-213`) |
 | Gateway | App route, cookie validity, OP JWT validity, pairwise projection, route auth level/scopes, request identity HMAC, public signal transport | Signature/type/issuer/expiry, app/client/audience, CSRF for cookie mutation, family marker when DB is configured, and route policy; it does not validate `wst_` (`crates/gateway/src/router/auth.rs:142-460`, `crates/gateway/src/router/auth.rs:654-1021`, `crates/gateway/src/signal_ingress.rs:67-125`) |
-| Control plus authn/authz | Creator principal, OAuth provider result, current owner authority, the scope-derived wrapper policy | Bearer cryptography and DB state and principal lifecycle; owner/wrapper Cedar only where a handler calls `require`. Every accepted bearer now carries a wrapper built from the closed scope vocabulary, so two Cedar actions are unreachable, Finding 30 (`crates/authn/src/lib.rs`, `BearerVerifier::verify_bearer` and `oauth_guard_from_bearer`; `crates/control/src/authz_guard.rs`, `AuthzGuard::require`) |
+| Control plus authn/authz | Creator principal, OAuth provider result, current owner authority, the scope-derived wrapper policy | Bearer cryptography and DB state and principal lifecycle; owner/wrapper Cedar only where a handler calls `require`. Every accepted bearer now carries a wrapper built from the closed scope vocabulary, so one Cedar action is unreachable, Finding 30 (`crates/authn/src/lib.rs`, `BearerVerifier::verify_bearer` and `oauth_guard_from_bearer`; `crates/control/src/authz_guard.rs`, `AuthzGuard::require`) |
 | Control workflow API | App-scoped operations and signed `wst_` claims; master and per-app HMAC keys | Mint requires app-scoped HMAC and live target; ingress requires Gateway `control_key`, then capability HMAC, expiry, type, target, epoch, and replay (`crates/control/src/workflow_instance_api.rs:326-405`, `crates/control/src/workflow_instance_api.rs:2129-2266`, `crates/control/src/workflow_instance_api.rs:2317-2587`) |
 | Migrated plus authn/authz | Independently verified creator principal and migration policy result | Reverify the forwarded raw bearer, active principal, app ownership, Cedar deploy action, and operator-ceiling intersection (`crates/migrated/src/api.rs:79-108`, `crates/migrated/src/auth.rs:63-143`, `crates/migrated/src/policy.rs:110-133`, `crates/migrated/src/apply.rs:214-239`) |
 | External signal caller | A plaintext `wst_` capability and its permitted payload | Present the capability in the JSON body; Gateway proves nothing about it and Control proves HMAC, expiry, type, target, epoch, and replay (`crates/gateway/src/signal_ingress.rs:67-125`, `crates/control/src/workflow_instance_api.rs:2317-2587`) |
@@ -2235,10 +2235,10 @@ RESOLVED BY DELETION, not by adding the missing ceiling check: `POST /me/tokens`
 and control's `token_handlers` module are gone, so there is no issuance-time
 caller boundary left to get wrong. The operator decision is section 11 of
 `docs/proposals/2026-08-16-cli-token-issuance.md`, which names this finding as
-the one that deletion answers. See section 4.1. The citations that carried this
-finding (`crates/control/src/token_handlers.rs`,
-`crates/control/tests/token_handlers_test.rs`) named files that no longer
-exist and are therefore stated rather than cited.
+the one that deletion answers. See section 4.1. Every citation this finding
+originally carried pointed into control's token-handler module or its test
+binary, both of which were deleted with the routes, so the statement above is
+made in prose with no file reference left to resolve.
 
 ### 4. RESOLVED BY DELETION: PAT token management bypassed the token's policy
 
@@ -2904,63 +2904,77 @@ VERIFIED drift:
   full Auth-tree search for `resend` and `verification` found provider/mail
   terminology but no resend handler.
 
-### 30. HIGH: two Cedar actions are outside the scope vocabulary, so no bearer can carry them
+### 30. HIGH: `migrations:approve` is outside the scope vocabulary, so no bearer can carry it
 
-VERIFIED. `zeroship_authz::Action` has 18 variants; `zeroship_authz::Scope` has
+VERIFIED. `zeroship_authz::Action` has 17 variants; `zeroship_authz::Scope` has
 16, and `Scope::action` maps them 1:1 (`crates/authz/src/scope.rs:6-23`,
-`crates/authz/src/scope.rs:47-66`). The two variants with no scope are
-`AppsApproveMigration` (`migrations:approve`) and `PlatformPoliciesWrite`
-(`platform_policies:write`) (`crates/authz/src/action.rs:18`,
-`crates/authz/src/action.rs:32`). `Scope::parse` is a closed vocabulary that
-returns `ParseScopeError::Unknown` for anything else, so neither string can
-enter a scope set (`crates/authz/src/scope.rs:118-138`).
+`crates/authz/src/scope.rs:47-66`). The one variant with no scope is
+`AppsApproveMigration`, whose Cedar id is `migrations:approve`
+(`crates/authz/src/action.rs:18`, `crates/authz/src/action.rs:41`).
+`Scope::parse` is a closed vocabulary that returns `ParseScopeError::Unknown`
+for anything else, so that string cannot enter a scope set
+(`crates/authz/src/scope.rs:118-138`).
 
 `authz::enforce` is a two-evaluation intersection: when the caller carries a
 wrapper policy it evaluates owner authority against the static policy set
-first, then re-evaluates against the WRAPPER ALONE, and the static platform
-`admin` universal-allow takes no part in that second decision
-(`crates/authz/src/eval.rs`, `enforce`). Control's `AuthzGuard` is built solely
-from a `VerifiedPrincipal` (`crates/control/src/authz_guard.rs`,
-`impl From<VerifiedPrincipal> for AuthzGuard`), and with PATs deleted
-(section 4.1) the only producer of one is `oauth_guard_from_bearer`, whose
-platform arm sets the wrapper to `zeroship_authz::scopes_to_policy(&scopes)`
-and whose GoTrue arm derives it from `principal_grants` parsed through the same
-`Scope::parse` (`crates/authn/src/lib.rs`, `oauth_guard_from_bearer`;
-`crates/authz/src/scope.rs:162-176`). Both wrappers are therefore drawn
-entirely from the 16-scope vocabulary, and neither missing action can appear in
-one.
+first, then re-evaluates against the WRAPPER ALONE
+(`crates/authz/src/eval.rs:38-76`, `crates/authz/src/eval.rs:56-62`). The
+static platform `admin` universal-allow takes no part in that second decision,
+which is what makes this a gap rather than an operator inconvenience: the role
+that `Action::AppsApproveMigration`'s own doc comment names as the holder is
+evaluated only in the first pass.
 
-Migrated reaches `enforce` through the same `BearerVerifier` and copies the
-same wrapper into its `AuthzContext` (`crates/migrated/src/auth.rs`,
-`ControlPlaneAuthenticator::verify_action` and `authorize`).
+With personal access tokens deleted (section 4.1) there is exactly one producer
+of a wrapper policy left. Control's `AuthzGuard` is built solely from a
+`VerifiedPrincipal` (`crates/control/src/authz_guard.rs`,
+`impl From<VerifiedPrincipal> for AuthzGuard`), the only producer of one is
+`BearerVerifier::verify_bearer`, and it now delegates every bearer to
+`oauth_guard_from_bearer` (`crates/authn/src/lib.rs`). That function's platform
+arm sets the wrapper to `zeroship_authz::scopes_to_policy(&scopes)` and its
+GoTrue arm derives it from `principal_grants` parsed through the same
+`Scope::parse` (`crates/authz/src/scope.rs:162-172`). Both wrappers are
+therefore drawn entirely from the 16-scope vocabulary, and the missing action
+cannot appear in either. Migrated reaches `enforce` through the same
+`BearerVerifier` and copies the same wrapper into its `AuthzContext`
+(`crates/migrated/src/auth.rs`, `ControlPlaneAuthenticator::verify_action` and
+`authorize`).
 
-INFERRED impact: the second evaluation denies both actions for every
-authenticated caller, so two live routes are unreachable by anyone. Migrated's
-migration-approval endpoint requires `Action::AppsApproveMigration`
-(`crates/migrated/src/api.rs:124-140`), which is exactly the operator-only
-approval gate the action's own doc comment describes as reachable through the
-platform `admin` role. Control's three `/admin/oauth-clients` routes each
-require `Action::PlatformPoliciesWrite`
-(`crates/control/src/oauth_handlers.rs:63-73`,
-`crates/control/src/oauth_handlers.rs:130-139`,
-`crates/control/src/oauth_handlers.rs:163-173`,
-`crates/control/src/oauth_handlers.rs:211-221`), so confidential OAuth client
-registration has no caller either.
+INFERRED impact: the second evaluation denies `migrations:approve` for every
+authenticated caller, so Migrated's migration-approval route is unreachable by
+anyone. It is registered (`crates/migrated/src/api.rs:25-26`) and its handler
+requires that action before doing anything else
+(`crates/migrated/src/api.rs:124-140`). That route is exactly the operator-only
+approval gate a creator holding `apps:deploy` is supposed to be unable to
+self-satisfy; it is now equally unusable by the operator.
 
-This is a CONSEQUENCE of the PAT deletion, not a defect the deletion should be
-reversed for: before it, a PAT's stored wrapper policy was authored as arbitrary
-Cedar and could name any action, so the operator path existed only because a
-second issuance authority existed. The gap was already known and stated in the
-test fixtures (`crates/control/tests/common/authz_fixture.rs:41-46`), which say
-in as many words that no bearer can carry either action; what changed is that
-there is no longer any other credential class that can.
+This is a CONSEQUENCE of the PAT deletion, not a reason to reverse it. Before
+it, a PAT's stored wrapper policy was authored as arbitrary Cedar and could
+name any action, so the operator path existed only because a second issuance
+authority existed.
 
-Not fixed here, and deliberately not fixed by inventing a scope: whether these
-two operator actions should get scope tokens (widening the creator-facing
-consent vocabulary with operator powers), a separate operator credential class,
-or an out-of-band admin path is an open design decision, and picking one in a
-documentation pass would be picking it by accident. Search method:
-`rg 'AppsApproveMigration|PlatformPoliciesWrite|migrations:approve|platform_policies:write' crates/`
-returned the action definitions, the two route families above, the migrated
+The same defect had a second instance that is already fixed, which is worth
+recording because it shows the shape of the available answers. Control's three
+`/admin/oauth-clients` routes required `Action::PlatformPoliciesWrite`, which
+likewise had no scope. They were moved onto the gate every other `/admin/*`
+route uses - `team:write` on the synthetic platform org, which IS in the
+vocabulary - and `PlatformPoliciesWrite` was deleted
+(`crates/control/src/admin_handlers.rs`, `require_platform_admin`;
+`crates/control/src/oauth_handlers.rs:68`,
+`crates/control/src/oauth_handlers.rs:131`,
+`crates/control/src/oauth_handlers.rs:162`).
+
+Not fixed here for `migrations:approve`, and deliberately not fixed by
+inventing a scope: whether it should get a scope token (widening the
+creator-facing consent vocabulary with an operator power), be re-gated on an
+existing operator-only resource the way the `/admin/*` routes were, or move
+behind a separate operator credential class is an open design decision, and
+picking one in a documentation pass would be picking it by accident. Note that
+the re-gating answer is not a drop-in here: `migrations:approve` is deliberately
+exempt from Migrated's app-owner check (`crates/migrated/src/auth.rs:169`,
+`requires_app_owner`), so whatever replaces it has to keep the action
+operator-only rather than owner-satisfiable. Search method:
+`rg 'AppsApproveMigration|migrations:approve' crates/` returned the action
+definition and its Cedar-id mapping, the single route family above, the
 owner-check exemption, and tests - no scope token, and no second producer of a
-wrapper policy.
+wrapper policy. The control test fixtures state the same absence in prose
+(`crates/control/tests/common/authz_fixture.rs`).
