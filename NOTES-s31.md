@@ -61,3 +61,60 @@ provider_conformance, trusted_clients_test
 So on NAMES, all 45 are reached. The open question is the trap: which of them
 actually execute against the database rather than self-skipping inside a run
 that still reports passes.
+
+## The `live-db-tests` set is NOT where the hole is
+
+Static reading says every one of the 45 is reached, and by construction rather
+than by a name list:
+
+- `cargo test -p zeroship-control --features live-db-tests` runs ALL 43 control
+  targets. Only three of them can self-skip at all (workflow_engine_test:238,
+  workflow_instance_api_test x5, workflow_plugin.rs:577), and all three gate on
+  `CONTROL_TEST_DB`, which run_billing_suite.sh:116 exports. Every other gated
+  control target resolves its DSN with a hardcoded fallback to
+  `postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test` and
+  PANICS if nothing answers - it cannot report a hollow pass.
+- Same for zeroship-migrated (`MIGRATED_TEST_DB`, exported at :118).
+- plugin-db's `distributed_live` is named at run_plugin_db_live_suite.sh:129
+  with `LIVE_DB_TEST_URL` exported at :66.
+
+The brief's premise -- "authz_guard_oauth_test ... no gate runs it" -- does not
+hold against the tree as it stands: that binary is inside the by-construction
+invocation at run_billing_suite.sh:217, which ci.yml `billing-gate` runs on
+every push. To be confirmed by measurement, not just by reading.
+
+## THE ACTUAL HOLE: live-DB binaries that are NOT feature-gated
+
+Being outside `live-db-tests` is what makes a binary invisible. Such a target
+IS built by `cargo test --workspace` in the `rust` job, runs with no DSN,
+self-skips, and counts as PASSED. The `rust` job's skip census REPORTS this
+(ci.yml:583) but deliberately does not fail.
+
+Cross-referencing every workspace test file that reads a DSN through
+`test_env!` against the gate scripts:
+
+| binary | var | tests gated | who runs it with a DSN |
+| --- | --- | --- | --- |
+| crates/authn/tests/service_replay_pg_test.rs | AUTH_DB_URL | 6 of 6 | NOBODY |
+| crates/gateway/tests/db_pool_smoke.rs | GATEWAY_POOL_SMOKE_URL | 1 of 1 | NOBODY |
+| crates/zeroship-migrate-adapter/tests/smoke_apply_pg.rs | ZERO_MIGRATE_TEST_PG_URL | 1 of 1 | NOBODY |
+| crates/zeroship-migrate-adapter/tests/author_and_apply_pg.rs | ZERO_MIGRATE_TEST_PG_URL | 1 of 2 | NOBODY |
+| crates/zeroship-migrate-adapter/tests/platform_migrate.rs | ZERO_MIGRATE_TEST_PG_URL | 9 | named by ci.yml but always skips (ci.yml:571 says so) |
+
+Evidence for "NOBODY", each an independent grep over tests/ .github/ deploy/:
+
+- `GATEWAY_POOL_SMOKE_URL` appears in the whole repo only at
+  docs/reference/env-vars.md:608. No script, no workflow sets it.
+- `ZERO_MIGRATE_TEST_PG_URL` appears only at ci.yml:571 (a comment saying it is
+  set nowhere) and docs/reference/env-vars.md:607.
+- `AUTH_DB_URL` IS exported (run_auth_suite.sh:69), but that script runs
+  zeroship-auth, then a hand-maintained name list at :150-158 covering
+  zeroship-authz, zeroship-mailer and six zeroship-gateway targets.
+  `zeroship-authn` is not in it, and `zeroship-authn` appears NOWHERE in tests/
+  or .github/. That name list is exactly the drift-prone structure
+  run_billing_suite.sh removed.
+
+Control on the pattern (an empty grep is not proof): the same search DOES find
+the covered ones - `zeroship-gateway:oidc_rp_e2e` at run_auth_suite.sh:158,
+`distributed_live` at run_plugin_db_live_suite.sh:129 - so the pattern finds
+binaries that are gated, and the misses above are real misses.
