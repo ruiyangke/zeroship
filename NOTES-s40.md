@@ -140,6 +140,22 @@ against sources last edited 10:55:42, checked by mtime rather than assumed.
   gitignored and fetched on demand by `crates/runtime/tests/setup-wpt.sh`. This
   worktree had never run it. Re-run after fetching.
 
+## Control: the new zone bound DISCRIMINATES, it is not just a probe that ran
+
+The live-DSN run passing proves check (7) EXECUTED and was satisfied. It does not
+prove it would object to anything. Paired cases on a scratch database, one
+variable between them (psql, no cargo):
+
+    CASE A  service_authn holds exactly service_assertion_replay  -> t
+    CASE B  the same, plus one extra table                        -> f
+
+So the count arm rejects the exact drift it exists to catch. Note what this does
+NOT cover: the arm asserting no grantee holds CREATE on the schema is satisfied
+by PostgreSQL's default (a new schema grants CREATE to nobody but its owner), so
+the explicit REVOKE in the migration is belt-and-braces and the assertion would
+pass with it deleted. That is stated in the migration comment rather than
+implied.
+
 ## Incident: I disturbed the s4 agent's auth suite, and the fix is a private DB
 
 `tests/run_auth_suite.sh` opens with `DROP DATABASE IF EXISTS zeroship_auth_test
