@@ -86,7 +86,6 @@ async fn emit_transition(state: &AppState, t: &SpendTransition) {
             app_id: Some(t.app_id),
             creator_id: None,
             actor_user_id: None,
-            actor_token_id: None,
             action: Action::SpendStateChange,
             resource: Some("spend_state"),
             source_ip: None,

@@ -103,7 +103,6 @@ pub async fn tick(state: &AppState, max_dunning_days: i64) -> Result<usize, Regi
                 app_id: None,
                 creator_id: Some(t.creator_id),
                 actor_user_id: None,
-                actor_token_id: None,
                 action: Action::AccountStateChange,
                 resource: Some("dunning"),
                 source_ip: None,

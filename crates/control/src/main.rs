@@ -53,7 +53,7 @@ fn build_billing_mailer(
                 password: settings.smtp_password.expose_secret().cloned(),
                 tls: SmtpTls::Starttls,
             })
-            .map_err(|e| format!("smtp mailer: {e}"))?;
+            .map_(|e| format!("smtp mailer: {e}"))?;
             Ok(Arc::new(driver))
         }
         "resend" => {
@@ -305,7 +305,6 @@ fn main() -> std::io::Result<()> {
     let gateway_url = settings.gateway_url.get().trim_end_matches('/').to_string();
     let migrated_url = settings.migrated_url.get().trim_end_matches('/').to_string();
     let worker_key = settings.worker_key.expose_str().to_owned();
-    let signing_key_file = settings.signing_key_file.get().clone();
     let stripe_webhook_secret = settings.stripe_webhook_secret.expose_str().to_owned();
     let stripe_secret_key = settings.stripe_secret_key.expose_str().to_owned();
     let stripe_base_url = settings.stripe_base_url.get().clone();
@@ -360,9 +359,6 @@ fn main() -> std::io::Result<()> {
     }
     if !settings.control_key.is_configured() {
         missing.push("--control-key-file / ZEROSHIP_CONTROL_KEY");
-    }
-    if signing_key_file.as_os_str().is_empty() {
-        missing.push("--signing-key-file / ZEROSHIP_CONTROL_SIGNING_KEY_FILE");
     }
     if !missing.is_empty() {
         tracing::error!(
@@ -564,18 +560,6 @@ fn main() -> std::io::Result<()> {
     }
     let _ = std::fs::remove_file(&probe);
     tracing::info!(path = %deploy_tmp_dir.display(), "control: deploy_tmp_dir configured");
-
-    let signing_key = zeroship_authn::load_signing_key_from_path(
-        std::path::Path::new(&signing_key_file),
-    )
-    .map_err(|err| {
-        tracing::error!(error = %err, "control: failed to load PAT signing key");
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, err)
-    })?;
-    let pat_issuer = Arc::new(zeroship_authn::PatIssuer::new(&signing_key).map_err(|err| {
-        tracing::error!(error = %err, "control: failed to initialize PAT issuer");
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, err)
-    })?);
 
     ntex::rt::System::build()
         .name("zeroship-control")
@@ -926,7 +910,6 @@ fn main() -> std::io::Result<()> {
         expected_oauth_audience,
         static_policies: zeroship_authz::load_platform_policies()
             .expect("control: bundled authz policies parse"),
-        pat_issuer,
         auth_provider,
         provider_registry,
         billing_stack,

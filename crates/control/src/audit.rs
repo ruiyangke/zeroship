@@ -137,7 +137,6 @@ pub struct AuditEntry<'a> {
     pub app_id: Option<Uuid>,
     pub creator_id: Option<Uuid>,
     pub actor_user_id: Option<Uuid>,
-    pub actor_token_id: Option<Uuid>,
     pub action: Action,
     pub resource: Option<&'a str>,
     pub source_ip: Option<&'a str>,
@@ -177,7 +176,6 @@ pub async fn log_with_detail(registry: &Registry, entry: AuditEntry<'_>, detail:
         "app_id": entry.app_id,
         "creator_id": entry.creator_id,
         "actor_user_id": entry.actor_user_id,
-        "actor_token_id": entry.actor_token_id,
         "action": entry.action.as_str(),
         "resource": entry.resource,
         "source_ip": entry.source_ip,
@@ -199,13 +197,12 @@ pub async fn log_with_detail(registry: &Registry, entry: AuditEntry<'_>, detail:
             // which makes PG infer the param OID as `inet` and reject the `&str`
             // bind at serialize time ("error serializing parameter"). The latter
             // silently broke EVERY detail-audit insert (best-effort path).
-            "INSERT INTO zeroship.app_audit(app_id, creator_id, actor_user_id, actor_token_id, action, resource, source_ip, detail)
-             VALUES($1, $2, $3, $4, $5, $6, $7::text::inet, $8)",
+            "INSERT INTO zeroship.app_audit(app_id, creator_id, actor_user_id, action, resource, source_ip, detail)
+             VALUES($1, $2, $3, $4, $5, $6::text::inet, $7)",
             &[
                 &entry.app_id,
                 &entry.creator_id,
                 &entry.actor_user_id,
-                &entry.actor_token_id,
                 &entry.action.as_str(),
                 &entry.resource,
                 &entry.source_ip,
@@ -228,7 +225,7 @@ pub async fn recent_for_app(
     let conn = registry.conn().await?;
     let rows = conn
         .query(
-            "SELECT id, actor_user_id, actor_token_id, action, resource, source_ip::text AS source_ip,
+            "SELECT id, actor_user_id, action, resource, source_ip::text AS source_ip,
                     to_char(occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS at_text
              FROM zeroship.app_audit
              WHERE app_id = $1
@@ -242,7 +239,6 @@ pub async fn recent_for_app(
         .map(|r| AuditRow {
             id: r.get("id"),
             actor_user_id: r.get("actor_user_id"),
-            actor_token_id: r.get("actor_token_id"),
             action: r.get("action"),
             resource: r.get("resource"),
             source_ip: r.get("source_ip"),
@@ -255,7 +251,6 @@ pub async fn recent_for_app(
 pub struct AuditRow {
     pub id: Uuid,
     pub actor_user_id: Option<Uuid>,
-    pub actor_token_id: Option<Uuid>,
     pub action: String,
     pub resource: Option<String>,
     pub source_ip: Option<String>,

@@ -362,17 +362,6 @@ fn state_for_with_policy_config(
     )
 }
 
-async fn seed_platform_admin(conn: &Client, user_id: Uuid) {
-    seed_user(conn, user_id, "operator").await;
-    conn.execute(
-        "INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by) \
-         VALUES ($1, 'admin', $1)",
-        &[&user_id],
-    )
-    .await
-    .expect("seed platform admin role");
-}
-
 fn create_notes_request() -> Value {
     json!({
         "kind": "ir",
