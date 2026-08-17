@@ -1,4 +1,4 @@
-import { table, t } from "@zeroship/migrate";
+import { enumType, table, t } from "@zeroship/migrate";
 
 // issue-tracker's schema, authored migration-first. Committed migrations are
 // the sole source for the generated runtime descriptor that `env.db` is
@@ -45,6 +45,32 @@ import { table, t } from "@zeroship/migrate";
 export default {
   name: "create_issue_tracker",
   up() {
+    // -----------------------------------------------------------------------
+    // Closed vocabularies
+    // -----------------------------------------------------------------------
+    //
+    // Each of these is also declared in TypeScript (src/lib/workflow.ts,
+    // src/lib/quicksearch.ts, src/lib/flags.ts). The two declarations must
+    // agree; the database one is the one a direct write cannot talk past.
+    enumType("issue_kind").create({ values: ["defect", "enhancement", "task"] });
+    enumType("issue_status").create({
+      values: ["UNCONFIRMED", "CONFIRMED", "IN_PROGRESS", "RESOLVED", "VERIFIED", "CLOSED"],
+    });
+    enumType("issue_resolution").create({
+      values: ["FIXED", "INVALID", "WONTFIX", "DUPLICATE", "WORKSFORME", "INCOMPLETE"],
+    });
+    enumType("issue_severity").create({
+      values: ["blocker", "critical", "major", "normal", "minor", "trivial"],
+    });
+    enumType("issue_priority").create({ values: ["P1", "P2", "P3", "P4", "P5"] });
+    enumType("flag_target_type").create({ values: ["issue", "attachment"] });
+    enumType("flag_status").create({ values: ["+", "-", "?"] });
+    // One member, and that is the point: the fanout in `notifyIssueChange` is
+    // the only producer, so the set is closed at one until a second notifier
+    // exists. Spelling it as an enum is what makes adding the second one a
+    // schema change rather than a free-text drift.
+    enumType("notification_kind").create({ values: ["issue_changed"] });
+
     // -----------------------------------------------------------------------
     // People and groups
     // -----------------------------------------------------------------------
@@ -215,11 +241,11 @@ export default {
         // So `enhancement` is gone from severity (see BUG_SEVERITIES) and
         // lives here instead. `defect` is the default because an unclassified
         // report is more often something broken than something wished for.
-        kind: t.text().notNull().default("defect"),
-        status: t.text().notNull().default("UNCONFIRMED"),
-        resolution: t.text(),
-        severity: t.text().notNull().default("normal"),
-        priority: t.text().notNull().default("P3"),
+        kind: t.enum("issue_kind").notNull().default("defect"),
+        status: t.enum("issue_status").notNull().default("UNCONFIRMED"),
+        resolution: t.enum("issue_resolution"),
+        severity: t.enum("issue_severity").notNull().default("normal"),
+        priority: t.enum("issue_priority").notNull().default("P3"),
         reporterId: t.text().notNull().references("users", "id"),
         assigneeId: t.text().references("users", "id"),
         qaContactId: t.text().references("users", "id"),
@@ -406,7 +432,7 @@ export default {
       columns: {
         name: t.text().notNull(),
         description: t.text(),
-        targetType: t.text().notNull().default("issue"),
+        targetType: t.enum("flag_target_type").notNull().default("issue"),
         isRequestable: t.boolean().notNull().default(true),
         isMultiplicable: t.boolean().notNull().default(false),
         productId: t.text().references("products", "id"),
@@ -426,7 +452,7 @@ export default {
         attachmentId: t.text().references("attachments", "id"),
         setterId: t.text().notNull().references("users", "id"),
         requesteeId: t.text().references("users", "id"),
-        status: t.text().notNull().default("?"),
+        status: t.enum("flag_status").notNull().default("?"),
       },
       indexes: [
         { name: "flags_issue_idx", on: ["issueId"] },
@@ -496,7 +522,7 @@ export default {
       columns: {
         userId: t.text().notNull().references("users", "id"),
         issueId: t.text().references("issues", "id"),
-        kind: t.text().notNull().default("issue_changed"),
+        kind: t.enum("notification_kind").notNull().default("issue_changed"),
         title: t.text().notNull(),
         body: t.text(),
         isRead: t.boolean().notNull().default(false),
