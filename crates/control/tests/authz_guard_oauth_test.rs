@@ -25,7 +25,7 @@ use zeroship_authz::{Action, Resource};
 use zeroship_core::auth_provider::{AuthProvider, PlatformConfig, PlatformProvider};
 use zeroship_core::config::{Secret, SourceKind};
 use zeroship_core::device_grant::{
-    OP_PROVIDER, PLATFORM_CLI_CLIENT_ID, PLATFORM_CLI_ISSUABLE_SCOPES,
+    OP_PROVIDER, PLATFORM_CLI_CLIENT_ID, PLATFORM_CLI_REGISTERED_SCOPES,
 };
 
 mod common;
@@ -674,7 +674,10 @@ async fn assert_platform_cli_registration(pg: &compio_postgres::Client) {
         )
         .await
         .expect("load reconciled platform CLI client");
-    let expected_scopes = PLATFORM_CLI_ISSUABLE_SCOPES
+    // The REGISTERED list, which is the issuable ceiling plus `offline_access`:
+    // the CLI has to be able to ask for a refresh token, and the
+    // device-authorization endpoint checks the request against this column.
+    let expected_scopes = PLATFORM_CLI_REGISTERED_SCOPES
         .iter()
         .map(|scope| (*scope).to_string())
         .collect::<Vec<_>>();
@@ -686,7 +689,7 @@ async fn assert_platform_cli_registration(pg: &compio_postgres::Client) {
     assert!(row.get::<_, bool>("skip_consent"));
     assert!(row.get::<_, Option<Uuid>>("created_by").is_none());
     assert!(row.get::<_, Option<String>>("client_secret_hash").is_none());
-    assert!(!row.get::<_, bool>("refresh_allowed"));
+    assert!(row.get::<_, bool>("refresh_allowed"));
     assert_eq!(row.get::<_, String>("token_endpoint_auth_method"), "none");
     assert!(!row.get::<_, bool>("brokered"));
     assert!(row
@@ -848,10 +851,14 @@ async fn op_cli_device_token_authorizes_control_endpoint() {
     assert_eq!(claims["aud"], "control.zeroship.ai");
     assert_eq!(claims["client_id"], PLATFORM_CLI_CLIENT_ID);
     assert_eq!(claims["scope"], "apps:deploy apps:read");
+    // 15 minutes, not the 12-hour ceiling. This grant asked for no
+    // `offline_access`, so it got no refresh token and this token is the whole
+    // session - but the lifetime is a property of the grant, not of what the
+    // caller asked for, and control must accept the short one.
     assert_eq!(
         claims["exp"].as_i64().expect("OP token exp")
             - claims["iat"].as_i64().expect("OP token iat"),
-        43_200
+        zeroship_auth::oidc::ACCESS_TOKEN_TTL_SECS
     );
 
     let control = init_control!(fx);

@@ -1,9 +1,13 @@
 //! Control-mediated OAuth device flow for platform deploy tokens.
 //!
-//! This is the flow `zeroship login` drives. Control owns the RFC 8628 pending
-//! rows and the polling discipline; the auth service owns issuance. Rows
-//! written here carry `provider = 'platform'`
+//! Control owns the RFC 8628 pending rows and the polling discipline; the auth
+//! service owns issuance. Rows written here carry `provider = 'platform'`
 //! ([`zeroship_core::device_grant::PLATFORM_PROVIDER`]).
+//!
+//! `zeroship login` does NOT drive this flow. It reads
+//! [`protected_resource_metadata`] to learn which authorization server control
+//! trusts, then runs the OP's own device grant, which hands it a refresh
+//! family this flow cannot issue.
 //!
 //! Three steps, and the split between them is deliberate:
 //!
@@ -61,27 +65,32 @@ const POLL_INTERVAL_SECS: i64 = 5;
 const USER_CODE_ATTEMPTS: usize = 8;
 const PLATFORM_MINT_TIMEOUT: StdDuration = StdDuration::from_secs(3);
 const PLATFORM_TOKEN_ENDPOINT: &str = "/internal/platform-token";
-/// Lifetime of the deploy token `zeroship login` ends up holding.
+/// Lifetime of the deploy token THIS flow issues.
 ///
 /// The OP's default access-token lifetime is 15 minutes
-/// (`crates/auth/src/oidc/issuer.rs`), which is right for a browser session
-/// that can refresh silently and wrong for a CLI: this flow issues no refresh
-/// token, so a 15-minute deploy token means a human runs `zeroship login`
-/// again before most first deploys finish. A working day is the unit that
-/// matches the credential's actual use.
+/// (`crates/auth/src/oidc/issuer.rs`), which is right for a credential that
+/// can be refreshed and wrong for one that cannot: this flow issues no refresh
+/// token, so a 15-minute deploy token would mean a human re-authorizing before
+/// most first deploys finish. A working day is the unit that matches the
+/// credential's actual use.
 ///
-/// What bounds it: the token's `aud` is control's OAuth audience, so the
-/// gateway and app runtime do not accept it; its scope is capped to the
-/// principal's stored grants intersected with
+/// `zeroship login` no longer takes this trade. It drives the OP's own device
+/// grant (`crates/auth/src/oidc/device_token.rs`), asks for `offline_access`,
+/// and gets a 15-minute access token plus a rotating refresh family - which
+/// reuse detection and `kill_family` can revoke, writing exactly the
+/// (`zeroship-cli`, principal UUID) marker the paragraph below says nothing
+/// writes.
+///
+/// What bounds the token this flow still issues: its `aud` is control's OAuth
+/// audience, so the gateway and app runtime do not accept it; its scope is
+/// capped to the principal's stored grants intersected with
 /// [`PLATFORM_CLI_ISSUABLE_SCOPES`], so it carries no admin or billing
-/// authority; and the CLI writes it 0600. What
-/// does NOT currently bound it is a supported server-side revocation action.
-/// The bearer read path honors `zeroship.token_revocations`, but disconnecting
-/// an app writes a per-app client and pairwise subject. Auth's generic RFC 7009
-/// writer requires an authenticated registered client, while `zeroship-cli`
-/// is deliberately unregistered. No supported path writes the
-/// (`zeroship-cli`, principal UUID) marker this token needs, so the shared
-/// 12-hour issuance ceiling is its effective recall bound today.
+/// authority; and the CLI writes it 0600. What does NOT bound it is a
+/// supported server-side revocation action. The bearer read path honors
+/// `zeroship.token_revocations`, but disconnecting an app writes a per-app
+/// client and pairwise subject, and auth's generic RFC 7009 writer requires an
+/// authenticated registered client. For a token minted HERE the 12-hour
+/// issuance ceiling remains the effective recall bound.
 
 #[derive(Debug, Deserialize)]
 pub struct DeviceAuthRequest {
@@ -138,10 +147,52 @@ struct PlatformMintResponse {
     client_id: String,
 }
 
+/// RFC 9728 protected-resource metadata.
+///
+/// `authorization_servers` is a list in the RFC; control accepts exactly one
+/// issuer (`auth.platform_issuer`, the same string
+/// `zeroship_authn::BearerVerifier` checks `iss` against), so the list is
+/// always a single element or the document is not served at all.
+#[derive(Debug, Serialize)]
+pub struct ProtectedResourceMetadata {
+    resource: String,
+    authorization_servers: Vec<String>,
+}
+
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(web::resource("/api/device/auth").route(web::post().to(device_auth)))
         .service(web::resource("/api/device/approve").route(web::post().to(device_approve)))
-        .service(web::resource("/api/device/token").route(web::post().to(device_token)));
+        .service(web::resource("/api/device/token").route(web::post().to(device_token)))
+        .service(
+            web::resource(device_grant::PROTECTED_RESOURCE_METADATA_PATH)
+                .route(web::get().to(protected_resource_metadata)),
+        );
+}
+
+/// Tell an unauthenticated client which authorization server to log in to.
+///
+/// The CLI holds one configured URL - control's. Asking control which OP it
+/// trusts means the OP it logs in to is BY CONSTRUCTION the one whose tokens
+/// control will accept: the same `platform_issuer` that
+/// `zeroship_authn::BearerVerifier` pins `iss` to, and whose JWKS it fetches.
+/// A separately configured auth URL could drift from it, and the failure would
+/// surface as an opaque 401 at the first deploy rather than at login.
+///
+/// Unauthenticated by design: RFC 9728 metadata exists to be read by a client
+/// that has no credential yet. It discloses only what a 401
+/// `WWW-Authenticate` challenge would.
+pub async fn protected_resource_metadata(state: State<Arc<AppState>>) -> web::HttpResponse {
+    let Some(issuer) = state.auth_provider.platform_issuer() else {
+        // A deployment with no platform OP has no device flow to advertise.
+        // Saying so beats naming an issuer whose tokens would be refused.
+        return web::HttpResponse::NotFound().json(&json!({"error": "no_platform_issuer"}));
+    };
+    web::HttpResponse::Ok()
+        .header("cache-control", "no-store")
+        .json(&ProtectedResourceMetadata {
+            resource: state.expected_oauth_audience.clone(),
+            authorization_servers: Vec::from([issuer.to_string()]),
+        })
 }
 
 pub async fn device_auth(
