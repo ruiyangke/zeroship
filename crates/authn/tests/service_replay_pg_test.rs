@@ -49,6 +49,75 @@ const FIXTURE_DDL: &str = "CREATE SCHEMA IF NOT EXISTS zeroship; \
      CREATE INDEX IF NOT EXISTS service_assertion_replay_expiry_idx \
          ON zeroship.service_assertion_replay (expires_at)";
 
+/// The migration, read at compile time so its GRANT cannot drift from here.
+///
+/// The DDL above is hand-written and CAN drift; that is stated at
+/// [`FIXTURE_DDL`] and remains true. The GRANT does not have to, and it is the
+/// half that went wrong: the shipped migration granted insert, update and
+/// delete and argued SELECT away, and every statement this store issues reads
+/// `expires_at` in a condition, so all four roles were denied both of them.
+/// Nothing here could see that, because the fixture connects as the superuser.
+///
+/// So the privilege list and the role list are parsed out of the migration and
+/// applied verbatim, and [`every_granted_role_can_run_the_stores_own_statements`]
+/// runs the store as each of those roles. Take `select` back out of the
+/// migration and that test goes red with the Postgres permission error.
+const MIGRATION_SOURCE: &str =
+    include_str!("../../../db/migrations-ts/20260816000100_service_assertion_replay.ts");
+
+/// A role that is deliberately NOT in the migration's grant list.
+///
+/// It holds `usage` on the `zeroship` schema
+/// (`db/migrations-ts/20260702000900_grants.ts:46`) and nothing at all on this
+/// table, so a statement it issues fails on the TABLE privilege rather than on
+/// reaching the schema - which is what makes it a driver-error fixture and not
+/// a differently-shaped one.
+const UNGRANTED_ROLE: &str = "zeroship_app";
+
+/// Pull the quoted strings out of the first `<marker>...]` list in the migration.
+fn quoted_list_after(marker: &str) -> Vec<String> {
+    let (_, tail) = MIGRATION_SOURCE
+        .split_once(marker)
+        .unwrap_or_else(|| panic!("the migration source contains {marker:?}"));
+    let (list, _) = tail
+        .split_once(']')
+        .unwrap_or_else(|| panic!("the list after {marker:?} is closed"));
+    let items: Vec<String> = list
+        .split('"')
+        .skip(1)
+        .step_by(2)
+        .map(ToOwned::to_owned)
+        .collect();
+    assert!(!items.is_empty(), "the list after {marker:?} is not empty");
+    items
+}
+
+/// The roles the migration grants on the replay table.
+fn granted_roles() -> Vec<String> {
+    quoted_list_after("to: [")
+}
+
+/// The migration's own GRANT, re-expressed as SQL against the fixture table.
+///
+/// The schema-level `usage` is a fixture concern rather than a parsed one: a
+/// database this suite provisions itself has no
+/// `db/migrations-ts/20260702000900_grants.ts` to have run, so without it every
+/// role below fails on reaching the schema and the table privileges are never
+/// exercised at all. [`UNGRANTED_ROLE`] is included for exactly that reason -
+/// its failure has to be about the TABLE.
+fn fixture_grant_sql() -> String {
+    let granted = granted_roles();
+    let mut reach_the_schema = granted.clone();
+    reach_the_schema.push(UNGRANTED_ROLE.to_owned());
+    format!(
+        "GRANT usage ON SCHEMA zeroship TO {}; \
+         GRANT {} ON zeroship.service_assertion_replay TO {}",
+        reach_the_schema.join(", "),
+        quoted_list_after("privileges: [").join(", "),
+        granted.join(", "),
+    )
+}
+
 /// Serialises the fixture DDL across concurrent test threads and processes.
 ///
 /// MEASURED: without it, the first run against a database that does not yet
@@ -71,12 +140,34 @@ async fn ensure_fixture(client: &Client) {
         .execute("SELECT pg_advisory_lock($1)", &[&FIXTURE_LOCK])
         .await
         .expect("take the fixture lock");
-    let established = client.batch_execute(FIXTURE_DDL).await;
+    let established = client
+        .batch_execute(FIXTURE_DDL)
+        .await
+        .and(client.batch_execute(&fixture_grant_sql()).await);
     client
         .execute("SELECT pg_advisory_unlock($1)", &[&FIXTURE_LOCK])
         .await
         .expect("release the fixture lock");
     established.expect("establish the replay table fixture");
+}
+
+/// A connection whose privileges are exactly one role's.
+///
+/// MEASURED, on a scratch database built by `zeroship-platform-migrate` from
+/// `db/migrations-ts`: a superuser session that has `SET ROLE` to a
+/// non-superuser really is privilege-checked as that role - before the grant
+/// was fixed, this exact probe returned `permission denied for table
+/// service_assertion_replay` for all four granted roles, and after it all of
+/// them succeeded. So this is a genuine least-privilege session and not a
+/// superuser wearing a label.
+async fn client_as_role(url: &str, role: &str) -> Client {
+    let client = connect(url).await;
+    ensure_fixture(&client).await;
+    client
+        .execute(&format!("SET ROLE {role}"), &[])
+        .await
+        .unwrap_or_else(|error| panic!("assume the role {role}: {error}"));
+    client
 }
 
 async fn connect(url: &str) -> Client {
@@ -305,5 +396,85 @@ async fn a_verified_assertion_cannot_be_replayed_at_another_replica() {
     assert_eq!(
         verify_identity(replicas.second.as_ref(), &observed).await,
         Err(AuthError::CredentialRejected)
+    );
+}
+
+#[compio::test]
+async fn every_granted_role_can_run_the_stores_own_statements() {
+    let Some(url) = db_url() else {
+        zeroship_test_support::skip("AUTH_DB_URL unset (Postgres jti store)");
+        return;
+    };
+    // The rest of this file connects as the privileged test DSN, so it can
+    // prove the SQL is correct and cannot prove a service is allowed to issue
+    // it. Those are different questions and only the second one shipped wrong.
+    for role in granted_roles() {
+        let store = PostgresReplayStore::new(client_as_role(&url, &role).await);
+        let key = format!("spiffe://zeroship.ai/svc/gateway|{role}-{}", unique_suffix());
+        let future = SystemTime::now() + Duration::from_secs(120);
+
+        assert_eq!(
+            store
+                .claim(&key, future)
+                .await
+                .unwrap_or_else(|error| panic!("{role} must be able to claim: {error}")),
+            ReplayClaim::Accepted,
+            "{role}: the first claim of a fresh key wins"
+        );
+        assert_eq!(
+            store
+                .claim(&key, future)
+                .await
+                .unwrap_or_else(|error| panic!("{role} must be able to re-claim: {error}")),
+            ReplayClaim::AlreadyUsed,
+            "{role}: a live claim is single use"
+        );
+        store
+            .purge_expired()
+            .await
+            .unwrap_or_else(|error| panic!("{role} must be able to sweep: {error}"));
+    }
+}
+
+#[compio::test]
+async fn a_role_without_the_grant_fails_closed_rather_than_admitting_the_assertion() {
+    let Some(url) = db_url() else {
+        zeroship_test_support::skip("AUTH_DB_URL unset (Postgres jti store)");
+        return;
+    };
+    // The fail-closed arm was covered only in `zeroship-core`, against a store
+    // that returns an error by construction. Mutating `service_replay.rs` to
+    // map a driver error to Accepted left this file 4 of 4 green, because
+    // nothing here ever made a statement fail. A role without the grant does,
+    // and it is the same failure the missing SELECT would have produced in
+    // production.
+    let store = PostgresReplayStore::new(client_as_role(&url, UNGRANTED_ROLE).await);
+    let key = format!("spiffe://zeroship.ai/svc/gateway|denied-{}", unique_suffix());
+    let error = store
+        .claim(&key, SystemTime::now() + Duration::from_secs(120))
+        .await
+        .expect_err("a role without the grant cannot claim");
+    assert!(
+        error.to_string().contains("permission denied"),
+        "the store must surface the driver's refusal, not swallow it: {error}"
+    );
+
+    // And the verifier turns that into a refusal rather than a free pass.
+    let signing = ServiceSigningKey::generate();
+    let kid = format!("{CALLER_KID}-{}", unique_suffix());
+    let assertion = ServiceAssertionMinter::new(issuer(CALLER), kid.clone(), &signing)
+        .expect("build the caller's minter")
+        .mint(&issuer(CALLEE))
+        .expect("mint one assertion");
+    let mut bundle = ServiceTrustBundle::new();
+    bundle
+        .trust(&issuer(CALLER), kid, signing.verifying_key_bytes())
+        .expect("trust the caller's key");
+    let verifier = ServiceAssertionVerifier::new(bundle, Arc::new(store));
+    let observed = PeerCredentials::new(Some(assertion.as_str()), None, CALLEE);
+    assert_eq!(
+        verify_identity(&verifier, &observed).await,
+        Err(AuthError::CredentialRejected),
+        "a store that could not answer has not said the assertion is fresh"
     );
 }
