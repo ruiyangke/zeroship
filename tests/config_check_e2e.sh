@@ -225,7 +225,6 @@ MIGRATED="$BIN/zeroship-migrated"
 STRONG_HEX="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 CONTROL_KEY_HEX="1111111111111111111111111111111111111111111111111111111111111111"
 WORKER_KEY_HEX="2222222222222222222222222222222222222222222222222222222222222222"
-MINT_KEY_HEX="3333333333333333333333333333333333333333333333333333333333333333"
 
 # Secrets are supplied by their CANONICAL ENVIRONMENT NAME, not by a value flag:
 # a secret's only generated flag is `--<name>-file PATH`, so there is no value
@@ -233,19 +232,11 @@ MINT_KEY_HEX="3333333333333333333333333333333333333333333333333333333333333333"
 # on purpose - an in-memory literal keeps its material under --check-config, so
 # every strength guard below is still exercised by a dry run. A path-flag case
 # further down covers the arm that deliberately reads nothing.
-# The mint destination is mandatory whenever a platform issuer is configured,
-# and every control case below configures one (the native provider already
-# requires it). It is set here rather than per case for the same reason the
-# four secrets are: it is a precondition of the runs, not the subject of any
-# one of them. Case 18 is where it IS the subject.
-CONTROL_MINT_URL="http://auth.internal.check-config.test:9092"
 CONTROL_ENV=(
     env
-    ZEROSHIP_AUTH_PLATFORM_MINT_KEY="$MINT_KEY_HEX"
     ZEROSHIP_CONTROL_KEY="$CONTROL_KEY_HEX"
     ZEROSHIP_WORKER_KEY="$WORKER_KEY_HEX"
     ZEROSHIP_PAIRWISE_SALT="$STRONG_HEX"
-    ZEROSHIP_AUTH_PLATFORM_MINT_URL="$CONTROL_MINT_URL"
 )
 CONTROL_COMMON=(--signing-key-file "$TMPDIR/control-signing.pem")
 # Split out so a case can vary the master key alone.
@@ -266,7 +257,6 @@ GATEWAY_COMMON=(--broker-secret-file "$ZEROSHIP_GATEWAY_BROKER_SECRET_FILE")
 AUTH_RUN=(
     env
     ZEROSHIP_AUTH_DATABASE_URL=postgres://check-config
-    ZEROSHIP_AUTH_PLATFORM_MINT_KEY="$MINT_KEY_HEX"
     ZEROSHIP_AUTH_STASH_SIGNING_KEY="$STRONG_HEX"
     ZEROSHIP_AUTH_TOTP_ENC_KEY="$STRONG_HEX"
     "$AUTH"
@@ -709,78 +699,6 @@ run_cmd control-retired-provider-key "${CONTROL_RUN[@]}" --check-config \
     --auth-platform-issuer http://platform.test/oauth2
 show_last_output
 expect_rejected "auth_provider" "control rejects the retired [control] auth_provider key"
-echo ""
-
-echo "=== Case 18: the platform mint destination is configured, not derived ==="
-# One string used to do two jobs: the issuer was both the trust anchor a token's
-# `iss` must equal AND the address control POSTed `control_key` to. On the live
-# deployment those cannot be the same value - the public name resolves to a CDN
-# with no route back to the host - so every `zeroship login` approval ended in
-# `{"error":"internal error"}`. --check-config must now show BOTH, separately,
-# because "which of these two is wrong" is the question an operator is asking
-# when they read this output.
-run_cmd control-mint-url "${CONTROL_RUN[@]}" --check-config "${CONTROL_COMMON[@]}" \
-    --auth-platform-issuer https://auth.public.test/oauth2
-show_last_output
-expect_status 0 "control exits 0 with a public issuer and a separate mint URL"
-expect_stdout_contains "auth_platform_issuer = https://auth.public.test/oauth2" \
-    "control reports the PUBLIC issuer as the trust anchor"
-expect_stdout_contains "auth_platform_mint_url = $CONTROL_MINT_URL" \
-    "control reports the INTERNAL mint destination, which is not derived from the issuer"
-expect_stdout_not_contains "auth_platform_mint_url = https://auth.public.test" \
-    "the mint destination did not follow the issuer"
-echo ""
-
-# The refusal. An issuer with no mint destination must NOT fall back to the
-# issuer's own origin - that fallback is bit-for-bit the shipped bug, and it
-# would reappear on exactly the deployments that never set the new value.
-run_cmd control-mint-url-missing env \
-    ZEROSHIP_AUTH_PLATFORM_MINT_KEY="$MINT_KEY_HEX" \
-    ZEROSHIP_CONTROL_KEY="$CONTROL_KEY_HEX" ZEROSHIP_WORKER_KEY="$WORKER_KEY_HEX" \
-    ZEROSHIP_PAIRWISE_SALT="$STRONG_HEX" "${CONTROL_MASTER[@]}" \
-    "$CONTROL" --check-config "${CONTROL_COMMON[@]}" \
-    --auth-platform-issuer https://auth.public.test/oauth2
-show_last_output
-expect_rejected "ZEROSHIP_AUTH_PLATFORM_MINT_URL" \
-    "control refuses an issuer with no mint destination rather than deriving one"
-echo ""
-
-# A credential destination, so the value is parsed rather than trusted. Each
-# spelling below resolves somewhere other than the host it reads as.
-for bad_mint in "auth:9092" "https://auth.internal@evil.example" \
-    "http://auth:9092/oauth2"; do
-    run_cmd control-mint-url-bad env \
-        ZEROSHIP_AUTH_PLATFORM_MINT_KEY="$MINT_KEY_HEX" \
-        ZEROSHIP_CONTROL_KEY="$CONTROL_KEY_HEX" ZEROSHIP_WORKER_KEY="$WORKER_KEY_HEX" \
-        ZEROSHIP_PAIRWISE_SALT="$STRONG_HEX" "${CONTROL_MASTER[@]}" \
-        ZEROSHIP_AUTH_PLATFORM_MINT_URL="$bad_mint" \
-        "$CONTROL" --check-config "${CONTROL_COMMON[@]}" \
-        --auth-platform-issuer https://auth.public.test/oauth2
-    expect_rejected "ZEROSHIP_AUTH_PLATFORM_MINT_URL" \
-        "control rejects the mint destination $bad_mint"
-done
-echo ""
-
-echo "=== Case 18b: the platform mint credential is distinct from worker-held keys ==="
-run_cmd control-mint-equals-control env \
-    ZEROSHIP_AUTH_PLATFORM_MINT_KEY="$CONTROL_KEY_HEX" \
-    ZEROSHIP_CONTROL_KEY="$CONTROL_KEY_HEX" ZEROSHIP_WORKER_KEY="$WORKER_KEY_HEX" \
-    ZEROSHIP_PAIRWISE_SALT="$STRONG_HEX" "${CONTROL_MASTER[@]}" \
-    ZEROSHIP_AUTH_PLATFORM_MINT_URL="$CONTROL_MINT_URL" \
-    "$CONTROL" --check-config "${CONTROL_COMMON[@]}" \
-    --auth-platform-issuer https://auth.public.test/oauth2
-expect_rejected "ZEROSHIP_CONTROL_KEY" \
-    "control rejects a platform mint key equal to the worker-held control key"
-
-run_cmd control-mint-equals-worker env \
-    ZEROSHIP_AUTH_PLATFORM_MINT_KEY="$WORKER_KEY_HEX" \
-    ZEROSHIP_CONTROL_KEY="$CONTROL_KEY_HEX" ZEROSHIP_WORKER_KEY="$WORKER_KEY_HEX" \
-    ZEROSHIP_PAIRWISE_SALT="$STRONG_HEX" "${CONTROL_MASTER[@]}" \
-    ZEROSHIP_AUTH_PLATFORM_MINT_URL="$CONTROL_MINT_URL" \
-    "$CONTROL" --check-config "${CONTROL_COMMON[@]}" \
-    --auth-platform-issuer https://auth.public.test/oauth2
-expect_rejected "ZEROSHIP_WORKER_KEY" \
-    "control rejects a platform mint key equal to the worker dispatch key"
 echo ""
 
 echo "============================================"

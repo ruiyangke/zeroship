@@ -22,16 +22,13 @@
 #     -> `zeroship deploy` with that token
 #     -> the gateway serves the deployed app
 #
-# THE MINT PROXY IS NO LONGER ON THE LOGIN PATH. `zeroship login` used to drive
-# control's parallel flow, which POSTed `auth.platform_mint_url` with the
-# dedicated mint key; the recording proxy below existed to observe WHERE that
-# POST went, because a fallback that derived the target from the issuer looked
-# identical on a single-host harness. The CLI now redeems at the OP directly,
-# so control mints nothing during login and the proxy records zero hits. The
-# proxy and the "issuer origin is not the mint destination" precondition are
-# KEPT because the mint path itself is unchanged and still reachable through
-# `/api/device/token`; what is asserted about it here is that login does NOT
-# use it, which is a different claim from the old one and is stated as such.
+# THERE IS NO MINT LEG LEFT TO OBSERVE. `zeroship login` used to drive control's
+# parallel flow, which POSTed `auth.platform_mint_url` with a dedicated mint
+# key; a recording proxy here watched WHERE that POST went, because a fallback
+# deriving the target from the issuer looked identical on a single-host
+# harness. Control's flow and the mint endpoint are both deleted, so the proxy
+# had nothing left to discriminate and a "0 hits" assertion would have been
+# true no matter what broke. Both are gone; the CLI redeems at the OP directly.
 #
 # The signup leg reads its URL off the login page for the same reason the
 # approval leg loads the device page: a harness that composes the URL itself
@@ -39,13 +36,6 @@
 # `/oauth2/authorize` continuation while the login page linked to
 # `/signup?return_to=/me`, so the product's own path into signup was a 400 and
 # every harness that hand-built an RP continuation stayed green.
-#
-# `tests/supabase_deploy_e2e.sh` curls `/api/device/approve` directly, which is
-# exactly the shortcut that let the browser leg stay broken in BOTH provider
-# configurations: control wrote `provider = 'platform'` rows and the only page
-# that could approve anything filtered `provider = 'op'`, so every code the CLI
-# printed read back as "invalid or expired code". A harness that never loads
-# the page cannot see that.
 #
 # Usage:  ./tests/e2e_device_login.sh
 # Needs:  docker, curl, node, openssl, and a release build:
@@ -75,9 +65,6 @@ export ZEROSHIP_WORKER_PORT="${ZEROSHIP_WORKER_PORT:-8481}"
 export ZEROSHIP_GATEWAY_PORT="${ZEROSHIP_GATEWAY_PORT:-8382}"
 export PG_PORT="${PG_PORT:-5481}"
 export PG_CONTAINER="${PG_CONTAINER:-zs-devlogin-pg}"
-# A RECORDING PROXY in front of the OP, on its own port, so the harness can see
-# WHERE control sent the mint rather than only that a token came back.
-MINT_PROXY_PORT="${MINT_PROXY_PORT:-9483}"
 MIGRATED_PORT="${MIGRATED_PORT:-9484}"
 MIGRATED_URL="http://localhost:$MIGRATED_PORT"
 
@@ -103,7 +90,6 @@ cleanup() {
     while read -r pid; do kill "$pid" 2>/dev/null || true; done < "$PIDFILE"
   fi
   [ -n "${CLI_PID:-}" ] && kill "$CLI_PID" 2>/dev/null
-  [ -n "${MINT_PROXY_PID:-}" ] && kill "$MINT_PROXY_PID" 2>/dev/null
   docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
   [ -n "${WORK:-}" ] && [ -d "$WORK" ] && rm -rf "$WORK"
   return 0
@@ -176,76 +162,14 @@ stack_pg_up || { fail "postgres + migrations"; exit 1; }
 export ZEROSHIP_CONFIG_HOME="$WORK/cli-config"
 mkdir -p "$ZEROSHIP_CONFIG_HOME"
 
-for p in $AUTH_PORT $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT $MINT_PROXY_PORT; do
+for p in $AUTH_PORT $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT; do
   lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 done
-
-# ---------------------------------------------------------------------------
-step "Put a RECORDING PROXY in front of the OP, and point the mint at it"
-# WHY: every other harness in this tree runs the whole platform on one loopback
-# host, so the OP's public issuer origin and its reachable address are the same
-# string. When those two agree, code that DERIVES the mint target from the
-# issuer is indistinguishable from code that reads the configured one - which is
-# exactly how a shipped deployment ended up POSTing the mint credential at its own
-# public CDN hostname, failing Connect on every device approval, while every
-# green harness said the flow worked.
-#
-# So the mint is pointed at a port the issuer does not name. The proxy forwards
-# to the same OP, so a PASS still means the real flow completed; what it adds is
-# an observation of WHERE the mint went. If control fell back to the issuer the
-# login would still succeed and this log would be empty.
-MINT_LOG="$WORK/mint-proxy.log"
-: > "$MINT_LOG"
-cat > "$WORK/mint-proxy.js" <<'PROXY'
-const net = require("net");
-const fs = require("fs");
-const [, , listenPort, targetPort, logPath] = process.argv;
-net
-  .createServer((client) => {
-    const upstream = net.connect(Number(targetPort), "127.0.0.1");
-    let head = "";
-    let logged = false;
-    client.on("data", (chunk) => {
-      if (logged) return;
-      head += chunk.toString("latin1");
-      const nl = head.indexOf("\r\n");
-      if (nl !== -1) {
-        logged = true;
-        fs.appendFileSync(logPath, head.slice(0, nl) + "\n");
-      }
-    });
-    client.pipe(upstream);
-    upstream.pipe(client);
-    client.on("error", () => upstream.destroy());
-    upstream.on("error", () => client.destroy());
-  })
-  .listen(Number(listenPort), "127.0.0.1", () => process.stdout.write("ready\n"));
-PROXY
-node "$WORK/mint-proxy.js" "$MINT_PROXY_PORT" "$AUTH_PORT" "$MINT_LOG" \
-  > "$WORK/mint-proxy.out" 2>&1 &
-MINT_PROXY_PID=$!
-for _ in $(seq 1 40); do grep -q ready "$WORK/mint-proxy.out" 2>/dev/null && break; sleep 0.25; done
-grep -q ready "$WORK/mint-proxy.out" \
-  && pass "the mint recording proxy is listening on :$MINT_PROXY_PORT" \
-  || { fail "the mint proxy never started"; cat "$WORK/mint-proxy.out"; exit 1; }
-
-# The two settings, and the assertion that they DISAGREE. Without this the
-# observation below would be vacuous: if the mint URL happened to be the
-# issuer's own origin, a mint that reached the proxy would prove nothing about
-# which of the two control read.
-export ZEROSHIP_AUTH_PLATFORM_MINT_URL="http://127.0.0.1:$MINT_PROXY_PORT"
-ISSUER_ORIGIN="${ZEROSHIP_AUTH_PLATFORM_ISSUER%/oauth2}"
-echo "  trust anchor (issuer):   $ZEROSHIP_AUTH_PLATFORM_ISSUER"
-echo "  outbound (mint URL):     $ZEROSHIP_AUTH_PLATFORM_MINT_URL"
-[ "$ISSUER_ORIGIN" != "$ZEROSHIP_AUTH_PLATFORM_MINT_URL" ] \
-  && pass "the mint destination is not the issuer's origin ($ISSUER_ORIGIN)" \
-  || fail "the mint URL equals the issuer origin; this harness cannot tell them apart"
 
 # ---------------------------------------------------------------------------
 step "Boot the platform-only stack"
 echo "  auth=$AUTH_URL control=$CONTROL_URL gateway=$GATE_URL pg=:$PG_PORT"
 echo "  platform issuer: $ZEROSHIP_AUTH_PLATFORM_ISSUER"
-echo "  platform mint URL: $ZEROSHIP_AUTH_PLATFORM_MINT_URL"
 
 e2e_with_platform_mint_key "$BIN/zeroship-auth" \
   --addr "0.0.0.0:$AUTH_PORT" --public-url "$AUTH_URL" \
@@ -567,22 +491,6 @@ case "$REFRESH_TOKEN" in
   zrt_*) pass "the CLI stored a refresh token" ;;
   *) fail "the CLI stored no refresh token; a 15-minute session with no rotation is worse than the 12-hour bearer it replaced" ;;
 esac
-
-# ---------------------------------------------------------------------------
-# THE MINT LEG. The claim inverted with the CLI cutover: login must NOT reach
-# control's mint at all. The proxy is still in front of the OP, still on a port
-# the issuer does not name, so a nonzero count here would mean the CLI is still
-# on the old path (or something else started minting during login).
-# `grep -c` prints the count AND exits 1 on zero matches, so a `|| echo 0`
-# fallback appends a SECOND line and the comparison below dies with "integer
-# expected" instead of reporting the count it found. Let grep's own 0 stand;
-# the default only covers a missing file.
-MINT_HITS="$(grep -c 'POST /internal/platform-token' "$MINT_LOG" 2>/dev/null || true)"
-MINT_HITS="${MINT_HITS:-0}"
-echo "  mint proxy recorded: $(tr '\n' '|' < "$MINT_LOG")"
-[ "$MINT_HITS" = "0" ] \
-  && pass "login minted nothing through control (0 hits on :$MINT_PROXY_PORT)" \
-  || fail "login POSTed control's platform mint $MINT_HITS time(s); the CLI is on the old path"
 
 TOKEN_ISS="$(jwt_claim "$TOKEN" iss)"
 [ "$TOKEN_ISS" = "$ZEROSHIP_AUTH_PLATFORM_ISSUER" ] \

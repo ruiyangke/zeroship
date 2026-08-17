@@ -1,16 +1,16 @@
 //! The vocabulary of `zeroship.device_grants`, defined once.
 //!
-//! Two RFC 8628 flows share that one table, and the `provider` column is what
-//! keeps them apart:
+//! One RFC 8628 flow writes that table now: [`OP_PROVIDER`], the auth
+//! service's own device grant. The approved row is redeemed at the OP's
+//! `/oauth2/token` for an OIDC access token, so the row carries `client_id`,
+//! `sid` and `auth_credential_version`.
 //!
-//! * [`OP_PROVIDER`] - the auth service's own device grant. The approved row is
-//!   redeemed at the OP's `/oauth2/token` for an OIDC access token, so the row
-//!   carries `client_id`, `sid` and `auth_credential_version`.
-//! * [`PLATFORM_PROVIDER`] - the control plane's deploy-token grant. The
-//!   approved row is redeemed at control's `/api/device/token` for a platform
-//!   access token scoped to the principal's `zeroship.principal_grants`. It
-//!   issues no refresh token, so its access token carries the full
-//!   [`PLATFORM_TOKEN_MAX_TTL_SECS`] ceiling.
+//! [`PLATFORM_PROVIDER`] named the control plane's parallel deploy-token
+//! grant, which was deleted once `zeroship login` moved onto the OP's
+//! endpoints. The spelling survives because `zeroship.identity_links` still
+//! uses it to mark a platform-native principal (see
+//! `crates/control/src/identity_bridge.rs`); nothing writes a
+//! `device_grants` row with it.
 //!
 //! The auth service also reconciles a first-party [`PLATFORM_CLI_CLIENT_ID`]
 //! registration at startup. Its OP device grants use [`OP_PROVIDER`] and may
@@ -43,24 +43,28 @@
 /// `zeroship.device_grants.provider` for the auth service's own OP grant.
 pub const OP_PROVIDER: &str = "op";
 
-/// `zeroship.device_grants.provider` for control's platform deploy-token grant.
+/// Marks a platform-native principal in `zeroship.identity_links`.
+///
+/// Named for control's deleted deploy-token device grant, which is where the
+/// spelling started. No `zeroship.device_grants` row carries it any more.
 pub const PLATFORM_PROVIDER: &str = "platform";
 
 /// OAuth client id reserved for first-party CLI platform access tokens.
 ///
-/// Auth reconciles this registration at startup. The current parallel control
-/// flow also fixes this id onto the tokens issued to `zeroship login`.
+/// Auth reconciles this registration at startup and fixes this id onto the
+/// tokens its device grant issues to `zeroship login`.
 pub const PLATFORM_CLI_CLIENT_ID: &str = "zeroship-cli";
 
 /// Exact AUTHORITY ceiling registered for the first-party platform CLI client.
 ///
 /// These are the scopes a CLI token may actually carry authority for. The
-/// control-plane mint intersects them with the principal's stored grants.
+/// bearer path intersects them with the principal's stored grants
+/// (`crates/authn/src/lib.rs`, `platform_cli_entitlement`).
 ///
 /// This is deliberately NOT the same list as
 /// [`PLATFORM_CLI_REGISTERED_SCOPES`]: `offline_access` may be REQUESTED (it
 /// asks for a refresh token) but confers no resource authority, and folding it
-/// in here would let it through the mint's `issuable_scopes` filter as though
+/// in here would let it through that intersection as though
 /// it did.
 pub const PLATFORM_CLI_ISSUABLE_SCOPES: [&str; 4] = [
     "apps:deploy",
@@ -95,8 +99,9 @@ pub const PLATFORM_CLI_REGISTERED_SCOPES: [&str; 5] = [
 /// This is a CEILING, not the lifetime the OP device grant issues: that grant
 /// now returns a refresh family, so its access token takes the OP's ordinary
 /// short lifetime (`ACCESS_TOKEN_TTL_SECS`) and the long life lives in the
-/// rotating, revocable refresh token instead. The ceiling still bounds the
-/// control-mediated mint, which issues no refresh token.
+/// rotating, revocable refresh token instead. What the ceiling still bounds is
+/// `validate_registered_ttl`, which the OP applies to every mint, and the
+/// signing-key retention horizon that has to outlast the longest live token.
 pub const PLATFORM_TOKEN_MAX_TTL_SECS: i64 = 12 * 60 * 60;
 
 /// The OP's device-authorization endpoint, relative to the issuer.
@@ -152,87 +157,6 @@ pub fn op_public_url(issuer: &str) -> Option<&str> {
     let base = trimmed.strip_suffix(OP_PATH_PREFIX)?;
     let base = base.trim_end_matches('/');
     (!base.is_empty()).then_some(base)
-}
-
-/// Where control POSTs the platform deploy-token mint, validated.
-///
-/// This is the OUTBOUND half of what [`op_public_url`] used to do on its own,
-/// and it is deliberately not derived from the issuer. See the doc comment on
-/// `ControlSettings::auth_platform_mint_url` for why the trust anchor and the
-/// route cannot be one string.
-///
-/// The rules exist because the request this URL addresses carries the dedicated
-/// platform-mint key in an `Authorization` header, so whatever this names
-/// receives that credential. What the rules bound:
-///
-///   * ABSOLUTE http/https only. A relative or scheme-less value cannot be
-///     resolved against anything here, and `auth:9092` - which reads as a
-///     host:port - parses as the scheme `auth`, so it is refused by name rather
-///     than silently treated as a path.
-///   * NO userinfo. `https://auth.internal@evil.example` names `evil.example`
-///     while reading as the internal host; a value carrying `@` is refused.
-///   * NO path, query or fragment. Control appends a fixed endpoint path, and
-///     a configured suffix could otherwise move or re-parse the effective
-///     target.
-///
-/// What it does NOT bound: the host itself. Nothing here can tell an internal
-/// address from a hostile one, and a check that pretended to would be claiming
-/// a protection it does not have. The real bound is on the SUPPLY: this value
-/// comes only from a flag, an environment variable, or the operator-owned
-/// config overlay, never from a request, a token, a database row, or the
-/// issuer string.
-///
-/// # Errors
-///
-/// Returns the specific rule the value broke, so the boot diagnostic can name
-/// it rather than saying "invalid".
-pub fn platform_mint_base_url(raw: &str) -> Result<&str, MintUrlError> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err(MintUrlError::Missing);
-    }
-    let parsed = url::Url::parse(trimmed).map_err(|_| MintUrlError::NotAbsolute)?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Err(MintUrlError::UnsupportedScheme);
-    }
-    if parsed.host_str().is_none_or(str::is_empty) {
-        return Err(MintUrlError::NoHost);
-    }
-    if !parsed.username().is_empty() || parsed.password().is_some() {
-        return Err(MintUrlError::Userinfo);
-    }
-    if parsed.path() != "/" {
-        return Err(MintUrlError::HasPath);
-    }
-    if parsed.query().is_some() || parsed.fragment().is_some() {
-        return Err(MintUrlError::QueryOrFragment);
-    }
-    Ok(trimmed.trim_end_matches('/'))
-}
-
-/// Why a configured platform mint URL was refused.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum MintUrlError {
-    #[error("no value is set")]
-    Missing,
-
-    #[error("must be an absolute URL, e.g. http://auth:9092")]
-    NotAbsolute,
-
-    #[error("must use http or https")]
-    UnsupportedScheme,
-
-    #[error("must name a host")]
-    NoHost,
-
-    #[error("must not carry userinfo (a `user:pass@` prefix)")]
-    Userinfo,
-
-    #[error("must be a bare origin with no path")]
-    HasPath,
-
-    #[error("must not carry a query string or fragment")]
-    QueryOrFragment,
 }
 
 /// Format `chars` as `XXXX-XXXX-XXXX`.
@@ -367,83 +291,5 @@ mod tests {
         // verification URI it cannot serve.
         assert_eq!(op_public_url("https://project.supabase.co/auth/v1"), None);
         assert_eq!(op_public_url("/oauth2"), None);
-    }
-
-    #[test]
-    fn a_mint_url_is_a_bare_reachable_origin() {
-        assert_eq!(
-            platform_mint_base_url("http://auth:9092"),
-            Ok("http://auth:9092")
-        );
-        // A trailing slash is the same origin, and the caller appends a path
-        // beginning with `/`, so it is trimmed rather than refused.
-        assert_eq!(
-            platform_mint_base_url("https://auth.internal/  "),
-            Ok("https://auth.internal")
-        );
-        assert_eq!(
-            platform_mint_base_url("http://127.0.0.1:9481"),
-            Ok("http://127.0.0.1:9481")
-        );
-    }
-
-    #[test]
-    fn a_mint_url_that_could_redirect_the_platform_mint_key_is_refused() {
-        // Each case is a way the resolved destination could differ from the
-        // host an operator reading the value would name.
-        assert_eq!(platform_mint_base_url(""), Err(MintUrlError::Missing));
-        assert_eq!(platform_mint_base_url("   "), Err(MintUrlError::Missing));
-        // Reads as host:port, parses as the scheme `auth`.
-        assert_eq!(
-            platform_mint_base_url("auth:9092"),
-            Err(MintUrlError::UnsupportedScheme)
-        );
-        assert_eq!(
-            platform_mint_base_url("//auth:9092"),
-            Err(MintUrlError::NotAbsolute)
-        );
-        assert_eq!(
-            platform_mint_base_url("file:///etc/passwd"),
-            Err(MintUrlError::UnsupportedScheme)
-        );
-        // Reads as the internal host, resolves to evil.example.
-        assert_eq!(
-            platform_mint_base_url("https://auth.internal@evil.example"),
-            Err(MintUrlError::Userinfo)
-        );
-        assert_eq!(
-            platform_mint_base_url("http://auth:9092/oauth2"),
-            Err(MintUrlError::HasPath)
-        );
-        assert_eq!(
-            platform_mint_base_url("http://auth:9092/?next=x"),
-            Err(MintUrlError::QueryOrFragment)
-        );
-        assert_eq!(
-            platform_mint_base_url("http://auth:9092/#frag"),
-            Err(MintUrlError::QueryOrFragment)
-        );
-    }
-
-    #[test]
-    fn the_issuer_and_the_mint_url_are_not_interchangeable() {
-        // The one-variable pair that names the whole bug. `op_public_url` maps
-        // an issuer to the PUBLIC origin that advertises it - correct for the
-        // browser page it feeds, and the wrong answer for an outbound POST on a
-        // host with no egress-and-back route. The mint URL is that outbound
-        // answer, and it is not derivable from the issuer: nothing in the
-        // issuer string mentions `auth:9092`.
-        let issuer = "https://auth.zeroship.co/oauth2";
-        assert_eq!(op_public_url(issuer), Some("https://auth.zeroship.co"));
-        assert_eq!(
-            platform_mint_base_url("http://auth:9092"),
-            Ok("http://auth:9092")
-        );
-        // And the issuer is not itself a legal mint URL, so a deployment
-        // cannot quietly paste one into the other and keep today's behaviour.
-        assert_eq!(
-            platform_mint_base_url(issuer),
-            Err(MintUrlError::HasPath)
-        );
     }
 }

@@ -1,23 +1,18 @@
-//! Native OP device grant support plus the internal platform-token mint.
+//! Native OP device grant support.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Duration, Utc};
 use compio_postgres::{Client, GenericClient, Transaction};
 use ntex::http::StatusCode;
-use ntex::web::{self, HttpRequest, HttpResponse};
+use ntex::web::{self, HttpResponse};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
-use zeroship_authz::Scope;
-use zeroship_core::auth::{constant_time_eq, extract_bearer};
 use zeroship_core::device_grant::{
-    OFFLINE_ACCESS_SCOPE, PLATFORM_CLI_CLIENT_ID, PLATFORM_CLI_ISSUABLE_SCOPES,
-    PLATFORM_CLI_REGISTERED_SCOPES, PLATFORM_TOKEN_MAX_TTL_SECS,
+    OFFLINE_ACCESS_SCOPE, PLATFORM_CLI_CLIENT_ID, PLATFORM_CLI_REGISTERED_SCOPES,
 };
 
 use crate::advisory_lock::lock_refresh_user_xact;
@@ -30,7 +25,6 @@ use crate::oidc::authorization_code::{
 use crate::oidc::refresh::{self, ClientAuth, ClientAuthMethod, RefreshSessionPool, RefreshTokenKeys};
 use crate::oidc::{Issuer, PrincipalAccessTokenMint, ACCESS_TOKEN_TTL_SECS};
 
-pub const INTERNAL_PLATFORM_TOKEN_PATH: &str = "/internal/platform-token";
 pub const DEVICE_CODE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:device_code";
 
 const DEVICE_CODE_BYTES: usize = 32;
@@ -238,11 +232,15 @@ pub enum DeviceApproval {
 
 /// A pending grant the `/device` page found for a typed user code.
 ///
-/// The `provider` column selects which service redeems the approved row, so the
-/// page renders from it rather than assuming: an [`OP_DEVICE_PROVIDER`] row is
-/// redeemed at this service's `/oauth2/token` and names a registered OAuth
-/// client, while a [`PLATFORM_PROVIDER`] row is redeemed at control's
-/// `/api/device/token` and names none.
+/// The `provider` column used to select which service redeems the approved
+/// row: an [`OP_DEVICE_PROVIDER`] row at this service's `/oauth2/token`, a
+/// [`PLATFORM_PROVIDER`] row at control's `/api/device/token`. Control's flow
+/// is deleted and NOTHING writes a `PLATFORM_PROVIDER` row to
+/// `zeroship.device_grants` any more, so every row the page sees today is an
+/// OP row. The discriminator and [`Self::is_platform`] are left in place
+/// rather than removed with the flow, because dropping them reaches into the
+/// OP device grant and the `provider` column is schema; they are vestigial,
+/// not load-bearing.
 #[derive(Debug, Clone)]
 pub(crate) struct PendingDeviceGrant {
     pub client_id: String,
@@ -256,58 +254,6 @@ impl PendingDeviceGrant {
     pub(crate) fn is_platform(&self) -> bool {
         self.provider == PLATFORM_PROVIDER
     }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MintPlatformTokenRequest {
-    pub principal_id: String,
-    #[serde(default)]
-    pub scopes: Vec<String>,
-    pub ttl_secs: Option<i64>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct MintPlatformTokenResponse {
-    pub access_token: String,
-    pub token_type: &'static str,
-    pub expires_in: u64,
-    pub scope: String,
-    pub provider: &'static str,
-    pub client_id: &'static str,
-}
-
-struct PlatformMintCaller {
-    token_client_id: &'static str,
-    issuable_scopes: &'static [&'static str],
-}
-
-const CONTROL_MINT_CALLER: PlatformMintCaller = PlatformMintCaller {
-    token_client_id: PLATFORM_CLI_CLIENT_ID,
-    issuable_scopes: &PLATFORM_CLI_ISSUABLE_SCOPES,
-};
-
-fn platform_token_scopes(
-    caller: &PlatformMintCaller,
-    requested: &[String],
-    granted: &HashSet<String>,
-) -> Vec<String> {
-    let mut seen = HashSet::new();
-    requested
-        .iter()
-        .map(|scope| scope.trim().to_string())
-        .filter(|scope| {
-            granted.contains(scope)
-                && caller.issuable_scopes.contains(&scope.as_str())
-                && seen.insert(scope.clone())
-        })
-        .collect()
-}
-
-pub fn configure(cfg: &mut web::ServiceConfig) {
-    cfg.service(
-        web::resource(INTERNAL_PLATFORM_TOKEN_PATH).route(web::post().to(mint_platform_token)),
-    );
 }
 
 #[allow(clippy::future_not_send)]
@@ -686,8 +632,7 @@ async fn exchange_device_code_locked(
             //
             // Say what this does not do, because the difference is invisible
             // from the response: this does not intersect with
-            // `zeroship.principal_grants`, which the sibling
-            // `mint_platform_token` below does. It cannot -
+            // `zeroship.principal_grants`. It cannot -
             // `db/migrations-ts/20260702000900_grants.ts:55` gives
             // `zeroship_auth` SELECT on that table and no write anywhere near
             // it, so intersecting HERE would mint `scope: ""` on every first
@@ -847,169 +792,4 @@ fn verification_uri_complete(verification_uri: &str, user_code: &str) -> String 
     let mut url = url::Url::parse(verification_uri).expect("verification_uri is absolute");
     url.query_pairs_mut().append_pair("user_code", user_code);
     url.to_string()
-}
-
-#[allow(clippy::future_not_send)]
-pub async fn mint_platform_token(
-    req: HttpRequest,
-    cfg: web::types::State<Arc<AuthConfig>>,
-    issuer: web::types::State<Arc<Issuer>>,
-    refresh_pool: web::types::State<RefreshSessionPool>,
-    body: web::types::Json<MintPlatformTokenRequest>,
-) -> HttpResponse {
-    let Some(caller) = authenticated_platform_mint_caller(&req, cfg.as_ref()) else {
-        return HttpResponse::Unauthorized().json(&json!({"error": "unauthorized"}));
-    };
-
-    let principal_id = match Uuid::parse_str(body.principal_id.trim()) {
-        Ok(principal_id) => principal_id,
-        Err(_) => {
-            return HttpResponse::BadRequest().json(&json!({"error": "invalid_principal_id"}));
-        }
-    };
-    if body
-        .scopes
-        .iter()
-        .any(|scope| Scope::parse(scope.trim()).is_err())
-    {
-        return HttpResponse::BadRequest().json(&json!({"error": "invalid_scope"}));
-    }
-    let ttl_secs = body.ttl_secs.unwrap_or(ACCESS_TOKEN_TTL_SECS);
-    if ttl_secs <= 0 || ttl_secs > PLATFORM_TOKEN_MAX_TTL_SECS {
-        return HttpResponse::BadRequest().json(&json!({"error": "invalid_ttl"}));
-    }
-
-    let pool = match refresh_pool.checkout_pool("platform token mint").await {
-        Ok(pool) => pool,
-        Err(err) => {
-            tracing::error!(error = %err, "auth: platform token database pool failed");
-            return HttpResponse::InternalServerError()
-                .json(&json!({"error": "grant_lookup_failed"}));
-        }
-    };
-    let mut conn = match pool.get().await {
-        Ok(conn) => conn,
-        Err(err) => {
-            tracing::error!(error = %err, "auth: platform token database checkout failed");
-            return HttpResponse::InternalServerError()
-                .json(&json!({"error": "grant_lookup_failed"}));
-        }
-    };
-    let tx = match conn.transaction().await {
-        Ok(tx) => tx,
-        Err(err) => {
-            tracing::error!(error = %err, "auth: platform token transaction failed");
-            return HttpResponse::InternalServerError()
-                .json(&json!({"error": "grant_lookup_failed"}));
-        }
-    };
-    if let Err(err) = crate::advisory_lock::lock_refresh_user_xact(&tx, principal_id).await {
-        tracing::error!(error = %err, principal_id = %principal_id, "auth: platform token user lock failed");
-        return HttpResponse::InternalServerError()
-            .json(&json!({"error": "grant_lookup_failed"}));
-    }
-    let rows = match tx
-        .query(
-            "SELECT pg.grant_name \
-             FROM zeroship.users u \
-             LEFT JOIN zeroship.principal_grants pg ON pg.principal_id = u.id \
-             WHERE u.id = $1 \
-               AND u.disabled_at IS NULL \
-               AND u.anonymized_at IS NULL \
-               AND u.deletion_requested_at IS NULL \
-               AND u.deletion_scheduled_for IS NULL \
-               AND (u.locked_until IS NULL OR u.locked_until <= NOW()) \
-             ORDER BY pg.grant_name",
-            &[&principal_id],
-        )
-        .await
-    {
-        Ok(rows) => rows,
-        Err(err) => {
-            tracing::error!(
-                error = %err,
-                principal_id = %principal_id,
-                "auth: platform token principal grant lookup failed"
-            );
-            return HttpResponse::InternalServerError()
-                .json(&json!({"error": "grant_lookup_failed"}));
-        }
-    };
-    if rows.is_empty() {
-        return HttpResponse::BadRequest().json(&json!({"error": "unknown_principal"}));
-    }
-    let granted: HashSet<String> = rows
-        .iter()
-        .filter_map(|row| row.get::<_, Option<String>>("grant_name"))
-        .collect();
-    let scopes = platform_token_scopes(caller, &body.scopes, &granted);
-    let principal_id = principal_id.to_string();
-    let access_token = match issuer
-        .issue_principal_access_token(
-            &tx,
-            &PrincipalAccessTokenMint {
-                principal_id: &principal_id,
-                audience: cfg.settings.oauth_audience.get().trim(),
-                client_id: caller.token_client_id,
-                scopes: &scopes,
-                ttl_secs: Some(ttl_secs),
-            },
-        )
-        .await
-    {
-        Ok(token) => token,
-        Err(err) => {
-            tracing::error!(error = %err, "auth: platform token mint failed");
-            return HttpResponse::InternalServerError().json(&json!({"error": "mint_failed"}));
-        }
-    };
-    if let Err(err) = tx.commit().await {
-        tracing::error!(error = %err, "auth: platform token transaction commit failed");
-        return HttpResponse::InternalServerError().json(&json!({"error": "mint_failed"}));
-    }
-
-    HttpResponse::Ok().json(&MintPlatformTokenResponse {
-        access_token,
-        token_type: "Bearer",
-        expires_in: ttl_secs as u64,
-        scope: scopes.join(" "),
-        provider: "platform",
-        client_id: caller.token_client_id,
-    })
-}
-
-fn authenticated_platform_mint_caller(
-    req: &HttpRequest,
-    cfg: &AuthConfig,
-) -> Option<&'static PlatformMintCaller> {
-    let expected = cfg.settings.platform_mint_key.expose_str().trim();
-    if expected.is_empty() {
-        return None;
-    }
-    let header = req
-        .headers()
-        .get("authorization")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("");
-    extract_bearer(header)
-        .filter(|provided| constant_time_eq(provided, expected))
-        .map(|_| &CONTROL_MINT_CALLER)
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::HashSet;
-
-    use super::{platform_token_scopes, CONTROL_MINT_CALLER};
-
-    #[test]
-    fn platform_token_scopes_apply_the_callers_issuance_ceiling() {
-        let requested = vec!["apps:read".to_string(), "billing:write".to_string()];
-        let granted = HashSet::from(["apps:read".to_string(), "billing:write".to_string()]);
-
-        assert_eq!(
-            platform_token_scopes(&CONTROL_MINT_CALLER, &requested, &granted),
-            ["apps:read"]
-        );
-    }
 }
