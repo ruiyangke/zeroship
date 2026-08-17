@@ -219,8 +219,41 @@ type SecretSpec = (
     fn(&[u8]) -> Result<(), String>,
 );
 
-fn secret_specs() -> [SecretSpec; 7] {
+/// The compose `migrate` one-shot's privileged DSN.
+///
+/// COUPLED TO deploy/compose/docker-compose.yml: `postgres` there is reachable
+/// on the compose network as host `postgres`, and its `POSTGRES_PASSWORD` is
+/// the literal `zeroship`. Change either and this must change with it - which
+/// is the point of writing it down in one place instead of leaving it inline in
+/// the deploy file, where it also sat in the one-shot's ARGV.
+///
+/// Written only when absent, so an operator who repoints this file at a real
+/// database keeps their value across re-runs.
+const COMPOSE_MIGRATE_DSN: &str = "postgres://postgres:zeroship@postgres:5432/zeroship\n";
+
+fn generate_migrate_dsn() -> Result<Vec<u8>, String> {
+    Ok(COMPOSE_MIGRATE_DSN.as_bytes().to_vec())
+}
+
+/// A DSN is credential material by grammar (it admits userinfo), so it gets the
+/// same private-file treatment as generated key material. Validation is
+/// structural only: this file is meant to be re-pointed at a real database, so
+/// the contents are not pinned to the default above.
+fn validate_migrate_dsn(bytes: &[u8]) -> Result<(), String> {
+    let text = std::str::from_utf8(bytes).map_err(|error| format!("expected UTF-8: {error}"))?;
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("is empty".to_string());
+    }
+    if !text.starts_with("postgres://") && !text.starts_with("postgresql://") {
+        return Err("must be a postgres:// or postgresql:// DSN".to_string());
+    }
+    Ok(())
+}
+
+fn secret_specs() -> [SecretSpec; 8] {
     [
+        ("migrate-dsn", generate_migrate_dsn, validate_migrate_dsn),
         (
             "auth-signing.pem",
             generate_signing_key,
