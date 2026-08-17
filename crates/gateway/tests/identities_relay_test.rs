@@ -66,6 +66,22 @@ async fn seed_oauth_client(client: &Client, client_id: &str) {
         .expect("seed oauth client");
 }
 
+/// The pairwise subject the gateway would project for `(user, client)`, derived
+/// through the production function with a fixture salt.
+///
+/// A hand-written `pws_<random>` is shape-valid and therefore survives
+/// `is_pairwise_subject`, so a shape check cannot catch it - but it is not the
+/// value any real credential for this pair carries. Since the stored subject is
+/// IMMUTABLE (`identities::upsert` refuses to rewrite it), a fabricated seed
+/// turns the first token mint added to this binary into an opaque 500.
+fn fixture_pairwise_sub(client_id: &str, user_id: Uuid) -> String {
+    zeroship_core::auth::derive_pairwise(
+        &zeroship_core::crypto::derive_key("identities-relay-test-salt"),
+        &user_id.to_string(),
+        &format!("https://{client_id}.zeroship.test"),
+    )
+}
+
 async fn cleanup(client: &Client, client_id: &str, user_id: Uuid) {
     let _ = client
         .execute(
@@ -93,7 +109,7 @@ async fn lookup_relay_email_returns_active_alias_and_fails_closed_on_revoke() {
     let client_id = format!("oac_relayswap_{}", Uuid::new_v4().simple());
     seed_oauth_client(&client, &client_id).await;
     let user_id = seed_user(&client, "relayswap").await;
-    let pairwise_sub = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
+    let pairwise_sub = fixture_pairwise_sub(&client_id, user_id);
     let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
 
     // Active alias row (relay_email set, revoked_at NULL).
@@ -222,7 +238,7 @@ async fn lookup_relay_email_is_none_when_no_alias_minted() {
     let client_id = format!("oac_noalias_{}", Uuid::new_v4().simple());
     seed_oauth_client(&client, &client_id).await;
     let user_id = seed_user(&client, "noalias").await;
-    let pairwise_sub = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
+    let pairwise_sub = fixture_pairwise_sub(&client_id, user_id);
 
     // Identity row exists (gateway upserted the pairwise mapping) but no alias
     // minted yet — relay_email NULL (consent ran before, or no email scope).

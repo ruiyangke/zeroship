@@ -71,7 +71,16 @@ async fn seed_active_alias(db: &Client) -> (Uuid, String, String) {
     .expect("insert grant");
 
     let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
-    let pairwise_sub = format!("pws_test_{}", Uuid::new_v4().simple());
+    // DERIVED, not invented: the stored subject is what a live token for this
+    // (app, user) carries, so a fabricated one is a value no real credential
+    // holds. Nothing in this file mints a token today, which is exactly why a
+    // wrong value here is silent - the first mint added to this binary would
+    // hit the immutable-binding refusal as an opaque 500.
+    let pairwise_sub = zeroship_core::auth::derive_pairwise(
+        &zeroship_core::crypto::derive_key("relay-auto-revoke-test-salt"),
+        &user_id.to_string(),
+        &format!("https://{client_id}.zeroship.localhost"),
+    );
     db.execute(
         "INSERT INTO zeroship.app_user_identities \
             (app_client_id, global_user_id, pairwise_sub, relay_email) \

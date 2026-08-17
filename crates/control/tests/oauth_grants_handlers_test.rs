@@ -303,13 +303,22 @@ async fn insert_grant(state: &AppState, user_id: Uuid, client_id: &str, scopes: 
 /// Seed a `zeroship.app_user_identities` row with a minted relay alias keyed on
 /// `(client_id, user_id)` — the row the gateway writes and the alias consent
 /// mints. The relay revocation cascade revokes THIS row.
+///
+/// `sector` is the app's apex `sector_identifier`. The `pairwise_sub` is DERIVED
+/// from it with the same salt the `AppState` carries, so the row holds the value
+/// the gateway would actually project for this `(app, user)` rather than an
+/// invented string. An invented one is not merely cosmetic: it is the value a
+/// live token carries, so any assertion downstream of a token mint for this pair
+/// would be comparing against something no real credential ever holds.
 async fn insert_identity_with_alias(
     state: &AppState,
     client_id: &str,
+    sector: &str,
     user_id: Uuid,
     relay_email: &str,
 ) {
-    let pairwise_sub = format!("pws_test_{}", Uuid::new_v4().simple());
+    let pairwise_sub =
+        zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &user_id.to_string(), sector);
     state
         .control_pg
         .execute(
@@ -656,10 +665,11 @@ async fn revoke_cascade_revokes_relay_alias_so_inbound_bounces() {
     let pat = account_pat(&fx.state, "cascade").await;
     let app = init_control!(fx);
     let client_id = format!("oauth-grant-cascade-{}", Uuid::new_v4().simple());
+    let sector = format!("https://{client_id}.zeroship.localhost");
     insert_client(&fx.state, &client_id, pat.user_id).await;
     insert_grant(&fx.state, pat.user_id, &client_id, &["apps:read", "email"]).await;
     let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
-    insert_identity_with_alias(&fx.state, &client_id, pat.user_id, &relay_email).await;
+    insert_identity_with_alias(&fx.state, &client_id, &sector, pat.user_id, &relay_email).await;
 
     // Pre-condition: the alias forwards (active map present — what 5b resolves).
     assert!(
@@ -755,7 +765,7 @@ async fn revoke_grant_writes_token_family_marker_that_rejects_live_token() {
     let app_id = insert_app_oauth_client(&fx.state, &client_id, &sector).await;
     insert_grant(&fx.state, pat.user_id, &client_id, &["apps:read", "email"]).await;
     let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
-    insert_identity_with_alias(&fx.state, &client_id, pat.user_id, &relay_email).await;
+    insert_identity_with_alias(&fx.state, &client_id, &sector, pat.user_id, &relay_email).await;
 
     // The per-app pws_ the gateway projects for this (app, user) — derived with
     // the SAME salt the AppState carries + the app's sector. A live token for
@@ -874,10 +884,11 @@ async fn re_grant_reuses_same_alias_with_cleared_revoked_at() {
     let pat = account_pat(&fx.state, "regrant").await;
     let app = init_control!(fx);
     let client_id = format!("oauth-grant-regrant-{}", Uuid::new_v4().simple());
+    let sector = format!("https://{client_id}.zeroship.localhost");
     insert_client(&fx.state, &client_id, pat.user_id).await;
     insert_grant(&fx.state, pat.user_id, &client_id, &["email"]).await;
     let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
-    insert_identity_with_alias(&fx.state, &client_id, pat.user_id, &relay_email).await;
+    insert_identity_with_alias(&fx.state, &client_id, &sector, pat.user_id, &relay_email).await;
 
     // Revoke → alias goes inactive.
     let req = test::TestRequest::delete()
@@ -1000,7 +1011,7 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
         let app_id = insert_app_oauth_client(&fx.state, &client_id, &sector).await;
         insert_grant(&fx.state, pat.user_id, &client_id, &["email"]).await;
         let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
-        insert_identity_with_alias(&fx.state, &client_id, pat.user_id, &relay_email).await;
+        insert_identity_with_alias(&fx.state, &client_id, &sector, pat.user_id, &relay_email).await;
         assert!(alias_is_active(&fx.state, &relay_email).await, "active before");
 
         // First revoke (sets revoked_at + DELETEs grant), then re-consent fully
@@ -1078,7 +1089,7 @@ async fn revoke_vs_reconsent_race_grant_absent_implies_alias_inert() {
         let app_id = insert_app_oauth_client(&fx.state, &client_id, &sector).await;
         insert_grant(&fx.state, pat.user_id, &client_id, &["email"]).await;
         let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
-        insert_identity_with_alias(&fx.state, &client_id, pat.user_id, &relay_email).await;
+        insert_identity_with_alias(&fx.state, &client_id, &sector, pat.user_id, &relay_email).await;
         assert!(alias_is_active(&fx.state, &relay_email).await, "active before");
 
         // Revoke commits: grant DELETEd, revoked_at set.
@@ -1179,8 +1190,9 @@ async fn app_delete_cascades_away_relay_identities() {
     insert_grant(&fx.state, user_b, &client_id, &["email"]).await;
     let alias_a = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
     let alias_b = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
-    insert_identity_with_alias(&fx.state, &client_id, user_a, &alias_a).await;
-    insert_identity_with_alias(&fx.state, &client_id, user_b, &alias_b).await;
+    let sector = format!("https://{client_id}.zeroship.localhost");
+    insert_identity_with_alias(&fx.state, &client_id, &sector, user_a, &alias_a).await;
+    insert_identity_with_alias(&fx.state, &client_id, &sector, user_b, &alias_b).await;
 
     assert!(alias_is_active(&fx.state, &alias_a).await);
     assert!(alias_is_active(&fx.state, &alias_b).await);
