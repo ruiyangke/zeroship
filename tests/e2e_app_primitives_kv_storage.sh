@@ -14,8 +14,9 @@
 #      `ZEROSHIP_WORKER_KV_URL=redis://...` (enables env.kv) AND `--storage-url <path|s3://…>`
 #      (enables env.storage). Without those inputs the namespaces simply are
 #      not registered.
-#   4. Mint an admin PAT OFFLINE (ed25519 --signing-key-file + seeded
-#      permission_tokens row), exactly as e2e_app_primitives.sh does.
+#   4. Mint an admin platform bearer OFFLINE (a one-key JWKS served on the
+#      harness's own ed25519 key, named as control's trusted issuer), exactly
+#      as e2e_app_primitives.sh does.
 #   5. Create + deploy examples/kv-dashboard and examples/storage-gallery.
 #   6. Exercise the primitives DIRECT to the worker /dispatch with the
 #      generated worker bearer, bypassing only the gateway's SEC-5 app-auth
@@ -173,13 +174,16 @@ chmod 600 "$WORK/signing-key.pem"
 
 for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT; do lsof -ti :$p 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 
-ZEROSHIP_CONTROL_SIGNING_KEY_FILE="$WORK/signing-key.pem"
-ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$ZEROSHIP_CONTROL_SIGNING_KEY_FILE"
+ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$WORK/signing-key.pem"
+# The issuer control verifies the admin bearer against, on the same key the
+# gateway signs with. Up BEFORE control: control reads the issuer once at boot.
+e2e_platform_op_up "$WORK/signing-key.pem" "$WORK" || exit 1
+PIDS+=($E2E_PLATFORM_OP_PID)
 ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
 e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DBURL"
 e2e_with_platform_mint_key "$BIN/zeroship-control" --port $ZEROSHIP_CONTROL_PORT \
-  --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
+  --blob-store "$WORK/blobs" \
  > "$WORK/control.log" 2>&1 &
 PIDS+=($!)
 for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
@@ -213,65 +217,41 @@ curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && pas
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Stage 3: mint admin PAT (offline) ==="
-POLICY_JSON='{"name":"e2e-admin","statements":[{"effect":"allow","actions":["apps:read","apps:write","apps:deploy","apps:delete","deployments:read","deployments:rollback","env:read","env:write","secrets:read","secrets:write"],"resources":[{"type":"any"}],"conditions":[]}]}'
-
-POLICY_HASH="$(node -e '
-const {createHash}=require("crypto");
-function c(v){if(v===null||typeof v==="number"||typeof v==="boolean")return JSON.stringify(v);
-if(typeof v==="string")return JSON.stringify(v);
-if(Array.isArray(v))return "["+v.map(c).join(",")+"]";
-return "{"+Object.keys(v).sort().map(k=>JSON.stringify(k)+":"+c(v[k])).join(",")+"}";}
-process.stdout.write(createHash("sha256").update(c(JSON.parse(process.argv[1]))).digest("hex"));
-' "$POLICY_JSON")"
+echo "=== Stage 3: mint admin platform bearer (offline) ==="
+# The scope string is the deleted permission_tokens policy's action list,
+# one-for-one: it becomes the token policy control intersects with the
+# owner's own authority (TOKEN and USER).
+SCOPE="apps:read apps:write apps:deploy apps:delete deployments:read deployments:rollback env:read env:write secrets:read secrets:write"
 
 OWNER="$(node -e 'console.log(require("crypto").randomUUID())')"
-TOKID="$(node -e 'console.log(require("crypto").randomUUID())')"
-EXP=$(( $(date +%s) + 86400 ))
 
 docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.users (id, email, name, email_verified_at)
 VALUES ('$OWNER', 'e2e-$OWNER@zeroship.test'::citext, 'E2E Admin', NOW());
 INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by)
 VALUES ('$OWNER', 'admin', '$OWNER');
-INSERT INTO zeroship.permission_tokens (id, owner_id, kind, name, policies, policy_hash, expires_at)
-VALUES ('$TOKID', '$OWNER', 'pat', 'e2e harness', '$POLICY_JSON'::jsonb, '$POLICY_HASH', to_timestamp($EXP));
 SQL
 
-PAT="$(node --input-type=module -e '
-import { readFileSync } from "node:fs";
-import { createHash, randomBytes } from "node:crypto";
-import { importPKCS8, exportJWK, SignJWT } from "file://'"$JOSE_JS"'";
-const [pem, owner, tid, phash, exp] = process.argv.slice(1);
-const key = await importPKCS8(readFileSync(pem,"utf8"), "EdDSA", { extractable:true });
-const x = (await exportJWK(key)).x;
-const kid = createHash("sha256").update(`{"crv":"Ed25519","kty":"OKP","x":"${x}"}`).digest("base64url");
-const jwt = await new SignJWT({ sub:owner, owner, tid, jti:tid, scope:"pat", policy_hash:phash, nonce:randomBytes(32).toString("base64url") })
-  .setProtectedHeader({ alg:"EdDSA", typ:"pat+jwt", kid })
-  .setIssuer("https://api.zeroship.ai").setAudience("control.zeroship.ai")
-  .setIssuedAt(Math.floor(Date.now()/1000)).setExpirationTime(Number(exp))
-  .sign(key);
-process.stdout.write(jwt);
-' "$WORK/signing-key.pem" "$OWNER" "$TOKID" "$POLICY_HASH" "$EXP")"
-[ "$(echo -n "$PAT" | awk -F. '{print NF}')" = "3" ] && pass "minted pat+jwt" || { fail "PAT mint failed: $PAT"; exit 1; }
+ADMIN_TOKEN="$(e2e_mint_platform_bearer "$OWNER" "$SCOPE")"
+[ "$(echo -n "$ADMIN_TOKEN" | awk -F. '{print NF}')" = "3" ] && pass "minted platform bearer" || { fail "bearer mint failed: $ADMIN_TOKEN"; exit 1; }
 
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Stage 4: create apps + deploy kv-dashboard + storage-gallery ==="
 KV_APP_JSON="$(curl -s -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" \
-  -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" -d '{"name":"kv-dashboard-e2e"}')"
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" -d '{"name":"kv-dashboard-e2e"}')"
 KV_APP="$(echo "$KV_APP_JSON" | jget '.id')"
 [ -n "$KV_APP" ] && pass "created app kv-dashboard-e2e ($KV_APP)" || { fail "create kv app: $KV_APP_JSON"; exit 1; }
 
 ST_APP_JSON="$(curl -s -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" \
-  -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" -d '{"name":"storage-gallery-e2e"}')"
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" -d '{"name":"storage-gallery-e2e"}')"
 ST_APP="$(echo "$ST_APP_JSON" | jget '.id')"
 [ -n "$ST_APP" ] && pass "created app storage-gallery-e2e ($ST_APP)" || { fail "create storage app: $ST_APP_JSON"; exit 1; }
 
-KVDEP="$("$BIN/zeroship" deploy "$KV_ZSHIP" --app="$KV_APP" --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$PAT" 2>&1)"
+KVDEP="$("$BIN/zeroship" deploy "$KV_ZSHIP" --app="$KV_APP" --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$ADMIN_TOKEN" 2>&1)"
 echo "$KVDEP" | grep -q "deploy_hash" && pass "deployed kv-dashboard .zship" || fail "kv deploy failed: $KVDEP"
 
-STDEP="$("$BIN/zeroship" deploy "$ST_ZSHIP" --app="$ST_APP" --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$PAT" 2>&1)"
+STDEP="$("$BIN/zeroship" deploy "$ST_ZSHIP" --app="$ST_APP" --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$ADMIN_TOKEN" 2>&1)"
 echo "$STDEP" | grep -q "deploy_hash" && pass "deployed storage-gallery .zship" || fail "storage deploy failed: $STDEP"
 sleep 5   # let route + version sync to gateway + worker
 

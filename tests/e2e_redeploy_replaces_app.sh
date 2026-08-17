@@ -15,7 +15,8 @@
 # 2 failed, and the two that fail are exactly the post-redeploy assertions.
 #
 # dev-provision reuses an app by name (`--name` is documented "create or reuse",
-# and the reuse path calls set_deploy_with_manifest), so no PAT is needed here.
+# and the reuse path calls set_deploy_with_manifest), so no bearer token is
+# needed here.
 #
 # Prereqs (docs/runbooks/local-dev.md):
 #   cargo build --release -p zeroship-control -p zeroship-worker -p zeroship-gateway -p zeroship --bins
@@ -90,7 +91,7 @@ ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
 e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DB_URL"
 e2e_with_platform_mint_key "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --blob-store "$WORK/bundles" \
-  --signing-key-file "$ZEROSHIP_CONTROL_SIGNING_KEY_FILE" > "$WORK/control.log" 2>&1 & PIDS+=($!)
+  > "$WORK/control.log" 2>&1 & PIDS+=($!)
 sleep 4
 # env.kv is absent without ZEROSHIP_WORKER_KV_URL by design, and kv-dashboard needs it.
 ZEROSHIP_WORKER_KV_URL="redis://127.0.0.1:$REDIS_PORT" \

@@ -293,13 +293,15 @@ chmod 600 "$WORK/signing-key.pem"
 # control — REAL https://api.stripe.com, the operator's TEST secret key (from env,
 # NEVER on argv where it'd hit /proc/cmdline), and a known throwaway webhook
 # secret so the harness can produce VALID signatures (the REAL verify path).
-ZEROSHIP_CONTROL_SIGNING_KEY_FILE="$WORK/signing-key.pem"
-ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$ZEROSHIP_CONTROL_SIGNING_KEY_FILE"
+ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$WORK/signing-key.pem"
+# The issuer control verifies the admin bearer against, on the same key the
+# gateway signs with. Up BEFORE control: control reads the issuer once at boot.
+e2e_platform_op_up "$WORK/signing-key.pem" "$WORK" || exit 1
 e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DBURL"
 ZEROSHIP_CONTROL_STRIPE_SECRET_KEY="$SK" ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET="$WEBHOOK_SECRET" \
 e2e_with_platform_mint_key "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
-  --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
+  --blob-store "$WORK/blobs" \
   --stripe-base-url "https://api.stripe.com" \
  > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
@@ -322,56 +324,34 @@ post_signed_webhook() {
     --data-binary "$body"
 }
 
-# Mint a platform-admin PAT so the operator-only set_fee_policy + the self-service
-# onboard/checkout endpoints accept us (faithful AuthzGuard, EdDSA via jose).
+# Mint a platform-admin bearer so the operator-only set_fee_policy + the
+# self-service onboard/checkout endpoints accept us (faithful AuthzGuard,
+# the same EdDSA-signed at+jwt control verifies in production).
 CREATOR="$(node -e 'console.log(require("crypto").randomUUID())')"
 NOW_UNIX="$(date +%s)"
-EXP=$(( NOW_UNIX + 86400 ))
-POLICY_JSON='{"name":"e2e-connect-admin","statements":[{"effect":"allow","actions":["billing:read","billing:write"],"resources":[{"type":"any"}],"conditions":[]}]}'
-POLICY_HASH="$(node -e '
-const {createHash}=require("crypto");
-function c(v){if(v===null||typeof v==="number"||typeof v==="boolean"||typeof v==="string")return JSON.stringify(v);
-if(Array.isArray(v))return "["+v.map(c).join(",")+"]";
-return "{"+Object.keys(v).sort().map(k=>JSON.stringify(k)+":"+c(v[k])).join(",")+"}";}
-process.stdout.write(createHash("sha256").update(c(JSON.parse(process.argv[1]))).digest("hex"));
-' "$POLICY_JSON")"
-TOKID="$(node -e 'console.log(require("crypto").randomUUID())')"
+# The deleted policy's action list, one-for-one, as OAuth scopes.
+SCOPE="billing:read billing:write"
 
-psql_db -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL || { fail "creator/PAT seed failed"; exit 1; }
+psql_db -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL || { fail "creator/bearer seed failed"; exit 1; }
 INSERT INTO zeroship.users (id, email, name, email_verified_at)
 VALUES ('$CREATOR', 'connect-$CREATOR@zeroship.test'::citext, 'E2E Connect Creator', NOW());
 INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by)
 VALUES ('$CREATOR','admin','$CREATOR') ON CONFLICT DO NOTHING;
-INSERT INTO zeroship.permission_tokens (id, owner_id, kind, name, policies, policy_hash, expires_at)
-VALUES ('$TOKID','$CREATOR','pat','e2e connect harness','$POLICY_JSON'::jsonb,'$POLICY_HASH', to_timestamp($EXP));
 SQL
-pass "seeded creator $CREATOR + operator PAT row"
+pass "seeded creator $CREATOR + operator role"
 
 JOSE_JS="$ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index.js"
-PAT=""
+ADMIN_TOKEN=""
 if [ -f "$JOSE_JS" ]; then
-  PAT="$(node --input-type=module -e '
-  import { readFileSync } from "node:fs";
-  import { createHash, randomBytes } from "node:crypto";
-  import { importPKCS8, exportJWK, SignJWT } from "file://'"$JOSE_JS"'";
-  const [pem, owner, tid, phash, exp] = process.argv.slice(1);
-  const key = await importPKCS8(readFileSync(pem,"utf8"), "EdDSA", { extractable:true });
-  const x = (await exportJWK(key)).x;
-  const kid = createHash("sha256").update(`{"crv":"Ed25519","kty":"OKP","x":"${x}"}`).digest("base64url");
-  const jwt = await new SignJWT({ sub:owner, owner, tid, jti:tid, scope:"pat", policy_hash:phash, nonce:randomBytes(32).toString("base64url") })
-    .setProtectedHeader({ alg:"EdDSA", typ:"pat+jwt", kid })
-    .setIssuer("https://api.zeroship.ai").setAudience("control.zeroship.ai")
-    .setIssuedAt(Math.floor(Date.now()/1000)).setExpirationTime(Number(exp)).sign(key);
-  process.stdout.write(jwt);
-  ' "$WORK/signing-key.pem" "$CREATOR" "$TOKID" "$POLICY_HASH" "$EXP")"
+  ADMIN_TOKEN="$(e2e_mint_platform_bearer "$CREATOR" "$SCOPE")"
 fi
-if [ "$(echo -n "$PAT" | awk -F. '{print NF}')" = "3" ]; then
-  pass "minted operator PAT for the onboard/checkout/fee-policy endpoints"
+if [ "$(echo -n "$ADMIN_TOKEN" | awk -F. '{print NF}')" = "3" ]; then
+  pass "minted operator bearer for the onboard/checkout/fee-policy endpoints"
 else
-  echo "  ⚠ SKIP: could not mint PAT (jose missing at $JOSE_JS?) — the authenticated Connect legs need it."
+  echo "  ⚠ SKIP: could not mint bearer (jose missing at $JOSE_JS?) — the authenticated Connect legs need it."
   exit 0
 fi
-AUTH=(-H "Authorization: Bearer $PAT")
+AUTH=(-H "Authorization: Bearer $ADMIN_TOKEN")
 
 # ===========================================================================
 echo ""
