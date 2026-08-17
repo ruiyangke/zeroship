@@ -85,7 +85,35 @@ pub const JWT_ASSERTION_MECHANISM: &str = "jwt-assertion";
 pub const MAX_ASSERTION_LIFETIME: Duration = Duration::from_secs(60);
 
 /// Clock-skew tolerance applied to `exp` and `iat`, matching Keycloak.
+///
+/// This is about the CALLER's clock against the CALLEE's, and it is the only
+/// disagreement the token times are judged under. The replay store's clock is a
+/// third one; see [`MAX_REPLAY_STORE_CLOCK_SKEW`].
 pub const CLOCK_SKEW_TOLERANCE: Duration = Duration::from_secs(15);
+
+/// How far the replay store's clock may run AHEAD of a verifier's.
+///
+/// A second quantity rather than a second use of [`CLOCK_SKEW_TOLERANCE`],
+/// because it is a different assumption about a different pair of machines and
+/// the two are worth being able to move independently. Naming it also writes
+/// the assumption down: the retention window previously ran to exactly `exp +
+/// CLOCK_SKEW_TOLERANCE` with no margin at all, which is only correct if the
+/// store and the verifier agree to the second.
+///
+/// Acceptance is judged on the VERIFIER's clock - `jsonwebtoken` refuses once
+/// `exp < now - leeway`, so the last accepting instant is `exp + leeway` there.
+/// Retention is judged on the STORE's clock, deliberately: comparing against
+/// the database's `now()` is what makes the verdict consistent across replicas
+/// whose clocks differ (see `zeroship_authn::service_replay`). If the store
+/// runs `s` seconds ahead, a row becomes reclaimable at verifier-time
+/// `exp + leeway - s` while that verifier still accepts the assertion for
+/// another `s` seconds, and a replay inside that gap is admitted. The whole
+/// reason [`CLOCK_SKEW_TOLERANCE`] exists is that this stack does NOT assume
+/// synchronised clocks; retaining to exactly the acceptance edge assumed them.
+///
+/// It costs one row-lifetime, not one decision: a claim is retained longer, and
+/// a longer-retained claim can only ever refuse a replay, never admit one.
+pub const MAX_REPLAY_STORE_CLOCK_SKEW: Duration = Duration::from_secs(15);
 
 /// The one signature algorithm this profile admits.
 ///

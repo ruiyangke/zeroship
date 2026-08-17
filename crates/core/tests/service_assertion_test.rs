@@ -26,8 +26,8 @@ use serde_json::{json, Value};
 use zeroship_core::service_assertion::{
     AssertionError, ClaimFuture, InMemoryReplayStore, ReplayClaim, ReplayStore, ReplayStoreError,
     ServiceAssertionMinter, ServiceAssertionVerifier, ServiceIssuer, ServiceSigningKey,
-    ServiceTrustBundle, JWT_ASSERTION_MECHANISM, MAX_ASSERTION_LIFETIME, MAX_JTI_LEN,
-    SERVICE_ASSERTION_TYP,
+    ServiceTrustBundle, CLOCK_SKEW_TOLERANCE, JWT_ASSERTION_MECHANISM, MAX_ASSERTION_LIFETIME,
+    MAX_JTI_LEN, MAX_REPLAY_STORE_CLOCK_SKEW, SERVICE_ASSERTION_TYP,
 };
 use zeroship_core::service_identity::{
     verify_identity, AuthError, PeerCredentials, ServiceIdentity, ServiceName, ServicePrincipal,
@@ -539,11 +539,20 @@ async fn a_replay_claim_is_retained_for_the_whole_acceptance_window() {
         key.starts_with(&format!("{CALLER}|")),
         "the replay key is scoped by issuer so one service cannot burn another's jti: {key}"
     );
+    // `exp` alone is not the edge. This verifier keeps accepting until
+    // `exp + CLOCK_SKEW_TOLERANCE` on its own clock, and the store decides
+    // reclaimability on the DATABASE's clock, which may run ahead by up to
+    // MAX_REPLAY_STORE_CLOCK_SKEW. Both terms are load-bearing and neither was
+    // asserted: the previous bound was `>= exp`, so deleting the `+ leeway`
+    // from the source left the whole suite green.
     let earliest_safe_eviction = UNIX_EPOCH
-        + Duration::from_secs(u64::try_from(expiry).expect("a positive exp"));
+        + Duration::from_secs(u64::try_from(expiry).expect("a positive exp"))
+        + CLOCK_SKEW_TOLERANCE
+        + MAX_REPLAY_STORE_CLOCK_SKEW;
     assert!(
         *retain_until >= earliest_safe_eviction,
-        "a claim evicted before exp makes the assertion replayable while it is still valid"
+        "a claim evicted while any clock still accepts the assertion makes it replayable: \
+         retained to {retain_until:?}, needed {earliest_safe_eviction:?}"
     );
 }
 
