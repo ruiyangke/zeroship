@@ -78,6 +78,41 @@ Third failure (`platform_migrate_applies_only_newly_appended_file`) uses
 `PLATFORM_MIGRATION_FILES` throughout and has no stale literal; cause still to be
 measured against a live DSN.
 
+MEASURED BASELINE (no source changes, live DSN
+`postgresql://postgres:zeroship@localhost:5440/postgres`):
+
+    test result: FAILED. 5 passed; 3 failed; finished in 137.04s
+
+and the three failures have THREE DIFFERENT causes, one each:
+
+1. `apply_all_platform_migrations_to_fresh_db` -- :436
+   `"zeroship_worker can write a platform relation"`. The grant collision.
+2. `ordered_runner_retains_authored_fk_formats_across_catalog_refresh` -- :835
+   `"expected 12 files, saw 23"`. The stale literal of finding 3, confirmed.
+3. `platform_migrate_applies_only_newly_appended_file` -- :1122
+   `"checksum drift on mig_0000595bcDNs774MyYTiwC"`.
+
+So NONE of the other two share the grant cause.
+
+## Finding 5: the third failure is a probe filename that stopped sorting last
+
+`APPEND_FILENAME` was `20260710000100_append_probe.ts`. The test writes it into a
+copy of the corpus to stand for a migration added today, and the runner derives a
+migration's stable version from its ORDINAL in the sorted set. Ten committed
+files sort after that date now -- every `202608*`, the first landing 2026-08-11 --
+so the probe lands MID-corpus and shifts the version of every file after it. Run
+2 then checks the journal's checksum for a version against a different file's
+body, and the verdict is checksum drift, which reads as a corrupted journal and
+says nothing about ordering.
+
+Fixed by naming it `29991231000000_append_probe.ts` (far-future so it does not
+have to move whenever a migration lands) plus `assert_probe_sorts_last`, which
+states the requirement where it can be acted on instead of letting it resurface
+as drift.
+
+Note all three are staleness of a different kind, and all three were invisible
+for the same reason: with no DSN the binary self-skipped and counted as passed.
+
 ## Finding 4: option (a) costs a charter widening, and that is the whole price
 
 `crates/zeroship-migrate-adapter/policies/platform.policy.toml` is the ceiling
