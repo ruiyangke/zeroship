@@ -3746,7 +3746,16 @@ fn validate_no_name_is_claimed_twice(
 /// function - whereas a wrong alias would refuse a migration the server runs.
 /// `varchar(255)` versus `varchar` is a known instance: length is not part of a
 /// PG signature, but it is not folded here because it was not measured.
-fn canonical_pg_arg_type(raw: &str) -> String {
+///
+/// SHARED WITH DRIFT. `crate::apply::drift` compares a folded function signature
+/// against the one `pg_proc` reports, and the catalog reports `integer` where the
+/// author wrote `int`, so it needs exactly this mapping. It calls this function
+/// rather than carrying a second copy - a duplicated type table that drifts from
+/// this one is a defect this codebase has already had. Drift layers ONE further
+/// reduction of its own (dropping a type modifier) on top of the result; that
+/// belongs to drift and not here, because widening this function widens what the
+/// authoring gate REFUSES.
+pub(crate) fn canonical_pg_arg_type(raw: &str) -> String {
     let lowered = raw.trim().to_ascii_lowercase();
     let collapsed = lowered.split_whitespace().collect::<Vec<_>>().join(" ");
     match collapsed.as_str() {

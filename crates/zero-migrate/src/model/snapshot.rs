@@ -1501,6 +1501,54 @@ impl FunctionKey {
             arg_types: arg_types.unwrap_or_default().to_vec(),
         }
     }
+
+    /// This key with its argument types reduced to the ONE spelling an offline fold
+    /// and a `pg_proc` read can both produce.
+    ///
+    /// The rollback map above keys on AUTHORED spellings on purpose - it has no
+    /// catalog OIDs to resolve them with. Drift does have the catalog, and the
+    /// catalog rewrites: an authored `f(x int)` is reported as `f(integer)`. Both
+    /// sides of the comparison go through this so the same overload is not seen as
+    /// one function missing and a different one appearing.
+    #[must_use]
+    pub fn canonicalized(&self) -> Self {
+        Self {
+            schema: self.schema.clone(),
+            name: self.name.clone(),
+            arg_types: self
+                .arg_types
+                .iter()
+                .map(|ty| canonical_pg_signature_type(ty))
+                .collect(),
+        }
+    }
+}
+
+/// One PostgreSQL argument type in the spelling that decides function IDENTITY.
+///
+/// Two reductions, in order:
+///
+///  1. **Drop a type modifier.** A modifier is not part of a PostgreSQL signature
+///     and `format_type(oid, NULL)` never prints one. MEASURED on PostgreSQL 18.4:
+///     `CREATE FUNCTION g(x varchar(255))` reads back from `pg_proc` as `character
+///     varying`, so an authored `varchar(255)` that kept its length would be
+///     reported as a missing function and an unexpected one on every snapshot.
+///  2. **Fold the alias**, through [`crate::model::validate::canonical_pg_arg_type`]
+///     - the authoring gate's own table, called rather than copied.
+///
+/// Step 1 is deliberately NOT pushed into that shared function. It decides which
+/// migrations the gate REFUSES as duplicate signatures; widening it is a change to
+/// authoring, not to drift, and is not what this work measured.
+#[must_use]
+pub fn canonical_pg_signature_type(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let base = match (trimmed.find('('), trimmed.rfind(')')) {
+        (Some(open), Some(close)) if close > open => {
+            format!("{}{}", &trimmed[..open], &trimmed[close + 1..])
+        }
+        _ => trimmed.to_string(),
+    };
+    crate::model::validate::canonical_pg_arg_type(&base)
 }
 
 /// The authored definition needed to restore a dropped PostgreSQL function.
@@ -1609,6 +1657,113 @@ pub struct TriggerSnapshot {
     pub when: Option<Expr>,
 }
 
+/// The CATALOG-COMPARABLE identity of one PostgreSQL policy.
+///
+/// NOT the authored definition. [`PolicySnapshot`] carries the `USING` /
+/// `WITH CHECK` predicates so rollback can restore a dropped policy; those are
+/// deliberately ABSENT here, because PostgreSQL re-deparses a policy predicate and
+/// an authored `USING (owner = current_user AND v > 0)` reads back from `pg_policy`
+/// as `((owner = CURRENT_USER) AND (v > 0))`. Comparing that text would report
+/// drift on every project, permanently. What remains - the command scope, the role
+/// list and the permissive flag - survives the round trip unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyIdentity {
+    /// `pg_policy.polcmd`.
+    pub for_cmd: PolicyCmd,
+    /// Roles the policy applies to, sorted. EMPTY means `PUBLIC`, which is both
+    /// PostgreSQL's default and what an authored `to: None` renders to.
+    pub to: Vec<String>,
+    /// `pg_policy.polpermissive`. The IR has no `AS RESTRICTIVE`, so an authored
+    /// policy is always permissive and a restrictive one in the catalog is an
+    /// out-of-band change.
+    pub permissive: bool,
+}
+
+impl PolicyIdentity {
+    /// The identity an authored policy has once PostgreSQL has accepted it.
+    #[must_use]
+    pub fn of(snapshot: &PolicySnapshot) -> Self {
+        let mut to = snapshot.to.clone().unwrap_or_default();
+        to.sort();
+        to.dedup();
+        Self {
+            for_cmd: snapshot.for_cmd,
+            to,
+            permissive: true,
+        }
+    }
+}
+
+/// The CATALOG-COMPARABLE identity of one trigger.
+///
+/// NOT the authored definition. [`TriggerSnapshot`] carries the `WHEN` predicate
+/// and the action; both are excluded here because PostgreSQL re-deparses them - an
+/// authored `WHEN (NEW.v > 0)` reads back as `WHEN ((new.v > 0))`. Timing and the
+/// event set are stored as `pg_trigger.tgtype` BITS, so they round-trip exactly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriggerIdentity {
+    /// `BEFORE` / `AFTER` / `INSTEAD OF`, from the `tgtype` bits.
+    pub timing: TriggerTiming,
+    /// The firing events, in the fixed order [`Self::sorted_events`] imposes so a
+    /// re-ordered authored list cannot read as a change.
+    pub events: Vec<TriggerEvent>,
+}
+
+impl TriggerIdentity {
+    /// The identity an authored trigger has once PostgreSQL has accepted it.
+    #[must_use]
+    pub fn of(snapshot: &TriggerSnapshot) -> Self {
+        Self {
+            timing: snapshot.timing,
+            events: Self::sorted_events(snapshot.events.clone()),
+        }
+    }
+
+    /// Put an event list in one canonical order and drop duplicates.
+    ///
+    /// `pg_trigger.tgtype` is a bit set with no order at all, so the authored order
+    /// is unrecoverable. Normalising BOTH sides is what stops `INSERT OR UPDATE`
+    /// and `UPDATE OR INSERT` reading as different triggers.
+    #[must_use]
+    pub fn sorted_events(mut events: Vec<TriggerEvent>) -> Vec<TriggerEvent> {
+        fn rank(event: TriggerEvent) -> u8 {
+            match event {
+                TriggerEvent::Insert => 0,
+                TriggerEvent::Update => 1,
+                TriggerEvent::Delete => 2,
+                TriggerEvent::Truncate => 3,
+            }
+        }
+        events.sort_by_key(|event| rank(*event));
+        events.dedup_by_key(|event| rank(*event));
+        events
+    }
+}
+
+/// The PostgreSQL functions, policies and triggers a snapshot can be held to,
+/// reduced to what a catalog read and an offline fold can BOTH produce.
+///
+/// `None` on [`SchemaSnapshot::vendor_objects`] means "this snapshot does not speak
+/// about these objects at all" - a SQLite or MySQL catalog read, or a fold for
+/// either dialect. `Some` means the side is AUTHORITATIVE, so an empty map is the
+/// positive claim that the schema has none. That distinction is the whole
+/// false-drift defence: without it, an engine that never introspects a policy would
+/// be accused of having lost every policy the expected side knows about, and a
+/// genuinely dropped policy would be indistinguishable from it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VendorObjectIdentities {
+    /// Function overloads present, keyed by [`FunctionKey`] whose `arg_types` are
+    /// CANONICAL PostgreSQL type names, not authored spellings - see
+    /// [`crate::model::validate::canonical_pg_arg_type`]. `pg_proc` reports
+    /// `integer` for an authored `int`, so an uncanonicalised key would report the
+    /// same function as both missing and unexpected.
+    pub functions: std::collections::BTreeSet<FunctionKey>,
+    /// Policies present, with their comparable identity.
+    pub policies: BTreeMap<PolicyKey, PolicyIdentity>,
+    /// Triggers present, with their comparable identity.
+    pub triggers: BTreeMap<TriggerKey, TriggerIdentity>,
+}
+
 /// A deterministic snapshot of one child partition relation.
 ///
 /// A relation on PostgreSQL only. SQLite and MySQL collapse a partition child into
@@ -1665,6 +1820,22 @@ pub struct SchemaSnapshot {
     /// This rollback-only history is absent from catalog snapshots and excluded
     /// from structural equality.
     pub triggers: BTreeMap<TriggerKey, TriggerSnapshot>,
+    /// The catalog-comparable identity of the functions, policies and triggers
+    /// above - the ONLY form of them a live snapshot and an offline fold can both
+    /// produce, and therefore the only form drift may compare.
+    ///
+    /// A SEPARATE FIELD rather than teaching the three maps above to carry catalog
+    /// state. Those maps are rollback history: `LiveSchema::from_catalog_snapshot`
+    /// copies them straight into the lowering seam, where `DropFunction`,
+    /// `DropPolicy` and `DropTrigger` read the recorded body/predicate back to build
+    /// the inverse DDL. Filling them from `pg_proc`/`pg_policy`/`pg_trigger` - which
+    /// cannot return an authored `Expr` or a pre-normalisation body - would make
+    /// rollback emit statements that do not restore what was dropped. A blind spot
+    /// in drift is better than a wrong `down`.
+    ///
+    /// `None` means the snapshot does not speak about these objects. See
+    /// [`VendorObjectIdentities`] for why that is not the same as "has none".
+    pub vendor_objects: Option<VendorObjectIdentities>,
 }
 
 impl PartialEq for SchemaSnapshot {

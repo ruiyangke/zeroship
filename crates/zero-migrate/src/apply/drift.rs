@@ -41,16 +41,18 @@ use crate::apply::journal::{self, AppliedEntry, JournalError, Phase};
 use crate::conn::ExecutorConfig;
 use crate::model::ir::{
     IdentityCol, IndexSortOrder, IndexStorageParams, PartitionBoundValue, PartitionBounds,
-    PartitionSpec, SafeI64, SafeU64, SequenceOwnedBy, SequenceRef,
+    PartitionSpec, PolicyCmd, SafeI64, SafeU64, SequenceOwnedBy, SequenceRef, TriggerEvent,
+    TriggerTiming,
 };
 use crate::model::migration::Migration;
 use crate::model::snapshot::{
     canonical_index_sort_order, index_elements_canonically_eq, index_predicates_canonically_eq,
     normalize_sequence_max_value, normalize_sequence_min_value, ColumnCollationSnapshot,
-    ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot, IdDefaultSnapshot, IndexElementSnapshot,
-    IndexSnapshot, MysqlPhysicalType, NamedTypeSnapshot, PartitionSnapshot, RoleSnapshot,
-    SchemaObjectSnapshot, SchemaSnapshot, SequenceDataTypeSnapshot, SequenceSnapshot,
-    TableSnapshot, ViewSnapshot,
+    ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot, FunctionKey, IdDefaultSnapshot,
+    IndexElementSnapshot, IndexSnapshot, MysqlPhysicalType, NamedTypeSnapshot, PartitionSnapshot,
+    PolicyIdentity, PolicyKey, RoleSnapshot, SchemaObjectSnapshot, SchemaSnapshot,
+    SequenceDataTypeSnapshot, SequenceSnapshot, TableSnapshot, TriggerIdentity, TriggerKey,
+    VendorObjectIdentities, ViewSnapshot,
 };
 use crate::render::value_format::{
     catalog_expression_fingerprint_in_dialect, catalog_id_default, catalog_id_default_for_expected,
@@ -625,6 +627,206 @@ pub async fn snapshot_schema<D: SqlSession>(
     schema: &str,
 ) -> Result<SchemaSnapshot, DriftError> {
     snapshot_schema_for(conn, schema).await
+}
+
+/// The functions, policies and triggers PostgreSQL actually holds in `schema`,
+/// reduced to the identity drift is allowed to compare.
+///
+/// THREE CATALOG READS - `pg_proc`, `pg_policy`, `pg_trigger` - each binding the
+/// schema as `$1` like the rest of this module. Before this existed the three maps
+/// on [`SchemaSnapshot`] were filled ONLY by the offline fold, so an out-of-band
+/// `DROP POLICY` left a table with row-level security enabled and nothing enforcing
+/// it while drift reported the schema clean.
+///
+/// **WHAT IS READ AND WHAT IS REFUSED.** Every textual definition PostgreSQL owns
+/// is skipped, because the server normalises all of it and a text compare would
+/// report drift forever. Measured on PostgreSQL 18.4:
+///
+/// | authored                            | catalog                            |
+/// |-------------------------------------|------------------------------------|
+/// | `f(x int)`                          | `f(integer)`                       |
+/// | `USING (owner = current_user)`       | `((owner = CURRENT_USER))`         |
+/// | `WHEN (NEW.v > 0)`                  | `WHEN ((new.v > 0))`               |
+///
+/// So a function is its schema, name and canonicalised argument vector; a policy is
+/// its table, command, roles and permissive flag; a trigger is its table, timing
+/// and event set. Bodies, `USING`/`WITH CHECK` predicates and `WHEN` clauses are
+/// not collected at all - not collected rather than collected-and-ignored, so no
+/// later change can start comparing them by accident.
+///
+/// **THREE EXCLUSIONS, each a false-drift source rather than a nicety.**
+///  * `prokind IN ('f','p')` drops aggregates and window functions, which the IR
+///    cannot author and which would therefore always read as unexpected.
+///  * The `pg_depend` `deptype = 'e'` filter drops functions an EXTENSION owns.
+///    Installing `pgcrypto` into the project schema would otherwise report dozens
+///    of unexpected functions on the next drift run.
+///  * `tgisinternal` drops the `RI_ConstraintTrigger_*` pair PostgreSQL creates for
+///    every foreign key, and `relispartition = false` drops the copy it clones onto
+///    each child of a partitioned table. Measured: a single `REFERENCES` produced
+///    four internal triggers, and one trigger on a partitioned parent produced one
+///    visible clone per child.
+#[cfg(pg_seam)]
+async fn snapshot_vendor_objects_pg<D: SqlSession>(
+    conn: &D,
+    schema: &str,
+) -> Result<VendorObjectIdentities, DriftError> {
+    let mut out = VendorObjectIdentities::default();
+
+    let function_rows = conn
+        .query(
+            "SELECT p.proname AS name, \
+                    COALESCE( \
+                      (SELECT array_agg(pg_catalog.format_type(a.t, NULL) ORDER BY a.ord) \
+                         FROM unnest(p.proargtypes) WITH ORDINALITY AS a(t, ord)), \
+                      ARRAY[]::text[] \
+                    ) AS arg_types \
+             FROM pg_catalog.pg_proc p \
+             JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+             WHERE n.nspname = $1 AND p.prokind IN ('f', 'p') \
+               AND NOT EXISTS ( \
+                     SELECT 1 FROM pg_catalog.pg_depend d \
+                      WHERE d.classid = 'pg_catalog.pg_proc'::regclass \
+                        AND d.objid = p.oid AND d.deptype = 'e') \
+             ORDER BY p.proname",
+            &[schema.into()],
+        )
+        .await?;
+    for r in &function_rows {
+        // `proargtypes` holds the IN/INOUT/VARIADIC types only - OUT arguments are
+        // in `proallargtypes` and are excluded here for the same reason
+        // `FunctionKey::from_create` filters them: they do not identify an overload.
+        let arg_types: Vec<String> = r.try_get("arg_types").unwrap_or_default();
+        out.functions.insert(
+            FunctionKey {
+                schema: schema.to_string(),
+                name: r.try_get("name")?,
+                arg_types,
+            }
+            .canonicalized(),
+        );
+    }
+
+    let policy_rows = conn
+        .query(
+            "SELECT c.relname AS table_name, p.polname AS policy_name, \
+                    p.polcmd::text AS cmd, p.polpermissive AS permissive, \
+                    COALESCE( \
+                      array_agg(r.rolname ORDER BY r.rolname) \
+                        FILTER (WHERE r.rolname IS NOT NULL), \
+                      ARRAY[]::text[] \
+                    ) AS roles \
+             FROM pg_catalog.pg_policy p \
+             JOIN pg_catalog.pg_class c ON c.oid = p.polrelid \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             LEFT JOIN LATERAL unnest(p.polroles) AS pr(roleoid) ON true \
+             LEFT JOIN pg_catalog.pg_roles r ON r.oid = pr.roleoid \
+             WHERE n.nspname = $1 \
+             GROUP BY c.relname, p.polname, p.polcmd, p.polpermissive \
+             ORDER BY c.relname, p.polname",
+            &[schema.into()],
+        )
+        .await?;
+    for r in &policy_rows {
+        let table: String = r.try_get("table_name")?;
+        let name: String = r.try_get("policy_name")?;
+        let cmd: String = r.try_get("cmd")?;
+        // A policy applying to PUBLIC stores role OID 0, which joins to no pg_roles
+        // row and so drops out of the aggregate as an EMPTY list - the same shape an
+        // authored `to: None` folds to.
+        let to: Vec<String> = r.try_get("roles").unwrap_or_default();
+        out.policies.insert(
+            PolicyKey {
+                schema: schema.to_string(),
+                table,
+                name: name.clone(),
+            },
+            PolicyIdentity {
+                for_cmd: policy_cmd_from_polcmd(&cmd, &name)?,
+                to,
+                permissive: r.try_get("permissive").unwrap_or(true),
+            },
+        );
+    }
+
+    let trigger_rows = conn
+        .query(
+            "SELECT c.relname AS table_name, t.tgname AS trigger_name, \
+                    t.tgtype::int AS tgtype \
+             FROM pg_catalog.pg_trigger t \
+             JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND NOT t.tgisinternal AND c.relispartition = false \
+             ORDER BY c.relname, t.tgname",
+            &[schema.into()],
+        )
+        .await?;
+    for r in &trigger_rows {
+        let tgtype: i32 = r.try_get("tgtype")?;
+        out.triggers.insert(
+            TriggerKey {
+                schema: schema.to_string(),
+                table: r.try_get("table_name")?,
+                name: r.try_get("trigger_name")?,
+            },
+            TriggerIdentity {
+                timing: trigger_timing_from_tgtype(tgtype),
+                events: trigger_events_from_tgtype(tgtype),
+            },
+        );
+    }
+
+    Ok(out)
+}
+
+/// `pg_policy.polcmd` as the authored lexicon.
+///
+/// An unknown code is an ERROR, not a default. PostgreSQL defines exactly these
+/// five; guessing `ALL` for a sixth would silently claim a policy is broader than
+/// it is, which is the wrong direction for a security facet.
+#[cfg(pg_seam)]
+fn policy_cmd_from_polcmd(cmd: &str, policy: &str) -> Result<PolicyCmd, DriftError> {
+    match cmd {
+        "*" => Ok(PolicyCmd::All),
+        "r" => Ok(PolicyCmd::Select),
+        "a" => Ok(PolicyCmd::Insert),
+        "w" => Ok(PolicyCmd::Update),
+        "d" => Ok(PolicyCmd::Delete),
+        other => Err(DriftError::Snapshot(format!(
+            "unknown pg_policy.polcmd `{other}` on policy `{policy}`"
+        ))),
+    }
+}
+
+/// `pg_trigger.tgtype` bit 6 (`INSTEAD OF`) then bit 1 (`BEFORE`), else `AFTER`.
+/// The bit values are PostgreSQL's `TRIGGER_TYPE_*` constants.
+#[cfg(pg_seam)]
+fn trigger_timing_from_tgtype(tgtype: i32) -> TriggerTiming {
+    if tgtype & 0x40 != 0 {
+        TriggerTiming::InsteadOf
+    } else if tgtype & 0x02 != 0 {
+        TriggerTiming::Before
+    } else {
+        TriggerTiming::After
+    }
+}
+
+/// The `tgtype` event bits, in the one canonical order both sides normalise to.
+#[cfg(pg_seam)]
+fn trigger_events_from_tgtype(tgtype: i32) -> Vec<TriggerEvent> {
+    let mut events = Vec::new();
+    if tgtype & 0x04 != 0 {
+        events.push(TriggerEvent::Insert);
+    }
+    if tgtype & 0x10 != 0 {
+        events.push(TriggerEvent::Update);
+    }
+    if tgtype & 0x08 != 0 {
+        events.push(TriggerEvent::Delete);
+    }
+    if tgtype & 0x20 != 0 {
+        events.push(TriggerEvent::Truncate);
+    }
+    TriggerIdentity::sorted_events(events)
 }
 
 #[cfg(pg_seam)]
@@ -1537,6 +1739,8 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
         );
     }
 
+    let vendor_objects = snapshot_vendor_objects_pg(conn, schema).await?;
+
     Ok(SchemaSnapshot {
         tables,
         table_rls,
@@ -1546,9 +1750,16 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
         roles,
         schemas,
         extensions,
+        // The AUTHORED definitions stay empty on a catalog read. They are rollback
+        // history - `LiveSchema::from_catalog_snapshot` hands them to the lowering
+        // seam, which reads the recorded body back to build a `down` - and no
+        // catalog can return the pre-normalisation body an author wrote.
         functions: BTreeMap::new(),
         policies: BTreeMap::new(),
         triggers: BTreeMap::new(),
+        // `Some` even when every map inside is empty: this side HAS looked, and an
+        // empty result is the positive claim that the schema holds none.
+        vendor_objects: Some(vendor_objects),
         partitions,
     })
 }

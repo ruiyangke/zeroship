@@ -2726,6 +2726,11 @@ pub fn fold_ops_onto(
         functions,
         policies,
         triggers,
+        // The expected side of the vendor-object comparison: populated once the
+        // diff is wired. `None` until then, which is what stops the diff comparing
+        // a full expected side against an empty actual one and reporting every
+        // authored function, policy and trigger as lost.
+        vendor_objects: None,
     })
 }
 
