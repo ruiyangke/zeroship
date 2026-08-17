@@ -971,10 +971,19 @@ async fn seed_user_client(db: &Client, user_id: Uuid, app_id: Uuid, client_id: &
     )
     .await
     .expect("seed app scope def");
+    // The pairwise subject is IMMUTABLE once stored: the token endpoint
+    // recomputes it and refuses to mint when the row disagrees
+    // (`crates/auth/src/oidc/authorization_code.rs:1431-1464`). Seeding an
+    // invented `pws_` therefore makes the whole flow 500 rather than skipping
+    // a step, so this row must carry the value production would derive.
     db.execute(
         "INSERT INTO zeroship.app_user_identities (app_client_id, global_user_id, pairwise_sub) \
          VALUES ($1, $2, $3)",
-        &[&client_id, &user_id, &format!("pws_test_{}", user_id.simple())],
+        &[
+            &client_id,
+            &user_id,
+            &test_issuer().pairwise_subject(&user_id.to_string(), SECTOR),
+        ],
     )
     .await
     .expect("seed app identity");
