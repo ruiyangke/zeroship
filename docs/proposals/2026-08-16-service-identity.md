@@ -958,3 +958,89 @@ transport half (TLS on cross-host hops, and task 8's `MakeTlsConnect` for
 compio-postgres) is UNAFFECTED - server-side TLS is required for confidentiality
 regardless of how identity is proven, and JWT assertions in cleartext would be
 capturable and replayable inside their `exp`.
+
+---
+
+## 14. SHIPPED 2026-08-16: the mechanism, and the trust-bundle answer
+
+The minter, the verifier and the replay store are implemented. Nothing is wired
+into any service's request path yet; rollout is a separate change, and mixing it
+in would have made this one unreviewable.
+
+| Piece | Where |
+| --- | --- |
+| Issuer identifiers, minter, verifier, `ReplayStore` trait, in-memory store | `crates/core/src/service_assertion.rs` |
+| Postgres `jti` store | `crates/authn/src/service_replay.rs` |
+| The replay table and its grants | `db/migrations-ts/20260816000100_service_assertion_replay.ts` |
+| Security-property tests | `crates/core/tests/service_assertion_test.rs` (27), `crates/authn/tests/service_replay_pg_test.rs` (4, live PG) |
+
+### 14.1 The trust bundle is STATICALLY CONFIGURED, not JWKS-over-TLS
+
+6.6 leaned JWKS. The implementation went the other way, keyed on `iss` either
+way. The four reasons, in the order they matter:
+
+1. **Bootstrapping.** 6.3.2 already names shared state on the authentication hot
+   path as the strongest argument against 7523. A JWKS fetch adds a SECOND
+   availability dependency to the same path, and it is a dependency on the
+   PEER - a service that has just restarted would fail inbound calls until it
+   could reach the caller calling it. A static bundle makes verification a pure
+   function of local configuration; only the replay store remains.
+2. **The trust anchor is weaker, not stronger, in this deployment.** 2.3 records
+   that internal hops are cleartext today. A JWKS document fetched over plain
+   HTTP is attacker-substitutable, so key distribution would be exactly as
+   strong as the network the assertions exist to stop trusting. Static key
+   material needs no network trust at all. JWKS becomes defensible once S2's
+   transport half lands, and not before.
+3. **It does not actually save configuration.** JWKS needs a per-issuer URL in
+   config regardless. The trade is a public key for a URL, which moves the trust
+   decision onto DNS plus TLS plus peer liveness and buys only rotation
+   convenience.
+4. **`JwksCache` would not have given issuer binding for free.** It is keyed on
+   one URL and `keys()` returns a flat `Vec<CachedKey>` with no issuer attached
+   (`crates/core/src/oidc_verify.rs:203`). Using it would have required one
+   cache instance per issuer anyway - and using it as-is would have produced
+   precisely the flat pool RFC 8725 section 3.8 forbids.
+
+**What this gives up, stated plainly:** unattended rotation. A new key is
+trusted by editing configuration on each peer and restarting it. The bundle
+holds several keys per issuer, so the overlap window is expressible and rotation
+never needs a flag day - but it is an operator action, not a background refresh.
+
+### 14.2 Key provisioning: what exists, and the hole
+
+**What exists.** `ServiceSigningKey` generates a keypair, loads one from PKCS#8
+DER, and emits the base64url public half a peer puts in its bundle.
+`ServiceTrustBundle::trust` refuses to silently replace a key already held under
+the same issuer and `kid`, so a later configuration line cannot revoke an
+earlier one by shadowing it.
+
+**What does NOT exist, and is required before rollout:**
+
+1. **No config surface.** Nothing reads a private key or a trust bundle from a
+   file, an environment variable or `zeroship dev init`. Every key in the tree
+   today is constructed in a test. Section 9.3's config work is unstarted.
+2. **No distribution mechanism.** How service A's public key reaches service B's
+   configuration is entirely manual. For a single-VPS self-hoster that is a
+   `zeroship dev init` away from fine; for a multi-host deployment it is an
+   unautomated N-by-N step, and that is the real cost of choosing static bundles
+   over JWKS.
+3. **No boot gate.** 6.5.2's gate against weak defaults is queued separately.
+   Until it lands, an empty trust bundle is a verifier that trusts nobody, which
+   fails closed - but a MISCONFIGURED bundle is not detected at boot.
+4. **No rotation runbook.** The overlap window is expressible; the procedure for
+   using it is not written down.
+
+Until 1 and 2 exist, this mechanism protects nothing in production, because
+nothing calls it. The code is the end state; the provisioning around it is not.
+
+### 14.3 One divergence from 6.6
+
+`IdentityVerifier::verify` is now asynchronous, returning a boxed future rather
+than a `Result` (`crates/core/src/service_identity.rs`). 6.6's sketch is
+synchronous. It had to change: the `jti` claim is I/O and it must happen INSIDE
+the seam, because a claim made by the caller after `verify` returned would mean
+a `ServiceIdentity` exists for a replayed assertion. The future is boxed rather
+than written as `async fn` so the trait stays dyn-compatible, which is what the
+`?Sized` bound on `verify_identity` always promised. Nothing else in 6.6 changed:
+two types, `aud` as input only, no validity in the neutral output, trust domain
+and name compared together.
