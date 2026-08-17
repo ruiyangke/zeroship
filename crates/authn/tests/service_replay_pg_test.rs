@@ -123,10 +123,10 @@ fn fixture_grant_sql() -> String {
     let mut reach_the_schema = granted.clone();
     reach_the_schema.push(UNGRANTED_ROLE.to_owned());
     format!(
-        "GRANT usage ON SCHEMA zeroship TO {}; \
-         GRANT {} ON zeroship.service_assertion_replay TO {}",
+        "GRANT usage ON SCHEMA service_authn TO {}; \
+         GRANT {} ON service_authn.service_assertion_replay TO {}",
         reach_the_schema.join(", "),
-        quoted_list_after("privileges: [").join(", "),
+        quoted_list_after_in(table_grant_call(), "privileges: [").join(", "),
         granted.join(", "),
     )
 }
@@ -222,7 +222,7 @@ impl ReplayStore for ReadThenWriteStore {
             let seen = self
                 .client
                 .query(
-                    "SELECT 1 FROM zeroship.service_assertion_replay \
+                    "SELECT 1 FROM service_authn.service_assertion_replay \
                      WHERE replay_key = $1 AND expires_at > now()",
                     &[&key],
                 )
@@ -237,7 +237,7 @@ impl ReplayStore for ReadThenWriteStore {
                 .as_secs_f64();
             self.client
                 .execute(
-                    "INSERT INTO zeroship.service_assertion_replay (replay_key, expires_at) \
+                    "INSERT INTO service_authn.service_assertion_replay (replay_key, expires_at) \
                      VALUES ($1, to_timestamp($2::double precision)) \
                      ON CONFLICT (replay_key) DO UPDATE SET expires_at = excluded.expires_at",
                     &[&key, &seconds],
