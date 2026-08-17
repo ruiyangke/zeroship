@@ -10,7 +10,7 @@ use rand::RngCore as _;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
-use zeroship_authz::{Action, Resource, Scope};
+use zeroship_authz::Scope;
 use zeroship_core::auth::hash_api_key;
 
 use crate::auth_audit;
