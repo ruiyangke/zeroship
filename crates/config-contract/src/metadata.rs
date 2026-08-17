@@ -150,6 +150,29 @@ pub fn check_workspace(manifest_path: &Path) -> Result<MetadataSummary, Vec<Meta
     check_metadata(&metadata)
 }
 
+/// Run `cargo metadata --no-deps` and return the targets and their classes.
+///
+/// The peer of [`check_workspace`] for callers that need the NAMES rather than
+/// the counts. [`MetadataSummary`] answers "how many are `platform`", which
+/// cannot answer "is `zeroship-gate` one of them"; the registry anti-vacuity
+/// guard in `tests/real_registry.rs` asks the second question.
+///
+/// # Errors
+///
+/// Returns Cargo execution errors, malformed package metadata, and unknown
+/// classes. Completeness of the classification is
+/// [`validate_target_classifications`]'s question, not this one's.
+pub fn extract_workspace(
+    manifest_path: &Path,
+) -> Result<(Vec<BinaryTarget>, Vec<TargetClassification>), Vec<MetadataContractError>> {
+    let metadata = MetadataCommand::new()
+        .manifest_path(manifest_path)
+        .no_deps()
+        .exec()
+        .map_err(|error| vec![MetadataContractError::Cargo(error.to_string())])?;
+    extract_metadata(&metadata)
+}
+
 /// Validate an already extracted Cargo metadata model.
 ///
 /// This split is intentional: mutation fixtures exercise the checker without
@@ -159,6 +182,19 @@ pub fn check_workspace(manifest_path: &Path) -> Result<MetadataSummary, Vec<Meta
 ///
 /// Returns every classification error found in the model.
 pub fn check_metadata(metadata: &Metadata) -> Result<MetadataSummary, Vec<MetadataContractError>> {
+    let (binaries, classifications) = extract_metadata(metadata)?;
+    validate_target_classifications(&binaries, &classifications)
+}
+
+/// Read workspace binary targets and package-owned classifications out of a
+/// Cargo metadata model, without judging whether the two sets agree.
+///
+/// # Errors
+///
+/// Returns malformed-metadata and unknown-class errors.
+pub fn extract_metadata(
+    metadata: &Metadata,
+) -> Result<(Vec<BinaryTarget>, Vec<TargetClassification>), Vec<MetadataContractError>> {
     let workspace_ids = metadata
         .workspace_members
         .iter()
@@ -213,7 +249,7 @@ pub fn check_metadata(metadata: &Metadata) -> Result<MetadataSummary, Vec<Metada
     if !extraction_errors.is_empty() {
         return Err(extraction_errors);
     }
-    validate_target_classifications(&binaries, &classifications)
+    Ok((binaries, classifications))
 }
 
 /// Compare extracted binary targets with package-owned classifications.

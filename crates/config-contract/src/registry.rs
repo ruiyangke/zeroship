@@ -8,11 +8,18 @@
 //! satisfy by editing a list.
 //!
 //! A binary missing from [`platform_specs`] is invisible here, so
-//! [`declared_binaries`] states the expected set and
-//! `tests/real_registry.rs` compares it with the cargo-metadata classification
-//! that `check-metadata` already enforces. That comparison is the anti-vacuity
-//! guard: adding a seventh server and forgetting this file fails there rather
-//! than silently shrinking every count in this tool.
+//! [`DECLARING_BINARIES`] states the expected set, [`declared_binaries`]
+//! recovers the set the LINKED declarations actually name, and
+//! `tests/real_registry.rs` compares both against the `platform` class that
+//! `check-metadata` already enforces from the package manifests. That
+//! comparison is the anti-vacuity guard: adding a platform binary and
+//! forgetting this file fails there rather than silently shrinking every count
+//! in this tool.
+//!
+//! Cargo metadata classifies SEVEN targets `platform`: these six servers plus
+//! the `zeroship-platform-migrate` one-shot, which the design puts in scope and
+//! has not converted. The test pins that gap by exact name, so it stays one
+//! target wide instead of becoming the precedent for the next one.
 
 use zeroship_core::config::{ConfigSpec, GeneratedConfig, ReadSite, CONFIG_READ_SITES};
 
