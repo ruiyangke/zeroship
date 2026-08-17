@@ -19,6 +19,7 @@ use serde_json::json;
 use uuid::Uuid;
 use zeroship_authz as authz;
 use zeroship_core::auth_provider::{AuthProvider, ProviderAuthz, VerifyTokenError};
+use zeroship_core::device_grant::{PLATFORM_CLI_CLIENT_ID, PLATFORM_CLI_ISSUABLE_SCOPES};
 use zeroship_authz::wrapper_revocation::{family_revoked_at, revoked_after_for};
 
 pub type HttpRejection = web::Error;
@@ -166,6 +167,27 @@ pub struct VerifiedPrincipal {
     pub mfa_age_seconds: Option<u32>,
     pub request_ip: Option<IpAddr>,
     pub request_id: String,
+    /// This bearer is a platform CLI token for a principal with no
+    /// `zeroship.identity_links` seeding marker, so it was authorized against
+    /// the DEFAULT CLI grant set rather than against stored rows
+    /// (see [`BearerVerifier::platform_cli_entitlement`]).
+    ///
+    /// A caller that can write `zeroship.principal_grants` should materialize
+    /// those defaults, because until it does the operator has no rows to
+    /// delete and narrowing has nothing to bite on. A caller that cannot write
+    /// them ignores this: the request itself was already authorized correctly,
+    /// and control will materialize on its own first sight of the principal.
+    pub seed_platform_cli_grants: bool,
+}
+
+/// What a platform CLI token may actually do, resolved from the live grant
+/// rows rather than from the token.
+struct PlatformCliEntitlement {
+    scopes: HashSet<authz::Scope>,
+    /// No `zeroship.identity_links` row at all. Deliberately NOT "holds zero
+    /// grants": "the operator revoked everything" is a legitimate empty
+    /// entitlement and must not be re-seeded.
+    unseeded: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -252,6 +274,10 @@ impl BearerVerifier {
                     mfa_age_seconds: None,
                     request_ip,
                     request_id,
+                    // A PAT is not a CLI device-grant token; its authority
+                    // comes from the wrapper policy, not from the CLI grant
+                    // set, so it never triggers CLI grant materialization.
+                    seed_platform_cli_grants: false,
                 }
             }
         };
@@ -385,7 +411,8 @@ impl BearerVerifier {
                     web::error::ErrorUnauthorized("platform token verification failed").into()
                 }
             })?;
-        let (principal_id, token_policy) = match &verified.provider_authz {
+        let (principal_id, token_policy, seed_platform_cli_grants) = match &verified.provider_authz
+        {
             ProviderAuthz::OAuthScope(raw_scope) => {
                 if !verified.aud.as_ref().is_some_and(|audiences| {
                     audiences
@@ -403,8 +430,15 @@ impl BearerVerifier {
 
                 let principal_id = Uuid::parse_str(&verified.provider_subject)
                     .map_err(|_| web::error::ErrorUnauthorized("invalid oauth sub"))?;
-                let token_policy = policy_from_scope_string(raw_scope, "invalid oauth scope")?;
-                (principal_id, token_policy)
+                let mut scopes = authz::parse_scope_string(raw_scope)
+                    .map_err(|_| web::error::ErrorUnauthorized("invalid oauth scope"))?;
+                let mut seed = false;
+                if verified.client_id.as_deref() == Some(PLATFORM_CLI_CLIENT_ID) {
+                    let entitlement = self.platform_cli_entitlement(principal_id).await?;
+                    seed = entitlement.unseeded;
+                    scopes.retain(|scope| entitlement.scopes.contains(scope));
+                }
+                (principal_id, authz::scopes_to_policy(&scopes), seed)
             }
             ProviderAuthz::GoTrueRole(role) => {
                 if role != "authenticated" {
@@ -416,7 +450,7 @@ impl BearerVerifier {
                 let grants = self.load_principal_grants(principal_id).await?;
                 let raw_scope = grants.join(" ");
                 let token_policy = policy_from_scope_string(&raw_scope, "invalid principal grant")?;
-                (principal_id, token_policy)
+                (principal_id, token_policy, false)
             }
         };
 
@@ -428,6 +462,7 @@ impl BearerVerifier {
             mfa_age_seconds: None,
             request_ip,
             request_id,
+            seed_platform_cli_grants,
         })
     }
 
@@ -455,6 +490,87 @@ impl BearerVerifier {
             .first()
             .ok_or_else(|| web::error::ErrorUnauthorized("unlinked supabase principal"))?;
         Ok(row.get("principal_id"))
+    }
+
+    /// Resolve the live entitlement a platform CLI token is capped to.
+    ///
+    /// The OP caps a device-grant token to the client REGISTRATION and cannot
+    /// do more: `db/migrations-ts/20260702000900_grants.ts:55` gives
+    /// `zeroship_auth` SELECT on `zeroship.principal_grants` and no write
+    /// anywhere near it. So the token's `scope` claim is a coarse ceiling, and
+    /// this is where an operator's narrowing takes effect - per request, which
+    /// means a DELETE reaches the token already in the creator's hand and not
+    /// merely the next login.
+    ///
+    /// This is a pure read and needs no privilege beyond what
+    /// `zeroship_control` already holds on both tables (`grants.ts:65`).
+    ///
+    /// An UNSEEDED principal falls back to the default CLI set rather than to
+    /// nothing. `zeroship login` is an OP-only conversation, so control's
+    /// first sight of a platform-native creator IS this request; intersecting
+    /// with the empty table would 403 every creator's first command. The
+    /// fallback is not a second source of truth - it is exactly the set
+    /// `identity_bridge::ensure_platform_creator_grants` materializes, which
+    /// the caller triggers on [`PlatformCliEntitlement::unseeded`].
+    async fn platform_cli_entitlement(
+        &self,
+        principal_id: Uuid,
+    ) -> Result<PlatformCliEntitlement, HttpRejection> {
+        let row = self
+            .control_pg
+            .query_one(
+                "SELECT EXISTS ( \
+                     SELECT 1 FROM zeroship.identity_links WHERE principal_id = $1 \
+                 ) AS seeded, \
+                 ( \
+                     SELECT string_agg(grant_name, ' ' ORDER BY grant_name) \
+                     FROM zeroship.principal_grants WHERE principal_id = $1 \
+                 ) AS granted",
+                &[&principal_id],
+            )
+            .await
+            .map_err(|err| {
+                tracing::error!(
+                    error = %err,
+                    "control: platform CLI entitlement lookup failed"
+                );
+                web::error::ErrorInternalServerError("principal grant lookup failed")
+            })?;
+
+        if !row.get::<_, bool>("seeded") {
+            return Ok(PlatformCliEntitlement {
+                scopes: PLATFORM_CLI_ISSUABLE_SCOPES
+                    .iter()
+                    .filter_map(|grant| authz::Scope::parse(grant).ok())
+                    .collect(),
+                unseeded: true,
+            });
+        }
+
+        // An unparseable grant name grants nothing rather than rejecting the
+        // request. The rows are operator-written free text with no CHECK
+        // constraint, so a typo must cost the creator that one scope, not
+        // every scope they legitimately hold.
+        let scopes = row
+            .get::<_, Option<String>>("granted")
+            .unwrap_or_default()
+            .split_whitespace()
+            .filter_map(|grant| match authz::Scope::parse(grant) {
+                Ok(scope) => Some(scope),
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        principal_id = %principal_id,
+                        "control: ignoring unknown principal grant"
+                    );
+                    None
+                }
+            })
+            .collect();
+        Ok(PlatformCliEntitlement {
+            scopes,
+            unseeded: false,
+        })
     }
 
     async fn load_principal_grants(&self, principal_id: Uuid) -> Result<Vec<String>, HttpRejection> {

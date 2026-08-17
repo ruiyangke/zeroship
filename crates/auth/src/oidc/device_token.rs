@@ -684,22 +684,29 @@ async fn exchange_device_code_locked(
             let granted_scopes = sort_dedup(requested_scopes);
             // The cap here is the client REGISTRATION, and only that.
             //
-            // Say what this does not do, because two sibling paths do it and
-            // the difference is invisible from the response: neither this
-            // check nor the mint below intersects with
-            // `zeroship.principal_grants`, which control's
-            // `deploy_scopes_for_principal` and `mint_platform_token` both do.
-            // An operator who deletes a grant row therefore does not narrow a
-            // token issued here.
+            // Say what this does not do, because the difference is invisible
+            // from the response: this does not intersect with
+            // `zeroship.principal_grants`, which the sibling
+            // `mint_platform_token` below does. It cannot -
+            // `db/migrations-ts/20260702000900_grants.ts:55` gives
+            // `zeroship_auth` SELECT on that table and no write anywhere near
+            // it, so intersecting HERE would mint `scope: ""` on every first
+            // login: nothing in this service can provision a creator's grants.
             //
-            // It cannot be fixed in this function alone. The only writer of
-            // platform-creator grants is control's `/api/device/token`
-            // (`identity_bridge::ensure_platform_creator_grants`), and
-            // `db/migrations-ts/20260702000900_grants.ts` gives `zeroship_auth`
-            // SELECT only on that table - so intersecting before provisioning
-            // moves would mint `scope: ""` on every first login. Pinned by
-            // `crates/auth/tests/cli_device_refresh_test.rs`,
-            // `the_cli_device_grant_does_not_consult_stored_principal_grants`.
+            // That is a coarse ceiling, not a hole. The entitlement check is
+            // control's, at request time
+            // (`crates/authn/src/lib.rs`, `platform_cli_entitlement`), so an
+            // operator deleting a grant row narrows the token already in the
+            // creator's hand rather than only the next login. Do not "fix"
+            // this function by adding the intersection; the privilege model is
+            // what puts it in control, and the split is deliberate.
+            //
+            // Pinned at both ends: `crates/auth/tests/cli_device_refresh_test.rs`,
+            // `the_cli_device_grant_caps_scope_to_the_client_registration_only`
+            // for the ceiling, and
+            // `crates/control/tests/authz_guard_oauth_test.rs`,
+            // `an_operator_deleting_a_grant_row_narrows_the_next_cli_request`
+            // for the narrowing.
             if platform_cli && !scope_subset(&granted_scopes, &platform_cli_scopes()) {
                 return Err(OAuthError::invalid_grant(
                     "device grant scope is no longer allowed",

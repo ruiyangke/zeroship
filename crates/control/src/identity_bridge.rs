@@ -1,7 +1,18 @@
 //! Control-plane identity bridge for provider-native platform principals.
 //!
-//! JIT provisioning is deliberately a device-approval write path, not a bearer
-//! authz read path. The hot deploy guard only resolves existing links.
+//! JIT provisioning used to be a device-approval write path, deliberately kept
+//! off the bearer authz read path. It is now BOTH, and the change was forced
+//! rather than chosen: once `zeroship login` moved to the OP's own device
+//! grant, control stopped being on the login path at all, so a platform-native
+//! creator's first bearer request is the only moment control still sees them.
+//! The choice is no longer "approval path vs authz path", it is "authz path vs
+//! nowhere".
+//!
+//! What that header was protecting survives: [`ensure_platform_creator_grants`]
+//! is guarded on the `identity_links` marker, so the write is attempted once
+//! per principal and the hot path settles into a pure read.
+//!
+//! Supabase provisioning is untouched and still happens at device approval.
 
 use std::error::Error as StdError;
 use std::time::Duration;

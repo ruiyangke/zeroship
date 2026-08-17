@@ -1591,6 +1591,214 @@ async fn oauth_token_subset_of_user_two_call_enforcement() {
     common::drain_pg().await;
 }
 
+/// Seed the `zeroship.identity_links` marker WITHOUT granting anything
+/// through it, then grant exactly `grants`.
+///
+/// This is the shape an operator leaves behind after narrowing: the principal
+/// has been provisioned once (so the marker exists) and some grant rows have
+/// since been deleted. Keying off the marker rather than the grant count is
+/// what makes "operator revoked everything" distinguishable from "never
+/// provisioned" - see `crates/control/src/identity_bridge.rs`.
+async fn seed_grants(state: &AppState, principal_id: Uuid, grants: &[&str]) {
+    state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.identity_links \
+                (principal_id, provider, provider_subject, email) \
+             VALUES ($1, 'platform', $2, NULL) \
+             ON CONFLICT (provider, provider_subject) DO NOTHING",
+            &[&principal_id, &principal_id.to_string()],
+        )
+        .await
+        .expect("seed identity_links marker");
+    for grant in grants {
+        state
+            .control_pg
+            .execute(
+                "INSERT INTO zeroship.principal_grants (principal_id, grant_name) \
+                 VALUES ($1, $2) ON CONFLICT (principal_id, grant_name) DO NOTHING",
+                &[&principal_id, grant],
+            )
+            .await
+            .expect("seed principal grant");
+    }
+}
+
+/// Both tables carry a plain FK to `zeroship.users` with no ON DELETE action
+/// (`db/migrations-ts/20260702000600_constraints_indexes_fks.ts:159,195`), so
+/// the fixture's `DELETE FROM zeroship.users` is REFUSED while these rows
+/// exist - and it is a `let _ =`, so the refusal is silent and the user row
+/// simply leaks. Anything that seeds or materializes them must clear them
+/// here first.
+async fn clear_grants(state: &AppState, principal_id: Uuid) {
+    for sql in [
+        "DELETE FROM zeroship.principal_grants WHERE principal_id = $1",
+        "DELETE FROM zeroship.identity_links WHERE principal_id = $1",
+    ] {
+        state
+            .control_pg
+            .execute(sql, &[&principal_id])
+            .await
+            .expect("clear seeded grant state");
+    }
+}
+
+async fn stored_grants(state: &AppState, principal_id: Uuid) -> Vec<String> {
+    state
+        .control_pg
+        .query(
+            "SELECT grant_name FROM zeroship.principal_grants \
+             WHERE principal_id = $1 ORDER BY grant_name",
+            &[&principal_id],
+        )
+        .await
+        .expect("read principal grants")
+        .iter()
+        .map(|row| row.get::<_, String>("grant_name"))
+        .collect()
+}
+
+async fn seeding_marker_count(state: &AppState, principal_id: Uuid) -> i64 {
+    state
+        .control_pg
+        .query_one(
+            "SELECT COUNT(*)::INT8 AS n FROM zeroship.identity_links \
+             WHERE principal_id = $1",
+            &[&principal_id],
+        )
+        .await
+        .expect("count identity links")
+        .get::<_, i64>("n")
+}
+
+/// A creator's FIRST CLI request must not be narrowed to nothing, and must
+/// leave the default grants behind for the operator to narrow later.
+///
+/// Login moved off control's `/api/device/token` in `5ae8c7f7d`, which was the
+/// only thing that had ever written a platform creator's grant rows. So a
+/// platform-native principal reaches control with no `principal_grants` and no
+/// `identity_links` marker at all. If control simply intersected the token's
+/// scope with that empty set, every first `zeroship deploy` would 403 - which
+/// is why the intersection treats an UNSEEDED principal as holding the default
+/// CLI set rather than holding nothing.
+///
+/// Both halves are asserted because either one alone passes for the wrong
+/// reason: authorizing without materializing leaves the operator with no rows
+/// to delete (so `an_operator_deleting_a_grant_row_narrows_the_next_cli_request`
+/// below would have nothing to narrow), and materializing without authorizing
+/// is the 403 this exists to prevent.
+#[compio::test]
+async fn a_first_cli_request_is_authorized_and_materializes_the_default_grants() {
+    let user_id = Uuid::new_v4();
+    let Some(mut fx) = fixture_with_platform("first-cli", user_id).await else {
+        return;
+    };
+    let app_id = create_app(&mut fx, "first-cli").await;
+    let app = init_control!(fx);
+
+    assert_eq!(
+        stored_grants(&fx.state, user_id).await,
+        Vec::<String>::new(),
+        "the measurement needs a principal that starts with no grant rows"
+    );
+    assert_eq!(
+        seeding_marker_count(&fx.state, user_id).await,
+        0,
+        "the measurement needs a principal that starts with no seeding marker"
+    );
+
+    let req = test::TestRequest::post()
+        .uri(&format!("/raw-app/{app_id}/deploy-check"))
+        .header("authorization", bearer_for_scope(user_id, "apps:deploy apps:read"))
+        .to_request();
+    let status = test::call_service(&app, req).await.status();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an unseeded principal's first CLI token was narrowed to nothing"
+    );
+
+    assert_eq!(
+        stored_grants(&fx.state, user_id).await,
+        vec!["apps:deploy", "apps:read", "apps:write", "secrets:read"],
+        "the default CLI grants were not materialized, so an operator has no row to delete"
+    );
+    assert_eq!(
+        seeding_marker_count(&fx.state, user_id).await,
+        1,
+        "materializing without the marker lets a later request re-seed revoked grants"
+    );
+
+    clear_grants(&fx.state, user_id).await;
+    fx.cleanup().await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+}
+
+/// The capability this whole change exists to restore: an operator DELETE
+/// against `zeroship.principal_grants` narrows what a CLI token can do.
+///
+/// The token carries `apps:deploy apps:read` - the OP issued it against the
+/// client registration and knows nothing about this principal's grants. The
+/// principal holds only `apps:read`. So the read must succeed and the deploy
+/// must not, from one and the same bearer.
+///
+/// What this does NOT show: that the OP stopped issuing `apps:deploy`. It did
+/// not, and that is the design - the registration is a coarse ceiling and the
+/// entitlement check is control's, at request time. `crates/auth`'s
+/// `the_cli_device_grant_caps_scope_to_the_client_registration_only` pins the
+/// other half.
+#[compio::test]
+async fn an_operator_deleting_a_grant_row_narrows_the_next_cli_request() {
+    let user_id = Uuid::new_v4();
+    let Some(mut fx) = fixture_with_platform("narrowed-cli", user_id).await else {
+        return;
+    };
+    let app_id = create_app(&mut fx, "narrowed-cli").await;
+    seed_grants(&fx.state, user_id, &["apps:read"]).await;
+    let app = init_control!(fx);
+
+    let read = test::TestRequest::get()
+        .uri(&format!("/api/apps/{app_id}"))
+        .header("authorization", bearer_for_scope(user_id, "apps:deploy apps:read"))
+        .to_request();
+    let read_status = test::call_service(&app, read).await.status();
+
+    let deploy = test::TestRequest::post()
+        .uri(&format!("/raw-app/{app_id}/deploy-check"))
+        .header("authorization", bearer_for_scope(user_id, "apps:deploy apps:read"))
+        .to_request();
+    let deploy_status = test::call_service(&app, deploy).await.status();
+
+    assert_eq!(
+        read_status,
+        StatusCode::OK,
+        "narrowing removed a grant the principal still holds"
+    );
+    assert_eq!(
+        deploy_status,
+        StatusCode::FORBIDDEN,
+        "a token scope the principal no longer holds a grant for was honored anyway"
+    );
+
+    // The revoked grant must stay revoked: nothing on the request path may
+    // re-seed a principal whose marker already exists.
+    assert_eq!(
+        stored_grants(&fx.state, user_id).await,
+        vec!["apps:read"],
+        "a request re-seeded grants an operator had deleted"
+    );
+
+    clear_grants(&fx.state, user_id).await;
+    fx.cleanup().await;
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+}
+
 #[compio::test]
 async fn user_without_admin_role_oauth_scope_does_not_grant_apps_delete() {
     let user_id = Uuid::new_v4();
@@ -1603,6 +1811,12 @@ async fn user_without_admin_role_oauth_scope_does_not_grant_apps_delete() {
     let owner_id = Uuid::new_v4();
     let app_id = create_app_owned_by(&mut fx, "user-subset", owner_id).await;
     grant_app_member(&fx.state, app_id, user_id, "viewer").await;
+    // The principal is entitled to `apps:delete` and the token carries it, so
+    // the 403 below is the ROLE check refusing a viewer. Without this the
+    // request would also 403, but for the uninteresting reason that
+    // `apps:delete` is outside the default CLI grant set and control's
+    // entitlement intersection had already stripped it from the policy.
+    seed_grants(&fx.state, user_id, &["apps:delete"]).await;
     let app = init_control!(fx);
 
     let req = test::TestRequest::delete()
@@ -1612,6 +1826,7 @@ async fn user_without_admin_role_oauth_scope_does_not_grant_apps_delete() {
     let status = test::call_service(&app, req).await.status();
     assert_eq!(status, StatusCode::FORBIDDEN);
 
+    clear_grants(&fx.state, user_id).await;
     fx.cleanup().await;
     let _ = fx
         .state

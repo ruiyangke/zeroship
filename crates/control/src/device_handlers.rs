@@ -635,7 +635,14 @@ fn ensure_platform_device_provider(state: &AppState) -> Result<(), web::HttpResp
     }
 }
 
-async fn ensure_platform_creator_grants_committed(
+/// Seed a platform creator's default grants in their own committed
+/// transaction.
+///
+/// Two callers, and the second is the load-bearing one now:
+/// this flow's `/api/device/token`, which the CLI no longer drives, and
+/// [`crate::authz_guard`] on control's first sight of a platform-native
+/// principal, which is the only moment control still gets.
+pub(crate) async fn ensure_platform_creator_grants_committed(
     state: &AppState,
     principal_id: uuid::Uuid,
 ) -> Result<(), String> {
