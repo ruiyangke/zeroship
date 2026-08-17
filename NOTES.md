@@ -140,3 +140,55 @@ uses seed 77 and now publishes it at lines 49-53. The following consent suite
 uses seed 42 at `oidc_login_consent_test.rs:913` and publishes it at lines
 66-69. Publishing seed 77 correctly retires the previously active seed 42,
 so the later fixture correctly refuses to reactivate a retiring key.
+
+## The consent failure predates this branch: cargo fail-fast hid it
+
+Switching the logout fixture to seed 42 did NOT remove the consent failure.
+The suite still ends:
+
+```text
+test result: FAILED. 0 passed; 17 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.26s
+error: test failed, to rerun pass `-p zeroship-auth --test oidc_login_consent_test`
+...
+FAIL: only 488 auth tests passed, fewer than the 505 this gate expects.
+```
+
+with the same message the seed-77 attempt produced:
+
+```text
+publish active OP key: Config("signing key RdsIdO3CsMDzCjNZvzh9oqMmTgMASg3jgoAi8dXZLIQ has non-activatable status \"retiring\"")
+```
+
+so the earlier attribution of this failure to the logout fixture was wrong.
+`cargo test` stops at the first failing test target. On main the auth crate
+aborted at `oidc_backchannel_logout_test`, which sorts before
+`oidc_brokered_login_test`, `oidc_foundation_test` and
+`oidc_login_consent_test` - so those three binaries, and everything after them
+in the crate, NEVER RAN on main. Main's "nine failures" is nine failures
+*before truncation*, not the whole picture. Fixing the logout fixture moved the
+truncation point later and uncovered the next latent breakage.
+
+## Duplicate signing-key seeds across test binaries
+
+`Issuer::publish_active_key` retires every other active row
+(`crates/auth/src/oidc/issuer.rs:397-408`) and refuses to reactivate a
+`retiring` row (`issuer.rs:388-391`). The kid is a pure thumbprint of the
+public key (`issuer.rs:273`), so two test binaries built from the same seed
+publish the SAME kid into the one shared suite database. Ten binaries in
+`crates/auth/tests/` publish, and three seeds are used twice:
+
+```text
+seed 42  oidc_authorization_code_test:503, oidc_login_consent_test:913, oidc_userinfo_test:338
+seed 43  oidc_brokered_login_test:406, oidc_refresh_token_test:1174
+```
+
+Run order is alphabetical, so `oidc_authorization_code_test` publishes kid(42),
+`oidc_brokered_login_test` publishes kid(43) and retires kid(42),
+`oidc_foundation_test` publishes kid(21) and retires kid(43), and then
+`oidc_login_consent_test` tries to reactivate the now-`retiring` kid(42) and
+fails closed. `oidc_refresh_token_test` and `oidc_userinfo_test` sit behind the
+same wall, unreached only because the run is truncated first.
+
+The production behaviour is correct: a retiring signer must not reactivate.
+The fixtures are wrong to share one OP identity across binaries that each act
+as their own OP.
