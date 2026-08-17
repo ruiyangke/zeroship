@@ -1600,27 +1600,6 @@ fn load_hash_keyring(path: &Path) -> Result<Vec<RefreshHashKey>, String> {
     Ok(keys)
 }
 
-#[cfg(test)]
-mod lifecycle_introspection_tests {
-    use super::*;
-
-    #[test]
-    fn refresh_introspection_uses_hard_lifecycle_without_soft_lockout() {
-        for column in [
-            "disabled_at",
-            "anonymized_at",
-            "deletion_requested_at",
-            "deletion_scheduled_for",
-        ] {
-            assert!(
-                REFRESH_PRINCIPAL_ACTIVE_SQL.contains(&format!("{column} IS NULL")),
-                "missing active lifecycle predicate for {column}"
-            );
-        }
-        assert!(!REFRESH_PRINCIPAL_ACTIVE_SQL.contains("locked_until"));
-    }
-}
-
 fn decode_key_material(value: &str) -> Option<Vec<u8>> {
     hex::decode(value)
         .ok()
@@ -1663,4 +1642,25 @@ fn reject_insecure_permissions(_path: &Path, _label: &str) -> Result<(), String>
 #[must_use]
 pub fn client_secret_hash(secret: &str) -> String {
     hash_api_key(secret)
+}
+
+#[cfg(test)]
+mod lifecycle_introspection_tests {
+    use super::*;
+
+    #[test]
+    fn refresh_introspection_uses_hard_lifecycle_without_soft_lockout() {
+        for column in [
+            "disabled_at",
+            "anonymized_at",
+            "deletion_requested_at",
+            "deletion_scheduled_for",
+        ] {
+            assert!(
+                REFRESH_PRINCIPAL_ACTIVE_SQL.contains(&format!("{column} IS NULL")),
+                "missing active lifecycle predicate for {column}"
+            );
+        }
+        assert!(!REFRESH_PRINCIPAL_ACTIVE_SQL.contains("locked_until"));
+    }
 }
