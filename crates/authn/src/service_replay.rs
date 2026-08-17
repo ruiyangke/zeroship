@@ -41,7 +41,7 @@ use zeroship_core::service_assertion::{ClaimFuture, ReplayClaim, ReplayStore, Re
 ///
 /// That is NOT a statement about privileges, and an earlier version of this
 /// comment said it was. The statement reads `expires_at` in the `DO UPDATE`
-/// arm's `WHERE`, and PostgreSQL requires `SELECT` on every column read in a
+/// arm's `WHERE`, and `PostgreSQL` requires `SELECT` on every column read in a
 /// condition whether or not a row is returned. It needs select, insert and
 /// update; the sweep below needs select and delete. All four are granted in
 /// `db/migrations-ts/20260816000100_service_assertion_replay.ts`.
