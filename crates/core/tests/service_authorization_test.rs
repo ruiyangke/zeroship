@@ -6,8 +6,7 @@ use zeroship_core::service_identity::{
 };
 
 /// Every operation the catalog names, in one place for the table-wide guards.
-const CATALOG: [ServiceEndpoint; 14] = [
-    endpoints::AUTH_PLATFORM_TOKEN,
+const CATALOG: [ServiceEndpoint; 13] = [
     endpoints::MIGRATED_APPLY_MIGRATIONS,
     endpoints::GATEWAY_BACKCHANNEL_LOGOUT,
     endpoints::GATEWAY_WORKFLOW_ADVANCE,
@@ -71,12 +70,6 @@ fn assert_endpoint(
 #[test]
 fn endpoint_catalog_records_exact_measured_operations() {
     for (endpoint, destination, method, path_template) in [
-        (
-            endpoints::AUTH_PLATFORM_TOKEN,
-            "auth",
-            "POST",
-            "/internal/platform-token",
-        ),
         (
             endpoints::MIGRATED_APPLY_MIGRATIONS,
             "migrated",
@@ -168,7 +161,6 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
     assert_allowlist_row(
         "svc/control",
         &[
-            endpoints::AUTH_PLATFORM_TOKEN,
             endpoints::MIGRATED_APPLY_MIGRATIONS,
             endpoints::GATEWAY_WORKFLOW_ADVANCE,
             endpoints::WORKER_APP_LOGS,
@@ -209,12 +201,12 @@ fn authorization_keys_on_individual_compound_identity() {
     let unknown = identity("zeroship.ai", "svc/unknown");
     let wrong_domain = identity("attacker.example", "svc/control");
 
-    assert!(authorize(&control, endpoints::AUTH_PLATFORM_TOKEN));
-    assert!(!authorize(&auth, endpoints::AUTH_PLATFORM_TOKEN));
-    assert!(!authorize(&unknown, endpoints::AUTH_PLATFORM_TOKEN));
+    assert!(authorize(&control, endpoints::MIGRATED_APPLY_MIGRATIONS));
+    assert!(!authorize(&auth, endpoints::MIGRATED_APPLY_MIGRATIONS));
+    assert!(!authorize(&unknown, endpoints::MIGRATED_APPLY_MIGRATIONS));
     assert!(!authorize(
         &wrong_domain,
-        endpoints::AUTH_PLATFORM_TOKEN
+        endpoints::MIGRATED_APPLY_MIGRATIONS
     ));
 }
 
