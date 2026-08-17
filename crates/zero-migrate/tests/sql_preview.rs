@@ -1062,3 +1062,96 @@ fn guarded_drop_partition_announces_that_a_run_verdict_destroys_rows() {
         "the create direction is additive and must stay quiet:\n{guarded_create}"
     );
 }
+
+/// A retype's blocked-column assertion changes the PLAN and must change no SQL.
+///
+/// `setColumnType` now carries a `ColumnTypeChangeHasNoBlockers` precondition,
+/// evaluated against a live database. Preview has no database, and the question this
+/// settles is whether preview therefore has to say something new. It does not, and
+/// the reason is worth pinning rather than assuming: a precondition GATES a
+/// statement, it is not a statement, so the SQL the engine would run is unchanged
+/// and preview's contract is exactly "the SQL the engine would run".
+///
+/// The trap this guards against is the shape of `59a0b238`, where a fix that made
+/// apply correct left preview rendering a statement apply no longer emits. Preview
+/// lowers each op IN ISOLATION against an EMPTY `LiveSchema`, so a stamp made
+/// conditional on live state would land in one path and not the other. Both halves
+/// are asserted: the preview text holds the engine's `up` verbatim, and the
+/// single-op lower preview uses stamps the SAME assertion as the whole-envelope
+/// lower apply uses.
+///
+/// It also supplies what F877 recorded as missing outright - no golden in the tree
+/// pinned an `ALTER COLUMN ... TYPE` statement at all.
+#[test]
+fn a_retype_previews_the_statement_apply_runs_and_nothing_more() {
+    let envelope_json = r#"{
+      "ir_version": 1,
+      "name": "retype_preview",
+      "ops": [
+        {"op":"createTable","name":"codes","columns":[
+          {"name":"code","type":"int","nullable":false,"unique":true}
+        ]},
+        {"op":"setColumnType","table":"codes","column":"code","toType":"bigInt"}
+      ]
+    }"#;
+    let envelope_json = resolve_envelope_json(envelope_json);
+    let ir: MigrationIr = serde_json::from_str(&envelope_json).unwrap();
+    let author = IrAuthor::new(
+        "public",
+        "app_preview",
+        SqlDialect::Postgres,
+        &support::confined_charter(),
+    );
+    let steps = author
+        .lower_steps(&ir, &LiveSchema::default())
+        .expect("lowers offline");
+    let preview = render_ir_envelope_sql(&envelope_json, SqlDialect::Postgres, &opts())
+        .expect("renders offline");
+
+    // The statement itself, pinned. Written out rather than derived from the lowered
+    // step, so a change to the emitted spelling has to be typed here deliberately.
+    let expected =
+        r#"ALTER TABLE "public"."codes" ALTER COLUMN "code" TYPE bigint USING "code"::bigint"#;
+    let retype = steps
+        .iter()
+        .find_map(|step| match step {
+            PlanStep::Ddl(m) if m.up.contains("ALTER COLUMN") => Some(m),
+            _ => None,
+        })
+        .expect("the envelope lowers exactly one ALTER COLUMN step");
+    assert_eq!(
+        retype.up.trim_end().trim_end_matches(';'),
+        expected,
+        "the lowered `up` and the pinned statement must be the same bytes, or the \
+         preview assertion below is checking a spelling nothing runs"
+    );
+    assert!(
+        preview.contains(expected),
+        "the retype must preview as the statement the engine emits:\n\
+         --- expected ---\n{expected}\n--- preview ---\n{preview}"
+    );
+
+    // The precondition rides on the plan, and rides on the PREVIEW lower too.
+    let stamped = format!("{:?}", retype.preconditions);
+    assert!(
+        stamped.contains("ColumnTypeChangeHasNoBlockers"),
+        "the retype's unit must carry the blocked-column assertion: {stamped}"
+    );
+    let single_op: MigrationIr = serde_json::from_str(
+        r#"{"ir_version":1,"name":"retype_solo","ops":[
+             {"op":"setColumnType","table":"codes","column":"code","toType":"bigInt"}]}"#,
+    )
+    .unwrap();
+    let solo = author
+        .lower_steps(&single_op, &LiveSchema::default())
+        .expect("a lone retype lowers offline");
+    let PlanStep::Ddl(solo) = &solo[0] else {
+        panic!("a lone retype lowers to one Ddl step");
+    };
+    assert_eq!(
+        format!("{:?}", solo.preconditions),
+        stamped,
+        "the per-op lower preview uses and the whole-envelope lower apply uses must \
+         stamp the SAME assertion, or preview and apply disagree about the plan"
+    );
+}
