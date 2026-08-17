@@ -1,5 +1,7 @@
 //! Shared bearer authentication for control-like services.
 
+pub mod service_replay;
+
 use std::collections::HashSet;
 use std::net::IpAddr;
 use std::path::Path;

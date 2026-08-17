@@ -20,5 +20,12 @@ uuid = { workspace = true }
 zeroship-authz = { workspace = true }
 zeroship-core = { workspace = true }
 
+[dev-dependencies]
+# The Postgres jti store's race test drives two connections from one compio
+# runtime. `polling` keeps it runnable in sandboxes that block io_uring, the
+# same split the `auth` and `core` crates use.
+compio = { workspace = true, features = ["polling"] }
+zeroship-test-support = { workspace = true }
+
 [lints]
 workspace = true
