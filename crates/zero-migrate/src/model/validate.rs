@@ -3873,7 +3873,33 @@ fn expression_column_references<'a>(
             table, constraint, ..
         } => match &constraint.kind {
             IrConstraintKind::Check { expr, .. } => refs(table, expr),
-            _ => Vec::new(),
+            // AN EXCLUSION CARRIES EXPRESSIONS TOO - its partial-index WHERE and
+            // any expression element target. Measured: `dropColumn v` then
+            // `EXCLUDE ... WHERE (v > 0)` was ACCEPTED while the server rejects a
+            // predicate naming a missing column.
+            //
+            // This arm is why an exhaustive OUTER match is not the same as a
+            // closed accessor: F765 listed every Op here and left this INNER
+            // match on its catch-all.
+            IrConstraintKind::Exclusion {
+                elements,
+                where_predicate,
+                ..
+            } => where_predicate
+                .as_ref()
+                .map(|expr| refs(table, expr))
+                .unwrap_or_default()
+                .into_iter()
+                .chain(elements.iter().flat_map(|element| match &element.target {
+                    crate::model::ir::ColumnOrExpr::Expr { expr } => refs(table, expr),
+                    // A plain column target is a bare identifier, so it belongs to
+                    // `plain_column_references` rather than here.
+                    crate::model::ir::ColumnOrExpr::Column { .. } => Vec::new(),
+                }))
+                .collect(),
+            // Exhaustive: a foreign key and a unique constraint name columns as
+            // bare identifiers, which the plain accessor reads.
+            IrConstraintKind::Fk { .. } | IrConstraintKind::Unique { .. } => Vec::new(),
         },
         Op::AddColumn {
             table, generated, ..
@@ -4138,7 +4164,18 @@ fn plain_column_references<'a>(op: &'a crate::model::ir::Op) -> Vec<(&'a str, &'
                 .iter()
                 .map(|column| (table.as_str(), column.as_str()))
                 .collect(),
-            IrConstraintKind::Check { .. } | IrConstraintKind::Exclusion { .. } => Vec::new(),
+            // An exclusion element may name a bare column, which is a plain
+            // reference exactly like a unique column list.
+            IrConstraintKind::Exclusion { elements, .. } => elements
+                .iter()
+                .filter_map(|element| match &element.target {
+                    crate::model::ir::ColumnOrExpr::Column { name } => {
+                        Some((table.as_str(), name.as_str()))
+                    }
+                    crate::model::ir::ColumnOrExpr::Expr { .. } => None,
+                })
+                .collect(),
+            IrConstraintKind::Check { .. } => Vec::new(),
         },
         // An identity synchronization names its column, and the lookup it must
         // perform is exactly the one that fails. MEASURED: after `DROP COLUMN v`,
