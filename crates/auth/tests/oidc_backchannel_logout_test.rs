@@ -83,7 +83,15 @@ async fn logout_emission_posts_signed_logout_token_with_sid() {
     .await
     .expect("create OP session");
     let sid = session.id.to_string();
-    let sub = format!("pws_{}", Uuid::new_v4().simple());
+    // The `sub` an RP participation row carries is the per-app pairwise subject
+    // the OP minted for this (user, client) - so derive it through the issuer
+    // rather than inventing one. `pws_` + a 32-char simple UUID is not even the
+    // minted shape (`is_pairwise_subject` requires exactly 20 base62 chars), so
+    // the old value could never have come off a real token.
+    let sub = issuer.pairwise_subject(
+        &user_id.to_string(),
+        &format!("https://{client_id}.zeroship.localhost"),
+    );
 
     backchannel_logout::record_rp_participation(
         &db,
