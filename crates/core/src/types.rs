@@ -64,11 +64,25 @@ pub struct NetAllowEntry {
 
 /// Plan-catalog tier limits for creator outbound raw TCP.
 ///
-/// Hosts live in `app_net_grants`; plans only determine "how much".
+/// Hosts live in `app_net_grants`; plans only determine "how much". The
+/// creator chooses WHICH hosts within these caps and can never raise them.
+///
+/// `max_grants` bounds the NUMBER of `app_net_grants` rows an app may hold. It
+/// exists because the grant author is the creator: `max_sockets` and
+/// `egress_ceiling_bytes` bound concurrency and volume, and neither bounds how
+/// wide a destination set a creator can enumerate one exact host at a time.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppNetPolicyLimits {
     pub max_sockets: u32,
     pub egress_ceiling_bytes: u64,
+    /// Absent in a plan-catalog row written before this field existed; the
+    /// free-tier value is the fail-closed default, never "unbounded".
+    #[serde(default = "free_tier_max_grants")]
+    pub max_grants: u32,
+}
+
+const fn free_tier_max_grants() -> u32 {
+    FREE_TIER_NET_POLICY_LIMITS.max_grants
 }
 
 impl Default for AppNetPolicyLimits {
@@ -80,6 +94,7 @@ impl Default for AppNetPolicyLimits {
 pub const FREE_TIER_NET_POLICY_LIMITS: AppNetPolicyLimits = AppNetPolicyLimits {
     max_sockets: 4,
     egress_ceiling_bytes: 10 * 1024 * 1024,
+    max_grants: 10,
 };
 
 /// Worker-facing metadata for an app version/config snapshot.

@@ -12,12 +12,11 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zeroship_auth::audit::{self as auth_audit, AuditEvent};
 use zeroship_authz::{Action, EntityCache, PolicySet, Resource};
-use zeroship_core::net_policy::{
-    normalize_frontable_suffixes, HostPort, FRONTABLE_WILDCARD_SUFFIXES,
-};
+use zeroship_core::net_policy::{normalize_frontable_suffixes, FRONTABLE_WILDCARD_SUFFIXES};
 
 use crate::auth_audit as control_auth_audit;
 use crate::authz_guard::AuthzGuard;
+use crate::net_grants;
 use crate::AppState;
 
 pub(crate) const PLATFORM_ORG_ID: &str = "zeroship_platform";
@@ -247,49 +246,10 @@ pub async fn list_app_net_grants(
         Ok(id) => id,
         Err(resp) => return resp,
     };
-    let manifest_json = match load_app_manifest_json(&state, app_id).await {
-        Ok(Some(json)) => json,
-        Ok(None) => {
-            return web::HttpResponse::NotFound().json(&json!({"error": "app not found"}));
-        }
-        Err(resp) => return resp,
-    };
-
-    let rows = match state
-        .control_pg
-        .query(
-            "SELECT app_id, host, port, granted_by, granted_at, note \
-             FROM zeroship.app_net_grants \
-             WHERE app_id = $1 \
-             ORDER BY host ASC, port ASC",
-            &[&app_id],
-        )
-        .await
-    {
-        Ok(rows) => rows,
-        Err(err) => {
-            tracing::error!(error = %err, app_id = %app_id, "control: app net grants list failed");
-            return db_error();
-        }
-    };
-    let grants = rows.iter().map(row_to_net_grant).collect::<Vec<_>>();
-    let requests = manifest_net_requests(manifest_json.as_deref(), app_id);
-    let granted_keys = grants
-        .iter()
-        .map(|g| (normalize_host_text(&g.host), g.port))
-        .collect::<std::collections::HashSet<_>>();
-    let pending_requests = requests
-        .iter()
-        .filter(|r| !granted_keys.contains(&(normalize_host_text(&r.host), r.port)))
-        .cloned()
-        .collect::<Vec<_>>();
-
-    web::HttpResponse::Ok().json(&AppNetGrantListResponse {
-        app_id,
-        grants,
-        requests,
-        pending_requests,
-    })
+    match net_grants::list_grants(state.control_pg.as_ref(), app_id).await {
+        Ok(list) => web::HttpResponse::Ok().json(&list),
+        Err(err) => net_grant_error(err),
+    }
 }
 
 pub async fn grant_app_net(
@@ -297,7 +257,7 @@ pub async fn grant_app_net(
     guard: AuthzGuard,
     state: State<Arc<AppState>>,
     app_id: Path<String>,
-    body: Json<NetGrantBody>,
+    body: Json<net_grants::NetGrantBody>,
 ) -> web::HttpResponse {
     if let Err(resp) = require_platform_admin(&guard, &state).await {
         return resp;
@@ -307,66 +267,12 @@ pub async fn grant_app_net(
         Ok(id) => id,
         Err(resp) => return resp,
     };
-    match app_exists(&state, app_id).await {
-        Ok(true) => {}
-        Ok(false) => {
-            return web::HttpResponse::NotFound().json(&json!({"error": "app not found"}));
-        }
-        Err(resp) => return resp,
-    }
-
-    let catalog = match load_frontable_suffix_catalog(&state).await {
-        Ok(catalog) => catalog,
-        Err(resp) => return resp,
-    };
-    let reviewed = match HostPort::try_new_with_frontable_suffixes(
-        body.host.clone(),
-        body.port,
-        &catalog.suffixes,
-        catalog.available,
-    ) {
-        Ok(hp) => hp,
-        Err(err) => {
-            return web::HttpResponse::BadRequest().json(&json!({
-                "error": "invalid net grant",
-                "detail": err,
-            }));
-        }
-    };
-    let host = reviewed.host().to_string();
-    let port = i32::from(reviewed.port());
     let granted_by = guard.principal_id.to_string();
-    let note = body
-        .note
-        .as_ref()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-
-    let rows = match state
-        .control_pg
-        .query(
-            "INSERT INTO zeroship.app_net_grants \
-                (app_id, host, port, granted_by, note) \
-             VALUES ($1, $2, $3, $4, $5) \
-             ON CONFLICT (app_id, host, port) DO UPDATE SET \
-                granted_by = EXCLUDED.granted_by, \
-                granted_at = NOW(), \
-                note = EXCLUDED.note \
-             RETURNING app_id, host, port, granted_by, granted_at, note",
-            &[&app_id, &host, &port, &granted_by, &note],
-        )
+    let grant = match net_grants::upsert_grant(state.control_pg.as_ref(), app_id, &body, &granted_by)
         .await
     {
-        Ok(rows) => rows,
-        Err(err) => {
-            tracing::error!(error = %err, app_id = %app_id, host = %host, port, "control: app net grant upsert failed");
-            return db_error();
-        }
-    };
-    let Some(row) = rows.first() else {
-        tracing::error!(app_id = %app_id, host = %host, port, "control: app net grant upsert returned no row");
-        return db_error();
+        Ok(grant) => grant,
+        Err(err) => return net_grant_error(err),
     };
 
     if let Err(resp) = audit_event(
@@ -377,8 +283,8 @@ pub async fn grant_app_net(
         json!({
             "actor": guard.principal_id,
             "app_id": app_id,
-            "host": host,
-            "port": port,
+            "host": grant.host,
+            "port": grant.port,
         }),
     )
     .await
@@ -386,7 +292,7 @@ pub async fn grant_app_net(
         return resp;
     }
 
-    web::HttpResponse::Ok().json(&row_to_net_grant(row))
+    web::HttpResponse::Ok().json(&grant)
 }
 
 pub async fn revoke_app_net(
@@ -394,7 +300,7 @@ pub async fn revoke_app_net(
     guard: AuthzGuard,
     state: State<Arc<AppState>>,
     app_id: Path<String>,
-    body: Json<NetGrantBody>,
+    body: Json<net_grants::NetGrantBody>,
 ) -> web::HttpResponse {
     if let Err(resp) = require_platform_admin(&guard, &state).await {
         return resp;
@@ -404,25 +310,14 @@ pub async fn revoke_app_net(
         Ok(id) => id,
         Err(resp) => return resp,
     };
-    let host = normalize_host_text(&body.host);
-    if host.is_empty() || body.port == 0 {
-        return web::HttpResponse::BadRequest().json(&json!({"error": "invalid net grant"}));
-    }
-    let port = i32::from(body.port);
-    let n = match state
-        .control_pg
-        .execute(
-            "DELETE FROM zeroship.app_net_grants \
-             WHERE app_id = $1 AND host = $2 AND port = $3",
-            &[&app_id, &host, &port],
-        )
-        .await
-    {
-        Ok(n) => n,
-        Err(err) => {
-            tracing::error!(error = %err, app_id = %app_id, host = %host, port, "control: app net grant revoke failed");
-            return db_error();
-        }
+    // A revoke that matched nothing is still audited (`deleted: 0`), as it was
+    // before; only a malformed request or a database fault short-circuits.
+    let revoked =
+        net_grants::revoke_grant(state.control_pg.as_ref(), app_id, &body.host, body.port).await;
+    let deleted = match revoked {
+        Ok(()) => 1_u32,
+        Err(net_grants::NetGrantError::GrantNotFound) => 0,
+        Err(err) => return err.into_response(),
     };
 
     if let Err(resp) = audit_event(
@@ -433,9 +328,9 @@ pub async fn revoke_app_net(
         json!({
             "actor": guard.principal_id,
             "app_id": app_id,
-            "host": host,
-            "port": port,
-            "deleted": n,
+            "host": net_grants::normalize_host_text(&body.host),
+            "port": body.port,
+            "deleted": deleted,
         }),
     )
     .await
@@ -443,8 +338,8 @@ pub async fn revoke_app_net(
         return resp;
     }
 
-    if n == 0 {
-        web::HttpResponse::NotFound().json(&json!({"error": "net grant not found"}))
+    if deleted == 0 {
+        net_grants::NetGrantError::GrantNotFound.into_response()
     } else {
         web::HttpResponse::NoContent().finish()
     }
@@ -457,13 +352,13 @@ pub async fn get_frontable_suffixes(
     if let Err(resp) = require_admin_or_support(&guard, &state).await {
         return resp;
     }
-    match load_frontable_suffix_catalog(&state).await {
+    match net_grants::load_frontable_suffix_catalog(state.control_pg.as_ref()).await {
         Ok(catalog) => web::HttpResponse::Ok().json(&FrontableSuffixesResponse {
             suffixes: catalog.suffixes,
             catalog_available: catalog.available,
             backstop_suffixes: FRONTABLE_WILDCARD_SUFFIXES.to_vec(),
         }),
-        Err(resp) => resp,
+        Err(err) => err.into_response(),
     }
 }
 
@@ -663,142 +558,6 @@ pub async fn list_platform_policies(
         .collect::<Vec<_>>();
 
     web::HttpResponse::Ok().json(&policies)
-}
-
-struct FrontableSuffixCatalog {
-    suffixes: Vec<String>,
-    available: bool,
-}
-
-async fn app_exists(state: &AppState, app_id: Uuid) -> Result<bool, web::HttpResponse> {
-    state
-        .control_pg
-        .query("SELECT 1 FROM zeroship.apps WHERE id = $1", &[&app_id])
-        .await
-        .map(|rows| !rows.is_empty())
-        .map_err(|err| {
-            tracing::error!(error = %err, app_id = %app_id, "control: app lookup failed");
-            db_error()
-        })
-}
-
-async fn load_app_manifest_json(
-    state: &AppState,
-    app_id: Uuid,
-) -> Result<Option<Option<String>>, web::HttpResponse> {
-    let rows = state
-        .control_pg
-        .query("SELECT manifest_json FROM zeroship.apps WHERE id = $1", &[&app_id])
-        .await
-        .map_err(|err| {
-            tracing::error!(error = %err, app_id = %app_id, "control: app manifest lookup failed");
-            db_error()
-        })?;
-    Ok(rows.first().map(|row| row.get::<_, Option<String>>("manifest_json")))
-}
-
-fn row_to_net_grant(row: &compio_postgres::Row) -> AppNetGrantResponse {
-    let port_i32: i32 = row.get("port");
-    AppNetGrantResponse {
-        app_id: row.get("app_id"),
-        host: row.get("host"),
-        port: u16::try_from(port_i32).unwrap_or(0),
-        granted_by: row.get("granted_by"),
-        granted_at: row.get("granted_at"),
-        note: row.get("note"),
-    }
-}
-
-fn manifest_net_requests(
-    manifest_json: Option<&str>,
-    app_id: Uuid,
-) -> Vec<AppNetRequestResponse> {
-    let Some(raw) = manifest_json else {
-        return Vec::new();
-    };
-    let manifest = match serde_json::from_str::<zeroship_bundle::Manifest>(raw) {
-        Ok(manifest) => manifest,
-        Err(err) => {
-            tracing::warn!(
-                app_id = %app_id,
-                error = %err,
-                "control: app net grant list could not parse manifest requests"
-            );
-            return Vec::new();
-        }
-    };
-    manifest
-        .net
-        .requests
-        .into_iter()
-        .map(|r| AppNetRequestResponse {
-            host: normalize_host_text(&r.host),
-            port: r.port,
-            reason: r.reason,
-        })
-        .collect()
-}
-
-async fn load_frontable_suffix_catalog(
-    state: &AppState,
-) -> Result<FrontableSuffixCatalog, web::HttpResponse> {
-    let rows = state
-        .control_pg
-        .query(
-            "SELECT value_json FROM zeroship.net_policy_catalog \
-             WHERE key = 'frontable_wildcard_suffixes'",
-            &[],
-        )
-        .await
-        .map_err(|err| {
-            tracing::error!(error = %err, "control: frontable suffix catalog lookup failed");
-            db_error()
-        })?;
-    let Some(row) = rows.first() else {
-        tracing::error!("control: frontable suffix catalog row missing; wildcard grants fail closed");
-        return Ok(FrontableSuffixCatalog {
-            suffixes: Vec::new(),
-            available: false,
-        });
-    };
-    let value: serde_json::Value = row.get("value_json");
-    let raw = match serde_json::from_value::<Vec<String>>(value) {
-        Ok(raw) => raw,
-        Err(err) => {
-            tracing::error!(
-                error = %err,
-                "control: frontable suffix catalog row invalid; wildcard grants fail closed"
-            );
-            return Ok(FrontableSuffixCatalog {
-                suffixes: Vec::new(),
-                available: false,
-            });
-        }
-    };
-    match normalize_frontable_suffixes(&raw) {
-        Ok(suffixes) => Ok(FrontableSuffixCatalog {
-            suffixes,
-            available: true,
-        }),
-        Err(err) => {
-            tracing::error!(
-                error = %err,
-                "control: frontable suffix catalog contains invalid suffix; wildcard grants fail closed"
-            );
-            Ok(FrontableSuffixCatalog {
-                suffixes: Vec::new(),
-                available: false,
-            })
-        }
-    }
-}
-
-fn normalize_host_text(host: &str) -> String {
-    host.trim()
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .trim_end_matches('.')
-        .to_ascii_lowercase()
 }
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
