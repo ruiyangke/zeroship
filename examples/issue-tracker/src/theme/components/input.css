@@ -72,7 +72,7 @@
   box-shadow:
     inset 0 0 0 0 transparent,
     inset 0 0 0 var(--zeroship-input-border-width) var(--it-accent-500),
-    0 0 0 var(--zeroship-focus-ring-width) var(--zeroship-input-focus-ring-color);
+    var(--it-focus-ring);
 }
 
 [data-slot~="input"][data-invalid] {
@@ -87,7 +87,7 @@
   box-shadow:
     inset 0 0 0 0 transparent,
     inset 0 0 0 var(--zeroship-input-border-width) var(--it-red-500),
-    0 0 0 var(--zeroship-focus-ring-width) var(--zeroship-input-focus-ring-color);
+    var(--it-focus-ring);
 }
 
 [data-slot~="input"][data-filled] [data-slot~="input-control"] {

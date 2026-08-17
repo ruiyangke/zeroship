@@ -243,11 +243,12 @@ function NewProductDialog() {
               </form>
             </Dialog.Body>
             <Dialog.Footer>
-              <Dialog.Close>Cancel</Dialog.Close>
+              <Dialog.Close className="h-7 px-3 text-base">Cancel</Dialog.Close>
               <Button
                 type="submit"
                 form="new-product-form"
                 variant="filled"
+                className="h-7 px-3 text-base"
                 disabled={busy || !name.trim()}
               >
                 Create product
@@ -397,6 +398,7 @@ function ProductBrowser({
                   <Badge
                     intent={rollup.open > 0 ? "info" : "neutral"}
                     variant="soft"
+                    className="min-h-7 px-2 text-sm"
                   >
                     {rollup.open} open
                   </Badge>

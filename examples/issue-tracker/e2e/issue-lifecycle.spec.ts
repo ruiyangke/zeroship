@@ -85,7 +85,12 @@ test("files an issue through the guided form and resolves it", async ({ page, ba
   await chooseOption(page, page, "Severity", "major");
   await chooseOption(page, page, "Priority", "P1");
 
-  await page.getByRole("button", { name: "File issue" }).click();
+  const fileIssue = page.getByRole("button", { name: "File issue" });
+  await expect(fileIssue, "the terminal form action keeps medium emphasis").toHaveCSS(
+    "height",
+    "28px",
+  );
+  await fileIssue.click();
 
   // Filing navigates to the new issue's detail page. Asserted by ROLE rather
   // than by text: the summary appears in both the h1 (prefixed with the issue
@@ -109,6 +114,24 @@ test("files an issue through the guided form and resolves it", async ({ page, ba
     page.locator(".rail-choice", { hasText: "Severity" }),
     "the rail states the severity",
   ).toContainText("major");
+  const severityBadge = page
+    .locator(".rail-choice", { hasText: "Severity" })
+    .locator('.rail-choice-value [class*="border-warning"]');
+  const severityColours = await severityBadge.evaluate((element) => {
+    const probe = document.createElement("span");
+    probe.style.color = "var(--it-amber-700)";
+    document.body.appendChild(probe);
+    const result = {
+      actual: getComputedStyle(element).color,
+      expected: getComputedStyle(probe).color,
+    };
+    probe.remove();
+    return result;
+  });
+  expect(
+    severityColours.actual,
+    "warning text uses the strong semantic ink against its tinted surface",
+  ).toBe(severityColours.expected);
   // Same as severity: the priority badge is gone, and loose text "P1" now
   // matches a hidden <option> inside the select -- "received: hidden" rather
   // than "not found", which is the tell.

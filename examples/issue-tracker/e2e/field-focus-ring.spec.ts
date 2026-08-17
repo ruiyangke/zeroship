@@ -37,6 +37,24 @@ const RUN = `${process.pid}-${Date.now()}`;
 
 type Shadow = { rest: string; focus: string; radius: string };
 
+/** Keep only outer shadow layers, without splitting commas inside colour functions. */
+function outerShadows(value: string): string {
+  const layers: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (character === "(") depth += 1;
+    if (character === ")") depth -= 1;
+    if (character === "," && depth === 0) {
+      layers.push(value.slice(start, index).trim());
+      start = index + 1;
+    }
+  }
+  layers.push(value.slice(start).trim());
+  return layers.filter((layer) => !/\binset\b/.test(layer)).join(", ");
+}
+
 /** Rest and focus box-shadow for one selector, focused by clicking `target`. */
 async function shadows(page: Page, shell: string, target: string): Promise<Shadow> {
   const read = () =>
@@ -113,6 +131,21 @@ test("the app's own fields wear the design system's focus ring", async ({ page, 
   expect(ds.focus, "and paints a ring of some visible width").toMatch(
     /0px 0px 0px [1-9]\d*px/,
   );
+
+  // Input and both app-owned fields used to agree with EACH OTHER on a faint
+  // single halo while Select painted the theme's stronger two-layer ring.
+  // Compare only outer layers because Input and Select legitimately draw
+  // their resting edges in different ways.
+  await page.goto("/reports");
+  const select = page.getByRole("combobox", { name: "Product" });
+  await select.focus();
+  await expect(select, "the reference Select received focus").toBeFocused();
+  await page.waitForTimeout(350);
+  const selectFocus = await select.evaluate((element) => getComputedStyle(element).boxShadow);
+  expect(
+    outerShadows(ds.focus),
+    "Input and app-owned fields use the same outer focus ring as Select",
+  ).toBe(outerShadows(selectFocus));
 
   // 1. The comment composer -- a contenteditable, so focus lands on a CHILD of
   //    the shell. A rule keyed on the shell itself never fires, which is the

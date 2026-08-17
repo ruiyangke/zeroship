@@ -60,6 +60,25 @@ test("the component report distinguishes same-named components across products",
   const section = page.locator("section.report-section").filter({ hasText: "By component" });
   await expect(section).toBeVisible();
 
+  const summary = page.locator("section.report-section").filter({ hasText: "By status" });
+  const countIndicators = summary.locator('[data-slot~="progress-indicator"]');
+  expect(await countIndicators.count(), "the summary rendered count bars to inspect").toBeGreaterThan(0);
+  const countColours = await countIndicators.evaluateAll((elements) =>
+    elements.map((element) => getComputedStyle(element).backgroundColor),
+  );
+  const neutralCountColour = await summary.evaluate(() => {
+    const probe = document.createElement("span");
+    probe.style.backgroundColor = "var(--it-ink-muted)";
+    document.body.appendChild(probe);
+    const result = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+    return result;
+  });
+  expect(
+    [...new Set(countColours)],
+    "relative counts use one neutral ink instead of claiming success at the maximum",
+  ).toEqual([neutralCountColour]);
+
   const labels = (await section.locator("tbody tr td:first-child").allTextContents()).map((t) =>
     t.trim(),
   );

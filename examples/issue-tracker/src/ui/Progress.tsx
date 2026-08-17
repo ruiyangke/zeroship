@@ -11,11 +11,20 @@ export interface ProgressProps extends Omit<
   showValue?: boolean;
   label?: ReactNode;
   className?: string;
+  indicatorClassName?: string;
 }
 
 export const Progress = forwardRef<HTMLDivElement, ProgressProps>(
   function Progress(
-    { size = "md", showValue = false, label, className, value, ...props },
+    {
+      size = "md",
+      showValue = false,
+      label,
+      className,
+      indicatorClassName,
+      value,
+      ...props
+    },
     ref,
   ) {
     return (
@@ -46,7 +55,10 @@ export const Progress = forwardRef<HTMLDivElement, ProgressProps>(
               </div>
             ) : null}
             <BaseProgress.Track data-slot="progress-track">
-              <BaseProgress.Indicator data-slot="progress-indicator" />
+            <BaseProgress.Indicator
+              className={indicatorClassName}
+              data-slot="progress-indicator"
+            />
             </BaseProgress.Track>
           </div>
         )}

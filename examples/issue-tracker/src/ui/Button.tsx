@@ -14,7 +14,7 @@ const BASE_CLASSES =
 
 const VARIANT_CLASSES: Record<ButtonVariant, string> = {
   filled:
-    "border-ink bg-ink text-surface! hover:border-ink-secondary hover:bg-ink-secondary active:border-ink-muted active:bg-ink-muted",
+    "border-ink bg-ink text-surface! hover:border-ink-secondary hover:bg-ink-secondary active:border-ink-muted active:bg-ink-muted hover:border-action-filled-hover! hover:bg-action-filled-hover! active:border-action-filled-active! active:bg-action-filled-active!",
   gray:
     "border-line-strong bg-surface text-ink! hover:border-line-strong hover:bg-surface-hover active:border-line-strong active:bg-surface-sunken",
   plain:
@@ -26,7 +26,7 @@ const PRESSED_PLAIN_CLASSES =
 
 const DESTRUCTIVE_CLASSES: Record<ButtonVariant, string> = {
   filled:
-    "border-danger bg-danger text-surface! hover:border-danger hover:bg-danger active:border-danger active:bg-danger",
+    "border-danger bg-danger text-surface! hover:border-danger hover:bg-danger active:border-danger active:bg-danger hover:border-danger-strong! hover:bg-danger-strong! active:border-danger-strong! active:bg-danger-strong!",
   gray:
     "border-line-strong bg-surface text-danger! hover:border-danger hover:bg-danger-soft hover:text-danger! active:border-danger active:bg-surface-sunken active:text-danger!",
   plain:

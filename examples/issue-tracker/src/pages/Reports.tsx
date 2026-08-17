@@ -38,7 +38,12 @@ function CountBar({ label, value, max }: { label: string; value: number; max: nu
   return (
     <li className="grid grid-cols-[90px_1fr_32px] items-center gap-2 text-sm">
       <span className="text-ink-secondary capitalize">{label}</span>
-      <Progress value={value} max={max} aria-label={`${label}: ${value}`} />
+      <Progress
+        value={value}
+        max={max}
+        indicatorClassName="bg-ink-muted!"
+        aria-label={`${label}: ${value}`}
+      />
       <span className="text-right text-ink-secondary tabular-nums">{value}</span>
     </li>
   );

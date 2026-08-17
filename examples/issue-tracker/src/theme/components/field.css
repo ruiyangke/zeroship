@@ -115,7 +115,7 @@
 [data-slot~="field-control"]:focus-visible,
 [data-slot~="field"][data-focused] [data-slot~="field-control"] {
   border-color: var(--it-accent-500);
-  box-shadow: var(--it-focus-ring-tight);
+  box-shadow: var(--it-focus-ring);
 }
 
 [data-slot~="field"][data-invalid] [data-slot~="field-control"],

@@ -53,7 +53,7 @@ const PRIORITY_INTENT: Record<string, "neutral" | "info" | "success" | "warning"
 
 export function StatusBadge({ status }: { status: string }) {
   return (
-    <Badge intent={STATUS_INTENT[status] ?? "neutral"} variant="soft">
+    <Badge className="tracking-wide" intent={STATUS_INTENT[status] ?? "neutral"} variant="soft">
       {status.replace("_", " ")}
     </Badge>
   );
@@ -64,7 +64,11 @@ export function ResolutionBadge({ resolution }: { resolution: string | null }) {
   // of dashes is noise that reads as data.
   if (!resolution) return null;
   return (
-    <Badge intent={resolution === "FIXED" ? "success" : "neutral"} variant="outline">
+    <Badge
+      className="tracking-wide"
+      intent={resolution === "FIXED" ? "success" : "neutral"}
+      variant="outline"
+    >
       {resolution}
     </Badge>
   );

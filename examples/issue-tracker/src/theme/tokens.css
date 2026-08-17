@@ -80,6 +80,10 @@
   --it-surface-selected: var(--it-accent-50);
   --it-overlay: color-mix(in oklab, var(--it-grey-950) 40%, transparent);
 
+  /* Filled action states keep light text readable while still showing input. */
+  --it-action-filled-hover: var(--it-grey-800);
+  --it-action-filled-active: var(--it-grey-700);
+
   /* --- Semantic ink ----------------------------------------------------
    * Four steps only. More than four and nobody can tell them apart, which
    * defeats the point of a hierarchy. */
@@ -175,11 +179,10 @@
   --it-motion: 140ms;
   --it-ease: cubic-bezier(0.2, 0, 0.2, 1);
 
-  /* --- Compatibility shims ---------------------------------------------
-   * src/styles.css still names twelve --zeroship-* tokens from the old
-   * theme. Rather than rewrite that file in the same change, map them here
-   * so this theme is a drop-in replacement and the diff stays readable.
-   * They are aliases, not a second vocabulary; new CSS uses --it-*. */
+  /* --- App field bridge -------------------------------------------------
+   * AppFieldShell uses the same edge variables as Input while wrapping rich
+   * contenteditable and textarea controls. New theme decisions stay --it-*;
+   * these aliases are only the shared field-chrome interface. */
   --zeroship-input-bg: var(--it-surface);
   --zeroship-input-bg-focus: var(--it-surface);
   --zeroship-input-border: var(--it-line-strong);
@@ -187,13 +190,7 @@
   --zeroship-input-border-width: 1px;
   --zeroship-input-ink: var(--it-ink);
   --zeroship-input-surface-edge: var(--it-line);
-  --zeroship-input-focus-ring-color: color-mix(
-    in oklab,
-    var(--it-accent-500) 30%,
-    transparent
-  );
   --zeroship-control-radius-md: var(--it-radius);
-  --zeroship-focus-ring-width: 2px;
   --zeroship-motion-fast: var(--it-motion-fast);
   --zeroship-motion-ease: var(--it-ease);
 }

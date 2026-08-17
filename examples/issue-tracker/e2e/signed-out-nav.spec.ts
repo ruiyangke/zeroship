@@ -55,6 +55,15 @@ test("the primary nav lives in the header band, not in a rail", async ({ page, b
     "AppShell renders no sidebar rail",
   ).toHaveCount(0);
 
+  // Root renders the same issue list as /issues, so its navigation state must
+  // make the same claim. Otherwise identical screens disagree about where the
+  // reader is solely because one arrived through the shorter URL.
+  await page.goto("/");
+  await expect(
+    nav.getByRole("link", { name: "Issues" }),
+    "the root issue list marks Issues as the current destination",
+  ).toHaveAttribute("aria-current", "page");
+
   // And the links still navigate -- a header full of decoration would pass
   // every assertion above.
   await nav.getByRole("link", { name: "Reports" }).click();
@@ -153,11 +162,72 @@ test("the products page reads publicly and administers privately", async ({
   // check on the button alone, and the claim here is that a signed-in user can
   // actually create a product.
   await page.getByRole("button", { name: "New product" }).click();
+  const createProduct = page.getByRole("button", { name: "Create product" });
+  const cancel = page.getByRole("button", { name: "Cancel" });
   await expect(
-    page.getByRole("button", { name: "Create product" }),
+    createProduct,
     "a signed-in user can reach the create form",
   ).toBeVisible();
-  await page.getByRole("button", { name: "Cancel" }).click();
+  await expect(createProduct, "the dialog primary action keeps medium emphasis").toHaveCSS(
+    "height",
+    "28px",
+  );
+  await expect(cancel, "the paired dialog action stays the same height").toHaveCSS(
+    "height",
+    "28px",
+  );
+
+  // The old active colour dropped the white label below 4.5:1 and made the
+  // primary action resemble a disabled control. Hold the real :active state
+  // past the theme's transition, then check contrast and geometry together.
+  await page.getByRole("textbox", { name: "Name" }).fill("Contrast probe");
+  const relativeBox = () =>
+    createProduct.evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      const parent = element.parentElement?.getBoundingClientRect();
+      if (!parent) throw new Error("the dialog action has no parent box");
+      return {
+        x: box.x - parent.x,
+        y: box.y - parent.y,
+        width: box.width,
+        height: box.height,
+      };
+    });
+  const restBox = await relativeBox();
+  await createProduct.hover();
+  await page.waitForTimeout(120);
+  await page.mouse.down();
+  await page.waitForTimeout(120);
+  const active = await createProduct.evaluate((element) => {
+    const parse = (value: string) =>
+      value.match(/[\d.]+/g)?.slice(0, 3).map(Number) ?? [0, 0, 0];
+    const luminance = (rgb: number[]) => {
+      const channels = rgb.map((channel) => {
+        const value = channel / 255;
+        return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+      });
+      return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+    };
+    const style = getComputedStyle(element);
+    const foreground = luminance(parse(style.color));
+    const background = luminance(parse(style.backgroundColor));
+    return (Math.max(foreground, background) + 0.05) /
+      (Math.min(foreground, background) + 0.05);
+  });
+  const activeBox = await relativeBox();
+  expect(active, "the active filled action keeps readable text contrast").toBeGreaterThanOrEqual(4.5);
+  expect(activeBox, "hover and active states do not move the control").toEqual(restBox);
+  await page.mouse.move(0, 0);
+  await page.mouse.up();
+
+  await cancel.click();
+
+  await page.getByRole("searchbox").fill(name);
+  const openCount = page.getByText("0 open", { exact: true }).locator("..");
+  await expect(openCount, "the product total registers above component chips").toHaveCSS(
+    "height",
+    "28px",
+  );
   // Groups and flag types are the second tab -- see openProductsAdmin.
   await openProductsAdmin(page);
   await expect(page.getByRole("heading", { name: "Groups", exact: true }).first()).toBeVisible();

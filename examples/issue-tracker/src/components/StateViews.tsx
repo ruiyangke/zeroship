@@ -104,7 +104,7 @@ export function ErrorState({
           in first, so the button says what it does. */}
       {onRetry ? (
         <UiErrorState.Actions>
-          <Button variant="filled" onClick={onRetry}>
+          <Button variant="filled" className="h-7 px-3 text-base" onClick={onRetry}>
             {authRequired ? "Check again" : "Retry"}
           </Button>
         </UiErrorState.Actions>

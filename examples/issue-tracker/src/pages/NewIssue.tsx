@@ -382,6 +382,7 @@ export function NewIssuePage() {
                     <Button
                       type="submit"
                       variant="filled"
+                      className="h-7 px-3 text-base"
                       disabled={create.isPending || !summary.trim() || !description.trim()}
                     >
                       {create.isPending ? "Filing..." : "File issue"}

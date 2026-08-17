@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Link, NavLink } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 
 import { UnreadBadge, UserChip } from "./SessionChips";
 import type { Session } from "./session";
@@ -63,6 +63,7 @@ export function Shell({
   children: ReactNode;
 }) {
   const signedIn = session.status === "in";
+  const { pathname } = useLocation();
 
   return (
     <AppShell>
@@ -84,20 +85,25 @@ export function Shell({
               aria-label="Primary"
               className="flex min-w-0 flex-row flex-wrap items-center justify-start gap-1"
             >
-              {LINKS.filter((link) => signedIn || !link.identity).map((link) => (
-                <NavLink
-                  key={link.href}
-                  to={link.href}
-                  className="inline-flex items-center whitespace-nowrap rounded-lg px-2 py-1 text-md leading-snug font-medium text-ink-secondary! no-underline! hover:bg-current/8! hover:text-ink! hover:no-underline! aria-[current=page]:bg-current/12! aria-[current=page]:font-semibold aria-[current=page]:text-ink!"
-                  // NavLink sets aria-current="page" itself, so the styling
-                  // rule and the accessible state cannot drift apart -- and
-                  // the app no longer threads a route name down here to work
-                  // out which link is current.
-                >
-                  <span>{link.label}</span>
-                  {link.href === "/dashboard" ? <UnreadBadge signedIn={signedIn} /> : null}
-                </NavLink>
-              ))}
+              {LINKS.filter((link) => signedIn || !link.identity).map((link) => {
+                const current =
+                  link.href === "/issues"
+                    ? pathname === "/" ||
+                      pathname === "/issues" ||
+                      pathname.startsWith("/issues/")
+                    : pathname === link.href || pathname.startsWith(`${link.href}/`);
+                return (
+                  <Link
+                    key={link.href}
+                    to={link.href}
+                    aria-current={current ? "page" : undefined}
+                    className="inline-flex items-center whitespace-nowrap rounded-lg px-2 py-1 text-md leading-snug font-medium text-ink-secondary! no-underline! hover:bg-current/8! hover:text-ink! hover:no-underline! aria-[current=page]:bg-current/12! aria-[current=page]:font-semibold aria-[current=page]:text-ink!"
+                  >
+                    <span>{link.label}</span>
+                    {link.href === "/dashboard" ? <UnreadBadge signedIn={signedIn} /> : null}
+                  </Link>
+                );
+              })}
             </nav>
           </div>
           <div className="flex min-w-0 flex-row flex-wrap items-center justify-start gap-2">

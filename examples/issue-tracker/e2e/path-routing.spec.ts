@@ -68,4 +68,14 @@ test("a deep path renders, survives reload, and has no hash", async ({ page, bas
   await expect(page.locator("ul.comment-list"), "the issue renders after a reload").toBeVisible();
   await expect(page.getByText("No page here"), "and it is not the not-found page").toHaveCount(0);
   expect(page.url()).toContain(`/issues/${issue.id}`);
+
+  const last = issue.id.at(-1);
+  const missingId = `${issue.id.slice(0, -1)}${last === "1" ? "2" : "1"}`;
+  await page.goto(`/issues/${missingId}`);
+  const retry = page.getByRole("button", { name: "Retry" });
+  await expect(retry, "a failed surface offers its recovery action").toBeVisible();
+  await expect(retry, "the sparse recovery action keeps medium emphasis").toHaveCSS(
+    "height",
+    "28px",
+  );
 });

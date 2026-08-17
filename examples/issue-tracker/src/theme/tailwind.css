@@ -29,6 +29,9 @@
   --color-surface-hover: var(--it-surface-hover);
   --color-surface-selected: var(--it-surface-selected);
 
+  --color-action-filled-hover: var(--it-action-filled-hover);
+  --color-action-filled-active: var(--it-action-filled-active);
+
   --color-ink: var(--it-ink);
   --color-ink-secondary: var(--it-ink-secondary);
   --color-ink-muted: var(--it-ink-muted);
@@ -70,6 +73,14 @@
   --text-lg: var(--it-text-lg);
   --text-xl: var(--it-text-xl);
   --text-2xl: var(--it-text-2xl);
+
+  --text-xs--line-height: var(--it-leading-snug);
+  --text-sm--line-height: var(--it-leading-snug);
+  --text-base--line-height: var(--it-leading-snug);
+  --text-md--line-height: var(--it-leading-snug);
+  --text-lg--line-height: var(--it-leading-tight);
+  --text-xl--line-height: var(--it-leading-tight);
+  --text-2xl--line-height: var(--it-leading-tight);
 
   --leading-tight: var(--it-leading-tight);
   --leading-snug: var(--it-leading-snug);
@@ -132,8 +143,7 @@
     var(--zeroship-input-surface-edge, inset 0 0 0 0 transparent),
     inset 0 0 0 var(--zeroship-input-border-width, 0.0625rem)
       var(--zeroship-input-border-focus),
-    0 0 0 var(--zeroship-focus-ring-width)
-      var(--zeroship-input-focus-ring-color);
+    var(--it-focus-ring);
 }
 
 @utility focus-ring-tight {
