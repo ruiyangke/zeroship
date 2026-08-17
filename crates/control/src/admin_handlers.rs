@@ -248,7 +248,7 @@ pub async fn list_app_net_grants(
     };
     match net_grants::list_grants(state.control_pg.as_ref(), app_id).await {
         Ok(list) => web::HttpResponse::Ok().json(&list),
-        Err(err) => net_grant_error(err),
+        Err(err) => err.into_response(),
     }
 }
 
@@ -272,7 +272,7 @@ pub async fn grant_app_net(
         .await
     {
         Ok(grant) => grant,
-        Err(err) => return net_grant_error(err),
+        Err(err) => return err.into_response(),
     };
 
     if let Err(resp) = audit_event(

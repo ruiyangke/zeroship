@@ -135,13 +135,21 @@ tracing-subscriber = { workspace = true }
 # `cargo test --workspace` - which provisions no database - could never be green.
 #
 # The failing-without-a-database property is what this feature encodes, and the
-# set below was determined by MEASUREMENT, not by grep: every control test
-# executable was built once and then run with the DSN environment variables
-# pointed at a dead port. The 44 that failed are listed here; the six that
+# set below was originally determined by MEASUREMENT, not by grep: every control
+# test executable was built once and then run with the DSN environment variables
+# pointed at a dead port. The ones that failed are listed here; the six that
 # passed (authz_guard_supabase_test, billing_pipeline_redpanda_e2e,
 # durable_workflows_keystone_e2e, no_liquibase_residue_test,
 # provider_conformance, trusted_clients_test) are deliberately NOT listed, so
 # they keep running under a bare `cargo test --workspace`.
+#
+# The list is 43 targets as of 2026-08-17 (counted: 49 files in tests/, 43
+# `required-features` entries, 6 ungated). It read "44" until then, which was
+# stale by two deletions; the count is stated once here rather than twice
+# because a number repeated is a number that rots. `net_grants_test` was added
+# to it by CONSTRUCTION - it builds an `AppState` against a live DSN and cannot
+# reach its first assertion without one - not by re-running the dead-port
+# measurement.
 #
 # Gating hides a target from the default build, which is exactly the failure
 # mode a gate is supposed to prevent, so it is only honest while something else
@@ -150,7 +158,7 @@ tracing-subscriber = { workspace = true }
 #     cargo test -p zeroship-control --features live-db-tests
 #
 # which builds and runs every target whose `required-features` are satisfied -
-# the 44 below AND the six ungated ones. There is no second list to keep in
+# the ones below AND the six ungated ones. There is no second list to keep in
 # step: a target added to this file is covered by that command the moment it is
 # added, and a target removed from it stops being gated rather than stops being
 # run. `tests/run_billing_suite.sh` drives that one command (it no longer
@@ -282,6 +290,11 @@ required-features = ["live-db-tests"]
 [[test]]
 name = "identity_bridge_test"
 path = "tests/identity_bridge_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
+name = "net_grants_test"
+path = "tests/net_grants_test.rs"
 required-features = ["live-db-tests"]
 
 [[test]]
