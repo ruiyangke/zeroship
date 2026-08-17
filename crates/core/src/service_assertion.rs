@@ -720,19 +720,31 @@ impl ServiceAssertionVerifier {
         let ceiling =
             i64::try_from(self.max_lifetime.as_secs()).map_err(|_| "ceiling out of range")?;
 
-        // The CALLER picks exp, so the CALLEE caps it, twice over. The first
-        // bound catches an honest `iat` with a long lifetime; the second
-        // catches a back-dated `iat` chosen to slip a distant `exp` past the
-        // first.
+        // The CALLER picks exp, so the CALLEE caps it. Two bounds, and they are
+        // both load-bearing:
+        //
+        // - The lifetime bound catches a long window. It cannot be replaced by
+        //   a bound on `exp` alone, because `iat = now - 3600, exp = now + 60`
+        //   is a 61-minute assertion whose `exp` is perfectly ordinary.
+        // - The `iat` bound catches a window shifted into the future, where
+        //   `exp - iat` is small but the assertion stays live for an hour.
+        //
+        // A THIRD bound was here and has been removed:
+        // `exp <= now + ceiling + leeway`. It is implied by these two -
+        // `exp = iat + lifetime <= (now + leeway) + ceiling` - so no input can
+        // trip it that the pair does not already reject, and no test could make
+        // it fail on its own. Worse, while it was present it ALSO caught both
+        // of the cases below, so deleting either real guard left the suite
+        // green. Measured: mutating away the lifetime bound with the third one
+        // present gave "26 passed"; with it gone the ceiling test fails. A
+        // redundant guard that hides the failure of a real one is not defence
+        // in depth.
         let lifetime = claims.exp.checked_sub(claims.iat).ok_or("lifetime overflow")?;
         if lifetime <= 0 || lifetime > ceiling {
             return Err("assertion lifetime exceeds the ceiling");
         }
         if claims.iat > now_secs.saturating_add(leeway) {
             return Err("iat is in the future");
-        }
-        if claims.exp > now_secs.saturating_add(ceiling).saturating_add(leeway) {
-            return Err("exp is further away than the ceiling allows");
         }
 
         if claims.jti.is_empty()
