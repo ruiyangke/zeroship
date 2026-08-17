@@ -201,20 +201,24 @@ function MoveControl({
   };
 
   return (
-    <div className="col-span-full grid grid-cols-subgrid">
-      {/* No label. Every other rail line is "property: value"; this one had
-          no value to state, so hiding its button until hover left the word
-          "Move" sitting alone like a field whose contents had gone missing.
-          It is an action, and it is written as one. */}
-      <span aria-hidden="true" />
-      <div className="col-start-3 block">
-        <Button variant="gray" onClick={() => setOpen((v) => !v)}>
-          {/* Short enough to fit the rail. The full sentence ran past the
-              column edge, which is how a rail says "this control does not
-              belong here" -- the dialog it opens explains the rest. */}
-          {open ? "Cancel" : "Move issue..."}
-        </Button>
-      </div>
+    <>
+      {/* The control renders its group's HEADING, because moving an issue
+          changes product and component together -- it acts on "Where", not on
+          any one line in it. It used to sit in the row action track under
+          Milestone with no row beside it, which read as a fragment, and being
+          `auto`-sized that track then charged its 92px to every other row's
+          value column. */}
+      <RailSection
+        title="Where"
+        action={
+          <Button variant="plain" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+            {/* Short enough to fit the rail. The full sentence ran past the
+                column edge, which is how a rail says "this control does not
+                belong here" -- the dialog it opens explains the rest. */}
+            {open ? "Cancel" : "Move issue..."}
+          </Button>
+        }
+      />
       {open ? (
         <InlineForm className="col-span-full">
           <Field.Root className="flex-row items-center gap-3">
@@ -273,7 +277,7 @@ function MoveControl({
           {error ?? errorMessage(targetProductQ.error)}
         </FieldError>
       ) : null}
-    </div>
+    </>
   );
 }
 
@@ -436,10 +440,13 @@ export function FieldsPanel({
       <Classification issue={issue} />
       <AssigneeControl issue={issue} people={people} />
 
+      {/* Renders the "Where" heading, with the move control as the heading's
+          action. See MoveControl: the button acts on the whole group. */}
+      <MoveControl issue={issue} products={products} />
+
       {/* The facts you read rather than change, as a description list. They
           were four spans in a row with hand-rolled "Label: value" strings and
           inconsistent emphasis -- two bold values, two not. */}
-      <RailSection title="Where" />
       <RailDescriptionList
         items={[
           { term: "Product", detail: product.name },
@@ -491,21 +498,29 @@ export function FieldsPanel({
         <FieldError className="col-span-full">{versionMilestoneError}</FieldError>
       ) : null}
 
-      {/* After the properties, not among them. It sat between "QA contact"
-          and "Version", so a column of "label: value" lines was interrupted
-          by a lone button and the reader lost the rhythm mid-scan. Moving a
-          issue changes product AND component, so it belongs to the whole group
-          rather than to any one line in it. */}
-      <MoveControl issue={issue} products={products} />
-
       {/* Four rows that usually say nothing.
           Whiteboard, OS, platform and URL are unset on most issues, so the rail
           ended with "Whiteboard --", "OS Unspecified", "Platform Unspecified",
           "URL --" -- four lines of absence at the bottom of a column whose job
           is to be glanceable. They appear when they HAVE a value, and behind
           one line when they do not, so setting them is still one click and
-          reading an issue that never used them costs nothing. */}
-      <RailSection title="Other" />
+          reading an issue that never used them costs nothing.
+
+          The one line is the HEADING's action, not a sentence under it. As a
+          full-width button it was body text that happened to be clickable, and
+          its own padding indented it past the heading it sat below, so the
+          group read as a title followed by a stray phrase. It reveals all four
+          fields, so it belongs to the group the same way "Move issue..." does. */}
+      <RailSection
+        title="Other"
+        action={
+          hasOther || showOther ? undefined : (
+            <Button variant="plain" onClick={() => setShowOther(true)}>
+              Set whiteboard, OS, platform or URL
+            </Button>
+          )
+        }
+      />
       {hasOther || showOther ? (
         <>
           <GeneralField issue={issue} field="whiteboard" label="Whiteboard" value={issue.whiteboard ?? ""} />
@@ -513,11 +528,7 @@ export function FieldsPanel({
           <GeneralField issue={issue} field="platform" label="Platform" value={issue.platform} />
           <GeneralField issue={issue} field="url" label="URL" value={issue.url ?? ""} />
         </>
-      ) : (
-        <Button className="col-span-full justify-self-start" variant="plain" onClick={() => setShowOther(true)}>
-          Set whiteboard, OS, platform or URL
-        </Button>
-      )}
+      ) : null}
       </RailFieldset>
     </div>
   );
