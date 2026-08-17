@@ -1066,6 +1066,10 @@ pub fn fold_ops_onto(
     effective: &EffectivePolicy,
 ) -> Result<SchemaSnapshot, FoldError> {
     let mut tables: BTreeMap<String, TableSnapshot> = base.tables.clone();
+    // Per-table RLS, carried alongside `tables` because it lives on the schema
+    // snapshot rather than on TableSnapshot. Seeded from the base so a fold onto an
+    // existing snapshot keeps what the base already knew.
+    let mut table_rls: BTreeMap<String, bool> = base.table_rls.clone();
     let mut partitions: BTreeMap<String, PartitionSnapshot> = base.partitions.clone();
     let mut attached_partition_tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
     let mut created_partition_comments: BTreeMap<String, Option<String>> = BTreeMap::new();
@@ -1193,6 +1197,11 @@ pub fn fold_ops_onto(
                 schema,
                 ..
             } => {
+                // A new table starts with row-level security OFF. Seeding the entry -
+                // rather than leaving it absent - keeps the expected map shaped like
+                // the live one, which records every table it sees. An absent entry on
+                // one side and `false` on the other would read as drift.
+                table_rls.insert(name.clone(), false);
                 if tables.contains_key(name) {
                     return Err(FoldError::DuplicateTable(name.clone()));
                 }
@@ -1510,6 +1519,15 @@ pub fn fold_ops_onto(
                 attached_partition_tables.remove(name);
                 created_partition_comments.remove(name);
             }
+            // ROW-LEVEL SECURITY. Recorded on the EXPECTED side so it can be compared
+            // with the live catalog; without this the live map would carry every
+            // table and the expected map none, and the diff would report permanent
+            // drift instead of real change.
+            Op::SetRls { table, enabled, .. } => {
+                if let Some(enabled) = enabled {
+                    table_rls.insert(table.clone(), *enabled);
+                }
+            }
             Op::SetTableOptions { table, options, .. } => {
                 let snap = table_mut(&mut tables, table)?;
                 if let Some(soft_delete) = options.soft_delete {
@@ -1523,6 +1541,9 @@ pub fn fold_ops_onto(
                 }
             }
             Op::DropTable { table, .. } => {
+                // The table is gone, so its RLS entry goes with it - the same
+                // obligation the snapshot map itself has.
+                table_rls.remove(table);
                 // Remove ONLY the target table. We do NOT cascade-drop FK constraints
                 // on OTHER tables that reference it, and that is faithful (not a hole):
                 // the lower IGNORES the op's `cascade` flag (`render::lower`
@@ -1542,6 +1563,11 @@ pub fn fold_ops_onto(
                 created_partition_comments.retain(|name, _| partitions.contains_key(name));
             }
             Op::RenameTable { table, to, .. } => {
+                // Re-key the RLS entry with the table, exactly as the snapshot map is
+                // re-keyed below: RLS is a property of the relation, not of its name.
+                if let Some(rls) = table_rls.remove(table) {
+                    table_rls.insert(to.clone(), rls);
+                }
                 // A whole-table rename moves the snapshot WHOLESALE from the old key
                 // to the new one — every column / index / constraint / facet is
                 // preserved (a `TableSnapshot` carries no own `name`; the BTreeMap
@@ -2671,7 +2697,6 @@ pub fn fold_ops_onto(
             | Op::DropOwnedBy { .. }
             | Op::Grant { .. }
             | Op::Revoke { .. }
-            | Op::SetRls { .. }
             | Op::PgRaw { .. } => {}
             Op::Dialectal { .. } => {}
         }
@@ -2685,9 +2710,7 @@ pub fn fold_ops_onto(
 
     Ok(SchemaSnapshot {
         tables,
-        // The expected side: populated once the fold learns Op::SetRls. Empty until
-        // then, which is why the diff must not compare it yet.
-        table_rls: Default::default(),
+        table_rls,
         partitions,
         views,
         named_types: named_type_snapshots,
