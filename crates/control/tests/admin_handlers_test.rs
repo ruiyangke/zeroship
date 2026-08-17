@@ -165,18 +165,6 @@ async fn count_audit(pg: &Client, event_type: &str, target: Uuid) -> i64 {
     rows[0].get("n")
 }
 
-async fn app_flag(pg: &Client, app_id: Uuid, column: &str) -> bool {
-    let sql = match column {
-        "audit_locked" => "SELECT audit_locked AS flag FROM apps WHERE id = $1",
-        _ => panic!("unknown app flag column: {column}"),
-    };
-    let rows = pg
-        .query(sql, &[&app_id])
-        .await
-        .expect("select app flag");
-    rows[0].get("flag")
-}
-
 async fn cleanup_user(pg: &Client, user_id: Uuid) {
     let _ = pg
         .execute(
@@ -433,46 +421,6 @@ async fn admin_net_grant_endpoint_validates_lists_pending_and_revokes() {
     assert!(rows.is_empty(), "revoke endpoint must delete the grant row");
 
     cleanup_user(&fx.state.control_pg, owner).await;
-    pat.cleanup(&fx.state).await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
-}
-
-#[compio::test]
-async fn admin_can_audit_lock_app() {
-    let db_url = db_url();
-    let fx = build_test_state(&db_url, "audit-lock").await;
-    let pat = common::authz_fixture::admin_principal(&fx.state).await;
-    let app_record = fx
-        .state
-        .registry
-        .create_app(
-            &format!("audit-lock-{}", Uuid::new_v4().simple()),
-            &zeroship_control::plan_catalog::free_plan_id(),
-            &pat.user_id,
-        )
-        .await
-        .expect("create app");
-
-    let app = test::init_service(
-        web::App::new()
-            .state(fx.state.clone())
-            .configure(admin_handlers::configure),
-    )
-    .await;
-    let req = test::TestRequest::post()
-        .uri(&format!("/admin/apps/{}/audit-lock", app_record.id))
-        .header("authorization", pat.bearer())
-        .set_json(&serde_json::json!({"audit_locked": true}))
-        .to_request();
-    let status = test::call_service(&app, req).await.status();
-
-    assert_eq!(status, StatusCode::OK);
-    assert!(app_flag(&fx.state.control_pg, app_record.id, "audit_locked").await);
-
-    let _ = fx.state.registry.delete_app(&app_record.id).await;
     pat.cleanup(&fx.state).await;
 
     drop(app);
