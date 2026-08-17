@@ -3773,19 +3773,30 @@ pub fn build_set_clauses_with_system_fields(
 
                 let clause = match op {
                     "$set" => {
-                        let is_encrypted = encrypted_cols.contains(key.as_str());
-                        let raw = value_to_param(op_val);
-                        let param_value = if is_encrypted {
-                            dialect.wrap_encrypted_param(raw)
+                        // Same NULL rule as the INSERT builder: the text-format
+                        // param protocol cannot represent NULL, so binding a
+                        // JSON null would write `""` -- rejected by a CHECK on
+                        // an enum column, silently stored on SQLite. Inline the
+                        // literal and bind nothing. The encrypted arm is
+                        // deliberately skipped: an absent value is NULL, not a
+                        // ciphertext that decrypts to the empty string.
+                        if op_val.is_null() {
+                            format!("{col} = NULL")
                         } else {
-                            raw
-                        };
-                        params.push(param_value);
-                        let n = params.len();
-                        if is_encrypted {
-                            format!("{col} = {}", dialect.encrypted_column_bind_placeholder(n))
-                        } else {
-                            format!("{col} = ${n}")
+                            let is_encrypted = encrypted_cols.contains(key.as_str());
+                            let raw = value_to_param(op_val);
+                            let param_value = if is_encrypted {
+                                dialect.wrap_encrypted_param(raw)
+                            } else {
+                                raw
+                            };
+                            params.push(param_value);
+                            let n = params.len();
+                            if is_encrypted {
+                                format!("{col} = {}", dialect.encrypted_column_bind_placeholder(n))
+                            } else {
+                                format!("{col} = ${n}")
+                            }
                         }
                     }
                     "$inc" => {
@@ -3832,6 +3843,12 @@ pub fn build_set_clauses_with_system_fields(
         }
 
         // Plain field: value — treat as $set
+        // A JSON null is inlined as a SQL NULL literal and binds no param;
+        // see the `$set` arm above for why.
+        if value.is_null() {
+            set_clauses.push(format!("{col} = NULL"));
+            continue;
+        }
         let is_encrypted = encrypted_cols.contains(key.as_str());
         let raw = value_to_param(value);
         let param_value = if is_encrypted {
@@ -5972,6 +5989,12 @@ pub fn build_find_or_create(
 
     for (key, value) in obj {
         columns.push(quote_ident(key));
+        // Same NULL rule as build_insert / build_upsert: a JSON null becomes a
+        // SQL NULL literal, never an empty text param.
+        if value.is_null() {
+            placeholders.push("NULL".to_string());
+            continue;
+        }
         params.push(value_to_param(value));
         placeholders.push(format!("${}", params.len()));
     }
