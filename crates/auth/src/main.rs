@@ -8,7 +8,7 @@ use std::sync::Arc;
 use clap::Parser;
 use compio_postgres::{connect, NoTls};
 use zeroship_core::config::{
-    bootstrap_or_exit, validate_master_key_material, validate_platform_mint_key,
+    bootstrap_or_exit, validate_master_key_material,
     validate_secret_material, validate_stash_key, CheckConfigReport, CheckValue,
 };
 use zeroship_core::oidc_verify::JwksCache;
@@ -20,7 +20,6 @@ use zeroship_core::oidc_verify::JwksCache;
 /// a parameter rather than spelling one itself. Derived from the declaration at
 /// `crates/auth/src/config.rs` (`#[config(name = "auth.stash_signing_key")]`).
 const STASH_SIGNING_KEY_LABEL: &str = "ZEROSHIP_AUTH_STASH_SIGNING_KEY / --stash-signing-key-file";
-const PLATFORM_MINT_KEY_LABEL: &str = "ZEROSHIP_AUTH_PLATFORM_MINT_KEY / --platform-mint-key-file";
 
 use zeroship_auth::config::{AuthCli, AuthConfig, AuthSettings};
 use zeroship_auth::cron;
@@ -95,10 +94,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         report.field(
             "control_url",
             CheckValue::Plain(cfg.control_url().to_string()),
-        );
-        report.field(
-            "platform_mint_key_configured",
-            CheckValue::Secret(cfg.settings.platform_mint_key.is_configured()),
         );
         report.field("log_filter", CheckValue::Plain(boot.log_filter.clone()));
         report.field(
@@ -322,9 +317,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ///
 /// Propagates the first validator's message unchanged.
 fn validate_startup_secrets(cfg: &AuthConfig) -> Result<(), String> {
-    validate_secret_material(&cfg.settings.platform_mint_key, |value| {
-        validate_platform_mint_key(PLATFORM_MINT_KEY_LABEL, value)
-    })?;
     validate_secret_material(&cfg.settings.stash_signing_key, |value| {
         validate_stash_key(STASH_SIGNING_KEY_LABEL, value)
     })?;
@@ -424,7 +416,6 @@ mod tests {
     /// exactly one of them and know which guard spoke.
     fn healthy() -> AuthConfig {
         let mut cfg = AuthConfig::parse_from(["zeroship-auth"]);
-        cfg.settings.platform_mint_key = supplied("platform-mint-key-at-least-32-bytes");
         cfg.settings.stash_signing_key = supplied("0123456789abcdef0123456789abcdef");
         cfg.settings.totp_enc_key = supplied(&"00".repeat(32));
         cfg
@@ -433,28 +424,6 @@ mod tests {
     /// An in-memory literal, which is what the env and TOML tiers resolve to.
     fn supplied(material: &str) -> Secret<String> {
         Secret::supplied(SourceKind::Env, Some(material.to_owned()))
-    }
-
-    #[test]
-    fn an_absent_platform_mint_key_fails_the_startup_guard() {
-        let mut cfg = healthy();
-        cfg.settings.platform_mint_key = Secret::absent();
-
-        let message =
-            validate_startup_secrets(&cfg).expect_err("an unset platform mint key is rejected");
-        assert!(
-            message.contains("ZEROSHIP_AUTH_PLATFORM_MINT_KEY"),
-            "{message}"
-        );
-        assert!(message.contains("required"), "{message}");
-
-        cfg.settings.platform_mint_key = supplied("   ");
-        validate_startup_secrets(&cfg).expect_err("a whitespace-only mint key is rejected");
-
-        cfg.settings.platform_mint_key = supplied("too-short");
-        let message =
-            validate_startup_secrets(&cfg).expect_err("a short platform mint key is rejected");
-        assert!(message.contains("minimum 32 bytes"), "{message}");
     }
 
     // The stash key signs the federation stash cookie; a forgeable one bypasses

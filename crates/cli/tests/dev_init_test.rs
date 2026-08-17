@@ -6,7 +6,7 @@ use base64::Engine as _;
 use ed25519_dalek::pkcs8::DecodePrivateKey as _;
 use ed25519_dalek::SigningKey;
 use zeroship_core::config::{
-    validate_master_key_material, validate_pairwise_salt, validate_platform_mint_key,
+    validate_master_key_material, validate_pairwise_salt,
     validate_stash_key, validate_worker_key,
 };
 
@@ -29,14 +29,13 @@ use zeroship_core::config::{
 //
 // It carries the postgres SUPERUSER password, so of everything here it is the
 // entry that most needs the 0600 the loop below pins.
-const SECRET_FILES: [&str; 9] = [
+const SECRET_FILES: [&str; 8] = [
     "auth-signing.pem",
     "broker-secret",
     "control-signing.pem",
     "gateway-signing.pem",
     "migrate-dsn",
     "pairwise-salt",
-    "platform-mint-key",
     "refresh-hash-key",
     "refresh-idem-key",
 ];
@@ -131,11 +130,6 @@ fn dev_init_generates_the_complete_private_deployment_secret_set() {
         "migrate-dsn must address the compose postgres service with its POSTGRES_PASSWORD"
     );
 
-    let platform_mint_key =
-        std::fs::read_to_string(secrets_dir.join("platform-mint-key"))
-            .expect("read platform-mint-key");
-    validate_platform_mint_key("platform-mint-key", &platform_mint_key)
-        .expect("generated platform mint key must pass the production boot guard");
 
     let refresh_hash = std::fs::read_to_string(secrets_dir.join("refresh-hash-key"))
         .expect("read refresh-hash-key");
@@ -155,7 +149,6 @@ fn dev_init_generates_the_complete_private_deployment_secret_set() {
         overlay.keys().map(String::as_str).collect::<Vec<_>>(),
         ENV_KEYS
     );
-    assert!(!overlay.contains_key("ZEROSHIP_AUTH_PLATFORM_MINT_KEY"));
     let mut env_values = BTreeSet::new();
     for (name, value) in &overlay {
         let decoded =
@@ -402,19 +395,6 @@ fn compose_preserves_shared_secret_topology_and_has_no_weak_literals() {
         "auth must not receive the control key"
     );
 
-    let required_mint = "ZEROSHIP_AUTH_PLATFORM_MINT_KEY: urn:zeroship:file:/etc/zeroship/secrets/platform-mint-key";
-    let required_mint_mount = "${ZEROSHIP_SECRETS_DIR:-./secrets}/platform-mint-key:/etc/zeroship/secrets/platform-mint-key:ro";
-    assert!(control.contains(required_mint));
-    assert!(auth.contains(required_mint));
-    assert!(!gateway.contains(required_mint));
-    assert!(!worker.contains(required_mint));
-    assert!(!migrated.contains(required_mint));
-    assert_eq!(
-        compose.matches(required_mint).count(),
-        2,
-        "only control and auth consume the generated platform mint key"
-    );
-    assert_eq!(compose.matches(required_mint_mount).count(), 2);
     assert!(!worker.contains("../ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro"));
 
     // Stripe is OPTIONAL: only Stripe can issue a webhook secret that verifies,
@@ -439,13 +419,11 @@ fn compose_preserves_shared_secret_topology_and_has_no_weak_literals() {
 
     // The platform OP's NAME and its ADDRESS are separate settings, and the
     // rendered compose must keep them separate. The issuer follows
-    // ZEROSHIP_DOMAIN because it is what a token's `iss` carries; the two
-    // outbound targets are LITERALS naming the service on this network,
-    // because a domain-derived value sends control out through the public edge
-    // and back - which on a real single-host deployment has no route, so every
-    // `zeroship login` approval ended in `internal error`.
+    // ZEROSHIP_DOMAIN because it is what a token's `iss` carries; the JWKS
+    // target is a LITERAL naming the service on this network, because a
+    // domain-derived value sends control out through the public edge and back,
+    // which on a real single-host deployment has no route.
     for (label, service, expected) in [
-        ("control mint", control, "ZEROSHIP_AUTH_PLATFORM_MINT_URL: http://auth:9092"),
         (
             "control jwks",
             control,
@@ -462,10 +440,6 @@ fn compose_preserves_shared_secret_topology_and_has_no_weak_literals() {
             "{label}: rendered compose must set {expected}"
         );
     }
-    assert!(
-        !control.contains("ZEROSHIP_AUTH_PLATFORM_MINT_URL: ${ZEROSHIP_ORIGIN_SCHEME"),
-        "the mint destination must not be derived from the public domain"
-    );
 
     let active_compose = compose
         .lines()
