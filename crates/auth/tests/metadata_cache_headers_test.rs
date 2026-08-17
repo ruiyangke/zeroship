@@ -11,7 +11,6 @@
 use std::sync::Arc;
 
 use compio_postgres::{connect, NoTls};
-use ed25519_dalek::SigningKey;
 use ntex::web;
 use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::oidc::Issuer;
@@ -46,7 +45,7 @@ async fn boot() -> Option<(web::test::TestServer, cyper::Client)> {
     .detach();
     let db = Arc::new(pg_client);
 
-    let signing = SigningKey::from_bytes(&[23u8; 32]);
+    let signing = common::op_signing_key();
     let issuer = Arc::new(
         Issuer::from_signing_key(&signing, [9u8; 32], ISSUER.to_string()).expect("issuer"),
     );
