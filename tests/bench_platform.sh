@@ -65,8 +65,15 @@ for port in 9090 8080 8000 5100 5101; do
 done
 rm -rf /tmp/zeroship-bench-bundles
 BENCH_SECURITY_DIR="/tmp/zeroship-bench-security-$$"
-ZEROSHIP_CONTROL_SIGNING_KEY_FILE="$BENCH_SECURITY_DIR/signing-key.pem"
-ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$ZEROSHIP_CONTROL_SIGNING_KEY_FILE"
+ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$BENCH_SECURITY_DIR/signing-key.pem"
+mkdir -p "$BENCH_SECURITY_DIR"
+openssl genpkey -algorithm ed25519 -out "$ZEROSHIP_GATEWAY_SIGNING_KEY_FILE" 2>/dev/null
+chmod 600 "$ZEROSHIP_GATEWAY_SIGNING_KEY_FILE"
+# The issuer control verifies the admin bearer against. Must be up BEFORE
+# control, which reads the issuer once at boot.
+e2e_platform_op_up "$ZEROSHIP_GATEWAY_SIGNING_KEY_FILE" "$BENCH_SECURITY_DIR" \
+  || { echo "FAIL: could not start the harness platform issuer" >&2; exit 1; }
+PIDS+=($E2E_PLATFORM_OP_PID)
 e2e_export_runtime_secrets "$BENCH_SECURITY_DIR"
 # THE DSN, WHICH WENT MISSING. 05989cf5d removed
 # `--db postgres://postgres:test@localhost:5434/postgres` from control's launch
@@ -81,7 +88,7 @@ docker exec pg-test psql -U postgres -c "DROP TABLE IF EXISTS usage_history, usa
 
 # Start platform
 e2e_with_platform_mint_key "$BIN/zeroship-control" --port 9090 \
-    --blob-store /tmp/zeroship-bench-bundles --signing-key-file "$ZEROSHIP_CONTROL_SIGNING_KEY_FILE" > /dev/null 2>&1 &
+    --blob-store /tmp/zeroship-bench-bundles > /dev/null 2>&1 &
 PIDS+=($!)
 sleep 3
 
@@ -99,10 +106,10 @@ sleep 3
 WORK="$BENCH_SECURITY_DIR"
 PG_CONTAINER=pg-test
 E2E_PG_DATABASE=postgres
-mint_admin_pat || { echo "FAIL: could not mint benchmark admin PAT" >&2; exit 1; }
+mint_admin_bearer || { echo "FAIL: could not mint the benchmark admin bearer" >&2; exit 1; }
 APP=$(curl -sf -X POST http://localhost:9090/api/apps \
     -H 'Content-Type: application/json' \
-    -H "Authorization: Bearer $PAT" \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
     -d '{"name":"bench"}')
 APP_ID=$(echo "$APP" | jq -r '.id')
 API_KEY=$(echo "$APP" | jq -r '.api_key')
@@ -110,7 +117,7 @@ API_KEY=$(echo "$APP" | jq -r '.api_key')
 mkdir -p /tmp/zeroship-bench-app
 echo 'export function ping() { return "pong"; }' > /tmp/zeroship-bench-app/index.js
 "$BIN/zeroship" deploy /tmp/zeroship-bench-app/index.js --app="$APP_ID" \
-    --control=http://localhost:9090 --token="$PAT" > /dev/null 2>&1
+    --control=http://localhost:9090 --token="$ADMIN_TOKEN" > /dev/null 2>&1
 
 # Baseline
 "$BIN/zeroship-bench-server" --port=5100 --workers=1 > /dev/null 2>&1 &
