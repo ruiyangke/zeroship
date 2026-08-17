@@ -232,11 +232,15 @@ pub enum DeviceApproval {
 
 /// A pending grant the `/device` page found for a typed user code.
 ///
-/// The `provider` column selects which service redeems the approved row, so the
-/// page renders from it rather than assuming: an [`OP_DEVICE_PROVIDER`] row is
-/// redeemed at this service's `/oauth2/token` and names a registered OAuth
-/// client, while a [`PLATFORM_PROVIDER`] row is redeemed at control's
-/// `/api/device/token` and names none.
+/// The `provider` column used to select which service redeems the approved
+/// row: an [`OP_DEVICE_PROVIDER`] row at this service's `/oauth2/token`, a
+/// [`PLATFORM_PROVIDER`] row at control's `/api/device/token`. Control's flow
+/// is deleted and NOTHING writes a `PLATFORM_PROVIDER` row to
+/// `zeroship.device_grants` any more, so every row the page sees today is an
+/// OP row. The discriminator and [`Self::is_platform`] are left in place
+/// rather than removed with the flow, because dropping them reaches into the
+/// OP device grant and the `provider` column is schema; they are vestigial,
+/// not load-bearing.
 #[derive(Debug, Clone)]
 pub(crate) struct PendingDeviceGrant {
     pub client_id: String,
