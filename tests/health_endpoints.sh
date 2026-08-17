@@ -128,9 +128,12 @@ pass "all five service binaries present"
 echo ""
 echo "=== Stack: control + worker + gateway ==="
 # stack_workspace + stack_pg_up rather than stack_up: stack_up's preflight
-# requires node and the workspace `jose` because it can mint PATs, and nothing
-# in this harness authenticates anything. Booting the three binaries here keeps
-# the health contract testable on a checkout that has never run `pnpm install`.
+# requires node and the workspace `jose`, and nothing in this harness
+# authenticates anything. Booting the three binaries here keeps the health
+# contract testable on a checkout that has never run `pnpm install` -- which is
+# also why the issuer is pinned to the OP booted below rather than left for
+# stack_workspace to serve, since serving one needs node and jose.
+export ZEROSHIP_AUTH_PLATFORM_ISSUER="http://localhost:$AUTH_PORT/oauth2"
 stack_workspace || { fail "stack_workspace failed"; exit 1; }
 stack_pg_up || { fail "stack_pg_up failed"; exit 1; }
 
@@ -140,7 +143,7 @@ for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT \
 done
 
 e2e_with_platform_mint_key "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
-  --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
+  --blob-store "$WORK/blobs" \
   > "$WORK/control.log" 2>&1 &
 EXTRA_PIDS+=($!)
 for _ in $(seq 1 30); do
@@ -170,7 +173,7 @@ done
 echo ""
 echo "=== Stack: migrated + auth ==="
 "$BIN/zeroship-migrated" --port "$MIGRATED_PORT" \
-  --signing-key-file "$WORK/signing-key.pem" --tmp-dir "$WORK/migrated-tmp" \
+  --tmp-dir "$WORK/migrated-tmp" \
   > "$WORK/migrated.log" 2>&1 &
 EXTRA_PIDS+=($!)
 for _ in $(seq 1 30); do

@@ -187,6 +187,13 @@ PLATFORM_OP_JS
 }
 
 # e2e_platform_op_up <signing-key.pem> <workdir>
+#
+# A harness that already runs the REAL `zeroship-auth` OP and wants control to
+# trust IT pins ZEROSHIP_AUTH_PLATFORM_ISSUER to that OP's origin BEFORE calling
+# here (tests/e2e_device_login.sh does, and asserts a real token's `iss` against
+# it). This function then configures the minter against the pinned issuer and
+# starts no server of its own: two issuers on one control plane is not a shape
+# control has, so the harness picks one.
 e2e_platform_op_up() {
   local key="$1" dir="$2" i
   [ -s "$key" ] || {
@@ -197,15 +204,7 @@ e2e_platform_op_up() {
     echo "e2e_platform_op_up: a workspace directory is required" >&2
     return 1
   }
-  [ -f "$E2E_JOSE_JS" ] || {
-    echo "e2e_platform_op_up: missing jose at $E2E_JOSE_JS (run pnpm install)" >&2
-    return 1
-  }
-  command -v node >/dev/null 2>&1 || {
-    echo "e2e_platform_op_up: node is required" >&2
-    return 1
-  }
-
+  local pinned_issuer="${ZEROSHIP_AUTH_PLATFORM_ISSUER:-}"
   E2E_PLATFORM_OP_PORT="${E2E_PLATFORM_OP_PORT:-9188}"
   E2E_PLATFORM_OP_KEY="$key"
   E2E_PLATFORM_OP_JOSE="file://$E2E_JOSE_JS"
@@ -213,7 +212,7 @@ e2e_platform_op_up() {
   # against the token's `iss`, and the JWKS is fetched from the same origin, so
   # a name that may resolve to ::1 on one host and 127.0.0.1 on another is a
   # portability hazard for no gain.
-  E2E_PLATFORM_OP_ISSUER="http://127.0.0.1:$E2E_PLATFORM_OP_PORT/oauth2"
+  E2E_PLATFORM_OP_ISSUER="${pinned_issuer:-http://127.0.0.1:$E2E_PLATFORM_OP_PORT/oauth2}"
   # Control's `--oauth-audience` default. A token minted for anything else is
   # rejected with `wrong_audience` before the scope is ever read.
   E2E_PLATFORM_OP_AUDIENCE="${E2E_PLATFORM_OP_AUDIENCE:-control.zeroship.ai}"
@@ -223,6 +222,23 @@ e2e_platform_op_up() {
 
   mkdir -p "$dir"
   _e2e_write_platform_op_js "$E2E_PLATFORM_OP_JS" || return 1
+
+  # The pinned-issuer path needs neither node nor jose, and tests/health_endpoints.sh
+  # takes it precisely so the health contract stays testable on a checkout that
+  # has never run `pnpm install`. So these two are checked HERE, on the path that
+  # actually runs a node server, not at the top of the function.
+  if [ -n "$pinned_issuer" ]; then
+    echo "  note: platform issuer pinned to $pinned_issuer; serving no harness JWKS" >&2
+    return 0
+  fi
+  [ -f "$E2E_JOSE_JS" ] || {
+    echo "e2e_platform_op_up: missing jose at $E2E_JOSE_JS (run pnpm install)" >&2
+    return 1
+  }
+  command -v node >/dev/null 2>&1 || {
+    echo "e2e_platform_op_up: node is required" >&2
+    return 1
+  }
 
   # Same treatment `stack_up` gives its own ports: a leftover listener from an
   # aborted run would otherwise serve the PREVIOUS run's public key and every
