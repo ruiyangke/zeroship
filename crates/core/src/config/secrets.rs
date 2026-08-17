@@ -41,33 +41,6 @@ pub fn require_nonempty(label: &str, value: &str) -> Result<(), String> {
     }
 }
 
-/// Validate the dedicated platform-token mint bearer.
-///
-/// The key crosses a service boundary and authorizes access-token issuance, so
-/// it must contain at least 32 bytes of secret material. Leading and trailing
-/// whitespace is ignored because both mint consumers treat it as transport
-/// padding rather than credential material.
-///
-/// # Errors
-///
-/// Returns an explanatory error when `value` is empty or shorter than 32 bytes
-/// after trimming transport whitespace.
-pub fn validate_platform_mint_key(label: &str, value: &str) -> Result<(), String> {
-    let value = value.trim();
-    if value.is_empty() {
-        return Err(format!("{label} is required; set a strong (>=32 byte) value"));
-    }
-
-    if value.len() < 32 {
-        return Err(format!(
-            "{label} is too short ({} bytes); minimum 32 bytes",
-            value.len()
-        ));
-    }
-
-    Ok(())
-}
-
 /// Validate the shared requirement for a stash signing key.
 ///
 /// The single stash validator across every binary: non-empty, raw UTF-8 length
@@ -502,8 +475,7 @@ mod tests {
 
     use super::{
         decoded_master_key_len, enforce_owner_only, is_loopback_url, parse_secret_ref,
-        read_secret_file, require_nonempty,
-        validate_platform_mint_key, validate_secret_material,
+        read_secret_file, require_nonempty, validate_secret_material,
         resolve_secret, validate_master_key_material, validate_pairwise_salt, validate_secret_ref,
         validate_stash_key, validate_worker_key, SecretError, SecretRef, KNOWN_WEAK_MASTER_KEYS,
         KNOWN_WEAK_PAIRWISE_SALTS, KNOWN_WEAK_STASH_KEYS, KNOWN_WEAK_WORKER_KEYS,
@@ -515,18 +487,6 @@ mod tests {
             .expect_err("missing secret");
         assert_eq!(err, "ZEROSHIP_CONTROL_KEY / --control-key-file is required");
         require_nonempty("ZEROSHIP_CONTROL_KEY / --control-key-file", "secret").expect("present");
-    }
-
-    #[test]
-    fn validate_platform_mint_key_requires_32_bytes() {
-        assert!(validate_platform_mint_key(SENTINEL, "")
-            .expect_err("empty mint key")
-            .contains("required"));
-        assert!(validate_platform_mint_key(SENTINEL, "short")
-            .expect_err("short mint key")
-            .contains("minimum 32 bytes"));
-        validate_platform_mint_key(SENTINEL, "0123456789abcdef0123456789abcdef")
-            .expect("strong mint key");
     }
 
     /// A label no declaration could ever produce, so a message that carries it
@@ -602,8 +562,6 @@ mod tests {
             validate_master_key_material(SENTINEL, KNOWN_WEAK_MASTER_KEYS[0]),
             validate_master_key_material(SENTINEL, "YWJj"),
             validate_master_key_material(SENTINEL, "not!base64!"),
-            validate_platform_mint_key(SENTINEL, ""),
-            validate_platform_mint_key(SENTINEL, "short"),
             require_nonempty(SENTINEL, ""),
         ]
         .into_iter()

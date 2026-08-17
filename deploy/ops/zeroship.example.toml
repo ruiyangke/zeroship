@@ -31,34 +31,27 @@ pairwise_salt = "urn:zeroship:file:/etc/zeroship/secrets/pairwise_salt"
 # matching token issuer to control through ZEROSHIP_AUTH_PLATFORM_ISSUER. This shared
 # overlay defines neither key.
 #
-# THREE SETTINGS NAME THE PLATFORM OP, AND THEY ARE NOT INTERCHANGEABLE. Two are
-# names, one is an address, and a deployment behind a CDN or an ingress cannot
+# TWO SETTINGS NAME THE PLATFORM OP, AND THEY ARE NOT INTERCHANGEABLE. One is a
+# name, one is an address, and a deployment behind a CDN or an ingress cannot
 # use one string for both jobs:
 #
 #   auth.platform_issuer    TRUST ANCHOR. The exact string a platform token's
 #                           `iss` claim must equal. PUBLIC, always - it is what
 #                           the OP stamps and what every verifier compares.
-#   auth.platform_mint_url  OUTBOUND. Where control POSTs the deploy-token mint
-#                           (`{url}/internal/platform-token`) carrying the
-#                           dedicated platform_mint_key. Must be an address
-#                           CONTROL can reach.
 #   auth.platform_jwks_url  OUTBOUND. Where control FETCHES the OP's signing
-#                           keys. Same reasoning; defaults to
+#                           keys; defaults to
 #                           `{issuer}/.well-known/jwks.json`, which is only
 #                           correct when the public name is reachable from
 #                           inside.
 #
-# Control used to derive the mint address from the issuer. On a single host
-# whose public name resolves to a CDN there is no route back in, so every
-# `zeroship login` approval ended in `internal error` while the OP answered
-# instantly one network hop away. Setting these two to an internal address is
-# what fixes it; they do NOT change what control trusts.
+# On a single host whose public name resolves to a CDN there is no route back
+# in, so a derived JWKS address fails while the OP answers instantly one
+# network hop away. Setting the outbound value to an internal address is what
+# fixes it; it does NOT change what control trusts.
 #
-# Left commented because both outbound values are deployment topology and
-# because control REFUSES TO START if a mint URL is set with no issuer (and
-# vice versa) - uncomment them together with the issuer, or set all three as
-# environment variables as deploy/compose/docker-compose.yml does.
-# platform_mint_url = "http://auth:9092"
+# Left commented because the outbound value is deployment topology - uncomment
+# it together with the issuer, or set both as environment variables as
+# deploy/compose/docker-compose.yml does.
 # platform_jwks_url = "http://auth:9092/oauth2/.well-known/jwks.json"
 #
 # First-party OAuth client IDs that skip native OP consent for the first-party
@@ -93,12 +86,6 @@ trusted_oauth_clients = []
 # frame_ancestor_origins = ["https://console.zeroship.ai"]
 frame_ancestor_origins = []
 
-# Do not put the platform mint credential in this shared overlay. The worker
-# cannot load overlays, but gateway and migrated still load this file. Mount one
-# dedicated key file only into auth and control and pass auth
-# --platform-mint-key-file and control --auth-platform-mint-key-file. Both
-# services need the same bytes. The value must not equal a control or worker
-# credential.
 
 [observability]
 # Tracing filter passed to Rust tracing subscribers (EnvFilter syntax).

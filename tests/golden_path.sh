@@ -240,7 +240,7 @@ trap cleanup EXIT
 # stack that was never started, and 100 misleading rows are worse than one
 # honest refusal. Exit 2 marks "prerequisite absent" as distinct from exit 1
 # "assertions failed", matching tests/create_demo_invoices.sh and
-# tests/supabase_deploy_e2e.sh (`ensure_release_bins`).
+# `ensure_release_bins`.
 #
 # NO pass row on success, deliberately: a prerequisite is not an assertion
 # about the product, and emitting one would shift GOLDEN_MIN_PASSED for a
@@ -1404,8 +1404,8 @@ rm -rf "$BODYCAP_TMP"
 # WHY /dev/tcp AND NOT curl OR nc: the assertion is about the exact byte length
 # of the header block, and curl appends its own headers, so the number on the
 # wire would not be the number under test. `nc` would work but is an external
-# dependency this suite does not otherwise take on the golden path (only
-# supabase_deploy_e2e.sh uses it), and the OpenBSD build here has no `-q`. Bash
+# dependency this suite does not otherwise take on the golden path (and
+# no longer-present harness uses it), and the OpenBSD build here has no `-q`. Bash
 # `/dev/tcp` is a builtin and is already the idiom in
 # tests/e2e_gateway_path_backslash.sh for exactly this reason.
 #

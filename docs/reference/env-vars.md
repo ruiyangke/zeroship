@@ -48,8 +48,6 @@ process argument list.
 
 ```
 control_key          ZEROSHIP_CONTROL_KEY            --control-key-file
-auth.platform_mint_key ZEROSHIP_AUTH_PLATFORM_MINT_KEY
-  auth: --platform-mint-key-file; control: --auth-platform-mint-key-file
 control.master_key   ZEROSHIP_CONTROL_MASTER_KEY     --master-key-file
 gateway.database_url ZEROSHIP_GATEWAY_DATABASE_URL   --database-url-file
 ```
@@ -57,7 +55,7 @@ gateway.database_url ZEROSHIP_GATEWAY_DATABASE_URL   --database-url-file
 LOCATION ENCODES OWNERSHIP. A canonical name with no scope prefix is
 platform-global. A domain-scoped name belongs to that domain, even when more
 than one binary participates in it: auth and control both read
-`auth.platform_mint_key`, while only control reads `control.master_key`. The
+`auth.platform_issuer`, while only control reads `control.master_key`. The
 overlay follows the same paths.
 
 The alias hop is gone. `deploy/ops/zeroship.toml` used to carry a `[secrets]`
@@ -101,47 +99,36 @@ with `ZEROSHIP_CONFIG`.
 
 ## A name is not an address
 
-Three settings describe the platform OP, and they are not interchangeable. The
+Two settings describe the platform OP, and they are not interchangeable. The
 generated table lists them adjacently and cannot say which is which, so it is
 said here:
 
 | Setting | What it is | Which value |
 | --- | --- | --- |
 | `auth.platform_issuer` | Trust anchor: the exact string a platform token's `iss` claim must equal | The PUBLIC issuer, always |
-| `auth.platform_mint_url` | Outbound: where control POSTs the deploy-token mint, carrying `auth.platform_mint_key` | An address control can reach |
 | `auth.platform_jwks_url` | Outbound: where the OP's signing keys are fetched | An address the reader can reach |
 
 The first is a NAME. It is fixed by what the OP stamps into its tokens and by
 what every other verifier already compares against, so it must be the public
 one and it is never dialled.
 
-The other two are ROUTES. They are fixed by what the reading process can
+The other is a ROUTE. It is fixed by what the reading process can
 actually open a socket to. Whenever the OP's public name is served by an edge
 that only accepts traffic from outside - a CDN, an external load balancer, an
 ingress with no hairpin - the route and the name are necessarily different
-values, and setting the routes to an internal service address changes nothing
+values, and setting the route to an internal service address changes nothing
 about what is trusted.
 
 Consequences worth knowing before you configure a deployment:
 
-- **`auth.platform_mint_url` is mandatory on control whenever
-  `auth.platform_issuer` is set, and it has no default.** Control refuses to
-  start without it rather than deriving one from the issuer. A derived route is
-  wrong on exactly the topologies described above, and wrong in a way that
-  surfaces only when a creator has already approved a login in their browser.
-- **It is a credential destination.** Control sends `auth.platform_mint_key` to whatever it
-  names, so the value must be a bare absolute `http`/`https` origin: no
-  userinfo, no path, no query, no fragment. Anything else is refused at boot.
-  It is supplied only by flag, environment variable, or the operator-owned
-  overlay - never from a request, a token, or a database row.
 - **`auth.platform_jwks_url` defaults to
   `{auth.platform_issuer}/.well-known/jwks.json`**, which is correct only when
   the public name is reachable from inside. Set it explicitly on any deployment
   where it is not.
 
 `deploy/compose/docker-compose.yml` shows the shipped shape: a public
-`auth.platform_issuer` built from `ZEROSHIP_DOMAIN`, and both routes as
-literals naming the `auth` service on the compose network.
+`auth.platform_issuer` built from `ZEROSHIP_DOMAIN`, and the route as a literal
+naming the `auth` service on the compose network.
 
 ---
 
@@ -216,8 +203,6 @@ by the generator.
 | `auth.pairwise_salt_file` | operational | `ZEROSHIP_AUTH_PAIRWISE_SALT_FILE` | `auth.pairwise_salt_file` | zeroship-auth `--pairwise-salt-file` | empty |
 | `auth.platform_issuer` | operational | `ZEROSHIP_AUTH_PLATFORM_ISSUER` | `auth.platform_issuer` | zeroship-control `--auth-platform-issuer`<br>zeroship-migrated `--auth-platform-issuer` | empty |
 | `auth.platform_jwks_url` | operational | `ZEROSHIP_AUTH_PLATFORM_JWKS_URL` | `auth.platform_jwks_url` | zeroship-control `--auth-platform-jwks-url`<br>zeroship-migrated `--auth-platform-jwks-url` | empty |
-| `auth.platform_mint_key` | secret | `ZEROSHIP_AUTH_PLATFORM_MINT_KEY` | `auth.platform_mint_key` | zeroship-auth `--platform-mint-key-file`<br>zeroship-control `--auth-platform-mint-key-file` | - |
-| `auth.platform_mint_url` | operational | `ZEROSHIP_AUTH_PLATFORM_MINT_URL` | `auth.platform_mint_url` | zeroship-control `--auth-platform-mint-url` | empty |
 | `auth.postmark_webhook_password` | secret | `ZEROSHIP_AUTH_POSTMARK_WEBHOOK_PASSWORD` | `auth.postmark_webhook_password` | zeroship-auth `--postmark-webhook-password-file` | - |
 | `auth.postmark_webhook_user` | operational | `ZEROSHIP_AUTH_POSTMARK_WEBHOOK_USER` | `auth.postmark_webhook_user` | zeroship-auth `--postmark-webhook-user` | empty |
 | `auth.provider` | operational | `ZEROSHIP_AUTH_PROVIDER` | `auth.provider` | zeroship-auth `--provider`<br>zeroship-control `--auth-provider` | `AuthProviderKind::Native` |
@@ -429,9 +414,7 @@ than rotating it. Here the `.env` name and the container name coincide:
 Compose uses required `${VAR:?run zeroship dev init}` interpolation for these
 values rather than built-in weak defaults. One generated value therefore moves
 every consumer together. `ZEROSHIP_CONTROL_KEY` reaches control, gateway,
-worker, and migrated. The independent `platform-mint-key` file is mounted only
-into control and auth, where its file reference is supplied through
-`ZEROSHIP_AUTH_PLATFORM_MINT_KEY`.
+worker, and migrated.
 
 ### Database DSNs an operator may override
 

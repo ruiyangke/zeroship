@@ -160,15 +160,6 @@ pub(crate) const SHARED_IDENTITIES: &[SharedIdentity] = &[
         wrapper: "Operational",
         inner: "String",
     },
-    // Auth accepts this bearer only on the platform-token mint, and control is
-    // its only caller. It must not collapse into the control key the worker
-    // also holds.
-    SharedIdentity {
-        symbol: "AUTH_PLATFORM_MINT_KEY",
-        canonical: "auth.platform_mint_key",
-        wrapper: "Secret",
-        inner: "String",
-    },
     // The GoTrue base URL is ONE deployment fact read by two binaries: control
     // verifies Supabase tokens against it and auth drives the browser-side
     // GoTrue login with it. It became shared the moment auth converted; before

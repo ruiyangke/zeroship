@@ -1012,147 +1012,30 @@ VERIFIED walk-through:
 
 ## 2. CLI auth
 
-### 2.1 Control device grant (NOT the flow `zeroship login` uses)
+### 2.1 Control device grant (DELETED)
 
-`zeroship login` moved to the OP's own device grant, section 2.3. This flow
-still exists and still mints through `platform_mint_key`; nothing in the CLI
-calls it.
+Control used to run a second RFC 8628 flow of its own: `/api/device/auth`
+minted a `provider = 'platform'` row, `/api/device/approve` bound a principal
+to it (with a Supabase browser leg that posted a GoTrue bearer), and
+`/api/device/token` exchanged the approved row for a deploy token through
+Auth's `/internal/platform-token` mint under a dedicated `platform_mint_key`.
 
-```text
-+----------------------------------------------------------+
-| CLI holds random device code and polls Control           |
-+----------------------------------------------------------+
-                             |
-                             v
-+----------------------------------------------------------+
-| TRUST BOUNDARY: CLI to Control public API                |
-+----------------------------------------------------------+
-                             |
-                             v
-+----------------------------------------------------------+
-| Control stores hash plus user code for 10m               |
-+----------------------------------------------------------+
-                             |
-                             v
-+----------------------------------------------------------+
-| Browser proves Auth IdP session on shared device page    |
-+----------------------------------------------------------+
-                             |
-                             v
-+----------------------------------------------------------+
-| TRUST BOUNDARY: browser to Auth public origin            |
-+----------------------------------------------------------+
-                             |
-                             v
-+----------------------------------------------------------+
-| Auth binds zeroship user ID to Control's pending row     |
-+----------------------------------------------------------+
-                             |
-                             v
-+----------------------------------------------------------+
-| Control rechecks lifecycle and decides deploy scopes     |
-+----------------------------------------------------------+
-                             |
-                             v
-+----------------------------------------------------------+
-| TRUST BOUNDARY: Control uses platform_mint_key to Auth   |
-+----------------------------------------------------------+
-                             |
-                             v
-+----------------------------------------------------------+
-| Auth intersects subject grants, caps 12h, signs JWT      |
-| Control verifies returned claims; CLI stores token 0600  |
-+----------------------------------------------------------+
-```
+All of it is gone. `zeroship login` moved onto the OP's own device grant
+(section 2.2), which hands the CLI a bounded access token plus a rotating
+refresh family the deleted flow could not issue, and the parallel flow had no
+caller left. The scope narrowing the mint performed - intersecting a token's
+scopes with the principal's stored `zeroship.principal_grants` - now runs on
+control's bearer path at request time (`crates/authn/src/lib.rs`,
+`platform_cli_entitlement`), so it applies to a token already in a creator's
+hand rather than only at issuance.
 
-VERIFIED walk-through:
+The Supabase DEPLOY path went with it, per
+`docs/decisions/2026-06-30-self-contained-auth-replace-hydra.md` line 32.
+Supabase remains an upstream social login (line 13 of the same ADR), and
+control still resolves a GoTrue bearer to a principal through
+`identity_links` on its ordinary bearer path.
 
-1. No CLI code path reaches this flow. `/api/device/auth` and
-   `/api/device/token` are still served and still behave as described below;
-   the caller that used to drive them is now on the OP's endpoints
-   (`crates/cli/src/auth.rs`, `login_device_flow`).
-2. Control start is unauthenticated but rate limited. It creates 32 random bytes,
-   stores only their SHA-256 hash with a user code, `provider=platform`, scopes,
-   and a 10-minute expiry
-   (`crates/control/src/device_handlers.rs:152-163`,
-   `crates/control/src/device_handlers.rs:182-222`).
-3. Auth's `/device` page handles both device providers. It verifies CSRF, a live
-   IdP session, user lifecycle, and explicit confirmation, then binds the global
-   user ID, IdP session ID, and credential version to the pending row
-   (`crates/auth/src/ui/device.rs:1-21`,
-   `crates/auth/src/ui/device.rs:149-275`,
-   `crates/auth/src/oidc/device_token.rs:244-296`).
-4. Control hashes the CLI's device code, locks the platform row, enforces expiry
-   and poll interval, rechecks active owner state, seeds creator grants once,
-   and intersects the request with four deploy scopes and current subject grants
-   (`crates/control/src/device_handlers.rs:304-473`,
-   `crates/control/src/device_handlers.rs:592-670`). Control makes the first
-   authorization decision.
-5. Control sends the separate `platform_mint_key` to an operator-configured,
-   validated Auth base plus the fixed `/internal/platform-token` path, and
-   requests the 12-hour maximum
-   (`crates/control/src/device_handlers.rs:673-754`). Auth constant-time checks
-   that key, validates principal, scope vocabulary and TTL, intersects the
-   subject's grants again, and signs the fixed-client token
-   (`crates/auth/src/oidc/device_token.rs:604-715`). Auth is the signer and the
-   issuer-side decision maker.
-6. Control verifies provider, client, and returned `expires_in` metadata, then
-   verifies signature, issuer, audience, subject, exact scopes, fixed client,
-   and ordinary JWT expiry before deleting the one-shot row
-   (`crates/control/src/device_handlers.rs:487-536`,
-   `crates/control/src/device_handlers.rs:759-813`).
-7. A token minted here lasts at most 12 hours and carries no refresh token, so
-   expiry means re-authorizing (`crates/core/src/device_grant.rs`,
-   `PLATFORM_TOKEN_MAX_TTL_SECS`). The CLI no longer consumes it; see 2.3 for
-   what it stores instead. CLI logout deletes only the local file
-   (`crates/cli/src/auth.rs`, `cmd_logout`).
-
-### 2.2 Supabase browser approval alternative
-
-```text
-+----------------------------------------------------------+
-| Supabase signs GoTrue bearer held by Auth-hosted page    |
-+----------------------------------------------------------+
-                             |
-                             v
-+----------------------------------------------------------+
-| TRUST BOUNDARY: browser to Supabase GoTrue               |
-+----------------------------------------------------------+
-                             |
-                             v
-+----------------------------------------------------------+
-| TRUST BOUNDARY: browser posts bearer to Control origin   |
-+----------------------------------------------------------+
-                             |
-                             v
-+----------------------------------------------------------+
-| Control selects verifier and decides by provider         |
-| Platform checks audience; Supabase checks auth role      |
-| Control maps subject to active zeroship principal        |
-+----------------------------------------------------------+
-                             |
-                             v
-+----------------------------------------------------------+
-| Control marks the platform device row approved           |
-+----------------------------------------------------------+
-```
-
-VERIFIED: server-side `AuthProviderKind::Supabase`, not the CLI provider flag,
-selects this page (`crates/auth/src/ui/device.rs:65-74`,
-`crates/auth/src/ui/device.rs:130-147`). Its JavaScript obtains a GoTrue bearer
-and posts JSON to Control `/api/device/approve`
-(`crates/auth/src/ui/templates/device_supabase.html:33-73`). Control requires the
-Control audience and revocation state for platform tokens or GoTrue role
-`authenticated` for Supabase, maps or JIT-links the subject, and requires an
-active zeroship principal before approval
-(`crates/control/src/device_handlers.rs:230-301`,
-`crates/control/src/device_handlers.rs:815-958`). Its configured provider pins
-HS256 or a permitted asymmetric algorithm and verifies the JWT signature and
-registered claims (`crates/core/src/auth_provider/supabase.rs:312-390`). The
-cross-origin browser
-mechanics are Finding 9.
-
-### 2.3 The OP RFC 8628 grant `zeroship login` drives
+### 2.2 The OP RFC 8628 grant `zeroship login` drives
 
 ```text
 +----------------------------------------------------------+
@@ -2012,57 +1895,7 @@ lookup; it signs no response credential
 (`crates/control/src/workflow_instance_api.rs:326-405`,
 `crates/control/src/workflow_instance_api.rs:1788-1871`).
 
-### 5.6 Separate `platform_mint_key`
-
-```text
-+----------------------------------------------------------+
-| Control and Auth hold platform_mint_key; Control has UUID |
-+----------------------------------------------------------+
-                             |
-                             v
-+----------------------------------------------------------+
-| TRUST BOUNDARY: Control to Auth internal mint            |
-+----------------------------------------------------------+
-                             |
-                             v
-+----------------------------------------------------------+
-| Auth constant-time verifies dedicated key                |
-| Auth decides active subject, subject grants, 12h cap     |
-+----------------------------------------------------------+
-                             |
-                             v
-+----------------------------------------------------------+
-| Auth signs fixed zeroship-cli access JWT                 |
-+----------------------------------------------------------+
-                             |
-                             v
-+----------------------------------------------------------+
-| Control verifies signature, subject, audience, scopes    |
-+----------------------------------------------------------+
-```
-
-VERIFIED walk-through:
-
-1. Control loads `platform_mint_key` for the outbound bearer and Auth loads the
-   matching verifier under their dedicated configuration fields
-   (`crates/control/src/config.rs:332-337`,
-   `crates/auth/src/config.rs:121-126`,
-   `crates/auth/src/config.rs:1002-1017`). Both require strong material, and
-   Control rejects equality with its control or worker keys
-   (`crates/core/src/config/secrets.rs:44-69`,
-   `crates/control/src/main.rs:208-239`).
-2. Control sends the dedicated bearer only to the configured, validated mint
-   base plus fixed `/internal/platform-token`, with a three-second timeout
-   (`crates/control/src/device_handlers.rs:673-754`).
-3. Auth compares the key, validates principal UUID, scope syntax, and the
-   12-hour cap, reloads active subject grants, intersects them, and signs
-   (`crates/auth/src/oidc/device_token.rs:604-715`).
-4. Control independently verifies returned subject, audience, exact scopes, and
-   fixed client before releasing the token
-   (`crates/control/src/device_handlers.rs:774-813`). The missing caller-specific
-   allowance is the second known in-progress item.
-
-### 5.7 OIDC broker secret
+### 5.6 OIDC broker secret
 
 ```text
 +--------------------------------------------------------+
@@ -2103,7 +1936,7 @@ operations; the registration-method mismatch is Finding 19
 (`crates/auth/src/oidc/issuer.rs:853-860`,
 `crates/auth/src/oidc/introspect.rs:58-66`).
 
-### 5.8 Confidential OAuth client-secret issuance
+### 5.7 Confidential OAuth client-secret issuance
 
 ```text
 +------------------------------------------------------------+
@@ -2138,7 +1971,7 @@ flow (`crates/control/src/oauth_handlers.rs:63-127`,
 `crates/control/src/oauth_handlers.rs:374-409`,
 `crates/control/src/oauth_handlers.rs:440-444`).
 
-### 5.9 Confidential OAuth client authentication
+### 5.8 Confidential OAuth client authentication
 
 ```text
 +--------------------------------------------------------------+
@@ -2182,7 +2015,7 @@ the non-brokered stored-POST branch has no production writer
 clients are a separate branch and deliberately accept their derived secret by
 Basic or form POST (`crates/auth/src/oidc/authorization_code.rs:1342-1385`).
 
-### 5.10 OP signing-key lifecycle
+### 5.9 OP signing-key lifecycle
 
 ```text
 +--------------------------------------------------------+
@@ -2219,7 +2052,7 @@ JWKS cache and clock-skew windows
 `crates/auth/src/cron/signing_key_retention.rs:45-106`). This is current behavior
 from the recent signing-key merge, not a finding.
 
-### 5.11 Workflow advance from Control through Gateway
+### 5.10 Workflow advance from Control through Gateway
 
 ```text
 +----------------------------------------------------------+
@@ -2310,7 +2143,6 @@ INFERRED consequences appear only where explicitly labeled in FINDINGS.
 | `control_key` bearer | Operator config | Control | Config lifetime | Yes, global rotation | Broad internal Control API (`crates/control/src/internal.rs:16-40`, `crates/control/src/internal.rs:82-263`) |
 | App-scoped Control HMAC | Worker Rust derives | Control | `control_key` lifetime | Yes, global rotation only | Workflow operations for asserted app ID (`crates/core/src/auth/mod.rs:157-174`, `crates/control/src/workflow_instance_api.rs:326-405`) |
 | Workflow signal capability `wst_` | Control per-app HMAC signer | Control | At most 24h; run once per allowed type, topic once total | No general revoke; run epoch may stale on deploy-changing restart | Post an allowed signal to one bound run or topic (`crates/core/src/typed_id.rs:526-622`, `crates/control/src/workflow_instance_api.rs:2350-2587`, `crates/control/src/workflow_instance_api.rs:2746-2757`, `crates/control/src/workflow_instance_api.rs:2852-2888`) |
-| `platform_mint_key` | Operator config | Auth | Config lifetime | Yes, global rotation | Internal platform token mint subject to Auth checks (`crates/control/src/device_handlers.rs:673-754`, `crates/auth/src/oidc/device_token.rs:604-715`) |
 | Broker-derived client secret | Gateway derives from master | Auth re-derives | Master lifetime with current/previous overlap | Yes, master rotation | Per-client code, refresh, introspection, and revoke authentication (`crates/core/src/auth/mod.rs:83-96`, `crates/auth/src/oidc/issuer.rs:853-860`, `crates/auth/src/oidc/introspect.rs:58-66`) |
 | Registered OAuth client secret | Control random generator | Auth stored-hash verifier | Until client deletion or replacement | Yes, delete or replace client | Confidential-client code, refresh, introspection, and revoke authentication (`crates/control/src/oauth_handlers.rs:63-127`, `crates/auth/src/oidc/refresh.rs:910-958`) |
 | Legacy `X-Api-Key` | Route configuration | Unwired Gateway helper | Config lifetime | Yes, route change | Nothing on current dispatch path; see Finding 28 (`crates/gateway/src/auth.rs:1-27`) |
@@ -2572,27 +2404,14 @@ generation and storage but no read or comparison on completion. State and S256
 PKCE still provide material defenses, so this is ranked below the direct
 identity and revocation failures, but the asserted OIDC boundary is absent.
 
-### 9. MEDIUM: Supabase device approval would be cross-origin without CORS
+### 9. RESOLVED: Supabase device approval would be cross-origin without CORS
 
-VERIFIED: when server-side Supabase mode is enabled, Auth's page sends
-`Authorization` and `application/json` from the Auth origin to Control
-`/api/device/approve`
-(`crates/auth/src/ui/templates/device_supabase.html:49-73`,
-`crates/auth/src/ui/device.rs:463-503`). The shipped Caddy topology gives Auth
-and Control different origins (`deploy/ops/Caddyfile:36-56`), and Control
-registers only POST for the endpoint
-(`crates/control/src/device_handlers.rs:146-150`).
-
-Search method: `rg -n 'Access-Control-Allow|access-control-allow|cors|CORS|OPTIONS|options\('
-deploy/ops crates/control/src crates/control/Cargo.toml` found no CORS or
-preflight handler. The native compose file does not enable Supabase mode, and
-the Supabase E2E posts directly with curl rather than a
-browser (`tests/supabase_deploy_e2e.sh:704-723`). INFERRED: a browser should
-preflight and block the request under the shipped two-origin routing shape if
-Supabase mode is enabled. Auth also defaults its Control URL to localhost while
-compose does not override it
-(`crates/auth/src/config.rs:113-115`,
-`deploy/compose/docker-compose.yml:729-752`).
+Auth's Supabase `/device` page sent `Authorization` and `application/json`
+from the Auth origin to Control `/api/device/approve`, which the shipped Caddy
+topology puts on a different origin, with no CORS or preflight handler
+anywhere in `deploy/ops` or `crates/control/src`. RESOLVED BY DELETION rather
+than by adding CORS: the Supabase deploy path is retired, the page and the
+endpoint are both gone, and no browser request crosses that boundary any more.
 
 ### 10. MEDIUM: First consent loses the relay alias until re-consent
 
@@ -2772,11 +2591,7 @@ the key travels in clear, then writes the bearer in a hand-built TCP request
 decrypted app environment data and other broad internal Control endpoints
 (`crates/control/src/internal.rs:82-263`).
 
-This is not isolated to `control_key`. Shipped Compose sends the dedicated
-`platform_mint_key` from Control to Auth at an `http://auth:9092` URL, and its
-URL validator explicitly accepts either HTTP or HTTPS
-(`deploy/compose/docker-compose.yml:272-284`,
-`crates/core/src/device_grant.rs:113-134`). Control also forwards the creator's
+This is not isolated to `control_key`. Control also forwards the creator's
 raw OAuth or PAT bearer to Migrated over an HTTP-default service URL
 (`deploy/compose/docker-compose.yml:305-316`,
 `crates/control/src/migrations_api.rs:147-196`).
@@ -3036,7 +2851,7 @@ VERIFIED items, each paired with a positive live path or complete scoped search:
   `crates/control/src/app_oauth_client.rs:559-574`). A full-tree search for
   `client_secret_post` found metadata, parsing, verification, and tests but no
   production writer for that non-brokered stored state. Brokered POST is live
-  through a separate derived-secret branch, as mapped in Section 5.7.
+  through a separate derived-secret branch, as mapped in Section 5.6.
 - The workflow signal-key schema admits `zeroship-hmac` and `provider:stripe`
   verifiers, but production mint and verify code uses only `bearer-signing`.
   It also admits key lifecycle states with no production status writer, while

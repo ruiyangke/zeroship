@@ -190,21 +190,11 @@ token when the access token expires. The rotated credential is written to disk
 before it is used: the presented token is already spent, and re-presenting it
 is a reuse detection that revokes the family.
 
-Control's parallel device flow still exists and exchanges an approved grant for
-a platform access token through `POST /internal/platform-token`. That mint is
-deliberately narrower than the other internal control APIs:
-
-- Only auth and control receive `auth.platform_mint_key`. The worker still
-  needs `control_key` for its normal control-plane calls, but that key is not
-  accepted by the mint.
-- Auth rejects an unknown `principal_id`, loads that principal's grants from
-  Postgres itself, and issues only the intersection of stored grants and the
-  requested scopes. The caller cannot establish entitlement by naming a
-  principal or scope in the request. The auth database role has SELECT-only
-  access to `zeroship.principal_grants`; it cannot mutate grants.
-- Auth chooses the server-configured platform audience and the fixed
-  `zeroship-cli` client ID. Neither value is caller-controlled.
-- The requested lifetime must be positive and no more than 12 hours.
+Control no longer runs a parallel device flow. It used to exchange an approved
+grant for a platform access token through `POST /internal/platform-token`, but
+`zeroship login` drives the OP directly, so both the flow and the mint were
+deleted; the entitlement narrowing that mint performed now happens on control's
+bearer path at request time (`crates/authn/src/lib.rs`).
 
 Auth reconciles a first-party `zeroship-cli` OAuth client registration at
 startup. It may request `apps:deploy`, `apps:read`, `apps:write`,
@@ -317,7 +307,6 @@ at minimum:
 - `REFRESH_IDEM_KEY_FILE`
 - `AUTH_STASH_SIGNING_KEY`
 - `AUTH_TOTP_ENC_KEY`
-- `ZEROSHIP_AUTH_PLATFORM_MINT_KEY`
 
 Run platform migrations before booting services:
 

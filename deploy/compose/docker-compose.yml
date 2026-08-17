@@ -263,32 +263,20 @@ services:
       #
       # PUBLIC on purpose: it is the exact string a token's `iss` claim carries,
       # so it must be the name the OP advertises to everyone. It is NOT an
-      # address control dials - the two settings below are.
+      # address control dials - the JWKS setting below is.
       ZEROSHIP_AUTH_PLATFORM_ISSUER: ${ZEROSHIP_ORIGIN_SCHEME:-http}://auth.${ZEROSHIP_DOMAIN:-zeroship.localhost}/oauth2
-      # The two OUTBOUND platform-OP targets, both on the compose network.
+      # The OUTBOUND platform-OP target, on the compose network.
       #
-      # Literals, not `${VAR}` interpolations, because they name a service on
+      # A literal, not a `${VAR}` interpolation, because it names a service on
       # THIS network: `auth:9092` is the auth container's address, and it is
       # correct regardless of which public domain the deployment serves. Making
-      # them follow ZEROSHIP_DOMAIN is precisely the derivation that broke:
+      # it follow ZEROSHIP_DOMAIN is precisely the derivation that broke:
       # control would then dial the public hostname, egress to the CDN in front
       # of it, and get nothing back on a host with no hairpin route. Measured on
       # the live single-host deployment: `auth:9092/healthz` -> 200,
-      # `https://auth.<domain>/healthz` -> 000, so every `zeroship login`
-      # approval ended in `{"error":"internal error"}`.
-      #
-      # The mint URL carries ZEROSHIP_AUTH_PLATFORM_MINT_KEY in an Authorization
-      # header, so it is a credential destination; control validates it at boot
-      # (bare http/https origin, no userinfo, no path) and refuses to start
-      # without it whenever an issuer is set.
-      ZEROSHIP_AUTH_PLATFORM_MINT_URL: http://auth:9092
-      # Dedicated to control -> auth platform-token mint calls. The worker does
-      # not receive this key, so its control-plane bearer cannot invoke mint.
-      ZEROSHIP_AUTH_PLATFORM_MINT_KEY: urn:zeroship:file:/etc/zeroship/secrets/platform-mint-key
-      # Same split for the key fetch, using the setting that already existed:
-      # the JWKS is FETCHED, so it needs a reachable address, while the `iss`
-      # it validates stays the public issuer above. Without this the mint would
-      # succeed and the verify-back would fail with the same `Connect` error.
+      # `https://auth.<domain>/healthz` -> 000.
+      # The JWKS is FETCHED, so it needs a reachable address, while the `iss`
+      # it validates stays the public issuer above.
       ZEROSHIP_AUTH_PLATFORM_JWKS_URL: http://auth:9092/oauth2/.well-known/jwks.json
       # NO provisioning DSN here. The privileged CREATE SCHEMA / CREATE ROLE
       # work belongs to `migrated`, which is the only code that reads one; this
@@ -376,10 +364,8 @@ services:
       - bundles:/data/bundles
       - ../../data:/data
       # Control mints PATs, so it reads the signing key that migrated also
-      # verifies. The platform mint key is a separate file visible only to
-      # control and auth.
+      # verifies.
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}/control-signing.pem:/etc/zeroship/secrets/control-signing.pem:ro
-      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/platform-mint-key:/etc/zeroship/secrets/platform-mint-key:ro
       # mounted at the well-known path => auto-discovered, no --config needed
       - ../ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
     security_opt:
@@ -732,9 +718,6 @@ services:
       # Native OP issuer base; discovery/JWKS and token `iss` use
       # `${ZEROSHIP_AUTH_PUBLIC_URL}/oauth2`.
       ZEROSHIP_AUTH_PUBLIC_URL: ${ZEROSHIP_ORIGIN_SCHEME:-http}://auth.${ZEROSHIP_DOMAIN:-zeroship.localhost}
-      # Dedicated to control -> auth platform-token mint calls. Auth does not
-      # receive the broader control API key.
-      ZEROSHIP_AUTH_PLATFORM_MINT_KEY: urn:zeroship:file:/etc/zeroship/secrets/platform-mint-key
       # Auth has independent stash-cookie and TOTP-at-rest keys. Both are
       # generated once and retained across restarts by the dev overlay.
       ZEROSHIP_AUTH_STASH_SIGNING_KEY: ${ZEROSHIP_AUTH_STASH_SIGNING_KEY:?run zeroship dev init}
@@ -763,7 +746,6 @@ services:
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}/broker-secret:/etc/zeroship/secrets/broker-secret:ro
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}/refresh-hash-key:/etc/zeroship/secrets/refresh-hash-key:ro
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}/refresh-idem-key:/etc/zeroship/secrets/refresh-idem-key:ro
-      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/platform-mint-key:/etc/zeroship/secrets/platform-mint-key:ro
       # frame_ancestor_origins comes from the shared [auth] overlay,
       # auto-discovered at the well-known path.
       - ../ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
