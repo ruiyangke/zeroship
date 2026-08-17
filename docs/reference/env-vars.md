@@ -438,8 +438,17 @@ the deploy and names each pair until that is done.
 privileged: `migrated` uses it to `CREATE SCHEMA "<app_id>"` and
 `CREATE ROLE migrator_<app_id>` for each deployed app.
 
-Optional: `OPENAI_API_KEY` (defaults empty), `ZEROSHIP_MIGRATE_DSN` (the platform
-migration one-shot).
+Optional: `OPENAI_API_KEY` (defaults empty).
+
+The platform migration one-shot is NOT in this table, because it takes no DSN
+from the environment at all. `zeroship-platform-migrate` reads a path
+(`--database-url-file`), and compose mounts `secrets/migrate-dsn` written by
+`zeroship dev init`. Its DSN is the postgres SUPERUSER, so it is the most
+valuable credential in the deployment and the one that least belongs in a
+process argument list, which is where it lived until 2026-08-16.
+`ZEROSHIP_MIGRATE_DSN` still exists, but only as the input to
+`deploy/ops/db-migrate.sh`, which writes it to a private temporary file and
+passes that path along; it is not read by any container.
 
 Section 4.3 of `docs/proposals/2026-08-11-config-name-alignment.md` requires
 `LEFT == RIGHT` for any container value whose whole scalar is one interpolation.
