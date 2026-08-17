@@ -237,3 +237,28 @@ the two projected-identity assertions added earlier
 (`crates/gateway/tests/oidc_rp_e2e.rs`,
 `crates/gateway/tests/auth_token_anchors_test.rs:1500`), which check the
 projected `pws_` rather than an HTTP status.
+
+Remaining gates, all at their stated baselines:
+
+```text
+cargo test -p zeroship-gateway       491 across 11 suites (414+19+23+11+10+1+2+3+7+1+0)
+cargo test -p zeroship-auth --lib    220 passed
+cargo test -p zeroship-control --lib 224 passed
+tests/commit_msg_gate.sh --range main..HEAD   checked 20 commits, 0 rejected
+```
+
+`oidc_rp_e2e` needs care: under a plain `cargo test -p zeroship-gateway` it
+reports "3 passed ... in 0.00s", which is three SELF-SKIPS, so the new
+projected-identity assertion never executes there. Given AUTH_DB_URL and
+CONTROL_TEST_DB against a freshly migrated database it runs for real:
+
+```text
+test gateway_bearer_rejects_real_op_id_token_but_accepts_access_token ...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.81s
+```
+
+3.81s against 0.00s is the whole difference between the assertion holding and
+the assertion being absent. No gate in this repo runs that binary with a
+database - `run_auth_suite.sh` excludes it by name because it also wants
+CONTROL_TEST_DB, which the script does not provision. The strengthened test is
+therefore only as good as whoever remembers to give it a database.
