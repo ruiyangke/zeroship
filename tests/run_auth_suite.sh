@@ -259,7 +259,12 @@ if log_shows_disk_full "$LOG"; then
   exit 90
 fi
 
-AUTH_MIN_PASSED="${AUTH_MIN_PASSED:-595}"
+# 595 -> 604 for the three targets added above. The +9 is the measured delta and
+# nothing more: 647 before, 656 after, on the same database provisioning, and
+# the added tests account for all nine - zeroship-authn's lib (2), its
+# service_replay_pg_test (6, previously six announced skips at 0.00s, now
+# 1.10s of real work) and zeroship-gateway's db_pool_smoke (1, 0.52s).
+AUTH_MIN_PASSED="${AUTH_MIN_PASSED:-604}"
 if [ "$passed" -lt "$AUTH_MIN_PASSED" ]; then
   echo "FAIL: only ${passed} auth tests passed, fewer than the ${AUTH_MIN_PASSED} this gate expects." >&2
   echo "A suite that silently stopped running is indistinguishable from a suite that passed." >&2
