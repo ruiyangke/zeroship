@@ -156,13 +156,15 @@ TOML
 # secret handle it used to use is deleted: an operator-supplied config string
 # naming an environment variable is env-to-env indirection with no declared
 # identity. Short recompute interval.
-ZEROSHIP_CONTROL_SIGNING_KEY_FILE="$WORK/sk.pem"
-ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$ZEROSHIP_CONTROL_SIGNING_KEY_FILE"
+ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$WORK/sk.pem"
 ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gate-broker-secret"
+# The issuer control verifies the admin bearer against, on the same key the
+# gateway signs with. Up BEFORE control: control reads the issuer once at boot.
+e2e_platform_op_up "$WORK/sk.pem" "$WORK" || exit 1
 e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DBURL"
 e2e_with_platform_mint_key "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --config "$CFG_TOML" \
-  --blob-store "$WORK/blobs" --signing-key-file "$WORK/sk.pem" \
+  --blob-store "$WORK/blobs" \
   --meter-provider lago --invoicer-provider lago \
   --provider-config "{\"lago\":{\"api_url\":\"$LAGO_URL\",\"api_key\":\"$LAGO_KEY\",\"billable_metric_code\":\"requests\"}}" \
   --spend-recompute-interval 2 > "$WORK/control.log" 2>&1 &
@@ -183,24 +185,24 @@ echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && pass "gateway healthy" || { fail "gateway"; tail -30 "$WORK/gate.log"; exit 1; }
 
-echo ""; echo "=== Stage 2: PAT + creator + app + deploy + matching Lago customer/subscription ==="
-POLICY_JSON='{"name":"e2e-lago","statements":[{"effect":"allow","actions":["apps:read","apps:write","apps:deploy","billing:read","billing:write"],"resources":[{"type":"any"}],"conditions":[]}]}'
-POLICY_HASH="$(node -e 'const{createHash}=require("crypto");function c(v){if(v===null||typeof v==="number"||typeof v==="boolean")return JSON.stringify(v);if(typeof v==="string")return JSON.stringify(v);if(Array.isArray(v))return "["+v.map(c).join(",")+"]";return "{"+Object.keys(v).sort().map(k=>JSON.stringify(k)+":"+c(v[k])).join(",")+"}";}process.stdout.write(createHash("sha256").update(c(JSON.parse(process.argv[1]))).digest("hex"));' "$POLICY_JSON")"
-CREATOR="$(node -e 'console.log(require("crypto").randomUUID())')"; TOKID="$(node -e 'console.log(require("crypto").randomUUID())')"; EXP=$(( $(date +%s) + 86400 ))
+echo ""; echo "=== Stage 2: bearer + creator + app + deploy + matching Lago customer/subscription ==="
+# The scope string is the action list the deleted permission_tokens policy
+# carried, one scope per Cedar action.
+SCOPE="apps:read apps:write apps:deploy billing:read billing:write"
+CREATOR="$(node -e 'console.log(require("crypto").randomUUID())')"
 psql_exec >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.users (id,email,name,email_verified_at) VALUES ('$CREATOR','e2e-lago-$CREATOR@zeroship.test'::citext,'E2E Lago',NOW());
 INSERT INTO zeroship.platform_admin_roles (user_id,role,granted_by) VALUES ('$CREATOR','admin','$CREATOR');
-INSERT INTO zeroship.permission_tokens (id,owner_id,kind,name,policies,policy_hash,expires_at) VALUES ('$TOKID','$CREATOR','pat','e2e lago','$POLICY_JSON'::jsonb,'$POLICY_HASH',to_timestamp($EXP));
 SQL
-PAT="$(node --input-type=module -e 'import{readFileSync}from "node:fs";import{createHash,randomBytes}from "node:crypto";import{importPKCS8,exportJWK,SignJWT}from "file://'"$JOSE"'";const[pem,owner,tid,phash,exp]=process.argv.slice(1);const key=await importPKCS8(readFileSync(pem,"utf8"),"EdDSA",{extractable:true});const x=(await exportJWK(key)).x;const kid=createHash("sha256").update(`{"crv":"Ed25519","kty":"OKP","x":"${x}"}`).digest("base64url");const jwt=await new SignJWT({sub:owner,owner,tid,jti:tid,scope:"pat",policy_hash:phash,nonce:randomBytes(32).toString("base64url")}).setProtectedHeader({alg:"EdDSA",typ:"pat+jwt",kid}).setIssuer("https://api.zeroship.ai").setAudience("control.zeroship.ai").setIssuedAt(Math.floor(Date.now()/1000)).setExpirationTime(Number(exp)).sign(key);process.stdout.write(jwt);' "$WORK/sk.pem" "$CREATOR" "$TOKID" "$POLICY_HASH" "$EXP")"
-[ "$(echo -n "$PAT" | awk -F. '{print NF}')" = "3" ] && pass "minted PAT (creator=$CREATOR)" || { fail "PAT"; exit 1; }
+ADMIN_TOKEN="$(e2e_mint_platform_bearer "$CREATOR" "$SCOPE")"
+[ "$(echo -n "$ADMIN_TOKEN" | awk -F. '{print NF}')" = "3" ] && pass "minted platform bearer (creator=$CREATOR)" || { fail "bearer mint"; exit 1; }
 
-APP="$(curl -s -X POST "$CONTROL_URL/api/apps" -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" -d "{\"name\":\"lago-probe\",\"plan_id\":\"$PLAN_ID\"}" | jget '.id')"
+APP="$(curl -s -X POST "$CONTROL_URL/api/apps" -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" -d "{\"name\":\"lago-probe\",\"plan_id\":\"$PLAN_ID\"}" | jget '.id')"
 [ -n "$APP" ] && pass "created app $APP" || { fail "create app"; exit 1; }
 psql_exec >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.app_members (app_id,user_id,role) VALUES ('$APP','$CREATOR','owner') ON CONFLICT (app_id,user_id) DO UPDATE SET role='owner';
 SQL
-"$BIN/zeroship" deploy "$PROBE" --app="$APP" --control="$CONTROL_URL" --token="$PAT" 2>&1 | grep -q deploy_hash && pass "deployed probe" || { fail "deploy"; exit 1; }
+"$BIN/zeroship" deploy "$PROBE" --app="$APP" --control="$CONTROL_URL" --token="$ADMIN_TOKEN" 2>&1 | grep -q deploy_hash && pass "deployed probe" || { fail "deploy"; exit 1; }
 
 # The forwarder attributes usage to the app's OWNING creator, so the Lago
 # customer + subscription external_id MUST be the creator UUID.
@@ -249,11 +251,11 @@ else
 fi
 
 # Enforcement rail (provider-independent): usage_aggregates populated by recompute.
-REQS=""; for _ in $(seq 1 20); do REQS="$(curl -s "$CONTROL_URL/api/apps/$APP/usage" -H "Authorization: Bearer $PAT" | jget '.requests')"; [ -n "$REQS" ] && [ "$REQS" != "0" ] && break; sleep 2; done
+REQS=""; for _ in $(seq 1 20); do REQS="$(curl -s "$CONTROL_URL/api/apps/$APP/usage" -H "Authorization: Bearer $ADMIN_TOKEN" | jget '.requests')"; [ -n "$REQS" ] && [ "$REQS" != "0" ] && break; sleep 2; done
 [ -n "$REQS" ] && [ "$REQS" -ge "$N_REQ" ] 2>/dev/null && pass "enforcement recompute aggregated requests ($REQS ≥ $N_REQ)" || fail "usage_aggregates not populated (got '$REQS')"
 
 echo ""; echo "=== Stage 5: spend enforcement — low cap → 402 Block ==="
-curl -s -o /dev/null -X PUT "$CONTROL_URL/api/apps/$APP/spend-limit" -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" -d '{"cents":1}'
+curl -s -o /dev/null -X PUT "$CONTROL_URL/api/apps/$APP/spend-limit" -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" -d '{"cents":1}'
 curl -s -o /dev/null -X POST -H "Authorization: Bearer $ZEROSHIP_CONTROL_KEY" "$CONTROL_URL/internal/spend/reconcile"
 STATE="$(psql_exec -tA -c "SELECT state FROM zeroship.app_spend_state WHERE app_id='$APP'" 2>/dev/null | tr -d '[:space:]')"
 [ "$STATE" = "block" ] && pass "control derived spend state = block" || fail "expected block, got '$STATE'"

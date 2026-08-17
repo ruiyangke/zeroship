@@ -323,7 +323,7 @@ ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
 e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DB_URL"
 e2e_with_platform_mint_key "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --blob-store "$WORK/bundles" \
-  --signing-key-file "$ZEROSHIP_CONTROL_SIGNING_KEY_FILE" > "$WORK/control.log" 2>&1 & PIDS+=($!)
+  > "$WORK/control.log" 2>&1 & PIDS+=($!)
 sleep 4
 "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
   --blob-store "$WORK/bundles" --poll-interval 2 > "$WORK/worker.log" 2>&1 & PIDS+=($!)

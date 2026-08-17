@@ -112,9 +112,13 @@ e2e_without_platform_mint_key() {
 # `e2e_platform_op_up` must run BEFORE control starts: control reads the issuer
 # once at boot and fetches the JWKS over HTTP on the first bearer it sees.
 #
-# Tunable: E2E_PLATFORM_OP_PORT (default 9188, a port nothing else in tests/
-# binds). Exports: ZEROSHIP_AUTH_PLATFORM_ISSUER, E2E_PLATFORM_OP_JS,
-# E2E_PLATFORM_OP_PID, E2E_PLATFORM_OP_PORT.
+# The port is EPHEMERAL by default -- the server binds 0 and reports what the
+# kernel gave it, and only then is the issuer named. Every other port in these
+# harnesses is a fixed number each file picks so two harnesses can run at once,
+# and a single hard-coded default here would have undone that for all of them.
+# Set E2E_PLATFORM_OP_PORT to pin one anyway. Exports:
+# ZEROSHIP_AUTH_PLATFORM_ISSUER, E2E_PLATFORM_OP_JS, E2E_PLATFORM_OP_PID,
+# E2E_PLATFORM_OP_PORT.
 #
 # The default client id is `zeroship-console`, NOT `zeroship-cli`. The CLI id is
 # the one control intersects against the principal's live
@@ -131,7 +135,7 @@ _e2e_write_platform_op_js() {
 //   node platform-op.mjs serve
 //   node platform-op.mjs mint <subject> <scope> <client-id> <ttl-seconds>
 import { createServer } from "node:http";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 
 const jose = await import(process.env.E2E_PLATFORM_OP_JOSE);
@@ -152,7 +156,7 @@ if (mode === "serve") {
   const body = JSON.stringify({
     keys: [{ kid, kty: "OKP", crv: "Ed25519", alg: "EdDSA", use: "sig", x }],
   });
-  createServer((req, res) => {
+  const server = createServer((req, res) => {
     const path = (req.url || "").split("?")[0];
     if (path === "/oauth2/.well-known/jwks.json") {
       res.writeHead(200, { "content-type": "application/json" });
@@ -161,7 +165,12 @@ if (mode === "serve") {
     }
     res.writeHead(404, { "content-type": "application/json" });
     res.end('{"error":"not_found"}');
-  }).listen(Number(process.env.E2E_PLATFORM_OP_PORT), "127.0.0.1");
+  });
+  // Port 0 unless the caller pinned one: the kernel picks a free port and the
+  // shell reads it back out of this file, so two harnesses never contend.
+  server.listen(Number(process.env.E2E_PLATFORM_OP_PORT || 0), "127.0.0.1", () => {
+    writeFileSync(process.env.E2E_PLATFORM_OP_PORT_FILE, String(server.address().port));
+  });
 } else if (mode === "mint") {
   const [subject, scope, clientId, ttl] = process.argv.slice(3);
   const now = Math.floor(Date.now() / 1000);
@@ -205,20 +214,15 @@ e2e_platform_op_up() {
     return 1
   }
   local pinned_issuer="${ZEROSHIP_AUTH_PLATFORM_ISSUER:-}"
-  E2E_PLATFORM_OP_PORT="${E2E_PLATFORM_OP_PORT:-9188}"
   E2E_PLATFORM_OP_KEY="$key"
   E2E_PLATFORM_OP_JOSE="file://$E2E_JOSE_JS"
-  # 127.0.0.1 rather than localhost: the issuer string is compared byte-for-byte
-  # against the token's `iss`, and the JWKS is fetched from the same origin, so
-  # a name that may resolve to ::1 on one host and 127.0.0.1 on another is a
-  # portability hazard for no gain.
-  E2E_PLATFORM_OP_ISSUER="${pinned_issuer:-http://127.0.0.1:$E2E_PLATFORM_OP_PORT/oauth2}"
   # Control's `--oauth-audience` default. A token minted for anything else is
   # rejected with `wrong_audience` before the scope is ever read.
   E2E_PLATFORM_OP_AUDIENCE="${E2E_PLATFORM_OP_AUDIENCE:-control.zeroship.ai}"
   E2E_PLATFORM_OP_JS="$dir/platform-op.mjs"
-  export E2E_PLATFORM_OP_PORT E2E_PLATFORM_OP_KEY E2E_PLATFORM_OP_JOSE
-  export E2E_PLATFORM_OP_ISSUER E2E_PLATFORM_OP_AUDIENCE E2E_PLATFORM_OP_JS
+  E2E_PLATFORM_OP_PORT_FILE="$dir/platform-op.port"
+  export E2E_PLATFORM_OP_KEY E2E_PLATFORM_OP_JOSE
+  export E2E_PLATFORM_OP_AUDIENCE E2E_PLATFORM_OP_JS E2E_PLATFORM_OP_PORT_FILE
 
   mkdir -p "$dir"
   _e2e_write_platform_op_js "$E2E_PLATFORM_OP_JS" || return 1
@@ -228,6 +232,11 @@ e2e_platform_op_up() {
   # has never run `pnpm install`. So these two are checked HERE, on the path that
   # actually runs a node server, not at the top of the function.
   if [ -n "$pinned_issuer" ]; then
+    E2E_PLATFORM_OP_ISSUER="$pinned_issuer"
+    # Empty, not unset: a caller doing `PIDS+=($E2E_PLATFORM_OP_PID)` must add
+    # nothing here rather than trip `set -u`.
+    E2E_PLATFORM_OP_PID=""
+    export E2E_PLATFORM_OP_ISSUER E2E_PLATFORM_OP_PID
     echo "  note: platform issuer pinned to $pinned_issuer; serving no harness JWKS" >&2
     return 0
   fi
@@ -240,11 +249,7 @@ e2e_platform_op_up() {
     return 1
   }
 
-  # Same treatment `stack_up` gives its own ports: a leftover listener from an
-  # aborted run would otherwise serve the PREVIOUS run's public key and every
-  # token would fail signature verification.
-  lsof -ti :"$E2E_PLATFORM_OP_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
-
+  rm -f "$E2E_PLATFORM_OP_PORT_FILE"
   node "$E2E_PLATFORM_OP_JS" serve > "$dir/platform-op.log" 2>&1 &
   E2E_PLATFORM_OP_PID=$!
   export E2E_PLATFORM_OP_PID
@@ -254,14 +259,20 @@ e2e_platform_op_up() {
     echo "$E2E_PLATFORM_OP_PID" >> "$PIDFILE"
   fi
 
-  for i in $(seq 1 40); do
-    if curl -sf "$E2E_PLATFORM_OP_ISSUER/.well-known/jwks.json" >/dev/null 2>&1; then
-      break
-    fi
+  for i in $(seq 1 80); do
+    [ -s "$E2E_PLATFORM_OP_PORT_FILE" ] && break
     sleep 0.25
   done
-  if ! curl -sf "$E2E_PLATFORM_OP_ISSUER/.well-known/jwks.json" >/dev/null 2>&1; then
-    echo "e2e_platform_op_up: JWKS never answered on :$E2E_PLATFORM_OP_PORT" >&2
+  E2E_PLATFORM_OP_PORT="$(cat "$E2E_PLATFORM_OP_PORT_FILE" 2>/dev/null)"
+  # 127.0.0.1 rather than localhost: the issuer string is compared byte-for-byte
+  # against the token's `iss`, and the JWKS is fetched from the same origin, so
+  # a name that may resolve to ::1 on one host and 127.0.0.1 on another is a
+  # portability hazard for no gain.
+  E2E_PLATFORM_OP_ISSUER="http://127.0.0.1:$E2E_PLATFORM_OP_PORT/oauth2"
+  export E2E_PLATFORM_OP_PORT E2E_PLATFORM_OP_ISSUER
+  if [ -z "$E2E_PLATFORM_OP_PORT" ] ||
+     ! curl -sf "$E2E_PLATFORM_OP_ISSUER/.well-known/jwks.json" >/dev/null 2>&1; then
+    echo "e2e_platform_op_up: JWKS never answered (port='${E2E_PLATFORM_OP_PORT:-unbound}')" >&2
     tail -10 "$dir/platform-op.log" >&2 2>/dev/null || true
     return 1
   fi
