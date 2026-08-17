@@ -389,6 +389,55 @@ async fn the_cli_device_grant_returns_a_short_access_token_and_a_refresh_token()
     fx.cleanup().await;
 }
 
+/// KNOWN GAP, pinned so that changing it is a visible diff.
+///
+/// `zeroship.principal_grants` is the entitlement store. Control's parallel
+/// mint intersects with it (`crates/control/src/device_handlers.rs`,
+/// `deploy_scopes_for_principal`) and so does the internal platform mint
+/// (`crates/auth/src/oidc/device_token.rs`, `mint_platform_token`). This
+/// grant does NOT: it caps only to the client registration, so the scope a
+/// login-issued token carries is independent of the principal's stored
+/// grants.
+///
+/// The fixture user is created with no grant rows at all, which is the whole
+/// measurement - if the intersection existed, the scope below would be empty.
+///
+/// It cannot simply be added here. Nothing provisions grants for a
+/// platform-native creator except control's `/api/device/token`
+/// (`identity_bridge::ensure_platform_creator_grants`, its only call site),
+/// and `db/migrations-ts/20260702000900_grants.ts` gives `zeroship_auth`
+/// SELECT only on that table. Intersecting without moving provisioning first
+/// would mint `scope: ""` on every first login.
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn the_cli_device_grant_does_not_consult_stored_principal_grants() {
+    let Some(fx) = Fixture::boot().await else {
+        return;
+    };
+    let rows = fx
+        .db
+        .query(
+            "SELECT COUNT(*)::BIGINT AS n FROM zeroship.principal_grants \
+             WHERE principal_id = $1",
+            &[&fx.user_id],
+        )
+        .await
+        .expect("count principal grants");
+    assert_eq!(
+        rows[0].get::<_, i64>("n"),
+        0,
+        "the measurement needs a principal with no stored grants"
+    );
+
+    let (token, _device_code) = fx.login().await;
+    assert_eq!(
+        token.scope, "apps:deploy apps:read offline_access",
+        "a grant this principal does not hold was issued anyway"
+    );
+
+    fx.cleanup().await;
+}
+
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn a_cli_refresh_rotation_keeps_the_platform_principal_token_shape() {

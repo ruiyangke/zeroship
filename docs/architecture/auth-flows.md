@@ -1012,7 +1012,11 @@ VERIFIED walk-through:
 
 ## 2. CLI auth
 
-### 2.1 Live flow used by `zeroship login`: Control device grant
+### 2.1 Control device grant (NOT the flow `zeroship login` uses)
+
+`zeroship login` moved to the OP's own device grant, section 2.3. This flow
+still exists and still mints through `platform_mint_key`; nothing in the CLI
+calls it.
 
 ```text
 +----------------------------------------------------------+
@@ -1063,10 +1067,10 @@ VERIFIED walk-through:
 
 VERIFIED walk-through:
 
-1. Both accepted `--provider` values currently call the same Control flow. The
-   CLI sends fixed client `zeroship-cli` and its requested scopes to
-   `/api/device/auth` (`crates/cli/src/auth.rs:80-109`,
-   `crates/cli/src/auth.rs:164-173`).
+1. No CLI code path reaches this flow. `/api/device/auth` and
+   `/api/device/token` are still served and still behave as described below;
+   the caller that used to drive them is now on the OP's endpoints
+   (`crates/cli/src/auth.rs`, `login_device_flow`).
 2. Control start is unauthenticated but rate limited. It creates 32 random bytes,
    stores only their SHA-256 hash with a user code, `provider=platform`, scopes,
    and a 10-minute expiry
@@ -1097,13 +1101,11 @@ VERIFIED walk-through:
    and ordinary JWT expiry before deleting the one-shot row
    (`crates/control/src/device_handlers.rs:487-536`,
    `crates/control/src/device_handlers.rs:759-813`).
-7. CLI requires `provider=platform`, saves no refresh token, and writes
-   `token.json` mode 0600 on Unix
-   (`crates/cli/src/auth.rs:198-217`, `crates/cli/src/auth.rs:424-465`). The token
-   lasts at most 12 hours and expiry requires login again
-   (`crates/core/src/device_grant.rs:37-43`,
-   `crates/cli/src/auth.rs:142-160`). CLI logout only deletes the local file
-   (`crates/cli/src/auth.rs:112-127`).
+7. A token minted here lasts at most 12 hours and carries no refresh token, so
+   expiry means re-authorizing (`crates/core/src/device_grant.rs`,
+   `PLATFORM_TOKEN_MAX_TTL_SECS`). The CLI no longer consumes it; see 2.3 for
+   what it stores instead. CLI logout deletes only the local file
+   (`crates/cli/src/auth.rs`, `cmd_logout`).
 
 ### 2.2 Supabase browser approval alternative
 
@@ -1150,7 +1152,7 @@ registered claims (`crates/core/src/auth_provider/supabase.rs:312-390`). The
 cross-origin browser
 mechanics are Finding 9.
 
-### 2.3 Separate live OP RFC 8628 implementation, not used by the CLI
+### 2.3 The OP RFC 8628 grant `zeroship login` drives
 
 ```text
 +----------------------------------------------------------+
@@ -1203,13 +1205,21 @@ VERIFIED walk-through:
 4. Redemption locks the owner and checks credential version, disabled,
    deletion-requested, and anonymized state. It deletes the row, signs a
    15-minute access token, and issues refresh only for allowed `offline_access`
-   (`crates/auth/src/oidc/device_token.rs:427-511`).
-5. The complete CLI login and polling path calls Control's `/api/device/auth`
-   and `/api/device/token`, not this endpoint
-   (`crates/cli/src/auth.rs:164-173`, `crates/cli/src/auth.rs:224-240`). Search
-   method: a scoped search for `oauth2/device`, `/api/device`, and the device
-   grant URN across `crates/cli` found production endpoint construction only in
-   those two functions; the other matches were response types and tests.
+   (`crates/auth/src/oidc/device_token.rs`, `exchange_device_code_locked`).
+5. This IS the flow `zeroship login` drives. The CLI first reads control's RFC
+   9728 metadata (`GET {control}/.well-known/oauth-protected-resource`) to
+   learn which OP control accepts tokens from, then runs the grant against that
+   issuer (`crates/cli/src/auth.rs`, `discover_authorization_server` and
+   `login_device_flow`).
+6. For the reserved `zeroship-cli` client the minted access token is a PLATFORM
+   PRINCIPAL token - `sub` is the `zeroship.users` UUID, `aud` is control's
+   `oauth_audience` - and both the device redemption and the later refresh
+   rotation mint it through one helper
+   (`crates/auth/src/oidc/device_token.rs`, `mint_grant_access_token`). The
+   refresh row stores that same principal subject, so `kill_family` writes the
+   `zeroship.token_revocations` marker keyed `(zeroship-cli, principal UUID)`
+   that control's bearer read path consults - which is what recalls an
+   outstanding access token rather than waiting out its 15 minutes.
 
 ## 3. App end-user auth
 
