@@ -374,7 +374,17 @@ export function IssueDetailPage({
               ) : null}
             </div>
           </div>
-          <div className="issue-detail-side flex min-w-0 flex-col gap-5 border-l border-line pt-1 pl-7 [&_*]:max-w-full [&>*]:shrink-0 desktop:sticky desktop:top-0 desktop:max-h-[calc(100dvh-4rem)] desktop:self-start desktop:overflow-y-auto desktop:overscroll-contain desktop:pb-4 max-wide:mt-5 max-wide:static! max-wide:top-auto! max-wide:max-h-none! max-wide:self-auto! max-wide:overflow-visible! max-wide:overscroll-auto! max-wide:border-t max-wide:border-l-0 max-wide:pt-5 max-wide:pb-0! max-wide:pl-0">
+          {/* The rail is a sticky column only where the grid above it is two
+              columns, which is `wide` (1101px) and up. Below that it is a
+              block stacked under the conversation, so it wants none of the
+              sticky geometry and a top border instead of a left one.
+
+              Both halves are stated as the width that WANTS them. Saying it
+              the other way -- turn sticky on at `desktop` and off again under
+              `wide` -- needs `!` on every undo, because Tailwind emits
+              `(width>=901px)` after `not all and (width>=1101px)` and so the
+              on-rules win the 901-1100 overlap on source order alone. */}
+          <div className="issue-detail-side flex min-w-0 flex-col gap-5 border-line [&_*]:max-w-full [&>*]:shrink-0 wide:sticky wide:top-0 wide:max-h-[calc(100dvh-4rem)] wide:self-start wide:overflow-y-auto wide:overscroll-contain wide:border-l wide:pt-1 wide:pb-4 wide:pl-7 max-wide:mt-5 max-wide:border-t max-wide:pt-5">
             <FieldsPanel
               issue={detail.issue}
               people={detail.people}
