@@ -52,37 +52,46 @@ pub struct ColumnSnapshot {
     /// table constraints separately; only recognized ID format CHECKs project
     /// into [`Self::value_format`].
     ///
-    /// KNOWN GAP: these bodies NAME THEIR OWN COLUMN, and a rename does not rewrite
-    /// them, so a rebuild can emit a clause naming a column the new table does not
-    /// have. The stale copy is made at `render::declarative`'s SQLite rename rebuild,
-    /// which clones the LIVE table snapshot and rewrites only `ColumnSnapshot::name` -
-    /// not in the fold's `Op::RenameColumn` arm, which never sees this field.
+    /// These bodies NAME THEIR OWN COLUMN, so a rename has to follow them, and BOTH
+    /// replays that own a `TableSnapshot` now do: the fold's `Op::RenameColumn` arm
+    /// and `render::declarative`'s SQLite rename rebuild, through the shared
+    /// `rename_column_in_inline_checks`. This used to be a KNOWN GAP recorded here,
+    /// and the gap was real - the rebuild emitted
+    /// `"state" TEXT NOT NULL CHECK ("status" IN (…))` over a table with no `status`.
     ///
-    /// That DDL is REJECTED rather than accepted, and the rejection is designed. The
-    /// SQLite actor turns off double-quoted string literals for both DDL and DML
-    /// (`SQLITE_DBCONFIG_DQS_DDL` / `_DQS_DML` in the hardened open sequence), so an
-    /// unknown quoted identifier is an error naming the column rather than a silent
-    /// string literal. Without that setting the clause would degrade to a
-    /// constant-false CHECK the database accepts. The rebuild's `CREATE TABLE` leads
-    /// its statement spec, so the failure lands before any value copy, inside the
-    /// transaction.
+    /// The rewrite is TEXT SURGERY, which nothing else in this crate does to an
+    /// expression, and the reason is recorded in the paragraph below: there is no AST
+    /// to walk and nothing complete to re-render from. It is admissible only because
+    /// the fragment is walked as QUOTED RUNS, so a string literal spelling the old
+    /// column name is copied through whole, the decoded identifier is matched EXACTLY,
+    /// and a body the walk cannot read is left STALE rather than corrupt.
     ///
-    /// Two more things keep it off every live path: a SQLite CATALOG snapshot carries
-    /// this field empty and `stored_create_sql` set, which routes the rebuild through
-    /// the arm that replays SQLite's own stored body; and the only fold-sourced
-    /// snapshot feeds a historical replay whose artifact is never applied. The first
-    /// of those is an accident of what introspection recovers, not a guard.
+    /// The severity of a stale body, MEASURED before the fix: that DDL is REJECTED
+    /// rather than accepted, and the rejection is designed. The SQLite actor turns off
+    /// double-quoted string literals for both DDL and DML (`SQLITE_DBCONFIG_DQS_DDL` /
+    /// `_DQS_DML` in the hardened open sequence), so an unknown quoted identifier is an
+    /// error naming the column (`no such column: "status"`) rather than a silent string
+    /// literal. Without that setting the clause would degrade to a constant CHECK the
+    /// database accepts. The rebuild's `CREATE TABLE` leads its statement spec, so the
+    /// failure lands before any value copy, inside the transaction: a FAILED migration,
+    /// never a corrupted schema.
+    ///
+    /// A SQLite CATALOG snapshot carries this field EMPTY and `stored_create_sql` set,
+    /// which routes a pure rename through the arm that replays SQLite's own stored body
+    /// and lets its `RENAME COLUMN` rewrite the predicate. That is an accident of what
+    /// introspection recovers, not a guard, and it is why the rewrite above is scoped to
+    /// what the fold populates rather than relying on the emptiness holding.
     ///
     /// Regenerating the clause from the column's facets does NOT work as a general
     /// repair, and this is the load-bearing detail for anyone attempting it: only the
     /// value-format writer still has its input on the snapshot. The uuid, SQLite enum
     /// and domain writers all overwrite `data_type` / `ddl_type_override` and discard
     /// the name of the type that produced the check, so there is nothing left to
-    /// regenerate from - only something to infer.
+    /// regenerate from - only something to infer. That is what forces the surgery.
     ///
-    /// [`Self::generated`] carries the same hazard through the same emitter and is
-    /// worse: a generated expression names OTHER columns by definition, so no
-    /// rename-side rewrite is even conceivable for it.
+    /// [`Self::generated`] carries the same hazard through the same emitter and was
+    /// repaired first, by the OTHER route: it keeps the closed `Expr` its rendering came
+    /// from, so its rename walks an AST.
     pub inline_checks: Vec<String>,
     /// A generated/computed column expression rendered for the target dialect,
     /// plus whether it is STORED or VIRTUAL. Emission-only, like `default`: live

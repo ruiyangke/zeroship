@@ -1879,6 +1879,16 @@ pub fn fold_ops_onto(
                     snap, table, from, to, dialect,
                 )
                 .map_err(|error| FoldError::Render(error.to_string()))?;
+                // An inline CHECK body names the column it guards, so the rename has
+                // to follow it for the same reason. This one CANNOT be re-rendered
+                // from an AST - `inline_checks` is rendered SQL text whose producers
+                // keep none - so it is rewritten by a quoted-run walk that copies a
+                // string literal through whole and leaves an unparseable body stale
+                // (`rename_column_in_inline_checks`). Without it, a folded snapshot
+                // carrying a rename is a broken rebuild source for every LATER
+                // migration in the same history, which the rebuild's own rewrite
+                // cannot repair: it only knows the rename it is lowering.
+                crate::render::declarative::rename_column_in_inline_checks(snap, from, to, dialect);
                 // `cascade_columns` names columns, so a rename has to follow it.
                 // PostgreSQL renames the attribute in place and leaves every
                 // constraint's `conkey` pointing at it, so a later drop of the NEW

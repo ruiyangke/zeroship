@@ -2871,6 +2871,128 @@ pub(crate) fn rename_column_in_generated_columns(
     Ok(())
 }
 
+/// The character `dialect` wraps a column reference in. A DOUBLED occurrence is an
+/// escaped one and does not close the run, which is the whole grammar
+/// [`rename_quoted_column_in_sql`] needs.
+const fn ident_quote_char(dialect: SqlDialect) -> char {
+    match dialect {
+        SqlDialect::Postgres | SqlDialect::Sqlite => '"',
+        SqlDialect::Mysql => '`',
+    }
+}
+
+/// Rewrite every QUOTED IDENTIFIER spelling `from` inside one rendered SQL fragment,
+/// returning `None` to leave the fragment untouched.
+///
+/// This is TEXT SURGERY, and it is confined to the one shape that makes it sound: the
+/// fragment is walked as QUOTED RUNS, so a `'…'` STRING LITERAL is copied through
+/// whole and can never be mistaken for a column reference. That is the trap that rules
+/// out plain substitution here - a SQLite enum membership is
+/// `CHECK ("status" IN ('UNCONFIRMED', 'status'))`, where the same word appears as
+/// both. Matching is on the DECODED identifier and is EXACT, so `"status_id"` is not a
+/// `"status"`, and a BARE `status` is not rewritten at all: it is a different token,
+/// and every producer of these fragments quotes.
+///
+/// The `Expr`-walking rewrite [`rename_column_in_generated_columns`] uses is not
+/// available: `ColumnSnapshot::inline_checks` is a `Vec<String>` of already-rendered
+/// SQL whose producers (the enum, domain, UUID and TypeID/ULID writers) keep no AST,
+/// and the facets two of them were built from are overwritten in the same breath, so
+/// there is nothing to re-render from either.
+///
+/// ROUND-TRIP GUARD, the same one [`crate::render::fold`]'s constraint-definition
+/// rewrite carries: an identifier is replaced only if re-quoting its decoded form
+/// reproduces the ORIGINAL run byte for byte, and an UNTERMINATED run abandons the
+/// whole fragment. A body this scan misreads is therefore left STALE rather than
+/// CORRUPT. The literal grammar assumed is quote-DOUBLING, which is what this crate
+/// emits on every dialect (`render::dml::sql_string_literal`, and MySQL's hex form
+/// carries no interior quote at all); a backslash-escaped literal is not produced
+/// here and the backend pins `NO_BACKSLASH_ESCAPES` besides.
+fn rename_quoted_column_in_sql(
+    sql: &str,
+    from: &str,
+    to: &str,
+    dialect: SqlDialect,
+) -> Option<String> {
+    let quote = ident_quote_char(dialect);
+    let replacement = crate::render::dml::escape_quote_ident_for_dialect(to, dialect);
+    let mut out = String::with_capacity(sql.len());
+    let mut rewrote = false;
+    let mut i = 0usize;
+    while i < sql.len() {
+        let ch = sql[i..].chars().next()?;
+        if ch != '\'' && ch != quote {
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        }
+        let mut j = i + ch.len_utf8();
+        let mut decoded = String::new();
+        let closed = loop {
+            let Some(offset) = sql[j..].find(ch) else {
+                break false;
+            };
+            let close = j + offset;
+            decoded.push_str(&sql[j..close]);
+            let after = close + ch.len_utf8();
+            if sql[after..].starts_with(ch) {
+                decoded.push(ch);
+                j = after + ch.len_utf8();
+                continue;
+            }
+            j = after;
+            break true;
+        };
+        if !closed {
+            return None;
+        }
+        let raw = &sql[i..j];
+        if ch == quote
+            && decoded == from
+            && crate::render::dml::escape_quote_ident_for_dialect(&decoded, dialect) == raw
+        {
+            out.push_str(&replacement);
+            rewrote = true;
+        } else {
+            out.push_str(raw);
+        }
+        i = j;
+    }
+    rewrote.then_some(out)
+}
+
+/// Follow a COLUMN rename into every inline CHECK body this table carries.
+///
+/// The sibling of [`rename_column_in_generated_columns`], one field over and reached
+/// from the same two replays: the offline fold's `Op::RenameColumn` arm and the SQLite
+/// rename rebuild. `ColumnSnapshot::inline_checks` holds the enum membership, domain,
+/// UUID and TypeID/ULID predicates, and every one of them NAMES ITS OWN COLUMN. The
+/// rebuild derives its post-rename table from the live one by changing column NAMES,
+/// so without this the emitted `CREATE TABLE` carried
+/// `"state" TEXT NOT NULL CHECK ("status" IN (…))` over a table with no `status` -
+/// which the hardened SQLite connection REFUSES (`SQLITE_DBCONFIG_DQS_DDL` is off, so
+/// the unknown quoted token is an error rather than a demotion to a CONSTANT string
+/// comparison - constant-false usually, but constant-TRUE when the old column name
+/// happens to be one of the members, which enforces nothing at all), failing the
+/// migration at the rebuild's LEADING statement.
+///
+/// Every column is walked, not only the renamed one: the match is on an exact decoded
+/// identifier, so a body that does not name `from` is returned untouched, and a body
+/// on another column that DOES name it would be just as broken after the rename.
+pub(crate) fn rename_column_in_inline_checks(
+    snapshot: &mut TableSnapshot,
+    from: &str,
+    to: &str,
+    dialect: SqlDialect,
+) {
+    for column in &mut snapshot.columns {
+        for check in &mut column.inline_checks {
+            if let Some(renamed) = rename_quoted_column_in_sql(check, from, to, dialect) {
+                *check = renamed;
+            }
+        }
+    }
+}
+
 /// Follow a TABLE rename into every generated expression this table carries.
 ///
 /// A generated expression may QUALIFY its column references with the enclosing
@@ -7304,6 +7426,32 @@ impl DeclarativeAuthor {
         // column is now `quantity` - refused by SQLite inside the rebuild
         // transaction, so the migration cannot apply at all.
         rename_column_in_generated_columns(&mut desired_table, table, from, to, self.dialect)?;
+        // The same hazard one field over, and it reaches the SAME emitter: an inline
+        // CHECK body names the column it guards, so the rebuild emitted
+        // `"state" TEXT NOT NULL CHECK ("status" IN (…))` for a column that is now
+        // `state`. `has_inline_checks` is one of the three facets that route this
+        // rebuild through the snapshot renderer at all, so the stale body is not
+        // merely carried - it is the reason the renderer was chosen.
+        rename_column_in_inline_checks(&mut desired_table, from, to, self.dialect);
+        // STILL STALE HERE, and MEASURED rather than assumed: a FOREIGN KEY
+        // `ConstraintSnapshot::definition`. A fold-seeded live table carrying both an
+        // inline CHECK (which selects the snapshot renderer) and a column-level `ref`
+        // emits `CONSTRAINT "issues_owner_id_fkey" FOREIGN KEY (owner_id) …` after
+        // `owner_id` became `holder_id`. The fold's `Op::RenameColumn` arm already
+        // rewrites that definition; this one does not, and the repair is NOT the one
+        // more line it looks like. `ConstraintSnapshot`'s `PartialEq` COMPARES
+        // `definition`, so rewriting it here changes what `pure_sqlite_column_rename`
+        // sees, turns `preserve_stored_shape` off, and stops the CATALOG path replaying
+        // its stored body - a regression on the leg that is actually deployed. The
+        // rename-follow has to run AFTER that decision, which is a restructuring of
+        // this seam rather than an addition to it. `inline_checks` and `generated` are
+        // safe to rewrite in place only because both are EXCLUDED from column equality.
+        //
+        // Two carriers audited and found NOT exposed, so the list above is closed
+        // rather than merely unfinished: a table-level CHECK or UNIQUE never reaches a
+        // SQLite snapshot (the fold refuses both, by name), and a `default` cannot
+        // reference a column on SQLite - a literal DEFAULT 'status' beside a renamed
+        // `status` column comes through untouched.
 
         // ---- desired (post-rename) SDK schema `Value` ----
         // The shared SQLite emitter renders the new-table CREATE from this Value.
@@ -10632,6 +10780,135 @@ mod mysql_storage_agreement_tests {
                 f.name
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod inline_check_rename_tests {
+    //! The quoted-run walk behind [`rename_column_in_inline_checks`], at the level the
+    //! end-to-end SQLite suite cannot reach.
+    //!
+    //! `tests/rename_column_inline_check_sqlite.rs` proves the behaviour against a real
+    //! database on the one dialect that rebuilds. These pin the DISCRIMINATIONS that
+    //! make text surgery admissible here at all - literal vs identifier, exact vs
+    //! prefix, quoted vs bare - and the refusal that keeps a body it cannot read STALE
+    //! rather than CORRUPT. Every one of them is a way a plain substring swap is wrong.
+    use super::{rename_quoted_column_in_sql, SqlDialect};
+
+    #[test]
+    fn a_string_literal_spelling_the_column_name_is_not_a_column_reference() {
+        // The SQLite enum membership, with a MEMBER that spells the column.
+        assert_eq!(
+            rename_quoted_column_in_sql(
+                r#"CHECK ("status" IN ('UNCONFIRMED', 'status'))"#,
+                "status",
+                "state",
+                SqlDialect::Sqlite,
+            )
+            .as_deref(),
+            Some(r#"CHECK ("state" IN ('UNCONFIRMED', 'status'))"#),
+        );
+    }
+
+    #[test]
+    fn a_longer_name_that_merely_starts_with_the_renamed_one_is_left_alone() {
+        assert_eq!(
+            rename_quoted_column_in_sql(
+                r#"CHECK ("status_id" IS NOT NULL)"#,
+                "status",
+                "state",
+                SqlDialect::Sqlite,
+            ),
+            None,
+            "an exact decoded match, not a prefix: no rewrite means the fragment is \
+             returned untouched",
+        );
+    }
+
+    #[test]
+    fn a_bare_identifier_is_a_different_token_and_is_not_rewritten() {
+        assert_eq!(
+            rename_quoted_column_in_sql(
+                "CHECK (status IS NOT NULL)",
+                "status",
+                "state",
+                SqlDialect::Sqlite,
+            ),
+            None,
+            "every producer of these fragments quotes; an unquoted word could as \
+             easily be a keyword or a function name",
+        );
+    }
+
+    #[test]
+    fn every_occurrence_in_one_body_moves_together() {
+        // The SQLite UUID predicate names its column a dozen times over.
+        let renamed = rename_quoted_column_in_sql(
+            r#"CHECK ("ref" IS NULL OR (typeof("ref") = 'text' AND length("ref") = 36))"#,
+            "ref",
+            "target",
+            SqlDialect::Sqlite,
+        )
+        .expect("the body names the column");
+        assert_eq!(
+            renamed,
+            r#"CHECK ("target" IS NULL OR (typeof("target") = 'text' AND length("target") = 36))"#
+        );
+    }
+
+    #[test]
+    fn mysql_spells_the_identifier_with_backticks_and_the_walk_follows() {
+        assert_eq!(
+            rename_quoted_column_in_sql(
+                "CHECK (`status` IS NOT NULL)",
+                "status",
+                "state",
+                SqlDialect::Mysql,
+            )
+            .as_deref(),
+            Some("CHECK (`state` IS NOT NULL)"),
+        );
+        assert_eq!(
+            rename_quoted_column_in_sql(
+                r#"CHECK ("status" IS NOT NULL)"#,
+                "status",
+                "state",
+                SqlDialect::Mysql,
+            ),
+            None,
+            "a double-quoted token is not an identifier on MySQL, so it is left alone",
+        );
+    }
+
+    #[test]
+    fn an_unterminated_quote_abandons_the_whole_fragment() {
+        assert_eq!(
+            rename_quoted_column_in_sql(
+                r#"CHECK ("status" <> 'unclosed)"#,
+                "status",
+                "state",
+                SqlDialect::Sqlite,
+            ),
+            None,
+            "a body this walk cannot read is left STALE rather than half-rewritten",
+        );
+    }
+
+    #[test]
+    fn a_doubled_quote_escapes_rather_than_closes_its_run() {
+        // `'it''s'` is ONE literal. A walk that took the middle quote as a close
+        // would then read ` s` as ordinary text and `', "status" <> '` as a literal,
+        // and would miss the identifier entirely.
+        assert_eq!(
+            rename_quoted_column_in_sql(
+                r#"CHECK ("status" IN ('it''s', 'other'))"#,
+                "status",
+                "state",
+                SqlDialect::Sqlite,
+            )
+            .as_deref(),
+            Some(r#"CHECK ("state" IN ('it''s', 'other'))"#),
+        );
     }
 }
 

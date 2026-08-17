@@ -122,15 +122,20 @@ fn an_inlined_enum_column_gets_exactly_one_membership_check() {
 /// `NamedTypeRegistry`, and the descriptor's `enum_values` adds nothing on top of it.
 /// One CHECK before, one CHECK after.
 ///
-/// A SECOND, PRE-EXISTING defect this measurement exposed and does NOT fix, recorded
-/// so the assertion below is not mistaken for a blessing: the inline CHECK's BODY
-/// still names the PRE-rename column (`CHECK ("status" IN (...))` on a column now
-/// called `state`), because `sqlite_rename_rebuild` renames `ColumnSnapshot::name`
-/// and the generated expressions but not `inline_checks`. It is byte-identical with
-/// and without this fix. It is reachable only on the fold-seeded path taken here -
-/// a catalog-read live snapshot carries `stored_create_sql`, which makes the rebuild
-/// preserve the stored body and let SQLite's own `RENAME COLUMN` rewrite the
-/// predicate.
+/// A SECOND, PRE-EXISTING defect this measurement exposed and did NOT fix, kept here
+/// because this test is where it was first seen: the inline CHECK's BODY still named
+/// the PRE-rename column (`CHECK ("status" IN (...))` on a column now called `state`),
+/// because `sqlite_rename_rebuild` renamed `ColumnSnapshot::name` and the generated
+/// expressions but not `inline_checks`. It was byte-identical with and without the
+/// membership lift, which is why it was recorded rather than blamed on it.
+///
+/// IT IS NOW FIXED, and the assertion below was REVERSED accordingly - it used to pin
+/// the stale body as current behaviour. `rename_column_in_inline_checks` walks the
+/// rendered fragment as quoted runs and rewrites only the identifier, which is why the
+/// member literal `'status'` in the neighbouring file's fixture survives it. The
+/// end-to-end proof, including what SQLite does when handed the stale body, is
+/// `rename_column_inline_check_sqlite.rs`; this file keeps the assertion because the
+/// membership lift must not reintroduce the stale spelling by another route.
 #[test]
 fn a_sqlite_rebuild_carries_the_membership_exactly_once() {
     let ops = issues_ir().ops;
@@ -183,11 +188,14 @@ fn a_sqlite_rebuild_carries_the_membership_exactly_once() {
             && create.contains("'RESOLVED'"),
         "and that one CHECK carries every member:\n{create}"
     );
-    // The pre-existing staleness, pinned as the CURRENT behaviour so a later fix to
-    // it is a deliberate change rather than a surprise. See the doc comment.
+    // And it names the POST-rename column. See the doc comment: this assertion was
+    // reversed when the staleness it used to pin was fixed.
     assert!(
-        create.contains(r#""state" TEXT NOT NULL CHECK ("status" IN ("#),
-        "the inline CHECK body still names the pre-rename column (pre-existing, \
-         unchanged by the membership lift):\n{create}"
+        create.contains(r#""state" TEXT NOT NULL CHECK ("state" IN ("#),
+        "the inline CHECK body names the post-rename column:\n{create}"
+    );
+    assert!(
+        !create.contains(r#"CHECK ("status" IN ("#),
+        "and no CHECK body still names the renamed-away column:\n{create}"
     );
 }
