@@ -218,3 +218,22 @@ invent a fourth spelling.
 Three fixtures, one production invariant, three different invented `pws_`
 formats: `pws_seed_`, `pws_test_`, and an unpublished signing key. Each failed
 closed exactly as designed.
+
+## Green
+
+```text
+==> skip census: 1 test(s) announced they did nothing (1 allowlisted, 0 not)
+    test smtp_plaintext_sink_delivers_relay_forward ... ZEROSHIP-TEST-SKIPPED: skip (need AUTH_DB_URL + AUTH_TEST_SMTP_SINK=host:port)
+AUTH SUITE: 636 tests passed, 0 unexpected skips, 1 allowlisted (floor 505)
+```
+
+Zero `test result: FAILED` lines in the whole run. 451 to 636 is far more than
+the nine failures repaired: six Auth binaries that main's fail-fast never
+reached now run, which is most of the 185.
+
+No production code changed on this branch. Every edit is a test fixture, this
+file, or the audit document. The regression coverage is the suite itself plus
+the two projected-identity assertions added earlier
+(`crates/gateway/tests/oidc_rp_e2e.rs`,
+`crates/gateway/tests/auth_token_anchors_test.rs:1500`), which check the
+projected `pws_` rather than an HTTP status.
