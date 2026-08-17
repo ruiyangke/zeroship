@@ -819,15 +819,18 @@ openssl genpkey -algorithm ed25519 -out "$WORK/sk.pem" 2>/dev/null
 chmod 600 "$WORK/sk.pem"
 openssl rand -base64 48 > "$WORK/gate-secret"; chmod 600 "$WORK/gate-secret"
 
-ZEROSHIP_CONTROL_SIGNING_KEY_FILE="$WORK/sk.pem"
-ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$ZEROSHIP_CONTROL_SIGNING_KEY_FILE"
+ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$WORK/sk.pem"
 ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
+# The issuer control verifies the admin bearer against, on the same key the
+# gateway signs with. Up BEFORE control: control reads the issuer once at boot.
+e2e_platform_op_up "$WORK/sk.pem" "$WORK" || exit 1
+PIDS+=($E2E_PLATFORM_OP_PID)
 e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DBURL"
 e2e_with_platform_mint_key "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --blob-store "$WORK/bundles" \
-  --signing-key-file "$WORK/sk.pem" > "$WORK/control.log" 2>&1 & PIDS+=($!)
+  > "$WORK/control.log" 2>&1 & PIDS+=($!)
 "$BIN/zeroship-migrated" --port "$ZEROSHIP_MIGRATED_PORT" \
-  --signing-key-file "$WORK/sk.pem" --tmp-dir "$WORK/migrated-tmp" \
+  --tmp-dir "$WORK/migrated-tmp" \
  > "$WORK/migrated.log" 2>&1 & PIDS+=($!)
 for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 \
@@ -864,19 +867,18 @@ API_KEY=$(echo "$OUT" | awk -F= '$1 == "api_key" { print $2 }')
 # Same mechanism as tests/e2e_db_app_end_to_end.sh: the .zship carries the
 # DESCRIPTOR only; migrations travel through the migration service, which is
 # the real deployed path. A hand-rolled CREATE TABLE here would test nothing.
-POLICY_JSON='{"name":"e2e-devdeploy-db","statements":[{"effect":"allow","actions":["apps:read","apps:write","apps:deploy","billing:read","billing:write"],"resources":[{"type":"any"}],"conditions":[]}]}'
-POLICY_HASH="$(node -e 'const{createHash}=require("crypto");function c(v){if(v===null||typeof v==="number"||typeof v==="boolean")return JSON.stringify(v);if(typeof v==="string")return JSON.stringify(v);if(Array.isArray(v))return "["+v.map(c).join(",")+"]";return "{"+Object.keys(v).sort().map(k=>JSON.stringify(k)+":"+c(v[k])).join(",")+"}";}process.stdout.write(createHash("sha256").update(c(JSON.parse(process.argv[1]))).digest("hex"));' "$POLICY_JSON")"
+# The scope string is the action list the deleted permission_tokens policy
+# carried, one scope per Cedar action: control turns `scope` into the token
+# policy and intersects it with the owner's own authority.
+SCOPE="apps:read apps:write apps:deploy billing:read billing:write"
 CREATOR="$(node -e 'console.log(require("crypto").randomUUID())')"
-TOKID="$(node -e 'console.log(require("crypto").randomUUID())')"
-EXP=$(( $(date +%s) + 86400 ))
 psql_exec >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.users (id,email,name,email_verified_at) VALUES ('$CREATOR','devdeploy-db-$CREATOR@zeroship.test'::citext,'DevDeploy DB',NOW());
 INSERT INTO zeroship.platform_admin_roles (user_id,role,granted_by) VALUES ('$CREATOR','admin','$CREATOR');
-INSERT INTO zeroship.permission_tokens (id,owner_id,kind,name,policies,policy_hash,expires_at) VALUES ('$TOKID','$CREATOR','pat','devdeploy db','$POLICY_JSON'::jsonb,'$POLICY_HASH',to_timestamp($EXP));
 INSERT INTO zeroship.app_members (app_id,user_id,role) VALUES ('$APP_ID','$CREATOR','owner') ON CONFLICT (app_id,user_id) DO UPDATE SET role='owner';
 SQL
-PAT="$(node --input-type=module -e 'import{readFileSync}from "node:fs";import{createHash,randomBytes}from "node:crypto";import{importPKCS8,exportJWK,SignJWT}from "file://'"$JOSE"'";const[pem,owner,tid,phash,exp]=process.argv.slice(1);const key=await importPKCS8(readFileSync(pem,"utf8"),"EdDSA",{extractable:true});const x=(await exportJWK(key)).x;const kid=createHash("sha256").update(`{"crv":"Ed25519","kty":"OKP","x":"${x}"}`).digest("base64url");const jwt=await new SignJWT({sub:owner,owner,tid,jti:tid,scope:"pat",policy_hash:phash,nonce:randomBytes(32).toString("base64url")}).setProtectedHeader({alg:"EdDSA",typ:"pat+jwt",kid}).setIssuer("https://api.zeroship.ai").setAudience("control.zeroship.ai").setIssuedAt(Math.floor(Date.now()/1000)).setExpirationTime(Number(exp)).sign(key);process.stdout.write(jwt);' "$WORK/sk.pem" "$CREATOR" "$TOKID" "$POLICY_HASH" "$EXP")"
-[ "$(echo -n "$PAT" | awk -F. '{print NF}')" = "3" ] && pass "minted PAT" || { fail "PAT mint"; exit 1; }
+ADMIN_TOKEN="$(e2e_mint_platform_bearer "$CREATOR" "$SCOPE")"
+[ "$(echo -n "$ADMIN_TOKEN" | awk -F. '{print NF}')" = "3" ] && pass "minted platform bearer" || { fail "bearer mint"; exit 1; }
 
 node --input-type=module - "$RECORDER" "$APP/migrations" > "$WORK/apply-migrations.json" <<'NODE'
 import { pathToFileURL } from "node:url";
@@ -892,7 +894,7 @@ NODE
 [ -s "$WORK/apply-migrations.json" ] || { fail "recorded no migration IR"; exit 1; }
 APPLY_CODE="$(curl -s -o "$WORK/apply-response.json" -w '%{http_code}' -X POST \
   "http://localhost:$ZEROSHIP_MIGRATED_PORT/v1/apps/$APP_ID/migrations/apply" \
-  -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" \
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" \
   --data-binary @"$WORK/apply-migrations.json")"
 APPLIED="$(jget '.applied.length' < "$WORK/apply-response.json")"
 SKIPPED="$(jget '.skipped.length' < "$WORK/apply-response.json")"
