@@ -7,6 +7,7 @@ import {
 } from "react";
 
 import { Button } from "./Button";
+import { cn } from "./cn";
 import { Input } from "./Input";
 
 export interface FilterBarActiveFilter {
@@ -103,9 +104,10 @@ export const FilterBar = forwardRef<HTMLDivElement, FilterBarProps>(function Fil
       {...props}
       ref={ref}
       role={searchable ? "search" : undefined}
-      className={`flex min-h-8 w-full flex-wrap items-center gap-2 border-b border-line py-1${
-        className ? ` ${className}` : ""
-      }`}
+      className={cn(
+        "flex min-h-8 w-full flex-wrap items-center gap-2 border-b border-line py-1",
+        className,
+      )}
     >
       {searchable ? (
         <Input

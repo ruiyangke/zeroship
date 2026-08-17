@@ -1,6 +1,8 @@
 import { Button as BaseButton } from "@base-ui/react/button";
 import { forwardRef } from "react";
 
+import { cn } from "./cn";
+
 export type ButtonVariant = "filled" | "gray" | "plain";
 export type ButtonIntent = "normal" | "destructive";
 
@@ -71,9 +73,11 @@ export const Button = forwardRef<HTMLElement, ButtonProps>(function Button(
       className={(state) => {
         const consumerClasses =
           typeof className === "function" ? className(state) : className;
-        return `${BASE_CLASSES} ${visualClasses(variant, intent, state.disabled, pressed)}${
-          consumerClasses ? ` ${consumerClasses}` : ""
-        }`;
+        return cn(
+          BASE_CLASSES,
+          visualClasses(variant, intent, state.disabled, pressed),
+          consumerClasses,
+        );
       }}
     >
       <span className="inline-flex min-w-0 items-center justify-center gap-1">

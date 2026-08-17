@@ -7,6 +7,8 @@ import {
   type Ref,
 } from "react";
 
+import { cn } from "./cn";
+
 const MainIdContext = createContext<string | null>(null);
 
 const AppShellRoot = forwardRef<HTMLDivElement, ComponentPropsWithoutRef<"div">>(
@@ -21,9 +23,10 @@ const AppShellRoot = forwardRef<HTMLDivElement, ComponentPropsWithoutRef<"div">>
           data-slot="app-shell"
           data-sidebar-open=""
           data-sidebar-side="start"
-          className={`isolate flex h-dvh w-full min-w-0 flex-col overflow-hidden bg-canvas font-sans text-base font-normal text-ink leading-snug${
-            className ? ` ${className}` : ""
-          }`}
+          className={cn(
+            "isolate flex h-dvh w-full min-w-0 flex-col overflow-hidden bg-canvas font-sans text-base font-normal text-ink leading-snug",
+            className,
+          )}
         >
           <a data-slot="skip-link" href={`#${mainId}`}>
             Skip to main content
@@ -44,9 +47,10 @@ const AppShellHeader = forwardRef<HTMLElement, ComponentPropsWithoutRef<"header"
         {...props}
         ref={ref}
         data-slot="app-shell-header"
-        className={`flex min-h-12 flex-none items-center border-b border-line-strong bg-surface px-4 py-2${
-          className ? ` ${className}` : ""
-        }`}
+        className={cn(
+          "flex min-h-12 flex-none items-center border-b border-line-strong bg-surface px-4 py-2",
+          className,
+        )}
       />
     );
   },
@@ -64,9 +68,10 @@ const AppShellMain = forwardRef<HTMLElement, ComponentPropsWithoutRef<"main">>(
         ref={ref as Ref<HTMLElement>}
         id={mainId}
         data-slot="app-shell-main split-main"
-        className={`min-h-0 w-full min-w-0 flex-1 overflow-auto overscroll-contain px-6 pb-8 pt-4${
-          className ? ` ${className}` : ""
-        }`}
+        className={cn(
+          "min-h-0 w-full min-w-0 flex-1 overflow-auto overscroll-contain px-6 pb-8 pt-4",
+          className,
+        )}
       >
         {children}
       </main>

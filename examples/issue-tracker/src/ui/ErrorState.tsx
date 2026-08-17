@@ -4,6 +4,8 @@ import {
   type ReactNode,
 } from "react";
 
+import { cn } from "./cn";
+
 export type ErrorStateIntent = "warning" | "danger";
 
 export interface ErrorStateProps extends Omit<
@@ -49,7 +51,7 @@ const ErrorStateActions = forwardRef<
     <div
       {...props}
       ref={ref}
-      className={`${ACTIONS_CLASSES}${className ? ` ${className}` : ""}`}
+      className={cn(ACTIONS_CLASSES, className)}
     />
   );
 });
@@ -75,18 +77,20 @@ const ErrorStateRoot = forwardRef<HTMLDivElement, ErrorStateProps>(
         ref={ref}
         role={live ? "alert" : undefined}
         data-intent={intent}
-        className={`grid min-h-8 place-items-center px-4 py-6 text-center text-ink-secondary${
-          className ? ` ${className}` : ""
-        }`}
+        className={cn(
+          "grid min-h-8 place-items-center px-4 py-6 text-center text-ink-secondary",
+          className,
+        )}
       >
         <div className={COLUMN_CLASSES}>
           <div
             aria-hidden="true"
-            className={`inline-flex size-8 items-center justify-center ${
+            className={cn(
+              "inline-flex size-8 items-center justify-center",
               intent === "warning"
                 ? "text-warning-strong"
-                : "text-danger-strong"
-            }`}
+                : "text-danger-strong",
+            )}
           >
             <CircleAlertIcon />
           </div>

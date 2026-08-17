@@ -1,5 +1,7 @@
 import type { ComponentPropsWithoutRef, ReactNode } from "react";
 
+import { cn } from "./cn";
+
 export type BannerIntent = "info" | "success" | "warning" | "danger";
 
 export interface BannerProps extends Omit<ComponentPropsWithoutRef<"div">, "title"> {
@@ -63,14 +65,19 @@ export function Banner({
           : undefined
       }
       data-intent={intent}
-      className={`rounded border border-s-4 border-line text-base text-ink ${INTENT_CLASSES[intent]}${
-        className ? ` ${className}` : ""
-      }`}
+      className={cn(
+        "rounded border border-s-4 border-line text-base text-ink",
+        INTENT_CLASSES[intent],
+        className,
+      )}
     >
       <div className="flex min-h-8 flex-row items-start gap-3 px-3 py-2">
         <div
           aria-hidden="true"
-          className={`inline-flex size-4 flex-none items-center justify-center ${ICON_CLASSES[intent]}`}
+          className={cn(
+            "inline-flex size-4 flex-none items-center justify-center",
+            ICON_CLASSES[intent],
+          )}
         >
           <CircleAlertIcon />
         </div>

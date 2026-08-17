@@ -1,6 +1,8 @@
 import { Progress as BaseProgress } from "@base-ui/react/progress";
 import { forwardRef, type ReactNode } from "react";
 
+import { cn } from "./cn";
+
 export type ProgressSize = "sm" | "md" | "lg";
 
 export interface ProgressProps extends Omit<
@@ -35,9 +37,7 @@ export const Progress = forwardRef<HTMLDivElement, ProgressProps>(
         render={(rootProps, state) => (
           <div
             {...rootProps}
-            className={[rootProps.className, className]
-              .filter(Boolean)
-              .join(" ") || undefined}
+            className={cn(rootProps.className, className) || undefined}
             data-slot="progress"
             data-size={size}
             data-status={state.status}
@@ -56,7 +56,7 @@ export const Progress = forwardRef<HTMLDivElement, ProgressProps>(
             ) : null}
             <BaseProgress.Track data-slot="progress-track">
             <BaseProgress.Indicator
-              className={indicatorClassName}
+              className={cn(indicatorClassName) || undefined}
               data-slot="progress-indicator"
             />
             </BaseProgress.Track>

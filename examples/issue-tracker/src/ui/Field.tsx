@@ -1,6 +1,8 @@
 import { Field as BaseField } from "@base-ui/react/field";
 import { forwardRef } from "react";
 
+import { cn } from "./cn";
+
 const ROOT_CLASSES = "flex min-w-0 flex-col gap-2 font-sans text-ink";
 const LABEL_CLASSES =
   "inline-flex items-baseline gap-1 text-sm font-medium leading-snug text-ink-secondary";
@@ -13,7 +15,7 @@ function resolveClassName<State>(
 ) {
   const consumerClasses =
     typeof className === "function" ? className(state) : className;
-  return `${baseClasses}${consumerClasses ? ` ${consumerClasses}` : ""}`;
+  return cn(baseClasses, consumerClasses);
 }
 
 const Root = forwardRef<HTMLDivElement, BaseField.Root.Props>(function FieldRoot(

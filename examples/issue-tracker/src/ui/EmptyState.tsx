@@ -4,6 +4,8 @@ import {
   type ReactNode,
 } from "react";
 
+import { cn } from "./cn";
+
 export interface EmptyStateProps extends Omit<
   ComponentPropsWithoutRef<"div">,
   "title"
@@ -28,9 +30,10 @@ export const EmptyState = forwardRef<HTMLDivElement, EmptyStateProps>(
       <div
         {...props}
         ref={ref}
-        className={`grid min-h-8 place-items-center px-4 py-6 text-center text-ink-secondary${
-          className ? ` ${className}` : ""
-        }`}
+        className={cn(
+          "grid min-h-8 place-items-center px-4 py-6 text-center text-ink-secondary",
+          className,
+        )}
       >
         <div className={COLUMN_CLASSES}>
           {icon != null ? (

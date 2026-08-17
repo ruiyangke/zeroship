@@ -6,6 +6,8 @@ import {
   type Ref,
 } from "react";
 
+import { cn } from "./cn";
+
 export type CheckboxSize = "sm" | "md" | "lg";
 export type CheckboxVariant = "default" | "tinted";
 
@@ -59,7 +61,7 @@ export const Checkbox = forwardRef<HTMLSpanElement, CheckboxProps>(
       <BaseCheckbox.Root
         {...props}
         ref={ref as Ref<HTMLElement>}
-        className={className}
+        className={cn(className) || undefined}
         disabled={disabled}
         data-slot="checkbox"
         data-size={size}
@@ -80,9 +82,7 @@ export const Checkbox = forwardRef<HTMLSpanElement, CheckboxProps>(
     return (
       <label
         {...fieldProps}
-        className={[fieldClassName, fieldProps?.className]
-          .filter(Boolean)
-          .join(" ") || undefined}
+        className={cn(fieldClassName, fieldProps?.className) || undefined}
         data-slot="checkbox-field"
         data-size={size}
         data-disabled={disabled || undefined}

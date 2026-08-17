@@ -3,6 +3,8 @@ import {
   type ComponentPropsWithoutRef,
 } from "react";
 
+import { cn } from "./cn";
+
 export type PageHeaderProps = ComponentPropsWithoutRef<"div">;
 export type PageHeaderTitleProps = ComponentPropsWithoutRef<"h1">;
 export type PageHeaderDescriptionProps = ComponentPropsWithoutRef<"p">;
@@ -21,7 +23,7 @@ const PageHeaderRoot = forwardRef<HTMLDivElement, PageHeaderProps>(
         {...props}
         ref={ref}
         data-slot="page-header"
-        className={`${ROOT_CLASSES}${className ? ` ${className}` : ""}`}
+        className={cn(ROOT_CLASSES, className)}
       >
         {children}
       </div>
@@ -37,7 +39,7 @@ const PageHeaderTitle = forwardRef<HTMLHeadingElement, PageHeaderTitleProps>(
         {...props}
         ref={ref}
         data-slot="page-header-title"
-        className={`${TITLE_CLASSES}${className ? ` ${className}` : ""}`}
+        className={cn(TITLE_CLASSES, className)}
       >
         {children}
       </h1>
@@ -55,7 +57,7 @@ const PageHeaderDescription = forwardRef<
       {...props}
       ref={ref}
       data-slot="page-header-description"
-      className={`${DESCRIPTION_CLASSES}${className ? ` ${className}` : ""}`}
+      className={cn(DESCRIPTION_CLASSES, className)}
     >
       {children}
     </p>

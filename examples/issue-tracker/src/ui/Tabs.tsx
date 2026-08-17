@@ -7,6 +7,8 @@ import {
   type Ref,
 } from "react";
 
+import { cn } from "./cn";
+
 export type TabsSize = "sm" | "md" | "lg";
 export type TabsVariant = "default" | "pill" | "card";
 export type TabsOrientation = "horizontal" | "vertical";
@@ -54,7 +56,7 @@ const TabsRoot = forwardRef<HTMLDivElement, TabsProps>(function TabsRoot(
       <BaseTabs.Root
         {...props}
         ref={ref}
-        className={className}
+        className={cn(className) || undefined}
         orientation={orientation}
         data-slot="tabs"
         data-size={size}
@@ -84,7 +86,7 @@ const TabsList = forwardRef<HTMLDivElement, TabsListProps>(function TabsList(
     <BaseTabs.List
       {...props}
       ref={ref}
-      className={className}
+      className={cn(className) || undefined}
       data-slot="tabs-list"
       data-size={size}
       data-variant={variant}
@@ -113,7 +115,7 @@ const TabsTab = forwardRef<HTMLButtonElement, TabsTabProps>(function TabsTab(
       ref={ref as Ref<HTMLElement>}
       type="button"
       value={value}
-      className={className}
+      className={cn(className) || undefined}
       data-slot="tabs-tab"
       data-size={sizeProp ?? rootSize}
       data-variant={variant}
@@ -139,7 +141,7 @@ const TabsPanel = forwardRef<HTMLDivElement, TabsPanelProps>(
         ref={ref}
         value={value}
         keepMounted={keepMounted ?? !lazyMount}
-        className={className}
+        className={cn(className) || undefined}
         data-slot="tabs-panel"
         data-size={size}
         data-variant={variant}
@@ -163,7 +165,7 @@ const TabsIndicator = forwardRef<HTMLSpanElement, TabsIndicatorProps>(
       <BaseTabs.Indicator
         {...props}
         ref={ref}
-        className={className}
+        className={cn(className) || undefined}
         data-slot="tabs-indicator"
         data-size={size}
         data-variant={variant}

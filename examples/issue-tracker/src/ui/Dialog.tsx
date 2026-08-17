@@ -6,6 +6,7 @@ import {
   type Ref,
 } from "react";
 import { Button, type ButtonProps } from "./Button";
+import { cn } from "./cn";
 
 export type DialogSize = "sm" | "md" | "lg" | "full";
 export type DialogPlacement = "center" | "top";
@@ -79,7 +80,11 @@ const DialogBackdrop = forwardRef<HTMLDivElement, DialogBackdropProps>(
       <BaseDialog.Backdrop
         {...props}
         ref={ref}
-        className={className}
+        className={(state) => {
+          const consumerClasses =
+            typeof className === "function" ? className(state) : className;
+          return cn(consumerClasses) || undefined;
+        }}
         data-slot="dialog-backdrop"
         data-tint={tint}
       />
@@ -101,7 +106,11 @@ const DialogPopup = forwardRef<HTMLDivElement, DialogPopupProps>(
       <BaseDialog.Popup
         {...props}
         ref={ref}
-        className={className}
+        className={(state) => {
+          const consumerClasses =
+            typeof className === "function" ? className(state) : className;
+          return cn(consumerClasses) || undefined;
+        }}
         data-slot="dialog-popup"
         data-size={size}
         data-placement={placement}

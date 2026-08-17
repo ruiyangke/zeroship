@@ -1,6 +1,7 @@
 import type { ComponentPropsWithoutRef } from "react";
 
 import { Button } from "./Button";
+import { cn } from "./cn";
 
 type PageItem =
   | { type: "page"; page: number }
@@ -90,9 +91,10 @@ export function Pagination({
     <nav
       {...props}
       aria-label={ariaLabel}
-      className={`flex min-w-0 flex-wrap items-center gap-3 text-sm text-ink-secondary${
-        className ? ` ${className}` : ""
-      }`}
+      className={cn(
+        "flex min-w-0 flex-wrap items-center gap-3 text-sm text-ink-secondary",
+        className,
+      )}
     >
       <p className="m-0 tabular-nums">
         {safeTotal === 0 ? "No results" : `Showing ${from}–${to} of ${safeTotal}`}
@@ -126,11 +128,11 @@ export function Pagination({
               key={`page-${item.page}`}
               type="button"
               variant="plain"
-              className={`h-7! min-w-6! px-1! font-mono tabular-nums${
-                item.page === currentPage
-                  ? " border-line! bg-surface-sunken! text-accent-strong!"
-                  : ""
-              }`}
+              className={cn(
+                "h-7! min-w-6! px-1! font-mono tabular-nums",
+                item.page === currentPage &&
+                  "border-line! bg-surface-sunken! text-accent-strong!",
+              )}
               aria-label={`Go to page ${item.page}`}
               aria-current={item.page === currentPage ? "page" : undefined}
               onClick={() => goTo(item.page)}

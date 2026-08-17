@@ -5,6 +5,8 @@ import {
   type FocusEvent as ReactFocusEvent,
 } from "react";
 
+import { cn } from "./cn";
+
 export type NumberFieldSize = "sm" | "md" | "lg";
 export type NumberFieldVariant = "default" | "outline";
 
@@ -83,9 +85,7 @@ export const NumberField = forwardRef<HTMLDivElement, NumberFieldProps>(
           return (
             <div
               {...rootProps}
-              className={[rootProps.className, className]
-                .filter(Boolean)
-                .join(" ") || undefined}
+              className={cn(rootProps.className, className) || undefined}
               data-slot="number-field"
               data-size={size}
               data-variant={variant}

@@ -4,6 +4,8 @@ import {
   type ReactNode,
 } from "react";
 
+import { cn } from "./cn";
+
 export interface StatCardProps extends ComponentPropsWithoutRef<"div"> {
   label: ReactNode;
   value: ReactNode;
@@ -25,7 +27,7 @@ export const StatCard = forwardRef<HTMLDivElement, StatCardProps>(
         data-slot="card stat-card"
         data-variant="elevated"
         data-size="md"
-        className={`${ROOT_CLASSES}${className ? ` ${className}` : ""}`}
+        className={cn(ROOT_CLASSES, className)}
       >
         <div
           data-slot="stat-card-head"

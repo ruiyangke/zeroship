@@ -1,5 +1,7 @@
 import type { ComponentPropsWithoutRef } from "react";
 
+import { cn } from "./cn";
+
 export type BadgeIntent =
   | "neutral"
   | "muted"
@@ -43,7 +45,11 @@ export function Badge({
   return (
     <span
       {...props}
-      className={`inline-flex min-h-6 min-w-0 max-w-full items-center justify-center rounded border px-1 align-middle text-xs font-medium leading-tight no-underline ${INTENT_CLASSES[variant][intent]}${className ? ` ${className}` : ""}`}
+      className={cn(
+        "inline-flex min-h-6 min-w-0 max-w-full items-center justify-center rounded border px-1 align-middle text-xs font-medium leading-tight no-underline",
+        INTENT_CLASSES[variant][intent],
+        className,
+      )}
     >
       <span className="min-w-0 truncate tabular-nums">{children}</span>
     </span>

@@ -5,6 +5,8 @@ import {
   type ReactNode,
 } from "react";
 
+import { cn } from "./cn";
+
 export interface ListViewItem {
   id: string;
   leading?: ReactNode;
@@ -48,7 +50,7 @@ function itemMain(item: ListViewItem) {
 
   if (item.href != null) {
     return (
-      <a className={`${MAIN_CLASSES} w-full cursor-pointer`} href={item.href}>
+      <a className={cn(MAIN_CLASSES, "w-full cursor-pointer")} href={item.href}>
         {contents}
       </a>
     );
@@ -57,7 +59,7 @@ function itemMain(item: ListViewItem) {
     return (
       <button
         type="button"
-        className={`${MAIN_CLASSES} w-full cursor-pointer`}
+        className={cn(MAIN_CLASSES, "w-full cursor-pointer")}
         onClick={item.onClick}
       >
         {contents}
@@ -81,20 +83,21 @@ export const ListView = forwardRef<HTMLUListElement, ListViewProps>(function Lis
     <ul
       {...props}
       ref={ref}
-      className={`m-0 w-full list-none rounded border border-line bg-surface p-0 text-ink${
-        className ? ` ${className}` : ""
-      }`}
+      className={cn(
+        "m-0 w-full list-none rounded border border-line bg-surface p-0 text-ink",
+        className,
+      )}
     >
       {items.map((item, index) => (
         <li
           key={item.id}
-          className={`flex min-h-8 items-center duration-fast ease-out motion-reduce:transition-none ${
-            density === "compact" ? "px-2" : "px-3"
-          }${divided && index > 0 ? " border-t border-line" : ""}${
-            item.href != null || item.onClick != null
-              ? " transition-colors hover:bg-surface-hover"
-              : ""
-          }`}
+          className={cn(
+            "flex min-h-8 items-center duration-fast ease-out motion-reduce:transition-none",
+            density === "compact" ? "px-2" : "px-3",
+            divided && index > 0 && "border-t border-line",
+            (item.href != null || item.onClick != null) &&
+              "transition-colors hover:bg-surface-hover",
+          )}
         >
           {itemMain(item)}
           {item.meta != null || item.trailing != null ? (

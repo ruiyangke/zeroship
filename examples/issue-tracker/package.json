@@ -26,21 +26,22 @@
     "@zeroship/server": "workspace:*",
     "react": "catalog:",
     "react-dom": "catalog:",
-    "react-router-dom": "catalog:"
+    "react-router-dom": "catalog:",
+    "tailwind-merge": "catalog:"
   },
   "devDependencies": {
     "@playwright/test": "1.58.2",
+    "@tailwindcss/vite": "catalog:",
     "@types/react": "catalog:",
     "@types/react-dom": "catalog:",
     "@vitejs/plugin-react": "catalog:",
     "@zeroship/types": "workspace:*",
     "@zeroship/vite-plugin": "workspace:*",
     "jsdom": "^29.1.1",
+    "tailwindcss": "catalog:",
     "typescript": "catalog:",
     "vite": "catalog:",
     "vitest": "^4.1.7",
-    "zeroship": "workspace:*",
-    "tailwindcss": "catalog:",
-    "@tailwindcss/vite": "catalog:"
+    "zeroship": "workspace:*"
   }
 }

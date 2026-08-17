@@ -1,6 +1,8 @@
 import { Input as BaseInput } from "@base-ui/react/input";
 import { forwardRef, type ReactNode } from "react";
 
+import { cn } from "./cn";
+
 export interface InputProps extends Omit<BaseInput.Props, "render"> {
   startSlot?: ReactNode;
   endSlot?: ReactNode;
@@ -17,7 +19,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
       ref={ref}
       render={(controlProps, state) => (
         <div
-          className={wrapperClassName}
+          className={cn(wrapperClassName) || undefined}
           data-slot="input"
           data-variant="outline"
           data-size="md"

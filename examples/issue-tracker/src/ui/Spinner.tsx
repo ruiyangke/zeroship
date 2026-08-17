@@ -1,5 +1,7 @@
 import { useId, type ComponentPropsWithoutRef } from "react";
 
+import { cn } from "./cn";
+
 export interface SpinnerProps extends ComponentPropsWithoutRef<"span"> {
   size?: "sm" | "md" | "lg";
   label?: string;
@@ -28,13 +30,17 @@ export function Spinner({
       aria-label={ariaLabel}
       aria-labelledby={consumerNamed ? ariaLabelledBy : labelId}
       role="status"
-      className={`inline-flex flex-none items-center justify-center text-ink-secondary${
-        className ? ` ${className}` : ""
-      }`}
+      className={cn(
+        "inline-flex flex-none items-center justify-center text-ink-secondary",
+        className,
+      )}
     >
       <span
         aria-hidden="true"
-        className={`block animate-spin rounded-full border border-line-strong border-t-current motion-reduce:animate-none ${RING_SIZE[size]}`}
+        className={cn(
+          "block animate-spin rounded-full border border-line-strong border-t-current motion-reduce:animate-none",
+          RING_SIZE[size],
+        )}
       />
       {consumerNamed ? null : (
         <span id={labelId} className="sr-only">
