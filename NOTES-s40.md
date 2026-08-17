@@ -113,6 +113,15 @@ as drift.
 Note all three are staleness of a different kind, and all three were invisible
 for the same reason: with no DSN the binary self-skipped and counted as passed.
 
+## RESULT
+
+Same command, same DSN, after the change:
+
+    test result: ok. 8 passed; 0 failed; finished in 121.32s
+
+against the baseline's `5 passed; 3 failed`. The binary was rebuilt at 10:56:30
+against sources last edited 10:55:42, checked by mtime rather than assumed.
+
 ## Finding 4: option (a) costs a charter widening, and that is the whole price
 
 `crates/zeroship-migrate-adapter/policies/platform.policy.toml` is the ceiling
