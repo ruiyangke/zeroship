@@ -204,6 +204,13 @@
           ]
         },
         {
+          "name": "attachments_storage_key_uniq",
+          "fields": [
+            "storageKey"
+          ],
+          "unique": true
+        },
+        {
           "name": "attachments_deleted_at_idx",
           "fields": [
             "deleted_at"
@@ -1692,9 +1699,10 @@
       },
       "indexes": [
         {
-          "name": "notifications_user_idx",
+          "name": "notifications_user_read_idx",
           "fields": [
-            "userId"
+            "userId",
+            "isRead"
           ]
         },
         {

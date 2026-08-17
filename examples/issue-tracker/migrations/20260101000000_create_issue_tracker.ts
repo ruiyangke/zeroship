@@ -364,6 +364,9 @@ export default {
       indexes: [
         { name: "attachments_issue_idx", on: ["issueId"] },
         { name: "attachments_comment_idx", on: ["commentId"] },
+        // One object, one row. Two rows naming the same key means deleting
+        // either attachment takes the other one's bytes with it.
+        { name: "attachments_storage_key_uniq", on: ["storageKey"], unique: true },
       ],
     });
 
@@ -548,7 +551,11 @@ export default {
         body: t.text(),
         isRead: t.boolean().notNull().default(false),
       },
-      indexes: [{ name: "notifications_user_idx", on: ["userId"] }],
+      // Composite rather than two indexes: it leads with `userId`, so the
+      // by-user-only read (`notifications.list` without `unreadOnly`) still
+      // uses it, and the unread badge -- polled on every page -- stops
+      // scanning a user's whole history to count the unread ones.
+      indexes: [{ name: "notifications_user_read_idx", on: ["userId", "isRead"] }],
     });
   },
 };

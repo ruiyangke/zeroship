@@ -41,7 +41,7 @@ const schema = {
     description: t.string(),
     isPatch: t.boolean().required().default(false),
     isObsolete: t.boolean().required().default(false),
-  }).index("attachments_issue_idx", ["issueId"]).index("attachments_comment_idx", ["commentId"]).index("attachments_deleted_at_idx", ["deleted_at"]).index("attachments_updated_at_idx", ["updated_at"]).index("attachments_created_by_idx", ["created_by"]),
+  }).index("attachments_issue_idx", ["issueId"]).index("attachments_comment_idx", ["commentId"]).uniqueIndex("attachments_storage_key_uniq", ["storageKey"]).index("attachments_deleted_at_idx", ["deleted_at"]).index("attachments_updated_at_idx", ["updated_at"]).index("attachments_created_by_idx", ["created_by"]),
   comments: defineSchema({
     issueId: t.string().required(),
     authorId: t.string().required(),
@@ -145,7 +145,7 @@ const schema = {
     title: t.string().required(),
     body: t.string(),
     isRead: t.boolean().required().default(false),
-  }).index("notifications_user_idx", ["userId"]).index("notifications_deleted_at_idx", ["deleted_at"]).index("notifications_updated_at_idx", ["updated_at"]).index("notifications_created_by_idx", ["created_by"]),
+  }).index("notifications_user_read_idx", ["userId","isRead"]).index("notifications_deleted_at_idx", ["deleted_at"]).index("notifications_updated_at_idx", ["updated_at"]).index("notifications_created_by_idx", ["created_by"]),
   productGroups: defineSchema({
     productId: t.string().required(),
     groupId: t.string().required(),
