@@ -1088,12 +1088,22 @@ export interface TableRuntimeOptions {
  *  Apply-level lowering (what reaches the live DDL):
  *  - `uniques`, `foreignKeys`, `indexes` LOWER to DDL on Postgres (a named UNIQUE
  *    + a single-`id` FOREIGN KEY + extra indexes appear in the live catalog).
- *  - `indexes` also lower on SQLite (plain btree); a table-level `uniques` /
- *    `foreignKeys` on SQLite is a HARD authoring error (the SQLite CREATE renders
- *    from the column descriptor — a table-level constraint is not threaded into
- *    the emitter; refused fail-closed rather than silently dropped).
+ *  - `indexes` also lower on SQLite (plain btree). A table-level `uniques` on
+ *    SQLite is a HARD authoring error, refused fail-closed rather than silently
+ *    dropped: "SQLite createTable table-level unique constraints are not threaded
+ *    into the emitter" (`Feature::TableLevelUnique`, zero-migrate
+ *    `src/model/support.rs`). It lowers on Postgres and MySQL.
  *  - `foreignKeys` can name one or more local columns and one or more referenced
- *    columns. Composite/non-`id` forms are PostgreSQL-only in the current engine.
+ *    columns, and is PORTABLE on all three dialects -- including the composite and
+ *    non-`id` forms (`Feature::{TableLevelForeignKey,CompositeForeignKey,
+ *    NonIdForeignKey}` are all `PORTABLE_FOREIGN_KEY`, i.e. `all_supported`).
+ *    THE TWO LINES ABOVE SAID THE OPPOSITE until 2026-08-17: that a table-level
+ *    `foreignKeys` was a hard SQLite error and that composite/non-`id` forms were
+ *    PostgreSQL-only. Both were false at the vendored commit AND at zero-migrate
+ *    `main` (518de22b) -- checked in the feature table, not inferred from the
+ *    neighbouring `uniques` carve-out, which is what made the claim look plausible
+ *    for so long. The only genuinely non-portable table-level constraints are
+ *    `uniques` (SQLite) and `checks` (SQLite + MySQL), below.
  *  - `checks` lower from the closed `Expr` AST through the engine renderer, and
  *    are POSTGRES-ONLY. A table-level check on SQLite or MySQL is refused
  *    fail-closed (`PG_ONLY_TABLE_LEVEL_CHECK`,

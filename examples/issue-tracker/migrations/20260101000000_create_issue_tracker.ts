@@ -40,9 +40,9 @@ import { enumType, table, t } from "@zeroship/migrate";
 //     `keywords.attach` are duplicate-row generators under retry.
 //
 // WHAT IT CANNOT ENFORCE, MEASURED RATHER THAN ASSUMED. Table-level `checks`
-// is in the same refused-on-SQLite class as `uniques`, which the type doc does
-// NOT say. Authoring one -- any one, down to `col("number").gt(0)` -- fails the
-// migration outright:
+// is refused on SQLite, like `uniques`. The type doc did not say so when this
+// was found; it does now, corrected from this measurement. Authoring one -- any
+// one, down to `col("number").gt(0)` -- fails the migration outright:
 //
 //   [UNSUPPORTED kind=expr op_index=16 dialect=sqlite]: table-level CHECK
 //   expression rendering is PostgreSQL-only in the current engine
