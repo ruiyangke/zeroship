@@ -6901,6 +6901,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "chrono",
+ "compio",
  "compio-postgres",
  "ed25519-dalek",
  "jsonwebtoken",
@@ -6913,6 +6914,7 @@ dependencies = [
  "uuid",
  "zeroship-authz",
  "zeroship-core",
+ "zeroship-test-support",
 ]
 
 [[package]]

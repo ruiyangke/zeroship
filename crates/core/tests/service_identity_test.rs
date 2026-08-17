@@ -5,7 +5,7 @@ use serde_json::json;
 use zeroship_core::service_identity::{
     verify_identity, AuthError, IdentityVerifier, MechanismTag, PeerCredentials,
     PresentedCredentials, ServiceIdentity, ServiceName, ServicePrincipal, StubIdentityVerifier,
-    TlsPeerInfo, TrustDomain,
+    TlsPeerInfo, TrustDomain, VerifyFuture,
 };
 
 fn principal(trust_domain: &str, name: &str) -> ServicePrincipal {
@@ -25,12 +25,9 @@ struct FailOpenVerifier {
 }
 
 impl IdentityVerifier for FailOpenVerifier {
-    fn verify(
-        &self,
-        _credentials: &PresentedCredentials<'_>,
-    ) -> Result<ServiceIdentity, AuthError> {
+    fn verify<'a>(&'a self, _credentials: &'a PresentedCredentials<'a>) -> VerifyFuture<'a> {
         self.calls.set(self.calls.get() + 1);
-        Ok(identity("svc/control"))
+        Box::pin(async { Ok(identity("svc/control")) })
     }
 }
 
@@ -52,8 +49,8 @@ fn service_identity_compares_domain_and_name_as_one_principal() {
     assert_eq!(identity.attributes()["assurance"], json!("stub"));
 }
 
-#[test]
-fn framework_rejects_missing_or_empty_credentials_before_verifier_dispatch() {
+#[compio::test]
+async fn framework_rejects_missing_or_empty_credentials_before_verifier_dispatch() {
     let verifier = FailOpenVerifier {
         calls: Cell::new(0),
     };
@@ -74,7 +71,7 @@ fn framework_rejects_missing_or_empty_credentials_before_verifier_dispatch() {
             "https://control.zeroship.ai",
         );
         assert_eq!(
-            verify_identity(&verifier, &observed),
+            verify_identity(&verifier, &observed).await,
             Err(AuthError::NoCredentialPresented)
         );
     }
@@ -82,8 +79,8 @@ fn framework_rejects_missing_or_empty_credentials_before_verifier_dispatch() {
     assert_eq!(verifier.calls.get(), 0);
 }
 
-#[test]
-fn stub_verifier_maps_presented_credentials_to_a_neutral_identity() {
+#[compio::test]
+async fn stub_verifier_maps_presented_credentials_to_a_neutral_identity() {
     let expected = identity("svc/gateway");
     let verifier = StubIdentityVerifier::new(expected.clone());
     let observed = PeerCredentials::new(
@@ -92,35 +89,34 @@ fn stub_verifier_maps_presented_credentials_to_a_neutral_identity() {
         "https://control.zeroship.ai",
     );
 
-    assert_eq!(verify_identity(&verifier, &observed), Ok(expected));
+    assert_eq!(verify_identity(&verifier, &observed).await, Ok(expected));
 }
 
 struct ObservationVerifier;
 
 impl IdentityVerifier for ObservationVerifier {
-    fn verify(
-        &self,
-        credentials: &PresentedCredentials<'_>,
-    ) -> Result<ServiceIdentity, AuthError> {
-        assert_eq!(credentials.bearer_assertion(), "observed-assertion");
-        assert_eq!(
-            credentials
-                .tls_peer()
-                .expect("TLS peer observation is preserved")
-                .certificate_chain_der()
-                .len(),
-            1
-        );
-        assert_eq!(
-            credentials.expected_audience(),
-            "https://control.zeroship.ai"
-        );
-        Ok(identity("svc/gateway"))
+    fn verify<'a>(&'a self, credentials: &'a PresentedCredentials<'a>) -> VerifyFuture<'a> {
+        Box::pin(async move {
+            assert_eq!(credentials.bearer_assertion(), "observed-assertion");
+            assert_eq!(
+                credentials
+                    .tls_peer()
+                    .expect("TLS peer observation is preserved")
+                    .certificate_chain_der()
+                    .len(),
+                1
+            );
+            assert_eq!(
+                credentials.expected_audience(),
+                "https://control.zeroship.ai"
+            );
+            Ok(identity("svc/gateway"))
+        })
     }
 }
 
-#[test]
-fn mechanism_fat_input_preserves_simultaneous_transport_observations() {
+#[compio::test]
+async fn mechanism_fat_input_preserves_simultaneous_transport_observations() {
     let leaf = [1, 2, 3];
     let certificate_chain: [&[u8]; 1] = [&leaf];
     let tls_peer = TlsPeerInfo::new(&certificate_chain)
@@ -132,7 +128,7 @@ fn mechanism_fat_input_preserves_simultaneous_transport_observations() {
     );
 
     assert_eq!(
-        verify_identity(&ObservationVerifier, &observed),
+        verify_identity(&ObservationVerifier, &observed).await,
         Ok(identity("svc/gateway"))
     );
     assert!(TlsPeerInfo::new(&[]).is_none());
@@ -141,19 +137,18 @@ fn mechanism_fat_input_preserves_simultaneous_transport_observations() {
 struct DebugVerifier;
 
 impl IdentityVerifier for DebugVerifier {
-    fn verify(
-        &self,
-        credentials: &PresentedCredentials<'_>,
-    ) -> Result<ServiceIdentity, AuthError> {
-        let diagnostic = format!("{credentials:?}");
-        assert!(!diagnostic.contains("credential-must-stay-secret"));
-        assert!(diagnostic.contains("[REDACTED]"));
-        Ok(identity("svc/gateway"))
+    fn verify<'a>(&'a self, credentials: &'a PresentedCredentials<'a>) -> VerifyFuture<'a> {
+        Box::pin(async move {
+            let diagnostic = format!("{credentials:?}");
+            assert!(!diagnostic.contains("credential-must-stay-secret"));
+            assert!(diagnostic.contains("[REDACTED]"));
+            Ok(identity("svc/gateway"))
+        })
     }
 }
 
-#[test]
-fn credential_diagnostics_redact_bearer_assertions() {
+#[compio::test]
+async fn credential_diagnostics_redact_bearer_assertions() {
     let observed = PeerCredentials::new(
         Some("credential-must-stay-secret"),
         None,
@@ -164,7 +159,7 @@ fn credential_diagnostics_redact_bearer_assertions() {
     assert!(!diagnostic.contains("credential-must-stay-secret"));
     assert!(diagnostic.contains("[REDACTED]"));
     assert_eq!(
-        verify_identity(&DebugVerifier, &observed),
+        verify_identity(&DebugVerifier, &observed).await,
         Ok(identity("svc/gateway"))
     );
 }

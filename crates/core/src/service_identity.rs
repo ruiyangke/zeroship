@@ -2,6 +2,8 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::OnceLock;
 
 use serde_json::Value;
@@ -223,27 +225,68 @@ impl PresentedCredentials<'_> {
 }
 
 /// Failure to establish a service identity.
+///
+/// Every variant means the same thing to the request: it is refused. They
+/// differ in what the operator should DO about it, which is why the outage case
+/// is not folded into [`AuthError::CredentialRejected`] - a page for a database
+/// outage and an alert on a rise in rejected credentials are different
+/// responses to different incidents, and a caller that cannot tell them apart
+/// gets to choose one of them wrongly.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum AuthError {
     /// The transport supplied no non-empty bearer for the supported mechanism.
     #[error("no service credential presented")]
     NoCredentialPresented,
     /// A presented credential did not pass mechanism-specific verification.
+    ///
+    /// This is the only variant that says anything about the CREDENTIAL, and it
+    /// says exactly one thing: no. It never reports which check tripped, so it
+    /// is not an oracle for a prober.
     #[error("service credential rejected")]
     CredentialRejected,
+    /// A store the mechanism must consult before admitting a credential could
+    /// not be reached, so the credential was refused without being judged.
+    ///
+    /// FAIL CLOSED, identically to [`AuthError::CredentialRejected`]: a store
+    /// that cannot answer has not said the credential is fresh, and this
+    /// variant exists to change what the caller can OBSERVE and log, never
+    /// which requests are admitted.
+    ///
+    /// It does tell a prober that a backing store is unavailable. That is a
+    /// fact about the deployment rather than about their credential - it is
+    /// the same signal a 503 carries - and it does not narrow which check a
+    /// credential would have failed.
+    #[error("service credential store unavailable")]
+    StoreUnavailable,
 }
 
+/// The future a verifier returns from [`IdentityVerifier::verify`].
+///
+/// Boxed rather than written as `async fn` in the trait for two reasons. It
+/// keeps the trait dyn-compatible, so a deployment can hold its verifier as
+/// `&dyn IdentityVerifier` exactly as the `?Sized` bound on [`verify_identity`]
+/// always promised; and it names one concrete return type, so every
+/// implementation is spelled the same way. There is no `+ Send`: this stack is
+/// compio/io_uring, whose futures are thread-per-core and not `Send`.
+pub type VerifyFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<ServiceIdentity, AuthError>> + 'a>>;
+
 /// Mechanism-specific mapping from presented credentials to a neutral identity.
+///
+/// Verification is asynchronous because a correct mechanism can need I/O to
+/// complete it. The shipped JWT-assertion mechanism must claim the assertion's
+/// `jti` in a store shared by every replica of the callee before it may return
+/// an identity (OIDC Core section 9 makes single use a MUST, and skipping it is
+/// CVE-2020-15222). Making that claim a step the caller performs AFTER
+/// `verify` returned would mean a `ServiceIdentity` exists for a replayed
+/// assertion, so the await belongs inside the seam.
 pub trait IdentityVerifier {
     /// Verify a presence-proven observation and return a mechanism-thin identity.
     ///
     /// # Errors
     ///
     /// Returns [`AuthError::CredentialRejected`] when mechanism checks fail.
-    fn verify(
-        &self,
-        credentials: &PresentedCredentials<'_>,
-    ) -> Result<ServiceIdentity, AuthError>;
+    fn verify<'a>(&'a self, credentials: &'a PresentedCredentials<'a>) -> VerifyFuture<'a>;
 }
 
 /// Non-cryptographic verifier used to exercise the framework seam.
@@ -265,11 +308,8 @@ impl StubIdentityVerifier {
 }
 
 impl IdentityVerifier for StubIdentityVerifier {
-    fn verify(
-        &self,
-        _credentials: &PresentedCredentials<'_>,
-    ) -> Result<ServiceIdentity, AuthError> {
-        Ok(self.identity.clone())
+    fn verify<'a>(&'a self, _credentials: &'a PresentedCredentials<'a>) -> VerifyFuture<'a> {
+        Box::pin(async move { Ok(self.identity.clone()) })
     }
 }
 
@@ -281,7 +321,7 @@ impl IdentityVerifier for StubIdentityVerifier {
 /// non-empty bearer assertion. TLS observations are not accepted as credentials
 /// while the only supported mechanism is JWT. Other errors come from the
 /// verifier implementation.
-pub fn verify_identity(
+pub async fn verify_identity(
     verifier: &(impl IdentityVerifier + ?Sized),
     observed: &PeerCredentials<'_>,
 ) -> Result<ServiceIdentity, AuthError> {
@@ -294,7 +334,7 @@ pub fn verify_identity(
         tls_peer: observed.tls_peer,
         expected_audience: observed.expected_audience,
     };
-    verifier.verify(&presented)
+    verifier.verify(&presented).await
 }
 
 /// A platform HTTP endpoint protected by service authorization.
