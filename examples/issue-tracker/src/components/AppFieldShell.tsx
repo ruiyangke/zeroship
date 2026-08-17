@@ -24,7 +24,7 @@ export function AppFieldShell<T extends ElementType = "div">({
     <Component
       {...props}
       className={cn(
-        "app-field-shell field-edge rounded border-0 bg-surface text-ink transition duration-fast ease-out focus-within:bg-surface focus-within:field-edge-focus!",
+        "app-field-shell field-edge rounded border-0 bg-surface text-ink transition duration-fast ease-out focus-within:bg-surface focus-within:field-edge-focus",
         className,
       )}
     />

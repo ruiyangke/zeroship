@@ -216,7 +216,7 @@ export function IssueResultsTable({
       cell: (issue) => (
         <Link
           to={`/issues/${issue.id}`}
-          className="block max-w-80 truncate rounded-sm text-ink! hover:text-accent-strong! focus-visible:focus-ring-tight"
+          className="block max-w-80 truncate rounded-sm text-ink hover:text-accent-strong focus-visible:focus-ring-tight"
         >
           {issue.summary}
         </Link>
