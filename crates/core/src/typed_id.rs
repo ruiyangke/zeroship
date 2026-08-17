@@ -770,12 +770,20 @@ mod tests {
         );
 
         // Both characters are reachable in a real id.
-        assert!(BASE62.contains(&b'Q') && BASE62.contains(&b'a'));
+        let q = BASE62
+            .iter()
+            .position(|&c| c == b'Q')
+            .expect("'Q' must be reachable in a real id");
+        let a = BASE62
+            .iter()
+            .position(|&c| c == b'a')
+            .expect("'a' must be reachable in a real id");
 
-        // Byte order (dev): 'Q' (0x51) before 'a' (0x61). Stated at compile
-        // time because it is a property of ASCII, not of anything this test
-        // built; a runtime assert on two literals can never fail.
-        const _: () = assert!(b'Q' < b'a');
+        // Byte order (dev): 'Q' (0x51) before 'a' (0x61). Asserted against
+        // BASE62's own contents rather than the two literals, so it is a claim
+        // a reordering of the alphabet would break; `assert!(b'Q' < b'a')` only
+        // restates ASCII and can never fail.
+        assert!(q < a, "BASE62 must place 'Q' before 'a' in byte order");
 
         // Case-insensitive primary order (deployed): 'a' before 'q'.
         assert!(b'a'.to_ascii_lowercase() < b'Q'.to_ascii_lowercase());
