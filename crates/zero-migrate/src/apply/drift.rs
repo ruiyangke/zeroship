@@ -1702,6 +1702,23 @@ pub fn diff_snapshots_with_index_aliases(
             });
         }
     }
+    // ROW-LEVEL SECURITY, per table. Skipping a table the ACTUAL side does not
+    // mention is what keeps engines with no row-level security - and any table the
+    // live snapshot did not reach - from reporting drift they cannot have.
+    for (name, expected_rls) in &expected.table_rls {
+        let Some(actual_rls) = actual.table_rls.get(name) else {
+            continue;
+        };
+        if expected_rls != actual_rls {
+            altered.push(AlteredObject {
+                table: name.clone(),
+                object: format!("table {name}"),
+                field: "row_level_security".to_string(),
+                expected: expected_rls.to_string(),
+                actual: actual_rls.to_string(),
+            });
+        }
+    }
     for name in expected.views.keys() {
         if !actual.views.contains_key(name) {
             missing.push(format!("view {name}"));

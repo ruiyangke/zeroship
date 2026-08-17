@@ -1677,6 +1677,7 @@ impl PartialEq for SchemaSnapshot {
             && self.roles == other.roles
             && self.schemas == other.schemas
             && self.extensions == other.extensions
+            && self.table_rls == other.table_rls
     }
 }
 

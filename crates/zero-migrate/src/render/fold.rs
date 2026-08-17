@@ -1197,11 +1197,16 @@ pub fn fold_ops_onto(
                 schema,
                 ..
             } => {
-                // A new table starts with row-level security OFF. Seeding the entry -
-                // rather than leaving it absent - keeps the expected map shaped like
-                // the live one, which records every table it sees. An absent entry on
-                // one side and `false` on the other would read as drift.
-                table_rls.insert(name.clone(), false);
+                // A new table starts with row-level security OFF. Seeded so the
+                // expected map is shaped like the live one, which records every table
+                // it sees - absent-vs-false would otherwise read as a change.
+                //
+                // POSTGRESQL ONLY. SQLite and MySQL have no row-level security and
+                // their introspection leaves the map empty, so seeding there would
+                // make the folded snapshot differ from the live one for every table.
+                if matches!(dialect, SqlDialect::Postgres) {
+                    table_rls.insert(name.clone(), false);
+                }
                 if tables.contains_key(name) {
                     return Err(FoldError::DuplicateTable(name.clone()));
                 }
