@@ -99,7 +99,7 @@ Cross-referencing every workspace test file that reads a DSN through
 | crates/gateway/tests/db_pool_smoke.rs | GATEWAY_POOL_SMOKE_URL | 1 of 1 | NOBODY |
 | crates/zeroship-migrate-adapter/tests/smoke_apply_pg.rs | ZERO_MIGRATE_TEST_PG_URL | 1 of 1 | NOBODY |
 | crates/zeroship-migrate-adapter/tests/author_and_apply_pg.rs | ZERO_MIGRATE_TEST_PG_URL | 1 of 2 | NOBODY |
-| crates/zeroship-migrate-adapter/tests/platform_migrate.rs | ZERO_MIGRATE_TEST_PG_URL | 9 | named by ci.yml but always skips (ci.yml:571 says so) |
+| crates/zeroship-migrate-adapter/tests/platform_migrate.rs | ZERO_MIGRATE_TEST_PG_URL | 4 | named by ci.yml but always skips (ci.yml:571 says so) |
 
 Evidence for "NOBODY", each an independent grep over tests/ .github/ deploy/:
 
@@ -182,3 +182,82 @@ fixtures, not a product defect - but still red, and still unfixed here.
 Neither red is explained by this machine: "schema does not exist" and a policy
 parse rejection are code-level and deterministic. CI's `billing-gate` runs the
 same script on every push.
+
+## The ZERO_MIGRATE_TEST_PG_URL three: SITUATION A, gated
+
+The coordinator asked which of two situations applies. It is the first one:
+**a gate can provision that database from what this repo already stands up.**
+Not the second. The vendored engine's own test DB is irrelevant here - these
+three targets are in `crates/zeroship-migrate-adapter`, part of THIS workspace,
+and they take a DSN through `zeroship_core::test_env!` like every other live
+target in the tree. `tests/run_billing_suite.sh` already creates and migrates a
+Postgres as the postgres superuser, which is everything they need.
+
+MEASURED, one variable changed, nothing else:
+
+    cargo test -p zeroship-migrate-adapter --features platform-cli \
+      --test author_and_apply_pg -- --test-threads=1
+
+    unset ZERO_MIGRATE_TEST_PG_URL
+      test authored_v1_envelope_lowers_and_applies_over_native_compio_seam ...
+        ZEROSHIP-TEST-SKIPPED: skipping Phase F Stage 2 apply
+      test result: ok. 2 passed; 0 failed; ... finished in 0.04s
+
+    ZERO_MIGRATE_TEST_PG_URL=postgresql://postgres:zeroship@127.0.0.1:5440/zeroship_billing_test
+      test authored_v1_envelope_lowers_and_applies_over_native_compio_seam ... ok
+      test result: ok. 2 passed; 0 failed; ... finished in 0.34s
+
+Identical result line, identical exit code. The clock and the announcement are
+the only difference. That is the trap, reproduced.
+
+`smoke_apply_pg` behaves the same way: 0.00s skip -> 2.28s real pass.
+
+Nothing new is provisioned by the gating change. `smoke_apply_pg` and
+`author_and_apply_pg` create and drop their own token-suffixed `proj_*` /
+`meta_*` schemas; `platform_migrate` creates and drops its own scratch database
+through an admin session (platform_migrate.rs:396-430). They are appended after
+the control and migrated groups so neither can disturb them.
+
+GATED at tests/run_billing_suite.sh, one group, no name list:
+
+    env ZERO_MIGRATE_TEST_PG_URL="$DSN" \
+      cargo test -p zeroship-migrate-adapter --features platform-cli --no-fail-fast
+
+FLOOR raised 660 -> 670. The +10 is measured, counted exactly the way the
+script's tally counts (`test result: ok.` lines only):
+
+    lib unittests                   2
+    bin zeroship-platform-migrate   5
+    author_and_apply_pg             2
+    smoke_apply_pg                  1
+
+## RED 3 - PLATFORM_MIGRATION_FILES is 22 against 23 files on disk
+
+`platform_migrate` contributes 0 to that floor because it is red: 3 passed,
+5 failed, and all five fail on the same stale constant.
+
+    crates/zeroship-migrate-adapter/tests/platform_migrate.rs:42
+        const PLATFORM_MIGRATION_FILES: usize = 22;
+
+    expected 22 platform migrations, got 23: [... ,
+      "20260816000000_auth_app_oauth_clients_select.ts",
+      "20260816000100_service_assertion_replay.ts"]
+
+    failures:
+      all_platform_migrations_author_and_lower_on_standalone_engine
+      apply_all_platform_migrations_to_fresh_db
+      ordered_runner_retains_authored_fk_formats_across_catalog_refresh
+      platform_migrate_applies_only_newly_appended_file
+      platform_migrate_resumes_partially_applied_corpus
+
+THIS ONE IS NOT MINE TO HAVE FOUND BY GATING. The first of the five is the
+DB-FREE half, and the `rust` job already runs it today
+(.github/workflows/ci.yml:561, `cargo test -p zeroship-migrate-adapter
+--features platform-cli --test platform_migrate`). So the `rust` job is red on
+main right now, independently of anything in this branch. Introduced by
+c658cbafd "feat(authn): add the postgres jti store the replicated callee needs"
+(2026-08-16 23:31), which added db/migrations-ts/20260816000100_service_
+assertion_replay.ts without moving the constant.
+
+Not fixed here, per the brief. The fix is one line, 22 -> 23, plus +8 on the
+billing floor once it lands.
