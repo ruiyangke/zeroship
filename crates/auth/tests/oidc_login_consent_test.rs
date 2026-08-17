@@ -5,7 +5,6 @@ mod common;
 use std::sync::Arc;
 
 use compio_postgres::{connect, Client, NoTls};
-use ed25519_dalek::SigningKey;
 use http::Method;
 use ntex::web;
 use serde::Deserialize;
@@ -910,7 +909,7 @@ fn db_url() -> Option<String> {
 }
 
 fn test_issuer() -> Issuer {
-    let signing = SigningKey::from_bytes(&[42u8; 32]);
+    let signing = common::op_signing_key();
     Issuer::from_signing_key(&signing, [9u8; 32], ISSUER.to_string()).expect("issuer")
 }
 

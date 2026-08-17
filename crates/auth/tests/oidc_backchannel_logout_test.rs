@@ -1,10 +1,11 @@
 //! OIDC Back-Channel Logout OP emission tests.
 
+mod common;
+
 use std::sync::{Arc, Mutex};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use compio_postgres::{connect, Client, NoTls};
-use ed25519_dalek::SigningKey;
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use ntex::web::{self, HttpResponse};
 use serde_json::{json, Value};
@@ -37,7 +38,7 @@ async fn open_conn() -> Option<Client> {
 }
 
 fn test_issuer() -> Issuer {
-    let signing = SigningKey::from_bytes(&[42u8; 32]);
+    let signing = common::op_signing_key();
     Issuer::from_signing_key(&signing, [9u8; 32], ISSUER.to_string()).expect("issuer")
 }
 

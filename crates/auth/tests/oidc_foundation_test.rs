@@ -1,8 +1,9 @@
 //! P1a platform OP token-issuance foundation tests.
 
+mod common;
+
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use compio_postgres::{connect, Client, NoTls};
-use ed25519_dalek::SigningKey;
 use jsonwebtoken::{decode, decode_header, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use ntex::web;
 use serde::de::DeserializeOwned;
@@ -25,7 +26,7 @@ const SECTOR_A: &str = "https://app-a.zeroship.test";
 const SECTOR_B: &str = "https://app-b.zeroship.test";
 
 fn test_issuer() -> Issuer {
-    let signing = SigningKey::from_bytes(&[21u8; 32]);
+    let signing = common::op_signing_key();
     Issuer::from_signing_key(&signing, [9u8; 32], ISSUER.to_string()).expect("issuer")
 }
 

@@ -28,6 +28,28 @@ use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::server;
 use zeroship_core::config::{Secret, SourceKind};
 
+/// The OP signing key belonging to the calling test binary, and to no other.
+///
+/// Every integration test binary in this crate shares ONE suite database.
+/// `Issuer::publish_active_key` retires every other active row in
+/// `zeroship.signing_keys` and then refuses to reactivate a `retiring` row
+/// (`crates/auth/src/oidc/issuer.rs:388-408`), and the kid is a pure
+/// thumbprint of the public key (`issuer.rs:273`). So two binaries that build
+/// their issuer from the same seed publish the SAME kid, and the one that runs
+/// second dies on a key some binary between them retired. That is production
+/// behaving correctly - a retiring signer must not come back - against
+/// fixtures wrong to share one OP identity.
+///
+/// `mod common` is compiled into each test binary separately, so
+/// `CARGO_CRATE_NAME` here expands to that binary's own target name. The
+/// distinctness therefore holds by construction; nobody has to track which
+/// seed literals are already spoken for.
+pub fn op_signing_key() -> ed25519_dalek::SigningKey {
+    ed25519_dalek::SigningKey::from_bytes(&zeroship_core::crypto::derive_key(env!(
+        "CARGO_CRATE_NAME"
+    )))
+}
+
 // ─── AuthConfig test fixture ─────────────────────────────────────────────
 //
 // Every test that boots an in-process auth server needs an `AuthConfig`.

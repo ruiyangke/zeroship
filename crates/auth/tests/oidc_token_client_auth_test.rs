@@ -18,7 +18,6 @@ use std::sync::Arc;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use compio_postgres::{connect, Client, NoTls};
-use ed25519_dalek::SigningKey;
 use ntex::web;
 use serde_json::Value;
 use uuid::Uuid;
@@ -311,7 +310,7 @@ async fn brokered_client_still_authenticates_by_broker_secret() {
 }
 
 fn test_issuer() -> Issuer {
-    let signing = SigningKey::from_bytes(&[57u8; 32]);
+    let signing = common::op_signing_key();
     let broker_secrets = BrokerSecrets::new(BROKER_MASTER.to_vec(), None).expect("broker secrets");
     Issuer::from_signing_key(&signing, [23u8; 32], ISSUER.to_string())
         .expect("issuer")
