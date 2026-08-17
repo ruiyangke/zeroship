@@ -37,7 +37,47 @@ Two changes in it:
 - The TOML-literal rejection, moved to the Section 4.7 tracked-file gate. This
   is the one that was never built.
 
-It also ADDED a protection which is itself worth checking (see section 4).
+It also ADDED a protection which is itself worth checking (see 2b).
+
+### 2a. Did the same amendment trade away any OTHER runtime check? NO.
+
+A clean negative, established rather than assumed. The amendment is a doc-only
+commit; the CODE side of it is `94c7ba7dd` refactor(config)!: leave the secret
+type admitting a literal and a file path only (2026-08-13). Four things were
+deleted there. Only one was protection:
+
+- `obtain_secret`'s literal rejection. THE trade. Verbatim at the amendment's
+  parent: "config: {label}: a secret in the [secrets] config section must be a
+  urn:/arn: reference, not a literal value", `std::process::exit(1)`. It really
+  existed; it is really gone; check 8 is its replacement.
+- The env-to-env arm `urn:zeroship:env:<VAR>`. A FEATURE, and deleting it
+  removes the deployment alias hop. Strictly stronger.
+- The Vault and AWS Secrets Manager reference forms. Both parsed and then
+  always failed at boot with `BackendUnavailable`. Turning "parse, then refuse"
+  into "refuse at parse" loses no protection.
+- The flat `[secrets]` table. `#[serde(deny_unknown_fields)]` went WITH the
+  fields into the component tables rather than being dropped: 21 occurrences in
+  `crates/core/src/config/file.rs` before, 20 after, and the one lost is the
+  deleted `[secrets]` struct's own attribute. The misspelled-key refusal is
+  intact.
+
+The malformed-reference refusal (a `urn:`/`arn:` value that is not a
+recognized reference) also survives, at `crates/core/src/config/secrets.rs:326`
+and `:481-489`.
+
+The other 2026-08-12 commit that reads like this pattern is `972798057`
+docs(proposals): record the two deletions the six-behaviour table missed. It
+belongs to a DIFFERENT proposal (`2026-08-12-secure-by-default-config.md`) and
+its two deletions - AUTH_INSECURE_DEV and the flag-gated localhost
+platform-issuer default - are RELAXATIONS removed. That is the opposite trade.
+
+### 2b. The amendment's OTHER unlanded promise, already owned
+
+Section 4.7 also ADDED: "Runtime permission check. When the overlay contains a
+secret literal and is group- or world-readable, startup refuses." That is not
+this gate's subject and is NOT built here. It is the subject of the queued
+secret-file-permissions task, live in `.worktrees/s24`, so it has an owner
+and is not an orphan. Recorded so the next reader does not re-derive it.
 
 ## 3. Scope decision for the gate
 
