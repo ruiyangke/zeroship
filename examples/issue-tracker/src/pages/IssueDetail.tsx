@@ -282,7 +282,7 @@ export function IssueDetailPage({
           <Tabs.Tab value="details">Details</Tabs.Tab>
           <Tabs.Tab value="history">
             <span>History</span>
-            <Badge intent="neutral" variant="soft" size="sm">
+            <Badge intent="neutral" variant="soft">
               {detail.activities.length}
             </Badge>
           </Tabs.Tab>

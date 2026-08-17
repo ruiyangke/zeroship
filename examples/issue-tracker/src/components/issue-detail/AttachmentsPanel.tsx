@@ -69,8 +69,8 @@ function AttachmentRow({ attachment }: { attachment: Attachment }) {
         </Button>
         <Muted>{formatBytes(attachment.sizeBytes)}</Muted>
         <Muted>{attachment.contentType}</Muted>
-        {attachment.isPatch ? <Badge tone="info">patch</Badge> : null}
-        {attachment.isObsolete ? <Badge tone="muted">obsolete</Badge> : null}
+        {attachment.isPatch ? <Badge intent="info">patch</Badge> : null}
+        {attachment.isObsolete ? <Badge intent="muted">obsolete</Badge> : null}
         <Button variant="gray" disabled={busy} onClick={() => void toggleObsolete()}>
           {attachment.isObsolete ? "Un-obsolete" : "Mark obsolete"}
         </Button>

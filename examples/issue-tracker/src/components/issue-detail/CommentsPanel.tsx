@@ -149,7 +149,7 @@ function CommentRow({
         <span title={formatDate(comment.created_at)}>
           {timeAgo(comment.created_at)}
         </span>
-        {comment.isPrivate ? <Badge tone="danger">private</Badge> : null}
+        {comment.isPrivate ? <Badge intent="danger">private</Badge> : null}
         {/* A ROUTE, not a bare fragment. "#comment-3" reads like an anchor
             and is one in a normal page, but this app routes on the hash, so
             clicking it replaced the route and landed on "No page here.

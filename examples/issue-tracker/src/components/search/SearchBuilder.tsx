@@ -223,7 +223,7 @@ export function SavedSearchesPanel({ currentWhere }: { currentWhere: WhereNode |
               <li className="flex items-center gap-2" key={row.id}>
                 {row.name}
                 {row.isShared ? (
-                  <Badge intent="neutral" variant="outline" size="sm">
+                  <Badge intent="neutral" variant="outline">
                     shared
                   </Badge>
                 ) : null}

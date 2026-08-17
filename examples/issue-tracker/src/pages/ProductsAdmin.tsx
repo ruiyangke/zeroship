@@ -116,7 +116,7 @@ function ComponentChips({ rollup }: { rollup: Rollup }) {
   return (
     <span className="inline-flex max-w-88 flex-wrap items-center justify-end gap-1">
       {shown.map((component) => (
-        <Badge key={component.name} intent="neutral" variant="soft" size="sm">
+        <Badge key={component.name} intent="neutral" variant="soft">
           {component.name} {component.count}
         </Badge>
       ))}
@@ -381,11 +381,11 @@ function ProductBrowser({
                 title: (
                   <span className="inline-flex flex-wrap items-center gap-2">
                     <span className="font-semibold">{product.name}</span>
-                    <Badge intent="neutral" variant="outline" size="sm">
+                    <Badge intent="neutral" variant="outline">
                       {product.key}
                     </Badge>
                     {product.isActive ? null : (
-                      <Badge intent="warning" variant="soft" size="sm">
+                      <Badge intent="warning" variant="soft">
                         inactive
                       </Badge>
                     )}
@@ -397,7 +397,6 @@ function ProductBrowser({
                   <Badge
                     intent={rollup.open > 0 ? "info" : "neutral"}
                     variant="soft"
-                    size="md"
                   >
                     {rollup.open} open
                   </Badge>

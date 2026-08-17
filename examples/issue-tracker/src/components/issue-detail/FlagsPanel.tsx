@@ -119,7 +119,6 @@ function FlagRow({
                     : "warning"
               }
               variant="soft"
-              size="sm"
             >
               {entry.flag.status}
             </Badge>

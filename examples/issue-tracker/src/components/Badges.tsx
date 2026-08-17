@@ -53,7 +53,7 @@ const PRIORITY_INTENT: Record<string, "neutral" | "info" | "success" | "warning"
 
 export function StatusBadge({ status }: { status: string }) {
   return (
-    <Badge intent={STATUS_INTENT[status] ?? "neutral"} variant="soft" size="sm">
+    <Badge intent={STATUS_INTENT[status] ?? "neutral"} variant="soft">
       {status.replace("_", " ")}
     </Badge>
   );
@@ -64,7 +64,7 @@ export function ResolutionBadge({ resolution }: { resolution: string | null }) {
   // of dashes is noise that reads as data.
   if (!resolution) return null;
   return (
-    <Badge intent={resolution === "FIXED" ? "success" : "neutral"} variant="outline" size="sm">
+    <Badge intent={resolution === "FIXED" ? "success" : "neutral"} variant="outline">
       {resolution}
     </Badge>
   );
@@ -72,7 +72,7 @@ export function ResolutionBadge({ resolution }: { resolution: string | null }) {
 
 export function KindBadge({ kind }: { kind: IssueKind | string }) {
   return (
-    <Badge intent={KIND_INTENT[kind] ?? "neutral"} variant="soft" size="sm">
+    <Badge intent={KIND_INTENT[kind] ?? "neutral"} variant="soft">
       {kind}
     </Badge>
   );
@@ -80,7 +80,7 @@ export function KindBadge({ kind }: { kind: IssueKind | string }) {
 
 export function SeverityBadge({ severity }: { severity: IssueSeverity | string }) {
   return (
-    <Badge intent={SEVERITY_INTENT[severity] ?? "neutral"} variant="soft" size="sm">
+    <Badge intent={SEVERITY_INTENT[severity] ?? "neutral"} variant="soft">
       {severity}
     </Badge>
   );
@@ -88,7 +88,7 @@ export function SeverityBadge({ severity }: { severity: IssueSeverity | string }
 
 export function PriorityBadge({ priority }: { priority: IssuePriority | string }) {
   return (
-    <Badge intent={PRIORITY_INTENT[priority] ?? "neutral"} variant="outline" size="sm">
+    <Badge intent={PRIORITY_INTENT[priority] ?? "neutral"} variant="outline">
       {priority}
     </Badge>
   );

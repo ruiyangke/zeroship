@@ -286,8 +286,8 @@ function TrendSection({ productId, days }: { productId: string; days: number }) 
               ))}
             </div>
             <div className="flex gap-2">
-              <Badge intent="info" variant="outline" size="sm">created</Badge>
-              <Badge intent="success" variant="outline" size="sm">resolved</Badge>
+              <Badge intent="info" variant="outline">created</Badge>
+              <Badge intent="success" variant="outline">resolved</Badge>
             </div>
           </ReportSection>
         );
