@@ -1764,6 +1764,39 @@ mod tests {
     const LOWER: &str = "0123456789abcdefghjkmnpqrstvwxyz";
     const UPPER: &str = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
+    /// The measurement behind `apply::drift::index_expression_bodies_are_comparable`'s
+    /// verdict that the reduce-both-sides technique does not rescue an index body:
+    /// everything the CATALOG injects is already normalised away by this fingerprint,
+    /// so what remains between an offline render and a live read is the identifier
+    /// QUOTING - and, after a column rename, the identifier itself, which no
+    /// normaliser can reconcile.
+    #[test]
+    fn expression_fingerprint_already_absorbs_what_the_catalog_injects() {
+        for (authored, catalog) in [
+            (r#"("note" <> 'a')"#, "(note <> 'a'::text)"),
+            (r#"("note" || 'x')"#, "(note || 'x'::text)"),
+            (r#"("qty" + 1)"#, "(qty + 1)"),
+        ] {
+            let authored_key = catalog_expression_fingerprint_in_dialect(
+                &authored.replace('"', ""),
+                SqlDialect::Postgres,
+            );
+            let catalog_key =
+                catalog_expression_fingerprint_in_dialect(catalog, SqlDialect::Postgres);
+            assert_eq!(
+                authored_key, catalog_key,
+                "the injected cast and the added parentheses must already normalise away; \
+                 {authored} against {catalog}"
+            );
+        }
+        assert_ne!(
+            catalog_expression_fingerprint_in_dialect(r#"("qty" + 1)"#, SqlDialect::Postgres),
+            catalog_expression_fingerprint_in_dialect("(qty + 1)", SqlDialect::Postgres),
+            "identifier QUOTING is the one thing left between the two sides, so a body \
+             comparison would need a rule for it before the rename problem even comes up"
+        );
+    }
+
     #[test]
     fn postgres_catalog_parentheses_and_text_cast_recover_exact_format() {
         let check = format!(

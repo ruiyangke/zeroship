@@ -173,6 +173,25 @@ fn require_no_default_drift(drift: &StructuralDrift, column: &str) -> Result<(),
     }
 }
 
+/// The boundary assertion for a generated column: the STORAGE KIND agrees, so
+/// nothing may be reported, because the only evidence left is two rendered bodies
+/// the differ cannot soundly compare.
+fn require_no_generated_drift(drift: &StructuralDrift, column: &str) -> Result<(), String> {
+    let object = format!("column {column}");
+    if drift
+        .altered_objects
+        .iter()
+        .any(|altered| altered.object == object && altered.field == "generated")
+    {
+        Err(format!(
+            "plain_defaults.{object} reported generated drift it cannot soundly claim - the \
+             storage kind is unchanged and only the rendered bodies differ: {drift:#?}"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 #[compio::test]
 async fn live_postgres_reports_ordinary_column_default_drift() {
     let url = skip_if_no_pg!();
@@ -293,29 +312,51 @@ async fn live_postgres_reports_ordinary_column_default_drift() {
             require_no_default_drift(&diff_snapshots(&expected, &actual), column)?;
         }
 
-        // A GENERATED column is a SEPARATE and still-open gap, recorded here so
-        // nobody has to re-measure it. `ColumnSnapshot::generated` is populated by
-        // the fold and left `None` by live PostgreSQL introspection, which reads
-        // `attgenerated` only to keep a generated expression out of the default
-        // surface. So neither the expression nor the generated-ness itself is
-        // compared, and both of these are silent. Closing it needs two things this
-        // change does not do: introspection that COLLECTS the expression, and a
-        // sound way to compare it - `pg_get_expr` returns `(source + 1)` for the
-        // `(("source" + 1))` the offline renderer emits, the same deparse problem
-        // `constraint_definition_is_comparable` already refuses at.
-        for mutation in [
-            format!("ALTER TABLE {table} ALTER COLUMN derived SET EXPRESSION AS (source + 2)"),
-            format!("ALTER TABLE {table} ALTER COLUMN derived DROP EXPRESSION"),
-        ] {
-            let actual = snapshot_after_mutation(&session, &schema, &mutation).await?;
-            let drift = diff_snapshots(&expected, &actual);
-            if !drift.is_clean() {
-                return Err(format!(
-                    "`{mutation}` now reports drift - the generated-column gap this pins has \
-                     been closed, so replace this block with the assertion it earned: {drift:#?}"
-                ));
-            }
+        // A GENERATED column is a column the application cannot write: the engine
+        // computes it. `DROP EXPRESSION` turns it into an ordinary writable one
+        // while leaving its name, type and nullability untouched, so nothing else
+        // in this differ can see it. `comparable_generated_column` compares the
+        // STORAGE KIND - `attgenerated`, a single catalog char - and reports it.
+        let actual = snapshot_after_mutation(
+            &session,
+            &schema,
+            &format!("ALTER TABLE {table} ALTER COLUMN derived DROP EXPRESSION"),
+        )
+        .await?;
+        let dropped = diff_snapshots(&expected, &actual);
+        if !dropped.altered_objects.iter().any(|altered| {
+            altered.table == "plain_defaults"
+                && altered.object == "column derived"
+                && altered.field == "generated"
+                && altered.expected == "stored"
+                && altered.actual.is_empty()
+        }) {
+            return Err(format!(
+                "`DROP EXPRESSION` makes a computed column writable and must report \
+                 `generated: stored -> \"\"`: {dropped:#?}"
+            ));
         }
+
+        // The BOUNDARY, and it is measured rather than assumed. A generated
+        // expression REWRITTEN in place keeps `attgenerated = 's'`, so the storage
+        // kind agrees and only the two rendered bodies disagree - and those are
+        // exactly what `comparable_generated_column` refuses to compare. The
+        // refusal is not squeamishness about the cast PostgreSQL injects; it is
+        // the column RENAME. Measured on PostgreSQL 18.4, after
+        // `RENAME COLUMN qty_on_hand TO amount_on_hand` the catalog deparses
+        // `(amount_on_hand + 1)` while the fold still projects
+        // `("qty_on_hand" + 1)`, because `GeneratedColumnSnapshot::expr` is
+        // rendered TEXT and a rename cannot be replayed over it - substituting the
+        // name would rewrite the string literal in
+        // `(note || 'qty_on_hand'::text)`, which is a real generated column.
+        // Comparing the bodies would therefore make every rename permanent drift.
+        let actual = snapshot_after_mutation(
+            &session,
+            &schema,
+            &format!("ALTER TABLE {table} ALTER COLUMN derived SET EXPRESSION AS (source + 2)"),
+        )
+        .await?;
+        require_no_generated_drift(&diff_snapshots(&expected, &actual), "derived")?;
 
         Ok(())
     }

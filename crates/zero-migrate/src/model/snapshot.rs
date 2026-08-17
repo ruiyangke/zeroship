@@ -87,8 +87,30 @@ pub struct ColumnSnapshot {
     /// A generated/computed column expression rendered for the target dialect,
     /// plus whether it is STORED or VIRTUAL. Emission-only, like `default`: live
     /// introspection does not carry this expression into the structural snapshot,
-    /// so it is excluded from drift equality.
+    /// so it is excluded from drift equality. The comparable half of the same fact
+    /// is [`Self::generated_kind`].
     pub generated: Option<GeneratedColumnSnapshot>,
+    /// Whether this column is GENERATED and how the engine stores it, as the
+    /// STRUCTURAL facet rather than the rendered expression.
+    ///
+    /// This stands to [`Self::generated`] exactly as [`Self::id_default`] stands to
+    /// [`Self::default`]: a narrow semantic comparison key beside emission-only SQL
+    /// text. PostgreSQL holds the fact in `pg_attribute.attgenerated`, one char per
+    /// column (`''` / `'s'` / `'v'`), so it survives deparsing and column renames
+    /// untouched - unlike the expression, which `pg_get_expr` re-renders from the
+    /// parse tree under whatever names the columns currently have.
+    ///
+    /// `None` means THIS PRODUCER DID NOT LOOK, which is distinct from
+    /// `Some(NotGenerated)`. Only the PostgreSQL catalog read and the offline fold
+    /// populate it; MySQL and SQLite introspection leave it `None`, so
+    /// `apply::drift::comparable_generated_column` declines rather than accusing
+    /// those engines of having dropped a generated column they never modeled.
+    ///
+    /// Excluded from `PartialEq` / `Eq` / `Hash` for the same reason
+    /// [`Self::generated`] is: adding it would change what every consumer of column
+    /// equality means by "the same column", including the fold and dedup paths, when
+    /// only the drift comparator is asking.
+    pub generated_kind: Option<GeneratedKindSnapshot>,
     /// SQL identity / portable auto-increment facet. Desired snapshots use it
     /// for emission and live introspection recovers it from PostgreSQL
     /// `attidentity`, MySQL `AUTO_INCREMENT`, or SQLite's explicit
@@ -215,6 +237,23 @@ pub struct ColumnSnapshot {
     pub comment: Option<String>,
 }
 
+/// The structural generated-column facet: whether a column is computed by the
+/// engine, and how the value is kept.
+///
+/// Deliberately a closed enum rather than an `Option<bool>`: `NotGenerated` has to be
+/// a value a producer can ASSERT, because the drift comparison's whole subject is a
+/// column that stopped being generated. An `Option<bool>` would spell that as `None`,
+/// which is already taken by "this producer did not look".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GeneratedKindSnapshot {
+    /// An ordinary writable column (`attgenerated = ''`).
+    NotGenerated,
+    /// The engine computes the value and STORES it (`attgenerated = 's'`).
+    Stored,
+    /// The engine computes the value on read (`attgenerated = 'v'`).
+    Virtual,
+}
+
 /// Emission metadata for a generated/computed column.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeneratedColumnSnapshot {
@@ -237,8 +276,11 @@ impl std::fmt::Debug for ColumnSnapshot {
         if !self.inline_checks.is_empty() {
             s.field("inline_checks", &self.inline_checks);
         }
-        s.field("generated", &self.generated)
-            .field("identity", &self.identity)
+        s.field("generated", &self.generated);
+        if self.generated_kind.is_some() {
+            s.field("generated_kind", &self.generated_kind);
+        }
+        s.field("identity", &self.identity)
             .field("sqlite_rowid", &self.sqlite_rowid)
             .field("value_format", &self.value_format)
             .field("id_default", &self.id_default)

@@ -454,6 +454,12 @@ async fn introspect_columns(
         let id_default = tracks_id_default.then_some(catalog_default);
         t.columns.push(ColumnSnapshot {
             name: name.clone(),
+            // Deliberately NOT populated, for the same reason as the MySQL leg:
+            // SQLite records the facet (`PRAGMA table_xinfo.hidden` is 2 for VIRTUAL
+            // and 3 for STORED), so this is a closable gap rather than a wall, and
+            // `None` makes `apply::drift::comparable_generated_column` decline instead
+            // of asserting a `NotGenerated` no fixture has measured here.
+            generated_kind: None,
             // Normalise the declared type to a lowercase spelling so it is a stable
             // drift attribute (SQLite type affinity is case-insensitive and free-
             // form; the engine's emitter spells these consistently).

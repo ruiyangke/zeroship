@@ -1083,6 +1083,7 @@ mod tests {
             ddl_type_override: None,
             inline_checks: Vec::new(),
             generated: None,
+            generated_kind: None,
             identity: None,
             sqlite_rowid: false,
             value_format: None,

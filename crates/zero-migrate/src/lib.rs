@@ -264,10 +264,10 @@ pub use model::migration::{
 };
 pub use model::snapshot::{
     ColumnCollationSnapshot, ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot, FunctionKey,
-    FunctionSnapshot, GeneratedColumnSnapshot, IndexElementSnapshot, IndexSnapshot,
-    MysqlTextStorageSnapshot, NamedTypeSnapshot, PartitionSnapshot, PolicyKey, PolicySnapshot,
-    RoleSnapshot, SchemaObjectSnapshot, SchemaSnapshot, SequenceDataTypeSnapshot, SequenceSnapshot,
-    TableSnapshot, TriggerKey, TriggerSnapshot, ViewSnapshot,
+    FunctionSnapshot, GeneratedColumnSnapshot, GeneratedKindSnapshot, IndexElementSnapshot,
+    IndexSnapshot, MysqlTextStorageSnapshot, NamedTypeSnapshot, PartitionSnapshot, PolicyKey,
+    PolicySnapshot, RoleSnapshot, SchemaObjectSnapshot, SchemaSnapshot, SequenceDataTypeSnapshot,
+    SequenceSnapshot, TableSnapshot, TriggerKey, TriggerSnapshot, ViewSnapshot,
 };
 pub use plan::manifest::{
     compute_manifest, verify_manifest, ManifestError, ManifestHash, MismatchKind,

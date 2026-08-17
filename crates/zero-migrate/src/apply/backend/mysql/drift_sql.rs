@@ -213,6 +213,14 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
         let mysql_default_generated = default.as_ref().map(|_| has_default_generated(&extra));
         table.columns.push(ColumnSnapshot {
             name: column_name,
+            // Deliberately NOT populated. MySQL does record the facet - `EXTRA` reads
+            // `VIRTUAL GENERATED` / `STORED GENERATED` - so this is a gap that can be
+            // closed, not a wall. Leaving it `None` makes
+            // `apply::drift::comparable_generated_column` decline rather than compare
+            // an asserted `NotGenerated` against the fold, which is the safe direction
+            // while no live-MySQL fixture has measured the pairing; the cost is that a
+            // MySQL `DROP EXPRESSION` equivalent stays invisible.
+            generated_kind: None,
             data_type: crate::schema::query::mysql_canonical_type(&raw_type),
             mysql_physical_type: Some(MysqlPhysicalType::parse(&raw_type)),
             nullable: nullable.eq_ignore_ascii_case("YES"),

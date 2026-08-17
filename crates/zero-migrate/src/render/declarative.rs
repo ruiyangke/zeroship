@@ -46,7 +46,8 @@ use crate::model::ir::{
 use crate::model::migration::{Checksum, Migration, MigrationFlags, MigrationId};
 use crate::model::snapshot::{
     canonical_index_sort_order, ColumnSnapshot, ConstraintSnapshot, GeneratedColumnSnapshot,
-    IndexElementSnapshot, IndexSnapshot, MysqlPhysicalType, SchemaSnapshot, TableSnapshot,
+    GeneratedKindSnapshot, IndexElementSnapshot, IndexSnapshot, MysqlPhysicalType, SchemaSnapshot,
+    TableSnapshot,
 };
 use crate::model::table_shape::ResolvedInject;
 use crate::render::expand_contract::{
@@ -2840,6 +2841,16 @@ pub(crate) fn column_snapshot_for_field(
             .as_ref()
             .map(|g| generated_column_snapshot(g, dialect))
             .transpose()?,
+        // The structural half of the same fact, always populated. `Some` is this
+        // producer saying it LOOKED, so an ordinary column has to assert
+        // `NotGenerated` rather than leave the field empty - otherwise a column that
+        // stopped being generated and a snapshot that never modeled the facet would
+        // be the same value. See `apply::drift::comparable_generated_column`.
+        generated_kind: Some(match f.generated.as_ref() {
+            None => GeneratedKindSnapshot::NotGenerated,
+            Some(generated) if generated.stored => GeneratedKindSnapshot::Stored,
+            Some(_) => GeneratedKindSnapshot::Virtual,
+        }),
         identity: f.identity,
         id_default: f.identity.map(|_| {
             crate::render::value_format::catalog_id_default(default.as_deref(), dialect, None)
@@ -4425,6 +4436,12 @@ fn fts_objects_pg(
         // NOT a drift attribute (excluded from `ColumnSnapshot` equality) — the
         // `__fts` COLUMN itself round-trips as a plain nullable tsvector column.
         default: Some(format!("{GENERATED_PREFIX}{generation_expr}")),
+        // The structural facet, which is NOT emission-only and DOES round-trip:
+        // this column really is `GENERATED ALWAYS AS (...) STORED` in PostgreSQL, so
+        // `pg_attribute.attgenerated` reads `'s'` on the live side. Saying
+        // `NotGenerated` here because the expression rides on `default` rather than
+        // on `generated` would report drift on every FTS-enabled collection.
+        generated_kind: Some(GeneratedKindSnapshot::Stored),
         ddl_type_override: None,
         inline_checks: Vec::new(),
         generated: None,

@@ -48,11 +48,11 @@ use crate::model::migration::Migration;
 use crate::model::snapshot::{
     canonical_index_sort_order, index_elements_canonically_eq, index_predicates_canonically_eq,
     normalize_sequence_max_value, normalize_sequence_min_value, ColumnCollationSnapshot,
-    ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot, FunctionKey, IdDefaultSnapshot,
-    IndexElementSnapshot, IndexSnapshot, MysqlPhysicalType, NamedTypeSnapshot, PartitionSnapshot,
-    PolicyIdentity, PolicyKey, RoleSnapshot, SchemaObjectSnapshot, SchemaSnapshot,
-    SequenceDataTypeSnapshot, SequenceSnapshot, TableSnapshot, TriggerIdentity, TriggerKey,
-    VendorObjectIdentities, ViewSnapshot,
+    ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot, FunctionKey, GeneratedKindSnapshot,
+    IdDefaultSnapshot, IndexElementSnapshot, IndexSnapshot, MysqlPhysicalType, NamedTypeSnapshot,
+    PartitionSnapshot, PolicyIdentity, PolicyKey, RoleSnapshot, SchemaObjectSnapshot,
+    SchemaSnapshot, SequenceDataTypeSnapshot, SequenceSnapshot, TableSnapshot, TriggerIdentity,
+    TriggerKey, VendorObjectIdentities, ViewSnapshot,
 };
 use crate::render::value_format::{
     catalog_expression_fingerprint_in_dialect, catalog_id_default, catalog_id_default_for_expected,
@@ -1180,7 +1180,23 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
             // column defaults. Reading adbin without this gate would project a
             // clean generated UUID/TypeID expression onto the ID-default drift
             // surface even though information_schema.column_default is NULL.
-            let is_generated = !r.try_get::<_, String>("generated_kind")?.is_empty();
+            //
+            // The same char is ALSO the structural drift key. It used to be read
+            // only for the gate above, so a column that stopped being generated out
+            // of band changed nothing this differ looked at - see
+            // `comparable_generated_column`.
+            let attgenerated: String = r.try_get("generated_kind")?;
+            let is_generated = !attgenerated.is_empty();
+            let generated_kind = Some(match attgenerated.as_str() {
+                "s" => GeneratedKindSnapshot::Stored,
+                "v" => GeneratedKindSnapshot::Virtual,
+                // Any future `attgenerated` code is still GENERATED, and reporting it
+                // as an ordinary column would be a false drift line rather than a
+                // missing one. `Virtual` is the conservative read: it says "computed"
+                // without claiming a storage contract this build does not model.
+                "" => GeneratedKindSnapshot::NotGenerated,
+                _ => GeneratedKindSnapshot::Virtual,
+            });
             let raw_default: Option<String> = if is_generated {
                 None
             } else {
@@ -1241,6 +1257,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
                     }),
                 default,
                 id_default,
+                generated_kind,
                 comment,
                 comment_sentinel,
                 ..Default::default()
@@ -2366,9 +2383,10 @@ fn comparable_nextval_default(expr: Option<&str>) -> Option<String> {
 /// two sides' spellings is meaningful, and `None` when it is not.
 ///
 /// The FOURTH member of the family [`constraint_definition_is_comparable`],
-/// [`index_expression_bodies_are_comparable`] and [`comparable_vendor_objects`]
-/// belong to, answering the same question - is this text worth comparing across an
-/// offline render and a live catalog read? - for the default on a column that
+/// [`index_expression_bodies_are_comparable`], [`comparable_vendor_objects`] and
+/// [`comparable_generated_column`] belong to, answering the same question - is this
+/// text worth comparing across an offline render and a live catalog read? - for the
+/// default on a column that
 /// carries no ID facet at all. Those columns never populate
 /// [`ColumnSnapshot::id_default`], so the raw SQL text in
 /// [`ColumnSnapshot::default`] is the only evidence either side holds, and until
@@ -2417,6 +2435,69 @@ fn comparable_nextval_default(expr: Option<&str>) -> Option<String> {
 /// exemptions already take, and recovering it needs the same treatment foreign
 /// keys get: parse the catalog text back to the closed AST and compare
 /// structurally rather than comparing spellings.
+/// The two sides' GENERATED-column facet reduced to a comparable key, and `None`
+/// when comparing them is not meaningful.
+///
+/// The FIFTH member of the family [`constraint_definition_is_comparable`],
+/// [`index_expression_bodies_are_comparable`], [`comparable_vendor_objects`] and
+/// [`comparable_column_default`] belong to, answering the same question - is this
+/// worth comparing across an offline render and a live catalog read? - for a column
+/// the engine computes rather than the application writing it. Until this existed
+/// nothing compared any part of it: an out-of-band
+/// `ALTER COLUMN ... DROP EXPRESSION` turned a computed column into an ordinary
+/// writable one, left its name, type and nullability untouched, and no drift line
+/// said so.
+///
+/// WHAT IS COMPARED, and why it is immune to the deparse problem. Only
+/// [`ColumnSnapshot::generated_kind`] - `pg_attribute.attgenerated`, ONE CHAR per
+/// column. PostgreSQL stores it structurally, exactly as it stores a `polcmd` code
+/// or a `tgtype` bit set, so no renderer is involved on either side and there is
+/// nothing for `pg_get_expr` to rewrite. That is the same property that makes an
+/// [`IndexElementSnapshot::Column`] comparable where an `Expr` key is not.
+///
+/// WHEN THE COMPARISON IS SKIPPED: `None` on either side. MySQL and SQLite
+/// introspection do not populate the field, so those engines are never accused of
+/// having dropped a generated column they never modeled. This is the both-sides rule
+/// [`comparable_vendor_objects`] applies, at the granularity this facet needs.
+///
+/// WHAT THIS GIVES UP: the EXPRESSION. `ALTER COLUMN c SET EXPRESSION AS (src + 2)`
+/// keeps `attgenerated = 's'`, so both sides agree here and the rewrite is not
+/// reported. That refusal is measured rather than assumed, and the measurement is
+/// NOT the injected cast the sibling predicates cite - it is the column RENAME.
+/// [`GeneratedColumnSnapshot::expr`] is RENDERED TEXT, and `fold_ops`'s
+/// `Op::RenameColumn` arm cannot replay a rename over it: substituting the name
+/// inside rendered SQL would rewrite the string literal in a real generated column
+/// such as `(note || 'qty_on_hand'::text)`, which is exactly the false positive
+/// [`IndexSnapshot::expr_cascade_columns`] exists to avoid. Measured on PostgreSQL
+/// 18.4, after `RENAME COLUMN qty_on_hand TO amount_on_hand`:
+///
+/// | side | generated expression       |
+/// |------|----------------------------|
+/// | fold | `("qty_on_hand" + 1)`      |
+/// | live | `(amount_on_hand + 1)`     |
+///
+/// Those are two different COLUMN NAMES, not two spellings of one thing, so the
+/// reduce-both-sides-through-one-key technique that closed the ordinary-default gap
+/// cannot close this: normalising quoting and casts lands them on
+/// `qty_on_hand|literal:1` against `amount_on_hand|literal:1`, still different, and
+/// no apply could ever clear it. Recovering the expression needs the treatment
+/// foreign keys get - keep the closed AST rather than its rendering, and compare
+/// structurally.
+fn comparable_generated_column(
+    expected: &ColumnSnapshot,
+    actual: &ColumnSnapshot,
+) -> Option<(GeneratedKindSnapshot, GeneratedKindSnapshot)> {
+    Some((expected.generated_kind?, actual.generated_kind?))
+}
+
+fn format_generated_kind(kind: GeneratedKindSnapshot) -> &'static str {
+    match kind {
+        GeneratedKindSnapshot::NotGenerated => "",
+        GeneratedKindSnapshot::Stored => "stored",
+        GeneratedKindSnapshot::Virtual => "virtual",
+    }
+}
+
 fn comparable_column_default(
     raw: Option<&str>,
     dialect: Option<SqlDialect>,
@@ -2819,6 +2900,18 @@ fn diff_attrs(
                 &ac.nullable.to_string(),
             );
             push(&obj, "identity", format_identity(ec), format_identity(ac));
+            // Whether the engine computes this column at all. `comparable_generated_column`
+            // documents why the storage KIND compares and the expression does not.
+            if let Some((expected_generated, actual_generated)) =
+                comparable_generated_column(ec, ac)
+            {
+                push(
+                    &obj,
+                    "generated",
+                    format_generated_kind(expected_generated),
+                    format_generated_kind(actual_generated),
+                );
+            }
             push(
                 &obj,
                 "format",
@@ -2945,10 +3038,12 @@ fn diff_attrs(
             if !ei.access_method.is_empty() {
                 push(&obj, "access_method", &ei.access_method, &ai.access_method);
             }
+            let expected_predicate = effective_index_predicate(ei.predicate.as_deref());
+            let actual_predicate = effective_index_predicate(ai.predicate.as_deref());
             let predicates_eq = if bodies_comparable {
-                index_predicates_canonically_eq(ei.predicate.as_deref(), ai.predicate.as_deref())
+                index_predicates_canonically_eq(expected_predicate, actual_predicate)
             } else {
-                ei.predicate.is_some() == ai.predicate.is_some()
+                expected_predicate.is_some() == actual_predicate.is_some()
             };
             if !predicates_eq {
                 push(
@@ -3059,6 +3154,33 @@ fn diff_attrs(
 /// indexes and the SQLite introspector recovers no such set, so both keep comparing
 /// text exactly as before.
 ///
+/// WHY THE REDUCE-BOTH-SIDES TECHNIQUE DOES NOT RESCUE THIS, measured rather than
+/// assumed. [`comparable_column_default`] closed its own gap by putting both sides
+/// through one semantic key instead of declining, which works because `pg_get_expr` is
+/// idempotent. Run on these bodies, that technique gets most of the way and then stops
+/// dead. The shared fingerprint already collapses everything the catalog INJECTS -
+/// measured on the four bodies this file's fixtures produce, `("note" <> 'a')` and
+/// `(note <> 'a'::text)` differ only in the QUOTING of the identifier, the `::text` and
+/// the parentheses having normalised away - so a rule that unquotes an identifier
+/// PostgreSQL would not have quoted would land them on one key.
+///
+/// The RENAME is what cannot be reduced. Measured on PostgreSQL 18.4, after
+/// `RENAME COLUMN qty_on_hand TO amount_on_hand` the fold projects
+/// `("qty_on_hand" > 0)` where the catalog deparses `(amount_on_hand > 0)`
+/// (`fold_rename_column_stale_index_body_pg` pins both sides separately). Those are two
+/// different COLUMN NAMES, not two spellings of one thing; normalisation reduces
+/// spellings. The fold cannot repair its side either, because
+/// [`IndexSnapshot::predicate`] is rendered TEXT and substituting a name inside it
+/// would rewrite the string literal in `WHERE (note <> 'qty_on_hand')` - the exact
+/// false positive [`IndexSnapshot::expr_cascade_columns`] exists to avoid. So comparing
+/// these bodies would make every column rename permanent drift that no apply can clear,
+/// which is strictly worse than the silence below. It stays declined.
+///
+/// [`comparable_generated_column`] reaches the same verdict about a generated column's
+/// expression, for the same measurement, and both take the same way out: compare the
+/// structural facet the catalog stores natively - the referenced-column set here,
+/// `attgenerated` there - and leave the rendered body alone.
+///
 /// What this gives up: two expressions over the SAME columns with DIFFERENT logic
 /// compare equal. `WHERE (qty > 0)` and `WHERE (qty > -2147483648)` are
 /// indistinguishable, and so are `(a + 1)` and `(a * 1000)` as expression keys. That
@@ -3066,11 +3188,57 @@ fn diff_attrs(
 /// the treatment foreign keys get: parse the catalog text back to the closed AST and
 /// compare structurally, rather than comparing spellings.
 ///
+/// PRESENCE is a separate question and is NOT declined here - see
+/// [`effective_index_predicate`], which reduces both sides through one key rather than
+/// declining, because the server itself defines that reduction.
+///
 /// Presence is NOT exempted, and neither is any other facet: `None` against `Some` on
 /// the predicate, element count and order, `Column`-vs-`Expr` element kind, plain
 /// column names and sort orders all still compare.
 fn index_expression_bodies_are_comparable(actual: &IndexSnapshot) -> bool {
     actual.expr_cascade_columns.is_none()
+}
+
+/// One index's partial predicate as the SERVER understands it: `None` for an index
+/// that restricts nothing.
+///
+/// PostgreSQL discards a `WHERE` clause that is the bare constant `TRUE` - `CREATE
+/// INDEX ... WHERE TRUE` leaves `pg_index.indpred` NULL and the index is total. The
+/// fold has no server to ask, so it projects the predicate it was authored with, and
+/// the presence comparison above then read `Some` against `None` and reported
+/// `predicate: expected "TRUE", actual ""` on the FIRST introspection after a clean
+/// apply, forever, with nothing in the history but the `createIndex` that built it.
+///
+/// So this reduces BOTH sides through one key instead of declining - the technique
+/// [`comparable_column_default`] uses for a literal default, applied to presence. It
+/// is sound because the server DEFINES the reduction: a constant-true predicate is
+/// not a predicate, which is why there is nothing in the catalog to read back.
+///
+/// The rule is exactly as narrow as the measurement. On PostgreSQL 18.4 only the bare
+/// constant is dropped; every other predicate survives verbatim, including the ones
+/// that are semantically constant:
+///
+/// | authored                 | read back from the catalog |
+/// |--------------------------|----------------------------|
+/// | `WHERE TRUE`             | *(no predicate at all)*    |
+/// | `WHERE FALSE`            | `false`                    |
+/// | `WHERE (1 = 1)`          | `(1 = 1)`                  |
+/// | `WHERE (TRUE AND TRUE)`  | `(true AND true)`          |
+///
+/// Widening this to "anything tautological" would therefore INVENT the divergence it
+/// is here to remove, so it stays a text match on the constant, modulo the case and
+/// grouping either renderer may add. Presence is not otherwise weakened: an index that
+/// loses a real predicate out of band still reports.
+fn effective_index_predicate(predicate: Option<&str>) -> Option<&str> {
+    let predicate = predicate?;
+    let mut body = predicate.trim();
+    while let Some(inner) = body
+        .strip_prefix('(')
+        .and_then(|inner| inner.strip_suffix(')'))
+    {
+        body = inner.trim();
+    }
+    (!body.eq_ignore_ascii_case("true")).then_some(predicate)
 }
 
 /// [`index_elements_canonically_eq`] with the `Expr` BODIES exempted - element count,

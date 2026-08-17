@@ -8,6 +8,9 @@ TableSnapshot {
                 "GENERATED:to_tsvector('english'::regconfig, coalesce(\"title\", ''::text))",
             ),
             generated: None,
+            generated_kind: Some(
+                Stored,
+            ),
             identity: None,
             sqlite_rowid: false,
             value_format: None,
@@ -24,6 +27,9 @@ TableSnapshot {
             nullable: true,
             default: None,
             generated: None,
+            generated_kind: Some(
+                NotGenerated,
+            ),
             identity: None,
             sqlite_rowid: false,
             value_format: None,
@@ -40,6 +46,9 @@ TableSnapshot {
             nullable: false,
             default: None,
             generated: None,
+            generated_kind: Some(
+                NotGenerated,
+            ),
             identity: None,
             sqlite_rowid: false,
             value_format: None,
@@ -56,6 +65,9 @@ TableSnapshot {
             nullable: true,
             default: None,
             generated: None,
+            generated_kind: Some(
+                NotGenerated,
+            ),
             identity: None,
             sqlite_rowid: false,
             value_format: None,
@@ -72,6 +84,9 @@ TableSnapshot {
             nullable: true,
             default: None,
             generated: None,
+            generated_kind: Some(
+                NotGenerated,
+            ),
             identity: None,
             sqlite_rowid: false,
             value_format: None,
@@ -88,6 +103,9 @@ TableSnapshot {
             nullable: false,
             default: None,
             generated: None,
+            generated_kind: Some(
+                NotGenerated,
+            ),
             identity: None,
             sqlite_rowid: false,
             value_format: None,
@@ -104,6 +122,9 @@ TableSnapshot {
             nullable: true,
             default: None,
             generated: None,
+            generated_kind: Some(
+                NotGenerated,
+            ),
             identity: None,
             sqlite_rowid: false,
             value_format: None,
@@ -140,6 +161,9 @@ TableSnapshot {
             nullable: true,
             default: None,
             generated: None,
+            generated_kind: Some(
+                NotGenerated,
+            ),
             identity: None,
             sqlite_rowid: false,
             value_format: None,
@@ -156,6 +180,9 @@ TableSnapshot {
             nullable: false,
             default: None,
             generated: None,
+            generated_kind: Some(
+                NotGenerated,
+            ),
             identity: None,
             sqlite_rowid: false,
             value_format: None,
@@ -172,6 +199,9 @@ TableSnapshot {
             nullable: false,
             default: None,
             generated: None,
+            generated_kind: Some(
+                NotGenerated,
+            ),
             identity: None,
             sqlite_rowid: false,
             value_format: None,
@@ -188,6 +218,9 @@ TableSnapshot {
             nullable: true,
             default: None,
             generated: None,
+            generated_kind: Some(
+                NotGenerated,
+            ),
             identity: None,
             sqlite_rowid: false,
             value_format: None,
@@ -204,6 +237,9 @@ TableSnapshot {
             nullable: false,
             default: None,
             generated: None,
+            generated_kind: Some(
+                NotGenerated,
+            ),
             identity: None,
             sqlite_rowid: false,
             value_format: None,
@@ -222,6 +258,9 @@ TableSnapshot {
                 "0",
             ),
             generated: None,
+            generated_kind: Some(
+                NotGenerated,
+            ),
             identity: None,
             sqlite_rowid: false,
             value_format: None,
