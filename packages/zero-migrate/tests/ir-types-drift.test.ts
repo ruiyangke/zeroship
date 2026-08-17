@@ -383,6 +383,7 @@ const IR_TS_HAND_AUTHORED_ENUMS: Record<string, string> = {
   VectorMetric: "VectorMetric",
   IrMaskKind: "MaskKind",
   IrClassification: "Classification",
+  ColumnCollation: "ColumnCollation",
 };
 
 test("hand-authored ir.ts token unions match their schema enum defs", () => {

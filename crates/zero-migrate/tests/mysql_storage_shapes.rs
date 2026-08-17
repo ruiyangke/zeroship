@@ -54,6 +54,7 @@ fn column(name: &str, ty: ColType) -> IrColumn {
         value_format: None,
         references: None,
         id_prefix: None,
+        collation: None,
         vector_metric: None,
         case_sensitive: None,
         mask: None,

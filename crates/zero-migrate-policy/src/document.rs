@@ -13,8 +13,8 @@ use serde::Deserialize;
 use crate::knob::{KnobDef, KnobKey, KnobKind, KnobValue, ObjectModel, Polarity};
 use crate::registry::PolicyRegistry;
 use crate::rule::{
-    AuthorPkPolicy, InjectColumn, InjectIndex, InjectSpec, NameGlob, Rule, RuleKind,
-    ValidatePredicate,
+    AuthorPkPolicy, InjectCollation, InjectColumn, InjectIndex, InjectSpec, NameGlob, Rule,
+    RuleKind, ValidatePredicate,
 };
 use crate::scope::normalize_pg_identifier;
 use crate::value_order::leq_value;
@@ -325,6 +325,18 @@ struct WireColumn {
     nullable: bool,
     #[serde(default)]
     default: Option<String>,
+    /// A closed token, so an operator who misspells the intent is told at LOAD,
+    /// with the TOML line, rather than shipping a charter that silently pins
+    /// nothing. `deny_unknown_fields` above already refuses an unknown KEY; this
+    /// refuses an unknown VALUE for the key.
+    #[serde(default)]
+    collation: Option<WireCollation>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WireCollation {
+    Bytewise,
 }
 
 #[derive(Deserialize)]
@@ -933,6 +945,9 @@ fn resolve_inject(inj: WireInject) -> Result<InjectSpec, LoadError> {
             ty: c.ty,
             nullable: c.nullable,
             default: c.default,
+            collation: c.collation.map(|collation| match collation {
+                WireCollation::Bytewise => InjectCollation::Bytewise,
+            }),
         })
         .collect();
     let indexes = inj

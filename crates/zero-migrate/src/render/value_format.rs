@@ -1748,6 +1748,52 @@ fn bytewise_catalog_collation(dialect: SqlDialect) -> Option<ColumnCollationSnap
     })
 }
 
+/// The physical column details implied by a bare
+/// [`ColumnCollation::Bytewise`](crate::model::ir::ColumnCollation::Bytewise) facet
+/// on a column whose DDL type is already spelled as `rendered_type`.
+///
+/// This is the value formats' collation half WITHOUT their format half. A value
+/// format also pins a length, an alphabet and a CHECK, because its whole subject is
+/// what the column may HOLD; this facet's subject is only how the column COMPARES,
+/// so it changes nothing but the collation and leaves the type spelling the caller
+/// already decided.
+///
+///   * PostgreSQL: `COLLATE "C"`, and the same `pg_catalog."C"` catalog identity the
+///     value formats record — so a live introspection of either compares equal.
+///   * SQLite: `COLLATE BINARY`. That is already SQLite's default, so the snapshot
+///     collation stays `None` (introspection canonicalizes BINARY to `None`, and a
+///     `Some` here would make every such table drift on the first read).
+///   * MySQL: `utf8mb4_0900_bin` — NO PAD and a memcmp of the encoded bytes, which
+///     is what `C` and BINARY both mean. NOT the legacy `utf8mb4_bin`, which is PAD
+///     SPACE and would make `'x'` and `'x '` the same key. NOT the value formats'
+///     `CHARACTER SET ascii`: those earn ascii from a CHECK proving the content is
+///     ascii, and this facet has no such proof — narrowing the charset would turn a
+///     silent ordering bug into a loud rejected INSERT on a `created_by` holding a
+///     non-ascii name.
+///
+/// Returns `None` when the dialect needs no override, which is never today but keeps
+/// the caller from assuming one exists.
+pub(crate) fn bytewise_column_metadata(
+    rendered_type: &str,
+    dialect: SqlDialect,
+) -> (String, Option<ColumnCollationSnapshot>) {
+    let ddl_type = match dialect {
+        SqlDialect::Postgres => format!("{rendered_type} COLLATE \"C\""),
+        SqlDialect::Sqlite => format!("{rendered_type} COLLATE BINARY"),
+        SqlDialect::Mysql => {
+            format!("{} CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin", {
+                // MySQL character types already carry an explicit charset+collation
+                // suffix from `mysql_type_override_with_collation`. Replace it rather
+                // than append a second one.
+                rendered_type
+                    .split_once(" CHARACTER SET ")
+                    .map_or(rendered_type, |(base, _)| base)
+            })
+        }
+    };
+    (ddl_type, bytewise_catalog_collation(dialect))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

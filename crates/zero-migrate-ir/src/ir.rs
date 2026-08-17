@@ -1030,6 +1030,47 @@ pub enum VectorMetric {
     InnerProduct,
 }
 
+/// The CLOSED per-column collation-INTENT lexicon.
+///
+/// A collation NAME is dialect-private — `C` means nothing to SQLite, `BINARY`
+/// means nothing to PostgreSQL, and MySQL spells the same idea a third way — so
+/// this carries the INTENT and lets the render seam spell it. That is the same
+/// treatment [`IrColumn::case_sensitive`] already gets, and the reason it is a
+/// closed enum rather than a string: an author-supplied collation name would land
+/// verbatim in emitted DDL, and it would have to be sound on three dialects at
+/// once.
+///
+/// The one member is the one intent the engine can spell everywhere. Ordinary
+/// case-insensitivity is [`IrColumn::case_sensitive`]'s job, not this one's, and
+/// the DEFAULT (absent) is whatever the database's own collation is.
+///
+/// Only a text-family column may carry it; the validator refuses it elsewhere,
+/// and refuses it alongside `caseSensitive: false`, which asks for the opposite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ColumnCollation {
+    /// Compare and order this column by its stored BYTES, so a value whose byte
+    /// order is its semantic order (a ULID, a TypeID, a base62 UUIDv7) sorts the
+    /// way it was minted.
+    ///
+    /// PostgreSQL `COLLATE "C"`, SQLite `COLLATE BINARY`, MySQL
+    /// `utf8mb4_0900_bin`. Without it the column takes the database default,
+    /// which on a `en_US.utf8` PostgreSQL interleaves the upper- and lower-case
+    /// runs of base62 and silently stops `ORDER BY id` being creation order.
+    Bytewise,
+}
+
+impl ColumnCollation {
+    /// The wire token, in lock-step with the `serde(rename_all = "camelCase")`
+    /// image.
+    #[must_use]
+    pub const fn as_token(self) -> &'static str {
+        match self {
+            Self::Bytewise => "bytewise",
+        }
+    }
+}
+
 impl VectorMetric {
     /// The SDK `vectorMetric` token (the camelCase spelling
     /// `vector_opclass` maps to the ivfflat/hnsw opclass).
@@ -1385,6 +1426,21 @@ pub struct IrColumn {
         skip_serializing_if = "Option::is_none"
     )]
     pub case_sensitive: Option<bool>,
+    /// Per-column collation INTENT, spelled per dialect by the render seam.
+    ///
+    /// The sibling of [`Self::case_sensitive`], and deliberately separate from it:
+    /// that one asks for case-INSENSITIVE comparison (PostgreSQL `citext`), this one
+    /// asks for BYTEWISE comparison. They are contradictory rather than composable,
+    /// so the validator refuses a column carrying both.
+    ///
+    /// A [`Self::value_format`] column already pins bytewise comparison as part of its
+    /// storage contract, so it needs nothing here; carrying both is refused too, to
+    /// keep ONE writer of the snapshot's collation per column.
+    ///
+    /// Default-absent + `skip_serializing_if`, so a column that declares no collation
+    /// is BYTE-IDENTICAL on the wire and in the checksum to the pre-facet image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collation: Option<ColumnCollation>,
     /// A STANDALONE column mask (`t.string().mask({ kind, classification })`). Unlike
     /// `id_prefix`/`vector_metric` (declared-only), a mask IS recoverable from the live
     /// `zero-migrate:mask` sentinel by the RUNTIME — but the OFFLINE op fold + gen-types have no
@@ -4964,6 +5020,7 @@ mod tests {
                 value_format: None,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -5065,6 +5122,7 @@ mod tests {
             value_format: None,
             references: None,
             id_prefix: None,
+            collation: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,
@@ -5672,6 +5730,7 @@ mod tests {
                 value_format: None,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -6014,6 +6073,7 @@ mod tests {
             value_format: None,
             references: None,
             id_prefix: None,
+            collation: None,
             case_sensitive: Some(false),
             vector_metric: None,
             mask: None,
@@ -6047,6 +6107,7 @@ mod tests {
                 name: None,
             }),
             id_prefix: None,
+            collation: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,
@@ -6096,6 +6157,7 @@ mod tests {
             value_format: None,
             references: None,
             id_prefix: None,
+            collation: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,
@@ -6124,6 +6186,7 @@ mod tests {
             value_format: None,
             references: None,
             id_prefix: None,
+            collation: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,

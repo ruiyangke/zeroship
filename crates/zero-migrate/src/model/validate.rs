@@ -6554,6 +6554,7 @@ pub fn validate_op_authorized(
                 value_format: value_format.clone(),
                 references: None,
                 id_prefix: None,
+                collation: None,
                 vector_metric: *vector_metric,
                 case_sensitive: *case_sensitive,
                 mask: *mask,
@@ -8482,6 +8483,53 @@ fn validate_column_facets(
         }
     }
 
+    if col.collation.is_some() {
+        // A collation is a rule for comparing TEXT. Pinning one on an integer or a
+        // timestamp says something no dialect can hear, so refuse rather than emit
+        // DDL that quietly drops it.
+        if !matches!(
+            col.ty,
+            crate::model::ir::ColType::Text | crate::model::ir::ColType::String { .. }
+        ) {
+            return Err(mk(
+                CODE_COLUMN_FACET_CONFLICT,
+                format!(
+                    "column {:?} pins a collation on a non-text type; a collation orders \
+                     text and has no meaning on this column's type",
+                    col.name
+                ),
+                "drop the collation, or declare the column as text/string".to_string(),
+            ));
+        }
+        if col.case_sensitive == Some(false) {
+            return Err(mk(
+                CODE_COLUMN_FACET_CONFLICT,
+                format!(
+                    "column {:?} asks for both a bytewise collation and case-insensitive \
+                     comparison; those are contradictory orderings, not composable ones",
+                    col.name
+                ),
+                "keep the collation for byte order, or `caseSensitive: false` for a \
+                 case-insensitive comparison - not both"
+                    .to_string(),
+            ));
+        }
+        if col.value_format.is_some() {
+            // A value format already pins bytewise storage as part of its contract,
+            // and it is the one that also carries the length and the CHECK. Two
+            // writers of the same snapshot field is how the two halves of a column's
+            // identity drift apart, so keep it at one.
+            return Err(mk(
+                CODE_COLUMN_FACET_CONFLICT,
+                format!(
+                    "column {:?} declares both a value format and a collation; the value \
+                     format already pins the column's comparison order",
+                    col.name
+                ),
+                "drop the collation - the value format carries it".to_string(),
+            ));
+        }
+    }
     if col.generated.is_some() && col.default.is_some() {
         return Err(mk(
             CODE_COLUMN_FACET_CONFLICT,
@@ -10204,6 +10252,7 @@ mod tests {
                 value_format: None,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -10331,6 +10380,7 @@ mod tests {
             value_format: None,
             references: None,
             id_prefix: None,
+            collation: None,
             vector_metric: None,
             case_sensitive: None,
             mask: None,
@@ -11493,6 +11543,7 @@ mod tests {
                         value_format: None,
                         references: None,
                         id_prefix: None,
+                        collation: None,
                         case_sensitive: None,
                         vector_metric: None,
                         mask: None,
@@ -11508,6 +11559,7 @@ mod tests {
                         value_format: None,
                         references: None,
                         id_prefix: None,
+                        collation: None,
                         case_sensitive: None,
                         vector_metric: None,
                         mask: None,
@@ -11807,6 +11859,7 @@ mod tests {
                 value_format: None,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -11873,6 +11926,7 @@ mod tests {
                 value_format: None,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -11919,6 +11973,7 @@ mod tests {
                 value_format: None,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -12405,6 +12460,7 @@ mod tests {
                 value_format: None,
                 references: None,
                 id_prefix: Some(prefix.to_string()),
+                collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -12441,6 +12497,7 @@ mod tests {
                     name: Some(name.to_string()),
                 }),
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -12471,6 +12528,7 @@ mod tests {
                 }),
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive,
                 vector_metric: None,
                 mask: None,
@@ -12499,6 +12557,7 @@ mod tests {
                 value_format: Some(ValueFormat::Ulid),
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive,
                 vector_metric: None,
                 mask: None,
@@ -12527,6 +12586,7 @@ mod tests {
                 value_format: None,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -12855,6 +12915,7 @@ mod tests {
                 value_format: None,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: Some(VectorMetric::Cosine),
                 mask: None,
@@ -12890,6 +12951,7 @@ mod tests {
                     value_format: None,
                     references: None,
                     id_prefix: None,
+                    collation: None,
                     case_sensitive: Some(false),
                     vector_metric: None,
                     mask: None,
@@ -12995,6 +13057,7 @@ mod tests {
                 value_format: None,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: Some(VectorMetric::Cosine),
                 mask: None,
@@ -13029,6 +13092,7 @@ mod tests {
                 value_format,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 vector_metric: None,
                 case_sensitive: None,
                 mask: None,
@@ -13263,6 +13327,7 @@ mod tests {
                 name: None,
             }),
             id_prefix: None,
+            collation: None,
             vector_metric: None,
             case_sensitive,
             mask: None,

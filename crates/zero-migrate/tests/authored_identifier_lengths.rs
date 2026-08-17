@@ -101,6 +101,7 @@ fn column() -> IrColumn {
         value_format: None,
         references: None,
         id_prefix: None,
+        collation: None,
         case_sensitive: None,
         vector_metric: None,
         mask: None,

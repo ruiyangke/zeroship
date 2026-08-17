@@ -76,9 +76,9 @@
 use std::collections::BTreeMap;
 
 use crate::model::ir::{
-    AlterPrimaryKeyAction, ColType, ColumnOrExpr, ColumnReference, CommentTarget, ExclusionElement,
-    IndexElement, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, Op, RefAction,
-    SafeI64, SafeU64, SequenceOwnedBy, TableRuntimeOptions,
+    AlterPrimaryKeyAction, ColType, ColumnCollation, ColumnOrExpr, ColumnReference, CommentTarget,
+    ExclusionElement, IndexElement, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex,
+    Op, RefAction, SafeI64, SafeU64, SequenceOwnedBy, TableRuntimeOptions,
 };
 use crate::model::snapshot::{
     normalize_sequence_max_value, normalize_sequence_min_value, sequence_default_start_value,
@@ -1251,6 +1251,7 @@ pub fn fold_ops_onto(
                     effective,
                 )?;
                 apply_fold_uuid_metadata(columns, &mut snap, dialect, effective_schema)?;
+                apply_fold_collation_metadata(columns, &mut snap, dialect)?;
                 apply_fold_value_format_metadata(columns, &mut snap, dialect, effective_schema)?;
                 apply_fold_id_default_metadata(columns, &mut snap, dialect, effective_schema)?;
                 fold_create_table_specs(
@@ -1660,6 +1661,7 @@ pub fn fold_ops_onto(
                     value_format: value_format.clone(),
                     references: None,
                     id_prefix: None,
+                    collation: None,
                     vector_metric: *vector_metric,
                     case_sensitive: *case_sensitive,
                     mask: *mask,
@@ -2065,6 +2067,7 @@ pub fn fold_ops_onto(
                                 value_format: None,
                                 references: None,
                                 id_prefix: None,
+                                collation: None,
                                 case_sensitive: None,
                                 vector_metric: None,
                                 mask: None,
@@ -2169,10 +2172,17 @@ pub fn fold_ops_onto(
                 //   * `collation` — DRIFT-COMPARED, and PostgreSQL RESETS it: measured,
                 //     `text COLLATE "C" → character varying(40)` leaves the catalog
                 //     reporting the DEFAULT collation, never `C`. BELT-AND-BRACES
-                //     rather than the fix, and said plainly: the ONE fold-side writer
-                //     of this field is `value_format`'s `bytewise_catalog_collation`
-                //     (SQLite's `NOCASE` rides on `case_sensitive`), so the refusal
-                //     above already closes the only route a stale collation had.
+                //     rather than the fix, and said plainly: there are now TWO
+                //     fold-side writers of this field — `value_format`'s
+                //     `bytewise_catalog_collation` and the `IrColumn::collation`
+                //     facet's `apply_fold_collation_metadata`, which calls the same
+                //     function (SQLite's `NOCASE` rides on `case_sensitive`). Both
+                //     write the SAME bytewise identity, so re-deriving the field from
+                //     the TARGET type still clears whichever of them put it there, and
+                //     the refusal above still closes the only route a stale collation
+                //     had. A retype AWAY from a collated column therefore drops the
+                //     collation, which is what PostgreSQL itself does; the column must
+                //     re-declare it, and drift says so rather than staying silent.
                 //   * `case_sensitive` — DRIFT-COMPARED. On PostgreSQL
                 //     case-insensitivity IS the `citext` type, so the retype destroys
                 //     it; measured, `citext → character varying(40)` reported
@@ -3065,6 +3075,7 @@ fn add_column_snapshot(
         value_format: None,
         references: None,
         id_prefix: None,
+        collation: None,
         vector_metric,
         case_sensitive,
         mask,
@@ -3241,6 +3252,42 @@ fn apply_fold_named_type_metadata(
             project_schema,
             effective,
         )?;
+    }
+    Ok(())
+}
+
+/// Stamp the per-column collation facet onto the folded snapshot.
+///
+/// Runs BEFORE the value-format pass on purpose. A column carrying both is refused
+/// by the validator, so the two never contend in a valid migration; ordering them
+/// this way means that if one ever slips through, the format's own bytewise
+/// collation wins rather than a bare facet overwriting a storage contract.
+///
+/// This is the second fold-side writer of `ColumnSnapshot::collation`, and the
+/// invariant `SetColumnType` relies on still holds: both writers write the SAME
+/// bytewise identity, so a retype that re-derives the field from the target type
+/// still clears whichever of them put it there.
+fn apply_fold_collation_metadata(
+    columns: &[IrColumn],
+    snap: &mut TableSnapshot,
+    dialect: SqlDialect,
+) -> Result<(), FoldError> {
+    for source in columns {
+        let Some(ColumnCollation::Bytewise) = source.collation else {
+            continue;
+        };
+        let col = snap
+            .columns
+            .iter_mut()
+            .find(|col| col.name == source.name)
+            .ok_or(FoldError::Unsupported("collated column folded away"))?;
+        // The type spelling the renderer would have used, so the override REPLACES
+        // that decision rather than guessing beside it.
+        let rendered = crate::render::declarative::column_type_for_render(col, dialect, false);
+        let (ddl_type, collation) =
+            crate::render::value_format::bytewise_column_metadata(&rendered, dialect);
+        col.ddl_type_override = Some(ddl_type);
+        col.collation = collation;
     }
     Ok(())
 }
@@ -4539,6 +4586,7 @@ pub fn fold_to_field_defs(
                         value_format: value_format.clone(),
                         references: None,
                         id_prefix: None,
+                        collation: None,
                         case_sensitive: *case_sensitive,
                         vector_metric: *vector_metric,
                         mask: *mask,
@@ -5273,6 +5321,7 @@ pub fn descriptors_to_create_ops(
                 value_format: None,
                 references,
                 id_prefix: f.id_prefix.clone(),
+                collation: None,
                 vector_metric,
                 case_sensitive: f.case_sensitive,
                 mask,
@@ -5571,6 +5620,7 @@ mod tests {
             value_format: None,
             references: None,
             id_prefix: None,
+            collation: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,
@@ -6687,6 +6737,7 @@ columns = [
             value_format: None,
             references: None,
             id_prefix: None,
+            collation: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,
@@ -8075,6 +8126,7 @@ columns = [
             value_format: None,
             references: None,
             id_prefix: None,
+            collation: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,
@@ -8124,6 +8176,7 @@ columns = [
                     value_format: None,
                     references: None,
                     id_prefix: None,
+                    collation: None,
                     case_sensitive: None,
                     vector_metric: None,
                     mask: None,
@@ -8145,6 +8198,7 @@ columns = [
                     value_format: None,
                     references: None,
                     id_prefix: None,
+                    collation: None,
                     case_sensitive: None,
                     vector_metric: None,
                     mask: None,
@@ -8351,6 +8405,7 @@ columns = [
             value_format: None,
             references: None,
             id_prefix: Some("post".into()),
+            collation: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,
@@ -8379,6 +8434,7 @@ columns = [
             value_format: None,
             references: None,
             id_prefix: None,
+            collation: None,
             case_sensitive: None,
             vector_metric: Some(crate::model::ir::VectorMetric::InnerProduct),
             mask: None,
@@ -8413,6 +8469,7 @@ columns = [
             value_format: None,
             references: None,
             id_prefix: None,
+            collation: None,
             case_sensitive: None,
             vector_metric: None,
             mask: Some(crate::model::ir::IrMask {
@@ -8451,6 +8508,7 @@ columns = [
             value_format: None,
             references: None,
             id_prefix: None,
+            collation: None,
             case_sensitive: None,
             vector_metric: None,
             mask: Some(crate::model::ir::IrMask {
@@ -8527,6 +8585,7 @@ columns = [
             value_format: None,
             references: None,
             id_prefix: None,
+            collation: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,
@@ -8710,6 +8769,7 @@ columns = [
             value_format: None,
             references: None,
             id_prefix: None,
+            collation: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,

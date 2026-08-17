@@ -36,12 +36,13 @@ use crate::model::backfill::{
 };
 use crate::model::expr::Expr;
 use crate::model::ir::{
-    ColType, ColumnOrExpr, CommentTarget, EmptyContainerKind, ExclusionElement, ExclusionMethod,
-    ExclusionOperator, ExistenceGuard, ForEach, IndexElement, IndexMethod, IndexStorageParams,
-    IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, IrMask, Join, MigrationIr, Op,
-    OrderDir, OrderItem, PartitionBoundValue, PartitionBounds, PartitionSpec, RaiseLevel,
-    RefAction, SafeI64, SelectAst, SelectItem, SequenceOwnedBy, TableRef, TableRuntimeOptions,
-    TriggerAction, TriggerEvent, TriggerStmt, ValueFormat, VectorMetric, ViewQuery,
+    ColType, ColumnCollation, ColumnOrExpr, CommentTarget, EmptyContainerKind, ExclusionElement,
+    ExclusionMethod, ExclusionOperator, ExistenceGuard, ForEach, IndexElement, IndexMethod,
+    IndexStorageParams, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, IrMask, Join,
+    MigrationIr, Op, OrderDir, OrderItem, PartitionBoundValue, PartitionBounds, PartitionSpec,
+    RaiseLevel, RefAction, SafeI64, SelectAst, SelectItem, SequenceOwnedBy, TableRef,
+    TableRuntimeOptions, TriggerAction, TriggerEvent, TriggerStmt, ValueFormat, VectorMetric,
+    ViewQuery,
 };
 use crate::model::load::ir_created_tables;
 use crate::model::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
@@ -3927,6 +3928,7 @@ impl IrAuthor {
                 value_format: contract.value_format.clone(),
                 references: None,
                 id_prefix: None,
+                collation: None,
                 vector_metric: None,
                 case_sensitive: contract.case_sensitive,
                 mask: None,
@@ -4862,6 +4864,7 @@ impl IrAuthor {
                 apply_structured_defaults_to_snapshot(name, columns, &mut snap, self.dialect)?;
                 self.apply_named_type_metadata(&eff_schema, name, columns, &mut snap, named_types)?;
                 self.apply_uuid_metadata(columns, &mut snap)?;
+                self.apply_collation_metadata(columns, &mut snap)?;
                 self.apply_value_format_metadata(columns, &mut snap)?;
                 self.apply_id_default_metadata(columns, &mut snap)?;
                 // keep the CREATE path on the same
@@ -4989,6 +4992,7 @@ impl IrAuthor {
                     value_format: value_format.clone(),
                     references: None,
                     id_prefix: None,
+                    collation: None,
                     vector_metric: *vector_metric,
                     case_sensitive: *case_sensitive,
                     mask: *mask,
@@ -5523,6 +5527,7 @@ impl IrAuthor {
                                 value_format: None,
                                 references: None,
                                 id_prefix: None,
+                                collation: None,
                                 case_sensitive: None,
                                 vector_metric: None,
                                 mask: None,
@@ -7582,6 +7587,7 @@ impl IrAuthor {
             value_format: None,
             references: None,
             id_prefix: None,
+            collation: None,
             vector_metric,
             case_sensitive,
             mask,
@@ -7652,6 +7658,35 @@ impl IrAuthor {
                 ));
             };
             self.apply_value_format_column_metadata(source, col)?;
+        }
+        Ok(())
+    }
+
+    /// The lower-side twin of `fold::apply_fold_collation_metadata`.
+    ///
+    /// Two replays of the same rule, as `set_column_type_facets` describes for the
+    /// facet verdicts: this one produces the DDL, the fold one produces the snapshot
+    /// drift compares against. `collation_metadata_pg` in `injected_column_collation`
+    /// pins that they agree, because a disagreement here is a table that drifts the
+    /// moment it is created.
+    fn apply_collation_metadata(
+        &self,
+        columns: &[IrColumn],
+        snap: &mut TableSnapshot,
+    ) -> Result<(), IrLowerError> {
+        for source in columns {
+            let Some(ColumnCollation::Bytewise) = source.collation else {
+                continue;
+            };
+            let Some(col) = snap.columns.iter_mut().find(|col| col.name == source.name) else {
+                return Err(IrLowerError::UnsupportedOp("collated column folded away"));
+            };
+            let rendered =
+                crate::render::declarative::column_type_for_render(col, self.dialect, false);
+            let (ddl_type, collation) =
+                crate::render::value_format::bytewise_column_metadata(&rendered, self.dialect);
+            col.ddl_type_override = Some(ddl_type);
+            col.collation = collation;
         }
         Ok(())
     }
@@ -10342,6 +10377,7 @@ pub(crate) fn retype_field_descriptor(field: &mut FieldDescriptor, to_type: &Col
         value_format: None,
         references: None,
         id_prefix: None,
+        collation: None,
         vector_metric: None,
         case_sensitive: None,
         mask: None,
@@ -10399,6 +10435,7 @@ pub(crate) fn mysql_storage_for_column_facets(
         value_format: value_format.cloned(),
         references: None,
         id_prefix: id_prefix.map(str::to_string),
+        collation: None,
         vector_metric: None,
         case_sensitive,
         mask: None,
@@ -11371,6 +11408,7 @@ mod tests {
             value_format: None,
             references: None,
             id_prefix: None,
+            collation: None,
             vector_metric: None,
             case_sensitive: None,
             mask: None,
@@ -11391,6 +11429,7 @@ mod tests {
             }),
             references: None,
             id_prefix: None,
+            collation: None,
             vector_metric: None,
             case_sensitive: None,
             mask: None,
@@ -11653,6 +11692,7 @@ mod tests {
             value_format: Some(crate::model::ir::ValueFormat::Ulid),
             references: None,
             id_prefix: None,
+            collation: None,
             vector_metric: None,
             case_sensitive: None,
             mask: None,
@@ -12032,6 +12072,7 @@ mod tests {
                 value_format: None,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -12075,6 +12116,7 @@ mod tests {
                 value_format: None,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -12127,6 +12169,7 @@ mod tests {
                 value_format: None,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -12176,6 +12219,7 @@ mod tests {
                 value_format: None,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -12288,6 +12332,7 @@ mod tests {
                 value_format: None,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -12338,6 +12383,7 @@ mod tests {
                     value_format: None,
                     references: None,
                     id_prefix: None,
+                    collation: None,
                     case_sensitive: None,
                     vector_metric: None,
                     mask: None,
@@ -12355,6 +12401,7 @@ mod tests {
                     value_format: None,
                     references: None,
                     id_prefix: None,
+                    collation: None,
                     case_sensitive: None,
                     vector_metric: None,
                     mask: None,
@@ -12434,6 +12481,7 @@ mod tests {
                     value_format: None,
                     references: None,
                     id_prefix: None,
+                    collation: None,
                     case_sensitive: None,
                     vector_metric: None,
                     mask: None,
@@ -12499,6 +12547,7 @@ mod tests {
                     value_format: None,
                     references: None,
                     id_prefix: None,
+                    collation: None,
                     case_sensitive: None,
                     vector_metric: None,
                     mask: None,
@@ -12514,6 +12563,7 @@ mod tests {
                     value_format: None,
                     references: None,
                     id_prefix: None,
+                    collation: None,
                     case_sensitive: None,
                     vector_metric: None,
                     mask: None,
@@ -12556,6 +12606,7 @@ mod tests {
                     value_format: None,
                     references: None,
                     id_prefix: None,
+                    collation: None,
                     case_sensitive: None,
                     vector_metric: None,
                     mask: None,
@@ -12629,6 +12680,7 @@ mod tests {
                 value_format: None,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -12683,6 +12735,7 @@ mod tests {
                 value_format: None,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -12743,6 +12796,7 @@ mod tests {
                     value_format: None,
                     references: None,
                     id_prefix: None,
+                    collation: None,
                     case_sensitive: None,
                     vector_metric: None,
                     mask: None,
@@ -12760,6 +12814,7 @@ mod tests {
                     value_format: None,
                     references: None,
                     id_prefix: None,
+                    collation: None,
                     case_sensitive: None,
                     vector_metric: None,
                     mask: None,
@@ -12779,6 +12834,7 @@ mod tests {
                     value_format: None,
                     references: None,
                     id_prefix: None,
+                    collation: None,
                     case_sensitive: None,
                     vector_metric: None,
                     mask: None,
@@ -12796,6 +12852,7 @@ mod tests {
                     value_format: None,
                     references: None,
                     id_prefix: None,
+                    collation: None,
                     case_sensitive: None,
                     vector_metric: None,
                     mask: None,
@@ -12813,6 +12870,7 @@ mod tests {
                     value_format: None,
                     references: None,
                     id_prefix: None,
+                    collation: None,
                     case_sensitive: None,
                     vector_metric: None,
                     mask: None,
@@ -12830,6 +12888,7 @@ mod tests {
                     value_format: None,
                     references: None,
                     id_prefix: None,
+                    collation: None,
                     case_sensitive: None,
                     vector_metric: None,
                     mask: None,
@@ -12894,6 +12953,7 @@ mod tests {
                 value_format: None,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -12941,6 +13001,7 @@ mod tests {
                 value_format: None,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -12986,6 +13047,7 @@ mod tests {
                 value_format: None,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -13031,6 +13093,7 @@ mod tests {
                 value_format: None,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -13076,6 +13139,7 @@ mod tests {
                 value_format: None,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -13121,6 +13185,7 @@ mod tests {
                 value_format: None,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -13328,6 +13393,7 @@ mod tests {
                 value_format: None,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -13703,6 +13769,7 @@ mod tests {
                 value_format: None,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -13766,6 +13833,7 @@ mod tests {
                 value_format: None,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -13808,6 +13876,7 @@ mod tests {
                 value_format: None,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -13863,6 +13932,7 @@ mod tests {
                 value_format: None,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -14173,6 +14243,7 @@ columns = [
                 value_format: None,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -14256,6 +14327,7 @@ columns = [
                         value_format: None,
                         references: None,
                         id_prefix: None,
+                        collation: None,
                         case_sensitive: None,
                         vector_metric: None,
                         mask: None,
@@ -14273,6 +14345,7 @@ columns = [
                         value_format: None,
                         references: None,
                         id_prefix: None,
+                        collation: None,
                         case_sensitive: None,
                         vector_metric: None,
                         mask: None,
@@ -14290,6 +14363,7 @@ columns = [
                         value_format: None,
                         references: None,
                         id_prefix: None,
+                        collation: None,
                         case_sensitive: None,
                         vector_metric: None,
                         mask: None,
@@ -14401,6 +14475,7 @@ columns = [
                     value_format: None,
                     references: None,
                     id_prefix: None,
+                    collation: None,
                     case_sensitive: None,
                     vector_metric: None,
                     mask: None,
@@ -14476,6 +14551,7 @@ columns = [
                     value_format: None,
                     references: None,
                     id_prefix: None,
+                    collation: None,
                     case_sensitive: None,
                     vector_metric: None,
                     mask: None,
@@ -14544,6 +14620,7 @@ columns = [
                     value_format: None,
                     references: None,
                     id_prefix: None,
+                    collation: None,
                     case_sensitive: None,
                     vector_metric: None,
                     mask: None,
@@ -15259,6 +15336,7 @@ columns = [
                 value_format: None,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -15335,6 +15413,7 @@ columns = [
                 value_format: None,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -15385,6 +15464,7 @@ columns = [
                 value_format: None,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -15403,6 +15483,7 @@ columns = [
                 value_format: None,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -15907,6 +15988,7 @@ columns = [
                 value_format: None,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,

@@ -247,6 +247,7 @@ fn create_time_not_valid_is_refused_in_both_spellings_by_validate() {
             value_format: None,
             references: None,
             id_prefix: None,
+            collation: None,
             vector_metric: None,
             case_sensitive: None,
             mask: None,

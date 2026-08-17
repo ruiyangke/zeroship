@@ -480,10 +480,16 @@ fn write_seg(b: &mut Vec<u8>, g: &SegGlob) {
     write_bytes(b, g.suffix_bytes());
 }
 
-/// Canonical inject-spec encoding: columns (name/ty/nullable/default) in doc order,
-/// indexes (name/columns), the pinned PK, the author-PK policy, and the mandatory
-/// flag. Column/index ORDER is preserved (it is load-bearing — the sealed layout
-/// order, II.4.4), unlike the set-valued scope/StrSet fields.
+/// Canonical inject-spec encoding: columns (name/ty/nullable/default/collation) in
+/// doc order, indexes (name/columns), the pinned PK, the author-PK policy, and the
+/// mandatory flag. Column/index ORDER is preserved (it is load-bearing — the sealed
+/// layout order, II.4.4), unlike the set-valued scope/StrSet fields.
+///
+/// EVERY field of an injected column belongs here, and the collation is the reason
+/// to say so: it changes the DDL the resolver emits, so two charters that differ
+/// only in it are two different policies. Leaving it out would let them seal
+/// IDENTICALLY, and a seal that cannot tell two policies apart is not tamper
+/// evidence.
 fn write_inject(b: &mut Vec<u8>, spec: &crate::rule::InjectSpec) {
     b.extend_from_slice(&(spec.columns.len() as u32).to_be_bytes());
     for c in &spec.columns {
@@ -496,6 +502,10 @@ fn write_inject(b: &mut Vec<u8>, spec: &crate::rule::InjectSpec) {
                 write_str(b, d);
             }
             None => b.push(0x00),
+        }
+        match &c.collation {
+            None => b.push(0x00),
+            Some(crate::rule::InjectCollation::Bytewise) => b.push(0x01),
         }
     }
     b.extend_from_slice(&(spec.indexes.len() as u32).to_be_bytes());

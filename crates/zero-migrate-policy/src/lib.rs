@@ -81,8 +81,8 @@ pub use knob::{
 };
 pub use registry::{PolicyRegistry, RegistryError};
 pub use rule::{
-    AuthorPkPolicy, InjectColumn, InjectIndex, InjectSpec, NameGlob, Rule, RuleKind,
-    ValidatePredicate,
+    AuthorPkPolicy, InjectCollation, InjectColumn, InjectIndex, InjectSpec, NameGlob, Rule,
+    RuleKind, ValidatePredicate,
 };
 pub use scope::{
     glob::SegGlob,

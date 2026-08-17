@@ -334,6 +334,7 @@ fn the_create_table_ownership_rule_still_applies_with_a_reverse_present() {
             value_format: None,
             references: None,
             id_prefix: None,
+            collation: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,

@@ -141,6 +141,12 @@ export type ValueFormat = { typeId: { prefix: string } } | "ulid";
  *  recover, so it is carried on the column. */
 export type VectorMetric = "cosine" | "l2" | "innerProduct";
 
+/** The CLOSED per-column collation-INTENT lexicon — faithful transcription of the
+ *  schema `ColumnCollation` `oneOf` const set. It carries the INTENT rather than a
+ *  collation NAME, because a name is dialect-private: `"bytewise"` is PostgreSQL
+ *  `COLLATE "C"`, SQLite `COLLATE BINARY`, MySQL `utf8mb4_0900_bin`. */
+export type ColumnCollation = "bytewise";
+
 /** The CLOSED column-masking transform lexicon (`.mask({ kind })`, #174) — faithful
  *  transcription of the schema `IrMaskKind` `oneOf` const set. The two date forms
  *  are KEBAB (`date-year`/`date-decade`); the rest are single camelCase words. */
@@ -303,6 +309,10 @@ export interface IrColumn {
   /** Case-sensitivity facet for text columns. Only `false` is meaningful;
    *  omitted/`true` is the byte-identical default. */
   caseSensitive?: boolean | null;
+  /** Per-column collation INTENT (closed {@link ColumnCollation}), spelled per
+   *  dialect by the engine. The sibling of `caseSensitive` and contradictory with
+   *  it; refused alongside `valueFormat`, which pins its own. Default-absent. */
+  collation?: ColumnCollation | null;
   /** **#174** — a STANDALONE column mask. Default-absent. */
   mask?: IrMask | null;
   /** Generated/computed column facet. Default-absent. */

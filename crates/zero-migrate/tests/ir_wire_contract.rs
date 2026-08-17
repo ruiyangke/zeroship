@@ -271,6 +271,7 @@ fn ir_column_facet_fields_are_camel_case() {
         value_format: None,
         references: None,
         id_prefix: Some("post".into()),
+        collation: None,
         case_sensitive: None,
         vector_metric: Some(VectorMetric::Cosine),
         mask: None,
@@ -307,6 +308,55 @@ fn ir_column_facet_fields_are_camel_case() {
 }
 
 #[test]
+fn column_collation_round_trips_and_absent_collation_omits_key() {
+    use zero_migrate::model::ir::{ColType, ColumnCollation, IrColumn};
+
+    let collated = IrColumn {
+        name: "id".into(),
+        ty: ColType::String { length: 255 },
+        nullable: Some(false),
+        default: None,
+        unique: None,
+        value_format: None,
+        references: None,
+        id_prefix: None,
+        case_sensitive: None,
+        collation: Some(ColumnCollation::Bytewise),
+        vector_metric: None,
+        mask: None,
+        generated: None,
+        identity: None,
+    };
+    let json = serde_json::to_string(&collated).expect("collated column serializes");
+    assert!(
+        json.contains(r#""collation":"bytewise""#),
+        "the collation facet is a closed camelCase token on the wire: {json}"
+    );
+    let back: IrColumn = serde_json::from_str(&json).expect("collated column round-trips");
+    assert_eq!(back.collation, Some(ColumnCollation::Bytewise));
+
+    // The checksum-neutrality claim the facet's doc makes: a column that declares
+    // no collation must be BYTE-IDENTICAL to the pre-facet image, or every existing
+    // migration's checksum moves.
+    let plain = IrColumn {
+        collation: None,
+        ..collated
+    };
+    let plain_json = serde_json::to_string(&plain).expect("plain column serializes");
+    assert_eq!(
+        plain_json, r#"{"name":"id","type":{"string":{"length":255}},"nullable":false}"#,
+        "a column without a collation must keep the byte-identical omitted-key image"
+    );
+
+    // A closed token set: serde rejects anything else at DESERIALIZE, so a
+    // hand-crafted envelope cannot smuggle a collation name into emitted DDL.
+    assert!(
+        serde_json::from_str::<IrColumn>(r#"{"name":"id","type":"text","collation":"C"}"#).is_err(),
+        "an out-of-set collation token must be rejected at deserialize"
+    );
+}
+
+#[test]
 fn identity_by_default_round_trips_and_absent_identity_omits_key() {
     use zero_migrate::model::ir::{ColType, IdentityCol, IrColumn};
 
@@ -319,6 +369,7 @@ fn identity_by_default_round_trips_and_absent_identity_omits_key() {
         value_format: None,
         references: None,
         id_prefix: None,
+        collation: None,
         case_sensitive: None,
         vector_metric: None,
         mask: None,
@@ -366,6 +417,7 @@ fn create_table_primary_key_round_trips_and_schema_carries_field() {
                 value_format: None,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -381,6 +433,7 @@ fn create_table_primary_key_round_trips_and_schema_carries_field() {
                 value_format: None,
                 references: None,
                 id_prefix: None,
+                collation: None,
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -1040,6 +1093,7 @@ fn nested_ir_column_index_constraint_omit_absent_optionals() {
         value_format: None,
         references: None,
         id_prefix: None,
+        collation: None,
         case_sensitive: None,
         vector_metric: None,
         mask: None,
@@ -1127,6 +1181,7 @@ fn partition_ops_round_trip_and_absent_fields_stay_omitted() {
             value_format: None,
             references: None,
             id_prefix: None,
+            collation: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,

@@ -33,11 +33,14 @@
 //! measured here; do not read this note as a claim that they do.
 
 use zero_migrate_policy::{
-    normalize_pg_identifier, AuthorPkPolicy, EffectivePolicy, InjectColumn, InjectIndex, ObjectName,
+    normalize_pg_identifier, AuthorPkPolicy, EffectivePolicy, InjectCollation, InjectColumn,
+    InjectIndex, ObjectName,
 };
 
 use crate::model::expr::{Expr, SynthFn};
-use crate::model::ir::{ColType, IndexElement, IrColumn, IrDefault, IrIndex, MigrationIr, Op};
+use crate::model::ir::{
+    ColType, ColumnCollation, IndexElement, IrColumn, IrDefault, IrIndex, MigrationIr, Op,
+};
 use zero_migrate_ir::policy_registry;
 
 /// Error raised while applying the effective policy's table injection.
@@ -56,6 +59,14 @@ pub enum TableShapeError {
     /// The policy injects a system column type this engine cannot express in IR.
     #[error("system column {column:?} uses unsupported type {data_type:?}")]
     UnsupportedSystemColumnType {
+        /// Column name.
+        column: String,
+        /// Inject type token.
+        data_type: String,
+    },
+    /// The policy pins a collation on a system column whose type cannot carry one.
+    #[error("system column {column:?} pins a collation, which type {data_type:?} cannot carry")]
+    UnsupportedSystemColumnCollation {
         /// Column name.
         column: String,
         /// Inject type token.
@@ -457,6 +468,7 @@ fn inject_column_to_ir(column: &InjectColumn) -> Result<IrColumn, TableShapeErro
         }
     };
     let default = inject_default_to_ir(column, &ty)?;
+    let collation = inject_collation_to_ir(column, &ty, &name)?;
     Ok(IrColumn {
         name,
         ty,
@@ -467,11 +479,37 @@ fn inject_column_to_ir(column: &InjectColumn) -> Result<IrColumn, TableShapeErro
         references: None,
         id_prefix: None,
         case_sensitive: None,
+        collation,
         vector_metric: None,
         mask: None,
         generated: None,
         identity: None,
     })
+}
+
+/// Map an [`InjectColumn`]'s collation intent onto the column facet.
+///
+/// A collation is a rule for comparing TEXT, so pinning one on the `timestamptz`
+/// or `integer` token is a charter that says something the database cannot hear.
+/// Refuse it here rather than drop it: a silently ignored pin is the same class of
+/// defect as the missing collation this facet exists to fix.
+fn inject_collation_to_ir(
+    column: &InjectColumn,
+    ty: &ColType,
+    name: &str,
+) -> Result<Option<ColumnCollation>, TableShapeError> {
+    let Some(collation) = column.collation else {
+        return Ok(None);
+    };
+    if !matches!(ty, ColType::Text | ColType::String { .. }) {
+        return Err(TableShapeError::UnsupportedSystemColumnCollation {
+            column: name.to_string(),
+            data_type: column.ty.clone(),
+        });
+    }
+    Ok(Some(match collation {
+        InjectCollation::Bytewise => ColumnCollation::Bytewise,
+    }))
 }
 
 fn inject_default_to_ir(
@@ -706,6 +744,17 @@ fn system_columns_match(actual: &IrColumn, expected: &IrColumn) -> bool {
     // inject's name AND its type/nullability/default (the shape the InjectSpec
     // carries — `inject_column_to_ir` maps the opaque token; injected columns carry
     // the canonical default mapped from the rule, when present).
+    //
+    // `collation` is in the comparison for the reason the facet exists. An author
+    // column that matches an injected slot on name/type/nullability/default but not
+    // on collation would otherwise be judged CONFORMING, left verbatim, and land
+    // without the collation the charter pinned — a column that reads as the
+    // operator's shape and orders like the author's. That is the silent divergence
+    // the facet is here to end, so it must not be reproduced inside the check.
+    //
+    // No charter in existence carries the key, so every currently-conforming create
+    // stays conforming: `inject_column_to_ir` yields `None` on both sides until an
+    // operator EDITS the charter, which is the same edit that would start denying.
     actual.name == expected.name
         && actual.ty == expected.ty
         && actual.nullable == expected.nullable
@@ -713,6 +762,7 @@ fn system_columns_match(actual: &IrColumn, expected: &IrColumn) -> bool {
         && actual.unique == expected.unique
         && actual.references == expected.references
         && actual.case_sensitive == expected.case_sensitive
+        && actual.collation == expected.collation
         && actual.vector_metric == expected.vector_metric
         && actual.mask == expected.mask
         && actual.generated == expected.generated
@@ -875,6 +925,7 @@ mod tests {
             value_format: None,
             references: None,
             id_prefix: None,
+            collation: None,
             case_sensitive: None,
             vector_metric: None,
             mask: None,

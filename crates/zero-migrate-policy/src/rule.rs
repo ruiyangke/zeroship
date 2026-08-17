@@ -69,7 +69,7 @@ pub struct InjectSpec {
 }
 
 /// One injected column: enough to drive the resolver + the II.2.6b conformance
-/// check (name/type/nullable/default). The `ty` is an opaque type token.
+/// check (name/type/nullable/default/collation). The `ty` is an opaque type token.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct InjectColumn {
     /// The column's (normalized) name.
@@ -80,6 +80,29 @@ pub struct InjectColumn {
     pub nullable: bool,
     /// An optional default expression (opaque token), if any.
     pub default: Option<String>,
+    /// An optional collation INTENT for the column.
+    ///
+    /// Unlike `ty` this is NOT an opaque token, and the difference is deliberate.
+    /// `ty` is opaque because this leaf crate has no SQL-type dependency to check
+    /// it against; a collation is not a type, it is a comparison rule with a fixed
+    /// vocabulary, and one that lands in emitted DDL. A closed enum lets the LOADER
+    /// refuse an unknown spelling at charter-load time, which is where an operator
+    /// can still fix it, instead of at render time on a deploy.
+    pub collation: Option<InjectCollation>,
+}
+
+/// The CLOSED collation-intent vocabulary an `[[inject]]` column may pin.
+///
+/// The resolver maps this onto the engine's per-column collation facet, which each
+/// dialect spells its own way. A charter is ONE document that has to be sound on
+/// PostgreSQL, MySQL and SQLite at once, so it names the intent rather than a
+/// collation NAME - `C` would be meaningless to two of the three.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum InjectCollation {
+    /// Compare and order the column by its stored bytes, so a value whose byte
+    /// order is its semantic order (an id minted from a monotonic clock) sorts the
+    /// way it was minted rather than the way a natural-language locale would.
+    Bytewise,
 }
 
 /// One injected index: a name + the columns it covers.

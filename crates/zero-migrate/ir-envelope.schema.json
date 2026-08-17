@@ -2939,6 +2939,17 @@
             "null"
           ]
         },
+        "collation": {
+          "description": "Per-column collation INTENT, spelled per dialect by the render seam.\n\nThe sibling of [`Self::case_sensitive`], and deliberately separate from it:\nthat one asks for case-INSENSITIVE comparison (PostgreSQL `citext`), this one\nasks for BYTEWISE comparison. They are contradictory rather than composable,\nso the validator refuses a column carrying both.\n\nA [`Self::value_format`] column already pins bytewise comparison as part of its\nstorage contract, so it needs nothing here; carrying both is refused too, to\nkeep ONE writer of the snapshot's collation per column.\n\nDefault-absent + `skip_serializing_if`, so a column that declares no collation\nis BYTE-IDENTICAL on the wire and in the checksum to the pre-facet image.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ColumnCollation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "mask": {
           "description": "A STANDALONE column mask (`t.string().mask({ kind, classification })`). Unlike\n`id_prefix`/`vector_metric` (declared-only), a mask IS recoverable from the live\n`zero-migrate:mask` sentinel by the RUNTIME — but the OFFLINE op fold + gen-types have no\nlive DB, so the facet is carried here to keep it through author→generate→fold\n(and so the op lower emits the `zero-migrate:mask` sentinel the runtime later reads). An\nencrypted column's auto-mask `{ full, pii }` is IMPLIED by the carrier and NOT\ncarried here; an explicit mask OVERRIDES it. Default-absent + `skip_serializing_if`\n⇒ a mask-less column is BYTE-IDENTICAL on the wire/checksum to the pre-mask image.\nBounded STRUCTURALLY by the closed [`IrMask`]/[`IrMaskKind`]/[`IrClassification`]\nenums (serde rejects an out-of-set kind/classification at deserialize).",
           "anyOf": [
@@ -4627,6 +4638,16 @@
           "description": "Inner product (`vector_ip_ops`).",
           "type": "string",
           "const": "innerProduct"
+        }
+      ]
+    },
+    "ColumnCollation": {
+      "description": "The CLOSED per-column collation-INTENT lexicon.\n\nA collation NAME is dialect-private — `C` means nothing to SQLite, `BINARY`\nmeans nothing to PostgreSQL, and MySQL spells the same idea a third way — so\nthis carries the INTENT and lets the render seam spell it. That is the same\ntreatment [`IrColumn::case_sensitive`] already gets, and the reason it is a\nclosed enum rather than a string: an author-supplied collation name would land\nverbatim in emitted DDL, and it would have to be sound on three dialects at\nonce.\n\nThe one member is the one intent the engine can spell everywhere. Ordinary\ncase-insensitivity is [`IrColumn::case_sensitive`]'s job, not this one's, and\nthe DEFAULT (absent) is whatever the database's own collation is.\n\nOnly a text-family column may carry it; the validator refuses it elsewhere,\nand refuses it alongside `caseSensitive: false`, which asks for the opposite.",
+      "oneOf": [
+        {
+          "description": "Compare and order this column by its stored BYTES, so a value whose byte\norder is its semantic order (a ULID, a TypeID, a base62 UUIDv7) sorts the\nway it was minted.\n\nPostgreSQL `COLLATE \"C\"`, SQLite `COLLATE BINARY`, MySQL\n`utf8mb4_0900_bin`. Without it the column takes the database default,\nwhich on a `en_US.utf8` PostgreSQL interleaves the upper- and lower-case\nruns of base62 and silently stops `ORDER BY id` being creation order.",
+          "type": "string",
+          "const": "bytewise"
         }
       ]
     },
