@@ -1,8 +1,11 @@
 -- ops/postgres-init.sql - runs ONCE on a fresh postgres data dir
 -- (mounted into /docker-entrypoint-initdb.d/).
 --
--- The whole platform shares ONE database with a single `zeroship` schema for
--- all system tables. Most queries are fully qualified
+-- The whole platform shares ONE database, and `zeroship` is the schema holding
+-- platform state. It is not the only system schema: `service_authn` holds the
+-- service-assertion replay store, which is deliberately outside `zeroship` and
+-- deliberately NOT on any role's search_path, since every statement against it
+-- is qualified. Most queries here are fully qualified
 -- (`zeroship.apps`), but a few reference objects UNQUALIFIED (e.g.
 -- `crates/control/src/admin_handlers.rs` `UPDATE apps ...`), so every connection
 -- needs `zeroship` on its search_path. Postgres's default role search_path
