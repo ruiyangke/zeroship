@@ -180,9 +180,19 @@ All token operations are native to `crates/auth`.
 
 ### CLI platform tokens
 
-The CLI currently uses control's parallel device flow. It exchanges an approved
-grant for a platform access token through `POST /internal/platform-token`. That
-mint is deliberately narrower than the other internal control APIs:
+`zeroship login` runs the OP's own device grant. It first reads control's RFC
+9728 metadata at `GET {control}/.well-known/oauth-protected-resource` to learn
+which authorization server control accepts tokens from, then drives
+`POST {issuer}/device/authorization` and `POST {issuer}/token` against that
+issuer. It asks for `offline_access`, so the OP returns a refresh token
+alongside a 15-minute access token, and `zeroship deploy` rotates that refresh
+token when the access token expires. The rotated credential is written to disk
+before it is used: the presented token is already spent, and re-presenting it
+is a reuse detection that revokes the family.
+
+Control's parallel device flow still exists and exchanges an approved grant for
+a platform access token through `POST /internal/platform-token`. That mint is
+deliberately narrower than the other internal control APIs:
 
 - Only auth and control receive `auth.platform_mint_key`. The worker still
   needs `control_key` for its normal control-plane calls, but that key is not
@@ -196,25 +206,38 @@ mint is deliberately narrower than the other internal control APIs:
   `zeroship-cli` client ID. Neither value is caller-controlled.
 - The requested lifetime must be positive and no more than 12 hours.
 
-Auth also reconciles a first-party `zeroship-cli` OAuth client registration at
-startup. Its registered scope ceiling is exactly `apps:deploy`, `apps:read`,
-`apps:write`, and `secrets:read`; a token request cannot expand that set. An
-approved OP device grant for this client produces a 12-hour access token, still
-bounded by `PLATFORM_TOKEN_MAX_TTL_SECS`, with the configured control audience
-and a public `sub` equal to the platform principal UUID. Generic app clients
-continue to receive app-sector pairwise `pws_...` subjects.
+Auth reconciles a first-party `zeroship-cli` OAuth client registration at
+startup. It may request `apps:deploy`, `apps:read`, `apps:write`,
+`secrets:read` and `offline_access`; a token request cannot expand that set,
+and `offline_access` asks for the refresh family without conferring any
+resource authority of its own. An approved OP device grant for this client
+produces a 15-minute access token with the configured control audience and a
+public `sub` equal to the platform principal UUID. Generic app clients continue
+to receive app-sector pairwise `pws_...` subjects.
 
-This OP path is additive and `zeroship login` has not switched to it. Control's
-parallel device flow and the internal platform-token mint remain unchanged
-until a later change moves the CLI atomically.
+The refresh rotation mints through the same code path as the device
+redemption, so a rotated CLI token keeps that principal shape rather than
+silently becoming a pairwise token control would refuse. The refresh row
+stores the principal subject too, which is what makes reuse detection write
+the `zeroship.token_revocations` marker described below.
+
+`PLATFORM_TOKEN_MAX_TTL_SECS` (12 hours) still bounds control's parallel mint,
+which issues no refresh token and therefore has nothing shorter to fall back
+on.
 
 Control's bearer verification path honors a
 `zeroship.token_revocations` marker for `zeroship-cli`. Account deletion writes
 that marker, so credentials issued before a deletion request stay revoked even
-if the request is cancelled. The current `zeroship logout` path does not call
-RFC 7009 and deletes only the local credential. Other revocation reasons
-therefore rely on expiry; the 12-hour ceiling remains part of the authorization
-boundary.
+if the request is cancelled. Refresh reuse detection now writes it too: a
+rotated-away CLI refresh token, presented once more after its one lost-response
+retry, revokes the family AND stamps the marker, which recalls the access token
+the attacker may already be holding.
+
+Everything else still relies on expiry. The current `zeroship logout` deletes
+only the local credential and calls no RFC 7009 endpoint, so a token already
+copied off the machine stays valid for the rest of its lifetime: at most 15
+minutes for a login-issued token, at most 12 hours for one minted through
+control's parallel flow.
 
 ## OAuth Clients
 

@@ -682,6 +682,24 @@ async fn exchange_device_code_locked(
                 .map(|scope| parse_scopes(&scope))
                 .unwrap_or_default();
             let granted_scopes = sort_dedup(requested_scopes);
+            // The cap here is the client REGISTRATION, and only that.
+            //
+            // Say what this does not do, because two sibling paths do it and
+            // the difference is invisible from the response: neither this
+            // check nor the mint below intersects with
+            // `zeroship.principal_grants`, which control's
+            // `deploy_scopes_for_principal` and `mint_platform_token` both do.
+            // An operator who deletes a grant row therefore does not narrow a
+            // token issued here.
+            //
+            // It cannot be fixed in this function alone. The only writer of
+            // platform-creator grants is control's `/api/device/token`
+            // (`identity_bridge::ensure_platform_creator_grants`), and
+            // `db/migrations-ts/20260702000900_grants.ts` gives `zeroship_auth`
+            // SELECT only on that table - so intersecting before provisioning
+            // moves would mint `scope: ""` on every first login. Pinned by
+            // `crates/auth/tests/cli_device_refresh_test.rs`,
+            // `the_cli_device_grant_does_not_consult_stored_principal_grants`.
             if platform_cli && !scope_subset(&granted_scopes, &platform_cli_scopes()) {
                 return Err(OAuthError::invalid_grant(
                     "device grant scope is no longer allowed",
