@@ -99,8 +99,8 @@ export default {
 
     table("groupMembers").create({
       columns: {
-        groupId: t.text().notNull().references("groups", "id"),
-        userId: t.text().notNull().references("users", "id"),
+        groupId: t.text().notNull().references("groups", "id", { onDelete: "cascade" }),
+        userId: t.text().notNull().references("users", "id", { onDelete: "cascade" }),
       },
       indexes: [
         { name: "group_members_pair_uniq", on: ["groupId", "userId"], unique: true },
@@ -134,13 +134,13 @@ export default {
 
     table("components").create({
       columns: {
-        productId: t.text().notNull().references("products", "id"),
+        productId: t.text().notNull().references("products", "id", { onDelete: "cascade" }),
         name: t.text().notNull(),
         description: t.text(),
         // Bugzilla requires `initialowner` per component. Nullable here left
         // `bugs.create` with no guaranteed assignment target.
-        defaultAssigneeId: t.text().notNull().references("users", "id"),
-        defaultQaContactId: t.text().references("users", "id"),
+        defaultAssigneeId: t.text().notNull().references("users", "id", { onDelete: "restrict" }),
+        defaultQaContactId: t.text().references("users", "id", { onDelete: "setNull" }),
         // Bugzilla's `initialcc`: users CC'd onto every new bug in this
         // component. Stored as a JSON array of user ids.
         initialCc: t.json(),
@@ -156,7 +156,7 @@ export default {
 
     table("versions").create({
       columns: {
-        productId: t.text().notNull().references("products", "id"),
+        productId: t.text().notNull().references("products", "id", { onDelete: "cascade" }),
         name: t.text().notNull(),
         // Deliberately a float, not an int: fractional keys let a version be
         // inserted between two existing ones without renumbering the rest.
@@ -172,7 +172,7 @@ export default {
 
     table("milestones").create({
       columns: {
-        productId: t.text().notNull().references("products", "id"),
+        productId: t.text().notNull().references("products", "id", { onDelete: "cascade" }),
         name: t.text().notNull(),
         sortKey: t.double().notNull().default(0),
         isActive: t.boolean().notNull().default(true),
@@ -185,8 +185,8 @@ export default {
 
     table("productGroups").create({
       columns: {
-        productId: t.text().notNull().references("products", "id"),
-        groupId: t.text().notNull().references("groups", "id"),
+        productId: t.text().notNull().references("products", "id", { onDelete: "cascade" }),
+        groupId: t.text().notNull().references("groups", "id", { onDelete: "cascade" }),
       },
       indexes: [
         { name: "product_groups_pair_uniq", on: ["productId", "groupId"], unique: true },
@@ -207,15 +207,19 @@ export default {
     // fields, not two names for one axis.
     table("issues").create({
       columns: {
-        productId: t.text().notNull().references("products", "id"),
-        componentId: t.text().notNull().references("components", "id"),
+        // `restrict`, not `cascade`: the DB refuses to drop a product or
+        // component out from under live issues. That is the same policy
+        // `products.delete` states with its `deleteIssues` confirmation, which
+        // purges the issues first and so satisfies this.
+        productId: t.text().notNull().references("products", "id", { onDelete: "restrict" }),
+        componentId: t.text().notNull().references("components", "id", { onDelete: "restrict" }),
         // NULLABLE, and this reversed an earlier decision that read "version is
         // mandatory on a Bugzilla bug; nullable here was wrong". That was true
         // while every row WAS a bug: "version found in" is a defect concept.
         // An enhancement has no version it was found in, so requiring one meant
         // a feature request had to name a version it has nothing to do with.
-        versionId: t.text().references("versions", "id"),
-        milestoneId: t.text().references("milestones", "id"),
+        versionId: t.text().references("versions", "id", { onDelete: "setNull" }),
+        milestoneId: t.text().references("milestones", "id", { onDelete: "setNull" }),
         // Bugzilla users address bugs by alias constantly. Unique when set,
         // via the plain unique index below: NULLs compare distinct in both
         // PostgreSQL and SQLite, so any number of alias-less bugs coexist
@@ -246,12 +250,18 @@ export default {
         resolution: t.enum("issue_resolution"),
         severity: t.enum("issue_severity").notNull().default("normal"),
         priority: t.enum("issue_priority").notNull().default("P3"),
-        reporterId: t.text().notNull().references("users", "id"),
-        assigneeId: t.text().references("users", "id"),
-        qaContactId: t.text().references("users", "id"),
+        reporterId: t.text().notNull().references("users", "id", { onDelete: "restrict" }),
+        assigneeId: t.text().references("users", "id", { onDelete: "setNull" }),
+        qaContactId: t.text().references("users", "id", { onDelete: "setNull" }),
         // Was a bare t.text() with no FK and no index, which made
         // `dupes.list` an unindexed scan against an unconstrained column.
-        duplicateOfId: t.text().references("issues", "id"),
+        //
+        // `setNull` is what makes `products.delete` able to finish the job: a
+        // duplicate marker can cross products, so purging one product's issues
+        // used to leave markers elsewhere pointing at ids that no longer
+        // resolve, and the handler could only COUNT them because env.db cannot
+        // write SQL NULL through an update. The database can.
+        duplicateOfId: t.text().references("issues", "id", { onDelete: "setNull" }),
         whiteboard: t.text(),
         opSys: t.text().notNull().default("Unspecified"),
         platform: t.text().notNull().default("Unspecified"),
@@ -293,8 +303,13 @@ export default {
     // cannot express "this one bug is restricted".
     table("issueGroups").create({
       columns: {
-        issueId: t.text().notNull().references("issues", "id"),
-        groupId: t.text().notNull().references("groups", "id"),
+        // Both sides cascade, including the group side, where `groups.delete`
+        // separately REFUSES while a live restriction exists. The two are not
+        // in conflict: the refusal is the user-facing policy, and the cascade
+        // is what stops a soft-deleted tombstone -- invisible to that check,
+        // still physically holding the id -- from blocking the purge.
+        issueId: t.text().notNull().references("issues", "id", { onDelete: "cascade" }),
+        groupId: t.text().notNull().references("groups", "id", { onDelete: "cascade" }),
       },
       indexes: [
         { name: "issue_groups_pair_uniq", on: ["issueId", "groupId"], unique: true },
@@ -313,8 +328,8 @@ export default {
     // and a dead control teaches the wrong thing in an example app.
     table("comments").create({
       columns: {
-        issueId: t.text().notNull().references("issues", "id"),
-        authorId: t.text().notNull().references("users", "id"),
+        issueId: t.text().notNull().references("issues", "id", { onDelete: "cascade" }),
+        authorId: t.text().notNull().references("users", "id", { onDelete: "restrict" }),
         body: t.text().notNull(),
         commentNumber: t.int().notNull().default(0),
         isPrivate: t.boolean().notNull().default(false),
@@ -331,7 +346,7 @@ export default {
     // list view never has to touch object storage.
     table("attachments").create({
       columns: {
-        issueId: t.text().notNull().references("issues", "id"),
+        issueId: t.text().notNull().references("issues", "id", { onDelete: "cascade" }),
         // The comment a file arrived with, when it arrived with one.
         // Files are attached BY commenting, the way anyone who has used a
         // tracker this decade expects, so an attachment usually has a
@@ -339,8 +354,8 @@ export default {
         // the bug can still hold files with no comment of their own, and
         // because bugId stays the thing visibility is decided by -- a file
         // is reachable exactly when its bug is.
-        commentId: t.text().references("comments", "id"),
-        uploaderId: t.text().notNull().references("users", "id"),
+        commentId: t.text().references("comments", "id", { onDelete: "setNull" }),
+        uploaderId: t.text().notNull().references("users", "id", { onDelete: "restrict" }),
         filename: t.text().notNull(),
         contentType: t.text().notNull().default("application/octet-stream"),
         // A file size is not a float.
@@ -365,8 +380,8 @@ export default {
 
     table("issueKeywords").create({
       columns: {
-        issueId: t.text().notNull().references("issues", "id"),
-        keywordId: t.text().notNull().references("keywords", "id"),
+        issueId: t.text().notNull().references("issues", "id", { onDelete: "cascade" }),
+        keywordId: t.text().notNull().references("keywords", "id", { onDelete: "cascade" }),
       },
       indexes: [
         { name: "issue_keywords_pair_uniq", on: ["issueId", "keywordId"], unique: true },
@@ -381,8 +396,8 @@ export default {
     // enforced in `deps.add`.
     table("issueDependencies").create({
       columns: {
-        issueId: t.text().notNull().references("issues", "id"),
-        dependsOnId: t.text().notNull().references("issues", "id"),
+        issueId: t.text().notNull().references("issues", "id", { onDelete: "cascade" }),
+        dependsOnId: t.text().notNull().references("issues", "id", { onDelete: "cascade" }),
       },
       indexes: [
         { name: "issue_deps_pair_uniq", on: ["issueId", "dependsOnId"], unique: true },
@@ -392,8 +407,8 @@ export default {
 
     table("issueCc").create({
       columns: {
-        issueId: t.text().notNull().references("issues", "id"),
-        userId: t.text().notNull().references("users", "id"),
+        issueId: t.text().notNull().references("issues", "id", { onDelete: "cascade" }),
+        userId: t.text().notNull().references("users", "id", { onDelete: "cascade" }),
       },
       indexes: [
         { name: "issue_cc_pair_uniq", on: ["issueId", "userId"], unique: true },
@@ -404,7 +419,7 @@ export default {
 
     table("issueSeeAlso").create({
       columns: {
-        issueId: t.text().notNull().references("issues", "id"),
+        issueId: t.text().notNull().references("issues", "id", { onDelete: "cascade" }),
         url: t.text().notNull(),
       },
       indexes: [
@@ -414,8 +429,8 @@ export default {
 
     table("votes").create({
       columns: {
-        issueId: t.text().notNull().references("issues", "id"),
-        userId: t.text().notNull().references("users", "id"),
+        issueId: t.text().notNull().references("issues", "id", { onDelete: "cascade" }),
+        userId: t.text().notNull().references("users", "id", { onDelete: "cascade" }),
         // A vote quantity, so bugs.voteCount is SUM(count), not COUNT(*).
         count: t.int().notNull().default(1),
       },
@@ -435,7 +450,11 @@ export default {
         targetType: t.enum("flag_target_type").notNull().default("issue"),
         isRequestable: t.boolean().notNull().default(true),
         isMultiplicable: t.boolean().notNull().default(false),
-        productId: t.text().references("products", "id"),
+        // `cascade`, not `setNull`, even though the column is nullable: NULL
+        // here means GLOBAL. Nulling a product-scoped type on product deletion
+        // would silently widen it to apply tracker-wide, which is the opposite
+        // of tidying up.
+        productId: t.text().references("products", "id", { onDelete: "cascade" }),
       },
       indexes: [
         { name: "flag_types_name_target_uniq", on: ["name", "targetType"], unique: true },
@@ -447,11 +466,15 @@ export default {
     // columns; it is enforced in `flags.set` and asserted in the test suite.
     table("flags").create({
       columns: {
-        flagTypeId: t.text().notNull().references("flagTypes", "id"),
-        issueId: t.text().references("issues", "id"),
-        attachmentId: t.text().references("attachments", "id"),
-        setterId: t.text().notNull().references("users", "id"),
-        requesteeId: t.text().references("users", "id"),
+        flagTypeId: t.text().notNull().references("flagTypes", "id", { onDelete: "restrict" }),
+        // Both target columns cascade rather than null out. They are nullable,
+        // but the XOR check below means nulling one produces a row with NO
+        // target, so `setNull` here would trade a dangling id for an illegal
+        // row. A flag is contained by whatever it is set on.
+        issueId: t.text().references("issues", "id", { onDelete: "cascade" }),
+        attachmentId: t.text().references("attachments", "id", { onDelete: "cascade" }),
+        setterId: t.text().notNull().references("users", "id", { onDelete: "restrict" }),
+        requesteeId: t.text().references("users", "id", { onDelete: "setNull" }),
         status: t.enum("flag_status").notNull().default("?"),
       },
       indexes: [
@@ -474,11 +497,11 @@ export default {
     // separate event log.
     table("activities").create({
       columns: {
-        issueId: t.text().notNull().references("issues", "id"),
-        actorId: t.text().notNull().references("users", "id"),
+        issueId: t.text().notNull().references("issues", "id", { onDelete: "cascade" }),
+        actorId: t.text().notNull().references("users", "id", { onDelete: "restrict" }),
         // Bugzilla's bugs_activity carries attach_id. Without it, "attachment
         // 12 marked obsolete" renders in the history as a bare field name.
-        attachmentId: t.text().references("attachments", "id"),
+        attachmentId: t.text().references("attachments", "id", { onDelete: "setNull" }),
         fieldName: t.text().notNull(),
         oldValue: t.text(),
         newValue: t.text(),
@@ -493,7 +516,7 @@ export default {
 
     table("savedSearches").create({
       columns: {
-        ownerId: t.text().notNull().references("users", "id"),
+        ownerId: t.text().notNull().references("users", "id", { onDelete: "cascade" }),
         name: t.text().notNull(),
         // Executed on behalf of others when shared, so it is validated against
         // a closed field/operator whitelist before execution.
@@ -507,8 +530,8 @@ export default {
 
     table("watchers").create({
       columns: {
-        watcherId: t.text().notNull().references("users", "id"),
-        watchedId: t.text().notNull().references("users", "id"),
+        watcherId: t.text().notNull().references("users", "id", { onDelete: "cascade" }),
+        watchedId: t.text().notNull().references("users", "id", { onDelete: "cascade" }),
       },
       indexes: [
         { name: "watchers_pair_uniq", on: ["watcherId", "watchedId"], unique: true },
@@ -520,8 +543,10 @@ export default {
 
     table("notifications").create({
       columns: {
-        userId: t.text().notNull().references("users", "id"),
-        issueId: t.text().references("issues", "id"),
+        userId: t.text().notNull().references("users", "id", { onDelete: "cascade" }),
+        // `cascade` even though nullable: a notification is ABOUT its issue,
+        // and one whose subject is gone has nothing left to link to or say.
+        issueId: t.text().references("issues", "id", { onDelete: "cascade" }),
         kind: t.enum("notification_kind").notNull().default("issue_changed"),
         title: t.text().notNull(),
         body: t.text(),

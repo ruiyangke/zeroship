@@ -36,18 +36,21 @@
           "type": "string",
           "refTarget": "issues",
           "refColumn": "id",
+          "onDelete": "cascade",
           "required": true
         },
         "actorId": {
           "type": "string",
           "refTarget": "users",
           "refColumn": "id",
+          "onDelete": "restrict",
           "required": true
         },
         "attachmentId": {
           "type": "string",
           "refTarget": "attachments",
-          "refColumn": "id"
+          "refColumn": "id",
+          "onDelete": "setNull"
         },
         "fieldName": {
           "type": "string",
@@ -134,17 +137,20 @@
           "type": "string",
           "refTarget": "issues",
           "refColumn": "id",
+          "onDelete": "cascade",
           "required": true
         },
         "commentId": {
           "type": "string",
           "refTarget": "comments",
-          "refColumn": "id"
+          "refColumn": "id",
+          "onDelete": "setNull"
         },
         "uploaderId": {
           "type": "string",
           "refTarget": "users",
           "refColumn": "id",
+          "onDelete": "restrict",
           "required": true
         },
         "filename": {
@@ -252,12 +258,14 @@
           "type": "string",
           "refTarget": "issues",
           "refColumn": "id",
+          "onDelete": "cascade",
           "required": true
         },
         "authorId": {
           "type": "string",
           "refTarget": "users",
           "refColumn": "id",
+          "onDelete": "restrict",
           "required": true
         },
         "body": {
@@ -344,6 +352,7 @@
           "type": "string",
           "refTarget": "products",
           "refColumn": "id",
+          "onDelete": "cascade",
           "required": true
         },
         "name": {
@@ -357,12 +366,14 @@
           "type": "string",
           "refTarget": "users",
           "refColumn": "id",
+          "onDelete": "restrict",
           "required": true
         },
         "defaultQaContactId": {
           "type": "string",
           "refTarget": "users",
-          "refColumn": "id"
+          "refColumn": "id",
+          "onDelete": "setNull"
         },
         "initialCc": {
           "type": "json"
@@ -469,7 +480,8 @@
         "productId": {
           "type": "string",
           "refTarget": "products",
-          "refColumn": "id"
+          "refColumn": "id",
+          "onDelete": "cascade"
         }
       },
       "options": {
@@ -541,28 +553,33 @@
           "type": "string",
           "refTarget": "flagTypes",
           "refColumn": "id",
+          "onDelete": "restrict",
           "required": true
         },
         "issueId": {
           "type": "string",
           "refTarget": "issues",
-          "refColumn": "id"
+          "refColumn": "id",
+          "onDelete": "cascade"
         },
         "attachmentId": {
           "type": "string",
           "refTarget": "attachments",
-          "refColumn": "id"
+          "refColumn": "id",
+          "onDelete": "cascade"
         },
         "setterId": {
           "type": "string",
           "refTarget": "users",
           "refColumn": "id",
+          "onDelete": "restrict",
           "required": true
         },
         "requesteeId": {
           "type": "string",
           "refTarget": "users",
-          "refColumn": "id"
+          "refColumn": "id",
+          "onDelete": "setNull"
         },
         "status": {
           "type": "string",
@@ -655,12 +672,14 @@
           "type": "string",
           "refTarget": "groups",
           "refColumn": "id",
+          "onDelete": "cascade",
           "required": true
         },
         "userId": {
           "type": "string",
           "refTarget": "users",
           "refColumn": "id",
+          "onDelete": "cascade",
           "required": true
         }
       },
@@ -817,12 +836,14 @@
           "type": "string",
           "refTarget": "issues",
           "refColumn": "id",
+          "onDelete": "cascade",
           "required": true
         },
         "userId": {
           "type": "string",
           "refTarget": "users",
           "refColumn": "id",
+          "onDelete": "cascade",
           "required": true
         }
       },
@@ -901,12 +922,14 @@
           "type": "string",
           "refTarget": "issues",
           "refColumn": "id",
+          "onDelete": "cascade",
           "required": true
         },
         "dependsOnId": {
           "type": "string",
           "refTarget": "issues",
           "refColumn": "id",
+          "onDelete": "cascade",
           "required": true
         }
       },
@@ -985,12 +1008,14 @@
           "type": "string",
           "refTarget": "issues",
           "refColumn": "id",
+          "onDelete": "cascade",
           "required": true
         },
         "groupId": {
           "type": "string",
           "refTarget": "groups",
           "refColumn": "id",
+          "onDelete": "cascade",
           "required": true
         }
       },
@@ -1069,12 +1094,14 @@
           "type": "string",
           "refTarget": "issues",
           "refColumn": "id",
+          "onDelete": "cascade",
           "required": true
         },
         "keywordId": {
           "type": "string",
           "refTarget": "keywords",
           "refColumn": "id",
+          "onDelete": "cascade",
           "required": true
         }
       },
@@ -1153,6 +1180,7 @@
           "type": "string",
           "refTarget": "issues",
           "refColumn": "id",
+          "onDelete": "cascade",
           "required": true
         },
         "url": {
@@ -1229,23 +1257,27 @@
           "type": "string",
           "refTarget": "products",
           "refColumn": "id",
+          "onDelete": "restrict",
           "required": true
         },
         "componentId": {
           "type": "string",
           "refTarget": "components",
           "refColumn": "id",
+          "onDelete": "restrict",
           "required": true
         },
         "versionId": {
           "type": "string",
           "refTarget": "versions",
-          "refColumn": "id"
+          "refColumn": "id",
+          "onDelete": "setNull"
         },
         "milestoneId": {
           "type": "string",
           "refTarget": "milestones",
-          "refColumn": "id"
+          "refColumn": "id",
+          "onDelete": "setNull"
         },
         "alias": {
           "type": "string"
@@ -1285,22 +1317,26 @@
           "type": "string",
           "refTarget": "users",
           "refColumn": "id",
+          "onDelete": "restrict",
           "required": true
         },
         "assigneeId": {
           "type": "string",
           "refTarget": "users",
-          "refColumn": "id"
+          "refColumn": "id",
+          "onDelete": "setNull"
         },
         "qaContactId": {
           "type": "string",
           "refTarget": "users",
-          "refColumn": "id"
+          "refColumn": "id",
+          "onDelete": "setNull"
         },
         "duplicateOfId": {
           "type": "string",
           "refTarget": "issues",
-          "refColumn": "id"
+          "refColumn": "id",
+          "onDelete": "setNull"
         },
         "whiteboard": {
           "type": "string"
@@ -1537,6 +1573,7 @@
           "type": "string",
           "refTarget": "products",
           "refColumn": "id",
+          "onDelete": "cascade",
           "required": true
         },
         "name": {
@@ -1629,12 +1666,14 @@
           "type": "string",
           "refTarget": "users",
           "refColumn": "id",
+          "onDelete": "cascade",
           "required": true
         },
         "issueId": {
           "type": "string",
           "refTarget": "issues",
-          "refColumn": "id"
+          "refColumn": "id",
+          "onDelete": "cascade"
         },
         "kind": {
           "type": "string",
@@ -1721,12 +1760,14 @@
           "type": "string",
           "refTarget": "products",
           "refColumn": "id",
+          "onDelete": "cascade",
           "required": true
         },
         "groupId": {
           "type": "string",
           "refTarget": "groups",
           "refColumn": "id",
+          "onDelete": "cascade",
           "required": true
         }
       },
@@ -1923,6 +1964,7 @@
           "type": "string",
           "refTarget": "users",
           "refColumn": "id",
+          "onDelete": "cascade",
           "required": true
         },
         "name": {
@@ -2112,6 +2154,7 @@
           "type": "string",
           "refTarget": "products",
           "refColumn": "id",
+          "onDelete": "cascade",
           "required": true
         },
         "name": {
@@ -2204,12 +2247,14 @@
           "type": "string",
           "refTarget": "issues",
           "refColumn": "id",
+          "onDelete": "cascade",
           "required": true
         },
         "userId": {
           "type": "string",
           "refTarget": "users",
           "refColumn": "id",
+          "onDelete": "cascade",
           "required": true
         },
         "count": {
@@ -2293,12 +2338,14 @@
           "type": "string",
           "refTarget": "users",
           "refColumn": "id",
+          "onDelete": "cascade",
           "required": true
         },
         "watchedId": {
           "type": "string",
           "refTarget": "users",
           "refColumn": "id",
+          "onDelete": "cascade",
           "required": true
         }
       },

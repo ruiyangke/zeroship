@@ -3971,10 +3971,12 @@ export const createGroup = mutation(
  * confirmation is a parameter rather than a second page, so a script has to be
  * as explicit as a person.
  *
- * The cascade is written out rather than left to the database. There are no ON
- * DELETE CASCADE clauses in the migration, so anything not purged here becomes
- * a row pointing at an id that no longer resolves -- and the app renders those
- * as the raw id, which is the defect `useIssueLookups` exists to prevent.
+ * The cascade is written out even though the migration now carries ON DELETE
+ * CASCADE, because the two do different jobs: the clauses are what guarantee no
+ * row survives pointing at a dead id, while writing the order out here is what
+ * lets the handler count what it removed and report it back. `issues.productId`
+ * is ON DELETE RESTRICT, so the final `products.purge` would fail outright if
+ * the issue purge above it were ever incomplete.
  */
 export const deleteProduct = mutation(
   async ({ id, deleteIssues = false }: { id: string; deleteIssues?: boolean }) => {
