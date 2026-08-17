@@ -2,6 +2,8 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::OnceLock;
 
 use serde_json::Value;
@@ -233,17 +235,33 @@ pub enum AuthError {
     CredentialRejected,
 }
 
+/// The future a verifier returns from [`IdentityVerifier::verify`].
+///
+/// Boxed rather than written as `async fn` in the trait for two reasons. It
+/// keeps the trait dyn-compatible, so a deployment can hold its verifier as
+/// `&dyn IdentityVerifier` exactly as the `?Sized` bound on [`verify_identity`]
+/// always promised; and it names one concrete return type, so every
+/// implementation is spelled the same way. There is no `+ Send`: this stack is
+/// compio/io_uring, whose futures are thread-per-core and not `Send`.
+pub type VerifyFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<ServiceIdentity, AuthError>> + 'a>>;
+
 /// Mechanism-specific mapping from presented credentials to a neutral identity.
+///
+/// Verification is asynchronous because a correct mechanism can need I/O to
+/// complete it. The shipped JWT-assertion mechanism must claim the assertion's
+/// `jti` in a store shared by every replica of the callee before it may return
+/// an identity (OIDC Core section 9 makes single use a MUST, and skipping it is
+/// CVE-2020-15222). Making that claim a step the caller performs AFTER
+/// `verify` returned would mean a `ServiceIdentity` exists for a replayed
+/// assertion, so the await belongs inside the seam.
 pub trait IdentityVerifier {
     /// Verify a presence-proven observation and return a mechanism-thin identity.
     ///
     /// # Errors
     ///
     /// Returns [`AuthError::CredentialRejected`] when mechanism checks fail.
-    fn verify(
-        &self,
-        credentials: &PresentedCredentials<'_>,
-    ) -> Result<ServiceIdentity, AuthError>;
+    fn verify<'a>(&'a self, credentials: &'a PresentedCredentials<'a>) -> VerifyFuture<'a>;
 }
 
 /// Non-cryptographic verifier used to exercise the framework seam.
@@ -265,11 +283,8 @@ impl StubIdentityVerifier {
 }
 
 impl IdentityVerifier for StubIdentityVerifier {
-    fn verify(
-        &self,
-        _credentials: &PresentedCredentials<'_>,
-    ) -> Result<ServiceIdentity, AuthError> {
-        Ok(self.identity.clone())
+    fn verify<'a>(&'a self, _credentials: &'a PresentedCredentials<'a>) -> VerifyFuture<'a> {
+        Box::pin(async move { Ok(self.identity.clone()) })
     }
 }
 
@@ -281,7 +296,7 @@ impl IdentityVerifier for StubIdentityVerifier {
 /// non-empty bearer assertion. TLS observations are not accepted as credentials
 /// while the only supported mechanism is JWT. Other errors come from the
 /// verifier implementation.
-pub fn verify_identity(
+pub async fn verify_identity(
     verifier: &(impl IdentityVerifier + ?Sized),
     observed: &PeerCredentials<'_>,
 ) -> Result<ServiceIdentity, AuthError> {
@@ -294,7 +309,7 @@ pub fn verify_identity(
         tls_peer: observed.tls_peer,
         expected_audience: observed.expected_audience,
     };
-    verifier.verify(&presented)
+    verifier.verify(&presented).await
 }
 
 /// A platform HTTP endpoint protected by service authorization.
