@@ -123,7 +123,7 @@ async fn every_security_header_is_present_on_a_ui_route() {
     // absent everywhere.
     let forgot = fx
         .http
-        .request(http::Method::GET, &format!("{}/forgot", fx.auth_base))
+        .request(http::Method::GET, format!("{}/forgot", fx.auth_base))
         .expect("build GET /forgot")
         .send()
         .await
