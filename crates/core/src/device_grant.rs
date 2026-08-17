@@ -6,19 +6,25 @@
 //! * [`OP_PROVIDER`] - the auth service's own device grant. The approved row is
 //!   redeemed at the OP's `/oauth2/token` for an OIDC access token, so the row
 //!   carries `client_id`, `sid` and `auth_credential_version`.
-//! * [`PLATFORM_PROVIDER`] - the control plane's deploy-token grant, the one
-//!   `zeroship login` drives. The approved row is redeemed at control's
-//!   `/api/device/token` for a platform access token scoped to the principal's
-//!   `zeroship.principal_grants`.
+//! * [`PLATFORM_PROVIDER`] - the control plane's deploy-token grant. The
+//!   approved row is redeemed at control's `/api/device/token` for a platform
+//!   access token scoped to the principal's `zeroship.principal_grants`. It
+//!   issues no refresh token, so its access token carries the full
+//!   [`PLATFORM_TOKEN_MAX_TTL_SECS`] ceiling.
 //!
 //! The auth service also reconciles a first-party [`PLATFORM_CLI_CLIENT_ID`]
 //! registration at startup. Its OP device grants use [`OP_PROVIDER`] and may
-//! request only [`PLATFORM_CLI_ISSUABLE_SCOPES`]. Redemption issues a public
-//! subject equal to the platform principal UUID, the configured control
-//! audience, and a 12-hour token bounded by [`PLATFORM_TOKEN_MAX_TTL_SECS`].
-//! App clients keep their app-sector pairwise subjects. This path is additive:
-//! `zeroship login` continues to use [`PLATFORM_PROVIDER`] until the CLI and
-//! control's parallel device flow are switched atomically in a later change.
+//! request only [`PLATFORM_CLI_REGISTERED_SCOPES`]. Redemption issues a public
+//! subject equal to the platform principal UUID and the configured control
+//! audience; app clients keep their app-sector pairwise subjects.
+//!
+//! `zeroship login` drives THAT flow. It asks for
+//! [`OFFLINE_ACCESS_SCOPE`], so redemption also opens a rotating refresh
+//! family and the access token takes the OP's ordinary short lifetime. That is
+//! the trade the whole arrangement exists for: a self-contained bearer cannot
+//! be called back once minted, so the long-lived half has to be the
+//! DB-backed refresh token, which reuse detection and family revocation can
+//! kill.
 //!
 //! Both spellings used to be private constants in the crate that wrote them
 //! (`crates/auth/src/oidc/device_token.rs` and
@@ -46,9 +52,16 @@ pub const PLATFORM_PROVIDER: &str = "platform";
 /// flow also fixes this id onto the tokens issued to `zeroship login`.
 pub const PLATFORM_CLI_CLIENT_ID: &str = "zeroship-cli";
 
-/// Exact scope ceiling registered for the first-party platform CLI client.
+/// Exact AUTHORITY ceiling registered for the first-party platform CLI client.
 ///
-/// The current parallel control flow uses the same ceiling.
+/// These are the scopes a CLI token may actually carry authority for. The
+/// control-plane mint intersects them with the principal's stored grants.
+///
+/// This is deliberately NOT the same list as
+/// [`PLATFORM_CLI_REGISTERED_SCOPES`]: `offline_access` may be REQUESTED (it
+/// asks for a refresh token) but confers no resource authority, and folding it
+/// in here would let it through the mint's `issuable_scopes` filter as though
+/// it did.
 pub const PLATFORM_CLI_ISSUABLE_SCOPES: [&str; 4] = [
     "apps:deploy",
     "apps:read",
@@ -56,12 +69,54 @@ pub const PLATFORM_CLI_ISSUABLE_SCOPES: [&str; 4] = [
     "secrets:read",
 ];
 
+/// The scope that asks an OAuth authorization server for a refresh token.
+pub const OFFLINE_ACCESS_SCOPE: &str = "offline_access";
+
+/// Exact `oauth_clients.scopes` the CLI registration is reconciled to.
+///
+/// The device-authorization endpoint checks the requested scope against the
+/// REGISTRATION, so a scope missing here is refused with `invalid_scope`
+/// before anything else happens. `offline_access` therefore has to be listed
+/// even though it grants no authority.
+pub const PLATFORM_CLI_REGISTERED_SCOPES: [&str; 5] = [
+    "apps:deploy",
+    "apps:read",
+    "apps:write",
+    "secrets:read",
+    OFFLINE_ACCESS_SCOPE,
+];
+
 /// Maximum lifetime of a platform CLI token, in seconds.
 ///
 /// Account deletion recalls these tokens with a platform-family marker. Other
 /// revocation reasons still rely on expiry, so this remains an authorization
 /// ceiling. Markers are retained for 24 hours and outlast this 12-hour maximum.
+///
+/// This is a CEILING, not the lifetime the OP device grant issues: that grant
+/// now returns a refresh family, so its access token takes the OP's ordinary
+/// short lifetime (`ACCESS_TOKEN_TTL_SECS`) and the long life lives in the
+/// rotating, revocable refresh token instead. The ceiling still bounds the
+/// control-mediated mint, which issues no refresh token.
 pub const PLATFORM_TOKEN_MAX_TTL_SECS: i64 = 12 * 60 * 60;
+
+/// The OP's device-authorization endpoint, relative to the issuer.
+///
+/// Declared here rather than in the auth service so the producer of the
+/// discovery document and the CLI that consumes it read one definition. That
+/// is the same rule the `provider` column and the user-code shape are under,
+/// and for the same reason: the two spellings drifted the moment they were
+/// two constants.
+pub const DEVICE_AUTHORIZATION_PATH: &str = "/device/authorization";
+
+/// The OP's token endpoint, relative to the issuer.
+pub const TOKEN_PATH: &str = "/token";
+
+/// RFC 9728 protected-resource metadata, relative to the resource server.
+///
+/// The CLI asks CONTROL which authorization server to talk to rather than
+/// being configured with one, so the OP it logs in to is by construction the
+/// OP whose tokens control accepts.
+pub const PROTECTED_RESOURCE_METADATA_PATH: &str = "/.well-known/oauth-protected-resource";
 
 /// Path the OP mounts its protocol endpoints under, relative to the auth
 /// service's public URL.
