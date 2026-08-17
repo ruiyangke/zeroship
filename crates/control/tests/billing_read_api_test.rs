@@ -32,12 +32,11 @@ mod common;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
+use chrono::Utc;
 use compio_postgres::{connect, Client, NoTls};
 use ntex::http::StatusCode;
 use ntex::web::{self, test};
 use uuid::Uuid;
-use zeroship_authz::{policy_hash, Action, Effect, Policy, Resource, Statement};
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::pricing::{charge_cents, MetricWeight, MetricWeights, PlanPrice, FX_SCALE};
 use zeroship_control::{
@@ -417,10 +416,10 @@ async fn cleanup(pg: &Client, creator_ids: &[Uuid], app_ids: &[Uuid], callers: &
     for app in app_ids {
         let _ = pg.execute("DELETE FROM zeroship.apps WHERE id = $1", &[app]).await;
     }
-    for pat in pats {
-        let _ = pg.execute("DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1", &[&pat.user_id]).await;
-        let _ = pg.execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&pat.user_id]).await;
-        let _ = pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&pat.user_id]).await;
+    for caller in callers {
+        let _ = pg.execute("DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1", &[&caller.user_id]).await;
+        let _ = pg.execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&caller.user_id]).await;
+        let _ = pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&caller.user_id]).await;
     }
     let _ = pg.execute("DELETE FROM zeroship.users WHERE id = ANY($1)", &[&creator_ids.to_vec()]).await;
 }
