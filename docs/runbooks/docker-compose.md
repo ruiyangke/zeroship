@@ -43,7 +43,7 @@ paths because Compose must receive both the custom env-file and mount path.
 The secret directory contains exactly eight files:
 
 `control-signing.pem` `gateway-signing.pem` `auth-signing.pem` `broker-secret`
-`pairwise-salt` `platform-mint-key` `refresh-hash-key` `refresh-idem-key`
+`pairwise-salt` `refresh-hash-key` `refresh-idem-key`
 
 The env overlay contains eight generated scalar values:
 
@@ -307,8 +307,7 @@ defined ONCE instead of being repeated as per-service flags:
 For local compose, the referenced scalar secret values come from the gitignored
 `.env` written by `zeroship dev init`. In particular, one generated
 `ZEROSHIP_CONTROL_KEY` is interpolated into control, gateway, worker, and
-migrated. The separate `platform-mint-key` file is mounted only into control
-and auth; the worker cannot read the key or authenticate to the token mint.
+migrated.
 
 Precedence is CLI/env-flag > `[secrets]`/`[auth]` file reference > default, so a
 leftover literal flag would silently WIN and defeat the file - keep config-covered

@@ -77,32 +77,17 @@ of the process environment. Each terminal below only adds the settings that
 are NOT in the generated overlay (database DSNs, key-material file paths, and
 other operational flags).
 
-One generated file is deliberately limited to two services:
-`platform-mint-key` belongs only in control and auth. Pass its file reference
-only in terminals 1 and 4. The worker never receives the raw value or a path to
-the file.
-
 Terminal 1:
 
 ```bash
 ZEROSHIP_CONTROL_DATABASE_URL=postgres://localhost:5432/zeroship \
 ZEROSHIP_AUTH_PLATFORM_ISSUER="http://localhost:9092/oauth2" \
-ZEROSHIP_AUTH_PLATFORM_MINT_URL="http://localhost:9092" \
-ZEROSHIP_AUTH_PLATFORM_MINT_KEY="urn:zeroship:file:$PWD/deploy/compose/secrets/platform-mint-key" \
 ./target/release/zeroship-control \
   --port 9090 \
   --blob-store ./bundles \
   --signing-key-file deploy/compose/secrets/control-signing.pem
 ```
 
-Those last two are DIFFERENT settings and control refuses to start with only the
-first. `ZEROSHIP_AUTH_PLATFORM_ISSUER` is the `iss` a platform token must carry;
-`ZEROSHIP_AUTH_PLATFORM_MINT_URL` is where control POSTs the deploy-token mint,
-carrying `ZEROSHIP_AUTH_PLATFORM_MINT_KEY`. They happen to name the same host
-here because everything runs on one loopback machine - on a deployment whose
-public name is served by a CDN or an ingress they are necessarily different
-values. See
-`docs/reference/env-vars.md`, "A name is not an address".
 
 `ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET` is not in the generated overlay and
 `dev init` does not generate it: only Stripe issues a value that verifies.
@@ -141,7 +126,6 @@ Terminal 4:
 
 ```bash
 ZEROSHIP_AUTH_DATABASE_URL=postgres://localhost:5432/zeroship \
-ZEROSHIP_AUTH_PLATFORM_MINT_KEY="urn:zeroship:file:$PWD/deploy/compose/secrets/platform-mint-key" \
 ./target/release/zeroship-auth \
   --addr 127.0.0.1:9092 \
   --public-url http://localhost:9092 \

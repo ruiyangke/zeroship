@@ -242,10 +242,8 @@ rejects every delivery to `/internal/webhooks/stripe` with 500 - which is
 the correct answer for a deployment Stripe cannot reach anyway.
 
 Do not replace them with shared examples or per-service values. The generated
-`ZEROSHIP_CONTROL_KEY` supplies control, gateway, worker, and migrated. The
-independent `platform-mint-key` file is mounted only into control and auth, so
-the worker cannot read material that authorizes token minting. `chmod 600 .env`;
-the generator applies that mode on Unix too.
+`ZEROSHIP_CONTROL_KEY` supplies control, gateway, worker, and migrated.
+`chmod 600 .env`; the generator applies that mode on Unix too.
 
 ### Control plane access
 
