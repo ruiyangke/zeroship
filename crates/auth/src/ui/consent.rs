@@ -732,7 +732,6 @@ async fn classify_and_authorize(
     for scope in delegated {
         let ctx = AuthzContext {
             principal_id,
-            token_id: None,
             token_policy: None,
             action: scope.action(),
             resource: Resource::Any,

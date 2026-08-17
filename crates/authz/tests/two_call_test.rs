@@ -123,7 +123,6 @@ fn app_owner_is_authorized_anywhere_for_owned_app_action() {
         let policies = load_platform_policies().unwrap();
         let ctx = AuthzContext {
             principal_id: fixture.user_id,
-            token_id: None,
             token_policy: None,
             action: Action::AppsDeploy,
             resource: Resource::Any,
@@ -294,7 +293,6 @@ fn unroled_creator_denied_cross_tenant_reads() {
         ] {
             let ctx = AuthzContext {
                 principal_id: attacker_id,
-                token_id: None,
                 token_policy: None,
                 action,
                 resource: Resource::App {
@@ -319,7 +317,6 @@ fn unroled_creator_denied_cross_tenant_reads() {
         EntityCache::invalidate(victim.user_id);
         let owner_ctx = AuthzContext {
             principal_id: victim.user_id,
-            token_id: None,
             token_policy: None,
             action: Action::SecretsRead,
             resource: Resource::App {
@@ -500,7 +497,6 @@ impl Fixture {
     fn ctx(&self) -> AuthzContext<'_> {
         AuthzContext {
             principal_id: self.user_id,
-            token_id: None,
             token_policy: None,
             action: Action::AppsDeploy,
             resource: self.app(),
@@ -515,7 +511,6 @@ impl Fixture {
     fn ctx_with_policy(&self, action: Action, now: i64, policy: Policy) -> AuthzContext<'_> {
         AuthzContext {
             principal_id: self.user_id,
-            token_id: None,
             token_policy: Some(policy),
             action,
             resource: self.app(),

@@ -1024,7 +1024,6 @@ async fn bearer_verifier_directly_accepts_oauth_and_rejects_revoked_platform_tok
         .await
         .expect("OAuth bearer verifies directly");
     assert_eq!(oauth.principal_id, user_id);
-    assert_eq!(oauth.token_id, None);
     assert!(oauth.token_policy.is_some());
 
     // A bearer that is not a platform OAuth token is refused outright. There is
