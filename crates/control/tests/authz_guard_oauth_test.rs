@@ -851,14 +851,23 @@ async fn op_cli_device_token_authorizes_control_endpoint() {
     assert_eq!(claims["aud"], "control.zeroship.ai");
     assert_eq!(claims["client_id"], PLATFORM_CLI_CLIENT_ID);
     assert_eq!(claims["scope"], "apps:deploy apps:read");
-    // 15 minutes, not the 12-hour ceiling. This grant asked for no
-    // `offline_access`, so it got no refresh token and this token is the whole
-    // session - but the lifetime is a property of the grant, not of what the
-    // caller asked for, and control must accept the short one.
-    assert_eq!(
-        claims["exp"].as_i64().expect("OP token exp")
-            - claims["iat"].as_i64().expect("OP token iat"),
-        zeroship_auth::oidc::ACCESS_TOKEN_TTL_SECS
+    // Minutes, not the 12-hour ceiling this assertion used to pin at 43_200.
+    //
+    // The bound is a LITERAL on purpose. Comparing to
+    // `zeroship_auth::oidc::ACCESS_TOKEN_TTL_SECS` - which is what stood here
+    // briefly - proves only that control sees what auth emitted, and passes
+    // for any value of it: the constant was set to `12 * 60 * 60` and every
+    // gate in the tree stayed green.
+    //
+    // This is the CONSUMER's vantage. `crates/auth` bounds the constant and
+    // the emitted token; here the token has crossed a service boundary and
+    // been parsed by the crate that actually authorizes with it.
+    let lifetime = claims["exp"].as_i64().expect("OP token exp")
+        - claims["iat"].as_i64().expect("OP token iat");
+    assert!(
+        (120..=30 * 60).contains(&lifetime),
+        "control received a {lifetime}s CLI access token; it must be minutes, because \
+         nothing recalls a bearer this long-lived except the token_revocations marker"
     );
 
     let control = init_control!(fx);

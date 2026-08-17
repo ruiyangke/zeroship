@@ -48,6 +48,45 @@ const EXPECTED_REGISTERED_SCOPES: [&str; 5] = [
 const EXPECTED_ISSUABLE_SCOPES: [&str; 4] =
     ["apps:deploy", "apps:read", "apps:write", "secrets:read"];
 
+// ─── Lifetime ceilings, as LITERALS ──────────────────────────────────────────
+//
+// Every bound below is a literal, never the constant it bounds. Comparing an
+// observed lifetime to the constant that produced it proves the plumbing and
+// passes for any value: `ACCESS_TOKEN_TTL_SECS` was set to `12 * 60 * 60` and
+// the whole auth suite stayed green at 645 passed, byte-identical.
+//
+// `issuer.rs`'s own `ttl_tests` bounds the CONSTANT. These bound what the
+// server actually put on the wire and in the database, so a mint that ignores
+// the constant fails here even when the constant is right. The two fail for
+// different reasons and neither subsumes the other.
+
+/// See `crates/auth/src/oidc/issuer.rs`, `MAX_ACCESS_TOKEN_LIFETIME_SECS`, for
+/// the argument. Restated as a literal rather than imported so the two are
+/// independent witnesses.
+const MAX_ACCESS_TOKEN_LIFETIME_SECS: i64 = 30 * 60;
+const MIN_ACCESS_TOKEN_LIFETIME_SECS: i64 = 120;
+
+/// The longest a refresh FAMILY may live before re-authorization, in days.
+///
+/// This is the credential the change moved the long life onto, so it is the
+/// one that most needs a bound - and it had none in any form before now.
+/// Ninety days is the coarsest re-authorization cadence that is still a
+/// cadence; past a quarter an un-rotated family is a permanent credential in
+/// all but name, and the whole revocation story would rest on reuse detection
+/// firing.
+const MAX_REFRESH_FAMILY_LIFETIME_DAYS: f64 = 90.0;
+
+/// And it must be worth having: a family that expires inside a day gives the
+/// human nothing the access token did not already give them.
+const MIN_REFRESH_FAMILY_LIFETIME_DAYS: f64 = 1.0;
+
+/// The longest a SPENT refresh token may still be replayed, in seconds.
+///
+/// This is the lost-response retry window, so it needs to span one HTTP
+/// timeout and a retry, not a session. Past a few minutes a rotated-away token
+/// keeps working, which is the exact thing reuse detection exists to stop.
+const MAX_REPLAY_WINDOW_SECS: f64 = 300.0;
+
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
     access_token: String,
@@ -243,6 +282,51 @@ impl Fixture {
         post_form(&format!("{}/oauth2/token", self.auth_base), form).await
     }
 
+    /// How long the live refresh family the CLI is holding has left, in days,
+    /// measured from the row the server wrote rather than from a constant.
+    ///
+    /// `(absolute, idle)`: the absolute cap the family cannot outlive however
+    /// often it rotates, and this token's own idle expiry.
+    #[allow(clippy::future_not_send)]
+    async fn live_family_lifetime_days(&self) -> (f64, f64) {
+        let row = self
+            .db
+            .query_one(
+                "SELECT (EXTRACT(EPOCH FROM (family_absolute_expires_at - NOW())) / 86400.0)::float8 \
+                          AS absolute_days, \
+                        (EXTRACT(EPOCH FROM (expires_at - NOW())) / 86400.0)::float8 AS idle_days \
+                 FROM zeroship.oauth_refresh_tokens \
+                 WHERE user_id = $1 AND rotated_at IS NULL AND revoked_at IS NULL \
+                 ORDER BY issued_at DESC LIMIT 1",
+                &[&self.user_id],
+            )
+            .await
+            .expect("load live refresh family row");
+        (
+            row.get::<_, f64>("absolute_days"),
+            row.get::<_, f64>("idle_days"),
+        )
+    }
+
+    /// How long the SPENT predecessor may still be replayed, in seconds, from
+    /// the row rotation wrote.
+    #[allow(clippy::future_not_send)]
+    async fn replay_window_secs(&self) -> f64 {
+        let row = self
+            .db
+            .query_one(
+                "SELECT EXTRACT(EPOCH FROM (idem_expires_at - NOW()))::float8 AS window_secs \
+                 FROM zeroship.oauth_refresh_tokens \
+                 WHERE user_id = $1 AND rotated_at IS NOT NULL \
+                   AND idem_expires_at IS NOT NULL \
+                 ORDER BY rotated_at DESC LIMIT 1",
+                &[&self.user_id],
+            )
+            .await
+            .expect("load rotated predecessor row");
+        row.get::<_, f64>("window_secs")
+    }
+
     /// Rows in `zeroship.token_revocations` for the (client, subject) pair
     /// control's bearer read path consults.
     #[allow(clippy::future_not_send)]
@@ -305,10 +389,28 @@ fn assert_platform_principal_token(fx: &Fixture, access_token: &str, scope: &str
     assert_eq!(claims.aud, CONTROL_AUDIENCE);
     assert_eq!(claims.client_id, PLATFORM_CLI_CLIENT_ID);
     assert_eq!(claims.scope, scope);
+    // WIRING: the token's own exp matches the constant the response advertises.
+    // True for any value of that constant - it is not the property below.
     assert_eq!(
         claims.exp - claims.iat,
         ACCESS_TOKEN_TTL_SECS,
         "a refreshable CLI credential takes the OP's short access-token lifetime"
+    );
+    // VALUE: the lifetime the server actually stamped, against literals. This
+    // is what fails when the constant is moved back to twelve hours.
+    let lifetime = claims.exp - claims.iat;
+    assert!(
+        lifetime <= MAX_ACCESS_TOKEN_LIFETIME_SECS,
+        "the OP stamped a {lifetime}s access token; ceiling is \
+         {MAX_ACCESS_TOKEN_LIFETIME_SECS}s. Nothing recalls a bearer this long-lived \
+         except the token_revocations marker - the long life belongs in the refresh \
+         family, which rotation and reuse detection can kill."
+    );
+    assert!(
+        lifetime >= MIN_ACCESS_TOKEN_LIFETIME_SECS,
+        "the OP stamped a {lifetime}s access token; floor is \
+         {MIN_ACCESS_TOKEN_LIFETIME_SECS}s (the CLI's 60s expiry skew would make it \
+         stale on arrival)."
     );
 }
 
@@ -385,6 +487,59 @@ async fn the_cli_device_grant_returns_a_short_access_token_and_a_refresh_token()
     assert_eq!(status, 400, "second redemption must fail: {body}");
     let err: Value = serde_json::from_str(&body).expect("decode error body");
     assert_eq!(err["error"], "expired_token");
+
+    fx.cleanup().await;
+}
+
+/// The refresh family is where this change PUT the long life, so its lifetime
+/// is the one that most needs a bound - and it had none anywhere in the tree,
+/// in any form, before this test. Neither `FAMILY_ABSOLUTE_DAYS` nor
+/// `FAMILY_IDLE_DAYS` nor `IDEM_WINDOW_SECS` was read by a single assertion.
+///
+/// Measured off the rows the server wrote, against literals.
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn the_refresh_family_and_its_replay_window_are_bounded() {
+    let Some(fx) = Fixture::boot().await else {
+        return;
+    };
+    let (token, _device_code) = fx.login().await;
+    let first_refresh = token.refresh_token.clone().expect("root refresh token");
+
+    let (absolute_days, idle_days) = fx.live_family_lifetime_days().await;
+    assert!(
+        absolute_days <= MAX_REFRESH_FAMILY_LIFETIME_DAYS,
+        "the refresh family runs {absolute_days:.2} days without re-authorization; \
+         ceiling is {MAX_REFRESH_FAMILY_LIFETIME_DAYS} days. Past a quarter this is a \
+         permanent credential and revocation rests entirely on reuse detection."
+    );
+    assert!(
+        absolute_days >= MIN_REFRESH_FAMILY_LIFETIME_DAYS,
+        "the refresh family runs only {absolute_days:.2} days; floor is \
+         {MIN_REFRESH_FAMILY_LIFETIME_DAYS} day. Shorter than that and it buys nothing \
+         over the access token it backs."
+    );
+    assert!(
+        idle_days <= absolute_days,
+        "idle expiry {idle_days:.2}d outlives the absolute cap {absolute_days:.2}d, \
+         so the cap does not cap"
+    );
+
+    // Rotate once so a spent predecessor with a replay window exists.
+    let (status, body) = fx.refresh(&first_refresh).await;
+    assert_eq!(status, 200, "rotation failed: {body}");
+    let replay_window = fx.replay_window_secs().await;
+    assert!(
+        replay_window <= MAX_REPLAY_WINDOW_SECS,
+        "a spent refresh token stays replayable for {replay_window:.1}s; ceiling is \
+         {MAX_REPLAY_WINDOW_SECS}s. This is a lost-response retry, not a session: \
+         every second of it is a second a rotated-away token still works."
+    );
+    assert!(
+        replay_window > 0.0,
+        "no replay window at all ({replay_window:.1}s) turns a legitimate retry after a \
+         dropped response into a family revocation"
+    );
 
     fx.cleanup().await;
 }

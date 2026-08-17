@@ -908,7 +908,55 @@ fn new_jti() -> String {
 
 #[cfg(test)]
 mod ttl_tests {
-    use super::{validate_registered_ttl, PLATFORM_TOKEN_MAX_TTL_SECS};
+    use super::{validate_registered_ttl, ACCESS_TOKEN_TTL_SECS, PLATFORM_TOKEN_MAX_TTL_SECS};
+
+    /// The longest an access token may live, in seconds.
+    ///
+    /// A LITERAL, never the constant under test. Every other assertion on this
+    /// lifetime in the tree compares the wire value to `ACCESS_TOKEN_TTL_SECS`
+    /// itself, which proves the plumbing and passes for any value at all: the
+    /// constant was set to `12 * 60 * 60` and the whole live-database auth
+    /// suite stayed green, byte-identical, at 645 passed.
+    ///
+    /// Why a bound rather than an equality. The invariant the design rests on
+    /// is "the access token is not the session" - the session is the rotating,
+    /// DB-backed refresh family, and this token only has to outlive one CLI
+    /// operation. A ceiling states exactly that and leaves the number tunable;
+    /// an equality would re-encode today's choice, and its failure message
+    /// ("expected 900, got 1200") would tell a reader nothing about why 900
+    /// mattered, so the cheapest way to green would be to edit the number here
+    /// - which is how the tautology comes back.
+    ///
+    /// Why 30 minutes. A self-contained bearer cannot be recalled; the only
+    /// early recall is the `zeroship.token_revocations` marker, so this
+    /// lifetime is the window a leaked token still works if that marker is
+    /// never written. Thirty minutes is generous for the longest single
+    /// operation (a `zeroship deploy` upload) and 24x below the 12 hours it
+    /// replaced. Anything expressing "a shift" or "a working day" is above it.
+    const MAX_ACCESS_TOKEN_LIFETIME_SECS: i64 = 30 * 60;
+
+    /// The shortest it may live. Derived, not taste: `crates/cli/src/auth.rs`
+    /// treats a credential as expired at `expires_at <= now + 60`
+    /// (`TOKEN_EXPIRY_SKEW_SECS`), so a lifetime at or under that skew makes
+    /// every freshly minted token already stale to the CLI and turns each
+    /// command into a rotation.
+    const MIN_ACCESS_TOKEN_LIFETIME_SECS: i64 = 120;
+
+    #[test]
+    fn the_access_token_lifetime_stays_short_enough_to_expire_as_a_backstop() {
+        assert!(
+            ACCESS_TOKEN_TTL_SECS <= MAX_ACCESS_TOKEN_LIFETIME_SECS,
+            "access token lives {ACCESS_TOKEN_TTL_SECS}s, ceiling is \
+             {MAX_ACCESS_TOKEN_LIFETIME_SECS}s. A bearer this long-lived cannot be \
+             called back; put the long life in the refresh family instead."
+        );
+        assert!(
+            ACCESS_TOKEN_TTL_SECS >= MIN_ACCESS_TOKEN_LIFETIME_SECS,
+            "access token lives {ACCESS_TOKEN_TTL_SECS}s, floor is \
+             {MIN_ACCESS_TOKEN_LIFETIME_SECS}s. Below the CLI's 60s expiry skew a \
+             fresh token is stale on arrival."
+        );
+    }
 
     #[test]
     fn registered_token_issuer_enforces_the_platform_ttl_ceiling() {
