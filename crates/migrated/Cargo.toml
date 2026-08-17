@@ -54,7 +54,15 @@ toml = { workspace = true }
 zeroship-migrate-adapter = { workspace = true }
 
 [dev-dependencies]
-chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
+# `apply_api_test` drives the REAL `ControlPlaneAuthenticator`, whose only
+# principal path is a platform OAuth access token. Minting one means signing an
+# EdDSA `at+jwt` (jsonwebtoken + ed25519-dalek) and publishing the matching
+# public key from a local JWKS endpoint the auth provider fetches over HTTP
+# (base64 for the `x` coordinate). Same crates and features
+# `crates/control/Cargo.toml` uses for the identical fixture.
+base64 = { workspace = true }
+ed25519-dalek = { workspace = true, features = ["pkcs8", "pem", "rand_core"] }
+jsonwebtoken = { workspace = true }
 
 # ---------------------------------------------------------------------------
 # Live-database test gate
