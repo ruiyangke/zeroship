@@ -102,7 +102,7 @@ zeroship dev init \
 The command creates exactly these eight files, with a mode of 0600 on Unix (and
 0700 on the directory):
 
-`control-signing.pem` `gateway-signing.pem` `auth-signing.pem` `broker-secret`
+`gateway-signing.pem` `auth-signing.pem` `broker-secret`
 `pairwise-salt` `refresh-hash-key` `refresh-idem-key`
 
 It also adds eight 32-byte random hex values to the env overlay:
@@ -129,7 +129,6 @@ mkdir -p "$S"
 chmod 0700 "$S"
 openssl genpkey -algorithm ed25519 -out "$S/auth-signing.pem"
 openssl genpkey -algorithm ed25519 -out "$S/gateway-signing.pem"
-openssl genpkey -algorithm ed25519 -out "$S/control-signing.pem"
 openssl rand -base64 48 > "$S/broker-secret"
 printf '1:%s\n' "$(openssl rand -hex 48)" > "$S/refresh-hash-key"
 openssl rand -base64 48 > "$S/refresh-idem-key"

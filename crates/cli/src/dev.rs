@@ -265,11 +265,6 @@ fn secret_specs() -> [SecretSpec; 7] {
             validate_signing_key,
         ),
         (
-            "control-signing.pem",
-            generate_signing_key,
-            validate_signing_key,
-        ),
-        (
             "broker-secret",
             generate_base64_secret,
             validate_broker_secret,
