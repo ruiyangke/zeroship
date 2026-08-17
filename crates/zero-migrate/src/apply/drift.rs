@@ -48,11 +48,11 @@ use crate::model::migration::Migration;
 use crate::model::snapshot::{
     canonical_index_sort_order, index_elements_canonically_eq, index_predicates_canonically_eq,
     normalize_sequence_max_value, normalize_sequence_min_value, ColumnCollationSnapshot,
-    ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot, FunctionKey, GeneratedKindSnapshot,
-    IdDefaultSnapshot, IndexElementSnapshot, IndexSnapshot, MysqlPhysicalType, NamedTypeSnapshot,
-    PartitionSnapshot, PolicyIdentity, PolicyKey, RoleSnapshot, SchemaObjectSnapshot,
-    SchemaSnapshot, SequenceDataTypeSnapshot, SequenceSnapshot, TableSnapshot, TriggerIdentity,
-    TriggerKey, VendorObjectIdentities, ViewSnapshot,
+    ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot, FunctionIdentity, FunctionKey,
+    GeneratedKindSnapshot, IdDefaultSnapshot, IndexElementSnapshot, IndexSnapshot,
+    MysqlPhysicalType, NamedTypeSnapshot, PartitionSnapshot, PolicyIdentity, PolicyKey,
+    RoleSnapshot, SchemaObjectSnapshot, SchemaSnapshot, SequenceDataTypeSnapshot, SequenceSnapshot,
+    TableSnapshot, TriggerIdentity, TriggerKey, VendorObjectIdentities, ViewSnapshot,
 };
 use crate::render::value_format::{
     catalog_expression_fingerprint_in_dialect, catalog_id_default, catalog_id_default_for_expected,
@@ -680,7 +680,9 @@ async fn snapshot_vendor_objects_pg<D: SqlSession>(
                       (SELECT array_agg(pg_catalog.format_type(a.t, NULL) ORDER BY a.ord) \
                          FROM unnest(p.proargtypes) WITH ORDINALITY AS a(t, ord)), \
                       ARRAY[]::text[] \
-                    ) AS arg_types \
+                    ) AS arg_types, \
+                    p.prosrc AS body, \
+                    (p.prosqlbody IS NOT NULL) AS has_sql_body \
              FROM pg_catalog.pg_proc p \
              JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
              WHERE n.nspname = $1 AND p.prokind IN ('f', 'p') \
@@ -697,6 +699,12 @@ async fn snapshot_vendor_objects_pg<D: SqlSession>(
         // in `proallargtypes` and are excluded here for the same reason
         // `FunctionKey::from_create` filters them: they do not identify an overload.
         let arg_types: Vec<String> = r.try_get("arg_types").unwrap_or_default();
+        // `prosrc` is the body AS WRITTEN for every language this DSL admits, which
+        // is why it may be compared where a deparsed policy predicate may not - see
+        // `comparable_function_body`. `has_sql_body` separates the one shape that
+        // has no `prosrc` to read.
+        let body: String = r.try_get("body").unwrap_or_default();
+        let has_sql_body: bool = r.try_get("has_sql_body").unwrap_or(false);
         out.functions.insert(
             FunctionKey {
                 schema: schema.to_string(),
@@ -704,6 +712,7 @@ async fn snapshot_vendor_objects_pg<D: SqlSession>(
                 arg_types,
             }
             .canonicalized(),
+            FunctionIdentity::from_catalog(&body, has_sql_body),
         );
     }
 
@@ -1951,13 +1960,16 @@ pub fn diff_snapshots_with_index_aliases(
     // FUNCTIONS, POLICIES AND TRIGGERS. What is compared, what is deliberately not,
     // and when the whole comparison is skipped: `comparable_vendor_objects`.
     if let Some((expected_vendor, actual_vendor)) = comparable_vendor_objects(expected, actual) {
-        for key in &expected_vendor.functions {
-            if !actual_vendor.functions.contains(key) {
-                missing.push(function_label(key));
+        for (key, expected_function) in &expected_vendor.functions {
+            match actual_vendor.functions.get(key) {
+                Some(actual_function) => {
+                    diff_function_attrs(key, expected_function, actual_function, &mut altered);
+                }
+                None => missing.push(function_label(key)),
             }
         }
-        for key in &actual_vendor.functions {
-            if !expected_vendor.functions.contains(key) {
+        for key in actual_vendor.functions.keys() {
+            if !expected_vendor.functions.contains_key(key) {
                 unexpected.push(function_label(key));
             }
         }
@@ -2383,8 +2395,9 @@ fn comparable_nextval_default(expr: Option<&str>) -> Option<String> {
 /// two sides' spellings is meaningful, and `None` when it is not.
 ///
 /// The FOURTH member of the family [`constraint_definition_is_comparable`],
-/// [`index_expression_bodies_are_comparable`], [`comparable_vendor_objects`] and
-/// [`comparable_generated_column`] belong to, answering the same question - is this
+/// [`index_expression_bodies_are_comparable`], [`comparable_vendor_objects`],
+/// [`comparable_generated_column`] and [`comparable_function_body`] belong to,
+/// answering the same question - is this
 /// text worth comparing across an offline render and a live catalog read? - for the
 /// default on a column that
 /// carries no ID facet at all. Those columns never populate
@@ -2439,8 +2452,9 @@ fn comparable_nextval_default(expr: Option<&str>) -> Option<String> {
 /// when comparing them is not meaningful.
 ///
 /// The FIFTH member of the family [`constraint_definition_is_comparable`],
-/// [`index_expression_bodies_are_comparable`], [`comparable_vendor_objects`] and
-/// [`comparable_column_default`] belong to, answering the same question - is this
+/// [`index_expression_bodies_are_comparable`], [`comparable_vendor_objects`],
+/// [`comparable_column_default`] and [`comparable_function_body`] belong to,
+/// answering the same question - is this
 /// worth comparing across an offline render and a live catalog read? - for a column
 /// the engine computes rather than the application writing it. Until this existed
 /// nothing compared any part of it: an out-of-band
@@ -3355,13 +3369,19 @@ fn constraint_definition_is_comparable(kind: &str) -> bool {
 /// would make a dropped policy unreportable, which is exactly the case worth
 /// reporting.
 ///
-/// WHAT THIS GIVES UP: a policy predicate, a function body or a trigger `WHEN`
-/// clause rewritten out of band while the identity is untouched is not reported.
-/// `USING (owner = current_user)` swapped for `USING (true)` leaves the table
-/// readable by everyone and this differ silent. That is a real loss, the same one
-/// the CHECK and partial-index exemptions already take, and recovering it needs the
-/// same treatment foreign keys get: parse the catalog text back to the closed AST
-/// and compare structurally rather than comparing spellings.
+/// WHAT THIS GIVES UP: a policy predicate or a trigger `WHEN` clause rewritten out
+/// of band while the identity is untouched is not reported. `USING (owner =
+/// current_user)` swapped for `USING (true)` leaves the table readable by everyone
+/// and this differ silent. That is a real loss, the same one the CHECK and
+/// partial-index exemptions already take, and recovering it needs the same treatment
+/// foreign keys get: parse the catalog text back to the closed AST and compare
+/// structurally rather than comparing spellings.
+///
+/// A FUNCTION BODY IS NO LONGER ON THAT LIST. It was, on the assumption that it
+/// deparsed like the predicates do; it does not. `pg_proc.prosrc` is the authored
+/// text byte for byte, so [`comparable_function_body`] compares it directly and
+/// [`VendorObjectIdentities::functions`] carries it. The predicates are genuinely
+/// irreducible here and the body never was.
 fn comparable_vendor_objects<'a>(
     expected: &'a SchemaSnapshot,
     actual: &'a SchemaSnapshot,
@@ -3392,6 +3412,92 @@ fn policy_label(key: &PolicyKey) -> String {
 /// `trigger <name> on <schema>.<table>`, for the same reason.
 fn trigger_label(key: &TriggerKey) -> String {
     format!("trigger {} on {}.{}", key.name, key.schema, key.table)
+}
+
+/// The two sides' function BODY reduced to a comparable pair, and `None` when
+/// comparing them is not meaningful.
+///
+/// The SIXTH member of the family [`constraint_definition_is_comparable`],
+/// [`index_expression_bodies_are_comparable`], [`comparable_vendor_objects`],
+/// [`comparable_column_default`] and [`comparable_generated_column`] belong to,
+/// answering the same question - is this text worth comparing across an offline
+/// render and a live catalog read? - for the one thing a function actually DOES.
+/// Until this existed nothing compared it: [`comparable_vendor_objects`] compares a
+/// function's schema, name and canonicalised argument vector and nothing else, so a
+/// `CREATE OR REPLACE FUNCTION` run out of band with the SAME signature and a
+/// DIFFERENT body reported the schema CLEAN. That is not an edge case - replacing
+/// the body without touching the signature is the ordinary way a function is
+/// changed.
+///
+/// WHY THIS IS COMPARABLE WHERE THE SIBLING PREDICATES ARE NOT. The vendor-object
+/// work excluded function bodies, policy `USING`/`WITH CHECK` and trigger `WHEN`
+/// together, on the grounds that PostgreSQL does not store SQL as written. That is
+/// TRUE OF THE PREDICATES AND FALSE OF THE BODY. Measured on PostgreSQL 18.4:
+///
+/// | authored                            | read back from the catalog         |
+/// |-------------------------------------|------------------------------------|
+/// | `AS $$ SELECT x+1 $$`               | `prosrc` = `[ SELECT x+1 ]`        |
+/// | `AS $$BEGIN\n   RETURN   42;\nEND$$`| `[BEGIN\n   RETURN   42;\nEND]`    |
+/// | `USING (owner = current_user)`      | `((owner = CURRENT_USER))`         |
+///
+/// A `LANGUAGE sql`/`plpgsql` body is an OPAQUE STRING to PostgreSQL - it is stored
+/// verbatim and handed to the language handler at call time - so leading and
+/// trailing spaces, odd internal whitespace and a nested `$tag$` literal all survive
+/// byte for byte. A policy predicate is a parse tree `pg_get_expr` re-prints, which
+/// injects casts, uppercases `CURRENT_USER` and adds parentheses. So the body needs
+/// NO normaliser and the predicates cannot have one. Policies and triggers are
+/// deliberately left where they are.
+///
+/// The one reduction both sides do go through is [`comparable_function_body`], and
+/// it is forced by this project's own renderer rather than by PostgreSQL: the body
+/// is emitted inside `$zsfn$\n … \n$zsfn$`, so the stored `prosrc` carries a newline
+/// at each end that the authored string does not. That predicate documents the trim
+/// and what it costs.
+///
+/// WHEN THE COMPARISON IS SKIPPED, and why the skip is not an oversight: `None` on
+/// either side, which has exactly one cause - a SQL-standard-body
+/// (`BEGIN ATOMIC … END`) function. Measured on PostgreSQL 18.4, `CREATE FUNCTION
+/// f2(x int) RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT x+1; END` stores its body
+/// as a PARSE TREE in `prosqlbody` and leaves `prosrc` EMPTY. Comparing an authored
+/// body against `""` would report every such function as drifted on every run, so
+/// [`FunctionIdentity::from_catalog`] declines DETECTABLY - empty `prosrc` WITH a
+/// non-null `prosqlbody`, never empty `prosrc` alone. The identity comparison is
+/// unaffected: such a function is still reported if it disappears.
+///
+/// WHAT THIS GIVES UP: the body of a `BEGIN ATOMIC` function, rewritten out of band,
+/// is not reported. Recovering it needs what the predicates need - `pg_get_functiondef`
+/// deparses `prosqlbody` back to text, but the authored side has no deparser to meet
+/// it with, so it is the same parse-the-catalog-text-back-to-the-closed-AST work
+/// foreign keys already get, not a spelling comparison.
+fn comparable_function_body<'a>(
+    expected: &'a FunctionIdentity,
+    actual: &'a FunctionIdentity,
+) -> Option<(&'a str, &'a str)> {
+    Some((expected.body.as_deref()?, actual.body.as_deref()?))
+}
+
+/// The comparable facets of ONE same-signature function present on both sides.
+///
+/// `table` on the reported [`AlteredObject`] is the function NAME: a function does
+/// not belong to a table, and the roles diff already reports a table-less object
+/// this way.
+fn diff_function_attrs(
+    key: &FunctionKey,
+    expected: &FunctionIdentity,
+    actual: &FunctionIdentity,
+    altered: &mut Vec<AlteredObject>,
+) {
+    let Some((expected_body, actual_body)) = comparable_function_body(expected, actual) else {
+        return;
+    };
+    push_vendor_attr(
+        altered,
+        &key.name,
+        function_label(key),
+        "body",
+        expected_body.to_string(),
+        actual_body.to_string(),
+    );
 }
 
 /// The comparable facets of ONE same-named policy present on both sides.

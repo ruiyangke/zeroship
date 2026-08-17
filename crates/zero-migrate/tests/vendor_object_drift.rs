@@ -6,25 +6,36 @@
 //! table with row-level security ENABLED and nothing enforcing it, and drift
 //! reported the schema clean.
 //!
-//! **IDENTITY, NEVER BODIES.** PostgreSQL does not store any of these as written.
-//! Measured on PostgreSQL 18.4:
+//! **IDENTITY, PLUS THE ONE BODY THAT SURVIVES.** This file originally said
+//! IDENTITY, NEVER BODIES, on the grounds that PostgreSQL does not store any of
+//! these as written. Re-measuring on PostgreSQL 18.4 split that claim in two:
 //!
 //! ```text
 //!   authored  CREATE FUNCTION spk.f(x int) ...
-//!   catalog   spk.f(x integer)
+//!   catalog   spk.f(x integer)                       REWRITTEN
 //!   authored  USING (owner = current_user AND v > 0)
-//!   catalog   ((owner = CURRENT_USER) AND (v > 0))
+//!   catalog   ((owner = CURRENT_USER) AND (v > 0))   DEPARSED
 //!   authored  WHEN (NEW.v > 0)
-//!   catalog   WHEN ((new.v > 0))
+//!   catalog   WHEN ((new.v > 0))                     DEPARSED
+//!   authored  AS $$ SELECT x+1 $$
+//!   catalog   prosrc = [ SELECT x+1 ]                VERBATIM
 //! ```
 //!
-//! Comparing that text is the same defect `constraint_definition_is_comparable`
-//! and `index_expression_bodies_are_comparable` already answer for a CHECK body and
-//! a partial-index predicate: permanent false drift on every project. So the
-//! comparison surface is the STRUCTURAL residue - what a policy is FOR, who it
-//! applies TO, whether it is permissive; a trigger's timing and event set; a
-//! function's canonicalised argument vector - and the predicates and bodies are not
-//! collected at all.
+//! A policy `USING` and a trigger `WHEN` are parse trees `pg_get_expr` re-prints,
+//! so comparing them is the same defect `constraint_definition_is_comparable` and
+//! `index_expression_bodies_are_comparable` already answer for a CHECK body and a
+//! partial-index predicate: permanent false drift on every project. Those stay
+//! uncollected. A function BODY is not one of them - PostgreSQL keeps a
+//! `LANGUAGE sql`/`plpgsql` body in `pg_proc.prosrc` as an opaque string and hands
+//! it to the language handler at call time, so it reads back byte for byte and needs
+//! no normaliser. `comparable_function_body` collects it, because identity alone
+//! left `CREATE OR REPLACE FUNCTION` with an unchanged signature - the ordinary way
+//! a function is modified - reporting a clean schema.
+//!
+//! So the comparison surface is the STRUCTURAL residue - what a policy is FOR, who
+//! it applies TO, whether it is permissive; a trigger's timing and event set; a
+//! function's canonicalised argument vector - AND the function body, which is not
+//! residue but the thing itself.
 //!
 //! **THE ABSENT-SIDE RULE.** `SchemaSnapshot::vendor_objects` is an `Option`.
 //! `None` means the snapshot does not speak about these objects - a SQLite or MySQL
@@ -46,8 +57,8 @@ mod support;
 
 use zero_migrate::model::ir::{PolicyCmd, TriggerEvent, TriggerTiming};
 use zero_migrate::model::snapshot::{
-    FunctionKey, PolicyIdentity, PolicyKey, SchemaSnapshot, TriggerIdentity, TriggerKey,
-    VendorObjectIdentities,
+    FunctionIdentity, FunctionKey, PolicyIdentity, PolicyKey, SchemaSnapshot, TriggerIdentity,
+    TriggerKey, VendorObjectIdentities,
 };
 use zero_migrate::schema::query::SqlDialect;
 
@@ -98,9 +109,25 @@ fn speaking(vendor: VendorObjectIdentities) -> SchemaSnapshot {
     }
 }
 
+/// A function whose body IS comparable - the ordinary case, and what the fold
+/// always produces.
+fn body(sql: &str) -> FunctionIdentity {
+    FunctionIdentity {
+        body: Some(sql.to_string()),
+    }
+}
+
+/// A function whose body is NOT comparable on this side: `BEGIN ATOMIC`, whose body
+/// lives in `prosqlbody` as a parse tree and leaves `prosrc` empty.
+fn atomic_body() -> FunctionIdentity {
+    FunctionIdentity { body: None }
+}
+
 fn one_of_each() -> VendorObjectIdentities {
     let mut vendor = VendorObjectIdentities::default();
-    vendor.functions.insert(function("audit", &["int4"]));
+    vendor
+        .functions
+        .insert(function("audit", &["int4"]), body("SELECT 1"));
     vendor
         .policies
         .insert(policy_key("orders_owner", "orders"), select_policy());
@@ -286,19 +313,83 @@ fn an_alias_spelled_argument_type_is_not_drift() {
     // signature compared as authored text would report the SAME function as one
     // missing and one unexpected, on every snapshot, forever.
     let mut expected_vendor = VendorObjectIdentities::default();
-    expected_vendor
-        .functions
-        .insert(function("audit", &["int", "varchar(255)"]).canonicalized());
+    expected_vendor.functions.insert(
+        function("audit", &["int", "varchar(255)"]).canonicalized(),
+        body("SELECT 1"),
+    );
     let mut actual_vendor = VendorObjectIdentities::default();
-    actual_vendor
-        .functions
-        .insert(function("audit", &["integer", "character varying"]).canonicalized());
+    actual_vendor.functions.insert(
+        function("audit", &["integer", "character varying"]).canonicalized(),
+        body("SELECT 1"),
+    );
 
     assert!(
         zero_migrate::diff_snapshots(&speaking(expected_vendor), &speaking(actual_vendor))
             .is_clean(),
         "an alias spelling is not a different function"
     );
+}
+
+#[test]
+fn a_replaced_function_body_is_reported_as_drift() {
+    // The signature is IDENTICAL, so the identity comparison - which is all this
+    // differ used to do - sees nothing. `CREATE OR REPLACE FUNCTION` with an
+    // unchanged signature is the ORDINARY way a function is modified, so this was
+    // the common case reporting clean, not an edge case.
+    let mut expected_vendor = VendorObjectIdentities::default();
+    expected_vendor
+        .functions
+        .insert(function("audit", &["int4"]), body("SELECT x + 1"));
+    let mut actual_vendor = VendorObjectIdentities::default();
+    actual_vendor
+        .functions
+        .insert(function("audit", &["int4"]), body("SELECT x + 999"));
+
+    let drift = zero_migrate::diff_snapshots(&speaking(expected_vendor), &speaking(actual_vendor));
+    assert!(
+        drift.missing_objects.is_empty() && drift.unexpected_objects.is_empty(),
+        "a replaced body must not disturb the identity pairing: {drift:#?}"
+    );
+    assert!(
+        drift.altered_objects.iter().any(|altered| {
+            altered.object == "function app.audit(int4)"
+                && altered.field == "body"
+                && altered.expected == "SELECT x + 1"
+                && altered.actual == "SELECT x + 999"
+        }),
+        "a replaced function body must be reported: {drift:#?}"
+    );
+}
+
+#[test]
+fn a_begin_atomic_body_declines_rather_than_reporting_false_drift() {
+    // A SQL-standard-body function keeps its body as a parse tree in `prosqlbody`
+    // and leaves `prosrc` EMPTY. Measured on PostgreSQL 18.4. Comparing an authored
+    // body against `""` would report every such function as drifted on every run,
+    // which is strictly worse than the blind spot it replaces - so the side with no
+    // comparable body declines, in BOTH directions.
+    for (expected_fn, actual_fn) in [
+        (body("SELECT x + 1"), atomic_body()),
+        (atomic_body(), body("SELECT x + 1")),
+        (atomic_body(), atomic_body()),
+    ] {
+        let mut expected_vendor = VendorObjectIdentities::default();
+        expected_vendor
+            .functions
+            .insert(function("audit", &["int4"]), expected_fn);
+        let mut actual_vendor = VendorObjectIdentities::default();
+        actual_vendor
+            .functions
+            .insert(function("audit", &["int4"]), actual_fn);
+
+        let drift =
+            zero_migrate::diff_snapshots(&speaking(expected_vendor), &speaking(actual_vendor));
+        assert!(
+            drift.is_clean(),
+            "a BEGIN ATOMIC body has no `prosrc` to compare and must decline, not \
+             report drift: {drift:#?}"
+        );
+    }
 }
 
 #[test]

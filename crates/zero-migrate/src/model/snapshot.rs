@@ -1631,6 +1631,104 @@ pub struct FunctionSnapshot {
     pub body: String,
 }
 
+/// The catalog-comparable facets of ONE PostgreSQL function overload, beyond the
+/// [`FunctionKey`] identity that finds it.
+///
+/// The sibling of [`PolicyIdentity`] and [`TriggerIdentity`], and it carries the
+/// facet those two deliberately cannot: the BODY. A policy's `USING` and a trigger's
+/// `WHEN` are parse trees `pg_get_expr` re-prints, so the authored spelling is
+/// unrecoverable. A `LANGUAGE sql`/`plpgsql` body is not - PostgreSQL keeps it in
+/// `pg_proc.prosrc` as an opaque string and hands it to the language handler at call
+/// time, so it reads back byte for byte. See [`Self::body`] for the one shape that
+/// is not true of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionIdentity {
+    /// The function body reduced to the form both sides can produce, or `None` when
+    /// this side holds no comparable body at all.
+    ///
+    /// `None` means DECLINE, and it has exactly one cause: a SQL-standard-body
+    /// function (`BEGIN ATOMIC … END`) keeps its body as a PARSE TREE in
+    /// `pg_proc.prosqlbody` and leaves `prosrc` EMPTY. Measured on PostgreSQL 18.4:
+    ///
+    /// ```text
+    ///   CREATE FUNCTION f2(x int) RETURNS int LANGUAGE sql
+    ///   BEGIN ATOMIC SELECT x+1; END;
+    ///       prosrc = []   prosqlbody IS NOT NULL
+    /// ```
+    ///
+    /// Comparing an authored body against `""` would report every such function as
+    /// drifted forever, so the empty-`prosrc`-with-a-`prosqlbody` case declines
+    /// DETECTABLY rather than comparing a value it does not have.
+    pub body: Option<String>,
+}
+
+impl FunctionIdentity {
+    /// The identity an AUTHORED function has, from the rollback history the fold
+    /// keeps.
+    ///
+    /// Always `Some`: the IR cannot express a `BEGIN ATOMIC` body. The renderer
+    /// emits `AS $zsfn$ … $zsfn$` unconditionally, so every function this project
+    /// creates stores its body in `prosrc`.
+    #[must_use]
+    pub fn of(snapshot: &FunctionSnapshot) -> Self {
+        Self {
+            body: Some(comparable_function_body(&snapshot.body)),
+        }
+    }
+
+    /// The identity a function READ BACK from `pg_proc` has.
+    ///
+    /// `has_sql_body` is `prosqlbody IS NOT NULL`. It is required rather than
+    /// inferred from an empty `prosrc`, because the two states an empty `prosrc` can
+    /// mean - a `BEGIN ATOMIC` body that lives elsewhere, and a genuinely empty
+    /// authored body - are different claims, and only the first may decline.
+    #[must_use]
+    pub fn from_catalog(prosrc: &str, has_sql_body: bool) -> Self {
+        let body = comparable_function_body(prosrc);
+        Self {
+            body: (!(body.is_empty() && has_sql_body)).then_some(body),
+        }
+    }
+}
+
+/// One function body in the ONE form an offline fold and a `pg_proc` read can both
+/// produce: the authored text with its OUTER whitespace removed.
+///
+/// TRIMMED, and the trim is not squeamishness - it is forced, and measured. The
+/// renderer wraps the authored body in a dollar tag with a newline at each end
+/// (`AS $zsfn$\n{body}\n$zsfn$`), so what PostgreSQL stores for a function this
+/// project created is never the authored string. Measured on PostgreSQL 18.4, after
+/// applying an authored body of `SELECT x + 1`:
+///
+/// ```text
+///   pg_proc.prosrc = [\nSELECT x + 1\n]
+/// ```
+///
+/// An untrimmed byte compare would therefore report EVERY function in EVERY project
+/// as drifted, on the first run, against a schema nobody has touched - the exact
+/// false-drift failure this reduction exists to prevent.
+///
+/// TRIMMED RATHER THAN UN-PADDED. Asserting `prosrc == format!("\n{body}\n")` is
+/// tighter but pins drift to one renderer's padding: a function created by
+/// `Op::PgRaw` or by hand chooses its own delimiter spacing, and a later change to
+/// the tag would turn every function permanently red. Trimming both sides is the
+/// smallest reduction that survives all of them.
+///
+/// SOUND BECAUSE IT IS APPLIED TO BOTH SIDES, and because the whitespace it removes
+/// is outside the body in both languages this DSL admits: a `LANGUAGE sql` body is a
+/// statement list and a `LANGUAGE plpgsql` body is a `BEGIN … END` block, and
+/// neither can be changed by padding around it. Whitespace INSIDE the body is
+/// untouched - `BEGIN\n   RETURN   42;\nEND` compares with its odd spacing intact.
+///
+/// WHAT THIS GIVES UP: a rewrite that changes ONLY the leading or trailing
+/// whitespace is not reported. It cannot change what the function computes, and it
+/// is unobservable to the differ in the first place, because the two sides never
+/// agreed about it.
+#[must_use]
+pub fn comparable_function_body(raw: &str) -> String {
+    raw.trim().to_string()
+}
+
 /// Offline identity key for one authored PostgreSQL policy.
 ///
 /// PostgreSQL scopes a policy name to its table, so schema, table, and name all
@@ -1817,7 +1915,13 @@ pub struct VendorObjectIdentities {
     /// [`crate::model::validate::canonical_pg_arg_type`]. `pg_proc` reports
     /// `integer` for an authored `int`, so an uncanonicalised key would report the
     /// same function as both missing and unexpected.
-    pub functions: std::collections::BTreeSet<FunctionKey>,
+    ///
+    /// A MAP rather than the set this used to be, for the reason the two siblings
+    /// below are maps: the key answers "does this overload exist", and the value
+    /// answers "is it still the same function". Identity alone left
+    /// `CREATE OR REPLACE FUNCTION` with an unchanged signature - the ORDINARY way a
+    /// function is modified - reporting a clean schema.
+    pub functions: BTreeMap<FunctionKey, FunctionIdentity>,
     /// Policies present, with their comparable identity.
     pub policies: BTreeMap<PolicyKey, PolicyIdentity>,
     /// Triggers present, with their comparable identity.

@@ -79,7 +79,7 @@ async fn live_postgres_reports_a_hand_dropped_function_policy_and_trigger() {
         //     forever, so this asserts the FOLDED form, not the catalog's.
         let functions: Vec<String> = vendor
             .functions
-            .iter()
+            .keys()
             .map(|key| format!("{}({})", key.name, key.arg_types.join(",")))
             .collect();
         if functions != vec!["audit(int4)".to_string(), "stamp()".to_string()] {

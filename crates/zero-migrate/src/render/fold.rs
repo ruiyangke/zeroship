@@ -82,9 +82,9 @@ use crate::model::ir::{
 };
 use crate::model::snapshot::{
     normalize_sequence_max_value, normalize_sequence_min_value, sequence_default_start_value,
-    ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot, FunctionKey, FunctionSnapshot,
-    IndexElementSnapshot, IndexSnapshot, NamedTypeSnapshot, PartitionSnapshot, PolicyIdentity,
-    PolicyKey, PolicySnapshot, RoleSnapshot, SchemaObjectSnapshot, SchemaSnapshot,
+    ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot, FunctionIdentity, FunctionKey,
+    FunctionSnapshot, IndexElementSnapshot, IndexSnapshot, NamedTypeSnapshot, PartitionSnapshot,
+    PolicyIdentity, PolicyKey, PolicySnapshot, RoleSnapshot, SchemaObjectSnapshot, SchemaSnapshot,
     SequenceDataTypeSnapshot, SequenceSnapshot, TableSnapshot, TriggerIdentity, TriggerKey,
     TriggerSnapshot, VendorObjectIdentities, ViewSnapshot,
 };
@@ -2765,7 +2765,13 @@ pub fn fold_ops_onto(
     // and the dialect test alone failed it on `None` against `Some({})`.
     let speaks = dialect == SqlDialect::Postgres || base.vendor_objects.is_some();
     let vendor_objects = speaks.then(|| VendorObjectIdentities {
-        functions: functions.keys().map(FunctionKey::canonicalized).collect(),
+        // The body comes from the SAME `functions` map the rollback history uses, so
+        // a `CREATE OR REPLACE` that overwrote an entry above contributes the LAST
+        // body rather than the first - which is what PostgreSQL holds too.
+        functions: functions
+            .iter()
+            .map(|(key, snapshot)| (key.canonicalized(), FunctionIdentity::of(snapshot)))
+            .collect(),
         policies: policies
             .iter()
             .map(|(key, snapshot)| (key.clone(), PolicyIdentity::of(snapshot)))
