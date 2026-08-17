@@ -9998,7 +9998,7 @@ fn encrypted_wraps_token(of: &ColType) -> &'static str {
 /// Map a closed [`ColType`] to the descriptor's `(type_token, references?)`. The
 /// tokens are exactly the SDK `FieldDef` type spellings the shared kernel maps
 /// (`def_to_column_type_for_dialect`).
-fn col_type_to_token(ty: &ColType) -> (String, Option<String>) {
+pub(crate) fn col_type_to_token(ty: &ColType) -> (String, Option<String>) {
     match ty {
         ColType::String { .. } => ("string".into(), None),
         ColType::Text => ("string".into(), None),

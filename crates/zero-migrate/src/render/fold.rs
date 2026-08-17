@@ -4336,6 +4336,37 @@ pub fn fold_to_field_defs(
                     cols.shift_remove(column);
                 }
             }
+            // THE FACET OPS. These change a column's shape without adding or
+            // removing one, and the replay used to drop them on its catch-all -
+            // so a migration that widened a type or tightened a NOT NULL produced
+            // generated types describing the OLD shape.
+            //
+            // The type string comes from `col_type_to_token`, the same conversion
+            // `ir_column_to_field` uses for a createTable column. A second mapping
+            // here would drift from it invisibly: the fold would emit a token that
+            // no longer matches what a create of the same ColType produces.
+            Op::SetColumnType {
+                table,
+                column,
+                to_type,
+                ..
+            } => {
+                if let Some(field) = tables.get_mut(table).and_then(|c| c.get_mut(column)) {
+                    let (token, _legacy_references) =
+                        crate::render::lower::col_type_to_token(to_type);
+                    field.ty = token;
+                }
+            }
+            Op::SetColumnNotNull { table, column, .. } => {
+                if let Some(field) = tables.get_mut(table).and_then(|c| c.get_mut(column)) {
+                    field.required = true;
+                }
+            }
+            Op::DropColumnNotNull { table, column, .. } => {
+                if let Some(field) = tables.get_mut(table).and_then(|c| c.get_mut(column)) {
+                    field.required = false;
+                }
+            }
             Op::RenameColumn {
                 table, from, to, ..
             } => {
