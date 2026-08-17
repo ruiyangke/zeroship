@@ -156,6 +156,28 @@ the explicit REVOKE in the migration is belt-and-braces and the assertion would
 pass with it deleted. That is stated in the migration comment rather than
 implied.
 
+## Two gates I did NOT get a number for, and why
+
+Both were queued and both were CANCELLED rather than left running unattended.
+
+- `bash tests/run_auth_suite.sh` and `bash tests/run_billing_suite.sh` each open
+  with a forced DROP of a fixed-name database. Having already damaged a peer's
+  run that way once (below), leaving either queued to fire after I stop is the
+  same hazard with nobody watching. Machine load was 34 with several agents
+  building, so neither would have finished inside my window anyway.
+- `cargo test --workspace --no-run` was still compiling when I stopped. Its only
+  recorded failure was the missing WPT tree, which is now fetched
+  (`setup-wpt.sh`, exit 0), and the re-run had produced zero `error` lines at
+  that point.
+
+What can be said about the billing total without measuring it: the suite's
+`zeroship-migrate-adapter` group is the platform_migrate binary, which went
+`5 passed 3 failed` -> `8 passed 0 failed`. Nothing in this change is in the
+other three groups (control live-db, migrated live-db, metering outbox). So the
+expected move is +3 passed / -3 failed against the brief's 720/53. That is an
+inference from the group result, NOT a measured suite total, and the two
+non-mine failure classes the brief names (#35, #36) are untouched.
+
 ## Incident: I disturbed the s4 agent's auth suite, and the fix is a private DB
 
 `tests/run_auth_suite.sh` opens with `DROP DATABASE IF EXISTS zeroship_auth_test
