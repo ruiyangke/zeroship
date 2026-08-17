@@ -77,3 +77,44 @@ there is no second copy left to rot.
 Third failure (`platform_migrate_applies_only_newly_appended_file`) uses
 `PLATFORM_MIGRATION_FILES` throughout and has no stale literal; cause still to be
 measured against a live DSN.
+
+## Finding 4: option (a) costs a charter widening, and that is the whole price
+
+`crates/zeroship-migrate-adapter/policies/platform.policy.toml` is the ceiling
+the platform migrate path lowers under. Three of its grants -
+`schema.cross_schema` (:69), `schema.create_table` (:74), `schema.rename` (:79) -
+scope to `{ include = ["__ZEROSHIP_PROJECT_SCHEMA__", "public"] }`, and
+`platform_effective` asserts the placeholder appears exactly three times
+(`platform.rs:52`). The in-file test `platform_charter_retains_the_project_and_
+public_schema_allowlist` (:70-75) pins the resulting allowlist to exactly
+`["public", "zeroship"]`.
+
+So a table in a NEW schema is refused by the lowering guard until that schema is
+added to the charter. Option (a) is therefore: new schema + charter widening +
+USAGE grants + the four call sites that name the table.
+
+The widening is what makes option (a) honest rather than free, and it needs a
+counterweight: once a third schema is on the allowlist, any later platform
+migration can put a table there and hand the worker writes on it, which would
+reintroduce the collision one namespace over. So the move is paired with a NEW
+assertion that the new schema holds EXACTLY the replay table and that the worker
+has no CREATE on it. That bounds the second zone instead of merely relocating
+into an unbounded one - the `zeroship` invariant is untouched and stays blanket.
+
+## Decision: option (a), with the new schema bounded by its own assertion
+
+Schema name `service_authn`: it names the trust zone (state of the
+service-to-service authentication MECHANISM), not the product, so it cannot be
+misread as a role - `zeroship_authn` sits one character from the existing role
+`zeroship_auth`. AGENTS.md's system map already describes unprefixed peer schemas
+("separate schemas (control, auth, per-app)").
+
+Why this is a real boundary and not relabeling: the `zeroship` schema holds
+platform STATE - apps, users, deploys, grants, billing - and authority over it is
+authority over the platform, which is exactly what a process running creator code
+must not have. The replay table holds no platform state: two columns, a key and
+an expiry, conferring nothing, and the migration's own comment (:75-78) records
+that a `jti` is not a credential. The writer sets differ too: `zeroship` is
+written by the control plane, while the replay table is written by EVERY service
+that authenticates, worker included. One schema was carrying two trust zones with
+one grant policy; splitting them is the fix the collision was pointing at.
