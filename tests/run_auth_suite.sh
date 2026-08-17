@@ -146,8 +146,30 @@ echo "------------------------------------------------------------------"
 # key off per-test UUIDs, and TEST_THREADS serializes the run.
 export GATEWAY_ANCHORS_DB_URL="$DSN"
 
-echo "==> Other AUTH_DB_URL-gated binaries (authz, mailer, gateway)"
+# GATEWAY_POOL_SMOKE_URL was set NOWHERE in this repo - the only occurrence of
+# the name outside its own test file was docs/reference/env-vars.md:608, so
+# `crates/gateway/tests/db_pool_smoke.rs` announced a skip on every run of
+# `cargo test --workspace` and its one test had never executed. The target needs
+# no schema at all ("any reachable Postgres works", db_pool_smoke.rs:6 - it runs
+# `SELECT $1::int4`), so this script's database satisfies it as-is and there is
+# nothing to provision beyond naming the variable.
+export GATEWAY_POOL_SMOKE_URL="$DSN"
+
+echo "==> Other AUTH_DB_URL-gated binaries (authn, authz, mailer, gateway)"
+# `zeroship-authn` is here because it was in NO gate at all. Its one target,
+# crates/authn/tests/service_replay_pg_test.rs, gates all six of its tests on
+# AUTH_DB_URL and announces a skip for each; the string "zeroship-authn"
+# appeared nowhere under tests/ or .github/. It is not feature-gated, so the
+# `rust` job DID build and run it - with no database, six announced skips, six
+# counted passes, and a census that reports rather than fails.
+#
+# This list is hand-maintained and that is its weakness: a new AUTH_DB_URL-gated
+# binary anywhere in the workspace is covered only if someone remembers to add
+# it here. run_billing_suite.sh removed the equivalent list by running a whole
+# package with a feature; the same trick does not apply here because these are
+# individual targets inside packages whose other targets need no database.
 for spec in \
+  "zeroship-authn:" \
   "zeroship-authz:" \
   "zeroship-mailer:" \
   "zeroship-gateway:backchannel_logout_test" \
@@ -156,6 +178,7 @@ for spec in \
   "zeroship-gateway:identities_relay_test" \
   "zeroship-gateway:sessions_test" \
   "zeroship-gateway:oidc_rp_e2e" \
+  "zeroship-gateway:db_pool_smoke" \
 ; do
   pkg="${spec%%:*}"
   bin="${spec#*:}"
