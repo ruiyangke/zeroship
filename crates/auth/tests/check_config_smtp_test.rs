@@ -48,8 +48,6 @@ fn run_auth_with_db(
         .env("PATH", path)
         .env("HOME", home)
         .env(
-        )
-        .env(
             "ZEROSHIP_AUTH_STASH_SIGNING_KEY",
             "test-stash-key-not-for-prod-32bytes!",
         )
