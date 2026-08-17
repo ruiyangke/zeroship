@@ -95,16 +95,28 @@ curl -sf "$GATE/readyz" > /dev/null && pass "gateway" || fail "gateway"
 RUNNING=$(docker compose ps worker --format json 2>/dev/null | jq -s 'length')
 [ "$RUNNING" -eq "$NUM_WORKERS" ] && pass "$RUNNING workers running" || fail "expected $NUM_WORKERS workers, got $RUNNING"
 
-# Creator APIs accept PAT/OAuth bearers only. Mint a real short-lived test PAT
-# against the compose database with the same generated key control loaded.
-command -v node >/dev/null 2>&1 || { fail "node is required to mint a test PAT"; exit 1; }
-[ -f "$E2E_JOSE_JS" ] || { fail "workspace jose is required to mint a test PAT"; exit 1; }
-WORK="$ROOT/deploy/compose/secrets"
-ZEROSHIP_CONTROL_SIGNING_KEY_FILE="$WORK/control-signing.pem"
+# Creator APIs accept a platform OAuth bearer only, verified against the JWKS
+# of the issuer control booted with. This stack runs the REAL OP, so the harness
+# signs with the OP's OWN key (deploy/compose/secrets/auth-signing.pem, the file
+# the auth container loads) under the OP's own issuer, rather than serving a
+# JWKS of its own that control would not trust.
+command -v node >/dev/null 2>&1 || { fail "node is required to mint a test bearer"; exit 1; }
+[ -f "$E2E_JOSE_JS" ] || { fail "workspace jose is required to mint a test bearer"; exit 1; }
+SECRETS="$ROOT/deploy/compose/secrets"
+WORK="$(mktemp -d -t zs-docker-e2e-XXXXXX)"
+trap 'rm -rf "$WORK"' EXIT
 PG_CONTAINER="$(docker compose ps -q postgres)"
 E2E_PG_DATABASE=zeroship
 [ -n "$PG_CONTAINER" ] || { fail "compose postgres container is missing"; exit 1; }
-mint_admin_pat || { fail "mint compose admin PAT"; exit 1; }
+# Read the issuer out of the RUNNING control container rather than re-deriving
+# it from ZEROSHIP_DOMAIN here: compose resolves it from deploy/compose/.env,
+# which this shell has not read, so a re-derivation would silently disagree
+# with the string control compares `iss` against.
+ZEROSHIP_AUTH_PLATFORM_ISSUER="$(docker compose exec -T control printenv ZEROSHIP_AUTH_PLATFORM_ISSUER 2>/dev/null | tr -d '\r\n')"
+[ -n "$ZEROSHIP_AUTH_PLATFORM_ISSUER" ] || { fail "control container names no platform issuer"; exit 1; }
+export ZEROSHIP_AUTH_PLATFORM_ISSUER
+e2e_platform_op_up "$SECRETS/auth-signing.pem" "$WORK" || { fail "configure the compose issuer"; exit 1; }
+mint_admin_bearer || { fail "mint compose admin bearer"; exit 1; }
 
 # --- Create + Deploy 20 apps ---
 echo ""
@@ -116,7 +128,7 @@ for i in $(seq 1 20); do
     name="dkr-$(printf '%02d' $i)"
     result=$(curl -sf -X POST "$CONTROL/api/apps" \
         -H 'Content-Type: application/json' \
-        -H "Authorization: Bearer $PAT" \
+        -H "Authorization: Bearer $ADMIN_TOKEN" \
         -d "{\"name\":\"$name\"}")
     IDS[$name]=$(echo "$result" | jq -r '.id')
     KEYS[$name]=$(echo "$result" | jq -r '.api_key')
@@ -125,7 +137,7 @@ for i in $(seq 1 20); do
     if [ -n "${IDS[$name]}" ] && [ "${IDS[$name]}" != "null" ] \
        && docker compose exec -T control sh -c "
         echo 'export function ping() { return \"I am $name\"; }' > /tmp/$name.js
-        zeroship deploy /tmp/$name.js --app=${IDS[$name]} --control=http://localhost:9090 --token=$PAT 2>/dev/null
+        zeroship deploy /tmp/$name.js --app=${IDS[$name]} --control=http://localhost:9090 --token=$ADMIN_TOKEN 2>/dev/null
     " > /dev/null 2>&1; then
         DEPLOYED=$((DEPLOYED + 1))
     fi

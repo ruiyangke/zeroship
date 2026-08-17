@@ -765,15 +765,20 @@ docker exec "$REDIS_CONTAINER" redis-cli ping 2>/dev/null | grep -q PONG \
   && pass "ephemeral Redis on :$REDIS_PORT (env.kv backend)" \
   || { fail "Redis never became ready on :$REDIS_PORT"; exit 1; }
 
-# One ed25519 key shared by control and migrated: step 10 mints an offline
-# platform-admin PAT signed with it to call migrated's apply endpoint. Pass it
-# to BOTH or the PAT verifies against a key the service never saw and every
-# call comes back 401 "platform token verification failed".
+# One ed25519 key with two consumers: the harness's own platform OP publishes
+# it as a one-key JWKS and signs the admin bearers steps 10, 13 and 14 use, and
+# the gateway loads it as its session/wrapper signing key. Control takes no
+# signing key at all now -- it verifies a bearer against the ISSUER's published
+# key, which is why this harness has to serve one. Name an issuer nothing
+# serves and every authenticated call comes back 401 "platform token
+# verification failed".
 GP_SIGNING_KEY=/tmp/gp-signing-key.pem
 openssl genpkey -algorithm ed25519 -out "$GP_SIGNING_KEY" 2>/dev/null
 chmod 600 "$GP_SIGNING_KEY"
-ZEROSHIP_CONTROL_SIGNING_KEY_FILE="$GP_SIGNING_KEY"
 ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$GP_SIGNING_KEY"
+# Up BEFORE control: control reads the issuer once at boot.
+e2e_platform_op_up "$GP_SIGNING_KEY" "$GP_SECURITY_DIR" || exit 1
+PIDS+=($E2E_PLATFORM_OP_PID)
 e2e_export_runtime_secrets "$GP_SECURITY_DIR" || exit 1
 e2e_export_database_urls "$DB_URL"
 
@@ -832,10 +837,9 @@ e2e_export_database_urls "$DB_URL"
 # because it was reading an empty body from a port nothing listens on.
 e2e_with_platform_mint_key "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --blob-store /tmp/gp-bundles \
   --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" \
-  --audit-retention-check-secs 1 \
-  --signing-key-file "$GP_SIGNING_KEY" >/tmp/gp-control.log 2>&1 & PIDS+=($!)
+  --audit-retention-check-secs 1 >/tmp/gp-control.log 2>&1 & PIDS+=($!)
 "$BIN/zeroship-migrated" --port "$ZEROSHIP_MIGRATED_PORT" \
-  --signing-key-file "$GP_SIGNING_KEY" --tmp-dir /tmp/gp-migrated-tmp \
+  --tmp-dir /tmp/gp-migrated-tmp \
   >/tmp/gp-migrated.log 2>&1 & PIDS+=($!)
 sleep 3
 # ONE definition of the worker command line, because there are TWO places that
@@ -904,8 +908,9 @@ chmod 600 "$GATE_BROKER_SECRET"
 # was warning about: whether the gateway could validate a session used to
 # depend on an ambient variable this harness never set.
 #
-# `--signing-key-file` shares the SAME ed25519 key control and migrated already
-# use ($GP_SIGNING_KEY). Without it the gateway has no key to verify an app
+# `--signing-key-file` is the gateway's alone now, and it is the SAME ed25519
+# key the harness OP signs bearers with ($GP_SIGNING_KEY): one key, two roles,
+# because this is one host. Without it the gateway has no key to verify an app
 # session cookie against, so every authenticated request is anonymous and any
 # `auth: "user"` procedure answers 401 - which is indistinguishable from a
 # working gate refusing a bad credential, and is why scoped-data coverage could
@@ -980,8 +985,7 @@ chmod 600 "$GP_DEAD_DSN_FILE"
 # wins and assertion A would measure nothing.
 e2e_with_platform_mint_key env -u ZEROSHIP_CONTROL_DATABASE_URL \
   "$BIN/zeroship-control" --port "$CFG_PORT" --config "$GP_OVERLAY" \
-  --blob-store /tmp/gp-bundles \
-  --signing-key-file "$GP_SIGNING_KEY" >/tmp/gp-control-overlay.log 2>&1 & PIDS+=($!)
+  --blob-store /tmp/gp-bundles >/tmp/gp-control-overlay.log 2>&1 & PIDS+=($!)
 for _ in $(seq 1 20); do curl -sf "http://localhost:$CFG_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
 if curl -sf "http://localhost:$CFG_PORT/readyz" >/dev/null 2>&1; then
   pass "control boots with its DSN from [control] database_url (no flag, no env name)"
@@ -998,8 +1002,7 @@ grep -q "loaded overlay" /tmp/gp-control-overlay.log \
 # NOT come up.
 ZEROSHIP_CONTROL_DATABASE_URL="$GP_DEAD_DSN" \
   e2e_with_platform_mint_key "$BIN/zeroship-control" --port "$CFG_PORT_B" --config "$GP_OVERLAY" \
-  --blob-store /tmp/gp-bundles \
-  --signing-key-file "$GP_SIGNING_KEY" >/tmp/gp-control-envwins.log 2>&1 & PIDS+=($!)
+  --blob-store /tmp/gp-bundles >/tmp/gp-control-envwins.log 2>&1 & PIDS+=($!)
 sleep 6
 if curl -sf "http://localhost:$CFG_PORT_B/readyz" >/dev/null 2>&1; then
   fail "ZEROSHIP_CONTROL_DATABASE_URL ignored in favour of the overlay (precedence inverted)"
@@ -1021,7 +1024,7 @@ grep -q "failed to connect to database" /tmp/gp-control-envwins.log \
 e2e_with_platform_mint_key env -u ZEROSHIP_CONTROL_DATABASE_URL \
   "$BIN/zeroship-control" --port "$CFG_PORT_C" --config "$GP_OVERLAY" \
   --blob-store /tmp/gp-bundles --database-url-file "$GP_DEAD_DSN_FILE" \
-  --signing-key-file "$GP_SIGNING_KEY" >/tmp/gp-control-cliwins.log 2>&1 & PIDS+=($!)
+  >/tmp/gp-control-cliwins.log 2>&1 & PIDS+=($!)
 sleep 6
 if curl -sf "http://localhost:$CFG_PORT_C/readyz" >/dev/null 2>&1; then
   fail "--database-url-file ignored in favour of the overlay (precedence inverted)"
@@ -1075,7 +1078,7 @@ else
     # so it arrives as a per-process assignment rather than on the command line.
     ZEROSHIP_CONTROL_DATABASE_URL="$_dsn" \
     e2e_with_platform_mint_key "$BIN/zeroship-control" --port "$_port" --blob-store /tmp/gp-bundles \
-      --signing-key-file "$GP_SIGNING_KEY" > "/tmp/gp-$_tag.log" 2>&1 &
+      > "/tmp/gp-$_tag.log" 2>&1 &
     # `disown`, and deliberately NOT PIDS+=. These two are killed a few lines
     # below, inside this step. Registering them for the EXIT trap as well made
     # bash report `line NNN: <pid> Killed` when it reaped them, and because the
@@ -1118,7 +1121,7 @@ if [ -n "$TOKEN" ]; then
   # "create app: <the full JSON body>" - a message that points at the server
   # response when the actual fault is a missing tool on this machine.
   command -v jq >/dev/null 2>&1 || {
-    echo "FAIL: ZEROSHIP_TOKEN is set, which selects the PAT arm, but jq is not installed." >&2
+    echo "FAIL: ZEROSHIP_TOKEN is set, which selects the bearer arm, but jq is not installed." >&2
     echo "      Install jq, or unset ZEROSHIP_TOKEN to use the dev-provision arm." >&2
     exit 2
   }
@@ -2326,13 +2329,13 @@ fi
 # the real vite-plugin, deploy it, apply ITS OWN migrations through
 # zeroship-migrated (the path #162 lived in), drive the SAME two RPC calls
 # through the gateway, and diff the RESULT against the dev run above -
-# following step 10's pattern (offline-mint a platform-admin PAT,
+# following step 10's pattern (mint a platform-admin bearer,
 # dev-provision, POST the recorded IR to zeroship-migrated) rather than
 # inventing a new one.
 #
-# A SEPARATE creator/PAT and a separate app name ("dbtodos9") from step 11's
+# A SEPARATE creator/bearer and a separate app name ("dbtodos9") from step 11's
 # later "dbtodos" deploy, on purpose: step 11 runs after step 10 and reuses
-# step 10's scaffold PAT/creator, neither of which exists yet here (step 9
+# step 10's scaffold bearer/creator, neither of which exists yet here (step 9
 # runs first). Two independent deploys of the same source under different
 # names is the same shape step 10 and step 11 already use for the scaffold
 # app - it costs one extra build and provision, not new cross-step plumbing.
@@ -2389,21 +2392,17 @@ if [ "$DB9_BUILD_RC" = "0" ] && [ -f "$TODOS/dist/app.zship" ]; then
   if [ -z "$DB9_APP_ID" ] || [ -z "$DB9_API_KEY" ]; then
     fail "could not provision db-todos for the deployed leg: ${DB9_OUT:0:200}"
   else
-    # Offline-mint a platform-admin PAT, following step 10's mechanism exactly
-    # (see step 10 for why it must be offline: no OP runs in this script).
-    DB9_POLICY='{"name":"golden-db9","statements":[{"effect":"allow","actions":["apps:read","apps:write","apps:deploy","billing:read","billing:write"],"resources":[{"type":"any"}],"conditions":[]}]}'
-    DB9_PHASH="$(node -e 'const{createHash}=require("crypto");function c(v){if(v===null||typeof v==="number"||typeof v==="boolean")return JSON.stringify(v);if(typeof v==="string")return JSON.stringify(v);if(Array.isArray(v))return "["+v.map(c).join(",")+"]";return "{"+Object.keys(v).sort().map(k=>JSON.stringify(k)+":"+c(v[k])).join(",")+"}";}process.stdout.write(createHash("sha256").update(c(JSON.parse(process.argv[1]))).digest("hex"));' "$DB9_POLICY")"
+    # Mint a platform-admin bearer from the harness's own issuer, following
+    # step 10's mechanism exactly. The scope string is the action list the
+    # deleted permission_tokens policy carried, one scope per Cedar action.
+    DB9_SCOPE="apps:read apps:write apps:deploy billing:read billing:write"
     DB9_CREATOR="$(node -e 'console.log(require("crypto").randomUUID())')"
-    DB9_TOKID="$(node -e 'console.log(require("crypto").randomUUID())')"
-    DB9_EXP=$(( $(date +%s) + 86400 ))
     docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.users (id,email,name,email_verified_at) VALUES ('$DB9_CREATOR','golden-db9-$DB9_CREATOR@zeroship.test'::citext,'Golden DB9',NOW());
 INSERT INTO zeroship.platform_admin_roles (user_id,role,granted_by) VALUES ('$DB9_CREATOR','admin','$DB9_CREATOR');
-INSERT INTO zeroship.permission_tokens (id,owner_id,kind,name,policies,policy_hash,expires_at) VALUES ('$DB9_TOKID','$DB9_CREATOR','pat','golden db9','$DB9_POLICY'::jsonb,'$DB9_PHASH',to_timestamp($DB9_EXP));
 INSERT INTO zeroship.app_members (app_id,user_id,role) VALUES ('$DB9_APP_ID','$DB9_CREATOR','owner') ON CONFLICT (app_id,user_id) DO UPDATE SET role='owner';
 SQL
-    DB9_JOSE="$ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index.js"
-    DB9_PAT="$(node --input-type=module -e 'import{readFileSync}from "node:fs";import{createHash,randomBytes}from "node:crypto";import{importPKCS8,exportJWK,SignJWT}from "file://'"$DB9_JOSE"'";const[pem,owner,tid,phash,exp]=process.argv.slice(1);const key=await importPKCS8(readFileSync(pem,"utf8"),"EdDSA",{extractable:true});const x=(await exportJWK(key)).x;const kid=createHash("sha256").update(`{"crv":"Ed25519","kty":"OKP","x":"${x}"}`).digest("base64url");const jwt=await new SignJWT({sub:owner,owner,tid,jti:tid,scope:"pat",policy_hash:phash,nonce:randomBytes(32).toString("base64url")}).setProtectedHeader({alg:"EdDSA",typ:"pat+jwt",kid}).setIssuer("https://api.zeroship.ai").setAudience("control.zeroship.ai").setIssuedAt(Math.floor(Date.now()/1000)).setExpirationTime(Number(exp)).sign(key);process.stdout.write(jwt);' "$GP_SIGNING_KEY" "$DB9_CREATOR" "$DB9_TOKID" "$DB9_PHASH" "$DB9_EXP" 2>/tmp/gp-dbtodos9-pat.log)"
+    DB9_TOKEN="$(e2e_mint_platform_bearer "$DB9_CREATOR" "$DB9_SCOPE" 2>/tmp/gp-dbtodos9-mint.log)"
 
     node --input-type=module - "$ROOT/sdks/vite-plugin/dist/gen-types/recorder.js" "$TODOS/migrations" >/tmp/gp-dbtodos9-ir.json 2>/tmp/gp-dbtodos9-ir.log <<'NODE'
 import { pathToFileURL } from "node:url";
@@ -2416,7 +2415,7 @@ console.log(JSON.stringify({ kind: "ir", documents }));
 NODE
     DB9_APPLY_CODE="$(curl -s -o /tmp/gp-dbtodos9-apply.json -w '%{http_code}' -X POST \
       "http://localhost:$ZEROSHIP_MIGRATED_PORT/v1/apps/$DB9_APP_ID/migrations/apply" \
-      -H 'Content-Type: application/json' -H "Authorization: Bearer $DB9_PAT" \
+      -H 'Content-Type: application/json' -H "Authorization: Bearer $DB9_TOKEN" \
       --data-binary @/tmp/gp-dbtodos9-ir.json)"
     DB9_APPLIED="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.stdout.write(String((o.applied||[]).length))}catch{process.stdout.write("0")}})' </tmp/gp-dbtodos9-apply.json)"
     if [ "$DB9_APPLY_CODE" = "200" ] && [ "${DB9_APPLIED:-0}" -ge 1 ] 2>/dev/null; then
@@ -2745,8 +2744,8 @@ SC_READY=0
 if [ -z "$SC_APP_ID" ] || [ -z "$SC_API_KEY" ]; then
   fail "could not provision the scaffold app: ${SC_OUT:0:200}"
 else
-  # OFFLINE-mint a platform-admin PAT signed with the key control+migrated
-  # share. The .zship carries the DESCRIPTOR only; migrations travel through
+  # Mint a platform-admin bearer from the harness's own issuer, signed with the
+  # key it publishes. The .zship carries the DESCRIPTOR only; migrations travel through
   # zeroship-migrated, which is the real deployed path -- a hand-rolled CREATE
   # TABLE here would test nothing.
   # `apps:delete` is here for step 12 (teardown) and for nothing else. It was
@@ -2761,22 +2760,19 @@ else
   # -- the only surface a creator has for reading a deployed app's output --
   # requires Action::DeploymentsRead (crates/control/src/api.rs:2053), whose
   # string is "deployments:read" (crates/authz/src/action.rs:44). NONE of this
-  # harness's PAT policies granted it, so the logs endpoint would have answered
-  # 403 for every token here and the obvious reading of that 403 is "creators
-  # cannot read their own logs". They can; the token could not ask. See #332.
-  SC_POLICY='{"name":"golden-scaffold","statements":[{"effect":"allow","actions":["apps:read","apps:write","apps:deploy","apps:delete","deployments:read","billing:read","billing:write"],"resources":[{"type":"any"}],"conditions":[]}]}'
-  SC_PHASH="$(node -e 'const{createHash}=require("crypto");function c(v){if(v===null||typeof v==="number"||typeof v==="boolean")return JSON.stringify(v);if(typeof v==="string")return JSON.stringify(v);if(Array.isArray(v))return "["+v.map(c).join(",")+"]";return "{"+Object.keys(v).sort().map(k=>JSON.stringify(k)+":"+c(v[k])).join(",")+"}";}process.stdout.write(createHash("sha256").update(c(JSON.parse(process.argv[1]))).digest("hex"));' "$SC_POLICY")"
+  # harness's earlier token policies granted it, so the logs endpoint would have
+  # answered 403 for every token here and the obvious reading of that 403 is
+  # "creators cannot read their own logs". They can; the token could not ask.
+  # See #332. The scope string below is that same action list, one scope per
+  # Cedar action, now carried as the bearer's `scope` claim.
+  SC_SCOPE="apps:read apps:write apps:deploy apps:delete deployments:read billing:read billing:write"
   SC_CREATOR="$(node -e 'console.log(require("crypto").randomUUID())')"
-  SC_TOKID="$(node -e 'console.log(require("crypto").randomUUID())')"
-  SC_EXP=$(( $(date +%s) + 86400 ))
   docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.users (id,email,name,email_verified_at) VALUES ('$SC_CREATOR','golden-scaffold-$SC_CREATOR@zeroship.test'::citext,'Golden Scaffold',NOW());
 INSERT INTO zeroship.platform_admin_roles (user_id,role,granted_by) VALUES ('$SC_CREATOR','admin','$SC_CREATOR');
-INSERT INTO zeroship.permission_tokens (id,owner_id,kind,name,policies,policy_hash,expires_at) VALUES ('$SC_TOKID','$SC_CREATOR','pat','golden scaffold','$SC_POLICY'::jsonb,'$SC_PHASH',to_timestamp($SC_EXP));
 INSERT INTO zeroship.app_members (app_id,user_id,role) VALUES ('$SC_APP_ID','$SC_CREATOR','owner') ON CONFLICT (app_id,user_id) DO UPDATE SET role='owner';
 SQL
-  GP_JOSE="$ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index.js"
-  SC_PAT="$(node --input-type=module -e 'import{readFileSync}from "node:fs";import{createHash,randomBytes}from "node:crypto";import{importPKCS8,exportJWK,SignJWT}from "file://'"$GP_JOSE"'";const[pem,owner,tid,phash,exp]=process.argv.slice(1);const key=await importPKCS8(readFileSync(pem,"utf8"),"EdDSA",{extractable:true});const x=(await exportJWK(key)).x;const kid=createHash("sha256").update(`{"crv":"Ed25519","kty":"OKP","x":"${x}"}`).digest("base64url");const jwt=await new SignJWT({sub:owner,owner,tid,jti:tid,scope:"pat",policy_hash:phash,nonce:randomBytes(32).toString("base64url")}).setProtectedHeader({alg:"EdDSA",typ:"pat+jwt",kid}).setIssuer("https://api.zeroship.ai").setAudience("control.zeroship.ai").setIssuedAt(Math.floor(Date.now()/1000)).setExpirationTime(Number(exp)).sign(key);process.stdout.write(jwt);' "$GP_SIGNING_KEY" "$SC_CREATOR" "$SC_TOKID" "$SC_PHASH" "$SC_EXP" 2>/tmp/gp-scaffold-pat.log)"
+  SC_TOKEN="$(e2e_mint_platform_bearer "$SC_CREATOR" "$SC_SCOPE" 2>/tmp/gp-scaffold-mint.log)"
   node --input-type=module - "$ROOT/sdks/vite-plugin/dist/gen-types/recorder.js" "$SCAFFOLD/migrations" >/tmp/gp-scaffold-ir.json 2>/tmp/gp-scaffold-ir.log <<'NODE'
 import { pathToFileURL } from "node:url";
 const [recorderPath, dir] = process.argv.slice(2);
@@ -2788,7 +2784,7 @@ console.log(JSON.stringify({ kind: "ir", documents }));
 NODE
   SC_APPLY_CODE="$(curl -s -o /tmp/gp-scaffold-apply.json -w '%{http_code}' -X POST \
     "http://localhost:$ZEROSHIP_MIGRATED_PORT/v1/apps/$SC_APP_ID/migrations/apply" \
-    -H 'Content-Type: application/json' -H "Authorization: Bearer $SC_PAT" \
+    -H 'Content-Type: application/json' -H "Authorization: Bearer $SC_TOKEN" \
     --data-binary @/tmp/gp-scaffold-ir.json)"
   SC_APPLIED="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.stdout.write(String((o.applied||[]).length))}catch{process.stdout.write("0")}})' </tmp/gp-scaffold-apply.json)"
   if [ "$SC_APPLY_CODE" = "200" ] && [ "${SC_APPLIED:-0}" -ge 1 ] 2>/dev/null; then
@@ -2920,7 +2916,7 @@ else
     fi
     if ( cd "$SCAFFOLD" && pnpm build ) >/tmp/gp-scaffold-ctlbuild.log 2>&1 \
        && "$BIN/zeroship" deploy "$SC_ZSHIP" --app="$SC_APP_ID" \
-            --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$SC_PAT" >/tmp/gp-scaffold-ctldeploy.log 2>&1; then
+            --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$SC_TOKEN" >/tmp/gp-scaffold-ctldeploy.log 2>&1; then
       sleep 6
       sc_tier "$SC_DEP_BASE" "X-Api-Key: $SC_API_KEY" /tmp/gp-scaffold-ctl.tsv
       SC_BEFORE="$(cut -f2 /tmp/gp-scaffold-dep.tsv | cut -d' ' -f1 | paste -sd, -)"
@@ -3027,19 +3023,19 @@ fi
 # Only the deploy API calls `ensure_app_client`; `dev-provision` never does
 # (crates/control/src/bin/dev_provision.rs:106, zero references to it), which is
 # why three of this harness's four apps have no client row at all and the
-# check below would otherwise have exactly one to look at. The PAT minted for
+# check below would otherwise have exactly one to look at. The bearer minted for
 # step 10's control already carries apps:write + apps:deploy on {"type":"any"},
 # so no new credential is needed.
 #
 # A THROWAWAY APP ON PURPOSE: do NOT reuse db-todos for the second row. Step 11
 # asserts against its deployed state and re-deploying it here would change the
 # thing that step measures.
-if [ -z "${SC_PAT:-}" ]; then
-  fail "SC_PAT is unset, so the second app cannot be registered - the distinctness check below would compare one row against itself"
+if [ -z "${SC_TOKEN:-}" ]; then
+  fail "SC_TOKEN is unset, so the second app cannot be registered - the distinctness check below would compare one row against itself"
 else
   PW_APP="gppairwise"
   PW_JSON=$(curl -sf -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" \
-    -H 'Content-Type: application/json' -H "Authorization: Bearer $SC_PAT" \
+    -H 'Content-Type: application/json' -H "Authorization: Bearer $SC_TOKEN" \
     -d "{\"name\":\"$PW_APP\"}" 2>/tmp/gp-pairwise-create.log)
   # NO jq HERE, deliberately. The CI job for this harness installs lsof, zstd
   # and postgresql-client and nothing else, and this file has no prerequisite
@@ -3058,7 +3054,7 @@ else
     fail "could not create the second app for the pairwise check: $(head -c 200 <<<"$PW_JSON")"
   else
     "$BIN/zeroship" deploy "$SC_ZSHIP" --app="$PW_ID" \
-      --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$SC_PAT" \
+      --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$SC_TOKEN" \
       >/tmp/gp-pairwise-deploy.log 2>&1 \
       && pass "second app registered through the deploy API ($PW_APP)" \
       || fail "second app deploy failed: $(tail -2 /tmp/gp-pairwise-deploy.log | tr '\n' ' ')"
@@ -3097,8 +3093,8 @@ DB_APP="dbtodos"
 DB_ZSHIP="$TODOS/dist/app.zship"
 DB_DEP_READY=0
 
-if [ -z "${SC_PAT:-}" ] || [ -z "${SC_CREATOR:-}" ]; then
-  fail "step 10 minted no PAT, so the deployed half of the ordering check cannot run"
+if [ -z "${SC_TOKEN:-}" ] || [ -z "${SC_CREATOR:-}" ]; then
+  fail "step 10 minted no bearer, so the deployed half of the ordering check cannot run"
 elif ! ( cd "$TODOS" && pnpm build ) >/tmp/gp-dbtodos-build.log 2>&1 || [ ! -f "$DB_ZSHIP" ]; then
   fail "examples/db-todos does not build: $(tail -5 /tmp/gp-dbtodos-build.log | tr '\n' ' ')"
 else
@@ -3109,7 +3105,7 @@ else
   if [ -z "$DB_APP_ID" ] || [ -z "$DB_API_KEY" ]; then
     fail "could not provision db-todos: ${DB_OUT:0:200}"
   else
-    # Same creator as step 10, so the PAT already minted is accepted; only the
+    # Same creator as step 10, so the bearer already minted is accepted; only the
     # membership row is per-app. Migrations travel through zeroship-migrated --
     # a hand-rolled CREATE TABLE here would create the table with whatever
     # collation THIS script chose, which is precisely the thing under test.
@@ -3127,7 +3123,7 @@ console.log(JSON.stringify({ kind: "ir", documents }));
 NODE
     DB_APPLY_CODE="$(curl -s -o /tmp/gp-dbtodos-apply.json -w '%{http_code}' -X POST \
       "http://localhost:$ZEROSHIP_MIGRATED_PORT/v1/apps/$DB_APP_ID/migrations/apply" \
-      -H 'Content-Type: application/json' -H "Authorization: Bearer $SC_PAT" \
+      -H 'Content-Type: application/json' -H "Authorization: Bearer $SC_TOKEN" \
       --data-binary @/tmp/gp-dbtodos-ir.json)"
     DB_APPLIED="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.stdout.write(String((o.applied||[]).length))}catch{process.stdout.write("0")}})' </tmp/gp-dbtodos-apply.json)"
     if [ "$DB_APPLY_CODE" = "200" ] && [ "${DB_APPLIED:-0}" -ge 1 ] 2>/dev/null; then
@@ -3432,13 +3428,13 @@ else
 fi
 step 13 "Logs: the creator can read what their deployed app printed"
 GP_LOG_MARK="[starter] getMessages"
-if [ -z "${SC_PAT:-}" ] || [ -z "${APP_ID:-}" ]; then
-  fail "no PAT or app id, so the logs surface could not be exercised at all --
+if [ -z "${SC_TOKEN:-}" ] || [ -z "${APP_ID:-}" ]; then
+  fail "no bearer or app id, so the logs surface could not be exercised at all --
       FAILED SETUP, not a passing check"
 else
-  # Harness setup, not a product claim: give the PAT's principal membership on
+  # Harness setup, not a product claim: give the bearer's principal membership on
   # the starter app so the token is authorized here the same way step 10c does
-  # for the scaffold. The POLICY already carries deployments:read (1974406b0).
+  # for the scaffold. The SCOPE already carries deployments:read (1974406b0).
   docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.app_members (app_id,user_id,role) VALUES ('$APP_ID','$SC_CREATOR','owner') ON CONFLICT (app_id,user_id) DO UPDATE SET role='owner';
 SQL
@@ -3466,7 +3462,7 @@ SQL
   # --- DEPLOYED arm: before, drive one call, after ---------------------------
   LOG_URL="http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$APP_ID/logs"
   LOG_CODE_A=$(curl -s -o /tmp/gp-logs-a.json -w '%{http_code}' --max-time 20 \
-    "$LOG_URL" -H "Authorization: Bearer $SC_PAT" 2>/dev/null)
+    "$LOG_URL" -H "Authorization: Bearer $SC_TOKEN" 2>/dev/null)
   LOG_BEFORE=$(grep -oF -- "$GP_LOG_MARK" /tmp/gp-logs-a.json 2>/dev/null | wc -l | tr -d ' ')
 
   if [ "$LOG_CODE_A" = "200" ]; then
@@ -3483,7 +3479,7 @@ SQL
   command sleep 2
 
   LOG_CODE_B=$(curl -s -o /tmp/gp-logs-b.json -w '%{http_code}' --max-time 20 \
-    "$LOG_URL" -H "Authorization: Bearer $SC_PAT" 2>/dev/null)
+    "$LOG_URL" -H "Authorization: Bearer $SC_TOKEN" 2>/dev/null)
   LOG_AFTER=$(grep -oF -- "$GP_LOG_MARK" /tmp/gp-logs-b.json 2>/dev/null | wc -l | tr -d ' ')
   echo "  deployed (GET /api/apps/<id>/logs): http=$LOG_CODE_A/$LOG_CODE_B marker $LOG_BEFORE -> $LOG_AFTER"
 
@@ -3528,7 +3524,7 @@ SQL
     -H "X-Api-Key: $API_KEY" 2>/dev/null)
   command sleep 2
   curl -s -o /tmp/gp-logs-e.json --max-time 20 "$LOG_URL" \
-    -H "Authorization: Bearer $SC_PAT" 2>/dev/null || true
+    -H "Authorization: Bearer $SC_TOKEN" 2>/dev/null || true
   LOG_ERR=$(grep -oF -- "[zeroship:rpc] sanitized error" /tmp/gp-logs-e.json 2>/dev/null | wc -l | tr -d ' ')
   echo "  deployed error probe: http=$LOG_ERR_CODE, rpc error marker x$LOG_ERR"
   if [ "${LOG_ERR_CODE:-200}" -lt 400 ] 2>/dev/null; then
@@ -3594,7 +3590,7 @@ SQL
     -H "X-Api-Key: $API_KEY" 2>/dev/null)
   command sleep 2
   curl -s -o /tmp/gp-logs-boom.json --max-time 20 "$LOG_URL" \
-    -H "Authorization: Bearer $SC_PAT" 2>/dev/null || true
+    -H "Authorization: Bearer $SC_TOKEN" 2>/dev/null || true
   LOG_BOOM=$(grep -oF -- "[zeroship:rpc] sanitized error" /tmp/gp-logs-boom.json 2>/dev/null | wc -l | tr -d ' ')
   LOG_BOOM_OWN=$(grep -oF -- "[starter] boom" /tmp/gp-logs-boom.json 2>/dev/null | wc -l | tr -d ' ')
   echo "  deployed throw probe: http=$LOG_BOOM_CODE, rpc error marker x$LOG_BOOM, app message x$LOG_BOOM_OWN"
@@ -3675,9 +3671,10 @@ step 14 "Scoped data through the gateway: two identities, one row, no leak"
 AN_ZSHIP="$ROOT/examples/auth-notes-db/dist/app.zship"
 AN_APP="gpnotes"
 AN_HOST="$AN_APP.localhost"
-# Defined HERE rather than inherited: step 10 assigns GP_JOSE at :2254, but
-# inside its own branch, so depending on it would make this step's outcome a
-# function of whether an unrelated step ran.
+# Defined HERE rather than inherited. Step 10 used to assign a GP_JOSE inside
+# its own branch and this step would then have been a function of whether an
+# unrelated step ran; that assignment is gone with the offline token mint, and
+# a local name keeps this step independent of whatever replaces it.
 AN_JOSE="$ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index.js"
 
 # ARTIFACT FRESHNESS, asserted rather than assumed. This step provisions a
@@ -3694,13 +3691,13 @@ if [ ! -f "$AN_ZSHIP" ]; then
   fail "14: missing $AN_ZSHIP - run: pnpm --filter auth-notes-db build"
 elif [ ! -f "$AN_JOSE" ]; then
   fail "14: missing jose at $AN_JOSE - cannot mint a session, so nothing below is testable"
-elif [ -z "${SC_PAT:-}" ]; then
+elif [ -z "${SC_TOKEN:-}" ]; then
   # The app MUST be registered through the deploy API, not dev-provision: only
   # the deploy path calls ensure_app_client, so a dev-provisioned app has NO
   # row in zeroship.app_oauth_clients and every authed call 401s for that reason
   # alone (#328, and measured here on 2026-08-12 -- dev_provision.rs inserts
-  # only into zeroship.users). SC_PAT already carries apps:write + apps:deploy.
-  fail "14: SC_PAT is unset, so the app cannot be registered through the deploy API - a dev-provisioned app has no OAuth client and every assertion below would 401 for that reason"
+  # only into zeroship.users). SC_TOKEN already carries apps:write + apps:deploy.
+  fail "14: SC_TOKEN is unset, so the app cannot be registered through the deploy API - a dev-provisioned app has no OAuth client and every assertion below would 401 for that reason"
 else
   [ -z "$AN_STALE" ] \
     && pass "14: the auth-notes-db artifact is newer than its sources (the run measures the current app)" \
@@ -3710,7 +3707,7 @@ else
       this example would silently not apply."
 
   AN_CREATE_JSON=$(curl -sf -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" \
-    -H 'Content-Type: application/json' -H "Authorization: Bearer $SC_PAT" \
+    -H 'Content-Type: application/json' -H "Authorization: Bearer $SC_TOKEN" \
     -d "{\"name\":\"$AN_APP\"}" 2>/tmp/gp-notes-create.log)
   # No jq: this harness's CI image installs lsof, zstd and postgresql-client
   # and nothing else. Anchored on the QUOTED key so an error body with no id
@@ -3719,7 +3716,7 @@ else
   if [ -z "$AN_APP_ID" ]; then
     fail "14: could not create the notes app: $(head -c 200 <<<"$AN_CREATE_JSON")"
   elif ! "$BIN/zeroship" deploy "$AN_ZSHIP" --app="$AN_APP_ID" \
-         --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$SC_PAT" \
+         --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$SC_TOKEN" \
          >/tmp/gp-notes-deploy.log 2>&1; then
     fail "14: deploy failed: $(tail -2 /tmp/gp-notes-deploy.log | tr '\n' ' ')"
   else
@@ -3729,7 +3726,7 @@ else
     # ENVELOPE, not an empty object: the first version of this step sent
     # `-d '{}'` and got `400 Json deserialize error: missing field 'kind'`.
     # The three working call sites (:1925, :2268, :2607) all --data-binary a
-    # recorder-produced document, and all send the PAT.
+    # recorder-produced document, and all send the bearer.
     node --input-type=module - "$ROOT/sdks/vite-plugin/dist/gen-types/recorder.js" \
       "$ROOT/examples/auth-notes-db/migrations" >/tmp/gp-notes-ir.json 2>/tmp/gp-notes-ir.log <<'NODE'
 import { pathToFileURL } from "node:url";
@@ -3742,7 +3739,7 @@ console.log(JSON.stringify({ kind: "ir", documents }));
 NODE
     AN_APPLY=$(curl -s -o /tmp/gp-notes-apply.json -w '%{http_code}' -X POST \
       "http://localhost:$ZEROSHIP_MIGRATED_PORT/v1/apps/$AN_APP_ID/migrations/apply" \
-      -H 'Content-Type: application/json' -H "Authorization: Bearer $SC_PAT" \
+      -H 'Content-Type: application/json' -H "Authorization: Bearer $SC_TOKEN" \
       --data-binary @/tmp/gp-notes-ir.json)
     AN_APPLIED="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);process.stdout.write(String((o.applied||[]).length))}catch{process.stdout.write("0")}})' </tmp/gp-notes-apply.json)"
     { [ "$AN_APPLY" = "200" ] && [ "${AN_APPLIED:-0}" -ge 1 ] 2>/dev/null; } \
@@ -3875,11 +3872,11 @@ gp_close_step
 #
 # THE VEHICLE IS scaffoldapp, deliberately, and it must be the LAST thing this
 # file touches: it is the only app here that has a real per-app schema applied
-# through the real zeroship-migrated (step 10c) AND an owner PAT that can
-# authorize AppsDelete (SC_PAT, the app_members row written at step 10c).
+# through the real zeroship-migrated (step 10c) AND an owner bearer that can
+# authorize AppsDelete (SC_TOKEN, the app_members row written at step 10c).
 step 12 "Teardown: the creator deletes the app, and its state goes with it"
-if [ -z "${SC_APP_ID:-}" ] || [ -z "${SC_PAT:-}" ]; then
-  fail "no scaffold app id or PAT, so the deletion path could not be exercised at all --
+if [ -z "${SC_APP_ID:-}" ] || [ -z "${SC_TOKEN:-}" ]; then
+  fail "no scaffold app id or bearer, so the deletion path could not be exercised at all --
       this is a FAILED SETUP, not a passing teardown check"
 else
   # --- BEFORE: prove the vehicle can discriminate ---------------------------
@@ -3949,13 +3946,13 @@ else
       billing_period is a DOMAIN OVER DATE, not an enum, and to_plan_id must
       reference an existing zeroship.plans row."
 
-  # --- THE DELETE, over the real HTTP surface with the creator's own PAT -----
+  # --- THE DELETE, over the real HTTP surface with the creator's own bearer -
   DEL_BODY=$(curl -s -o /tmp/gp-delete.json -w '%{http_code}' --max-time 20 \
     -X DELETE "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$SC_APP_ID" \
-    -H "Authorization: Bearer $SC_PAT" 2>/dev/null)
+    -H "Authorization: Bearer $SC_TOKEN" 2>/dev/null)
   echo "  DELETE /api/apps/$SC_APP_ID -> $DEL_BODY $(head -c 120 /tmp/gp-delete.json)"
   if [ "$DEL_BODY" = "200" ] && grep -q '"deleted":true' /tmp/gp-delete.json 2>/dev/null; then
-    pass "the creator's own PAT can delete the creator's own app (200 deleted:true)"
+    pass "the creator's own bearer can delete the creator's own app (200 deleted:true)"
   else
     fail "DELETE /api/apps/<id> did not succeed for the app's OWNER (http=$DEL_BODY): $(head -c 200 /tmp/gp-delete.json)
       A creator who cannot delete their own app has no workaround, so this is a
