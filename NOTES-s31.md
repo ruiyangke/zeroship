@@ -118,3 +118,67 @@ Control on the pattern (an empty grep is not proof): the same search DOES find
 the covered ones - `zeroship-gateway:oidc_rp_e2e` at run_auth_suite.sh:158,
 `distributed_live` at run_plugin_db_live_suite.sh:129 - so the pattern finds
 binaries that are gated, and the misses above are real misses.
+
+## MEASURED: tests/run_billing_suite.sh is RED on main, 50 failures
+
+Run on this branch with NO code change of mine, against live PG 16.14 on
+127.0.0.1:5440, REDPANDA_BROKERS unset:
+
+    696 passed (sum of `test result: ok.` lines)
+    50 failed across 4 binaries
+    6 announced skips, all expected (5 x ZEROSHIP_DW_E2E, 1 x REDPANDA_BROKERS)
+    exit 1: LIVE-DATABASE SUITE FAILED
+
+So the live-db set is not uncovered - it is covered and RED. Two independent
+causes, both reported here and NOT fixed, per the brief.
+
+### RED 1 - 44 tests: `schema "app_<uuid>" does not exist`
+
+    workflow_engine_test        1 passed, 39 failed
+    workflow_instance_api_test  1 passed,  4 failed
+    workflow_plugin             5 passed,  1 failed
+
+Every one panics identically at the `PgStore::provision` call
+(workflow_engine_test.rs:532, workflow_instance_api_test.rs:183,
+workflow_plugin.rs:231):
+
+    provision workflow journal: Db("db error: ERROR: schema
+    "app_4c019118-27dc-4ae6-87c3-2b4b25914900" does not exist")
+
+CAUSE, by `git log -S`: commit 2a44ea8ef "fix(worker): constrain database
+authority" (2026-08-16, one day before this run) deleted
+`CREATE SCHEMA IF NOT EXISTS {schema}` from the workflow journal provisioning
+and added a unit test asserting it can never come back
+(crates/plugin-workflow/src/store/pg.rs:1955
+`worker_provisioning_uses_a_precreated_narrow_owner_role`). That is a
+deliberate privilege decision. What it did not do is update the 44 tests that
+seed an app by INSERTing into `zeroship.apps` and then expect `provision` to
+create the schema for them. The product change may well be right; the test
+seeding is now missing a step.
+
+### RED 2 - 6 tests: apply API answers 422 where 200/503 is expected
+
+    zeroship-migrated::apply_api_test  20 passed, 6 failed
+
+    apply_api_5xx_detail_is_generic_and_does_not_leak_internals   (422 != 503)
+    apply_api_uses_stored_current_policy_when_no_inline_draft_pg  (422 != 200)
+    approval_repreflight_refuses_when_current_policy_changes_reviewed_scope_pg
+    authz_receives_the_callers_request_id_pg
+    policy_api_submits_gets_and_lists_versioned_policy_pg
+    real_delegating_authenticator_rejects_malformed_bearer
+
+The service logs the reason:
+
+    migrated: migration policy rejected error=parse migrate-policy.toml:
+    DeclaredOnlyNonDefault { key: "runtime.lock_timeout_ms" }
+
+The engine rejects a policy that GRANTS `runtime.lock_timeout_ms`
+(third_party/zero-migrate/crates/zero-migrate-policy/src/document.rs:205).
+Two commits on 2026-08-10 removed exactly that grant elsewhere (4ea3c103b
+"drop the declared-only runtime timeout grants", d4d242a14). The fixtures at
+crates/migrated/tests/apply_api_test.rs:441 and :457 still carry it. Stale
+fixtures, not a product defect - but still red, and still unfixed here.
+
+Neither red is explained by this machine: "schema does not exist" and a policy
+parse rejection are code-level and deterministic. CI's `billing-gate` runs the
+same script on every push.
