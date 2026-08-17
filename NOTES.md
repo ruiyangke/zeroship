@@ -246,3 +246,61 @@ direction.
 currently asserts 0 grants after login, which under E becomes the full
 provisioned set, and a new step must delete a row and assert the next control
 request is narrowed.
+
+---
+
+## 5. Amendments made during implementation
+
+Three things I got wrong or left open in sections 1-4, corrected here rather
+than by editing them silently.
+
+### 5.1 The privilege question, answered by reading rather than assuming
+
+Section 4.1 asserted the read rule needs no new privilege. **VERIFIED** that it
+does not, and the specific reason is stronger than "SELECT suffices":
+`db/migrations-ts/20260702000900_grants.ts:65` lists BOTH `identity_links` and
+`principal_grants` in the same `["select", "insert", "update", "delete"]` grant
+to `zeroship_control`. So control already holds more than the read rule needs
+AND exactly what the write in 4.2 needs.
+
+**No grant is added by this change, to any role.** `zeroship_auth` is untouched
+- it keeps SELECT-only on `principal_grants` (`:55`) and no privilege at all on
+`identity_links`, which is what makes the auth side structurally incapable of
+provisioning and therefore what forces the design.
+
+### 5.2 Section 4.1's worry about `migrated` was unfounded
+
+I wrote that `crates/migrated`'s DB role was unverifiable and let that shape the
+read/write split. It is verifiable: `deploy/compose/docker-compose.yml:431`
+defaults `ZEROSHIP_MIGRATED_DATABASE_URL` to
+`postgres://zeroship_control:zeroship_control@postgres:5432/zeroship`. So the
+reference deployment runs `migrated` as `zeroship_control` and the read is safe
+there for the same reason it is safe in control.
+
+The split still stands, but on its real merit rather than that one: the
+unseeded fallback means a service that cannot write is never blocked, so the
+write can stay in the one service that indisputably owns the table instead of
+being duplicated into the shared crate.
+
+### 5.3 The intersection is scoped to the CLI client - a point section 4 missed
+
+Section 4.1 as written would have capped EVERY OAuth token to
+`principal_grants`. That is wrong, and it would have broken more than it fixed:
+`PLATFORM_CLI_ISSUABLE_SCOPES` is four scopes, so once a principal is seeded,
+any token needing `env:write`, `billing:read`, `team:write` or `account:*` -
+the console's surface, not the CLI's - would be silently narrowed to nothing.
+The constant's own doc comment in `crates/core/src/device_grant.rs:55-58` says
+what it is: the ceiling registered for the FIRST-PARTY CLI CLIENT.
+
+So the intersection runs only when `client_id == PLATFORM_CLI_CLIENT_ID`. That
+is also the faithful restoration rather than a widening: the behaviour
+`5ae8c7f7d` removed was `deploy_scopes_for_principal`, which only ever ran on
+control's CLI device flow. Restoring exactly that and nothing more is the
+smaller and better-supported change.
+
+I caught this from an existing test rather than by reasoning:
+`user_without_admin_role_oauth_scope_does_not_grant_apps_delete` mints
+`apps:delete`, which is outside the CLI set, and would have started passing for
+the wrong reason - a 403 from an emptied policy instead of from the role check
+it exists to test. It now seeds that grant explicitly so the assertion still
+measures what its name claims.
