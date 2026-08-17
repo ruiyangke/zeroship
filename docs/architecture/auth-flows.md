@@ -2917,9 +2917,11 @@ for anything else, so that string cannot enter a scope set
 
 `authz::enforce` is a two-evaluation intersection: when the caller carries a
 wrapper policy it evaluates owner authority against the static policy set
-first, then re-evaluates against the WRAPPER ALONE
-(`crates/authz/src/eval.rs:38-76`, `crates/authz/src/eval.rs:56-62`). The
-static platform `admin` universal-allow takes no part in that second decision,
+first, then re-evaluates against the WRAPPER ALONE (`crates/authz/src/eval.rs`,
+`enforce`; its own doc comment records that the one policy source that could
+have carried something else - a row loaded by token id - went with the personal
+access tokens). The static platform `admin` universal-allow takes no part in
+that second decision,
 which is what makes this a gap rather than an operator inconvenience: the role
 that `Action::AppsApproveMigration`'s own doc comment names as the holder is
 evaluated only in the first pass.
