@@ -84,12 +84,12 @@ async fn reconcile_in_transaction(
     client
         .query_text_params(
             "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-            &[&publication],
+            &[publication],
         )
         .await?;
 
     let rows = client
-        .query_text_params(creator_table_query(), &[&app_id])
+        .query_text_params(creator_table_query(), &[app_id])
         .await?;
     let tables = rows
         .iter()
@@ -98,7 +98,7 @@ async fn reconcile_in_transaction(
     let exists = !client
         .query_text_params(
             "SELECT 1 FROM pg_publication WHERE pubname = $1",
-            &[&publication],
+            &[publication],
         )
         .await?
         .is_empty();
