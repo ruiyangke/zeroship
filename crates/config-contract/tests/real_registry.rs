@@ -1,0 +1,131 @@
+//! The anti-vacuity guard for `src/registry.rs`.
+//!
+//! Every other check in this crate reads `platform_specs()`, and a binary that
+//! is missing from that function is invisible to all of them: its declarations
+//! are not linked, so no collision, no undeclared read and no name projection
+//! can be attributed to it. Nothing about that state looks wrong from inside
+//! the tool - every count simply gets smaller, and every check still passes.
+//!
+//! Cargo metadata is the independent second opinion. `check-metadata` already
+//! requires every workspace bin target to carry a package-owned class, so the
+//! set of targets classified `platform` is derived from the manifests rather
+//! than from this crate, and comparing the two sets makes "forgot to register
+//! the new server" a failure instead of a silent shrink.
+//!
+//! Does not cover: whether a linked registry declares the RIGHT names. That is
+//! `contract.rs` plus `tests/linked_registry.rs`. This file only asks which
+//! binaries are present on each side.
+
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+
+use zeroship_config_contract::metadata::{extract_workspace, TargetClass};
+use zeroship_config_contract::registry::{declared_binaries, platform_specs, DECLARING_BINARIES};
+
+/// Targets classified `platform` in Cargo metadata that link no registry here.
+///
+/// Not an escape hatch: it is pinned by exact set equality below, so a NEW
+/// unregistered platform binary fails even though this one is listed. The
+/// entry is the platform-migrate one-shot, which the design puts in scope and
+/// records as unconverted
+/// (`docs/proposals/2026-08-11-config-name-alignment.md:55-82`: "SEVEN targets
+/// classified `platform`", of which six are servers, and "those processes must
+/// be registered before the final gate turns green"). Registering it deletes
+/// the entry; the assertion is what stops that from being forgotten quietly.
+const PLATFORM_TARGETS_WITHOUT_A_REGISTRY: [&str; 1] = ["zeroship-platform-migrate"];
+
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("config-contract is two levels below the workspace root")
+        .to_path_buf()
+}
+
+/// Every bin target the manifests classify `platform`.
+fn platform_targets() -> BTreeSet<String> {
+    let (_, classifications) = extract_workspace(&workspace_root().join("Cargo.toml"))
+        .expect("cargo metadata classification");
+    let targets = classifications
+        .iter()
+        .filter(|classification| classification.class == TargetClass::Platform)
+        .map(|classification| classification.target.clone())
+        .collect::<BTreeSet<_>>();
+    // The instrument, not the subject: an extraction that returned nothing
+    // would make every assertion below pass by comparing empty sets.
+    assert!(
+        !targets.is_empty(),
+        "cargo metadata produced no platform targets; the comparisons below \
+         would be vacuous"
+    );
+    targets
+}
+
+#[test]
+fn every_platform_target_is_declaring_or_a_named_unregistered_gap() {
+    // Mutation: classify one more bin target `platform` in its Cargo.toml
+    // without adding it to DECLARING_BINARIES. This is THE case the module doc
+    // describes - a seventh server whose config nothing in this tool can see.
+    // Does not cover: a new platform process that is never given a bin target
+    // or a manifest class at all. `check-metadata` owns that boundary.
+    let declared = DECLARING_BINARIES
+        .iter()
+        .chain(PLATFORM_TARGETS_WITHOUT_A_REGISTRY.iter())
+        .map(|target| (*target).to_owned())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(
+        platform_targets(),
+        declared,
+        "the `platform` targets in Cargo metadata and the binaries this tool \
+         links have drifted; a new platform binary must either link its \
+         generated registry into src/registry.rs or be listed as an \
+         unregistered gap"
+    );
+}
+
+#[test]
+fn every_declaring_binary_is_classified_platform() {
+    // Mutation: reclassify a server as `test-dev-tool` in its Cargo.toml. The
+    // set equality above would still hold if BOTH lists were edited together,
+    // so this states the direction that matters on its own: a binary this tool
+    // treats as production must be production in the manifests too.
+    // Does not cover: whether `platform` is the right class for a target. A
+    // reason string is prose and cannot be checked.
+    let platform = platform_targets();
+    let missing = DECLARING_BINARIES
+        .iter()
+        .filter(|target| !platform.contains(**target))
+        .collect::<Vec<_>>();
+
+    assert!(
+        missing.is_empty(),
+        "{missing:?} link a registry into this tool but are not classified \
+         `platform` in workspace metadata"
+    );
+}
+
+#[test]
+fn every_declaring_binary_actually_contributes_declarations() {
+    // The other half of the vacuity: DECLARING_BINARIES is a list in this
+    // crate, and a name on it whose registry is empty - a settings struct that
+    // lost its fields, a crate that stopped invoking the attribute - would
+    // shrink every count exactly as a missing binary does.
+    // Mutation: delete a binary's `#[zeroship_config]` struct fields, or drop
+    // its `SPECS` line from `platform_specs`.
+    // Does not cover: how MANY declarations a binary owns. One field is enough
+    // here; per-name coverage is tests/linked_registry.rs.
+    let specs = platform_specs();
+    assert!(!specs.is_empty(), "no linked declarations at all");
+    let linked = declared_binaries(&specs).into_iter().collect::<BTreeSet<_>>();
+    let expected = DECLARING_BINARIES
+        .iter()
+        .map(|target| (*target).to_owned())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(
+        linked, expected,
+        "the binaries appearing in the LINKED declarations and the \
+         DECLARING_BINARIES list disagree"
+    );
+}
