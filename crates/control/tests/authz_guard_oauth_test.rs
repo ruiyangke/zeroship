@@ -1010,7 +1010,7 @@ async fn platform_access_token_revocation_marker_rejects_within_cache_ttl() {
 }
 
 #[compio::test]
-async fn bearer_verifier_directly_accepts_pat_and_oauth_and_rejects_revoked_platform_token() {
+async fn bearer_verifier_directly_accepts_oauth_and_rejects_revoked_platform_token() {
     let user_id = Uuid::new_v4();
     let Some(fx) = fixture_with_platform("bearer-verifier", user_id).await else {
         return;
@@ -1027,41 +1027,21 @@ async fn bearer_verifier_directly_accepts_pat_and_oauth_and_rejects_revoked_plat
     assert_eq!(oauth.token_id, None);
     assert!(oauth.token_policy.is_some());
 
-    let token_id = Uuid::new_v4();
-    let policy_json = json!({
-        "name": "direct-bearer-verifier-pat",
-        "statements": [],
-    });
-    let policy_hash = zeroship_authz::policy_hash(&policy_json);
-    let expires_at = Utc::now() + Duration::hours(1);
-    let pat = fx
-        .state
-        .pat_issuer
-        .issue(token_id, user_id, policy_hash.clone(), expires_at)
-        .expect("issue direct PAT");
-    fx.state
-        .control_pg
-        .execute(
-            "INSERT INTO zeroship.permission_tokens \
-                (id, owner_id, kind, name, policies, policy_hash, expires_at) \
-             VALUES ($1, $2, 'pat', 'direct-bearer-verifier-pat', $3, $4, $5)",
-            &[&token_id, &user_id, &policy_json, &policy_hash, &expires_at],
-        )
-        .await
-        .expect("insert direct PAT row");
-    let pat_principal = fx
-        .state
-        .bearer_verifier()
-        .verify_bearer(
-            &pat,
-            Some("127.0.0.1".parse().expect("test IP parses")),
-            "direct-pat".to_string(),
-        )
-        .await
-        .expect("PAT bearer verifies directly");
-    assert_eq!(pat_principal.principal_id, user_id);
-    assert_eq!(pat_principal.token_id, Some(token_id));
-    assert!(pat_principal.token_policy.is_none());
+    // A bearer that is not a platform OAuth token is refused outright. There is
+    // no second local verifier behind the OAuth arm any more: the PAT branch
+    // that used to run first is gone with the token type.
+    assert!(
+        fx.state
+            .bearer_verifier()
+            .verify_bearer(
+                "not-a-jwt",
+                Some("127.0.0.1".parse().expect("test IP parses")),
+                "direct-garbage".to_string(),
+            )
+            .await
+            .is_err(),
+        "a bearer the platform issuer did not sign must be rejected"
+    );
 
     let revoked_client_id = "zeroship-cli-revoked";
     let platform =
@@ -1086,11 +1066,6 @@ async fn bearer_verifier_directly_accepts_pat_and_oauth_and_rejects_revoked_plat
         "revoked platform bearer must be rejected by BearerVerifier"
     );
 
-    let _ = fx
-        .state
-        .control_pg
-        .execute("DELETE FROM zeroship.permission_tokens WHERE id = $1", &[&token_id])
-        .await;
     let _ = fx
         .state
         .control_pg

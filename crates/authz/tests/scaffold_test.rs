@@ -61,7 +61,6 @@ fn action_cedar_ids_are_canonical() {
         (Action::TeamWrite, "team:write"),
         (Action::AccountRead, "account:read"),
         (Action::AccountWrite, "account:write"),
-        (Action::PlatformPoliciesWrite, "platform_policies:write"),
     ];
 
     for (action, cedar_id) in cases {

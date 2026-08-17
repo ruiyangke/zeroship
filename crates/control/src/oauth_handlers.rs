@@ -65,10 +65,7 @@ pub async fn create_oauth_client(
     state: State<Arc<AppState>>,
     body: Json<CreateOauthClientBody>,
 ) -> web::HttpResponse {
-    if let Err(resp) = authz
-        .require(Action::PlatformPoliciesWrite, Resource::Any, &state)
-        .await
-    {
+    if let Err(resp) = crate::admin_handlers::require_platform_admin(&authz, &state).await {
         return resp;
     }
 
@@ -131,10 +128,7 @@ pub async fn list_oauth_clients(
     authz: AuthzGuard,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    if let Err(resp) = authz
-        .require(Action::PlatformPoliciesWrite, Resource::Any, &state)
-        .await
-    {
+    if let Err(resp) = crate::admin_handlers::require_platform_admin(&authz, &state).await {
         return resp;
     }
 
@@ -165,10 +159,7 @@ pub async fn delete_oauth_client(
     state: State<Arc<AppState>>,
     id: Path<String>,
 ) -> web::HttpResponse {
-    if let Err(resp) = authz
-        .require(Action::PlatformPoliciesWrite, Resource::Any, &state)
-        .await
-    {
+    if let Err(resp) = crate::admin_handlers::require_platform_admin(&authz, &state).await {
         return resp;
     }
 

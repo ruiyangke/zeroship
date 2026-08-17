@@ -42,8 +42,8 @@ impl AdminPrincipal {
 ///
 /// The scope set is the whole closed vocabulary, so the wrapper policy the
 /// bearer path derives never narrows the platform role away. Two Cedar actions
-/// have no scope at all - `migrations:approve` and `platform_policies:write` -
-/// and no bearer can carry them; see the note on `zeroship_authz::Action`.
+/// One Cedar action has no scope at all - `migrations:approve` - and no bearer
+/// can carry it; see the note on `zeroship_authz::Action::AppsApproveMigration`.
 pub async fn admin_principal(state: &AppState) -> AdminPrincipal {
     seed_principal(state, true).await
 }

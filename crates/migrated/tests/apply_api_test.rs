@@ -1,16 +1,20 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, OnceLock, RwLock};
+use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use chrono::{Duration, Utc};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use compio_postgres::{Client, NoTls};
+use ed25519_dalek::pkcs8::EncodePrivateKey;
+use ed25519_dalek::SigningKey;
+use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use ntex::http::StatusCode;
-use ntex::web::{self, test};
+use ntex::web::{self, test, HttpResponse};
 use serde_json::{json, Value};
 use uuid::Uuid;
-use zeroship_authz::{policy_hash, Action, Effect, Policy, Resource, Scope, Statement};
-use zeroship_authn::PatIssuer;
+use zeroship_authz::{Action, Scope};
 use zeroship_migrated::auth::{
     AuthError, Authenticator, ControlPlaneAuthenticator, VerifiedCaller,
 };
@@ -111,7 +115,6 @@ impl Authenticator for StaticAuthenticator {
         }
         Ok(VerifiedCaller {
             principal_id: caller.principal_id,
-            token_id: None,
         })
     }
 }
