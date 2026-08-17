@@ -8,13 +8,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
 use compio_postgres::{connect, NoTls};
 use ntex::http::StatusCode;
 use ntex::web::{self, test};
 use serde_json::{json, Value};
 use uuid::Uuid;
-use zeroship_authz::{policy_hash, Action, Effect, Policy, Resource, Statement};
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::{
     oauth_handlers, AppState, EnvStore, Quota, RateLimiter, Registry,
@@ -145,13 +143,16 @@ impl Drop for Fixture {
     }
 }
 
-struct NonAdminPat {
+/// A creator with NO platform role. The operator OAuth-client routes gate on
+/// `team:write` over the synthetic platform org, which only the platform admin
+/// Cedar policy grants, so this principal holds `team:write` and is still
+/// refused - the role check is what bites, not a missing scope.
+struct NonAdminCaller {
     user_id: Uuid,
-    token_id: Uuid,
     token: String,
 }
 
-impl NonAdminPat {
+impl NonAdminCaller {
     fn bearer(&self) -> String {
         format!("Bearer {}", self.token)
     }
@@ -160,15 +161,8 @@ impl NonAdminPat {
         let _ = state
             .control_pg
             .execute(
-                "DELETE FROM zeroship.authz_decisions WHERE token_id = $1 OR actor_user_id = $2",
-                &[&self.token_id, &self.user_id],
-            )
-            .await;
-        let _ = state
-            .control_pg
-            .execute(
-                "DELETE FROM zeroship.permission_tokens WHERE id = $1",
-                &[&self.token_id],
+                "DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1",
+                &[&self.user_id],
             )
             .await;
         let _ = state
@@ -178,7 +172,7 @@ impl NonAdminPat {
     }
 }
 
-async fn non_admin_pat(state: &AppState) -> NonAdminPat {
+async fn non_admin_caller(state: &AppState) -> NonAdminCaller {
     let user_id = Uuid::new_v4();
     let email = format!("non-admin-oauth-{user_id}@zeroship.test");
     state
@@ -191,41 +185,13 @@ async fn non_admin_pat(state: &AppState) -> NonAdminPat {
         .await
         .expect("insert non-admin user");
 
-    let token_id = Uuid::new_v4();
-    let policies = platform_policy().to_json_value();
-    let hash = policy_hash(&policies);
-    let expires_at = Utc::now() + Duration::days(1);
-    let token = state
-        .pat_issuer
-        .issue(token_id, user_id, hash.clone(), expires_at)
-        .expect("issue non-admin PAT");
-    state
-        .control_pg
-        .execute(
-            "INSERT INTO zeroship.permission_tokens \
-                (id, owner_id, kind, name, policies, policy_hash, expires_at) \
-             VALUES ($1, $2, 'pat', 'integration non-admin PAT', $3, $4, $5)",
-            &[&token_id, &user_id, &policies, &hash, &expires_at],
-        )
-        .await
-        .expect("insert non-admin PAT row");
-
-    NonAdminPat {
+    NonAdminCaller {
         user_id,
-        token_id,
-        token,
-    }
-}
-
-fn platform_policy() -> Policy {
-    Policy {
-        name: "oauth client admin".to_string(),
-        statements: vec![Statement {
-            effect: Effect::Allow,
-            actions: vec![Action::PlatformPoliciesWrite],
-            resources: vec![Resource::Any],
-            conditions: Vec::new(),
-        }],
+        token: common::platform_token_for_client(
+            user_id,
+            "team:write",
+            common::CONSOLE_CLIENT_ID,
+        ),
     }
 }
 
@@ -343,7 +309,7 @@ async fn unauthenticated_request_returns_401() {
 async fn non_admin_request_returns_403() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "non-admin").await;
-    let pat = non_admin_pat(&fx.state).await;
+    let pat = non_admin_caller(&fx.state).await;
     let app = init_control!(fx);
     let client_id = format!("oauth-non-admin-{}", Uuid::new_v4().simple());
 

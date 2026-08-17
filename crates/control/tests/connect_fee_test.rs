@@ -3,7 +3,7 @@
 //!
 //! FAITHFUL by construction: the tests drive the REAL ntex HTTP handlers
 //! (`onboard`/`callback`/`connect_checkout`/`set_fee_policy`) through a real
-//! `AuthzGuard` (a real PAT) against a live, migrated Postgres, and the REAL
+//! `AuthzGuard` (a real platform OAuth bearer) against a live, migrated Postgres, and the REAL
 //! `cyper`-based `StripeClient` against a localhost **mock-Stripe-Connect** HTTP
 //! server that speaks the `/v1/accounts`, `/v1/account_links`,
 //! `/v1/payment_intents` shapes and RECORDS every request. No stubbed client on
@@ -20,14 +20,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use chrono::{Duration, Utc};
 use compio::io::{AsyncRead, AsyncWriteExt};
 use compio::net::{TcpListener, TcpStream};
 use ntex::http::StatusCode;
 use ntex::web::{self, test};
 use uuid::Uuid;
 
-use zeroship_authz::{policy_hash, Action, Effect, Policy, Resource, Statement};
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::{
     stripe_handlers, AppState, EnvStore, Quota, RateLimiter, Registry,
@@ -375,16 +373,15 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
 }
 
 // ---------------------------------------------------------------------------
-// PAT + principal helpers (faithful AuthzGuard).
+// Bearer + principal helpers (faithful AuthzGuard).
 // ---------------------------------------------------------------------------
 
-struct Pat {
+struct Caller {
     user_id: Uuid,
-    token_id: Uuid,
     token: String,
 }
 
-impl Pat {
+impl Caller {
     fn bearer(&self) -> String {
         format!("Bearer {}", self.token)
     }
@@ -405,7 +402,7 @@ async fn make_user(state: &AppState, label: &str) -> Uuid {
     id
 }
 
-async fn issue_pat(state: &AppState, user_id: Uuid, role: Option<&str>, policy: Policy) -> Pat {
+async fn issue_bearer(state: &AppState, user_id: Uuid, role: Option<&str>, scope: &str) -> Caller {
     if let Some(role) = role {
         state
             .control_pg
@@ -417,56 +414,26 @@ async fn issue_pat(state: &AppState, user_id: Uuid, role: Option<&str>, policy: 
             .await
             .expect("insert platform role");
     }
-    let token_id = Uuid::new_v4();
-    let policies = policy.to_json_value();
-    let hash = policy_hash(&policies);
-    let expires_at = Utc::now() + Duration::days(1);
-    let token = state
-        .pat_issuer
-        .issue(token_id, user_id, hash.clone(), expires_at)
-        .expect("issue PAT");
-    state
-        .control_pg
-        .execute(
-            "INSERT INTO zeroship.permission_tokens \
-                (id, owner_id, kind, name, policies, policy_hash, expires_at) \
-             VALUES ($1, $2, 'pat', 'connect PAT', $3, $4, $5)",
-            &[&token_id, &user_id, &policies, &hash, &expires_at],
-        )
-        .await
-        .expect("insert PAT row");
-    Pat { user_id, token_id, token }
-}
-
-/// Self-service policy: BillingWrite on the creator's OWN app surface — the
-/// creator upper bound. Crucially does NOT grant Resource::Any (operator-only).
-fn billing_write_self() -> Policy {
-    Policy {
-        name: "creator self".to_owned(),
-        statements: vec![Statement {
-            effect: Effect::Allow,
-            actions: vec![Action::BillingWrite],
-            // A self-scoped grant the creator legitimately holds; it is NOT
-            // Resource::Any, so the operator-only `set_fee_policy` denies it.
-            resources: vec![Resource::App { id: Uuid::new_v4().to_string() }],
-            conditions: Vec::new(),
-        }],
+    Caller {
+        user_id,
+        token: common::platform_token_for_client(user_id, scope, common::CONSOLE_CLIENT_ID),
     }
 }
 
-fn billing_write_any() -> Policy {
-    Policy {
-        name: "operator".to_owned(),
-        statements: vec![Statement {
-            effect: Effect::Allow,
-            actions: vec![Action::BillingWrite],
-            resources: vec![Resource::Any],
-            conditions: Vec::new(),
-        }],
-    }
-}
+// The scope vocabulary is resource-blind: a scope always lowers to
+// `Resource::Any`, so per-app narrowing now comes from Cedar app membership
+// rather than from the caller-supplied wrapper policy a PAT used to carry.
+// The old "creator self" fixture modeled BillingWrite scoped to ONE app (not
+// Resource::Any) — self-service `onboard`/`callback`/`connect_checkout` don't
+// actually consult that grant anyway (they bind `:id` to the principal and
+// only fall back to `require(BillingWrite, Any)` when the caller is NOT the
+// path creator), and the ALWAYS-operator `set_fee_policy` never had a
+// self-service branch to begin with. So a "billing:read" scope (no
+// billing:write) reproduces both outcomes: self-service still succeeds via
+// the principal-id bind, and `set_fee_policy` still denies the creator.
+// "billing:write" is the fleet-wide operator scope.
 
-async fn cleanup(state: &AppState, creators: &[Uuid], pats: &[&Pat]) {
+async fn cleanup(state: &AppState, creators: &[Uuid], callers: &[&Caller]) {
     let pg = &state.control_pg;
     for c in creators {
         let _ = pg.execute("DELETE FROM zeroship.creator_fee_policy WHERE creator_id = $1", &[c]).await;
@@ -474,10 +441,9 @@ async fn cleanup(state: &AppState, creators: &[Uuid], pats: &[&Pat]) {
         let _ = pg.execute("DELETE FROM zeroship.creator_account_history WHERE creator_id = $1", &[c]).await;
         let _ = pg.execute("DELETE FROM zeroship.creator_accounts WHERE creator_id = $1", &[c]).await;
     }
-    for p in pats {
-        let _ = pg.execute("DELETE FROM zeroship.authz_decisions WHERE token_id = $1", &[&p.token_id]).await;
-        let _ = pg.execute("DELETE FROM zeroship.permission_tokens WHERE id = $1", &[&p.token_id]).await;
-        let _ = pg.execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&p.user_id]).await;
+    for caller in callers {
+        let _ = pg.execute("DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1", &[&caller.user_id]).await;
+        let _ = pg.execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&caller.user_id]).await;
     }
     let _ = pg.execute("DELETE FROM zeroship.users WHERE id = ANY($1)", &[&creators.to_vec()]).await;
 }
@@ -491,7 +457,7 @@ async fn onboard_returns_real_account_link() {
     let url = db_url();
     let fx = build_fixture(&url, "onboard").await;
     let creator = make_user(&fx.state, "creator").await;
-    let pat = issue_pat(&fx.state, creator, None, billing_write_self()).await;
+    let caller = issue_bearer(&fx.state, creator, None, "billing:read").await;
 
     let svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
@@ -503,7 +469,7 @@ async fn onboard_returns_real_account_link() {
 
     let req = test::TestRequest::post()
         .uri(&format!("/api/creators/{creator}/stripe/onboard"))
-        .header("authorization", pat.bearer())
+        .header("authorization", caller.bearer())
         .to_request();
     let resp = test::call_service(&svc, req).await;
     assert_eq!(resp.status(), StatusCode::OK, "onboard should succeed");
@@ -527,7 +493,7 @@ async fn onboard_returns_real_account_link() {
         "create account must stamp metadata[creator_id]"
     );
 
-    cleanup(&fx.state, &[creator], &[&pat]).await;
+    cleanup(&fx.state, &[creator], &[&caller]).await;
 
     // Teardown: `svc` holds a cloned `Arc<AppState>` and `fx.state` holds the
     // original, and both are dropped only after the body returns - by which
@@ -544,7 +510,7 @@ async fn callback_rejects_acct_not_owned_by_creator() {
     let fx = build_fixture(&url, "callback-forge").await;
     let creator = make_user(&fx.state, "creator").await;
     let attacker = make_user(&fx.state, "attacker").await;
-    let pat = issue_pat(&fx.state, creator, None, billing_write_self()).await;
+    let caller = issue_bearer(&fx.state, creator, None, "billing:read").await;
 
     let svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
@@ -558,7 +524,7 @@ async fn callback_rejects_acct_not_owned_by_creator() {
     // Creator onboards → mints THEIR acct_… (stored server-side).
     let onboard = test::TestRequest::post()
         .uri(&format!("/api/creators/{creator}/stripe/onboard"))
-        .header("authorization", pat.bearer())
+        .header("authorization", caller.bearer())
         .to_request();
     // Status only: a shadowed `resp` binding would NOT drop the earlier
     // `WebResponse` (Rust drops locals in reverse declaration order only once
@@ -580,7 +546,7 @@ async fn callback_rejects_acct_not_owned_by_creator() {
 
     let forge = test::TestRequest::post()
         .uri(&format!("/api/creators/{creator}/stripe/callback"))
-        .header("authorization", pat.bearer())
+        .header("authorization", caller.bearer())
         .set_json(&serde_json::json!({ "stripe_account_id": foreign_acct }))
         .to_request();
     let forge_status = test::call_service(&svc, forge).await.status();
@@ -590,7 +556,7 @@ async fn callback_rejects_acct_not_owned_by_creator() {
         "a forged/foreign acct_… that doesn't match the creator's onboarded account MUST be rejected (ISS-30)"
     );
 
-    cleanup(&fx.state, &[creator, attacker], &[&pat]).await;
+    cleanup(&fx.state, &[creator, attacker], &[&caller]).await;
 
     drop(svc);
     drop(fx);
@@ -602,7 +568,7 @@ async fn callback_accepts_owned_account_and_persists_flags() {
     let url = db_url();
     let fx = build_fixture(&url, "callback-ok").await;
     let creator = make_user(&fx.state, "creator").await;
-    let pat = issue_pat(&fx.state, creator, None, billing_write_self()).await;
+    let caller = issue_bearer(&fx.state, creator, None, "billing:read").await;
     fx.mock.set_flags(true, true, true);
 
     let svc = test::init_service(
@@ -616,14 +582,14 @@ async fn callback_accepts_owned_account_and_persists_flags() {
 
     let onboard = test::TestRequest::post()
         .uri(&format!("/api/creators/{creator}/stripe/onboard"))
-        .header("authorization", pat.bearer())
+        .header("authorization", caller.bearer())
         .to_request();
     assert_eq!(test::call_service(&svc, onboard).await.status(), StatusCode::OK);
 
     // Callback with NO body acct hint — server retrieves + verifies the stored acct.
     let cb = test::TestRequest::post()
         .uri(&format!("/api/creators/{creator}/stripe/callback"))
-        .header("authorization", pat.bearer())
+        .header("authorization", caller.bearer())
         .set_json(&serde_json::json!({}))
         .to_request();
     let resp = test::call_service(&svc, cb).await;
@@ -647,7 +613,7 @@ async fn callback_accepts_owned_account_and_persists_flags() {
     assert!(row.get::<_, bool>("payouts_enabled"));
     assert!(row.get::<_, bool>("details_submitted"));
 
-    cleanup(&fx.state, &[creator], &[&pat]).await;
+    cleanup(&fx.state, &[creator], &[&caller]).await;
 
     drop(svc);
     drop(fx);
@@ -659,7 +625,7 @@ async fn checkout_stamps_server_fee_not_client_value() {
     let url = db_url();
     let fx = build_fixture(&url, "checkout-fee").await;
     let creator = make_user(&fx.state, "creator").await;
-    let pat = issue_pat(&fx.state, creator, None, billing_write_self()).await;
+    let caller = issue_bearer(&fx.state, creator, None, "billing:read").await;
 
     let svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
@@ -675,12 +641,12 @@ async fn checkout_stamps_server_fee_not_client_value() {
     // persists charges_enabled=true — the M1 gate requires a ready account).
     let onboard = test::TestRequest::post()
         .uri(&format!("/api/creators/{creator}/stripe/onboard"))
-        .header("authorization", pat.bearer())
+        .header("authorization", caller.bearer())
         .to_request();
     assert_eq!(test::call_service(&svc, onboard).await.status(), StatusCode::OK);
     let cb = test::TestRequest::post()
         .uri(&format!("/api/creators/{creator}/stripe/callback"))
-        .header("authorization", pat.bearer())
+        .header("authorization", caller.bearer())
         .set_json(&serde_json::json!({}))
         .to_request();
     assert_eq!(test::call_service(&svc, cb).await.status(), StatusCode::OK);
@@ -690,7 +656,7 @@ async fn checkout_stamps_server_fee_not_client_value() {
     // path and MUST be ignored.
     let checkout = test::TestRequest::post()
         .uri(&format!("/api/creators/{creator}/connect/checkout"))
-        .header("authorization", pat.bearer())
+        .header("authorization", caller.bearer())
         .set_json(&serde_json::json!({
             "amount_cents": 20000,
             "currency": "usd",
@@ -726,7 +692,7 @@ async fn checkout_stamps_server_fee_not_client_value() {
         "must route to the connected account, got: {pi_body}"
     );
 
-    cleanup(&fx.state, &[creator], &[&pat]).await;
+    cleanup(&fx.state, &[creator], &[&caller]).await;
 
     drop(svc);
     drop(fx);
@@ -739,8 +705,8 @@ async fn checkout_honors_operator_set_fee_policy() {
     let fx = build_fixture(&url, "checkout-policy").await;
     let creator = make_user(&fx.state, "creator").await;
     let op = make_user(&fx.state, "operator").await;
-    let creator_pat = issue_pat(&fx.state, creator, None, billing_write_self()).await;
-    let op_pat = issue_pat(&fx.state, op, Some("billing"), billing_write_any()).await;
+    let creator_caller = issue_bearer(&fx.state, creator, None, "billing:read").await;
+    let op_caller = issue_bearer(&fx.state, op, Some("billing"), "billing:write").await;
 
     let svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
@@ -756,12 +722,12 @@ async fn checkout_honors_operator_set_fee_policy() {
     // Onboard the creator, then complete onboarding (charges_enabled=true).
     let onboard = test::TestRequest::post()
         .uri(&format!("/api/creators/{creator}/stripe/onboard"))
-        .header("authorization", creator_pat.bearer())
+        .header("authorization", creator_caller.bearer())
         .to_request();
     assert_eq!(test::call_service(&svc, onboard).await.status(), StatusCode::OK);
     let cb = test::TestRequest::post()
         .uri(&format!("/api/creators/{creator}/stripe/callback"))
-        .header("authorization", creator_pat.bearer())
+        .header("authorization", creator_caller.bearer())
         .set_json(&serde_json::json!({}))
         .to_request();
     assert_eq!(test::call_service(&svc, cb).await.status(), StatusCode::OK);
@@ -769,7 +735,7 @@ async fn checkout_honors_operator_set_fee_policy() {
     // Operator sets a 25% policy capped at $40 (4000 cents).
     let set = test::TestRequest::put()
         .uri(&format!("/api/creators/{creator}/fee-policy"))
-        .header("authorization", op_pat.bearer())
+        .header("authorization", op_caller.bearer())
         .set_json(&serde_json::json!({ "kind": "percent", "percent_bps": 2500, "cap_cents": 4000 }))
         .to_request();
     assert_eq!(
@@ -781,7 +747,7 @@ async fn checkout_honors_operator_set_fee_policy() {
     // Charge $200 → 25% = 5000, capped to 4000.
     let checkout = test::TestRequest::post()
         .uri(&format!("/api/creators/{creator}/connect/checkout"))
-        .header("authorization", creator_pat.bearer())
+        .header("authorization", creator_caller.bearer())
         .set_json(&serde_json::json!({ "amount_cents": 20000, "currency": "usd", "cart_id": "c2" }))
         .to_request();
     let resp = test::call_service(&svc, checkout).await;
@@ -790,7 +756,7 @@ async fn checkout_honors_operator_set_fee_policy() {
     let body: serde_json::Value = serde_json::from_slice(&bytes).expect("response is JSON");
     assert_eq!(body["application_fee_cents"], serde_json::json!(4000), "25% capped at 4000");
 
-    cleanup(&fx.state, &[creator, op], &[&creator_pat, &op_pat]).await;
+    cleanup(&fx.state, &[creator, op], &[&creator_caller, &op_caller]).await;
 
     drop(svc);
     drop(fx);
@@ -805,7 +771,7 @@ async fn checkout_rejected_when_charges_not_enabled() {
     let url = db_url();
     let fx = build_fixture(&url, "checkout-not-ready").await;
     let creator = make_user(&fx.state, "creator").await;
-    let pat = issue_pat(&fx.state, creator, None, billing_write_self()).await;
+    let caller = issue_bearer(&fx.state, creator, None, "billing:read").await;
     // The account exists but onboarding is incomplete: charges are NOT enabled.
     fx.mock.set_flags(false, false, false);
 
@@ -822,14 +788,14 @@ async fn checkout_rejected_when_charges_not_enabled() {
     // Onboard mints the acct_… (charges_enabled defaults to false on the row).
     let onboard = test::TestRequest::post()
         .uri(&format!("/api/creators/{creator}/stripe/onboard"))
-        .header("authorization", pat.bearer())
+        .header("authorization", caller.bearer())
         .to_request();
     assert_eq!(test::call_service(&svc, onboard).await.status(), StatusCode::OK);
 
     // Callback verifies + persists the (false) flags from Stripe's truth.
     let cb = test::TestRequest::post()
         .uri(&format!("/api/creators/{creator}/stripe/callback"))
-        .header("authorization", pat.bearer())
+        .header("authorization", caller.bearer())
         .set_json(&serde_json::json!({}))
         .to_request();
     assert_eq!(test::call_service(&svc, cb).await.status(), StatusCode::OK);
@@ -844,7 +810,7 @@ async fn checkout_rejected_when_charges_not_enabled() {
     // Checkout must be REJECTED with 400 before any PI POST.
     let checkout = test::TestRequest::post()
         .uri(&format!("/api/creators/{creator}/connect/checkout"))
-        .header("authorization", pat.bearer())
+        .header("authorization", caller.bearer())
         .set_json(&serde_json::json!({ "amount_cents": 20000, "currency": "usd", "cart_id": "cart-x" }))
         .to_request();
     // Status only: a retained `WebResponse` keeps the app state - and its
@@ -867,7 +833,7 @@ async fn checkout_rejected_when_charges_not_enabled() {
         "no PaymentIntent may be POSTed when charges are not enabled (M1)"
     );
 
-    cleanup(&fx.state, &[creator], &[&pat]).await;
+    cleanup(&fx.state, &[creator], &[&caller]).await;
 
     drop(svc);
     drop(fx);
@@ -884,7 +850,7 @@ async fn checkout_rejects_empty_cart_id_no_stale_replay() {
     let url = db_url();
     let fx = build_fixture(&url, "checkout-cartid").await;
     let creator = make_user(&fx.state, "creator").await;
-    let pat = issue_pat(&fx.state, creator, None, billing_write_self()).await;
+    let caller = issue_bearer(&fx.state, creator, None, "billing:read").await;
     fx.mock.set_flags(true, true, true);
 
     let svc = test::init_service(
@@ -899,12 +865,12 @@ async fn checkout_rejects_empty_cart_id_no_stale_replay() {
 
     let onboard = test::TestRequest::post()
         .uri(&format!("/api/creators/{creator}/stripe/onboard"))
-        .header("authorization", pat.bearer())
+        .header("authorization", caller.bearer())
         .to_request();
     assert_eq!(test::call_service(&svc, onboard).await.status(), StatusCode::OK);
     let cb = test::TestRequest::post()
         .uri(&format!("/api/creators/{creator}/stripe/callback"))
-        .header("authorization", pat.bearer())
+        .header("authorization", caller.bearer())
         .set_json(&serde_json::json!({}))
         .to_request();
     assert_eq!(test::call_service(&svc, cb).await.status(), StatusCode::OK);
@@ -912,7 +878,7 @@ async fn checkout_rejects_empty_cart_id_no_stale_replay() {
     // First checkout with NO cart_id, amount $200.
     let c1 = test::TestRequest::post()
         .uri(&format!("/api/creators/{creator}/connect/checkout"))
-        .header("authorization", pat.bearer())
+        .header("authorization", caller.bearer())
         .set_json(&serde_json::json!({ "amount_cents": 20000, "currency": "usd" }))
         .to_request();
     // Status only: a retained `WebResponse` keeps the app state - and its
@@ -927,7 +893,7 @@ async fn checkout_rejects_empty_cart_id_no_stale_replay() {
     // Second checkout with NO cart_id, DIFFERENT amount $50.
     let c2 = test::TestRequest::post()
         .uri(&format!("/api/creators/{creator}/connect/checkout"))
-        .header("authorization", pat.bearer())
+        .header("authorization", caller.bearer())
         .set_json(&serde_json::json!({ "amount_cents": 5000, "currency": "usd" }))
         .to_request();
     let status2 = test::call_service(&svc, c2).await.status();
@@ -946,13 +912,13 @@ async fn checkout_rejects_empty_cart_id_no_stale_replay() {
     // key — two carts with different amounts get DISTINCT idempotency keys.
     let c3 = test::TestRequest::post()
         .uri(&format!("/api/creators/{creator}/connect/checkout"))
-        .header("authorization", pat.bearer())
+        .header("authorization", caller.bearer())
         .set_json(&serde_json::json!({ "amount_cents": 20000, "currency": "usd", "cart_id": "cart-A" }))
         .to_request();
     assert_eq!(test::call_service(&svc, c3).await.status(), StatusCode::OK);
     let c4 = test::TestRequest::post()
         .uri(&format!("/api/creators/{creator}/connect/checkout"))
-        .header("authorization", pat.bearer())
+        .header("authorization", caller.bearer())
         .set_json(&serde_json::json!({ "amount_cents": 5000, "currency": "usd", "cart_id": "cart-A" }))
         .to_request();
     assert_eq!(test::call_service(&svc, c4).await.status(), StatusCode::OK);
@@ -970,7 +936,7 @@ async fn checkout_rejects_empty_cart_id_no_stale_replay() {
         "same cart_id but DIFFERENT amount must yield distinct idempotency keys (M2)"
     );
 
-    cleanup(&fx.state, &[creator], &[&pat]).await;
+    cleanup(&fx.state, &[creator], &[&caller]).await;
 
     drop(svc);
     drop(fx);
@@ -985,7 +951,7 @@ async fn fee_policy_rejects_floor_above_cap() {
     let fx = build_fixture(&url, "fee-floor-cap").await;
     let creator = make_user(&fx.state, "creator").await;
     let op = make_user(&fx.state, "operator").await;
-    let op_pat = issue_pat(&fx.state, op, Some("billing"), billing_write_any()).await;
+    let op_caller = issue_bearer(&fx.state, op, Some("billing"), "billing:write").await;
 
     let svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
@@ -997,7 +963,7 @@ async fn fee_policy_rejects_floor_above_cap() {
 
     let set = test::TestRequest::put()
         .uri(&format!("/api/creators/{creator}/fee-policy"))
-        .header("authorization", op_pat.bearer())
+        .header("authorization", op_caller.bearer())
         .set_json(&serde_json::json!({
             "kind": "percent", "percent_bps": 1500, "floor_cents": 1000, "cap_cents": 100
         }))
@@ -1019,7 +985,7 @@ async fn fee_policy_rejects_floor_above_cap() {
         .len();
     assert_eq!(n, 0, "the rejected floor>cap policy must not persist");
 
-    cleanup(&fx.state, &[creator, op], &[&op_pat]).await;
+    cleanup(&fx.state, &[creator, op], &[&op_caller]).await;
 
     drop(svc);
     drop(fx);
@@ -1033,7 +999,7 @@ async fn checkout_rejects_bad_currency() {
     let url = db_url();
     let fx = build_fixture(&url, "checkout-currency").await;
     let creator = make_user(&fx.state, "creator").await;
-    let pat = issue_pat(&fx.state, creator, None, billing_write_self()).await;
+    let caller = issue_bearer(&fx.state, creator, None, "billing:read").await;
     fx.mock.set_flags(true, true, true);
 
     let svc = test::init_service(
@@ -1048,19 +1014,19 @@ async fn checkout_rejects_bad_currency() {
 
     let onboard = test::TestRequest::post()
         .uri(&format!("/api/creators/{creator}/stripe/onboard"))
-        .header("authorization", pat.bearer())
+        .header("authorization", caller.bearer())
         .to_request();
     assert_eq!(test::call_service(&svc, onboard).await.status(), StatusCode::OK);
     let cb = test::TestRequest::post()
         .uri(&format!("/api/creators/{creator}/stripe/callback"))
-        .header("authorization", pat.bearer())
+        .header("authorization", caller.bearer())
         .set_json(&serde_json::json!({}))
         .to_request();
     assert_eq!(test::call_service(&svc, cb).await.status(), StatusCode::OK);
 
     let checkout = test::TestRequest::post()
         .uri(&format!("/api/creators/{creator}/connect/checkout"))
-        .header("authorization", pat.bearer())
+        .header("authorization", caller.bearer())
         .set_json(&serde_json::json!({ "amount_cents": 20000, "currency": "US Dollars", "cart_id": "cart-z" }))
         .to_request();
     // Status only: a retained `WebResponse` keeps the app state - and its
@@ -1072,7 +1038,7 @@ async fn checkout_rejects_bad_currency() {
         "a non ^[a-z]{{3}}$ currency must be rejected (m1)"
     );
 
-    cleanup(&fx.state, &[creator], &[&pat]).await;
+    cleanup(&fx.state, &[creator], &[&caller]).await;
 
     drop(svc);
     drop(fx);
@@ -1085,9 +1051,10 @@ async fn fee_policy_set_is_operator_only() {
     let fx = build_fixture(&url, "fee-authz").await;
     let creator = make_user(&fx.state, "creator").await;
     let op = make_user(&fx.state, "operator").await;
-    // The creator holds a SELF-scoped BillingWrite (NOT Resource::Any).
-    let creator_pat = issue_pat(&fx.state, creator, None, billing_write_self()).await;
-    let op_pat = issue_pat(&fx.state, op, Some("billing"), billing_write_any()).await;
+    // The creator holds "billing:read" — no billing:write, so the operator-only
+    // gate below denies them regardless of being the path creator.
+    let creator_caller = issue_bearer(&fx.state, creator, None, "billing:read").await;
+    let op_caller = issue_bearer(&fx.state, op, Some("billing"), "billing:write").await;
 
     let svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
@@ -1100,7 +1067,7 @@ async fn fee_policy_set_is_operator_only() {
     // A creator trying to set THEIR OWN fee policy → 403 (privilege escalation).
     let creator_set = test::TestRequest::put()
         .uri(&format!("/api/creators/{creator}/fee-policy"))
-        .header("authorization", creator_pat.bearer())
+        .header("authorization", creator_caller.bearer())
         .set_json(&serde_json::json!({ "kind": "percent", "percent_bps": 0 }))
         .to_request();
     // Status only: a shadowed `resp` binding would NOT drop the earlier
@@ -1130,13 +1097,13 @@ async fn fee_policy_set_is_operator_only() {
     // An operator may set it.
     let op_set = test::TestRequest::put()
         .uri(&format!("/api/creators/{creator}/fee-policy"))
-        .header("authorization", op_pat.bearer())
+        .header("authorization", op_caller.bearer())
         .set_json(&serde_json::json!({ "kind": "percent", "percent_bps": 1000 }))
         .to_request();
     let op_set_status = test::call_service(&svc, op_set).await.status();
     assert_eq!(op_set_status, StatusCode::NO_CONTENT, "operator may set the fee policy");
 
-    cleanup(&fx.state, &[creator, op], &[&creator_pat, &op_pat]).await;
+    cleanup(&fx.state, &[creator, op], &[&creator_caller, &op_caller]).await;
 
     drop(svc);
     drop(fx);

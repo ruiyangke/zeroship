@@ -2,28 +2,26 @@ use compio_postgres::{connect, Client, NoTls};
 use std::future::Future;
 use uuid::Uuid;
 use zeroship_authz::{
-    enforce, is_authorized_anywhere, load_platform_policies, policy_hash, Action, AuthzContext,
+    enforce, is_authorized_anywhere, load_platform_policies, Action, AuthzContext,
     AuthzDecision, Condition, Effect, EntityCache, Policy, Resource, Statement,
 };
 
 #[test]
 fn owner_authorized_token_authorized_returns_allow() {
     run_db_test(|pg| async move {
-        let mut fixture = Fixture::new(&pg, "admin_allow", Some("admin"), None).await;
-        let token_id = fixture
-            .insert_token(
-                &pg,
-                Policy {
-                    name: "deploy token".to_owned(),
-                    statements: vec![allow(vec![Action::AppsDeploy], vec![fixture.app()])],
-                },
-            )
-            .await;
+        let fixture = Fixture::new(&pg, "admin_allow", Some("admin"), None).await;
+        let wrapper = Policy {
+            name: "deploy token".to_owned(),
+            statements: vec![allow(vec![Action::AppsDeploy], vec![fixture.app()])],
+        };
 
-        let decision =
-            enforce(&pg, &load_platform_policies().unwrap(), &fixture.ctx(Some(token_id)))
-                .await
-                .unwrap();
+        let decision = enforce(
+            &pg,
+            &load_platform_policies().unwrap(),
+            &fixture.ctx_with_policy(Action::AppsDeploy, 12 * 60 * 60, wrapper),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(decision, AuthzDecision::Allow);
         fixture.cleanup(&pg).await;
@@ -33,21 +31,19 @@ fn owner_authorized_token_authorized_returns_allow() {
 #[test]
 fn owner_unauthorized_returns_deny_even_if_token_grants() {
     run_db_test(|pg| async move {
-        let mut fixture = Fixture::new(&pg, "viewer_token_grants", None, Some("viewer")).await;
-        let token_id = fixture
-            .insert_token(
-                &pg,
-                Policy {
-                    name: "overbroad token".to_owned(),
-                    statements: vec![allow(vec![Action::AppsDeploy], vec![fixture.app()])],
-                },
-            )
-            .await;
+        let fixture = Fixture::new(&pg, "viewer_token_grants", None, Some("viewer")).await;
+        let wrapper = Policy {
+            name: "overbroad token".to_owned(),
+            statements: vec![allow(vec![Action::AppsDeploy], vec![fixture.app()])],
+        };
 
-        let decision =
-            enforce(&pg, &load_platform_policies().unwrap(), &fixture.ctx(Some(token_id)))
-                .await
-                .unwrap();
+        let decision = enforce(
+            &pg,
+            &load_platform_policies().unwrap(),
+            &fixture.ctx_with_policy(Action::AppsDeploy, 12 * 60 * 60, wrapper),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(decision, AuthzDecision::Deny);
         fixture.cleanup(&pg).await;
@@ -57,21 +53,19 @@ fn owner_unauthorized_returns_deny_even_if_token_grants() {
 #[test]
 fn token_denies_returns_deny_even_if_owner_allowed() {
     run_db_test(|pg| async move {
-        let mut fixture = Fixture::new(&pg, "admin_token_denies", Some("admin"), None).await;
-        let token_id = fixture
-            .insert_token(
-                &pg,
-                Policy {
-                    name: "read env token".to_owned(),
-                    statements: vec![allow(vec![Action::EnvRead], vec![fixture.app()])],
-                },
-            )
-            .await;
+        let fixture = Fixture::new(&pg, "admin_token_denies", Some("admin"), None).await;
+        let wrapper = Policy {
+            name: "read env token".to_owned(),
+            statements: vec![allow(vec![Action::EnvRead], vec![fixture.app()])],
+        };
 
-        let decision =
-            enforce(&pg, &load_platform_policies().unwrap(), &fixture.ctx(Some(token_id)))
-                .await
-                .unwrap();
+        let decision = enforce(
+            &pg,
+            &load_platform_policies().unwrap(),
+            &fixture.ctx_with_policy(Action::AppsDeploy, 12 * 60 * 60, wrapper),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(decision, AuthzDecision::Deny);
         fixture.cleanup(&pg).await;
@@ -83,7 +77,7 @@ fn no_token_uses_owner_policies_only() {
     run_db_test(|pg| async move {
         let fixture = Fixture::new(&pg, "admin_no_token", Some("admin"), None).await;
 
-        let decision = enforce(&pg, &load_platform_policies().unwrap(), &fixture.ctx(None))
+        let decision = enforce(&pg, &load_platform_policies().unwrap(), &fixture.ctx())
             .await
             .unwrap();
 
@@ -98,7 +92,7 @@ fn audit_locked_app_denies_owner_writes() {
         let fixture =
             Fixture::new_registered_app(&pg, "audit-locked", "owner", false, true).await;
 
-        let decision = enforce(&pg, &load_platform_policies().unwrap(), &fixture.ctx(None))
+        let decision = enforce(&pg, &load_platform_policies().unwrap(), &fixture.ctx())
             .await
             .unwrap();
 
@@ -112,7 +106,7 @@ fn suspended_app_denies_owner_writes() {
     run_db_test(|pg| async move {
         let fixture = Fixture::new_registered_app(&pg, "suspended", "owner", true, false).await;
 
-        let decision = enforce(&pg, &load_platform_policies().unwrap(), &fixture.ctx(None))
+        let decision = enforce(&pg, &load_platform_policies().unwrap(), &fixture.ctx())
             .await
             .unwrap();
 
@@ -196,7 +190,7 @@ fn entity_cache_invalidation_refreshes_platform_role() {
         let fixture = Fixture::new(&pg, "cache-invalidate", None, None).await;
         let policies = load_platform_policies().unwrap();
 
-        let denied = enforce(&pg, &policies, &fixture.ctx(None)).await.unwrap();
+        let denied = enforce(&pg, &policies, &fixture.ctx()).await.unwrap();
         assert_eq!(denied, AuthzDecision::Deny);
 
         pg.execute(
@@ -207,7 +201,7 @@ fn entity_cache_invalidation_refreshes_platform_role() {
         .expect("insert platform role");
         EntityCache::invalidate(fixture.user_id);
 
-        let allowed = enforce(&pg, &policies, &fixture.ctx(None)).await.unwrap();
+        let allowed = enforce(&pg, &policies, &fixture.ctx()).await.unwrap();
         assert_eq!(allowed, AuthzDecision::Allow);
 
         fixture.cleanup(&pg).await;
@@ -219,7 +213,7 @@ fn audit_decision_recorded() {
     run_db_test(|pg| async move {
         let fixture = Fixture::new(&pg, "audit", Some("admin"), None).await;
 
-        let decision = enforce(&pg, &load_platform_policies().unwrap(), &fixture.ctx(None))
+        let decision = enforce(&pg, &load_platform_policies().unwrap(), &fixture.ctx())
             .await
             .unwrap();
         assert_eq!(decision, AuthzDecision::Allow);
@@ -387,7 +381,6 @@ struct Fixture {
     user_id: Uuid,
     app_id: String,
     app_db_id: Option<Uuid>,
-    token_ids: Vec<Uuid>,
 }
 
 impl Fixture {
@@ -446,7 +439,6 @@ impl Fixture {
             user_id,
             app_id,
             app_db_id,
-            token_ids: Vec::new(),
         }
     }
 
@@ -496,24 +488,7 @@ impl Fixture {
             user_id,
             app_id,
             app_db_id: Some(app_db_id),
-            token_ids: Vec::new(),
         }
-    }
-
-    async fn insert_token(&mut self, pg: &Client, policy: Policy) -> Uuid {
-        let token_id = Uuid::new_v4();
-        let policies = policy.to_json_value();
-        let hash = policy_hash(&policies);
-        pg.execute(
-            "INSERT INTO zeroship.permission_tokens \
-                (id, owner_id, kind, name, policies, policy_hash) \
-             VALUES ($1, $2, 'pat', $3, $4, $5)",
-            &[&token_id, &self.user_id, &"test token", &policies, &hash],
-        )
-        .await
-        .expect("insert permission token");
-        self.token_ids.push(token_id);
-        token_id
     }
 
     fn app(&self) -> Resource {
@@ -522,10 +497,10 @@ impl Fixture {
         }
     }
 
-    fn ctx(&self, token_id: Option<Uuid>) -> AuthzContext<'_> {
+    fn ctx(&self) -> AuthzContext<'_> {
         AuthzContext {
             principal_id: self.user_id,
-            token_id,
+            token_id: None,
             token_policy: None,
             action: Action::AppsDeploy,
             resource: self.app(),
@@ -559,11 +534,6 @@ impl Fixture {
                 &[&self.user_id],
             )
             .await;
-        for token_id in &self.token_ids {
-            let _ = pg
-                .execute("DELETE FROM zeroship.permission_tokens WHERE id = $1", &[token_id])
-                .await;
-        }
         let _ = pg
             .execute(
                 "DELETE FROM zeroship.app_members WHERE user_id = $1",
