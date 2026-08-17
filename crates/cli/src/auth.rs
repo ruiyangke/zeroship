@@ -6,10 +6,29 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use zeroship_core::device_grant::PLATFORM_CLI_CLIENT_ID;
+use zeroship_core::device_grant::{
+    DEVICE_AUTHORIZATION_PATH, OFFLINE_ACCESS_SCOPE, PLATFORM_CLI_CLIENT_ID,
+    PLATFORM_CLI_ISSUABLE_SCOPES, PROTECTED_RESOURCE_METADATA_PATH, TOKEN_PATH,
+};
 
-const SCOPE: &str = "openid offline_access apps:deploy apps:read apps:write secrets:read";
+/// What `zeroship login` asks the OP for: every scope the CLI client may hold
+/// authority for, plus `offline_access`.
+///
+/// `offline_access` is what turns a 15-minute bearer into a session - without
+/// it the OP issues no refresh token and the credential expires mid-deploy.
+/// `openid` is deliberately absent: the device grant mints no id_token, so
+/// asking for it would only add a scope the registration would have to carry.
+///
+/// Built from the shared ceiling rather than spelled out, so a scope added to
+/// the client cannot be silently missing from what the CLI requests.
+fn requested_scope() -> String {
+    let mut scopes: Vec<&str> = PLATFORM_CLI_ISSUABLE_SCOPES.to_vec();
+    scopes.push(OFFLINE_ACCESS_SCOPE);
+    scopes.join(" ")
+}
+
 const TOKEN_EXPIRY_SKEW_SECS: u64 = 60;
+const DEVICE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:device_code";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Credentials {
@@ -46,10 +65,13 @@ struct TokenResponse {
     access_token: Option<String>,
     refresh_token: Option<String>,
     expires_in: Option<u64>,
+}
+
+/// RFC 9728 protected-resource metadata, as served by control.
+#[derive(Debug, Deserialize)]
+struct ProtectedResourceMetadata {
     #[serde(default)]
-    provider: Option<String>,
-    #[serde(default)]
-    principal_id: Option<String>,
+    authorization_servers: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -104,7 +126,7 @@ pub fn cmd_login(args: &[String]) -> Result<(), String> {
                 "login",
                 &[("control", &control_url)],
             );
-            login_control_device_flow(&control_url.value, true)
+            login_device_flow(&control_url.value, true)
         }
     }
 }
@@ -148,28 +170,99 @@ pub fn load_credentials() -> Result<Credentials, String> {
 
     let token = match credential_provider(&creds)? {
         CliDeviceFlow::Supabase => refresh_supabase_credentials(&creds)?,
-        CliDeviceFlow::Platform => {
-            return Err("saved platform token expired; run `zeroship login` again".to_string());
-        }
+        CliDeviceFlow::Platform => refresh_platform_credentials(&creds)?,
     };
     creds.access_token = require_access_token(token.access_token, "refresh token response")?;
     if let Some(refresh_token) = token.refresh_token {
         creds.refresh_token = refresh_token;
     }
     creds.expires_at = now_secs()?.saturating_add(token.expires_in.unwrap_or(3600));
+    // WRITE BEFORE USE. The server has already rotated: the token we presented
+    // is spent, and presenting it again is REUSE, which revokes the whole
+    // family. If this process died between here and the caller's first request,
+    // the only thing standing between the human and a locked-out session is
+    // that the successor is already on disk.
     save_credentials(&creds)?;
     Ok(creds)
 }
 
-fn login_control_device_flow(control_url: &str, print_prompt: bool) -> Result<(), String> {
+/// Rotate the platform refresh token at the OP's token endpoint.
+///
+/// A public client, so no client secret - `client_id` in the body is the whole
+/// of RFC 6749 client identification here, and the refresh token itself is the
+/// credential.
+fn refresh_platform_credentials(creds: &Credentials) -> Result<TokenResponse, String> {
+    let token_endpoint = creds.token_endpoint.as_deref().ok_or_else(|| {
+        "saved credentials predate the OP device flow; run `zeroship login` again".to_string()
+    })?;
+    if creds.refresh_token.is_empty() {
+        return Err("saved credentials carry no refresh token; run `zeroship login` again".into());
+    }
+    let resp = post_form_with_headers(
+        token_endpoint,
+        &[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", creds.refresh_token.as_str()),
+            ("client_id", creds.client_id.as_str()),
+        ],
+        &[],
+    )?;
+    if (200..300).contains(&resp.status) {
+        return serde_json::from_str(&resp.body)
+            .map_err(|e| format!("parse refresh token response: {e}"));
+    }
+    // `invalid_grant` is every way the family can be gone: reuse detection, an
+    // operator revoke, a disabled account, or simple expiry. They are one
+    // class on purpose, and the human's next step is the same for all of them.
+    let err = serde_json::from_str::<TokenErrorResponse>(&resp.body).ok();
+    if err.as_ref().map(|e| e.error.as_str()) == Some("invalid_grant") {
+        return Err("session ended; run `zeroship login` again".to_string());
+    }
+    Err(format!(
+        "refresh failed (HTTP {}): {}",
+        resp.status, resp.body
+    ))
+}
+
+/// Ask control which authorization server it trusts.
+///
+/// The CLI is configured with one URL, control's. Deriving the OP from control
+/// rather than configuring it separately means the OP we authenticate to is by
+/// construction the one whose tokens control accepts - a second configured URL
+/// could drift, and the drift would surface as an opaque 401 on the first
+/// deploy rather than here.
+fn discover_authorization_server(control_url: &str) -> Result<String, String> {
+    let url = endpoint(control_url, PROTECTED_RESOURCE_METADATA_PATH);
+    let resp = get_plain(&url)?;
+    if !(200..300).contains(&resp.status) {
+        return Err(format!(
+            "{control_url} did not advertise an authorization server (HTTP {}): {}",
+            resp.status, resp.body
+        ));
+    }
+    let metadata: ProtectedResourceMetadata = serde_json::from_str(&resp.body)
+        .map_err(|e| format!("parse protected resource metadata: {e}"))?;
+    metadata
+        .authorization_servers
+        .into_iter()
+        .next()
+        .map(|issuer| issuer.trim_end_matches('/').to_string())
+        .ok_or_else(|| format!("{control_url} advertises no authorization server"))
+}
+
+fn login_device_flow(control_url: &str, print_prompt: bool) -> Result<(), String> {
     let control_url = control_url.trim_end_matches('/');
-    let device_url = endpoint(control_url, "/api/device/auth");
-    let resp = post_json(
+    let issuer = discover_authorization_server(control_url)?;
+    let device_url = endpoint(&issuer, DEVICE_AUTHORIZATION_PATH);
+    let token_url = endpoint(&issuer, TOKEN_PATH);
+    let scope = requested_scope();
+    let resp = post_form_with_headers(
         &device_url,
-        &serde_json::json!({
-            "client_id": PLATFORM_CLI_CLIENT_ID,
-            "scope": SCOPE,
-        }),
+        &[
+            ("client_id", PLATFORM_CLI_CLIENT_ID),
+            ("scope", scope.as_str()),
+        ],
+        &[],
     )?;
     if !(200..300).contains(&resp.status) {
         return Err(format!(
@@ -195,48 +288,65 @@ fn login_control_device_flow(control_url: &str, print_prompt: bool) -> Result<()
         eprintln!("Waiting for approval...");
     }
 
-    let bound = poll_for_control_device_token(control_url, &device, interval)?;
-    if bound.provider.as_deref() != Some("platform") {
-        return Err("device token response did not name provider=platform".to_string());
-    }
+    let bound = poll_for_device_token(&token_url, &device, interval)?;
     let access_token = require_access_token(bound.access_token, "device token response")?;
-    let principal_id = bound.principal_id.clone();
+    // Refuse rather than degrade. The access token is minutes long BECAUSE a
+    // refresh family backs it; storing one without the family would silently
+    // hand the human a session that dies mid-deploy, and the failure would
+    // surface far from its cause.
+    let refresh_token = bound
+        .refresh_token
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "{issuer} issued no refresh token for scope '{scope}'; the access token \
+                 alone is too short-lived to be a session"
+            )
+        })?;
+    // The OP answers with a plain RFC 6749 body and no principal field, so the
+    // identity comes out of the token's own `sub` - which is the platform
+    // principal UUID for this client.
+    let identity = userinfo_from_platform_token(&access_token)
+        .sub
+        .unwrap_or_else(|| "<unknown>".into());
     let expires_at = now_secs()?.saturating_add(bound.expires_in.unwrap_or(900));
     let creds = Credentials {
         access_token,
-        refresh_token: String::new(),
+        refresh_token,
         expires_at,
-        auth_url: control_url.to_string(),
+        auth_url: issuer.clone(),
         client_id: PLATFORM_CLI_CLIENT_ID.to_string(),
         provider: "platform".to_string(),
         control_url: Some(control_url.to_string()),
-        token_endpoint: None,
+        // Stored so a rotation costs one request rather than re-running
+        // discovery on every expiry.
+        token_endpoint: Some(token_url),
         anon_key: None,
         userinfo_url: None,
     };
     save_credentials(&creds)?;
 
-    let identity = principal_id.unwrap_or_else(|| "<unknown>".into());
     println!("Signed in as {identity}");
     Ok(())
 }
 
-fn poll_for_control_device_token(
-    control_url: &str,
+fn poll_for_device_token(
+    token_url: &str,
     device: &DeviceAuthResponse,
     initial_interval: u64,
 ) -> Result<TokenResponse, String> {
-    let token_url = endpoint(control_url, "/api/device/token");
     let deadline = now_secs()?.saturating_add(device.expires_in);
     let mut interval = initial_interval;
 
     loop {
-        let resp = post_json(
-            &token_url,
-            &serde_json::json!({
-                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-                "device_code": device.device_code.as_str(),
-            }),
+        let resp = post_form_with_headers(
+            token_url,
+            &[
+                ("grant_type", DEVICE_GRANT_TYPE),
+                ("device_code", device.device_code.as_str()),
+                ("client_id", PLATFORM_CLI_CLIENT_ID),
+            ],
+            &[],
         )?;
         if (200..300).contains(&resp.status) {
             return serde_json::from_str(&resp.body)
@@ -534,31 +644,14 @@ fn get_bearer_with_headers(
     parse_curl_output(output)
 }
 
-fn post_json(url: &str, value: &serde_json::Value) -> Result<HttpResponse, String> {
-    let body = serde_json::to_string(value).map_err(|e| format!("serialize JSON body: {e}"))?;
+/// GET with no credential. Discovery metadata is public by design (RFC 9728),
+/// so sending a bearer here would only leak one to whatever the URL names.
+fn get_plain(url: &str) -> Result<HttpResponse, String> {
     let output = Command::new("curl")
-        .args([
-            "-sS",
-            "-w",
-            "\n%{http_code}",
-            "-X",
-            "POST",
-            url,
-            "-H",
-            "Content-Type: application/json",
-            "--data-binary",
-            "@-",
-        ])
-        .stdin(Stdio::piped())
+        .args(["-sS", "-w", "\n%{http_code}", url])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
-        .and_then(|mut child| {
-            if let Some(stdin) = child.stdin.as_mut() {
-                stdin.write_all(body.as_bytes()).ok();
-            }
-            child.wait_with_output()
-        })
+        .output()
         .map_err(|e| format!("curl spawn error: {e}"))?;
     parse_curl_output(output)
 }
@@ -619,6 +712,17 @@ mod tests {
     fn device_grant_request_shape() {
         let body = form_body(&[("grant_type", "refresh_token"), ("refresh_token", "rt")]);
         assert_eq!(body, "grant_type=refresh_token&refresh_token=rt");
+    }
+
+    #[test]
+    fn the_requested_scope_covers_the_whole_client_ceiling_plus_offline_access() {
+        // Spelled out rather than rebuilt from the same constant the code
+        // reads, so this measures the request instead of restating it. A
+        // missing entry here is a `zeroship deploy` that 403s on one verb.
+        assert_eq!(
+            requested_scope(),
+            "apps:deploy apps:read apps:write secrets:read offline_access"
+        );
     }
 
     #[test]

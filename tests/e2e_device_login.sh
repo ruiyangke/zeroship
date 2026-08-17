@@ -14,23 +14,24 @@
 #     -> POST /signup                          (a real creator row)
 #     -> follow signup's own redirect and sign in
 #   real `zeroship login` process
-#     -> control POST /api/device/auth        (user code + verification URI)
+#     -> control GET /.well-known/oauth-protected-resource  (which OP to use)
+#     -> OP POST {issuer}/device/authorization (user code + verification URI)
 #     -> GET  {verification_uri}?user_code=..  with that signed-in session
 #     -> POST /device  csrf + user_code + confirm=authorize
-#     -> the CLI's poll returns a token
+#     -> the CLI's poll of {issuer}/token returns an access + refresh token
 #     -> `zeroship deploy` with that token
 #     -> the gateway serves the deployed app
 #
-# The mint leg is OBSERVED, not inferred. Control POSTs the deploy-token mint to
-# `auth.platform_mint_url`, which is a different setting from
-# `auth.platform_issuer`: the issuer is the `iss` a token must carry, the mint
-# URL is where the dedicated platform mint key is sent. Every other harness
-# runs both on one loopback host, where the two agree and code that DERIVES one
-# from the other
-# looks identical to code that reads it. So this harness puts a recording proxy
-# on a third port, points the mint there, and asserts both halves: the POST
-# arrived at the configured address, AND the token that came back still carries
-# the public issuer.
+# THE MINT PROXY IS NO LONGER ON THE LOGIN PATH. `zeroship login` used to drive
+# control's parallel flow, which POSTed `auth.platform_mint_url` with the
+# dedicated mint key; the recording proxy below existed to observe WHERE that
+# POST went, because a fallback that derived the target from the issuer looked
+# identical on a single-host harness. The CLI now redeems at the OP directly,
+# so control mints nothing during login and the proxy records zero hits. The
+# proxy and the "issuer origin is not the mint destination" precondition are
+# KEPT because the mint path itself is unchanged and still reachable through
+# `/api/device/token`; what is asserted about it here is that login does NOT
+# use it, which is a different claim from the old one and is stated as such.
 #
 # The signup leg reads its URL off the login page for the same reason the
 # approval leg loads the device page: a harness that composes the URL itself
@@ -423,13 +424,14 @@ case "$EVIL_ECHOED" in
   *) pass "an off-origin continuation is replaced, not echoed (HTTP $EVIL_CODE, return_to='$EVIL_ECHOED')" ;;
 esac
 
-# B2 regression, checked BEFORE the login: the auth service can read but cannot
-# write `zeroship.principal_grants`, so a freshly signed-up platform creator has
-# NO grants. If control does
-# not provision them the deploy token mints with `scope: ""`.
+# The auth service can read but cannot write `zeroship.principal_grants`, so a
+# freshly signed-up platform creator has NO grants. Recorded here because the
+# OP device grant the CLI now drives does not intersect with that table at all
+# (see the FINDING at the end of this harness): the login below succeeds with a
+# full-scope token against exactly this empty grant set.
 GRANTS_AT_SIGNUP="$(psql_q "SELECT count(*) FROM zeroship.principal_grants WHERE principal_id = '$USER_ID'")"
 [ "$GRANTS_AT_SIGNUP" = "0" ] \
-  && pass "a fresh platform principal has 0 grants (so the mint must provision them)" \
+  && pass "a fresh platform principal has 0 grants" \
   || fail "expected 0 grants at signup, got $GRANTS_AT_SIGNUP"
 
 step "Log in, the way a browser does"
@@ -544,30 +546,33 @@ TOKEN_EXP="$(jwt_claim "$TOKEN" exp)"
 TOKEN_IAT="$(jwt_claim "$TOKEN" iat)"
 TOKEN_TTL=$((TOKEN_EXP - TOKEN_IAT))
 echo "  token: sub=$TOKEN_SUB aud=$TOKEN_AUD client_id=$TOKEN_CLIENT_ID scope='$TOKEN_SCOPE' ttl=${TOKEN_TTL}s"
-# B2: an empty scope here is the bug that made approval succeed and deploy 403.
-[ "$TOKEN_SCOPE" = "apps:deploy apps:read apps:write secrets:read" ] \
-  && pass "the deploy token carries the creator scopes" \
+REFRESH_TOKEN="$(jget '.refresh_token' < "$CREDS")"
+[ "$TOKEN_SCOPE" = "apps:deploy apps:read apps:write secrets:read offline_access" ] \
+  && pass "the deploy token carries the creator scopes plus offline_access" \
   || fail "deploy token scope was '$TOKEN_SCOPE'"
 [ "$TOKEN_SUB" = "$USER_ID" ] && pass "the token's subject is the approving user" \
   || fail "token sub $TOKEN_SUB != $USER_ID"
 [ "$TOKEN_AUD" = "control.zeroship.ai" ] \
-  && pass "the mint fixed the token audience to control" \
+  && pass "the token audience is control" \
   || fail "token audience was '$TOKEN_AUD'"
 [ "$TOKEN_CLIENT_ID" = "zeroship-cli" ] \
-  && pass "the mint fixed the token client_id to zeroship-cli" \
+  && pass "the token client_id is zeroship-cli" \
   || fail "token client_id was '$TOKEN_CLIENT_ID'"
-# The CLI token has no supported early-recall operation. Its exact 12-hour
-# lifetime is therefore the effective revocation bound, not merely a usability
-# choice above the OP's 15-minute browser default.
-[ "$TOKEN_TTL" = "43200" ] \
-  && pass "the deploy token expires at the 12-hour ceiling (${TOKEN_TTL}s)" \
-  || fail "deploy token TTL was ${TOKEN_TTL}s, expected 43200s"
+# 15 minutes, not the 12-hour ceiling: the long-lived half is now the refresh
+# token, which is DB-backed and can be revoked. A bearer cannot be.
+[ "$TOKEN_TTL" = "900" ] \
+  && pass "the access token expires in 15 minutes (${TOKEN_TTL}s)" \
+  || fail "access token TTL was ${TOKEN_TTL}s, expected 900s"
+case "$REFRESH_TOKEN" in
+  zrt_*) pass "the CLI stored a refresh token" ;;
+  *) fail "the CLI stored no refresh token; a 15-minute session with no rotation is worse than the 12-hour bearer it replaced" ;;
+esac
 
 # ---------------------------------------------------------------------------
-# THE MINT LEG, observed rather than inferred. Two halves, and both must hold:
-# the POST went to the CONFIGURED address, and the token it returned is trusted
-# because its `iss` is the PUBLIC issuer. Changing where we post must not change
-# what we trust.
+# THE MINT LEG. The claim inverted with the CLI cutover: login must NOT reach
+# control's mint at all. The proxy is still in front of the OP, still on a port
+# the issuer does not name, so a nonzero count here would mean the CLI is still
+# on the old path (or something else started minting during login).
 # `grep -c` prints the count AND exits 1 on zero matches, so a `|| echo 0`
 # fallback appends a SECOND line and the comparison below dies with "integer
 # expected" instead of reporting the count it found. Let grep's own 0 stand;
@@ -575,25 +580,25 @@ echo "  token: sub=$TOKEN_SUB aud=$TOKEN_AUD client_id=$TOKEN_CLIENT_ID scope='$
 MINT_HITS="$(grep -c 'POST /internal/platform-token' "$MINT_LOG" 2>/dev/null || true)"
 MINT_HITS="${MINT_HITS:-0}"
 echo "  mint proxy recorded: $(tr '\n' '|' < "$MINT_LOG")"
-[ "$MINT_HITS" -ge 1 ] \
-  && pass "the mint was POSTed to the configured mint URL ($MINT_HITS hit(s) on :$MINT_PROXY_PORT)" \
-  || fail "nothing reached the configured mint URL; the mint went somewhere this harness did not name"
+[ "$MINT_HITS" = "0" ] \
+  && pass "login minted nothing through control (0 hits on :$MINT_PROXY_PORT)" \
+  || fail "login POSTed control's platform mint $MINT_HITS time(s); the CLI is on the old path"
 
 TOKEN_ISS="$(jwt_claim "$TOKEN" iss)"
 [ "$TOKEN_ISS" = "$ZEROSHIP_AUTH_PLATFORM_ISSUER" ] \
-  && pass "the minted token still carries the PUBLIC issuer ($TOKEN_ISS)" \
+  && pass "the token carries the PUBLIC issuer ($TOKEN_ISS)" \
   || fail "token iss '$TOKEN_ISS' != configured issuer '$ZEROSHIP_AUTH_PLATFORM_ISSUER'"
 
-# The pre-fix log line, named exactly. A fallback that dialled an unreachable
-# public host produced this and nothing else that a caller could see.
-grep -q 'platform token mint transport failed' "$WORK/control.log" \
-  && fail "control logged a mint transport failure: $(grep -m1 'platform token mint' "$WORK/control.log")" \
-  || pass "control logged no mint transport failure"
-
-GRANTS_AFTER="$(psql_q "SELECT string_agg(grant_name, ',' ORDER BY grant_name) FROM zeroship.principal_grants WHERE principal_id = '$USER_ID'")"
-[ "$GRANTS_AFTER" = "apps:deploy,apps:read,apps:write,secrets:read" ] \
-  && pass "control provisioned the creator grants ($GRANTS_AFTER)" \
-  || fail "unexpected grants after login: '$GRANTS_AFTER'"
+# FINDING, asserted rather than described so it cannot rot into a claim.
+# `zeroship.principal_grants` is the entitlement store, and the OP device grant
+# does not consult it: the token above carries four resource scopes for a
+# principal that still holds zero grant rows. Control's `/api/device/token` is
+# the only writer (`identity_bridge::ensure_platform_creator_grants`), and it is
+# no longer on the login path.
+GRANTS_AFTER="$(psql_q "SELECT count(*) FROM zeroship.principal_grants WHERE principal_id = '$USER_ID'")"
+[ "$GRANTS_AFTER" = "0" ] \
+  && pass "KNOWN GAP confirmed: a full-scope token was issued against 0 stored grants" \
+  || fail "grants appeared after login ($GRANTS_AFTER); the finding above is stale, re-check it"
 
 # ---------------------------------------------------------------------------
 step "Deploy with that token, and serve it"

@@ -25,7 +25,7 @@ use zeroship_authz::{Action, Resource};
 use zeroship_core::auth_provider::{AuthProvider, PlatformConfig, PlatformProvider};
 use zeroship_core::config::{Secret, SourceKind};
 use zeroship_core::device_grant::{
-    OP_PROVIDER, PLATFORM_CLI_CLIENT_ID, PLATFORM_CLI_ISSUABLE_SCOPES,
+    OP_PROVIDER, PLATFORM_CLI_CLIENT_ID, PLATFORM_CLI_REGISTERED_SCOPES,
 };
 
 mod common;
@@ -674,7 +674,10 @@ async fn assert_platform_cli_registration(pg: &compio_postgres::Client) {
         )
         .await
         .expect("load reconciled platform CLI client");
-    let expected_scopes = PLATFORM_CLI_ISSUABLE_SCOPES
+    // The REGISTERED list, which is the issuable ceiling plus `offline_access`:
+    // the CLI has to be able to ask for a refresh token, and the
+    // device-authorization endpoint checks the request against this column.
+    let expected_scopes = PLATFORM_CLI_REGISTERED_SCOPES
         .iter()
         .map(|scope| (*scope).to_string())
         .collect::<Vec<_>>();
@@ -686,7 +689,7 @@ async fn assert_platform_cli_registration(pg: &compio_postgres::Client) {
     assert!(row.get::<_, bool>("skip_consent"));
     assert!(row.get::<_, Option<Uuid>>("created_by").is_none());
     assert!(row.get::<_, Option<String>>("client_secret_hash").is_none());
-    assert!(!row.get::<_, bool>("refresh_allowed"));
+    assert!(row.get::<_, bool>("refresh_allowed"));
     assert_eq!(row.get::<_, String>("token_endpoint_auth_method"), "none");
     assert!(!row.get::<_, bool>("brokered"));
     assert!(row
@@ -848,10 +851,23 @@ async fn op_cli_device_token_authorizes_control_endpoint() {
     assert_eq!(claims["aud"], "control.zeroship.ai");
     assert_eq!(claims["client_id"], PLATFORM_CLI_CLIENT_ID);
     assert_eq!(claims["scope"], "apps:deploy apps:read");
-    assert_eq!(
-        claims["exp"].as_i64().expect("OP token exp")
-            - claims["iat"].as_i64().expect("OP token iat"),
-        43_200
+    // Minutes, not the 12-hour ceiling this assertion used to pin at 43_200.
+    //
+    // The bound is a LITERAL on purpose. Comparing to
+    // `zeroship_auth::oidc::ACCESS_TOKEN_TTL_SECS` - which is what stood here
+    // briefly - proves only that control sees what auth emitted, and passes
+    // for any value of it: the constant was set to `12 * 60 * 60` and every
+    // gate in the tree stayed green.
+    //
+    // This is the CONSUMER's vantage. `crates/auth` bounds the constant and
+    // the emitted token; here the token has crossed a service boundary and
+    // been parsed by the crate that actually authorizes with it.
+    let lifetime = claims["exp"].as_i64().expect("OP token exp")
+        - claims["iat"].as_i64().expect("OP token iat");
+    assert!(
+        (120..=30 * 60).contains(&lifetime),
+        "control received a {lifetime}s CLI access token; it must be minutes, because \
+         nothing recalls a bearer this long-lived except the token_revocations marker"
     );
 
     let control = init_control!(fx);
@@ -892,7 +908,21 @@ async fn op_cli_device_token_authorizes_control_endpoint() {
         StatusCode::OK,
         "OP-issued CLI token was rejected by a production control endpoint: {app_body_text}"
     );
-    assert_eq!(token["expires_in"], 43_200);
+    // The response's advertised lifetime, bounded by the same literals as the
+    // token's own `exp - iat` above, and asserted to AGREE with it. Agreement
+    // is the wiring; the bound is the value. This assertion read `43_200`
+    // until the CLI moved to this grant, and it is the second of two lifetime
+    // assertions in this test - updating only the first is how a 12-hour
+    // `expires_in` would have survived here.
+    let advertised = token["expires_in"].as_i64().expect("OP token expires_in");
+    assert_eq!(
+        advertised, lifetime,
+        "the response advertises {advertised}s but the token itself lives {lifetime}s"
+    );
+    assert!(
+        (120..=30 * 60).contains(&advertised),
+        "the OP advertised a {advertised}s CLI access token; it must be minutes"
+    );
     assert_eq!(token["scope"], "apps:deploy apps:read");
 }
 
