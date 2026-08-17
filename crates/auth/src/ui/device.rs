@@ -363,9 +363,11 @@ fn redirect(to: &str) -> HttpResponse {
 
 /// Name shown on the confirmation page for a grant that names no OAuth client.
 ///
-/// Control's parallel-flow rows carry a NULL `client_id`; they do not bind to
-/// auth's first-party CLI registration. There is no id to display for those
-/// rows, but the page still has to name what the human is authorizing.
+/// Control's parallel-flow rows carried a NULL `client_id` and did not bind to
+/// auth's first-party CLI registration, so the page still had to name what the
+/// human was authorizing. That flow is deleted and nothing writes such a row
+/// now, so this arm is unreachable in practice; it is kept only because the
+/// `provider` discriminator it reads is still schema.
 const PLATFORM_DEVICE_CLIENT_NAME: &str = "the zeroship CLI";
 
 /// What the confirmation page calls the thing asking for authorization.
