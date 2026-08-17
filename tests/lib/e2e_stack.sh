@@ -157,10 +157,10 @@ stack_workspace() {
   #
   # An earlier version of this comment claimed every harness bringing its own
   # stack passed the flag directly and was unaffected. That was wrong, and the
-  # claim is why nobody rechecked: seven own-stack harnesses launch a gateway
+  # claim is why nobody rechecked: several own-stack harnesses launch a gateway
   # with no secret at all (e2e_app_primitives{,_auth,_kv_storage}, e2e_platform,
-  # bench_platform, supabase_deploy_e2e; m0_gate was a seventh until it was
-  # deleted with its subject). Running e2e_app_primitives.sh
+  # bench_platform; m0_gate and supabase_deploy_e2e were others until they were
+  # deleted with their subjects). Running e2e_app_primitives.sh
   # is what surfaced it - it dies at "gateway unhealthy" before reaching a single
   # env.db assertion, so its header's "env.db GREEN" describes a run that has not
   # happened since cd54028e7. The three app_primitives ones now generate their
