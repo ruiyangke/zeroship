@@ -1426,111 +1426,67 @@ loads that keyring before hash lookup (`crates/auth/src/oidc/refresh.rs:640-658`
 
 ## 4. Programmatic auth
 
-### 4.1 PAT issuance
+### 4.1 Personal access tokens (DELETED)
 
-```text
-+----------------------------------------------------------+
-| Caller holds a non-PAT bearer accepted by Control        |
-+----------------------------------------------------------+
-                             |
-                             v
-+----------------------------------------------------------+
-| TRUST BOUNDARY: caller to Control PAT create route       |
-+----------------------------------------------------------+
-                             |
-                             v
-+----------------------------------------------------------+
-| Control verifies platform OAuth or Supabase bearer       |
-| Control rechecks active owner                            |
-| Control decides requested grant subset and constraints   |
-+----------------------------------------------------------+
-                             |
-                             v
-+----------------------------------------------------------+
-| Control signs PAT with Ed25519 and stores policy row     |
-| Caller receives plaintext PAT once                       |
-+----------------------------------------------------------+
-```
+Control used to be a second issuance authority of its own. It held an Ed25519
+signing key, `POST /me/tokens` minted a `pat+jwt` credential lasting up to 365
+days with a stored Cedar wrapper policy, `GET /me/tokens` and
+`DELETE /me/tokens/{id}` managed them, and the shared `BearerVerifier` tried
+local PAT verification against `zeroship.permission_tokens` before it tried
+OAuth introspection. Migrated verified the same credential class.
 
-VERIFIED walk-through:
+All of it is gone: the three routes and their handler module, the
+`permission_tokens` table
+(`db/migrations-ts/20260817000000_drop_permission_tokens.ts`), the audit columns
+only a PAT ever populated
+(`db/migrations-ts/20260817000100_drop_audit_token_columns.ts`), the `PatIssuer`
+and `PatClaims` types, the token-policy lookup in the authz evaluator, and the
+`token_id` field those carried through `AuthzContext` and the control-plane
+guard. Control's and migrated's `--signing-key-file` inputs went with them:
+both existed only to build a `PatIssuer`. Gateway's `--signing-key-file` is a
+DIFFERENT consumer - it signs app-session wrapper tokens - and survives.
 
-1. `POST /me/tokens` is behind Control's bearer-only `AuthzGuard`; creation rejects
-   an already verified PAT because its guard has a token ID
-   (`crates/control/src/token_handlers.rs:64-74`,
-   `crates/control/src/token_handlers.rs:257-264`,
-   `crates/control/src/authz_guard.rs:36-44`).
-2. The accepted non-PAT bearer can be a platform OAuth token or, in Supabase
-   mode, a linked GoTrue bearer. Both converge on a user-row check that rejects
-   missing, disabled, deletion-requested, or anonymized principals
-   (`crates/authn/src/lib.rs:261`, `crates/authn/src/lib.rs:338-445`). This is the
-   current behavior from the recent lifecycle merge.
-3. PAT creation accepts a 1-to-200-character name, 1-to-365-day lifetime
-   defaulting to 365 days, at most 10,000 Allow action/resource pairs, valid
-   resources, and no MFA conditions
-   (`crates/control/src/token_handlers.rs:20-23`,
-   `crates/control/src/token_handlers.rs:55-90`,
-   `crates/control/src/token_handlers.rs:266-372`).
-4. Control signs fixed issuer/audience,
-   owner, token ID, expiry, and policy hash, persists the authoritative policy
-   row, and returns the plaintext only in the create response
-   (`crates/authn/src/lib.rs:60-121`,
-   `crates/control/src/token_handlers.rs:96-153`). Migrated also loads and
-   retains the same private signing key even though its live path verifies only
-   (`crates/migrated/src/main.rs:108-118`,
-   `crates/migrated/src/main.rs:239-251`); see Finding 16.
-5. The issuance endpoint discards the OAuth caller's scope ceiling even though
-   it rejects PAT chaining; see Finding 3.
+The reason is that a PAT was a SECOND ISSUANCE AUTHORITY. The platform is meant
+to have exactly one, the OP, with control a pure bearer resource server; a
+control-plane signing key minting year-long credentials was the largest
+counterexample to that. Removing it makes the OP the sole issuer. The operator
+decision is section 11 of `docs/proposals/2026-08-16-cli-token-issuance.md`
+("do not support PAT token, this is a security decision"): removed, not
+hardened.
 
-### 4.2 PAT validation and request authorization
+Long-lived automation is now served by the OP refresh family on the device-flow
+credential (`crates/auth/src/oidc/refresh.rs`), which already implements
+rotation, reuse detection and an absolute family expiry. That is a better
+trade than the credential it replaces: a short access token plus a revocable
+long-lived family, both issued by the OP.
 
-```text
-+----------------------------------------------------------+
-| Caller holds Control-signed pat+jwt                      |
-+----------------------------------------------------------+
-                             |
-                             v
-+----------------------------------------------------------+
-| TRUST BOUNDARY: caller to Control AuthzGuard             |
-+----------------------------------------------------------+
-                             |
-                             v
-+----------------------------------------------------------+
-| Control verifies signature active DB row and owner       |
-+----------------------------------------------------------+
-                             |
-                             v
-+----------------------------------------------------------+
-| Route may call Cedar for owner authority then PAT policy |
-| Control authorizes only checked actions if both allow    |
-+----------------------------------------------------------+
-```
+The one genuine loss is NON-INTERACTIVE CREATION. A PAT could be minted by API,
+so an unattended system could bootstrap its own credential; a device grant
+needs a human once per setup, after which the family self-renews.
 
-VERIFIED walk-through:
+`BearerVerifier::verify_bearer` is now OAuth-only, and every bearer control
+accepts reaches one of the two arms of `oauth_guard_from_bearer`
+(`crates/authn/src/lib.rs`). They are deliberately asymmetric. A platform OAuth
+bearer (`ProviderAuthz::OAuthScope`) must carry the expected audience, is
+refused when its token family is revoked, and derives its wrapper policy from
+its own scopes through `zeroship_authz::scopes_to_policy`; for the
+`zeroship-cli` client those scopes are first intersected with the principal's
+stored `zeroship.principal_grants`. A Supabase GoTrue bearer
+(`ProviderAuthz::GoTrueRole`) must carry role `authenticated`, resolves to a
+principal through `zeroship.identity_links`, and derives its wrapper from that
+principal's `principal_grants` rather than from anything in the token. Both
+converge on the same active-principal lifecycle check.
 
-1. `BearerVerifier` tries local `pat+jwt` verification first, then the configured
-   OAuth provider (`crates/authn/src/lib.rs:205-220`). PAT validation pins type,
-   key ID, EdDSA, fixed issuer, audience, and expiry, then requires a matching
-   active DB row by token ID, owner, policy hash, kind, revocation, and expiry
-   (`crates/authn/src/lib.rs:28-44`, `crates/authn/src/lib.rs:123-141`,
-   `crates/authn/src/lib.rs:221-258`).
-2. Every accepted PAT also converges on the active-owner lifecycle check
-   (`crates/authn/src/lib.rs:261`, `crates/authn/src/lib.rs:338-376`).
-3. A route that calls `AuthzGuard::require` evaluates current owner authority
-   and then token policy, preserving `TOKEN` as a subset of current `USER`
-   authority (`crates/control/src/authz_guard.rs:48-91`,
-   `crates/authz/src/eval.rs:33-74`). This is not automatic after bearer
-   extraction: token listing and deletion never call `require`, so they apply
-   owner predicates but no Cedar action or PAT-policy decision
-   (`crates/control/src/token_handlers.rs:162-255`); see Finding 4. Deletion
-   sets `revoked_at`, and the next DB-backed verification rejects that PAT
-   (`crates/authn/src/lib.rs:227-246`).
+Both arms therefore hand `authz::enforce` a wrapper policy built out of the
+closed OAuth scope vocabulary, and nothing else can now supply one. Two Cedar
+actions are outside that vocabulary; see Finding 30.
 
-### 4.3 Delegated creator bearer for migration apply
+### 4.2 Delegated creator bearer for migration apply
 
 ```text
 +----------------------------------------------------------------+
-| Caller holds platform OAuth bearer, PAT, or Supabase bearer    |
-| Auth signs OAuth; Control signs PAT; Supabase signs GoTrue     |
+| Caller holds platform OAuth bearer or Supabase bearer          |
+| Auth signs the OAuth bearer; Supabase signs the GoTrue bearer  |
 +----------------------------------------------------------------+
                                 |
                                 v
@@ -1551,8 +1507,8 @@ VERIFIED walk-through:
                                 |
                                 v
 +----------------------------------------------------------------+
-| Migrated holds Control PAT private key but only verifies       |
-| Migrated verifies PAT or platform bearer                       |
+| Migrated holds no signing key of its own                       |
+| Migrated verifies the forwarded platform bearer                |
 | Cedar plus app-owner check decides; no new token signed        |
 +----------------------------------------------------------------+
 ```
@@ -1567,22 +1523,20 @@ VERIFIED walk-through:
    is plain `http://migrated:9091`
    (`deploy/compose/docker-compose.yml:305-316`).
 3. Migrated extracts the bearer and independently invokes the shared
-   `BearerVerifier`, preserving PAT policy and owner lifecycle checks, then
-   requires Cedar `AppsDeploy` plus app ownership before applying
-   (`crates/migrated/src/api.rs:79-108`,
-   `crates/migrated/src/auth.rs:63-143`,
-   `crates/migrated/src/main.rs:166-179`). Auth signs platform OAuth JWTs,
-   Control signs PATs, and Supabase signs GoTrue JWTs
+   `BearerVerifier`, preserving the caller's scope-derived wrapper policy and
+   the owner lifecycle check, then requires Cedar `AppsDeploy` plus app
+   ownership before applying (`crates/migrated/src/api.rs:79-108`,
+   `crates/migrated/src/auth.rs`, `ControlPlaneAuthenticator::verify_action`).
+   Auth signs the platform OAuth JWTs and Supabase signs the GoTrue JWTs
    (`crates/auth/src/oidc/issuer.rs:453-473`,
-   `crates/authn/src/lib.rs:89-120`,
-   `crates/core/src/auth_provider/supabase.rs:312-390`). Unlike Control,
-   Migrated configures a platform-only OAuth provider, so a Supabase bearer
-   accepted by Control fails
-   here (`crates/control/src/main.rs:118-160`,
-   `crates/migrated/src/main.rs:217-237`); see Finding 17. It signs no
-   replacement credential.
+   `crates/core/src/auth_provider/supabase.rs:312-390`); since the PAT class
+   was deleted (section 4.1) Migrated holds no signing key at all. Unlike
+   Control, Migrated configures a platform-only OAuth provider, so a Supabase
+   bearer accepted by Control fails here (`crates/control/src/main.rs`,
+   `crates/migrated/src/main.rs`); see Finding 17. It signs no replacement
+   credential.
 
-### 4.4 Workflow signal-capability issuance
+### 4.3 Workflow signal-capability issuance
 
 ```text
 +----------------------------------------------------------+
@@ -1629,7 +1583,7 @@ VERIFIED walk-through:
    `crates/core/src/typed_id.rs:526-622`). The plaintext capability is returned
    to the caller; no Gateway or Worker signs in this flow.
 
-### 4.5 Public workflow signal ingress
+### 4.4 Public workflow signal ingress
 
 ```text
 +------------------------------------------------------------+
