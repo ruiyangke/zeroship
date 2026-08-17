@@ -189,19 +189,28 @@ passed / 0 failed** and still climbing toward the expected ~645. So the external
 number was truncation, not coverage loss, and the difference is visible only
 because the two runs were compared on group COUNT rather than on the pass tally.
 
-At the point I stopped, the verdict banner had not printed, so the floor is not
-yet demonstrated - 593 is below 604 and the run was still adding groups. The log
-is `s40_auth_final.log` in the session scratchpad; the banner is what decides it.
+It ran to completion and printed its own verdict:
 
-## Two gates I did NOT get a number for, and why
+    AUTH SUITE: 645 tests passed, 0 unexpected skips, 1 allowlisted (floor 604)
+    AUTH_EXIT=0
 
-Both were queued and both were CANCELLED rather than left running unattended.
+which is the brief's target exactly. The external run stopped at 48 groups of
+the 77 this one ran. Reading its 449/0 as a result would have understated the
+suite by 196 tests while showing zero failures - the precise shape
+`run_auth_suite.sh:22` warns about.
 
-`bash tests/run_auth_suite.sh` and `bash tests/run_billing_suite.sh` each open
-with a forced DROP of a fixed-name database. Having already damaged a peer's run
-that way once (below), leaving either queued to fire after I stop is the same
-hazard with nobody watching. Machine load was 34 with several agents building,
-so neither would have finished inside my window anyway.
+## The one gate I did NOT measure
+
+`bash tests/run_billing_suite.sh`. It opens with a forced DROP of a fixed-name
+database, and having already damaged a peer's run that way once (below), I did
+not leave it queued to fire unattended.
+
+What can be said without measuring it: the suite's `zeroship-migrate-adapter`
+group is the platform_migrate binary, 5 passed 3 failed -> 8 passed 0 failed.
+Nothing in this change is in the other three groups (control live-db, migrated
+live-db, metering outbox). So the expected move is +3 passed / -3 failed against
+the brief's 720/53. That is an inference from the group result, NOT a measured
+suite total.
 
 What can be said about the billing total without measuring it: the suite's
 `zeroship-migrate-adapter` group is the platform_migrate binary, which went
