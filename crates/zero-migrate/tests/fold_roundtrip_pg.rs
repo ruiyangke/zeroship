@@ -958,43 +958,38 @@ async fn view_lifecycle() {
     .await;
 }
 
-/// A trigger and function lifecycle APPLIES cleanly - and this oracle cannot see
-/// either object.
+/// A trigger and function lifecycle, folded offline and checked against the live
+/// catalog at every stage.
 ///
-/// Read the name of this test as a warning, not as coverage. It was written to
-/// add triggers to the fold==live oracle for the same reason views and constraint
-/// facets are here, and it passes - VACUOUSLY.
+/// THIS TEST USED TO PASS VACUOUSLY, and said so. `snapshot_schema` built the live
+/// side with `functions`, `policies` and `triggers` hardcoded empty, and
+/// `diff_snapshots` compared none of them, so the scenario proved only that the
+/// APPLY path ran - the oracle could not see either object it created. Its own
+/// note ended: if those maps are ever populated and compared, this test starts
+/// failing on a genuine fold-vs-live difference, and that is the moment to turn it
+/// into the real round-trip scenario it looks like. They now are, through
+/// `SchemaSnapshot::vendor_objects`, and it did not fail - the two sides agree.
 ///
-/// `snapshot_schema` builds the live side with
+/// So this is now the FALSE-DRIFT CONTROL for that comparison, and the only one
+/// that runs both halves for real. The unit tests in `vendor_object_drift.rs` build
+/// both snapshots by hand and cannot catch a normalisation mismatch; this folds the
+/// authored ops offline and diffs them against what PostgreSQL actually stored.
+/// Everything PostgreSQL rewrites is in the scenario deliberately:
 ///
-///     functions: BTreeMap::new(),
-///     policies:  BTreeMap::new(),
-///     triggers:  BTreeMap::new(),
+///   * `returns: "trigger"` and no argument list, so the function key has to survive
+///     `format_type` and the `int`/`integer` canonicalisation;
+///   * an ORDERED event list (`insert`, `update`), which `tgtype` keeps as an
+///     unordered bit set;
+///   * a `WHEN` predicate over `NEW`, which the catalog deparses to `((new.payload
+///     IS NOT NULL))` - it must not be compared at all, and a change that started
+///     comparing it would turn this stage permanently red.
 ///
-/// hardcoded (`apply/drift.rs`), and `diff_snapshots` never compares those three
-/// maps. The FOLD does record the trigger (`fold.rs` `triggers.insert`), so if the
-/// comparison looked at them this test would fail on the difference. It passes,
-/// which is the proof that it does not look.
-///
-/// So what this scenario actually establishes is narrower than its shape suggests,
-/// and both halves are worth having:
-///
-///   * the APPLY path really does create a function, create a trigger with an
-///     ordered event set and a `WHEN` predicate, and drop the trigger, against
-///     live PostgreSQL, without error - that part is real;
-///   * the ORACLE is blind to triggers, functions and policies, so no scenario
-///     added here can ever measure them.
-///
-/// The second half matters beyond this file: the same `diff_snapshots` powers
-/// structural DRIFT DETECTION, so an out-of-band change to a trigger, a function,
-/// or an RLS policy is invisible to it. Dropping a trigger by hand produces no
-/// drift report.
-///
-/// If those three maps are ever populated and compared, this test starts failing
-/// on a genuine fold-vs-live difference, and that is the moment to turn it into
-/// the real round-trip scenario it looks like.
+/// Measured rather than assumed: blinding the fold's trigger derivation makes the
+/// `create trigger` checkpoint fail with `unexpected_objects: ["trigger
+/// trigger_rows_audit_trg on <schema>.trigger_rows"]`, which is the proof that the
+/// comparison is live and this test is no longer vacuous.
 #[compio::test]
-async fn trigger_lifecycle_applies_but_is_invisible_to_this_oracle() {
+async fn trigger_and_function_lifecycle() {
     let source = r#"{
       "ir_version": 1,
       "name": "trigger_lifecycle",
@@ -1210,9 +1205,12 @@ async fn index_storage_parameter_lifecycle() {
 #[compio::test]
 async fn standalone_sequence_lifecycle() {
     // Standalone sequences are MODELLED in `SchemaSnapshot::sequences`, so the fold
-    // oracle can speak about them — unlike triggers, functions and policies, which
-    // the snapshot documents as "absent from catalog snapshots and excluded from
-    // structural equality" and where a roundtrip would compare nothing to nothing.
+    // oracle can speak about them. It once could not speak about triggers, functions
+    // or policies at all — their maps are rollback history, "absent from catalog
+    // snapshots and excluded from structural equality", and a roundtrip compared
+    // nothing to nothing. `SchemaSnapshot::vendor_objects` closed that: the maps
+    // themselves stay excluded, and their catalog-comparable IDENTITY is compared,
+    // which is what `trigger_and_function_lifecycle` now measures.
     //
     // Nothing exercised them. `createSequence` and `alterSequence` appear in no
     // fold test, so every attribute the fold believes about a sequence — increment,
@@ -1274,9 +1272,11 @@ async fn view_comment_lifecycle() {
     // `altered` entry with field `comment` when the two sides disagree.
     //
     // So a view comment is a field the oracle CAN see and nothing ever moved. The
-    // distinction matters beyond this test: "excluded from structural equality" is
-    // the reason a trigger is not worth a roundtrip (nothing to compare), and it is
-    // not the reason a view comment was not worth one.
+    // distinction matters beyond this test: "excluded from structural equality" was
+    // once the reason a trigger was not worth a roundtrip (nothing to compare), and
+    // it was never the reason a view comment was not worth one. The trigger half of
+    // that has since been fixed by comparing a trigger's IDENTITY rather than the
+    // rollback definition that stays excluded.
     //
     // The clearing stage is the half that catches a fold modelling `COMMENT ON` as
     // set-only. PostgreSQL removes the `pg_description` row for a comment set to

@@ -83,9 +83,10 @@ use crate::model::ir::{
 use crate::model::snapshot::{
     normalize_sequence_max_value, normalize_sequence_min_value, sequence_default_start_value,
     ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot, FunctionKey, FunctionSnapshot,
-    IndexElementSnapshot, IndexSnapshot, NamedTypeSnapshot, PartitionSnapshot, PolicyKey,
-    PolicySnapshot, RoleSnapshot, SchemaObjectSnapshot, SchemaSnapshot, SequenceDataTypeSnapshot,
-    SequenceSnapshot, TableSnapshot, TriggerKey, TriggerSnapshot, ViewSnapshot,
+    IndexElementSnapshot, IndexSnapshot, NamedTypeSnapshot, PartitionSnapshot, PolicyIdentity,
+    PolicyKey, PolicySnapshot, RoleSnapshot, SchemaObjectSnapshot, SchemaSnapshot,
+    SequenceDataTypeSnapshot, SequenceSnapshot, TableSnapshot, TriggerIdentity, TriggerKey,
+    TriggerSnapshot, VendorObjectIdentities, ViewSnapshot,
 };
 use crate::model::table_shape::ResolvedInject;
 #[cfg(test)]
@@ -2713,6 +2714,37 @@ pub fn fold_ops_onto(
         }
     }
 
+    // The expected side of the vendor-object comparison: what the authored history
+    // says exists, reduced to the identity a catalog read can also produce. The
+    // three maps this derives FROM keep their authored definitions for every
+    // dialect - they are rollback history, and a SQLite trigger is still restorable.
+    //
+    // POSTGRESQL ONLY, for the reason the row-level-security seeding above is:
+    // SQLite and MySQL introspection reads none of these catalogs and leaves the
+    // field `None`, so filling it for them would make every folded snapshot differ
+    // from the live one it is supposed to equal. Equality compares the field plainly
+    // and cannot skip an absent side the way the diff does.
+    //
+    // OR THE BASE ALREADY SPOKE, which is the carry-through every other map here
+    // gets. Folding onto a base is a continuation, so a base that asserted "this
+    // schema holds no policies" must not have that assertion ERASED by a fold under
+    // another dialect - a no-op op would then change the snapshot. Measured:
+    // `synchronize_identity_fold_validates_target_without_changing_schema` folds a
+    // PostgreSQL base under all three dialects and asserts the result is unchanged,
+    // and the dialect test alone failed it on `None` against `Some({})`.
+    let speaks = dialect == SqlDialect::Postgres || base.vendor_objects.is_some();
+    let vendor_objects = speaks.then(|| VendorObjectIdentities {
+        functions: functions.keys().map(FunctionKey::canonicalized).collect(),
+        policies: policies
+            .iter()
+            .map(|(key, snapshot)| (key.clone(), PolicyIdentity::of(snapshot)))
+            .collect(),
+        triggers: triggers
+            .iter()
+            .map(|(key, snapshot)| (key.clone(), TriggerIdentity::of(snapshot)))
+            .collect(),
+    });
+
     Ok(SchemaSnapshot {
         tables,
         table_rls,
@@ -2726,11 +2758,7 @@ pub fn fold_ops_onto(
         functions,
         policies,
         triggers,
-        // The expected side of the vendor-object comparison: populated once the
-        // diff is wired. `None` until then, which is what stops the diff comparing
-        // a full expected side against an empty actual one and reporting every
-        // authored function, policy and trigger as lost.
-        vendor_objects: None,
+        vendor_objects,
     })
 }
 

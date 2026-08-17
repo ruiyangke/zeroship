@@ -1808,17 +1808,20 @@ pub struct SchemaSnapshot {
     /// Authored PostgreSQL functions, keyed by overload identity.
     ///
     /// This rollback-only history is absent from catalog snapshots and excluded
-    /// from structural equality.
+    /// from structural equality. What drift compares instead is
+    /// [`Self::vendor_objects`].
     pub functions: BTreeMap<FunctionKey, FunctionSnapshot>,
     /// Authored PostgreSQL policies, keyed by resolved schema, table, and name.
     ///
     /// This rollback-only history is absent from catalog snapshots and excluded
-    /// from structural equality.
+    /// from structural equality. What drift compares instead is
+    /// [`Self::vendor_objects`].
     pub policies: BTreeMap<PolicyKey, PolicySnapshot>,
     /// Authored triggers, keyed by resolved schema, table, and name.
     ///
     /// This rollback-only history is absent from catalog snapshots and excluded
-    /// from structural equality.
+    /// from structural equality. What drift compares instead is
+    /// [`Self::vendor_objects`].
     pub triggers: BTreeMap<TriggerKey, TriggerSnapshot>,
     /// The catalog-comparable identity of the functions, policies and triggers
     /// above - the ONLY form of them a live snapshot and an offline fold can both
@@ -1849,6 +1852,26 @@ impl PartialEq for SchemaSnapshot {
             && self.schemas == other.schemas
             && self.extensions == other.extensions
             && self.table_rls == other.table_rls
+        // `vendor_objects` is EXCLUDED, with `functions`, `policies` and
+        // `triggers` it projects from, and for a reason the other exclusions do
+        // not have: it is an `Option`, and its two empty-looking states are
+        // different claims. `None` is "this snapshot carries no information about
+        // vendor objects"; `Some({})` is "we looked, and there are none". Only the
+        // second may be compared against a populated side, which is why
+        // `diff_snapshots` skips the comparison unless BOTH sides are `Some`.
+        //
+        // Equality cannot make that distinction. It has no skip, and collapsing the
+        // two states so that `None == Some({})` would break transitivity - `Some(a)
+        // == None` and `None == Some(b)` while `Some(a) != Some(b)` - which `Eq`
+        // forbids and every `BTreeMap` key would then misbehave on. Comparing them
+        // strictly instead makes a hand-built expectation unequal to a fold purely
+        // for not having thought about the field, which is a false negative in the
+        // oracles rather than a real difference.
+        //
+        // Nothing is lost. Drift does not go through this impl: `diff_snapshots`
+        // compares the field explicitly, `tests/vendor_object_drift.rs` pins that,
+        // and `fold_roundtrip_pg::trigger_and_function_lifecycle` runs it against a
+        // live catalog.
     }
 }
 

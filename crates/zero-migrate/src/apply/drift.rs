@@ -658,8 +658,9 @@ pub async fn snapshot_schema<D: SqlSession>(
 ///  * `prokind IN ('f','p')` drops aggregates and window functions, which the IR
 ///    cannot author and which would therefore always read as unexpected.
 ///  * The `pg_depend` `deptype = 'e'` filter drops functions an EXTENSION owns.
-///    Installing `pgcrypto` into the project schema would otherwise report dozens
-///    of unexpected functions on the next drift run.
+///    Measured on PostgreSQL 18.4: `CREATE EXTENSION pgcrypto WITH SCHEMA s` puts
+///    37 functions in `s`, and the filter removes all 37. Without it every one of
+///    them would be reported as an unexpected function on the next drift run.
 ///  * `tgisinternal` drops the `RI_ConstraintTrigger_*` pair PostgreSQL creates for
 ///    every foreign key, and `relispartition = false` drops the copy it clones onto
 ///    each child of a partitioned table. Measured: a single `REFERENCES` produced
@@ -1930,6 +1931,46 @@ pub fn diff_snapshots_with_index_aliases(
             });
         }
     }
+    // FUNCTIONS, POLICIES AND TRIGGERS. What is compared, what is deliberately not,
+    // and when the whole comparison is skipped: `comparable_vendor_objects`.
+    if let Some((expected_vendor, actual_vendor)) = comparable_vendor_objects(expected, actual) {
+        for key in &expected_vendor.functions {
+            if !actual_vendor.functions.contains(key) {
+                missing.push(function_label(key));
+            }
+        }
+        for key in &actual_vendor.functions {
+            if !expected_vendor.functions.contains(key) {
+                unexpected.push(function_label(key));
+            }
+        }
+        for (key, expected_policy) in &expected_vendor.policies {
+            match actual_vendor.policies.get(key) {
+                Some(actual_policy) => {
+                    diff_policy_attrs(key, expected_policy, actual_policy, &mut altered);
+                }
+                None => missing.push(policy_label(key)),
+            }
+        }
+        for key in actual_vendor.policies.keys() {
+            if !expected_vendor.policies.contains_key(key) {
+                unexpected.push(policy_label(key));
+            }
+        }
+        for (key, expected_trigger) in &expected_vendor.triggers {
+            match actual_vendor.triggers.get(key) {
+                Some(actual_trigger) => {
+                    diff_trigger_attrs(key, expected_trigger, actual_trigger, &mut altered);
+                }
+                None => missing.push(trigger_label(key)),
+            }
+        }
+        for key in actual_vendor.triggers.keys() {
+            if !expected_vendor.triggers.contains_key(key) {
+                unexpected.push(trigger_label(key));
+            }
+        }
+    }
     for name in expected.views.keys() {
         if !actual.views.contains_key(name) {
             missing.push(format!("view {name}"));
@@ -3019,6 +3060,169 @@ fn index_referenced_columns(index: &IndexSnapshot) -> Option<Vec<&str>> {
 /// message that says anything specific.
 fn constraint_definition_is_comparable(kind: &str) -> bool {
     !matches!(kind, "EXCLUDE" | "CHECK")
+}
+
+/// The two sides' vendor-object identity when comparing them is meaningful, and
+/// `None` when it is not.
+///
+/// The THIRD member of the family [`constraint_definition_is_comparable`] and
+/// [`index_expression_bodies_are_comparable`] belong to, answering the same
+/// question - is this text worth comparing across an offline render and a live
+/// catalog read? - for PostgreSQL functions, policies and triggers. Its shape
+/// differs because its answer is structural rather than per-field: the
+/// non-comparable text is never COLLECTED, so there is no field left to exempt at
+/// comparison time and nothing a later change could start comparing by accident.
+///
+/// WHAT PostgreSQL NORMALISES. Measured on PostgreSQL 18.4:
+///
+/// | authored                       | read back from the catalog   |
+/// |--------------------------------|------------------------------|
+/// | `CREATE FUNCTION f(x int)`     | `f(integer)`                 |
+/// | `USING (owner = current_user)` | `((owner = CURRENT_USER))`   |
+/// | `WHEN (NEW.v > 0)`             | `WHEN ((new.v > 0))`         |
+///
+/// `pg_get_expr` deparses a policy predicate and a trigger `WHEN` clause from the
+/// parse tree exactly as it does the index predicate the sibling above exempts, and
+/// `format_type` resolves an argument-type alias. So [`VendorObjectIdentities`]
+/// carries only what survives the round trip: a function's schema, name and
+/// canonicalised argument vector; a policy's table, command, roles and permissive
+/// flag; a trigger's table, timing and event set. PostgreSQL stores every one of
+/// those STRUCTURALLY - a `polcmd` code, a `tgtype` bit set, an OID vector - which
+/// is the same property that makes an [`IndexElementSnapshot::Column`] immune where
+/// an `Expr` key is not.
+///
+/// WHEN THE COMPARISON IS SKIPPED: `None` on either side.
+/// [`SchemaSnapshot::vendor_objects`] is `None` for every snapshot that did not
+/// look - a SQLite or MySQL catalog read, and a fold for either dialect - so those
+/// engines cannot be accused of having lost objects they never modeled. This is the
+/// absent-side rule the row-level-security diff applies per table, at the
+/// granularity THIS facet needs: presence is the signal here, so a per-object skip
+/// would make a dropped policy unreportable, which is exactly the case worth
+/// reporting.
+///
+/// WHAT THIS GIVES UP: a policy predicate, a function body or a trigger `WHEN`
+/// clause rewritten out of band while the identity is untouched is not reported.
+/// `USING (owner = current_user)` swapped for `USING (true)` leaves the table
+/// readable by everyone and this differ silent. That is a real loss, the same one
+/// the CHECK and partial-index exemptions already take, and recovering it needs the
+/// same treatment foreign keys get: parse the catalog text back to the closed AST
+/// and compare structurally rather than comparing spellings.
+fn comparable_vendor_objects<'a>(
+    expected: &'a SchemaSnapshot,
+    actual: &'a SchemaSnapshot,
+) -> Option<(&'a VendorObjectIdentities, &'a VendorObjectIdentities)> {
+    Some((
+        expected.vendor_objects.as_ref()?,
+        actual.vendor_objects.as_ref()?,
+    ))
+}
+
+/// `schema.name(argtype, ...)` - the overload, not just the name, because
+/// PostgreSQL lets two functions share a name.
+fn function_label(key: &FunctionKey) -> String {
+    format!(
+        "function {}.{}({})",
+        key.schema,
+        key.name,
+        key.arg_types.join(", ")
+    )
+}
+
+/// `policy <name> on <schema>.<table>` - a policy name is scoped to its table, so
+/// the table is part of the identity and not decoration.
+fn policy_label(key: &PolicyKey) -> String {
+    format!("policy {} on {}.{}", key.name, key.schema, key.table)
+}
+
+/// `trigger <name> on <schema>.<table>`, for the same reason.
+fn trigger_label(key: &TriggerKey) -> String {
+    format!("trigger {} on {}.{}", key.name, key.schema, key.table)
+}
+
+/// The comparable facets of ONE same-named policy present on both sides.
+///
+/// An empty role list renders as `PUBLIC` rather than as nothing: that is what an
+/// authored `to: None` means and what `pg_policy` stores for it, and an empty
+/// string in a drift report would read as a missing value instead of a real one.
+fn diff_policy_attrs(
+    key: &PolicyKey,
+    expected: &PolicyIdentity,
+    actual: &PolicyIdentity,
+    altered: &mut Vec<AlteredObject>,
+) {
+    let object = policy_label(key);
+    push_vendor_attr(
+        altered,
+        &key.table,
+        object.clone(),
+        "command",
+        expected.for_cmd.as_sql().to_string(),
+        actual.for_cmd.as_sql().to_string(),
+    );
+    push_vendor_attr(
+        altered,
+        &key.table,
+        object.clone(),
+        "roles",
+        policy_role_list(&expected.to),
+        policy_role_list(&actual.to),
+    );
+    push_vendor_attr(
+        altered,
+        &key.table,
+        object,
+        "permissive",
+        expected.permissive.to_string(),
+        actual.permissive.to_string(),
+    );
+}
+
+/// The roles a policy applies to, with PostgreSQL's default spelled out.
+fn policy_role_list(roles: &[String]) -> String {
+    if roles.is_empty() {
+        "PUBLIC".to_string()
+    } else {
+        roles.join(", ")
+    }
+}
+
+/// The comparable facets of ONE same-named trigger present on both sides.
+///
+/// The event set renders in the fixed order both sides normalise to, so a
+/// re-ordered authored list cannot show up here as a change - `tgtype` is a bit
+/// set and does not retain the order at all.
+fn diff_trigger_attrs(
+    key: &TriggerKey,
+    expected: &TriggerIdentity,
+    actual: &TriggerIdentity,
+    altered: &mut Vec<AlteredObject>,
+) {
+    let object = trigger_label(key);
+    push_vendor_attr(
+        altered,
+        &key.table,
+        object.clone(),
+        "timing",
+        expected.timing.as_sql().to_string(),
+        actual.timing.as_sql().to_string(),
+    );
+    push_vendor_attr(
+        altered,
+        &key.table,
+        object,
+        "events",
+        trigger_event_list(&expected.events),
+        trigger_event_list(&actual.events),
+    );
+}
+
+/// The firing events as `CREATE TRIGGER` spells them.
+fn trigger_event_list(events: &[TriggerEvent]) -> String {
+    events
+        .iter()
+        .map(|event| event.as_sql())
+        .collect::<Vec<_>>()
+        .join(" OR ")
 }
 
 /// Whether to store a live constraint's catalog text on the introspected snapshot.

@@ -578,7 +578,29 @@ async fn live_postgres_introspects_identity_default_format_and_reference_drift()
         );
         let shadow_clean =
             snapshot_after_mutation(&session, &schema, &clean_shadowed_builtins).await?;
-        let shadow_clean_drift = diff_snapshots(&expected, &shadow_clean);
+        let mut shadow_clean_drift = diff_snapshots(&expected, &shadow_clean);
+        // The shadow function created IN THE PROJECT SCHEMA is genuinely
+        // out-of-band - no migration authored `nextval(regclass)` - and drift now
+        // reports it, which is the point of comparing `pg_proc` at all. It is
+        // subtracted rather than tolerated: this check is about deparser DECORATION
+        // in defaults and CHECK bodies, and everything else still has to be clean,
+        // including the four objects created in the SEPARATE shadow schema, which
+        // this snapshot does not read.
+        let expected_unexpected = format!("function {schema}.nextval(regclass)");
+        let subtracted = shadow_clean_drift
+            .unexpected_objects
+            .iter()
+            .filter(|object| **object == expected_unexpected)
+            .count();
+        if subtracted != 1 {
+            return Err(format!(
+                "the hand-created shadow function must be reported exactly once as \
+                 out-of-band: {shadow_clean_drift:#?}"
+            ));
+        }
+        shadow_clean_drift
+            .unexpected_objects
+            .retain(|object| *object != expected_unexpected);
         if !shadow_clean_drift.is_clean() {
             return Err(format!(
                 "pg_catalog-qualified builtins caused phantom drift: {shadow_clean_drift:#?}"
