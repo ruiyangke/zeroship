@@ -682,7 +682,17 @@ async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
 
     // The gateway stores the per-app pairwise subject the cookie carries here;
     // the reset teardown must reuse it as the family-marker `sub`.
-    let pairwise_sub = format!("pws_anchor_{}", Uuid::new_v4().simple());
+    //
+    // DERIVED through the production function, not invented. An invented seed
+    // still satisfies the marker assertion below (the teardown copies whatever
+    // it finds), so the pair "seed X, assert marker == X" holds for a value no
+    // live cookie could ever carry. Deriving it is what makes the assertion say
+    // something about the real subject rather than about itself.
+    let pairwise_sub = zeroship_core::auth::derive_pairwise(
+        &zeroship_core::crypto::derive_key("password-reset-test-salt"),
+        &user.id.to_string(),
+        &format!("https://{client_id}.zeroship.localhost"),
+    );
     client
         .execute(
             "INSERT INTO zeroship.app_user_identities \
@@ -772,18 +782,28 @@ async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
 
     // (2) A family marker must exist for (client_id, pairwise_sub) so any live
     //     app-session cookie is rejected from now on.
-    let marker_count: i64 = pg
-        .query_one(
-            "SELECT COUNT(*) FROM zeroship.token_revocations \
-             WHERE client_id = $1 AND sub = $2",
-            &[&client_id, &pairwise_sub],
+    //
+    //     Read the marker's `sub` back and compare, rather than counting rows
+    //     that match the seed: counting cannot distinguish "no marker" from
+    //     "a marker under some other subject", and a marker keyed on anything
+    //     but the subject the cookie carries revokes nothing.
+    let markers = pg
+        .query(
+            "SELECT sub FROM zeroship.token_revocations WHERE client_id = $1",
+            &[&client_id],
         )
         .await
-        .expect("count family markers")
-        .get(0);
+        .expect("read family markers");
     assert_eq!(
-        marker_count, 1,
-        "password reset must write the (client_id, pairwise_sub) family marker"
+        markers.len(),
+        1,
+        "password reset must write exactly one family marker for the app client"
+    );
+    let marker_sub: String = markers[0].get("sub");
+    assert_eq!(
+        marker_sub, pairwise_sub,
+        "the family marker must be keyed on the per-app pairwise subject the \
+         cookie carries, not on any other identifier"
     );
 
     // (3) credential_version bumped — IdP-leg defense in depth.

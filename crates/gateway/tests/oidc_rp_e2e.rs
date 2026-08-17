@@ -41,6 +41,7 @@ const APP_NAME: &str = "gateway-e2e";
 const PASSWORD: &str = "gateway-test-password-with-enough-bytes-1234";
 const BROKER_MASTER: &[u8] = b"gateway-oidc-rp-e2e-broker-master-32-bytes";
 const GATEWAY_ISS: &str = "https://api.zeroship.ai";
+const WORKER_KEY: &str = "gateway-e2e-worker-key";
 
 fn db_url() -> Option<String> {
     zeroship_core::test_env!("AUTH_DB_URL").or_else(|| zeroship_core::test_env!("CONTROL_TEST_DB"))
@@ -230,9 +231,68 @@ fn protected_static_manifest(body: bytes::Bytes) -> (Manifest, MemoryBlobStore) 
     )
 }
 
-fn build_gateway_state(auth_base: &str, app_id: Uuid, client_id: &str) -> Arc<GateState> {
+fn protected_worker_manifest() -> Manifest {
+    let mut manifest = Manifest::passthrough();
+    let root = manifest.resources.get_mut("*").expect("passthrough root");
+    root.auth = Some(AuthLevel::User);
+    root.publicly_accessible = None;
+    manifest
+        .resources
+        .insert("/private".to_string(), ResourceEntry::default());
+    manifest
+}
+
+async fn echo_verified_user(req: web::HttpRequest) -> web::HttpResponse {
+    let authorized = req
+        .headers()
+        .get(http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        == Some(WORKER_KEY);
+    if !authorized {
+        return web::HttpResponse::Unauthorized().finish();
+    }
+    let Some(user_header) = req
+        .headers()
+        .get("zeroship-user")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return web::HttpResponse::Unauthorized().finish();
+    };
+    let Some(request_id) = req
+        .headers()
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| Uuid::parse_str(value).ok())
+    else {
+        return web::HttpResponse::Unauthorized().finish();
+    };
+    let Some(user_json) = zeroship_core::auth::verify_zeroship_user_header_for_request(
+        WORKER_KEY.as_bytes(),
+        user_header,
+        request_id,
+    ) else {
+        return web::HttpResponse::Unauthorized().finish();
+    };
+    web::HttpResponse::Ok()
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .body(user_json)
+}
+
+fn build_gateway_state(
+    auth_base: &str,
+    app_id: Uuid,
+    client_id: &str,
+    worker_url: Option<&str>,
+) -> Arc<GateState> {
     let body = bytes::Bytes::from_static(b"ok");
-    let (manifest, blob_store) = protected_static_manifest(body);
+    let (static_manifest, blob_store) = protected_static_manifest(body);
+    let manifest = if worker_url.is_some() {
+        protected_worker_manifest()
+    } else {
+        static_manifest
+    };
+    let worker_urls = vec![worker_url.unwrap_or("http://0.0.0.0:0").to_string()];
     let mut tmp = std::env::temp_dir();
     tmp.push(format!("zsgate-oidc-e2e-{}", Uuid::new_v4().simple()));
     let disk_cache = DiskBlobCache::new(tmp, 1024 * 1024).expect("disk cache");
@@ -253,9 +313,9 @@ fn build_gateway_state(auth_base: &str, app_id: Uuid, client_id: &str) -> Arc<Ga
         config: GateConfig {
             control_url: String::new(),
             control_key: String::new(),
-            worker_urls: vec!["http://0.0.0.0:0".to_string()],
+            worker_urls: worker_urls.clone(),
             poll_interval_secs: 5,
-            worker_key: "gateway-e2e-worker-key".to_string(),
+            worker_key: WORKER_KEY.to_string(),
             auth_ui_url: auth_base.to_string(),
             origin_scheme: zeroship_core::config::OriginScheme::Https,
             trusted_origins: vec![],
@@ -263,7 +323,7 @@ fn build_gateway_state(auth_base: &str, app_id: Uuid, client_id: &str) -> Arc<Ga
             public_url: GATEWAY_ISS.to_string(),
         },
         routes: RouteCache::new(),
-        hash_ring: HashRing::new(vec!["http://0.0.0.0:0".to_string()], 1),
+        hash_ring: HashRing::new(worker_urls, 1),
         rate_limiters: enforce::RateLimitRegistry::new(100, 100),
         per_rule_rate_limits: enforce::PerRuleRateLimitRegistry::new(),
         concurrency: enforce::ConcurrencyRegistry::new(100),
@@ -614,7 +674,14 @@ async fn gateway_bearer_rejects_real_op_id_token_but_accepts_access_token() {
     let tokens = browser_pkce_tokens(&rp, &auth_base, &client_id, &email).await;
     let id_token = tokens.id_token.as_deref().expect("openid flow returns id_token");
 
-    let state = build_gateway_state(&auth_base, app_id, &client_id);
+    let worker = test::server(|| async {
+        web::App::new().service(
+            web::resource("/dispatch/{app_id}").route(web::post().to(echo_verified_user)),
+        )
+    })
+    .await;
+    let worker_base = worker.url("").trim_end_matches('/').to_string();
+    let state = build_gateway_state(&auth_base, app_id, &client_id, Some(&worker_base));
     let app = test::init_service(web::App::new().state(state).service(
         web::resource("/{tail}*")
             .route(web::route().to(zeroship_gateway::router::handle_subdomain)),
@@ -635,6 +702,19 @@ async fn gateway_bearer_rejects_real_op_id_token_but_accepts_access_token() {
         200,
         "real OP at+jwt access token must authenticate the user route"
     );
+    let access_body = test::read_body(access_resp).await;
+    let projected_user: serde_json::Value =
+        serde_json::from_slice(&access_body).expect("worker returned projected user JSON");
+    let expected_pws = zeroship_core::auth::derive_pairwise(
+        &[9u8; 32],
+        &user_id.to_string(),
+        SECTOR,
+    );
+    assert_eq!(
+        projected_user["id"],
+        serde_json::json!(expected_pws),
+        "worker must receive the OP's once-projected pairwise subject"
+    );
 
     let id_req = test::TestRequest::get()
         .uri("/private")
@@ -650,6 +730,7 @@ async fn gateway_bearer_rejects_real_op_id_token_but_accepts_access_token() {
 
     cleanup(&pg_client, user_id, app_id, &client_id).await;
     compio::time::sleep(Duration::from_millis(50)).await;
+    drop(worker);
     drop(srv);
 }
 
@@ -675,7 +756,7 @@ async fn gateway_bearer_rejects_access_token_for_different_resource_audience() {
     let client_id = format!("oac_{}", zeroship_core::typed_id::uuid_to_base62(&app_id));
     let srv = start_platform_op(&db_url, pg_client, issuer.clone()).await;
     let auth_base = srv.url("").trim_end_matches('/').to_string();
-    let state = build_gateway_state(&auth_base, app_id, &client_id);
+    let state = build_gateway_state(&auth_base, app_id, &client_id, None);
     let app = test::init_service(web::App::new().state(state).service(
         web::resource("/{tail}*")
             .route(web::route().to(zeroship_gateway::router::handle_subdomain)),

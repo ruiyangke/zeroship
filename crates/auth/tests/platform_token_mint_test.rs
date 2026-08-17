@@ -4,7 +4,6 @@ mod common;
 
 use std::sync::Arc;
 
-use ed25519_dalek::SigningKey;
 use ntex::web;
 use serde::Deserialize;
 use serde_json::json;
@@ -191,7 +190,7 @@ impl Fixture {
 }
 
 fn test_issuer() -> Issuer {
-    let signing = SigningKey::from_bytes(&[91_u8; 32]);
+    let signing = common::op_signing_key();
     Issuer::from_signing_key(
         &signing,
         [37_u8; 32],

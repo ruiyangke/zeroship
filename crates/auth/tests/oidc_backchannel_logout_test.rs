@@ -1,10 +1,11 @@
 //! OIDC Back-Channel Logout OP emission tests.
 
+mod common;
+
 use std::sync::{Arc, Mutex};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use compio_postgres::{connect, Client, NoTls};
-use ed25519_dalek::SigningKey;
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use ntex::web::{self, HttpResponse};
 use serde_json::{json, Value};
@@ -37,7 +38,7 @@ async fn open_conn() -> Option<Client> {
 }
 
 fn test_issuer() -> Issuer {
-    let signing = SigningKey::from_bytes(&[77u8; 32]);
+    let signing = common::op_signing_key();
     Issuer::from_signing_key(&signing, [9u8; 32], ISSUER.to_string()).expect("issuer")
 }
 
@@ -47,6 +48,10 @@ async fn logout_emission_posts_signed_logout_token_with_sid() {
         return;
     };
     let issuer = test_issuer();
+    issuer
+        .publish_active_key(&db)
+        .await
+        .expect("publish active OP key");
     let captured = Arc::new(Mutex::new(Vec::<String>::new()));
     let rp_state = captured.clone();
     let rp = web::test::server(move || {
@@ -78,7 +83,15 @@ async fn logout_emission_posts_signed_logout_token_with_sid() {
     .await
     .expect("create OP session");
     let sid = session.id.to_string();
-    let sub = format!("pws_{}", Uuid::new_v4().simple());
+    // The `sub` an RP participation row carries is the per-app pairwise subject
+    // the OP minted for this (user, client) - so derive it through the issuer
+    // rather than inventing one. `pws_` + a 32-char simple UUID is not even the
+    // minted shape (`is_pairwise_subject` requires exactly 20 base62 chars), so
+    // the old value could never have come off a real token.
+    let sub = issuer.pairwise_subject(
+        &user_id.to_string(),
+        &format!("https://{client_id}.zeroship.localhost"),
+    );
 
     backchannel_logout::record_rp_participation(
         &db,

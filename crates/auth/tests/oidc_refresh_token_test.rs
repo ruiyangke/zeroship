@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use compio_postgres::{connect, Client, NoTls};
-use ed25519_dalek::SigningKey;
 use ntex::web;
 use serde::Deserialize;
 use serde_json::Value;
@@ -1171,7 +1170,7 @@ fn db_url() -> Option<String> {
 }
 
 fn test_issuer() -> Issuer {
-    let signing = SigningKey::from_bytes(&[43u8; 32]);
+    let signing = common::op_signing_key();
     Issuer::from_signing_key(&signing, [11u8; 32], ISSUER.to_string()).expect("issuer")
 }
 

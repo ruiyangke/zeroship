@@ -208,7 +208,14 @@ async fn cancellation_does_not_restore_pre_deletion_app_credentials() {
     .unwrap();
     let app_id = Uuid::new_v4();
     let client_id = format!("oac_acctdel_{tag}");
-    let pairwise_sub = format!("pws_acctdel_{tag}");
+    // DERIVED through the production function, not invented. The deletion
+    // cascade copies whatever subject it finds stored, so "seed X, assert
+    // marker == X" holds for any X - including one no live token carries.
+    let pairwise_sub = zeroship_core::auth::derive_pairwise(
+        &zeroship_core::crypto::derive_key("account-deletion-test-salt"),
+        &user.id.to_string(),
+        &format!("https://{client_id}.zeroship.localhost"),
+    );
 
     db.execute(
         "INSERT INTO zeroship.plans \
@@ -271,11 +278,14 @@ async fn cancellation_does_not_restore_pre_deletion_app_credentials() {
         .unwrap();
     assert!(users::cancel_deletion(&db, user.id).await.unwrap());
 
+    // Read the marker's `sub` back rather than counting rows that match the
+    // seed: a count cannot tell "no marker" from "a marker under some other
+    // subject", and a marker keyed on anything but the subject the app's tokens
+    // carry revokes nothing.
     let marker = db
         .query(
-            "SELECT 1 FROM zeroship.token_revocations \
-             WHERE client_id = $1 AND sub = $2",
-            &[&client_id, &pairwise_sub],
+            "SELECT sub FROM zeroship.token_revocations WHERE client_id = $1",
+            &[&client_id],
         )
         .await
         .unwrap();
@@ -283,6 +293,12 @@ async fn cancellation_does_not_restore_pre_deletion_app_credentials() {
         marker.len(),
         1,
         "deletion must durably revoke access tokens without refresh families"
+    );
+    let marker_sub: String = marker[0].get("sub");
+    assert_eq!(
+        marker_sub, pairwise_sub,
+        "the deletion marker must be keyed on the per-app pairwise subject the \
+         app's access tokens carry"
     );
     let platform_marker = db
         .query(

@@ -666,8 +666,18 @@ mod platform_cli {
         {
             return Err("non-authenticating user feed index is missing".to_string());
         }
+        // The seeded `pairwise_sub` is DERIVED, not a literal: it is the value
+        // the gateway would project for this (user, client), and the stored
+        // subject is immutable once written, so a made-up literal is the value
+        // no credential for this pair can ever carry. This probe only reads the
+        // row across RLS today; deriving it keeps that true if it ever does more.
+        let lifecycle_pws = zeroship_core::auth::derive_pairwise(
+            &zeroship_core::crypto::derive_key("platform-migrate-test-salt"),
+            "10000000-0000-0000-0000-000000000001",
+            "https://oac_lifecycle_feed.zeroship.localhost",
+        );
         probe
-            .batch(
+            .batch(&format!(
                 "INSERT INTO zeroship.users (id, email, name) VALUES \
                    ('10000000-0000-0000-0000-000000000001', \
                     'lifecycle-feed@zeroship.test', 'Lifecycle Feed'); \
@@ -677,8 +687,8 @@ mod platform_cli {
                  INSERT INTO zeroship.app_user_identities \
                    (app_client_id, global_user_id, pairwise_sub) VALUES \
                    ('oac_lifecycle_feed', \
-                    '10000000-0000-0000-0000-000000000001', 'pws_lifecycle_feed')",
-            )
+                    '10000000-0000-0000-0000-000000000001', '{lifecycle_pws}')"
+            ))
             .await
             .map_err(|e| format!("seed lifecycle feed: {e}"))?;
         probe
