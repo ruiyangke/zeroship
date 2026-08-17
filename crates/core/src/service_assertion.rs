@@ -107,12 +107,12 @@ const SPIFFE_SCHEME: &str = "spiffe://";
 /// `spiffe://zeroship.ai@attacker.example/svc/control` cannot masquerade as a
 /// trusted host to a reader), `:` (no port), `?`, `#`, `%`, and the `|` used to
 /// join issuer and `jti` into a replay-store key.
-fn is_issuer_char(c: char) -> bool {
+const fn is_issuer_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '/')
 }
 
 /// Characters admitted in a `jti`.
-fn is_jti_char(c: char) -> bool {
+const fn is_jti_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '-' | '_')
 }
 
@@ -207,7 +207,7 @@ impl ServiceIssuer {
     /// separately: comparing a name without its scope is the defect behind
     /// three Vault CVEs.
     #[must_use]
-    pub fn principal(&self) -> &ServicePrincipal {
+    pub const fn principal(&self) -> &ServicePrincipal {
         &self.principal
     }
 }
@@ -343,13 +343,13 @@ impl ServiceAssertionMinter {
 
     /// Override the lifetime this minter stamps on its assertions.
     ///
-    /// Present because the lifetime a caller chooses is NOT a security control
-    /// - the callee's ceiling is - and because the test that proves the ceiling
-    /// works has to be able to mint an over-long assertion. Raising it above
+    /// Present because the lifetime a caller chooses is NOT a security control.
+    /// The callee's ceiling is, and the test that proves the ceiling works has
+    /// to be able to mint an over-long assertion. Raising this above
     /// [`MAX_ASSERTION_LIFETIME`] does not widen anything: every conforming
     /// callee rejects the result.
     #[must_use]
-    pub fn with_lifetime(mut self, lifetime: Duration) -> Self {
+    pub const fn with_lifetime(mut self, lifetime: Duration) -> Self {
         self.lifetime = lifetime;
         self
     }
