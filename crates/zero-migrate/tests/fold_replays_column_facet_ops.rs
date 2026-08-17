@@ -119,3 +119,65 @@ fn drop_column_not_null_is_replayed() {
         "relaxing a column to NULL must make the generated field optional again"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The DEFAULT facet. Measured after the three above were fixed, on the
+// prediction that `FieldDescriptor.default` had the same shape of hole - the
+// descriptor carries the slot, the ops write it, the replay ignored them.
+//
+// THESE NEED THEIR OWN BASELINE. An earlier probe tested "drop a default" on a
+// column that had none, where "unchanged" is also the CORRECT answer, so it
+// proved nothing. `folded_with_default` gives the column a default first, and
+// the baseline test below asserts the fold can SEE it - without that, the drop
+// test cannot distinguish a working implementation from a broken one.
+// ---------------------------------------------------------------------------
+
+/// Like [`folded`], but `v` is declared carrying a literal default.
+fn folded_with_default(ops_after_create: &str) -> serde_json::Value {
+    let bytes = format!(
+        r#"{{"ir_version":1,"name":"n","ops":[{{"op":"createTable","name":"a","columns":[{{"name":"c0","type":"int","nullable":false}},{{"name":"v","type":"int","nullable":true,"default":{{"literal":{{"value":7}}}}}}],"primaryKey":["c0"]}}{ops_after_create}]}}"#
+    );
+    let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
+    let effective = support::operator_charter("public");
+    let map = fold_to_field_defs(&ir.ops, SqlDialect::Postgres, "public", &effective)
+        .expect("the fold succeeds");
+    map.get("a").cloned().expect("table a is in the fold")
+}
+
+#[test]
+fn a_declared_default_is_visible_to_the_fold() {
+    // The precondition for the two tests below. If this ever stops holding, they
+    // are measuring nothing and would pass for the wrong reason.
+    let a = folded_with_default("");
+    assert_eq!(
+        field(&a, "v")
+            .get("default")
+            .and_then(serde_json::Value::as_i64),
+        Some(7),
+        "a default declared on createTable must reach the folded descriptor"
+    );
+}
+
+#[test]
+fn drop_column_default_is_replayed() {
+    let a = folded_with_default(r#",{"op":"dropColumnDefault","table":"a","column":"v"}"#);
+    assert_eq!(
+        field(&a, "v").get("default"),
+        None,
+        "dropping the default must remove it from the generated field"
+    );
+}
+
+#[test]
+fn set_column_default_is_replayed() {
+    let a = folded(
+        r#",{"op":"setColumnDefault","table":"a","column":"v","value":{"literal":{"value":7}}}"#,
+    );
+    assert_eq!(
+        field(&a, "v")
+            .get("default")
+            .and_then(serde_json::Value::as_i64),
+        Some(7),
+        "setting a default must reach the generated field"
+    );
+}

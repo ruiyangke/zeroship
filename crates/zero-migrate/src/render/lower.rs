@@ -10207,7 +10207,7 @@ fn apply_structured_default_to_column(
 /// descriptor bridge cannot carry type-aware structured defaults; CreateTable /
 /// AddColumn overlay the rendered default onto the returned snapshot before
 /// emitting DDL.
-fn ir_default_to_value(d: &IrDefault) -> Option<serde_json::Value> {
+pub(crate) fn ir_default_to_value(d: &IrDefault) -> Option<serde_json::Value> {
     use crate::model::ir::IrScalar;
     use serde_json::Value;
     match d {

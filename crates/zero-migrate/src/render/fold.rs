@@ -4367,6 +4367,24 @@ pub fn fold_to_field_defs(
                     field.required = false;
                 }
             }
+            // The DEFAULT facet, both directions. `ir_default_to_value` is the same
+            // conversion `ir_column_to_field` applies to a createTable column, so a
+            // default set by an op serialises identically to one declared inline.
+            Op::SetColumnDefault {
+                table,
+                column,
+                value,
+                ..
+            } => {
+                if let Some(field) = tables.get_mut(table).and_then(|c| c.get_mut(column)) {
+                    field.default = crate::render::lower::ir_default_to_value(value);
+                }
+            }
+            Op::DropColumnDefault { table, column, .. } => {
+                if let Some(field) = tables.get_mut(table).and_then(|c| c.get_mut(column)) {
+                    field.default = None;
+                }
+            }
             Op::RenameColumn {
                 table, from, to, ..
             } => {
