@@ -122,6 +122,24 @@ Same command, same DSN, after the change:
 against the baseline's `5 passed; 3 failed`. The binary was rebuilt at 10:56:30
 against sources last edited 10:55:42, checked by mtime rather than assumed.
 
+## Gate results as they land
+
+- `cargo test -p zeroship-control --lib` -> `223 passed; 0 failed`, exit 0. The
+  brief expected 224. Nothing in this change touches `crates/control`
+  (`git diff main..HEAD --name-only | grep -c control` = 0), and the only path
+  from here into control is `zeroship-authn`, where the diff is two SQL string
+  literals and doc comments. Two commits already on main - `d5ad53352
+  test(control)!: drop the removed AppState mint fields from every fixture` and
+  `f6710f854 style(control): drop the now-redundant Secret import from the test
+  module` - are the kind of change that moves that count, so 224 looks like a
+  reading from before them rather than a regression here.
+- `cargo build --workspace` -> exit 0.
+- `cargo test --workspace --no-run` -> exit 101, and NOT from this change: every
+  error is `couldn't read crates/runtime/tests/wpt/...: No such file or
+  directory`, five of them, all under the WPT tree AGENTS.md documents as
+  gitignored and fetched on demand by `crates/runtime/tests/setup-wpt.sh`. This
+  worktree had never run it. Re-run after fetching.
+
 ## What the change touches, and why each file is in it
 
 - `db/migrations-ts/20260816000100_service_assertion_replay.ts` - the table moves
