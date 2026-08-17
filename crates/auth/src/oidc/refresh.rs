@@ -22,10 +22,10 @@ use zeroship_core::typed_id;
 use crate::advisory_lock::{lock_refresh_family_xact, lock_refresh_user_xact};
 use crate::config::AuthConfig;
 use crate::oidc::authorization_code::{
-    clean_optional, load_client, mint_access_token, parse_scopes, required_param, scope_subset,
+    clean_optional, load_client, parse_scopes, required_param, scope_subset,
     sort_dedup, OAuthClient, OAuthError, TokenRequest, TokenResponse, TOKEN_TYPE_BEARER,
 };
-use crate::oidc::{introspect, Issuer, ACCESS_TOKEN_TTL_SECS};
+use crate::oidc::{device_token, introspect, Issuer, ACCESS_TOKEN_TTL_SECS};
 
 const REFRESH_TOKEN_BYTES: usize = 32;
 const REFRESH_TOKEN_PREFIX: &str = "zrt_";
@@ -358,7 +358,17 @@ pub(super) async fn issue_root_refresh_token(
     let hash = keys.active_hash(&raw);
     let family_id = typed_id::generate("rfam");
     let user_id_string = user_id.to_string();
-    let sub = issuer.pairwise_subject(&user_id_string, &client.sector_identifier);
+    // `sub` is not decoration here: `kill_family` copies it into
+    // `zeroship.token_revocations`, and that table is what recalls an
+    // OUTSTANDING access token. Control looks the marker up under
+    // (`zeroship-cli`, principal UUID), so a platform CLI family that stored a
+    // pairwise subject would revoke a subject nothing ever presents - the
+    // family would die and the access token would live out its TTL.
+    let sub = if device_token::platform_cli_policy_selected(db, &client.client_id).await? {
+        user_id_string.clone()
+    } else {
+        issuer.pairwise_subject(&user_id_string, &client.sector_identifier)
+    };
     db.execute(
         "INSERT INTO zeroship.oauth_refresh_tokens \
             (token_hash, hash_key_version, refresh_family_id, client_id, user_id, sub, \
@@ -391,6 +401,7 @@ pub(super) async fn issue_root_refresh_token(
 pub(super) async fn exchange_refresh_token(
     shared_db: &Client,
     refresh_pool: &RefreshSessionPool,
+    cfg: &AuthConfig,
     issuer: &Issuer,
     keys: &RefreshTokenKeys,
     params: &TokenRequest,
@@ -412,7 +423,7 @@ pub(super) async fn exchange_refresh_token(
         tracing::error!(error = %err, "refresh: BEGIN failed on dedicated session");
         OAuthError::server_error("refresh rotation unavailable")
     })?;
-    let result = exchange_refresh_token_inner(&tx, issuer, keys, params, preauth).await;
+    let result = exchange_refresh_token_inner(&tx, cfg, issuer, keys, params, preauth).await;
     match result {
         Ok(response) => {
             tx.commit().await.map_err(|err| {
@@ -467,6 +478,7 @@ async fn preauthenticate_refresh(
 #[allow(clippy::future_not_send)]
 async fn exchange_refresh_token_inner(
     db: &Transaction<'_>,
+    cfg: &AuthConfig,
     issuer: &Issuer,
     keys: &RefreshTokenKeys,
     params: &TokenRequest,
@@ -509,7 +521,7 @@ async fn exchange_refresh_token_inner(
     }
 
     if row.rotated_at.is_some() {
-        return replay_or_kill(db, issuer, keys, &client, &row).await;
+        return replay_or_kill(db, cfg, issuer, keys, &client, &row).await;
     }
 
     if row.revoked_at.is_some()
@@ -585,7 +597,11 @@ async fn exchange_refresh_token_inner(
         OAuthError::server_error("refresh rotation unavailable")
     })?;
 
-    let access_token = mint_access_token(db, issuer, &client, row.user_id, &new_scopes).await?;
+    // Rotation must reproduce the token shape the ORIGINAL grant issued; see
+    // `device_token::mint_grant_access_token`.
+    let access_token =
+        device_token::mint_grant_access_token(db, cfg, issuer, &client, row.user_id, &new_scopes)
+            .await?;
     Ok(TokenResponse {
         access_token,
         id_token: None,
@@ -827,12 +843,13 @@ pub async fn sweep_refresh_tokens(refresh_pool: &RefreshSessionPool) -> Result<(
 /// retry a lost response earns, or reuse. Serve the retry, then kill.
 async fn replay_or_kill(
     db: &Transaction<'_>,
+    cfg: &AuthConfig,
     issuer: &Issuer,
     keys: &RefreshTokenKeys,
     client: &OAuthClient,
     row: &RefreshRow,
 ) -> Result<TokenResponse, OAuthError> {
-    if let Some(response) = replay_lost_response(db, issuer, keys, client, row).await? {
+    if let Some(response) = replay_lost_response(db, cfg, issuer, keys, client, row).await? {
         return Ok(response);
     }
     kill_family(db, &row.refresh_family_id, "replay").await?;
@@ -847,6 +864,7 @@ async fn replay_or_kill(
 /// or a snapshot came back under a different one.
 async fn replay_lost_response(
     db: &Transaction<'_>,
+    cfg: &AuthConfig,
     issuer: &Issuer,
     keys: &RefreshTokenKeys,
     client: &OAuthClient,
@@ -910,7 +928,9 @@ async fn replay_lost_response(
         return Ok(None);
     };
     let scopes = parse_scopes(&cached.scope);
-    let access_token = mint_access_token(db, issuer, client, successor.user_id, &scopes).await?;
+    let access_token =
+        device_token::mint_grant_access_token(db, cfg, issuer, client, successor.user_id, &scopes)
+            .await?;
     tracing::info!(
         family_id = %row.refresh_family_id,
         client_id = %row.client_id,
