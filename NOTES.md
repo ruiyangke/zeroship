@@ -230,6 +230,39 @@ Three fixtures, one production invariant, three different invented `pws_`
 formats: `pws_seed_`, `pws_test_`, and an unpublished signing key. Each failed
 closed exactly as designed.
 
+## Seven more invented subjects that were never red
+
+Three fixtures were red only because they sit in a flow that RECOMPUTES the
+subject. Seven others invent one and are green, uniformly because their flow
+READS the stored value instead:
+
+```text
+crates/control/tests/oauth_grants_handlers_test.rs:312  format!("pws_test_{}", uuid)
+crates/auth/tests/password_reset_test.rs:685            format!("pws_anchor_{}", uuid)
+crates/auth/tests/account_deletion_test.rs:211          format!("pws_acctdel_{tag}")
+crates/auth/tests/relay_auto_revoke_test.rs:74          format!("pws_test_{}", uuid)
+crates/gateway/tests/identities_relay_test.rs:96,149    format!("pws_{}", uuid[..20])
+crates/zeroship-migrate-adapter/tests/platform_migrate.rs:680  SQL literal 'pws_lifecycle_feed'
+```
+
+Latent, not inert. `crates/core/src/auth/mod.rs:223-231` requires `pws_` plus
+exactly 20 base62 characters, so five of the seven are not even shape-valid -
+but the two in `identities_relay_test.rs` ARE, which is the worse case: a shape
+check cannot catch a well-formed value that is simply the wrong one. The stored
+subject is immutable, so the moment any of these binaries drives a token mint
+for the same `(client_id, user_id)` the fixture turns into an opaque 500 and
+this entire diagnosis gets run again from scratch.
+
+All seven now derive, plus the adjacent `oidc_session_clients.sub` at
+`crates/auth/tests/oidc_backchannel_logout_test.rs:86`.
+
+Two of them were worth more than the fabrication. `password_reset_test.rs` and
+`account_deletion_test.rs` each seeded a value X and then asserted the
+revocation marker's `sub == X`, which holds for ANY X - a tautology that cannot
+detect the marker being keyed on a subject no live credential carries. Both now
+read the marker's `sub` back and compare it to the derived value, so a count of
+matching rows can no longer stand in for the identity of the row.
+
 ## Green
 
 ```text
@@ -237,6 +270,12 @@ closed exactly as designed.
     test smtp_plaintext_sink_delivers_relay_forward ... ZEROSHIP-TEST-SKIPPED: skip (need AUTH_DB_URL + AUTH_TEST_SMTP_SINK=host:port)
 AUTH SUITE: 636 tests passed, 0 unexpected skips, 1 allowlisted (floor 505)
 ```
+
+That transcript is the state at the fixture repairs. The gate now reads
+`AUTH SUITE: 640 tests passed, 0 unexpected skips, 1 allowlisted (floor 595)`:
+`+3` from `oidc_rp_e2e`, which this gate had never run, `+1` from the
+immutable-binding behaviour test, and the floor raised from 505 (set against a
+543-test suite in 2026-08-07 and never moved since) back to ~7 percent headroom.
 
 Zero `test result: FAILED` lines in the whole run. 451 to 636 is far more than
 the nine failures repaired: THIRTY Auth binaries that main's fail-fast never
