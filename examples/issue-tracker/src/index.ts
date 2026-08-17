@@ -121,19 +121,17 @@ const OPEN_STATUSES: readonly IssueStatus[] = [
   "CONFIRMED",
   "IN_PROGRESS",
 ];
-// Read-side compensation for a PLATFORM defect: the shared UPDATE builder
-// (crates/zeroship-schema/src/query.rs, build_set_clauses_with_system_fields)
-// binds a `$set: null` as an empty text PARAMETER instead of emitting a `NULL`
-// literal the way the INSERT/upsert builders do. So clearing one of these
-// columns through `env.db.update` stores "" and every read has to map it back.
+// The issue columns that are genuinely nullable. Two uses, both about the
+// difference between "no value" and "some value": normalising a row so an
+// absent column reads as null rather than undefined, and deciding whether an
+// advanced-search clause is allowed to ask for null membership.
 //
-// The compensation now covers reads ONLY. `issues.resolution` carries a column
-// CHECK (it is an enum), and "" is not a member -- so the write itself is
-// refused with CHECK_VIOLATION, and `issues.reopen` plus the reopening arm of
-// `issues.changeStatus` fail until the builder is fixed. That is the correct
-// outcome for a database asked to store a value outside a closed set; what has
-// to change is the builder, not the constraint.
-const NULLABLE_ISSUE_TEXT_FIELDS = new Set([
+// This set used to ALSO map "" back to null, because the shared UPDATE builder
+// bound a JSON null as an empty text param rather than emitting a SQL NULL
+// literal. That defect is fixed in crates/zeroship-schema/src/query.rs, so the
+// mapping is gone: with the builder correct, "" is a value a caller actually
+// stored and coercing it to null would destroy it.
+const NULLABLE_ISSUE_FIELDS = new Set([
   "versionId",
   "milestoneId",
   "resolution",
@@ -607,9 +605,7 @@ async function validateProductChildren(
 
 function issueState(row: IssueRow): IssueState {
   if (!isIssueStatus(row.status)) invalid(`issue ${row.id} has an invalid stored status`);
-  // See NULLABLE_ISSUE_TEXT_FIELDS: "" is the update builder's stand-in for
-  // NULL, so it is read back as null here and in history/state checks.
-  const resolution = row.resolution ? row.resolution : null;
+  const resolution = row.resolution ?? null;
   if (resolution !== null && !isIssueResolution(resolution)) {
     invalid(`issue ${row.id} has an invalid stored resolution`);
   }
@@ -656,25 +652,23 @@ function maskHiddenIssueLinks(row: IssueRow, hidden: ReadonlySet<string>): Issue
 
 function normalizeIssueRow(row: IssueRow): IssueRow {
   const out = { ...row } as IssueRow & Record<string, unknown>;
-  for (const field of NULLABLE_ISSUE_TEXT_FIELDS) {
-    if (out[field] === "" || out[field] === undefined) out[field] = null;
+  for (const field of NULLABLE_ISSUE_FIELDS) {
+    if (out[field] === undefined) out[field] = null;
   }
   if (out.deadline === undefined) out.deadline = null;
   return out;
 }
 
 function logicalIssueValue(field: string, value: unknown): unknown {
-  return NULLABLE_ISSUE_TEXT_FIELDS.has(field) && (value === "" || value === undefined)
-    ? null
-    : value;
+  return NULLABLE_ISSUE_FIELDS.has(field) && value === undefined ? null : value;
 }
 
 function asTrackedRecord(value: object): Record<string, string | number | boolean | null | undefined> {
   const record = {
     ...(value as Record<string, string | number | boolean | null | undefined>),
   };
-  for (const field of NULLABLE_ISSUE_TEXT_FIELDS) {
-    if (record[field] === "" || record[field] === undefined) record[field] = null;
+  for (const field of NULLABLE_ISSUE_FIELDS) {
+    if (record[field] === undefined) record[field] = null;
   }
   return record;
 }
@@ -3206,33 +3200,21 @@ function compileAdvancedSearch(
   validateEnumCondition(node.field, node.value);
   switch (node.operator) {
     case "eq":
-      if (node.value === null && NULLABLE_ISSUE_TEXT_FIELDS.has(node.field)) {
-        return { $or: [{ [node.field]: null }, { [node.field]: "" }] };
-      }
       return { [node.field]: node.value };
     case "ne":
-      if (node.value === null && NULLABLE_ISSUE_TEXT_FIELDS.has(node.field)) {
-        return {
-          $and: [
-            { [node.field]: { $ne: null } },
-            { [node.field]: { $ne: "" } },
-          ],
-        };
-      }
       return { [node.field]: { $ne: node.value } };
     case "in":
       if (!Array.isArray(node.value)) invalid("in requires an array value");
       if (node.value.length === 0) return impossibleFilter();
       if (node.value.length > 100) invalid("in accepts at most 100 values");
       if (node.value.includes(null)) {
-        if (!NULLABLE_ISSUE_TEXT_FIELDS.has(node.field)) {
+        if (!NULLABLE_ISSUE_FIELDS.has(node.field)) {
           invalid("null membership requires a nullable field");
         }
         const nonNull = node.value.filter((value) => value !== null);
         return {
           $or: [
             { [node.field]: null },
-            { [node.field]: "" },
             ...(nonNull.length > 0 ? [{ [node.field]: { $in: nonNull } }] : []),
           ],
         };
@@ -3243,14 +3225,13 @@ function compileAdvancedSearch(
       if (node.value.length === 0) return {};
       if (node.value.length > 100) invalid("notIn accepts at most 100 values");
       if (node.value.includes(null)) {
-        if (!NULLABLE_ISSUE_TEXT_FIELDS.has(node.field)) {
+        if (!NULLABLE_ISSUE_FIELDS.has(node.field)) {
           invalid("null membership requires a nullable field");
         }
         const nonNull = node.value.filter((value) => value !== null);
         return {
           $and: [
             { [node.field]: { $ne: null } },
-            { [node.field]: { $ne: "" } },
             ...(nonNull.length > 0 ? [{ [node.field]: { $nin: nonNull } }] : []),
           ],
         };
@@ -3884,11 +3865,14 @@ export const reportTimeToResolve = query(
     // maintained by issues.resolve / issues.markDuplicate / issues.reopen and is
     // indexed (issues_resolved_at_idx).
     //
-    // The `typeof === "number"` test is load-bearing and not defensive noise:
-    // clearing this column on reopen stores an EMPTY STRING rather than SQL
-    // NULL (measured 2026-08-12 on the SQLite dev backend -- a reopened issue
-    // reads back `resolvedAt: ""`). A `!= null` test would let that through
-    // and `"" - created_at` is NaN, which would silently poison the average.
+    // The `typeof === "number"` test narrows `number | null` before the
+    // subtraction, so a reopened issue (resolvedAt cleared to NULL) is
+    // excluded rather than contributing NaN to the average.
+    //
+    // It used to be load-bearing for a second reason: the UPDATE builder wrote
+    // a JSON null as an empty text param, so a reopened issue read back
+    // `resolvedAt: ""` and a `!= null` test admitted it. That is fixed in
+    // crates/zeroship-schema/src/query.rs; the null narrowing is what remains.
     const issues = await reportIssues(productId);
     const durations = issues
       .filter((issue) => typeof issue.resolvedAt === "number" && issue.resolvedAt >= start)

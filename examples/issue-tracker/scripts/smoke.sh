@@ -14,8 +14,10 @@
 #      indexed, and was null on every resolved issue in the system.
 #   2. components.create declared defaultAssigneeId optional against a NOT NULL
 #      column, turning a caller-fixable input error into HTTP 500.
-#   3. Clearing a timestamp stores an EMPTY STRING rather than SQL NULL, so a
-#      reopened issue reads `resolvedAt: ""` and a `!= null` test admits it.
+#   3. Clearing a column stored an EMPTY STRING rather than SQL NULL, so a
+#      reopened issue read `resolvedAt: ""` and a `!= null` test admitted it.
+#      Fixed in crates/zeroship-schema/src/query.rs; the reopen assertions
+#      below still run and are what would catch it coming back.
 #
 # WHAT THIS DOES NOT CATCH. It drives the DEV tier. Identity arrives through
 # `dev_auth::resolve_dev_user_json` instead of the gateway's `ZeroShip-User`
@@ -193,9 +195,10 @@ case "$COUNT" in
        || fail "reports.timeToResolve counted nothing" "resolvedCount=$COUNT" ;;
 esac
 
-# REGRESSION (defect 3): reopen clears resolvedAt to an EMPTY STRING, not NULL.
-# The report filters on typeof number so "" cannot become NaN and poison the
-# average. This asserts the average stays a number after a reopen.
+# REGRESSION (defect 3): reopen used to clear resolvedAt to an EMPTY STRING
+# rather than SQL NULL. The report filters on typeof number so neither ""
+# nor null can become NaN and poison the average. This asserts the average
+# stays a number after a reopen.
 call issues.reopen "{\"id\":\"$ISSUE\"}" >/dev/null
 AVG="$(call reports.timeToResolve '{}' | jget 'json.averageMs')"
 # A mean is legitimately FRACTIONAL. An earlier version of this tested for
