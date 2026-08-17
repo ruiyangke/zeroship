@@ -29,7 +29,7 @@ use zeroship_core::config::{
 //
 // It carries the postgres SUPERUSER password, so of everything here it is the
 // entry that most needs the 0600 the loop below pins.
-const SECRET_FILES: [&str; 8] = [
+const SECRET_FILES: [&str; 7] = [
     "auth-signing.pem",
     "broker-secret",
     "gateway-signing.pem",
