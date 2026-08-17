@@ -7,7 +7,6 @@ use std::thread;
 use std::time::{Duration as StdDuration, SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use chrono::{Duration, Utc};
 use compio_postgres::{connect, NoTls};
 use ed25519_dalek::pkcs8::EncodePrivateKey;
 use ed25519_dalek::SigningKey;
