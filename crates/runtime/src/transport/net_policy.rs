@@ -7,12 +7,18 @@
 //! SSRF, socket caps, and egress caps.
 //!
 //! The allowlist is deliberately scoped as a compromised-dependency
-//! blast-radius control, not a malicious-creator exfiltration control. Runtime
-//! construction must receive reviewed entries from the operator/control-plane
-//! path; creator code never self-declares them. Broad wildcards and wildcards
-//! fronting shared infrastructure are rejected at construction time. The
+//! blast-radius control, not a malicious-creator exfiltration control. The
 //! malicious-creator controls are egress attribution, spend enforcement, and
 //! hard egress ceilings.
+//!
+//! The creator AUTHORS the entries, through the control plane's
+//! `/api/apps/{id}/net-grants` API, bounded by their plan's caps and the
+//! frontable-suffix catalog. What app JavaScript cannot do is widen its own
+//! policy: `NetPolicy` is built in trusted Rust from control-plane rows the
+//! isolate cannot reach, the manifest's `net.requests` entries are inert
+//! hints that never become grants by being deployed, and broad wildcards and
+//! wildcards fronting shared infrastructure are rejected at construction time.
+//! In-band self-grant is impossible; out-of-band self-service is the design.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 

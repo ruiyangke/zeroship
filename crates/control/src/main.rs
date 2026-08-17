@@ -1109,6 +1109,11 @@ fn main() -> std::io::Result<()> {
                 web::resource("/api/apps/{id}/audit")
                     .route(web::get().to(env_handlers::list_audit)),
             )
+            // Creator self-service for the app's raw-TCP egress hosts. The
+            // creator names hosts; the plan's caps and the operator's
+            // frontable-suffix catalog bound what they may name, and an app
+            // with no rows stays default-deny.
+            .configure(zeroship_control::net_grants::configure)
             // --- Auth (resource server) ---
             // No console OIDC RP and no console back-channel-logout endpoint:
             // the console is now a gateway-fronted regular app authenticated

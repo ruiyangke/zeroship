@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use zeroship_control::plan_catalog::{Plan, PlanCatalog};
 use zeroship_control::pricing::{charge_cents, MetricWeight, MetricWeights, PlanPrice, FX_SCALE};
+use zeroship_control::net_grants;
 use zeroship_control::Registry;
 use zeroship_core::types::{AppNetPolicyLimits, AppRuntimeLimits};
 
@@ -70,6 +71,7 @@ async fn seed_plan(catalog: &PlanCatalog, name: &str) -> Plan {
         net: AppNetPolicyLimits {
             max_sockets: 32,
             egress_ceiling_bytes: 256 * 1024 * 1024,
+            max_grants: 8,
         },
         archived: false,
         assignable_by_creator: false,
@@ -256,6 +258,14 @@ async fn get_versions_derives_limits_from_catalog_not_hardcode() {
     common::drain_pg().await;
 }
 
+/// The registry projection, driven through the CREATOR authoring path rather
+/// than a raw INSERT: `net_grants::upsert_grant` / `revoke_grant` are what
+/// `/api/apps/{id}/net-grants` calls, so this pins that a creator-authored row
+/// reaches the data plane and a creator-revoked one leaves it.
+///
+/// What this does NOT cover: authorization. Whether the CALLER may reach those
+/// functions for this app is the guard's job and is tested over HTTP in
+/// `net_grants_test.rs`; here they are called directly.
 #[compio::test]
 async fn get_versions_projects_app_net_grants_with_plan_caps() {
     let url = db_url();
@@ -268,6 +278,7 @@ async fn get_versions_projects_app_net_grants_with_plan_caps() {
     plan.net = AppNetPolicyLimits {
         max_sockets: 9,
         egress_ceiling_bytes: 42 * 1024 * 1024,
+        max_grants: 3,
     };
     catalog.upsert(&plan, Some(plan.archived)).await.expect("upsert net caps");
 
@@ -284,14 +295,19 @@ async fn get_versions_projects_app_net_grants_with_plan_caps() {
         "no grant rows must project literal default-deny"
     );
 
-    client
-        .execute(
-            "INSERT INTO zeroship.app_net_grants (app_id, host, port, granted_by, note) \
-             VALUES ($1, 'db.example.com', 5432, 'test-operator', 'test grant')",
-            &[&app.id],
-        )
-        .await
-        .expect("insert grant");
+    let granted = net_grants::upsert_grant(
+        &client,
+        app.id,
+        &net_grants::NetGrantBody {
+            host: "DB.Example.COM.".to_string(),
+            port: 5432,
+            note: Some("primary".to_string()),
+        },
+        &owner.to_string(),
+    )
+    .await
+    .expect("creator grant");
+    assert_eq!(granted.host, "db.example.com", "the host is normalized on write");
 
     let versions = registry.get_versions().await.expect("get_versions with grant");
     let net = &versions.get(&app.id).expect("app").net_policy;
@@ -301,13 +317,52 @@ async fn get_versions_projects_app_net_grants_with_plan_caps() {
     assert_eq!(net.max_sockets, 9, "caps come from the plan catalog row");
     assert_eq!(net.egress_ceiling_bytes, 42 * 1024 * 1024);
 
-    client
-        .execute(
-            "DELETE FROM zeroship.app_net_grants WHERE app_id = $1 AND host = 'db.example.com' AND port = 5432",
-            &[&app.id],
+    // The creator names hosts within the caps and never touches the caps: the
+    // fourth grant on a `max_grants: 3` plan is refused, and the projection is
+    // still the three that were allowed.
+    for port in [5433_u16, 5434] {
+        net_grants::upsert_grant(
+            &client,
+            app.id,
+            &net_grants::NetGrantBody {
+                host: "db.example.com".to_string(),
+                port,
+                note: None,
+            },
+            &owner.to_string(),
         )
         .await
-        .expect("delete grant");
+        .expect("grants within the cap");
+    }
+    let over = net_grants::upsert_grant(
+        &client,
+        app.id,
+        &net_grants::NetGrantBody {
+            host: "db.example.com".to_string(),
+            port: 5435,
+            note: None,
+        },
+        &owner.to_string(),
+    )
+    .await;
+    assert!(
+        matches!(
+            over,
+            Err(net_grants::NetGrantError::CapExceeded { max: 3, current: 3 })
+        ),
+        "the fourth grant must be refused by the plan cap, got {over:?}"
+    );
+    let versions = registry.get_versions().await.expect("get_versions at cap");
+    let net = &versions.get(&app.id).expect("app").net_policy;
+    assert_eq!(net.allow.len(), 3, "the refused grant reached no runtime");
+    assert_eq!(net.max_sockets, 9, "a refused grant leaves the caps untouched");
+    assert_eq!(net.egress_ceiling_bytes, 42 * 1024 * 1024);
+
+    for port in [5432_u16, 5433, 5434] {
+        net_grants::revoke_grant(&client, app.id, "db.example.com", port)
+            .await
+            .expect("creator revoke");
+    }
     let versions = registry.get_versions().await.expect("get_versions after revoke");
     assert_eq!(
         versions.get(&app.id).expect("app").net_policy,
