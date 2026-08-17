@@ -21,24 +21,33 @@
 //! ```
 //!
 //! Usage:
-//!   zeroship-platform-migrate --database-url postgres://…:5440/db \
+//!   zeroship-platform-migrate --database-url-file /path/to/dsn \
 //!       [--migrations-dir db/migrations-ts] [--project-schema zeroship] \
 //!       [--project-id zeroship]
+//!
+//! IN A DEPLOY FILE THE DSN ARRIVES AS A PATH, NEVER AS A VALUE. A process
+//! argument list is public: `docker inspect`, `docker ps --no-trunc`, `ps` and
+//! /proc/<pid>/cmdline all publish it to anything sharing the PID namespace,
+//! and it survives in shell history and CI logs afterwards. A DSN admits
+//! userinfo, so it is credential material by grammar - the same reason every
+//! converted binary declares its DSN `Secret<String>` (crates/migrated/src/
+//! config.rs) and gets `--<name>-file PATH` and nothing else from the macro.
+//! This parser is hand-rolled and so was never covered by that guarantee, which
+//! is how a postgres SUPERUSER DSN came to sit in the compose one-shot's argv;
+//! `--database-url-file` is the projection the macro would have generated.
+//!
+//! `--database-url <dsn>` SURVIVES, and only because 29 in-repo test harnesses
+//! pass a throwaway DSN that way against a scratch database on a dev box. It is
+//! not a supported deploy shape and nothing under deploy/ may use it: check 6c
+//! of tests/config_name_alignment_gate.sh fails any compose `command:` block
+//! carrying a secret's value flag or a userinfo-bearing URL. Converting those
+//! 29 callers to the path form is the change that lets this flag go; it was
+//! left out of the fix deliberately, because 29 test files is not a reviewable
+//! diff to bundle with a credential move.
 
 use std::path::{Path, PathBuf};
 
 use zeroship_migrate_adapter::platform::{run_platform_migrations, PlatformMigrateConfig};
-
-zeroship_core::declare_env_consumer!(
-    /// This binary's identity in the environment-read registry.
-    ///
-    /// It is a real `[[bin]]` target with no `#[zeroship_config]` declaration
-    /// (its argument parsing is the hand-rolled loop below), so it has no
-    /// generated consumer marker and needs this one to name itself.
-    pub PlatformMigrateConsumer,
-    target = "zeroship-platform-migrate",
-    scope = "platform_migrate",
-);
 
 fn main() {
     let cfg = match parse_args() {
@@ -46,7 +55,7 @@ fn main() {
         Err(msg) => {
             eprintln!("zeroship-platform-migrate: {msg}");
             eprintln!(
-                "\nusage: zeroship-platform-migrate --database-url <DSN> \
+                "\nusage: zeroship-platform-migrate --database-url-file <PATH> \
                  [--migrations-dir <dir>] [--project-schema <schema>] [--project-id <id>]"
             );
             std::process::exit(2);
@@ -82,17 +91,29 @@ fn main() {
 }
 
 fn parse_args() -> Result<PlatformMigrateConfig, String> {
+    parse_args_from(std::env::args().skip(1))
+}
+
+/// The argument loop, over any iterator so the rules below are testable.
+fn parse_args_from<I>(args: I) -> Result<PlatformMigrateConfig, String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut database_url_file: Option<String> = None;
     let mut database_url: Option<String> = None;
     let mut migrations_dir: Option<PathBuf> = None;
     let mut project_schema = String::from("zeroship");
     let mut project_id = String::from("zeroship");
 
-    let mut args = std::env::args().skip(1);
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--database-url-file" => {
+                database_url_file =
+                    Some(args.next().ok_or("--database-url-file needs a value")?);
+            }
             "--database-url" => {
-                database_url =
-                    Some(args.next().ok_or("--database-url needs a value")?);
+                database_url = Some(args.next().ok_or("--database-url needs a value")?);
             }
             "--migrations-dir" => {
                 migrations_dir =
@@ -109,9 +130,26 @@ fn parse_args() -> Result<PlatformMigrateConfig, String> {
         }
     }
 
-    let database_url = database_url
-        .or_else(|| zeroship_core::declared_env!(external, "DATABASE_URL", PlatformMigrateConsumer))
-        .ok_or("a --database-url (or DATABASE_URL) is required")?;
+    // Ambiguity is a refusal, not a precedence rule. Two DSNs mean the caller
+    // does not know which database it is about to migrate, and silently
+    // preferring one is how a migration lands somewhere nobody chose.
+    let database_url = match (database_url_file, database_url) {
+        (Some(_), Some(_)) => {
+            return Err(
+                "--database-url-file and --database-url are mutually exclusive; pass one"
+                    .to_string(),
+            )
+        }
+        // Same reader the generated `-file` flags use, so the permission
+        // refusal and the newline trim are the platform's, not a second
+        // implementation.
+        (Some(path), None) => zeroship_core::config::read_secret_file(&path)
+            .map_err(|error| format!("--database-url-file {path}: {error}"))?,
+        (None, Some(dsn)) => dsn,
+        (None, None) => {
+            return Err("a --database-url-file <PATH> (or --database-url <DSN>) is required".to_string())
+        }
+    };
 
     let migrations_dir = migrations_dir.unwrap_or_else(default_migrations_dir);
 
@@ -121,6 +159,109 @@ fn parse_args() -> Result<PlatformMigrateConfig, String> {
         project_schema,
         project_id,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::parse_args_from;
+
+    fn argv(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// A DSN file the secret reader will accept: private to the owner.
+    fn dsn_file(dir: &std::path::Path, contents: &str) -> String {
+        let path = dir.join("migrate-dsn");
+        let mut file = std::fs::File::create(&path).expect("create dsn file");
+        file.write_all(contents.as_bytes()).expect("write dsn");
+        drop(file);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("tighten dsn file");
+        path.to_string_lossy().into_owned()
+    }
+
+    /// THE CAPABILITY THE FIX NEEDED. Before this flag existed the ONLY way to
+    /// reach this binary was `--database-url <dsn>`, so the compose one-shot
+    /// had no choice but to put a postgres superuser password in its argv.
+    ///
+    /// Covers the parser. It does NOT cover deploy files continuing to spell
+    /// the value form - the regression test for the defect itself is check 6c
+    /// of tests/config_name_alignment_gate.sh, which reads deploy/compose and
+    /// fails on a userinfo URL or a secret's value flag in a `command:` block.
+    #[test]
+    fn the_dsn_is_read_from_the_file_the_path_names() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dsn_file(dir.path(), "postgres://postgres:zeroship@postgres:5432/zeroship\n");
+        let config = parse_args_from(argv(&["--database-url-file", &path]))
+            .expect("a DSN supplied as a path must parse");
+        assert_eq!(
+            config.database_url,
+            "postgres://postgres:zeroship@postgres:5432/zeroship",
+            "the trailing newline must be trimmed by the shared secret reader"
+        );
+    }
+
+    /// The one-variable partner for the test above: the SAME DSN passed the
+    /// old way still parses, so that test measures the FILE path being read
+    /// and not the parser rejecting everything.
+    #[test]
+    fn the_value_flag_still_parses_for_the_in_repo_harnesses() {
+        let config = parse_args_from(argv(&[
+            "--database-url",
+            "postgres://postgres:zeroship@postgres:5432/zeroship",
+        ]))
+        .expect("the value form is still what 29 test harnesses pass");
+        assert_eq!(
+            config.database_url,
+            "postgres://postgres:zeroship@postgres:5432/zeroship"
+        );
+    }
+
+    /// Two DSNs is a refusal, not a precedence rule. A deploy file half-moved
+    /// onto the path form would otherwise run against whichever one this
+    /// parser happened to prefer.
+    #[test]
+    fn a_path_and_a_value_together_are_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dsn_file(dir.path(), "postgres://postgres:zeroship@postgres:5432/zeroship\n");
+        let error = parse_args_from(argv(&[
+            "--database-url-file",
+            &path,
+            "--database-url",
+            "postgres://someone:else@elsewhere:5432/other",
+        ]))
+        .expect_err("two DSNs must refuse");
+        assert!(
+            error.contains("mutually exclusive"),
+            "got {error:?}"
+        );
+    }
+
+    /// No DSN at all is a refusal, not a compiled-in default. A default that
+    /// works is how a deployment ends up pointed somewhere nobody chose.
+    #[test]
+    fn a_missing_dsn_is_refused() {
+        let error =
+            parse_args_from(argv(&["--project-id", "zeroship"])).expect_err("no DSN must refuse");
+        assert!(
+            error.contains("--database-url-file"),
+            "the refusal must name what is missing; got {error:?}"
+        );
+    }
+
+    /// A flag with no value must not silently take the next flag as its path.
+    #[test]
+    fn a_dangling_dsn_path_flag_is_refused() {
+        let error = parse_args_from(argv(&["--database-url-file"]))
+            .expect_err("a dangling flag must refuse");
+        assert!(
+            error.contains("needs a value"),
+            "got {error:?}"
+        );
+    }
 }
 
 /// The default `db/migrations-ts` directory, resolved relative to the repo root

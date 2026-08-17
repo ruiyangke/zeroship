@@ -382,7 +382,7 @@ check_compose_command_secrets() {
 
     # Anti-hollow: every arm above passes at zero if the extractor stops
     # matching, and that failure is indistinguishable from compliance.
-    # MEASURED on deploy/compose/docker-compose.yml 2026-08-16: 85 items.
+    # MEASURED on deploy/compose/docker-compose.yml 2026-08-16: 84 items.
     local min_items="${COMPOSE_COMMAND_MIN_ITEMS:-60}"
     if [ "$checked" -lt "$min_items" ]; then
         fail "$label: only $checked command items scanned, expected at least $min_items"
@@ -609,8 +609,8 @@ echo "============================================"
 
 # ANTI-HOLLOW FLOOR. Every check above passes at zero if its extraction stops
 # matching, and this catches the case where several do at once. MEASURED on a
-# clean tree 2026-08-13: 9, then 10 once check 6b was armed.
-CONFIG_GATE_MIN_PASSED="${CONFIG_GATE_MIN_PASSED:-10}"
+# clean tree 2026-08-13: 9, then 10 once check 6b was armed, then 11 once 6c was.
+CONFIG_GATE_MIN_PASSED="${CONFIG_GATE_MIN_PASSED:-11}"
 if [ "$PASS" -lt "$CONFIG_GATE_MIN_PASSED" ]; then
     echo "" >&2
     echo "FLOOR: only $PASS checks passed, expected at least $CONFIG_GATE_MIN_PASSED." >&2

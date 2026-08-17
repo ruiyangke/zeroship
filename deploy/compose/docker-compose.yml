@@ -166,6 +166,14 @@ services:
         condition: service_healthy
     volumes:
       - ../../db/migrations-ts:/db/migrations-ts:ro
+      # The privileged DSN, as a PATH like every other credential here. It was
+      # a `--database-url <dsn>` VALUE until 2026-08-16, which put a postgres
+      # SUPERUSER password - not a scoped role - into this container's argv,
+      # where `docker inspect`, `docker ps --no-trunc` and /proc/<pid>/cmdline
+      # publish it to anything in the PID namespace. `zeroship dev init` writes
+      # this file; deploy/scripts/deploy-remote.sh discovers it by grepping this
+      # very mount, so no list anywhere needs updating.
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/migrate-dsn:/etc/zeroship/secrets/migrate-dsn:ro
     command:
       # NB: the bin's parser takes space-separated flag/value pairs only
       # (no `--flag=value` form) - keep each flag and its value as separate
@@ -173,8 +181,8 @@ services:
       - zeroship-platform-migrate
       - --migrations-dir
       - /db/migrations-ts
-      - --database-url
-      - ${ZEROSHIP_MIGRATE_DSN:-postgres://postgres:zeroship@postgres:5432/zeroship}
+      - --database-url-file
+      - /etc/zeroship/secrets/migrate-dsn
       - --project-schema
       - zeroship
       - --project-id
