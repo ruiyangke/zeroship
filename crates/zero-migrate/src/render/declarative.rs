@@ -2794,8 +2794,107 @@ fn generated_column_snapshot(
     })?;
     Ok(GeneratedColumnSnapshot {
         expr,
+        source: Some(generated.expr.clone()),
         stored: generated.stored,
     })
+}
+
+/// Re-render a generated body from its (possibly just-rewritten) AST.
+fn rerender_generated(
+    generated: &mut GeneratedColumnSnapshot,
+    dialect: SqlDialect,
+) -> Result<(), DeclarativeError> {
+    let Some(source) = generated.source.as_ref() else {
+        return Ok(());
+    };
+    generated.expr = crate::render::dml::render_expr_inline(source, dialect).map_err(|e| {
+        DeclarativeError::Invalid(format!(
+            "generated column expression is not renderable after a rename: {e}"
+        ))
+    })?;
+    Ok(())
+}
+
+/// Follow a COLUMN rename into every generated expression this table carries.
+///
+/// The single implementation both replays that own a `TableSnapshot` call: the
+/// offline fold's `Op::RenameColumn` arm, and the SQLite rename rebuild, which
+/// derives its post-rename table from the live one by changing column NAMES. Before
+/// this existed they disagreed with each other and with the descriptor fold, which
+/// has followed renames into the AST all along.
+///
+/// The rewrite matches `colRef` nodes on the SERIALIZED expression, never the
+/// rendered text, so a string literal that spells the old column name is left alone.
+/// A column whose producer kept no AST (`source: None`) is left STALE rather than
+/// text-substituted — the honest outcome, and the same line every other rendered
+/// body in this crate draws.
+///
+/// # Errors
+/// [`DeclarativeError::Invalid`] if a rewritten expression no longer renders for
+/// `dialect`. A rename cannot change renderability (it swaps one identifier for
+/// another), so this is a fail-closed guard, not an expected path.
+pub(crate) fn rename_column_in_generated_columns(
+    snapshot: &mut TableSnapshot,
+    table: &str,
+    from: &str,
+    to: &str,
+    dialect: SqlDialect,
+) -> Result<(), DeclarativeError> {
+    for column in &mut snapshot.columns {
+        let Some(generated) = column.generated.as_mut() else {
+            continue;
+        };
+        let Some(source) = generated.source.as_mut() else {
+            continue;
+        };
+        crate::render::gen_types::rename_expr_column(source, table, from, to, true);
+        rerender_generated(generated, dialect)?;
+    }
+    Ok(())
+}
+
+/// Follow a TABLE rename into every generated expression this table carries.
+///
+/// A generated expression may QUALIFY its column references with the enclosing
+/// table (`line_items.qty_on_hand`); the qualifier is an identity that moves with
+/// the rename exactly as the column names do. The same `source: None` boundary
+/// applies.
+///
+/// # Errors
+/// As [`rename_column_in_generated_columns`].
+pub(crate) fn rename_table_in_generated_columns(
+    snapshot: &mut TableSnapshot,
+    from: &str,
+    to: &str,
+    dialect: SqlDialect,
+) -> Result<(), DeclarativeError> {
+    for column in &mut snapshot.columns {
+        let Some(generated) = column.generated.as_mut() else {
+            continue;
+        };
+        let Some(source) = generated.source.as_mut() else {
+            continue;
+        };
+        crate::render::gen_types::rename_expr_table(source, from, to);
+        rerender_generated(generated, dialect)?;
+    }
+    Ok(())
+}
+
+/// Does this column's value come from the engine rather than from a write?
+///
+/// A SQLite rebuild copies values with `INSERT INTO tmp (…) SELECT (…)`, and SQLite
+/// refuses a write to a generated column, so such a column must never appear in the
+/// copy list — the engine recomputes it from the rebuilt expression. Both carriers
+/// are consulted: the emission body (`generated`, populated by the fold and the
+/// descriptor compiler) and the structural kind (`generated_kind`, populated by the
+/// fold and the PostgreSQL catalog read).
+pub(crate) fn is_engine_computed_column(column: &ColumnSnapshot) -> bool {
+    column.generated.is_some()
+        || matches!(
+            column.generated_kind,
+            Some(GeneratedKindSnapshot::Stored | GeneratedKindSnapshot::Virtual)
+        )
 }
 
 pub(crate) fn column_snapshot_for_field(
@@ -6902,6 +7001,16 @@ impl DeclarativeAuthor {
             );
         } else {
             for c in &dt.columns {
+                // SQLite refuses a write to a generated column, and the copy phase is
+                // an `INSERT INTO tmp (…) SELECT (…)`. The engine recomputes the value
+                // from the rebuilt expression, so such a column must not appear in the
+                // copy list. The stored-shape branch above already excludes them (it
+                // reads the names out of the stored CREATE); this branch did not, so a
+                // rebuild of any table with a generated column failed on the copy even
+                // once its CREATE was correct.
+                if is_engine_computed_column(c) {
+                    continue;
+                }
                 let dest = c.name.as_str();
                 if let Some(src) = rename_to_from.get(dest) {
                     // RENAME: copy from the old column name into the new one (the old
@@ -7130,6 +7239,15 @@ impl DeclarativeAuthor {
                  (the rebuild needs the live structure to carry the value across)"
             )));
         }
+        // Renaming `ColumnSnapshot::name` alone leaves any generated expression in
+        // this table naming the PRE-rename column, and this desired snapshot is what
+        // `render_create_table_sqlite_rebuild` renders the new-table CREATE from
+        // whenever the table has a generated column. Follow the rename into the
+        // expressions through the SAME helper the fold uses, or the rebuild emits
+        // `GENERATED ALWAYS AS (("qty_on_hand" + 1))` for a table whose only such
+        // column is now `quantity` - refused by SQLite inside the rebuild
+        // transaction, so the migration cannot apply at all.
+        rename_column_in_generated_columns(&mut desired_table, table, from, to, self.dialect)?;
 
         // ---- desired (post-rename) SDK schema `Value` ----
         // The shared SQLite emitter renders the new-table CREATE from this Value.

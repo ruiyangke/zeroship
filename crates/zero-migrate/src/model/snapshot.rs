@@ -255,10 +255,28 @@ pub enum GeneratedKindSnapshot {
 }
 
 /// Emission metadata for a generated/computed column.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GeneratedColumnSnapshot {
     /// The dialect-rendered closed expression body.
     pub expr: String,
+    /// The closed [`Expr`] [`Self::expr`] was rendered from.
+    ///
+    /// A generated expression NAMES OTHER COLUMNS, so a rename has to follow it or
+    /// the body describes a column the table no longer has. Rendered SQL cannot be
+    /// repaired — substituting inside text turns `note <> 'qty'` into
+    /// `note <> 'quantity'`, which is why every other rendered body in this module
+    /// is left stale on a rename. Keeping the AST beside the rendering is the
+    /// treatment `apply::drift::comparable_generated_column` prescribes and the one
+    /// the descriptor fold already relies on: match `colRef` nodes structurally,
+    /// re-render, and a string literal spelling the old name is untouched.
+    ///
+    /// `None` means THIS PRODUCER HAD NO AST. Only catalog introspection is in that
+    /// position, and it does not populate [`ColumnSnapshot::generated`] at all, so a
+    /// `Some(GeneratedColumnSnapshot)` with `None` here is currently unreachable —
+    /// the arm exists so a future catalog reader that recovers only the deparsed
+    /// text stays honest about what it can and cannot follow, rather than being
+    /// forced to invent an AST.
+    pub source: Option<Expr>,
     /// `true` ⇒ STORED; `false` ⇒ VIRTUAL.
     pub stored: bool,
 }

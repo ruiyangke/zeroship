@@ -1591,9 +1591,18 @@ pub fn fold_ops_onto(
                 if views.contains_key(to) {
                     return Err(FoldError::DuplicateView(to.clone()));
                 }
-                let snap = tables
+                let mut snap = tables
                     .remove(table)
                     .ok_or_else(|| FoldError::MissingTable(table.clone()))?;
+                // A generated expression may QUALIFY its column references with the
+                // enclosing table (`line_items.qty_on_hand`). That qualifier is an
+                // identity the rename moves, so it follows the table for the same
+                // reason the column-rename arm follows a column - and through the same
+                // AST walk, which cannot touch a string literal.
+                crate::render::declarative::rename_table_in_generated_columns(
+                    &mut snap, table, to, dialect,
+                )
+                .map_err(|error| FoldError::Render(error.to_string()))?;
                 tables.insert(to.clone(), snap);
                 // Live PG/SQLite re-target every INCOMING FK to the renamed table by
                 // OID, so the FK `definition` in OTHER tables now reports the NEW
@@ -1846,6 +1855,28 @@ pub fn fold_ops_onto(
                     })?;
                 col.name = to.clone();
                 snap.columns.sort_by(|a, b| a.name.cmp(&b.name));
+                // A generated expression READS other columns, so the rename has to
+                // follow it. PostgreSQL holds the expression as a parse tree over
+                // attribute NUMBERS, so `pg_get_expr` deparses the NEW name the
+                // instant the rename commits (measured on PG 18.4:
+                // `("qty_on_hand" + 1)` becomes `(quantity + 1)`), and the descriptor
+                // fold has rewritten it all along. This snapshot used to keep the old
+                // name, which is not merely cosmetic: on SQLite a rename is a table
+                // REBUILD, and `render_create_table_sqlite_rebuild` renders the
+                // new-table CREATE FROM THIS SNAPSHOT for exactly the tables that have
+                // a generated column, so the stale body emitted
+                // `GENERATED ALWAYS AS (("qty_on_hand" + 1))` over a table with no
+                // such column.
+                //
+                // The rewrite walks the closed `Expr` the snapshot now keeps beside
+                // the rendering, so it matches column REFERENCES and cannot corrupt a
+                // string literal that spells the old name - the discrimination that
+                // rules out the text substitution refused for the CHECK body and the
+                // index predicate below.
+                crate::render::declarative::rename_column_in_generated_columns(
+                    snap, table, from, to, dialect,
+                )
+                .map_err(|error| FoldError::Render(error.to_string()))?;
                 // `cascade_columns` names columns, so a rename has to follow it.
                 // PostgreSQL renames the attribute in place and leaves every
                 // constraint's `conkey` pointing at it, so a later drop of the NEW
@@ -4362,7 +4393,22 @@ pub fn fold_to_field_defs(
                 // sees the RENAMED table (the same wholesale move the structural
                 // `fold_ops` does). A column dropped/renamed/added under the new
                 // name afterward resolves; the old name no longer does.
-                if let Some(cols) = tables.remove(table) {
+                if let Some(mut cols) = tables.remove(table) {
+                    // A generated expression may QUALIFY its column references with
+                    // the enclosing table. The `env.db.ts` replay in `gen_types`
+                    // rewrites that qualifier on a table rename and this one did not,
+                    // so the two artifacts shipped side by side described the same
+                    // column under different table names - the runtime descriptor
+                    // still naming the collection that no longer exists.
+                    for field in cols.values_mut() {
+                        if let Some(generated) = field.generated.as_mut() {
+                            crate::render::gen_types::rename_expr_table(
+                                &mut generated.expr,
+                                table,
+                                to,
+                            );
+                        }
+                    }
                     tables.insert(to.clone(), cols);
                 }
                 if let Some(c) = checks.remove(table) {

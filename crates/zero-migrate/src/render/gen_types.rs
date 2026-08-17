@@ -928,7 +928,7 @@ fn for_each_expr_mut(table: &mut AuthoringTable, mut f: impl FnMut(&mut Expr)) {
     }
 }
 
-fn rename_expr_table(expr: &mut Expr, from: &str, to: &str) {
+pub(crate) fn rename_expr_table(expr: &mut Expr, from: &str, to: &str) {
     let mut value = serde_json::to_value(&*expr).expect("Expr serializes");
     visit_expr_values_mut(&mut value, &mut |node| {
         if node.get("node").and_then(Value::as_str) == Some("colRef")

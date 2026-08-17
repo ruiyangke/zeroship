@@ -14,10 +14,14 @@
 //! that still searches for the old name silently drops the facet rather than
 //! failing, so `min`/`max` and `onDelete`/`onUpdate` simply vanish.
 //!
-//! The offline `SchemaSnapshot` lane is a different story and is NOT covered here:
-//! it renders the expression to a `String` at construction, nothing compares it, and
-//! nothing executes it. See `fold_rename_column_stale_index_body_pg.rs` for the
-//! equivalent reasoning about index bodies.
+//! The offline `SchemaSnapshot` lane follows the rename too, and the last test here
+//! pins that. It did not always: the snapshot rendered the expression to a `String`
+//! at construction and threw the AST away, so the rename had nothing structural to
+//! walk. It now keeps the closed `Expr` beside the rendering
+//! (`GeneratedColumnSnapshot::source`) for that reason alone — which is the treatment
+//! `apply::drift::comparable_generated_column` prescribes, and the one an INDEX body
+//! still does not get (see `fold_rename_column_stale_index_body_pg.rs`: a predicate
+//! and an expression key remain stale because the snapshot keeps no AST for them).
 
 mod support;
 
@@ -153,6 +157,115 @@ fn a_rename_follows_the_generated_expressions_that_read_the_column() {
     );
 }
 
+/// `line_items.qty * unit_cents` — the same expression, with the reference to the
+/// renamed-away column QUALIFIED by its enclosing table.
+fn total_from_qualified_qty() -> GeneratedCol {
+    GeneratedCol {
+        expr: Expr::BinOp {
+            op: BinaryOp::Mul,
+            lhs: Box::new(Expr::ColRef {
+                table: Some("line_items".to_string()),
+                name: "qty".to_string(),
+            }),
+            rhs: Box::new(Expr::col("unit_cents")),
+        },
+        stored: true,
+    }
+}
+
+fn create_qualified_line_items() -> Op {
+    let mut total = col("total_cents", ColType::Int);
+    total.generated = Some(total_from_qualified_qty());
+    Op::CreateTable {
+        name: "line_items".to_string(),
+        columns: vec![
+            col("qty", ColType::Int),
+            col("unit_cents", ColType::Int),
+            total,
+        ],
+        primary_key: None,
+        constraints: Vec::new(),
+        indexes: Vec::new(),
+        partition_by: None,
+        runtime_options: None,
+        schema: None,
+        existence_guard: None,
+    }
+}
+
+/// Every QUALIFIER inside `value`, by name, in document order.
+fn col_ref_tables(value: &serde_json::Value, found: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if map.get("node").and_then(serde_json::Value::as_str) == Some("colRef") {
+                if let Some(table) = map.get("table").and_then(serde_json::Value::as_str) {
+                    found.push(table.to_string());
+                }
+            }
+            for nested in map.values() {
+                col_ref_tables(nested, found);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for nested in items {
+                col_ref_tables(nested, found);
+            }
+        }
+        _ => {}
+    }
+}
+
+// A generated expression may QUALIFY its column references with the enclosing table,
+// and a TABLE rename moves that qualifier exactly as it moves the collection key. The
+// `env.db.ts` replay in `render::gen_types` has rewritten it all along; this descriptor
+// fold did not, so the two artifacts shipped SIDE BY SIDE out of one `renderArtifacts`
+// call described the same column under different table names — the runtime descriptor
+// still naming a collection that no longer exists.
+//
+// Asserted through `render_artifacts`, which produces both, so the test fails if
+// EITHER lane regresses rather than only the one being repaired.
+#[test]
+fn a_table_rename_carries_a_qualified_generated_reference_in_both_artifacts() {
+    let effective = support::confined_charter();
+    let ops = vec![
+        create_qualified_line_items(),
+        Op::RenameTable {
+            table: "line_items".to_string(),
+            to: "order_lines".to_string(),
+            schema: None,
+            existence_guard: None,
+        },
+    ];
+
+    let artifacts = zero_migrate::render_artifacts(&ops, SqlDialect::Postgres, SCHEMA, &effective)
+        .expect("the op stream renders both artifacts");
+
+    let runtime: serde_json::Value =
+        serde_json::from_str(&artifacts.runtime_json).expect("the runtime descriptor is JSON");
+    let generated = runtime["collections"]["order_lines"]["fields"]["total_cents"]
+        .get("generated")
+        .unwrap_or_else(|| panic!("the generated column keeps its expression: {runtime}"));
+    let mut qualifiers = Vec::new();
+    col_ref_tables(generated, &mut qualifiers);
+    assert_eq!(
+        qualifiers,
+        vec!["order_lines".to_string()],
+        "the runtime descriptor's qualifier follows the table rename: {generated}"
+    );
+
+    // The authoring artifact, from the OTHER replay over the same ops.
+    assert!(
+        artifacts.env_db_ts.contains("\"table\":\"order_lines\""),
+        "the authoring types name the renamed table too: {}",
+        artifacts.env_db_ts
+    );
+    assert!(
+        !artifacts.env_db_ts.contains("\"table\":\"line_items\""),
+        "no authoring reference may still name the pre-rename table: {}",
+        artifacts.env_db_ts
+    );
+}
+
 /// `qty >= 0 AND qty <= 100`, the bound whose recovered facet is lifted by name.
 fn qty_between_0_and_100() -> Expr {
     Expr::BinOp {
@@ -241,18 +354,29 @@ fn a_rename_carries_a_recovered_check_bound_onto_the_new_column_name() {
     );
 }
 
-// The OTHER lane, and the reason it is left alone. `SchemaSnapshot` renders a
-// generated expression to a `String` when the snapshot is built, so the structure a
-// rename would need is already gone - the same reason re-rendering an index body was
-// rejected. Here that staleness costs nothing, because no reader exists: the
-// expression is emission-only, and the emitter that would consume it is never handed
-// a folded snapshot on the applied path (a pure rename replays the pre-rename stored
-// body and lets the engine rewrite its own dependent expressions).
+// The OTHER lane, which used to be excluded here and no longer is.
+//
+// THIS TEST WAS REVERSED, DELIBERATELY. It previously asserted that the snapshot lane
+// KEEPS a stale generated body, on the stated grounds that "no reader exists". That
+// grounds is a testable claim and it was measured FALSE: on SQLite a rename is a
+// 12-step table REBUILD, and `render_create_table_sqlite_rebuild` renders the
+// new-table CREATE from the TABLE SNAPSHOT — not from the SDK descriptor — for exactly
+// the tables that carry a generated column. A stale body therefore reached emitted DDL
+// as `GENERATED ALWAYS AS (("qty" * "unit_cents"))` over a table whose column is now
+// `quantity`, which SQLite refuses inside the rebuild transaction. See
+// `rename_column_generated_expr_snapshot.rs`, which applies it for real, and
+// `fold_rename_column_generated_expr_pg.rs`, which shows the server deparsing the NEW
+// name. The old assertion was pinning a defect, not a boundary.
+//
+// The second half is UNCHANGED and still true: the differ does not compare the body.
+// That remains correct — live PostgreSQL reports a DEPARSED string and the fold a
+// rendered one, so the two spellings would never meet. Following the rename is about
+// what the fold EMITS, not about what it can compare.
 //
 // Each side is asserted SEPARATELY. Asserting only that the differ is quiet would
 // pass just as well against a differ that had stopped looking at columns entirely.
 #[test]
-fn the_snapshot_lane_keeps_a_stale_generated_body_and_no_reader_reports_it() {
+fn the_snapshot_lane_follows_the_rename_and_the_differ_still_ignores_the_body() {
     let effective = support::confined_charter();
 
     let folded = fold_ops(
@@ -273,28 +397,52 @@ fn the_snapshot_lane_keeps_a_stale_generated_body_and_no_reader_reports_it() {
         .find(|c| c.name == "total_cents")
         .expect("the generated column survives the rename");
 
-    // Side one: the fold's rendered body still names the pre-rename column.
+    // Side one: the fold's rendered body names the POST-rename column, which is what
+    // PostgreSQL deparses and what the SQLite rebuild has to emit.
     let generated = total
         .generated
         .as_ref()
         .expect("the snapshot carries the generated body");
     assert!(
-        generated.expr.contains("qty"),
-        "this pins the KNOWN staleness rather than endorsing it - the rendered body \
-         still names the pre-rename column: {}",
+        generated.expr.contains("quantity") && !generated.expr.contains("qty\""),
+        "the rendered body follows the rename to the new column name: {}",
         generated.expr
     );
+    // The untouched reference is left alone, so the rewrite is a targeted one rather
+    // than a wholesale re-render from something else.
+    assert!(
+        generated.expr.contains("unit_cents"),
+        "an untouched reference survives the rewrite: {}",
+        generated.expr
+    );
+    // And the AST the rendering came from is carried, which is what MAKES the rewrite
+    // possible: text substitution is refused everywhere in this crate.
+    let source = generated
+        .source
+        .as_ref()
+        .expect("the snapshot keeps the closed Expr its rendering came from");
+    let mut names = Vec::new();
+    col_refs(
+        &serde_json::to_value(source).expect("the closed Expr serializes"),
+        &mut names,
+    );
+    assert!(
+        names.iter().any(|n| n == "quantity") && !names.iter().any(|n| n == "qty"),
+        "the carried AST names the post-rename column too: {names:?}"
+    );
 
-    // Side two: nothing compares it. Two columns differing ONLY in the generated body
-    // are equal, so the differ cannot see the staleness above even in principle.
+    // Side two: nothing COMPARES it, and that is still deliberate. Two columns
+    // differing only in the generated body are equal, because live PostgreSQL reports
+    // a deparsed spelling the fold cannot reproduce.
     let mut rewritten = total.clone();
     rewritten.generated = Some(zero_migrate::model::snapshot::GeneratedColumnSnapshot {
-        expr: "(\"quantity\" * \"unit_cents\")".to_string(),
+        expr: "(\"something\" * \"else\")".to_string(),
+        source: None,
         stored: true,
     });
     assert_eq!(
         total, &rewritten,
-        "column equality excludes the generated body, so a rename cannot show up as drift"
+        "column equality excludes the generated body, so the two renderings never meet"
     );
 
     // And end to end through the differ, for the same reason.
@@ -306,13 +454,13 @@ fn the_snapshot_lane_keeps_a_stale_generated_body_and_no_reader_reports_it() {
         .columns
     {
         if let Some(generated) = column.generated.as_mut() {
-            generated.expr = "(\"quantity\" * \"unit_cents\")".to_string();
+            generated.expr = "(\"something\" * \"else\")".to_string();
         }
     }
     let drift = diff_snapshots(&folded, &other);
     assert!(
         drift.is_clean(),
-        "a rewritten generated body reports no drift, which is why the fold is free to \
-         leave it stale: {drift:?}"
+        "a rewritten generated body reports no drift: the comparison is off by design, \
+         which is exactly why the fold has to get the EMITTED body right: {drift:?}"
     );
 }
