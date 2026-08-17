@@ -118,8 +118,7 @@ impl AuthzGuard {
     /// (`Resource::Any`) OR owner/member of at least one app carrying the grant.
     /// The self-scope gate for the creator-keyed billing reads (the caller
     /// reading their OWN creator data must be a billing-capable creator, not
-    /// merely any authenticated token). Mirrors `token_handlers`' `Resource::Any`
-    /// handling via [`authz::is_authorized_anywhere`].
+    /// merely any authenticated token), via [`authz::is_authorized_anywhere`].
     pub async fn can_act_anywhere(
         &self,
         action: Action,

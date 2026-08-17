@@ -20,7 +20,6 @@ use zeroship_control::config::{ControlSettings, ControlSettingsSources};
 use zeroship_control::{
     admin_handlers, api, device_handlers, env_handlers,
     internal, migrations_api, oauth_grants_handlers, oauth_handlers, plan_catalog, stripe_handlers,
-    token_handlers,
     workflow_instance_api,
     AppState, EnvStore, Quota, RateLimiter, Registry, StripeStore,
 };
@@ -1132,10 +1131,9 @@ fn main() -> std::io::Result<()> {
             // the console is now a gateway-fronted regular app authenticated
             // via `@zeroship/auth` (BFF). Per-app back-channel logout for the
             // console is handled by the GATEWAY's own per-app BCL endpoint (it
-            // is a gateway app like any other). Control exposes only the PAT /
-            // OAuth-grant management surfaces below.
+            // is a gateway app like any other). Control exposes only the
+            // OAuth-grant management surface below.
             .configure(device_handlers::configure)
-            .configure(token_handlers::configure)
             .configure(oauth_grants_handlers::configure)
             // --- Stripe Connect ---
             .service(

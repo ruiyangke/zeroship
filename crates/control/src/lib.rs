@@ -45,7 +45,6 @@ pub mod stripe_client;
 pub mod stripe_handlers;
 pub mod stripe_store;
 pub mod tax;
-pub mod token_handlers;
 pub mod void_reissue;
 pub mod workflow_instance_api;
 pub(crate) mod workflow_limits;
