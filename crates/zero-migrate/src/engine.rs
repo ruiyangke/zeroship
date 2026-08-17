@@ -1860,6 +1860,27 @@ impl MigrationEngine {
             }
         }
 
+        // A `setColumnType` the database will refuse dies at ITS OWN step, which is
+        // not where the damage is. Every lowered unit commits in its own
+        // transaction, so an ordinary two-op envelope - `addColumn` then the
+        // retype - leaves the added column committed and the type unchanged: a
+        // schema that is neither the old shape nor the new one, and the exact
+        // half-migration a per-migration precondition cannot prevent, because by
+        // the time it is evaluated the earlier migration has already committed.
+        //
+        // So the assertion the lower stamps on the retype's unit is ALSO asked
+        // here, for the whole plan, under the lock and before the first step runs.
+        // The per-migration evaluation stays exactly where it is - it is the seam a
+        // direct executor caller reaches, and re-asking under the same held lock
+        // costs one catalog read and cannot disagree.
+        //
+        // Scoped to this one variant on purpose. `ColumnHasNoBlockingDependents`,
+        // which `dropColumn` stamps, is a shipped gate with its own behaviour at
+        // the per-migration seam, and hoisting it would change when an existing
+        // refusal fires. That is a separate decision, not a side effect of this one.
+        self.preflight_plan_column_retypes(steps, backend, exec_cfg)
+            .await?;
+
         // A timeout budget that resolves to zero is refused when the session
         // preamble renders, which is inside the per-step apply and therefore after
         // every earlier step has committed. The budget is a property of the plan -
@@ -2770,6 +2791,66 @@ impl MigrationEngine {
     /// approval. Any matching inflight/progress evidence remains pending and is
     /// gated before the authored-order loop starts; any checksum disagreement is
     /// drift and wins over the approval error.
+    /// Refuse the whole plan when a `setColumnType` step names a column the
+    /// database will not let it retype, before the authored loop can commit
+    /// anything.
+    ///
+    /// Reads the assertion the LOWER already stamped
+    /// ([`Precondition::ColumnTypeChangeHasNoBlockers`]) rather than re-deriving
+    /// which steps are retypes from their SQL or their op. The stamp is the single
+    /// place that decides a unit is a retype, so this cannot come to a different
+    /// conclusion than the per-migration evaluator does about the same step.
+    ///
+    /// Every other precondition is left to the per-migration seam. That is not
+    /// timidity about the general case: `OnUnmet::Skip` means "leave this migration
+    /// pending", which is a per-migration verdict with no whole-plan reading, and
+    /// hoisting the `dropColumn` assertion would move when an already-shipped
+    /// refusal fires. This variant is `Halt`-only by construction (the lower stamps
+    /// it through `PreconditionCheck::halt`) and is engine-stamped, never authored,
+    /// so hoisting it changes nothing an author can observe except WHEN the refusal
+    /// arrives - which is the entire point.
+    ///
+    /// Backends with no catalog to consult answer "nothing blocks it" from the
+    /// trait default, so this is a no-op on SQLite and MySQL - which also never
+    /// receive the stamp, since the lower gates it on PostgreSQL.
+    ///
+    /// # Errors
+    /// [`ApplyError::ColumnTypeChangeBlocked`] naming the column and what the
+    /// database says blocks it.
+    async fn preflight_plan_column_retypes<B: MigrationBackend>(
+        &self,
+        steps: &[PlanStep],
+        backend: &B,
+        exec_cfg: &ExecutorConfig,
+    ) -> Result<(), DeclarativeApplyError> {
+        for step in steps {
+            let PlanStep::Ddl(m) = step else { continue };
+            for pc in &m.preconditions {
+                let crate::model::precondition::Precondition::ColumnTypeChangeHasNoBlockers {
+                    table,
+                    column,
+                } = &pc.check
+                else {
+                    continue;
+                };
+                let blockers = backend
+                    .column_type_change_blockers(exec_cfg, table, column)
+                    .await
+                    .map_err(EngineError::Apply)?;
+                if !blockers.is_empty() {
+                    return Err(DeclarativeApplyError::from(EngineError::Apply(
+                        ApplyError::ColumnTypeChangeBlocked {
+                            table: table.clone(),
+                            column: column.clone(),
+                            blockers,
+                        },
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Refuse the whole plan when any step's effective timeout budget resolves to
     /// zero, before the authored loop can commit anything.
     ///

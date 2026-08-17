@@ -5581,7 +5581,43 @@ impl IrAuthor {
                     });
                 }
                 self.refuse_mysql_alter_column("setColumnType")?;
-                vec![decl.lower_alter_column_type(table, &col)]
+                let mut units = vec![decl.lower_alter_column_type(table, &col)];
+
+                // THE COMPANION OBJECTS, which neither the op nor the live schema
+                // this lower is handed can see. PostgreSQL refuses a retype outright
+                // when a view, a rule, a generated column, an RLS policy, a trigger
+                // or a publication reads the column, when the column is part of the
+                // table's partition key, or when it is inherited from a parent -
+                // each one measured, each one a plan that cleared validate, the
+                // guard and preview and then died PART WAY THROUGH apply, leaving an
+                // earlier op in the same envelope committed against a schema that is
+                // neither the old shape nor the new one.
+                //
+                // Asserted rather than rendered around, because the retype is the
+                // only statement in this unit and there is nothing correct to emit
+                // instead: dropping the view or the policy the operator did not ask
+                // about is a bigger change than the one authored. The assertion is
+                // evaluated under the project lock immediately before the statement,
+                // so the answer cannot go stale between the check and the ALTER.
+                //
+                // NOT `ColumnHasNoBlockingDependents`, which `dropColumn` stamps a
+                // few arms above and which reads like the same question. The two
+                // disagree in BOTH directions against a live server, so sharing one
+                // would be wrong twice over - see
+                // `Precondition::ColumnTypeChangeHasNoBlockers`. PostgreSQL is the
+                // only backend with an evaluator; SQLite reconciles a type change by
+                // rebuilding the table and MySQL refuses `setColumnType` just above.
+                if self.dialect == SqlDialect::Postgres {
+                    use crate::model::precondition::{Precondition, PreconditionCheck};
+
+                    units[0].0.preconditions.push(PreconditionCheck::halt(
+                        Precondition::ColumnTypeChangeHasNoBlockers {
+                            table: table.clone(),
+                            column: column.clone(),
+                        },
+                    ));
+                }
+                units
             }
             Op::SetColumnNotNull { table, column, .. } => {
                 // Same SQLite rebuild constraint as setColumnType.

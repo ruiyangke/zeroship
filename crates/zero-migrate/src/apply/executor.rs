@@ -315,6 +315,39 @@ pub enum ApplyError {
         /// so the wording matches the server's own error DETAIL.
         blockers: Vec<String>,
     },
+    /// A `setColumnType` in this plan names a column the database will not let it
+    /// retype. Refused before ANY step of the plan runs.
+    ///
+    /// The refusal is a whole-plan one rather than a per-migration one because the
+    /// damage this prevents is not the failed statement. Each lowered unit commits
+    /// in its own transaction, so an envelope carrying `addColumn` before the
+    /// retype leaves the added column COMMITTED when the retype dies against the
+    /// server, and the operator is left with a schema that is neither the old shape
+    /// nor the new one. Asking under the lock before the first step runs is what
+    /// makes the plan all-or-nothing at this boundary.
+    ///
+    /// Deliberately NOT a CASCADE and deliberately not a repair: the blockers are
+    /// views, rules, generated columns, policies, triggers and publications the
+    /// operator never named in a step approved for one column's type, and dropping
+    /// them silently is a larger change than the one authored.
+    #[error(
+        "changing the type of {table:?}.{column:?} would be refused by the database because \
+         {blockers:?} block it. No step of this plan has run, because a plan that dies at \
+         this statement would leave the steps before it committed against a schema that is \
+         neither the old shape nor the new one. Redefine or drop the blockers first, or \
+         change the type by hand with them rebuilt around it"
+    )]
+    ColumnTypeChangeBlocked {
+        /// The table carrying the column being retyped.
+        table: String,
+        /// The column whose type the plan would change.
+        column: String,
+        /// What the database says blocks the retype, rendered by
+        /// `pg_describe_object` so the wording matches the server's own error
+        /// DETAIL, plus the two structural blockers that are not dependencies at
+        /// all (partition-key membership, column inheritance).
+        blockers: Vec<String>,
+    },
     /// An already-applied migration's recorded checksum no longer matches the
     /// migration in the set — drift / tamper. Hard abort.
     ///
