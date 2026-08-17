@@ -66,6 +66,22 @@ async fn seed_oauth_client(client: &Client, client_id: &str) {
         .expect("seed oauth client");
 }
 
+/// The pairwise subject the gateway would project for `(user, client)`, derived
+/// through the production function with a fixture salt.
+///
+/// A hand-written `pws_<random>` is shape-valid and therefore survives
+/// `is_pairwise_subject`, so a shape check cannot catch it - but it is not the
+/// value any real credential for this pair carries. Since the stored subject is
+/// IMMUTABLE (`identities::upsert` refuses to rewrite it), a fabricated seed
+/// turns the first token mint added to this binary into an opaque 500.
+fn fixture_pairwise_sub(client_id: &str, user_id: Uuid) -> String {
+    zeroship_core::auth::derive_pairwise(
+        &zeroship_core::crypto::derive_key("identities-relay-test-salt"),
+        &user_id.to_string(),
+        &format!("https://{client_id}.zeroship.test"),
+    )
+}
+
 async fn cleanup(client: &Client, client_id: &str, user_id: Uuid) {
     let _ = client
         .execute(
@@ -93,7 +109,7 @@ async fn lookup_relay_email_returns_active_alias_and_fails_closed_on_revoke() {
     let client_id = format!("oac_relayswap_{}", Uuid::new_v4().simple());
     seed_oauth_client(&client, &client_id).await;
     let user_id = seed_user(&client, "relayswap").await;
-    let pairwise_sub = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
+    let pairwise_sub = fixture_pairwise_sub(&client_id, user_id);
     let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
 
     // Active alias row (relay_email set, revoked_at NULL).
@@ -137,6 +153,82 @@ async fn lookup_relay_email_returns_active_alias_and_fails_closed_on_revoke() {
     cleanup(&client, &client_id, user_id).await;
 }
 
+/// The immutable-binding guard in `identities::upsert`, exercised through the
+/// real function against a real database.
+///
+/// `identity_upsert_sql`'s `WHERE ...pairwise_sub = EXCLUDED.pairwise_sub` is what
+/// makes a stored subject immutable: a conflicting insert that carries a
+/// DIFFERENT subject updates zero rows, and `upsert` turns that zero into a
+/// hard error rather than silently re-keying the row every app uses as its
+/// permanent per-user foreign key.
+///
+/// The unit test above this file (`identities.rs`) only asserts the SQL STRING
+/// contains that clause, which would still pass if the clause were moved into a
+/// comment and the runtime check dropped. This test asserts the BEHAVIOUR:
+/// second bind fails, and the first subject is still what a read returns.
+#[compio::test]
+async fn upsert_refuses_to_rebind_a_stored_pairwise_subject() {
+    let Some(mut client) = pg_or_skip().await else {
+        zeroship_test_support::skip("[identities_relay_test] skip (no AUTH_DB_URL)");
+        return;
+    };
+    let client_id = format!("oac_rebind_{}", Uuid::new_v4().simple());
+    seed_oauth_client(&client, &client_id).await;
+    let user_id = seed_user(&client, "rebind").await;
+
+    // Both subjects are DERIVED the way the gateway derives them, so neither is
+    // a hand-invented string that happens to differ: they are the two values
+    // the same user genuinely projects to under two sector identifiers, which
+    // is exactly the configuration drift the guard exists to refuse.
+    let salt = zeroship_core::auth::derive_pairwise_salt(b"identities-rebind-fixture-salt");
+    let user_sub = user_id.to_string();
+    let subject_a = zeroship_core::auth::derive_pairwise(
+        &salt,
+        &user_sub,
+        "https://rebind-a.zeroship.test",
+    );
+    let subject_b = zeroship_core::auth::derive_pairwise(
+        &salt,
+        &user_sub,
+        "https://rebind-b.zeroship.test",
+    );
+    assert_ne!(
+        subject_a, subject_b,
+        "the fixture must offer the guard two genuinely different subjects"
+    );
+
+    identities::upsert(&mut client, &client_id, user_id, &subject_a)
+        .await
+        .expect("first bind must be accepted");
+
+    // Re-deriving the SAME subject is the normal re-login path and must still
+    // pass, so the test cannot be satisfied by a guard that rejects everything.
+    identities::upsert(&mut client, &client_id, user_id, &subject_a)
+        .await
+        .expect("re-binding the same subject is idempotent, not a conflict");
+
+    let err = identities::upsert(&mut client, &client_id, user_id, &subject_b)
+        .await
+        .expect_err("re-binding a DIFFERENT subject must fail closed");
+    let message = format!("{err}");
+    assert!(
+        message.contains("pairwise binding changed"),
+        "the refusal must name the binding, got: {message}"
+    );
+
+    // The row must still carry the FIRST subject: failing closed means the
+    // stored identity survived, not that the write half-landed.
+    assert_eq!(
+        identities::lookup_pairwise_sub(&mut client, &client_id, user_id)
+            .await
+            .expect("lookup after refused rebind"),
+        Some(subject_a.clone()),
+        "the refused rebind must leave the original subject stored"
+    );
+
+    cleanup(&client, &client_id, user_id).await;
+}
+
 #[compio::test]
 async fn lookup_relay_email_is_none_when_no_alias_minted() {
     let Some(mut client) = pg_or_skip().await else {
@@ -146,7 +238,7 @@ async fn lookup_relay_email_is_none_when_no_alias_minted() {
     let client_id = format!("oac_noalias_{}", Uuid::new_v4().simple());
     seed_oauth_client(&client, &client_id).await;
     let user_id = seed_user(&client, "noalias").await;
-    let pairwise_sub = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
+    let pairwise_sub = fixture_pairwise_sub(&client_id, user_id);
 
     // Identity row exists (gateway upserted the pairwise mapping) but no alias
     // minted yet — relay_email NULL (consent ran before, or no email scope).

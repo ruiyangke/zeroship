@@ -4,7 +4,6 @@ mod common;
 
 use std::sync::Arc;
 
-use ed25519_dalek::SigningKey;
 use ntex::web;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -98,7 +97,7 @@ async fn boot_native() -> Option<(
 }
 
 fn test_issuer() -> Issuer {
-    let signing = SigningKey::from_bytes(&[51u8; 32]);
+    let signing = common::op_signing_key();
     Issuer::from_signing_key(&signing, [13u8; 32], "https://auth.zeroship.test/oauth2".into())
         .expect("issuer")
 }

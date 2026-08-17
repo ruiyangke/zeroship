@@ -485,6 +485,7 @@ impl zeroship_bundle::BlobStore for StubBlobStore {
 const APP_HOST: &str = "myapp.zeroship.ai";
 const APP_NAME: &str = "myapp";
 const CLIENT_ID: &str = "oac_myapp";
+const PAIRWISE_TEST_SALT_SEED: &str = "pairwise-test-salt";
 const BCL_REFRESH_APP_HOST: &str = "bcl-refresh.zeroship.ai";
 const BCL_REFRESH_APP_NAME: &str = "bcl-refresh";
 const BCL_REFRESH_CLIENT_ID: &str = "oac_bcl_refresh";
@@ -495,6 +496,18 @@ const BCL_REFRESH_APP_UUID: &str = "00000000-0000-7000-8000-0000000000bb";
 /// is exactly what lets the cookie validate on the real SPA→app dispatch arm
 /// (the `app_id` column is UUID, bound natively).
 const APP_UUID: &str = "00000000-0000-7000-8000-0000000000aa";
+
+fn test_pairwise_salt() -> [u8; 32] {
+    zeroship_core::crypto::derive_key(PAIRWISE_TEST_SALT_SEED)
+}
+
+fn test_pairwise_subject(user_id: Uuid, app_host: &str) -> String {
+    zeroship_core::auth::derive_pairwise(
+        &test_pairwise_salt(),
+        &user_id.to_string(),
+        &format!("https://{app_host}"),
+    )
+}
 
 /// Build a `GateState` whose `OidcRp` dials the loopback mock OP and
 /// whose route cache has one provisioned app (`myapp` → `oac_myapp`).
@@ -540,7 +553,7 @@ fn build_state_with_route(
     .with_issuer(MOCK_ISSUER);
 
     let routes = RouteCache::new();
-    let pairwise_salt = zeroship_core::crypto::derive_key("pairwise-test-salt");
+    let pairwise_salt = test_pairwise_salt();
     routes.update_snapshot(
         zeroship_core::types::GatewaySnapshot {
             routes: build_route_map_for(app_uuid, app_name, app_host, client_id),
@@ -1236,10 +1249,16 @@ const REAL_EMAIL: &str = "user@example.com";
 /// by pairwise projection and populated with the alias at consent. The
 /// email-claim swap reads THIS and projects it instead of the real email.
 async fn seed_relay_alias(dsn: &str, user_id: Uuid, relay_email: &str) {
-    seed_relay_alias_for(dsn, CLIENT_ID, user_id, relay_email).await;
+    seed_relay_alias_for(dsn, CLIENT_ID, APP_HOST, user_id, relay_email).await;
 }
 
-async fn seed_relay_alias_for(dsn: &str, client_id: &str, user_id: Uuid, relay_email: &str) {
+async fn seed_relay_alias_for(
+    dsn: &str,
+    client_id: &str,
+    app_host: &str,
+    user_id: Uuid,
+    relay_email: &str,
+) {
     let (client, conn) = compio_postgres::connect(dsn, compio_postgres::NoTls)
         .await
         .expect("connect");
@@ -1247,7 +1266,7 @@ async fn seed_relay_alias_for(dsn: &str, client_id: &str, user_id: Uuid, relay_e
         let _ = conn.run().await;
     })
     .detach();
-    let pairwise_sub = format!("pws_seed_{}", user_id.simple());
+    let pairwise_sub = test_pairwise_subject(user_id, app_host);
     client
         .execute(
             "INSERT INTO zeroship.app_user_identities \
@@ -1477,6 +1496,13 @@ async fn token_exchange_swaps_email_for_relay_alias() {
     assert_eq!(resp.status().as_u16(), 200, "code exchange must succeed");
 
     let body: serde_json::Value = read_json(resp).await;
+
+    let expected_pws = test_pairwise_subject(user_id, APP_HOST);
+    assert_eq!(
+        body["user"]["id"],
+        serde_json::json!(expected_pws),
+        "relay projection must preserve the route's deterministic pairwise identity"
+    );
 
     // The user projection carries the relay ALIAS, never the real email.
     assert_eq!(body["user"]["email"], serde_json::json!(relay_email));
@@ -1764,7 +1790,14 @@ async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
     )
     .await;
     let relay_email = format!("{}@relay.zeroship.localhost", user_id.simple());
-    seed_relay_alias_for(&dsn, BCL_REFRESH_CLIENT_ID, user_id, &relay_email).await;
+    seed_relay_alias_for(
+        &dsn,
+        BCL_REFRESH_CLIENT_ID,
+        BCL_REFRESH_APP_HOST,
+        user_id,
+        &relay_email,
+    )
+    .await;
     let (base, _srv) = boot_mock_op(op.clone()).await;
     let db_cfg = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
     let state = build_state_with_route(

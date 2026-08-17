@@ -105,11 +105,22 @@ echo "------------------------------------------------------------------"
 # 0.00s without a DSN against the same "ok. 1 passed" in 0.22s with one. Same
 # count, same exit code, only the clock differed.
 #
-# `oidc_rp_e2e` is deliberately absent: it also wants CONTROL_TEST_DB, which
-# this script does not provision, so it would skip and fail the check below.
-# tests/run_billing_suite.sh was named here as owning the CONTROL_TEST_DB half -
-# it does not. That script invokes zeroship-control and zeroship-migrated and
-# never touches the gateway crate, so oidc_rp_e2e is covered by nothing.
+# `oidc_rp_e2e` used to be excluded BY NAME here, on the stated ground that it
+# "also wants CONTROL_TEST_DB, which this script does not provision, so it would
+# skip". That reason was wrong, and the file says so: `db_url()` at
+# crates/gateway/tests/oidc_rp_e2e.rs:47 is
+# `test_env!("AUTH_DB_URL").or_else(|| test_env!("CONTROL_TEST_DB"))` - EITHER
+# variable satisfies it, and this script exports the first one. Measured
+# 2026-08-16 with CONTROL_TEST_DB explicitly unset and only AUTH_DB_URL set:
+# "3 passed in 6.73s", against the "3 passed in 0.00s" the same target reports
+# with neither. The exclusion cost real coverage for a provisioning gap that did
+# not exist, and this is the branch's strongest new assertion (the projected
+# identity check) - which no gate ran.
+#
+# It is in the list below now. It needs no allowlist entry and gets none: it
+# announces through `zeroship_test_support::skip`, so if it ever stops seeing a
+# database the census below counts it and this gate goes red, which is the
+# required behaviour - a self-skip here is a FAILURE, not a pass.
 #
 # GATEWAY_ANCHORS_DB_URL used to be set nowhere in this repo, so the 13 gated
 # tests in `auth_token_anchors_test` and the 1 in `browser_auth_test` announced
@@ -144,6 +155,7 @@ for spec in \
   "zeroship-gateway:browser_auth_test" \
   "zeroship-gateway:identities_relay_test" \
   "zeroship-gateway:sessions_test" \
+  "zeroship-gateway:oidc_rp_e2e" \
 ; do
   pkg="${spec%%:*}"
   bin="${spec#*:}"
@@ -205,10 +217,16 @@ passed="$(grep -oE '^test result: ok\. [0-9]+ passed' "$LOG" | grep -oE '[0-9]+'
 # backchannel_logout}_test and device_grant_test all report "ok" in ~0.00s, and
 # the grep above finds zero. The gate would print "0 skipped" and exit 0.
 #
-# So require a MINIMUM instead of forbidding a maximum. 505 against 543 measured
-# on 2026-08-07 is the same ~7 percent headroom the CI test-target floor carries.
-# Raise it as the suite grows; a fixed floor gets looser with every test added,
-# which is the wrong direction for a guard against coverage loss.
+# So require a MINIMUM instead of forbidding a maximum. The floor tracks the
+# measured total at ~7 percent headroom, the same margin the CI test-target floor
+# carries. Raise it as the suite grows; a fixed floor gets looser with every test
+# added, which is the wrong direction for a guard against coverage loss.
+#
+# History, so nobody reads the gap between floor and total as slack: 505 was set
+# against 543 measured on 2026-08-07. The suite then reached 636 and the floor
+# stayed put, leaving 21 percent of the suite free to vanish unnoticed. 595 is
+# against 640 measured on 2026-08-16 - the 636 the fixture repairs reached, plus
+# oidc_rp_e2e's 3 (newly run by this gate) and the identities rebinding test.
 # Checked BEFORE the floor, because a build that died for want of disk space also
 # passes zero tests. Without this the gate blames coverage loss and tells you to
 # lower AUTH_MIN_PASSED - advice that would permanently weaken the guard in
@@ -218,7 +236,7 @@ if log_shows_disk_full "$LOG"; then
   exit 90
 fi
 
-AUTH_MIN_PASSED="${AUTH_MIN_PASSED:-505}"
+AUTH_MIN_PASSED="${AUTH_MIN_PASSED:-595}"
 if [ "$passed" -lt "$AUTH_MIN_PASSED" ]; then
   echo "FAIL: only ${passed} auth tests passed, fewer than the ${AUTH_MIN_PASSED} this gate expects." >&2
   echo "A suite that silently stopped running is indistinguishable from a suite that passed." >&2
