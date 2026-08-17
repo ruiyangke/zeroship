@@ -2214,43 +2214,51 @@ remains usable until expiry and the surviving anchor can mint another cookie.
 The listed app-session idle time is also not a reliable activity signal because
 ordinary requests never slide that audit row.
 
-### 3. HIGH: PAT issuance discards the caller's OAuth scope ceiling
+### 3. RESOLVED BY DELETION: PAT issuance discarded the caller's OAuth scope ceiling
 
-VERIFIED: `create_token` claims an interactive OAuth/BFF session is required but
-only rejects `guard.token_id.is_some()`
-(`crates/control/src/token_handlers.rs:64-74`). Every OAuth bearer, including a
-`zeroship-cli` token, becomes `token_id=None` with a token policy
-(`crates/authn/src/lib.rs:401-445`,
-`crates/control/src/authz_guard.rs:200-210`). The grant-subset check then builds a
-new context with both `token_id=None` and `token_policy=None`, so it checks only
-the subject's static authority
-(`crates/control/src/token_handlers.rs:266-337`). Tests call this shape
-interactive while using `client_id=zeroship-cli`
-(`crates/control/tests/token_handlers_test.rs:1-8`,
-`crates/control/tests/common/mod.rs:137-160`,
-`crates/control/tests/token_handlers_test.rs:245-264`).
+What was found, kept so the defect stays legible: `create_token` claimed an
+interactive OAuth/BFF session was required but only rejected
+`guard.token_id.is_some()`. Every OAuth bearer, including a `zeroship-cli`
+token, arrives as `token_id=None` with a scope-derived wrapper policy, so it
+passed. The grant-subset check then built a fresh context with both
+`token_id=None` and `token_policy=None`, so it consulted only the subject's
+static authority; the caller's own scope ceiling never entered the decision.
+The control test suite called that shape interactive while authenticating with
+`client_id=zeroship-cli`.
 
-INFERRED impact: a valid low-scope, empty-scope, or 12-hour CLI OAuth bearer can
-mint a PAT lasting up to 365 days with any permission the underlying subject
-has. The request-time owner-and-token intersection remains sound; the defect is
-the issuance-time caller boundary.
+INFERRED impact as recorded: a valid low-scope, empty-scope, or 12-hour CLI
+OAuth bearer could mint a PAT lasting up to 365 days carrying any permission
+the underlying subject held. The request-time owner-and-wrapper intersection
+was sound; the defect was the issuance-time caller boundary.
 
-### 4. HIGH: PAT token management bypasses the token's policy
+RESOLVED BY DELETION, not by adding the missing ceiling check: `POST /me/tokens`
+and control's `token_handlers` module are gone, so there is no issuance-time
+caller boundary left to get wrong. The operator decision is section 11 of
+`docs/proposals/2026-08-16-cli-token-issuance.md`, which names this finding as
+the one that deletion answers. See section 4.1. The citations that carried this
+finding (`crates/control/src/token_handlers.rs`,
+`crates/control/tests/token_handlers_test.rs`) named files that no longer
+exist and are therefore stated rather than cited.
 
-VERIFIED: `list_tokens` and `delete_token` extract `AuthzGuard` but never call
-its `require` method; they proceed directly with an owner-ID predicate
-(`crates/control/src/token_handlers.rs:162-255`). `AuthzGuard::require` is the
-only bridge from an authenticated principal to `authz::enforce`, where current
-owner authority and PAT policy are intersected
-(`crates/control/src/authz_guard.rs:48-91`,
-`crates/authz/src/eval.rs:33-74`). Authentication, active-token lookup, and
-owner lifecycle still run before the handler
-(`crates/authn/src/lib.rs:205-276`).
+### 4. RESOLVED BY DELETION: PAT token management bypassed the token's policy
 
-INFERRED impact: any active PAT for an owner, including a deny-only or narrowly
-scoped token, can enumerate and revoke every sibling PAT for that owner. The
-owner predicate blocks cross-owner access, but the advertised token-policy
-ceiling is absent on these two authorization decisions.
+What was found: `list_tokens` and `delete_token` extracted `AuthzGuard` but
+never called its `require` method; they proceeded straight to an owner-ID
+predicate. `AuthzGuard::require` is the only bridge from an authenticated
+principal to `authz::enforce`, where current owner authority and the caller's
+wrapper policy are intersected (`crates/control/src/authz_guard.rs`,
+`crates/authz/src/eval.rs`, `enforce`). Authentication, active-token lookup and
+owner lifecycle still ran before the handler.
+
+INFERRED impact as recorded: any active PAT for an owner, including a deny-only
+or narrowly scoped one, could enumerate and revoke every sibling PAT for that
+owner. The owner predicate blocked cross-owner access, but the advertised
+token-policy ceiling was absent on those two authorization decisions.
+
+RESOLVED BY DELETION: `GET /me/tokens`, `DELETE /me/tokens/{id}` and the handler
+module are gone, and so is the `zeroship.permission_tokens` table they read
+(`db/migrations-ts/20260817000000_drop_permission_tokens.ts`). No route reaches
+that decision any more. See section 4.1.
 
 ### 5. HIGH: `auth: "admin"` is enforced exactly as `auth: "user"`
 
@@ -2506,20 +2514,24 @@ current reachability, but when the feature is deliberately enabled, the first
 hop still has no cryptographic way to distinguish Control from another caller
 that can reach Gateway.
 
-### 16. MEDIUM: Migrated loads the PAT private signing key only to verify
+### 16. RESOLVED BY DELETION: Migrated loaded the PAT private signing key only to verify
 
-VERIFIED: Migrated requires the Control PAT signing-key file and constructs a
-full `PatIssuer` from it (`crates/migrated/src/main.rs:108-118`,
-`crates/migrated/src/main.rs:239-251`). That type retains PKCS#8 private bytes
-and exposes issuance as well as verification (`crates/authn/src/lib.rs:46-75`,
-`crates/authn/src/lib.rs:89-141`). Migrated passes it only into the shared bearer
-verifier (`crates/migrated/src/main.rs:166-179`).
+What was found: Migrated required Control's PAT signing-key file
+(`--signing-key-file` / `ZEROSHIP_MIGRATED_SIGNING_KEY_FILE`) and built a full
+`PatIssuer` from it. That type retained the PKCS#8 private bytes and exposed
+issuance as well as verification, yet Migrated passed it only into the shared
+bearer verifier. Search method: `rg 'pat_issuer|PatIssuer|\.issue\(' crates/migrated/src`
+found construction, verifier injection and tests, but no issuance call. The
+INFERRED remedy recorded at the time was to hand Migrated a public verification
+key instead, restoring the Control-signer / Migrated-verifier custody split.
 
-Search method: `rg 'pat_issuer|PatIssuer|\.issue\(' crates/migrated/src` found
-construction, verifier injection, and tests, but no issuance call. INFERRED:
-because the positive request path uses `BearerVerifier::verify`, a public
-verification key should preserve behavior while restoring the
-Control-signer/Migrated-verifier custody split.
+RESOLVED BY DELETION rather than by splitting the key: `PatIssuer` no longer
+exists, and both Migrated's and Control's `--signing-key-file` inputs were
+removed with it, since building a `PatIssuer` was the only thing either did
+with one. Migrated now holds no signing key at all and verifies platform OAuth
+bearers through the OP's published JWKS (`crates/migrated/src/main.rs`). Note
+that Gateway's identically named `--signing-key-file` is a different consumer -
+it signs app-session wrapper tokens - and is untouched.
 
 ### 17. MEDIUM: Control and Migrated disagree on accepted OAuth issuers
 
@@ -2852,11 +2864,15 @@ VERIFIED drift:
   for a loopback dev bind, but the binary unconditionally validates a strong
   key before binding (`crates/worker/src/main.rs:48-68`,
   `crates/worker/src/main.rs:217-226`).
-- `crates/control/src/lib.rs:529-532` says PATs reuse Gateway's signing key, but
-  deployment config gives Control and Gateway different key files
-  (`deploy/compose/docker-compose.yml:291-304`,
-  `deploy/compose/docker-compose.yml:505-518`).
-- `crates/control/src/lib.rs:570-577` says pairwise salt derives from the Gateway
+- RESOLVED BY DELETION. The `pat_issuer` field on control's `AppState` carried a
+  doc comment saying PATs reused the gateway's `--signing-key-file` key
+  material, which was false in the shipped topology: Compose gave Control and
+  Gateway different key files. The field, its comment and control's
+  `--signing-key-file` are all gone with the PAT class (section 4.1), so the
+  claim no longer exists to be wrong. Gateway keeps its own signing key
+  (`deploy/compose/docker-compose.yml:512`).
+- `crates/control/src/lib.rs`, the `pairwise_salt` field, says the salt derives
+  from the Gateway
   stash key and names wrapper/DPoP readers. The implementation uses a dedicated
   permanent pairwise secret (`crates/core/src/auth/mod.rs:235-264`) and the DPoP
   arm is gone.
