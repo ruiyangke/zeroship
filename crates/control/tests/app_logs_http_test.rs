@@ -104,8 +104,7 @@ async fn build_test_state(db_url: &str, worker_urls: Vec<String>) -> Fixture {
             expected_oauth_audience: "control.zeroship.ai".to_string(),
             static_policies: zeroship_authz::load_platform_policies()
                 .expect("bundled authz policies parse"),
-            pat_issuer: Arc::new(zeroship_authn::PatIssuer::generate_ephemeral()),
-            auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
+            auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some(common::platform_jwks_url())),
         // No platform deploy-token mint here: that is control's OUTBOUND
         // destination for the device flow, and no fixture below drives one.
         provider_registry: zeroship_control::metering::provider::builtin_registry(),
@@ -162,7 +161,7 @@ async fn app_logs_route_proxies_worker_lines() {
         .expect("unauthenticated control response");
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
-    let pat = common::authz_fixture::admin_pat(&fixture.state).await;
+    let pat = common::authz_fixture::admin_principal(&fixture.state).await;
     let response = control
         .get(format!("/api/apps/{app_id}/logs"))
         .header("authorization", pat.bearer())

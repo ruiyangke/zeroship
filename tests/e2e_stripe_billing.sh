@@ -173,13 +173,15 @@ chmod 600 "$WORK/signing-key.pem"
 # secret key (from env; NEVER on the command line where it'd hit /proc/cmdline).
 # The generated ZEROSHIP_CONTROL_KEY gates the /internal/* endpoints. The webhook secret is a known
 # throwaway so the harness can produce VALID signatures (the REAL verify path).
-ZEROSHIP_CONTROL_SIGNING_KEY_FILE="$WORK/signing-key.pem"
-ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$ZEROSHIP_CONTROL_SIGNING_KEY_FILE"
+ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$WORK/signing-key.pem"
+# The issuer control verifies the admin bearer against, on the same key the
+# gateway signs with. Up BEFORE control: control reads the issuer once at boot.
+e2e_platform_op_up "$WORK/signing-key.pem" "$WORK" || exit 1
 e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DBURL"
 ZEROSHIP_CONTROL_STRIPE_SECRET_KEY="$SK" ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET="$WEBHOOK_SECRET" \
 e2e_with_platform_mint_key "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
-  --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
+  --blob-store "$WORK/blobs" \
   --stripe-base-url "https://api.stripe.com" \
  > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
@@ -421,51 +423,28 @@ fi
 echo ""
 echo "=== Stage 6: REAL cash Refund (re_…) via POST /api/invoices/{id}/refunds ==="
 # ===========================================================================
-# Mint a platform-admin PAT so the authenticated refund endpoint accepts us.
+# Mint a platform-admin bearer so the authenticated refund endpoint accepts us.
 INTERNAL_INV="$(psql_db -tA -c "SELECT id FROM zeroship.invoices WHERE creator_id='$CREATOR' ORDER BY created_at DESC LIMIT 1" 2>/dev/null | tr -d '[:space:]')"
 [ -n "$INTERNAL_INV" ] && pass "internal invoice id = $INTERNAL_INV" || { fail "no internal invoice row"; }
 
-POLICY_JSON='{"name":"e2e-stripe-admin","statements":[{"effect":"allow","actions":["billing:read","billing:write"],"resources":[{"type":"any"}],"conditions":[]}]}'
-POLICY_HASH="$(node -e '
-const {createHash}=require("crypto");
-function c(v){if(v===null||typeof v==="number"||typeof v==="boolean"||typeof v==="string")return JSON.stringify(v);
-if(Array.isArray(v))return "["+v.map(c).join(",")+"]";
-return "{"+Object.keys(v).sort().map(k=>JSON.stringify(k)+":"+c(v[k])).join(",")+"}";}
-process.stdout.write(createHash("sha256").update(c(JSON.parse(process.argv[1]))).digest("hex"));
-' "$POLICY_JSON")"
+# The deleted policy's action list, one-for-one, as OAuth scopes.
+SCOPE="billing:read billing:write"
 ADMIN="$CREATOR"   # reuse the creator as the admin principal
-TOKID="$(node -e 'console.log(require("crypto").randomUUID())')"
-EXP=$(( NOW_UNIX + 86400 ))
 psql_db -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by) VALUES ('$ADMIN','admin','$ADMIN') ON CONFLICT DO NOTHING;
-INSERT INTO zeroship.permission_tokens (id, owner_id, kind, name, policies, policy_hash, expires_at)
-VALUES ('$TOKID','$ADMIN','pat','e2e stripe harness','$POLICY_JSON'::jsonb,'$POLICY_HASH', to_timestamp($EXP));
 SQL
 JOSE_JS="$ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index.js"
-PAT=""
+ADMIN_TOKEN=""
 if [ -f "$JOSE_JS" ]; then
-  PAT="$(node --input-type=module -e '
-  import { readFileSync } from "node:fs";
-  import { createHash, randomBytes } from "node:crypto";
-  import { importPKCS8, exportJWK, SignJWT } from "file://'"$JOSE_JS"'";
-  const [pem, owner, tid, phash, exp] = process.argv.slice(1);
-  const key = await importPKCS8(readFileSync(pem,"utf8"), "EdDSA", { extractable:true });
-  const x = (await exportJWK(key)).x;
-  const kid = createHash("sha256").update(`{"crv":"Ed25519","kty":"OKP","x":"${x}"}`).digest("base64url");
-  const jwt = await new SignJWT({ sub:owner, owner, tid, jti:tid, scope:"pat", policy_hash:phash, nonce:randomBytes(32).toString("base64url") })
-    .setProtectedHeader({ alg:"EdDSA", typ:"pat+jwt", kid })
-    .setIssuer("https://api.zeroship.ai").setAudience("control.zeroship.ai")
-    .setIssuedAt(Math.floor(Date.now()/1000)).setExpirationTime(Number(exp)).sign(key);
-  process.stdout.write(jwt);
-  ' "$WORK/signing-key.pem" "$ADMIN" "$TOKID" "$POLICY_HASH" "$EXP")"
+  ADMIN_TOKEN="$(e2e_mint_platform_bearer "$ADMIN" "$SCOPE")"
 fi
-[ "$(echo -n "$PAT" | awk -F. '{print NF}')" = "3" ] && pass "minted admin PAT for the refund endpoint" || diverge "could not mint PAT (jose missing?) — refund leg will be skipped"
+[ "$(echo -n "$ADMIN_TOKEN" | awk -F. '{print NF}')" = "3" ] && pass "minted admin bearer for the refund endpoint" || diverge "could not mint bearer (jose missing?) — refund leg will be skipped"
 
 REFUND_OK=0
-if [ -n "$PAT" ] && [ -n "$INTERNAL_INV" ]; then
+if [ -n "$ADMIN_TOKEN" ] && [ -n "$INTERNAL_INV" ]; then
   # Refund 200c of the 750c cash to the card (destination=cash → a REAL re_…).
   REFJSON="$(curl -s -w '\n%{http_code}' -X POST "$CONTROL_URL/api/invoices/$INTERNAL_INV/refunds" \
-    -H 'content-type: application/json' -H "Authorization: Bearer $PAT" \
+    -H 'content-type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" \
     -H "Idempotency-Key: e2e-refund-$INTERNAL_INV-200" \
     -d '{"amount_cents":200,"destination":"cash"}')"
   REF_CODE="$(echo "$REFJSON" | tail -1)"; REF_BODY="$(echo "$REFJSON" | head -n -1)"

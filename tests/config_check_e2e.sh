@@ -238,7 +238,10 @@ CONTROL_ENV=(
     ZEROSHIP_WORKER_KEY="$WORKER_KEY_HEX"
     ZEROSHIP_PAIRWISE_SALT="$STRONG_HEX"
 )
-CONTROL_COMMON=(--signing-key-file "$TMPDIR/control-signing.pem")
+# Control takes no key file of its own any more: the PAT signing key it used to
+# load was the only consumer, and both are deleted. Kept as an empty array so
+# every call site below still reads the same.
+CONTROL_COMMON=()
 # Split out so a case can vary the master key alone.
 CONTROL_MASTER=(ZEROSHIP_CONTROL_MASTER_KEY="$STRONG_HEX")
 CONTROL_RUN=("${CONTROL_ENV[@]}" "${CONTROL_MASTER[@]}" "$CONTROL")

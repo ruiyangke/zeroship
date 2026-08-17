@@ -45,7 +45,6 @@ pub mod stripe_client;
 pub mod stripe_handlers;
 pub mod stripe_store;
 pub mod tax;
-pub mod token_handlers;
 pub mod void_reissue;
 pub mod workflow_instance_api;
 pub(crate) mod workflow_limits;
@@ -491,9 +490,9 @@ pub struct AppState {
     pub deploy_tmp_dir: std::path::PathBuf,
     /// Shared long-lived Postgres client on the SINGLE physical `zeroship`
     /// database — the same DB the `registry` opens per-query connections on.
-    /// Used by the `AuthzGuard` bearer path (`zeroship.permission_tokens`
-    /// lookup + Cedar enforcement against `zeroship.*`), the audit emitter,
-    /// and the connected-app OAuth grant handlers.
+    /// Used by the `AuthzGuard` bearer path (Cedar enforcement against
+    /// `zeroship.*`), the audit emitter, and the connected-app OAuth grant
+    /// handlers.
     ///
     /// There is no separate auth database any more: control's former
     /// `--auth-db` was only ever a config capability (compose always pointed
@@ -524,12 +523,8 @@ pub struct AppState {
     /// Parsed once at boot; per-token policies are loaded by the authz
     /// evaluator only when a token-bearing request needs them.
     pub static_policies: zeroship_authz::PolicySet,
-    /// Ed25519 issuer/verifier for first-party Personal Access Tokens.
-    /// Control uses the same key material as the gateway's
-    /// `--signing-key-file` wrapper-token issuer for P9 v1.
-    pub pat_issuer: Arc<zeroship_authn::PatIssuer>,
-    /// Platform auth-provider token verifier for third-party OAuth bearer
-    /// access tokens. Used only after local PAT verification fails.
+    /// Platform auth-provider token verifier for OAuth bearer access tokens.
+    /// The ONLY bearer path: control signs nothing of its own.
     pub auth_provider: Arc<zeroship_core::auth_provider::AuthProvider>,
     /// Provider factories available in this process. Boot registers built-ins
     /// explicitly, then builds the role-addressed billing stack below.
@@ -573,12 +568,11 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Build the shared bearer verifier from the only control-plane state
-    /// needed by the PAT + OAuth bearer path.
+    /// Build the shared bearer verifier from the only control-plane state the
+    /// OAuth bearer path needs.
     #[must_use]
     pub fn bearer_verifier(&self) -> zeroship_authn::BearerVerifier {
         zeroship_authn::BearerVerifier::new(
-            Arc::clone(&self.pat_issuer),
             Arc::clone(&self.control_pg),
             Arc::clone(&self.auth_provider),
             self.trusted_oauth_clients.clone(),

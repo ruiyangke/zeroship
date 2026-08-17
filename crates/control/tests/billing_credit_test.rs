@@ -30,14 +30,10 @@ mod common;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use chrono::{Duration, Utc};
 use ntex::http::StatusCode;
 use ntex::web::{self, test};
 use uuid::Uuid;
 
-use zeroship_authz::{
-    policy_hash, Action as AuthzAction, Effect, Policy, Resource as AuthzResource, Statement,
-};
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::cron::billing_reconcile;
 use zeroship_control::credit::{self, GrantOutcome};
@@ -286,8 +282,7 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         expected_oauth_audience: "control.zeroship.ai".to_string(),
         static_policies: zeroship_authz::load_platform_policies()
             .expect("bundled authz policies parse"),
-        pat_issuer: Arc::new(zeroship_authn::PatIssuer::generate_ephemeral()),
-        auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
+        auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some(common::platform_jwks_url())),
         // No platform deploy-token mint here: that is control's OUTBOUND
         // destination for the device flow, and no fixture below drives one.
         provider_registry: zeroship_control::metering::provider::builtin_registry(),
@@ -911,18 +906,18 @@ async fn grant_helper_idempotency_key_and_fingerprint() {
 //     handler through an ntex test app + the REAL authz guard.
 // ===========================================================================
 
-struct Pat {
+struct Caller {
     token: String,
 }
 
-impl Pat {
+impl Caller {
     fn bearer(&self) -> String {
         format!("Bearer {}", self.token)
     }
 }
 
-/// Issue a real PAT bound to `policy` (faithful AuthzGuard path).
-async fn issue_pat(state: &AppState, user_id: Uuid, role: Option<&str>, policy: Policy) -> Pat {
+/// Issue a real platform OAuth bearer scoped to `scope` (faithful AuthzGuard path).
+async fn issue_bearer(state: &AppState, user_id: Uuid, role: Option<&str>, scope: &str) -> Caller {
     if let Some(role) = role {
         state
             .control_pg
@@ -934,53 +929,19 @@ async fn issue_pat(state: &AppState, user_id: Uuid, role: Option<&str>, policy: 
             .await
             .expect("insert platform role");
     }
-    let token_id = Uuid::new_v4();
-    let policies = policy.to_json_value();
-    let hash = policy_hash(&policies);
-    let expires_at = Utc::now() + Duration::days(1);
-    let token = state
-        .pat_issuer
-        .issue(token_id, user_id, hash.clone(), expires_at)
-        .expect("issue PAT");
-    state
-        .control_pg
-        .execute(
-            "INSERT INTO zeroship.permission_tokens \
-                (id, owner_id, kind, name, policies, policy_hash, expires_at) \
-             VALUES ($1, $2, 'pat', 'credit PAT', $3, $4, $5)",
-            &[&token_id, &user_id, &policies, &hash, &expires_at],
-        )
-        .await
-        .expect("insert PAT row");
-    Pat { token }
-}
-
-/// Operator policy: BillingWrite on `Resource::Any` — the fleet-wide gate.
-fn billing_any() -> Policy {
-    Policy {
-        name: "operator".to_owned(),
-        statements: vec![Statement {
-            effect: Effect::Allow,
-            actions: vec![AuthzAction::BillingRead, AuthzAction::BillingWrite],
-            resources: vec![AuthzResource::Any],
-            conditions: Vec::new(),
-        }],
+    Caller {
+        token: common::platform_token_for_client(user_id, scope, common::CONSOLE_CLIENT_ID),
     }
 }
 
-/// Creator self policy: BillingWrite on an OWN app only — NOT `Resource::Any`, so
-/// the operator-only credit endpoint denies it (the 403 path).
-fn billing_self() -> Policy {
-    Policy {
-        name: "creator self".to_owned(),
-        statements: vec![Statement {
-            effect: Effect::Allow,
-            actions: vec![AuthzAction::BillingRead, AuthzAction::BillingWrite],
-            resources: vec![AuthzResource::App { id: Uuid::new_v4().to_string() }],
-            conditions: Vec::new(),
-        }],
-    }
-}
+// The scope vocabulary is resource-blind: a scope always lowers to
+// `Resource::Any`, so per-app narrowing now comes from Cedar app membership
+// rather than from the caller-supplied wrapper policy a PAT used to carry.
+// The old "creator self" fixture modeled a token holding BillingWrite scoped
+// to ONE app only (not Resource::Any) so the operator-only endpoint would
+// deny it; that per-resource narrowing has no OAuth-scope equivalent, so the
+// denied caller below instead carries "billing:read" — a real, plausible
+// creator scope that simply omits the billing:write action under test.
 
 #[compio::test]
 async fn grant_endpoint_operator_only_and_idempotency_conflict() {
@@ -989,12 +950,12 @@ async fn grant_endpoint_operator_only_and_idempotency_conflict() {
     let creator = make_user(&fx.state, "endpoint").await;
     ensure_creator_billing(&fx.state, creator).await;
 
-    // A creator-self PAT (App-scoped BillingWrite — NOT Resource::Any) and an
-    // operator PAT (Resource::Any BillingWrite).
+    // A creator bearer that lacks billing:write (a real creator scope, not the
+    // fleet-wide operator grant) and an operator bearer holding billing:write.
     let creator_user = make_user(&fx.state, "creator-token").await;
-    let creator_pat = issue_pat(&fx.state, creator_user, None, billing_self()).await;
+    let creator_caller = issue_bearer(&fx.state, creator_user, None, "billing:read").await;
     let op_user = make_user(&fx.state, "operator").await;
-    let op_pat = issue_pat(&fx.state, op_user, Some("billing"), billing_any()).await;
+    let op_caller = issue_bearer(&fx.state, op_user, Some("billing"), "billing:write").await;
 
     let app = test::init_service(
         web::App::new().state(fx.state.clone()).service(
@@ -1006,11 +967,11 @@ async fn grant_endpoint_operator_only_and_idempotency_conflict() {
     let key = format!("idem-{}", Uuid::new_v4());
     let body = serde_json::json!({"creator_id": creator, "amount_cents": 500});
 
-    // (1) A CREATOR token (App-scoped only) is 403 — credit is never self-grantable.
+    // (1) A creator bearer without billing:write is 403 — credit is never self-grantable.
     let req = test::TestRequest::post()
         .uri("/api/billing/credit")
         .header("idempotency-key", key.as_str())
-        .header("authorization", creator_pat.bearer())
+        .header("authorization", creator_caller.bearer())
         .set_json(&body)
         .to_request();
     // Status only: a retained `WebResponse` keeps the app state - and its Postgres
@@ -1019,14 +980,14 @@ async fn grant_endpoint_operator_only_and_idempotency_conflict() {
     assert_eq!(
         status,
         StatusCode::FORBIDDEN,
-        "a creator (App-scoped) token must be 403 on the operator-only credit endpoint",
+        "a creator without billing:write must be 403 on the operator-only credit endpoint",
     );
 
     // (2) Operator grant succeeds (201 Created).
     let req = test::TestRequest::post()
         .uri("/api/billing/credit")
         .header("idempotency-key", key.as_str())
-        .header("authorization", op_pat.bearer())
+        .header("authorization", op_caller.bearer())
         .set_json(&body)
         .to_request();
     let status = test::call_service(&app, req).await.status();
@@ -1036,7 +997,7 @@ async fn grant_endpoint_operator_only_and_idempotency_conflict() {
     let req = test::TestRequest::post()
         .uri("/api/billing/credit")
         .header("idempotency-key", key.as_str())
-        .header("authorization", op_pat.bearer())
+        .header("authorization", op_caller.bearer())
         .set_json(&body)
         .to_request();
     let status = test::call_service(&app, req).await.status();
@@ -1047,7 +1008,7 @@ async fn grant_endpoint_operator_only_and_idempotency_conflict() {
     let req = test::TestRequest::post()
         .uri("/api/billing/credit")
         .header("idempotency-key", key.as_str())
-        .header("authorization", op_pat.bearer())
+        .header("authorization", op_caller.bearer())
         .set_json(&body2)
         .to_request();
     let status = test::call_service(&app, req).await.status();
@@ -1069,7 +1030,7 @@ async fn grant_endpoint_operator_only_and_idempotency_conflict() {
     // (5) Missing Idempotency-Key header ⇒ 400.
     let req = test::TestRequest::post()
         .uri("/api/billing/credit")
-        .header("authorization", op_pat.bearer())
+        .header("authorization", op_caller.bearer())
         .set_json(&body)
         .to_request();
     let status = test::call_service(&app, req).await.status();
@@ -1296,7 +1257,7 @@ async fn grant_endpoint_unknown_creator_is_fk_400() {
     let url = db_url();
     let fx = build_fixture(&url, "fk400").await;
     let op_user = make_user(&fx.state, "operator-fk").await;
-    let op_pat = issue_pat(&fx.state, op_user, Some("billing"), billing_any()).await;
+    let op_caller = issue_bearer(&fx.state, op_user, Some("billing"), "billing:write").await;
 
     let app = test::init_service(
         web::App::new().state(fx.state.clone()).service(
@@ -1312,7 +1273,7 @@ async fn grant_endpoint_unknown_creator_is_fk_400() {
     let req = test::TestRequest::post()
         .uri("/api/billing/credit")
         .header("idempotency-key", format!("idem-{}", Uuid::new_v4()))
-        .header("authorization", op_pat.bearer())
+        .header("authorization", op_caller.bearer())
         .set_json(&body)
         .to_request();
     let status = test::call_service(&app, req).await.status();
@@ -1328,7 +1289,7 @@ async fn grant_endpoint_unknown_creator_is_fk_400() {
     let req = test::TestRequest::post()
         .uri("/api/billing/credit")
         .header("idempotency-key", format!("idem-{}", Uuid::new_v4()))
-        .header("authorization", op_pat.bearer())
+        .header("authorization", op_caller.bearer())
         .set_json(&body_ok)
         .to_request();
     let status = test::call_service(&app, req).await.status();

@@ -29,10 +29,9 @@ use zeroship_core::config::{
 //
 // It carries the postgres SUPERUSER password, so of everything here it is the
 // entry that most needs the 0600 the loop below pins.
-const SECRET_FILES: [&str; 8] = [
+const SECRET_FILES: [&str; 7] = [
     "auth-signing.pem",
     "broker-secret",
-    "control-signing.pem",
     "gateway-signing.pem",
     "migrate-dsn",
     "pairwise-salt",
@@ -86,7 +85,6 @@ fn dev_init_generates_the_complete_private_deployment_secret_set() {
     for name in [
         "auth-signing.pem",
         "gateway-signing.pem",
-        "control-signing.pem",
     ] {
         let pem = std::fs::read_to_string(secrets_dir.join(name))
             .unwrap_or_else(|error| panic!("read {name}: {error}"));
@@ -99,7 +97,7 @@ fn dev_init_generates_the_complete_private_deployment_secret_set() {
             "{name} duplicates another generated Ed25519 key"
         );
     }
-    assert_eq!(private_keys.len(), 3);
+    assert_eq!(private_keys.len(), 2);
 
     assert_base64_file(&secrets_dir.join("broker-secret"), 48);
     assert_base64_file(&secrets_dir.join("refresh-idem-key"), 48);

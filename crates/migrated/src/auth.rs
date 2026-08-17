@@ -11,7 +11,6 @@ use zeroship_authn::BearerVerifier;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedCaller {
     pub principal_id: Uuid,
-    pub token_id: Option<Uuid>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -87,7 +86,6 @@ impl ControlPlaneAuthenticator {
         let now = now_unix().map_err(AuthError::Infrastructure)?;
         let ctx = AuthzContext {
             principal_id: seed.principal_id,
-            token_id: seed.token_id,
             token_policy: seed.token_policy,
             action: required_action,
             resource,
@@ -112,7 +110,6 @@ impl ControlPlaneAuthenticator {
 
         Ok(VerifiedCaller {
             principal_id: seed.principal_id,
-            token_id: seed.token_id,
         })
     }
 }
@@ -133,7 +130,6 @@ impl Authenticator for ControlPlaneAuthenticator {
             .map_err(map_bearer_error)?;
         let seed = VerifiedSeed {
             principal_id: verified.principal_id,
-            token_id: verified.token_id,
             token_policy: verified.token_policy,
             request_id: verified.request_id,
             mfa_verified: verified.mfa_verified,
@@ -146,7 +142,6 @@ impl Authenticator for ControlPlaneAuthenticator {
 #[derive(Debug)]
 struct VerifiedSeed {
     principal_id: Uuid,
-    token_id: Option<Uuid>,
     token_policy: Option<authz::Policy>,
     request_id: String,
     mfa_verified: bool,

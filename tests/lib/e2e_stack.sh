@@ -5,9 +5,9 @@
 # Single source of truth for the full local stack the gateway-level E2E
 # harnesses need:
 #
-#   stack_workspace $WORK scratch dir + PIDFILE + $DBURL + the ed25519
-#                   signing key `mint_admin_pat` signs with + the gateway
-#                   broker master secret.
+#   stack_workspace $WORK scratch dir + PIDFILE + $DBURL + the ed25519 key the
+#                   harness OP signs with (also the gateway's signing key) + the
+#                   harness JWKS endpoint + the gateway broker master secret.
 #   stack_pg_up     ephemeral Postgres (docker) + the FULL platform migration
 #                   set from db/migrations-ts applied from scratch via the
 #                   `zeroship-platform-migrate` bin (Platform profile).
@@ -17,13 +17,14 @@
 #                   the function returns once all three are health-green.
 #                   A harness whose topology differs (e.g. e2e_platform.sh's
 #                   three workers) calls stack_workspace + stack_pg_up +
-#                   mint_admin_pat and starts its own binaries.
-#   mint_admin_pat  OFFLINE-mints a platform-admin PAT (inserts users +
-#                   platform_admin_roles + permission_tokens rows, signs an
-#                   EdDSA pat+jwt with the workspace `jose`). Exports $PAT.
+#                   mint_admin_bearer and starts its own binaries.
+#   mint_admin_bearer
+#                   seeds a platform-admin principal (users +
+#                   platform_admin_roles rows) and mints a platform OAuth access
+#                   token for it from the harness OP. Exports $ADMIN_TOKEN.
 #   deploy_zship    create an app named <slug> via the control API and deploy a
-#                   prebuilt .zship with `zeroship deploy --token=$PAT`; echoes
-#                   the created app id on stdout (return 0), or returns 1.
+#                   prebuilt .zship with `zeroship deploy --token=$ADMIN_TOKEN`;
+#                   echoes the created app id on stdout (return 0), or returns 1.
 #   stack_down      kill the binary PIDs, docker rm -f the PG container, rm $WORK.
 #
 # This file is SOURCED, not executed. It assumes `set -uo pipefail` in the
@@ -35,7 +36,7 @@
 # Tunables (export BEFORE calling stack_up; sensible defaults pick a private
 # port band so multiple harnesses can run back-to-back without colliding):
 #   ZEROSHIP_CONTROL_PORT ZEROSHIP_WORKER_PORT ZEROSHIP_GATEWAY_PORT PG_PORT
-#                                - listen ports
+#   E2E_PLATFORM_OP_PORT         - listen ports
 #   PG_CONTAINER                 - docker container name
 #   ZEROSHIP_WORKER_THREADS      - worker --threads
 #   E2E_ROOT                     - repo root (auto-derived)
@@ -129,7 +130,7 @@ stack_preflight() {
 #
 # Split out of stack_up so a harness with a NON-standard topology (e.g.
 # tests/e2e_platform.sh, which runs THREE workers to exercise CHWBL routing
-# and cross-worker isolation) can reuse the workspace + PG + PAT halves
+# and cross-worker isolation) can reuse the workspace + PG + credential halves
 # without inheriting stack_up's single-worker bring-up.
 stack_workspace() {
   WORK="$(mktemp -d -t zs-e2e-stack-XXXXXX)"
@@ -142,10 +143,11 @@ stack_workspace() {
   # userinfo, so it is secret-classed and secrets never travel through argv.
   e2e_export_database_urls "$DBURL" || return 1
 
-  # Control/gateway PAT + session signing key. `mint_admin_pat` signs the
-  # harness PAT with THIS key, so a harness that starts its own control MUST
-  # pass `--signing-key-file "$WORK/signing-key.pem"` or every admin call
-  # comes back 401 "platform token verification failed".
+  # One ed25519 key with two consumers: the harness's own platform OP publishes
+  # it as its JWKS and signs admin bearers with it, and the gateway loads it as
+  # its wrapper-token signing key. Control no longer takes a signing key at all
+  # -- it verifies bearers against the ISSUER's published key, which is why the
+  # harness has to serve one.
   openssl genpkey -algorithm ed25519 -out "$WORK/signing-key.pem" 2>/dev/null
   chmod 600 "$WORK/signing-key.pem"
 
@@ -168,10 +170,15 @@ stack_workspace() {
   openssl rand -base64 48 > "$WORK/gate-secret"
   chmod 600 "$WORK/gate-secret"
 
-  # Keep the explicit signing/broker files above because PAT minting consumes
-  # them. Generate every other mandatory service input and export it through
-  # the binaries' normal CLI/env configuration surface.
-  ZEROSHIP_CONTROL_SIGNING_KEY_FILE="$WORK/signing-key.pem"
+  # Stand the harness OP up BEFORE `e2e_export_runtime_secrets`: it exports
+  # ZEROSHIP_AUTH_PLATFORM_ISSUER, and that helper only fills the name in when
+  # it is unset. Before control starts, too -- control reads the issuer once at
+  # boot. Its PID lands in $PIDFILE (created above), so `stack_down` reaps it.
+  e2e_platform_op_up "$WORK/signing-key.pem" "$WORK" || return 1
+
+  # Keep the explicit signing/broker files above because the gateway consumes
+  # them directly. Generate every other mandatory service input and export it
+  # through the binaries' normal CLI/env configuration surface.
   ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$WORK/signing-key.pem"
   ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
   e2e_export_runtime_secrets "$WORK" || return 1
@@ -254,7 +261,7 @@ stack_up() {
   # Every credential arrives through the canonical environment names exported by
   # `stack_workspace`; only non-secret operational values are on the line.
   e2e_with_platform_mint_key "$E2E_BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
-    --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
+    --blob-store "$WORK/blobs" \
     > "$WORK/control.log" 2>&1 &
   echo $! >> "$PIDFILE"
   for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
@@ -287,52 +294,41 @@ stack_up() {
   return 0
 }
 
-# --- mint_admin_pat: offline-signed platform-admin PAT, exports $PAT --------
-mint_admin_pat() {
-  local policy_json policy_hash owner tokid exp pg_database pat_signing_key
+# --- mint_admin_bearer: platform-admin OAuth access token, exports $ADMIN_TOKEN
+#
+# Two halves, and both are load-bearing:
+#
+#   the principal   control resolves the token's `sub` against `zeroship.users`
+#                   and refuses a missing or lifecycle-disabled row, and the
+#                   `platform_admin_roles` row is what makes Cedar's OWNER pass
+#                   allow platform-wide `Resource::Any`.
+#   the token       an `at+jwt` from the harness OP. `scope` becomes the token
+#                   policy, which is intersected with the owner's authority, so
+#                   this is the ceiling on what the harness may do.
+#
+# The scope list is the exact action list the deleted `permission_tokens` policy
+# carried, one scope string per Cedar action. Billing is NOT in it, because it
+# was not in that policy either; a harness that needs `billing:*` passes its own
+# list as the first argument.
+mint_admin_bearer() {
+  local scope="${1:-apps:read apps:write apps:deploy apps:delete deployments:read deployments:rollback env:read env:write secrets:read secrets:write}"
+  local owner pg_database
   pg_database="${E2E_PG_DATABASE:-zeroship}"
-  pat_signing_key="${ZEROSHIP_CONTROL_SIGNING_KEY_FILE:-$WORK/signing-key.pem}"
-  policy_json='{"name":"e2e-admin","statements":[{"effect":"allow","actions":["apps:read","apps:write","apps:deploy","apps:delete","deployments:read","deployments:rollback","env:read","env:write","secrets:read","secrets:write"],"resources":[{"type":"any"}],"conditions":[]}]}'
-  policy_hash="$(node -e '
-const {createHash}=require("crypto");
-function c(v){if(v===null||typeof v==="number"||typeof v==="boolean")return JSON.stringify(v);
-if(typeof v==="string")return JSON.stringify(v);
-if(Array.isArray(v))return "["+v.map(c).join(",")+"]";
-return "{"+Object.keys(v).sort().map(k=>JSON.stringify(k)+":"+c(v[k])).join(",")+"}";}
-process.stdout.write(createHash("sha256").update(c(JSON.parse(process.argv[1]))).digest("hex"));
-' "$policy_json")"
   owner="$(node -e 'console.log(require("crypto").randomUUID())')"
-  tokid="$(node -e 'console.log(require("crypto").randomUUID())')"
-  exp=$(( $(date +%s) + 86400 ))
   docker exec -i "$PG_CONTAINER" psql -U postgres -d "$pg_database" -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.users (id, email, name, email_verified_at)
 VALUES ('$owner', 'e2e-$owner@zeroship.test'::citext, 'E2E Stack Admin', NOW());
 INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by)
 VALUES ('$owner', 'admin', '$owner');
-INSERT INTO zeroship.permission_tokens (id, owner_id, kind, name, policies, policy_hash, expires_at)
-VALUES ('$tokid', '$owner', 'pat', 'e2e stack harness', '$policy_json'::jsonb, '$policy_hash', to_timestamp($exp));
 SQL
-  PAT="$(node --input-type=module -e '
-import { readFileSync } from "node:fs";
-import { createHash, randomBytes } from "node:crypto";
-import { importPKCS8, exportJWK, SignJWT } from "file://'"$E2E_JOSE_JS"'";
-const [pem, owner, tid, phash, exp] = process.argv.slice(1);
-const key = await importPKCS8(readFileSync(pem,"utf8"), "EdDSA", { extractable:true });
-const x = (await exportJWK(key)).x;
-const kid = createHash("sha256").update(`{"crv":"Ed25519","kty":"OKP","x":"${x}"}`).digest("base64url");
-const jwt = await new SignJWT({ sub:owner, owner, tid, jti:tid, scope:"pat", policy_hash:phash, nonce:randomBytes(32).toString("base64url") })
-  .setProtectedHeader({ alg:"EdDSA", typ:"pat+jwt", kid })
-  .setIssuer("https://api.zeroship.ai").setAudience("control.zeroship.ai")
-  .setIssuedAt(Math.floor(Date.now()/1000)).setExpirationTime(Number(exp))
-  .sign(key);
-process.stdout.write(jwt);
-' "$pat_signing_key" "$owner" "$tokid" "$policy_hash" "$exp")"
-  export PAT
-  if [ "$(echo -n "$PAT" | awk -F. '{print NF}')" = "3" ]; then
-    _stk_ok "minted pat+jwt"
+  ADMIN_TOKEN="$(e2e_mint_platform_bearer "$owner" "$scope")"
+  ADMIN_SUBJECT="$owner"
+  export ADMIN_TOKEN ADMIN_SUBJECT
+  if [ "$(echo -n "$ADMIN_TOKEN" | awk -F. '{print NF}')" = "3" ]; then
+    _stk_ok "minted platform admin bearer (sub=$owner)"
     return 0
   else
-    _stk_bad "PAT mint failed: $PAT"
+    _stk_bad "admin bearer mint failed: $ADMIN_TOKEN"
     return 1
   fi
 }
@@ -342,11 +338,11 @@ deploy_zship() {
   local slug="$1" zship="$2"
   local j id dep
   j="$(curl -s -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" \
-        -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" \
+        -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" \
         -d "{\"name\":\"$slug\"}")"
   id="$(echo "$j" | _stk_jget '.id')"
   if [ -z "$id" ]; then echo "    create-app($slug) failed: $j" >&2; return 1; fi
-  dep="$("$E2E_BIN/zeroship" deploy "$zship" --app="$id" --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$PAT" 2>&1)"
+  dep="$("$E2E_BIN/zeroship" deploy "$zship" --app="$id" --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$ADMIN_TOKEN" 2>&1)"
   if ! echo "$dep" | grep -q "deploy_hash"; then echo "    deploy($slug) failed: $dep" >&2; return 1; fi
   echo "$id"
   return 0

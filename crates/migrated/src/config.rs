@@ -74,15 +74,6 @@ pub struct MigratedSettings {
     #[config(shared = AUTH_PLATFORM_JWKS_URL, default = String::new())]
     pub auth_platform_jwks_url: Operational<String>,
 
-    /// PEM/PKCS#8 signing key FILE for PAT verification.
-    ///
-    /// A PATH, not key material, and it stays one. The loader sniffs PEM versus
-    /// DER and refuses a group- or world-readable file; reading the contents
-    /// into an in-memory secret would drop the permission check and make a DER
-    /// key unrepresentable. A path to a secret is not itself a secret.
-    #[config(name = "migrated.signing_key_file", default = PathBuf::new())]
-    pub signing_key_file: Operational<PathBuf>,
-
     // Secrets last within the table, by convention. Each generates ONE
     // `--<name>-file` path flag and no value flag, so none of them can reach a
     // process argument list.

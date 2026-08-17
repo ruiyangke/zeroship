@@ -224,8 +224,8 @@ fi
 # is invisible to the dry run, so a key path passed as `--x-file` makes
 # check-config report a required secret missing on a host where it is present
 # -- a false refusal, which is how a gate gets switched off. Control's
-# `--signing-key-file` was the last one and is now
-# ZEROSHIP_CONTROL_SIGNING_KEY_FILE.
+# `--signing-key-file` was the last one; it is deleted, along with the personal
+# access tokens whose issuer was its only consumer.
 #
 # SCOPED TO THE SERVICES THE PRE-ROLL ACTUALLY DRY-RUNS, which is the rule
 # matching its own reason rather than an exception carved out of it. The set is
@@ -657,7 +657,7 @@ chmod +x "$STUB"/*
 # this file would never notice.
 ROLL_FILES="$(printf '%s\n' $SNAPSHOT_MEMBERS | grep -v '^secrets\.tar$' | tr '\n' ' ')"
 
-# The eight secret files the shipped compose references. Derived, for the same
+# The secret files the shipped compose references. Derived, for the same
 # reason: this gate must not carry its own copy of a list the script reads.
 SECRET_NAMES="$(secret_files "$REAL_COMPOSE" | tr '\n' ' ')"
 
@@ -1295,7 +1295,6 @@ else
     ZEROSHIP_WORKER_KEY=2222222222222222222222222222222222222222222222222222222222222222
     ZEROSHIP_PAIRWISE_SALT=4444444444444444444444444444444444444444444444444444444444444444
     ZEROSHIP_CONTROL_MASTER_KEY=5555555555555555555555555555555555555555555555555555555555555555
-    ZEROSHIP_CONTROL_SIGNING_KEY_FILE=/etc/zeroship/secrets/control-signing.pem
     ZEROSHIP_AUTH_PLATFORM_ISSUER=https://auth.example.com/oauth2
     # The issuer above is the PUBLIC name a token's `iss` carries; this is the
     # address control dials to mint one. Two settings on purpose, and control

@@ -3,7 +3,7 @@
 //!
 //! FAITHFUL by construction: the tests drive the REAL ntex HTTP handlers
 //! (`get_pricing_config`/`set_pricing_config`) through a real `AuthzGuard` (a
-//! real PAT) against a live, migrated Postgres. The handler resolves the global
+//! real platform OAuth bearer) against a live, migrated Postgres. The handler resolves the global
 //! FX through the REAL `PricingStore` against `zeroship.pricing_config`, and the
 //! audit row is read back from `zeroship.app_audit`. No stubbed authz, no shim.
 //!
@@ -17,12 +17,10 @@ mod common;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
 use ntex::http::StatusCode;
 use ntex::web::{self, test};
 use uuid::Uuid;
 
-use zeroship_authz::{policy_hash, Action, Effect, Policy, Resource, Statement};
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::{
     api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
@@ -119,8 +117,7 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         expected_oauth_audience: "control.zeroship.ai".to_string(),
         static_policies: zeroship_authz::load_platform_policies()
             .expect("bundled authz policies parse"),
-        pat_issuer: Arc::new(zeroship_authn::PatIssuer::generate_ephemeral()),
-        auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
+        auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some(common::platform_jwks_url())),
         // No platform deploy-token mint here: that is control's OUTBOUND
         // destination for the device flow, and no fixture below drives one.
         provider_registry: zeroship_control::metering::provider::builtin_registry(),
@@ -147,16 +144,15 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
 }
 
 // ---------------------------------------------------------------------------
-// PAT + principal helpers (faithful AuthzGuard).
+// Bearer + principal helpers (faithful AuthzGuard).
 // ---------------------------------------------------------------------------
 
-struct Pat {
+struct Caller {
     user_id: Uuid,
-    token_id: Uuid,
     token: String,
 }
 
-impl Pat {
+impl Caller {
     fn bearer(&self) -> String {
         format!("Bearer {}", self.token)
     }
@@ -177,7 +173,7 @@ async fn make_user(state: &AppState, label: &str) -> Uuid {
     id
 }
 
-async fn issue_pat(state: &AppState, user_id: Uuid, role: Option<&str>, policy: Policy) -> Pat {
+async fn issue_bearer(state: &AppState, user_id: Uuid, role: Option<&str>, scope: &str) -> Caller {
     if let Some(role) = role {
         state
             .control_pg
@@ -189,58 +185,29 @@ async fn issue_pat(state: &AppState, user_id: Uuid, role: Option<&str>, policy: 
             .await
             .expect("insert platform role");
     }
-    let token_id = Uuid::new_v4();
-    let policies = policy.to_json_value();
-    let hash = policy_hash(&policies);
-    let expires_at = Utc::now() + Duration::days(1);
-    let token = state
-        .pat_issuer
-        .issue(token_id, user_id, hash.clone(), expires_at)
-        .expect("issue PAT");
-    state
-        .control_pg
-        .execute(
-            "INSERT INTO zeroship.permission_tokens \
-                (id, owner_id, kind, name, policies, policy_hash, expires_at) \
-             VALUES ($1, $2, 'pat', 'pricing-config PAT', $3, $4, $5)",
-            &[&token_id, &user_id, &policies, &hash, &expires_at],
-        )
-        .await
-        .expect("insert PAT row");
-    Pat { user_id, token_id, token }
-}
-
-/// Operator policy: BillingRead+Write on `Resource::Any` — the fleet-wide gate.
-fn billing_any() -> Policy {
-    Policy {
-        name: "operator".to_owned(),
-        statements: vec![Statement {
-            effect: Effect::Allow,
-            actions: vec![Action::BillingRead, Action::BillingWrite],
-            resources: vec![Resource::Any],
-            conditions: Vec::new(),
-        }],
+    Caller {
+        user_id,
+        token: common::platform_token_for_client(user_id, scope, common::CONSOLE_CLIENT_ID),
     }
 }
 
-/// Self-service policy: BillingRead+Write on the creator's OWN app surface — the
-/// creator upper bound. Crucially does NOT grant `Resource::Any` (operator-only),
-/// so the `Resource::Any` gate on the pricing-config routes denies it.
-fn billing_self() -> Policy {
-    Policy {
-        name: "creator self".to_owned(),
-        statements: vec![Statement {
-            effect: Effect::Allow,
-            actions: vec![Action::BillingRead, Action::BillingWrite],
-            resources: vec![Resource::App { id: Uuid::new_v4().to_string() }],
-            conditions: Vec::new(),
-        }],
-    }
-}
+// The scope vocabulary is resource-blind: a scope always lowers to
+// `Resource::Any`, so the "operator" vs. "creator" distinction below is no
+// longer carried by the wrapper policy's resource. It comes ENTIRELY from
+// whether the caller holds a `platform_admin_roles` row: `set_pricing_config`/
+// `get_pricing_config` require `Resource::Any` in the static Cedar policy
+// (`deploy/policies/platform/billing.cedar`), which only a `platform_role ==
+// "billing"` (or "admin") principal satisfies — a plain creator's bearer,
+// even with `billing:read billing:write` in scope, fails that static gate
+// before the scope-derived wrapper is ever consulted. The former
+// `billing_self()` per-app policy fixture is gone for the same reason: this
+// route was never reachable via app-scoped narrowing, only via the platform
+// role, so a bearer with no role and any non-empty scope reproduces the same
+// 403.
 
-async fn cleanup(state: &AppState, pats: &[&Pat]) {
+async fn cleanup(state: &AppState, callers: &[&Caller]) {
     let pg = &state.control_pg;
-    for p in pats {
+    for p in callers {
         let _ = pg
             .execute(
                 "DELETE FROM zeroship.app_audit WHERE actor_user_id = $1",
@@ -249,12 +216,9 @@ async fn cleanup(state: &AppState, pats: &[&Pat]) {
             .await;
         let _ = pg
             .execute(
-                "DELETE FROM zeroship.authz_decisions WHERE token_id = $1 OR actor_user_id = $2",
-                &[&p.token_id, &p.user_id],
+                "DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1",
+                &[&p.user_id],
             )
-            .await;
-        let _ = pg
-            .execute("DELETE FROM zeroship.permission_tokens WHERE id = $1", &[&p.token_id])
             .await;
         let _ = pg
             .execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&p.user_id])
@@ -312,7 +276,7 @@ async fn operator_put_updates_and_get_reflects_with_audit() {
     let seed = current_fx(&fx.state).await;
 
     let op = make_user(&fx.state, "operator").await;
-    let op_pat = issue_pat(&fx.state, op, Some("billing"), billing_any()).await;
+    let op_caller = issue_bearer(&fx.state, op, Some("billing"), "billing:read billing:write").await;
 
     let svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
@@ -328,7 +292,7 @@ async fn operator_put_updates_and_get_reflects_with_audit() {
     // PUT as operator → 200.
     let put = test::TestRequest::put()
         .uri("/api/pricing-config")
-        .header("authorization", op_pat.bearer())
+        .header("authorization", op_caller.bearer())
         .set_json(&serde_json::json!({ "fx_pico_cents_per_unit": new_fx }))
         .to_request();
     // Status only: a retained `WebResponse` keeps the app state - and its
@@ -342,7 +306,7 @@ async fn operator_put_updates_and_get_reflects_with_audit() {
     // GET reflects it.
     let get = test::TestRequest::get()
         .uri("/api/pricing-config")
-        .header("authorization", op_pat.bearer())
+        .header("authorization", op_caller.bearer())
         .to_request();
     let body: serde_json::Value = test::read_response_json(&svc, get).await;
     assert_eq!(
@@ -378,7 +342,7 @@ async fn operator_put_updates_and_get_reflects_with_audit() {
     );
 
     restore_seed_fx(&fx.state, seed).await;
-    cleanup(&fx.state, &[&op_pat]).await;
+    cleanup(&fx.state, &[&op_caller]).await;
 
     // Teardown: the service and the fixture both hold connections, and locals
     // are dropped only after the body returns - by which point the runtime is
@@ -389,8 +353,9 @@ async fn operator_put_updates_and_get_reflects_with_audit() {
     common::drain_pg().await;
 }
 
-/// PUT as a creator (app-scoped principal, NOT Resource::Any) → 403, and the
-/// stored value is unchanged. This is the operator-only invariant.
+/// PUT as a creator (no `platform_admin_roles` row, so no static-policy
+/// `Resource::Any` grant) → 403, and the stored value is unchanged. This is
+/// the operator-only invariant.
 // See the allow on `operator_put_updates_and_get_reflects_with_audit` above.
 #[allow(clippy::await_holding_lock)]
 #[compio::test]
@@ -401,8 +366,10 @@ async fn creator_put_is_forbidden_and_value_unchanged() {
     let seed = current_fx(&fx.state).await;
 
     let creator = make_user(&fx.state, "creator").await;
-    // No platform role; only an app-scoped BillingWrite grant.
-    let creator_pat = issue_pat(&fx.state, creator, None, billing_self()).await;
+    // No platform role: the bearer scope covers billing:read/write, but the
+    // static Cedar gate on this route needs `platform_role == "billing"` (or
+    // "admin"), which this caller does not have.
+    let creator_caller = issue_bearer(&fx.state, creator, None, "billing:read billing:write").await;
 
     let svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
@@ -415,14 +382,14 @@ async fn creator_put_is_forbidden_and_value_unchanged() {
 
     let put = test::TestRequest::put()
         .uri("/api/pricing-config")
-        .header("authorization", creator_pat.bearer())
+        .header("authorization", creator_caller.bearer())
         .set_json(&serde_json::json!({ "fx_pico_cents_per_unit": seed + 999 }))
         .to_request();
     let put_status = test::call_service(&svc, put).await.status();
     assert_eq!(
         put_status,
         StatusCode::FORBIDDEN,
-        "creator (app-scoped, not Resource::Any) must be denied — operator-only"
+        "creator (no platform role, so no Resource::Any grant) must be denied — operator-only"
     );
 
     // The stored value is untouched.
@@ -431,7 +398,7 @@ async fn creator_put_is_forbidden_and_value_unchanged() {
     // GET as a creator is also operator-only → 403.
     let get = test::TestRequest::get()
         .uri("/api/pricing-config")
-        .header("authorization", creator_pat.bearer())
+        .header("authorization", creator_caller.bearer())
         .to_request();
     let get_status = test::call_service(&svc, get).await.status();
     assert_eq!(
@@ -440,7 +407,7 @@ async fn creator_put_is_forbidden_and_value_unchanged() {
         "creator GET must be denied — operator-only read"
     );
 
-    cleanup(&fx.state, &[&creator_pat]).await;
+    cleanup(&fx.state, &[&creator_caller]).await;
 
     drop(svc);
     drop(fx);
@@ -459,7 +426,7 @@ async fn below_floor_put_is_rejected_400_value_unchanged() {
     let seed = current_fx(&fx.state).await;
 
     let op = make_user(&fx.state, "operator").await;
-    let op_pat = issue_pat(&fx.state, op, Some("billing"), billing_any()).await;
+    let op_caller = issue_bearer(&fx.state, op, Some("billing"), "billing:read billing:write").await;
 
     let svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
@@ -482,7 +449,7 @@ async fn below_floor_put_is_rejected_400_value_unchanged() {
 
     let put = test::TestRequest::put()
         .uri("/api/pricing-config")
-        .header("authorization", op_pat.bearer())
+        .header("authorization", op_caller.bearer())
         .set_json(&serde_json::json!({ "fx_pico_cents_per_unit": below }))
         .to_request();
     let below_status = test::call_service(&svc, put).await.status();
@@ -508,7 +475,7 @@ async fn below_floor_put_is_rejected_400_value_unchanged() {
     // The exact floor IS accepted (boundary is inclusive).
     let put_floor = test::TestRequest::put()
         .uri("/api/pricing-config")
-        .header("authorization", op_pat.bearer())
+        .header("authorization", op_caller.bearer())
         .set_json(&serde_json::json!({ "fx_pico_cents_per_unit": FLOOR }))
         .to_request();
     let floor_status = test::call_service(&svc, put_floor).await.status();
@@ -516,7 +483,7 @@ async fn below_floor_put_is_rejected_400_value_unchanged() {
     assert_eq!(current_fx(&fx.state).await, FLOOR, "floor value stored");
 
     restore_seed_fx(&fx.state, seed).await;
-    cleanup(&fx.state, &[&op_pat]).await;
+    cleanup(&fx.state, &[&op_caller]).await;
 
     drop(svc);
     drop(fx);

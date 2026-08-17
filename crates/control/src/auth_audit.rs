@@ -36,15 +36,13 @@ pub async fn emit_guard_event(
     })
 }
 
-pub fn auth_method(guard: &AuthzGuard) -> &'static str {
-    // Bearer is the only principal path on the control plane now (the
-    // console authenticates via a server-only PAT or an OAuth bearer through
-    // `@zeroship/control`); the bespoke OIDC-RP console-session arm was
-    // removed in the R5 cutover. A guard therefore always carries a PAT
-    // `token_id` or an OAuth `token_policy`.
-    if guard.token_id.is_some() {
-        "pat"
-    } else {
-        "oauth"
-    }
+/// The credential class every audited control-plane action was authenticated
+/// with. There is exactly one: an OAuth access token the platform OP issued.
+/// The console reaches control through `@zeroship/control` with the same
+/// bearer; the bespoke OIDC-RP console-session arm went in the R5 cutover and
+/// the locally-signed personal access token went with the second issuance
+/// authority. `guard` is taken so the signature still names what is being
+/// classified if a second class ever returns.
+pub fn auth_method(_guard: &AuthzGuard) -> &'static str {
+    "oauth"
 }

@@ -39,7 +39,7 @@
 #
 #   4. Provisioning only ever created ENV-shaped secrets, because it read its
 #      list out of `crates/cli/src/dev.rs` `ENV_KEYS`. The binaries also need
-#      eight secret FILES, and nothing created them, so control refused to
+#      secret FILES, and nothing created them, so control refused to
 #      start on a missing `--signing-key-file`. Provisioning now runs the
 #      deployed image's own `zeroship dev init`, which owns BOTH lists, and
 #      the file set the new compose actually references is verified after.
@@ -149,7 +149,7 @@ compose_vars() {
 # WHY THIS IS DERIVED FROM THE COMPOSE FILE and not from a list kept here.
 # Defect 4 above is exactly what a second, hand-maintained list produces: the
 # provisioning step read `ENV_KEYS` out of the CLI source, that list is
-# env-shaped by construction, and the eight secret FILES the servers require
+# env-shaped by construction, and the secret FILES the servers require
 # were in nobody's list at all. The compose file is the only artefact that
 # states which files this deployment's binaries will open, because it is the
 # thing that passes the paths, so it is the thing to ask.
@@ -572,7 +572,7 @@ main() {
   #
   # RUN THE IMAGE'S OWN PROVISIONER. This used to be a shell loop over a list
   # scraped out of `crates/cli/src/dev.rs` with sed, and that list is
-  # `ENV_KEYS` -- env-shaped names. The servers also require eight secret
+  # `ENV_KEYS` -- env-shaped names. The servers also require secret
   # FILES, which appear in `secret_specs()` a hundred lines further down the
   # same file and were in nobody's list, so nothing ever created them and
   # control refused to start on a missing --signing-key-file.

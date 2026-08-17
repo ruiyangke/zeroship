@@ -256,7 +256,6 @@ by the generator.
 | `control.port` | operational | `ZEROSHIP_CONTROL_PORT` | `control.port` | zeroship-control `--port` | `9090` |
 | `control.provider_config` | operational | `ZEROSHIP_CONTROL_PROVIDER_CONFIG` | `control.provider_config` | zeroship-control `--provider-config` | `{}` |
 | `control.resend_api_key` | secret | `ZEROSHIP_CONTROL_RESEND_API_KEY` | `control.resend_api_key` | zeroship-control `--resend-api-key-file` | - |
-| `control.signing_key_file` | operational | `ZEROSHIP_CONTROL_SIGNING_KEY_FILE` | `control.signing_key_file` | zeroship-control `--signing-key-file` | empty |
 | `control.smtp_host` | operational | `ZEROSHIP_CONTROL_SMTP_HOST` | `control.smtp_host` | zeroship-control `--smtp-host` | empty |
 | `control.smtp_password` | secret | `ZEROSHIP_CONTROL_SMTP_PASSWORD` | `control.smtp_password` | zeroship-control `--smtp-password-file` | - |
 | `control.smtp_port` | operational | `ZEROSHIP_CONTROL_SMTP_PORT` | `control.smtp_port` | zeroship-control `--smtp-port` | `587` |
@@ -300,7 +299,6 @@ by the generator.
 | `migrated.policy_seal_key` | secret | `ZEROSHIP_MIGRATED_POLICY_SEAL_KEY` | `migrated.policy_seal_key` | zeroship-migrated `--policy-seal-key-file` | - |
 | `migrated.port` | operational | `ZEROSHIP_MIGRATED_PORT` | `migrated.port` | zeroship-migrated `--port` | `9091` |
 | `migrated.provision_database_url` | secret | `ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL` | `migrated.provision_database_url` | zeroship-migrated `--provision-database-url-file` | - |
-| `migrated.signing_key_file` | operational | `ZEROSHIP_MIGRATED_SIGNING_KEY_FILE` | `migrated.signing_key_file` | zeroship-migrated `--signing-key-file` | empty |
 | `migrated.tmp_dir` | operational | `ZEROSHIP_MIGRATED_TMP_DIR` | `migrated.tmp_dir` | zeroship-migrated `--tmp-dir` | `std::env::temp_dir().join("zeroship-migrated")` |
 
 ### observability
@@ -471,7 +469,7 @@ These are literals in `deploy/compose/docker-compose.yml` and ignore `.env`:
 Seven secrets are read from files under `${ZEROSHIP_SECRETS_DIR}`. The stack
 will not boot without them:
 
-`control-signing.pem` `gateway-signing.pem` `auth-signing.pem` `broker-secret`
+`gateway-signing.pem` `auth-signing.pem` `broker-secret`
 `pairwise-salt` `refresh-hash-key` `refresh-idem-key`
 
 `refresh-hash-key` is a versioned keyring. Each nonempty line is

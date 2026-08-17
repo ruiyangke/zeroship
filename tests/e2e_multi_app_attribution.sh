@@ -144,13 +144,15 @@ openssl rand -base64 48 > "$WORK/gate-broker-secret"; chmod 600 "$WORK/gate-brok
 CFG_TOML="$WORK/zeroship.toml"
 printf '[metering]\nredpanda_brokers = "%s"\nusage_events_topic = "%s"\n' "$RP_BROKERS" "$USAGE_TOPIC" > "$CFG_TOML"
 
-ZEROSHIP_CONTROL_SIGNING_KEY_FILE="$WORK/sk.pem"
-ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$ZEROSHIP_CONTROL_SIGNING_KEY_FILE"
+ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$WORK/sk.pem"
 ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gate-broker-secret"
+# The issuer control verifies the admin bearer against, on the same key the
+# gateway signs with. Up BEFORE control: control reads the issuer once at boot.
+e2e_platform_op_up "$WORK/sk.pem" "$WORK" || exit 1
 e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DBURL"
 e2e_with_platform_mint_key "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --config "$CFG_TOML" \
-  --blob-store "$WORK/blobs" --signing-key-file "$WORK/sk.pem" \
+  --blob-store "$WORK/blobs" \
   --meter-provider lago --invoicer-provider lago \
   --provider-config "{\"lago\":{\"api_url\":\"$LAGO_URL\",\"api_key\":\"$LAGO_KEY\",\"billable_metric_code\":\"requests\"}}" \
   --spend-recompute-interval 2 > "$WORK/control.log" 2>&1 &
@@ -171,30 +173,30 @@ echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && pass "gateway healthy" || { fail "gateway"; tail -30 "$WORK/gate.log"; exit 1; }
 
-echo ""; echo "=== Stage 2: admin PAT + 2 creators + 3 apps (A1,A2->C1 ; A3->C2) + deploy ==="
-POLICY_JSON='{"name":"e2e-mapp","statements":[{"effect":"allow","actions":["apps:read","apps:write","apps:deploy","billing:read","billing:write"],"resources":[{"type":"any"}],"conditions":[]}]}'
-POLICY_HASH="$(node -e 'const{createHash}=require("crypto");function c(v){if(v===null||typeof v==="number"||typeof v==="boolean")return JSON.stringify(v);if(typeof v==="string")return JSON.stringify(v);if(Array.isArray(v))return "["+v.map(c).join(",")+"]";return "{"+Object.keys(v).sort().map(k=>JSON.stringify(k)+":"+c(v[k])).join(",")+"}";}process.stdout.write(createHash("sha256").update(c(JSON.parse(process.argv[1]))).digest("hex"));' "$POLICY_JSON")"
-ADMIN="$(uuid)"; C1="$(uuid)"; C2="$(uuid)"; TOKID="$(uuid)"; EXP=$(( $(date +%s) + 86400 ))
+echo ""; echo "=== Stage 2: admin bearer + 2 creators + 3 apps (A1,A2->C1 ; A3->C2) + deploy ==="
+# The scope string is the action list the deleted permission_tokens policy
+# carried, one scope per Cedar action.
+SCOPE="apps:read apps:write apps:deploy billing:read billing:write"
+ADMIN="$(uuid)"; C1="$(uuid)"; C2="$(uuid)"
 psql_exec >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.users (id,email,name,email_verified_at) VALUES
  ('$ADMIN','e2e-mapp-admin-$ADMIN@zeroship.test'::citext,'Admin',NOW()),
  ('$C1','e2e-mapp-c1-$C1@zeroship.test'::citext,'Creator One',NOW()),
  ('$C2','e2e-mapp-c2-$C2@zeroship.test'::citext,'Creator Two',NOW());
 INSERT INTO zeroship.platform_admin_roles (user_id,role,granted_by) VALUES ('$ADMIN','admin','$ADMIN');
-INSERT INTO zeroship.permission_tokens (id,owner_id,kind,name,policies,policy_hash,expires_at) VALUES ('$TOKID','$ADMIN','pat','e2e mapp','$POLICY_JSON'::jsonb,'$POLICY_HASH',to_timestamp($EXP));
 SQL
-PAT="$(node --input-type=module -e 'import{readFileSync}from "node:fs";import{createHash,randomBytes}from "node:crypto";import{importPKCS8,exportJWK,SignJWT}from "file://'"$JOSE"'";const[pem,owner,tid,phash,exp]=process.argv.slice(1);const key=await importPKCS8(readFileSync(pem,"utf8"),"EdDSA",{extractable:true});const x=(await exportJWK(key)).x;const kid=createHash("sha256").update(`{"crv":"Ed25519","kty":"OKP","x":"${x}"}`).digest("base64url");const jwt=await new SignJWT({sub:owner,owner,tid,jti:tid,scope:"pat",policy_hash:phash,nonce:randomBytes(32).toString("base64url")}).setProtectedHeader({alg:"EdDSA",typ:"pat+jwt",kid}).setIssuer("https://api.zeroship.ai").setAudience("control.zeroship.ai").setIssuedAt(Math.floor(Date.now()/1000)).setExpirationTime(Number(exp)).sign(key);process.stdout.write(jwt);' "$WORK/sk.pem" "$ADMIN" "$TOKID" "$POLICY_HASH" "$EXP")"
-[ "$(echo -n "$PAT" | awk -F. '{print NF}')" = "3" ] && pass "minted admin PAT (admin=$ADMIN, C1=$C1, C2=$C2)" || { fail "PAT"; exit 1; }
+ADMIN_TOKEN="$(e2e_mint_platform_bearer "$ADMIN" "$SCOPE")"
+[ "$(echo -n "$ADMIN_TOKEN" | awk -F. '{print NF}')" = "3" ] && pass "minted admin bearer (admin=$ADMIN, C1=$C1, C2=$C2)" || { fail "bearer mint"; exit 1; }
 
-# Create + deploy 3 apps via the admin PAT, then OVERRIDE each app's sole owner to
+# Create + deploy 3 apps via the admin bearer, then OVERRIDE each app's sole owner to
 # the intended creator (delete auto membership + insert exactly one owner) so the
 # forwarder's app->creator resolution is unambiguous.
 declare -A APPID
 create_deploy(){ # $1=slug  $2=owner_creator
   local slug="$1" owner="$2" id
-  id="$(curl -s -X POST "$CONTROL_URL/api/apps" -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" -d "{\"name\":\"$slug\",\"plan_id\":\"$PLAN_ID\"}" | jget '.id')"
+  id="$(curl -s -X POST "$CONTROL_URL/api/apps" -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" -d "{\"name\":\"$slug\",\"plan_id\":\"$PLAN_ID\"}" | jget '.id')"
   [ -n "$id" ] || { fail "create app $slug"; exit 1; }
-  "$BIN/zeroship" deploy "$PROBE" --app="$id" --control="$CONTROL_URL" --token="$PAT" 2>&1 | grep -q deploy_hash || { fail "deploy $slug"; exit 1; }
+  "$BIN/zeroship" deploy "$PROBE" --app="$id" --control="$CONTROL_URL" --token="$ADMIN_TOKEN" 2>&1 | grep -q deploy_hash || { fail "deploy $slug"; exit 1; }
   psql_exec >/dev/null 2>&1 <<SQL
 DELETE FROM zeroship.app_members WHERE app_id='$id';
 INSERT INTO zeroship.app_members (app_id,user_id,role) VALUES ('$id','$owner','owner');

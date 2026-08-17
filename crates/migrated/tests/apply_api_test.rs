@@ -1,16 +1,20 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, OnceLock, RwLock};
+use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use chrono::{Duration, Utc};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use compio_postgres::{Client, NoTls};
+use ed25519_dalek::pkcs8::EncodePrivateKey;
+use ed25519_dalek::SigningKey;
+use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use ntex::http::StatusCode;
-use ntex::web::{self, test};
+use ntex::web::{self, test, HttpResponse};
 use serde_json::{json, Value};
 use uuid::Uuid;
-use zeroship_authz::{policy_hash, Action, Effect, Policy, Resource, Scope, Statement};
-use zeroship_authn::PatIssuer;
+use zeroship_authz::{Action, Scope};
 use zeroship_migrated::auth::{
     AuthError, Authenticator, ControlPlaneAuthenticator, VerifiedCaller,
 };
@@ -111,7 +115,6 @@ impl Authenticator for StaticAuthenticator {
         }
         Ok(VerifiedCaller {
             principal_id: caller.principal_id,
-            token_id: None,
         })
     }
 }
@@ -359,17 +362,6 @@ fn state_for_with_policy_config(
     )
 }
 
-async fn seed_platform_admin(conn: &Client, user_id: Uuid) {
-    seed_user(conn, user_id, "operator").await;
-    conn.execute(
-        "INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by) \
-         VALUES ($1, 'admin', $1)",
-        &[&user_id],
-    )
-    .await
-    .expect("seed platform admin role");
-}
-
 fn create_notes_request() -> Value {
     json!({
         "kind": "ir",
@@ -468,56 +460,154 @@ fn malformed_policy() -> &'static str {
     "policy_version = 1\n\n[[grant]]\nkez = \"sql.raw\"\nvalue = true\nscope = \"all\"\n"
 }
 
-fn policy_for(name: &str, actions: Vec<Action>) -> Policy {
-    Policy {
-        name: name.to_string(),
-        statements: vec![Statement {
-            effect: Effect::Allow,
-            actions,
-            resources: vec![Resource::Any],
-            conditions: Vec::new(),
-        }],
+const PLATFORM_ISSUER: &str = "https://auth.zeroship.test/oauth2";
+const PLATFORM_KID: &str = "migrated-apply-api-test-kid";
+const PLATFORM_KEY_SEED: u8 = 47;
+
+/// The console BFF's client id, and the one these fixtures mint under.
+///
+/// Deliberately NOT `zeroship-cli`: that is the single client id whose token
+/// scopes `BearerVerifier` intersects against the principal's live
+/// `zeroship.principal_grants` rows, so a CLI bearer for a principal these
+/// tests never seeded grants for would silently collapse to the CLI's default
+/// issuable set instead of carrying the scope the test asked for.
+const CONSOLE_CLIENT_ID: &str = "zeroship-console";
+
+/// A local JWKS endpoint on its own ntex `System` thread.
+///
+/// The platform auth provider verifies an access token against the issuer's
+/// published key over HTTP, so a fixture that hands out a platform bearer has
+/// to leave a reachable JWKS behind it. Shaped after
+/// `crates/control/tests/common/mod.rs`; deliberately a private copy rather
+/// than a shared module, because that one is a `tests/common` of another crate.
+struct PlatformJwks {
+    base: String,
+    shutdown: Option<mpsc::Sender<()>>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl PlatformJwks {
+    fn start() -> Self {
+        let body = Arc::new(RwLock::new(platform_jwks_body()));
+        let factory_body = body.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (shutdown_tx, shutdown_rx) = mpsc::channel();
+        let thread = thread::spawn(move || {
+            ntex::rt::System::build()
+                .name("migrated-apply-api-platform-jwks")
+                .testing()
+                .build(ntex::rt::DefaultRuntime)
+                .block_on(async move {
+                    let server = web::test::server(move || {
+                        let body = factory_body.clone();
+                        async move {
+                            web::App::new().state(body).service(
+                                web::resource("/.well-known/jwks.json")
+                                    .route(web::get().to(platform_jwks_handler)),
+                            )
+                        }
+                    })
+                    .await;
+                    let addr = server.addr();
+                    started_tx.send(addr).expect("send platform jwks addr");
+                    let _ = shutdown_rx.recv();
+                    drop(server);
+                });
+        });
+        let addr = started_rx.recv().expect("platform jwks mock starts");
+        Self {
+            base: format!("http://{addr}"),
+            shutdown: Some(shutdown_tx),
+            thread: Some(thread),
+        }
+    }
+
+    fn jwks_url(&self) -> String {
+        format!("{}/.well-known/jwks.json", self.base)
     }
 }
 
-async fn issue_pat_for_policy(
-    conn: &Client,
-    issuer: &PatIssuer,
-    owner_id: Uuid,
-    policy: Policy,
-    name: &str,
-) -> (String, Uuid) {
-    let policy_json = policy.to_json_value();
-    let hash = policy_hash(&policy_json);
-    let token_id = Uuid::new_v4();
-    let expires_at = Utc::now() + Duration::days(1);
-    let token = issuer
-        .issue(token_id, owner_id, hash.clone(), expires_at)
-        .expect("issue PAT");
-    conn.execute(
-        "INSERT INTO zeroship.permission_tokens \
-            (id, owner_id, kind, name, policies, policy_hash, expires_at) \
-         VALUES ($1, $2, 'pat', $3, $4, $5, $6)",
-        &[&token_id, &owner_id, &name, &policy_json, &hash, &expires_at],
-    )
-    .await
-    .expect("insert permission token");
-    (token, token_id)
+impl Drop for PlatformJwks {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
-fn real_authenticator(conn: Client, issuer: Arc<PatIssuer>) -> ControlPlaneAuthenticator {
+async fn platform_jwks_handler(body: web::types::State<Arc<RwLock<String>>>) -> HttpResponse {
+    HttpResponse::Ok()
+        .content_type("application/json")
+        .body(body.read().expect("jwks body lock").clone())
+}
+
+/// One JWKS server per test binary, started on first use. Held in a `OnceLock`
+/// static, which is never dropped, so the server outlives every test here and
+/// stays reachable for as long as any bearer it backs may be presented.
+fn platform_jwks_url() -> String {
+    static JWKS: OnceLock<PlatformJwks> = OnceLock::new();
+    JWKS.get_or_init(PlatformJwks::start).jwks_url()
+}
+
+fn platform_encoding_key() -> EncodingKey {
+    let sk = SigningKey::from_bytes(&[PLATFORM_KEY_SEED; 32]);
+    let pkcs8 = sk.to_pkcs8_der().expect("encode pkcs8");
+    EncodingKey::from_ed_der(pkcs8.as_bytes())
+}
+
+fn platform_jwks_body() -> String {
+    let sk = SigningKey::from_bytes(&[PLATFORM_KEY_SEED; 32]);
+    json!({
+        "keys": [{
+            "kid": PLATFORM_KID,
+            "kty": "OKP",
+            "alg": "EdDSA",
+            "crv": "Ed25519",
+            "x": URL_SAFE_NO_PAD.encode(sk.verifying_key().to_bytes()),
+        }]
+    })
+    .to_string()
+}
+
+/// A platform OAuth access token for `subject` carrying `scope`, signed by the
+/// key `platform_jwks_url()` publishes.
+fn platform_token(subject: Uuid, scope: &str) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let claims = json!({
+        "iss": PLATFORM_ISSUER,
+        "sub": subject.to_string(),
+        "aud": "control.zeroship.ai",
+        "exp": now + 3600,
+        "iat": now,
+        "nbf": now.saturating_sub(1),
+        "jti": Uuid::new_v4().to_string(),
+        "client_id": CONSOLE_CLIENT_ID,
+        "scope": scope,
+    });
+    let mut header = Header::new(Algorithm::EdDSA);
+    header.typ = Some("at+jwt".to_string());
+    header.kid = Some(PLATFORM_KID.to_string());
+    encode(&header, &claims, &platform_encoding_key()).expect("platform token")
+}
+
+fn real_authenticator(conn: Client) -> ControlPlaneAuthenticator {
     let auth_provider = Arc::new(zeroship_core::auth_provider::AuthProvider::platform(
         zeroship_core::auth_provider::PlatformProvider::new(
             zeroship_core::auth_provider::PlatformConfig::new(
-                "http://127.0.0.1:1/oauth2",
-                Some("http://127.0.0.1:1/.well-known/jwks.json".to_string()),
+                PLATFORM_ISSUER,
+                Some(platform_jwks_url()),
             )
             .expect("test platform auth config"),
         ),
     ));
     let control_pg = Arc::new(conn);
     let bearer_verifier = zeroship_authn::BearerVerifier::new(
-        issuer,
         Arc::clone(&control_pg),
         auth_provider,
         zeroship_core::auth::default_trusted_oauth_clients(),
@@ -1546,108 +1636,6 @@ async fn approval_repreflight_refuses_when_current_policy_changes_reviewed_scope
 }
 
 #[ntex::test]
-async fn approve_endpoint_real_authenticator_denies_creator_and_allows_operator_pg() {
-    let conn = admin_conn().await;
-    let app_id = Uuid::now_v7();
-    let owner_id = Uuid::new_v4();
-    let operator_id = Uuid::new_v4();
-    seed_app(&conn, app_id, owner_id).await;
-    seed_platform_admin(&conn, operator_id).await;
-
-    let issuer = Arc::new(PatIssuer::generate_ephemeral());
-    let (creator_token, _creator_token_id) = issue_pat_for_policy(
-        &conn,
-        &issuer,
-        owner_id,
-        policy_for("migrated creator migrate only", vec![Action::AppsDeploy]),
-        "migrated creator PAT",
-    )
-    .await;
-    let (operator_token, _operator_token_id) = issue_pat_for_policy(
-        &conn,
-        &issuer,
-        operator_id,
-        policy_for(
-            "migrated operator approve",
-            vec![Action::AppsApproveMigration],
-        ),
-        "migrated operator PAT",
-    )
-    .await;
-
-    let auth_conn = admin_conn().await;
-    let auth: Arc<dyn Authenticator> = Arc::new(real_authenticator(auth_conn, issuer));
-    let (state, tmp) = state_for(auth);
-    let svc = test::init_service(
-        web::App::new()
-            .state(state)
-            .configure(zeroship_migrated::configure),
-    )
-    .await;
-
-    let req = test::TestRequest::post()
-        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
-        .header("authorization", format!("Bearer {creator_token}"))
-        .set_json(&create_notes_request())
-        .to_request();
-    let resp = test::call_service(&svc, req).await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert!(table_exists(&conn, &app_id.to_string(), "notes").await);
-
-    let req = test::TestRequest::post()
-        .uri(&format!("/v1/apps/{app_id}/migrations/apply"))
-        .header("authorization", format!("Bearer {creator_token}"))
-        .set_json(&with_policy(drop_notes_request(), require_approval_policy()))
-        .to_request();
-    let resp = test::call_service(&svc, req).await;
-    assert_eq!(resp.status(), StatusCode::CONFLICT);
-    let body: Value = serde_json::from_slice(&test::read_body(resp).await).expect("json body");
-    let migration_id = body["migration_id"]
-        .as_str()
-        .and_then(|raw| Uuid::parse_str(raw).ok())
-        .expect("pending migration id");
-
-    let creator_approve = test::TestRequest::post()
-        .uri(&format!(
-            "/v1/apps/{app_id}/migrations/{migration_id}/approve"
-        ))
-        .header("authorization", format!("Bearer {creator_token}"))
-        .to_request();
-    let resp = test::call_service(&svc, creator_approve).await;
-    assert_eq!(
-        resp.status(),
-        StatusCode::FORBIDDEN,
-        "real Cedar path must deny creator PATs that hold only apps:migrate"
-    );
-    assert!(table_exists(&conn, &app_id.to_string(), "notes").await);
-
-    let operator_approve = test::TestRequest::post()
-        .uri(&format!(
-            "/v1/apps/{app_id}/migrations/{migration_id}/approve"
-        ))
-        .header("authorization", format!("Bearer {operator_token}"))
-        .to_request();
-    let resp = test::call_service(&svc, operator_approve).await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert!(
-        !table_exists(&conn, &app_id.to_string(), "notes").await,
-        "real admin approve token should apply the reviewed destructive migration"
-    );
-    let audit = audit_rows(&conn, &app_id).await;
-    assert!(
-        audit.iter().any(|(action, outcome, principal, _)| {
-            action == "approve" && outcome == "approved" && principal == &operator_id
-        }),
-        "real operator approval must be audited: {audit:?}"
-    );
-
-    let _ = std::fs::remove_dir_all(tmp);
-    cleanup_app(&conn, &app_id).await;
-    cleanup_user(&conn, &owner_id).await;
-    cleanup_user(&conn, &operator_id).await;
-}
-
-#[ntex::test]
 async fn apply_api_uses_stored_current_policy_when_no_inline_draft_pg() {
     let conn = admin_conn().await;
     let app_id = Uuid::now_v7();
@@ -1974,66 +1962,56 @@ async fn apply_api_rejects_malformed_policy_draft_fail_closed() {
 }
 
 #[ntex::test]
-async fn real_delegating_authenticator_accepts_apps_migrate_owner_pat() {
+async fn real_delegating_authenticator_accepts_apps_deploy_owner_bearer() {
     let conn = admin_conn().await;
     let app_id = Uuid::now_v7();
     let owner_id = Uuid::new_v4();
     seed_app(&conn, app_id, owner_id).await;
 
-    let issuer = Arc::new(PatIssuer::generate_ephemeral());
-    let (token, token_id) = issue_pat_for_policy(
-        &conn,
-        &issuer,
-        owner_id,
-        policy_for("migrated apps migrate", vec![Action::AppsDeploy]),
-        "migrated integration PAT",
-    )
-    .await;
+    let token = platform_token(owner_id, "apps:deploy");
 
     let auth_conn = admin_conn().await;
-    let authenticator = real_authenticator(auth_conn, issuer);
+    let authenticator = real_authenticator(auth_conn);
     let caller = authenticator
         .verify_bearer(&token, app_id, Scope::AppsDeploy, "test-request-id")
         .await
-        .expect("PAT owner with apps:migrate verifies");
+        .expect("app owner holding apps:deploy verifies");
     assert_eq!(caller.principal_id, owner_id);
-    assert_eq!(caller.token_id, Some(token_id));
 
     cleanup_app(&conn, &app_id).await;
     cleanup_user(&conn, &owner_id).await;
 }
 
 #[ntex::test]
-async fn real_delegating_authenticator_rejects_pat_without_apps_migrate_scope() {
+async fn real_delegating_authenticator_rejects_bearer_without_apps_deploy_scope() {
     let conn = admin_conn().await;
     let app_id = Uuid::now_v7();
     let owner_id = Uuid::new_v4();
     seed_app(&conn, app_id, owner_id).await;
 
-    let issuer = Arc::new(PatIssuer::generate_ephemeral());
-    let (token, _token_id) = issue_pat_for_policy(
-        &conn,
-        &issuer,
-        owner_id,
-        policy_for("migrated apps read only", vec![Action::AppsRead]),
-        "migrated no-scope PAT",
-    )
-    .await;
+    // The principal OWNS the app; only the scope is short. Cedar would allow an
+    // owner `apps:deploy`, so the denial can only come from the token's own
+    // scope-derived policy.
+    let token = platform_token(owner_id, "apps:read");
 
     let auth_conn = admin_conn().await;
-    let authenticator = real_authenticator(auth_conn, issuer);
+    let authenticator = real_authenticator(auth_conn);
     let err = authenticator
         .verify_bearer(&token, app_id, Scope::AppsDeploy, "test-request-id")
         .await
-        .expect_err("PAT without apps:migrate must be denied");
+        .expect_err("bearer without apps:deploy must be denied");
     assert!(matches!(err, AuthError::Forbidden));
 
     cleanup_app(&conn, &app_id).await;
     cleanup_user(&conn, &owner_id).await;
 }
 
+/// A scope lowers to `Resource::Any`, so the token itself names no app: the
+/// per-app narrowing is entirely Cedar app membership. This is the test that
+/// proves that membership actually bites - the same bearer that verifies for
+/// the app its subject owns must be refused for an app it does not.
 #[ntex::test]
-async fn real_delegating_authenticator_rejects_pat_for_different_app_owner() {
+async fn real_delegating_authenticator_rejects_bearer_for_different_app_owner() {
     let conn = admin_conn().await;
     let app_id = Uuid::now_v7();
     let owner_id = Uuid::new_v4();
@@ -2042,22 +2020,20 @@ async fn real_delegating_authenticator_rejects_pat_for_different_app_owner() {
     seed_app(&conn, app_id, owner_id).await;
     seed_app(&conn, other_app_id, other_owner_id).await;
 
-    let issuer = Arc::new(PatIssuer::generate_ephemeral());
-    let (token, _token_id) = issue_pat_for_policy(
-        &conn,
-        &issuer,
-        owner_id,
-        policy_for("migrated apps migrate", vec![Action::AppsDeploy]),
-        "migrated wrong-app PAT",
-    )
-    .await;
+    let token = platform_token(owner_id, "apps:deploy");
 
     let auth_conn = admin_conn().await;
-    let authenticator = real_authenticator(auth_conn, issuer);
+    let authenticator = real_authenticator(auth_conn);
+    let caller = authenticator
+        .verify_bearer(&token, app_id, Scope::AppsDeploy, "test-request-id")
+        .await
+        .expect("the same bearer verifies for the app its subject owns");
+    assert_eq!(caller.principal_id, owner_id);
+
     let err = authenticator
         .verify_bearer(&token, other_app_id, Scope::AppsDeploy, "test-request-id")
         .await
-        .expect_err("PAT for one owner must not authorize a different app");
+        .expect_err("a bearer for one owner must not authorize a different owner's app");
     assert!(matches!(err, AuthError::Forbidden));
 
     cleanup_app(&conn, &app_id).await;
@@ -2069,13 +2045,15 @@ async fn real_delegating_authenticator_rejects_pat_for_different_app_owner() {
 #[ntex::test]
 async fn real_delegating_authenticator_rejects_malformed_bearer() {
     let auth_conn = admin_conn().await;
-    let issuer = Arc::new(PatIssuer::generate_ephemeral());
-    let authenticator = real_authenticator(auth_conn, issuer);
+    let authenticator = real_authenticator(auth_conn);
     let err = authenticator
         .verify_bearer("not-a-jwt", Uuid::now_v7(), Scope::AppsDeploy, "test-request-id")
         .await
         .expect_err("malformed bearer must be denied");
-    assert!(matches!(err, AuthError::Unauthorized));
+    assert!(
+        matches!(err, AuthError::Unauthorized),
+        "a malformed bearer is an authentication failure, not an infrastructure one: {err:?}"
+    );
 }
 
 /// The authz audit row records the request id the caller sent, so a denial can

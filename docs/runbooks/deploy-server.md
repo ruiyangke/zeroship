@@ -138,7 +138,7 @@ The explicit paths are necessary because the CLI's repository-local defaults
 are `deploy/compose/secrets` and `deploy/compose/.env`. The command creates
 exactly eight files:
 
-`control-signing.pem` `gateway-signing.pem` `auth-signing.pem` `broker-secret`
+`gateway-signing.pem` `auth-signing.pem` `broker-secret`
 `pairwise-salt` `refresh-hash-key` `refresh-idem-key`
 
 It also appends the generated scalar values described below to `.env`. The

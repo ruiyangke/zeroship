@@ -7,7 +7,7 @@
 #   3. Identity verification (each app returns its own response)
 #   4. Routing consistency (CHWBL: same app → same worker)
 #   5. Isolation (app-01 state doesn't leak into app-02)
-#   6. Auth enforcement (control-plane PAT gate + gateway rpc auth gate)
+#   6. Auth enforcement (gateway rpc auth gate)
 #   7. Worker on-demand loading (cold start)
 #   8. Hot deploy (update code while serving)
 #   9. Deploy edge cases (content-type / size cap / auth, pre-body)
@@ -16,13 +16,13 @@
 # consistency and cross-worker isolation, which a single worker cannot
 # show. That is why this file does its own bring-up instead of calling
 # `stack_up` from tests/lib/e2e_stack.sh; it borrows the workspace, the
-# ephemeral-Postgres + migration bring-up and the PAT mint from there.
+# ephemeral-Postgres + migration bring-up and the admin-bearer mint from there.
 #
 # Prerequisites:
 #   - cargo build --release
 #   - cargo build --release -p zeroship-migrate-adapter --features platform-cli \
 #         --bin zeroship-platform-migrate
-#   - pnpm install (jose, used to sign the admin PAT offline)
+#   - pnpm install (jose, used by the harness OP to sign the admin bearer)
 #   - docker (an EPHEMERAL Postgres is started and removed by this script)
 #
 # Usage:
@@ -59,12 +59,13 @@ PIDS=()
 pass() { PASS=$((PASS + 1)); echo "  ✓ $1"; }
 fail() { FAIL=$((FAIL + 1)); echo "  ✗ $1"; }
 
-# The stack lib is SOURCED for stack_workspace / stack_pg_up / mint_admin_pat.
-# Sourcing (rather than copying mint_admin_pat here) is deliberate: the PAT
-# mint is a five-part contract — users row, platform_admin_roles row,
-# permission_tokens row, the canonical policy hash, and the EdDSA header/claim
-# shape — and a copy of it in this file would drift from the control plane the
-# next time any of the five moves. stack_up() is defined by the source but
+# The stack lib is SOURCED for stack_workspace / stack_pg_up /
+# mint_admin_bearer. Sourcing (rather than copying mint_admin_bearer here) is
+# deliberate: the admin credential is a four-part contract — users row,
+# platform_admin_roles row, a JWKS the named issuer actually serves, and the
+# at+jwt header/claim shape control verifies — and a copy of it in this file
+# would drift from the control plane the next time any of the four moves.
+# stack_workspace is what stands the issuer up. stack_up() is defined but
 # never called; its port defaults use `:=` so the ports set above win.
 # shellcheck source=tests/lib/e2e_stack.sh
 . "$ROOT/tests/lib/e2e_stack.sh"
@@ -189,7 +190,7 @@ create_app() {
     local name="$1"
     if ! http_ok POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" \
         -H 'Content-Type: application/json' \
-        -H "Authorization: Bearer $PAT" \
+        -H "Authorization: Bearer $ADMIN_TOKEN" \
         -d "{\"name\":\"$name\"}"; then
         return 1
     fi
@@ -210,7 +211,7 @@ deploy_js() {
     if [ -n "$resources" ]; then build_zship "$tmpf" "$tmpz" "$resources"; else build_zship "$tmpf" "$tmpz"; fi
     set +e
     out="$("$BIN/zeroship" deploy "$tmpz" --app="$app_id" \
-        --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$PAT" 2>&1)"
+        --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$ADMIN_TOKEN" 2>&1)"
     rc=$?
     set -e
     rm -f "$tmpf" "$tmpz"
@@ -236,13 +237,12 @@ done
 stack_workspace || { echo "  ✗ stack_workspace failed"; exit 2; }
 stack_pg_up || { echo "  ✗ ephemeral Postgres bring-up failed"; exit 2; }
 
-# Start control. --signing-key-file is load-bearing: `mint_admin_pat` signs
-# the admin PAT with $WORK/signing-key.pem, and control verifies platform
-# tokens against the key it was started with. Without the flag every
-# `/api/apps` call answers 401 "platform token verification failed" — which
-# is exactly how this harness died before, silently, inside a `$(curl -sf)`.
+# Start control. ZEROSHIP_AUTH_PLATFORM_ISSUER is load-bearing and comes from
+# stack_workspace: control reads it ONCE at boot and fetches that issuer's JWKS
+# to verify the admin bearer. Name an issuer nothing serves and every
+# `/api/apps` call answers 401 "platform token verification failed" — which is
+# exactly how this harness died before, silently, inside a `$(curl -sf)`.
 e2e_with_platform_mint_key "$BIN/zeroship-control" --port $ZEROSHIP_CONTROL_PORT --blob-store "$WORK/blobs" \
- --signing-key-file "$WORK/signing-key.pem" \
     > "$WORK/control.log" 2>&1 &
 PIDS+=($!)
 for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
@@ -287,11 +287,11 @@ done
 if http_ok GET "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz"; then pass "gateway healthy"
 else fail "gateway unhealthy"; tail -15 "$WORK/gate.log" | sed 's/^/      /'; fi
 
-# The whole suite needs an admin PAT. Without it nothing below can run, so
+# The whole suite needs an admin bearer. Without it nothing below can run, so
 # this is the one place that aborts.
 echo ""
-echo "=== Setup: admin PAT ==="
-mint_admin_pat || { echo "  ✗ cannot mint admin PAT — aborting"; echo "  Results: $PASS passed, $((FAIL + 1)) failed"; exit 1; }
+echo "=== Setup: admin bearer ==="
+mint_admin_bearer || { echo "  ✗ cannot mint admin bearer — aborting"; echo "  Results: $PASS passed, $((FAIL + 1)) failed"; exit 1; }
 
 # ---------------------------------------------------------------------------
 # Test 2: App lifecycle
@@ -320,7 +320,7 @@ if [ -n "$APP_ID" ]; then
         fail "/internal/versions unreachable"
     fi
 
-    if http_ok DELETE "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$APP_ID" -H "Authorization: Bearer $PAT" \
+    if http_ok DELETE "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$APP_ID" -H "Authorization: Bearer $ADMIN_TOKEN" \
         && printf '%s' "$HTTP_BODY" | grep -q "true"; then
         pass "delete app"
     else
@@ -594,7 +594,7 @@ if [ -n "$EDGE_APP_ID" ]; then
     # --- 9.1: wrong content-type returns 415 ---
     echo "  -- 9.1: wrong content-type"
     if http POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$EDGE_APP_ID/deploy" \
-        -H "Authorization: Bearer $PAT" -H 'Content-Type: application/octet-stream' \
+        -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/octet-stream' \
         --data-binary "@$edge_zship" \
         && [ "$HTTP_STATUS" = "415" ] && printf '%s' "$HTTP_BODY" | grep -q "unsupported content type"; then
         pass "9.1: wrong content-type rejected with 415"
@@ -609,7 +609,7 @@ if [ -n "$EDGE_APP_ID" ]; then
     big_body=$(mktemp --suffix=.bin)
     dd if=/dev/zero of="$big_body" bs=1M count=257 status=none
     if http POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$EDGE_APP_ID/deploy" \
-        -H "Authorization: Bearer $PAT" -H 'Content-Type: application/x-zship' \
+        -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/x-zship' \
         --data-binary "@$big_body" \
         && [ "$HTTP_STATUS" = "413" ] && printf '%s' "$HTTP_BODY" | grep -q "deploy too large"; then
         pass "9.2: oversized body rejected with 413"
@@ -630,7 +630,7 @@ if [ -n "$EDGE_APP_ID" ]; then
     fi
     rm -f "$edge_zship"
 
-    if http_ok DELETE "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$EDGE_APP_ID" -H "Authorization: Bearer $PAT" \
+    if http_ok DELETE "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$EDGE_APP_ID" -H "Authorization: Bearer $ADMIN_TOKEN" \
         && printf '%s' "$HTTP_BODY" | grep -q "true"; then
         pass "9.4: cleanup edge-case app"
     else

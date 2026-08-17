@@ -37,7 +37,7 @@ This is a deliberate stance — not a limitation. Pre-launch is the moment to ge
 | **V8 runtime** (fetch, streams, WebSocket, modules) | `docs/architecture/runtime.md` · `crates/runtime/` |
 | **Adding a native primitive** (`env.*`) | `docs/reference/plugin-system.md` · `crates/runtime-macros/` · `crates/plugin-{db,kv,storage}/` |
 | **Control plane** (app CRUD, deploy, env, route registry) | `docs/architecture/control-plane.md` · `crates/control/src/api.rs` · `crates/control/src/registry.rs` |
-| **Control-plane TypeScript client** (`@zeroship/control`) | `docs/reference/control.md` · `sdks/control/` · `crates/control/src/{api,env_handlers,token_handlers}.rs` |
+| **Control-plane TypeScript client** (`@zeroship/control`) | `docs/reference/control.md` · `sdks/control/` · `crates/control/src/{api,env_handlers}.rs` |
 | **Deploy artifact** (.zship + manifest + blob storage) | `docs/reference/zship.md` · `docs/architecture/blob-store.md` · `crates/bundle/` (manifest types, BlobStore, pack/unpack) |
 | **Auth** (OIDC IdP + login UI + RPs) | `docs/reference/auth.md` · `crates/auth/` · `crates/gateway/src/oidc_rp.rs` · gates: `tests/run_auth_suite.sh` (live PG) + `tests/e2e_auth_ui.sh` (real Chromium against the real auth binary) |
 | **The DB SDK** (`@zeroship/db`) | `docs/reference/db.md` · `crates/plugin-db/` |
@@ -375,8 +375,8 @@ zeroship-control --port 9090 --database-url-file ./secrets/control-dsn --blob-st
 zeroship-worker --port 8080 --threads 16 --control-url http://localhost:9090 --control-key-file ./secrets/control-key --blob-store ./bundles
 zeroship-gate    --port 80   --control-url http://localhost:9090 --control-key-file ./secrets/control-key --worker-urls http://localhost:8080 --blob-store ./bundles
 
-# Deploy (a pre-built .zship artifact; auth via `zeroship login`, --token=<PAT>, or ZEROSHIP_TOKEN)
-zeroship deploy ./dist/app.zship --app=<uuid> --control=http://localhost:9090 --token=<PAT>
+# Deploy (a pre-built .zship artifact; auth via `zeroship login`, --token=<token>, or ZEROSHIP_TOKEN)
+zeroship deploy ./dist/app.zship --app=<uuid> --control=http://localhost:9090 --token=<token>
 
 # Docker Compose (all deploy config lives under deploy/)
 docker compose -f deploy/compose/docker-compose.yml up -d --scale worker=10
