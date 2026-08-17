@@ -290,7 +290,7 @@ export function IssueDetailPage({
         </Tabs.List>
 
         <Tabs.Panel value="details">
-          <div className="grid grid-cols-[minmax(0,1fr)_22rem] items-start gap-0 max-desktop:grid-cols-1 max-wide:grid-cols-1">
+          <div className="grid grid-cols-[minmax(0,1fr)_22rem] items-start gap-0 max-wide:grid-cols-1">
           {/* The conversation IS the issue. It used to sit under a screen of
               editable fields -- summary, status, severity, priority,
               assignee, product, component, version, whiteboard, OS, platform,
