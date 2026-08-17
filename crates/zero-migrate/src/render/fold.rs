@@ -4264,7 +4264,26 @@ pub fn fold_to_field_defs(
                                 fks.entry(name.clone()).or_default().push(recovered);
                             }
                         }
-                        _ => {}
+                        // A SINGLE-COLUMN UNIQUE IS A COLUMN FACET. Authoring it as
+                        // `t.string().unique()` set `unique` on the descriptor;
+                        // authoring the same constraint at table level did not, so
+                        // two routes to one uniqueness produced different generated
+                        // types. Multi-column unique is a table KEY, not a column
+                        // facet - the same single-column line `recover_fk_policy`
+                        // already draws for foreign keys.
+                        IrConstraintKind::Unique { columns } if columns.len() == 1 => {
+                            if let Some(field) = tables
+                                .get_mut(name)
+                                .and_then(|c| c.get_mut(&columns[0]))
+                            {
+                                field.unique = true;
+                            }
+                        }
+                        // Exhaustive: a multi-column unique is a table key, and an
+                        // exclusion constraint has no FieldDescriptor slot at all
+                        // (its access method, elements and predicate are
+                        // table-level).
+                        IrConstraintKind::Unique { .. } | IrConstraintKind::Exclusion { .. } => {}
                     }
                 }
             }
@@ -4491,6 +4510,19 @@ pub fn fold_to_field_defs(
                 if let IrConstraintKind::Check { expr, .. } = &constraint.kind {
                     if let Some(facet) = recover_check_facet(expr) {
                         checks.entry(table.clone()).or_default().push(facet);
+                    }
+                }
+                // The addConstraint route to the same single-column uniqueness the
+                // inline createTable route sets. Handling only one leaves two
+                // authoring forms disagreeing in the generated types.
+                if let IrConstraintKind::Unique { columns } = &constraint.kind {
+                    if columns.len() == 1 {
+                        if let Some(field) = tables
+                            .get_mut(table)
+                            .and_then(|c| c.get_mut(&columns[0]))
+                        {
+                            field.unique = true;
+                        }
                     }
                 }
             }

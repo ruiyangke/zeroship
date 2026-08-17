@@ -259,3 +259,80 @@ fn dropping_an_add_constraint_declared_policy_un_lifts_it_too() {
         "the policy must not outlive the constraint that granted it"
     );
 }
+
+// ---------------------------------------------------------------------------
+// A SINGLE-COLUMN UNIQUE is a column facet, whichever way it is authored.
+//
+// `t.string().unique()` set `unique` on the descriptor; the same constraint
+// declared at table level - inline on createTable, or via addConstraint - set
+// nothing, so two authoring routes to one uniqueness produced different
+// generated types.
+//
+// Multi-column unique is deliberately NOT a column facet: it is a table key,
+// and the fold already draws that single-column line for foreign-key policy.
+// ---------------------------------------------------------------------------
+
+fn folded_table(a_table: &str, rest: &str) -> serde_json::Value {
+    let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{a_table}{rest}]}}"#);
+    let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
+    let effective = support::operator_charter("public");
+    let map = fold_to_field_defs(&ir.ops, SqlDialect::Postgres, "public", &effective)
+        .expect("the fold succeeds");
+    map.get("a").cloned().expect("table a is in the fold")
+}
+
+const A_COL_UNIQUE: &str = r#"{"op":"createTable","name":"a","columns":[{"name":"c0","type":"int","nullable":false},{"name":"v","type":"int","nullable":true,"unique":true}],"primaryKey":["c0"]}"#;
+const A_TBL_UNIQUE: &str = r#"{"op":"createTable","name":"a","columns":[{"name":"c0","type":"int","nullable":false},{"name":"v","type":"int","nullable":true}],"primaryKey":["c0"],"constraints":[{"name":"u1","kind":{"kind":"unique","columns":["v"]}}]}"#;
+const A_PLAIN: &str = r#"{"op":"createTable","name":"a","columns":[{"name":"c0","type":"int","nullable":false},{"name":"v","type":"int","nullable":true}],"primaryKey":["c0"]}"#;
+const ADD_UNIQUE: &str = r#",{"op":"addConstraint","table":"a","constraint":{"name":"u1","kind":{"kind":"unique","columns":["v"]}}}"#;
+
+#[test]
+fn a_column_level_unique_is_visible_to_the_fold() {
+    // The precondition: without it, the two tests below could pass by the
+    // descriptor's `unique` slot being unreachable rather than by the fix.
+    let a = folded_table(A_COL_UNIQUE, "");
+    assert_eq!(
+        field(&a, "v")
+            .get("unique")
+            .and_then(serde_json::Value::as_bool),
+        Some(true),
+        "a column-level unique must reach the folded descriptor"
+    );
+}
+
+#[test]
+fn an_inline_table_level_unique_reaches_the_column() {
+    let a = folded_table(A_TBL_UNIQUE, "");
+    assert_eq!(
+        field(&a, "v")
+            .get("unique")
+            .and_then(serde_json::Value::as_bool),
+        Some(true),
+        "the same uniqueness authored at table level must reach the same field"
+    );
+}
+
+#[test]
+fn an_add_constraint_unique_reaches_the_column() {
+    let a = folded_table(A_PLAIN, ADD_UNIQUE);
+    assert_eq!(
+        field(&a, "v")
+            .get("unique")
+            .and_then(serde_json::Value::as_bool),
+        Some(true),
+        "the addConstraint route must agree with the inline one"
+    );
+}
+
+#[test]
+fn a_multi_column_unique_is_not_a_column_facet() {
+    // THE BOUNDARY. A composite unique is a table key; marking either member
+    // column `unique` would claim each is independently unique, which is false.
+    let ops = r#"{"op":"createTable","name":"a","columns":[{"name":"c0","type":"int","nullable":false},{"name":"v","type":"int","nullable":true}],"primaryKey":["c0"],"constraints":[{"name":"u2","kind":{"kind":"unique","columns":["c0","v"]}}]}"#;
+    let a = folded_table(ops, "");
+    assert_eq!(
+        field(&a, "v").get("unique"),
+        None,
+        "a composite unique must not mark its members individually unique"
+    );
+}
