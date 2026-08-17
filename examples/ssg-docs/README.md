@@ -80,7 +80,7 @@ not silently rewritten — only a lone trailing slash is normalized.
 ## Deploy
 
 ```bash
-zeroship deploy --token=<PAT>
+zeroship deploy --token=<token>
 ```
 
 The archive path, the app and the control plane come from `zeroship.jsonc`

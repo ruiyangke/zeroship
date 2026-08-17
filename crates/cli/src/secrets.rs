@@ -1,7 +1,7 @@
 //! `zeroship secret` / `zeroship var` subcommands.
 //!
 //! Shape:
-//!   zeroship secret set  KEY=value   --app=<uuid> [--expose] [--control=URL] [--token=PAT]
+//!   zeroship secret set  KEY=value   --app=<uuid> [--expose] [--control=URL] [--token=TOKEN]
 //!   zeroship secret list             --app=<uuid> [...]
 //!   zeroship secret rm   KEY         --app=<uuid> [...]
 //!   zeroship secret expose      KEY  --app=<uuid> [...]
@@ -94,12 +94,12 @@ fn usage(resource: &str) {
         eprintln!(
             concat!(
                 "Usage:\n",
-                "  zeroship secret set  KEY=value --app=<uuid> [--expose] [--control=URL] [--token=PAT]\n",
-                "  zeroship secret list           --app=<uuid> [--control=URL] [--token=PAT]\n",
-                "  zeroship secret rm   KEY       --app=<uuid> [--control=URL] [--token=PAT]\n",
-                "  zeroship secret expose      KEY --app=<uuid> [--control=URL] [--token=PAT]\n",
-                "  zeroship secret unexpose    KEY --app=<uuid> [--control=URL] [--token=PAT]\n",
-                "  zeroship secret expose-list     --app=<uuid> [--control=URL] [--token=PAT]\n",
+                "  zeroship secret set  KEY=value --app=<uuid> [--expose] [--control=URL] [--token=TOKEN]\n",
+                "  zeroship secret list           --app=<uuid> [--control=URL] [--token=TOKEN]\n",
+                "  zeroship secret rm   KEY       --app=<uuid> [--control=URL] [--token=TOKEN]\n",
+                "  zeroship secret expose      KEY --app=<uuid> [--control=URL] [--token=TOKEN]\n",
+                "  zeroship secret unexpose    KEY --app=<uuid> [--control=URL] [--token=TOKEN]\n",
+                "  zeroship secret expose-list     --app=<uuid> [--control=URL] [--token=TOKEN]\n",
                 "\n",
                 "Secrets are encrypted at rest and always readable from the zeroship `env`\n",
                 "object. They reach `process.env` (where any npm dependency can read them)\n",
@@ -110,9 +110,9 @@ fn usage(resource: &str) {
         eprintln!(
             concat!(
                 "Usage:\n",
-                "  zeroship var set  KEY=value --app=<uuid> [--control=URL] [--token=PAT]\n",
-                "  zeroship var list           --app=<uuid> [--control=URL] [--token=PAT]\n",
-                "  zeroship var rm   KEY       --app=<uuid> [--control=URL] [--token=PAT]\n",
+                "  zeroship var set  KEY=value --app=<uuid> [--control=URL] [--token=TOKEN]\n",
+                "  zeroship var list           --app=<uuid> [--control=URL] [--token=TOKEN]\n",
+                "  zeroship var rm   KEY       --app=<uuid> [--control=URL] [--token=TOKEN]\n",
                 "\n",
                 "Vars are stored in PLAINTEXT and are always visible in both `env` and\n",
                 "`process.env`. For credentials use `zeroship secret set` instead.",
