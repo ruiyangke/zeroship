@@ -4,17 +4,10 @@ pub mod service_replay;
 
 use std::collections::HashSet;
 use std::net::IpAddr;
-use std::path::Path;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use base64::Engine as _;
-use chrono::{DateTime, Utc};
-use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use ntex::web;
 use ntex::web::HttpResponse;
-use rand::RngCore as _;
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 use zeroship_authz as authz;
@@ -24,144 +17,9 @@ use zeroship_authz::wrapper_revocation::{family_revoked_at, revoked_after_for};
 
 pub type HttpRejection = web::Error;
 
-const PAT_AUDIENCE: &str = "control.zeroship.ai";
-const PAT_ISSUER: &str = "https://api.zeroship.ai";
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PatClaims {
-    pub iss: String,
-    pub aud: String,
-    pub sub: String,
-    pub owner: String,
-    pub tid: String,
-    pub jti: String,
-    pub iat: i64,
-    pub exp: i64,
-    pub scope: String,
-    pub policy_hash: String,
-    pub nonce: String,
-}
-
-pub struct PatIssuer {
-    private_der: Vec<u8>,
-    decoding_key: DecodingKey,
-    kid: String,
-}
-
-impl std::fmt::Debug for PatIssuer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PatIssuer")
-            .field("kid", &self.kid)
-            .finish_non_exhaustive()
-    }
-}
-
-impl PatIssuer {
-    pub fn new(signing_key: &ed25519_dalek::SigningKey) -> Result<Self, String> {
-        use ed25519_dalek::pkcs8::EncodePrivateKey;
-
-        let private_der = signing_key
-            .to_pkcs8_der()
-            .map_err(|err| format!("PAT signing key PKCS#8 encode: {err}"))?
-            .as_bytes()
-            .to_vec();
-        let decoding_key = DecodingKey::from_ed_der(signing_key.verifying_key().as_bytes());
-        let kid = jwk_thumbprint(signing_key);
-        Ok(Self {
-            private_der,
-            decoding_key,
-            kid,
-        })
-    }
-
-    /// Creates an issuer backed by a fresh, process-local signing key.
-    ///
-    /// This is suitable for ephemeral fixtures. Long-lived services should use
-    /// [`Self::new`] with operator-managed signing material so issued tokens
-    /// remain valid across restarts.
-    #[must_use]
-    pub fn generate_ephemeral() -> Self {
-        let key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
-        Self::new(&key).expect("generated ephemeral PAT key is valid")
-    }
-
-    pub fn issue(
-        &self,
-        token_id: Uuid,
-        owner_id: Uuid,
-        policy_hash: String,
-        expires_at: DateTime<Utc>,
-    ) -> Result<String, String> {
-        let now = now_unix()?;
-        let mut nonce = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut nonce);
-        let nonce = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(nonce);
-        let token_id = token_id.to_string();
-        let owner_id = owner_id.to_string();
-        let claims = PatClaims {
-            iss: PAT_ISSUER.to_owned(),
-            aud: PAT_AUDIENCE.to_owned(),
-            sub: owner_id.clone(),
-            owner: owner_id,
-            tid: token_id.clone(),
-            jti: token_id,
-            iat: now,
-            exp: expires_at.timestamp(),
-            scope: "pat".to_owned(),
-            policy_hash,
-            nonce,
-        };
-
-        let mut header = Header::new(Algorithm::EdDSA);
-        header.typ = Some("pat+jwt".to_owned());
-        header.kid = Some(self.kid.clone());
-        let key = EncodingKey::from_ed_der(&self.private_der);
-        encode(&header, &claims, &key).map_err(|err| format!("PAT JWT encode: {err}"))
-    }
-
-    pub fn verify(&self, token: &str) -> Result<PatClaims, String> {
-        let header = jsonwebtoken::decode_header(token)
-            .map_err(|err| format!("PAT JWT header decode: {err}"))?;
-        if header.typ.as_deref() != Some("pat+jwt") {
-            return Err(format!("unexpected PAT JWT typ: {:?}", header.typ));
-        }
-        match header.kid.as_deref() {
-            Some(kid) if kid == self.kid => {}
-            Some(kid) => return Err(format!("unknown PAT JWT kid: {kid}")),
-            None => return Err("missing PAT JWT kid".to_owned()),
-        }
-
-        let mut validation = Validation::new(Algorithm::EdDSA);
-        validation.set_issuer(&[PAT_ISSUER]);
-        validation.set_audience(&[PAT_AUDIENCE]);
-        decode::<PatClaims>(token, &self.decoding_key, &validation)
-            .map(|data| data.claims)
-            .map_err(|err| format!("PAT JWT verify: {err}"))
-    }
-}
-
-pub fn load_signing_key_from_path(path: &Path) -> Result<ed25519_dalek::SigningKey, String> {
-    let bytes = std::fs::read(path)
-        .map_err(|err| format!("read PAT signing key {}: {err}", path.display()))?;
-    reject_insecure_permissions(path)?;
-
-    if let Ok(text) = std::str::from_utf8(&bytes) {
-        if text.contains("-----BEGIN PRIVATE KEY-----") {
-            use ed25519_dalek::pkcs8::DecodePrivateKey;
-            return ed25519_dalek::SigningKey::from_pkcs8_pem(text)
-                .map_err(|err| format!("Ed25519 PAT PKCS#8 PEM: {err}"));
-        }
-    }
-
-    use ed25519_dalek::pkcs8::DecodePrivateKey;
-    ed25519_dalek::SigningKey::from_pkcs8_der(&bytes)
-        .map_err(|err| format!("Ed25519 PAT PKCS#8 DER: {err}"))
-}
-
 #[derive(Debug)]
 pub struct VerifiedPrincipal {
     pub principal_id: Uuid,
-    pub token_id: Option<Uuid>,
     pub token_policy: Option<authz::Policy>,
     pub mfa_verified: bool,
     pub mfa_age_seconds: Option<u32>,
@@ -192,7 +50,6 @@ struct PlatformCliEntitlement {
 
 #[derive(Clone, Debug)]
 pub struct BearerVerifier {
-    pat_issuer: Arc<PatIssuer>,
     control_pg: Arc<compio_postgres::Client>,
     auth_provider: Arc<AuthProvider>,
     trusted_oauth_clients: HashSet<String>,
@@ -202,14 +59,12 @@ pub struct BearerVerifier {
 impl BearerVerifier {
     #[must_use]
     pub fn new(
-        pat_issuer: Arc<PatIssuer>,
         control_pg: Arc<compio_postgres::Client>,
         auth_provider: Arc<AuthProvider>,
         trusted_oauth_clients: HashSet<String>,
         expected_oauth_audience: String,
     ) -> Self {
         Self {
-            pat_issuer,
             control_pg,
             auth_provider,
             trusted_oauth_clients,
@@ -228,74 +83,14 @@ impl BearerVerifier {
         request_ip: Option<IpAddr>,
         request_id: String,
     ) -> Result<VerifiedPrincipal, HttpRejection> {
-        let principal = match self.pat_issuer.verify(token) {
-            Err(err) => {
-                tracing::debug!(
-                    error = %err,
-                    "control: bearer was not a valid PAT; trying OAuth introspection"
-                );
-                self
-                    .oauth_guard_from_bearer(token, request_ip, request_id)
-                    .await?
-            }
-            Ok(claims) => {
-                let token_id = Uuid::parse_str(&claims.jti)
-                    .map_err(|_| web::error::ErrorUnauthorized("invalid bearer token id"))?;
-                let owner_id = Uuid::parse_str(&claims.owner)
-                    .map_err(|_| web::error::ErrorUnauthorized("invalid bearer owner"))?;
-
-                let rows = self
-                    .control_pg
-                    .query(
-                        "SELECT owner_id FROM zeroship.permission_tokens \
-                         WHERE id = $1 \
-                           AND owner_id = $2 \
-                           AND policy_hash = $3 \
-                           AND kind = 'pat' \
-                           AND revoked_at IS NULL \
-                           AND (expires_at IS NULL OR expires_at > NOW())",
-                        &[&token_id, &owner_id, &claims.policy_hash],
-                    )
-                    .await
-                    .map_err(|err| {
-                        tracing::error!(error = %err, "control: permission token lookup failed");
-                        web::error::ErrorInternalServerError("permission token lookup failed")
-                    })?;
-                let row = rows
-                    .first()
-                    .ok_or_else(|| web::error::ErrorUnauthorized("permission token not active"))?;
-                let principal_id: Uuid = row.get("owner_id");
-
-                VerifiedPrincipal {
-                    principal_id,
-                    token_id: Some(token_id),
-                    token_policy: None,
-                    mfa_verified: false,
-                    mfa_age_seconds: None,
-                    request_ip,
-                    request_id,
-                    // A PAT is not a CLI device-grant token; its authority
-                    // comes from the wrapper policy, not from the CLI grant
-                    // set, so it never triggers CLI grant materialization.
-                    seed_platform_cli_grants: false,
-                }
-            }
-        };
+        // The platform OP is the only issuer. A locally-signed personal access
+        // token used to be tried first, ahead of this call; that was a second
+        // issuance authority holding its own key, and it is gone.
+        let principal = self
+            .oauth_guard_from_bearer(token, request_ip, request_id)
+            .await?;
 
         self.require_active_principal(principal.principal_id).await?;
-
-        if let Some(token_id) = principal.token_id {
-            if let Err(err) = self
-                .control_pg
-                .execute(
-                    "UPDATE zeroship.permission_tokens SET last_used_at = NOW() WHERE id = $1",
-                    &[&token_id],
-                )
-                .await
-            {
-                tracing::warn!(error = %err, "control: permission token last_used_at update failed");
-            }
-        }
 
         Ok(principal)
     }
@@ -456,7 +251,6 @@ impl BearerVerifier {
 
         Ok(VerifiedPrincipal {
             principal_id,
-            token_id: None,
             token_policy: Some(token_policy),
             mfa_verified: false,
             mfa_age_seconds: None,
@@ -598,29 +392,6 @@ impl BearerVerifier {
     }
 }
 
-#[cfg(unix)]
-fn reject_insecure_permissions(path: &Path) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let mode = path
-        .metadata()
-        .map_err(|err| format!("stat PAT signing key {}: {err}", path.display()))?
-        .permissions()
-        .mode();
-    if mode & 0o077 != 0 {
-        return Err(format!(
-            "PAT signing key {} has insecure mode {mode:o}; group/world permissions must be zero",
-            path.display()
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn reject_insecure_permissions(_path: &Path) -> Result<(), String> {
-    Ok(())
-}
-
 fn policy_from_scope_string(
     raw_scope: &str,
     error: &'static str,
@@ -638,26 +409,6 @@ fn unauthorized_json(error: &'static str) -> web::Error {
     .into()
 }
 
-fn now_unix() -> Result<i64, String> {
-    i64::try_from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|err| format!("clock: {err}"))?
-            .as_secs(),
-    )
-    .map_err(|err| format!("clock overflow: {err}"))
-}
-
-fn jwk_thumbprint(key: &ed25519_dalek::SigningKey) -> String {
-    use sha2::{Digest, Sha256};
-
-    let x = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .encode(key.verifying_key().to_bytes());
-    let canonical = format!(r#"{{"crv":"Ed25519","kty":"OKP","x":"{x}"}}"#);
-    let digest = Sha256::digest(canonical.as_bytes());
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
-}
-
 const ACTIVE_PRINCIPAL_SQL: &str =
     "SELECT 1 FROM zeroship.users \
      WHERE id = $1 \
@@ -669,17 +420,6 @@ const ACTIVE_PRINCIPAL_SQL: &str =
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn generate_ephemeral_uses_fresh_key_per_issuer() {
-        let first = PatIssuer::generate_ephemeral();
-        let second = PatIssuer::generate_ephemeral();
-
-        assert_ne!(
-            first.kid, second.kid,
-            "ephemeral PAT issuers must not share one constant signing key"
-        );
-    }
 
     #[test]
     fn active_principal_query_blocks_every_hard_lifecycle_state() {

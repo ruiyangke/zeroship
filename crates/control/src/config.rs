@@ -264,16 +264,6 @@ pub struct ControlSettings {
     #[config(shared = AUTH_SUPABASE_ANON_KEY, default = String::new())]
     pub supabase_anon_key: Operational<String>,
 
-    /// PEM/PKCS#8 signing key FILE for PAT issuance.
-    ///
-    /// A PATH, not key material, and it stays one. `load_signing_key_from_path`
-    /// sniffs PEM versus DER and refuses a group- or world-readable file;
-    /// reading the contents into an in-memory secret would drop the permission
-    /// check and make a DER key unrepresentable. A path to a secret is not
-    /// itself a secret.
-    #[config(name = "control.signing_key_file", default = PathBuf::new())]
-    pub signing_key_file: Operational<PathBuf>,
-
     // Secrets last within the table, by convention. Each generates ONE
     // `--<name>-file` path flag and NO value flag, so no secret below can reach
     // a process argument list, and each carries its canonical environment name

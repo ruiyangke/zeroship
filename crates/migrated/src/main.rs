@@ -54,10 +54,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             CheckValue::Secret(settings.control_key.is_configured()),
         );
         report.field(
-            "signing_key_file_configured",
-            CheckValue::Secret(!settings.signing_key_file.get().as_os_str().is_empty()),
-        );
-        report.field(
             "policy_seal_key_configured",
             CheckValue::Secret(settings.policy_seal_key.is_configured()),
         );
@@ -105,18 +101,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tmp_dir = %tmp_dir.display(),
         "starting zeroship-migrated"
     );
-    let pat_issuer = match build_pat_issuer(settings.signing_key_file.get()) {
-        Ok(issuer) => Arc::new(issuer),
-        Err(message) => {
-            eprintln!("migrated: {message}");
-            tracing::error!(
-                error = %message,
-                "migrated: refusing to start with unsafe PAT signing-key config"
-            );
-            std::process::exit(1);
-        }
-    };
-
     let auth_provider = match build_auth_provider(
         settings.auth_platform_issuer.get(),
         settings.auth_platform_jwks_url.get(),
@@ -165,7 +149,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let control_pg = Arc::new(control_pg);
             let bearer_verifier = zeroship_authn::BearerVerifier::new(
-                Arc::clone(&pat_issuer),
                 Arc::clone(&control_pg),
                 Arc::clone(&auth_provider),
                 zeroship_core::auth::default_trusted_oauth_clients(),
@@ -236,35 +219,12 @@ fn build_auth_provider(
     Ok(AuthProvider::platform(PlatformProvider::new(config)))
 }
 
-fn build_pat_issuer(signing_key_file: &std::path::Path) -> Result<zeroship_authn::PatIssuer, String> {
-    if signing_key_file.as_os_str().is_empty() {
-        return Err(
-            "--signing-key-file / ZEROSHIP_MIGRATED_SIGNING_KEY_FILE is required for PAT \
-             verification."
-                .to_string(),
-        );
-    }
-
-    let signing_key = zeroship_authn::load_signing_key_from_path(signing_key_file)
-            .map_err(|err| format!("failed to load PAT signing key: {err}"))?;
-    zeroship_authn::PatIssuer::new(&signing_key)
-        .map_err(|err| format!("failed to initialize PAT issuer: {err}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use zeroship_core::config::env_like_tokens;
     use zeroship_core::config::GeneratedConfig;
-
-    #[test]
-    fn pat_signing_key_refuses_missing() {
-        let err = build_pat_issuer(std::path::Path::new(""))
-            .expect_err("missing signing key must fail closed");
-
-        assert!(err.contains("--signing-key-file / ZEROSHIP_MIGRATED_SIGNING_KEY_FILE"));
-    }
 
     #[test]
     fn policy_config_refuses_missing_key() {
@@ -328,7 +288,6 @@ mod tests {
 
         let diagnostics = [
             build_auth_provider("", "").expect_err("missing issuer must fail closed"),
-            build_pat_issuer(std::path::Path::new("")).expect_err("missing signing key must fail closed"),
             build_policy_config("", 1).map(|_| ()).expect_err("missing seal key must fail closed"),
         ];
         for diagnostic in diagnostics {
