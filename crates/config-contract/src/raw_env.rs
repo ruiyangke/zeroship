@@ -355,9 +355,10 @@ impl<'ast> Visit<'ast> for Reads<'_> {
     ///
     /// Most macro bodies parse as a comma-separated expression list, so the
     /// first arm re-uses the ordinary expression walk and keeps exact spans.
-    /// When they do not - a macro taking a type, a match arm, arbitrary tokens
-    /// - the fallback is a TOKEN TEXT test, which cannot resolve aliases and
-    /// has no line number, but fails loudly rather than passing silently.
+    /// When they do not (a macro taking a type, a match arm, arbitrary
+    /// tokens), the fallback is a TOKEN TEXT test, which cannot resolve
+    /// aliases and has no line number, but fails loudly rather than passing
+    /// silently.
     fn visit_macro(&mut self, mac: &'ast Macro) {
         let name = mac
             .path

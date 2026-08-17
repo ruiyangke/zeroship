@@ -14,6 +14,7 @@
 //! the transcripts live in the change's report, not here.
 
 use std::collections::BTreeMap;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -474,15 +475,17 @@ async fn a_verified_assertion_cannot_be_verified_a_second_time() {
 
 #[compio::test]
 async fn concurrent_verifications_of_one_assertion_admit_exactly_one() {
-    let fixture = Arc::new(Fixture::new());
+    // `Rc`, not `Arc`: compio is thread-per-core, so both spawned tasks run on
+    // this thread and an atomic refcount would buy nothing.
+    let fixture = Rc::new(Fixture::new());
     let assertion = Arc::new(fixture.minter.mint(&issuer(CALLEE)).expect("mint"));
 
     let first = {
-        let (fixture, assertion) = (Arc::clone(&fixture), Arc::clone(&assertion));
+        let (fixture, assertion) = (Rc::clone(&fixture), Arc::clone(&assertion));
         compio::runtime::spawn(async move { fixture.verify(&assertion).await })
     };
     let second = {
-        let (fixture, assertion) = (Arc::clone(&fixture), Arc::clone(&assertion));
+        let (fixture, assertion) = (Rc::clone(&fixture), Arc::clone(&assertion));
         compio::runtime::spawn(async move { fixture.verify(&assertion).await })
     };
     let accepted = [first.await.expect("first task"), second.await.expect("second task")]
@@ -500,17 +503,17 @@ async fn the_race_harness_can_tell_a_read_then_write_store_apart() {
     // reads, yields, and only then writes. It admits BOTH, which is what proves
     // the harness genuinely interleaves - and therefore that the single
     // acceptance above is the store's atomicity and not a serialised harness.
-    let fixture = Arc::new(Fixture::with_replay_store(Arc::new(
+    let fixture = Rc::new(Fixture::with_replay_store(Arc::new(
         ReadThenWriteReplayStore::default(),
     )));
     let assertion = Arc::new(fixture.minter.mint(&issuer(CALLEE)).expect("mint"));
 
     let first = {
-        let (fixture, assertion) = (Arc::clone(&fixture), Arc::clone(&assertion));
+        let (fixture, assertion) = (Rc::clone(&fixture), Arc::clone(&assertion));
         compio::runtime::spawn(async move { fixture.verify(&assertion).await })
     };
     let second = {
-        let (fixture, assertion) = (Arc::clone(&fixture), Arc::clone(&assertion));
+        let (fixture, assertion) = (Rc::clone(&fixture), Arc::clone(&assertion));
         compio::runtime::spawn(async move { fixture.verify(&assertion).await })
     };
     let accepted = [first.await.expect("first task"), second.await.expect("second task")]

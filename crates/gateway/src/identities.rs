@@ -80,18 +80,6 @@ pub async fn upsert(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::identity_upsert_sql;
-
-    #[test]
-    fn mapping_upsert_refuses_pairwise_subject_rebinding() {
-        assert!(identity_upsert_sql().contains(
-            "WHERE zeroship.app_user_identities.pairwise_sub = EXCLUDED.pairwise_sub"
-        ));
-    }
-}
-
 /// Read the persisted `pairwise_sub` for `(app_client_id,
 /// global_user_id)`, or `None` when no (live) row exists. Used by tests
 /// and support tooling to confirm the mapping the gateway wrote.
@@ -164,4 +152,16 @@ pub async fn lookup_relay_email(
         .await
         .map_err(|e| GatewayError::Db(format!("app_user_identities relay lookup commit: {e}")))?;
     Ok(email)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::identity_upsert_sql;
+
+    #[test]
+    fn mapping_upsert_refuses_pairwise_subject_rebinding() {
+        assert!(identity_upsert_sql().contains(
+            "WHERE zeroship.app_user_identities.pairwise_sub = EXCLUDED.pairwise_sub"
+        ));
+    }
 }

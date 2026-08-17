@@ -590,8 +590,16 @@ async fn handle_connection(
                 };
 
                 let wrote_ok = handle_request(
-                    &mut stream, method, &full_url, &request_headers, body_bytes, &runtime, &app_env,
-                    ws_pending,
+                    &mut stream,
+                    IncomingRequest {
+                        method,
+                        url: &full_url,
+                        request_headers: &request_headers,
+                        body: body_bytes,
+                        ws_pending,
+                    },
+                    &runtime,
+                    &app_env,
                 ).await;
                 if !wrote_ok { return; }
                 if is_upgrade { return; }
@@ -879,6 +887,24 @@ fn build_stream_response_headers(status: u16, headers: &[(String, String)]) -> V
 // Unified request dispatch
 // ===========================================================================
 
+/// One HTTP request as the connection loop parsed it out of the read buffer.
+///
+/// These five travel together by construction: they are produced at one point
+/// in `handle_connection` and consumed at one point in `handle_request`, and
+/// none of them is meaningful without the others. Passing them as a unit keeps
+/// the dispatch entry point at four arguments instead of eight.
+struct IncomingRequest<'a> {
+    method: &'a str,
+    url: &'a str,
+    request_headers: &'a [(String, String)],
+    body: &'a [u8],
+    /// Bytes already read past the end of this request. Only a WebSocket
+    /// upgrade can consume them; every other path drops them, which is correct
+    /// because the HTTP keep-alive loop re-parses them from its own connection
+    /// buffer instead.
+    ws_pending: Vec<u8>,
+}
+
 /// Single entry point from the TCP parser into the runtime. Builds the
 /// fetch-handler envelope (env + per-request ctx), invokes
 /// `Runtime::call_fetch_handler`, and writes the `FetchOutcome` back to
@@ -894,18 +920,12 @@ fn build_stream_response_headers(status: u16, headers: &[(String, String)]) -> V
 /// caller exits the connection handler since the stream is no longer HTTP.
 async fn handle_request(
     stream: &mut TcpStream,
-    method: &str,
-    url: &str,
-    request_headers: &[(String, String)],
-    body: &[u8],
+    request: IncomingRequest<'_>,
     runtime: &Runtime,
     app_env: &EnvSnapshot,
-    // Bytes already read past the end of this request. Only a WebSocket
-    // upgrade can consume them; every other path drops them, which is correct
-    // because the HTTP keep-alive loop re-parses them from its own connection
-    // buffer instead.
-    ws_pending: Vec<u8>,
 ) -> bool {
+    let IncomingRequest { method, url, request_headers, body, ws_pending } = request;
+
     // The app-facing env. In the standalone server there's no control plane
     // supplying per-app secrets/vars, so this is seeded from process-env
     // vars carrying the `ZS_VAR_` prefix (see `app_env_from_prefixed_vars`)
