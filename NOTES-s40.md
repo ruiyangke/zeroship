@@ -156,19 +156,27 @@ the explicit REVOKE in the migration is belt-and-braces and the assertion would
 pass with it deleted. That is stated in the migration comment rather than
 implied.
 
+## `cargo test --workspace --no-run` LANDED: exit 0
+
+Recorded here as a correction to what this file said before it finished. The
+first run was `WSNORUN_EXIT=101`, and every one of its five errors was
+`couldn't read crates/runtime/tests/wpt/...: No such file or directory` - the
+tree AGENTS.md documents as gitignored and fetched on demand, which this
+worktree had never fetched. After `crates/runtime/tests/setup-wpt.sh` (exit 0)
+the same command gives `WSNORUN2_EXIT=0` with `grep -cE '^error'` = 0.
+
+So the 101 was the missing fixture tree, not this change, and it is now measured
+rather than argued.
+
 ## Two gates I did NOT get a number for, and why
 
 Both were queued and both were CANCELLED rather than left running unattended.
 
-- `bash tests/run_auth_suite.sh` and `bash tests/run_billing_suite.sh` each open
-  with a forced DROP of a fixed-name database. Having already damaged a peer's
-  run that way once (below), leaving either queued to fire after I stop is the
-  same hazard with nobody watching. Machine load was 34 with several agents
-  building, so neither would have finished inside my window anyway.
-- `cargo test --workspace --no-run` was still compiling when I stopped. Its only
-  recorded failure was the missing WPT tree, which is now fetched
-  (`setup-wpt.sh`, exit 0), and the re-run had produced zero `error` lines at
-  that point.
+`bash tests/run_auth_suite.sh` and `bash tests/run_billing_suite.sh` each open
+with a forced DROP of a fixed-name database. Having already damaged a peer's run
+that way once (below), leaving either queued to fire after I stop is the same
+hazard with nobody watching. Machine load was 34 with several agents building,
+so neither would have finished inside my window anyway.
 
 What can be said about the billing total without measuring it: the suite's
 `zeroship-migrate-adapter` group is the platform_migrate binary, which went
