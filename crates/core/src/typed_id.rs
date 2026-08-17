@@ -772,8 +772,10 @@ mod tests {
         // Both characters are reachable in a real id.
         assert!(BASE62.contains(&b'Q') && BASE62.contains(&b'a'));
 
-        // Byte order (dev): 'Q' (0x51) before 'a' (0x61).
-        assert!(b'Q' < b'a');
+        // Byte order (dev): 'Q' (0x51) before 'a' (0x61). Stated at compile
+        // time because it is a property of ASCII, not of anything this test
+        // built; a runtime assert on two literals can never fail.
+        const _: () = assert!(b'Q' < b'a');
 
         // Case-insensitive primary order (deployed): 'a' before 'q'.
         assert!(b'a'.to_ascii_lowercase() < b'Q'.to_ascii_lowercase());
