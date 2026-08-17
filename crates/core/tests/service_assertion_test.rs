@@ -595,18 +595,53 @@ async fn an_assertion_whose_lifetime_exceeds_the_ceiling_is_rejected() {
 }
 
 #[compio::test]
-async fn a_backdated_iat_cannot_smuggle_a_distant_exp_past_the_ceiling() {
+async fn an_iat_in_the_future_cannot_shift_the_acceptance_window_forward() {
     let fixture = Fixture::new();
     let signing = fixture.caller_key.encoding_key();
 
-    // exp - iat is inside the ceiling, but exp itself is an hour away. Only the
-    // second bound catches this one.
+    // `exp - iat` is a well-behaved 30 seconds, so the lifetime ceiling has
+    // nothing to object to. The whole window has simply been moved an hour into
+    // the future, which would keep the assertion live far longer than a
+    // conforming one. Only the `iat` bound catches this shape.
     let far_future = now_secs() + 3600;
     let forged = forge(
         &conforming_header(),
         &json!({
             "iss": CALLER, "sub": CALLER, "aud": CALLEE,
-            "iat": far_future - 30, "exp": far_future, "jti": "backdated-iat-0001",
+            "iat": far_future - 30, "exp": far_future, "jti": "future-iat-0001",
+        }),
+        Some((&signing, Algorithm::EdDSA)),
+    );
+    assert_eq!(
+        fixture.verify(&forged).await,
+        Err(AuthError::CredentialRejected)
+    );
+
+    // CONTROL: the same 30-second window, sitting where it belongs.
+    let honest = forge(
+        &conforming_header(),
+        &json!({
+            "iss": CALLER, "sub": CALLER, "aud": CALLEE,
+            "iat": now_secs(), "exp": now_secs() + 30, "jti": "present-iat-0001",
+        }),
+        Some((&signing, Algorithm::EdDSA)),
+    );
+    assert!(fixture.verify(&honest).await.is_ok());
+}
+
+#[compio::test]
+async fn a_backdated_iat_cannot_stretch_the_lifetime_past_the_ceiling() {
+    let fixture = Fixture::new();
+    let signing = fixture.caller_key.encoding_key();
+
+    // The mirror image, and the reason a bound on `exp` alone would not do:
+    // `exp` is an ordinary 60 seconds away, but `iat` is an hour back, so the
+    // assertion has already been replayable for an hour by the time it arrives.
+    let forged = forge(
+        &conforming_header(),
+        &json!({
+            "iss": CALLER, "sub": CALLER, "aud": CALLEE,
+            "iat": now_secs() - 3600, "exp": now_secs() + 60, "jti": "backdated-iat-0001",
         }),
         Some((&signing, Algorithm::EdDSA)),
     );
