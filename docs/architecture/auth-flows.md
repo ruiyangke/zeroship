@@ -2373,15 +2373,24 @@ verifies the request-bound `ZeroShip-User` header there, and asserts that its
 a different pairwise salt, so a second Gateway derivation cannot satisfy the
 assertion.
 
-The nine deterministic suite failures observed at `e62b60dc7` were two stale
-fixtures, not this resolved production path. For the eight Gateway failures,
+The deterministic suite failures observed at `e62b60dc7` were stale fixtures,
+not this resolved production path. For the eight Gateway failures,
 instrumentation measured a stored
 `pws_seed_8ed3d71548e04205832647f488c5a77e` against the requested
 `pws_6LttJUCDnqZy1AhlkD9k`: the relay fixture fabricated the former while the
 cookie mint computed the latter through `auth_token::pairwise_sub`. The strict
-immutable-binding guard correctly refused the swap. The remaining Auth failure
+immutable-binding guard correctly refused the swap. One Auth failure
 constructed a logout-token issuer without publishing its key, so registered
 token issuance correctly refused it as untrusted for issuance.
+
+The "nine failures" count was itself an artifact: `cargo test` stops at the
+first failing target, and the logout binary sorts early, so six later Auth
+binaries never ran at all. Fixing it revealed a third fixture defect of the
+same family - ten binaries published an OP signing key into the one shared
+suite database and three seeds were used twice, so a binary publishing a
+duplicate kid after an intervening publish retired it hit the same
+correct-and-failing-closed refusal. Test fixtures now derive that key from
+their own target name (`crates/auth/tests/common/mod.rs`).
 
 ### 2. HIGH: App-session revoke deletes a row Gateway does not authorize from
 
