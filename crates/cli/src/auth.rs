@@ -11,19 +11,22 @@ use zeroship_core::device_grant::{
     PLATFORM_CLI_ISSUABLE_SCOPES, PROTECTED_RESOURCE_METADATA_PATH, TOKEN_PATH,
 };
 
-/// What `zeroship login` asks the OP for.
+/// What `zeroship login` asks the OP for: every scope the CLI client may hold
+/// authority for, plus `offline_access`.
 ///
-/// `offline_access` is what turns a 15-minute bearer into a session: without
+/// `offline_access` is what turns a 15-minute bearer into a session - without
 /// it the OP issues no refresh token and the credential expires mid-deploy.
-/// `openid` is deliberately absent - the device grant mints no id_token, so
+/// `openid` is deliberately absent: the device grant mints no id_token, so
 /// asking for it would only add a scope the registration would have to carry.
-const SCOPE: &[&str] = &[
-    OFFLINE_ACCESS_SCOPE,
-    PLATFORM_CLI_ISSUABLE_SCOPES[0],
-    PLATFORM_CLI_ISSUABLE_SCOPES[1],
-    PLATFORM_CLI_ISSUABLE_SCOPES[2],
-    PLATFORM_CLI_ISSUABLE_SCOPES[3],
-];
+///
+/// Built from the shared ceiling rather than spelled out, so a scope added to
+/// the client cannot be silently missing from what the CLI requests.
+fn requested_scope() -> String {
+    let mut scopes: Vec<&str> = PLATFORM_CLI_ISSUABLE_SCOPES.to_vec();
+    scopes.push(OFFLINE_ACCESS_SCOPE);
+    scopes.join(" ")
+}
+
 const TOKEN_EXPIRY_SKEW_SECS: u64 = 60;
 const DEVICE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:device_code";
 
@@ -252,11 +255,12 @@ fn login_device_flow(control_url: &str, print_prompt: bool) -> Result<(), String
     let issuer = discover_authorization_server(control_url)?;
     let device_url = endpoint(&issuer, DEVICE_AUTHORIZATION_PATH);
     let token_url = endpoint(&issuer, TOKEN_PATH);
+    let scope = requested_scope();
     let resp = post_form_with_headers(
         &device_url,
         &[
             ("client_id", PLATFORM_CLI_CLIENT_ID),
-            ("scope", SCOPE.join(" ").as_str()),
+            ("scope", scope.as_str()),
         ],
         &[],
     )?;
@@ -286,6 +290,16 @@ fn login_device_flow(control_url: &str, print_prompt: bool) -> Result<(), String
 
     let bound = poll_for_device_token(&token_url, &device, interval)?;
     let access_token = require_access_token(bound.access_token, "device token response")?;
+    // Refuse rather than degrade. The access token is minutes long BECAUSE a
+    // refresh family backs it; storing one without the family would silently
+    // hand the human a session that dies mid-deploy, and the failure would
+    // surface far from its cause.
+    let refresh_token = bound.refresh_token.filter(|token| !token.is_empty()).ok_or_else(|| {
+        format!(
+            "{issuer} issued no refresh token for scope '{scope}'; the access token alone \
+             is too short-lived to be a session"
+        )
+    })?;
     // The OP answers with a plain RFC 6749 body and no principal field, so the
     // identity comes out of the token's own `sub` - which is the platform
     // principal UUID for this client.
@@ -295,7 +309,7 @@ fn login_device_flow(control_url: &str, print_prompt: bool) -> Result<(), String
     let expires_at = now_secs()?.saturating_add(bound.expires_in.unwrap_or(900));
     let creds = Credentials {
         access_token,
-        refresh_token: bound.refresh_token.unwrap_or_default(),
+        refresh_token,
         expires_at,
         auth_url: issuer.clone(),
         client_id: PLATFORM_CLI_CLIENT_ID.to_string(),
@@ -695,6 +709,17 @@ mod tests {
     fn device_grant_request_shape() {
         let body = form_body(&[("grant_type", "refresh_token"), ("refresh_token", "rt")]);
         assert_eq!(body, "grant_type=refresh_token&refresh_token=rt");
+    }
+
+    #[test]
+    fn the_requested_scope_covers_the_whole_client_ceiling_plus_offline_access() {
+        // Spelled out rather than rebuilt from the same constant the code
+        // reads, so this measures the request instead of restating it. A
+        // missing entry here is a `zeroship deploy` that 403s on one verb.
+        assert_eq!(
+            requested_scope(),
+            "apps:deploy apps:read apps:write secrets:read offline_access"
+        );
     }
 
     #[test]

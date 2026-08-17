@@ -297,6 +297,49 @@ fn an_expired_access_token_rotates_and_the_successor_is_persisted_before_it_is_u
 }
 
 #[test]
+fn a_login_that_yields_no_refresh_token_fails_instead_of_storing_a_15_minute_session() {
+    // Same four legs as the happy path; the single variable is the absent
+    // `refresh_token` on the last response. Accepting it would store a
+    // credential that expires mid-deploy with nothing to rotate.
+    let server = MockServer::start_owned(vec![
+        (200, PROTECTED_RESOURCE_METADATA.to_string()),
+        (200, device_authorization_body("dev-norefresh")),
+        (400, r#"{"error":"authorization_pending"}"#.to_string()),
+        (
+            200,
+            format!(
+                r#"{{"access_token":"{PRINCIPAL_JWT}","token_type":"Bearer","expires_in":900,"scope":"apps:read"}}"#
+            ),
+        ),
+    ]);
+    let config = tempfile::tempdir().expect("tempdir");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_zeroship"))
+        .arg("login")
+        .arg("--control")
+        .arg(&server.url)
+        .env("ZEROSHIP_CONFIG_HOME", config.path())
+        .output()
+        .expect("run zeroship login");
+
+    assert!(
+        !output.status.success(),
+        "login stored a refresh-less credential\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no refresh token"),
+        "the failure must name what is missing; stderr={stderr}"
+    );
+    assert!(
+        !token_path(config.path()).exists(),
+        "nothing may be written when the credential is unusable"
+    );
+}
+
+#[test]
 fn a_refused_rotation_reports_that_the_session_ended_rather_than_a_raw_http_error() {
     // Family revocation (a reuse detection, an operator revoke, an account
     // disable) surfaces here as `invalid_grant`. The human's next step is
