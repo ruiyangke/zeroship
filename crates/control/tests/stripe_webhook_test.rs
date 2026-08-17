@@ -134,7 +134,6 @@ impl Fixture {
             blob_store,
             workflow_blob_store,
             control_key: SecretString::new("test-control-key".to_string()),
-            auth_platform_mint_key: SecretString::new("test-platform-mint-key".to_string()),
             master_key: SecretString::new("test-master-key".to_string()),
             stripe_webhook_secret: SecretString::new(webhook_secret.to_string()),
             stripe_secret_key: SecretString::new(stripe_secret_key.to_string()),
@@ -158,7 +157,6 @@ impl Fixture {
             auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
         // No platform deploy-token mint here: that is control's OUTBOUND
         // destination for the device flow, and no fixture below drives one.
-        platform_mint_url: None,
         provider_registry: zeroship_control::metering::provider::builtin_registry(),
         billing_stack: zeroship_control::metering::provider::BillingStack::for_tests(),
         billing_stream: None,

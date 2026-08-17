@@ -1755,7 +1755,6 @@ mod tests {
             .collect::<Vec<_>>();
         for expected in [
             "control-key-file",
-            "auth-platform-mint-key-file",
             "worker-key-file",
             "master-key-file",
             "database-url-file",
@@ -1768,7 +1767,6 @@ mod tests {
         }
         for gone in [
             "control-key",
-            "auth-platform-mint-key",
             "worker-key",
             "master-key",
             "db",

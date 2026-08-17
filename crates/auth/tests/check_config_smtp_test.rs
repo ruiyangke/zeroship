@@ -48,8 +48,6 @@ fn run_auth_with_db(
         .env("PATH", path)
         .env("HOME", home)
         .env(
-            "ZEROSHIP_AUTH_PLATFORM_MINT_KEY",
-            "test-platform-mint-key-at-least-32-bytes",
         )
         .env(
             "ZEROSHIP_AUTH_STASH_SIGNING_KEY",
