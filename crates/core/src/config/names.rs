@@ -1246,7 +1246,7 @@ database_url = "postgres://operator-mounted-secret"
         let rejected = resolve_secret_sources(
             name,
             None,
-            Some(format!("urn:zeroship:env:SOME_OTHER_VAR")),
+            Some("urn:zeroship:env:SOME_OTHER_VAR".to_owned()),
             None,
             SecretResolution::CheckConfig,
         )

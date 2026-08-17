@@ -76,9 +76,7 @@ struct NativeGithubFixture {
 impl NativeGithubFixture {
     #[allow(clippy::future_not_send)]
     async fn boot(mock: &MockProvider) -> Option<Self> {
-        let Some(db_url) = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) else {
-            return None;
-        };
+        let db_url = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)?;
 
         let (pg_client, pg_connection) =
             compio_postgres::connect(&db_url, compio_postgres::NoTls)

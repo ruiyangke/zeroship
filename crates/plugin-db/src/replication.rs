@@ -614,7 +614,7 @@ async fn drop_slot(pool: &Pool, slot: &str) -> Result<(), DbError> {
     let active_rows = pool
         .query_text_params(
             "SELECT active, active_pid FROM pg_replication_slots WHERE slot_name = $1",
-            &[&slot],
+            &[slot],
         )
         .await
         .map_err(|e| {
@@ -660,7 +660,7 @@ async fn drop_slot(pool: &Pool, slot: &str) -> Result<(), DbError> {
             let rows = pool
                 .query_text_params(
                     "SELECT active FROM pg_replication_slots WHERE slot_name = $1",
-                    &[&slot],
+                    &[slot],
                 )
                 .await
                 .map_err(|e| {
@@ -684,7 +684,7 @@ async fn drop_slot(pool: &Pool, slot: &str) -> Result<(), DbError> {
     //    attempt the drop when the slot row was present.
     if !active_rows.is_empty() {
         match pool
-            .query_text_params("SELECT pg_drop_replication_slot($1)", &[&slot])
+            .query_text_params("SELECT pg_drop_replication_slot($1)", &[slot])
             .await
         {
             Ok(_) => {}
