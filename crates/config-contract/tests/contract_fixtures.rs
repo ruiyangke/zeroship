@@ -126,7 +126,7 @@ fn a_wrong_consumer_is_both_unread_and_undeclared() {
     // consumer instead of control.
     // Does not cover: the compile-time EnvKey consumer mismatch. That is
     // tests/ui/wrong_consumer.rs, with its positive control in
-    // linked_registry.rs.
+    // typed_accessor.rs.
     let specs = [operational("control.port", CONTROL_ONLY)];
     let mut reads = sites(&specs);
     let env = reads
