@@ -114,10 +114,11 @@ fn dev_init_generates_the_complete_private_deployment_secret_set() {
     // the two drifting apart is the failure this pins.
     //
     // Does NOT cover: that the credential is correct for any real database, or
-    // that the mode survives past the moment dev init writes it. Nothing in
-    // the platform permission-checks a secret file on READ (measured against
-    // crates/core/src/config/secrets.rs `read_secret_file`), so the 0600 the
-    // loop above asserts is the only protection this file has.
+    // that the mode survives past the moment dev init writes it. It no longer
+    // has to be the only protection, though: since the owner-only policy landed
+    // in crates/core/src/config/secrets.rs `read_secret_file`, a later chmod is
+    // caught at the next read rather than passing silently, and
+    // `zeroship-platform-migrate` reads this exact file through that function.
     let migrate_dsn =
         std::fs::read_to_string(secrets_dir.join("migrate-dsn")).expect("read migrate-dsn");
     assert!(

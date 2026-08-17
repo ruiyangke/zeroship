@@ -128,6 +128,11 @@ log_format = "json"
 # which parsed but always failed at boot with BackendUnavailable. A syntax the
 # runtime always refuses is not a deployment source.
 #
+# EVERY FILE A urn:zeroship:file: REFERENCE OR A --<name>-file FLAG NAMES MUST BE
+# OWNER-ONLY. Boot refuses it outright if any group or other permission bit is
+# set, and says so with the mode and the chmod that fixes it. There is no way to
+# switch that off. Under docker the mode that counts is the HOST file's.
+#
 # A LITERAL IS PERMITTED HERE, and that is deliberate: the overlay may itself BE
 # a mounted Kubernetes Secret, in which case the values never enter git and are
 # RBAC-controlled. Permitting a literal by environment and forbidding one by
