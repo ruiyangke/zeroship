@@ -87,39 +87,10 @@ fn no_token_uses_owner_policies_only() {
 }
 
 #[test]
-fn audit_locked_app_denies_owner_writes() {
-    run_db_test(|pg| async move {
-        let fixture =
-            Fixture::new_registered_app(&pg, "audit-locked", "owner", false, true).await;
-
-        let decision = enforce(&pg, &load_platform_policies().unwrap(), &fixture.ctx())
-            .await
-            .unwrap();
-
-        assert_eq!(decision, AuthzDecision::Deny);
-        fixture.cleanup(&pg).await;
-    });
-}
-
-#[test]
-fn suspended_app_denies_owner_writes() {
-    run_db_test(|pg| async move {
-        let fixture = Fixture::new_registered_app(&pg, "suspended", "owner", true, false).await;
-
-        let decision = enforce(&pg, &load_platform_policies().unwrap(), &fixture.ctx())
-            .await
-            .unwrap();
-
-        assert_eq!(decision, AuthzDecision::Deny);
-        fixture.cleanup(&pg).await;
-    });
-}
-
-#[test]
 fn app_owner_is_authorized_anywhere_for_owned_app_action() {
     run_db_test(|pg| async move {
         let fixture =
-            Fixture::new_registered_app(&pg, "owner-anywhere", "owner", false, false).await;
+            Fixture::new_registered_app(&pg, "owner-anywhere", "owner").await;
         let policies = load_platform_policies().unwrap();
         let ctx = AuthzContext {
             principal_id: fixture.user_id,
@@ -146,7 +117,7 @@ fn app_owner_is_authorized_anywhere_for_owned_app_action() {
 fn time_window_policy_enforces_utc_hours() {
     run_db_test(|pg| async move {
         let fixture =
-            Fixture::new_registered_app(&pg, "time-window", "owner", false, false).await;
+            Fixture::new_registered_app(&pg, "time-window", "owner").await;
         let token_policy = Policy {
             name: "business hours".to_owned(),
             statements: vec![Statement {
@@ -439,13 +410,7 @@ impl Fixture {
         }
     }
 
-    async fn new_registered_app(
-        pg: &Client,
-        label: &str,
-        app_role: &str,
-        suspended: bool,
-        audit_locked: bool,
-    ) -> Self {
+    async fn new_registered_app(pg: &Client, label: &str, app_role: &str) -> Self {
         let user_id = Uuid::new_v4();
         let app_db_id = Uuid::new_v4();
         let app_id = app_db_id.to_string();
@@ -459,15 +424,12 @@ impl Fixture {
         .await
         .expect("insert user");
         pg.execute(
-            "INSERT INTO apps (id, name, api_key, api_key_hash, suspended, audit_locked) \
-             VALUES ($1, $2, $3, $4, $5, $6)",
+            "INSERT INTO apps (id, name, api_key, api_key_hash) VALUES ($1, $2, $3, $4)",
             &[
                 &app_db_id,
                 &app_name,
                 &"test-api-key",
                 &"test-api-key-hash",
-                &suspended,
-                &audit_locked,
             ],
         )
         .await

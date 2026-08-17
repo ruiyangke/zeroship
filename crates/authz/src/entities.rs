@@ -87,12 +87,6 @@ struct Memberships {
     viewer: Vec<String>,
 }
 
-#[derive(Clone, Copy, Default)]
-struct AppFlags {
-    suspended: bool,
-    audit_locked: bool,
-}
-
 /// Assemble Cedar entities for a principal/resource authorization request.
 ///
 /// The store contains the principal `User`, all app membership targets, the
@@ -128,9 +122,12 @@ pub async fn assemble_entities(
     let mut entities = Vec::new();
     entities.push(user_entity(principal_id, &user, &memberships)?);
 
+    // The `App` entity carries no attributes: the only two it ever had were the
+    // `suspended` and `audit_locked` freeze flags, and both are gone with the
+    // operator routes that were their sole writers. It exists so `resource is
+    // App` and the membership-set policies have an entity to bind to.
     for app_id in app_ids {
-        let flags = load_app_flags(pg, &app_id).await?;
-        entities.push(app_entity(&app_id, flags)?);
+        entities.push(empty_entity("App", &app_id)?);
     }
 
     if let Resource::Org { id } = &resource {
@@ -212,21 +209,6 @@ async fn load_memberships(pg: &Client, principal_id: Uuid) -> Result<Memberships
     Ok(memberships)
 }
 
-async fn load_app_flags(pg: &Client, app_id: &str) -> Result<AppFlags, AuthzError> {
-    let rows = pg
-        .query(
-            "SELECT suspended, audit_locked FROM zeroship.apps WHERE id::text = $1",
-            &[&app_id],
-        )
-        .await
-        .map_err(|err| AuthzError::Db(format!("load app entity: {err}")))?;
-
-    Ok(rows.first().map_or_else(AppFlags::default, |row| AppFlags {
-        suspended: row.get("suspended"),
-        audit_locked: row.get("audit_locked"),
-    }))
-}
-
 fn user_entity(
     principal_id: Uuid,
     user: &UserAttrs,
@@ -259,18 +241,6 @@ fn user_entity(
         ),
     ]);
     Entity::new(uid("User", &principal_id.to_string())?, attrs, HashSet::new())
-        .map_err(|err| AuthzError::CedarEntities(err.to_string()))
-}
-
-fn app_entity(app_id: &str, flags: AppFlags) -> Result<Entity, AuthzError> {
-    let attrs = HashMap::from([
-        ("suspended".to_owned(), restricted_bool(flags.suspended)?),
-        (
-            "audit_locked".to_owned(),
-            restricted_bool(flags.audit_locked)?,
-        ),
-    ]);
-    Entity::new(uid("App", app_id)?, attrs, HashSet::new())
         .map_err(|err| AuthzError::CedarEntities(err.to_string()))
 }
 
