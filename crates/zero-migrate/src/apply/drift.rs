@@ -668,12 +668,14 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
         );
     }
 
+    let mut table_rls: std::collections::BTreeMap<String, bool> = Default::default();
     // Base tables in the schema. `table_schema` is BOUND ($1), never interpolated.
     // Child partitions are modeled separately in `SchemaSnapshot::partitions`;
     // their columns/indexes/constraints are inherited/propagated catalog effects.
     let table_rows = conn
         .query(
-            "SELECT c.relname AS table_name, obj_description(c.oid, 'pg_class') AS comment \
+            "SELECT c.relname AS table_name, obj_description(c.oid, 'pg_class') AS comment, \
+             c.relrowsecurity AS rls_enabled \
              FROM pg_class c \
              JOIN pg_namespace n ON n.oid = c.relnamespace \
              WHERE n.nspname = $1 AND c.relkind IN ('r', 'p') AND c.relispartition = false \
@@ -683,6 +685,10 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
         .await?;
     for r in &table_rows {
         let name: String = r.try_get("table_name")?;
+        // RLS is read from the pg_class row this loop already has - no extra query.
+        // Recorded even when false so the map is complete for a schema, which is what
+        // lets an out-of-band DISABLE be seen as a change rather than as an absence.
+        table_rls.insert(name.clone(), r.try_get("rls_enabled").unwrap_or(false));
         tables.insert(
             name,
             TableSnapshot {
@@ -1533,6 +1539,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
 
     Ok(SchemaSnapshot {
         tables,
+        table_rls,
         views,
         named_types,
         sequences,

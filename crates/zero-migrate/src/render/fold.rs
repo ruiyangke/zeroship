@@ -2685,6 +2685,9 @@ pub fn fold_ops_onto(
 
     Ok(SchemaSnapshot {
         tables,
+        // The expected side: populated once the fold learns Op::SetRls. Empty until
+        // then, which is why the diff must not compare it yet.
+        table_rls: Default::default(),
         partitions,
         views,
         named_types: named_type_snapshots,

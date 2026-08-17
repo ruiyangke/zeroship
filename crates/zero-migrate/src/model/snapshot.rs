@@ -1626,6 +1626,14 @@ pub struct PartitionSnapshot {
 /// A deterministic snapshot of a project schema's structure.
 #[derive(Debug, Clone, Default)]
 pub struct SchemaSnapshot {
+    /// Per-table row-level-security state (`pg_class.relrowsecurity`), keyed by
+    /// table name like the sibling maps.
+    ///
+    /// A MAP RATHER THAN A FIELD ON TableSnapshot: that struct is constructed
+    /// exhaustively in ~15 places, while this type is built through `Default` in
+    /// almost all of its own. It also makes the dialect question vanish - engines
+    /// with no row-level security leave BOTH sides empty, so they cannot drift.
+    pub table_rls: std::collections::BTreeMap<String, bool>,
     /// Tables in the schema, keyed + ordered by name.
     pub tables: BTreeMap<String, TableSnapshot>,
     /// Child partitions in the schema, keyed + ordered by child relation name.
