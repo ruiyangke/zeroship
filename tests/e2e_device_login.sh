@@ -155,6 +155,13 @@ if [ ! -f "$ZSHIP" ]; then
 fi
 pass "binaries and $ZSHIP present"
 
+# Pin the platform issuer to the REAL OP this harness boots, BEFORE
+# stack_workspace: unpinned, stack_workspace stands its own JWKS up and names
+# THAT as the issuer, and the device-token `iss` assertion below would then be
+# comparing a real OP token against a harness origin. Control trusts one
+# issuer, so the harness that runs a real one has to say so.
+export ZEROSHIP_AUTH_PLATFORM_ISSUER="http://localhost:$AUTH_PORT/oauth2"
+
 stack_workspace || { fail "workspace"; exit 1; }
 stack_pg_up || { fail "postgres + migrations"; exit 1; }
 
@@ -188,7 +195,7 @@ curl -sf "$AUTH_URL/oauth2/.well-known/jwks.json" >/dev/null 2>&1 \
   || { fail "auth never came up"; tail -30 "$WORK/auth.log"; exit 1; }
 
 e2e_with_platform_mint_key "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
-  --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
+  --blob-store "$WORK/blobs" \
   --app-base-domain "localhost" \
   --migrated-url "$MIGRATED_URL" \
   > "$WORK/control.log" 2>&1 &
@@ -199,12 +206,12 @@ curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 \
 
 # The migration service, so this harness can drive `zeroship migrate` on the
 # SAME credential the login flow just produced. Every other harness that
-# migrates uses an offline-minted PAT; this one uses a real OAuth bearer from
-# the device flow, and the two take different verification paths in
-# `BearerVerifier` (a PAT resolves a stored policy by token id, an OAuth bearer
-# carries a scope-derived policy). Only this leg covers the second one.
+# migrates mints its bearer itself from a JWKS it serves; this one carries a
+# token the REAL OP issued through the device flow, so this is the leg that
+# covers the issuer, the device grant and the scope narrowing together rather
+# than the token shape alone.
 "$BIN/zeroship-migrated" --port "$MIGRATED_PORT" \
-  --signing-key-file "$WORK/signing-key.pem" --tmp-dir "$WORK/migrated-tmp" \
+  --tmp-dir "$WORK/migrated-tmp" \
   > "$WORK/migrated.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "$MIGRATED_URL/readyz" >/dev/null 2>&1 && break; sleep 1; done
