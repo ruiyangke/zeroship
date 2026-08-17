@@ -21,12 +21,24 @@ export function RailRow({
   action,
   editing = false,
   wide = false,
+  revealAction = false,
 }: {
   label: ReactNode;
   value: ReactNode;
   action: ReactNode;
   editing?: boolean;
   wide?: boolean;
+  /**
+   * Show the action at rest instead of on hover.
+   *
+   * For a row that HAS a value, hiding the action is what keeps the rail a
+   * column of facts rather than a column of buttons. For a row with no value
+   * it is the opposite: hidden, the whole row is one dim `--` and a reader is
+   * told there is nothing there without being told they can put something
+   * there. Three of the five Links rows are empty on a typical issue, which
+   * is most of what anyone sees.
+   */
+  revealAction?: boolean;
 }) {
   return (
     <div
@@ -48,7 +60,9 @@ export function RailRow({
             ? wide
               ? "col-span-full justify-self-start"
               : "col-start-3 justify-self-start"
-            : "justify-self-end opacity-0 transition-opacity duration-fast group-hover/rail-row:opacity-100 group-focus-within/rail-row:opacity-100 [@media(hover:none)]:opacity-100"
+            : revealAction
+              ? "justify-self-end"
+              : "justify-self-end opacity-0 transition-opacity duration-fast group-hover/rail-row:opacity-100 group-focus-within/rail-row:opacity-100 [@media(hover:none)]:opacity-100"
         }
       >
         {action}

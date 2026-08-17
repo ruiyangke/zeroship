@@ -24,6 +24,7 @@ export function RailDisclosure({
   label,
   summary,
   action = "Edit",
+  empty = false,
   children,
 }: {
   label: string;
@@ -31,6 +32,21 @@ export function RailDisclosure({
   summary: ReactNode;
   /** The verb on the affordance. "Add" reads better on an empty CC list. */
   action?: string;
+  /**
+   * The group has an ANSWER and the answer is nothing, so show the affordance
+   * at rest rather than on hover.
+   *
+   * Answered-and-empty, not "no data": while the query is still out the
+   * summary is a Skeleton and the group has made no claim, so promoting its
+   * button would be promoting a row that is about to say something else.
+   *
+   * The words do not change. `--` stays the rail's single token for absence
+   * (Absent.tsx) -- writing "Add" in the VALUE column would put a verb where
+   * every other row puts a fact, which is the two-vocabularies problem
+   * e2e/rail-absence.spec.ts exists to prevent. What was missing was not a
+   * different word for empty; it was the affordance being invisible.
+   */
+  empty?: boolean;
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
@@ -46,6 +62,7 @@ export function RailDisclosure({
       <RailRow
         label={label}
         value={summary}
+        revealAction={empty && !open}
         action={
           <Button
             variant="plain"

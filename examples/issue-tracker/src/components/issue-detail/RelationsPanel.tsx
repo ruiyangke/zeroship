@@ -79,7 +79,11 @@ export function DependenciesPanel({ issueId }: { issueId: string }) {
   );
 
   return (
-    <RailDisclosure label="Dependencies" summary={summary}>
+    <RailDisclosure
+      label="Dependencies"
+      summary={summary}
+      empty={counts !== null && counts.dependsOn === 0 && counts.blocks === 0}
+    >
       <section className="relations-panel">
         <AsyncSection
           query={graphQ}
@@ -181,6 +185,11 @@ export function DuplicatesPanel({
     <Absent />
   );
 
+  // No `empty`, unlike its four neighbours. An empty Duplicates group has
+  // nothing to offer: the panel below lists a cluster and marks nothing --
+  // duplicates are declared from the Status group's "Mark as duplicate...".
+  // Promoting the affordance here would advertise an action that is not in the
+  // panel it opens.
   return (
     <RailDisclosure label="Duplicates" summary={summary}>
       <section className="relations-panel">

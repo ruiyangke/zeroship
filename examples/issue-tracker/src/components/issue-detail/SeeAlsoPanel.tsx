@@ -73,7 +73,7 @@ export function SeeAlsoPanel({ issueId }: { issueId: string }) {
     );
 
   return (
-    <RailDisclosure label="See also" summary={summary} action="Add">
+    <RailDisclosure label="See also" summary={summary} action="Add" empty={linksQ.data !== undefined && links.length === 0}>
     <section className="see-also-panel">
       {links.length === 0 ? (
         <Hint>No linked reports.</Hint>

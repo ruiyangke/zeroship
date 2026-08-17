@@ -62,7 +62,7 @@ export function CcPanel({ issueId }: { issueId: string }) {
   );
 
   return (
-    <RailDisclosure label="CC" summary={summary} action="Add">
+    <RailDisclosure label="CC" summary={summary} action="Add" empty={cc?.length === 0}>
       <section>
         <AsyncSection
           query={ccQ}

@@ -85,7 +85,7 @@ export function KeywordsPanel({
     );
 
   return (
-    <RailDisclosure label="Labels" summary={summary}>
+    <RailDisclosure label="Labels" summary={summary} empty={names.length === 0}>
     <section>
       <div className="mb-2">
         {/* These two empty states say DIFFERENT things -- none attached to
