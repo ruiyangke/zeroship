@@ -77,6 +77,21 @@ pub struct AppNetPolicyLimits {
     pub egress_ceiling_bytes: u64,
     /// Absent in a plan-catalog row written before this field existed; the
     /// free-tier value is the fail-closed default, never "unbounded".
+    ///
+    /// This serde default is the ONLY thing that supplies the key. The
+    /// `zeroship.plans.net_policy_limits_json` column default
+    /// (`20260702000400`) still carries just `max_sockets` +
+    /// `egress_ceiling_bytes`, and that is deliberate: every reader of the
+    /// column goes through this type (`plan_catalog.rs`, `registry.rs`,
+    /// `net_grants.rs`), so a row missing the key and a row carrying
+    /// `max_grants: 10` deserialize identically. Adding it to the column
+    /// default is unobservable.
+    ///
+    /// A migration to add it was written and then DELETED rather than
+    /// rewritten: the engine cannot lower a JSON-object `setColumnDefault`
+    /// ("json value defaults need live column type",
+    /// `cargo test -p zeroship-migrate-adapter --features platform-cli
+    /// --test platform_migrate`). Do not re-add one - there is nothing to buy.
     #[serde(default = "free_tier_max_grants")]
     pub max_grants: u32,
 }
