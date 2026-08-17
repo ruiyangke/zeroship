@@ -16,8 +16,9 @@ export const name = "service_assertion_replay";
 // WHY THESE TWO COLUMNS AND NOTHING ELSE. The store answers one question --
 // "has this key been claimed, and is that claim still live" -- so it carries
 // the key and the instant the claim may be dropped. Nothing here is read back
-// by application code: the claim statement reports its verdict as an affected
-// row count, which is also why no role below needs SELECT.
+// INTO application code: the claim statement reports its verdict as an
+// affected row count and returns no rows. That is a statement about RETURNING,
+// and it is NOT a reason to withhold SELECT -- see the grant below.
 //
 // `replay_key` is `<iss>|<jti>`, scoped by issuer so one service cannot burn
 // another service's `jti`, and so a single table is safe to share across
@@ -52,9 +53,29 @@ export function up() {
   // `INSERT ... ON CONFLICT DO UPDATE ... WHERE`, and PostgreSQL requires
   // UPDATE privilege to PLAN that arm even when it never fires. This is the
   // same class as 20260812000000 and 20260812000200, where insert-only grants
-  // made production upserts fail at plan time. DELETE is for the sweep. No
-  // SELECT: the statement returns nothing and the verdict is the affected-row
-  // count.
+  // made production upserts fail at plan time. DELETE is for the sweep.
+  //
+  // SELECT IS ALSO REQUIRED, and an earlier revision of this file argued it
+  // away. PostgreSQL's rule is about COLUMN READS, not about RETURNING:
+  // UPDATE and DELETE need SELECT on every column read in an expression or a
+  // condition. The claim reads `expires_at` in the DO UPDATE arm's WHERE and
+  // the sweep reads it in its own WHERE, so both statements need it. MEASURED
+  // on a scratch database built by zeroship-platform-migrate from this
+  // directory: with insert/update/delete only, every one of the four roles
+  // below got `permission denied for table service_assertion_replay` for BOTH
+  // statements; adding select made all eight succeed. Controls, same role,
+  // one variable each: dropping the WHERE from the upsert is still denied
+  // (the DO UPDATE arm alone needs it), and a DELETE with no WHERE succeeds.
+  // Withholding it would have failed 100% of inbound service-to-service calls
+  // the day a service was wired to PostgresReplayStore, via the verifier's
+  // fail-closed arm, with a Postgres permission error in the log and nothing
+  // naming grants.
+  //
+  // What SELECT concedes is bounded: a service that already holds insert and
+  // delete here can read the `<iss>|<jti>` keys of other services' in-flight
+  // assertions. A `jti` is not a credential -- the assertion carrying it is
+  // signed, single use, and bound to its own audience -- and every grantee is
+  // itself one of the services whose keys are in the table.
   //
   // Granted to every role that runs a service which VERIFIES assertions. There
   // is no `zeroship_migrated` role in db/migrations-ts/20260702000100_schema_
@@ -62,7 +83,7 @@ export function up() {
   // it gets a role, and that is called out rather than pre-granted to a role
   // that does not exist.
   grant({
-    privileges: ["insert", "update", "delete"],
+    privileges: ["select", "insert", "update", "delete"],
     on: {
       kind: "table",
       schema: SCHEMA,
