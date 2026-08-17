@@ -29,6 +29,7 @@ pub mod pkce;
 pub mod preview_ports;
 pub mod readiness;
 pub mod replication_names;
+pub mod service_assertion;
 pub mod service_identity;
 pub mod superjson;
 
