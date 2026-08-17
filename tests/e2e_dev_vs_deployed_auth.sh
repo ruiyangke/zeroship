@@ -489,7 +489,7 @@ fi
 DEV_WORK="$WORK"
 stack_up || { fail "stack bring-up failed"; exit 1; }   # stack_up resets $WORK
 cp "$DEV_WORK/dev.txt" "$WORK/dev.txt"
-mint_admin_pat || exit 1
+mint_admin_bearer || exit 1
 
 APP_ID="$(deploy_zship "$APP_SLUG" "$ZSHIP")" || { fail "deploy auth-probe"; exit 1; }
 pass "deployed auth-probe ($APP_ID)"
@@ -531,7 +531,7 @@ SQL
 
 # Offline-mint an app session cookie by signing with the harness-controlled
 # gateway Ed25519 key -- the same technique tests/e2e_auth_rpc.sh uses, and the
-# same one that mints the admin PAT. The gateway's REAL cookie validation runs
+# same one that mints the admin bearer. The gateway's REAL cookie validation runs
 # (signature, kid, iss, exp, app binding, pws_ sanity, revocation gate); nothing
 # is bypassed and no auth escape hatch is added to the binaries.
 # What is skipped is only the interactive OIDC dance that would otherwise need a
@@ -654,7 +654,7 @@ fi
 #   ok both sides built / built app.zship / postures / identity / dev reachable
 #   / dev login / dev rejects wrong password / forged cookie / dev probe 48 rows
 #   / self-diff empty / ephemeral PG / postgres-init / platform migrations
-#   / control / worker / gateway healthy / pat+jwt / deployed / OAuth client
+#   / control / worker / gateway healthy / at+jwt / deployed / OAuth client
 #   / session cookies / gateway accepts session / deployed probe 48 rows
 #
 # TWENTY-THREE `ok` LINES, PASS=22. The uncounted one is

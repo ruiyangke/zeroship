@@ -5,7 +5,7 @@
 # The gateway's SEC-5 default makes every RPC procedure `auth: user`. Proving an
 # authenticated round-trip through the gateway needs a valid app session — which
 # normally comes from the interactive native-OP OAuth dance. This harness OFFLINE-
-# MINTS that session the same way the admin PAT is minted (sign a real token with
+# MINTS that session the same way the admin bearer is minted (sign a real token with
 # the harness-controlled gateway Ed25519 key + seed the backing rows), so the
 # gateway's REAL session-cookie validation + `ZeroShip-User` derivation runs
 # end-to-end with an offline-signed credential and the normal auth checks.
@@ -67,7 +67,7 @@ echo "  zeroship E2E — authenticated gateway RPC (ISS-64)"
 echo "============================================"
 
 stack_up       || { echo "stack bring-up failed"; exit 1; }
-mint_admin_pat || exit 1
+mint_admin_bearer || exit 1
 
 ZSHIP="$ROOT/examples/auth-notes/dist/app.zship"
 [ -f "$ZSHIP" ] || { echo "missing $ZSHIP — run: pnpm --filter ./examples/auth-notes build"; exit 2; }

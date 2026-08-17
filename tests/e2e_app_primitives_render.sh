@@ -20,7 +20,7 @@
 #
 # Bring-up mirrors e2e_app_primitives.sh exactly: ephemeral PG :5444 + the full
 # platform migration set + control/worker/gateway with an
-# OFFLINE-minted admin PAT + create-app + deploy + Host-header addressing.
+# Harness-minted admin bearer + create-app + deploy + Host-header addressing.
 #
 # Usage:
 #   ./tests/e2e_app_primitives_render.sh
@@ -55,7 +55,7 @@ pass()  { PASS=$((PASS+1));  echo "  ✓ $1"; }
 fail()  { FAIL=$((FAIL+1));  echo "  ✗ $1"; }
 known() { KNOWN=$((KNOWN+1)); echo "  ⚠ $1"; if [ "$STRICT" = "1" ]; then FAIL=$((FAIL+1)); fi; }
 
-# Shared bring-up: ephemeral PG + platform migrations + control/worker/gateway + PAT mint +
+# Shared bring-up: ephemeral PG + platform migrations + control/worker/gateway + bearer mint +
 # deploy. Single source of truth in tests/lib/e2e_stack.sh — the same library the
 # browser-level E2E (tests/e2e_browser/) sources. It emits ✓/✗ via the pass()/fail()
 # defined above. (Stages 1–3 + deploy_app below are now thin wrappers over it.)
@@ -92,8 +92,8 @@ stack_up || { fail "stack bring-up failed"; exit 1; }
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Stage 3: mint admin PAT (offline) ==="
-mint_admin_pat || exit 1
+echo "=== Stage 3: mint admin bearer from the harness OP ==="
+mint_admin_bearer || exit 1
 
 # --- helper: create an app, deploy a built .zship, return the app slug -------
 # usage: deploy_app <slug> <path-to-.zship>  → sets global APP_ID
@@ -266,7 +266,7 @@ fi
 CSR_APP_ID=""
 if [ -f "$CSR_ZSHIP" ]; then
   # look it up via the control API by name
-  CSR_APP_ID="$(curl -s -H "Authorization: Bearer $PAT" "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" 2>/dev/null \
+  CSR_APP_ID="$(curl -s -H "Authorization: Bearer $ADMIN_TOKEN" "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" 2>/dev/null \
     | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);const arr=Array.isArray(o)?o:(o.apps||o.items||[]);const a=arr.find(x=>x.name==="csr-todo-e2e");console.log(a?a.id:"")}catch(e){console.log("")}})')"
 fi
 if [ -z "$CSR_APP_ID" ]; then
@@ -371,7 +371,7 @@ else
   # create app, set the OPENAI_API_KEY secret, THEN deploy (so the first
   # isolate load hydrates env with the key already present).
   OAI_J="$(curl -s -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" \
-            -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" \
+            -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" \
             -d '{"name":"openai-demo-e2e"}')"
   OAI_ID="$(echo "$OAI_J" | jget '.id')"
   if [ -z "$OAI_ID" ]; then
@@ -379,12 +379,12 @@ else
   else
     SEC_CODE="$(curl -s -o /dev/null -w '%{http_code}' -X POST \
       "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$OAI_ID/secrets" \
-      -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" \
+      -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" \
       -d "$(node -e 'process.stdout.write(JSON.stringify({key:"OPENAI_API_KEY",value:process.argv[1]}))' "$OAI_KEY")")"
     [ "$SEC_CODE" = "204" ] && pass "set OPENAI_API_KEY secret on openai-demo (HTTP $SEC_CODE)" \
       || known "set OPENAI_API_KEY secret returned HTTP $SEC_CODE (proceeding)"
 
-    DEP="$("$BIN/zeroship" deploy "$OAI_ZSHIP" --app="$OAI_ID" --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$PAT" 2>&1)"
+    DEP="$("$BIN/zeroship" deploy "$OAI_ZSHIP" --app="$OAI_ID" --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$ADMIN_TOKEN" 2>&1)"
     if echo "$DEP" | grep -q "deploy_hash"; then
       pass "deployed openai-demo ($OAI_ID)"
       sleep 4

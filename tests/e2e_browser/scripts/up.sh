@@ -5,7 +5,7 @@
 #
 # Sources the shared bring-up library (tests/lib/e2e_stack.sh), then:
 #   • stack_up        — ephemeral PG + platform migrations + control/worker/gateway
-#   • mint_admin_pat  — offline platform-admin PAT
+#   • mint_admin_bearer — platform-admin OAuth bearer from the harness OP
 #   • deploy_zship    — csr-todo / ssr-blog / ssg-docs (slugs ...-bx, disjoint
 #                       from the curl harness's ...-e2e apps)
 #
@@ -39,7 +39,7 @@ echo "  zeroship browser-E2E stack bring-up"
 echo "============================================"
 
 stack_up   || { echo "FATAL: stack_up failed"; exit 1; }
-mint_admin_pat || { echo "FATAL: mint_admin_pat failed"; exit 1; }
+mint_admin_bearer || { echo "FATAL: mint_admin_bearer failed"; exit 1; }
 
 # --- deploy the three render examples (skip-with-note if a dist is missing) --
 CSR_ZSHIP="$ROOT/examples/csr-todo/dist/app.zship"

@@ -529,7 +529,7 @@ cp "$DEV_WORK/dev.txt" "$WORK/dev.txt"
 cp "$DEV_WORK/dev.raw" "$WORK/dev.raw"
 cp "$DEV_WORK/dev.dtxt" "$WORK/dev.dtxt"
 cp "$DEV_WORK/dev.draw" "$WORK/dev.draw"
-mint_admin_pat || exit 1
+mint_admin_bearer || exit 1
 
 APP_ID="$(deploy_zship "$APP_SLUG" "$ZSHIP")" || { fail "deploy error-probe"; exit 1; }
 pass "deployed error-probe ($APP_ID)"
@@ -782,7 +782,7 @@ cut -c1-200 "$WORK/dev.raw" | sed 's/^/  /'
 # err.ok CONTROL) + 4 from the `for p in err.plain err.status4xx
 # err.status4xxCode err.publicCode5xx` no-stack loop + 1 section-5 diff = 17,
 # PLUS the 7 `_stk_ok` sites in the SHARED tests/lib/e2e_stack.sh (PG, init.sql,
-# migrations, control, worker, gateway, pat+jwt), which increment the same
+# migrations, control, worker, gateway, at+jwt), which increment the same
 # counter and are why counting `pass "` in this file alone under-counts by
 # exactly 7. 17 + 7 = 24. Dynamic and static agree, and they fail differently.
 #

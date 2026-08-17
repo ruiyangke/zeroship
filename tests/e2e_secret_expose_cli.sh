@@ -169,12 +169,12 @@ grep -qE '"rpc:envp\.report":\{[^}]*"auth":"anon"' "$d/manifest.json" \
   && pass "envp.report is anon in the manifest (deployed calls reach the WORKER)" \
   || { fail "envp.report is not anon in the manifest -- deployed calls never reach the worker"; exit 1; }
 
-# --- 2. real stack, real PAT ------------------------------------------------
+# --- 2. real stack, real bearer ------------------------------------------------
 stack_up || { fail "stack bring-up failed"; exit 1; }   # stack_up resets $WORK
-mint_admin_pat || exit 1
+mint_admin_bearer || exit 1
 
 APP_JSON="$(curl -s -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" \
-  -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" \
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" \
   -d "{\"name\":\"$APP_SLUG\"}")"
 APP_ID="$(printf '%s' "$APP_JSON" | _stk_jget '.id')"
 [ -n "$APP_ID" ] && pass "created app $APP_ID" || { fail "create app: $APP_JSON"; exit 1; }
@@ -184,7 +184,7 @@ APP_ID="$(printf '%s' "$APP_JSON" | _stk_jget '.id')"
 # ---------------------------------------------------------------------------
 zs() {
   "$BIN/zeroship" "$@" \
-    --app="$APP_ID" --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$PAT"
+    --app="$APP_ID" --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$ADMIN_TOKEN"
 }
 
 # THE VERIFY STEP. Not "the CLI exited 0", and not the CLI's own stdout: an
@@ -192,7 +192,7 @@ zs() {
 # did not persist the union, this is where it shows.
 server_expose() {
   curl -s -m 10 "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$APP_ID/env/expose" \
-    -H "Authorization: Bearer $PAT" \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
   | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
       try{const o=JSON.parse(s);if(!Array.isArray(o.expose))return process.stdout.write("<BAD-SHAPE:"+s+">");
       process.stdout.write(o.expose.slice().sort().join(" "));}
@@ -252,7 +252,7 @@ expect_expose "$SEC_A $SEC_B" "a second \`unexpose $SEC_D\` is a no-op, not a wi
 # STORAGE CONTROL: all four secrets exist. Without this, "C is missing from
 # process.env" is indistinguishable from "C was never stored".
 secrets_body="$(curl -s -m 10 "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps/$APP_ID/secrets" \
-  -H "Authorization: Bearer $PAT")"
+  -H "Authorization: Bearer $ADMIN_TOKEN")"
 missing=""
 for k in "$SEC_A" "$SEC_B" "$SEC_C" "$SEC_D"; do
   printf '%s' "$secrets_body" | grep -qF "\"$k\"" || missing="$missing $k"
@@ -272,7 +272,7 @@ zs var set "$VAR_CONTROL=$VAL_CONTROL" >/dev/null 2>&1
 echo ""
 echo "--- the deployed app's view of those secrets ---"
 dep="$("$BIN/zeroship" deploy "$ZSHIP" --app="$APP_ID" \
-        --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$PAT" 2>&1)"
+        --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$ADMIN_TOKEN" 2>&1)"
 echo "$dep" | grep -q "deploy_hash" && pass "deployed env-probe" \
   || { fail "deploy failed: $dep"; echo "  results: $PASS passed, $FAIL failed"; exit 1; }
 
