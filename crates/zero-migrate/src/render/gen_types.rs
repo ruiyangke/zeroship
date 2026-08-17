@@ -701,10 +701,22 @@ fn authoring_tables_from_ops(
                     .get_mut(table)
                     .and_then(|state| state.columns.get_mut(column))
                 {
+                    // The IrColumn spelling of the verdict
+                    // `crate::render::lower::retype_field_descriptor` states in
+                    // descriptor terms and `crate::fold_ops` states in snapshot
+                    // terms; `set_column_type_facets` pins the three to each other.
+                    // Every parameterised facet rides INSIDE `ColType` here
+                    // (`String { length }`, `Char { length }`, `Vector { vector }`),
+                    // so assigning `ty` re-derives them by construction — which is
+                    // why this replay was the one that already got them right.
                     column.ty.clone_from(to_type);
                     column.value_format = None;
                     column.vector_metric = None;
                     column.case_sensitive = None;
+                    // `Op::SetColumnType` has no slot to re-declare the legacy
+                    // platform-ID brand either, and it is text-shaped.
+                    // `validate::declare_logical_column` already clears it.
+                    column.id_prefix = None;
                 }
             }
             Op::SetColumnNotNull { table, column, .. } => {

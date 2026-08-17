@@ -2103,10 +2103,83 @@ pub fn fold_ops_onto(
                          fail-closed rather than fold a stale encryption contract)",
                     ));
                 }
+                // FAIL-CLOSED on a VALUE-FORMAT column, for the same reason and by the
+                // same test as the sentinel refusal directly above: the apply path
+                // emits ONLY `ALTER COLUMN … TYPE`, never the `DROP CONSTRAINT` a
+                // TypeID/ULID format contract would need, so the LIVE DB keeps a
+                // contract this side can no longer describe either way.
+                //
+                // MEASURED on live PostgreSQL 18.4, through the real path
+                // (`MigrationEngine::apply_plan`, not raw SQL), because the two halves
+                // fail differently and neither is fixable by folding:
+                //
+                //   * To any NON-text target the SERVER REFUSES THE ALTER. The
+                //     engine's own `ALTER TABLE … ALTER COLUMN "v" TYPE integer USING
+                //     "v"::integer` dies with `function octet_length(integer) does not
+                //     exist`, because PostgreSQL re-parses the format CHECK against the
+                //     new type. `bigint` and `uuid` fail identically; `bytea` fails with
+                //     `collations are not supported by type bytea`. The plan clears
+                //     validate AND preview and then dies mid-deploy.
+                //
+                //   * To a TEXT-family target (`varchar(N)`, `char(N)`, `text`) the
+                //     ALTER SUCCEEDS and the CHECK SURVIVES — but PostgreSQL re-parses
+                //     it with casts injected (`octet_length((v)::text)`), a spelling
+                //     `render::value_format::recover_format_check` does not recognise.
+                //     So introspection never projects it back onto `value_format`, and
+                //     after `typeId(usr) text → string(50)` structural drift reported
+                //     THREE differences that do not exist, on a schema that was exactly
+                //     what had been deployed:
+                //         collation  expected "pg_catalog.C"  actual ""
+                //         format     expected "typeId(usr)"   actual ""
+                //         unexpected: constraint <table>_v_check
+                //     CLEARING `value_format` does not fix that: the engine-owned CHECK
+                //     is still in the database and still unaccounted for.
+                //
+                // So neither keeping nor clearing is truthful. Until the apply path can
+                // drop the format CHECK alongside the type change, refuse. Detection is
+                // SOURCE-ONLY, unlike the sentinel test: `Op::SetColumnType` carries no
+                // `valueFormat` slot, so a target can never acquire one — the assertion
+                // is `new_col.value_format.is_none()`, checked here rather than assumed.
+                debug_assert!(new_col.value_format.is_none());
+                if col.value_format.is_some() {
+                    return Err(FoldError::Unsupported(
+                        "setColumnType on a column carrying a value format \
+                         (the apply path cannot drop the TypeID/ULID format CHECK; \
+                         PostgreSQL refuses the ALTER outright for a non-text target, and \
+                         keeps an unrecognisable rewritten CHECK for a text one; \
+                         fail-closed rather than fold a stale format contract)",
+                    ));
+                }
                 let source_was_native_uuid =
                     dialect == SqlDialect::Postgres && col.data_type.eq_ignore_ascii_case("uuid");
                 col.data_type = new_col.data_type;
                 col.ddl_type_override = new_col.ddl_type_override;
+                // The remaining TYPE-BOUND facets, taken from `new_col` rather than
+                // left behind. Each one is `None`/empty on `new_col` unless `to_type`
+                // itself produces it, so this is "re-derive from the target type", not
+                // "clear" — the same rule `retype_field_descriptor` states in
+                // descriptor terms, and the reasons are recorded there.
+                //
+                //   * `inline_checks` — the enum / domain / UUID / format CHECKs of the
+                //     type the column HAD. Emission-only but it is DDL: the SQLite
+                //     rebuild joins it straight into the new table's column
+                //     declaration, so a SQLite `enum → int` retype used to leave
+                //     `CHECK ("v" IN ('ok', 'bad'))` sitting on an `integer` column —
+                //     the shape that made a SQLite rename undeployable (3903a98e).
+                //   * `collation` — DRIFT-COMPARED, and PostgreSQL RESETS it: measured,
+                //     `text COLLATE "C" → character varying(40)` leaves the catalog
+                //     reporting the DEFAULT collation, never `C`. BELT-AND-BRACES
+                //     rather than the fix, and said plainly: the ONE fold-side writer
+                //     of this field is `value_format`'s `bytewise_catalog_collation`
+                //     (SQLite's `NOCASE` rides on `case_sensitive`), so the refusal
+                //     above already closes the only route a stale collation had.
+                //   * `case_sensitive` — DRIFT-COMPARED. On PostgreSQL
+                //     case-insensitivity IS the `citext` type, so the retype destroys
+                //     it; measured, `citext → character varying(40)` reported
+                //     `case_sensitive expected "false" actual ""` forever after.
+                col.inline_checks = new_col.inline_checks;
+                col.collation = new_col.collation;
+                col.case_sensitive = new_col.case_sensitive;
                 if matches!(to_type, ColType::Uuid) {
                     // `setColumnType` preserves the live DEFAULT. Entering the UUID
                     // surface must therefore classify that existing default instead
@@ -4487,10 +4560,22 @@ pub fn fold_to_field_defs(
             // so a migration that widened a type or tightened a NOT NULL produced
             // generated types describing the OLD shape.
             //
-            // The type string comes from `col_type_to_token`, the same conversion
-            // `ir_column_to_field` uses for a createTable column. A second mapping
-            // here would drift from it invisibly: the fold would emit a token that
-            // no longer matches what a create of the same ColType produces.
+            // The new shape comes from `retype_field_descriptor`, which builds the
+            // target column through the SAME `ir_column_to_field` a createTable
+            // column goes through. A second mapping here would drift from it
+            // invisibly: the fold would emit a shape that no longer matches what a
+            // create of the same ColType produces.
+            //
+            // This arm used to assign `col_type_to_token(to_type)` and NOTHING ELSE,
+            // which is wrong in both directions, because the token is not the whole
+            // type - `String { length }`, `Char { length }` and `Vector { vector }`
+            // carry their parameter in a SIBLING descriptor field. It kept
+            // `maxLength: 24` on a column widened to `varchar(40)`, and emitted a
+            // bare `{"type":"char"}` for a retype INTO `char(8)`. On SQLite this map
+            // is the DESIRED snapshot the 12-step rebuild renders `CREATE TABLE`
+            // from (`engine`'s `sqlite_schemas`), so the shape is DDL, not just
+            // codegen. The per-facet verdict and its measurements live on
+            // `retype_field_descriptor`.
             Op::SetColumnType {
                 table,
                 column,
@@ -4498,9 +4583,7 @@ pub fn fold_to_field_defs(
                 ..
             } => {
                 if let Some(field) = tables.get_mut(table).and_then(|c| c.get_mut(column)) {
-                    let (token, _legacy_references) =
-                        crate::render::lower::col_type_to_token(to_type);
-                    field.ty = token;
+                    crate::render::lower::retype_field_descriptor(field, to_type);
                 }
             }
             Op::SetColumnNotNull { table, column, .. } => {
