@@ -1,4 +1,4 @@
-import { table, t, grant } from "@zeroship/migrate";
+import { table, t, grant, revoke, schema } from "@zeroship/migrate";
 
 export const name = "service_assertion_replay";
 
@@ -12,6 +12,35 @@ export const name = "service_assertion_replay";
 // until a different replica answers, and "single use" is really "single use per
 // replica". This deployment already has exactly one shared, strongly consistent
 // store, so the cache is a table rather than new infrastructure.
+//
+// WHY ITS OWN SCHEMA, AND NOT `zeroship`. The `zeroship` schema holds platform
+// STATE -- apps, users, deploys, grants, billing -- and authority over it is
+// authority over the platform. That is why
+// crates/zeroship-migrate-adapter/tests/platform_migrate.rs asserts a BLANKET
+// invariant: `zeroship_worker`, the login a process running creator code holds,
+// has no write privilege on ANY relation in `zeroship`.
+//
+// This table is not platform state. It is two columns, a key and an expiry,
+// conferring nothing (see the grant note below on why a `jti` is not a
+// credential), and its writer set is different in kind: `zeroship` is written by
+// the control plane, while every service that VERIFIES an assertion writes here,
+// worker included. Putting it in `zeroship` made one schema carry two trust
+// zones under one grant policy, and the worker's write grant collided with the
+// invariant head-on. Splitting the zones is the fix; narrowing the invariant to
+// "the worker writes nothing except the things it writes" would not be one.
+//
+// `service_authn` is named for the zone (state of the service-to-service
+// authentication MECHANISM) rather than the product, so it cannot be misread as
+// the role `zeroship_auth`. No role has it on `search_path`
+// (db/migrations-ts/20260702000100_schema_roles_extensions.ts), so every
+// statement against it is schema-qualified, which is deliberate.
+//
+// The schema is on the platform charter's namespace allowlist
+// (crates/zeroship-migrate-adapter/policies/platform.policy.toml) because
+// lowering refuses a table outside it. That widening is bounded from the other
+// side: platform_migrate.rs asserts this schema holds EXACTLY this table and
+// that the worker holds no CREATE on it, so the second zone cannot grow into the
+// collision the first one hit.
 //
 // WHY THESE TWO COLUMNS AND NOTHING ELSE. The store answers one question --
 // "has this key been claimed, and is that claim still live" -- so it carries
@@ -32,9 +61,11 @@ export const name = "service_assertion_replay";
 // it is still valid, which is exactly the window the mechanism exists to close.
 // Rows past it are reclaimed in place by the next claim of the same key, so the
 // sweep is housekeeping and not a correctness dependency.
-const SCHEMA = "zeroship";
+const SCHEMA = "service_authn";
 
 export function up() {
+  schema(SCHEMA).create({ ifNotExists: true });
+
   table("service_assertion_replay", { schema: SCHEMA }).create({
     columns: {
       replay_key: t.text().notNull(),
@@ -90,6 +121,24 @@ export function up() {
       names: ["service_assertion_replay"],
     },
     to: ["zeroship_control", "zeroship_gateway", "zeroship_worker", "zeroship_auth"],
+  });
+
+  // Reaching the table needs USAGE on the schema holding it. No role carries
+  // `service_authn` on its `search_path`, so this grants reach and nothing else.
+  grant({
+    privileges: ["usage"],
+    on: { kind: "schema", names: [SCHEMA] },
+    to: ["zeroship_control", "zeroship_gateway", "zeroship_worker", "zeroship_auth"],
+  });
+
+  // A newly created schema grants CREATE to nobody but its owner, so this is a
+  // no-op today. It is written down because the whole point of the split is
+  // that a grantee cannot add relations to this zone, and a privilege that is
+  // only absent by default is one a later `GRANT ALL` restores silently.
+  revoke({
+    privileges: ["create"],
+    on: { kind: "schema", names: [SCHEMA] },
+    from: ["zeroship_control", "zeroship_gateway", "zeroship_worker", "zeroship_auth"],
   });
 }
 
