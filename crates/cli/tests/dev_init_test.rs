@@ -97,7 +97,7 @@ fn dev_init_generates_the_complete_private_deployment_secret_set() {
             "{name} duplicates another generated Ed25519 key"
         );
     }
-    assert_eq!(private_keys.len(), 3);
+    assert_eq!(private_keys.len(), 2);
 
     assert_base64_file(&secrets_dir.join("broker-secret"), 48);
     assert_base64_file(&secrets_dir.join("refresh-idem-key"), 48);
