@@ -140,6 +140,22 @@ against sources last edited 10:55:42, checked by mtime rather than assumed.
   gitignored and fetched on demand by `crates/runtime/tests/setup-wpt.sh`. This
   worktree had never run it. Re-run after fetching.
 
+## Incident: I disturbed the s4 agent's auth suite, and the fix is a private DB
+
+`tests/run_auth_suite.sh` opens with `DROP DATABASE IF EXISTS zeroship_auth_test
+WITH (FORCE)` on a FIXED name (:53, :77). An agent in `.worktrees/s4` was 15
+minutes into its own run of that script when mine started and dropped the
+database out from under it. Mine was killed as soon as I saw the peer process;
+theirs may still have been damaged, and I cannot undo that.
+
+`TEST_DB` is overridable (:53), so my re-run uses `zeroship_auth_test_s40` and
+waits for the peer's process to exit first, because the migration also creates
+CLUSTER-GLOBAL roles that a private database does not isolate.
+
+Worth saying plainly: a suite whose first act is a forced DROP of a fixed-name
+database is not safe to run concurrently, and nothing in it says so. Checking for
+a peer process before running a suite is not a habit I had.
+
 ## What the change touches, and why each file is in it
 
 - `db/migrations-ts/20260816000100_service_assertion_replay.ts` - the table moves
