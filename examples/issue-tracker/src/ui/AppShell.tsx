@@ -21,7 +21,7 @@ const AppShellRoot = forwardRef<HTMLDivElement, ComponentPropsWithoutRef<"div">>
           data-slot="app-shell"
           data-sidebar-open=""
           data-sidebar-side="start"
-          className={`isolate flex h-dvh w-full min-w-0 flex-col overflow-hidden bg-canvas font-sans text-base font-normal text-ink leading-[var(--it-leading-snug)]${
+          className={`isolate flex h-dvh w-full min-w-0 flex-col overflow-hidden bg-canvas font-sans text-base font-normal text-ink leading-snug${
             className ? ` ${className}` : ""
           }`}
         >

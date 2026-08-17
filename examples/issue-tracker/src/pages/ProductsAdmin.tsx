@@ -372,7 +372,7 @@ function ProductBrowser({
             // default spends a third more page on the same two lines.
             density="compact"
             className={`overflow-hidden rounded-lg border border-line bg-surface${
-              refreshing ? " opacity-55 transition-opacity duration-[120ms]" : ""
+              refreshing ? " opacity-55 transition-opacity duration-fast" : ""
             }`}
             items={visible.map((product) => {
               const rollup = rollups.get(product.id) ?? EMPTY_ROLLUP;

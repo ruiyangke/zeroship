@@ -61,7 +61,7 @@ function NotFoundPage() {
         hint={
           <>
             Nothing is routed at{" "}
-            <code className="rounded-lg bg-surface-sunken px-1 py-px font-mono text-[0.85em]">
+            <code className="rounded-lg bg-surface-sunken px-1 py-px font-mono text-xs">
               {pathname}
             </code>
             . Try the{" "}

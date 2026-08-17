@@ -21,7 +21,7 @@ export function AppFieldShell<T extends ElementType = "div">({
   return (
     <Component
       {...props}
-      className={`app-field-shell border-0 bg-[var(--zeroship-input-bg)] text-[var(--zeroship-input-ink)] [box-shadow:var(--zeroship-input-surface-edge,_inset_0_0_0_0_transparent),_inset_0_0_0_var(--zeroship-input-border-width,_0.0625rem)_var(--zeroship-input-border),_0_0_0_0_transparent] transition-[background-color,box-shadow] duration-[var(--zeroship-motion-fast)] ease-[var(--zeroship-motion-ease)] rounded-[var(--zeroship-control-radius-md)] focus-within:bg-[var(--zeroship-input-bg-focus)] focus-within:[box-shadow:var(--zeroship-input-surface-edge,_inset_0_0_0_0_transparent),_inset_0_0_0_var(--zeroship-input-border-width,_0.0625rem)_var(--zeroship-input-border-focus),_0_0_0_var(--zeroship-focus-ring-width)_var(--zeroship-input-focus-ring-color)]! ${className}`}
+      className={`app-field-shell field-edge rounded border-0 bg-surface text-ink transition duration-fast ease-out focus-within:bg-surface focus-within:field-edge-focus! ${className}`}
     />
   );
 }

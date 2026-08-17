@@ -11,7 +11,7 @@ export function TimelineList({
 
   return (
     <Component
-      className={`${kind === "comments" ? "comment-list mb-5" : "history-timeline"} relative m-0 flex list-none flex-col gap-5 p-0 before:absolute before:top-6 before:bottom-2 before:start-4 before:w-px before:bg-line before:content-['']`}
+      className={`${kind === "comments" ? "comment-list mb-5" : "history-timeline"} relative m-0 flex list-none flex-col gap-5 p-0 before:absolute before:top-6 before:bottom-2 before:start-4 before:w-px before:bg-line before:content-empty`}
     >
       {children}
     </Component>

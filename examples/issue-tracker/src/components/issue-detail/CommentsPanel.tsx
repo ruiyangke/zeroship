@@ -164,7 +164,7 @@ function CommentRow({
           </Link>
         ) : null}
         {readOnly ? null : (
-        <span className="ms-auto inline-flex gap-1 opacity-0 transition-opacity duration-[120ms] ease-out group-hover/comment:opacity-100 group-focus-within/comment:opacity-100 [@media(hover:none)]:opacity-100">
+        <span className="ms-auto inline-flex gap-1 opacity-0 transition-opacity duration-fast ease-out group-hover/comment:opacity-100 group-focus-within/comment:opacity-100 [@media(hover:none)]:opacity-100">
           <Button
             variant="plain"
             disabled={busy}

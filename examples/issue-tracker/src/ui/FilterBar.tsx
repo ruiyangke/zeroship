@@ -61,18 +61,18 @@ function ActiveFilter({ filter }: { filter: FilterBarActiveFilter }) {
   };
 
   return (
-    <span className="inline-flex h-7 min-w-0 items-center gap-1 whitespace-nowrap rounded border border-line bg-surface-sunken ps-2 pe-1 font-sans text-sm font-medium leading-[var(--it-leading-tight)] text-ink-secondary">
+    <span className="inline-flex h-7 min-w-0 items-center gap-1 whitespace-nowrap rounded border border-line bg-surface-sunken ps-2 pe-1 font-sans text-sm font-medium leading-tight text-ink-secondary">
       <span className="min-w-0 truncate">{filter.label}</span>
       <button
         type="button"
         aria-label={removeLabel}
-        className="inline-flex size-4 flex-none cursor-pointer items-center justify-center rounded-sm border-0 bg-transparent p-0 text-ink-muted hover:bg-danger-soft hover:text-danger focus-visible:[box-shadow:var(--it-focus-ring-tight)]"
+        className="inline-flex size-4 flex-none cursor-pointer items-center justify-center rounded-sm border-0 bg-transparent p-0 text-ink-muted hover:bg-danger-soft hover:text-danger focus-visible:focus-ring-tight"
         onClick={remove}
         onKeyDown={(event) => {
           if (event.key === "Backspace" || event.key === "Delete") remove(event);
         }}
       >
-        <span aria-hidden="true" className="leading-[var(--it-leading-tight)]">
+        <span aria-hidden="true" className="leading-tight">
           ×
         </span>
       </button>
@@ -111,7 +111,7 @@ export const FilterBar = forwardRef<HTMLDivElement, FilterBarProps>(function Fil
         <Input
           type="search"
           data-slot="filter-bar-search"
-          wrapperClassName="min-w-12 [flex:1_1_var(--it-space-7)]"
+          wrapperClassName="min-w-12 grow shrink basis-12"
           value={search}
           onChange={(event) => onSearchChange?.(event.target.value)}
           placeholder={searchPlaceholder}

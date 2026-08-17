@@ -15,7 +15,7 @@ export function RailDescriptionList({
           key={index}
         >
           <dt
-            className="text-xs font-medium tracking-[0.04em] text-ink-muted"
+            className="text-xs font-medium tracking-wide text-ink-muted"
             data-slot="description-list-term"
           >
             {item.term}

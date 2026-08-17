@@ -28,7 +28,7 @@ function ReportSection({ title, children }: { title: ReactNode; children: ReactN
 
 function ReportPair({ children }: { children: ReactNode }) {
   return (
-    <div className="grid grid-cols-1 items-start gap-5 min-[1101px]:grid-cols-2 [&>*]:min-w-0">
+    <div className="grid grid-cols-1 items-start gap-5 wide:grid-cols-2 [&>*]:min-w-0">
       {children}
     </div>
   );
@@ -86,10 +86,10 @@ function CountReportTable({
     <table className="w-full border-collapse text-base">
       <thead>
         <tr>
-          <th className="border-b border-line bg-surface-sunken px-2 py-2 text-left text-xs font-semibold uppercase tracking-[0.04em] text-ink-muted whitespace-nowrap">
+          <th className="border-b border-line bg-surface-sunken px-2 py-2 text-left text-xs font-semibold uppercase tracking-wide text-ink-muted whitespace-nowrap">
             {labelHeading}
           </th>
-          <th className="w-20 border-b border-line bg-surface-sunken px-2 py-2 text-right text-xs font-semibold uppercase tracking-[0.04em] text-ink-muted whitespace-nowrap tabular-nums">
+          <th className="w-20 border-b border-line bg-surface-sunken px-2 py-2 text-right text-xs font-semibold uppercase tracking-wide text-ink-muted whitespace-nowrap tabular-nums">
             Open
           </th>
         </tr>
@@ -136,7 +136,7 @@ function SummarySection({ productId }: { productId: string }) {
             <StatCard label="Open" value={summary.open} />
             <StatCard label="Closed" value={summary.total - summary.open} />
           </div>
-          <div className="mt-2 grid grid-cols-1 gap-5 min-[901px]:grid-cols-2 min-[1101px]:grid-cols-4">
+          <div className="mt-2 grid grid-cols-1 gap-5 desktop:grid-cols-2 wide:grid-cols-4">
             <CountBreakdown title="By status" counts={summary.byStatus} />
             {/* Kind sits BESIDE severity, not folded into it. While a feature
                 request was `severity: enhancement`, "by severity" answered two

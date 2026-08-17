@@ -68,7 +68,7 @@ export function Page({
 }) {
   return (
     <div
-      className={`page transition-[opacity,transform] duration-[250ms] ease-out starting:translate-y-1 starting:opacity-0 [&>*+*]:mt-4 [&>h1]:mb-1 [&_[data-slot~="page-header"]]:mb-1 ${className}`}
+      className={`page transition duration-base ease-out starting:translate-y-1 starting:opacity-0 [&>*+*]:mt-4 [&>h1]:mb-1 [&_[data-slot~="page-header"]]:mb-1 ${className}`}
     >
       {children}
     </div>
@@ -97,8 +97,8 @@ export function SectionHeading({
     <Component
       className={
         level === 2
-          ? "mb-2 text-lg font-semibold tracking-[-0.01em] text-ink"
-          : "mb-2 text-md font-semibold tracking-[-0.01em] text-ink-secondary"
+          ? "mb-2 text-lg font-semibold tracking-tight text-ink"
+          : "mb-2 text-md font-semibold tracking-tight text-ink-secondary"
       }
     >
       {children}

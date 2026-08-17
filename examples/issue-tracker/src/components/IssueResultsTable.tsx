@@ -246,7 +246,7 @@ export function IssueResultsTable({
       aria-busy={refetching || undefined}
       className={
         refetching
-          ? "opacity-55 transition-opacity duration-[var(--it-motion-fast)] ease-out"
+          ? "opacity-55 transition-opacity duration-fast ease-out"
           : undefined
       }
     >
@@ -254,7 +254,7 @@ export function IssueResultsTable({
         <div className="min-h-0 w-full min-w-0 overflow-auto bg-surface">
           <table
             aria-label={caption ?? "Issues"}
-            className="w-full border-separate border-spacing-0 bg-surface text-base leading-[var(--it-leading-snug)] text-ink"
+            className="w-full border-separate border-spacing-0 bg-surface text-base leading-snug text-ink"
           >
             <thead>
               <tr>
@@ -275,7 +275,7 @@ export function IssueResultsTable({
                       scope="col"
                       data-column={key}
                       aria-sort={sortState}
-                      className="h-8 whitespace-nowrap border-b border-line-strong bg-surface-sunken px-3 py-0 text-left text-xs font-semibold tracking-[var(--it-tracking-wide)] text-ink-muted"
+                      className="h-8 whitespace-nowrap border-b border-line-strong bg-surface-sunken px-3 py-0 text-left text-xs font-semibold tracking-wide text-ink-muted"
                     >
                       {sortable ? (
                         <button
@@ -330,7 +330,7 @@ export function IssueResultsTable({
                   : issues.map((issue, rowIndex) => (
                       <tr
                         key={issue.id}
-                        className="bg-surface transition-colors duration-[var(--it-motion-fast)] ease-out hover:bg-surface-hover motion-reduce:transition-none"
+                        className="bg-surface transition-colors duration-fast ease-out hover:bg-surface-hover motion-reduce:transition-none"
                       >
                         {columns.map((key) => (
                           <td

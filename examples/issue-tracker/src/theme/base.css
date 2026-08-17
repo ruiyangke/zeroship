@@ -57,7 +57,7 @@ h3,
 h4 {
   font-weight: var(--it-weight-semibold);
   line-height: var(--it-leading-tight);
-  letter-spacing: -0.01em;
+  letter-spacing: var(--it-tracking-tight);
 }
 
 h1 { font-size: var(--it-text-xl); }

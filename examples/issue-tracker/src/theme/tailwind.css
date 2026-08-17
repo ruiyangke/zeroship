@@ -47,12 +47,16 @@
      chrome pick up colour the design says it must not have. */
   --color-danger: var(--it-red-500);
   --color-danger-soft: var(--it-red-50);
+  --color-danger-strong: var(--it-red-700);
   --color-warning: var(--it-amber-500);
   --color-warning-soft: var(--it-amber-50);
+  --color-warning-strong: var(--it-amber-700);
   --color-success: var(--it-green-500);
   --color-success-soft: var(--it-green-50);
+  --color-success-strong: var(--it-green-700);
   --color-info: var(--it-blue-500);
   --color-info-soft: var(--it-blue-50);
+  --color-info-strong: var(--it-blue-700);
 
   /* Type. The scale stops at the sizes the design actually uses, so there is
      no text-9xl to reach for on a dense tool. */
@@ -66,6 +70,17 @@
   --text-lg: var(--it-text-lg);
   --text-xl: var(--it-text-xl);
   --text-2xl: var(--it-text-2xl);
+
+  --leading-tight: var(--it-leading-tight);
+  --leading-snug: var(--it-leading-snug);
+  --leading-normal: var(--it-leading-normal);
+
+  --font-weight-normal: var(--it-weight-normal);
+  --font-weight-medium: var(--it-weight-medium);
+  --font-weight-semibold: var(--it-weight-semibold);
+
+  --tracking-tight: var(--it-tracking-tight);
+  --tracking-wide: var(--it-tracking-wide);
 
   /* Space. Tailwind multiplies --spacing by the numeric suffix, so a 4px base
      gives p-1 = 4px, p-2 = 8px, p-4 = 16px -- the same 4px grid the tokens
@@ -81,4 +96,46 @@
   --shadow-dialog: var(--it-shadow-dialog);
 
   --ease-out: var(--it-ease);
+
+  /* Tailwind's duration utility reads the transition-duration namespace. */
+  --transition-duration-fast: var(--it-motion-fast);
+  --transition-duration-base: var(--it-motion);
+
+  /* Complementary max-* variants resolve immediately below each threshold. */
+  --breakpoint-desktop: 901px;
+  --breakpoint-wide: 1101px;
+}
+
+/* Functional generated content gets a name instead of an arbitrary value at
+   every call site. */
+@utility content-empty {
+  content: "";
+}
+
+@utility content-placeholder {
+  content: attr(data-placeholder);
+}
+
+/* These are complete component chrome, not composable shadow-scale values.
+   Custom utilities preserve the exact layers instead of adding Tailwind's
+   general-purpose shadow composition layers. */
+@utility field-edge {
+  box-shadow:
+    var(--zeroship-input-surface-edge, inset 0 0 0 0 transparent),
+    inset 0 0 0 var(--zeroship-input-border-width, 0.0625rem)
+      var(--zeroship-input-border),
+    0 0 0 0 transparent;
+}
+
+@utility field-edge-focus {
+  box-shadow:
+    var(--zeroship-input-surface-edge, inset 0 0 0 0 transparent),
+    inset 0 0 0 var(--zeroship-input-border-width, 0.0625rem)
+      var(--zeroship-input-border-focus),
+    0 0 0 var(--zeroship-focus-ring-width)
+      var(--zeroship-input-focus-ring-color);
+}
+
+@utility focus-ring-tight {
+  box-shadow: var(--it-focus-ring-tight);
 }

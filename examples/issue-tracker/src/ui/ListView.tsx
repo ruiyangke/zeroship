@@ -34,11 +34,11 @@ function itemMain(item: ListViewItem) {
         </span>
       ) : null}
       <span className="flex min-w-0 flex-col justify-center">
-        <span className="truncate text-base font-medium leading-[var(--it-leading-snug)] text-ink">
+        <span className="truncate text-base font-medium leading-snug text-ink">
           {item.title}
         </span>
         {item.description != null ? (
-          <span className="truncate text-xs leading-[var(--it-leading-snug)] text-ink-secondary">
+          <span className="truncate text-xs leading-snug text-ink-secondary">
             {item.description}
           </span>
         ) : null}
@@ -88,7 +88,7 @@ export const ListView = forwardRef<HTMLUListElement, ListViewProps>(function Lis
       {items.map((item, index) => (
         <li
           key={item.id}
-          className={`flex min-h-8 items-center [transition-duration:var(--it-motion-fast)] [transition-timing-function:var(--it-ease)] motion-reduce:transition-none ${
+          className={`flex min-h-8 items-center duration-fast ease-out motion-reduce:transition-none ${
             density === "compact" ? "px-2" : "px-3"
           }${divided && index > 0 ? " border-t border-line" : ""}${
             item.href != null || item.onClick != null

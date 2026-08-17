@@ -269,7 +269,7 @@ export function RichTextEditor({
     editorProps: {
       attributes: {
         class:
-          "rich-text-input min-h-24 px-3 py-2 outline-none empty:before:pointer-events-none empty:before:float-start empty:before:h-0 empty:before:text-ink-muted empty:before:content-[attr(data-placeholder)] [&_p.is-editor-empty:first-child]:before:pointer-events-none [&_p.is-editor-empty:first-child]:before:float-start [&_p.is-editor-empty:first-child]:before:h-0 [&_p.is-editor-empty:first-child]:before:text-ink-muted [&_p.is-editor-empty:first-child]:before:content-[attr(data-placeholder)]",
+          "rich-text-input min-h-24 px-3 py-2 outline-none empty:before:pointer-events-none empty:before:float-start empty:before:h-0 empty:before:text-ink-muted empty:before:content-placeholder [&_p.is-editor-empty:first-child]:before:pointer-events-none [&_p.is-editor-empty:first-child]:before:float-start [&_p.is-editor-empty:first-child]:before:h-0 [&_p.is-editor-empty:first-child]:before:text-ink-muted [&_p.is-editor-empty:first-child]:before:content-placeholder",
         "aria-label": ariaLabel,
         ...(placeholder ? { "data-placeholder": placeholder } : {}),
       },

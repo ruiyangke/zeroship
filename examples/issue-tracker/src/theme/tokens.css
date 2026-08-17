@@ -122,7 +122,8 @@
   --it-weight-medium: 500;
   --it-weight-semibold: 600;
 
-  /* Column heads and status text: small caps-ish without the fake caps. */
+  /* Headings pull in slightly; column heads and status text open out. */
+  --it-tracking-tight: -0.01em;
   --it-tracking-wide: 0.04em;
 
   /* --- Space: a strict 4px grid -------------------------------------- */

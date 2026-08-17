@@ -156,7 +156,7 @@ export function NewIssuePage() {
   if (isVisitor(session)) {
     return (
       <Page>
-        <h1 className="text-xl font-semibold tracking-[-0.01em]">New issue</h1>
+        <h1 className="text-xl font-semibold tracking-tight">New issue</h1>
         <Hint>Filing an issue requires a signed-in identity. Sign in and reload.</Hint>
       </Page>
     );
@@ -164,7 +164,7 @@ export function NewIssuePage() {
 
   return (
     <Page className="mx-auto max-w-160">
-      <h1 className="text-xl font-semibold tracking-[-0.01em]">New issue</h1>
+      <h1 className="text-xl font-semibold tracking-tight">New issue</h1>
       <AsyncSection
         query={productsQ}
         loadingLabel="Loading products..."
@@ -247,7 +247,7 @@ export function NewIssuePage() {
                       <Field.Label htmlFor="new-issue-description">Description</Field.Label>
                       <AppFieldShell
                         as="textarea"
-                        className="app-textarea w-full px-2 py-2 font-[inherit] text-md outline-none"
+                        className="app-textarea w-full px-2 py-2 text-md outline-none"
                         id="new-issue-description"
                         value={description}
                         onChange={(e) => setDescription(e.target.value)}

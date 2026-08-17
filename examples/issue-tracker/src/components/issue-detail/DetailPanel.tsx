@@ -20,7 +20,7 @@ export function DetailPanel({
 }) {
   return (
     <section className={`${locator} m-0 min-w-0`}>
-      <h3 className="mb-2 text-xs font-semibold tracking-[0.06em] text-ink-muted uppercase">
+      <h3 className="mb-2 text-xs font-semibold tracking-wide text-ink-muted uppercase">
         {title}
       </h3>
       {children}

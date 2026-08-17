@@ -61,7 +61,7 @@ function AttachmentRow({ attachment }: { attachment: Attachment }) {
 
   return (
     <li
-      className={`border-t border-line py-1 first:border-t-0 ${attachment.isObsolete ? "opacity-[0.55]" : ""}`}
+      className={`border-t border-line py-1 first:border-t-0 ${attachment.isObsolete ? "opacity-55" : ""}`}
     >
       <div className="flex flex-wrap items-center gap-2 text-base">
         <Button variant="gray" disabled={downloading} onClick={() => void download()}>

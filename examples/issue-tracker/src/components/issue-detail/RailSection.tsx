@@ -7,7 +7,7 @@
  */
 export function RailSection({ title }: { title: string }) {
   return (
-    <p className="rail-section col-span-full mt-4 mb-2 border-t border-line pt-4 text-xs font-semibold tracking-[0.06em] text-ink-muted uppercase">
+    <p className="rail-section col-span-full mt-4 mb-2 border-t border-line pt-4 text-xs font-semibold tracking-wide text-ink-muted uppercase">
       {title}
     </p>
   );

@@ -10,17 +10,17 @@ export interface BannerProps extends Omit<ComponentPropsWithoutRef<"div">, "titl
 }
 
 const INTENT_CLASSES: Record<BannerIntent, string> = {
-  info: "bg-info-soft [border-inline-start-color:var(--it-blue-500)]",
-  success: "bg-success-soft [border-inline-start-color:var(--it-green-500)]",
-  warning: "bg-warning-soft [border-inline-start-color:var(--it-amber-500)]",
-  danger: "bg-danger-soft [border-inline-start-color:var(--it-red-500)]",
+  info: "border-s-info bg-info-soft",
+  success: "border-s-success bg-success-soft",
+  warning: "border-s-warning bg-warning-soft",
+  danger: "border-s-danger bg-danger-soft",
 };
 
 const ICON_CLASSES: Record<BannerIntent, string> = {
-  info: "[color:var(--it-blue-700)]",
-  success: "[color:var(--it-green-700)]",
-  warning: "[color:var(--it-amber-700)]",
-  danger: "[color:var(--it-red-700)]",
+  info: "text-info-strong",
+  success: "text-success-strong",
+  warning: "text-warning-strong",
+  danger: "text-danger-strong",
 };
 
 function CircleAlertIcon() {
@@ -75,7 +75,7 @@ export function Banner({
           <CircleAlertIcon />
         </div>
         <div className="flex min-w-0 flex-1 flex-col gap-1">
-          <div className="font-semibold leading-[var(--it-leading-snug)] text-ink">
+          <div className="font-semibold leading-snug text-ink">
             {title}
           </div>
           {description != null ? (

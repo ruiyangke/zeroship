@@ -221,20 +221,20 @@ export function IssueDetailPage({
           the state sits under it where it reads as a caption about the issue
           rather than as more title. */}
       <div className="mb-1 block">
-        <span className="mr-2 mb-1 inline-block font-mono text-sm tracking-[0.02em] text-ink-muted">
+        <span className="mr-2 mb-1 inline-block font-mono text-sm tracking-wide text-ink-muted">
           {detail.product ? `${detail.product.key}-${detail.issue.number}` : detail.issue.id}
         </span>
         {editingTitle ? (
           <TitleEditor issue={detail.issue} onDone={() => setEditingTitle(false)} />
         ) : (
           <div className="group/title flex min-w-0 flex-row flex-wrap items-center justify-start gap-2">
-            <h1 className="m-0 max-w-[46ch] text-[1.5rem] leading-[1.25] tracking-[-0.02em]">
+            <h1 className="m-0 max-w-[46ch] text-xl leading-tight tracking-tight">
               {detail.issue.summary}
             </h1>
             {signedOut ? null : (
               <Button
                 variant="plain"
-                className="opacity-0 transition-opacity duration-[120ms] group-hover/title:opacity-100 group-focus-within/title:opacity-100 [@media(hover:none)]:opacity-100"
+                className="opacity-0 transition-opacity duration-fast group-hover/title:opacity-100 group-focus-within/title:opacity-100 [@media(hover:none)]:opacity-100"
                 aria-label="Edit summary"
                 onClick={() => setEditingTitle(true)}
               >
@@ -290,7 +290,7 @@ export function IssueDetailPage({
         </Tabs.List>
 
         <Tabs.Panel value="details">
-          <div className="grid grid-cols-[minmax(0,1fr)_22rem] items-start gap-0 max-[900px]:grid-cols-1">
+          <div className="grid grid-cols-[minmax(0,1fr)_22rem] items-start gap-0 max-desktop:grid-cols-1">
           {/* The conversation IS the issue. It used to sit under a screen of
               editable fields -- summary, status, severity, priority,
               assignee, product, component, version, whiteboard, OS, platform,
@@ -374,7 +374,7 @@ export function IssueDetailPage({
               ) : null}
             </div>
           </div>
-          <div className="issue-detail-side flex min-w-0 flex-col gap-5 border-l border-line pt-1 pl-7 [&_*]:max-w-full [&>*]:shrink-0 min-[901px]:sticky min-[901px]:top-0 min-[901px]:max-h-[calc(100dvh-4rem)] min-[901px]:self-start min-[901px]:overflow-y-auto min-[901px]:overscroll-contain min-[901px]:pb-4">
+          <div className="issue-detail-side flex min-w-0 flex-col gap-5 border-l border-line pt-1 pl-7 [&_*]:max-w-full [&>*]:shrink-0 desktop:sticky desktop:top-0 desktop:max-h-[calc(100dvh-4rem)] desktop:self-start desktop:overflow-y-auto desktop:overscroll-contain desktop:pb-4">
             <FieldsPanel
               issue={detail.issue}
               people={detail.people}

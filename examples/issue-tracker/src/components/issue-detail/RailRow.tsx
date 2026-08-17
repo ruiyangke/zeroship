@@ -40,7 +40,7 @@ export function RailRow({
             ? wide
               ? "col-span-full justify-self-start"
               : "col-start-3 justify-self-start"
-            : "justify-self-end opacity-0 transition-opacity duration-[120ms] group-hover/rail-row:opacity-100 group-focus-within/rail-row:opacity-100 [@media(hover:none)]:opacity-100"
+            : "justify-self-end opacity-0 transition-opacity duration-fast group-hover/rail-row:opacity-100 group-focus-within/rail-row:opacity-100 [@media(hover:none)]:opacity-100"
         }
       >
         {action}

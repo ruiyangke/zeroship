@@ -17,15 +17,15 @@ export interface ErrorStateProps extends Omit<
 }
 
 const COLUMN_CLASSES =
-  "flex min-w-0 max-w-full flex-col items-center gap-[var(--it-space-3)]";
+  "flex min-w-0 max-w-full flex-col items-center gap-3";
 const ACTIONS_CLASSES =
-  "flex flex-wrap items-center justify-center gap-[var(--it-space-2)]";
+  "flex flex-wrap items-center justify-center gap-2";
 
 function CircleAlertIcon() {
   return (
     <svg
       aria-hidden="true"
-      className="size-[var(--it-control-h-sm)]"
+      className="size-6"
       fill="none"
       focusable="false"
       stroke="currentColor"
@@ -75,23 +75,23 @@ const ErrorStateRoot = forwardRef<HTMLDivElement, ErrorStateProps>(
         ref={ref}
         role={live ? "alert" : undefined}
         data-intent={intent}
-        className={`grid min-h-[var(--it-row-h)] place-items-center px-[var(--it-space-4)] py-[var(--it-space-5)] text-center text-ink-secondary${
+        className={`grid min-h-8 place-items-center px-4 py-6 text-center text-ink-secondary${
           className ? ` ${className}` : ""
         }`}
       >
         <div className={COLUMN_CLASSES}>
           <div
             aria-hidden="true"
-            className={`inline-flex size-[var(--it-control-h-lg)] items-center justify-center ${
+            className={`inline-flex size-8 items-center justify-center ${
               intent === "warning"
-                ? "[color:var(--it-amber-700)]"
-                : "[color:var(--it-red-700)]"
+                ? "text-warning-strong"
+                : "text-danger-strong"
             }`}
           >
             <CircleAlertIcon />
           </div>
           {title != null ? (
-            <h2 className="m-0 text-lg leading-[var(--it-leading-tight)] [font-weight:var(--it-weight-semibold)] text-ink">
+            <h2 className="m-0 text-lg leading-tight font-semibold text-ink">
               {title}
             </h2>
           ) : null}
