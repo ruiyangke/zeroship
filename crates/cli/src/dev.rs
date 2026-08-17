@@ -284,11 +284,6 @@ fn secret_specs() -> [SecretSpec; 8] {
             generate_base64_secret,
             validate_base64_secret,
         ),
-        (
-            "platform-mint-key",
-            generate_platform_mint_key,
-            validate_platform_mint_key,
-        ),
     ]
 }
 
@@ -648,15 +643,7 @@ fn generate_refresh_hash_key() -> Result<Vec<u8>, String> {
     Ok(format!("1:{}\n", random_hex(48)?).into_bytes())
 }
 
-fn generate_platform_mint_key() -> Result<Vec<u8>, String> {
-    Ok(random_hex(32)?.into_bytes())
-}
 
-fn validate_platform_mint_key(bytes: &[u8]) -> Result<(), String> {
-    let value = std::str::from_utf8(bytes)
-        .map_err(|error| format!("platform mint key must be UTF-8: {error}"))?;
-    zeroship_core::config::validate_platform_mint_key("platform-mint-key", value)
-}
 
 fn validate_refresh_hash_key(bytes: &[u8]) -> Result<(), String> {
     let text =

@@ -11,7 +11,6 @@ use zeroship_core::auth_provider::{
 };
 use zeroship_core::config::{
     bootstrap_or_exit, validate_master_key_material,
-    validate_platform_mint_key as validate_platform_mint_key_material,
     validate_secret_material, AuthProviderKind, CheckConfigReport, CheckValue,
 };
 use zeroship_bundle::{
@@ -198,84 +197,6 @@ fn platform_config(
     .map_err(|err| format!("platform auth provider config: {err}"))
 }
 
-/// Operator-facing spelling of the mint destination, for diagnostics that have
-/// to name something settable.
-const PLATFORM_MINT_URL_INPUT: &str = "--auth-platform-mint-url / ZEROSHIP_AUTH_PLATFORM_MINT_URL";
-const PLATFORM_MINT_KEY_INPUT: &str =
-    "ZEROSHIP_AUTH_PLATFORM_MINT_KEY / --auth-platform-mint-key-file";
-const CONTROL_KEY_INPUT: &str = "ZEROSHIP_CONTROL_KEY / --control-key-file";
-
-fn validate_platform_mint_key(
-    issuer: &str,
-    key: &zeroship_core::config::Secret<String>,
-    control_key: &zeroship_core::config::Secret<String>,
-    worker_key: &zeroship_core::config::Secret<String>,
-) -> Result<(), String> {
-    if issuer.trim().is_empty() {
-        return Ok(());
-    }
-    validate_secret_material(key, |value| {
-        validate_platform_mint_key_material(PLATFORM_MINT_KEY_INPUT, value)
-    })?;
-
-    let Some(mint_key) = key.expose_secret().map(|value| value.trim()) else {
-        return Ok(());
-    };
-    for (other_label, other) in [
-        (CONTROL_KEY_INPUT, control_key),
-        (WORKER_KEY_LABEL, worker_key),
-    ] {
-        if other
-            .expose_secret()
-            .is_some_and(|other_key| mint_key == other_key.trim())
-        {
-            return Err(format!(
-                "{PLATFORM_MINT_KEY_INPUT} must differ from {other_label}"
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-/// Resolve the validated platform mint destination, or refuse to boot.
-///
-/// Kept beside [`platform_config`] because the two settings are read together
-/// and mean different things: that one builds the VERIFIER (which issuer a
-/// token's `iss` must equal), this one is the ROUTE the mint key travels. The
-/// asymmetry in the two arms is deliberate:
-///
-///   * issuer set, mint URL empty -> REFUSE. There is no fall back to the
-///     issuer. Deriving the route from the name is the defect this setting
-///     exists to remove, and a fallback would reinstate it on exactly the
-///     deployments that did not know to set it - silently, and only visible
-///     once a human had already approved a device grant.
-///   * mint URL set, issuer empty -> REFUSE. This names a destination for a
-///     mint credential that nothing will ever use, so it is far more likely to
-///     be a half-finished configuration than an intent. Same shape as the
-///     existing "issuer is required when the JWKS URL is set" rule.
-///
-/// # Errors
-///
-/// The operator-facing message, already naming the input to fix.
-fn platform_mint_url(issuer: &str, mint_url: &str) -> Result<Option<String>, String> {
-    let issuer_configured = !issuer.trim().is_empty();
-    let mint_configured = !mint_url.trim().is_empty();
-    match (issuer_configured, mint_configured) {
-        (false, false) => Ok(None),
-        (false, true) => Err(format!(
-            "{PLATFORM_ISSUER_INPUT} is required when {PLATFORM_MINT_URL_INPUT} is set"
-        )),
-        (true, false) => Err(format!(
-            "{PLATFORM_MINT_URL_INPUT} is required when {PLATFORM_ISSUER_INPUT} is set; \
-             it is the address control POSTs the deploy-token mint to and is NOT derived \
-             from the issuer, which names the OP publicly (e.g. http://auth:9092)"
-        )),
-        (true, true) => zeroship_core::device_grant::platform_mint_base_url(mint_url)
-            .map(|base| Some(base.to_owned()))
-            .map_err(|err| format!("{PLATFORM_MINT_URL_INPUT}: {err}")),
-    }
-}
 
 fn platform_config_required(
     platform: ControlPlatformAuthConfig<'_>,
@@ -350,7 +271,6 @@ fn main() -> std::io::Result<()> {
     // precedence and `resolve_overlay_string` has nothing left to add.
     let auth_platform_issuer = settings.auth_platform_issuer.get().clone();
     let auth_platform_jwks_url = settings.auth_platform_jwks_url.get().clone();
-    let auth_platform_mint_url = settings.auth_platform_mint_url.get().clone();
     let trusted_oauth_clients = zeroship_control::resolve_trusted_oauth_clients(&file.auth);
     tracing::info!(
         trusted_oauth_clients = trusted_oauth_clients.len(),
@@ -381,11 +301,6 @@ fn main() -> std::io::Result<()> {
     };
     let blob_store_is_remote = store_url.is_remote();
     let control_key = settings.control_key.expose_str().to_owned();
-    let auth_platform_mint_key = settings
-        .auth_platform_mint_key
-        .expose_str()
-        .trim()
-        .to_owned();
     let master_key = settings.master_key.expose_str().to_owned();
     let workers_str = settings.worker_urls.get().clone();
     let gateway_url = settings.gateway_url.get().trim_end_matches('/').to_string();
@@ -447,11 +362,6 @@ fn main() -> std::io::Result<()> {
     if !settings.control_key.is_configured() {
         missing.push("--control-key-file / ZEROSHIP_CONTROL_KEY");
     }
-    if !auth_platform_issuer.trim().is_empty()
-        && !settings.auth_platform_mint_key.is_configured()
-    {
-        missing.push("--auth-platform-mint-key-file / ZEROSHIP_AUTH_PLATFORM_MINT_KEY");
-    }
     if signing_key_file.as_os_str().is_empty() {
         missing.push("--signing-key-file / ZEROSHIP_CONTROL_SIGNING_KEY_FILE");
     }
@@ -459,19 +369,6 @@ fn main() -> std::io::Result<()> {
         tracing::error!(
             missing = %missing.join(", "),
             "control: refusing to start; required secrets missing"
-        );
-        std::process::exit(1);
-    }
-    if let Err(message) = validate_platform_mint_key(
-        &auth_platform_issuer,
-        &settings.auth_platform_mint_key,
-        &settings.control_key,
-        &settings.worker_key,
-    ) {
-        eprintln!("control: {message}");
-        tracing::error!(
-            error = %message,
-            "control: refusing to start with an unusable platform mint key"
         );
         std::process::exit(1);
     }
@@ -538,20 +435,6 @@ fn main() -> std::io::Result<()> {
             std::process::exit(1);
         }
     }
-
-    // The outbound half of the platform-OP configuration, resolved BEFORE the
-    // `--check-config` early return so a dry run refuses what a real boot would
-    // refuse. Nothing here reaches the network: it is a parse and two presence
-    // rules.
-    let platform_mint_url = match platform_mint_url(&auth_platform_issuer, &auth_platform_mint_url) {
-        Ok(resolved) => resolved,
-        Err(message) => {
-            eprintln!("control: {message}");
-            tracing::error!(
-                error = %message,
-                "control: refusing to start; the platform deploy-token mint destination is unusable"
-            );
-            std::process::exit(1);
         }
     };
 
@@ -615,19 +498,6 @@ fn main() -> std::io::Result<()> {
         };
         report.field(
             "auth_platform_jwks_url",
-            CheckValue::Plain(platform_jwks_report),
-        );
-        // The destination the mint key travels to, printed in full. It is
-        // deployment topology, not key material, and an operator diagnosing a
-        // failed `zeroship login` needs to see it next to the issuer to tell
-        // the trust anchor from the route.
-        report.field(
-            "auth_platform_mint_url",
-            CheckValue::Plain(platform_mint_url.clone().unwrap_or_default()),
-        );
-        report.field(
-            "auth_platform_mint_key_configured",
-            CheckValue::Secret(settings.auth_platform_mint_key.is_configured()),
         );
         report.field(
             "trusted_oauth_clients_count",
@@ -1034,7 +904,6 @@ fn main() -> std::io::Result<()> {
         blob_store,
         workflow_blob_store,
         control_key: zeroship_control::SecretString::new(control_key),
-        auth_platform_mint_key: zeroship_control::SecretString::new(auth_platform_mint_key),
         master_key: zeroship_control::SecretString::new(master_key),
         stripe_webhook_secret: zeroship_control::SecretString::new(stripe_webhook_secret),
         stripe_secret_key: zeroship_control::SecretString::new(stripe_secret_key),
@@ -1061,7 +930,6 @@ fn main() -> std::io::Result<()> {
             .expect("control: bundled authz policies parse"),
         pat_issuer,
         auth_provider,
-        platform_mint_url,
         provider_registry,
         billing_stack,
         billing_stream,
@@ -1640,16 +1508,6 @@ mod tests {
             .map(|_| ())
             .expect_err("a JWKS URL without an issuer must fail closed"),
             PLATFORM_ISSUER_INPUT.to_owned(),
-            platform_mint_url("https://auth.zeroship.test/oauth2", "")
-                .map(|_| ())
-                .expect_err("a configured issuer with no mint URL must fail closed"),
-            platform_mint_url("", "http://auth:9092")
-                .map(|_| ())
-                .expect_err("a mint URL with no issuer must fail closed"),
-            platform_mint_url("https://auth.zeroship.test/oauth2", "auth:9092")
-                .map(|_| ())
-                .expect_err("a scheme-less mint URL must fail closed"),
-            PLATFORM_MINT_URL_INPUT.to_owned(),
         ]
     }
 
@@ -1705,13 +1563,6 @@ mod tests {
                 .expect_err("a short master key must fail closed"),
             validate_master_key_material(&format!("{LEGACY_MASTER_KEYS_LABEL}[0]"), "YWJj")
                 .expect_err("a short legacy master key must fail closed"),
-            validate_platform_mint_key(
-                "https://auth.zeroship.test/oauth2",
-                &Secret::absent(),
-                &Secret::absent(),
-                &Secret::absent(),
-            )
-            .expect_err("an absent platform mint key must fail closed"),
         ]
     }
 
@@ -1778,111 +1629,6 @@ mod tests {
             !readable.contains("ZEROSHIP_CONTROL_AUTH_PROVIDER"),
             "the retired control-scoped name must no longer be read"
         );
-    }
-
-    #[test]
-    fn a_configured_issuer_with_no_mint_url_refuses_to_boot() {
-        // THE REGRESSION. Before the split, control derived the mint target
-        // from the issuer, so this configuration booted happily and posted
-        // the mint key at the OP's PUBLIC name - which on the shipped
-        // single-host topology is a CDN with no route back in. The failure
-        // surfaced as `zeroship login` printing `internal error` AFTER the
-        // human had approved in the browser.
-        //
-        // The refusal must be a refusal and not a fallback: an empty mint URL
-        // resolving to the issuer's origin is exactly the old behaviour.
-        let err = platform_mint_url("https://auth.zeroship.co/oauth2", "")
-            .expect_err("an issuer with no mint URL must refuse");
-        assert!(
-            err.contains("ZEROSHIP_AUTH_PLATFORM_MINT_URL"),
-            "the refusal must name the setting to fix: {err}"
-        );
-
-        // One variable changed: the mint URL is supplied. Without this the
-        // assertion above would also pass on a function that refused
-        // everything.
-        assert_eq!(
-            platform_mint_url("https://auth.zeroship.co/oauth2", "http://auth:9092")
-                .expect("a configured pair resolves"),
-            Some("http://auth:9092".to_owned())
-        );
-    }
-
-    #[test]
-    fn a_configured_issuer_requires_strong_platform_mint_key_material() {
-        let issuer = "https://auth.zeroship.test/oauth2";
-        let control_key = Secret::supplied(
-            SourceKind::Env,
-            Some("11111111111111111111111111111111".to_owned()),
-        );
-        let worker_key = Secret::supplied(
-            SourceKind::Env,
-            Some("22222222222222222222222222222222".to_owned()),
-        );
-        let validate = |key: &Secret<String>| {
-            validate_platform_mint_key(issuer, key, &control_key, &worker_key)
-        };
-
-        let empty = Secret::supplied(SourceKind::Env, Some(String::new()));
-        let err = validate(&empty).expect_err("an explicitly empty mint key must fail closed");
-        assert!(
-            err.contains("ZEROSHIP_AUTH_PLATFORM_MINT_KEY"),
-            "the refusal must name the setting to fix: {err}"
-        );
-
-        let whitespace = Secret::supplied(SourceKind::Env, Some("   ".to_owned()));
-        validate(&whitespace)
-            .expect_err("a whitespace-only mint key must fail closed");
-
-        let short = Secret::supplied(SourceKind::Env, Some("too-short".to_owned()));
-        let err = validate(&short)
-            .expect_err("a short mint key must fail closed");
-        assert!(err.contains("minimum 32 bytes"), "{err}");
-
-        let present = Secret::supplied(
-            SourceKind::Env,
-            Some("platform-mint-key-at-least-32-bytes".to_owned()),
-        );
-        validate(&present)
-            .expect("nonempty resolved material is accepted");
-
-        let unread_file = Secret::supplied(SourceKind::CliFile, None);
-        validate(&unread_file)
-            .expect("check-config validates file presence without reading it");
-
-        validate_platform_mint_key("", &Secret::absent(), &control_key, &worker_key)
-            .expect("no platform issuer needs no mint credential");
-
-        let err = validate_platform_mint_key(issuer, &control_key, &control_key, &worker_key)
-            .expect_err("the mint key must differ from the worker-held control key");
-        assert!(err.contains("ZEROSHIP_CONTROL_KEY"), "{err}");
-
-        let err = validate_platform_mint_key(issuer, &worker_key, &control_key, &worker_key)
-            .expect_err("the mint key must differ from the worker dispatch key");
-        assert!(err.contains("ZEROSHIP_WORKER_KEY"), "{err}");
-    }
-
-    #[test]
-    fn the_mint_url_is_never_derived_from_the_issuer() {
-        // The property, stated directly: for every issuer, the resolved mint
-        // destination is the CONFIGURED string and owes nothing to the issuer.
-        // A future "simplification" that reinstates
-        // `op_public_url(platform_issuer)` as a fallback fails here.
-        for issuer in [
-            "https://auth.zeroship.co/oauth2",
-            "http://auth.zeroship.localhost/oauth2",
-            "http://localhost:9092/oauth2",
-        ] {
-            assert_eq!(
-                platform_mint_url(issuer, "http://auth:9092").expect("resolves"),
-                Some("http://auth:9092".to_owned()),
-                "the mint destination moved with the issuer"
-            );
-        }
-
-        // And with no platform OP at all there is nothing to mint through, so
-        // the absence is representable rather than an error.
-        assert_eq!(platform_mint_url("", "").expect("no platform OP"), None);
     }
 
     #[test]
@@ -2056,7 +1802,6 @@ mod tests {
             .collect::<Vec<_>>();
         for expected in [
             "ZEROSHIP_CONTROL_KEY",
-            "ZEROSHIP_AUTH_PLATFORM_MINT_KEY",
             "ZEROSHIP_WORKER_KEY",
             "ZEROSHIP_CONTROL_MASTER_KEY",
             "ZEROSHIP_CONTROL_DATABASE_URL",
