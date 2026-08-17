@@ -41,5 +41,48 @@ It also ADDED a protection which is itself worth checking (see section 4).
 
 ## 3. Scope decision for the gate
 
-Filled in after measuring; see the gate's own header comment for the durable
-version.
+See the gate's own header comment (check 8) for the durable version. The short
+form: the TOML arm lands, the compose `environment:` arm does not, and the
+reason is measured rather than asserted -- six secret-classed compose keys
+carry an inline DSN default with userinfo (lines 257, 431, 435, 517, 610, 731),
+and the only non-arbitrary fix makes all six required inputs that
+`zeroship dev init` does not write. An allowlist for them would be an allowlist
+for the gate's own subject.
+
+## 4. Mutation proof, four runs
+
+Mutation: three lines appended to the TRACKED `deploy/ops/zeroship.toml`.
+
+```text
+[control]
+master_key = "b7c1e2f9a4d68035c1ff2ab90e5d7643"
+```
+
+Applied-check, because an unapplied edit and a non-discriminating gate print
+the same thing: md5 `a47f4b0f...` before, `d7cf50bc...` after, `diff` showing
+`68a69,71`. After the revert the md5 is `a47f4b0f...` again and `diff` against
+the saved original is empty.
+
+| run | gate | mutation | result |
+| --- | --- | --- | --- |
+| 1 | `main:tests/config_name_alignment_gate.sh` | applied | exit 0, 11 passed 0 failed |
+| 2 | this branch | applied | exit 1, 11 passed 1 failed |
+| 3 | this branch `--self-test` | applied | exit 1, 12 passed 1 failed |
+| 4 | this branch, both modes | reverted | exit 0, 12 and 13 passed, 0 failed |
+
+Run 1 is the load-bearing one. The PRE-FIX gate passes the planted secret with
+a clean 11/0, which is the gap stated as an observation instead of a reading.
+Runs 2 and 4 differ in one variable each, so the RED is attributable to the
+literal and the GREEN to its removal.
+
+Run 2's output, verbatim:
+
+```text
+=== 8. No tracked file carries a plaintext secret ===
+  deploy/ops/zeroship.toml:71 control.master_key is secret-classed and holds a plaintext literal;
+      a tracked file may hold only a urn:/arn: reference
+FAIL: tracked secret literals: 1 secret-classed leaf/leaves hold a plaintext literal in a tracked file
+```
+
+The value is deliberately NOT echoed. This runs in CI, and a check that
+publishes the material it just found would be its own disclosure.
