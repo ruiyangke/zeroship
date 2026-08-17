@@ -22,6 +22,11 @@ thiserror = { workspace = true }
 linkme = { workspace = true }
 zeroship-config-macros = { workspace = true }
 aes-gcm = { workspace = true }
+# Service assertions (`service_assertion`) sign with ed25519. `pkcs8` is what
+# bridges a `SigningKey` to `jsonwebtoken::EncodingKey::from_ed_der`, which
+# takes the DER form; the same feature was already enabled on the
+# dev-dependency below before the minter existed.
+ed25519-dalek = { workspace = true, features = ["pkcs8"] }
 zeroize = { version = "1", features = ["derive"] }
 zeroship-bundle = { workspace = true }
 # OIDC verifier — JWKS cache + ID-token verification used by both
