@@ -11566,3 +11566,152 @@ mod tests {
         assert!(!sql.contains(r#""app_demo"."#), "must stay unqualified: {sql}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// JSON null must reach the database as SQL NULL, not as an empty text param
+// ---------------------------------------------------------------------------
+
+/// The text-format param protocol (`query_text_params`, `&[&str]`) has no
+/// representation for NULL: `value_to_param` maps `Value::Null` to
+/// `String::new()`, which Postgres reads as the literal empty string and
+/// SQLite stores as `''`. Every builder that turns a creator-supplied
+/// document into placeholders therefore has to inline `NULL` as a SQL
+/// literal instead of binding a param.
+///
+/// `build_insert`, `build_insert_many` and `build_upsert` already did. The
+/// UPDATE SET builder and `build_find_or_create` did not; these tests pin
+/// the behaviour for all of them.
+///
+/// What each assertion below licenses is narrow: it says the *generated SQL*
+/// carries `= NULL` and that the param vector did not grow. It does not
+/// exercise a live database, so it says nothing about how a given backend
+/// then treats that literal.
+#[cfg(test)]
+mod null_write_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn update_plain_null_emits_sql_null_not_empty_param() {
+        // The plain-field arm: `{"resolution": null}`. Before the fix this
+        // pushed "" and emitted `"resolution" = $1`, so a CHECK constraint
+        // on the column rejected the write (PG) or the row silently kept an
+        // empty string (SQLite).
+        let filter = json!({ "id": "iss_1" });
+        let update = json!({ "resolution": null });
+        let q = build_update_one("app1", "issues", &filter, &update).unwrap();
+        assert!(
+            q.sql.contains(r#""resolution" = NULL"#),
+            "plain null must inline a SQL NULL literal: {}",
+            q.sql,
+        );
+        assert!(
+            !q.params.iter().any(|p| p.is_empty()),
+            "no empty-string param may be bound for a null: {:?}",
+            q.params,
+        );
+        // Only the WHERE param (`iss_1`) remains.
+        assert_eq!(q.params, vec!["iss_1".to_string()], "params: {:?}", q.params);
+    }
+
+    #[test]
+    fn update_set_operator_null_emits_sql_null_not_empty_param() {
+        // The `$set` operator arm: `{"resolution": {"$set": null}}`.
+        let filter = json!({ "id": "iss_1" });
+        let update = json!({ "resolution": { "$set": null } });
+        let q = build_update_one("app1", "issues", &filter, &update).unwrap();
+        assert!(
+            q.sql.contains(r#""resolution" = NULL"#),
+            "$set null must inline a SQL NULL literal: {}",
+            q.sql,
+        );
+        assert_eq!(q.params, vec!["iss_1".to_string()], "params: {:?}", q.params);
+    }
+
+    #[test]
+    fn update_null_first_does_not_shift_later_placeholders() {
+        // The numbering trap: skipping a param push must not leave the
+        // second field bound to the first field's `$n`. `resolution` is
+        // null and `status` is not, so `status` has to be `$1` and the
+        // WHERE param `$2` -- with `$1` bound to "OPEN", not to "iss_1".
+        let filter = json!({ "id": "iss_1" });
+        let update = json!({ "resolution": null, "status": "OPEN" });
+        let q = build_update_one("app1", "issues", &filter, &update).unwrap();
+        assert!(
+            q.sql.contains(r#""resolution" = NULL"#),
+            "sql: {}",
+            q.sql,
+        );
+        assert!(q.sql.contains(r#""status" = $1"#), "sql: {}", q.sql);
+        assert_eq!(
+            q.params,
+            vec!["OPEN".to_string(), "iss_1".to_string()],
+            "params: {:?}",
+            q.params,
+        );
+        assert!(!q.sql.contains("$3"), "no third bind may exist: {}", q.sql);
+    }
+
+    #[test]
+    fn update_null_in_encrypted_column_emits_sql_null_not_ciphertext() {
+        // An encrypted column holding null is an absent value, not a value
+        // that happens to be empty. Encrypting "" would write a ciphertext
+        // blob that decrypts to "" -- indistinguishable from a real empty
+        // string and never NULL. The NULL literal wins over the encrypted
+        // bind shape, so no `decode(...)::bytea` wrap is emitted for it.
+        let filter = json!({ "id": "usr_1" });
+        let update = json!({ "secret": null, "__zsenc__secret": true });
+        let q = build_update_one_with_system_fields(
+            "app1",
+            "users",
+            &filter,
+            &update,
+            SqlDialect::Postgres,
+            &SystemFieldAutoBump::default(),
+        )
+        .unwrap();
+        assert!(
+            q.sql.contains(r#""secret" = NULL"#),
+            "null in an encrypted column must be a SQL NULL: {}",
+            q.sql,
+        );
+        assert!(
+            !q.sql.contains("decode("),
+            "a null must not be routed through the encrypted bind wrap: {}",
+            q.sql,
+        );
+        assert_eq!(q.params, vec!["usr_1".to_string()], "params: {:?}", q.params);
+    }
+
+    #[test]
+    fn update_many_null_emits_sql_null_not_empty_param() {
+        // updateMany shares build_set_clauses_with_system_fields, so it
+        // inherits the fix; this pins that the shared path is the one used.
+        let filter = json!({ "status": "CLOSED" });
+        let update = json!({ "resolution": null });
+        let q = build_update_many("app1", "issues", &filter, &update).unwrap();
+        assert!(
+            q.sql.contains(r#""resolution" = NULL"#),
+            "sql: {}",
+            q.sql,
+        );
+        assert_eq!(q.params, vec!["CLOSED".to_string()], "params: {:?}", q.params);
+    }
+
+    #[test]
+    fn find_or_create_null_emits_sql_null_not_empty_param() {
+        // build_find_or_create is a third document builder that lacked the
+        // guard entirely -- it pushed `value_to_param` unconditionally.
+        let doc = json!({ "email": "a@b.c", "nickname": null });
+        let conflict = json!(["email"]);
+        let q = build_find_or_create("app1", "users", &doc, &conflict).unwrap();
+        assert!(
+            q.sql.contains("NULL"),
+            "null column must be inlined as NULL: {}",
+            q.sql,
+        );
+        assert_eq!(q.params, vec!["a@b.c".to_string()], "params: {:?}", q.params);
+        // `email` is the only bind, so it must be $1.
+        assert!(q.sql.contains("VALUES ($1, NULL)"), "sql: {}", q.sql);
+    }
+}
