@@ -72,9 +72,27 @@ always failed at boot, so they were syntax for a source that did not exist, and
 they are deleted too. A literal is permitted, because the overlay may itself be
 a mounted Kubernetes Secret - but never in a TRACKED file.
 
+EVERY SECRET FILE MUST BE OWNER-ONLY. Whether it arrives through a
+`--<name>-file` flag or a `urn:zeroship:file:` reference, the file is refused at
+boot if any group or other permission bit is set:
+
+```
+secret file '/etc/zeroship/secrets/control-key' has mode 0644; group and other
+permissions must be zero (chmod 600 '/etc/zeroship/secrets/control-key')
+```
+
+`chmod 600` the file and restart. The check is not advisory and there is no way
+to switch it off - a credential a second local account can read is compromised,
+and a warning in a boot log is a signal nobody reads. `zeroship dev init`
+already writes 0600, so this bites only where something later widened the mode:
+a restore from a backup, a checkout, an operator copying a secret into place, or
+a bind mount whose host-side file is permissive. Bind mounts are the common
+case, because the mode the container sees is the HOST file's mode.
+
 Under `--check-config` nothing is opened and no reference is followed. The run
 establishes which source supplies each secret, validates that source's policy
-and format, and reports presence only.
+and format, and reports presence only - including its permissions, which are a
+property of the file at boot rather than of the configuration.
 
 The overlay is auto-discovered at `/etc/zeroship/zeroship.toml`, or pointed at
 with `ZEROSHIP_CONFIG`.

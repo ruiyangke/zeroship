@@ -778,7 +778,20 @@ fn read_optional_file(path: &Path) -> Result<Vec<u8>, String> {
     }
 }
 
-fn create_private_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+/// Create a new file that is owner-only FROM THE MOMENT IT EXISTS.
+///
+/// The `O_CREAT` mode is not redundant with the `set_permissions` that
+/// [`create_private_file`] runs afterwards, and deleting it would be a silent
+/// regression: between `open` and `set_permissions` the file exists with
+/// whatever mode the create used, and a local attacker who opens it inside that
+/// window keeps a readable descriptor even after the chmod lands. Only the
+/// creation mode closes it.
+///
+/// This is a separate function because the window is not observable from the
+/// finished file: `create_private_file` ends at 0600 whichever mode it created
+/// with, so a test that stats the path afterwards cannot tell the two apart.
+/// Its caller returns the open handle, and the test fstats THAT.
+fn open_new_private(path: &Path) -> Result<File, String> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -786,9 +799,13 @@ fn create_private_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
         use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600);
     }
-    let mut file = options
+    options
         .open(path)
-        .map_err(|error| format!("create {} without replacing it: {error}", path.display()))?;
+        .map_err(|error| format!("create {} without replacing it: {error}", path.display()))
+}
+
+fn create_private_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut file = open_new_private(path)?;
     if let Err(error) = file.write_all(bytes).and_then(|_| file.sync_all()) {
         drop(file);
         let _ = std::fs::remove_file(path);
@@ -819,4 +836,65 @@ fn set_private_file_permissions(path: &Path) -> Result<(), String> {
 #[cfg(not(unix))]
 fn set_private_file_permissions(_path: &Path) -> Result<(), String> {
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use super::open_new_private;
+
+    /// THE UNTESTED HALF of the write side. `create_private_file` set the mode
+    /// twice - once as the `O_CREAT` mode and once with `set_permissions` after
+    /// the write - and only the second was covered: mutating the `O_CREAT` mode
+    /// to 0o644 left the whole `dev_init` suite green, because the chmod reset
+    /// it before anything looked. So the creation mode could be widened
+    /// silently, and with it the window in which the secret exists world-
+    /// readable, which is the window a local attacker actually races.
+    ///
+    /// This asserts the mode on the DESCRIPTOR `open` returned, before any
+    /// chmod can run, which is the only way to tell the two apart.
+    ///
+    /// It does NOT cover a run under a umask of 0o077 or tighter: the kernel
+    /// masks the `O_CREAT` mode, so a widened constant would come out 0600
+    /// anyway - and in that environment the widening is also not exploitable.
+    /// Measured under the 022 umask this repo's suites run with.
+    #[test]
+    fn a_generated_secret_is_owner_only_at_the_instant_it_is_created() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("generated-secret");
+
+        let file = open_new_private(&path).expect("create the secret file");
+        let mode = file
+            .metadata()
+            .expect("fstat the handle that created it")
+            .permissions()
+            .mode()
+            & 0o777;
+
+        assert_eq!(
+            mode, 0o600,
+            "a generated secret must never exist at a wider mode, not even for \
+             the instant before set_private_file_permissions runs"
+        );
+
+        // The one-variable partner: same directory, same umask, same process -
+        // only the create mode differs. `File::create` uses 0o666, so this shows
+        // the assertion above is measuring the requested creation mode and not
+        // some property of the filesystem or a umask that would force 0600
+        // regardless.
+        let control = dir.path().join("default-create");
+        let mode = std::fs::File::create(&control)
+            .expect("create the control")
+            .metadata()
+            .expect("fstat the control")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_ne!(
+            mode, 0o600,
+            "the control came out 0600 too, so this run's umask hides the \
+             difference and the assertion above proves nothing"
+        );
+    }
 }

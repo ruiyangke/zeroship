@@ -628,6 +628,14 @@ mod tests {
                 std::thread::current().id()
             ));
             std::fs::write(&path, contents).expect("write fixture secret");
+            // The resolver refuses a secret file any second local account could
+            // read, and `std::fs::write` leaves 0644 under the usual umask.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                    .expect("owner-only fixture secret");
+            }
             Self(path)
         }
 

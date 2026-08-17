@@ -517,9 +517,13 @@ async fn browser_pkce_tokens(rp: &OidcRp, auth_base: &str, client_id: &str, emai
 /// lifetime obvious rather than accidental.
 fn test_auth_config(db_url: &str) -> (AuthConfig, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("temp dir for auth secrets");
+    // `write_secret_file`, not a bare `std::fs::write`: all three of these are
+    // Secret<String> settings and resolve through
+    // `zeroship_core::config::read_secret_file`, which refuses anything a
+    // second local account could read. The default 022 umask leaves 0644.
     let write = |name: &str, contents: &str| -> String {
         let path = dir.path().join(name);
-        std::fs::write(&path, contents).expect("write auth secret file");
+        write_secret_file(&path, contents.as_bytes());
         path.to_str().expect("utf8 temp path").to_owned()
     };
     let db_file = write("database-url", db_url);
