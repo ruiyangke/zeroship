@@ -20,28 +20,44 @@ import { enumType, table, t } from "@zeroship/migrate";
 //      (zero-migrate-ir/src/ir.rs, ColType::Ref). Every cross-table link below
 //      uses the facet.
 //
-// UNIQUENESS IS SPELLED AS A UNIQUE INDEX, NOT AS `uniques`. A table-level
-// `uniques` entry is a HARD authoring error on SQLite -- the SQLite CREATE
-// renders from the column descriptor and a table-level constraint is never
-// threaded into the emitter, so it is refused fail-closed rather than silently
-// dropped (sdks/migrate/src/types.ts:1091-1094). `indexes` lower on both
-// backends, and SQLite is the dev backend, so `indexes[{ unique: true }]` is
-// the only portable spelling. Every join table below carries one; without it
-// `cc.add` and `keywords.attach` are duplicate-row generators under retry.
+// WHAT THIS FILE ENFORCES, AND WHERE THE LINE IS.
 //
-// AN EARLIER VERSION OF THIS FILE WAS WRITTEN AGAINST AN IMAGINED, POORER DSL:
-// it claimed "the engine has no CHECK-constraint spelling here" and stored
-// every integer in `t.double()`. Both were false. The lexicon carries
-// `t.int()`, `t.smallInt()`, `t.bigInt()`, `t.timestamp()`, `t.uuid()`,
-// `t.numeric()` and `t.enum()` (types.ts:262-307), the engine's closed
-// `ColType` accepts them (ir.rs:546+), and the runtime bridge maps `int` to
-// `int` rather than widening it to `double` (db-lexicon.ts:124-137).
-// `CreateTableArgs` additionally carries `checks`, `uniques`, `indexes[].unique`,
-// partial-index `where`, and FK `onDelete`/`onUpdate` (types.ts:1085-1140).
-// Note `t.date()` is admitted ONLY as a PostgreSQL domain base type
-// (ir.rs, ColType::Date), so a plain calendar column is `t.timestamp()`.
+// The rules the DDL can state are stated here, not in a comment and not only in
+// `src/lib`. Concretely:
 //
-// Platform ids are typed-id TEXT (`usr_...`), so every FK column is t.text().
+//   - The eight closed vocabularies are `enumType(...)` + `t.enum(...)`. That
+//     is portable: PostgreSQL gets a native enum type, SQLite gets TEXT plus an
+//     inline `CHECK (col IN (...))`.
+//   - Every `.references()` names an `onDelete`. There is no default worth
+//     inheriting: NO ACTION on ~45 columns across two backends whose
+//     enforcement posture differs is a decision nobody made.
+//   - Uniqueness is a unique INDEX, never `uniques`. A table-level `uniques`
+//     entry is a HARD authoring error on SQLite (the SQLite CREATE renders from
+//     the column descriptor, so a table-level constraint is refused fail-closed
+//     rather than silently dropped). `indexes` lower on both backends and
+//     SQLite is the dev backend, so `indexes[{ unique: true }]` is the only
+//     portable spelling. Every join table carries one; without it `cc.add` and
+//     `keywords.attach` are duplicate-row generators under retry.
+//
+// WHAT IT CANNOT ENFORCE, MEASURED RATHER THAN ASSUMED. Table-level `checks`
+// is in the same refused-on-SQLite class as `uniques`, which the type doc does
+// NOT say. Authoring one -- any one, down to `col("number").gt(0)` -- fails the
+// migration outright:
+//
+//   [UNSUPPORTED kind=expr op_index=16 dialect=sqlite]: table-level CHECK
+//   expression rendering is PostgreSQL-only in the current engine
+//
+// (zero-migrate/src/model/support.rs, PG_ONLY_TABLE_LEVEL_CHECK). So three
+// cross-column invariants stay in app code and are named where they live:
+// status/resolution agreement and the `resolvedAt` stamp in
+// `src/lib/workflow.ts`, and the flag-target XOR in `src/lib/flags.ts`. Column
+// CHECKs reach SQLite only through `t.enum`, which is why the vocabularies
+// above are the part that made it into the schema.
+//
+// Two spellings the types do not enforce, kept because both were got wrong
+// here once: `t.date()` is admitted ONLY as a PostgreSQL domain base type, so a
+// plain calendar column is `t.timestamp()`; and platform ids are typed-id TEXT
+// (`usr_...`), so every FK column is `t.text()`.
 export default {
   name: "create_issue_tracker",
   up() {
