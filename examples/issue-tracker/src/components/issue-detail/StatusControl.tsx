@@ -20,9 +20,11 @@ import {
 import { invalidatedBy } from "../../lib/query-keys";
 import { useAppMutation } from "../../lib/queries";
 import { ResolutionBadge } from "../Badges";
-import { FieldError, InlineForm, Muted } from "../AppPrimitives";
+import { FieldError, InlineForm } from "../AppPrimitives";
 import { errorMessage } from "../rpc";
 import type { IssueDetail } from "../types";
+import { Absent } from "./Absent";
+import { RailRow } from "./RailRow";
 import { RailSection } from "./RailSection";
 
 type NonDuplicateResolution = Exclude<IssueResolution, "DUPLICATE">;
@@ -75,10 +77,19 @@ export function StatusControl({ issue }: { issue: IssueDetail["issue"] }) {
   };
 
   return (
-    <div className="col-span-full mt-3 mb-1 border-0 bg-transparent p-0">
+    <>
       <RailSection title="Status" />
-      <div className="flex flex-wrap gap-2">
-        <Field.Root>
+      {/* Two rail ROWS, on the rail's own tracks.
+          They were a flex pair floating in a col-span-full block, so status
+          and resolution were the only two facts in the column that did not
+          line up with the rest -- and "Resolution Unresolved" in particular
+          was two greys of the same weight side by side, where a reader could
+          not tell whether the second word was the value or the back half of a
+          phrase. On the grid, the label is in the label track and the value is
+          in the value track, which is what says which is which. */}
+      <RailRow
+        label="Status"
+        value={
           <Select
             value={issue.status}
             disabled={busy || targets.length === 0}
@@ -98,23 +109,26 @@ export function StatusControl({ issue }: { issue: IssueDetail["issue"] }) {
               </Select.Item>
             ))}
           </Select>
-        </Field.Root>
-        {/* A VALUE, not a disabled input. Resolution is never typed here --
-            it is chosen in the Resolve flow below, which also enforces the
-            pairing with status. A greyed-out text box holding "--" says "you
-            could edit this, but not right now", which is the opposite of
-            true. */}
-        <div className="flex items-center gap-2">
-          <span className="text-base font-medium text-ink-muted">Resolution</span>
-          {issue.resolution ? (
-            <ResolutionBadge resolution={issue.resolution} />
-          ) : (
-            <Muted>Unresolved</Muted>
-          )}
-        </div>
-      </div>
+        }
+        action={null}
+      />
+      {/* A VALUE, not a disabled input. Resolution is never typed here -- it
+          is chosen in the Resolve flow below, which also enforces the pairing
+          with status. A greyed-out text box holding "--" says "you could edit
+          this, but not right now", which is the opposite of true.
+          COPY: the empty case said "Unresolved" and now says "--", the one
+          token this rail uses for "no value here" (see Absent.tsx). It was the
+          last field with a private word for empty, and an open status one line
+          above already states that nothing is resolved. */}
+      <RailRow
+        label="Resolution"
+        value={
+          issue.resolution ? <ResolutionBadge resolution={issue.resolution} /> : <Absent />
+        }
+        action={null}
+      />
 
-      <div className="mt-2 flex flex-wrap gap-2">
+      <div className="col-span-full mt-2 mb-1 flex flex-wrap gap-2">
         {targets.includes("RESOLVED") ? (
           <Button variant="gray" disabled={busy} onClick={() => setShowResolve((v) => !v)}>
             Resolve...
@@ -131,7 +145,7 @@ export function StatusControl({ issue }: { issue: IssueDetail["issue"] }) {
       </div>
 
       {showResolve ? (
-        <InlineForm>
+        <InlineForm className="col-span-full">
           <Field.Root>
             <Field.Label>Resolution (required to resolve)</Field.Label>
             <Select
@@ -156,7 +170,7 @@ export function StatusControl({ issue }: { issue: IssueDetail["issue"] }) {
       ) : null}
 
       {showDuplicate ? (
-        <InlineForm>
+        <InlineForm className="col-span-full">
           <Field.Root>
             <Field.Label>Duplicate of</Field.Label>
             <Input
@@ -174,7 +188,7 @@ export function StatusControl({ issue }: { issue: IssueDetail["issue"] }) {
         </InlineForm>
       ) : null}
 
-      {error ? <FieldError>{error}</FieldError> : null}
-    </div>
+      {error ? <FieldError className="col-span-full">{error}</FieldError> : null}
+    </>
   );
 }
