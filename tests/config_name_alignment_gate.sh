@@ -19,6 +19,7 @@
 #                        name that exact binary declares
 #   6b alias equality    a container value that is EXACTLY one interpolation
 #                        must satisfy LEFT == RIGHT (proposal Section 4.3)
+#   6c command argv      no `command:`/`entrypoint:` item carries a credential
 #   7 ops TOML           every leaf in deploy/ops/*.toml is a generated overlay
 #                        path with a real consumer
 #
@@ -144,6 +145,55 @@ compose_service_env() {
     ' "$1"
 }
 
+# Emit `service<TAB>line<TAB>item` for every `command:` / `entrypoint:` item, in
+# all four spellings the deploy compose files use: a `- item` list, a `>` folded
+# scalar, a `| ` block scalar, and an inline `command: foo --bar` scalar.
+#
+# WHY THIS EXTRACTOR EXISTS AT ALL. `compose_service_env` above walks the same
+# file and reads `command:` too - but ONLY to learn the binary name, at the
+# `incmd && match($0, /zeroship-[a-z-]+/)` arm, which takes the first match and
+# `next`s past everything else. Every flag and every VALUE in a command block is
+# therefore invisible to checks 6 and 6b, which read `environment:` alone. That
+# blind spot held a live credential: the platform-migrate one-shot passed a
+# postgres SUPERUSER DSN as `--database-url <dsn>`, readable through `docker
+# inspect`, `docker ps --no-trunc` and /proc/<pid>/cmdline for anything in that
+# PID namespace. Nothing failed, because nothing looked.
+#
+# A service with NO `environment:` block emits no rows from `compose_service_env`
+# at all, so it was doubly unseen - which is exactly what the migrate one-shot
+# was.
+compose_command_items() {
+    awk '
+        /^  [a-z][a-z0-9_-]*:[[:space:]]*$/ { svc = $1; sub(/:$/, "", svc); incmd = 0; next }
+        svc == "" { next }
+        # Any other key at service-key depth closes the block.
+        /^    [a-zA-Z_][a-zA-Z0-9_-]*:/ {
+            if ($0 ~ /^    (command|entrypoint):/) {
+                incmd = 1
+                rest = $0
+                sub(/^    [a-z]+:[[:space:]]*/, "", rest)
+                sub(/[[:space:]]+$/, "", rest)
+                # `>`/`|` (with an optional chomp indicator) introduce a
+                # multi-line scalar and carry no content themselves.
+                if (rest != "" && rest !~ /^[>|][-+]?$/) print svc "\t" NR "\t" rest
+                next
+            }
+            incmd = 0; next
+        }
+        incmd {
+            line = $0
+            # A YAML list dash is `-` followed by SPACE. Requiring the space is
+            # what keeps `--port 9090` in a folded scalar from being read as a
+            # list item and silently losing one of its dashes.
+            sub(/^[[:space:]]*-[[:space:]]+/, "", line)
+            sub(/^[[:space:]]+/, "", line)
+            sub(/[[:space:]]+$/, "", line)
+            if (line == "" || line ~ /^#/ || line ~ /^[>|][-+]?$/) next
+            print svc "\t" NR "\t" line
+        }
+    ' "$1"
+}
+
 # Emit every `section.leaf` in a TOML file, comments and blanks discarded.
 toml_leaves() {
     awk '
@@ -253,6 +303,100 @@ check_compose_alias_equality() {
     return 0
 }
 
+# No compose `command:` / `entrypoint:` item may carry a credential.
+#
+# ARGV IS NOT PRIVATE. `docker inspect`, `docker ps --no-trunc`, `ps` and
+# /proc/<pid>/cmdline all publish it to anything sharing the PID namespace, and
+# it lands in shell history and CI logs besides. That is why the platform's own
+# rule - stated at deploy/compose/docker-compose.yml "No secret is passed as a
+# flag" and implemented by `Secret<T>` generating `--<name>-file PATH` and no
+# value flag - keeps credentials out of command lines by CONSTRUCTION for every
+# binary that carries a `#[zeroship_config]` declaration.
+#
+# This check exists for the binaries that do NOT, and for the deploy files a
+# macro cannot reach. It is the argv half of check 6.
+#
+# BOTH DETECTORS ARE DERIVED, NOT LISTED. An allowlist of "the credentials we
+# know about" is satisfiable by editing the allowlist, which is worse than no
+# check because it reads as coverage.
+#
+#   A. USERINFO IN A URL - `scheme://user:secret@host`. This is the product's
+#      OWN classification rule, not one invented here: crates/migrated/src/
+#      config.rs classes every DSN `Secret<String>` and says why - "Secret-
+#      classed by grammar: a DSN admits userinfo, so the type cannot depend on
+#      whether a particular deployment's value happens to carry a password."
+#      The same grammar decides it here.
+#
+#   B. A SECRET'S VALUE FLAG - a `Secret<T>` projects to `--<name>-file` and
+#      nothing else, so a command item spelling `--<name>` for any secret the
+#      COMPILED contract declares is passing the material where only a path may
+#      go. The set comes from the contract dump, so a new secret is covered
+#      without anyone editing this file.
+#
+# WHAT THIS DOES NOT CHECK, so a green is not over-read:
+#   - a bare high-entropy literal with no flag and no URL grammar to mark it.
+#     Nothing distinguishes it from an opaque operational value, and a detector
+#     that guesses would fire on every image digest and base64 config blob.
+#   - `environment:` values. Those are checks 6 and 6b; env is a different and
+#     narrower exposure than argv, not a safe one.
+#   - what a container does with an item AFTER parsing it (a shell block that
+#     reads a mounted file and re-exports it, say). This is a text check on the
+#     deploy file, and the mount surface is deploy/scripts/deploy-remote.sh's.
+check_compose_command_secrets() {
+    local compose="$1" label="$2" contract="$3"
+    local rows secret_flags bad=0 checked=0
+
+    rows="$(compose_command_items "$compose")"
+    if [ -z "$rows" ]; then
+        fail "$label: extracted zero command items from $compose"
+        return 1
+    fi
+
+    # Every secret's value-flag spelling: the declared `--<name>-file` with the
+    # `-file` suffix removed. Empty is not a failure here (it only disarms
+    # detector B); the floor below is what catches a broken extraction.
+    secret_flags="$(awk -F'\t' '$3 == "secret" && $4 ~ /-file$/ { sub(/-file$/, "", $4); print $4 }' \
+        "$contract" | sort -u)"
+
+    while IFS=$'\t' read -r svc line item; do
+        [ -n "$item" ] || continue
+        checked=$((checked + 1))
+        # A: a URL carrying userinfo.
+        if printf '%s' "$item" | grep -qE '[a-zA-Z][a-zA-Z0-9+.-]*://[^/@[:space:]"]*:[^/@[:space:]"]*@'; then
+            echo "  $compose:$line ($svc) passes a URL with userinfo in argv: $item"
+            bad=$((bad + 1))
+            continue
+        fi
+        # B: a declared secret's value flag rather than its `-file` path flag.
+        [ -n "$secret_flags" ] || continue
+        local head="${item%%[[:space:]]*}"
+        case "$head" in
+            --*)
+                if printf '%s\n' "$secret_flags" | grep -qxF -- "$head"; then
+                    echo "  $compose:$line ($svc) passes $head in argv; a secret has only a ${head}-file path flag"
+                    bad=$((bad + 1))
+                fi
+                ;;
+        esac
+    done <<<"$rows"
+
+    # Anti-hollow: every arm above passes at zero if the extractor stops
+    # matching, and that failure is indistinguishable from compliance.
+    # MEASURED on deploy/compose/docker-compose.yml 2026-08-16: 85 items.
+    local min_items="${COMPOSE_COMMAND_MIN_ITEMS:-60}"
+    if [ "$checked" -lt "$min_items" ]; then
+        fail "$label: only $checked command items scanned, expected at least $min_items"
+        echo "      The command extraction stopped matching, so a clean result would mean nothing."
+        return 1
+    fi
+    if [ "$bad" -ne 0 ]; then
+        fail "$label: $bad credential(s) reachable from a process argument list"
+        return 1
+    fi
+    pass "$label: all $checked command items are free of argv-borne credentials"
+    return 0
+}
+
 check_ops_toml() {
     local file="$1" label="$2" contract="$3"
     local bad=0 checked=0 leaf
@@ -342,6 +486,42 @@ if [ "${1:-}" = "--self-test" ]; then
         fail "self-test: the alias check PASSED a LEFT != RIGHT pair"
     fi
 
+    # Check 6c, detector A: a credential-bearing URL in a `command:` list item.
+    # This is the exact shape that sat unnoticed in the migrate one-shot -- a
+    # postgres DSN with userinfo, passed as the value half of a flag pair.
+    sed 's|^      - /data/app-storage$|      - postgres://postgres:hunter2@postgres:5432/zeroship|' \
+        "$COMPOSE" >"$TMP/self/cmd_url.yml"
+    if ! grep -q 'postgres:hunter2@postgres' "$TMP/self/cmd_url.yml"; then
+        fail "self-test: the command-URL mutation did not apply; the run below proves nothing"
+        exit 1
+    fi
+    before=$FAIL
+    check_compose_command_secrets "$TMP/self/cmd_url.yml" "command-url self-test" "$TMP/contract.tsv" >/dev/null 2>&1
+    if [ "$FAIL" -gt "$before" ]; then
+        FAIL=$before
+        pass "self-test: a userinfo-bearing URL in a command block is rejected"
+    else
+        fail "self-test: the command check PASSED a DSN with an embedded password"
+    fi
+
+    # Check 6c, detector B: a declared secret spelled as a VALUE flag. The
+    # contract gives `--control-key-file` and no `--control-key`, so the latter
+    # can only be material.
+    sed 's|^        --allow-unsupported-billing$|        --control-key t0psecret|' \
+        "$COMPOSE" >"$TMP/self/cmd_flag.yml"
+    if ! grep -q -- '--control-key t0psecret' "$TMP/self/cmd_flag.yml"; then
+        fail "self-test: the command-flag mutation did not apply; the run below proves nothing"
+        exit 1
+    fi
+    before=$FAIL
+    check_compose_command_secrets "$TMP/self/cmd_flag.yml" "command-flag self-test" "$TMP/contract.tsv" >/dev/null 2>&1
+    if [ "$FAIL" -gt "$before" ]; then
+        FAIL=$before
+        pass "self-test: a secret's value flag in a command block is rejected"
+    else
+        fail "self-test: the command check PASSED a secret passed as a value flag"
+    fi
+
     printf '[control]\nnot_a_real_setting = 1\n' >"$TMP/self/ops.toml"
     before=$FAIL
     check_ops_toml "$TMP/self/ops.toml" "ops-toml self-test" "$TMP/contract.tsv" >/dev/null 2>&1
@@ -356,6 +536,7 @@ if [ "${1:-}" = "--self-test" ]; then
     # or the mutations above proved only that the checks reject everything.
     check_compose "$COMPOSE" "compose control" "$TMP/contract.tsv"
     check_compose_alias_equality "$COMPOSE" "alias control"
+    check_compose_command_secrets "$COMPOSE" "command control" "$TMP/contract.tsv"
     check_ops_toml "deploy/ops/zeroship.toml" "ops-toml control" "$TMP/contract.tsv"
 
     echo ""
@@ -407,6 +588,10 @@ check_compose "$COMPOSE" "compose" "$TMP/contract.tsv"
 echo ""
 echo "=== 6b. Compose one-to-one aliases satisfy LEFT == RIGHT ==="
 check_compose_alias_equality "$COMPOSE" "compose alias equality"
+
+echo ""
+echo "=== 6c. No compose command/entrypoint item carries a credential ==="
+check_compose_command_secrets "$COMPOSE" "compose command argv" "$TMP/contract.tsv"
 
 echo ""
 echo "=== 7. Every ops-TOML leaf is a generated overlay path ==="
