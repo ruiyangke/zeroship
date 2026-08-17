@@ -16,6 +16,7 @@
 use std::ffi::OsString;
 
 /// The sole raw string read. Callers must present a typed key.
+#[allow(clippy::disallowed_methods)]
 pub(crate) fn raw_var(key: &str) -> Result<Option<String>, ()> {
     match std::env::var(key) {
         Ok(value) => Ok(Some(value)),
@@ -25,6 +26,7 @@ pub(crate) fn raw_var(key: &str) -> Result<Option<String>, ()> {
 }
 
 /// The sole raw `OsString` read. Callers must present a typed key.
+#[allow(clippy::disallowed_methods)]
 pub(crate) fn raw_var_os(key: &str) -> Option<OsString> {
     std::env::var_os(key)
 }
@@ -35,6 +37,7 @@ pub(crate) fn raw_var_os(key: &str) -> Option<OsString> {
 /// caller forwards this to creator app code as a `HashMap<String, String>`,
 /// and inventing a replacement character for a name or value it will later use
 /// as a lookup key would be worse than omitting it.
+#[allow(clippy::disallowed_methods)]
 pub(crate) fn raw_vars() -> Vec<(String, String)> {
     std::env::vars().collect()
 }
