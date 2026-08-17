@@ -258,7 +258,24 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 ```
 
 3.81s against 0.00s is the whole difference between the assertion holding and
-the assertion being absent. No gate in this repo runs that binary with a
-database - `run_auth_suite.sh` excludes it by name because it also wants
-CONTROL_TEST_DB, which the script does not provision. The strengthened test is
-therefore only as good as whoever remembers to give it a database.
+the assertion being absent.
+
+**The reason first given here for no gate running it was wrong, and is
+retracted.** This section said `run_auth_suite.sh` excluded the binary by name
+"because it also wants CONTROL_TEST_DB, which the script does not provision".
+That repeated the runner's own comment without checking it against the code.
+`db_url()` at `crates/gateway/tests/oidc_rp_e2e.rs:47` is
+`test_env!("AUTH_DB_URL").or_else(|| test_env!("CONTROL_TEST_DB"))`: EITHER
+variable satisfies it, and `tests/run_auth_suite.sh:69` exports `AUTH_DB_URL`.
+The target could have been in the gate the whole time.
+
+The measurement that settles it needs the control, because setting both
+variables at once cannot say which one did the work. With `CONTROL_TEST_DB`
+explicitly unset and `AUTH_DB_URL` alone: `3 passed ... finished in 6.73s`.
+With neither: `3 passed ... finished in 0.00s`. One variable changed, opposite
+outcomes.
+
+`tests/run_auth_suite.sh` now runs `zeroship-gateway:oidc_rp_e2e` in its
+gated-binary loop, with no `SKIP_ALLOWLIST` entry - the file announces through
+`zeroship_test_support::skip`, so losing the database makes the census count it
+and the gate go red rather than report a silent pass.
