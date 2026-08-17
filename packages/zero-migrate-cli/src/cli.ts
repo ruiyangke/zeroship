@@ -940,7 +940,33 @@ interface LintDialectResult {
   irVersion?: number;
   opCount?: number;
   error?: string;
+  /** The op the refusal is about, resolved from its `op_index`. */
+  op?: unknown;
   sql?: string;
+}
+
+/** Resolve a refusal's `op_index` back to the op itself.
+ *
+ * Every `AuthoringError` is stamped with `op_index`, and the CLI used to print
+ * that ordinal verbatim. It indexes the RENDERED IR envelope, which the author
+ * does not have in front of them - one authored statement fans out into several
+ * ops - so on its own it answers nothing. `envelopes` is the exact ordered list
+ * the message's producer was given: a preview refusal also names `envelope[K]`,
+ * which selects among them; a single-envelope verdict has only one to pick.
+ *
+ * Returns `undefined` when the message carries no index or the index does not
+ * land - naming the wrong op is worse than naming none. */
+function offendingOp(
+  message: string | undefined,
+  envelopes: readonly IrEnvelope[],
+): unknown | undefined {
+  if (message === undefined) return undefined;
+  const opIndex = /\bop_index=(\d+)\b/.exec(message);
+  if (opIndex === null) return undefined;
+  const envelopeIndex = /\benvelope\[(\d+)\]/.exec(message);
+  const envelope =
+    envelopes[envelopeIndex === null ? envelopes.length - 1 : Number(envelopeIndex[1])];
+  return envelope?.ops[Number(opIndex[1])];
 }
 
 /** One aggregate `lint` verdict line. */
@@ -980,6 +1006,9 @@ async function runLint(args: Args): Promise<number> {
       );
       let renderedSql: string | undefined;
       let previewError: string | undefined;
+      // The same prefix the preview below is handed, so an `envelope[K]` in a
+      // lowering refusal selects the envelope its `op_index` counts into.
+      const previewEnvelopes = authored.slice(0, index + 1).map((entry) => entry.envelope);
       try {
         // The whole prefix, not this file alone. A migration's ops are only
         // checkable against the schema the earlier migrations leave behind: lint
@@ -998,12 +1027,19 @@ async function runLint(args: Args): Promise<number> {
       } catch (error) {
         previewError = safeErrorMessage(error, undefined);
       }
+      // `loadVerify` saw this envelope alone, so its op_index counts into it;
+      // the preview saw the whole prefix and names which of them it means.
+      const op =
+        verdict.error !== undefined
+          ? offendingOp(verdict.error, [envelope])
+          : offendingOp(previewError, previewEnvelopes);
       return {
         dialect,
         ok: verdict.ok && previewError === undefined,
         irVersion: verdict.irVersion,
         opCount: verdict.opCount,
         error: verdict.error ?? previewError,
+        ...(op !== undefined ? { op } : {}),
         ...(args.explain && renderedSql !== undefined ? { sql: renderedSql } : {}),
       };
     });
@@ -1039,6 +1075,11 @@ async function runLint(args: Args): Promise<number> {
       for (const result of report.dialects) {
         if (!result.ok) {
           process.stdout.write(`  ${result.dialect}: ${result.error ?? "verification failed"}\n`);
+          // `op_index=N` alone is an ordinal into a document the author is not
+          // holding. Print the op it names, right under the refusal.
+          if (result.op !== undefined) {
+            process.stdout.write(`    op: ${JSON.stringify(result.op)}\n`);
+          }
         }
         if (args.explain) process.stdout.write(`${result.sql ?? ""}\n`);
       }
