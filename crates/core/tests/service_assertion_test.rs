@@ -26,7 +26,8 @@ use serde_json::{json, Value};
 use zeroship_core::service_assertion::{
     AssertionError, ClaimFuture, InMemoryReplayStore, ReplayClaim, ReplayStore, ReplayStoreError,
     ServiceAssertionMinter, ServiceAssertionVerifier, ServiceIssuer, ServiceSigningKey,
-    ServiceTrustBundle, JWT_ASSERTION_MECHANISM, MAX_ASSERTION_LIFETIME, SERVICE_ASSERTION_TYP,
+    ServiceTrustBundle, JWT_ASSERTION_MECHANISM, MAX_ASSERTION_LIFETIME, MAX_JTI_LEN,
+    SERVICE_ASSERTION_TYP,
 };
 use zeroship_core::service_identity::{
     verify_identity, AuthError, PeerCredentials, ServiceIdentity, ServiceName, ServicePrincipal,
@@ -412,6 +413,49 @@ async fn an_assertion_without_a_jti_is_rejected() {
 }
 
 #[compio::test]
+async fn a_jti_outside_the_length_and_charset_bound_is_rejected() {
+    // The `jti` is the only attacker-controlled string that reaches the replay
+    // store, joined to the issuer as `<iss>|<jti>`. Two properties therefore
+    // have to hold and neither had a test: it is BOUNDED, so a hostile caller
+    // cannot grow store keys without limit, and it excludes the `|` the key is
+    // built with, so it cannot forge a key that reads as another issuer's.
+    let fixture = Fixture::new();
+    let signing = fixture.caller_key.encoding_key();
+    let with_jti = |jti: String| {
+        let mut payload = conforming_payload();
+        payload["jti"] = json!(jti);
+        forge(&conforming_header(), &payload, Some((&signing, Algorithm::EdDSA)))
+    };
+
+    // CONTROL: exactly at the bound, and the only difference from the first
+    // rejection below is one character of length.
+    assert!(
+        fixture.verify(&with_jti("a".repeat(MAX_JTI_LEN))).await.is_ok(),
+        "a jti of exactly MAX_JTI_LEN is admitted, so the boundary is where it says it is"
+    );
+
+    for hostile in [
+        "a".repeat(MAX_JTI_LEN + 1),
+        "a".repeat(4096),
+        // The separator. Without the charset guard this claims the key
+        // `spiffe://zeroship.ai/svc/gateway|spiffe://...` - a key belonging to
+        // whatever issuer the caller names after the pipe.
+        format!("{THIRD_PARTY}|stolen"),
+        "has spaces".to_owned(),
+        "dots.are.not.admitted".to_owned(),
+        String::new(),
+    ] {
+        assert_eq!(
+            fixture.verify(&with_jti(hostile.clone())).await,
+            Err(AuthError::CredentialRejected),
+            "a jti of {} characters starting {:?} must be refused",
+            hostile.len(),
+            hostile.chars().take(16).collect::<String>()
+        );
+    }
+}
+
+#[compio::test]
 async fn a_verified_assertion_cannot_be_verified_a_second_time() {
     let fixture = Fixture::new();
     let assertion = fixture.minter.mint(&issuer(CALLEE)).expect("mint");
@@ -520,12 +564,26 @@ async fn the_replay_claim_happens_only_after_the_signature_verifies() {
     // An unauthenticated caller must not be able to write into the replay
     // store. The store here accepts every claim, so the only thing that can
     // keep the count at zero is the verifier refusing before it gets there.
+    //
+    // The token is signed by a key the bundle does not hold, under the kid and
+    // typ a real assertion carries. That matters: it is well-formed all the way
+    // to the signature, so the verifier really does select a key and really
+    // does fail the cryptographic check, which is the step the ordering claim
+    // is about. An earlier version forged with no key at all, whose header
+    // carries no `alg` and so dies in `decode_header` before key selection - it
+    // would have stayed green even if the claim were moved ahead of signature
+    // verification but left behind header parsing.
     let store = Arc::new(CountingReplayStore::default());
     let fixture = Fixture::with_replay_store(Arc::clone(&store) as Arc<dyn ReplayStore>);
-    let unsigned = forge(&conforming_header(), &conforming_payload(), None);
+    let untrusted = TestKey::generate();
+    let forged = forge(
+        &conforming_header(),
+        &conforming_payload(),
+        Some((&untrusted.encoding_key(), Algorithm::EdDSA)),
+    );
 
     assert_eq!(
-        fixture.verify(&unsigned).await,
+        fixture.verify(&forged).await,
         Err(AuthError::CredentialRejected)
     );
     assert_eq!(*store.claims.lock(), 0);
@@ -591,6 +649,50 @@ async fn an_assertion_whose_lifetime_exceeds_the_ceiling_is_rejected() {
             .verify(&long_lived.mint(&issuer(CALLEE)).expect("mint a long-lived assertion"))
             .await,
         Err(AuthError::CredentialRejected)
+    );
+}
+
+#[compio::test]
+async fn an_assertion_whose_lifetime_is_zero_or_negative_is_rejected() {
+    // The ceiling arm is `lifetime <= 0 || lifetime > ceiling`, and only the
+    // upper half had a test. The lower half is what keeps `exp == iat` and
+    // `exp < iat` out: both are inside the ceiling arithmetically, and both are
+    // inside the skew tolerance, so nothing else in the verifier objects to
+    // them. They are not assertions - a window that has no interior cannot have
+    // been issued honestly, and admitting one would mean the store retained a
+    // claim for a credential no clock ever considered live.
+    let fixture = Fixture::new();
+    let signing = fixture.caller_key.encoding_key();
+    let window = |iat: i64, exp: i64, jti: &str| {
+        forge(
+            &conforming_header(),
+            &json!({
+                "iss": CALLER, "sub": CALLER, "aud": CALLEE,
+                "iat": iat, "exp": exp, "jti": jti,
+            }),
+            Some((&signing, Algorithm::EdDSA)),
+        )
+    };
+
+    let issued = now_secs();
+    assert_eq!(
+        fixture.verify(&window(issued, issued, "zero-lifetime-0001")).await,
+        Err(AuthError::CredentialRejected),
+        "exp == iat is a zero-second assertion"
+    );
+    assert_eq!(
+        fixture.verify(&window(issued, issued - 5, "negative-lifetime-0001")).await,
+        Err(AuthError::CredentialRejected),
+        "exp < iat is a window that never opened"
+    );
+
+    // CONTROL: one second of interior, the same clock, everything else equal.
+    assert!(
+        fixture
+            .verify(&window(issued, issued + 1, "one-second-lifetime-0001"))
+            .await
+            .is_ok(),
+        "the shortest honest window is still admitted"
     );
 }
 

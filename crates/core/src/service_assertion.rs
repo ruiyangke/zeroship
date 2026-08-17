@@ -117,7 +117,11 @@ const fn is_jti_char(c: char) -> bool {
 }
 
 /// The longest `jti` accepted, so a hostile caller cannot grow store keys.
-const MAX_JTI_LEN: usize = 64;
+///
+/// Public so the test that pins the bound can exercise exactly one character
+/// either side of it rather than a hardcoded 64 that would quietly stop being
+/// the boundary if this changed.
+pub const MAX_JTI_LEN: usize = 64;
 
 /// Failure to build a minter, a trust bundle, or an issuer identifier.
 ///
