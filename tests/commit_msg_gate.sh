@@ -91,6 +91,16 @@ lint_message() {
     say "non-ASCII character (em-dash, curly quote, arrow); use ASCII" NON_ASCII
   fi
 
+  # Agent-tooling attribution. A session URL is a dead link to anyone but the
+  # one operator who ran it, and it says nothing about the change; the log
+  # records what changed and why, not which tool typed it.
+  if printf '%s' "$msg" | grep -qiE '^[[:space:]]*(Claude-Session|Co-Authored-By:[[:space:]]*Claude|Generated with)'; then
+    say "agent/session trailer; the log records the change, not the tool" AGENT_TRAILER
+  fi
+  if printf '%s' "$msg" | grep -qE 'https?://claude\.ai/'; then
+    say "claude.ai link; it is a dead link to every other reader" AGENT_TRAILER
+  fi
+
   # A body must be separated by one blank line, or git tooling folds it in.
   if [ -n "$rest" ]; then
     local second
