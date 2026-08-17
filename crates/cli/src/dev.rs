@@ -251,7 +251,7 @@ fn validate_migrate_dsn(bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-fn secret_specs() -> [SecretSpec; 8] {
+fn secret_specs() -> [SecretSpec; 7] {
     [
         ("migrate-dsn", generate_migrate_dsn, validate_migrate_dsn),
         (
