@@ -168,6 +168,31 @@ the same command gives `WSNORUN2_EXIT=0` with `grep -cE '^error'` = 0.
 So the 101 was the missing fixture tree, not this change, and it is now measured
 rather than argued.
 
+## The auth suite: 449 was TRUNCATION, and that is now proven
+
+An external verifier (`/tmp/v-s40.sh`, not mine) ran three gates against this
+worktree. Two corroborate my own numbers independently: `cargo test --workspace
+--no-run` gave 0 error lines, and `cargo test -p zeroship-control --lib` gave
+`223 passed; 0 failed` - a second measurement of 223, which settles that 223 is
+this tree's number rather than a regression here.
+
+Its auth stage reached 48 groups / 449 passed / 0 failed and then stopped. It
+printed NO verdict: grepping all 35,168 lines for `AUTH SUITE:`, `FAIL: only`
+and `did not run` returns nothing, so the script never reached its own summary.
+449 is under the 604 floor, and `tests/run_auth_suite.sh:22` names exactly this
+trap - "A suite that silently stopped running is indistinguishable from a suite
+that passed." Quoting 449/0 as a result would have been that mistake.
+
+Re-run on a private `TEST_DB=zeroship_auth_test_s40`, same tree, while the
+machine was idle: it passed 48 groups and kept going, reaching **70 groups / 593
+passed / 0 failed** and still climbing toward the expected ~645. So the external
+number was truncation, not coverage loss, and the difference is visible only
+because the two runs were compared on group COUNT rather than on the pass tally.
+
+At the point I stopped, the verdict banner had not printed, so the floor is not
+yet demonstrated - 593 is below 604 and the run was still adding groups. The log
+is `s40_auth_final.log` in the session scratchpad; the banner is what decides it.
+
 ## Two gates I did NOT get a number for, and why
 
 Both were queued and both were CANCELLED rather than left running unattended.
