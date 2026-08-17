@@ -4496,7 +4496,72 @@ pub fn fold_to_field_defs(
             }
             // Every other op (DML, index, type/nullability alters, drop*) does not
             // change the reconstructed column-facet shape.
-            _ => {}
+            // EXHAUSTIVE FROM HERE, and that is the point of this arm rather than a
+            // `_`. Six stale facets shipped behind the catch-all this file used to
+            // end with - a column type, nullability both ways, a default both
+            // ways, and an FK policy that outlived its constraint. Each was legal,
+            // accepted, and then dropped on the floor by the replay, so gen-types
+            // described a schema the database no longer had. Listing every variant
+            // makes the next op that touches a column a COMPILE ERROR here.
+            //
+            // `synchronizeIdentity` is a MEASURED no-op: it advances a live
+            // sequence value to clear existing rows and does not alter the identity
+            // DECLARATION, so the descriptor correctly does not move.
+            Op::SynchronizeIdentity { .. }
+            // `dialectal` never reaches here - `flatten_dialectal_ops` expands it
+            // into the replay list above - but the match must still name it.
+            | Op::Dialectal { .. }
+            // Relation-level ops: they create, move or drop whole relations that
+            // are not this map's tables, or alter table-level settings that carry
+            // no column facet.
+            | Op::CreatePartition { .. }
+            | Op::AttachPartition { .. }
+            | Op::DetachPartition { .. }
+            | Op::DropPartition { .. }
+            | Op::SetTableOptions { .. }
+            | Op::CreateView { .. }
+            | Op::DropView { .. }
+            | Op::CreateSequence { .. }
+            | Op::AlterSequence { .. }
+            | Op::DropSequence { .. }
+            // Index and comment ops: an index is not a column facet, and a comment
+            // is not projected into the FieldDescriptor at all.
+            | Op::CreateIndex { .. }
+            | Op::DropIndex { .. }
+            | Op::Comment { .. }
+            // `validateConstraint` promotes a NOT VALID constraint to validated;
+            // the policy it carries was already lifted when it was added.
+            | Op::ValidateConstraint { .. }
+            // DML moves ROWS, never column shape.
+            | Op::Insert { .. }
+            | Op::Update { .. }
+            | Op::Delete { .. }
+            | Op::Backfill { .. }
+            // Named-type and vendor objects: they live outside the per-table
+            // column map this replay builds.
+            | Op::CreateEnum { .. }
+            | Op::DropEnum { .. }
+            | Op::CreateDomain { .. }
+            | Op::DropDomain { .. }
+            | Op::CreateSchema { .. }
+            | Op::DropSchema { .. }
+            | Op::CreateExtension { .. }
+            | Op::DropExtension { .. }
+            | Op::CreateRole { .. }
+            | Op::AlterRole { .. }
+            | Op::DropRole { .. }
+            | Op::DropOwnedBy { .. }
+            | Op::Grant { .. }
+            | Op::Revoke { .. }
+            | Op::SetRls { .. }
+            | Op::CreatePolicy { .. }
+            | Op::DropPolicy { .. }
+            | Op::CreateTrigger { .. }
+            | Op::DropTrigger { .. }
+            | Op::CreateFunction { .. }
+            | Op::DropFunction { .. }
+            // Raw SQL is opaque; nothing can be recovered from it by construction.
+            | Op::PgRaw { .. } => {}
         }
     }
 
