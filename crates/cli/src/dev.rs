@@ -251,7 +251,7 @@ fn validate_migrate_dsn(bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-fn secret_specs() -> [SecretSpec; 7] {
+fn secret_specs() -> [SecretSpec; 6] {
     [
         ("migrate-dsn", generate_migrate_dsn, validate_migrate_dsn),
         (
@@ -261,11 +261,6 @@ fn secret_specs() -> [SecretSpec; 7] {
         ),
         (
             "gateway-signing.pem",
-            generate_signing_key,
-            validate_signing_key,
-        ),
-        (
-            "control-signing.pem",
             generate_signing_key,
             validate_signing_key,
         ),

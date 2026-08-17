@@ -84,8 +84,7 @@ ZEROSHIP_CONTROL_DATABASE_URL=postgres://localhost:5432/zeroship \
 ZEROSHIP_AUTH_PLATFORM_ISSUER="http://localhost:9092/oauth2" \
 ./target/release/zeroship-control \
   --port 9090 \
-  --blob-store ./bundles \
-  --signing-key-file deploy/compose/secrets/control-signing.pem
+  --blob-store ./bundles
 ```
 
 

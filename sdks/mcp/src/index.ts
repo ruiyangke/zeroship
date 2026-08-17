@@ -17,7 +17,7 @@ const DEFAULT_CONTROL_URL = "http://localhost:9090";
 const PACKAGE_NAME = "@zeroship/mcp";
 const PACKAGE_VERSION = "0.1.0";
 const MISSING_TOKEN_MESSAGE =
-  "set ZEROSHIP_TOKEN (run `zeroship login` or create a PAT)";
+  "set ZEROSHIP_TOKEN (run `zeroship login`)";
 
 const appInput = {
   app: z

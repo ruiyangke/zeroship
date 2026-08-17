@@ -297,7 +297,7 @@ else
   fail "mock-Stripe did not become ready"; tail -5 "$WORK/mock-stripe.log"; exit 1
 fi
 
-# signing key for PAT issuance + gateway/worker JWT.
+# signing key for the harness's own platform-bearer JWKS + gateway/worker JWT.
 openssl genpkey -algorithm ed25519 -out "$WORK/signing-key.pem" 2>/dev/null
 chmod 600 "$WORK/signing-key.pem"
 
@@ -326,15 +326,17 @@ pass "wrote shared config overlay $CFG_TOML ([metering] stream config, not env)"
 # group.id per role). A SHORT --spend-recompute-interval makes usage aggregation
 # deterministic (the recompute drains the stream every 2s). lite is recompute-fed
 # so no forwarder is spawned for it (Meter::accepts_forwarded_events=false).
-ZEROSHIP_CONTROL_SIGNING_KEY_FILE="$WORK/signing-key.pem"
-ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$ZEROSHIP_CONTROL_SIGNING_KEY_FILE"
+ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$WORK/signing-key.pem"
 ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gateway-broker-secret"
+# The issuer control verifies the admin bearer against, on the same key the
+# gateway signs with. Up BEFORE control: control reads the issuer once at boot.
+e2e_platform_op_up "$WORK/signing-key.pem" "$WORK" || exit 1
 e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DBURL"
 ZEROSHIP_CONTROL_STRIPE_SECRET_KEY="sk_test_e2e_billing" \
 e2e_with_platform_mint_key "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
   --config "$CFG_TOML" \
-  --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
+  --blob-store "$WORK/blobs" \
   --stripe-base-url "$MOCK_URL" \
   --meter-provider lite --invoicer-provider lite --allow-unsupported-billing \
   --spend-recompute-interval 2 \
@@ -374,7 +376,7 @@ curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 \
 
 # The migration service. Same invocation as tests/e2e_db_app_end_to_end.sh.
 "$BIN/zeroship-migrated" --port "$ZEROSHIP_MIGRATED_PORT" \
-  --signing-key-file "$WORK/signing-key.pem" --tmp-dir "$WORK/migrated-tmp" \
+  --tmp-dir "$WORK/migrated-tmp" \
   > "$WORK/migrated.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "$MIGRATED_URL/readyz" >/dev/null 2>&1 && break; sleep 1; done
@@ -384,65 +386,40 @@ curl -sf "$MIGRATED_URL/readyz" >/dev/null 2>&1 \
 
 # ===========================================================================
 echo ""
-echo "=== Stage 2: mint admin PAT (offline) + create creator + deploy metering-probe ==="
+echo "=== Stage 2: mint admin platform bearer (offline) + create creator + deploy metering-probe ==="
 # ===========================================================================
 
-# Offline-mint a platform-admin PAT (signs an EdDSA pat+jwt the PatIssuer
-# verifies; seeds users + platform_admin_roles + permission_tokens).
-POLICY_JSON='{"name":"e2e-bill-admin","statements":[{"effect":"allow","actions":["apps:read","apps:write","apps:deploy","apps:delete","deployments:read","deployments:rollback","env:read","env:write","secrets:read","secrets:write","billing:read","billing:write"],"resources":[{"type":"any"}],"conditions":[]}]}'
-POLICY_HASH="$(node -e '
-const {createHash}=require("crypto");
-function c(v){if(v===null||typeof v==="number"||typeof v==="boolean")return JSON.stringify(v);
-if(typeof v==="string")return JSON.stringify(v);
-if(Array.isArray(v))return "["+v.map(c).join(",")+"]";
-return "{"+Object.keys(v).sort().map(k=>JSON.stringify(k)+":"+c(v[k])).join(",")+"}";}
-process.stdout.write(createHash("sha256").update(c(JSON.parse(process.argv[1]))).digest("hex"));
-' "$POLICY_JSON")"
-# The PAT owner is ALSO the creator that owns the deployed app (so the billing
-# reconciler groups the app under this creator).
+# The scope string is the deleted permission_tokens policy's action list,
+# one-for-one: it becomes the token policy control intersects with the
+# owner's own authority.
+SCOPE="apps:read apps:write apps:deploy apps:delete deployments:read deployments:rollback env:read env:write secrets:read secrets:write billing:read billing:write"
+# The bearer's subject is ALSO the creator that owns the deployed app (so the
+# billing reconciler groups the app under this creator).
 CREATOR="$(node -e 'console.log(require("crypto").randomUUID())')"
-TOKID="$(node -e 'console.log(require("crypto").randomUUID())')"
-EXP=$(( $(date +%s) + 86400 ))
 psql_exec >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.users (id, email, name, email_verified_at)
 VALUES ('$CREATOR', 'e2e-bill-$CREATOR@zeroship.test'::citext, 'E2E Billing Admin', NOW());
 INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by)
 VALUES ('$CREATOR', 'admin', '$CREATOR');
-INSERT INTO zeroship.permission_tokens (id, owner_id, kind, name, policies, policy_hash, expires_at)
-VALUES ('$TOKID', '$CREATOR', 'pat', 'e2e billing harness', '$POLICY_JSON'::jsonb, '$POLICY_HASH', to_timestamp($EXP));
 SQL
-PAT="$(node --input-type=module -e '
-import { readFileSync } from "node:fs";
-import { createHash, randomBytes } from "node:crypto";
-import { importPKCS8, exportJWK, SignJWT } from "file://'"$JOSE_JS"'";
-const [pem, owner, tid, phash, exp] = process.argv.slice(1);
-const key = await importPKCS8(readFileSync(pem,"utf8"), "EdDSA", { extractable:true });
-const x = (await exportJWK(key)).x;
-const kid = createHash("sha256").update(`{"crv":"Ed25519","kty":"OKP","x":"${x}"}`).digest("base64url");
-const jwt = await new SignJWT({ sub:owner, owner, tid, jti:tid, scope:"pat", policy_hash:phash, nonce:randomBytes(32).toString("base64url") })
-  .setProtectedHeader({ alg:"EdDSA", typ:"pat+jwt", kid })
-  .setIssuer("https://api.zeroship.ai").setAudience("control.zeroship.ai")
-  .setIssuedAt(Math.floor(Date.now()/1000)).setExpirationTime(Number(exp))
-  .sign(key);
-process.stdout.write(jwt);
-' "$WORK/signing-key.pem" "$CREATOR" "$TOKID" "$POLICY_HASH" "$EXP")"
-[ "$(echo -n "$PAT" | awk -F. '{print NF}')" = "3" ] && pass "minted pat+jwt (creator=$CREATOR)" || { fail "PAT mint failed: $PAT"; exit 1; }
+ADMIN_TOKEN="$(e2e_mint_platform_bearer "$CREATOR" "$SCOPE")"
+[ "$(echo -n "$ADMIN_TOKEN" | awk -F. '{print NF}')" = "3" ] && pass "minted platform bearer (creator=$CREATOR)" || { fail "bearer mint failed: $ADMIN_TOKEN"; exit 1; }
 
 # Create the app ON the metering-test plan.
 APP_JSON="$(curl -s -X POST "$CONTROL_URL/api/apps" -H 'Content-Type: application/json' \
-  -H "Authorization: Bearer $PAT" -d "{\"name\":\"metering-probe\",\"plan_id\":\"$PLAN_ID\"}")"
+  -H "Authorization: Bearer $ADMIN_TOKEN" -d "{\"name\":\"metering-probe\",\"plan_id\":\"$PLAN_ID\"}")"
 APP="$(echo "$APP_JSON" | jget '.id')"
 [ -n "$APP" ] && pass "created app metering-probe → $APP (plan=$PLAN_ID)" || { fail "create-app failed: $APP_JSON"; exit 1; }
 
-# The PAT user owns the app (app_members role='owner') so the billing
+# The bearer's principal owns the app (app_members role='owner') so the billing
 # reconciler groups it under this creator. control's create-app may already do
-# this for the PAT principal; make it explicit + idempotent.
+# this for the principal; make it explicit + idempotent.
 psql_exec >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ('$APP', '$CREATOR', 'owner')
 ON CONFLICT (app_id, user_id) DO UPDATE SET role='owner';
 SQL
 
-DEP="$("$BIN/zeroship" deploy "$PROBE_ZSHIP" --app="$APP" --control="$CONTROL_URL" --token="$PAT" 2>&1)"
+DEP="$("$BIN/zeroship" deploy "$PROBE_ZSHIP" --app="$APP" --control="$CONTROL_URL" --token="$ADMIN_TOKEN" 2>&1)"
 echo "$DEP" | grep -q "deploy_hash" && pass "deployed metering-probe .zship → $APP" || { fail "deploy failed: $DEP"; tail -20 "$WORK/control.log"; exit 1; }
 
 # Apply the probe's migrations to its per-app schema. Deploy uploads the bundle;
@@ -451,7 +428,7 @@ echo "$DEP" | grep -q "deploy_hash" && pass "deployed metering-probe .zship → 
 write_apply_request || { fail "could not record migration IR"; exit 1; }
 APPLY_CODE="$(curl -s -o "$WORK/apply-response.json" -w '%{http_code}' \
   -X POST "$MIGRATED_URL/v1/apps/$APP/migrations/apply" \
-  -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" \
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" \
   --data-binary @"$WORK/apply-migrations.json")"
 APPLIED="$(jget '.applied.length' < "$WORK/apply-response.json")"
 if [ "$APPLY_CODE" = "200" ] && [ -n "$APPLIED" ] && [ "$APPLIED" -ge 1 ] 2>/dev/null; then
@@ -533,7 +510,7 @@ echo "=== Stage 4: metering → aggregation (worker → redpanda → recompute �
 PRIMARY_METRIC="db_writes"
 USAGE_JSON=""
 for _ in $(seq 1 20); do
-  USAGE_JSON="$(curl -s "$CONTROL_URL/api/apps/$APP/usage" -H "Authorization: Bearer $PAT")"
+  USAGE_JSON="$(curl -s "$CONTROL_URL/api/apps/$APP/usage" -H "Authorization: Bearer $ADMIN_TOKEN")"
   REQS="$(echo "$USAGE_JSON" | jget '.requests')"
   if [ -n "$REQS" ] && [ "$REQS" != "0" ]; then break; fi
   sleep 2
@@ -596,7 +573,7 @@ echo "=== Stage 5: spend enforcement — set a LOW cap, cross it, force sweep �
 # priced spend is >= N_REQ cents. Set the override cap to 1 cent so spend is
 # WAY over 100% ⇒ derive_state = Block.
 SL_JSON="$(curl -s -w '\n%{http_code}' -X PUT "$CONTROL_URL/api/apps/$APP/spend-limit" \
-  -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" -d '{"cents":1}')"
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" -d '{"cents":1}')"
 SL_CODE="$(echo "$SL_JSON" | tail -1)"
 [ "$SL_CODE" = "200" ] && pass "set spend-limit override to 1 cent (PUT /api/apps/:id/spend-limit → 200)" || { fail "set spend-limit failed (HTTP $SL_CODE): $(echo "$SL_JSON" | head -n -1)"; }
 
@@ -640,7 +617,7 @@ if [ -n "$SPEND_CENTS" ] && [ "$SPEND_CENTS" -ge 50 ] 2>/dev/null; then
   # band, below the 100% Block boundary). Integer cap = floor(spend*100/97).
   DEG_CAP=$(( SPEND_CENTS * 100 / 97 ))
   curl -s -o /dev/null -X PUT "$CONTROL_URL/api/apps/$APP/spend-limit" \
-    -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" -d "{\"cents\":$DEG_CAP}"
+    -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" -d "{\"cents\":$DEG_CAP}"
   curl -s -o /dev/null -X POST -H "Authorization: Bearer $ZEROSHIP_CONTROL_KEY" "$CONTROL_URL/internal/spend/reconcile"
   DEG_STATE="$(psql_exec -tA -c "SELECT state FROM zeroship.app_spend_state WHERE app_id='$APP'" 2>/dev/null | tr -d '[:space:]')"
   if [ "$DEG_STATE" = "degrade" ]; then

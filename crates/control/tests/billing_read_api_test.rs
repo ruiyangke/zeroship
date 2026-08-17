@@ -32,12 +32,11 @@ mod common;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
+use chrono::Utc;
 use compio_postgres::{connect, Client, NoTls};
 use ntex::http::StatusCode;
 use ntex::web::{self, test};
 use uuid::Uuid;
-use zeroship_authz::{policy_hash, Action, Effect, Policy, Resource, Statement};
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::pricing::{charge_cents, MetricWeight, MetricWeights, PlanPrice, FX_SCALE};
 use zeroship_control::{
@@ -117,8 +116,7 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
         expected_oauth_audience: "control.zeroship.ai".to_string(),
         static_policies: zeroship_authz::load_platform_policies()
             .expect("bundled authz policies parse"),
-        pat_issuer: Arc::new(zeroship_authn::PatIssuer::generate_ephemeral()),
-        auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
+        auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some(common::platform_jwks_url())),
         // No platform deploy-token mint here: that is control's OUTBOUND
         // destination for the device flow, and no fixture below drives one.
         provider_registry: zeroship_control::metering::provider::builtin_registry(),
@@ -143,22 +141,21 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
 }
 
 // --------------------------------------------------------------------------
-// PAT minting + policy helpers
+// Bearer minting helpers
 // --------------------------------------------------------------------------
 
-struct Pat {
+struct Caller {
     user_id: Uuid,
-    token_id: Uuid,
     token: String,
 }
 
-impl Pat {
+impl Caller {
     fn bearer(&self) -> String {
         format!("Bearer {}", self.token)
     }
 }
 
-async fn issue_pat(state: &AppState, user_id: Uuid, role: Option<&str>, policy: Policy) -> Pat {
+async fn issue_bearer(state: &AppState, user_id: Uuid, role: Option<&str>, scope: &str) -> Caller {
     if let Some(role) = role {
         state
             .control_pg
@@ -170,65 +167,15 @@ async fn issue_pat(state: &AppState, user_id: Uuid, role: Option<&str>, policy: 
             .await
             .expect("insert platform role");
     }
-    let token_id = Uuid::new_v4();
-    let policies = policy.to_json_value();
-    let hash = policy_hash(&policies);
-    let expires_at = Utc::now() + Duration::days(1);
-    let token = state
-        .pat_issuer
-        .issue(token_id, user_id, hash.clone(), expires_at)
-        .expect("issue PAT");
-    state
-        .control_pg
-        .execute(
-            "INSERT INTO zeroship.permission_tokens \
-                (id, owner_id, kind, name, policies, policy_hash, expires_at) \
-             VALUES ($1, $2, 'pat', 'billread PAT', $3, $4, $5)",
-            &[&token_id, &user_id, &policies, &hash, &expires_at],
-        )
-        .await
-        .expect("insert PAT row");
-    Pat {
+    Caller {
         user_id,
-        token_id,
-        token,
+        token: common::platform_token_for_client(user_id, scope, common::CONSOLE_CLIENT_ID),
     }
 }
 
-/// BillingRead on a specific app — the app-owner (creator) upper bound.
-fn billing_read_on_app(app_id: Uuid) -> Policy {
-    Policy {
-        name: "creator billing read".to_owned(),
-        statements: vec![Statement {
-            effect: Effect::Allow,
-            actions: vec![Action::BillingRead],
-            resources: vec![Resource::App { id: app_id.to_string() }],
-            conditions: Vec::new(),
-        }],
-    }
-}
-
-/// BillingRead fleet-wide — the operator upper bound.
-fn billing_read_any() -> Policy {
-    Policy {
-        name: "operator billing read".to_owned(),
-        statements: vec![Statement {
-            effect: Effect::Allow,
-            actions: vec![Action::BillingRead],
-            resources: vec![Resource::Any],
-            conditions: Vec::new(),
-        }],
-    }
-}
-
-/// A token with NO billing capability at all (empty policy) — the unauthorized
-/// caller used to assert a 403 on the billing reads.
-fn empty_policy() -> Policy {
-    Policy {
-        name: "no-grants".to_owned(),
-        statements: Vec::new(),
-    }
-}
+// The scope vocabulary is resource-blind: a scope always lowers to
+// `Resource::Any`, so per-app narrowing now comes from Cedar app membership
+// rather than from the caller-supplied wrapper policy a PAT used to carry.
 
 // --------------------------------------------------------------------------
 // Seeding helpers (faithful: real schema, real pricing inputs)
@@ -442,7 +389,7 @@ fn current_period() -> chrono::NaiveDate {
     chrono::NaiveDate::from_ymd_opt(now.year(), now.month(), 1).expect("first-of-month")
 }
 
-async fn cleanup(pg: &Client, creator_ids: &[Uuid], app_ids: &[Uuid], pats: &[&Pat]) {
+async fn cleanup(pg: &Client, creator_ids: &[Uuid], app_ids: &[Uuid], callers: &[&Caller]) {
     for app in app_ids {
         let _ = pg.execute("DELETE FROM zeroship.usage_aggregates WHERE app_id = $1", &[app]).await;
         let _ = pg.execute("DELETE FROM zeroship.invoice_lines WHERE app_id = $1", &[app]).await;
@@ -469,11 +416,10 @@ async fn cleanup(pg: &Client, creator_ids: &[Uuid], app_ids: &[Uuid], pats: &[&P
     for app in app_ids {
         let _ = pg.execute("DELETE FROM zeroship.apps WHERE id = $1", &[app]).await;
     }
-    for pat in pats {
-        let _ = pg.execute("DELETE FROM zeroship.authz_decisions WHERE token_id = $1", &[&pat.token_id]).await;
-        let _ = pg.execute("DELETE FROM zeroship.permission_tokens WHERE id = $1", &[&pat.token_id]).await;
-        let _ = pg.execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&pat.user_id]).await;
-        let _ = pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&pat.user_id]).await;
+    for caller in callers {
+        let _ = pg.execute("DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1", &[&caller.user_id]).await;
+        let _ = pg.execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&caller.user_id]).await;
+        let _ = pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&caller.user_id]).await;
     }
     let _ = pg.execute("DELETE FROM zeroship.users WHERE id = ANY($1)", &[&creator_ids.to_vec()]).await;
 }
@@ -541,10 +487,10 @@ async fn invoice_history_is_creator_scoped_operator_sees_any() {
             .await;
 
     // PATs: creator A (read on app A), creator B (read on app B), operator.
-    let pat_a = issue_pat(&fx.state, creator_a, None, billing_read_on_app(app_a)).await;
-    let pat_b = issue_pat(&fx.state, creator_b, None, billing_read_on_app(app_b)).await;
+    let pat_a = issue_bearer(&fx.state, creator_a, None, "billing:read").await;
+    let pat_b = issue_bearer(&fx.state, creator_b, None, "billing:read").await;
     let op_user = make_user(&pg, "operator").await;
-    let pat_op = issue_pat(&fx.state, op_user, Some("billing"), billing_read_any()).await;
+    let pat_op = issue_bearer(&fx.state, op_user, Some("billing"), "billing:read").await;
 
     let svc = test::init_service(web::App::new().state(fx.state.clone()).configure(full_router()))
         .await;
@@ -619,7 +565,7 @@ async fn unauthorized_token_is_forbidden_on_billing_reads() {
 
     // A token with NO billing grant whatsoever.
     let stranger = make_user(&pg, "stranger").await;
-    let pat_none = issue_pat(&fx.state, stranger, None, empty_policy()).await;
+    let pat_none = issue_bearer(&fx.state, stranger, None, "apps:read").await;
 
     let svc = test::init_service(web::App::new().state(fx.state.clone()).configure(full_router()))
         .await;
@@ -685,7 +631,7 @@ async fn invoice_line_detail_reproduces_amount_from_frozen_snapshot() {
         seed_finalized_invoice(&pg, &creator, &app, &plan, period, &price, &usage, &weights).await;
     assert_eq!(amt, 750, "sanity: seeded amount is the overage+base total");
 
-    let pat = issue_pat(&fx.state, creator, None, billing_read_on_app(app)).await;
+    let pat = issue_bearer(&fx.state, creator, None, "billing:read").await;
     let svc = test::init_service(web::App::new().state(fx.state.clone()).configure(full_router()))
         .await;
 
@@ -771,7 +717,7 @@ async fn projected_charge_is_non_authoritative_and_cache_budget_holds() {
     // 300 live rpc_calls ⇒ 300 CU × 1c + 200c base = 500c projected.
     seed_usage(&pg, &app, period, "rpc_calls", 300).await;
 
-    let pat = issue_pat(&fx.state, creator, None, billing_read_on_app(app)).await;
+    let pat = issue_bearer(&fx.state, creator, None, "billing:read").await;
     let svc = test::init_service(web::App::new().state(fx.state.clone()).configure(full_router()))
         .await;
 
@@ -883,10 +829,10 @@ async fn credit_balance_pm_and_billing_status_are_creator_scoped() {
     .await
     .expect("grant B");
 
-    let pat_a = issue_pat(&fx.state, creator_a, None, billing_read_on_app(app_a)).await;
-    let pat_b = issue_pat(&fx.state, creator_b, None, billing_read_on_app(app_b)).await;
+    let pat_a = issue_bearer(&fx.state, creator_a, None, "billing:read").await;
+    let pat_b = issue_bearer(&fx.state, creator_b, None, "billing:read").await;
     let op_user = make_user(&pg, "operator").await;
-    let pat_op = issue_pat(&fx.state, op_user, Some("billing"), billing_read_any()).await;
+    let pat_op = issue_bearer(&fx.state, op_user, Some("billing"), "billing:read").await;
 
     let svc = test::init_service(web::App::new().state(fx.state.clone()).configure(full_router()))
         .await;
@@ -1039,10 +985,10 @@ async fn invoice_detail_denies_a_different_creator() {
     )
     .await;
 
-    let pat_a = issue_pat(&fx.state, creator_a, None, billing_read_on_app(app_a)).await;
-    let pat_b = issue_pat(&fx.state, creator_b, None, billing_read_on_app(app_b)).await;
+    let pat_a = issue_bearer(&fx.state, creator_a, None, "billing:read").await;
+    let pat_b = issue_bearer(&fx.state, creator_b, None, "billing:read").await;
     let op_user = make_user(&pg, "operator").await;
-    let pat_op = issue_pat(&fx.state, op_user, Some("billing"), billing_read_any()).await;
+    let pat_op = issue_bearer(&fx.state, op_user, Some("billing"), "billing:read").await;
 
     let svc = test::init_service(web::App::new().state(fx.state.clone()).configure(full_router()))
         .await;
@@ -1134,7 +1080,7 @@ async fn invoice_read_denied_via_shared_app_membership() {
     .await;
 
     // Attacker A holds BillingRead on the app they own (Z) — nothing more.
-    let pat_a = issue_pat(&fx.state, attacker_a, None, billing_read_on_app(app_z)).await;
+    let pat_a = issue_bearer(&fx.state, attacker_a, None, "billing:read").await;
 
     let svc = test::init_service(web::App::new().state(fx.state.clone()).configure(full_router()))
         .await;
@@ -1213,10 +1159,10 @@ async fn app_invoice_history_denied_to_non_owner_member() {
     .await;
 
     // Both PATs carry BillingRead on app O; the difference is owner-vs-member.
-    let pat_owner = issue_pat(&fx.state, owner, None, billing_read_on_app(app_o)).await;
-    let pat_viewer = issue_pat(&fx.state, viewer, None, billing_read_on_app(app_o)).await;
+    let pat_owner = issue_bearer(&fx.state, owner, None, "billing:read").await;
+    let pat_viewer = issue_bearer(&fx.state, viewer, None, "billing:read").await;
     let op_user = make_user(&pg, "operator").await;
-    let pat_op = issue_pat(&fx.state, op_user, Some("billing"), billing_read_any()).await;
+    let pat_op = issue_bearer(&fx.state, op_user, Some("billing"), "billing:read").await;
 
     let svc = test::init_service(web::App::new().state(fx.state.clone()).configure(full_router()))
         .await;

@@ -130,10 +130,6 @@ pub struct ControlSection {
     pub smtp_password: Option<String>,
     /// Billing-notification Resend API key.
     pub resend_api_key: Option<String>,
-    /// PEM/PKCS#8 signing key FILE for PAT issuance. A path, not key material:
-    /// the loader owns the format sniff and the permission check, so making the
-    /// contents an in-memory secret would drop both.
-    pub signing_key_file: Option<std::path::PathBuf>,
     /// HTTP listen port.
     pub port: Option<u16>,
     /// Bind address.
@@ -205,7 +201,9 @@ pub struct GatewaySection {
     /// this schema accepts.
     pub broker_secret_file: Option<std::path::PathBuf>,
     /// PEM/PKCS#8 signing key FILE for the gateway-signed session cookie.
-    /// See `ControlSection::signing_key_file` for why this stays a path.
+    /// PEM/PKCS#8 signing key FILE for the wrapper-token issuer. A path, not
+    /// key material: the loader owns the format sniff and the permission
+    /// check, so making the contents an in-memory secret would drop both.
     pub signing_key_file: Option<std::path::PathBuf>,
     /// PEM/PKCS#8 PREVIOUS signing key FILE for the rotation overlap.
     pub prev_signing_key_file: Option<std::path::PathBuf>,
@@ -269,8 +267,6 @@ pub struct MigratedSection {
     pub provision_database_url: Option<String>,
     /// Key sealing the managed migration policy profile.
     pub policy_seal_key: Option<String>,
-    /// PEM/PKCS#8 signing key FILE. See `ControlSection::signing_key_file`.
-    pub signing_key_file: Option<std::path::PathBuf>,
     /// HTTP listen port.
     pub port: Option<u16>,
     /// Bind address.
@@ -392,7 +388,7 @@ pub struct AuthSection {
     pub relay_inbound_password: Option<String>,
     /// Relay-forward SMTP password.
     pub relay_smtp_password: Option<String>,
-    /// PEM/PKCS#8 signing key FILE. See `ControlSection::signing_key_file`.
+    /// PEM/PKCS#8 signing key FILE. See `GatewaySection::signing_key_file`.
     pub signing_key_file: Option<std::path::PathBuf>,
     /// Platform auth provider backend (`native` or `supabase`).
     ///

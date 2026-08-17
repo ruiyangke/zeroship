@@ -37,9 +37,6 @@ use ntex::http::StatusCode;
 use ntex::web::{self, test};
 use uuid::Uuid;
 
-use zeroship_authz::{
-    policy_hash, Action as AuthzAction, Effect, Policy, Resource as AuthzResource, Statement,
-};
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::cron::billing_reconcile;
 use zeroship_control::refund::{self, NativeRefundProvider, RefundDestination, RefundOutcome};
@@ -295,8 +292,7 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         expected_oauth_audience: "control.zeroship.ai".to_string(),
         static_policies: zeroship_authz::load_platform_policies()
             .expect("bundled authz policies parse"),
-        pat_issuer: Arc::new(zeroship_authn::PatIssuer::generate_ephemeral()),
-        auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
+        auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some(common::platform_jwks_url())),
         // No platform deploy-token mint here: that is control's OUTBOUND
         // destination for the device flow, and no fixture below drives one.
         provider_registry: zeroship_control::metering::provider::builtin_registry(),
@@ -987,16 +983,16 @@ async fn tax_split_refund_returns_proportional_tax() {
 // (e) Operator-only 403 + idempotency 409 via the REAL endpoint + authz guard.
 // ===========================================================================
 
-struct Pat {
+struct Caller {
     token: String,
 }
-impl Pat {
+impl Caller {
     fn bearer(&self) -> String {
         format!("Bearer {}", self.token)
     }
 }
 
-async fn issue_pat(state: &AppState, user_id: Uuid, role: Option<&str>, policy: Policy) -> Pat {
+async fn issue_bearer(state: &AppState, user_id: Uuid, role: Option<&str>, scope: &str) -> Caller {
     if let Some(role) = role {
         state
             .control_pg
@@ -1008,50 +1004,19 @@ async fn issue_pat(state: &AppState, user_id: Uuid, role: Option<&str>, policy: 
             .await
             .expect("insert platform role");
     }
-    let token_id = Uuid::new_v4();
-    let policies = policy.to_json_value();
-    let hash = policy_hash(&policies);
-    let expires_at = Utc::now() + Duration::days(1);
-    let token = state
-        .pat_issuer
-        .issue(token_id, user_id, hash.clone(), expires_at)
-        .expect("issue PAT");
-    state
-        .control_pg
-        .execute(
-            "INSERT INTO zeroship.permission_tokens \
-                (id, owner_id, kind, name, policies, policy_hash, expires_at) \
-             VALUES ($1, $2, 'pat', 'refund PAT', $3, $4, $5)",
-            &[&token_id, &user_id, &policies, &hash, &expires_at],
-        )
-        .await
-        .expect("insert PAT row");
-    Pat { token }
-}
-
-fn billing_any() -> Policy {
-    Policy {
-        name: "operator".to_owned(),
-        statements: vec![Statement {
-            effect: Effect::Allow,
-            actions: vec![AuthzAction::BillingRead, AuthzAction::BillingWrite],
-            resources: vec![AuthzResource::Any],
-            conditions: Vec::new(),
-        }],
+    Caller {
+        token: common::platform_token_for_client(user_id, scope, common::CONSOLE_CLIENT_ID),
     }
 }
 
-fn billing_self() -> Policy {
-    Policy {
-        name: "creator self".to_owned(),
-        statements: vec![Statement {
-            effect: Effect::Allow,
-            actions: vec![AuthzAction::BillingRead, AuthzAction::BillingWrite],
-            resources: vec![AuthzResource::App { id: Uuid::new_v4().to_string() }],
-            conditions: Vec::new(),
-        }],
-    }
-}
+// The scope vocabulary is resource-blind: a scope always lowers to
+// `Resource::Any`, so per-app narrowing now comes from Cedar app membership
+// rather than from the caller-supplied wrapper policy a PAT used to carry.
+// The old "creator self" fixture modeled a token holding BillingWrite scoped
+// to ONE app only (not Resource::Any) so the operator-only endpoint would
+// deny it; that per-resource narrowing has no OAuth-scope equivalent, so the
+// denied caller below instead carries "billing:read" — a real, plausible
+// creator scope that simply omits the billing:write action under test.
 
 // See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
 #[allow(clippy::await_holding_lock)]
@@ -1075,8 +1040,8 @@ async fn refund_endpoint_operator_only_and_idempotency_conflict() {
     append_payment(&fx.state, &inv, 10_000, "in_endpoint").await;
 
     let op_user = make_user(&fx.state, "operator").await;
-    let op_pat = issue_pat(&fx.state, op_user, Some("admin"), billing_any()).await;
-    let creator_pat = issue_pat(&fx.state, creator, None, billing_self()).await;
+    let op_caller = issue_bearer(&fx.state, op_user, Some("admin"), "billing:write").await;
+    let creator_caller = issue_bearer(&fx.state, creator, None, "billing:read").await;
 
     let svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
@@ -1092,11 +1057,11 @@ async fn refund_endpoint_operator_only_and_idempotency_conflict() {
     let k2 = key(&inv, "k2");
     let k_over = key(&inv, "k-over");
 
-    // (1) A creator (App-scoped) token is 403 — refunds are never self-serve.
+    // (1) A creator bearer without billing:write is 403 — refunds are never self-serve.
     let req = test::TestRequest::post()
         .uri(&uri)
         .header("idempotency-key", k1.as_str())
-        .header("authorization", creator_pat.bearer())
+        .header("authorization", creator_caller.bearer())
         .set_json(&serde_json::json!({"amount_cents": 1000, "destination": "credit"}))
         .to_request();
     // Status only: a retained `WebResponse` keeps the app state - and its Postgres
@@ -1108,7 +1073,7 @@ async fn refund_endpoint_operator_only_and_idempotency_conflict() {
     let req = test::TestRequest::post()
         .uri(&uri)
         .header("idempotency-key", k2.as_str())
-        .header("authorization", op_pat.bearer())
+        .header("authorization", op_caller.bearer())
         .set_json(&serde_json::json!({"amount_cents": 1000, "destination": "credit"}))
         .to_request();
     let status = test::call_service(&svc, req).await.status();
@@ -1118,7 +1083,7 @@ async fn refund_endpoint_operator_only_and_idempotency_conflict() {
     let req = test::TestRequest::post()
         .uri(&uri)
         .header("idempotency-key", k2.as_str())
-        .header("authorization", op_pat.bearer())
+        .header("authorization", op_caller.bearer())
         .set_json(&serde_json::json!({"amount_cents": 1000, "destination": "credit"}))
         .to_request();
     let status = test::call_service(&svc, req).await.status();
@@ -1128,7 +1093,7 @@ async fn refund_endpoint_operator_only_and_idempotency_conflict() {
     let req = test::TestRequest::post()
         .uri(&uri)
         .header("idempotency-key", k2.as_str())
-        .header("authorization", op_pat.bearer())
+        .header("authorization", op_caller.bearer())
         .set_json(&serde_json::json!({"amount_cents": 2000, "destination": "credit"}))
         .to_request();
     let status = test::call_service(&svc, req).await.status();
@@ -1137,7 +1102,7 @@ async fn refund_endpoint_operator_only_and_idempotency_conflict() {
     // (5) Missing Idempotency-Key → 400.
     let req = test::TestRequest::post()
         .uri(&uri)
-        .header("authorization", op_pat.bearer())
+        .header("authorization", op_caller.bearer())
         .set_json(&serde_json::json!({"amount_cents": 1000, "destination": "credit"}))
         .to_request();
     let status = test::call_service(&svc, req).await.status();
@@ -1147,7 +1112,7 @@ async fn refund_endpoint_operator_only_and_idempotency_conflict() {
     let req = test::TestRequest::post()
         .uri(&uri)
         .header("idempotency-key", k_over.as_str())
-        .header("authorization", op_pat.bearer())
+        .header("authorization", op_caller.bearer())
         .set_json(&serde_json::json!({"amount_cents": 100000, "destination": "cash"}))
         .to_request();
     let status = test::call_service(&svc, req).await.status();

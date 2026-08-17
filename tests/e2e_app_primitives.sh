@@ -9,11 +9,12 @@
 #      a finding — the migration set must apply cleanly from scratch.
 #   2. Boot control + migrated + worker + gateway with generated signing and
 #      shared keys.
-#   3. Mint an admin PAT OFFLINE (control's `/api/apps` now requires a real
-#      PAT bearer or OAuth introspection — the old `--master-key` bearer is
-#      gone). We give control a STABLE ed25519 signing key via
-#      `--signing-key-file`, seed a matching `permission_tokens` row + admin
-#      role, and sign a `pat+jwt` with jose so the PatIssuer verifies it.
+#   3. Mint an admin platform bearer OFFLINE (control's `/api/apps` now
+#      requires a real platform OAuth access token - the old `--master-key`
+#      bearer is gone). We stand up a one-key JWKS on the harness's own
+#      signing key, name it as control's trusted issuer, seed a matching
+#      `zeroship.users` + `platform_admin_roles` row, and sign an `at+jwt`
+#      with jose so control verifies it against that JWKS.
 #   4. Create an app, deploy the built `examples/db-todos` .zship, and APPLY ITS
 #      MIGRATIONS with `zeroship migrate`. The migrate step was absent until
 #      2026-08-14 and its absence is what made stage 5's env.db arms red: the
@@ -179,20 +180,24 @@ psql_q() { docker exec "$PG_CONTAINER" psql -U postgres -d zeroship -tAc "$1" 2>
 echo ""
 echo "=== Stage 2: boot authenticated stack ==="
 
-# stable ed25519 PKCS#8 signing key so we can offline-mint a PAT the
-# control PatIssuer (built via --signing-key-file) will verify.
+# stable ed25519 PKCS#8 signing key: the harness's own platform OP publishes it
+# as a one-key JWKS and mints admin bearers with it, and the gateway loads it
+# as its wrapper-token signing key.
 openssl genpkey -algorithm ed25519 -out "$WORK/signing-key.pem" 2>/dev/null
 chmod 600 "$WORK/signing-key.pem"
 
 for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT $ZEROSHIP_MIGRATED_PORT; do lsof -ti :$p 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 
-ZEROSHIP_CONTROL_SIGNING_KEY_FILE="$WORK/signing-key.pem"
-ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$ZEROSHIP_CONTROL_SIGNING_KEY_FILE"
+ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$WORK/signing-key.pem"
+# The issuer control verifies the admin bearer against, on the same key the
+# gateway signs with. Up BEFORE control: control reads the issuer once at boot.
+e2e_platform_op_up "$WORK/signing-key.pem" "$WORK" || exit 1
+PIDS+=($E2E_PLATFORM_OP_PID)
 ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
 e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DBURL"
 e2e_with_platform_mint_key "$BIN/zeroship-control" --port $ZEROSHIP_CONTROL_PORT \
-  --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
+  --blob-store "$WORK/blobs" \
   --migrated-url "http://localhost:$ZEROSHIP_MIGRATED_PORT" \
  > "$WORK/control.log" 2>&1 &
 PIDS+=($!)
@@ -205,9 +210,10 @@ curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && pas
 # step in the harness, not a defect in the app or the runtime, and no amount of
 # re-reading the worker log was going to say so - the error it prints
 # (`role "app_..._role" does not exist`) names a role whose only producer is
-# this service. It shares control's signing key so a control-issued PAT verifies.
+# this service. It takes no signing key of its own: `zeroship migrate` posts to
+# control, which authorizes the caller's bearer and forwards the apply.
 "$BIN/zeroship-migrated" --port $ZEROSHIP_MIGRATED_PORT \
-  --signing-key-file "$WORK/signing-key.pem" --tmp-dir "$WORK/migrated-tmp" \
+  --tmp-dir "$WORK/migrated-tmp" \
  > "$WORK/migrated.log" 2>&1 &
 PIDS+=($!)
 for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_MIGRATED_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
@@ -244,61 +250,33 @@ curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && pas
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Stage 3: mint admin PAT (offline) ==="
-# Admin wrapper policy — the token's stored `policies` is the ceiling Cedar
-# AND's with the principal's role (TOKEN ⊂ USER). Must grant the control
-# actions we exercise, on resource {type:any}.
-POLICY_JSON='{"name":"e2e-admin","statements":[{"effect":"allow","actions":["apps:read","apps:write","apps:deploy","apps:delete","deployments:read","deployments:rollback","env:read","env:write","secrets:read","secrets:write"],"resources":[{"type":"any"}],"conditions":[]}]}'
-
-# policy_hash MUST mirror crates/authz canonical_json (object keys sorted, no ws).
-POLICY_HASH="$(node -e '
-const {createHash}=require("crypto");
-function c(v){if(v===null||typeof v==="number"||typeof v==="boolean")return JSON.stringify(v);
-if(typeof v==="string")return JSON.stringify(v);
-if(Array.isArray(v))return "["+v.map(c).join(",")+"]";
-return "{"+Object.keys(v).sort().map(k=>JSON.stringify(k)+":"+c(v[k])).join(",")+"}";}
-process.stdout.write(createHash("sha256").update(c(JSON.parse(process.argv[1]))).digest("hex"));
-' "$POLICY_JSON")"
+echo "=== Stage 3: mint admin platform bearer (offline) ==="
+# The scope string is the deleted permission_tokens policy's action list,
+# one-for-one: it becomes the token policy control intersects with the
+# owner's own authority (TOKEN and USER).
+SCOPE="apps:read apps:write apps:deploy apps:delete deployments:read deployments:rollback env:read env:write secrets:read secrets:write"
 
 OWNER="$(node -e 'console.log(require("crypto").randomUUID())')"
-TOKID="$(node -e 'console.log(require("crypto").randomUUID())')"
-EXP=$(( $(date +%s) + 86400 ))
 
 docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.users (id, email, name, email_verified_at)
 VALUES ('$OWNER', 'e2e-$OWNER@zeroship.test'::citext, 'E2E Admin', NOW());
 INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by)
 VALUES ('$OWNER', 'admin', '$OWNER');
-INSERT INTO zeroship.permission_tokens (id, owner_id, kind, name, policies, policy_hash, expires_at)
-VALUES ('$TOKID', '$OWNER', 'pat', 'e2e harness', '$POLICY_JSON'::jsonb, '$POLICY_HASH', to_timestamp($EXP));
 SQL
 
-PAT="$(node --input-type=module -e '
-import { readFileSync } from "node:fs";
-import { createHash, randomBytes } from "node:crypto";
-import { importPKCS8, exportJWK, SignJWT } from "file://'"$JOSE_JS"'";
-const [pem, owner, tid, phash, exp] = process.argv.slice(1);
-const key = await importPKCS8(readFileSync(pem,"utf8"), "EdDSA", { extractable:true });
-const x = (await exportJWK(key)).x;                          // OKP public component
-const kid = createHash("sha256").update(`{"crv":"Ed25519","kty":"OKP","x":"${x}"}`).digest("base64url");
-const jwt = await new SignJWT({ sub:owner, owner, tid, jti:tid, scope:"pat", policy_hash:phash, nonce:randomBytes(32).toString("base64url") })
-  .setProtectedHeader({ alg:"EdDSA", typ:"pat+jwt", kid })
-  .setIssuer("https://api.zeroship.ai").setAudience("control.zeroship.ai")
-  .setIssuedAt(Math.floor(Date.now()/1000)).setExpirationTime(Number(exp))
-  .sign(key);
-process.stdout.write(jwt);
-' "$WORK/signing-key.pem" "$OWNER" "$TOKID" "$POLICY_HASH" "$EXP")"
-[ "$(echo -n "$PAT" | awk -F. '{print NF}')" = "3" ] && pass "minted pat+jwt" || { fail "PAT mint failed: $PAT"; exit 1; }
+ADMIN_TOKEN="$(e2e_mint_platform_bearer "$OWNER" "$SCOPE")"
+[ "$(echo -n "$ADMIN_TOKEN" | awk -F. '{print NF}')" = "3" ] && pass "minted platform bearer" || { fail "bearer mint failed: $ADMIN_TOKEN"; exit 1; }
 
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Stage 4: create app + deploy db-todos ==="
 APP_JSON="$(curl -s -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" \
-  -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" -d '{"name":"db-todos-e2e"}')"
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" -d '{"name":"db-todos-e2e"}')"
 APP_ID="$(echo "$APP_JSON" | jget '.id')"
 [ -n "$APP_ID" ] && pass "created app db-todos-e2e ($APP_ID)" || { fail "create app: $APP_JSON"; exit 1; }
 
-DEP="$("$BIN/zeroship" deploy "$ZSHIP" --app="$APP_ID" --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$PAT" 2>&1)"
+DEP="$("$BIN/zeroship" deploy "$ZSHIP" --app="$APP_ID" --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$ADMIN_TOKEN" 2>&1)"
 echo "$DEP" | grep -q "deploy_hash" && pass "deployed db-todos .zship" || fail "deploy failed: $DEP"
 
 # APP OWNERSHIP, and this row is NOT redundant with the platform-admin grant
@@ -395,7 +373,7 @@ fi
 IR_JSON="$ROOT/examples/db-todos/generated/zeroship/migrations.ir.json"
 [ -f "$IR_JSON" ] || { echo "missing $IR_JSON — run: pnpm gen-types"; exit 2; }
 MIG="$("$BIN/zeroship" migrate "$IR_JSON" --app="$APP_ID" \
-  --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$PAT" 2>&1)"
+  --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$ADMIN_TOKEN" 2>&1)"
 if grep -qE 'Applied [1-9][0-9]* migration op' <<<"$MIG"; then
   pass "zeroship migrate applied db-todos' schema through control ($(head -c 60 <<<"$MIG"))"
 else
@@ -419,9 +397,9 @@ cat > "$STAGE/manifest.json" <<EOF
 {"version":1,"resources":{"/[...rest]":{"auth":"anon","publicly_accessible":true}},"assets":{},"runtime_assets":{},"asset_version":0,"sourcemaps":{},"worker":{"entry":"index.js","modules":{"index.js":"$H"}},"metadata":{"compiler":"e2e","built_at":"$(date -u +%FT%TZ)"}}
 EOF
 (cd "$STAGE" && tar --format=ustar -cf - manifest.json "blobs/$H") | zstd -q -f -o "$STAGE/app.zship"
-NS_JSON="$(curl -s -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" -d '{"name":"noschema-e2e"}')"
+NS_JSON="$(curl -s -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" -d '{"name":"noschema-e2e"}')"
 NS_ID="$(echo "$NS_JSON" | jget '.id')"
-"$BIN/zeroship" deploy "$STAGE/app.zship" --app="$NS_ID" --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$PAT" >/dev/null 2>&1
+"$BIN/zeroship" deploy "$STAGE/app.zship" --app="$NS_ID" --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$ADMIN_TOKEN" >/dev/null 2>&1
 rm -rf "$STAGE"
 sleep 4
 NS_RESP="$(curl -s -w '\n%{http_code}' -H 'Host: noschema-e2e.localhost' "http://localhost:$ZEROSHIP_GATEWAY_PORT/")"

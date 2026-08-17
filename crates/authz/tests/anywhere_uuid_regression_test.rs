@@ -51,7 +51,6 @@ fn is_authorized_anywhere_with_app_membership_reads_uuid_app_id() {
         let policies = load_platform_policies().unwrap();
         let ctx = AuthzContext {
             principal_id: user_id,
-            token_id: None,
             token_policy: None,
             action: Action::AppsDeploy,
             resource: Resource::Any,

@@ -239,14 +239,16 @@ chmod 600 "$WORK/gate-broker-secret"
 CFG_TOML="$WORK/zeroship.toml"
 printf '[metering]\nredpanda_brokers = "%s"\nusage_events_topic = "%s"\n' "$RP_BROKERS" "$USAGE_TOPIC" > "$CFG_TOML"
 
-ZEROSHIP_CONTROL_SIGNING_KEY_FILE="$WORK/sk.pem"
-ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$ZEROSHIP_CONTROL_SIGNING_KEY_FILE"
+ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$WORK/sk.pem"
 ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gate-broker-secret"
+# The issuer control verifies the admin bearer against, on the same key the
+# gateway signs with. Up BEFORE control: control reads the issuer once at boot.
+e2e_platform_op_up "$WORK/sk.pem" "$WORK" || exit 1
 e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DBURL"
 ZEROSHIP_CONTROL_STRIPE_SECRET_KEY="sk_test_unused" \
 e2e_with_platform_mint_key "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --config "$CFG_TOML" \
-  --blob-store "$WORK/blobs" --signing-key-file "$WORK/sk.pem" \
+  --blob-store "$WORK/blobs" \
   --migrated-url "$MIGRATED_URL" \
   --stripe-base-url "http://127.0.0.1:1" \
   --meter-provider lite --invoicer-provider lite --allow-unsupported-billing \
@@ -256,7 +258,7 @@ for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 && break
 curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 && pass "control healthy" || { fail "control"; tail -40 "$WORK/control.log"; exit 1; }
 
 "$BIN/zeroship-migrated" --port "$ZEROSHIP_MIGRATED_PORT" \
-  --signing-key-file "$WORK/sk.pem" --tmp-dir "$WORK/migrated-tmp" > "$WORK/migrated.log" 2>&1 &
+  --tmp-dir "$WORK/migrated-tmp" > "$WORK/migrated.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "$MIGRATED_URL/readyz" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "$MIGRATED_URL/readyz" >/dev/null 2>&1 && pass "zeroship-migrated healthy" || { fail "migrated"; tail -40 "$WORK/migrated.log"; exit 1; }
@@ -275,27 +277,26 @@ for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/ready
 curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && pass "gateway healthy" || { fail "gateway"; tail -40 "$WORK/gate.log"; exit 1; }
 
 echo ""
-echo "=== Stage 3: PAT + creator + app + deploy + migrated apply ==="
-POLICY_JSON='{"name":"e2e-dbapp","statements":[{"effect":"allow","actions":["apps:read","apps:write","apps:deploy","billing:read","billing:write"],"resources":[{"type":"any"}],"conditions":[]}]}'
-POLICY_HASH="$(node -e 'const{createHash}=require("crypto");function c(v){if(v===null||typeof v==="number"||typeof v==="boolean")return JSON.stringify(v);if(typeof v==="string")return JSON.stringify(v);if(Array.isArray(v))return "["+v.map(c).join(",")+"]";return "{"+Object.keys(v).sort().map(k=>JSON.stringify(k)+":"+c(v[k])).join(",")+"}";}process.stdout.write(createHash("sha256").update(c(JSON.parse(process.argv[1]))).digest("hex"));' "$POLICY_JSON")"
+echo "=== Stage 3: bearer + creator + app + deploy + migrated apply ==="
+# The scope string is the action list the deleted permission_tokens policy
+# carried, one scope per Cedar action: control turns `scope` into the token
+# policy and intersects it with the owner's own authority.
+SCOPE="apps:read apps:write apps:deploy billing:read billing:write"
 CREATOR="$(node -e 'console.log(require("crypto").randomUUID())')"
-TOKID="$(node -e 'console.log(require("crypto").randomUUID())')"
-EXP=$(( $(date +%s) + 86400 ))
 psql_exec >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.users (id,email,name,email_verified_at) VALUES ('$CREATOR','e2e-dbapp-$CREATOR@zeroship.test'::citext,'E2E DB App',NOW());
 INSERT INTO zeroship.platform_admin_roles (user_id,role,granted_by) VALUES ('$CREATOR','admin','$CREATOR');
-INSERT INTO zeroship.permission_tokens (id,owner_id,kind,name,policies,policy_hash,expires_at) VALUES ('$TOKID','$CREATOR','pat','e2e dbapp','$POLICY_JSON'::jsonb,'$POLICY_HASH',to_timestamp($EXP));
 SQL
-PAT="$(node --input-type=module -e 'import{readFileSync}from "node:fs";import{createHash,randomBytes}from "node:crypto";import{importPKCS8,exportJWK,SignJWT}from "file://'"$JOSE"'";const[pem,owner,tid,phash,exp]=process.argv.slice(1);const key=await importPKCS8(readFileSync(pem,"utf8"),"EdDSA",{extractable:true});const x=(await exportJWK(key)).x;const kid=createHash("sha256").update(`{"crv":"Ed25519","kty":"OKP","x":"${x}"}`).digest("base64url");const jwt=await new SignJWT({sub:owner,owner,tid,jti:tid,scope:"pat",policy_hash:phash,nonce:randomBytes(32).toString("base64url")}).setProtectedHeader({alg:"EdDSA",typ:"pat+jwt",kid}).setIssuer("https://api.zeroship.ai").setAudience("control.zeroship.ai").setIssuedAt(Math.floor(Date.now()/1000)).setExpirationTime(Number(exp)).sign(key);process.stdout.write(jwt);' "$WORK/sk.pem" "$CREATOR" "$TOKID" "$POLICY_HASH" "$EXP")"
-[ "$(echo -n "$PAT" | awk -F. '{print NF}')" = "3" ] && pass "minted PAT (creator=$CREATOR)" || { fail "PAT"; exit 1; }
+ADMIN_TOKEN="$(e2e_mint_platform_bearer "$CREATOR" "$SCOPE")"
+[ "$(echo -n "$ADMIN_TOKEN" | awk -F. '{print NF}')" = "3" ] && pass "minted platform bearer (creator=$CREATOR)" || { fail "bearer mint"; exit 1; }
 
-APP="$(curl -s -X POST "$CONTROL_URL/api/apps" -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" -d "{\"name\":\"db-hitcounter\",\"plan_id\":\"$PLAN_ID\"}" | jget '.id')"
+APP="$(curl -s -X POST "$CONTROL_URL/api/apps" -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" -d "{\"name\":\"db-hitcounter\",\"plan_id\":\"$PLAN_ID\"}" | jget '.id')"
 [ -n "$APP" ] && pass "created app db-hitcounter ($APP)" || { fail "create app"; exit 1; }
 psql_exec >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.app_members (app_id,user_id,role) VALUES ('$APP','$CREATOR','owner') ON CONFLICT (app_id,user_id) DO UPDATE SET role='owner';
 SQL
 
-"$BIN/zeroship" deploy "$ZSHIP" --app="$APP" --control="$CONTROL_URL" --token="$PAT" 2>&1 | tee "$WORK/deploy.log" | grep -q deploy_hash \
+"$BIN/zeroship" deploy "$ZSHIP" --app="$APP" --control="$CONTROL_URL" --token="$ADMIN_TOKEN" 2>&1 | tee "$WORK/deploy.log" | grep -q deploy_hash \
   && pass "deployed db-hitcounter .zship" || { fail "deploy"; cat "$WORK/deploy.log"; exit 1; }
 
 # --- THE PRE-MIGRATE CONTROL ------------------------------------------------
@@ -330,7 +331,7 @@ ROLE_BEFORE="$(psql_exec -tA -c "SELECT count(*) FROM pg_roles WHERE rolname='$A
 # `zeroship migrate` posts to the CONTROL plane, which authorizes the caller for
 # this app and forwards to migrated. It is driven here exactly as a creator
 # drives it: the committed build artifact, the app id, the control URL, and the
-# same PAT the deploy above used - no extra scope, no operator credential, and
+# same bearer the deploy above used - no extra scope, no operator credential, and
 # no direct reach to migrated (which binds loopback in every real deployment).
 #
 # The body is the file the BUILD wrote (`generated/zeroship/migrations.ir.json`),
@@ -342,7 +343,7 @@ IR_FILE="$APP_EXAMPLE/generated/zeroship/migrations.ir.json"
   && pass "the build emitted $(basename "$IR_FILE")" \
   || { fail "missing $IR_FILE - run pnpm gen-types"; exit 1; }
 
-MIGRATE_OUT="$("$BIN/zeroship" migrate "$IR_FILE" --app="$APP" --control="$CONTROL_URL" --token="$PAT" 2>&1)"
+MIGRATE_OUT="$("$BIN/zeroship" migrate "$IR_FILE" --app="$APP" --control="$CONTROL_URL" --token="$ADMIN_TOKEN" 2>&1)"
 MIGRATE_RC=$?
 echo "$MIGRATE_OUT" > "$WORK/migrate.log"
 if [ "$MIGRATE_RC" = "0" ] && grep -qE 'Applied [1-9][0-9]* migration op' <<<"$MIGRATE_OUT"; then
@@ -357,7 +358,7 @@ fi
 # Re-running must be a no-op, not a second apply. A creator runs `deploy` then
 # `migrate` on every push; if the second run re-applied, every push after the
 # first would fail on an already-existing table.
-MIGRATE_AGAIN="$("$BIN/zeroship" migrate "$IR_FILE" --app="$APP" --control="$CONTROL_URL" --token="$PAT" 2>&1)"
+MIGRATE_AGAIN="$("$BIN/zeroship" migrate "$IR_FILE" --app="$APP" --control="$CONTROL_URL" --token="$ADMIN_TOKEN" 2>&1)"
 grep -qE 'Applied 0 migration op' <<<"$MIGRATE_AGAIN" \
   && pass "a second zeroship migrate is a no-op (idempotent)" \
   || fail "re-running zeroship migrate was not a no-op: $MIGRATE_AGAIN"
@@ -554,7 +555,7 @@ done
 EXPECTED_CHARGE=$(( REQ + DBR + DBW ))
 CHARGE=""
 for _ in $(seq 1 20); do
-  CHARGE="$(curl -s "$CONTROL_URL/api/apps/$APP/projected-charge" -H "Authorization: Bearer $PAT" | jget '.projected_charge_cents')"
+  CHARGE="$(curl -s "$CONTROL_URL/api/apps/$APP/projected-charge" -H "Authorization: Bearer $ADMIN_TOKEN" | jget '.projected_charge_cents')"
   [ -n "$CHARGE" ] && [ "$CHARGE" = "$EXPECTED_CHARGE" ] 2>/dev/null && break
   sleep 2
 done

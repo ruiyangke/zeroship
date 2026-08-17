@@ -3,9 +3,9 @@
 //! Drives the REAL `api::set_plan` HTTP handler through ntex (AuthzGuard +
 //! two-call enforce) against a live, migrated Postgres:
 //!
-//!   * an app_owner (creator) PAT may assign ONLY a plan flagged
+//!   * an app_owner (creator) bearer may assign ONLY a plan flagged
 //!     `assignable_by_creator = true` — a `false` plan is 403;
-//!   * an operator PAT (BillingWrite on Resource::Any, here a platform admin)
+//!   * an operator bearer (BillingWrite on Resource::Any, here a platform admin)
 //!     may assign EITHER.
 //!
 //! Pre-fix `set_plan` was gated only by BillingWrite/Resource::App (which an
@@ -17,12 +17,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
 use compio_postgres::{connect, Client, NoTls};
 use ntex::http::StatusCode;
 use ntex::web::{self, test};
 use uuid::Uuid;
-use zeroship_authz::{policy_hash, Action, Effect, Policy, Resource, Statement};
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::plan_catalog::{Plan, PlanCatalog};
 use zeroship_control::pricing::{PlanPrice, FX_SCALE};
@@ -110,8 +108,7 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
         expected_oauth_audience: "control.zeroship.ai".to_string(),
         static_policies: zeroship_authz::load_platform_policies()
             .expect("bundled authz policies parse"),
-        pat_issuer: Arc::new(zeroship_authn::PatIssuer::generate_ephemeral()),
-        auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
+        auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some(common::platform_jwks_url())),
         // No platform deploy-token mint here: that is control's OUTBOUND
         // destination for the device flow, and no fixture below drives one.
         provider_registry: zeroship_control::metering::provider::builtin_registry(),
@@ -135,22 +132,21 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
     }
 }
 
-/// A PAT, plus the user_id it is bound to, for one principal.
-struct Pat {
+/// A bearer, plus the user_id it is bound to, for one principal.
+struct Caller {
     user_id: Uuid,
-    token_id: Uuid,
     token: String,
 }
 
-impl Pat {
+impl Caller {
     fn bearer(&self) -> String {
         format!("Bearer {}", self.token)
     }
 }
 
-/// Issue a PAT for `user_id` with the given wrapper `policy`. Optionally grant a
-/// `platform_admin_roles` role (for the operator path).
-async fn issue_pat(state: &AppState, user_id: Uuid, role: Option<&str>, policy: Policy) -> Pat {
+/// Issue a platform OAuth bearer for `user_id` carrying `scope`. Optionally
+/// grant a `platform_admin_roles` role (for the operator path).
+async fn issue_bearer(state: &AppState, user_id: Uuid, role: Option<&str>, scope: &str) -> Caller {
     if let Some(role) = role {
         state
             .control_pg
@@ -162,53 +158,21 @@ async fn issue_pat(state: &AppState, user_id: Uuid, role: Option<&str>, policy: 
             .await
             .expect("insert platform role");
     }
-    let token_id = Uuid::new_v4();
-    let policies = policy.to_json_value();
-    let hash = policy_hash(&policies);
-    let expires_at = Utc::now() + Duration::days(1);
-    let token = state
-        .pat_issuer
-        .issue(token_id, user_id, hash.clone(), expires_at)
-        .expect("issue PAT");
-    state
-        .control_pg
-        .execute(
-            "INSERT INTO zeroship.permission_tokens \
-                (id, owner_id, kind, name, policies, policy_hash, expires_at) \
-             VALUES ($1, $2, 'pat', 'setplan PAT', $3, $4, $5)",
-            &[&token_id, &user_id, &policies, &hash, &expires_at],
-        )
-        .await
-        .expect("insert PAT row");
-    Pat { user_id, token_id, token }
-}
-
-/// Wrapper policy granting BillingWrite on a specific app (the app_owner upper
-/// bound: a creator's token may act on their own app).
-fn billing_write_on_app(app_id: Uuid) -> Policy {
-    Policy {
-        name: "creator billing".to_owned(),
-        statements: vec![Statement {
-            effect: Effect::Allow,
-            actions: vec![Action::BillingWrite],
-            resources: vec![Resource::App { id: app_id.to_string() }],
-            conditions: Vec::new(),
-        }],
+    Caller {
+        user_id,
+        token: common::platform_token_for_client(user_id, scope, common::CONSOLE_CLIENT_ID),
     }
 }
 
-/// Wrapper policy granting BillingWrite fleet-wide (the operator upper bound).
-fn billing_write_any() -> Policy {
-    Policy {
-        name: "operator billing".to_owned(),
-        statements: vec![Statement {
-            effect: Effect::Allow,
-            actions: vec![Action::BillingWrite],
-            resources: vec![Resource::Any],
-            conditions: Vec::new(),
-        }],
-    }
-}
+// The scope vocabulary is resource-blind: a scope always lowers to
+// `Resource::Any`, so the former `billing_write_on_app`/`billing_write_any`
+// per-resource wrapper policies collapse to the SAME scope string,
+// "billing:write". The app_owner-vs-operator distinction below is carried
+// entirely by the static Cedar policy: the app_owner path is allowed because
+// the creator's real `app_members` ownership row grants BillingWrite on their
+// OWN app (`set_plan`'s per-app gate), while the operator path additionally
+// needs a `platform_admin_roles` row (role "billing") for the fleet-wide
+// `Resource::Any` grant.
 
 /// Seed a plan with a given `assignable_by_creator` flag. Mints a fresh id.
 async fn seed_plan(catalog: &PlanCatalog, name: &str, assignable: bool) -> Plan {
@@ -279,11 +243,11 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
         .await
         .expect("create app");
 
-    let creator_pat = issue_pat(&fx.state, owner, None, billing_write_on_app(app.id)).await;
+    let creator_caller = issue_bearer(&fx.state, owner, None, "billing:write").await;
 
     // An operator: platform 'billing' role + BillingWrite on Resource::Any.
     let op_user = make_user(&pg, "operator").await;
-    let operator_pat = issue_pat(&fx.state, op_user, Some("billing"), billing_write_any()).await;
+    let operator_caller = issue_bearer(&fx.state, op_user, Some("billing"), "billing:write").await;
 
     let app_svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
@@ -305,7 +269,7 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
     // Postgres client - alive past the teardown at the end of this test.
     let status = test::call_service(
         &app_svc,
-        put(creator_pat.bearer(), app.id, operator_only.id.clone()),
+        put(creator_caller.bearer(), app.id, operator_only.id.clone()),
     )
     .await
     .status();
@@ -323,7 +287,7 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
     // 2. Creator assigning an ASSIGNABLE plan ⇒ 200, plan updated.
     let status = test::call_service(
         &app_svc,
-        put(creator_pat.bearer(), app.id, assignable.id.clone()),
+        put(creator_caller.bearer(), app.id, assignable.id.clone()),
     )
     .await
     .status();
@@ -334,7 +298,7 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
     //    EITHER), plan updated.
     let status = test::call_service(
         &app_svc,
-        put(operator_pat.bearer(), app.id, operator_only.id.clone()),
+        put(operator_caller.bearer(), app.id, operator_only.id.clone()),
     )
     .await
     .status();
@@ -349,15 +313,12 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
     let _ = pg.execute("DELETE FROM zeroship.app_spend_state WHERE app_id = $1", &[&app.id]).await;
     let _ = pg.execute("DELETE FROM zeroship.app_members WHERE app_id = $1", &[&app.id]).await;
     let _ = pg.execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app.id]).await;
-    for pat in [&creator_pat, &operator_pat] {
+    for caller in [&creator_caller, &operator_caller] {
         let _ = pg
-            .execute("DELETE FROM zeroship.authz_decisions WHERE token_id = $1", &[&pat.token_id])
+            .execute("DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1", &[&caller.user_id])
             .await;
         let _ = pg
-            .execute("DELETE FROM zeroship.permission_tokens WHERE id = $1", &[&pat.token_id])
-            .await;
-        let _ = pg
-            .execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&pat.user_id])
+            .execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&caller.user_id])
             .await;
     }
     let _ = pg.execute("DELETE FROM zeroship.users WHERE id = ANY($1)", &[&vec![owner, op_user]]).await;
@@ -410,7 +371,7 @@ async fn assigning_an_archived_plan_is_refused_and_not_reported_as_a_missing_app
         .expect("create app");
 
     let op_user = make_user(&pg, "operator").await;
-    let operator_pat = issue_pat(&fx.state, op_user, Some("billing"), billing_write_any()).await;
+    let operator_caller = issue_bearer(&fx.state, op_user, Some("billing"), "billing:write").await;
 
     let app_svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
@@ -423,7 +384,7 @@ async fn assigning_an_archived_plan_is_refused_and_not_reported_as_a_missing_app
         &app_svc,
         test::TestRequest::put()
             .uri(&format!("/api/apps/{}/plan", app.id))
-            .header("authorization", operator_pat.bearer())
+            .header("authorization", operator_caller.bearer())
             .set_json(&serde_json::json!({ "plan_id": retired.id }))
             .to_request(),
     )
@@ -449,13 +410,10 @@ async fn assigning_an_archived_plan_is_refused_and_not_reported_as_a_missing_app
 
     let _ = pg.execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app.id]).await;
     let _ = pg
-        .execute("DELETE FROM zeroship.authz_decisions WHERE token_id = $1", &[&operator_pat.token_id])
+        .execute("DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1", &[&operator_caller.user_id])
         .await;
     let _ = pg
-        .execute("DELETE FROM zeroship.permission_tokens WHERE id = $1", &[&operator_pat.token_id])
-        .await;
-    let _ = pg
-        .execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&operator_pat.user_id])
+        .execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&operator_caller.user_id])
         .await;
     let _ = pg.execute("DELETE FROM zeroship.users WHERE id = ANY($1)", &[&vec![owner, op_user]]).await;
 

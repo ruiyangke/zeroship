@@ -14,7 +14,6 @@ use crate::{http_util, AppState};
 #[derive(Debug)]
 pub struct AuthzGuard {
     pub principal_id: Uuid,
-    pub token_id: Option<Uuid>,
     pub token_policy: Option<authz::Policy>,
     pub mfa_verified: bool,
     pub mfa_age_seconds: Option<u32>,
@@ -33,11 +32,12 @@ impl FromRequest<web::DefaultError> for AuthzGuard {
             .and_then(|ip| ip.parse::<IpAddr>().ok());
         let request_id = request_id(req);
 
-        // Bearer is the ONLY principal path. The console now authenticates to
-        // the control plane with a server-only control PAT (or an OAuth bearer)
-        // through `@zeroship/control`; the bespoke OIDC-RP console-session path
-        // was removed in the R5 cutover (control is a pure API resource server).
-        // No bearer ⇒ unauthenticated.
+        // Bearer is the ONLY principal path, and the platform OP is its only
+        // issuer. The console authenticates to the control plane with an OAuth
+        // access token through `@zeroship/control`; the bespoke OIDC-RP
+        // console-session path went in the R5 cutover and the locally-signed
+        // personal access token went with the second issuance authority.
+        // No bearer means unauthenticated.
         match guard_from_bearer(req, state, request_ip, request_id).await? {
             Some(guard) => Ok(guard),
             None => Err(web::error::ErrorUnauthorized("unauthenticated").into()),
@@ -70,7 +70,6 @@ impl AuthzGuard {
 
         let ctx = AuthzContext {
             principal_id: self.principal_id,
-            token_id: self.token_id,
             token_policy: self.token_policy.clone(),
             action,
             resource,
@@ -92,8 +91,8 @@ impl AuthzGuard {
     }
 
     /// Whether this caller holds `action` on `Resource::Any` — the OPERATOR
-    /// (fleet-wide) probe, TOKEN-AWARE (it runs through `require`, so a narrowed
-    /// PAT that lost the grant returns `false`). Used by the creator-keyed
+    /// (fleet-wide) probe, TOKEN-AWARE (it runs through `require`, so a bearer
+    /// whose scopes do not cover the action returns `false`). Used by the creator-keyed
     /// billing reads to decide whether the caller may target ANOTHER creator via
     /// `?creator_id`. A plain 403 is "not operator"; any other status is an
     /// infrastructure failure propagated as `Err(HttpResponse)` (fail closed).
@@ -118,8 +117,7 @@ impl AuthzGuard {
     /// (`Resource::Any`) OR owner/member of at least one app carrying the grant.
     /// The self-scope gate for the creator-keyed billing reads (the caller
     /// reading their OWN creator data must be a billing-capable creator, not
-    /// merely any authenticated token). Mirrors `token_handlers`' `Resource::Any`
-    /// handling via [`authz::is_authorized_anywhere`].
+    /// merely any authenticated token), via [`authz::is_authorized_anywhere`].
     pub async fn can_act_anywhere(
         &self,
         action: Action,
@@ -135,7 +133,6 @@ impl AuthzGuard {
         };
         let ctx = AuthzContext {
             principal_id: self.principal_id,
-            token_id: self.token_id,
             token_policy: self.token_policy.clone(),
             action,
             resource: Resource::Any,
@@ -233,7 +230,6 @@ impl From<VerifiedPrincipal> for AuthzGuard {
     fn from(principal: VerifiedPrincipal) -> Self {
         Self {
             principal_id: principal.principal_id,
-            token_id: principal.token_id,
             token_policy: principal.token_policy,
             mfa_verified: principal.mfa_verified,
             mfa_age_seconds: principal.mfa_age_seconds,

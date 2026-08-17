@@ -147,7 +147,6 @@ impl Fixture {
             expected_oauth_audience: "control.zeroship.ai".to_string(),
             static_policies: zeroship_authz::load_platform_policies()
                 .expect("bundled authz policies parse"),
-            pat_issuer: Arc::new(zeroship_authn::PatIssuer::generate_ephemeral()),
             auth_provider,
             provider_registry: zeroship_control::metering::provider::builtin_registry(),
             billing_stack: zeroship_control::metering::provider::BillingStack::for_tests(),

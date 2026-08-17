@@ -29,9 +29,12 @@
 #     -> 200 {user, expires_at} + the three real Set-Cookies
 #
 # so the deployed half stands up FOUR services (auth + control + worker +
-# gateway). `mint_admin_pat` still offline-signs the *operator* PAT that creates
-# and deploys the app -- that is the deploy path, not the login path, and it is
-# what every harness in this family does.
+# gateway). `mint_admin_bearer` still mints the *operator* token that creates
+# and deploys the app, from the harness's own issuer rather than the OP booted
+# here -- that is the deploy path, not the login path, and it is what every
+# harness in this family does. Control trusts one issuer and this harness
+# leaves it on the harness one, because nothing here sends the OP's tokens to
+# control.
 #
 # WHAT IS COMPARED, AND WHAT IS NOT.
 #   The two tiers take DIFFERENT REQUESTS by construction: dev has no PKCE, no
@@ -638,7 +641,7 @@ curl -sf "$AUTH_URL/oauth2/.well-known/jwks.json" >/dev/null 2>&1 \
 
 # --- control ---------------------------------------------------------------
 e2e_with_platform_mint_key "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
-  --blob-store "$WORK/blobs" --signing-key-file "$WORK/signing-key.pem" \
+  --blob-store "$WORK/blobs" \
   --app-base-domain "$ZEROSHIP_CONTROL_APP_BASE_DOMAIN" \
  > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
@@ -668,7 +671,7 @@ for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/ready
 curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 \
   && pass "gateway healthy (auth-ui-url=$AUTH_URL)" || { fail "gateway unhealthy"; tail -20 "$WORK/gate.log"; exit 1; }
 
-mint_admin_pat || exit 1
+mint_admin_bearer || exit 1
 APP_ID="$(deploy_zship "$APP_SLUG" "$ZSHIP")" || { fail "deploy auth-probe"; exit 1; }
 pass "deployed auth-probe ($APP_ID)"
 

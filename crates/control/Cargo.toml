@@ -355,11 +355,6 @@ path = "tests/stripe_webhook_test.rs"
 required-features = ["live-db-tests"]
 
 [[test]]
-name = "token_handlers_test"
-path = "tests/token_handlers_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
 name = "workflow_engine_test"
 path = "tests/workflow_engine_test.rs"
 required-features = ["live-db-tests"]

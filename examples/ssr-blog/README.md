@@ -82,5 +82,5 @@ Type declarations: a triple-slash `<reference types="@zeroship/vite-plugin/types
 ## Deploy
 
 ```bash
-zeroship deploy ./dist/app.zship --app=<uuid> --control=<url> --token=<PAT>
+zeroship deploy ./dist/app.zship --app=<uuid> --control=<url> --token=<token>
 ```

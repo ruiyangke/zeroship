@@ -9,7 +9,7 @@ Creator apps should not import this package. Creator-facing app code talks to
 runtime SDKs such as `@zeroship/db`, `@zeroship/kv`, `@zeroship/auth`, and
 `@zeroship/rpc`; the control plane is an operator/admin surface.
 
-The Rust API lives in `crates/control/src/{api,env_handlers,token_handlers}.rs`.
+The Rust API lives in `crates/control/src/{api,env_handlers}.rs`.
 The TypeScript client lives in `sdks/control/src/index.ts`.
 
 ## Client setup

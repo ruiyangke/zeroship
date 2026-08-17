@@ -7192,10 +7192,12 @@ name = "zeroship-migrated"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "chrono",
+ "base64",
  "clap",
  "compio",
  "compio-postgres",
+ "ed25519-dalek",
+ "jsonwebtoken",
  "mimalloc",
  "ntex",
  "serde",

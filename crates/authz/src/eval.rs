@@ -4,7 +4,6 @@ use std::str::FromStr;
 
 use cedar_policy::{Context, Decision, EntityUid, PolicySet, Request, Response, RestrictedExpression};
 use compio_postgres::Client;
-use serde_json::Value;
 use uuid::Uuid;
 
 use crate::entities::{cedar_string, uid};
@@ -19,7 +18,6 @@ pub enum AuthzDecision {
 #[derive(Debug)]
 pub struct AuthzContext<'a> {
     pub principal_id: Uuid,
-    pub token_id: Option<Uuid>,
     pub token_policy: Option<Policy>,
     pub action: Action,
     pub resource: Resource,
@@ -30,11 +28,16 @@ pub struct AuthzContext<'a> {
     pub request_id: Option<&'a str>,
 }
 
-/// Enforce static owner permissions and optional token policies.
+/// Enforce static owner permissions and the caller's optional wrapper policy.
 ///
-/// When `token_id` or `token_policy` is present this intentionally calls Cedar
-/// twice: owner-without-token first, then token policies. This preserves
-/// TOKEN ⊂ USER after app memberships or platform roles change.
+/// When `token_policy` is present this intentionally calls Cedar twice:
+/// owner-without-token first, then the wrapper. This preserves TOKEN ⊂ USER
+/// after app memberships or platform roles change.
+///
+/// The wrapper now always comes from the bearer's own scopes, which lower to
+/// `Resource::Any` ([`crate::scopes_to_policy`]). The other source - a policy
+/// row loaded by token id, which could narrow to a single `Resource::App` -
+/// belonged to personal access tokens and is gone with them.
 pub async fn enforce(
     pg: &Client,
     static_policies: &PolicySet,
@@ -42,7 +45,7 @@ pub async fn enforce(
 ) -> Result<AuthzDecision, AuthzError> {
     let entities = assemble_entities(pg, ctx.principal_id, ctx.action, ctx.resource.clone()).await?;
 
-    if ctx.token_id.is_some() || ctx.token_policy.is_some() {
+    if ctx.token_policy.is_some() {
         let owner_req = build_request(ctx)?;
         let owner_decision =
             cedar_policy::Authorizer::new().is_authorized(&owner_req, static_policies, &entities);
@@ -55,8 +58,6 @@ pub async fn enforce(
 
     let final_policies = if let Some(token_policy) = &ctx.token_policy {
         policy_set_from_policy(token_policy)?
-    } else if let Some(token_id) = ctx.token_id {
-        load_token_policies(pg, token_id).await?
     } else {
         static_policies.clone()
     };
@@ -89,7 +90,6 @@ pub async fn is_authorized_anywhere(
     for resource in resources {
         let probe = AuthzContext {
             principal_id: ctx.principal_id,
-            token_id: None,
             token_policy: None,
             action: ctx.action,
             resource,
@@ -125,8 +125,8 @@ async fn load_principal_app_resources(
             // it as `Uuid`, then stringify. Reading it directly as `String`
             // panics (WrongType) the moment any membership row exists. This is
             // the sibling of the entities.rs:183 fix; `is_authorized_anywhere`
-            // calls this unconditionally, so the panic gated consent + PAT
-            // minting for any creator with >=1 app membership.
+            // calls this unconditionally, so the panic gated consent for any
+            // creator with >=1 app membership.
             let app_id: Uuid = row.get("app_id");
             let resource = Resource::App {
                 id: app_id.to_string(),
@@ -141,25 +141,6 @@ async fn load_principal_app_resources(
 
 fn policy_set_from_policy(policy: &Policy) -> Result<PolicySet, AuthzError> {
     PolicySet::from_str(&lower(policy)).map_err(|err| AuthzError::CedarParse(err.to_string()))
-}
-
-async fn load_token_policies(pg: &Client, token_id: Uuid) -> Result<PolicySet, AuthzError> {
-    let rows = pg
-        .query(
-            "SELECT policies FROM zeroship.permission_tokens \
-             WHERE id = $1 \
-               AND revoked_at IS NULL \
-               AND (expires_at IS NULL OR expires_at > NOW())",
-            &[&token_id],
-        )
-        .await
-        .map_err(|err| AuthzError::Db(format!("load token policies: {err}")))?;
-    let row = rows
-        .first()
-        .ok_or_else(|| AuthzError::Validation(format!("permission token not active: {token_id}")))?;
-    let wrapper_json: Value = row.get("policies");
-    let wrapper = Policy::from_json_value(&wrapper_json)?;
-    policy_set_from_policy(&wrapper)
 }
 
 fn build_request(ctx: &AuthzContext<'_>) -> Result<Request, AuthzError> {
@@ -241,11 +222,10 @@ async fn audit_decision(
     if let Err(err) = pg
         .execute(
             "INSERT INTO zeroship.authz_decisions \
-                (actor_user_id, token_id, action, resource_type, resource_id, decision, matched_policies, request_ip, request_id) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                (actor_user_id, action, resource_type, resource_id, decision, matched_policies, request_ip, request_id) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
             &[
                 &ctx.principal_id,
-                &ctx.token_id,
                 &ctx.action.cedar_id(),
                 &resource_type,
                 &resource_id,

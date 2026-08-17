@@ -42,7 +42,7 @@ paths because Compose must receive both the custom env-file and mount path.
 
 The secret directory contains exactly eight files:
 
-`control-signing.pem` `gateway-signing.pem` `auth-signing.pem` `broker-secret`
+`gateway-signing.pem` `auth-signing.pem` `broker-secret`
 `pairwise-salt` `refresh-hash-key` `refresh-idem-key`
 
 The env overlay contains eight generated scalar values:

@@ -100,8 +100,7 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
         expected_oauth_audience: "control.zeroship.ai".to_string(),
         static_policies: zeroship_authz::load_platform_policies()
             .expect("bundled authz policies parse"),
-        pat_issuer: Arc::new(zeroship_authn::PatIssuer::generate_ephemeral()),
-        auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
+        auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some(common::platform_jwks_url())),
         // No platform deploy-token mint here: that is control's OUTBOUND
         // destination for the device flow, and no fixture below drives one.
         provider_registry: zeroship_control::metering::provider::builtin_registry(),
@@ -208,7 +207,7 @@ async fn non_admin_cannot_grant_platform_role() {
     let fx = build_test_state(&db_url, "non-admin").await;
     // A NON-admin actor (a creator who is not a platform admin) — bearer is the
     // only principal path now, so the actor is a non-admin PAT.
-    let actor = common::authz_fixture::non_admin_pat(&fx.state).await;
+    let actor = common::authz_fixture::non_admin_principal(&fx.state).await;
     let target = insert_user(&fx.state.control_pg, "non-admin-target").await;
 
     let app = test::init_service(
@@ -258,7 +257,7 @@ async fn non_admin_cannot_grant_platform_role() {
 async fn admin_can_grant_platform_role() {
     let db_url = db_url();
     let fx = build_test_state(&db_url, "grant").await;
-    let pat = common::authz_fixture::admin_pat(&fx.state).await;
+    let pat = common::authz_fixture::admin_principal(&fx.state).await;
     let target = insert_user(&fx.state.control_pg, "grant-target").await;
 
     let app = test::init_service(
@@ -293,7 +292,7 @@ async fn admin_can_grant_platform_role() {
 async fn admin_can_revoke_platform_role() {
     let db_url = db_url();
     let fx = build_test_state(&db_url, "revoke").await;
-    let pat = common::authz_fixture::admin_pat(&fx.state).await;
+    let pat = common::authz_fixture::admin_principal(&fx.state).await;
     let target = insert_user(&fx.state.control_pg, "revoke-target").await;
     fx.state
         .control_pg
@@ -332,7 +331,7 @@ async fn admin_can_revoke_platform_role() {
 async fn admin_net_grant_endpoint_validates_lists_pending_and_revokes() {
     let db_url = db_url();
     let fx = build_test_state(&db_url, "net-grants").await;
-    let pat = common::authz_fixture::admin_pat(&fx.state).await;
+    let pat = common::authz_fixture::admin_principal(&fx.state).await;
     let owner = insert_user(&fx.state.control_pg, "net-grant-owner").await;
     let app_record = fx
         .state
@@ -446,7 +445,7 @@ async fn admin_net_grant_endpoint_validates_lists_pending_and_revokes() {
 async fn admin_can_audit_lock_app() {
     let db_url = db_url();
     let fx = build_test_state(&db_url, "audit-lock").await;
-    let pat = common::authz_fixture::admin_pat(&fx.state).await;
+    let pat = common::authz_fixture::admin_principal(&fx.state).await;
     let app_record = fx
         .state
         .registry
@@ -486,7 +485,7 @@ async fn admin_can_audit_lock_app() {
 async fn admin_can_suspend_app() {
     let db_url = db_url();
     let fx = build_test_state(&db_url, "suspend").await;
-    let pat = common::authz_fixture::admin_pat(&fx.state).await;
+    let pat = common::authz_fixture::admin_principal(&fx.state).await;
     let app_record = fx
         .state
         .registry
@@ -522,7 +521,7 @@ async fn admin_can_suspend_app() {
 async fn admin_can_create_platform_policy_with_valid_cedar() {
     let db_url = db_url();
     let fx = build_test_state(&db_url, "policy-valid").await;
-    let pat = common::authz_fixture::admin_pat(&fx.state).await;
+    let pat = common::authz_fixture::admin_principal(&fx.state).await;
     let policy_id = "lock_writes";
     let _ = fx
         .state
@@ -576,7 +575,7 @@ async fn admin_can_create_platform_policy_with_valid_cedar() {
 async fn admin_cannot_create_platform_policy_with_invalid_cedar() {
     let db_url = db_url();
     let fx = build_test_state(&db_url, "policy-invalid").await;
-    let pat = common::authz_fixture::admin_pat(&fx.state).await;
+    let pat = common::authz_fixture::admin_principal(&fx.state).await;
     let policy_id = "invalid_cedar";
     let _ = fx
         .state
