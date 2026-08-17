@@ -1624,6 +1624,25 @@ async fn seed_grants(state: &AppState, principal_id: Uuid, grants: &[&str]) {
     }
 }
 
+/// Both tables carry a plain FK to `zeroship.users` with no ON DELETE action
+/// (`db/migrations-ts/20260702000600_constraints_indexes_fks.ts:159,195`), so
+/// the fixture's `DELETE FROM zeroship.users` is REFUSED while these rows
+/// exist - and it is a `let _ =`, so the refusal is silent and the user row
+/// simply leaks. Anything that seeds or materializes them must clear them
+/// here first.
+async fn clear_grants(state: &AppState, principal_id: Uuid) {
+    for sql in [
+        "DELETE FROM zeroship.principal_grants WHERE principal_id = $1",
+        "DELETE FROM zeroship.identity_links WHERE principal_id = $1",
+    ] {
+        state
+            .control_pg
+            .execute(sql, &[&principal_id])
+            .await
+            .expect("clear seeded grant state");
+    }
+}
+
 async fn stored_grants(state: &AppState, principal_id: Uuid) -> Vec<String> {
     state
         .control_pg
@@ -1710,6 +1729,7 @@ async fn a_first_cli_request_is_authorized_and_materializes_the_default_grants()
         "materializing without the marker lets a later request re-seed revoked grants"
     );
 
+    clear_grants(&fx.state, user_id).await;
     fx.cleanup().await;
 
     drop(app);
@@ -1771,6 +1791,7 @@ async fn an_operator_deleting_a_grant_row_narrows_the_next_cli_request() {
         "a request re-seeded grants an operator had deleted"
     );
 
+    clear_grants(&fx.state, user_id).await;
     fx.cleanup().await;
 
     drop(app);
@@ -1805,6 +1826,7 @@ async fn user_without_admin_role_oauth_scope_does_not_grant_apps_delete() {
     let status = test::call_service(&app, req).await.status();
     assert_eq!(status, StatusCode::FORBIDDEN);
 
+    clear_grants(&fx.state, user_id).await;
     fx.cleanup().await;
     let _ = fx
         .state
