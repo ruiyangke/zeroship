@@ -175,12 +175,23 @@ truncation point later and uncovered the next latent breakage.
 `retiring` row (`issuer.rs:388-391`). The kid is a pure thumbprint of the
 public key (`issuer.rs:273`), so two test binaries built from the same seed
 publish the SAME kid into the one shared suite database. Ten binaries in
-`crates/auth/tests/` publish, and three seeds are used twice:
+`crates/auth/tests/` publish, and TWO seeds are shared - 42 by three of them and
+43 by two - not "three seeds used twice", which this paragraph said until it was
+re-measured against the block directly below it that contradicts it:
 
 ```text
 seed 42  oidc_authorization_code_test:503, oidc_login_consent_test:913, oidc_userinfo_test:338
 seed 43  oidc_brokered_login_test:406, oidc_refresh_token_test:1174
 ```
+
+Measured on main with
+`git grep -n SigningKey::from_bytes main -- crates/auth/tests` cross-referenced
+against `git grep -ln publish_active_key main -- crates/auth/tests`. The second
+list is what bounds the population: `consent_ui_test.rs:339` also builds an
+issuer from seed 42 but never publishes it, so it is not one of the ten and not
+part of the collision. `signing_key_retention_test` publishes from a random
+secret, not a fixed seed. The remaining eight publishers hold seeds 21, 23, 51,
+57, 77 and 91, each used once.
 
 Run order is alphabetical, so `oidc_authorization_code_test` publishes kid(42),
 `oidc_brokered_login_test` publishes kid(43) and retires kid(42),
@@ -228,8 +239,27 @@ AUTH SUITE: 636 tests passed, 0 unexpected skips, 1 allowlisted (floor 505)
 ```
 
 Zero `test result: FAILED` lines in the whole run. 451 to 636 is far more than
-the nine failures repaired: six Auth binaries that main's fail-fast never
-reached now run, which is most of the 185.
+the nine failures repaired: THIRTY Auth binaries that main's fail-fast never
+reached now run, contributing 161 of the 185.
+
+Thirty, not the six this paragraph claimed until it was re-measured. The method:
+take the completed run's log, reduce it to one `<binary> <passed>` line per
+target in the order cargo ran them, cut at the last `zeroship-auth` target, and
+sum everything after `oidc_backchannel_logout_test` - the binary that failed on
+main and therefore ended the whole `cargo test -p zeroship-auth` invocation:
+
+```text
+awk '/Running (unittests|tests\/)/ { bin=$2; if (bin=="unittests") bin=$3; next }
+     /^test result:/ { if (bin!="") { print bin, $4; bin="" } }' suite.log \
+  | awk 'NR<=54' \
+  | awk 'f{n++; s+=$2} /oidc_backchannel_logout_test/{f=1} END{print n, s}'
+30 161
+```
+
+The conclusion the six was offered for is unchanged and if anything understated:
+truncation, not the nine repaired failures, is where the delta came from. But
+the count was wrong by 5x, and a wrong number in an audit document outlives the
+argument it was supporting.
 
 No production code changed on this branch. Every edit is a test fixture, this
 file, or the audit document. The regression coverage is the suite itself plus

@@ -2384,11 +2384,20 @@ constructed a logout-token issuer without publishing its key, so registered
 token issuance correctly refused it as untrusted for issuance.
 
 The "nine failures" count was itself an artifact: `cargo test` stops at the
-first failing target, and the logout binary sorts early, so six later Auth
-binaries never ran at all. Fixing it revealed a third fixture defect of the
-same family - ten binaries published an OP signing key into the one shared
-suite database and three seeds were used twice, so a binary publishing a
-duplicate kid after an intervening publish retired it hit the same
+first failing target, and the logout binary sorts early, so THIRTY later Auth
+binaries never ran at all, taking 161 of the 185-test delta with them. That
+figure is measured, not estimated: reduce a completed suite log to one
+`<binary> <passed>` line per target in cargo's run order, cut at the last
+`zeroship-auth` target, and sum everything after `oidc_backchannel_logout_test`
+(the reproduction is written out in `NOTES.md`). This paragraph said "six" until
+that measurement was run; the conclusion it supported - that truncation, not the
+repaired failures, produced the delta - holds a fortiori.
+
+Fixing it revealed a third fixture defect of the same family: ten binaries
+published an OP signing key into the one shared suite database, and TWO of the
+seeds were shared - 42 across three of those binaries and 43 across two (this
+also read "three seeds used twice" before it was checked) - so a binary
+publishing a duplicate kid after an intervening publish retired it hit the same
 correct-and-failing-closed refusal. Test fixtures now derive that key from
 their own target name (`crates/auth/tests/common/mod.rs`).
 
