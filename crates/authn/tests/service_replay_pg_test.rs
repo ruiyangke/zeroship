@@ -41,13 +41,13 @@ const CALLER_KID: &str = "gateway-replay-test";
 /// neither create it nor needs to. The two spellings can drift, which is a real
 /// cost of testing against a database the suite provisions itself rather than
 /// one built by migrations alone.
-const FIXTURE_DDL: &str = "CREATE SCHEMA IF NOT EXISTS zeroship; \
-     CREATE TABLE IF NOT EXISTS zeroship.service_assertion_replay ( \
+const FIXTURE_DDL: &str = "CREATE SCHEMA IF NOT EXISTS service_authn; \
+     CREATE TABLE IF NOT EXISTS service_authn.service_assertion_replay ( \
          replay_key text PRIMARY KEY, \
          expires_at timestamptz NOT NULL \
      ); \
      CREATE INDEX IF NOT EXISTS service_assertion_replay_expiry_idx \
-         ON zeroship.service_assertion_replay (expires_at)";
+         ON service_authn.service_assertion_replay (expires_at)";
 
 /// The migration, read at compile time so its GRANT cannot drift from here.
 ///
@@ -67,18 +67,31 @@ const MIGRATION_SOURCE: &str =
 
 /// A role that is deliberately NOT in the migration's grant list.
 ///
-/// It holds `usage` on the `zeroship` schema
-/// (`db/migrations-ts/20260702000900_grants.ts:46`) and nothing at all on this
-/// table, so a statement it issues fails on the TABLE privilege rather than on
-/// reaching the schema - which is what makes it a driver-error fixture and not
-/// a differently-shaped one.
+/// [`fixture_grant_sql`] gives it `usage` on the schema and nothing at all on
+/// this table, so a statement it issues fails on the TABLE privilege rather
+/// than on reaching the schema - which is what makes it a driver-error fixture
+/// and not a differently-shaped one. In production it is the creator-app login,
+/// which runs no verifier and so is granted nothing here.
 const UNGRANTED_ROLE: &str = "zeroship_app";
 
-/// Pull the quoted strings out of the first `<marker>...]` list in the migration.
-fn quoted_list_after(marker: &str) -> Vec<String> {
-    let (_, tail) = MIGRATION_SOURCE
+/// The one `grant(...)` call in the migration whose target is the replay TABLE.
+///
+/// The migration also carries a schema-level `usage` grant, and both calls spell
+/// `privileges: [` and `to: [`. Taking the first match in the file would read
+/// `["usage"]` as the table privileges and still produce runnable SQL, so the
+/// call is selected by its `kind: "table"` target rather than by position.
+fn table_grant_call() -> &'static str {
+    MIGRATION_SOURCE
+        .split("grant({")
+        .find(|call| call.contains("kind: \"table\""))
+        .expect("the migration grants privileges on a table")
+}
+
+/// Pull the quoted strings out of the first `<marker>...]` list in `source`.
+fn quoted_list_after_in(source: &str, marker: &str) -> Vec<String> {
+    let (_, tail) = source
         .split_once(marker)
-        .unwrap_or_else(|| panic!("the migration source contains {marker:?}"));
+        .unwrap_or_else(|| panic!("the source contains {marker:?}"));
     let (list, _) = tail
         .split_once(']')
         .unwrap_or_else(|| panic!("the list after {marker:?} is closed"));
@@ -94,7 +107,7 @@ fn quoted_list_after(marker: &str) -> Vec<String> {
 
 /// The roles the migration grants on the replay table.
 fn granted_roles() -> Vec<String> {
-    quoted_list_after("to: [")
+    quoted_list_after_in(table_grant_call(), "to: [")
 }
 
 /// The migration's own GRANT, re-expressed as SQL against the fixture table.
@@ -110,10 +123,10 @@ fn fixture_grant_sql() -> String {
     let mut reach_the_schema = granted.clone();
     reach_the_schema.push(UNGRANTED_ROLE.to_owned());
     format!(
-        "GRANT usage ON SCHEMA zeroship TO {}; \
-         GRANT {} ON zeroship.service_assertion_replay TO {}",
+        "GRANT usage ON SCHEMA service_authn TO {}; \
+         GRANT {} ON service_authn.service_assertion_replay TO {}",
         reach_the_schema.join(", "),
-        quoted_list_after("privileges: [").join(", "),
+        quoted_list_after_in(table_grant_call(), "privileges: [").join(", "),
         granted.join(", "),
     )
 }
@@ -209,7 +222,7 @@ impl ReplayStore for ReadThenWriteStore {
             let seen = self
                 .client
                 .query(
-                    "SELECT 1 FROM zeroship.service_assertion_replay \
+                    "SELECT 1 FROM service_authn.service_assertion_replay \
                      WHERE replay_key = $1 AND expires_at > now()",
                     &[&key],
                 )
@@ -224,7 +237,7 @@ impl ReplayStore for ReadThenWriteStore {
                 .as_secs_f64();
             self.client
                 .execute(
-                    "INSERT INTO zeroship.service_assertion_replay (replay_key, expires_at) \
+                    "INSERT INTO service_authn.service_assertion_replay (replay_key, expires_at) \
                      VALUES ($1, to_timestamp($2::double precision)) \
                      ON CONFLICT (replay_key) DO UPDATE SET expires_at = excluded.expires_at",
                     &[&key, &seconds],

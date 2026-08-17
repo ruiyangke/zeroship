@@ -63,6 +63,14 @@ fn platform_effective(project_schema: &str) -> PdpPolicy {
 mod policy_tests {
     use super::*;
 
+    /// The namespace allowlist is the ceiling on what a platform migration may
+    /// create, so it is pinned by value rather than by "contains".
+    ///
+    /// `service_authn` is the mechanism-state zone holding
+    /// `service_assertion_replay`; it is separate from `zeroship` because every
+    /// service that verifies a service assertion writes there, worker included,
+    /// and the worker may not write platform state. Growing this list to four
+    /// should be a decision someone made, which is what failing here forces.
     #[test]
     fn platform_charter_retains_the_project_and_public_schema_allowlist() {
         let policy = platform_effective("zeroship");
@@ -71,7 +79,7 @@ mod policy_tests {
             panic!("platform charter must produce a schema allowlist");
         };
         schemas.sort();
-        assert_eq!(schemas, vec!["public", "zeroship"]);
+        assert_eq!(schemas, vec!["public", "service_authn", "zeroship"]);
     }
 }
 

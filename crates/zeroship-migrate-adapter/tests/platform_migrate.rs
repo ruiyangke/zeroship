@@ -778,6 +778,74 @@ mod platform_cli {
             return Err("zeroship_worker column grants exceed the workflow projection".to_string());
         }
 
+        // (7) The service-assertion replay store is a SECOND trust zone, and it
+        // is bounded. The worker holds write grants on
+        // `service_authn.service_assertion_replay` because a callee that
+        // verifies a service assertion must record its `jti`, and the worker is
+        // a callee (docs/proposals/2026-08-16-service-identity.md:180, where the
+        // gateway calls `worker POST /dispatch/{app}`). That is precisely the
+        // grant check (6) refuses, which is why the table sits in its own schema
+        // rather than as a named exception to a blanket rule.
+        //
+        // A second schema only helps while it stays one table. The platform
+        // charter now allowlists `service_authn` for CREATE TABLE, so without
+        // this a later platform migration could put real platform state there
+        // and grant the worker writes on it - the same collision one namespace
+        // over, with nothing in the way. So: the zone holds exactly the replay
+        // table, and no service role can add to it.
+        if !scalar_bool(
+            &probe,
+            "SELECT ( \
+                 SELECT count(*) \
+                   FROM pg_class relation \
+                   JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace \
+                  WHERE namespace.nspname = 'service_authn' \
+                    AND relation.relkind IN ('r', 'p', 'v', 'm', 'f', 'S') \
+               ) = 1 \
+               AND EXISTS ( \
+                 SELECT 1 \
+                   FROM pg_class relation \
+                   JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace \
+                  WHERE namespace.nspname = 'service_authn' \
+                    AND relation.relname = 'service_assertion_replay' \
+                    AND relation.relkind = 'r' \
+               ) \
+               AND NOT EXISTS ( \
+                 SELECT 1 \
+                   FROM (VALUES ('zeroship_control'), ('zeroship_gateway'), \
+                                ('zeroship_worker'), ('zeroship_auth'), \
+                                ('zeroship_app')) grantee(name) \
+                  WHERE has_schema_privilege(grantee.name, 'service_authn', 'CREATE') \
+               )",
+        )
+        .await
+        {
+            return Err("the service_authn zone is not exactly the replay table".to_string());
+        }
+
+        // And the zone's grants are the verifying services and nobody else.
+        // `zeroship_app` is the creator-app login: it reaches the `zeroship`
+        // schema (grants file) and runs no verifier, so it is the control that
+        // makes the four positives mean "granted to verifiers" rather than
+        // "granted to whoever asked".
+        if !scalar_bool(
+            &probe,
+            "SELECT has_table_privilege('zeroship_worker', \
+                        'service_authn.service_assertion_replay', 'INSERT') \
+                AND has_table_privilege('zeroship_gateway', \
+                        'service_authn.service_assertion_replay', 'INSERT') \
+                AND has_table_privilege('zeroship_control', \
+                        'service_authn.service_assertion_replay', 'INSERT') \
+                AND has_table_privilege('zeroship_auth', \
+                        'service_authn.service_assertion_replay', 'INSERT') \
+                AND NOT has_table_privilege('zeroship_app', \
+                        'service_authn.service_assertion_replay', 'SELECT')",
+        )
+        .await
+        {
+            return Err("replay-table grants do not match the verifying services".to_string());
+        }
+
         Ok(())
     }
 
@@ -845,8 +913,15 @@ mod platform_cli {
         let report = run_platform_migrations(&cfg)
             .await
             .map_err(|e| format!("run_platform_migrations failed: {e}"))?;
-        if report.files != 12 {
-            return Err(format!("expected 12 files, saw {}", report.files));
+        // The corpus size, not a literal. This read `!= 12`, which was true at
+        // abd1e70d7 when `db/migrations-ts` held twelve files and went stale as
+        // eleven more landed; the maintained constant is right there at the top
+        // of this file and every other count-check in it already uses it.
+        if report.files != PLATFORM_MIGRATION_FILES {
+            return Err(format!(
+                "expected {PLATFORM_MIGRATION_FILES} files, saw {}",
+                report.files
+            ));
         }
 
         let probe = CompioPgSession::connect(scratch_dsn)
@@ -1024,7 +1099,23 @@ mod platform_cli {
         Ok(())
     }
 
-    const APPEND_FILENAME: &str = "20260710000100_append_probe.ts";
+    /// The probe file's name, which must sort AFTER every committed migration.
+    ///
+    /// It stands for a migration added today, and the runner derives a
+    /// migration's stable version from its ORDINAL in the sorted set. A name
+    /// that lands mid-corpus shifts the version of every file after it, so run 2
+    /// checks the journal's checksum for a version against a DIFFERENT file's
+    /// body: the failure is checksum drift, which says nothing about ordering.
+    ///
+    /// MEASURED, on a live DSN before this was changed: the previous name
+    /// `20260710000100_append_probe.ts` had ten committed files sorting after it
+    /// (every `202608*`, the first landing 2026-08-11), and run 2 failed with
+    /// `checksum drift on mig_0000595bcDNs774MyYTiwC`.
+    ///
+    /// A far-future date rather than today's, so it does not have to move every
+    /// time a migration lands. [`assert_probe_sorts_last`] is what makes the
+    /// requirement fail loudly instead of as drift if it ever stops holding.
+    const APPEND_FILENAME: &str = "29991231000000_append_probe.ts";
     const APPEND_SOURCE: &str = r#"
 import { table, t } from "@zeroship/migrate";
 
@@ -1122,6 +1213,31 @@ export function down() {}
         result.expect("only the newly appended migration file must apply");
     }
 
+    /// Fail with the real reason if [`APPEND_FILENAME`] stops sorting last.
+    ///
+    /// This test says "appended", and the runner only treats a file as appended
+    /// when it sorts after every other. When that stopped being true the suite
+    /// still failed - but as `checksum drift`, which reads as a corrupted
+    /// journal and sent the reader to the migration bodies. This is the same
+    /// requirement stated where it can be acted on.
+    fn assert_probe_sorts_last(corpus: &Path) -> Result<(), String> {
+        let mut existing: Vec<String> = std::fs::read_dir(corpus)
+            .map_err(|e| format!("read the temporary corpus: {e}"))?
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".ts"))
+            .collect();
+        existing.sort();
+        match existing.last() {
+            Some(last) if last.as_str() < APPEND_FILENAME => Ok(()),
+            Some(last) => Err(format!(
+                "{APPEND_FILENAME} no longer sorts after the whole corpus (last is {last}), so it \
+                 would renumber the files after it instead of appending; move it past {last}"
+            )),
+            None => Err("the temporary corpus is empty".to_string()),
+        }
+    }
+
     async fn run_appended_file_assertions(scratch_dsn: &str, corpus: &Path) -> Result<(), String> {
         let cfg = test_config(scratch_dsn, corpus);
         let run1 = run_platform_migrations(&cfg)
@@ -1145,6 +1261,7 @@ export function down() {}
             .await
             .map_err(|e| format!("connect appended-file probe: {e}"))?;
         let rows_before_append = journal_completed_count(&probe).await;
+        assert_probe_sorts_last(corpus)?;
         write_migration(corpus, APPEND_FILENAME, APPEND_SOURCE)?;
 
         let run2 = run_platform_migrations(&cfg)
