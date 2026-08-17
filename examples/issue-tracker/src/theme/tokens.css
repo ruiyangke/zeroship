@@ -148,6 +148,20 @@
   --it-control-h-md: 1.75rem; /* 28 */
   --it-control-h-lg: 2rem;    /* 32 */
 
+  /* The issue rail's label column.
+   *
+   * Sized to the CONTENT: 5.75rem is the widest label the rail renders
+   * ("Dependencies", 88px as measured in the browser) rounded up to the 4px
+   * grid. The 7.5rem it replaced was a round number, and it left ~50px of dead
+   * gutter beside "Kind" and "CC" on a 352px rail.
+   *
+   * A token rather than `max-content` because the rail is TWO grids -- the
+   * fields fieldset and the Links fieldset -- and separate grids cannot share
+   * a track. Their longest labels differ ("Whiteboard" 73px vs "Dependencies"
+   * 88px), so `max-content` would put the two halves of one column 15px apart;
+   * e2e/rail-columns.spec.ts asserts by EQUALITY that they do not. */
+  --it-rail-label-w: 5.75rem; /* 92 */
+
   /* --- Radius ----------------------------------------------------------
    * 3px: enough to avoid looking like a 1995 form, small enough that a
    * dense grid of controls does not read as a bag of pills. */

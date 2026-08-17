@@ -115,6 +115,13 @@
   /* Complementary max-* variants resolve immediately below each threshold. */
   --breakpoint-desktop: 901px;
   --breakpoint-wide: 1101px;
+
+  /* The issue rail's three tracks: label, value, row action.
+     Named once because the rail is two separate fieldsets whose rows must
+     start their values at the same x (e2e/rail-columns.spec.ts asserts it by
+     equality). `grid-cols-rail` is the only spelling; two arbitrary values
+     could be edited apart. */
+  --grid-template-columns-rail: var(--it-rail-label-w) minmax(0, 1fr) auto;
 }
 
 /* Functional generated content gets a name instead of an arbitrary value at
