@@ -121,6 +121,18 @@ const OPEN_STATUSES: readonly IssueStatus[] = [
   "CONFIRMED",
   "IN_PROGRESS",
 ];
+// Read-side compensation for a PLATFORM defect: the shared UPDATE builder
+// (crates/zeroship-schema/src/query.rs, build_set_clauses_with_system_fields)
+// binds a `$set: null` as an empty text PARAMETER instead of emitting a `NULL`
+// literal the way the INSERT/upsert builders do. So clearing one of these
+// columns through `env.db.update` stores "" and every read has to map it back.
+//
+// The compensation now covers reads ONLY. `issues.resolution` carries a column
+// CHECK (it is an enum), and "" is not a member -- so the write itself is
+// refused with CHECK_VIOLATION, and `issues.reopen` plus the reopening arm of
+// `issues.changeStatus` fail until the builder is fixed. That is the correct
+// outcome for a database asked to store a value outside a closed set; what has
+// to change is the builder, not the constraint.
 const NULLABLE_ISSUE_TEXT_FIELDS = new Set([
   "versionId",
   "milestoneId",
@@ -595,9 +607,8 @@ async function validateProductChildren(
 
 function issueState(row: IssueRow): IssueState {
   if (!isIssueStatus(row.status)) invalid(`issue ${row.id} has an invalid stored status`);
-  // The current DB update builder binds a nullable TEXT `$set: null` as an
-  // empty text parameter. Keep the app's logical contract null-shaped at the
-  // boundary (and in history/state checks) until that platform seam is fixed.
+  // See NULLABLE_ISSUE_TEXT_FIELDS: "" is the update builder's stand-in for
+  // NULL, so it is read back as null here and in history/state checks.
   const resolution = row.resolution ? row.resolution : null;
   if (resolution !== null && !isIssueResolution(resolution)) {
     invalid(`issue ${row.id} has an invalid stored resolution`);
