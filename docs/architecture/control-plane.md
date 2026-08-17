@@ -71,8 +71,6 @@ apps(
   api_key text not null,
   api_key_hash text not null default '',
   env_version bigint not null default 0,
-  suspended boolean not null default false,
-  audit_locked boolean not null default false,
   manifest_json text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()

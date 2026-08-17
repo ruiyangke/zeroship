@@ -560,8 +560,6 @@ no second issuance authority.
 | Cedar-backed authorization (AuthzGuard) | 🟢 | internal | `crates/control/src/authz_guard.rs` | — | `crates/control/tests/authz_guard_oauth_test.rs` | Native OP introspection is the only bearer path. |
 | Platform admin role management | 🟢 | POST/DELETE/GET /api/admin/users/{id}/role | `crates/control/src/admin_handlers.rs` | — | `crates/control/tests/admin_handlers_test.rs` | Invalidates EntityCache. |
 | Platform Cedar policy CRUD | 🟢 | GET/PUT/DELETE /api/admin/platform-policies | `crates/control/src/admin_handlers.rs` | — | `crates/control/tests/admin_handlers_test.rs` | Validated before write; audit diff. |
-| App audit-lock | 🟢 | POST /api/admin/apps/{id}/audit-lock | `crates/control/src/admin_handlers.rs` | — | — | Flag stored; not yet enforced in sweep. |
-| App suspension | 🟡 | POST /api/admin/apps/{id}/suspend | `crates/control/src/admin_handlers.rs` | — | — | Flag written; gateway does not act on it. |
 | First-party OAuth client registration | 🟢 | POST/GET/DELETE /api/admin/oauth-clients | `crates/control/src/oauth_handlers.rs` | — | `crates/control/tests/oauth_handlers_test.rs` | Native OP registry rows. |
 | Per-app OAuth client provisioning (auto) | 🟢 | internal (create_app + deploy) | `crates/control/src/app_oauth_client.rs` | — | `crates/control/tests/app_oauth_client_test.rs` | Idempotent; non-destructive URI merge. |
 | Custom-domain OAuth redirect URI sync | 🟡 | internal (sync_app_redirect_uris) | `crates/control/src/app_oauth_client.rs` | — | — | Implemented/tested; no production caller. |
@@ -600,7 +598,7 @@ code on disk**.
 | Resource enum (App, Org, Any) | 🟢 | internal | `crates/authz/src/resource.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/scaffold_test.rs` | Org for P11; no org CRUD yet. |
 | Condition library (IpRange/TimeWindow/Mfa) | 🟡 | internal | `crates/authz/src/condition.rs`, `lower.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/engine_test.rs` | IpRange/TimeWindow work; MFA conditions not enforced; TimeWindow UTC-only. |
 | Cedar source lowering (lower()) | 🟢 | internal | `crates/authz/src/lower.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/injection_test.rs` | Injection-hardened. |
-| Static platform + creator Cedar policies | 🟢 | internal | `deploy/policies/platform/`, `deploy/policies/creator/`, `crates/authz/src/engine.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/platform_policies_test.rs` | 10 policies; build.rs parses at compile. |
+| Static platform + creator Cedar policies | 🟢 | internal | `deploy/policies/platform/`, `deploy/policies/creator/`, `crates/authz/src/engine.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/platform_policies_test.rs` | 8 policies; build.rs parses at compile. |
 | Entity assembly + LRU cache | 🟢 | internal | `crates/authz/src/entities.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/two_call_test.rs` | 30s TTL; default role 'none' (C1 fix). |
 | enforce() — two-call TOKEN⊂USER | 🟢 | internal | `crates/authz/src/eval.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/two_call_test.rs` | Both must allow; 100% audited (no sampling). |
 | is_authorized_anywhere() | 🟢 | internal | `crates/authz/src/eval.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/anywhere_uuid_regression_test.rs` | Consent gate + creator self-scope probe. |
@@ -608,8 +606,6 @@ code on disk**.
 | OAuth scope vocabulary (Scope enum) | 🟢 | internal | `crates/authz/src/scope.rs` | `docs/proposals/authorization.md` | `crates/authz/src/scope.rs` | 16-scope 1:1 with Action; no PlatformPoliciesWrite scope. |
 | OAuth consent UI with authz gate | 🟢 | internal | `crates/auth/src/ui/consent.rs` | `docs/proposals/authorization.md` | — | Identity scopes bypass gate. |
 | Platform RBAC role management | 🟢 | HTTP endpoint | `crates/control/src/admin_handlers.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/two_call_test.rs` | admin grants; admin+support read. |
-| App audit-lock (set_app_audit_lock) | 🟢 | HTTP endpoint | `crates/control/src/admin_handlers.rs`, `deploy/policies/platform/audit_locked.cedar` | `docs/proposals/authorization.md` | `crates/authz/tests/two_call_test.rs` | Cedar forbid blocks writes. |
-| App suspension (set_app_suspension) | 🟢 | HTTP endpoint | `crates/control/src/admin_handlers.rs`, `deploy/policies/platform/suspended_apps.cedar` | — | `crates/authz/tests/two_call_test.rs` | Reads allowed; writes blocked. |
 | Operator platform policy CRUD | 🟡 | HTTP endpoint | `crates/control/src/admin_handlers.rs` | `docs/proposals/authorization.md` | — | Persisted but NOT merged into running engine. |
 | policy_hash (SHA-256 canonical) | 🟢 | internal | `crates/authz/src/engine.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/engine_test.rs` | Key-sorted; drift detection. |
 | Authorization audit log | 🟢 | internal | `crates/authz/src/eval.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/two_call_test.rs` | Fire-and-forget; 100% audited. |
@@ -1156,7 +1152,6 @@ recount and run low):
 - ⚫ `manifest.exports.schema` / `ManifestExports.handlers` — deprecated Stage 5c; kept on the wire for archive upgrade only.
 - ⚫ Worker WebSocket-upgrade-via-/dispatch — returns 500 (gateway uses a separate WS path).
 - (gone) `rpcEndpoint` Vite option - it was accepted and non-effectful (stubs use the fixed `/__zeroship/v1/<id>` path), so it was deleted rather than moved to `zeroship.jsonc`. `serverEntry`, `mode` and `migrations.*` left `ZeroshipOptions` in the same change and are now `build.serverEntry`, `build.mode` and `migrations.*` in the project file.
-- 🟡 App suspension (control) — flag is written but the gateway does not act on it; a suspended app keeps serving.
 - 🟡 Gateway WS subscription proxy (multi-node) — returns 501; affinity selection runs but proxy not wired (use `zeroship serve` single-tenant).
 - 🟠 Sandbox cold-boot endpoint (501) and per-token share revoke (501) - both in the standalone `zeroship-sandbox` project, not this repo.
 - 🟡 Per-procedure `timeout` — manifested but `timeout_ms` hardcoded `None` in the gateway; not enforced.
@@ -1222,11 +1217,11 @@ limiting config, insecure-dev semantics, Ed25519 key rotation, and the Redis ide
 backend contract.
 
 **Control plane:** per-app OAuth client lifecycle, the platform admin
-surface (roles, Cedar policies, suspension, audit-lock), OAuth grant management, the two crons,
-console bootstrap, secret key rotation, app suspension, rate-limit config, trust-proxy, and the
+surface (roles, Cedar policies), OAuth grant management, the two crons,
+console bootstrap, secret key rotation, rate-limit config, trust-proxy, and the
 Cedar AuthzGuard bearer path.
 
-**Authorization:** app suspension + audit-lock policies, OAuth client
+**Authorization:** OAuth client
 registration, user OAuth grant endpoints, the `DEFAULT_PLATFORM_ROLE='none'` invariant (C1 IDOR
 fix), operator platform-policy CRUD (+ its unimplemented hot-reload), and the MFA / TimeWindow
 condition limitations — all documented only in proposal/code comments.
