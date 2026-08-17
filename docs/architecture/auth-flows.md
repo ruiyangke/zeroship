@@ -892,8 +892,8 @@ VERIFIED walk-through:
 
 ```text
 +----------------------------------------------------------+
-| Caller holds OAuth, PAT, or Supabase bearer              |
-| Auth, Control, or Supabase signs that bearer             |
+| Caller holds a platform OAuth or Supabase bearer         |
+| Auth or Supabase signs that bearer                       |
 +----------------------------------------------------------+
                              |
                              v
@@ -904,7 +904,7 @@ VERIFIED walk-through:
                              v
 +----------------------------------------------------------+
 | Control verifies bearer and active owner                 |
-| Cedar decides AccountRead including PAT policy           |
+| Cedar decides AccountRead under the scope wrapper        |
 +----------------------------------------------------------+
                              |
                              v
@@ -920,15 +920,15 @@ verified principal ID. The result is connected-client metadata, granted
 scopes, and timestamps; no credential is issued
 (`crates/control/src/oauth_grants_handlers.rs:29-80`,
 `crates/control/src/oauth_grants_handlers.rs:234-238`,
-`crates/control/src/authz_guard.rs:48-91`,
-`crates/authn/src/lib.rs:205-276`).
+`crates/control/src/authz_guard.rs`, `AuthzGuard::require`;
+`crates/authn/src/lib.rs`, `BearerVerifier::verify_bearer`).
 
 ### 1.22 Connected-app grant revocation
 
 ```text
 +------------------------------------------------------------+
-| Caller holds OAuth, PAT, or Supabase bearer                |
-| Auth, Control, or Supabase signs that bearer               |
+| Caller holds a platform OAuth or Supabase bearer           |
+| Auth or Supabase signs that bearer                         |
 +------------------------------------------------------------+
                               |
                               v
@@ -1566,8 +1566,8 @@ VERIFIED walk-through:
 1. The concrete `@zeroship/control` helpers post an app ID, signal types, and
    TTL to run- or topic-token endpoints using the bearer configured on that
    client (`sdks/control/src/index.ts:275-299`). Control derives the asserted
-   app from the header only after verifying the app-scoped HMAC bearer; a PAT
-   or platform OAuth bearer does not satisfy this endpoint
+   app from the header only after verifying the app-scoped HMAC bearer; a
+   platform OAuth or Supabase bearer does not satisfy this endpoint
    (`crates/control/src/workflow_instance_api.rs:326-405`). The creator-facing
    run helper is not wired to this live route; see Finding 14.
 2. Run issuance requires a live, nonterminal run and captures its current
@@ -2091,7 +2091,6 @@ INFERRED consequences appear only where explicitly labeled in FINDINGS.
 | Control device and user codes | Control | Control poll and Auth device page | 10m, one use | No supported early revoke; consume or expiry | `zeroship login` approval (`crates/control/src/device_handlers.rs:152-222`, `crates/control/src/device_handlers.rs:304-536`) |
 | CLI platform access JWT | Auth, requested by Control | Control or Migrated OAuth verifier | 12h maximum | No supported recall path; a family marker would be honored and lifecycle is checked | Fixed deploy-scope subset (`crates/control/src/device_handlers.rs:70-89`, `crates/authn/src/lib.rs:320-376`, `crates/core/src/device_grant.rs:34-43`, `crates/migrated/src/main.rs:166-179`) |
 | Supabase GoTrue bearer | Configured Supabase project | Control Supabase verifier | Provider JWT lifetime | No local recall | General Control access under mapped grants and Cedar, including device approval (`crates/core/src/auth_provider/supabase.rs:312-390`, `crates/authn/src/lib.rs:378-445`, `crates/control/src/device_handlers.rs:815-958`) |
-| Personal Access Token | Control Ed25519 signer | Control or Migrated shared verifier and DB; Cedar where called | 1 to 365d | Yes, owner-scoped `revoked_at` | Stored policy intersected with current owner authority only on handlers that call `require`; token list/revoke bypass it, Finding 4 (`crates/control/src/token_handlers.rs:162-255`, `crates/authz/src/eval.rs:33-74`) |
 | `ZeroShip-User` | Gateway HMAC signer | Worker | 60s, request-ID bound | No, no independent row | Identity for exactly one dispatch (`crates/core/src/auth/mod.rs:322-433`) |
 | `worker_key` bearer | Operator config | Worker | Config lifetime | Yes, global rotation | Gateway dispatch and Control log retrieval (`crates/worker/src/handler.rs:67-116`, `crates/control/src/api.rs:2162-2222`) |
 | `control_key` bearer | Operator config | Control | Config lifetime | Yes, global rotation | Broad internal Control API (`crates/control/src/internal.rs:16-40`, `crates/control/src/internal.rs:82-263`) |
@@ -2110,7 +2109,7 @@ INFERRED consequences appear only where explicitly labeled in FINDINGS.
 | Auth | Human identity, lifecycle result, consent, OP claims, social-link policy, OP private key, provider secrets | Password/TOTP or upstream protocol, live session/user, client/redirect/scope/PKCE, consent, and signing-key issuance eligibility (`crates/auth/src/identity/credentials.rs:81-344`, `crates/auth/src/oidc/authorization_code.rs:283-861`, `crates/auth/src/oidc/issuer.rs:766-799`) |
 | Google/GitHub | Provider subject and selected profile facts | Auth must verify their protocol response and apply its stricter email policy (`crates/auth/src/identity/oauth/google.rs:67-210`, `crates/auth/src/identity/oauth/github.rs:65-213`) |
 | Gateway | App route, cookie validity, OP JWT validity, pairwise projection, route auth level/scopes, request identity HMAC, public signal transport | Signature/type/issuer/expiry, app/client/audience, CSRF for cookie mutation, family marker when DB is configured, and route policy; it does not validate `wst_` (`crates/gateway/src/router/auth.rs:142-460`, `crates/gateway/src/router/auth.rs:654-1021`, `crates/gateway/src/signal_ingress.rs:67-125`) |
-| Control plus authn/authz | Creator principal, active PAT row, OAuth provider result, current owner authority, token policy | Bearer cryptography and DB state and principal lifecycle; owner/token Cedar only where a handler calls `require`, with the token-management gap in Finding 4 (`crates/authn/src/lib.rs:205-276`, `crates/authn/src/lib.rs:338-445`, `crates/control/src/authz_guard.rs:48-91`) |
+| Control plus authn/authz | Creator principal, OAuth provider result, current owner authority, the scope-derived wrapper policy | Bearer cryptography and DB state and principal lifecycle; owner/wrapper Cedar only where a handler calls `require`. Every accepted bearer now carries a wrapper built from the closed scope vocabulary, so two Cedar actions are unreachable, Finding 30 (`crates/authn/src/lib.rs`, `BearerVerifier::verify_bearer` and `oauth_guard_from_bearer`; `crates/control/src/authz_guard.rs`, `AuthzGuard::require`) |
 | Control workflow API | App-scoped operations and signed `wst_` claims; master and per-app HMAC keys | Mint requires app-scoped HMAC and live target; ingress requires Gateway `control_key`, then capability HMAC, expiry, type, target, epoch, and replay (`crates/control/src/workflow_instance_api.rs:326-405`, `crates/control/src/workflow_instance_api.rs:2129-2266`, `crates/control/src/workflow_instance_api.rs:2317-2587`) |
 | Migrated plus authn/authz | Independently verified creator principal and migration policy result | Reverify the forwarded raw bearer, active principal, app ownership, Cedar deploy action, and operator-ceiling intersection (`crates/migrated/src/api.rs:79-108`, `crates/migrated/src/auth.rs:63-143`, `crates/migrated/src/policy.rs:110-133`, `crates/migrated/src/apply.rs:214-239`) |
 | External signal caller | A plaintext `wst_` capability and its permitted payload | Present the capability in the JSON body; Gateway proves nothing about it and Control proves HMAC, expiry, type, target, epoch, and replay (`crates/gateway/src/signal_ingress.rs:67-125`, `crates/control/src/workflow_instance_api.rs:2317-2587`) |
