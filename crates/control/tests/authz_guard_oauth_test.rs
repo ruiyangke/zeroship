@@ -908,7 +908,21 @@ async fn op_cli_device_token_authorizes_control_endpoint() {
         StatusCode::OK,
         "OP-issued CLI token was rejected by a production control endpoint: {app_body_text}"
     );
-    assert_eq!(token["expires_in"], 43_200);
+    // The response's advertised lifetime, bounded by the same literals as the
+    // token's own `exp - iat` above, and asserted to AGREE with it. Agreement
+    // is the wiring; the bound is the value. This assertion read `43_200`
+    // until the CLI moved to this grant, and it is the second of two lifetime
+    // assertions in this test - updating only the first is how a 12-hour
+    // `expires_in` would have survived here.
+    let advertised = token["expires_in"].as_i64().expect("OP token expires_in");
+    assert_eq!(
+        advertised, lifetime,
+        "the response advertises {advertised}s but the token itself lives {lifetime}s"
+    );
+    assert!(
+        (120..=30 * 60).contains(&advertised),
+        "the OP advertised a {advertised}s CLI access token; it must be minutes"
+    );
     assert_eq!(token["scope"], "apps:deploy apps:read");
 }
 
