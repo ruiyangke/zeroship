@@ -128,13 +128,45 @@ async fn platform_jwks_handler(body: web::types::State<Arc<RwLock<String>>>) -> 
         .body(body.read().expect("jwks body lock").clone())
 }
 
+/// The JWKS endpoint a control test's platform auth provider must point at.
+///
+/// One server per test BINARY, started on first use and never shut down. The
+/// OAuth bearer path is the ONLY principal path into control, and it verifies
+/// the access token against the issuer's published key over HTTP - so a fixture
+/// that hands out a platform bearer has to leave a reachable JWKS behind it for
+/// as long as any request may use that bearer. Held in a `OnceLock` static,
+/// which is never dropped, so the server outlives every test in the binary.
+///
+/// Before PATs were removed most fixtures pointed the provider at
+/// `http://127.0.0.1:9/...` - deliberately unreachable, because those tests
+/// authenticated with a locally-signed PAT and never reached the OAuth arm.
+pub fn platform_jwks_url() -> String {
+    static JWKS: OnceLock<PlatformJwks> = OnceLock::new();
+    JWKS.get_or_init(PlatformJwks::start).jwks_url()
+}
+
 pub fn platform_auth_provider(jwks_url: String) -> Arc<AuthProvider> {
     Arc::new(AuthProvider::platform(PlatformProvider::new(
         PlatformConfig::new(PLATFORM_ISSUER, Some(jwks_url)).expect("platform config"),
     )))
 }
 
+/// A first-party CLI bearer. `zeroship-cli` is the one client id whose scopes
+/// control intersects with the principal's live `zeroship.principal_grants`
+/// rows, so a token minted here carries at most
+/// `PLATFORM_CLI_ISSUABLE_SCOPES` unless the test seeds grants of its own.
 pub fn platform_token(subject: Uuid, scope: &str) -> String {
+    platform_token_for_client(subject, scope, "zeroship-cli")
+}
+
+/// The console BFF's client id. Distinct from `zeroship-cli` on purpose: it is
+/// NOT the client whose scopes control narrows against the CLI grant set, so a
+/// console bearer carries exactly the scopes it was minted with. Fixtures for
+/// operator and billing surfaces use this, because those scopes are outside the
+/// CLI's issuable set.
+pub const CONSOLE_CLIENT_ID: &str = "zeroship-console";
+
+pub fn platform_token_for_client(subject: Uuid, scope: &str, client_id: &str) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -147,7 +179,7 @@ pub fn platform_token(subject: Uuid, scope: &str) -> String {
         "iat": now,
         "nbf": now.saturating_sub(1),
         "jti": Uuid::new_v4().to_string(),
-        "client_id": "zeroship-cli",
+        "client_id": client_id,
         "scope": scope,
     });
     let mut header = Header::new(Algorithm::EdDSA);
@@ -158,6 +190,13 @@ pub fn platform_token(subject: Uuid, scope: &str) -> String {
 
 pub fn platform_bearer(subject: Uuid, scope: &str) -> String {
     format!("Bearer {}", platform_token(subject, scope))
+}
+
+pub fn console_bearer(subject: Uuid, scope: &str) -> String {
+    format!(
+        "Bearer {}",
+        platform_token_for_client(subject, scope, CONSOLE_CLIENT_ID)
+    )
 }
 
 fn platform_encoding_key() -> EncodingKey {

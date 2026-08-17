@@ -793,7 +793,7 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         static_policies: zeroship_authz::load_platform_policies()
             .expect("bundled authz policies parse"),
         pat_issuer: Arc::new(zeroship_authn::PatIssuer::generate_ephemeral()),
-        auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
+        auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some(common::platform_jwks_url())),
         // No platform deploy-token mint here: that is control's OUTBOUND
         // destination for the device flow, and no fixture below drives one.
         provider_registry: zeroship_control::metering::provider::builtin_registry(),
@@ -2526,9 +2526,9 @@ async fn billing_setup_is_self_service_and_blocks_cross_creator() {
     let fx = build_fixture(&url, "authz").await;
 
     // A normal (non-operator) creator principal. Its PAT user_id IS the creator.
-    let creator_a = common::authz_fixture::non_admin_pat(&fx.state).await;
+    let creator_a = common::authz_fixture::non_admin_principal(&fx.state).await;
     // A second creator (a different user id) — the cross-creator target.
-    let creator_b = common::authz_fixture::non_admin_pat(&fx.state).await;
+    let creator_b = common::authz_fixture::non_admin_principal(&fx.state).await;
 
     let app = test::init_service(
         web::App::new().state(fx.state.clone()).configure(billing_setup_route),
@@ -2575,7 +2575,7 @@ async fn billing_setup_allows_platform_operator_for_any_creator() {
     let url = db_url();
     let fx = build_fixture(&url, "authz-op").await;
 
-    let operator = common::authz_fixture::admin_pat(&fx.state).await;
+    let operator = common::authz_fixture::admin_principal(&fx.state).await;
     let creator = make_user(&fx.state, "op-target").await;
 
     let app = test::init_service(

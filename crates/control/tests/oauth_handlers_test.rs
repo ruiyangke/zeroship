@@ -101,7 +101,7 @@ impl Fixture {
             static_policies: zeroship_authz::load_platform_policies()
                 .expect("bundled authz policies parse"),
             pat_issuer: Arc::new(zeroship_authn::PatIssuer::generate_ephemeral()),
-            auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
+            auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some(common::platform_jwks_url())),
         // No platform deploy-token mint here: that is control's OUTBOUND
         // destination for the device flow, and no fixture below drives one.
         provider_registry: zeroship_control::metering::provider::builtin_registry(),
@@ -368,7 +368,7 @@ async fn non_admin_request_returns_403() {
 async fn admin_can_register_oauth_client_in_native_store() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "register").await;
-    let pat = common::authz_fixture::admin_pat(&fx.state).await;
+    let pat = common::authz_fixture::admin_principal(&fx.state).await;
     let app = init_control!(fx);
     let client_id = format!("oauth-register-{}", Uuid::new_v4().simple());
 
@@ -441,7 +441,7 @@ async fn admin_can_register_oauth_client_in_native_store() {
 async fn skip_consent_is_derived_from_whitelist_not_body() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "trusted-client").await;
-    let pat = common::authz_fixture::admin_pat(&fx.state).await;
+    let pat = common::authz_fixture::admin_principal(&fx.state).await;
     let app = init_control!(fx);
     let client_id = "zeroship-builder".to_string();
     fx.cleanup_clients(std::slice::from_ref(&client_id)).await;
@@ -470,7 +470,7 @@ async fn skip_consent_is_derived_from_whitelist_not_body() {
 async fn arbitrary_client_gets_skip_consent_false() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "untrusted-client").await;
-    let pat = common::authz_fixture::admin_pat(&fx.state).await;
+    let pat = common::authz_fixture::admin_principal(&fx.state).await;
     let app = init_control!(fx);
     let client_id = "acme-ci".to_string();
     fx.cleanup_clients(std::slice::from_ref(&client_id)).await;
@@ -499,7 +499,7 @@ async fn arbitrary_client_gets_skip_consent_false() {
 async fn invalid_scope_returns_400() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "invalid-scope").await;
-    let pat = common::authz_fixture::admin_pat(&fx.state).await;
+    let pat = common::authz_fixture::admin_principal(&fx.state).await;
     let app = init_control!(fx);
     let client_id = format!("oauth-invalid-scope-{}", Uuid::new_v4().simple());
     let mut body = client_body(&client_id);
@@ -527,7 +527,7 @@ async fn invalid_scope_returns_400() {
 async fn redirect_uri_validation_rejects_unsafe_targets_and_allows_loopback_http() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "redirect-uri-validation").await;
-    let pat = common::authz_fixture::admin_pat(&fx.state).await;
+    let pat = common::authz_fixture::admin_principal(&fx.state).await;
     let app = init_control!(fx);
 
     for (label, redirect_uri) in [
@@ -596,7 +596,7 @@ async fn redirect_uri_validation_rejects_unsafe_targets_and_allows_loopback_http
 async fn duplicate_client_id_returns_409() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "duplicate").await;
-    let pat = common::authz_fixture::admin_pat(&fx.state).await;
+    let pat = common::authz_fixture::admin_principal(&fx.state).await;
     let app = init_control!(fx);
     let client_id = format!("oauth-duplicate-{}", Uuid::new_v4().simple());
 
@@ -632,7 +632,7 @@ async fn duplicate_client_id_returns_409() {
 async fn list_returns_registered_clients() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "list").await;
-    let pat = common::authz_fixture::admin_pat(&fx.state).await;
+    let pat = common::authz_fixture::admin_principal(&fx.state).await;
     let app = init_control!(fx);
     let client_id = format!("oauth-list-{}", Uuid::new_v4().simple());
     let redirect_uris = vec!["https://list.example/callback"];
@@ -680,7 +680,7 @@ async fn list_returns_registered_clients() {
 async fn delete_removes_from_native_store() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "delete").await;
-    let pat = common::authz_fixture::admin_pat(&fx.state).await;
+    let pat = common::authz_fixture::admin_principal(&fx.state).await;
     let app = init_control!(fx);
     let client_id = format!("oauth-delete-{}", Uuid::new_v4().simple());
 
