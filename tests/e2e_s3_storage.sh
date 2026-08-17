@@ -149,7 +149,7 @@ unset AWS_SESSION_TOKEN 2>/dev/null || true
 # Override the shared bring-up to use s3:// for the blob store on ALL THREE
 # services and --storage-url s3:// on the worker. We re-implement the lib's
 # control/worker/gateway boot here because the lib hard-codes a local
-# --blob-store; everything else (PG + platform migrations + PAT mint + deploy) reuses it.
+# --blob-store; everything else (PG + platform migrations + bearer mint + deploy) reuses it.
 # ---------------------------------------------------------------------------
 # shellcheck source=tests/lib/e2e_stack.sh
 . "$ROOT/tests/lib/e2e_stack.sh"
@@ -193,11 +193,13 @@ chmod 600 "$WORK/signing-key.pem"
 for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 
 # control — writes deploy blobs + manifests to S3.
-ZEROSHIP_CONTROL_SIGNING_KEY_FILE="$WORK/signing-key.pem"
-ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$ZEROSHIP_CONTROL_SIGNING_KEY_FILE"
+ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$WORK/signing-key.pem"
+# The issuer control verifies the admin bearer against, on the same key the
+# gateway signs with. Up BEFORE control: control reads the issuer once at boot.
+e2e_platform_op_up "$WORK/signing-key.pem" "$WORK" || exit 1
 e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_with_platform_mint_key "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
-  --blob-store "$BLOB_S3" --signing-key-file "$WORK/signing-key.pem" \
+  --blob-store "$BLOB_S3" \
  > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
@@ -223,8 +225,8 @@ curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && pas
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Stage 3: mint admin PAT (offline) ==="
-mint_admin_pat || { fail "PAT mint failed"; exit 1; }
+echo "=== Stage 3: mint the admin bearer ==="
+mint_admin_bearer || { fail "admin bearer mint failed"; exit 1; }
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -235,11 +237,11 @@ echo "=== Stage 4: deploy storage-gallery (its blobs now live in S3) ==="
 # plan, so the test deploys it there (the free-tier cap working as designed is
 # itself proven by the smaller buffered objects in Stage 7).
 ST_APP_JSON="$(curl -s -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" \
-  -H 'Content-Type: application/json' -H "Authorization: Bearer $PAT" \
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" \
   -d '{"name":"storage-gallery-s3","plan_id":"unlimited"}')"
 ST_APP="$(echo "$ST_APP_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).id)}catch(e){console.log("")}})')"
 if [ -z "$ST_APP" ]; then fail "create-app failed: $ST_APP_JSON"; exit 1; fi
-ST_DEP="$("$BIN/zeroship" deploy "$ST_ZSHIP" --app="$ST_APP" --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$PAT" 2>&1)"
+ST_DEP="$("$BIN/zeroship" deploy "$ST_ZSHIP" --app="$ST_APP" --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$ADMIN_TOKEN" 2>&1)"
 if echo "$ST_DEP" | grep -q "deploy_hash"; then
   pass "deployed storage-gallery (plan=unlimited) → app $ST_APP (deploy blobs written to MinIO)"
 else
