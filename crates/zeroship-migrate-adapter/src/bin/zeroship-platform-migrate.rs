@@ -140,9 +140,18 @@ where
                     .to_string(),
             )
         }
-        // Same reader the generated `-file` flags use, so the permission
-        // refusal and the newline trim are the platform's, not a second
-        // implementation.
+        // Same reader the generated `-file` flags use, so a DSN file written
+        // by an editor and one written by `printf` are read identically here
+        // and everywhere else, rather than by a second implementation.
+        //
+        // IT CHECKS NO PERMISSIONS. Measured 2026-08-16 by running this binary
+        // against a 0644 DSN file: it was accepted and the run proceeded to
+        // connect. `read_secret_file` (crates/core/src/config/secrets.rs)
+        // trims one trailing newline and does nothing else, so the mode the
+        // file arrives with is whatever created it - `zeroship dev init`
+        // writes 0600, and nothing re-checks afterwards. What the path form
+        // buys is that the DSN is absent from argv and from the environment;
+        // it is not a claim about the filesystem.
         (Some(path), None) => zeroship_core::config::read_secret_file(&path)
             .map_err(|error| format!("--database-url-file {path}: {error}"))?,
         (None, Some(dsn)) => dsn,
@@ -172,7 +181,9 @@ mod tests {
         items.iter().map(|s| (*s).to_string()).collect()
     }
 
-    /// A DSN file the secret reader will accept: private to the owner.
+    /// A DSN file at 0600, matching what `zeroship dev init` writes. The mode
+    /// is realism, not a precondition: the reader checks no permissions (see
+    /// the note in `parse_args_from`), so these tests would pass at any mode.
     fn dsn_file(dir: &std::path::Path, contents: &str) -> String {
         let path = dir.join("migrate-dsn");
         let mut file = std::fs::File::create(&path).expect("create dsn file");
