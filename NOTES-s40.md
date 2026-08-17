@@ -122,6 +122,28 @@ Same command, same DSN, after the change:
 against the baseline's `5 passed; 3 failed`. The binary was rebuilt at 10:56:30
 against sources last edited 10:55:42, checked by mtime rather than assumed.
 
+## What the change touches, and why each file is in it
+
+- `db/migrations-ts/20260816000100_service_assertion_replay.ts` - the table moves
+  to `service_authn`, which the migration now creates, plus USAGE for the four
+  verifying roles and an explicit REVOKE CREATE. The table grant keeps its exact
+  privilege and role lists.
+- `crates/zeroship-migrate-adapter/policies/platform.policy.toml` - the three
+  namespace-scoped grants gain `service_authn`, without which lowering refuses
+  the table.
+- `crates/zeroship-migrate-adapter/src/platform.rs` - the allowlist test is
+  pinned by value to the new three, so a fourth namespace is a decision.
+- `crates/zeroship-migrate-adapter/tests/platform_migrate.rs` - check (7) bounds
+  the new zone; the stale `12` becomes the maintained constant; the append probe
+  gets a name that sorts last plus a guard that says so when it stops.
+- `crates/authn/src/service_replay.rs`, `crates/authn/tests/service_replay_pg_
+  test.rs` - the qualified names, and a grant parser that selects the TABLE grant
+  by its `kind: "table"` target rather than by being first in the file (the
+  migration now has two grants, and the schema one spells `privileges: ["usage"]`
+  the same way).
+- `deploy/ops/postgres-init.sql`, `docs/proposals/2026-08-16-service-identity.md`
+  - two places that said `zeroship` was the only system schema.
+
 ## Finding 4: option (a) costs a charter widening, and that is the whole price
 
 `crates/zeroship-migrate-adapter/policies/platform.policy.toml` is the ceiling
