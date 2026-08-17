@@ -332,7 +332,6 @@ async fn build_state(db_url: &str, app_base_domain: &str) -> Arc<AppState> {
         trusted_oauth_clients: zeroship_control::default_trusted_oauth_clients(),
         expected_oauth_audience: "control.zeroship.ai".to_string(),
         static_policies: zeroship_authz::load_platform_policies().expect("authz policies"),
-        pat_issuer: Arc::new(zeroship_authn::PatIssuer::generate_ephemeral()),
         auth_provider: zeroship_control::platform_auth_provider(
             "https://auth.zeroship.test/oauth2",
             Some(common::platform_jwks_url()),

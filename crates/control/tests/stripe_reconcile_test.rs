@@ -369,7 +369,6 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         trusted_oauth_clients: zeroship_control::default_trusted_oauth_clients(),
         expected_oauth_audience: "control.zeroship.ai".to_string(),
         static_policies: zeroship_authz::load_platform_policies().expect("authz policies"),
-        pat_issuer: Arc::new(zeroship_authn::PatIssuer::generate_ephemeral()),
         auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some(common::platform_jwks_url())),
         // No platform deploy-token mint here: that is control's OUTBOUND
         // destination for the device flow, and no fixture below drives one.
