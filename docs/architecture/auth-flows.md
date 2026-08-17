@@ -2903,3 +2903,64 @@ VERIFIED drift:
   `crates/auth/src/server.rs:33-205`). The route inventory was inspected and a
   full Auth-tree search for `resend` and `verification` found provider/mail
   terminology but no resend handler.
+
+### 30. HIGH: two Cedar actions are outside the scope vocabulary, so no bearer can carry them
+
+VERIFIED. `zeroship_authz::Action` has 18 variants; `zeroship_authz::Scope` has
+16, and `Scope::action` maps them 1:1 (`crates/authz/src/scope.rs:6-23`,
+`crates/authz/src/scope.rs:47-66`). The two variants with no scope are
+`AppsApproveMigration` (`migrations:approve`) and `PlatformPoliciesWrite`
+(`platform_policies:write`) (`crates/authz/src/action.rs:18`,
+`crates/authz/src/action.rs:32`). `Scope::parse` is a closed vocabulary that
+returns `ParseScopeError::Unknown` for anything else, so neither string can
+enter a scope set (`crates/authz/src/scope.rs:118-138`).
+
+`authz::enforce` is a two-evaluation intersection: when the caller carries a
+wrapper policy it evaluates owner authority against the static policy set
+first, then re-evaluates against the WRAPPER ALONE, and the static platform
+`admin` universal-allow takes no part in that second decision
+(`crates/authz/src/eval.rs`, `enforce`). Control's `AuthzGuard` is built solely
+from a `VerifiedPrincipal` (`crates/control/src/authz_guard.rs`,
+`impl From<VerifiedPrincipal> for AuthzGuard`), and with PATs deleted
+(section 4.1) the only producer of one is `oauth_guard_from_bearer`, whose
+platform arm sets the wrapper to `zeroship_authz::scopes_to_policy(&scopes)`
+and whose GoTrue arm derives it from `principal_grants` parsed through the same
+`Scope::parse` (`crates/authn/src/lib.rs`, `oauth_guard_from_bearer`;
+`crates/authz/src/scope.rs:162-176`). Both wrappers are therefore drawn
+entirely from the 16-scope vocabulary, and neither missing action can appear in
+one.
+
+Migrated reaches `enforce` through the same `BearerVerifier` and copies the
+same wrapper into its `AuthzContext` (`crates/migrated/src/auth.rs`,
+`ControlPlaneAuthenticator::verify_action` and `authorize`).
+
+INFERRED impact: the second evaluation denies both actions for every
+authenticated caller, so two live routes are unreachable by anyone. Migrated's
+migration-approval endpoint requires `Action::AppsApproveMigration`
+(`crates/migrated/src/api.rs:124-140`), which is exactly the operator-only
+approval gate the action's own doc comment describes as reachable through the
+platform `admin` role. Control's three `/admin/oauth-clients` routes each
+require `Action::PlatformPoliciesWrite`
+(`crates/control/src/oauth_handlers.rs:63-73`,
+`crates/control/src/oauth_handlers.rs:130-139`,
+`crates/control/src/oauth_handlers.rs:163-173`,
+`crates/control/src/oauth_handlers.rs:211-221`), so confidential OAuth client
+registration has no caller either.
+
+This is a CONSEQUENCE of the PAT deletion, not a defect the deletion should be
+reversed for: before it, a PAT's stored wrapper policy was authored as arbitrary
+Cedar and could name any action, so the operator path existed only because a
+second issuance authority existed. The gap was already known and stated in the
+test fixtures (`crates/control/tests/common/authz_fixture.rs:41-46`), which say
+in as many words that no bearer can carry either action; what changed is that
+there is no longer any other credential class that can.
+
+Not fixed here, and deliberately not fixed by inventing a scope: whether these
+two operator actions should get scope tokens (widening the creator-facing
+consent vocabulary with operator powers), a separate operator credential class,
+or an out-of-band admin path is an open design decision, and picking one in a
+documentation pass would be picking it by accident. Search method:
+`rg 'AppsApproveMigration|PlatformPoliciesWrite|migrations:approve|platform_policies:write' crates/`
+returned the action definitions, the two route families above, the migrated
+owner-check exemption, and tests - no scope token, and no second producer of a
+wrapper policy.
