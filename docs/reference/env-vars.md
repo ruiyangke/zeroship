@@ -153,10 +153,10 @@ by the generator.
 | `blob_store` | operational | `ZEROSHIP_BLOB_STORE` | `blob_store` | zeroship-control `--blob-store`<br>zeroship-gate `--blob-store`<br>zeroship-worker `--blob-store` | `./bundles` |
 | `check_config` | command control | - | - | zeroship-auth `--check-config`<br>zeroship-control `--check-config`<br>zeroship-gate `--check-config`<br>zeroship-migrated `--check-config`<br>zeroship-worker `--check-config`<br>zeroship-workflow-scheduler `--check-config` | - |
 | `check_config_format` | command control | - | - | zeroship-auth `--check-config-format`<br>zeroship-control `--check-config-format`<br>zeroship-gate `--check-config-format`<br>zeroship-migrated `--check-config-format`<br>zeroship-worker `--check-config-format`<br>zeroship-workflow-scheduler `--check-config-format` | `CheckFormat::Text` |
-| `config` | bootstrap control | `ZEROSHIP_CONFIG` | - | zeroship-auth `--config`<br>zeroship-control `--config`<br>zeroship-gate `--config`<br>zeroship-migrated `--config`<br>zeroship-worker `--config`<br>zeroship-workflow-scheduler `--config` | - |
+| `config` | bootstrap control | `ZEROSHIP_CONFIG` | - | zeroship-auth `--config`<br>zeroship-control `--config`<br>zeroship-gate `--config`<br>zeroship-migrated `--config`<br>zeroship-workflow-scheduler `--config` | - |
 | `control_key` | secret | `ZEROSHIP_CONTROL_KEY` | `control_key` | zeroship-control `--control-key-file`<br>zeroship-gate `--control-key-file`<br>zeroship-migrated `--control-key-file`<br>zeroship-worker `--control-key-file` | - |
 | `control_url` | operational | `ZEROSHIP_CONTROL_URL` | `control_url` | zeroship-auth `--control-url`<br>zeroship-gate `--control-url`<br>zeroship-worker `--control-url` | `http://localhost:9090` |
-| `no_config` | bootstrap control | `ZEROSHIP_NO_CONFIG` | - | zeroship-auth `--no-config`<br>zeroship-control `--no-config`<br>zeroship-gate `--no-config`<br>zeroship-migrated `--no-config`<br>zeroship-worker `--no-config`<br>zeroship-workflow-scheduler `--no-config` | - |
+| `no_config` | bootstrap control | `ZEROSHIP_NO_CONFIG` | - | zeroship-auth `--no-config`<br>zeroship-control `--no-config`<br>zeroship-gate `--no-config`<br>zeroship-migrated `--no-config`<br>zeroship-workflow-scheduler `--no-config` | - |
 | `oauth_audience` | operational | `ZEROSHIP_OAUTH_AUDIENCE` | `oauth_audience` | zeroship-auth `--oauth-audience`<br>zeroship-control `--oauth-audience`<br>zeroship-migrated `--oauth-audience` | `control.zeroship.ai` |
 | `origin_scheme` | operational | `ZEROSHIP_ORIGIN_SCHEME` | `origin_scheme` | zeroship-control `--origin-scheme`<br>zeroship-gate `--origin-scheme` | `OriginScheme::Https` |
 | `pairwise_salt` | secret | `ZEROSHIP_PAIRWISE_SALT` | `pairwise_salt` | zeroship-control `--pairwise-salt-file`<br>zeroship-gate `--pairwise-salt-file` | - |
@@ -438,8 +438,17 @@ the deploy and names each pair until that is done.
 privileged: `migrated` uses it to `CREATE SCHEMA "<app_id>"` and
 `CREATE ROLE migrator_<app_id>` for each deployed app.
 
-Optional: `OPENAI_API_KEY` (defaults empty), `ZEROSHIP_MIGRATE_DSN` (the platform
-migration one-shot).
+Optional: `OPENAI_API_KEY` (defaults empty).
+
+The platform migration one-shot is NOT in this table, because it takes no DSN
+from the environment at all. `zeroship-platform-migrate` reads a path
+(`--database-url-file`), and compose mounts `secrets/migrate-dsn` written by
+`zeroship dev init`. Its DSN is the postgres SUPERUSER, so it is the most
+valuable credential in the deployment and the one that least belongs in a
+process argument list, which is where it lived until 2026-08-16.
+`ZEROSHIP_MIGRATE_DSN` still exists, but only as the input to
+`deploy/ops/db-migrate.sh`, which writes it to a private temporary file and
+passes that path along; it is not read by any container.
 
 Section 4.3 of `docs/proposals/2026-08-11-config-name-alignment.md` requires
 `LEFT == RIGHT` for any container value whose whole scalar is one interpolation.

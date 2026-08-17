@@ -46,9 +46,21 @@ else
           --features zeroship-migrate-adapter/platform-cli --)
 fi
 
-exec "${RUNNER[@]}" \
+# The DSN reaches the binary as a PATH, never as an argument value: `ps` and
+# /proc/<pid>/cmdline are readable by every process of this user, so a DSN in
+# argv is a password published to the whole session for as long as the migrate
+# runs. `ZEROSHIP_MIGRATE_DSN` stays the interface this script offers its seven
+# callers; only the last hop changes.
+DSN_FILE="$(mktemp -t zeroship-migrate-dsn.XXXXXX)"
+chmod 600 "$DSN_FILE"
+trap 'rm -f "$DSN_FILE"' EXIT HUP INT TERM
+printf '%s\n' "$DSN" >"$DSN_FILE"
+
+# `exec` would drop the EXIT trap and leave the DSN on disk, so this one runs as
+# a child and the trap does the cleanup.
+"${RUNNER[@]}" \
   --migrations-dir "$MIGRATIONS_DIR" \
-  --database-url "$DSN" \
+  --database-url-file "$DSN_FILE" \
   --project-schema "$PROJECT_SCHEMA" \
   --project-id "$PROJECT_ID" \
   "$@"

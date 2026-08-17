@@ -10,11 +10,31 @@ use zeroship_core::config::{
     validate_stash_key, validate_worker_key,
 };
 
-const SECRET_FILES: [&str; 8] = [
+// `migrate-dsn` is the one entry that is NOT generated key material: it is the
+// compose `migrate` one-shot's privileged DSN, provisioned rather than randomly
+// derived. It belongs in this set anyway, and the deploy path is what decides
+// that, not taste:
+//
+//   - deploy/compose/docker-compose.yml bind-mounts
+//     ${ZEROSHIP_SECRETS_DIR:-./secrets}/migrate-dsn. If nothing creates the
+//     file, Docker creates a DIRECTORY at that path and the one-shot fails
+//     with an error that names neither the cause nor the fix.
+//   - deploy/scripts/deploy-remote.sh `secret_files()` derives the host's
+//     required secret files by grepping `/etc/zeroship/secrets/<name>` out of
+//     that same compose file, so the mount alone makes this a file every
+//     deploy must find present.
+//   - `docker compose up` already refuses without `zeroship dev init` (the
+//     `${...:?run zeroship dev init}` interpolations), so dev init is the
+//     provisioning step for this stack, and it is the only writer.
+//
+// It carries the postgres SUPERUSER password, so of everything here it is the
+// entry that most needs the 0600 the loop below pins.
+const SECRET_FILES: [&str; 9] = [
     "auth-signing.pem",
     "broker-secret",
     "control-signing.pem",
     "gateway-signing.pem",
+    "migrate-dsn",
     "pairwise-salt",
     "platform-mint-key",
     "refresh-hash-key",
@@ -84,6 +104,31 @@ fn dev_init_generates_the_complete_private_deployment_secret_set() {
 
     assert_base64_file(&secrets_dir.join("broker-secret"), 48);
     assert_base64_file(&secrets_dir.join("refresh-idem-key"), 48);
+
+    // The migrate DSN must be a DSN, and it must address the compose network.
+    // `zeroship-platform-migrate` reads this file verbatim as its connection
+    // string, so a file that is merely present and private still fails the
+    // one-shot if the contents are not a postgres URL for the `postgres`
+    // service. The host is asserted because the value it must match is
+    // POSTGRES_PASSWORD/`postgres` in deploy/compose/docker-compose.yml, and
+    // the two drifting apart is the failure this pins.
+    //
+    // Does NOT cover: that the credential is correct for any real database, or
+    // that the mode survives past the moment dev init writes it. Nothing in
+    // the platform permission-checks a secret file on READ (measured against
+    // crates/core/src/config/secrets.rs `read_secret_file`), so the 0600 the
+    // loop above asserts is the only protection this file has.
+    let migrate_dsn =
+        std::fs::read_to_string(secrets_dir.join("migrate-dsn")).expect("read migrate-dsn");
+    assert!(
+        migrate_dsn.ends_with('\n'),
+        "migrate-dsn must end with a newline; got {migrate_dsn:?}"
+    );
+    assert_eq!(
+        migrate_dsn.trim_end_matches('\n'),
+        "postgres://postgres:zeroship@postgres:5432/zeroship",
+        "migrate-dsn must address the compose postgres service with its POSTGRES_PASSWORD"
+    );
 
     let platform_mint_key =
         std::fs::read_to_string(secrets_dir.join("platform-mint-key"))
