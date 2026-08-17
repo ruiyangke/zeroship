@@ -303,6 +303,25 @@ pub enum SecretError {
         #[source]
         source: std::io::Error,
     },
+    /// A secret file is readable or writable by group or other.
+    ///
+    /// Distinct from [`SecretError::FileIo`] because "could not read" sends an
+    /// operator looking for a missing file or a bad mount, and the fix here is
+    /// a `chmod`. Neither the path nor the mode is secret material.
+    #[error("secret file '{path}' has mode {mode:04o}; group and other permissions must be zero (chmod 600 '{path}')")]
+    InsecurePermissions {
+        /// The offending path.
+        path: String,
+        /// The full st_mode, so the refusal names what it actually saw.
+        mode: u32,
+    },
+    /// A secret file's permissions could not be determined, so the owner-only
+    /// policy cannot be enforced on it.
+    #[error("secret file '{path}' cannot be permission-checked on this platform, so owner-only access cannot be enforced; secret files require a unix filesystem")]
+    UndeterminableMode {
+        /// The path whose mode is unknown.
+        path: String,
+    },
     /// A value with a reserved `urn:`/`arn:` prefix that is not a recognized reference.
     #[error("malformed secret reference '{0}' (a value starting with urn:/arn: must be a recognized reference: the only one is urn:zeroship:file:<path>)")]
     Malformed(String),
@@ -368,32 +387,91 @@ pub fn resolve_secret(raw: &str) -> Result<String, SecretError> {
     }
 }
 
-/// Read a secret file, stripping exactly one trailing line ending.
+/// Read a secret file, enforcing owner-only permissions and stripping exactly
+/// one trailing line ending.
 ///
 /// Shared by the `urn:zeroship:file:` reference arm and the generated `-file`
 /// path flag, so the two spellings of "the secret is in this file" cannot
-/// disagree about trailing whitespace.
+/// disagree about either the permission policy or trailing whitespace.
+///
+/// THE POLICY IS REFUSE, not warn. `zeroship dev init` writes 0600 and until
+/// this function checked, nothing ever re-verified it: a later `chmod`, a file
+/// restored from a backup, a checkout, or a docker bind mount with permissive
+/// host modes silently downgraded every credential in the deployment with no
+/// signal at all. Refusing is what ssh does with a private key and what the
+/// four loaders in this tree that already check do
+/// (`crates/gateway/src/signing.rs`, `crates/auth/src/oidc/{refresh,signing}.rs`,
+/// `crates/authn/src/lib.rs`, all `mode & 0o077 != 0`); a warning in a boot log
+/// is a signal nobody reads.
+///
+/// The mode is taken from the OPEN HANDLE, not from the path. Stat-then-open
+/// leaves a window in which the file checked is not the file read; `fstat` on
+/// the descriptor that produced the bytes cannot be raced that way.
 ///
 /// # Errors
 ///
-/// Returns [`SecretError::FileIo`] when the file cannot be read.
+/// Returns [`SecretError::FileIo`] when the file cannot be opened or read,
+/// [`SecretError::InsecurePermissions`] when it is group- or other-accessible,
+/// and [`SecretError::UndeterminableMode`] when the mode is unavailable.
 pub fn read_secret_file(path: &str) -> Result<String, SecretError> {
-    match std::fs::read_to_string(path) {
-        Ok(mut contents) => {
-            // Strip a single trailing '\n' (and a preceding '\r' if present),
-            // matching how `printf 'secret' > file` vs an editor's trailing
-            // newline differ.
-            if contents.ends_with('\n') {
-                contents.pop();
-                if contents.ends_with('\r') {
-                    contents.pop();
-                }
-            }
-            Ok(contents)
+    use std::io::Read as _;
+
+    let io = |source: std::io::Error| SecretError::FileIo {
+        path: path.to_owned(),
+        source,
+    };
+
+    let mut file = std::fs::File::open(path).map_err(io)?;
+    enforce_owner_only(path, file_mode(&file.metadata().map_err(io)?))?;
+
+    let mut contents = String::new();
+    file.read_to_string(&mut contents).map_err(io)?;
+
+    // Strip a single trailing '\n' (and a preceding '\r' if present),
+    // matching how `printf 'secret' > file` vs an editor's trailing
+    // newline differ.
+    if contents.ends_with('\n') {
+        contents.pop();
+        if contents.ends_with('\r') {
+            contents.pop();
         }
-        Err(source) => Err(SecretError::FileIo {
+    }
+    Ok(contents)
+}
+
+/// The permission bits that must be clear on a secret file: any group or other
+/// access at all, not merely read. Write and execute are included because a
+/// group-writable credential is a credential a second account can replace.
+const GROUP_AND_OTHER_BITS: u32 = 0o077;
+
+/// The mode of an open file, or `None` where the platform has no such concept.
+#[cfg(unix)]
+fn file_mode(metadata: &std::fs::Metadata) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt as _;
+    Some(metadata.permissions().mode())
+}
+
+#[cfg(not(unix))]
+fn file_mode(_metadata: &std::fs::Metadata) -> Option<u32> {
+    None
+}
+
+/// Apply the owner-only policy to a mode that may not be knowable.
+///
+/// Split out from [`file_mode`] so the `None` arm is reachable from a unix test
+/// run. A permission check that quietly returns `Ok` where it cannot measure
+/// anything is worse than no check, because it reads as coverage on exactly the
+/// platform nobody verified - so this FAILS CLOSED instead. There is no opt out:
+/// the platform is io_uring-only and has no non-unix deployment to accommodate.
+fn enforce_owner_only(path: &str, mode: Option<u32>) -> Result<(), SecretError> {
+    match mode {
+        Some(mode) if mode & GROUP_AND_OTHER_BITS != 0 => Err(SecretError::InsecurePermissions {
             path: path.to_owned(),
-            source,
+            mode,
+        }),
+        Some(_) => Ok(()),
+        None => Err(SecretError::UndeterminableMode {
+            path: path.to_owned(),
         }),
     }
 }
@@ -454,6 +532,20 @@ mod tests {
     /// A label no declaration could ever produce, so a message that carries it
     /// can only have got it from the caller.
     const SENTINEL: &str = "ZEROSHIP_SENTINEL_LABEL";
+
+    /// Make a fixture readable only by its owner, which every secret file this
+    /// module reads must be. `std::fs::write` leaves 0644 under the usual 022
+    /// umask, and `read_secret_file` refuses that.
+    fn owner_only(path: &std::path::Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .expect("chmod 0600");
+        }
+        #[cfg(not(unix))]
+        let _ = path;
+    }
 
     // S4: one unified stash validator. Empty and short keys are rejected and
     // values of at least 32 bytes are accepted.
@@ -742,6 +834,9 @@ mod tests {
             // Trailing newline (and a CR) must be stripped on resolve.
             f.write_all(b"file-secret-value\r\n").expect("write secret");
         }
+        // A secret file must be owner-only to be readable at all; the default
+        // umask here would leave it 0644 and the resolve below would refuse it.
+        owner_only(&path);
         let path_str = path.to_str().expect("utf8 path");
         let reference = format!("urn:zeroship:file:{path_str}");
 
@@ -766,8 +861,9 @@ mod tests {
         // But validate (format-only) accepts it without touching the filesystem.
         validate_secret_ref(missing).expect("missing file path is format-valid");
 
-        // Does NOT cover file PERMISSIONS: a world-readable secret file still
-        // resolves here. That check belongs to the overlay permission gate.
+        // Does NOT cover file PERMISSIONS beyond needing them owner-only to get
+        // this far; the policy itself is
+        // `a_group_or_world_accessible_secret_file_is_refused`.
     }
 
     // File contents are the literal secret. A file whose text happens to spell a
@@ -785,6 +881,7 @@ mod tests {
         }
         let _cleanup = Cleanup(path.clone());
         std::fs::write(&path, b"urn:zeroship:file:/etc/shadow\n").expect("write nested ref");
+        owner_only(&path);
         let reference = format!("urn:zeroship:file:{}", path.to_str().expect("utf8 path"));
 
         assert_eq!(
