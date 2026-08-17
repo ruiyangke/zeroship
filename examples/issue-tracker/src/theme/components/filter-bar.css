@@ -1,42 +1,5 @@
-[data-slot~="filter-bar"] {
-  display: flex;
-  inline-size: 100%;
-  min-block-size: var(--it-row-h);
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--it-space-2);
-  padding-block: var(--it-space-1);
-  border-block-end: 1px solid var(--it-line);
-}
-
 /* Input appends the semantic search slot to the native control, not shell. */
-[data-slot~="filter-bar"]
-  > [data-slot~="input"]:has(> [data-slot~="filter-bar-search"]) {
-  flex: 1 1 var(--it-space-7);
-  min-inline-size: var(--it-space-7);
-}
-
 [data-slot~="filter-bar-search"] {
   inline-size: 100%;
   min-inline-size: 0;
-}
-
-[data-slot~="filter-bar-filters"] {
-  flex: 0 1 auto;
-  gap: var(--it-space-1);
-}
-
-[data-slot~="filter-bar-clear"] {
-  flex: 0 0 auto;
-}
-
-[data-slot~="filter-bar-spacer"] {
-  flex: 1 1 0;
-  min-inline-size: 0;
-}
-
-[data-slot~="filter-bar-actions"] {
-  flex: 0 0 auto;
-  gap: var(--it-space-2);
-  margin-inline-start: auto;
 }

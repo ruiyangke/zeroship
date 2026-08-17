@@ -14,16 +14,6 @@
   min-inline-size: 0;
 }
 
-[data-slot~="page-header-text"] {
-  grid-row: 1;
-  min-inline-size: 0;
-}
-
-[data-slot~="page-header-breadcrumbs"] {
-  color: var(--it-ink-muted);
-  font-size: var(--it-text-xs);
-}
-
 [data-slot~="page-header-title"] {
   margin: 0;
   color: var(--it-ink);
@@ -37,11 +27,4 @@
   color: var(--it-ink-secondary);
   font-size: var(--it-text-base);
   line-height: var(--it-leading-snug);
-}
-
-[data-slot~="page-header-actions"] {
-  grid-column: 2;
-  grid-row: 1 / span 3;
-  align-self: center;
-  flex: 0 0 auto;
 }

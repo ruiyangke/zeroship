@@ -1,7 +1,3 @@
-[data-slot~="dialog-viewport"] {
-  display: contents;
-}
-
 [data-slot~="dialog-backdrop"] {
   position: fixed;
   inset: 0;
