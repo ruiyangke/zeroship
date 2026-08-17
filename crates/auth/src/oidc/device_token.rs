@@ -16,7 +16,8 @@ use uuid::Uuid;
 use zeroship_authz::Scope;
 use zeroship_core::auth::{constant_time_eq, extract_bearer};
 use zeroship_core::device_grant::{
-    PLATFORM_CLI_CLIENT_ID, PLATFORM_CLI_ISSUABLE_SCOPES, PLATFORM_TOKEN_MAX_TTL_SECS,
+    OFFLINE_ACCESS_SCOPE, PLATFORM_CLI_CLIENT_ID, PLATFORM_CLI_ISSUABLE_SCOPES,
+    PLATFORM_CLI_REGISTERED_SCOPES, PLATFORM_TOKEN_MAX_TTL_SECS,
 };
 
 use crate::advisory_lock::lock_refresh_user_xact;
@@ -44,8 +45,11 @@ fn platform_cli_redirect_uris() -> Vec<String> {
     Vec::new()
 }
 
+/// What the CLI registration is allowed to REQUEST - the authority ceiling
+/// plus `offline_access`, which asks for the refresh family and confers no
+/// authority of its own.
 fn platform_cli_scopes() -> Vec<String> {
-    PLATFORM_CLI_ISSUABLE_SCOPES
+    PLATFORM_CLI_REGISTERED_SCOPES
         .iter()
         .map(|scope| (*scope).to_string())
         .collect()
@@ -66,7 +70,7 @@ async fn platform_cli_registration_is_exact(
                     AND oc.skip_consent \
                     AND oc.created_by IS NULL \
                     AND oc.client_secret_hash IS NULL \
-                    AND NOT oc.refresh_allowed \
+                    AND oc.refresh_allowed \
                     AND oc.token_endpoint_auth_method = 'none' \
                     AND NOT oc.brokered \
                     AND oc.backchannel_logout_uri IS NULL \
@@ -107,7 +111,7 @@ pub async fn reconcile_platform_cli_client(
                 (client_id, client_name, client_uri, logo_uri, redirect_uris, scopes, \
                  skip_consent, created_by, client_secret_hash, refresh_allowed, \
                  token_endpoint_auth_method, brokered, backchannel_logout_uri) \
-             VALUES ($1, $2, NULL, NULL, $3, $4, TRUE, NULL, NULL, FALSE, \
+             VALUES ($1, $2, NULL, NULL, $3, $4, TRUE, NULL, NULL, TRUE, \
                      'none', FALSE, NULL) \
              ON CONFLICT (client_id) DO UPDATE SET \
                 client_name = EXCLUDED.client_name, \
@@ -118,7 +122,7 @@ pub async fn reconcile_platform_cli_client(
                 skip_consent = TRUE, \
                 created_by = NULL, \
                 client_secret_hash = NULL, \
-                refresh_allowed = FALSE, \
+                refresh_allowed = TRUE, \
                 token_endpoint_auth_method = 'none', \
                 brokered = FALSE, \
                 backchannel_logout_uri = NULL \
@@ -143,7 +147,7 @@ pub async fn reconcile_platform_cli_client(
     Ok(())
 }
 
-async fn platform_cli_policy_selected(
+pub(super) async fn platform_cli_policy_selected(
     db: &(impl GenericClient + ?Sized),
     client_id: &str,
 ) -> Result<bool, OAuthError> {
@@ -161,6 +165,52 @@ async fn platform_cli_policy_selected(
             Err(OAuthError::server_error("client registry unavailable"))
         }
     }
+}
+
+/// Mint the access token a grant for `client` must hand back.
+///
+/// The first-party CLI client is a PLATFORM PRINCIPAL client: its token's
+/// `sub` is the `zeroship.users` UUID and its `aud` is control's configured
+/// resource audience, because control is the only thing that consumes it
+/// (`zeroship_authn::BearerVerifier::verify_bearer` compares both, and
+/// `crates/authz`'s `token_revocations` lookup is keyed on `(client_id, sub)`
+/// with that same UUID). Every other client gets the ordinary pairwise OIDC
+/// access token, with its per-app sector subject and app-resource audience.
+///
+/// Both grants that can produce a CLI token come through here - the device
+/// grant, and the refresh rotation that follows it. That is the point: a
+/// rotation that minted the pairwise shape would answer HTTP 200 and then be
+/// refused by control, which is a failure with no error message anywhere near
+/// its cause.
+#[allow(clippy::future_not_send)]
+pub(super) async fn mint_grant_access_token(
+    db: &Transaction<'_>,
+    cfg: &AuthConfig,
+    issuer: &Issuer,
+    client: &crate::oidc::authorization_code::OAuthClient,
+    user_id: Uuid,
+    scopes: &[String],
+) -> Result<String, OAuthError> {
+    if !platform_cli_policy_selected(db, &client.client_id).await? {
+        return mint_access_token(db, issuer, client, user_id, scopes).await;
+    }
+    let principal_id = user_id.to_string();
+    issuer
+        .issue_principal_access_token(
+            db,
+            &PrincipalAccessTokenMint {
+                principal_id: &principal_id,
+                audience: cfg.settings.oauth_audience.get().trim(),
+                client_id: PLATFORM_CLI_CLIENT_ID,
+                scopes,
+                ttl_secs: Some(ACCESS_TOKEN_TTL_SECS),
+            },
+        )
+        .await
+        .map_err(|err| {
+            tracing::error!(error = %err, "platform CLI access-token mint failed");
+            OAuthError::server_error("access token mint failed")
+        })
 }
 
 #[derive(Debug, Deserialize)]
@@ -632,6 +682,24 @@ async fn exchange_device_code_locked(
                 .map(|scope| parse_scopes(&scope))
                 .unwrap_or_default();
             let granted_scopes = sort_dedup(requested_scopes);
+            // The cap here is the client REGISTRATION, and only that.
+            //
+            // Say what this does not do, because two sibling paths do it and
+            // the difference is invisible from the response: neither this
+            // check nor the mint below intersects with
+            // `zeroship.principal_grants`, which control's
+            // `deploy_scopes_for_principal` and `mint_platform_token` both do.
+            // An operator who deletes a grant row therefore does not narrow a
+            // token issued here.
+            //
+            // It cannot be fixed in this function alone. The only writer of
+            // platform-creator grants is control's `/api/device/token`
+            // (`identity_bridge::ensure_platform_creator_grants`), and
+            // `db/migrations-ts/20260702000900_grants.ts` gives `zeroship_auth`
+            // SELECT only on that table - so intersecting before provisioning
+            // moves would mint `scope: ""` on every first login. Pinned by
+            // `crates/auth/tests/cli_device_refresh_test.rs`,
+            // `the_cli_device_grant_does_not_consult_stored_principal_grants`.
             if platform_cli && !scope_subset(&granted_scopes, &platform_cli_scopes()) {
                 return Err(OAuthError::invalid_grant(
                     "device grant scope is no longer allowed",
@@ -644,33 +712,16 @@ async fn exchange_device_code_locked(
 
             delete_device_grant(db, device_code_hash).await?;
 
-            let (access_token, expires_in) = if platform_cli {
-                let principal_id = user_id.to_string();
-                let access_token = issuer
-                    .issue_principal_access_token(
-                        db,
-                        &PrincipalAccessTokenMint {
-                            principal_id: &principal_id,
-                            audience: cfg.settings.oauth_audience.get().as_str(),
-                            client_id: PLATFORM_CLI_CLIENT_ID,
-                            scopes: &granted_scopes,
-                            ttl_secs: Some(PLATFORM_TOKEN_MAX_TTL_SECS),
-                        },
-                    )
-                    .await
-                    .map_err(|err| {
-                        tracing::error!(error = %err, "device token: platform CLI mint failed");
-                        OAuthError::server_error("access token mint failed")
-                    })?;
-                (access_token, PLATFORM_TOKEN_MAX_TTL_SECS as u64)
-            } else {
-                (
-                    mint_access_token(db, issuer, client, user_id, &granted_scopes).await?,
-                    ACCESS_TOKEN_TTL_SECS as u64,
-                )
-            };
-            let refresh_token = if !platform_cli
-                && granted_scopes.iter().any(|scope| scope == "offline_access")
+            // One lifetime for every client on this grant. The CLI used to take
+            // the 12-hour ceiling BECAUSE it got no refresh token; now that it
+            // does, the trade runs the other way - a short self-contained
+            // bearer plus a long DB-backed family gives the same usable
+            // session AND a revocation that works.
+            let access_token =
+                mint_grant_access_token(db, cfg, issuer, client, user_id, &granted_scopes).await?;
+            let refresh_token = if granted_scopes
+                .iter()
+                .any(|scope| scope == OFFLINE_ACCESS_SCOPE)
                 && client.refresh_allowed
             {
                 let keys = RefreshTokenKeys::from_config(cfg)?;
@@ -696,7 +747,7 @@ async fn exchange_device_code_locked(
                 id_token: None,
                 refresh_token,
                 token_type: TOKEN_TYPE_BEARER,
-                expires_in,
+                expires_in: ACCESS_TOKEN_TTL_SECS as u64,
                 scope: granted_scopes.join(" "),
             })
         }

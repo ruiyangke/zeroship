@@ -23,6 +23,15 @@ struct MockServer {
 
 impl MockServer {
     fn start(responses: Vec<(u16, &'static str)>) -> Self {
+        Self::start_owned(
+            responses
+                .into_iter()
+                .map(|(status, body)| (status, body.to_string()))
+                .collect(),
+        )
+    }
+
+    fn start_owned(responses: Vec<(u16, String)>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
         listener
             .set_nonblocking(true)
@@ -75,18 +84,40 @@ fn accept_with_timeout(listener: &TcpListener) -> TcpStream {
     }
 }
 
+/// A JWT-shaped access token whose payload is
+/// `{"sub":"11111111-1111-4111-8111-111111111111"}`.
+///
+/// The OP's token response is a plain RFC 6749 body with no `principal_id`
+/// field, so the identity the CLI prints has to come out of the token itself.
+const PRINCIPAL_JWT: &str =
+    "e30.eyJzdWIiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEifQ.sig";
+const PRINCIPAL_ID: &str = "11111111-1111-4111-8111-111111111111";
+
+/// RFC 9728 protected-resource metadata: control naming the authorization
+/// server whose tokens it accepts. `{{BASE_URL}}` is the mock server, which
+/// stands in for both control and the OP.
+const PROTECTED_RESOURCE_METADATA: &str =
+    r#"{"resource":"control.zeroship.ai","authorization_servers":["{{BASE_URL}}/oauth2"]}"#;
+
+fn device_authorization_body(device_code: &str) -> String {
+    format!(
+        r#"{{"device_code":"{device_code}","user_code":"BCDF-GHJK-LMNP","verification_uri":"http://auth.test/device","verification_uri_complete":"http://auth.test/device?user_code=BCDF-GHJK-LMNP","interval":1,"expires_in":60}}"#
+    )
+}
+
+fn op_token_body(refresh_token: &str) -> String {
+    format!(
+        r#"{{"access_token":"{PRINCIPAL_JWT}","token_type":"Bearer","expires_in":900,"scope":"apps:deploy apps:read apps:write secrets:read offline_access","refresh_token":"{refresh_token}"}}"#
+    )
+}
+
 #[test]
-fn device_grant_flow_polls_until_approved() {
-    let server = MockServer::start(vec![
-        (
-            200,
-            r#"{"device_code":"dev-123","user_code":"ABCD-EFGH","verification_uri":"http://auth.test/device","verification_uri_complete":"http://auth.test/device?user_code=ABCD-EFGH","interval":1,"expires_in":60}"#,
-        ),
-        (400, r#"{"error":"authorization_pending"}"#),
-        (
-            200,
-            r#"{"access_token":"platform-access","token_type":"Bearer","provider":"platform","expires_in":120,"scope":"apps:deploy apps:read apps:write secrets:read","principal_id":"11111111-1111-4111-8111-111111111111"}"#,
-        ),
+fn device_grant_flow_polls_the_op_until_approved_and_stores_a_refresh_token() {
+    let server = MockServer::start_owned(vec![
+        (200, PROTECTED_RESOURCE_METADATA.to_string()),
+        (200, device_authorization_body("dev-123")),
+        (400, r#"{"error":"authorization_pending"}"#.to_string()),
+        (200, op_token_body("zrt_root")),
     ]);
     let config = tempfile::tempdir().expect("tempdir");
 
@@ -105,8 +136,7 @@ fn device_grant_flow_polls_until_approved() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&output.stdout)
-            .contains("Signed in as 11111111-1111-4111-8111-111111111111"),
+        String::from_utf8_lossy(&output.stdout).contains(&format!("Signed in as {PRINCIPAL_ID}")),
         "stdout={}",
         String::from_utf8_lossy(&output.stdout)
     );
@@ -117,26 +147,64 @@ fn device_grant_flow_polls_until_approved() {
     );
 
     let requests = server.requests();
-    assert_eq!(requests.len(), 3);
-    assert_eq!(requests[0].method, "POST");
-    assert_eq!(requests[0].path, "/api/device/auth");
-    assert_header(&requests[0], "content-type", "application/json");
-    assert!(requests[0].body.contains(r#""client_id":"zeroship-cli""#));
-    assert!(requests[0].body.contains("apps:write"));
-    assert!(requests[0].body.contains("secrets:read"));
-    assert_eq!(requests[1].path, "/api/device/token");
-    assert!(requests[1].body.contains(r#""device_code":"dev-123""#));
-    assert_eq!(requests[2].path, "/api/device/token");
+    assert_eq!(requests.len(), 4, "requests={requests:?}");
+    // Discovery first: control names the authorization server it trusts, so
+    // the CLI cannot be pointed at an OP whose tokens control would refuse.
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(requests[0].path, "/.well-known/oauth-protected-resource");
+
+    // Then the OP's own RFC 8628 endpoints, form-encoded as OAuth requires.
+    assert_eq!(requests[1].method, "POST");
+    assert_eq!(requests[1].path, "/oauth2/device/authorization");
+    assert_header(
+        &requests[1],
+        "content-type",
+        "application/x-www-form-urlencoded",
+    );
     assert!(
-        requests[2].at.duration_since(requests[1].at) >= Duration::from_millis(900),
+        requests[1].body.contains("client_id=zeroship-cli"),
+        "body={}",
+        requests[1].body
+    );
+    assert!(
+        requests[1].body.contains("offline_access"),
+        "the CLI must ask for a refresh token; body={}",
+        requests[1].body
+    );
+    assert!(requests[1].body.contains("apps%3Adeploy"), "body={}", requests[1].body);
+    assert!(requests[1].body.contains("secrets%3Aread"), "body={}", requests[1].body);
+    assert!(
+        !requests[1].body.contains("openid"),
+        "the device grant mints no id_token, so openid is noise; body={}",
+        requests[1].body
+    );
+
+    assert_eq!(requests[2].path, "/oauth2/token");
+    assert_header(
+        &requests[2],
+        "content-type",
+        "application/x-www-form-urlencoded",
+    );
+    assert!(requests[2].body.contains("device_code=dev-123"), "body={}", requests[2].body);
+    assert_eq!(requests[3].path, "/oauth2/token");
+    assert!(
+        requests[3].at.duration_since(requests[2].at) >= Duration::from_millis(900),
         "token polling did not wait for the server interval"
     );
 
     let token = read_token(config.path());
-    assert_eq!(token["access_token"], "platform-access");
-    assert_eq!(token["refresh_token"], "");
+    assert_eq!(token["access_token"], PRINCIPAL_JWT);
+    assert_eq!(
+        token["refresh_token"], "zrt_root",
+        "without this the CLI has nothing to rotate and a 15-minute session"
+    );
     assert_eq!(token["provider"], "platform");
-    assert_eq!(token["auth_url"], server.url);
+    assert_eq!(token["auth_url"], format!("{}/oauth2", server.url));
+    assert_eq!(
+        token["token_endpoint"],
+        format!("{}/oauth2/token", server.url),
+        "the rotation endpoint is stored so a refresh needs no second discovery"
+    );
     assert_eq!(token["control_url"], server.url);
     assert_eq!(token["client_id"], "zeroship-cli");
     assert!(token["expires_at"].as_u64().expect("expires_at") > now_secs());
@@ -154,17 +222,170 @@ fn device_grant_flow_polls_until_approved() {
 }
 
 #[test]
+fn an_expired_access_token_rotates_and_the_successor_is_persisted_before_it_is_used() {
+    // The control call after the rotation fails. If the CLI persisted the
+    // rotated credential only after a successful use, the file would still
+    // hold `zrt_old` here - and `zrt_old` is now a REUSE presentation that
+    // revokes the whole family, locking the user out. Writing first is what
+    // makes a crash between rotation and use survivable.
+    let server = MockServer::start_owned(vec![
+        (200, op_token_body("zrt_new")),
+        (500, r#"{"error":"boom"}"#.to_string()),
+    ]);
+    let config = tempfile::tempdir().expect("tempdir");
+    write_token(
+        config.path(),
+        &serde_json::json!({
+            "access_token": "e30.eyJzdWIiOiJzdGFsZSJ9.sig",
+            "refresh_token": "zrt_old",
+            "expires_at": now_secs() - 1,
+            "auth_url": format!("{}/oauth2", server.url),
+            "client_id": "zeroship-cli",
+            "provider": "platform",
+            "control_url": server.url,
+            "token_endpoint": format!("{}/oauth2/token", server.url),
+        }),
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_zeroship"))
+        .arg("secret")
+        .arg("list")
+        .arg("--app=11111111-1111-4111-8111-111111111111")
+        .arg(format!("--control={}", server.url))
+        .env("ZEROSHIP_CONFIG_HOME", config.path())
+        .output()
+        .expect("run zeroship secret list");
+    assert!(
+        !output.status.success(),
+        "the control call was mocked as a 500 and must fail\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2, "requests={requests:?}");
+    assert_eq!(requests[0].method, "POST");
+    assert_eq!(requests[0].path, "/oauth2/token");
+    assert_header(
+        &requests[0],
+        "content-type",
+        "application/x-www-form-urlencoded",
+    );
+    assert!(
+        requests[0].body.contains("grant_type=refresh_token"),
+        "body={}",
+        requests[0].body
+    );
+    assert!(
+        requests[0].body.contains("refresh_token=zrt_old"),
+        "body={}",
+        requests[0].body
+    );
+    assert!(
+        requests[0].body.contains("client_id=zeroship-cli"),
+        "a public client identifies itself on the token endpoint; body={}",
+        requests[0].body
+    );
+
+    let token = read_token(config.path());
+    assert_eq!(
+        token["refresh_token"], "zrt_new",
+        "the rotated refresh token must survive a failure of whatever used the access token"
+    );
+    assert_eq!(token["access_token"], PRINCIPAL_JWT);
+    assert!(token["expires_at"].as_u64().expect("expires_at") > now_secs());
+}
+
+#[test]
+fn a_login_that_yields_no_refresh_token_fails_instead_of_storing_a_15_minute_session() {
+    // Same four legs as the happy path; the single variable is the absent
+    // `refresh_token` on the last response. Accepting it would store a
+    // credential that expires mid-deploy with nothing to rotate.
+    let server = MockServer::start_owned(vec![
+        (200, PROTECTED_RESOURCE_METADATA.to_string()),
+        (200, device_authorization_body("dev-norefresh")),
+        (400, r#"{"error":"authorization_pending"}"#.to_string()),
+        (
+            200,
+            format!(
+                r#"{{"access_token":"{PRINCIPAL_JWT}","token_type":"Bearer","expires_in":900,"scope":"apps:read"}}"#
+            ),
+        ),
+    ]);
+    let config = tempfile::tempdir().expect("tempdir");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_zeroship"))
+        .arg("login")
+        .arg("--control")
+        .arg(&server.url)
+        .env("ZEROSHIP_CONFIG_HOME", config.path())
+        .output()
+        .expect("run zeroship login");
+
+    assert!(
+        !output.status.success(),
+        "login stored a refresh-less credential\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no refresh token"),
+        "the failure must name what is missing; stderr={stderr}"
+    );
+    assert!(
+        !token_path(config.path()).exists(),
+        "nothing may be written when the credential is unusable"
+    );
+}
+
+#[test]
+fn a_refused_rotation_reports_that_the_session_ended_rather_than_a_raw_http_error() {
+    // Family revocation (a reuse detection, an operator revoke, an account
+    // disable) surfaces here as `invalid_grant`. The human's next step is
+    // `zeroship login`, so say that.
+    let server = MockServer::start_owned(vec![(
+        400,
+        r#"{"error":"invalid_grant","error_description":"refresh token is invalid"}"#.to_string(),
+    )]);
+    let config = tempfile::tempdir().expect("tempdir");
+    write_token(
+        config.path(),
+        &serde_json::json!({
+            "access_token": "e30.eyJzdWIiOiJzdGFsZSJ9.sig",
+            "refresh_token": "zrt_revoked",
+            "expires_at": now_secs() - 1,
+            "auth_url": format!("{}/oauth2", server.url),
+            "client_id": "zeroship-cli",
+            "provider": "platform",
+            "control_url": server.url,
+            "token_endpoint": format!("{}/oauth2/token", server.url),
+        }),
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_zeroship"))
+        .arg("secret")
+        .arg("list")
+        .arg("--app=11111111-1111-4111-8111-111111111111")
+        .arg(format!("--control={}", server.url))
+        .env("ZEROSHIP_CONFIG_HOME", config.path())
+        .output()
+        .expect("run zeroship secret list");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("zeroship login"),
+        "a dead refresh family must point at re-login; stderr={stderr}"
+    );
+}
+
+#[test]
 fn login_honors_project_config_environment_and_prints_provenance() {
-    let server = MockServer::start(vec![
-        (
-            200,
-            r#"{"device_code":"dev-config","user_code":"ABCD-EFGH","verification_uri":"http://auth.test/device","verification_uri_complete":"http://auth.test/device?user_code=ABCD-EFGH","interval":1,"expires_in":60}"#,
-        ),
-        (400, r#"{"error":"authorization_pending"}"#),
-        (
-            200,
-            r#"{"access_token":"platform-access","token_type":"Bearer","provider":"platform","expires_in":120,"scope":"apps:deploy apps:read apps:write secrets:read","principal_id":"11111111-1111-4111-8111-111111111111"}"#,
-        ),
+    let server = MockServer::start_owned(vec![
+        (200, PROTECTED_RESOURCE_METADATA.to_string()),
+        (200, device_authorization_body("dev-config")),
+        (400, r#"{"error":"authorization_pending"}"#.to_string()),
+        (200, op_token_body("zrt_config")),
     ]);
     let project = tempfile::tempdir().expect("project tempdir");
     let token_config = tempfile::tempdir().expect("token tempdir");
@@ -224,24 +445,26 @@ fn login_honors_project_config_environment_and_prints_provenance() {
     );
 
     let requests = server.requests();
-    assert_eq!(requests.len(), 3);
-    assert_eq!(requests[0].path, "/selected/api/device/auth");
-    assert_eq!(requests[1].path, "/selected/api/device/token");
-    assert_eq!(requests[2].path, "/selected/api/device/token");
+    assert_eq!(requests.len(), 4, "requests={requests:?}");
+    // Only DISCOVERY is addressed relative to the resolved control URL. The
+    // authorization server it names is absolute, so the OP legs do not inherit
+    // the `/selected` prefix.
+    assert_eq!(
+        requests[0].path,
+        "/selected/.well-known/oauth-protected-resource"
+    );
+    assert_eq!(requests[1].path, "/oauth2/device/authorization");
+    assert_eq!(requests[2].path, "/oauth2/token");
+    assert_eq!(requests[3].path, "/oauth2/token");
 }
 
 #[test]
-fn supabase_device_flow_uses_control_and_stores_platform_token() {
-    let server = MockServer::start(vec![
-        (
-            200,
-            r#"{"device_code":"supabase-dev-123","user_code":"BCDF-GHJK","verification_uri":"http://auth.test/device","verification_uri_complete":"http://auth.test/device?user_code=BCDF-GHJK","interval":1,"expires_in":60}"#,
-        ),
-        (400, r#"{"error":"authorization_pending"}"#),
-        (
-            200,
-            r#"{"access_token":"platform-access","token_type":"Bearer","provider":"platform","expires_in":120,"scope":"apps:deploy apps:read apps:write secrets:read","principal_id":"11111111-1111-4111-8111-111111111111"}"#,
-        ),
+fn supabase_provider_flag_still_drives_the_one_device_flow() {
+    let server = MockServer::start_owned(vec![
+        (200, PROTECTED_RESOURCE_METADATA.to_string()),
+        (200, device_authorization_body("supabase-dev-123")),
+        (400, r#"{"error":"authorization_pending"}"#.to_string()),
+        (200, op_token_body("zrt_supabase")),
     ]);
     let config = tempfile::tempdir().expect("tempdir");
 
@@ -261,34 +484,32 @@ fn supabase_device_flow_uses_control_and_stores_platform_token() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&output.stdout)
-            .contains("Signed in as 11111111-1111-4111-8111-111111111111"),
+        String::from_utf8_lossy(&output.stdout).contains(&format!("Signed in as {PRINCIPAL_ID}")),
         "stdout={}",
         String::from_utf8_lossy(&output.stdout)
     );
 
     let requests = server.requests();
-    assert_eq!(requests.len(), 3);
-    assert_eq!(requests[0].method, "POST");
-    assert_eq!(requests[0].path, "/api/device/auth");
-    assert_header(&requests[0], "content-type", "application/json");
-    assert!(requests[0].body.contains(r#""client_id":"zeroship-cli""#));
-    assert!(requests[0].body.contains("apps:write"));
-    assert_eq!(requests[1].path, "/api/device/token");
-    assert!(requests[1].body.contains("supabase-dev-123"));
-    assert_eq!(requests[2].path, "/api/device/token");
+    assert_eq!(requests.len(), 4, "requests={requests:?}");
+    assert_eq!(requests[0].path, "/.well-known/oauth-protected-resource");
+    assert_eq!(requests[1].method, "POST");
+    assert_eq!(requests[1].path, "/oauth2/device/authorization");
+    assert!(requests[1].body.contains("client_id=zeroship-cli"));
+    assert!(requests[1].body.contains("apps%3Awrite"));
+    assert_eq!(requests[2].path, "/oauth2/token");
+    assert!(requests[2].body.contains("supabase-dev-123"));
+    assert_eq!(requests[3].path, "/oauth2/token");
     assert!(
-        requests[2].at.duration_since(requests[1].at) >= Duration::from_millis(900),
+        requests[3].at.duration_since(requests[2].at) >= Duration::from_millis(900),
         "token polling did not wait for the server interval"
     );
 
     let token = read_token(config.path());
-    assert_eq!(token["access_token"], "platform-access");
-    assert_eq!(token["refresh_token"], "");
+    assert_eq!(token["access_token"], PRINCIPAL_JWT);
+    assert_eq!(token["refresh_token"], "zrt_supabase");
     assert_eq!(token["provider"], "platform");
-    assert_eq!(token["auth_url"], server.url);
+    assert_eq!(token["auth_url"], format!("{}/oauth2", server.url));
     assert_eq!(token["control_url"], server.url);
-    assert!(token["token_endpoint"].is_null());
     assert!(token["anon_key"].is_null());
     assert!(token["expires_at"].as_u64().expect("expires_at") > now_secs());
 }

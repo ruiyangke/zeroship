@@ -2209,6 +2209,80 @@ async fn platform_only_provider_refuses_a_gotrue_bearer() {
     common::drain_pg().await;
 }
 
+/// `zeroship login` holds ONE configured URL - control's - and learns the OP
+/// from this document. The value it must carry is therefore not "an issuer"
+/// but THE issuer `zeroship_authn::BearerVerifier` pins `iss` to, because a
+/// token minted anywhere else is a token control refuses.
+#[compio::test]
+async fn protected_resource_metadata_names_the_issuer_control_verifies_against() {
+    let fx = Fixture::new_with_provider(FixtureProvider::Platform).await;
+
+    let app = test::init_service(
+        web::App::new()
+            .state(fx.state.clone())
+            .configure(device_handlers::configure),
+    )
+    .await;
+
+    let req = test::TestRequest::get()
+        .uri(device_grant::PROTECTED_RESOURCE_METADATA_PATH)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&test::read_body(resp).await).expect("metadata body json");
+
+    let configured = fx
+        .state
+        .auth_provider
+        .platform_issuer()
+        .expect("platform fixture configures an issuer")
+        .to_string();
+    assert_eq!(
+        body["authorization_servers"],
+        json!([configured]),
+        "the advertised OP must be the one whose tokens this control accepts"
+    );
+    assert_eq!(body["resource"], fx.state.expected_oauth_audience.as_str());
+    // The CLI appends the OP's protocol paths to this string, so a value that
+    // is not the OP's protocol root would send the device request somewhere
+    // that cannot serve it.
+    assert!(
+        configured.ends_with(device_grant::OP_PATH_PREFIX),
+        "advertised issuer is not an OP protocol root: {configured}"
+    );
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+}
+
+/// The one-variable control for the case above: same request, same route, and
+/// the single difference is whether a platform OP is configured at all. A
+/// deployment with none has no device flow to advertise, and naming an issuer
+/// anyway would send the CLI somewhere control would refuse tokens from.
+#[compio::test]
+async fn protected_resource_metadata_is_absent_without_a_platform_op() {
+    let fx = Fixture::new_with_provider(FixtureProvider::SupabaseOnly).await;
+
+    let app = test::init_service(
+        web::App::new()
+            .state(fx.state.clone())
+            .configure(device_handlers::configure),
+    )
+    .await;
+
+    let req = test::TestRequest::get()
+        .uri(device_grant::PROTECTED_RESOURCE_METADATA_PATH)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    drop(app);
+    drop(fx);
+    common::drain_pg().await;
+}
+
 /// Without a platform OP the flow must refuse to start, not start and strand.
 ///
 /// This is the clause that survives in `ensure_platform_device_provider` after

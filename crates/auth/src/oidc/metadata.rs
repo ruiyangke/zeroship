@@ -5,6 +5,7 @@ use std::sync::Arc;
 use compio_postgres::Client;
 use ntex::web::{self, HttpResponse};
 use serde_json::{json, Map, Value};
+use zeroship_core::device_grant;
 
 use crate::config::AuthConfig;
 use crate::error::{AuthError, Result};
@@ -101,10 +102,14 @@ pub fn discovery_metadata(issuer: &str) -> Value {
     json!({
         "issuer": issuer,
         "authorization_endpoint": format!("{issuer}/authorize"),
-        "token_endpoint": format!("{issuer}/token"),
+        // The two the CLI drives come from `zeroship_core::device_grant`, the
+        // one definition its client also reads. Spelling them twice is how the
+        // producer and the consumer drifted before.
+        "token_endpoint": format!("{issuer}{}", device_grant::TOKEN_PATH),
         "userinfo_endpoint": format!("{issuer}/userinfo"),
         "end_session_endpoint": format!("{issuer}/logout"),
-        "device_authorization_endpoint": format!("{issuer}/device/authorization"),
+        "device_authorization_endpoint":
+            format!("{issuer}{}", device_grant::DEVICE_AUTHORIZATION_PATH),
         "revocation_endpoint": format!("{issuer}/revoke"),
         "introspection_endpoint": format!("{issuer}/introspect"),
         "jwks_uri": format!("{issuer}/.well-known/jwks.json"),
