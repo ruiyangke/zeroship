@@ -768,12 +768,30 @@ impl ServiceAssertionVerifier {
         // `exp <= now + ceiling + leeway`. It is implied by these two -
         // `exp = iat + lifetime <= (now + leeway) + ceiling` - so no input can
         // trip it that the pair does not already reject, and no test could make
-        // it fail on its own. Worse, while it was present it ALSO caught both
-        // of the cases below, so deleting either real guard left the suite
-        // green. Measured: mutating away the lifetime bound with the third one
-        // present gave "26 passed"; with it gone the ceiling test fails. A
-        // redundant guard that hides the failure of a real one is not defence
-        // in depth.
+        // it fail on its own. It also stood in FRONT of them, so a broken real
+        // guard could go unnoticed.
+        //
+        // MEASURED as a four-cell factorial against a 29-test baseline, each
+        // cell one mutation of this function:
+        //
+        //   break the lifetime ceiling, third bound absent  -> 27 passed, 2 failed
+        //   break the lifetime ceiling, third bound present -> 28 passed, 1 failed
+        //   break the `iat` bound,      third bound absent  -> 28 passed, 1 failed
+        //   break the `iat` bound,      third bound present -> 29 passed, 0 failed
+        //
+        // So the masking was TOTAL for the `iat` bound and that cell alone
+        // justifies the deletion: with the third bound present, the `iat` bound
+        // could be deleted outright and the suite stayed fully green, because
+        // `iat = now + 3570, exp = now + 3600` trips `exp <= now + 75` first.
+        // For the lifetime ceiling the masking was only PARTIAL - it took the
+        // run from two failures to one, and a 28/1 run is still a red suite.
+        // The commit that removed the bound (32d2577bc) and an earlier version
+        // of this comment both cited that one-failure run as though it were
+        // green; it was not.
+        //
+        // The deletion is still right. A redundant guard that can turn a real
+        // guard's failure invisible is not defence in depth, and cell D is that
+        // exactly.
         let lifetime = claims.exp.checked_sub(claims.iat).ok_or("lifetime overflow")?;
         if lifetime <= 0 || lifetime > ceiling {
             return Err("assertion lifetime exceeds the ceiling");
