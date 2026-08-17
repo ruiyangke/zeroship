@@ -469,6 +469,14 @@ async fn uuid_id_defaults_detect_add_remove_and_swap_without_cosmetic_drift() {
         "\"AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA\"",
     );
 
+    // An ordinary (non-ID) default on `label`. This case used to change the
+    // SPELLING and the VALUE at once - `'draft'` against `('published')` - and
+    // assert the pair clean, which could only hold while nothing compared an
+    // ordinary default at all. It cannot distinguish "the parens drifted" from
+    // "the stored value drifted", so it is split into the two questions it was
+    // conflating: redundant grouping is still cosmetic and must stay clean, and a
+    // changed value is a changed default and must now be reported
+    // (`comparable_column_default`).
     let p = paths("ordinary_default_cosmetic");
     let be = backend(&p);
     be.apply_one_additive(
@@ -488,15 +496,32 @@ async fn uuid_id_defaults_detect_add_remove_and_swap_without_cosmetic_drift() {
     replace_table(
         &p,
         "notes",
+        "CREATE TABLE notes (id INTEGER PRIMARY KEY, label TEXT DEFAULT ('draft'));",
+    );
+    let actual = backend(&p)
+        .snapshot_schema_sqlite()
+        .await
+        .expect("cosmetic default snapshot");
+    assert!(
+        diff_snapshots(&expected, &actual).is_clean(),
+        "ordinary default spelling alone must not create drift"
+    );
+
+    replace_table(
+        &p,
+        "notes",
         "CREATE TABLE notes (id INTEGER PRIMARY KEY, label TEXT DEFAULT ('published'));",
     );
     let actual = backend(&p)
         .snapshot_schema_sqlite()
         .await
-        .expect("actual snapshot");
-    assert!(
-        diff_snapshots(&expected, &actual).is_clean(),
-        "ordinary emission-only default spelling/value must not create ID drift"
+        .expect("changed default snapshot");
+    assert_column_drift(
+        &diff_snapshots(&expected, &actual),
+        "label",
+        "default",
+        "\"draft\"",
+        "\"published\"",
     );
 }
 

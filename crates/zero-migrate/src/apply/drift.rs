@@ -2355,9 +2355,91 @@ fn pg_foreign_key_definition(
     Ok(definition)
 }
 
+/// Canonical rendered form of a `nextval` default, or `None` when the expression
+/// is not one. Dialect-free on purpose: the sequence identity is the whole key.
 fn comparable_nextval_default(expr: Option<&str>) -> Option<String> {
     let sequence = parse_nextval_sequence_ref(expr?)?;
     Some(crate::render::declarative::nextval_default_expr(&sequence))
+}
+
+/// One column's ORDINARY `DEFAULT` reduced to a semantic key when comparing the
+/// two sides' spellings is meaningful, and `None` when it is not.
+///
+/// The FOURTH member of the family [`constraint_definition_is_comparable`],
+/// [`index_expression_bodies_are_comparable`] and [`comparable_vendor_objects`]
+/// belong to, answering the same question - is this text worth comparing across an
+/// offline render and a live catalog read? - for the default on a column that
+/// carries no ID facet at all. Those columns never populate
+/// [`ColumnSnapshot::id_default`], so the raw SQL text in
+/// [`ColumnSnapshot::default`] is the only evidence either side holds, and until
+/// this existed nothing compared it: an out-of-band `ALTER COLUMN ... SET DEFAULT`
+/// changed what every silent write stores and no drift line said so.
+///
+/// WHAT PostgreSQL NORMALISES. `pg_get_expr` deparses from the parse tree rather
+/// than replaying the authored text. Measured on PostgreSQL 18.4:
+///
+/// | authored             | read back from the catalog |
+/// |----------------------|----------------------------|
+/// | `DEFAULT 'active'`   | `'active'::text`           |
+/// | `DEFAULT '{}'`       | `'{}'::jsonb`              |
+/// | `DEFAULT current_user` | `CURRENT_USER`           |
+///
+/// So a byte compare of authored text against catalog text reports drift on every
+/// text and JSON default that exists, on every comparison, on a schema nobody has
+/// touched. What this returns instead is the SAME semantic key the ID-default
+/// surface already uses: [`catalog_id_default`] strips the cast parse analysis
+/// inferred, canonicalises quoting, decimal spelling and boolean form, and lands
+/// `'active'` and `'active'::text` on one fingerprint. Both sides go through it, so
+/// the normalisation is applied to the authored render and the catalog read alike -
+/// which is sound precisely because `pg_get_expr` is idempotent.
+///
+/// WHEN THE COMPARISON IS SKIPPED, and why each skip is not an oversight:
+///
+/// * `None` dialect. [`introspected_table_dialect`] recognises a live catalog read
+///   by the evidence only introspection leaves; a snapshot without it is not one,
+///   and the literal fingerprint is dialect-sensitive (a MySQL `COLUMN_DEFAULT`
+///   arrives with its SQL quotes already stripped). A `nextval` still compares,
+///   because its key is a sequence identity rather than a spelling.
+/// * Either side reduces to [`IdDefaultSnapshot::Expression`]. That arm is a
+///   fingerprint of DEPARSED TEXT, and the two sides do not produce text the same
+///   way: the offline renderer quotes every identifier and knows no column types,
+///   so it cannot reproduce PostgreSQL's inferred casts or keyword rewriting. This
+///   is the same refusal [`constraint_definition_is_comparable`] makes for a CHECK
+///   body and [`index_expression_bodies_are_comparable`] makes for an index
+///   expression key, for the same reason.
+///
+/// WHAT THIS GIVES UP: an expression default rewritten out of band is not reported.
+/// `DEFAULT now()` swapped for `DEFAULT clock_timestamp()`, or a `DEFAULT '{}'`
+/// swapped for `DEFAULT '[]'`, leaves this differ silent - and so does an
+/// expression default ADDED to a column that had none, because the added side
+/// reduces to `Expression` even though the absent side is unambiguous. That is a
+/// real loss, the same one the CHECK, index-expression and vendor-object
+/// exemptions already take, and recovering it needs the same treatment foreign
+/// keys get: parse the catalog text back to the closed AST and compare
+/// structurally rather than comparing spellings.
+fn comparable_column_default(
+    raw: Option<&str>,
+    dialect: Option<SqlDialect>,
+    mysql_expression_default: Option<bool>,
+) -> Option<IdDefaultSnapshot> {
+    let Some(raw) = raw else {
+        return Some(IdDefaultSnapshot::Absent);
+    };
+    if let Some(sequence) = comparable_nextval_default(Some(raw)) {
+        return Some(IdDefaultSnapshot::Nextval(sequence));
+    }
+    let dialect = dialect?;
+    // MySQL reports `COLUMN_DEFAULT` in its COERCED character form, without SQL
+    // quotes, so the two sides only meet once the authored key is projected into
+    // that same storage spelling. `mysql_expression_default` is the authoritative
+    // literal-vs-expression bit; the authored side has none and does not need one,
+    // because its text still carries its quotes.
+    let key = if dialect == SqlDialect::Mysql {
+        catalog_text_id_default(Some(raw), dialect, mysql_expression_default)
+    } else {
+        catalog_id_default(Some(raw), dialect, None)
+    };
+    (!matches!(key, IdDefaultSnapshot::Expression(_))).then_some(key)
 }
 
 fn diff_sequence_attrs(
@@ -2796,19 +2878,24 @@ fn diff_attrs(
                     &format_id_default(Some(expected_default)),
                     &format_id_default(Some(&actual_default)),
                 );
-            } else {
-                // Backward-compatible parsed-nextval seam for callers that
-                // construct snapshots directly without the newer semantic key.
-                let expected_nextval = comparable_nextval_default(ec.default.as_deref());
-                let actual_nextval = comparable_nextval_default(ac.default.as_deref());
-                if expected_nextval.is_some() || actual_nextval.is_some() {
-                    push(
-                        &obj,
-                        "default",
-                        expected_nextval.as_deref().unwrap_or(""),
-                        actual_nextval.as_deref().unwrap_or(""),
-                    );
-                }
+            } else if let (Some(expected_default), Some(actual_default)) = (
+                // The ordinary-default surface: no ID facet, so the raw SQL text
+                // is all either side holds. `comparable_column_default` documents
+                // which spellings that text can be compared through and which it
+                // cannot; a `None` on either side is that refusal, not an absence.
+                comparable_column_default(ec.default.as_deref(), actual_dialect, None),
+                comparable_column_default(
+                    ac.default.as_deref(),
+                    actual_dialect,
+                    ac.mysql_default_generated,
+                ),
+            ) {
+                push(
+                    &obj,
+                    "default",
+                    &format_id_default(Some(&expected_default)),
+                    &format_id_default(Some(&actual_default)),
+                );
             }
         }
     }
