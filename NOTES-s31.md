@@ -261,3 +261,64 @@ assertion_replay.ts without moving the constant.
 
 Not fixed here, per the brief. The fix is one line, 22 -> 23, plus +8 on the
 billing floor once it lands.
+
+## RESULTS
+
+### What was gated
+
+tests/run_auth_suite.sh (commit 61b0b1bc9, floor in 78dfcf682)
+  + `zeroship-authn:` in the binary list, and `GATEWAY_POOL_SMOKE_URL` exported
+  + `zeroship-gateway:db_pool_smoke`
+  floor 595 -> 604 (+9 measured)
+
+tests/run_billing_suite.sh (commit 344c9db12)
+  + a `zeroship-migrate-adapter --features platform-cli` group with
+    `ZERO_MIGRATE_TEST_PG_URL="$DSN"`, no name list
+  floor 660 -> 670 (+10 measured; platform_migrate's 8 excluded because it is
+  red on a stale constant, see RED 3)
+
+### Proof the gate provisions, not just names (one variable, three arms)
+
+    cargo test -p zeroship-authn --test service_replay_pg_test
+
+    A  no DSN, no REQUIRE   6 x ZEROSHIP-TEST-SKIPPED
+                            test result: ok. 6 passed ... in 0.00s
+    B  no DSN, REQUIRE=1    6 panics at crates/test-support/src/lib.rs:102
+    C  inside the gate      test result: ok. 6 passed ... in 1.12s, no skip line
+
+A and C differ ONLY in the clock and the announcement; B is what tells them
+apart. Same shape for `db_pool_smoke`: REQUIRE=1 with no DSN gives
+"0 passed; 1 failed"; inside the gate it is "1 passed ... in 0.50s".
+
+### Verification numbers
+
+    tests/run_auth_suite.sh          656 passed, 0 unexpected skips,
+                                     1 allowlisted, floor 595 -> 604, exit 0
+                                     (647 before this branch; +9 is exactly
+                                     the added tests)
+    cargo test -p zeroship-control --lib   224 passed
+    cargo test -p zeroship-auth --lib      221 passed
+    tests/commit_msg_gate.sh --range main..HEAD   6 commits, 0 rejected
+    tests/run_billing_suite.sh       RAN (not skipped): it recreated and
+                                     migrated zeroship_billing_test and printed
+                                     per-binary results. 696 passed, 50 failed,
+                                     exit 1. See RED 1 and RED 2.
+
+### A run that lied, and the control that caught it
+
+The FIRST auth-suite run reported 170 passed and failed the floor, with 3
+failures in the zeroship-auth lib ("signing key L0N3gfn... has non-activatable
+status retiring", all three naming the SAME deterministic key id). Because
+run_auth_suite.sh:98 invokes `cargo test -p zeroship-auth` WITHOUT
+`--no-fail-fast`, that lib failure aborted the remaining ~480 auth integration
+tests, which is where 170 came from - not from any coverage loss.
+
+Re-run with a private database (`TEST_DB=zeroship_s31_auth`) and nothing else
+changed: 656 passed, 0 failures. So those 3 were a shared-database collision on
+`zeroship_auth_test`, not a defect - another process was using the same
+database name at the same time. n=1 could not have told those apart, and the
+number it produced (170) was real and meant nothing.
+
+Worth recording separately: `cargo test -p zeroship-auth` in that script has no
+`--no-fail-fast`, so ONE red lib test hides ~480 results. run_billing_suite.sh
+passes the flag for exactly this reason (its header says so at :49-52).
