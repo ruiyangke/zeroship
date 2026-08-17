@@ -233,6 +233,40 @@ else
 fi
 
 echo "------------------------------------------------------------------"
+echo "==> zeroship-migrate-adapter live-PG targets (ZERO_MIGRATE_TEST_PG_URL)"
+# ZERO_MIGRATE_TEST_PG_URL was set NOWHERE in this repo. Three targets read it,
+# and each announced a skip and counted as passed on every run:
+#
+#   tests/smoke_apply_pg.rs        1 test of 1
+#   tests/author_and_apply_pg.rs   1 test of 2
+#   tests/platform_migrate.rs      the PG-apply half (ci.yml said so in a
+#                                  comment and left it that way)
+#
+# MEASURED, one variable changed, on `author_and_apply_pg`:
+#   unset -> "test result: ok. 2 passed ... finished in 0.04s", one skip line
+#   set   -> "test result: ok. 2 passed ... finished in 0.34s", no skip line
+# The result lines are IDENTICAL. Only the clock and the announcement differ,
+# which is exactly why being named in a script is not evidence of coverage.
+#
+# The database is the one THIS SCRIPT ALREADY CREATED. Nothing new is
+# provisioned: `smoke_apply_pg` and `author_and_apply_pg` create and drop their
+# own token-suffixed `proj_*` / `meta_*` schemas, and `platform_migrate`
+# provisions and drops its own scratch database through the admin session. They
+# run after the control and migrated groups so neither can disturb them.
+#
+# No name list, same as the two groups above: the package invocation runs every
+# target in the crate, so a target added there is covered here the moment it is
+# added.
+if run_group env ZERO_MIGRATE_TEST_PG_URL="$DSN" \
+     cargo test -p zeroship-migrate-adapter --features platform-cli --no-fail-fast \
+     -- "${THREAD_ARG[@]}"; then
+  :
+else
+  fail=1
+  failed+=("zeroship-migrate-adapter::platform-cli")
+fi
+
+echo "------------------------------------------------------------------"
 echo "==> zeroship-metering outbox WAL unit tests"
 # Not a zeroship-control target and not feature-gated, so the invocations above
 # do not reach it; the metering outbox is the producer half of the money path.
@@ -301,7 +335,22 @@ passed="$(grep -oE '^test result: ok\. [0-9]+ passed' "$SUITE_LOG" \
 # Raise it deliberately when the suite grows. A fixed floor gets looser with
 # every test added, which is the wrong direction for a guard against coverage
 # loss.
-BILLING_MIN_PASSED="${BILLING_MIN_PASSED:-660}"
+# 660 -> 670 for the zeroship-migrate-adapter group added above. The +10 is the
+# measured contribution of that group's PASSING targets, counted the way the
+# tally below counts (`test result: ok.` lines only), against the same database
+# this script provisions:
+#     lib unittests                2
+#     bin zeroship-platform-migrate 5
+#     author_and_apply_pg           2
+#     smoke_apply_pg                1
+# `platform_migrate` contributes 0 to this number because it is RED - 3 passed,
+# 5 failed, every one of the five on `PLATFORM_MIGRATION_FILES = 22`
+# (crates/zeroship-migrate-adapter/tests/platform_migrate.rs:42) against the 23
+# files now in db/migrations-ts. That constant already fails the DB-FREE test in
+# the same binary, which the `rust` job runs today, so the red is not something
+# this group introduced. When it is corrected, raise this floor by a further 8
+# rather than treating the gap as slack.
+BILLING_MIN_PASSED="${BILLING_MIN_PASSED:-670}"
 if [ "$passed" -lt "$BILLING_MIN_PASSED" ]; then
   echo "FAIL: only ${passed} billing tests passed, fewer than the ${BILLING_MIN_PASSED} this gate expects." >&2
   echo "A group that silently stopped running is indistinguishable from a group that passed." >&2
