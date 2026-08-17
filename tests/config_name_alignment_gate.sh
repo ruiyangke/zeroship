@@ -206,9 +206,11 @@ compose_command_items() {
 # away is why no check in this script could see a secret sitting in a tracked
 # overlay until check 8 was written.
 #
-# A quoted scalar ends at its closing quote, so a `#` INSIDE the value stays
-# part of the value. Getting that wrong would truncate a secret at its first
-# `#` and could turn a literal into something that looked like a clean prefix.
+# A quoted scalar ends at its closing quote - BOTH TOML quote forms, basic `"`
+# and literal `'` - so a `#` INSIDE the value stays part of the value. Getting
+# that wrong would truncate a secret at its first `#`. Handling `'` matters in
+# the other direction too: without it a legitimate `'urn:zeroship:file:/x'`
+# keeps its opening quote, fails the prefix test and reads as a violation.
 toml_assignments() {
     awk '
         /^[[:space:]]*#/ { next }
@@ -224,9 +226,10 @@ toml_assignments() {
             gsub(/[[:space:]"]/, "", key)
             val = $0
             sub(/^[^=]*=[[:space:]]*/, "", val)
-            if (substr(val, 1, 1) == "\"") {
+            quote = substr(val, 1, 1)
+            if (quote == "\"" || quote == "'\''") {
                 val = substr(val, 2)
-                q = index(val, "\"")
+                q = index(val, quote)
                 if (q > 0) val = substr(val, 1, q - 1)
             } else {
                 sub(/[[:space:]]*#.*$/, "", val)
