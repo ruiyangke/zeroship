@@ -375,9 +375,6 @@
           "refColumn": "id",
           "onDelete": "setNull"
         },
-        "initialCc": {
-          "type": "json"
-        },
         "isActive": {
           "type": "boolean",
           "required": true,
@@ -761,11 +758,6 @@
         },
         "description": {
           "type": "string"
-        },
-        "isIssueGroup": {
-          "type": "boolean",
-          "required": true,
-          "default": true
         }
       },
       "options": {

@@ -63,7 +63,7 @@ Every table gets the seven injected platform system columns (`id`,
   votesToConfirm (all three default 0, which means voting is off)
 - `components` — productId -> products, name, description, defaultAssigneeId
   (NOT NULL: a component always has an initial owner), defaultQaContactId,
-  initialCc, isActive
+  isActive
 - `versions` — productId -> products, name, sortKey, isActive
 - `milestones` — productId -> products, name, sortKey, isActive
 - `keywords` — name (unique), description
@@ -107,7 +107,7 @@ Every table gets the seven injected platform system columns (`id`,
 - `users` — email (unique), handle (unique), name, isAdmin, isDisabled,
   timezone, prefs (json). Bugzilla has login + realname and no third name
   field, so there is no separate `realName`
-- `groups` — name (unique), description, isIssueGroup
+- `groups` — name (unique), description
 - `groupMembers` — groupId, userId
 - `productGroups` — productId, groupId (per-product visibility)
 - `savedSearches` — ownerId, name, queryJson, isShared

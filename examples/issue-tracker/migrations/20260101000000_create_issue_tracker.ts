@@ -93,7 +93,6 @@ export default {
       columns: {
         name: t.text().notNull().unique(),
         description: t.text(),
-        isIssueGroup: t.boolean().notNull().default(true),
       },
     });
 
@@ -141,9 +140,6 @@ export default {
         // `bugs.create` with no guaranteed assignment target.
         defaultAssigneeId: t.text().notNull().references("users", "id", { onDelete: "restrict" }),
         defaultQaContactId: t.text().references("users", "id", { onDelete: "setNull" }),
-        // Bugzilla's `initialcc`: users CC'd onto every new bug in this
-        // component. Stored as a JSON array of user ids.
-        initialCc: t.json(),
         isActive: t.boolean().notNull().default(true),
       },
       indexes: [

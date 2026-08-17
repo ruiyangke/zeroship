@@ -3926,7 +3926,6 @@ export const createGroup = mutation(
       await db.groups.insert({
         name: cleanName,
         ...(description ? { description } : {}),
-        isIssueGroup: true,
       }),
     );
   },

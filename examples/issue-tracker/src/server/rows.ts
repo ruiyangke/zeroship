@@ -151,7 +151,6 @@ export type GroupMemberRow = SystemRow & { groupId: string; userId: string };
 export type GroupRow = SystemRow & {
   name: string;
   description?: string | null;
-  isIssueGroup: boolean;
 };
 export type IssueGroupRow = SystemRow & { issueId: string; groupId: string };
 

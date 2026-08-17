@@ -55,7 +55,6 @@ const schema = {
     description: t.string(),
     defaultAssigneeId: t.string().required(),
     defaultQaContactId: t.string(),
-    initialCc: t.json(),
     isActive: t.boolean().required().default(true),
   }).index("components_product_idx", ["productId"]).uniqueIndex("components_product_name_uniq", ["productId","name"]).index("components_deleted_at_idx", ["deleted_at"]).index("components_updated_at_idx", ["updated_at"]).index("components_created_by_idx", ["created_by"]),
   flagTypes: defineSchema({
@@ -81,7 +80,6 @@ const schema = {
   groups: defineSchema({
     name: t.string().required().unique(),
     description: t.string(),
-    isIssueGroup: t.boolean().required().default(true),
   }).uniqueIndex("groups_name_key", ["name"]).index("groups_deleted_at_idx", ["deleted_at"]).index("groups_updated_at_idx", ["updated_at"]).index("groups_created_by_idx", ["created_by"]),
   issueCc: defineSchema({
     issueId: t.string().required(),
