@@ -33,7 +33,6 @@ mod common;
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 const TEST_CONTROL_KEY: &str = "test-control-key";
-const TEST_PLATFORM_MINT_KEY: &str = "test-platform-mint-key";
 const SUPABASE_ANON_KEY: &str = "test-anon-key";
 const SUPABASE_JWT_SECRET: &str = "test-supabase-jwt-secret-at-least-32-bytes";
 
@@ -129,7 +128,6 @@ impl Fixture {
             blob_store,
             workflow_blob_store,
             control_key: SecretString::new(TEST_CONTROL_KEY.to_string()),
-            auth_platform_mint_key: SecretString::new(TEST_PLATFORM_MINT_KEY.to_string()),
             master_key: SecretString::new(TEST_MASTER_KEY.to_string()),
             stripe_webhook_secret: SecretString::new(String::new()),
             stripe_secret_key: SecretString::new(String::new()),
@@ -151,7 +149,6 @@ impl Fixture {
                 .expect("bundled authz policies parse"),
             pat_issuer: Arc::new(zeroship_authn::PatIssuer::generate_ephemeral()),
             auth_provider,
-            platform_mint_url: None,
             provider_registry: zeroship_control::metering::provider::builtin_registry(),
             billing_stack: zeroship_control::metering::provider::BillingStack::for_tests(),
             billing_stream: None,

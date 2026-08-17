@@ -1009,7 +1009,6 @@ mod tests {
             ("database-url", "database-url-file"),
             ("stash-signing-key", "stash-signing-key-file"),
             ("totp-enc-key", "totp-enc-key-file"),
-            ("platform-mint-key", "platform-mint-key-file"),
             ("google-client-secret", "google-client-secret-file"),
             ("github-client-secret", "github-client-secret-file"),
             ("smtp-password", "smtp-password-file"),
