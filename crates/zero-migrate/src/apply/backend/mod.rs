@@ -594,6 +594,37 @@ pub trait MigrationBackend {
         Ok(Vec::new())
     }
 
+    /// Describe what would make the database REFUSE an
+    /// `ALTER TABLE … ALTER COLUMN … TYPE` of `column` on `table`, or an empty list
+    /// when the retype would be accepted.
+    ///
+    /// A SEPARATE question from [`Self::blocking_column_dependents`], and the two
+    /// answers really do differ. Measured against a live PostgreSQL beside the
+    /// server's own verdict, one table per companion object: a column another
+    /// table's FOREIGN KEY points at BLOCKS a drop and is ACCEPTED for a retype, so
+    /// reusing the drop predicate here would refuse a migration the server honours.
+    /// In the other direction a retype is blocked by partition-key membership and
+    /// by column inheritance, neither of which is a dependency and neither of which
+    /// a drop predicate would ever look at.
+    ///
+    /// Read-only, and called under the apply lock immediately before the retype, so
+    /// a statement the server will refuse never runs beside ops that would commit.
+    ///
+    /// The default answers "nothing blocks it", for the same reason the drop
+    /// predicate's default does: SQLite reconciles a type change by rebuilding the
+    /// table rather than by altering a column, and the MySQL leg refuses
+    /// `setColumnType` at the lower. Only the PostgreSQL impl consults a catalog,
+    /// using the predicate `tests/pg_column_retype_dependency_oracle.rs` measures
+    /// against a live server.
+    async fn column_type_change_blockers(
+        &self,
+        _cfg: &ExecutorConfig,
+        _table: &str,
+        _column: &str,
+    ) -> Result<Vec<String>, ApplyError> {
+        Ok(Vec::new())
+    }
+
     // -- squash (DB-coupled supersession journal write) ---------------------
 
     /// Journal a **squash** as a `completed` `kind='squash'` event WITHOUT running

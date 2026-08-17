@@ -117,9 +117,10 @@ pub enum PreconditionError {
         /// The offending value.
         value: String,
     },
-    /// PostgreSQL could not describe the objects that block a bare column drop.
-    /// This query is part of the structured assertion, so failure to evaluate it
-    /// must fail closed instead of treating the column as safe to drop.
+    /// PostgreSQL could not describe the objects that block a bare column drop, or
+    /// the ones that block a column retype. This query is part of the structured
+    /// assertion, so failure to evaluate it must fail closed instead of treating
+    /// the column as safe to change.
     #[error("precondition blocking-column dependency query failed: {0}")]
     BlockingColumnDependents(#[source] Box<ApplyError>),
     /// A [`Precondition::SqlBoolean`]'s SQL was denied by the guard (cross-schema
@@ -180,7 +181,7 @@ fn quote_ident(ident: &str) -> String {
 /// - [`PreconditionError::InvalidIdentifier`] — a structured check's table/column
 /// is not a bare identifier.
 /// - [`PreconditionError::BlockingColumnDependents`] - PostgreSQL could not query
-/// the objects that block a bare column drop.
+/// the objects that block a bare column drop, or the ones that block a retype.
 /// - [`PreconditionError::Guard`] — a `SqlBoolean` was guard-denied.
 /// - [`PreconditionError::NotABooleanSelect`] — a `SqlBoolean` is not a single
 /// boolean-returning `SELECT`.
@@ -212,6 +213,11 @@ pub async fn evaluate<D: SqlSession>(
         }
         Precondition::ColumnHasNoBlockingDependents { table, column } => {
             Ok(drop_column_blockers(conn, cfg, table, column)
+                .await?
+                .is_empty())
+        }
+        Precondition::ColumnTypeChangeHasNoBlockers { table, column } => {
+            Ok(retype_column_blockers(conn, cfg, table, column)
                 .await?
                 .is_empty())
         }
@@ -267,9 +273,20 @@ pub(crate) async fn evaluate_all<D: SqlSession>(
         // evaluation, not only a boolean, so its refusal can name what PostgreSQL
         // says depends on the column. Keep that vector in this per-migration loop;
         // projecting it through `evaluate` would discard the reason for refusal.
+        // Both blocked-column assertions do this, and they ask DIFFERENT questions
+        // of the catalog - see `Precondition::ColumnTypeChangeHasNoBlockers`.
         let (met, blockers) = match &pc.check {
             Precondition::ColumnHasNoBlockingDependents { table, column } => {
                 let blockers = drop_column_blockers(conn, cfg, table, column)
+                    .await
+                    .map_err(|e| ApplyError::PreconditionFailed {
+                        version: m.version.as_str().to_string(),
+                        which: format!("{:?} could not be evaluated: {e}", pc.check),
+                    })?;
+                (blockers.is_empty(), Some(blockers))
+            }
+            Precondition::ColumnTypeChangeHasNoBlockers { table, column } => {
+                let blockers = retype_column_blockers(conn, cfg, table, column)
                     .await
                     .map_err(|e| ApplyError::PreconditionFailed {
                         version: m.version.as_str().to_string(),
@@ -324,6 +341,31 @@ async fn drop_column_blockers<D: SqlSession>(
     validate_ident("column", column)?;
     PostgresBackend::new_generic(conn)
         .blocking_column_dependents(cfg, table, column)
+        .await
+        .map_err(|error| PreconditionError::BlockingColumnDependents(Box::new(error)))
+}
+
+/// Ask the PostgreSQL backend's measured dependency predicate what would make the
+/// server refuse an `ALTER COLUMN … TYPE`. A backend call for the same reason the
+/// drop question is one: a second SQL spelling here could drift away from the live
+/// oracle that certifies it.
+///
+/// Deliberately a DIFFERENT predicate from [`drop_column_blockers`]. The two
+/// disagree in both directions on shapes measured against a live server, so
+/// routing this variant through the drop question would refuse retypes PostgreSQL
+/// accepts (a column an inbound FOREIGN KEY names) and admit retypes it rejects (a
+/// partition-key column, an inherited column).
+#[cfg(pg_seam)]
+async fn retype_column_blockers<D: SqlSession>(
+    conn: &D,
+    cfg: &ExecutorConfig,
+    table: &str,
+    column: &str,
+) -> Result<Vec<String>, PreconditionError> {
+    validate_ident("table", table)?;
+    validate_ident("column", column)?;
+    PostgresBackend::new_generic(conn)
+        .column_type_change_blockers(cfg, table, column)
         .await
         .map_err(|error| PreconditionError::BlockingColumnDependents(Box::new(error)))
 }

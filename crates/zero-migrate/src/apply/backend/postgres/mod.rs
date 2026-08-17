@@ -376,6 +376,110 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
             .collect()
     }
 
+    /// The retype-blocking predicate, MEASURED against a live server by
+    /// `tests/pg_column_retype_dependency_oracle.rs`, which calls THIS function and
+    /// attempts a real `ALTER COLUMN … TYPE` per shape.
+    ///
+    /// It is NOT the drop predicate with a filter bolted on, even though it reads
+    /// the same `pg_depend` join. Three differences, each a counterexample the
+    /// server supplied:
+    ///
+    /// 1. **Constraint-shaped dependents never block a retype.** PostgreSQL
+    ///    revalidates a CHECK, and rebuilds a UNIQUE / EXCLUDE / PRIMARY KEY index,
+    ///    rather than refusing. That includes the case the drop predicate exists
+    ///    for: an EXCLUDE whose expression reads the column BLOCKS a drop and is
+    ///    ACCEPTED for a retype. So the drop predicate's whole second leg - the one
+    ///    about an index a constraint internally owns - has no subject here and is
+    ///    absent, and with `pg_constraint` excluded the drop predicate's
+    ///    "does this dependent also hold an AUTO edge" qualifier has no subject
+    ///    either. It was a rule ABOUT constraints.
+    /// 2. **A FOREIGN KEY pointing AT the column blocks a drop and does not block a
+    ///    retype.** Falls out of (1) - the referencing constraint is a
+    ///    `pg_constraint` dependent - and it is the row that makes reusing the drop
+    ///    assertion an over-refusal rather than a conservative default.
+    /// 3. **Two blockers are not dependencies at all.** A column in the table's
+    ///    PARTITION KEY, and a column INHERITED from a parent table, are refused by
+    ///    `ATPrepAlterColumnType` before any dependency is consulted and leave no
+    ///    blocking `pg_depend` edge. They need their own catalog terms, and without
+    ///    them the predicate under-refuses on two shapes a live server rejects.
+    ///
+    /// The partition-key term reads `pg_partitioned_table` two ways because a key
+    /// can be spelled two ways. A plain column key lands in `partattrs`; an
+    /// EXPRESSION key stores `0` there and records the columns it reads as an
+    /// INTERNAL self-dependency of the relation on its own column instead. Both
+    /// spellings were measured refused, and `has_partition_attrs` in the server
+    /// consults exactly these two sources.
+    ///
+    /// `pg_describe_object` renders each blocker the way PostgreSQL's own error
+    /// DETAIL does, so the refusal names what the server would have named.
+    async fn column_type_change_blockers(
+        &self,
+        cfg: &ExecutorConfig,
+        table: &str,
+        column: &str,
+    ) -> Result<Vec<String>, ApplyError> {
+        let rows = self
+            .conn
+            .query(
+                "WITH col AS (
+                   SELECT att.attrelid, att.attnum, att.attinhcount
+                     FROM pg_attribute att
+                     JOIN pg_class c ON c.oid = att.attrelid
+                     JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = $1 AND c.relname = $2 AND att.attname = $3
+                      AND att.attnum > 0 AND NOT att.attisdropped
+                 ), dep AS (
+                   SELECT d.classid, d.objid, d.objsubid
+                     FROM col
+                     JOIN pg_depend d
+                            ON d.refobjid = col.attrelid
+                           AND d.refobjsubid = col.attnum
+                           AND d.refclassid = 'pg_class'::regclass
+                    WHERE d.deptype = 'n'
+                      AND d.classid <> 'pg_constraint'::regclass
+                 )
+                 SELECT blocker FROM (
+                     SELECT pg_describe_object(classid, objid, objsubid) AS blocker
+                       FROM dep
+                   UNION ALL
+                     SELECT 'partition key of ' || col.attrelid::regclass::text
+                       FROM col
+                      WHERE EXISTS (
+                        SELECT 1 FROM pg_partitioned_table pt
+                         WHERE pt.partrelid = col.attrelid
+                           AND (col.attnum = ANY (pt.partattrs::int2[])
+                                OR EXISTS (
+                                  SELECT 1 FROM pg_depend pd
+                                   WHERE pd.classid = 'pg_class'::regclass
+                                     AND pd.objid = col.attrelid
+                                     AND pd.objsubid = col.attnum
+                                     AND pd.refclassid = 'pg_class'::regclass
+                                     AND pd.refobjid = col.attrelid
+                                     AND pd.refobjsubid = 0
+                                     AND pd.deptype = 'i'
+                                ))
+                      )
+                   UNION ALL
+                     SELECT 'inherited column of ' || col.attrelid::regclass::text
+                       FROM col
+                      WHERE col.attinhcount > 0
+                 ) s
+                  ORDER BY blocker",
+                &[
+                    cfg.project_schema.as_str().into(),
+                    table.into(),
+                    column.into(),
+                ],
+            )
+            .await?;
+        rows.iter()
+            .map(|row| {
+                row.try_get::<_, String>("blocker")
+                    .map_err(ApplyError::from)
+            })
+            .collect()
+    }
+
     async fn record_squash(
         &self,
         cfg: &ExecutorConfig,

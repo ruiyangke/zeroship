@@ -236,6 +236,7 @@ fn precondition_variant_names_from_schema() {
         "ColumnExists",
         "ColumnNotExists",
         "ColumnHasNoBlockingDependents",
+        "ColumnTypeChangeHasNoBlockers",
         "RowCount",
         "SqlBoolean",
     ]

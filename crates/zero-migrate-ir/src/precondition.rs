@@ -77,6 +77,27 @@ pub enum Precondition {
         /// The bare column name.
         column: String,
     },
+    /// Changing the TYPE of `column` on project-schema table `table` has no
+    /// blocking dependents.
+    ///
+    /// NOT the same question as [`Precondition::ColumnHasNoBlockingDependents`],
+    /// and the difference was measured against a live server rather than reasoned
+    /// about. A column another table's FOREIGN KEY points at blocks a DROP and does
+    /// NOT block a RETYPE, so reusing the drop assertion here would refuse a
+    /// migration PostgreSQL honours. Conversely a retype is blocked by things a
+    /// drop is not: partition-key membership and column inheritance, neither of
+    /// which is a dependency at all.
+    ///
+    /// Evaluated by
+    /// `MigrationBackend::column_type_change_blockers`, whose
+    /// PostgreSQL predicate `tests/pg_column_retype_dependency_oracle.rs` measures
+    /// against the server's own verdict one shape at a time.
+    ColumnTypeChangeHasNoBlockers {
+        /// The bare table name (no schema qualifier).
+        table: String,
+        /// The bare column name.
+        column: String,
+    },
     /// `count(*)` of the project-schema table `table` compares to `value` under
     /// `op` (e.g. `RowCount { table, op: Eq, value: 0 }` = "the table is empty").
     RowCount {

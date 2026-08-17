@@ -7357,6 +7357,33 @@
           "additionalProperties": false
         },
         {
+          "description": "Changing the TYPE of `column` on project-schema table `table` has no\nblocking dependents.\n\nNOT the same question as [`Precondition::ColumnHasNoBlockingDependents`],\nand the difference was measured against a live server rather than reasoned\nabout. A column another table's FOREIGN KEY points at blocks a DROP and does\nNOT block a RETYPE, so reusing the drop assertion here would refuse a\nmigration PostgreSQL honours. Conversely a retype is blocked by things a\ndrop is not: partition-key membership and column inheritance, neither of\nwhich is a dependency at all.\n\nEvaluated by\n`MigrationBackend::column_type_change_blockers`, whose\nPostgreSQL predicate `tests/pg_column_retype_dependency_oracle.rs` measures\nagainst the server's own verdict one shape at a time.",
+          "type": "object",
+          "properties": {
+            "ColumnTypeChangeHasNoBlockers": {
+              "type": "object",
+              "properties": {
+                "table": {
+                  "description": "The bare table name (no schema qualifier).",
+                  "type": "string"
+                },
+                "column": {
+                  "description": "The bare column name.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "table",
+                "column"
+              ]
+            }
+          },
+          "required": [
+            "ColumnTypeChangeHasNoBlockers"
+          ],
+          "additionalProperties": false
+        },
+        {
           "description": "`count(*)` of the project-schema table `table` compares to `value` under\n`op` (e.g. `RowCount { table, op: Eq, value: 0 }` = \"the table is empty\").",
           "type": "object",
           "properties": {
