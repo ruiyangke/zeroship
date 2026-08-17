@@ -3946,7 +3946,13 @@ fn expression_column_references<'a>(
                 crate::model::ir::BackfillSetValue::Value(crate::model::ir::IrValue::Expr(
                     expr,
                 )) => Some(expr),
-                _ => None,
+                // Named rather than wildcarded, like the Update arm above: a
+                // scalar carries no column reference, and a per-row generator is
+                // an apply-engine value producer (uuidV4/uuidV7/typeId/ulid) with
+                // no expression in it. If either ever gains one, this is a
+                // compile error instead of a silently missed reference.
+                crate::model::ir::BackfillSetValue::Value(crate::model::ir::IrValue::Scalar(_))
+                | crate::model::ir::BackfillSetValue::PerRow { .. } => None,
             })
             .chain(filter.as_ref())
             .flat_map(|expr| refs(table, expr))
