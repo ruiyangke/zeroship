@@ -11,7 +11,7 @@ use zeroship_core::auth_provider::{
 };
 use zeroship_core::config::{
     bootstrap_or_exit, validate_master_key_material,
-    validate_secret_material, AuthProviderKind, CheckConfigReport, CheckValue,
+    AuthProviderKind, CheckConfigReport, CheckValue,
 };
 use zeroship_bundle::{
     build_blob_store, build_workflow_blob_store, BlobStore, StoreUrl, WorkflowBlobStore,
@@ -435,8 +435,6 @@ fn main() -> std::io::Result<()> {
             std::process::exit(1);
         }
     }
-        }
-    };
 
     if check_config {
         // M1: read-only. No filesystem mutation, no signing-key load.
@@ -498,6 +496,7 @@ fn main() -> std::io::Result<()> {
         };
         report.field(
             "auth_platform_jwks_url",
+            CheckValue::Plain(platform_jwks_report),
         );
         report.field(
             "trusted_oauth_clients_count",
