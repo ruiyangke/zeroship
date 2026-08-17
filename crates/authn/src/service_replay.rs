@@ -37,14 +37,37 @@ use zeroship_core::service_assertion::{ClaimFuture, ReplayClaim, ReplayStore, Re
 /// The one statement the store issues.
 ///
 /// `RETURNING` is deliberately absent: the affected-row count already carries
-/// the verdict, and asking for a returned column would demand a `SELECT` grant
-/// on top of the insert and update this needs.
+/// the verdict, so there is nothing to return.
+///
+/// That is NOT a statement about privileges, and an earlier version of this
+/// comment said it was. The statement reads `expires_at` in the `DO UPDATE`
+/// arm's `WHERE`, and PostgreSQL requires `SELECT` on every column read in a
+/// condition whether or not a row is returned. It needs select, insert and
+/// update; the sweep below needs select and delete. All four are granted in
+/// `db/migrations-ts/20260816000100_service_assertion_replay.ts`.
 const CLAIM_SQL: &str = "INSERT INTO zeroship.service_assertion_replay (replay_key, expires_at) \
      VALUES ($1, to_timestamp($2::double precision)) \
      ON CONFLICT (replay_key) DO UPDATE SET expires_at = excluded.expires_at \
      WHERE service_assertion_replay.expires_at <= now()";
 
 const PURGE_SQL: &str = "DELETE FROM zeroship.service_assertion_replay WHERE expires_at <= now()";
+
+/// Render a driver error with the server's own words.
+///
+/// `compio_postgres::Error` displays a server-side failure as the bare string
+/// `db error`; everything an operator would act on - the SQLSTATE and the
+/// message - hangs off `as_db_error`. The verifier logs this string and then
+/// fails closed, so an unrendered error means a total outage of inbound service
+/// authentication whose log line names nothing. MEASURED: a claim issued by a
+/// role without the table grant produced `replay store unavailable: db error`
+/// before this, and `replay store unavailable: db error: permission denied for
+/// table service_assertion_replay (42501)` after.
+fn describe(error: &compio_postgres::Error) -> String {
+    error.as_db_error().map_or_else(
+        || error.to_string(),
+        |db| format!("{error}: {} ({})", db.message(), db.code().code()),
+    )
+}
 
 /// A [`ReplayStore`] backed by `zeroship.service_assertion_replay`.
 ///
@@ -78,7 +101,7 @@ impl<C: GenericClient + Sync> PostgresReplayStore<C> {
         self.client
             .execute(PURGE_SQL, &[])
             .await
-            .map_err(|error| ReplayStoreError(error.to_string()))
+            .map_err(|error| ReplayStoreError(describe(&error)))
     }
 }
 
@@ -96,7 +119,7 @@ impl<C: GenericClient + Sync> ReplayStore for PostgresReplayStore<C> {
                 .client
                 .execute(CLAIM_SQL, &[&key, &epoch_seconds])
                 .await
-                .map_err(|error| ReplayStoreError(error.to_string()))?;
+                .map_err(|error| ReplayStoreError(describe(&error)))?;
             // One row means this caller inserted the key, or reclaimed a row
             // whose window had already closed. Zero means a live claim is
             // already held, by someone else or by an earlier presentation of
