@@ -164,11 +164,17 @@ fn requires_app_owner(action: Action) -> bool {
     !matches!(action, Action::AppsApproveMigration)
 }
 
+/// Classify a rejection from [`BearerVerifier`] by the status it reports.
+///
+/// This used to also match the message `"platform token verification failed"`.
+/// That was a patch on one symptom of a construction bug in `zeroship-authn`:
+/// ntex's `InternalError` discarded the 401 it was built with, so EVERY authn
+/// rejection arrived here as a 500 and the one message someone happened to hit
+/// got special-cased. `zeroship_authn::AuthnRejection` now reports the status
+/// it was constructed with, so the status alone is sufficient and matching on
+/// prose is not.
 fn map_bearer_error(err: ntex::web::Error) -> AuthError {
-    let status = err.as_response_error().status_code();
-    if status == StatusCode::UNAUTHORIZED
-        || err.to_string().contains("platform token verification failed")
-    {
+    if err.as_response_error().status_code() == StatusCode::UNAUTHORIZED {
         AuthError::Unauthorized
     } else {
         AuthError::Infrastructure(err.to_string())
@@ -183,4 +189,67 @@ fn now_unix() -> Result<i64, String> {
             .as_secs(),
     )
     .map_err(|err| format!("clock overflow: {err}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zeroship_authn::AuthnRejection;
+
+    /// A malformed bearer is a REJECTED CREDENTIAL, and the classifier must say
+    /// so from the status alone.
+    ///
+    /// `"not-a-jwt"` carries no `iss`, so `AuthProvider::verify_token` returns
+    /// `VerifyTokenError::MissingIssuer` and `zeroship-authn` answers the
+    /// `unknown_oauth_issuer` rejection built here. Before the fix that
+    /// rejection read back as 500 and this arrived as `Infrastructure`, telling
+    /// a client with a permanently bad token to retry forever.
+    ///
+    /// This pins the classifier against a rejection carrying a 401. It does NOT
+    /// exercise `AuthProvider`, so it cannot catch authn choosing the wrong
+    /// rejection for `MissingIssuer`; the live-database
+    /// `real_delegating_authenticator_rejects_malformed_bearer` walks that path.
+    #[test]
+    fn malformed_bearer_rejection_is_unauthorized() {
+        let rejection: ntex::web::Error =
+            AuthnRejection::unauthorized("unknown_oauth_issuer").into();
+        assert_eq!(
+            rejection.as_response_error().status_code(),
+            StatusCode::UNAUTHORIZED,
+            "authn must construct a malformed bearer as a 401, not a 500"
+        );
+        assert!(
+            matches!(map_bearer_error(rejection), AuthError::Unauthorized),
+            "a 401 rejection must classify as Unauthorized"
+        );
+    }
+
+    /// The counterpart: authn's own 500s still mean the service could not
+    /// decide, and must stay `Infrastructure` so a caller retries.
+    ///
+    /// Paired with the test above, this is what shows the classifier reads the
+    /// status rather than passing everything through one arm.
+    #[test]
+    fn authn_lookup_failure_stays_infrastructure() {
+        let rejection: ntex::web::Error =
+            AuthnRejection::internal("principal_grant_lookup_failed").into();
+        assert!(
+            matches!(map_bearer_error(rejection), AuthError::Infrastructure(_)),
+            "a 500 rejection must not be reported as a rejected credential"
+        );
+    }
+
+    /// The deleted special-case matched the message `"platform token
+    /// verification failed"`. Its replacement is the status, so the rejection
+    /// that message came from must classify correctly under its NEW snake_case
+    /// code, which no string match would have caught.
+    #[test]
+    fn platform_verification_failure_needs_no_message_match() {
+        let rejection: ntex::web::Error =
+            AuthnRejection::unauthorized("platform_token_verification_failed").into();
+        assert!(
+            matches!(map_bearer_error(rejection), AuthError::Unauthorized),
+            "classification must not depend on the rejection's prose"
+        );
+    }
 }

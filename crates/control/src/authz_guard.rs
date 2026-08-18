@@ -7,7 +7,7 @@ use ntex::web::{self, FromRequest, HttpRequest, HttpResponse};
 use serde_json::json;
 use uuid::Uuid;
 use zeroship_authz::{self as authz, Action, AuthzContext, AuthzDecision, Resource};
-use zeroship_authn::VerifiedPrincipal;
+use zeroship_authn::{AuthnRejection, VerifiedPrincipal};
 
 use crate::{http_util, AppState};
 
@@ -27,7 +27,7 @@ impl FromRequest<web::DefaultError> for AuthzGuard {
     async fn from_request(req: &HttpRequest, _: &mut Payload) -> Result<Self, Self::Error> {
         let state = req
             .app_state::<Arc<AppState>>()
-            .ok_or_else(|| web::error::ErrorInternalServerError("missing app state"))?;
+            .ok_or_else(|| AuthnRejection::internal("missing_app_state"))?;
         let request_ip = http_util::source_ip(req, state.trust_proxy)
             .and_then(|ip| ip.parse::<IpAddr>().ok());
         let request_id = request_id(req);
@@ -40,7 +40,7 @@ impl FromRequest<web::DefaultError> for AuthzGuard {
         // No bearer means unauthenticated.
         match guard_from_bearer(req, state, request_ip, request_id).await? {
             Some(guard) => Ok(guard),
-            None => Err(web::error::ErrorUnauthorized("unauthenticated").into()),
+            None => Err(AuthnRejection::unauthorized("unauthenticated").into()),
         }
     }
 }

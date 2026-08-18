@@ -240,8 +240,8 @@ stack_pg_up || { echo "  ✗ ephemeral Postgres bring-up failed"; exit 2; }
 # Start control. ZEROSHIP_AUTH_PLATFORM_ISSUER is load-bearing and comes from
 # stack_workspace: control reads it ONCE at boot and fetches that issuer's JWKS
 # to verify the admin bearer. Name an issuer nothing serves and every
-# `/api/apps` call answers 401 "platform token verification failed" — which is
-# exactly how this harness died before, silently, inside a `$(curl -sf)`.
+# `/api/apps` call answers 401 {"error":"platform_token_verification_failed"},
+# which is exactly how this harness died before, silently, inside `$(curl -sf)`.
 e2e_with_platform_mint_key "$BIN/zeroship-control" --port $ZEROSHIP_CONTROL_PORT --blob-store "$WORK/blobs" \
     > "$WORK/control.log" 2>&1 &
 PIDS+=($!)

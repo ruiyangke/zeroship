@@ -409,7 +409,7 @@ e2e_export_runtime_secrets() {
   # origin before calling here; one that does not calls `e2e_platform_op_up`,
   # which points it at the harness's own JWKS. This default -- the auth port,
   # which nothing may be serving -- is the last resort, and a stack that lands
-  # on it gets `platform token verification failed` on its first admin call.
+  # on it gets `platform_token_verification_failed` on its first admin call.
   ZEROSHIP_AUTH_PLATFORM_ISSUER="${ZEROSHIP_AUTH_PLATFORM_ISSUER:-http://localhost:${AUTH_PORT:-9092}/oauth2}"
   # The address control POSTs the deploy-token mint to, which is a DIFFERENT
   # setting from the issuer above: that one is the `iss` a token must carry,
