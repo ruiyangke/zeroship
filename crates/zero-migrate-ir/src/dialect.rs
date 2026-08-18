@@ -1,4 +1,4 @@
-//! The SQL deploy-target dialect — a closed, pure-data enum.
+//! Dialect IDENTITY: the closed `SqlDialect` enum and the open [`DialectId`].
 //!
 //! `SqlDialect` names which SQL engine a migration is being rendered/applied
 //! for. It is a wire-level target descriptor (three closed variants, no
@@ -11,6 +11,13 @@
 //! The *dialect-specific spelling* (the `SchemaRenderer` trait, the DDL builders,
 //! canonical type maps) lives engine-side in `zero_migrate::schema::query`; this
 //! enum carries only the identity of the target.
+//!
+//! [`DialectId`] is the OPEN identity that replaces the closed enum's role as a
+//! set/map key. A backend crate declares its own — `DialectId::new("duckdb")` —
+//! without editing anything here, which is the whole point: a closed enum cannot
+//! grow a variant from a crate that does not own it.
+
+use core::fmt;
 
 /// The SQL dialect a migration renders/applies against.
 ///
@@ -28,4 +35,267 @@ pub enum SqlDialect {
     /// `MySQL` dialect: binary DML values wrap their text placeholder with
     /// `FROM_BASE64(?)` so a binary column receives the original bytes.
     Mysql,
+}
+
+/// The canonical id of the PostgreSQL backend.
+pub const POSTGRES: DialectId = DialectId::new("postgres");
+/// The canonical id of the `SQLite` backend.
+pub const SQLITE: DialectId = DialectId::new("sqlite");
+/// The canonical id of the `MySQL` backend.
+pub const MYSQL: DialectId = DialectId::new("mysql");
+
+impl SqlDialect {
+    /// The open [`DialectId`] this closed variant denotes.
+    ///
+    /// The bridge between the enum the engine still matches on and the id every
+    /// set/map/descriptor is keyed by. It is deliberately one-way: an id does
+    /// NOT convert back to a variant, because that direction is exactly what a
+    /// fourth backend cannot satisfy.
+    #[must_use]
+    pub const fn id(self) -> DialectId {
+        match self {
+            Self::Postgres => POSTGRES,
+            Self::Sqlite => SQLITE,
+            Self::Mysql => MYSQL,
+        }
+    }
+}
+
+/// An opaque, cheaply copyable dialect identity with a stable string name.
+///
+/// NOT an enum: core code cannot exhaustively match it, which is the property
+/// that lets a backend live in a crate the core does not own.
+///
+/// # Equality is by CONTENT
+///
+/// `PartialEq`/`Ord`/`Hash` are derived over `&'static str`, so they compare the
+/// STRING, not the pointer. Two crates that both spell `"postgres"` are the same
+/// dialect. That is the desired behaviour and it is also the hazard: nothing
+/// structurally prevents two backends from claiming the same name, the way a
+/// closed enum did by construction. The rule that covers it is
+/// [`crate::backend::BackendRegistry`], which refuses to build over a duplicate
+/// id and names both registrants — it is never last-one-wins.
+///
+/// # Validity
+///
+/// A well-formed id is lowercase ASCII matching `[a-z][a-z0-9_]*`. There are no
+/// aliases and no display names in the id; a human-facing name is a separate
+/// field on [`crate::backend::BackendDescriptor`]. [`DialectId::new`] is `const`
+/// and does NOT check — a `const` constructor cannot return a `Result` usefully
+/// — so the check is enforced at REGISTRATION rather than trusted. See
+/// [`DialectId::is_well_formed`].
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct DialectId(&'static str);
+
+impl DialectId {
+    /// Declare an id. `const`, so a backend crate can write
+    /// `pub const DUCKDB: DialectId = DialectId::new("duckdb");` at item scope.
+    ///
+    /// This does NOT validate. Validity is enforced where it can produce a
+    /// diagnostic naming the offender: [`crate::backend::BackendRegistry::build`].
+    #[must_use]
+    pub const fn new(name: &'static str) -> Self {
+        Self(name)
+    }
+
+    /// The id's stable string name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        self.0
+    }
+
+    /// Whether this id satisfies the id rule: lowercase ASCII `[a-z][a-z0-9_]*`.
+    ///
+    /// Rejects the empty string, a leading digit or underscore, uppercase, dots,
+    /// dashes, and any non-ASCII byte. `const` so a backend can assert its own id
+    /// at compile time; the registry asserts it again at build time because a
+    /// backend is not trusted about its own declaration.
+    #[must_use]
+    pub const fn is_well_formed(self) -> bool {
+        let bytes = self.0.as_bytes();
+        if bytes.is_empty() {
+            return false;
+        }
+        if !bytes[0].is_ascii_lowercase() {
+            return false;
+        }
+        let mut i = 1;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if !(b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_') {
+                return false;
+            }
+            i += 1;
+        }
+        true
+    }
+}
+
+impl fmt::Debug for DialectId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "DialectId({:?})", self.0)
+    }
+}
+
+impl fmt::Display for DialectId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+/// A set of dialect identities.
+///
+/// Lifted here from `zero_migrate::model::support` (which re-exports it
+/// unchanged) so the [`crate::backend::BackendRegistry`] can key on the same set
+/// type the support matrix uses, rather than growing a second one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DialectSet(u8);
+
+impl DialectSet {
+    const POSTGRES: u8 = 0b001;
+    const SQLITE: u8 = 0b010;
+    const MYSQL: u8 = 0b100;
+
+    /// The empty set.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    /// Every dialect the engine currently ships.
+    #[must_use]
+    pub const fn all() -> Self {
+        Self(Self::POSTGRES | Self::SQLITE | Self::MYSQL)
+    }
+
+    /// Build from the three per-dialect support booleans.
+    #[must_use]
+    pub const fn from_bools(postgres: bool, sqlite: bool, mysql: bool) -> Self {
+        let mut bits = 0;
+        if postgres {
+            bits |= Self::POSTGRES;
+        }
+        if sqlite {
+            bits |= Self::SQLITE;
+        }
+        if mysql {
+            bits |= Self::MYSQL;
+        }
+        Self(bits)
+    }
+
+    /// Build from an arbitrary run of dialect identities.
+    #[must_use]
+    pub fn from_ids(ids: impl IntoIterator<Item = DialectId>) -> Self {
+        let mut bits = 0u8;
+        for id in ids {
+            if id == POSTGRES {
+                bits |= Self::POSTGRES;
+            } else if id == SQLITE {
+                bits |= Self::SQLITE;
+            } else if id == MYSQL {
+                bits |= Self::MYSQL;
+            }
+        }
+        Self(bits)
+    }
+
+    /// Whether the closed [`SqlDialect`]-era variant is a member.
+    #[must_use]
+    pub const fn contains(self, dialect: crate::validate::Dialect) -> bool {
+        let bit = match dialect {
+            crate::validate::Dialect::Postgres => Self::POSTGRES,
+            crate::validate::Dialect::Sqlite => Self::SQLITE,
+            crate::validate::Dialect::Mysql => Self::MYSQL,
+        };
+        self.0 & bit != 0
+    }
+
+    /// Whether an id is a member.
+    #[must_use]
+    pub fn contains_id(self, id: DialectId) -> bool {
+        self.iter().any(|member| member == id)
+    }
+
+    /// How many dialects the set holds.
+    #[must_use]
+    pub fn len(self) -> usize {
+        self.iter().count()
+    }
+
+    /// Whether the set is empty.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// The members, in ascending id order.
+    pub fn iter(self) -> impl Iterator<Item = DialectId> {
+        let mut out = Vec::new();
+        if self.0 & Self::POSTGRES != 0 {
+            out.push(POSTGRES);
+        }
+        if self.0 & Self::SQLITE != 0 {
+            out.push(SQLITE);
+        }
+        if self.0 & Self::MYSQL != 0 {
+            out.push(MYSQL);
+        }
+        out.sort_unstable();
+        out.into_iter()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shipping_ids_are_well_formed() {
+        for id in [POSTGRES, SQLITE, MYSQL] {
+            assert!(id.is_well_formed(), "{id} must satisfy the id rule");
+        }
+    }
+
+    #[test]
+    fn equality_is_by_content_not_pointer() {
+        // Two separately-allocated `&'static str` with the same bytes. Rust may
+        // or may not intern these; content equality must hold either way.
+        let a = DialectId::new("postgres");
+        let b = DialectId::new(concat!("postg", "res"));
+        assert_eq!(a, b);
+        assert_eq!(a.cmp(&b), core::cmp::Ordering::Equal);
+    }
+
+    #[test]
+    fn the_id_rule_refuses_the_shapes_it_names() {
+        for bad in [
+            "",           // empty
+            "Postgres",   // uppercase
+            "1postgres",  // leading digit
+            "_postgres",  // leading underscore
+            "post-gres",  // dash
+            "post.gres",  // dot
+            "post gres",  // space
+            "postgresql\u{00e9}", // non-ASCII
+        ] {
+            assert!(
+                !DialectId::new(bad).is_well_formed(),
+                "{bad:?} must be refused by the id rule"
+            );
+        }
+        for good in ["pg", "postgres", "mysql8", "cockroach_db", "a"] {
+            assert!(
+                DialectId::new(good).is_well_formed(),
+                "{good:?} must satisfy the id rule"
+            );
+        }
+    }
+
+    #[test]
+    fn sql_dialect_maps_onto_its_id() {
+        assert_eq!(SqlDialect::Postgres.id().as_str(), "postgres");
+        assert_eq!(SqlDialect::Sqlite.id().as_str(), "sqlite");
+        assert_eq!(SqlDialect::Mysql.id().as_str(), "mysql");
+    }
 }

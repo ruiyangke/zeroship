@@ -36,54 +36,12 @@ pub const fn pg_only_expr_disposition(dialect: Dialect) -> Disposition {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DialectSet(u8);
-
-impl DialectSet {
-    const POSTGRES: u8 = 0b001;
-    const SQLITE: u8 = 0b010;
-    const MYSQL: u8 = 0b100;
-
-    #[must_use]
-    pub const fn empty() -> Self {
-        Self(0)
-    }
-
-    #[must_use]
-    pub const fn all() -> Self {
-        Self(Self::POSTGRES | Self::SQLITE | Self::MYSQL)
-    }
-
-    #[must_use]
-    pub const fn from_bools(postgres: bool, sqlite: bool, mysql: bool) -> Self {
-        let mut bits = 0;
-        if postgres {
-            bits |= Self::POSTGRES;
-        }
-        if sqlite {
-            bits |= Self::SQLITE;
-        }
-        if mysql {
-            bits |= Self::MYSQL;
-        }
-        Self(bits)
-    }
-
-    #[must_use]
-    pub const fn contains(self, dialect: Dialect) -> bool {
-        let bit = match dialect {
-            Dialect::Postgres => Self::POSTGRES,
-            Dialect::Sqlite => Self::SQLITE,
-            Dialect::Mysql => Self::MYSQL,
-        };
-        self.0 & bit != 0
-    }
-
-    #[must_use]
-    pub const fn is_empty(self) -> bool {
-        self.0 == 0
-    }
-}
+/// The set of dialects an op/feature is supported on.
+///
+/// Defined in the leaf contract (`zero_migrate_ir::dialect`) and re-exported
+/// here unchanged: the backend registry and the support matrix key on the SAME
+/// set type, and the registry lives below the engine.
+pub use zero_migrate_ir::dialect::DialectSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderMode {
