@@ -154,6 +154,22 @@ postgres = "0.19"
 # `bytes::BytesMut`. Pinned to the version `tokio-postgres` already resolves, so the
 # buffer type matches exactly. Dev-dependency only — never ships.
 bytes = "1"
+# TEST-ONLY live-MySQL driver, the exact sibling of the `postgres` entry above and
+# added for the same reason: until it existed, NO Rust test had ever asked a live
+# MySQL server what the engine actually did. MySQL was covered at render level (unit
+# tests over emitted SQL) and at CLI/host level (TypeScript over `mysql2`), and
+# nowhere in between - `ZERO_MIGRATE_MYSQL_URL` appeared in 52 files under
+# `packages/` and in ONE file under `crates/`, which was source, not a test.
+#
+# The blocking `mysql` crate backs `MysqlDevSession`, a `driver::SqlSession` impl
+# that drives the SHIPPED generic `MysqlBackend`/executor/journal/drift path against
+# a live server in-crate, the same way `PgDevSession` does for Postgres.
+#
+# `default-features = false` with `minimal` only: the default set pulls
+# `native-tls` (OpenSSL) and the `derive` proc-macro, and this driver connects to a
+# loopback container over a plaintext socket and derives nothing. Dev-dependency
+# ONLY - it never ships, and `cargo tree -p zero-migrate -e normal` stays free of it.
+mysql = { version = "28", default-features = false, features = ["minimal"] }
 
 [lints]
 workspace = true

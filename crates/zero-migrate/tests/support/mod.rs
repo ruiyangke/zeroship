@@ -22,6 +22,12 @@
 
 #![allow(dead_code)] // Not every test binary uses every helper.
 
+/// The live-MySQL sibling of everything below: `MysqlDevSession`, `DatabaseGuard`,
+/// and the `ZERO_MIGRATE_MYSQL_URL` gate. It shares this module's
+/// [`announce_live_db_skip`] / [`live_db_required`] discipline, so a missing MySQL
+/// DSN skips loudly and fails under `ZERO_MIGRATE_REQUIRE_LIVE_DB`.
+pub mod mysql;
+
 use std::cell::{Cell, RefCell};
 
 use bytes::BytesMut;
