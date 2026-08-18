@@ -290,19 +290,26 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
     assert_eq!(status, StatusCode::OK, "creator may assign an assignable plan");
     assert_eq!(app_plan_id(&pg, app.id).await, assignable.id, "creator assignment applied");
 
-    // 3. Operator assigning the OPERATOR-ONLY plan ⇒ 200 (operator may assign
-    //    EITHER), plan updated.
+    // 3. A SECOND creator who owns nothing here is refused outright. There is
+    //    no operator arm to assign the operator-only plan any more: it was
+    //    satisfiable only by the deleted universal-allow policy, so a
+    //    non-creator-assignable tier is now set by editing the catalog row, not
+    //    through this endpoint.
     let status = test::call_service(
         &app_svc,
         put(operator_caller.bearer(), app.id, operator_only.id.clone()),
     )
     .await
     .status();
-    assert_eq!(status, StatusCode::OK, "operator may assign ANY plan");
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a caller with no membership of the app may not assign its plan",
+    );
     assert_eq!(
         app_plan_id(&pg, app.id).await,
-        operator_only.id,
-        "operator assignment of the operator-only plan applied",
+        assignable.id,
+        "the refused assignment leaves the creator's plan in place",
     );
 
     // Cleanup (best-effort; FK order: spend state, members, app, tokens, roles).
@@ -314,7 +321,7 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
             .execute("DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1", &[&caller.user_id])
             .await;
     }
-    let _ = pg.execute("DELETE FROM zeroship.users WHERE id = ANY($1)", &[&vec![owner, op_user]]).await;
+    let _ = pg.execute("DELETE FROM zeroship.users WHERE id = ANY($1)", &[&vec![owner]]).await;
 
     // Teardown: the service, the plan catalog, the cloned `pg` handle, and the
     // fixture all hold (or share) a Postgres connection, and locals are dropped
@@ -341,8 +348,10 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
 /// becomes `PlanChangeOutcome::AppNotFound` -> 404 "app not found", for an app
 /// that plainly exists.
 ///
-/// Uses the OPERATOR token deliberately: a creator would be stopped earlier by
-/// the `assignable_by_creator` gate, which would hide the defect behind a 403.
+/// Uses the app OWNER, and the archived plan is seeded `assignable_by_creator`
+/// deliberately: the caller must get PAST the assignability gate so the archived
+/// check is what answers, rather than a 403 hiding the defect. This used to
+/// reach that point with an operator token, which no principal can hold now.
 #[compio::test]
 async fn assigning_an_archived_plan_is_refused_and_not_reported_as_a_missing_app() {
     let url = db_url();
@@ -363,8 +372,7 @@ async fn assigning_an_archived_plan_is_refused_and_not_reported_as_a_missing_app
         .await
         .expect("create app");
 
-    let op_user = make_user(&pg, "operator").await;
-    let operator_caller = issue_bearer(&fx.state, op_user, "billing:write").await;
+    let owner_caller = issue_bearer(&fx.state, owner, "billing:write").await;
 
     let app_svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
@@ -377,7 +385,7 @@ async fn assigning_an_archived_plan_is_refused_and_not_reported_as_a_missing_app
         &app_svc,
         test::TestRequest::put()
             .uri(&format!("/api/apps/{}/plan", app.id))
-            .header("authorization", operator_caller.bearer())
+            .header("authorization", owner_caller.bearer())
             .set_json(&serde_json::json!({ "plan_id": retired.id }))
             .to_request(),
     )
@@ -388,7 +396,7 @@ async fn assigning_an_archived_plan_is_refused_and_not_reported_as_a_missing_app
         status,
         StatusCode::NOT_FOUND,
         "an archived plan must not surface as 404 app-not-found: the app exists, \
-         and that status sends the operator looking for a deleted app",
+         and that status sends the caller looking for a deleted app",
     );
     assert_eq!(
         status,
@@ -403,9 +411,9 @@ async fn assigning_an_archived_plan_is_refused_and_not_reported_as_a_missing_app
 
     let _ = pg.execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app.id]).await;
     let _ = pg
-        .execute("DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1", &[&operator_caller.user_id])
+        .execute("DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1", &[&owner_caller.user_id])
         .await;
-    let _ = pg.execute("DELETE FROM zeroship.users WHERE id = ANY($1)", &[&vec![owner, op_user]]).await;
+    let _ = pg.execute("DELETE FROM zeroship.users WHERE id = ANY($1)", &[&vec![owner]]).await;
 
     drop(app_svc);
     drop(catalog);
