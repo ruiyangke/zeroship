@@ -417,15 +417,12 @@ async fn issue_bearer(state: &AppState, user_id: Uuid, scope: &str) -> Caller {
 // The scope vocabulary is resource-blind: a scope always lowers to
 // `Resource::Any`, so per-app narrowing now comes from Cedar app membership
 // rather than from the caller-supplied wrapper policy a PAT used to carry.
-// The old "creator self" fixture modeled BillingWrite scoped to ONE app (not
-// Resource::Any) — self-service `onboard`/`callback`/`connect_checkout` don't
-// actually consult that grant anyway (they bind `:id` to the principal and
-// only fall back to `require(BillingWrite, Any)` when the caller is NOT the
-// path creator), and the ALWAYS-operator `set_fee_policy` never had a
-// self-service branch to begin with. So a "billing:read" scope (no
-// billing:write) reproduces both outcomes: self-service still succeeds via
-// the principal-id bind, and `set_fee_policy` still denies the creator.
-// "billing:write" is the fleet-wide operator scope.
+// The creator-facing Stripe routes bind `:id` to the principal and consult no
+// grant at all beyond that, so the scope a bearer carries does not decide them
+// - the principal id does. There is no longer any fleet-wide scope that would
+// change the answer: the arms that used to fall back to
+// `require(BillingWrite, Any)` for a NON-path creator are deleted, because
+// nothing grants that once the platform staff roles are gone.
 
 async fn cleanup(state: &AppState, creators: &[Uuid], callers: &[&Caller]) {
     let pg = &state.control_pg;
@@ -996,3 +993,102 @@ async fn checkout_rejects_bad_currency() {
     common::drain_pg().await;
 }
 
+
+/// `GET /api/creators/{id}/earnings` and `DELETE /api/creators/{id}/stripe` are
+/// SELF-SERVICE: `:id` is bound to the principal, exactly like `onboard`.
+///
+/// Both used to require `BillingRead`/`BillingWrite` on `Resource::Any` - an
+/// operator grant - so the creator who owns the payout history could not read
+/// it and the creator who linked the Stripe account could not unlink it. Only
+/// platform staff could, and those roles are deleted, which would have left two
+/// creator capabilities reachable by nobody at all.
+///
+/// The assertions run in BOTH directions on the same request shape, so the pair
+/// distinguishes "bound to the principal" from "allows everyone" - a test that
+/// only checked the owner's 200 would pass just as happily with no gate at all.
+#[compio::test]
+async fn earnings_and_unlink_are_bound_to_the_path_creator() {
+    let url = db_url();
+    let fx = build_fixture(&url, "self-serve").await;
+    let owner = make_user(&fx.state, "owner").await;
+    let other = make_user(&fx.state, "other").await;
+    let owner_caller = issue_bearer(&fx.state, owner, "billing:read billing:write").await;
+    let other_caller = issue_bearer(&fx.state, other, "billing:read billing:write").await;
+
+    let svc = test::init_service(
+        web::App::new().state(fx.state.clone()).service(
+            web::scope("/api/creators/{id}")
+                .service(web::resource("/stripe/onboard").route(web::post().to(stripe_handlers::onboard)))
+                .service(web::resource("/earnings").route(web::get().to(stripe_handlers::earnings)))
+                .service(web::resource("/stripe").route(web::delete().to(stripe_handlers::unlink))),
+        ),
+    )
+    .await;
+
+    // Give the owner a real Connect account so `unlink` has something to remove
+    // and does not answer 404 for a reason unrelated to authorization.
+    let onboard = test::TestRequest::post()
+        .uri(&format!("/api/creators/{owner}/stripe/onboard"))
+        .header("authorization", owner_caller.bearer())
+        .to_request();
+    assert_eq!(test::call_service(&svc, onboard).await.status(), StatusCode::OK);
+
+    // The owner reads their OWN earnings.
+    let status = test::call_service(
+        &svc,
+        test::TestRequest::get()
+            .uri(&format!("/api/creators/{owner}/earnings"))
+            .header("authorization", owner_caller.bearer())
+            .to_request(),
+    )
+    .await
+    .status();
+    assert_eq!(status, StatusCode::OK, "a creator reads their own earnings");
+
+    // A DIFFERENT creator, same request, is refused.
+    let status = test::call_service(
+        &svc,
+        test::TestRequest::get()
+            .uri(&format!("/api/creators/{owner}/earnings"))
+            .header("authorization", other_caller.bearer())
+            .to_request(),
+    )
+    .await
+    .status();
+    assert_eq!(status, StatusCode::FORBIDDEN, "nobody reads another creator's earnings");
+
+    // Unlink: the stranger first, so a wrongly-allowed call would be caught by
+    // the owner's own unlink answering 404 "not linked" afterwards.
+    let status = test::call_service(
+        &svc,
+        test::TestRequest::delete()
+            .uri(&format!("/api/creators/{owner}/stripe"))
+            .header("authorization", other_caller.bearer())
+            .to_request(),
+    )
+    .await
+    .status();
+    assert_eq!(status, StatusCode::FORBIDDEN, "nobody unlinks another creator's account");
+
+    let status = test::call_service(
+        &svc,
+        test::TestRequest::delete()
+            .uri(&format!("/api/creators/{owner}/stripe"))
+            .header("authorization", owner_caller.bearer())
+            .to_request(),
+    )
+    .await
+    .status();
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "a creator unlinks their own account, and it was still linked - so the \
+         stranger's DELETE above really was refused rather than silently applied",
+    );
+
+    cleanup(&fx.state, &[owner, other], &[&owner_caller, &other_caller]).await;
+
+    drop(svc);
+    drop(fx);
+    common::drain_pg().await;
+}
