@@ -1576,30 +1576,31 @@ fn quote_lit(value: &str) -> String {
 
 const APP_ROLE_TEMPLATE: &str = "__zeroship_app_role_template";
 const WORKER_ROLE: &str = "zeroship_worker";
-const WORKFLOW_OWNER_ROLE: &str = "zeroship_workflow_owner";
 
 fn runtime_app_role_name(app_id: &str) -> String {
     format!("app_{app_id}_role")
 }
 
+/// Both dependents of a freshly provisioned app schema: the worker's membership
+/// in the app's runtime role, and the app's workflow journal schema.
+///
+/// The journal half is [`crate::provisioning::workflow_journal_schema_sql`]
+/// verbatim rather than a second copy of it, so a caller that needs a deployed
+/// app's journal schema without running an apply
+/// ([`crate::provisioning::provision_workflow_journal_schema`]) runs the same
+/// statement this does.
 fn runtime_dependents_sql(schema: &str, runtime_role: &str) -> String {
     let runtime_role_q = quote_ident(runtime_role);
     let worker_q = quote_ident(WORKER_ROLE);
-    let workflow_owner_q = quote_ident(WORKFLOW_OWNER_ROLE);
-    let workflow_schema_q = quote_ident(&format!("app_{schema}"));
     format!(
         "DO $runtime_dependents$ BEGIN
             IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{worker_lit}') THEN
                 GRANT {runtime_role_q} TO {worker_q};
             END IF;
-            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{workflow_owner_lit}') THEN
-                CREATE SCHEMA IF NOT EXISTS {workflow_schema_q} AUTHORIZATION {workflow_owner_q};
-                ALTER SCHEMA {workflow_schema_q} OWNER TO {workflow_owner_q};
-                GRANT CREATE, USAGE ON SCHEMA {workflow_schema_q} TO {workflow_owner_q};
-            END IF;
-         END $runtime_dependents$",
+         END $runtime_dependents$;
+         {journal}",
         worker_lit = quote_lit(WORKER_ROLE),
-        workflow_owner_lit = quote_lit(WORKFLOW_OWNER_ROLE),
+        journal = crate::provisioning::workflow_journal_schema_sql(&format!("app_{schema}")),
     )
 }
 
@@ -1684,6 +1685,32 @@ mod tests {
             "CREATE SCHEMA IF NOT EXISTS \"app_0191e7a2-b3c4-4d5e-8f90-123456789abc\" AUTHORIZATION \"zeroship_workflow_owner\""
         ));
         assert!(!sql.contains("CREATE ROLE"));
+    }
+
+    /// The apply path and the exported
+    /// [`provision_workflow_journal_schema`](crate::provisioning::provision_workflow_journal_schema)
+    /// build the journal schema DDL from ONE generator, not two that resemble
+    /// each other. A caller outside the apply path (control's workflow seeding)
+    /// therefore reproduces the deployed privilege shape - owner role, ownership
+    /// transfer and grant - rather than a CREATE SCHEMA of its own.
+    ///
+    /// Asserts the apply path's SQL CONTAINS the exported generator's output
+    /// verbatim, so editing either generator alone fails here. It says nothing
+    /// about whether the statement is correct, and nothing about whether any
+    /// caller actually calls the exported one - the assertions above cover the
+    /// shape, and only a live apply covers the effect.
+    #[test]
+    fn the_apply_path_and_the_exported_helper_share_one_journal_statement() {
+        let app_id = uuid::Uuid::parse_str("0191e7a2-b3c4-4d5e-8f90-123456789abc").expect("uuid");
+        let schema = app_id.to_string();
+        let sql = runtime_dependents_sql(&schema, &runtime_app_role_name(&schema));
+        let exported = crate::provisioning::workflow_journal_schema_sql(
+            &crate::provisioning::workflow_journal_schema_name(&app_id),
+        );
+        assert!(
+            sql.contains(&exported),
+            "apply must embed the exported journal DDL verbatim:\n{sql}\n---\n{exported}"
+        );
     }
 
     /// Every `IrApplyError` a creator can provoke names the document at fault, so

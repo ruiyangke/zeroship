@@ -210,6 +210,7 @@ async fn build_fixture(db_url: &str, gateway_url: &str, app_id: Uuid, deploy_id:
             .expect("workflow blob store"),
     );
     let control_pg = Arc::new(pg(db_url).await);
+    common::provision_app_workflow_schema(control_pg.as_ref(), &app_id).await;
     PgStore::provision(control_pg.as_ref(), &app_id)
         .await
         .expect("provision workflow journal");
@@ -1381,8 +1382,8 @@ async fn scheduler_counts(fx: &Fixture, run_id: &str) -> (i64, i64) {
         .pg
         .query_one(
             "SELECT \
-                (SELECT COUNT(*)::bigint FROM workflow_scheduler.timers WHERE run_id = $1) AS timers, \
-                (SELECT COUNT(*)::bigint FROM workflow_scheduler.inflight WHERE run_id = $1) AS inflight",
+                (SELECT COUNT(*)::bigint FROM zeroship.workflow_scheduler_timers WHERE run_id = $1) AS timers, \
+                (SELECT COUNT(*)::bigint FROM zeroship.workflow_scheduler_inflight WHERE run_id = $1) AS inflight",
             &[&run_id],
         )
         .await
@@ -1411,7 +1412,7 @@ async fn wait_for_scheduler_counts(fx: &Fixture, run_id: &str, expected: (i64, i
 async fn scheduler_timer_wake_at(fx: &Fixture, run_id: &str) -> Option<DateTime<Utc>> {
     fx.pg
         .query(
-            "SELECT wake_at FROM workflow_scheduler.timers WHERE run_id = $1",
+            "SELECT wake_at FROM zeroship.workflow_scheduler_timers WHERE run_id = $1",
             &[&run_id],
         )
         .await
@@ -1438,7 +1439,7 @@ async fn force_inflight_deadline_elapsed(fx: &Fixture, run_id: &str) -> bool {
     let updated = fx
         .pg
         .execute(
-            "UPDATE workflow_scheduler.inflight SET deadline = $2 WHERE run_id = $1",
+            "UPDATE zeroship.workflow_scheduler_inflight SET deadline = $2 WHERE run_id = $1",
             &[&run_id, &deadline],
         )
         .await
@@ -2854,13 +2855,13 @@ async fn run_debug(fx: &Fixture, run_id: &str) -> String {
             "SELECT run_id, slot, wake_at, deadline, generation \
                FROM ( \
                  SELECT run_id, 'timer' AS slot, wake_at, NULL::timestamptz AS deadline, generation \
-                   FROM workflow_scheduler.timers \
+                   FROM zeroship.workflow_scheduler_timers \
                   WHERE run_id = $1 OR run_id IN ( \
                     SELECT id FROM zeroship.workflow_runs WHERE parent_run_id = $1 \
                   ) \
                  UNION ALL \
                  SELECT run_id, 'inflight' AS slot, NULL::timestamptz AS wake_at, deadline, dispatch_generation AS generation \
-                   FROM workflow_scheduler.inflight \
+                   FROM zeroship.workflow_scheduler_inflight \
                   WHERE run_id = $1 OR run_id IN ( \
                     SELECT id FROM zeroship.workflow_runs WHERE parent_run_id = $1 \
                   ) \

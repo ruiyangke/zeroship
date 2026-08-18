@@ -175,6 +175,7 @@ async fn seed_app_on_plan(
         )
         .await
         .expect("insert app");
+    common::provision_app_workflow_schema(fx.pg.as_ref(), &app_id).await;
     PgStore::provision(fx.pg.as_ref(), &app_id)
         .await
         .expect("provision workflow journal");
@@ -250,6 +251,7 @@ async fn seed_app_without_deploy(fx: &Fixture, label: &str) -> Uuid {
         )
         .await
         .expect("insert app without deploy");
+    common::provision_app_workflow_schema(fx.pg.as_ref(), &app_id).await;
     PgStore::provision(fx.pg.as_ref(), &app_id)
         .await
         .expect("provision workflow journal");
@@ -971,31 +973,31 @@ async fn pause_resume_cancel_transitions_preserve_wake_and_discard_claim() {
 
 /// Injects a scheduler-store timer-registration failure for one app.
 ///
-/// A `BEFORE INSERT` trigger on `workflow_scheduler.timers` raises whenever the
-/// inserted row's `app_id` is listed in a sentinel table, so the failure is
-/// scoped to the app under test and every other registration in the binary is
-/// untouched. This is the same class of failure a missing scheduler schema or a
-/// dead store connection produces, and it is the only failure the handler can
-/// hit after its journal writes have already succeeded.
+/// A `BEFORE INSERT` trigger on `zeroship.workflow_scheduler_timers` raises
+/// whenever the inserted row's `app_id` is listed in a sentinel table, so the
+/// failure is scoped to the app under test and every other registration in the
+/// binary is untouched. This is the same class of failure a dead store
+/// connection produces, and it is the only failure the handler can hit after
+/// its journal writes have already succeeded.
 async fn install_timer_registration_failpoint(fx: &Fixture) {
     fx.pg
         .batch_execute(
-            "CREATE TABLE IF NOT EXISTS workflow_scheduler.zs_test_timer_insert_fails \
+            "CREATE TABLE IF NOT EXISTS zeroship.zs_test_timer_insert_fails \
                  (app_id uuid PRIMARY KEY); \
-             CREATE OR REPLACE FUNCTION workflow_scheduler.zs_test_fail_timer_insert() \
+             CREATE OR REPLACE FUNCTION zeroship.zs_test_fail_timer_insert() \
                  RETURNS trigger AS $fp$ \
              BEGIN \
-                 IF EXISTS (SELECT 1 FROM workflow_scheduler.zs_test_timer_insert_fails f \
+                 IF EXISTS (SELECT 1 FROM zeroship.zs_test_timer_insert_fails f \
                              WHERE f.app_id = NEW.app_id) THEN \
                      RAISE EXCEPTION 'injected workflow scheduler timer registration failure'; \
                  END IF; \
                  RETURN NEW; \
              END; \
              $fp$ LANGUAGE plpgsql; \
-             DROP TRIGGER IF EXISTS zs_test_fail_timer_insert ON workflow_scheduler.timers; \
+             DROP TRIGGER IF EXISTS zs_test_fail_timer_insert ON zeroship.workflow_scheduler_timers; \
              CREATE TRIGGER zs_test_fail_timer_insert \
-                 BEFORE INSERT ON workflow_scheduler.timers \
-                 FOR EACH ROW EXECUTE FUNCTION workflow_scheduler.zs_test_fail_timer_insert();",
+                 BEFORE INSERT ON zeroship.workflow_scheduler_timers \
+                 FOR EACH ROW EXECUTE FUNCTION zeroship.zs_test_fail_timer_insert();",
         )
         .await
         .expect("install timer registration failpoint");
@@ -1004,9 +1006,9 @@ async fn install_timer_registration_failpoint(fx: &Fixture) {
 async fn remove_timer_registration_failpoint(fx: &Fixture) {
     fx.pg
         .batch_execute(
-            "DROP TRIGGER IF EXISTS zs_test_fail_timer_insert ON workflow_scheduler.timers; \
-             DROP FUNCTION IF EXISTS workflow_scheduler.zs_test_fail_timer_insert(); \
-             DROP TABLE IF EXISTS workflow_scheduler.zs_test_timer_insert_fails;",
+            "DROP TRIGGER IF EXISTS zs_test_fail_timer_insert ON zeroship.workflow_scheduler_timers; \
+             DROP FUNCTION IF EXISTS zeroship.zs_test_fail_timer_insert(); \
+             DROP TABLE IF EXISTS zeroship.zs_test_timer_insert_fails;",
         )
         .await
         .expect("remove timer registration failpoint");
@@ -1015,7 +1017,7 @@ async fn remove_timer_registration_failpoint(fx: &Fixture) {
 async fn arm_timer_registration_failure(fx: &Fixture, app_id: Uuid) {
     fx.pg
         .execute(
-            "INSERT INTO workflow_scheduler.zs_test_timer_insert_fails (app_id) \
+            "INSERT INTO zeroship.zs_test_timer_insert_fails (app_id) \
              VALUES ($1) ON CONFLICT DO NOTHING",
             &[&app_id],
         )
@@ -1026,7 +1028,7 @@ async fn arm_timer_registration_failure(fx: &Fixture, app_id: Uuid) {
 async fn disarm_timer_registration_failure(fx: &Fixture, app_id: Uuid) {
     fx.pg
         .execute(
-            "DELETE FROM workflow_scheduler.zs_test_timer_insert_fails WHERE app_id = $1",
+            "DELETE FROM zeroship.zs_test_timer_insert_fails WHERE app_id = $1",
             &[&app_id],
         )
         .await
@@ -1123,7 +1125,7 @@ async fn failed_timer_registration_leaves_no_run_so_a_retry_starts_exactly_one()
     let timers: i64 = fx
         .pg
         .query_one(
-            "SELECT count(*)::bigint AS n FROM workflow_scheduler.timers WHERE run_id = $1",
+            "SELECT count(*)::bigint AS n FROM zeroship.workflow_scheduler_timers WHERE run_id = $1",
             &[&retried_run],
         )
         .await
