@@ -144,7 +144,8 @@ impl BearerVerifier {
         let (Some(client_id), Some(iat)) = (client_id, iat) else {
             return Err(AuthnRejection::unauthorized("token_revocation_claims_missing").into());
         };
-        let iat = i64::try_from(iat).map_err(|_| AuthnRejection::unauthorized("invalid_token_iat"))?;
+        let iat = i64::try_from(iat)
+            .map_err(|_| AuthnRejection::unauthorized("invalid_token_iat"))?;
         let revoked_after = self.platform_revoked_after_for(client_id, sub).await?;
         if family_revoked_at(revoked_after, iat) {
             return Err(AuthnRejection::unauthorized("token_revoked").into());
