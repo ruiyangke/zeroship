@@ -60,7 +60,11 @@ ZEROSHIP_CONTROL_PORT="${ZEROSHIP_CONTROL_PORT:-9393}"
 ZEROSHIP_WORKER_PORT="${ZEROSHIP_WORKER_PORT:-8393}"
 ZEROSHIP_GATEWAY_PORT="${ZEROSHIP_GATEWAY_PORT:-8303}"
 REDIS_PORT="${REDIS_PORT:-6397}"
-REDIS_CONTAINER="zs-redeploy-redis"
+# Overridable for the same reason every port above is: with a per-run database
+# this harness is otherwise safe to run twice at once, and a fixed container
+# name is then the only thing left that one run can take from another --
+# `docker rm -f` in cleanup would kill the other run's Redis.
+REDIS_CONTAINER="${REDIS_CONTAINER:-zs-redeploy-redis}"
 export ZEROSHIP_WORKER_KEY="${ZEROSHIP_WORKER_KEY:-redeploy-worker-key-0123456789abcdef}"
 APP_NAME="redep"
 ZSHIP_A="${ZSHIP_A:-$ROOT/examples/kv-dashboard/dist/app.zship}"
