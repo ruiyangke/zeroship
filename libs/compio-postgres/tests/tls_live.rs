@@ -132,8 +132,7 @@ async fn require_fails_against_a_server_without_tls() {
     );
     let err = Pool::connect(&url, 2)
         .await
-        .err()
-        .expect("sslmode=require must not connect to a plaintext-only server");
+        .expect_err("sslmode=require must not connect to a plaintext-only server");
     let text = format!("{err}: {:?}", std::error::Error::source(&err));
     assert!(
         text.contains("does not support TLS"),
@@ -155,8 +154,7 @@ async fn require_fails_when_the_certificate_is_not_trusted() {
     let url = format!("{} sslmode=require sslrootcert=system", servers.tls_url);
     let err = Pool::connect(&url, 2)
         .await
-        .err()
-        .expect("a certificate signed by an untrusted private CA must be rejected");
+        .expect_err("a certificate signed by an untrusted private CA must be rejected");
     let text = format!("{err}: {:?}", std::error::Error::source(&err));
     assert!(
         text.contains("UnknownIssuer") || text.contains("invalid peer certificate"),
@@ -197,8 +195,7 @@ async fn channel_binding_require_fails_without_tls() {
     let url = format!("{} sslmode=disable channel_binding=require", servers.tls_url);
     let err = Pool::connect(&url, 2)
         .await
-        .err()
-        .expect("channel_binding=require must not succeed over plaintext");
+        .expect_err("channel_binding=require must not succeed over plaintext");
     let text = format!("{err}: {:?}", std::error::Error::source(&err));
     assert!(
         text.contains("channel binding"),
@@ -218,7 +215,9 @@ async fn bad_sslrootcert_is_reported_as_a_configuration_error() {
         "{} sslmode=require sslrootcert=/nonexistent/ca.crt",
         servers.tls_url
     );
-    let err = Pool::connect(&url, 2).await.err().expect("must fail");
+    let err = Pool::connect(&url, 2)
+        .await
+        .expect_err("a sslrootcert path that does not exist must fail");
     let text = format!("{err}: {:?}", std::error::Error::source(&err));
     assert!(
         text.contains("sslrootcert=/nonexistent/ca.crt"),
