@@ -1726,6 +1726,51 @@ pub enum IrLowerError {
         /// The sequence the op names.
         name: String,
     },
+    /// A `createTrigger` with `INSTEAD OF` timing whose target is a live TABLE.
+    ///
+    /// `INSTEAD OF` exists to make a VIEW writable, and both dialects that have it
+    /// refuse it on a table in their own words. MEASURED through the engine's own
+    /// emitted SQL:
+    ///
+    /// ```text
+    ///   sqlite      cannot create INSTEAD OF trigger on table: t
+    ///   postgres    "t" is a table  (DETAIL: Tables cannot have INSTEAD OF triggers.)
+    /// ```
+    ///
+    /// So this is NOT a dialect capability and NOT a `dialect-support.toml` cell:
+    /// the op IS supported on both, on a view. It is a structural fact about the op,
+    /// which is why the refusal is dialect-neutral and lives here rather than in the
+    /// capability tables. Before it existed, the op cleared validate, cleared lower
+    /// and met the operator mid-apply, with the migration's earlier statements
+    /// already committed.
+    ///
+    /// NOT SQLITE-ONLY. `createTrigger/bodyInsteadOf` is the only dialect-corpus row
+    /// carrying `INSTEAD OF`, and it is unsupported on PostgreSQL because PostgreSQL
+    /// has no trigger BODIES - so the live conformance sweep saw the defect on SQLite
+    /// alone. But `create_trigger_variant` routes every `executeFunction` action to
+    /// the `executeFunction` variant whatever the timing, so a PostgreSQL
+    /// `INSTEAD OF ... EXECUTE FUNCTION` on a table selects a supported cell and dies
+    /// the same way. Both are gated here.
+    ///
+    /// The test is the POSITIVE fact that the target is a KNOWN LIVE TABLE, never the
+    /// absence of a view: catalog introspection fills that set from
+    /// `relkind IN ('r','p')` on PostgreSQL and `type='table'` on SQLite, so a view is
+    /// never in it, and a `createTable` earlier in the same envelope adds itself to
+    /// it. A target the engine has never seen is left alone, the same fail-open
+    /// posture [`Self::DmlValidate`]'s resolved-`ColRef` rule documents.
+    #[error(
+        "createTrigger {trigger:?} is INSTEAD OF, but {table:?} is a table. INSTEAD OF \
+         triggers may only be used on views - SQLite answers `cannot create INSTEAD OF \
+         trigger on table: {table}` and PostgreSQL answers `\"{table}\" is a table \
+         (Tables cannot have INSTEAD OF triggers)`, so the migration would fail partway \
+         through applying. Target a view, or use BEFORE/AFTER timing on the table."
+    )]
+    InsteadOfTriggerTargetIsATable {
+        /// The trigger the op names.
+        trigger: String,
+        /// The live table the op targets.
+        table: String,
+    },
     /// A `createIndex` whose name already exists LIVE with a DIFFERENT shape.
     ///
     /// The emitters render `CREATE INDEX IF NOT EXISTS` whether or not the author
@@ -6435,6 +6480,25 @@ impl IrAuthor {
         decl: &DeclarativeAuthor,
         live_schema: &LiveSchema,
     ) -> Result<Vec<LoweredUnit>, IrLowerError> {
+        // An INSTEAD OF trigger belongs to a VIEW on every dialect that has one, so
+        // this refusal is dialect-neutral and sits before the renderers rather than
+        // in a capability table. See
+        // [`IrLowerError::InsteadOfTriggerTargetIsATable`] for both servers' own
+        // words and for why the corpus only ever showed it on SQLite.
+        if let Op::CreateTrigger {
+            name,
+            table,
+            timing: crate::model::ir::TriggerTiming::InsteadOf,
+            ..
+        } = op
+        {
+            if live_schema.tables.contains(table) {
+                return Err(IrLowerError::InsteadOfTriggerTargetIsATable {
+                    trigger: name.clone(),
+                    table: table.clone(),
+                });
+            }
+        }
         let stmts =
             crate::render::renderer::renderer(self.dialect).render_trigger_op(op, eff_schema)?;
         let history_down = trigger_inverse_from_history(op, live_schema, eff_schema, self.dialect);
