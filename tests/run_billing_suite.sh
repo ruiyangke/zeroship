@@ -303,9 +303,10 @@ else
 fi
 
 echo "------------------------------------------------------------------"
-echo "==> zeroship-migrate-adapter live-PG targets (ZERO_MIGRATE_TEST_PG_URL)"
-# ZERO_MIGRATE_TEST_PG_URL was set NOWHERE in this repo. Three targets read it,
-# and each announced a skip and counted as passed on every run:
+echo "==> zeroship-migrate-adapter live-PG targets"
+# ZERO_MIGRATE_TEST_PG_URL was set NOWHERE in this repo, and was this crate's
+# private name for the same server everything else already had. Three targets
+# read it, and each announced a skip and counted as passed on every run:
 #
 #   tests/smoke_apply_pg.rs        1 test of 1
 #   tests/author_and_apply_pg.rs   1 test of 2
@@ -318,6 +319,9 @@ echo "==> zeroship-migrate-adapter live-PG targets (ZERO_MIGRATE_TEST_PG_URL)"
 # The result lines are IDENTICAL. Only the clock and the announcement differ,
 # which is exactly why being named in a script is not evidence of coverage.
 #
+# The private name is gone; the three targets resolve the one test DSN like
+# every other target, so there is nothing left here that can go unexported.
+#
 # The database is the one THIS SCRIPT ALREADY CREATED. Nothing new is
 # provisioned: `smoke_apply_pg` and `author_and_apply_pg` create and drop their
 # own token-suffixed `proj_*` / `meta_*` schemas, and `platform_migrate`
@@ -327,7 +331,7 @@ echo "==> zeroship-migrate-adapter live-PG targets (ZERO_MIGRATE_TEST_PG_URL)"
 # No name list, same as the two groups above: the package invocation runs every
 # target in the crate, so a target added there is covered here the moment it is
 # added.
-if run_group env ZERO_MIGRATE_TEST_PG_URL="$DSN" \
+if run_group env PG_TEST_URL="$DSN" \
      cargo test -p zeroship-migrate-adapter --features platform-cli --no-fail-fast \
      -- "${THREAD_ARG[@]}"; then
   :
