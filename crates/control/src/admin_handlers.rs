@@ -1,4 +1,4 @@
-//! Platform-admin handlers for roles and operator net policy.
+//! Platform-admin handlers for the platform staff role table.
 
 use std::sync::Arc;
 
@@ -9,11 +9,9 @@ use serde_json::json;
 use uuid::Uuid;
 use zeroship_auth::audit::{self as auth_audit, AuditEvent};
 use zeroship_authz::{Action, EntityCache, Resource};
-use zeroship_core::net_policy::{normalize_frontable_suffixes, FRONTABLE_WILDCARD_SUFFIXES};
 
 use crate::auth_audit as control_auth_audit;
 use crate::authz_guard::AuthzGuard;
-use crate::net_grants;
 use crate::AppState;
 
 pub(crate) const PLATFORM_ORG_ID: &str = "zeroship_platform";
@@ -30,18 +28,6 @@ pub struct RoleBody {
 #[derive(Serialize)]
 struct RoleResponse {
     role: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct FrontableSuffixesBody {
-    suffixes: Vec<String>,
-}
-
-#[derive(Serialize)]
-struct FrontableSuffixesResponse {
-    suffixes: Vec<String>,
-    catalog_available: bool,
-    backstop_suffixes: Vec<&'static str>,
 }
 
 pub async fn grant_platform_role(
@@ -181,92 +167,12 @@ pub async fn get_platform_role(
     }
 }
 
-pub async fn get_frontable_suffixes(
-    guard: AuthzGuard,
-    state: State<Arc<AppState>>,
-) -> web::HttpResponse {
-    if let Err(resp) = require_admin_or_support(&guard, &state).await {
-        return resp;
-    }
-    match net_grants::load_frontable_suffix_catalog(state.control_pg.as_ref()).await {
-        Ok(catalog) => web::HttpResponse::Ok().json(&FrontableSuffixesResponse {
-            suffixes: catalog.suffixes,
-            catalog_available: catalog.available,
-            backstop_suffixes: FRONTABLE_WILDCARD_SUFFIXES.to_vec(),
-        }),
-        Err(err) => err.into_response(),
-    }
-}
-
-pub async fn put_frontable_suffixes(
-    req: web::HttpRequest,
-    guard: AuthzGuard,
-    state: State<Arc<AppState>>,
-    body: Json<FrontableSuffixesBody>,
-) -> web::HttpResponse {
-    if let Err(resp) = require_platform_admin(&guard, &state).await {
-        return resp;
-    }
-
-    let suffixes = match normalize_frontable_suffixes(&body.suffixes) {
-        Ok(suffixes) => suffixes,
-        Err(err) => {
-            return web::HttpResponse::BadRequest()
-                .json(&json!({"error": "invalid suffix catalog", "detail": err}));
-        }
-    };
-    let value = serde_json::to_value(&suffixes).expect("suffix Vec serializes");
-    let updated_by = guard.principal_id.to_string();
-    if let Err(err) = state
-        .control_pg
-        .execute(
-            "INSERT INTO zeroship.net_policy_catalog (key, value_json, updated_by, updated_at) \
-             VALUES ('frontable_wildcard_suffixes', $1, $2, NOW()) \
-             ON CONFLICT (key) DO UPDATE SET \
-                value_json = EXCLUDED.value_json, \
-                updated_by = EXCLUDED.updated_by, \
-                updated_at = NOW()",
-            &[&value, &updated_by],
-        )
-        .await
-    {
-        tracing::error!(error = %err, "control: frontable suffix catalog update failed");
-        return db_error();
-    }
-
-    if let Err(resp) = audit_event(
-        &req,
-        &state,
-        &guard,
-        "net_policy_frontable_suffixes_updated",
-        json!({
-            "actor": guard.principal_id,
-            "suffix_count": suffixes.len(),
-        }),
-    )
-    .await
-    {
-        return resp;
-    }
-
-    web::HttpResponse::Ok().json(&FrontableSuffixesResponse {
-        suffixes,
-        catalog_available: true,
-        backstop_suffixes: FRONTABLE_WILDCARD_SUFFIXES.to_vec(),
-    })
-}
-
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::resource("/admin/users/{user_id}/role")
             .route(web::post().to(grant_platform_role))
             .route(web::delete().to(revoke_platform_role))
             .route(web::get().to(get_platform_role)),
-    )
-    .service(
-        web::resource("/admin/net-policy/frontable-wildcard-suffixes")
-            .route(web::get().to(get_frontable_suffixes))
-            .route(web::put().to(put_frontable_suffixes)),
     );
 }
 
