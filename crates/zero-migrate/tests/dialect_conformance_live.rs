@@ -60,10 +60,32 @@
 //!
 //! ISOLATION. Every PostgreSQL row runs in its own schema pair (project + meta),
 //! created and dropped per row, plus a per-row role and the one extension. The
-//! PostgreSQL sweep counts `pg_namespace` before and after itself and fails if any
-//! `zmconf_%` schema survives - inside the sweep, not beside it, because a check
-//! whose subject is another test's in-flight state cannot be its own `#[test]`.
-//! Every SQLite row runs in its own `TempDir`.
+//! PostgreSQL sweep counts `pg_namespace` before and after itself and fails if a
+//! `zmconf_%` schema it is answerable for survives - inside the sweep, not beside
+//! it, because a check whose subject is another test's in-flight state cannot be
+//! its own `#[test]`. Every SQLite row runs in its own `TempDir`.
+//!
+//! LEAK CHECK. "Answerable for" is decided by the pid in the schema name, never by
+//! the `zmconf_` prefix alone. One PostgreSQL instance is shared by every agent and
+//! every gate run working in this tree, so at any moment a `zmconf_%` schema is as
+//! likely to be a sibling run's live probe as it is to be a leak; a guard that reads
+//! the first as the second fails suites that are working, which is what it used to
+//! do. [`probe_owner`] sorts the prefix match three ways: this process's own pid is
+//! always this run's leak; a foreign pid that is still running is a sibling
+//! mid-flight and is ignored; a foreign pid that has exited leaked its schema and
+//! still fails the run. Two limits are known and measured, both narrow:
+//!
+//!   - PID REUSE. A leak from a dead run whose pid has since been recycled by some
+//!     unrelated live process reads as in-flight and is not reported until that
+//!     process exits. Detection is delayed, never dropped - the schema keeps
+//!     failing later runs until it is cleaned up. `/proc/sys/kernel/pid_max` is
+//!     4194304 on the machine this suite is developed against, so a wrap takes
+//!     millions of spawns. The reverse case is safe by construction: a run that
+//!     inherits a leaker's pid reads the leftover as its own and fails loudly.
+//!   - NON-LINUX. [`process_is_running`] reads `/proc`. On a target without it,
+//!     every foreign pid reads as running, which keeps concurrent runs green and
+//!     gives up only the cross-run half of the check. This run's own leftovers are
+//!     still caught, because "is this pid mine" needs no `/proc`.
 //!
 //! SCOPE. PostgreSQL and SQLite. MySQL is deliberately absent: there is no live
 //! MySQL Rust coverage in this tree at all (`ZERO_MIGRATE_MYSQL_URL` appears in one
@@ -771,12 +793,22 @@ fn nonce(kind: &str, variant: &str) -> String {
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
     let slug: String = slug.to_ascii_lowercase().chars().take(28).collect();
-    format!("zmconf_{slug}_{}_{seq}", std::process::id())
+    format!("{}{slug}_{seq}", probe_prefix_for(std::process::id()))
 }
 
 /// The schema-name prefix every probe schema carries, so the leak check can find
 /// them all with one `pg_namespace` predicate.
 const PROBE_PREFIX: &str = "zmconf_";
+
+/// The prefix a probe schema carries when the process whose id is `pid` created it.
+///
+/// The pid is the FIRST segment after [`PROBE_PREFIX`], not a middle one, for two
+/// reasons. A row appends `_aux`, `_migrations` and `_role` to the base name, so
+/// only the head of the name is stable; and PostgreSQL truncates an identifier
+/// past 63 bytes from the tail, so only the head is guaranteed to survive.
+fn probe_prefix_for(pid: u32) -> String {
+    format!("{PROBE_PREFIX}{pid}_")
+}
 
 async fn pg_verdict(url: &str, kind: &str, variant: &str, op: &Op) -> Verdict {
     let session = PgDevSession::connect(url);
@@ -1220,10 +1252,127 @@ fn judge(dialect: &str, ledger: &[(String, String, Verdict)]) {
     );
 }
 
+/// Who a `zmconf_%` schema in `pg_namespace` belongs to.
+///
+/// The prefix alone cannot answer this. Every agent working in this tree points at
+/// ONE PostgreSQL instance, so a `zmconf_%` schema is as likely to be a sibling
+/// run's live probe as it is to be a leak, and reading the first as the second
+/// fails a suite that is working correctly. The name carries the pid of the process
+/// that created it, which is the evidence that separates the two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeOwner {
+    /// THIS process created it. No other process can produce this name, so it is
+    /// unconditionally this run's to answer for.
+    Mine,
+    /// Another process created it and that process is still running: a sibling
+    /// suite mid-flight, whose schemas are not this run's to judge.
+    SiblingInFlight,
+    /// No running process can still drop it. A finished run leaked it.
+    Abandoned,
+}
+
+/// The pid a probe schema's name carries, or `None` when there is no number where
+/// [`probe_prefix_for`] puts one.
+fn creating_pid(schema: &str) -> Option<u32> {
+    schema
+        .strip_prefix(PROBE_PREFIX)?
+        .split('_')
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// Whether `pid` is still running, which is the only evidence available that a
+/// probe schema is in flight rather than leaked.
+///
+/// `pg_namespace` is shared, but the pids in these names belong to the machine
+/// running the suite, so `/proc` is the right authority for them. On a target
+/// without `/proc` this answers "running", which keeps concurrent runs passing at
+/// the cost of the cross-run half of the leak check - see the LEAK CHECK note in
+/// the module header.
+fn process_is_running(pid: u32) -> bool {
+    if cfg!(target_os = "linux") {
+        std::path::Path::new(&format!("/proc/{pid}")).exists()
+    } else {
+        true
+    }
+}
+
+/// A binary built before the pid moved to the front of the name wrote it in the
+/// middle (`zmconf_<slug>_<pid>_<seq>`). Such runs share this server right now, so
+/// a live pid anywhere in a name this layout cannot parse still means "sibling in
+/// flight". Delete this once no binary that old can still be running.
+fn legacy_layout_is_in_flight(schema: &str) -> bool {
+    schema
+        .split('_')
+        .filter_map(|segment| segment.parse::<u32>().ok())
+        .any(process_is_running)
+}
+
+/// Judge one `zmconf_%` schema on behalf of the process whose id is `me`.
+fn probe_owner(schema: &str, me: u32) -> ProbeOwner {
+    match creating_pid(schema) {
+        Some(pid) if pid == me => ProbeOwner::Mine,
+        Some(pid) if process_is_running(pid) => ProbeOwner::SiblingInFlight,
+        Some(_) => ProbeOwner::Abandoned,
+        None if legacy_layout_is_in_flight(schema) => ProbeOwner::SiblingInFlight,
+        None => ProbeOwner::Abandoned,
+    }
+}
+
+/// The `zmconf_%` schemas the catalog holds, split by [`ProbeOwner`].
+struct ProbeCensus {
+    mine: Vec<String>,
+    sibling_in_flight: Vec<String>,
+    abandoned: Vec<String>,
+}
+
+impl ProbeCensus {
+    fn take(schemas: Vec<String>, me: u32) -> Self {
+        let mut census = Self {
+            mine: Vec::new(),
+            sibling_in_flight: Vec::new(),
+            abandoned: Vec::new(),
+        };
+        for schema in schemas {
+            match probe_owner(&schema, me) {
+                ProbeOwner::Mine => census.mine.push(schema),
+                ProbeOwner::SiblingInFlight => census.sibling_in_flight.push(schema),
+                ProbeOwner::Abandoned => census.abandoned.push(schema),
+            }
+        }
+        census
+    }
+
+    /// Every schema no running process can still drop. Both buckets are leaks; they
+    /// are reported apart because they accuse different runs.
+    fn leaked(&self) -> bool {
+        !self.mine.is_empty() || !self.abandoned.is_empty()
+    }
+}
+
+/// Re-read the catalog and keep only the `candidates` still there.
+///
+/// [`ProbeCensus`] reads `pg_namespace` and then reads `/proc`, and a sibling can
+/// finish between the two: its rows are already in hand while its pid is already
+/// gone, which reads as abandoned. That sibling dropped its schemas on its way out,
+/// so a second look tells a stale row from a real leak.
+async fn still_in_the_catalog(session: &PgDevSession, candidates: &[String]) -> Vec<String> {
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let (_, present) = probe_schemas(session).await;
+    candidates
+        .iter()
+        .filter(|candidate| present.contains(candidate))
+        .cloned()
+        .collect()
+}
+
 /// Every `zmconf_%` schema currently in `pg_namespace`, and the whole-catalog
 /// count beside it. The database is shared with every other live suite in this
 /// crate, so the global count moves for reasons that are not this file's; the
-/// prefixed list is the one this file is answerable for.
+/// prefixed list is the one [`ProbeCensus`] then sorts into this run's and others'.
 async fn probe_schemas(session: &PgDevSession) -> (i64, Vec<String>) {
     let total: i64 = session
         .query_one("SELECT count(*)::bigint AS n FROM pg_namespace", &[])
@@ -1238,11 +1387,11 @@ async fn probe_schemas(session: &PgDevSession) -> (i64, Vec<String>) {
         )
         .await
         .expect("query pg_namespace for probe schemas");
-    let mine = rows
+    let prefixed = rows
         .iter()
         .filter_map(|row| row.try_get::<_, String>("nspname").ok())
         .collect();
-    (total, mine)
+    (total, prefixed)
 }
 
 #[compio::test]
@@ -1260,10 +1409,26 @@ async fn every_postgres_row_of_the_dialect_table_answers_to_a_live_server() {
     // and reported a leak that was a live probe. A check whose subject is another
     // test's in-progress state has to be sequenced with it, so it is a step of the
     // sweep.
-    let (before_total, before_mine) = probe_schemas(&session).await;
+    //
+    // The census is by pid, not by prefix. `zmconf_%` alone answers "somebody on
+    // this server is or was running this suite", and every agent in this tree points
+    // at one instance: a sibling's live probe schema read as a leak fails a run that
+    // is working. What a leak actually is - a schema no running process can still
+    // drop - is what the pid in the name settles.
+    let me = std::process::id();
+    let (before_total, before_prefixed) = probe_schemas(&session).await;
+    let mut before = ProbeCensus::take(before_prefixed, me);
+    before.abandoned = still_in_the_catalog(&session, &before.abandoned).await;
     assert!(
-        before_mine.is_empty(),
-        "a previous run leaked probe schemas: {before_mine:?}"
+        !before.leaked(),
+        "probe schemas are on the server that no running process can still drop:\n  \
+         left by THIS process ({me}): {:?}\n  \
+         left by a process that has since exited: {:?}\n\
+         ({} more carry the pid of a process that is still running - a sibling suite \
+         mid-flight - and are not this run's to judge.)",
+        before.mine,
+        before.abandoned,
+        before.sibling_in_flight.len(),
     );
 
     let mut ledger: Vec<(String, String, Verdict)> = Vec::new();
@@ -1272,24 +1437,125 @@ async fn every_postgres_row_of_the_dialect_table_answers_to_a_live_server() {
         ledger.push((kind.to_string(), variant.to_string(), verdict));
     }
 
-    let (after_total, after_mine) = probe_schemas(&session).await;
+    // This half of the check needs no liveness reasoning: `me` is running by
+    // definition, so anything still carrying this pid is this run's own leak.
+    let (after_total, after_prefixed) = probe_schemas(&session).await;
+    let after = ProbeCensus::take(after_prefixed, me);
     println!(
         "LEDGER postgres pg_namespace before={before_total} after={after_total} \
-         probe_schemas_before={} probe_schemas_after={}",
-        before_mine.len(),
-        after_mine.len()
+         probe_schemas_mine_before={} probe_schemas_mine_after={} \
+         probe_schemas_sibling_in_flight_after={}",
+        before.mine.len(),
+        after.mine.len(),
+        after.sibling_in_flight.len(),
     );
     assert!(
-        after_mine.is_empty(),
+        after.mine.is_empty(),
         "this suite creates two schemas per row and drops both, but pg_namespace still \
-         holds {}: {after_mine:?}. A leaked probe schema means a row's guard did not run, \
-         and the next run's CREATE SCHEMA will fail against it.",
-        after_mine.len()
+         holds {} of this process's own ({me}): {:?}. A leaked probe schema means a row's \
+         guard did not run, and a run that inherits this pid will fail its CREATE SCHEMA \
+         against it.",
+        after.mine.len(),
+        after.mine,
     );
 
     report("postgres", &ledger);
     judge("postgres", &ledger);
     let _ = MYSQL_TODO;
+}
+
+/// The leak check reads the pid in the name, not just the prefix - measured against
+/// a real `pg_namespace` row and a real process, in all three directions.
+///
+/// The schema this plants carries a pid that is ALIVE and is not this process's, so
+/// the sweep above - which may be running concurrently in this same binary - reads
+/// it as a sibling in flight and ignores it, exactly as it would a real sibling's.
+/// A schema carrying a DEAD pid is deliberately never put on the shared server: that
+/// is a real leak by every run's reckoning, and planting one would fail a sibling
+/// that is working. The dead-pid verdict is measured on the same name string once
+/// its process has actually been reaped.
+#[compio::test]
+async fn a_probe_schema_is_judged_by_the_pid_in_its_name_not_by_its_prefix() {
+    let Some(url) = support::pg_url() else {
+        support::announce_live_db_skip(support::PG_URL_ENV);
+        return;
+    };
+    let session = PgDevSession::connect(&url);
+    let me = std::process::id();
+
+    // A real, running, foreign process. `sleep` outlives every assertion that needs
+    // it alive, and is reaped before the one that needs it dead.
+    let mut sibling = std::process::Command::new("sleep")
+        .arg("120")
+        .spawn()
+        .expect("spawn a real sibling process to own a probe schema");
+    let sibling_pid = sibling.id();
+    assert_ne!(sibling_pid, me, "the sibling has to be a different process");
+    assert!(
+        process_is_running(sibling_pid),
+        "the sibling was just spawned; it has to read as running"
+    );
+
+    let sibling_schema = format!("{}leakcheck_0", probe_prefix_for(sibling_pid));
+    let mine_schema = format!("{}leakcheck_0", probe_prefix_for(me));
+
+    {
+        let _guard = support::SchemaGuard::arm(&session, [sibling_schema.clone()]);
+        session
+            .batch(&format!("CREATE SCHEMA \"{sibling_schema}\""))
+            .await
+            .expect("create the sibling's probe schema");
+
+        // The real catalog read the sweep uses, over a real row.
+        let (_, prefixed) = probe_schemas(&session).await;
+        assert!(
+            prefixed.contains(&sibling_schema),
+            "the census must see the schema it is being asked about; saw {prefixed:?}"
+        );
+
+        let census = ProbeCensus::take(prefixed, me);
+        assert!(
+            census.sibling_in_flight.contains(&sibling_schema),
+            "a running foreign pid's schema is a sibling in flight, not a leak"
+        );
+        assert!(
+            !census.mine.contains(&sibling_schema),
+            "another process's schema is never this run's"
+        );
+        assert!(
+            !census.abandoned.contains(&sibling_schema),
+            "its creator is still running, so nothing has been abandoned"
+        );
+    }
+
+    // Scoping by pid must not blind the guard to this run's OWN leftovers.
+    assert_eq!(
+        probe_owner(&mine_schema, me),
+        ProbeOwner::Mine,
+        "a schema carrying this process's pid is this run's own leak"
+    );
+    assert!(
+        ProbeCensus::take(vec![mine_schema.clone()], me).leaked(),
+        "a census holding this run's own leftover has to read as leaked"
+    );
+
+    // ... nor to a schema whose creator has exited, which is what a leak from a
+    // finished run looks like.
+    sibling.kill().expect("stop the sibling process");
+    sibling.wait().expect("reap the sibling process");
+    assert!(
+        !process_is_running(sibling_pid),
+        "the sibling was killed and reaped; it has to read as gone"
+    );
+    assert_eq!(
+        probe_owner(&sibling_schema, me),
+        ProbeOwner::Abandoned,
+        "once its creator has exited, a probe schema is a leak to every run"
+    );
+    assert!(
+        ProbeCensus::take(vec![sibling_schema], me).leaked(),
+        "a census holding a finished run's leftover has to read as leaked"
+    );
 }
 
 #[compio::test]
