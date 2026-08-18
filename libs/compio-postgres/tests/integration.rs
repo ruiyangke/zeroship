@@ -2146,18 +2146,21 @@ async fn release_rollback_keeps_session_state_the_next_borrower_may_rely_on() {
 }
 
 // ---------------------------------------------------------------------------
-// TLS: the pool has no TLS connector, so a connection string that requires
-// encryption must fail rather than quietly connect in the clear.
+// TLS: a connection string that requires encryption must fail against this
+// plaintext server rather than quietly connect in the clear. WHY it fails
+// differs by build, and both arms are asserted below - the reason is the part
+// an operator reads.
 // ---------------------------------------------------------------------------
 
 #[compio::test]
-async fn sslmode_require_fails_closed_without_a_tls_connector() {
+async fn sslmode_require_fails_closed_over_a_plaintext_server() {
     let Some(url) = require_pg().await else {
         return;
     };
     let sep = if url.contains('?') { '&' } else { '?' };
     let require = format!("{url}{sep}sslmode=require");
 
+    // `NoTls` explicitly: no build of this crate lets NoTls satisfy `require`.
     let err = compio_postgres::connect(&require, NoTls)
         .await
         .err()
@@ -2171,8 +2174,41 @@ async fn sslmode_require_fails_closed_without_a_tls_connector() {
     let cause = std::error::Error::source(&err)
         .map(ToString::to_string)
         .unwrap_or_default();
+
+    // Without the `tls` feature the pool has no connector at all, and says so
+    // before opening a socket. With it, the pool builds a rustls connector,
+    // gets as far as `SSLRequest`, and the server's `N` is the failure.
+    #[cfg(not(feature = "tls"))]
     assert!(
-        cause.contains("sslmode=require") && cause.contains("NoTls"),
-        "the pool's refusal should name the unsatisfiable setting and why, got: {cause}"
+        cause.contains("sslmode=require") && cause.contains("`tls` feature"),
+        "the refusal should name the unsatisfiable setting and why, got: {cause}"
+    );
+    #[cfg(feature = "tls")]
+    assert!(
+        cause.contains("server does not support TLS"),
+        "the failure should be the server's refusal, got: {cause}"
+    );
+}
+
+/// `sslnegotiation=direct` under `sslmode=prefer` is the one TLS combination no
+/// build can serve: a mode that permits plaintext must not drive a TLS-only
+/// handshake. The pool rejects it before spending its retry budget.
+#[compio::test]
+async fn sslnegotiation_direct_under_prefer_is_rejected_by_the_pool() {
+    let Some(url) = require_pg().await else {
+        return;
+    };
+    let sep = if url.contains('?') { '&' } else { '?' };
+    let direct = format!("{url}{sep}sslmode=prefer&sslnegotiation=direct");
+
+    let err = Pool::connect(&direct, 2)
+        .await
+        .expect_err("prefer + direct is unsatisfiable in every build");
+    let cause = std::error::Error::source(&err)
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    assert!(
+        cause.contains("sslnegotiation=direct"),
+        "the refusal should name the unsatisfiable setting, got: {cause}"
     );
 }
