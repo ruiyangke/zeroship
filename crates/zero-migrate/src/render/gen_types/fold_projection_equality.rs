@@ -1,7 +1,8 @@
 //! **The step 3 gate: every projection reproduces its walker, byte for byte.**
 //!
-//! Three legs, not four. Step 4 retired the `runtime_metadata` leg with the walker it
-//! compared against - see [`Projection`].
+//! TWO legs, not four. Step 4 retires a leg with each walker it deletes: consumer 1
+//! took `runtime_metadata` and consumer 2 took `authoring_tables` - see
+//! [`Projection`].
 //!
 //! `docs/proposals/single-fold-and-effects.md` section G step 3:
 //!
@@ -39,16 +40,22 @@
 //! # What this gate CANNOT see
 //!
 //! The fold fails CLOSED: it runs the structural catalog replay, so a stream that
-//! replay refuses produces no projection at all. `authoring_tables_from_ops` applies
-//! no coherence gate and answers about such a stream anyway -
-//! `differential_corpus`'s `ONLY_THE_FOLD_BACKED_WALKERS_FAIL_CLOSED` records the
-//! same asymmetry, and records that it used to name TWO walkers. Those observations are counted separately as
-//! [`Verdict::FoldRefused`] and are NOT equality evidence; the count is pinned so the
-//! gate cannot quietly lose coverage by refusing more.
+//! replay refuses produces no projection at all. Both walkers still compared here -
+//! `fold_ops` and `fold_to_field_defs` - are fold-backed and fail closed the same way,
+//! so [`Verdict::FoldRefused`] is now **zero** and `BOTH_REFUSED` carries every
+//! refused prefix. That was not true while `authoring_tables_from_ops` was in this
+//! gate: it applied no coherence gate at all and answered about streams the fold
+//! refused, which is what the 196 fold-refused prefixes were.
+//!
+//! The consequence is worth stating rather than celebrating. A `FOLD_REFUSED` of zero
+//! does not mean the gate sees more; it means the last walker whose answer could have
+//! contradicted the fold on a refused stream is gone, so there is nothing left here to
+//! contradict it. What replaces that evidence is an OVER-REFUSAL control at the
+//! artifact level, in `tests/gen_types_authoring_tables_from_the_fold.rs`, because an
+//! equality gate is blind to a refusal change by construction.
 
 use std::collections::BTreeMap;
 
-use super::authoring_tables_from_ops;
 use super::differential_corpus::{
     parse, policy, read_golden, CASES, DIALECTS, SCHEMA, STEMS, STREAMS,
 };
@@ -62,37 +69,31 @@ use crate::SqlDialect;
 
 /// The projections still measurable here, named for the walker each must reproduce.
 ///
-/// `RuntimeMetadata` is NOT in this list any more, and its absence is the shape of
-/// step 4 rather than a gap. This gate compares a projection to the WALKER it
-/// replaces, and step 4 consumer 1 deleted `runtime_metadata_from_ops`: there is no
-/// second answer left to compare `project_runtime_metadata` against, and keeping the
-/// leg would have compared the projection to itself. What replaces it is a gate at
-/// the ARTIFACT level - `tests/gen_types_runtime_metadata_from_the_fold.rs`, whose
-/// golden was captured from the walker before it was deleted, so the evidence the
-/// walker used to provide outlives the walker. Each later consumer move retires its
-/// leg here the same way.
+/// `RuntimeMetadata` and `AuthoringTables` are NOT in this list any more, and their
+/// absence is the shape of step 4 rather than a gap. This gate compares a projection
+/// to the WALKER it replaces; consumer 1 deleted `runtime_metadata_from_ops` and
+/// consumer 2 deleted `authoring_tables_from_ops`, so for each of those there is no
+/// second answer left and keeping the leg would have compared the projection to
+/// itself. What replaces each is a gate at the ARTIFACT level -
+/// `tests/gen_types_runtime_metadata_from_the_fold.rs` and
+/// `tests/gen_types_authoring_tables_from_the_fold.rs` - whose goldens were captured
+/// from the walkers before they were deleted, so the evidence a walker used to
+/// provide outlives the walker. Each later consumer move retires its leg the same way.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Projection {
     /// `FoldedSchema::project_snapshot` against `fold_ops`.
     Snapshot,
     /// `FoldedSchema::project_field_defs` against `fold_to_field_defs`.
     FieldDefs,
-    /// `FoldedSchema::project_authoring_tables` against `authoring_tables_from_ops`.
-    AuthoringTables,
 }
 
-const PROJECTIONS: [Projection; 3] = [
-    Projection::Snapshot,
-    Projection::FieldDefs,
-    Projection::AuthoringTables,
-];
+const PROJECTIONS: [Projection; 2] = [Projection::Snapshot, Projection::FieldDefs];
 
 impl Projection {
     fn label(self) -> &'static str {
         match self {
             Projection::Snapshot => "snapshot",
             Projection::FieldDefs => "field_defs",
-            Projection::AuthoringTables => "authoring_tables",
         }
     }
 }
@@ -114,9 +115,6 @@ fn walker_answer(
         Projection::FieldDefs => fold_to_field_defs(ops, dialect, SCHEMA, &effective)
             .map(|v| serde_json::to_string_pretty(&v).expect("field defs serialize"))
             .map_err(|e| e.to_string()),
-        Projection::AuthoringTables => authoring_tables_from_ops(ops, dialect)
-            .map(|v| format!("{v:#?}"))
-            .map_err(|e| e.to_string()),
     }
 }
 
@@ -132,7 +130,6 @@ fn projection_answer(
         Projection::Snapshot => format!("{:#?}", folded.project_snapshot()),
         Projection::FieldDefs => serde_json::to_string_pretty(&folded.project_field_defs())
             .expect("field defs serialize"),
-        Projection::AuthoringTables => format!("{:#?}", folded.project_authoring_tables()),
     })
 }
 
@@ -308,21 +305,6 @@ struct Divergence {
     side: Side,
 }
 
-/// `authoring_tables_from_ops` does not handle `Op::AlterPrimaryKey` at all - it falls
-/// through the walker's `_ => {}`, measured `S` for ATO in the step 1 reach matrix
-/// (`alterPrimaryKey|Postgres|RRSS`). So `env.db.ts` keeps declaring the primary key
-/// the migration replaced or dropped, and `render_table` reads `primary_key`
-/// (`gen_types.rs:1162-1195`) to emit it. `fold_to_field_defs` DOES handle the op (it
-/// clears the identity facet), so one `renderArtifacts` call emits two artifacts that
-/// disagree about the same table - which is section B row 2's shape exactly, on an op
-/// nobody had looked at.
-const ATO_IGNORES_ALTER_PRIMARY_KEY: &str =
-    "authoring_tables_from_ops has no Op::AlterPrimaryKey arm, so env.db.ts keeps the \
-     pre-alter primary key and the pre-alter identity facet. The projection follows the \
-     op, because a model that ignored it would be stating a key the database does not \
-     have. Measured on the alter_primary_key fixture and on v_primary_key; \
-     docs/review-log.md has no entry for this one, so this gate is its first record.";
-
 /// `fold_to_field_defs` lifts a single-column `UNIQUE` onto the column descriptor and
 /// never un-lifts it. The FK half of exactly this lift IS un-lifted - the walker's
 /// `Op::DropConstraint` arm exists and its comment says why ("the policy outlived the
@@ -352,10 +334,21 @@ const DIVERGENCES: &[Divergence] = &[
     Divergence { key: "v_index_and_constraint|Sqlite|field_defs", at: 5, detail: "line 9: fold \"\\\"required\\\": true\" walker \"\\\"required\\\": true,\"", side: Side::WalkerDefect(FFD_NEVER_UNLIFTS_A_DROPPED_UNIQUE) },
     Divergence { key: "v_index_and_constraint|Mysql|field_defs", at: 5, detail: "line 9: fold \"\\\"required\\\": true\" walker \"\\\"required\\\": true,\"", side: Side::WalkerDefect(FFD_NEVER_UNLIFTS_A_DROPPED_UNIQUE) },
 
-    // `[createTable(orders PRIMARY KEY id), alterPrimaryKey replace -> legacy_id]`.
-    Divergence { key: "v_primary_key|Postgres|authoring_tables", at: 2, detail: "line 45: fold \"\\\"legacy_id\\\",\" walker \"\\\"id\\\",\"", side: Side::WalkerDefect(ATO_IGNORES_ALTER_PRIMARY_KEY) },
-    Divergence { key: "v_primary_key|Sqlite|authoring_tables", at: 2, detail: "line 45: fold \"\\\"legacy_id\\\",\" walker \"\\\"id\\\",\"", side: Side::WalkerDefect(ATO_IGNORES_ALTER_PRIMARY_KEY) },
-    Divergence { key: "v_primary_key|Mysql|authoring_tables", at: 2, detail: "line 45: fold \"\\\"legacy_id\\\",\" walker \"\\\"id\\\",\"", side: Side::WalkerDefect(ATO_IGNORES_ALTER_PRIMARY_KEY) },
+    // THREE ROWS RETIRED WITH THEIR LEG, not fixed away and not lost.
+    //
+    // `v_primary_key|{Postgres,Sqlite,Mysql}|authoring_tables` recorded
+    // `line 45: fold "legacy_id," walker "id,"` - `authoring_tables_from_ops` had no
+    // `Op::AlterPrimaryKey` arm, so `env.db.ts` kept the primary key the migration
+    // replaced. Step 4 consumer 2 deleted that walker, so the row has no second side
+    // to differ from and cannot be measured here any more.
+    //
+    // It is not evidence that evaporated. The defect it named is now pinned FIVE ways
+    // at the artifact level in `tests/gen_types_authoring_tables_from_the_fold.rs` -
+    // one per `AlterPrimaryKeyAction` shape plus the identity facet - and adjudicated
+    // against a live PostgreSQL in `tests/env_db_ts_matches_the_server_pg.rs`, which
+    // applies the migration, reads the key out of `pg_catalog`, and asserts the
+    // artifact declares THAT key. A recorded divergence traded for a live oracle is
+    // the trade this gate exists to make.
 ];
 
 // ---------------------------------------------------------------------------
@@ -486,35 +479,69 @@ fn the_gate_has_the_shape_it_claims() {
          a FALL in it specifically means a stream was deleted or the fold started \
          refusing something it used to answer - neither of which reads as a failure \
          anywhere else. FOLD-REFUSED counts the prefixes this gate did NOT get to \
-         compare, because the fold fails closed and the two artifact walkers do not"
+         compare, because the fold fails closed and an artifact walker did not - it is \
+         ZERO since consumer 2 deleted the last such walker"
     );
 }
 
 /// Byte-identical comparisons across the whole corpus.
 ///
-/// Was 2,720 over FOUR projections. Step 4 consumer 1 deleted
-/// `runtime_metadata_from_ops`, so the `runtime_metadata` leg has no walker left to
-/// compare against and retired; 2,720 - 2,037 = 683 is that leg's share and NOT a
-/// stream that stopped being measured. What now covers it is
-/// `tests/gen_types_runtime_metadata_from_the_fold.rs`, whose golden was captured
-/// from the walker before it was deleted.
-const EQUAL_COMPARISONS: usize = 2037;
+/// The number has fallen twice and BOTH falls are a leg retiring with the walker it
+/// compared against, not a stream leaving the corpus. A shrinking coverage count is
+/// the one number here that reads as progress and is usually a leak, so the drop is
+/// accounted for EXACTLY rather than plausibly.
+///
+/// Every leg measures the same set of prefixes, and that set is
+/// `sum over streams of (len + 1) * DIALECTS` = **879**. The four counters for one leg
+/// therefore always sum to 879, which is the identity the accounting below turns on:
+///
+/// | | equal | differs | both refused | fold refused | sum |
+/// |---|---|---|---|---|---|
+/// | `snapshot` | 683 | 0 | 196 | 0 | 879 |
+/// | `field_defs` | 677 | 6 | 196 | 0 | 879 |
+/// | `authoring_tables` (retired here) | 677 | 6 | 0 | 196 | 879 |
+/// | `runtime_metadata` (retired by consumer 1) | 683 | 0 | 0 | 196 | 879 |
+///
+/// So: 2,720 over FOUR legs at step 3; 2,037 over THREE when consumer 1 deleted
+/// `runtime_metadata_from_ops` (2,720 - 2,037 = 683, that leg's equal share); 1,360
+/// over TWO now (2,037 - 1,360 = 677, this leg's equal share). The two retired legs
+/// differ by exactly the 6 divergences one of them recorded and the other did not.
+///
+/// The CORPUS itself is unchanged across this move, which is the claim the arithmetic
+/// above is only circumstantial evidence for and which is checked directly: `STEMS`,
+/// `STREAMS` and `CASES` are untouched, `measured.len()` is still asserted equal to
+/// `(STEMS + STREAMS + CASES) * DIALECTS * PROJECTIONS`, and
+/// [`TABLES_PROBED_PER_FIELD`] - which sweeps `corpus_streams()` and does not depend
+/// on `PROJECTIONS` at all - is still 97. A stream deleted from the corpus would move
+/// both of those; retiring a leg moves neither.
+///
+/// What now covers the retired legs is `tests/gen_types_runtime_metadata_from_the_fold.rs`
+/// and `tests/gen_types_authoring_tables_from_the_fold.rs`, whose goldens were
+/// captured from the walkers before they were deleted.
+const EQUAL_COMPARISONS: usize = 1360;
 /// Comparisons whose two texts differ. Every one is attributed in [`DIVERGENCES`].
 ///
-/// UNCHANGED at 12 across the retirement, which says something worth keeping: every
-/// recorded divergence belonged to one of the three surviving legs, and the retired
-/// leg contributed none.
-const DIFFERING_COMPARISONS: usize = 12;
+/// Was 12; it is 6 because the three `v_primary_key|*|authoring_tables` rows retired
+/// with their leg. It was UNCHANGED at 12 across consumer 1's retirement, and the
+/// contrast is the point: the runtime-metadata leg genuinely contributed no
+/// divergence, and this one contributed exactly half of them.
+const DIFFERING_COMPARISONS: usize = 6;
 /// Prefixes both sides refuse.
+///
+/// UNCHANGED at 392, and that it did not move is the check on the story above: the
+/// retired leg contributed ZERO to this column (its walker refused nothing the fold
+/// also refused), so its whole refusal share was the 196 in [`FOLD_REFUSED`]. A leg
+/// leaving that had contributed here would have shown up as a fall in this number too.
 const BOTH_REFUSED: usize = 392;
 /// Prefixes the fold refuses and a walker answers about.
 ///
-/// Halved from 392 to 196 because there is now ONE walker in this gate that answers
-/// where the fold refuses (`authoring_tables_from_ops`) rather than two. The
-/// runtime-metadata answer became fail-closed when it became a projection of the
-/// fold, which moved three of the four artifact producers onto the same coherence
-/// gate.
-const FOLD_REFUSED: usize = 196;
+/// ZERO. `authoring_tables_from_ops` was the last walker in this gate with no
+/// coherence gate of its own, and consumer 2 deleted it; `fold_ops` and
+/// `fold_to_field_defs` are both fold-backed and fail closed exactly where the
+/// projection does. Pinned rather than deleted, because a return to non-zero would
+/// mean the fold started refusing something a surviving walker still answers - the
+/// direction this gate cannot otherwise see.
+const FOLD_REFUSED: usize = 0;
 
 // ---------------------------------------------------------------------------
 // The per-field probe
@@ -789,6 +816,90 @@ fn the_neutral_vendor_split_loses_no_field_on_a_folded_shape() {
 const TABLES_PROBED_PER_FIELD: usize = 97;
 
 // ---------------------------------------------------------------------------
+// The fold's own refusal set, stated independently of any leg
+// ---------------------------------------------------------------------------
+
+/// **The fold refuses exactly what the catalog replay refuses, prefix for prefix.**
+///
+/// Every counter above is a property of a LEG, and a leg can retire. That makes the
+/// counters incomparable across a consumer move in one specific and dangerous way:
+/// [`FOLD_REFUSED`] fell from 196 to 0 in this change, and the honest reading is not
+/// "the fold refuses less" but "the last walker that could disagree with a refusal is
+/// gone". A reader arriving at the diff cannot tell those apart from the constants.
+///
+/// So this test states the thing the constants only imply, at SET resolution rather
+/// than as a count, and without reference to any projection: for every prefix of every
+/// corpus stream under every dialect, `single_fold::fold` errors exactly when
+/// `fold_ops` errors. `fold` calls `fold_ops_onto` first, so its refusal set is a
+/// SUPERSET by construction; asserting equality is asserting that `AuthoredState::advance`'s
+/// three fallible sites add nothing on this corpus, which is the direction a consumer
+/// move could break and no equality gate can see.
+///
+/// This is the leg-independent statement of what
+/// `tests/gen_types_authoring_tables_from_the_fold.rs`'s over-refusal control says at
+/// the artifact level.
+#[test]
+fn the_folds_refusal_set_is_the_catalog_replays_refusal_set() {
+    let mut fold_only = Vec::new();
+    let mut catalog_only = Vec::new();
+    let mut refused = 0usize;
+    let mut accepted = 0usize;
+    for (name, ops, confined) in corpus_streams() {
+        for dialect in DIALECTS {
+            let effective = policy(confined);
+            for i in 0..=ops.len() {
+                let prefix = &ops[..i];
+                let mine = single_fold::fold(prefix, dialect, SCHEMA, &effective);
+                let catalog = fold_ops(prefix, dialect, SCHEMA, &effective);
+                match (mine.is_err(), catalog.is_err()) {
+                    (true, true) => refused += 1,
+                    (false, false) => accepted += 1,
+                    (true, false) => fold_only.push(format!(
+                        "{name}|{dialect:?}|{i} ops -> {}",
+                        mine.expect_err("the fold refused")
+                    )),
+                    (false, true) => catalog_only.push(format!(
+                        "{name}|{dialect:?}|{i} ops -> {}",
+                        catalog.expect_err("the catalog replay refused")
+                    )),
+                }
+            }
+        }
+    }
+    assert!(
+        fold_only.is_empty(),
+        "the fold refuses prefixes the catalog replay accepts, which is a NEW refusal \
+         no equality gate can see:\n  {}",
+        fold_only.join("\n  ")
+    );
+    assert!(
+        catalog_only.is_empty(),
+        "the catalog replay refuses prefixes the fold accepts, which would make the \
+         fold LESS fail-closed than the walker it replaces:\n  {}",
+        catalog_only.join("\n  ")
+    );
+    // Two-sided floor. All-accepted would pass while proving nothing about refusals,
+    // and all-refused would prove nothing about the streams that still fold.
+    assert_eq!(
+        refused, FOLD_REFUSAL_PREFIXES,
+        "prefixes BOTH refuse. Pinned, not bounded: this is the fold's whole refusal \
+         set, and it is the number `FOLD_REFUSED` and `BOTH_REFUSED` are both derived \
+         from - 196 per leg, 392 across the two surviving legs"
+    );
+    assert!(
+        accepted >= 500,
+        "the check must also exercise acceptance: {accepted}"
+    );
+}
+
+/// Prefixes the fold and the catalog replay both refuse, over the whole corpus.
+///
+/// UNCHANGED by step 4 consumer 2, which is the direct answer to "did the fold start
+/// refusing more when the leg retired". It did not: the same 196 prefixes, and the
+/// same ones the `snapshot` leg's `both_refused` counted before the move.
+const FOLD_REFUSAL_PREFIXES: usize = 196;
+
+// ---------------------------------------------------------------------------
 // The evidence behind the two recorded divergences
 // ---------------------------------------------------------------------------
 
@@ -907,16 +1018,20 @@ fn a_dropped_check_constraint_outlives_itself_in_the_field_def_map() {
     );
 }
 
-/// **Evidence for [`ATO_IGNORES_ALTER_PRIMARY_KEY`], including the shipped artifact.**
+/// **The retired divergence's replacement, in this file: the two answers now AGREE.**
 ///
-/// What the server does after an exact-order `alterPrimaryKey` replace is already
-/// live-proven in `tests/pg_primary_key.rs`
-/// (`replace_accepts_only_exact_order_and_supports_single_composite_round_trip`, which
-/// introspects `primary_key_columns` off a real PostgreSQL). This test does not
-/// re-prove it; it shows that `env.db.ts` - the artifact an app is regenerated from -
-/// still declares the key the replace removed.
+/// This test used to assert the defect - `TODAY: env.db.ts declares the PRE-ALTER
+/// primary key`. Step 4 consumer 2 removed the walker that produced that answer, so
+/// what is left to state is that the catalog oracle and the shipped artifact now say
+/// the same thing about the same table out of the same stream.
+///
+/// The anchor is `fold_ops`, the structural oracle the live PostgreSQL, SQLite and
+/// MySQL suites already run against a real server; the ADJUDICATION that the fold's
+/// answer is the server's answer is not made here but in
+/// `tests/env_db_ts_matches_the_server_pg.rs`, which applies this migration for real
+/// and reads `pg_catalog`.
 #[test]
-fn an_altered_primary_key_never_reaches_the_authoring_artifact() {
+fn the_catalog_and_the_authoring_artifact_agree_about_an_altered_primary_key() {
     let stream = corpus_stream("v_primary_key");
     // createTable(orders, PRIMARY KEY (id)), alterPrimaryKey replace -> (legacy_id)
     let ops = &stream[..2];
@@ -935,13 +1050,6 @@ fn an_altered_primary_key_never_reaches_the_authoring_artifact() {
          anything: {primary_key}"
     );
 
-    let walker = authoring_tables_from_ops(ops, SqlDialect::Postgres).expect("authoring tables");
-    assert_eq!(
-        walker["orders"].primary_key.as_deref(),
-        Some(["id".to_string()].as_slice()),
-        "TODAY: the authoring tables still declare the REPLACED key"
-    );
-
     let folded = single_fold::fold(ops, SqlDialect::Postgres, SCHEMA, &effective).expect("fold");
     assert_eq!(
         folded.project_authoring_tables()["orders"]
@@ -957,19 +1065,26 @@ fn an_altered_primary_key_never_reaches_the_authoring_artifact() {
     let artifacts = super::render_artifacts(ops, SqlDialect::Postgres, SCHEMA, &effective)
         .expect("render artifacts");
     // A single-column key renders as a COLUMN modifier (`render_table`'s
-    // `single_primary_key` path), so the stale key is visible as `.primaryKey()` on the
-    // wrong column rather than as a table-level clause.
+    // `single_primary_key` path), so the key is visible as `.primaryKey()` on a column
+    // rather than as a table-level clause.
+    // `.primaryKey()` implies NOT NULL in the authoring API, so the emitter renders
+    // the marker without a `.notNull()` beside it. Asserted as the emitter actually
+    // spells it rather than as a reader would guess.
     assert!(
-        artifacts.env_db_ts.contains("id: t.text().primaryKey()"),
-        "TODAY: env.db.ts declares the PRE-ALTER primary key, so regenerating an app \
-         from it reinstates a key the migration removed:\n{}",
+        artifacts
+            .env_db_ts
+            .contains("legacy_id: t.text().primaryKey()"),
+        "env.db.ts declares the key the replace installed:\n{}",
         artifacts.env_db_ts
     );
+    // `contains` on `id: …` would also match `legacy_id: …`, so the check is anchored
+    // to the emitter's four-space column indent. Without the anchor this assertion
+    // would fail for the wrong reason on the very artifact it is meant to accept.
     assert!(
         !artifacts
             .env_db_ts
-            .contains("legacy_id: t.text().notNull().primaryKey()"),
-        "TODAY: the column the replace made the primary key is not marked as one:\n{}",
+            .contains("\n      id: t.text().primaryKey()"),
+        "and no longer declares the one it removed:\n{}",
         artifacts.env_db_ts
     );
 }

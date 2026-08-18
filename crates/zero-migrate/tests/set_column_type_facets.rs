@@ -5,11 +5,18 @@
 //!
 //! | replay                      | artifact                                    |
 //! |-----------------------------|---------------------------------------------|
-//! | `authoring_tables_from_ops` | `env.db.ts`                                 |
+//! | the authoring tables *      | `env.db.ts`                                 |
 //! | `fold_to_field_defs`        | `schema.runtime.json` AND, on SQLite, the   |
 //! |                             | DESIRED snapshot the 12-step rebuild        |
 //! |                             | renders `CREATE TABLE` from                 |
 //! | `fold_ops`                  | the snapshot drift compares                 |
+//!
+//! \* was `authoring_tables_from_ops` until step 4 consumer 2 of
+//! `docs/proposals/single-fold-and-effects.md` deleted it; `env.db.ts` is now
+//! rendered from `FoldedSchema::project_authoring_tables`. This file drives
+//! `render_artifacts`, so it measures whichever producer is wired in and needed no
+//! change across that move - which is itself the claim it makes about the retype
+//! verdict surviving a producer swap.
 //!
 //! They disagreed. `fold_to_field_defs` replayed a retype by assigning the TYPE
 //! TOKEN and nothing else, which is wrong in BOTH directions because the token is
@@ -74,7 +81,8 @@ fn descriptor(create_col: &str, to_type: &str) -> serde_json::Value {
         .expect("table a has column v")
 }
 
-/// The `env.db.ts` line for column `v`, from `authoring_tables_from_ops`.
+/// The `env.db.ts` line for column `v`, from whichever producer `render_artifacts`
+/// is wired to - `FoldedSchema::project_authoring_tables` since step 4 consumer 2.
 fn authoring(create_col: &str, to_type: &str) -> String {
     let ir = envelope(create_col, to_type);
     let effective = support::operator_charter(SCHEMA);

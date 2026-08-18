@@ -395,8 +395,10 @@ fn a_plain_index_and_an_implicit_unique_index_are_both_described() {
 /// `i` in `pg_indexes`. The artifact was naming an index the database does not have.
 ///
 /// The `env.db.ts` half of the same artifact already agreed with the server, because
-/// it renders indexes from `authoring_tables_from_ops`, whose `DropColumn` arm
-/// cascades on `include`. So before this move the TWO artifacts out of one
+/// it rendered indexes from `authoring_tables_from_ops`, whose `DropColumn` arm
+/// cascaded on `include` (step 4 consumer 2 has since replaced that walker with
+/// `FoldedSchema::project_authoring_tables`, which cascades the same way). So before
+/// this move the TWO artifacts out of one
 /// `render_artifacts` call disagreed about the same index - which is exactly the
 /// class of defect section B of the proposal is a list of.
 #[test]

@@ -1,11 +1,20 @@
 //! **`schema.runtime.json` sees inside the selected dialect leg.**
 //!
-//! `render_artifacts` builds its two projections from the SAME op stream through TWO
-//! walkers, and only one of them expanded `Op::Dialectal`. `fold_to_field_defs` and
-//! `authoring_tables_from_ops` route through `flatten_dialectal_ops`, so COLUMNS
-//! authored inside a `dialect()` leg reach the artifact. `runtime_metadata_from_ops`
-//! walked the raw list with a catch-all `_ => {}` arm, so the wrapper fell through and
-//! the runtime OPTIONS and plain INDEXES authored in that same leg did not.
+//! `render_artifacts` builds its two projections from the SAME op stream, and there
+//! was a time when only one of the producers expanded `Op::Dialectal`.
+//! `fold_to_field_defs` and the authoring tables both route through
+//! `flatten_dialectal_ops`, so COLUMNS authored inside a `dialect()` leg reach the
+//! artifact. `runtime_metadata_from_ops` walked the raw list with a catch-all
+//! `_ => {}` arm, so the wrapper fell through and the runtime OPTIONS and plain
+//! INDEXES authored in that same leg did not.
+//!
+//! Both artifact walkers are gone: step 4 of
+//! `docs/proposals/single-fold-and-effects.md` replaced them with
+//! `FoldedSchema::project_runtime_metadata` and
+//! `FoldedSchema::project_authoring_tables`, two reads of ONE traversal that
+//! `flatten_dialectal_ops` opens. The hole this file pins therefore cannot reopen the
+//! way it opened; the file stays because "cannot reopen by construction" is a claim
+//! worth a test rather than a comment.
 //!
 //! The result was an artifact describing a table the database does not have: a
 //! collection whose fields are present and whose index is missing, on the very dialect

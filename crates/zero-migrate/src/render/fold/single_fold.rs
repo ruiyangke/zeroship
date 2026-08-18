@@ -1,38 +1,64 @@
 //! **The single fold, and its four projections.** Step 3 of
-//! `docs/proposals/single-fold-and-effects.md` section G, with step 4's first
-//! consumer moved.
+//! `docs/proposals/single-fold-and-effects.md` section G, with step 4's first TWO
+//! consumers moved.
 //!
 //! ONE traversal decides what an op means; four typed projections read the value it
 //! produces. A projection here MAY NOT walk the op stream, and none of them takes
 //! `&[Op]` - that is the rule enforced by the signatures below rather than by review.
 //!
-//! # One projection is LIVE; three are not
+//! # Two projections are LIVE; two are not
 //!
 //! Step 3 shipped this module dead. Step 4 moves the consumers one at a time in
-//! blast-radius order, and the FIRST is done: `render_artifacts` builds the runtime
-//! collection metadata from [`FoldedSchema::project_runtime_metadata`], and the
-//! walker it replaced (`runtime_metadata_from_ops`) is deleted. `fold` itself is
-//! therefore production code, and so is everything the runtime-metadata projection
-//! reads.
+//! blast-radius order, and the first two are done. ONE `fold` call inside
+//! `render_artifacts` now feeds both:
 //!
-//! The remaining three projections are still reachable only from tests, which is what
+//! * `FoldedSchema::project_runtime_metadata` replaced `runtime_metadata_from_ops`;
+//! * `FoldedSchema::project_authoring_tables` replaced `authoring_tables_from_ops`,
+//!   and is the source model `env.db.ts` is rendered from.
+//!
+//! (Backticks rather than intra-doc links on purpose. `cargo doc` cannot resolve a
+//! `pub(crate)` method of this module from a module-level doc comment, and
+//! `rustdoc::broken_intra_doc_links` fires only under `cargo doc` - which no gate in
+//! this repo's pipeline runs, so a dangling link here would ship green. Measured: the
+//! crate emits 14 such warnings on `38f9abc6` and 13 here - demoting these two costs
+//! one warning and adds none.)
+//!
+//! Both walkers are deleted. `fold` itself is production code, and so is everything
+//! those two projections read - which is now most of `AuthoredState`.
+//!
+//! The remaining two projections are still reachable only from tests, which is what
 //! `#![cfg_attr(not(test), allow(dead_code))]` below still covers. The attribute goes
 //! when the last consumer moves; until then it is load-bearing for
-//! `project_snapshot`, `project_field_defs` and `project_authoring_tables` and for
-//! nothing else.
+//! `project_snapshot` and `project_field_defs` and for nothing else.
 //!
-//! # What the live projection cost the model
+//! # What the live projections cost the model
 //!
-//! Moving a consumer is where a projection's claim to be DERIVED gets tested, and the
-//! first move failed that test in one place. `project_runtime_metadata` re-derived the
-//! implicit unique index name `{table}_{column}_key` from the columns it could see -
-//! which silently renamed the index on every `renameTable` and `renameColumn`, naming
-//! an object no catalog has. The fix is [`ImplicitUniqueIndex`], carried by this
-//! traversal, and it is decision 4 of the proposal working as written: a projection
-//! that needs a fact the model does not carry is a MODEL change, not a second replay.
-//! The step 3 corpus could not see it - no stream there crosses a `unique` column with
-//! a rename - so it was found by writing streams for the carriers rather than by
-//! re-running the gate.
+//! Moving a consumer is where a projection's claim to be DERIVED gets tested, and
+//! each move so far has failed that test in exactly one place.
+//!
+//! CONSUMER 1. `project_runtime_metadata` re-derived the implicit unique index name
+//! `{table}_{column}_key` from the columns it could see - which silently renamed the
+//! index on every `renameTable` and `renameColumn`, naming an object no catalog has.
+//! The fix is [`ImplicitUniqueIndex`], carried by this traversal, and it is decision 4
+//! of the proposal working as written: a projection that needs a fact the model does
+//! not carry is a MODEL change, not a second replay. The step 3 corpus could not see
+//! it - no stream there crosses a `unique` column with a rename - so it was found by
+//! writing streams for the carriers rather than by re-running the gate.
+//!
+//! CONSUMER 2 found the reverse: the model was RIGHT and the artifact had been wrong
+//! for as long as `authoring_tables_from_ops` existed. That walker had no
+//! `Op::AlterPrimaryKey` arm at all, so `env.db.ts` kept declaring the key the
+//! migration replaced, dropped or added, and kept `.autoIncrement()` on a column the
+//! same op stripped identity from. This traversal's `Op::AlterPrimaryKey` arm is what
+//! corrects it, and the correction is adjudicated against a live PostgreSQL in
+//! `tests/env_db_ts_matches_the_server_pg.rs` - applied for real, key read out of
+//! `pg_catalog` - rather than against this module's own opinion. The recorded corpus
+//! was blind to it for a measurable reason: its one `alterPrimaryKey` fixture is
+//! REFUSED on all three dialects (`table \`orders\` does not exist`), so no fixture in
+//! it renders an artifact carrying the op at all.
+//!
+//! The `Op::DropPartition` arm below moved with the same consumer, from "recorded as a
+//! choice" to measured; see its comment.
 //!
 //! # What the model carries, measured rather than promised
 //!
@@ -288,15 +314,25 @@ impl AuthoredState {
             Op::DropTable { table, .. } => {
                 self.tables.remove(table);
             }
-            // A dropped partition is a dropped RELATION, and the catalog replay and
-            // `runtime_metadata_from_ops` both remove it. `authoring_tables_from_ops`
-            // does not - it has no arm for this op - so the two differ whenever a
-            // partition also reached that map, which today only a
-            // `createTable` + `attachPartition` pair can do. The step 1 corpus does not
-            // construct that pair, so this choice is UNMEASURED by the gate and is
-            // recorded as a choice rather than presented as proven: the model follows
-            // the catalog, because a model that kept a dropped relation would be
-            // naming a table the database does not have.
+            // A dropped partition is a dropped RELATION. This arm was recorded as a
+            // CHOICE at step 3 - the step 1 corpus never constructs the only pair that
+            // reaches it, `createTable` followed by `attachPartition` - and step 4
+            // consumer 2 made it live in `env.db.ts`, so it stopped being allowed to
+            // stay unmeasured. It is now measured three ways:
+            //
+            // * against a live PostgreSQL, in
+            //   `tests/env_db_ts_matches_the_server_pg.rs`: the migration is applied
+            //   for real and `pg_class` no longer holds the child;
+            // * against `Op::DetachPartition` as the CONTROL, which has no arm here
+            //   because a detached partition survives as a standalone table under the
+            //   same name - the rule
+            //   `tests/partition_claims_the_relation_namespace_pg.rs` enforces;
+            // * offline on all three dialects in
+            //   `tests/gen_types_authoring_tables_from_the_fold.rs`.
+            //
+            // Only PostgreSQL can actually run the stream: `attachPartition` is
+            // PostgreSQL-only at lowering (`render/lower.rs`), so off Postgres the
+            // artifact describes a migration that cannot be applied there either way.
             Op::DropPartition { name, .. } => {
                 self.tables.remove(name);
             }
@@ -796,8 +832,9 @@ impl FoldedSchema {
         out
     }
 
-    /// **Projection 3: the authoring tables.** Today's `authoring_tables_from_ops`
-    /// output, the source model `env.db.ts` is rendered from.
+    /// **Projection 3: the authoring tables.** The source model `env.db.ts` is
+    /// rendered from, and LIVE since step 4 consumer 2 - `render_artifacts` reads this
+    /// and `authoring_tables_from_ops`, which used to produce it, is deleted.
     #[must_use]
     pub(crate) fn project_authoring_tables(&self) -> BTreeMap<String, AuthoringTable> {
         self.authored

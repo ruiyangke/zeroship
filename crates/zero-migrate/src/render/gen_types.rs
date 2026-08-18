@@ -267,21 +267,27 @@ pub fn render_artifacts(
     )
     .map_err(|error| GenTypesError::Fold(crate::FoldError::Render(error.to_string())))?;
     let ops = resolved.ops.as_slice();
-    // Step 4 of `docs/proposals/single-fold-and-effects.md` section G, consumer 1:
-    // the runtime collection metadata is a PROJECTION of the one traversal, not a
-    // private replay of the op stream. `runtime_metadata_from_ops` is gone.
+    // Step 4 of `docs/proposals/single-fold-and-effects.md` section G, consumers 1 and
+    // 2: BOTH halves of `env.db.ts` and the runtime collection metadata are
+    // PROJECTIONS of the one traversal, not private replays of the op stream.
+    // `runtime_metadata_from_ops` and `authoring_tables_from_ops` are both gone, and
+    // ONE `fold` call now feeds both.
     //
-    // This does not change which streams `render_artifacts` accepts.
-    // `single_fold::fold` runs the structural catalog replay through `fold_ops_onto`,
-    // and `render_runtime_descriptor_v1` below already reached the SAME replay through
-    // `fold_to_field_defs` -> `fold_ops` -> `fold_ops_onto(&default, ..)`, so every
-    // stream this refuses was already refused a few lines later. The cost is that the
-    // replay now runs twice per render; collapsing the two is the `fold_ops_onto`
-    // extraction the proposal assigns to the LAST consumer, not this one.
+    // Consumer 2 changes no refusal. `single_fold::fold` was already on this path -
+    // consumer 1 put it there - and `project_authoring_tables` is infallible, so the
+    // set of streams `render_artifacts` accepts is exactly what it was. The walker
+    // deleted here had one fallible call, `flatten_dialectal_ops`, which `fold` makes
+    // too and BEFORE the point the walker reached it. Pinned as a biconditional by
+    // `tests/gen_types_authoring_tables_from_the_fold.rs`.
+    //
+    // The structural catalog replay still runs twice per render (once here, once under
+    // `render_runtime_descriptor_v1` -> `fold_to_field_defs` -> `fold_ops`); collapsing
+    // the two is the `fold_ops_onto` extraction the proposal assigns to the LAST
+    // consumer, not this one.
     let folded = crate::render::fold::single_fold::fold(ops, dialect, project_schema, effective)
         .map_err(GenTypesError::Fold)?;
     let metadata = folded.project_runtime_metadata();
-    let authoring_tables = authoring_tables_from_ops(ops, dialect).map_err(GenTypesError::Fold)?;
+    let authoring_tables = folded.project_authoring_tables();
 
     // (a) RuntimeSchemaDescriptor v1 — fields plus runtime-visible collection
     // options and plain indexes.
@@ -334,6 +340,22 @@ pub fn render_artifacts_from_descriptors(
     render_artifacts(&ops, dialect, project_schema, effective)
 }
 
+/// The IR carriers the runtime `FieldDef` projection intentionally cannot represent:
+/// declaration order and the exact public-authoring facets the TypeScript emitter
+/// needs. `render_env_db_ts` is its only reader.
+///
+/// Since step 4 consumer 2 this is a PROJECTION TARGET, not a walker's accumulator:
+/// `FoldedSchema::project_authoring_tables` produces it and
+/// `authoring_tables_from_ops` - the private replay that used to - is deleted.
+/// `AuthoredState::advance` owns the op semantics, so the dialect that selects an
+/// `Op::Dialectal` leg is now necessarily the same one the runtime metadata folded
+/// under: both are reads of one traversal, and the "two artifacts under different
+/// dialects" hole this type's doc used to warn about cannot reopen.
+///
+/// The neighbouring hole is still OPEN and is not this move's: `render_runtime_descriptor_v1`
+/// takes the runtime-metadata map as given and falls back to `unwrap_or_default()`
+/// for a collection it lacks, so a table created only inside an `Op::Dialectal` leg
+/// emits its FIELDS but loses its runtime options and plain indexes.
 #[derive(Debug, Clone)]
 pub(crate) struct AuthoringTable {
     pub(crate) columns: IndexMap<String, IrColumn>,
@@ -342,325 +364,6 @@ pub(crate) struct AuthoringTable {
     pub(crate) indexes: Vec<IrIndex>,
     pub(crate) partition_by: Option<PartitionSpec>,
     pub(crate) schema: Option<String>,
-}
-
-/// Replay the IR carriers that the runtime `FieldDef` projection intentionally
-/// cannot represent. Structural coherence has already been checked by
-/// `fold_to_field_defs`; this replay preserves declaration order and the exact
-/// public-authoring facets needed by the TypeScript emitter.
-///
-/// `dialect` selects the `Op::Dialectal` leg, so it must be the SAME dialect
-/// `render_runtime_descriptor_v1` folds under or the two artifacts describe
-/// different tables. The runtime collection metadata is no longer a third answer to
-/// cover here: since step 4 it is `FoldedSchema::project_runtime_metadata`, which
-/// reads the SAME flattened traversal, so the leg-selection hole this paragraph used
-/// to warn about (a walker reading the unflattened list) cannot reopen. What still
-/// holds is the consequence: `render_runtime_descriptor_v1` takes that map as
-/// given and falls back to `unwrap_or_default()` for a collection it lacks, and the
-/// map has no other producer, so a table created only inside an `Op::Dialectal` leg
-/// emits its FIELDS but loses its runtime options and plain indexes. A hole, not a
-/// handoff.
-fn authoring_tables_from_ops(
-    ops: &[Op],
-    dialect: SqlDialect,
-) -> Result<BTreeMap<String, AuthoringTable>, crate::FoldError> {
-    let mut tables = BTreeMap::new();
-    for op in crate::render::fold::flatten_dialectal_ops(ops, dialect)? {
-        match op {
-            Op::CreateTable {
-                name,
-                columns,
-                primary_key,
-                constraints,
-                indexes,
-                partition_by,
-                schema,
-                ..
-            } => {
-                tables.insert(
-                    name.clone(),
-                    AuthoringTable {
-                        columns: columns
-                            .iter()
-                            .cloned()
-                            .map(|column| (column.name.clone(), column))
-                            .collect(),
-                        primary_key: primary_key.clone(),
-                        constraints: constraints
-                            .iter()
-                            .map(|constraint| named_constraint(name, constraint))
-                            .collect(),
-                        indexes: indexes
-                            .iter()
-                            .map(|index| named_index(name, index))
-                            .collect(),
-                        partition_by: partition_by.clone(),
-                        schema: schema.clone(),
-                    },
-                );
-            }
-            Op::DropTable { table, .. } => {
-                tables.remove(table);
-            }
-            Op::RenameTable { table, to, .. } => {
-                if let Some(state) = tables.remove(table) {
-                    tables.insert(to.clone(), state);
-                }
-                for state in tables.values_mut() {
-                    for column in state.columns.values_mut() {
-                        if let Some(reference) = &mut column.references {
-                            if reference.table == *table {
-                                reference.table.clone_from(to);
-                            }
-                        }
-                        if let ColType::Ref { references } = &mut column.ty {
-                            if references == table {
-                                references.clone_from(to);
-                            }
-                        }
-                    }
-                    for constraint in &mut state.constraints {
-                        if let IrConstraintKind::Fk {
-                            references_table, ..
-                        } = &mut constraint.kind
-                        {
-                            if references_table == table {
-                                references_table.clone_from(to);
-                            }
-                        }
-                    }
-                    for_each_expr_mut(state, |expr| rename_expr_table(expr, table, to));
-                }
-            }
-            Op::AddColumn {
-                table,
-                column,
-                ty,
-                nullable,
-                default,
-                value_format,
-                vector_metric,
-                case_sensitive,
-                mask,
-                generated,
-                identity,
-                ..
-            } => {
-                if let Some(state) = tables.get_mut(table) {
-                    state.columns.insert(
-                        column.clone(),
-                        IrColumn {
-                            name: column.clone(),
-                            ty: ty.clone(),
-                            nullable: *nullable,
-                            default: default.clone(),
-                            unique: None,
-                            value_format: value_format.clone(),
-                            references: None,
-                            id_prefix: None,
-                            collation: None,
-                            vector_metric: *vector_metric,
-                            case_sensitive: *case_sensitive,
-                            mask: *mask,
-                            generated: generated.clone(),
-                            identity: *identity,
-                        },
-                    );
-                }
-            }
-            Op::DropColumn { table, column, .. } => {
-                if let Some(state) = tables.get_mut(table) {
-                    state.columns.shift_remove(column);
-                    if state
-                        .primary_key
-                        .as_ref()
-                        .is_some_and(|columns| columns.iter().any(|name| name == column))
-                    {
-                        state.primary_key = None;
-                    }
-                    state.constraints.retain(|constraint| {
-                        !constraint_uses_local_column(constraint, table, column, dialect)
-                    });
-                    state
-                        .indexes
-                        .retain(|index| !index_uses_column(index, table, column, dialect));
-                }
-            }
-            Op::RenameColumn {
-                table, from, to, ..
-            } => {
-                if let Some(state) = tables.get_mut(table) {
-                    if let Some(index) = state.columns.get_index_of(from) {
-                        if let Some((_, mut column)) = state.columns.shift_remove_index(index) {
-                            column.name.clone_from(to);
-                            state.columns.shift_insert(index, to.clone(), column);
-                        }
-                    }
-                    if let Some(primary_key) = &mut state.primary_key {
-                        replace_name(primary_key, from, to);
-                    }
-                    for constraint in &mut state.constraints {
-                        rename_constraint_local_column(constraint, from, to);
-                    }
-                    for index in &mut state.indexes {
-                        rename_index_column(index, from, to);
-                    }
-                }
-                // Database foreign keys follow the referenced column rename too.
-                for state in tables.values_mut() {
-                    for column in state.columns.values_mut() {
-                        if let Some(reference) = &mut column.references {
-                            if reference.table == *table && reference.column == *from {
-                                reference.column.clone_from(to);
-                            }
-                        }
-                    }
-                    for constraint in &mut state.constraints {
-                        if let IrConstraintKind::Fk {
-                            references_table,
-                            references_columns,
-                            ..
-                        } = &mut constraint.kind
-                        {
-                            if references_table == table {
-                                replace_name(references_columns, from, to);
-                            }
-                        }
-                    }
-                }
-                for (owner_table, state) in &mut tables {
-                    let include_unqualified = owner_table == table;
-                    for_each_expr_mut(state, |expr| {
-                        rename_expr_column(expr, table, from, to, include_unqualified);
-                    });
-                }
-            }
-            Op::SetColumnType {
-                table,
-                column,
-                to_type,
-                ..
-            } => {
-                if let Some(column) = tables
-                    .get_mut(table)
-                    .and_then(|state| state.columns.get_mut(column))
-                {
-                    // The IrColumn spelling of the verdict
-                    // `crate::render::lower::retype_field_descriptor` states in
-                    // descriptor terms and `crate::fold_ops` states in snapshot
-                    // terms; `set_column_type_facets` pins the three to each other.
-                    // Every parameterised facet rides INSIDE `ColType` here
-                    // (`String { length }`, `Char { length }`, `Vector { vector }`),
-                    // so assigning `ty` re-derives them by construction — which is
-                    // why this replay was the one that already got them right.
-                    column.ty.clone_from(to_type);
-                    column.value_format = None;
-                    column.vector_metric = None;
-                    column.case_sensitive = None;
-                    // `Op::SetColumnType` has no slot to re-declare the legacy
-                    // platform-ID brand either, and it is text-shaped.
-                    // `validate::declare_logical_column` already clears it.
-                    column.id_prefix = None;
-                }
-            }
-            Op::SetColumnNotNull { table, column, .. } => {
-                if let Some(column) = tables
-                    .get_mut(table)
-                    .and_then(|state| state.columns.get_mut(column))
-                {
-                    column.nullable = Some(false);
-                }
-            }
-            Op::DropColumnNotNull { table, column, .. } => {
-                if let Some(column) = tables
-                    .get_mut(table)
-                    .and_then(|state| state.columns.get_mut(column))
-                {
-                    column.nullable = Some(true);
-                }
-            }
-            Op::SetColumnDefault {
-                table,
-                column,
-                value,
-                ..
-            } => {
-                if let Some(column) = tables
-                    .get_mut(table)
-                    .and_then(|state| state.columns.get_mut(column))
-                {
-                    column.default = Some(value.clone());
-                }
-            }
-            Op::DropColumnDefault { table, column, .. } => {
-                if let Some(column) = tables
-                    .get_mut(table)
-                    .and_then(|state| state.columns.get_mut(column))
-                {
-                    column.default = None;
-                }
-            }
-            Op::AddConstraint {
-                table, constraint, ..
-            } => {
-                if let Some(state) = tables.get_mut(table) {
-                    state.constraints.push(named_constraint(table, constraint));
-                }
-            }
-            Op::DropConstraint { table, name, .. } => {
-                if let Some(state) = tables.get_mut(table) {
-                    state
-                        .constraints
-                        .retain(|constraint| effective_constraint_name(table, constraint) != *name);
-                }
-            }
-            Op::CreateIndex {
-                table,
-                columns,
-                name,
-                unique,
-                using,
-                r#where,
-                include,
-                with,
-                only,
-                nulls_not_distinct,
-                ..
-            } => {
-                if let Some(state) = tables.get_mut(table) {
-                    let index = IrIndex {
-                        name: name.clone(),
-                        columns: columns.clone(),
-                        unique: *unique,
-                        using: *using,
-                        r#where: r#where.clone(),
-                        include: include.clone(),
-                        with: with.clone(),
-                        only: *only,
-                        nulls_not_distinct: *nulls_not_distinct,
-                    };
-                    state.indexes.push(named_index(table, &index));
-                }
-            }
-            Op::DropIndex { table, name, .. } => {
-                if let Some(table) = table {
-                    if let Some(state) = tables.get_mut(table) {
-                        state
-                            .indexes
-                            .retain(|index| effective_index_name(table, index) != *name);
-                    }
-                } else {
-                    for (table, state) in &mut tables {
-                        state
-                            .indexes
-                            .retain(|index| effective_index_name(table, index) != *name);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(tables)
 }
 
 pub(crate) fn replace_name(names: &mut [String], from: &str, to: &str) {
@@ -2275,9 +1978,11 @@ mod tests {
 }
 
 // The differential corpus over the four op-stream answers -- an in-crate test
-// module because `authoring_tables_from_ops` is private here (as
-// `runtime_metadata_from_ops` was before step 4 deleted it), and the alternative is
-// widening a production function so a test can reach it.
+// module because the items it drives are crate-private: `AuthoringTable` and
+// `RuntimeCollectionMetadata` here, `single_fold::fold` next door. It was
+// `authoring_tables_from_ops` and `runtime_metadata_from_ops` until step 4 of
+// `docs/proposals/single-fold-and-effects.md` deleted both. The alternative to a
+// child module is widening a production item so a test can reach it.
 #[cfg(test)]
 mod differential_corpus;
 

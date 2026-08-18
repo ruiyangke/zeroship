@@ -10427,13 +10427,19 @@ pub(crate) fn ir_column_to_field_resolved_create(c: &IrColumn) -> FieldDescripto
 /// # Why this is one function and not three rules
 ///
 /// The same op stream is replayed three times, and the three replays must agree:
-/// `authoring_tables_from_ops` → `env.db.ts`, [`crate::fold_to_field_defs`] →
+/// the authoring tables → `env.db.ts`, [`crate::fold_to_field_defs`] →
 /// `schema.runtime.json` (and, on SQLite, the DESIRED snapshot the 12-step rebuild
 /// renders `CREATE TABLE` from), and [`crate::fold_ops`] → the snapshot drift
 /// compares. A fourth, [`crate::model::validate`]'s `declare_logical_column`,
 /// models the same transition for the logical-column contract. They diverged
 /// because each spelled the rule for itself; the answer lives here once, and the
 /// three replays are pinned to each other by `set_column_type_facets`.
+///
+/// The first of the three is no longer a replay: step 4 consumer 2 of
+/// `docs/proposals/single-fold-and-effects.md` deleted `authoring_tables_from_ops` and
+/// `env.db.ts` is now rendered from `FoldedSchema::project_authoring_tables`. The
+/// agreement requirement is unchanged - a projection still has to state this verdict
+/// the same way - which is why this doc keeps naming three answers rather than two.
 ///
 /// The FACETS THIS FUNCTION OWNS are the ones a [`FieldDescriptor`] carries. The
 /// snapshot fold's arm re-derives the same decisions in `ColumnSnapshot` terms and
