@@ -178,6 +178,20 @@ pub struct ControlSection {
     pub audit_retention_months: Option<u32>,
     /// Audit retention cron tick in seconds.
     pub audit_retention_check_secs: Option<u64>,
+    /// DNS suffixes a creator's egress grant may NOT front with a wildcard,
+    /// extending the compiled-in `zeroship_core::net_policy` backstop.
+    ///
+    /// File-and-default ONLY, with no flag and no environment variable, so this
+    /// field is where it is actually read from - the `trusted_oauth_clients`
+    /// pattern, for the same reason: it is a list, and the generated
+    /// declarations carry scalars.
+    ///
+    /// `None` (key absent) is UNAVAILABLE and refuses every wildcard grant;
+    /// `Some(vec)` is exactly that extension, where an empty vec leaves only
+    /// the backstop. Absent config denies wildcards, never permits them - this
+    /// bounds creator input now that egress is self-service, so a permissive
+    /// value here is a fleet-wide widening.
+    pub frontable_wildcard_suffixes: Option<Vec<String>>,
 }
 
 /// Gateway operational values supplied by the overlay. See [`ControlSection`].

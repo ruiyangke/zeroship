@@ -1,12 +1,13 @@
 //! Registry — application CRUD backed by PostgreSQL (compio-postgres).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use compio_postgres::error::SqlState;
 use compio_postgres::{Client, NoTls};
 use uuid::Uuid;
 use zeroship_core::auth::hash_api_key;
-use zeroship_core::net_policy::normalize_frontable_suffixes;
+use zeroship_core::net_policy::FrontableSuffixCatalog;
 use zeroship_core::types::{
     AppNetPolicy, AppNetPolicyLimits, AppRecord, AppRuntimeLimits, AppVersionInfo,
     GatewayFamilyRevocation, GatewayPrincipalLifecycle, GatewaySnapshot, NetAllowEntry, RouteEntry,
@@ -104,6 +105,15 @@ fn source_chain(err: &dyn std::error::Error) -> Option<String> {
 #[derive(Clone, Debug)]
 pub struct Registry {
     db_url: String,
+    /// The deployment's frontable-wildcard-suffix catalog, resolved from the
+    /// config overlay at boot rather than read per query from a table.
+    ///
+    /// It lives here because both consumers reach it through a `Registry`: the
+    /// `get_versions` projection that ships it to every worker, and the creator
+    /// net-grant writer that validates against it. [`Registry::new`] leaves it
+    /// FAIL-CLOSED, so a caller that never configures one refuses every
+    /// wildcard grant instead of silently accepting all of them.
+    frontable_suffixes: Arc<FrontableSuffixCatalog>,
 }
 
 /// Open a new compio-postgres connection and detach its driver task onto the
@@ -134,7 +144,25 @@ impl Registry {
 
         Ok(Self {
             db_url: db_url.to_string(),
+            frontable_suffixes: Arc::new(FrontableSuffixCatalog::unavailable()),
         })
+    }
+
+    /// Attach the deployment's frontable-wildcard-suffix catalog.
+    ///
+    /// Boot calls this once with the resolved `[control]
+    /// frontable_wildcard_suffixes` overlay value. Not calling it leaves the
+    /// fail-closed catalog from [`Registry::new`].
+    #[must_use]
+    pub fn with_frontable_suffixes(mut self, catalog: FrontableSuffixCatalog) -> Self {
+        self.frontable_suffixes = Arc::new(catalog);
+        self
+    }
+
+    /// The deployment's frontable-wildcard-suffix catalog.
+    #[must_use]
+    pub fn frontable_suffixes(&self) -> &FrontableSuffixCatalog {
+        &self.frontable_suffixes
     }
 
     /// Open a fresh connection. Crate-internal: stores + internal
@@ -535,7 +563,7 @@ impl Registry {
                 &[],
             )
             .await?;
-        let frontable_catalog = load_frontable_suffix_catalog(&conn).await;
+        let frontable_catalog = self.frontable_suffixes();
         let mut grants: HashMap<Uuid, Vec<NetAllowEntry>> = HashMap::new();
         for row in &grant_rows {
             let app_id: Uuid = row.get("app_id");
@@ -815,87 +843,6 @@ impl Registry {
     // backed by `zeroship.usage_aggregates`. The old raw-additive
     // `record_usage`/`get_usage` over `zeroship.app_usage` are gone —
     // pre-launch, no deprecated aliases.
-}
-
-#[derive(Debug, Clone, Default)]
-struct FrontableSuffixCatalog {
-    suffixes: Vec<String>,
-    available: bool,
-}
-
-/// Load the operator-editable frontable wildcard catalog for worker-side
-/// revalidation. Missing/corrupt catalog data is not a version-load failure; it
-/// marks the catalog unavailable so wildcard entries fail closed in the worker.
-async fn load_frontable_suffix_catalog(conn: &Client) -> FrontableSuffixCatalog {
-    let rows = match conn
-        .query(
-            "SELECT value_json FROM zeroship.net_policy_catalog \
-             WHERE key = 'frontable_wildcard_suffixes'",
-            &[],
-        )
-        .await
-    {
-        Ok(rows) => rows,
-        Err(err) => {
-            tracing::error!(
-                error = %err,
-                "registry: frontable suffix catalog lookup failed; wildcard net grants fail closed"
-            );
-            return FrontableSuffixCatalog::default();
-        }
-    };
-    let Some(row) = rows.first() else {
-        // ABSENCE IS ANTICIPATED, so it is announced once rather than per
-        // refresh. This catalog is operator-supplied: which wildcard suffixes
-        // may be fronted is policy, not something a migration can seed, and
-        // this function's own contract above says a missing row "marks the
-        // catalog unavailable so wildcard entries fail closed". A correctly
-        // configured deployment that has simply not set the policy is
-        // therefore a normal state.
-        //
-        // It was logged at ERROR on every registry refresh. MEASURED against
-        // the live deployment 2026-08-11: 57 ERROR lines per minute, forever,
-        // describing a by-design condition. That is not a cosmetic problem --
-        // it buries real faults. The workflow_engine failure sitting beside it
-        // logged at a near-identical rate, and I misread this line as a
-        // deployment blocker twice before reading the contract above.
-        //
-        // The behaviour is unchanged: still fails closed, still returns the
-        // empty catalog. Only the announcement is once-per-process.
-        static ANNOUNCED: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(false);
-        if !ANNOUNCED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            tracing::warn!(
-                "registry: frontable suffix catalog row missing; wildcard net grants fail \
-                 closed (operator-supplied policy, logged once per process)"
-            );
-        }
-        return FrontableSuffixCatalog::default();
-    };
-    let value: serde_json::Value = row.get("value_json");
-    let raw = match serde_json::from_value::<Vec<String>>(value) {
-        Ok(raw) => raw,
-        Err(err) => {
-            tracing::error!(
-                error = %err,
-                "registry: frontable suffix catalog row invalid; wildcard net grants fail closed"
-            );
-            return FrontableSuffixCatalog::default();
-        }
-    };
-    match normalize_frontable_suffixes(&raw) {
-        Ok(suffixes) => FrontableSuffixCatalog {
-            suffixes,
-            available: true,
-        },
-        Err(err) => {
-            tracing::error!(
-                error = %err,
-                "registry: frontable suffix catalog contains invalid suffix; wildcard net grants fail closed"
-            );
-            FrontableSuffixCatalog::default()
-        }
-    }
 }
 
 /// Derive an app's [`AppRuntimeLimits`] from its plan-catalog

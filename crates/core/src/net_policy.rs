@@ -135,6 +135,61 @@ fn normalize_host(host: &str) -> String {
         .to_ascii_lowercase()
 }
 
+/// The deployment's frontable-wildcard-suffix catalog, plus whether it could be
+/// resolved at all.
+///
+/// `available: false` is the FAIL-CLOSED state: every wildcard grant is refused
+/// while the catalog is unresolved. Exact hosts never consult it and are
+/// unaffected. The distinction matters because the two states are not the same
+/// policy: an unresolved catalog refuses `*.example.com`, whereas a resolved
+/// EMPTY one permits it (the compiled-in [`FRONTABLE_WILDCARD_SUFFIXES`]
+/// backstop still applies).
+#[derive(Debug, Clone, Default)]
+pub struct FrontableSuffixCatalog {
+    /// Suffixes that may NOT be fronted by a wildcard, extending the backstop.
+    pub suffixes: Vec<String>,
+    /// Whether the catalog resolved. `false` refuses every wildcard.
+    pub available: bool,
+}
+
+impl FrontableSuffixCatalog {
+    /// The fail-closed catalog: unresolved, so no wildcard grant is accepted.
+    #[must_use]
+    pub const fn unavailable() -> Self {
+        Self {
+            suffixes: Vec::new(),
+            available: false,
+        }
+    }
+
+    /// Resolve the catalog from the config overlay's optional suffix list.
+    ///
+    /// `None` - the deployment did not configure the catalog - is UNAVAILABLE,
+    /// not "empty and therefore permissive". Absent config denies wildcards; it
+    /// never permits them. A configured list that fails normalization is
+    /// likewise unavailable, and says so at ERROR: a typo in an operator's
+    /// suffix must not silently widen what a creator may front.
+    #[must_use]
+    pub fn from_config(configured: Option<&[String]>) -> Self {
+        let Some(raw) = configured else {
+            return Self::unavailable();
+        };
+        match normalize_frontable_suffixes(raw) {
+            Ok(suffixes) => Self {
+                suffixes,
+                available: true,
+            },
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    "frontable wildcard suffix catalog is invalid; wildcard grants fail closed"
+                );
+                Self::unavailable()
+            }
+        }
+    }
+}
+
 /// Normalize an operator-editable frontable wildcard suffix catalog.
 ///
 /// Suffixes use the same DNS-name normalization as allowlist hosts, are sorted
@@ -237,7 +292,8 @@ fn suffix_matches(suffix: &str, blocked: &str) -> bool {
 /// end to end do not belong here; name them exactly instead.
 ///
 /// This list is a backstop, not a public-suffix list, and does not pretend to
-/// be exhaustive — operators extend it through `net_policy_catalog`. The
+/// be exhaustive — operators extend it through the config overlay's
+/// `[control] frontable_wildcard_suffixes`. The
 /// registry-level shapes (`co.uk`, `com.br`) are caught structurally by
 /// [`is_registry_level_suffix`] rather than by enumeration.
 pub const FRONTABLE_WILDCARD_SUFFIXES: &[&str] = &[
