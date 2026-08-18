@@ -110,7 +110,16 @@ async fn build_state(db_url: &str) -> (Arc<AppState>, PathBuf, PathBuf) {
 }
 
 /// Seed a plan with `spend_limit_default_cents = 1000` and an app on it.
-async fn make_app_with_plan_default(state: &AppState, plan_default: i64) -> Uuid {
+/// Seed a plan and an app on it, OWNED by `owner_id`.
+///
+/// The `app_members` owner row is what authorizes `billing:read` on the app now;
+/// this helper used to insert the app with no membership at all and rely on the
+/// caller holding the deleted universal-allow platform role.
+async fn make_app_with_plan_default(
+    state: &AppState,
+    plan_default: i64,
+    owner_id: uuid::Uuid,
+) -> Uuid {
     let plan_id = format!("pln_sl_{}", Uuid::new_v4().simple());
     state
         .control_pg
@@ -124,7 +133,7 @@ async fn make_app_with_plan_default(state: &AppState, plan_default: i64) -> Uuid
         )
         .await
         .expect("seed plan");
-    state
+    let app_id: Uuid = state
         .control_pg
         .query(
             "INSERT INTO zeroship.apps (name, plan_id, api_key, api_key_hash) \
@@ -133,7 +142,16 @@ async fn make_app_with_plan_default(state: &AppState, plan_default: i64) -> Uuid
         )
         .await
         .expect("insert app")[0]
-        .get("id")
+        .get("id");
+    state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ($1, $2, 'owner')",
+            &[&app_id, &owner_id],
+        )
+        .await
+        .expect("bind owner membership");
+    app_id
 }
 
 fn spend_limit_route(cfg: &mut web::ServiceConfig) {
@@ -150,7 +168,7 @@ async fn get_spend_limit_returns_the_app_spend_limit_override() {
     let pat = common::authz_fixture::seeded_principal(&state).await;
 
     // Plan default 1000c; no override yet ⇒ effective == plan default.
-    let app = make_app_with_plan_default(&state, 1000).await;
+    let app = make_app_with_plan_default(&state, 1000, pat.user_id).await;
 
     let svc = test::init_service(
         web::App::new().state(state.clone()).configure(spend_limit_route),

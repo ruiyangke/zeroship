@@ -917,18 +917,13 @@ impl Caller {
 }
 
 /// Issue a real platform OAuth bearer scoped to `scope` (faithful AuthzGuard path).
-async fn issue_bearer(state: &AppState, user_id: Uuid, role: Option<&str>, scope: &str) -> Caller {
-    if let Some(role) = role {
-        state
-            .control_pg
-            .execute(
-                "INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by) \
-                 VALUES ($1, $2, $1) ON CONFLICT DO NOTHING",
-                &[&user_id, &role],
-            )
-            .await
-            .expect("insert platform role");
-    }
+/// Issue a platform OAuth bearer for `user_id` carrying `scope`.
+///
+/// It used to take an optional platform role and seed a `platform_admin_roles`
+/// row for the operator paths. That table and those roles are deleted, so every
+/// principal this mints is an ordinary creator.
+async fn issue_bearer(state: &AppState, user_id: Uuid, scope: &str) -> Caller {
+    let _ = state;
     Caller {
         token: common::platform_token_for_client(user_id, scope, common::CONSOLE_CLIENT_ID),
     }
@@ -953,9 +948,9 @@ async fn grant_endpoint_operator_only_and_idempotency_conflict() {
     // A creator bearer that lacks billing:write (a real creator scope, not the
     // fleet-wide operator grant) and an operator bearer holding billing:write.
     let creator_user = make_user(&fx.state, "creator-token").await;
-    let creator_caller = issue_bearer(&fx.state, creator_user, None, "billing:read").await;
+    let creator_caller = issue_bearer(&fx.state, creator_user, "billing:read").await;
     let op_user = make_user(&fx.state, "operator").await;
-    let op_caller = issue_bearer(&fx.state, op_user, Some("billing"), "billing:write").await;
+    let op_caller = issue_bearer(&fx.state, op_user, "billing:write").await;
 
     let app = test::init_service(
         web::App::new().state(fx.state.clone()).service(
@@ -1257,7 +1252,7 @@ async fn grant_endpoint_unknown_creator_is_fk_400() {
     let url = db_url();
     let fx = build_fixture(&url, "fk400").await;
     let op_user = make_user(&fx.state, "operator-fk").await;
-    let op_caller = issue_bearer(&fx.state, op_user, Some("billing"), "billing:write").await;
+    let op_caller = issue_bearer(&fx.state, op_user, "billing:write").await;
 
     let app = test::init_service(
         web::App::new().state(fx.state.clone()).service(

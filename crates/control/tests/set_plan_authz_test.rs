@@ -146,18 +146,13 @@ impl Caller {
 
 /// Issue a platform OAuth bearer for `user_id` carrying `scope`. Optionally
 /// grant a `platform_admin_roles` role (for the operator path).
-async fn issue_bearer(state: &AppState, user_id: Uuid, role: Option<&str>, scope: &str) -> Caller {
-    if let Some(role) = role {
-        state
-            .control_pg
-            .execute(
-                "INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by) \
-                 VALUES ($1, $2, $1) ON CONFLICT DO NOTHING",
-                &[&user_id, &role],
-            )
-            .await
-            .expect("insert platform role");
-    }
+/// Issue a platform OAuth bearer for `user_id` carrying `scope`.
+///
+/// It used to take an optional platform role and seed a `platform_admin_roles`
+/// row for the operator paths. That table and those roles are deleted, so every
+/// principal this mints is an ordinary creator.
+async fn issue_bearer(state: &AppState, user_id: Uuid, scope: &str) -> Caller {
+    let _ = state;
     Caller {
         user_id,
         token: common::platform_token_for_client(user_id, scope, common::CONSOLE_CLIENT_ID),
@@ -244,11 +239,11 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
         .await
         .expect("create app");
 
-    let creator_caller = issue_bearer(&fx.state, owner, None, "billing:write").await;
+    let creator_caller = issue_bearer(&fx.state, owner, "billing:write").await;
 
     // An operator: platform 'billing' role + BillingWrite on Resource::Any.
     let op_user = make_user(&pg, "operator").await;
-    let operator_caller = issue_bearer(&fx.state, op_user, Some("billing"), "billing:write").await;
+    let operator_caller = issue_bearer(&fx.state, op_user, "billing:write").await;
 
     let app_svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
@@ -318,9 +313,6 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
         let _ = pg
             .execute("DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1", &[&caller.user_id])
             .await;
-        let _ = pg
-            .execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&caller.user_id])
-            .await;
     }
     let _ = pg.execute("DELETE FROM zeroship.users WHERE id = ANY($1)", &[&vec![owner, op_user]]).await;
 
@@ -372,7 +364,7 @@ async fn assigning_an_archived_plan_is_refused_and_not_reported_as_a_missing_app
         .expect("create app");
 
     let op_user = make_user(&pg, "operator").await;
-    let operator_caller = issue_bearer(&fx.state, op_user, Some("billing"), "billing:write").await;
+    let operator_caller = issue_bearer(&fx.state, op_user, "billing:write").await;
 
     let app_svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
@@ -412,9 +404,6 @@ async fn assigning_an_archived_plan_is_refused_and_not_reported_as_a_missing_app
     let _ = pg.execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app.id]).await;
     let _ = pg
         .execute("DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1", &[&operator_caller.user_id])
-        .await;
-    let _ = pg
-        .execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&operator_caller.user_id])
         .await;
     let _ = pg.execute("DELETE FROM zeroship.users WHERE id = ANY($1)", &[&vec![owner, op_user]]).await;
 

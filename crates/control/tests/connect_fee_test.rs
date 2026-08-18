@@ -401,18 +401,13 @@ async fn make_user(state: &AppState, label: &str) -> Uuid {
     id
 }
 
-async fn issue_bearer(state: &AppState, user_id: Uuid, role: Option<&str>, scope: &str) -> Caller {
-    if let Some(role) = role {
-        state
-            .control_pg
-            .execute(
-                "INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by) \
-                 VALUES ($1, $2, $1) ON CONFLICT DO NOTHING",
-                &[&user_id, &role],
-            )
-            .await
-            .expect("insert platform role");
-    }
+/// Issue a platform OAuth bearer for `user_id` carrying `scope`.
+///
+/// It used to take an optional platform role and seed a `platform_admin_roles`
+/// row for the operator paths. That table and those roles are deleted, so every
+/// principal this mints is an ordinary creator.
+async fn issue_bearer(state: &AppState, user_id: Uuid, scope: &str) -> Caller {
+    let _ = state;
     Caller {
         user_id,
         token: common::platform_token_for_client(user_id, scope, common::CONSOLE_CLIENT_ID),
@@ -442,7 +437,6 @@ async fn cleanup(state: &AppState, creators: &[Uuid], callers: &[&Caller]) {
     }
     for caller in callers {
         let _ = pg.execute("DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1", &[&caller.user_id]).await;
-        let _ = pg.execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&caller.user_id]).await;
     }
     let _ = pg.execute("DELETE FROM zeroship.users WHERE id = ANY($1)", &[&creators.to_vec()]).await;
 }
@@ -456,7 +450,7 @@ async fn onboard_returns_real_account_link() {
     let url = db_url();
     let fx = build_fixture(&url, "onboard").await;
     let creator = make_user(&fx.state, "creator").await;
-    let caller = issue_bearer(&fx.state, creator, None, "billing:read").await;
+    let caller = issue_bearer(&fx.state, creator, "billing:read").await;
 
     let svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
@@ -509,7 +503,7 @@ async fn callback_rejects_acct_not_owned_by_creator() {
     let fx = build_fixture(&url, "callback-forge").await;
     let creator = make_user(&fx.state, "creator").await;
     let attacker = make_user(&fx.state, "attacker").await;
-    let caller = issue_bearer(&fx.state, creator, None, "billing:read").await;
+    let caller = issue_bearer(&fx.state, creator, "billing:read").await;
 
     let svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
@@ -567,7 +561,7 @@ async fn callback_accepts_owned_account_and_persists_flags() {
     let url = db_url();
     let fx = build_fixture(&url, "callback-ok").await;
     let creator = make_user(&fx.state, "creator").await;
-    let caller = issue_bearer(&fx.state, creator, None, "billing:read").await;
+    let caller = issue_bearer(&fx.state, creator, "billing:read").await;
     fx.mock.set_flags(true, true, true);
 
     let svc = test::init_service(
@@ -624,7 +618,7 @@ async fn checkout_stamps_server_fee_not_client_value() {
     let url = db_url();
     let fx = build_fixture(&url, "checkout-fee").await;
     let creator = make_user(&fx.state, "creator").await;
-    let caller = issue_bearer(&fx.state, creator, None, "billing:read").await;
+    let caller = issue_bearer(&fx.state, creator, "billing:read").await;
 
     let svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
@@ -704,8 +698,8 @@ async fn checkout_honors_operator_set_fee_policy() {
     let fx = build_fixture(&url, "checkout-policy").await;
     let creator = make_user(&fx.state, "creator").await;
     let op = make_user(&fx.state, "operator").await;
-    let creator_caller = issue_bearer(&fx.state, creator, None, "billing:read").await;
-    let op_caller = issue_bearer(&fx.state, op, Some("billing"), "billing:write").await;
+    let creator_caller = issue_bearer(&fx.state, creator, "billing:read").await;
+    let op_caller = issue_bearer(&fx.state, op, "billing:write").await;
 
     let svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
@@ -770,7 +764,7 @@ async fn checkout_rejected_when_charges_not_enabled() {
     let url = db_url();
     let fx = build_fixture(&url, "checkout-not-ready").await;
     let creator = make_user(&fx.state, "creator").await;
-    let caller = issue_bearer(&fx.state, creator, None, "billing:read").await;
+    let caller = issue_bearer(&fx.state, creator, "billing:read").await;
     // The account exists but onboarding is incomplete: charges are NOT enabled.
     fx.mock.set_flags(false, false, false);
 
@@ -849,7 +843,7 @@ async fn checkout_rejects_empty_cart_id_no_stale_replay() {
     let url = db_url();
     let fx = build_fixture(&url, "checkout-cartid").await;
     let creator = make_user(&fx.state, "creator").await;
-    let caller = issue_bearer(&fx.state, creator, None, "billing:read").await;
+    let caller = issue_bearer(&fx.state, creator, "billing:read").await;
     fx.mock.set_flags(true, true, true);
 
     let svc = test::init_service(
@@ -950,7 +944,7 @@ async fn fee_policy_rejects_floor_above_cap() {
     let fx = build_fixture(&url, "fee-floor-cap").await;
     let creator = make_user(&fx.state, "creator").await;
     let op = make_user(&fx.state, "operator").await;
-    let op_caller = issue_bearer(&fx.state, op, Some("billing"), "billing:write").await;
+    let op_caller = issue_bearer(&fx.state, op, "billing:write").await;
 
     let svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
@@ -998,7 +992,7 @@ async fn checkout_rejects_bad_currency() {
     let url = db_url();
     let fx = build_fixture(&url, "checkout-currency").await;
     let creator = make_user(&fx.state, "creator").await;
-    let caller = issue_bearer(&fx.state, creator, None, "billing:read").await;
+    let caller = issue_bearer(&fx.state, creator, "billing:read").await;
     fx.mock.set_flags(true, true, true);
 
     let svc = test::init_service(
@@ -1052,8 +1046,8 @@ async fn fee_policy_set_is_operator_only() {
     let op = make_user(&fx.state, "operator").await;
     // The creator holds "billing:read" — no billing:write, so the operator-only
     // gate below denies them regardless of being the path creator.
-    let creator_caller = issue_bearer(&fx.state, creator, None, "billing:read").await;
-    let op_caller = issue_bearer(&fx.state, op, Some("billing"), "billing:write").await;
+    let creator_caller = issue_bearer(&fx.state, creator, "billing:read").await;
+    let op_caller = issue_bearer(&fx.state, op, "billing:write").await;
 
     let svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(

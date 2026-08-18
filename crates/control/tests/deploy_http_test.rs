@@ -69,24 +69,15 @@ fn tmpdir(label: &str) -> PathBuf {
     p
 }
 
-/// Seed a throwaway owner user so `create_app` (which binds an owner membership
-/// FKed to `zeroship.users`) succeeds. These tests exercise the deploy HTTP
-/// path, not authz, so the owner identity is immaterial.
-async fn seed_owner(state: &AppState, label: &str) -> Uuid {
-    let owner_id = Uuid::new_v4();
-    state
-        .control_pg
-        .execute(
-            "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2::citext, $3)",
-            &[
-                &owner_id,
-                &format!("{label}-owner-{owner_id}@zeroship.test"),
-                &label,
-            ],
-        )
-        .await
-        .expect("seed owner user");
-    owner_id
+/// Seed the principal that will BOTH own the app and send the deploy.
+///
+/// These tests exercise the deploy HTTP path rather than authz, but the owner
+/// identity is not immaterial: `create_app` binds an `app_members` owner row,
+/// and that row is now the only thing that authorizes `apps:deploy`. The
+/// previous helper seeded a throwaway owner unrelated to the bearer, which
+/// passed only because the deleted universal-allow policy covered the gap.
+async fn seed_owner(state: &AppState, _label: &str) -> common::authz_fixture::SeededPrincipal {
+    common::authz_fixture::seeded_principal(state).await
 }
 
 fn sha256_hex(data: &[u8]) -> String {
@@ -362,7 +353,8 @@ async fn deploy_happy_path_returns_200_with_deploy_hash() {
     let fx = build_test_state(&db_url, "happy").await;
 
     // Real app row in the test DB.
-    let owner_id = seed_owner(&fx.state, "httpd").await;
+    let pat = seed_owner(&fx.state, "httpd").await;
+    let owner_id = pat.user_id;
     let app_name = format!("httpd-{}", &Uuid::new_v4().simple().to_string()[..10]);
     let record = fx
         .state
@@ -404,7 +396,6 @@ async fn deploy_happy_path_returns_200_with_deploy_hash() {
     )
     .await;
 
-    let pat = common::authz_fixture::seeded_principal(&fx.state).await;
     let req = test::TestRequest::post()
         .uri(&format!("/api/apps/{app_id}/deploy"))
         .header("authorization", pat.bearer())
@@ -472,7 +463,21 @@ async fn deploy_wrong_content_type_returns_415_without_consuming_body() {
     let db_url = db_url();
 
     let fx = build_test_state(&db_url, "ct").await;
-    let app_id = Uuid::new_v4(); // route never reaches DB lookup
+    // A REAL app owned by the caller. The content-type check sits behind the
+    // authz gate, so a caller with no membership is refused before reaching it
+    // and this test would assert 403 instead of the 415 it is about.
+    let pat = seed_owner(&fx.state, "ct").await;
+    let record = fx
+        .state
+        .registry
+        .create_app(
+            &format!("ct-{}", &Uuid::new_v4().simple().to_string()[..10]),
+            &zeroship_control::plan_catalog::free_plan_id(),
+            &pat.user_id,
+        )
+        .await
+        .expect("create app");
+    let app_id = record.id;
     let body: Vec<u8> = b"this is not a zship payload".to_vec();
 
     let app = test::init_service(
@@ -488,7 +493,6 @@ async fn deploy_wrong_content_type_returns_415_without_consuming_body() {
     )
     .await;
 
-    let pat = common::authz_fixture::seeded_principal(&fx.state).await;
     let req = test::TestRequest::post()
         .uri(&format!("/api/apps/{app_id}/deploy"))
         .header("authorization", pat.bearer())
@@ -578,7 +582,8 @@ async fn deploy_manifest_not_first_returns_400() {
     // Real app — the handler walks all the way through ingest to
     // produce the structured BadRequest, so the app must exist for
     // the registry path to behave normally up to the rejection.
-    let owner_id = seed_owner(&fx.state, "httpmf").await;
+    let pat = seed_owner(&fx.state, "httpmf").await;
+    let owner_id = pat.user_id;
     let app_name = format!("httpmf-{}", &Uuid::new_v4().simple().to_string()[..10]);
     let record = fx
         .state
@@ -609,7 +614,6 @@ async fn deploy_manifest_not_first_returns_400() {
     )
     .await;
 
-    let pat = common::authz_fixture::seeded_principal(&fx.state).await;
     let req = test::TestRequest::post()
         .uri(&format!("/api/apps/{app_id}/deploy"))
         .header("authorization", pat.bearer())
@@ -656,7 +660,8 @@ async fn deploy_colliding_scope_returns_400_invalid_scope() {
 
     let fx = build_test_state(&db_url, "scopecollide").await;
 
-    let owner_id = seed_owner(&fx.state, "httpsc").await;
+    let pat = seed_owner(&fx.state, "httpsc").await;
+    let owner_id = pat.user_id;
     let app_name = format!("httpsc-{}", &Uuid::new_v4().simple().to_string()[..10]);
     let record = fx
         .state
@@ -686,7 +691,6 @@ async fn deploy_colliding_scope_returns_400_invalid_scope() {
     )
     .await;
 
-    let pat = common::authz_fixture::seeded_principal(&fx.state).await;
     let req = test::TestRequest::post()
         .uri(&format!("/api/apps/{app_id}/deploy"))
         .header("authorization", pat.bearer())
@@ -749,7 +753,8 @@ async fn deploy_noncolliding_scope_returns_200() {
 
     let fx = build_test_state(&db_url, "scopeok").await;
 
-    let owner_id = seed_owner(&fx.state, "httpok").await;
+    let pat = seed_owner(&fx.state, "httpok").await;
+    let owner_id = pat.user_id;
     let app_name = format!("httpok-{}", &Uuid::new_v4().simple().to_string()[..10]);
     let record = fx
         .state
@@ -777,7 +782,6 @@ async fn deploy_noncolliding_scope_returns_200() {
     )
     .await;
 
-    let pat = common::authz_fixture::seeded_principal(&fx.state).await;
     let req = test::TestRequest::post()
         .uri(&format!("/api/apps/{app_id}/deploy"))
         .header("authorization", pat.bearer())
@@ -889,7 +893,8 @@ async fn deploy_rejects_legacy_migration_approval_query() {
     let db_url = db_url();
     let fx = build_test_state(&db_url, "legacy-query").await;
     let app = deploy_service(fx.state.clone()).await;
-    let owner_id = seed_owner(&fx.state, "legacy-query").await;
+    let pat = seed_owner(&fx.state, "legacy-query").await;
+    let owner_id = pat.user_id;
     let record = fx
         .state
         .registry
@@ -901,7 +906,6 @@ async fn deploy_rejects_legacy_migration_approval_query() {
         .await
         .expect("create app");
     let app_id = record.id;
-    let pat = common::authz_fixture::seeded_principal(&fx.state).await;
     let bundle = worker_only_zship();
 
     let req = test::TestRequest::post()
@@ -935,7 +939,8 @@ async fn deploy_rejects_legacy_manifest_migrations_and_runs_no_migration() {
     let db_url = db_url();
     let fx = build_test_state(&db_url, "legacy-manifest").await;
     let app = deploy_service(fx.state.clone()).await;
-    let owner_id = seed_owner(&fx.state, "legacy-manifest").await;
+    let pat = seed_owner(&fx.state, "legacy-manifest").await;
+    let owner_id = pat.user_id;
     let record = fx
         .state
         .registry
@@ -947,7 +952,6 @@ async fn deploy_rejects_legacy_manifest_migrations_and_runs_no_migration() {
         .await
         .expect("create app");
     let app_id = record.id;
-    let pat = common::authz_fixture::seeded_principal(&fx.state).await;
     let bundle = zship_with_legacy_migrations_key();
 
     let req = test::TestRequest::post()
@@ -980,16 +984,23 @@ async fn deploy_rejects_legacy_manifest_migrations_and_runs_no_migration() {
     common::drain_pg().await;
 }
 
-/// Deploying to an app id that does not exist must be refused BEFORE the
-/// bundle's blobs are persisted. The handler streams the body, mmaps it and
-/// calls `deploy::ingest` (which writes every blob into the blob store) and
-/// only afterwards looks the app up and answers "app not found", so the blobs
-/// of a bundle for a nonexistent app outlive the request with nothing to
-/// reference or bill them.
+/// Deploying to an app id that does not exist writes no blobs.
 ///
-/// The caller here holds a fleet-wide grant, which is what makes the arm
-/// reachable: an ordinary creator is denied by authz on an app they do not
-/// own, so this is an operator-shaped exposure rather than an anonymous one.
+/// The handler streams the body, mmaps it and calls `deploy::ingest` (which
+/// writes every blob into the blob store) and only afterwards looks the app up,
+/// so a bundle for a nonexistent app used to leave blobs behind with nothing to
+/// reference or bill them. That arm was reachable only by a caller holding a
+/// fleet-wide grant; an ordinary creator was already denied by authz on an app
+/// they do not own.
+///
+/// With the fleet-wide grant deleted, EVERY caller is that ordinary creator, so
+/// the refusal is now 403 at the gate and the ingest is never entered. The
+/// blob assertion is the part that still earns its keep - it is what would go
+/// red if the gate were ever moved after the stream again.
+///
+/// 403 rather than 404 is also the better answer on its own terms: the response
+/// is identical for an app that does not exist and one the caller does not own,
+/// so it is not an existence oracle.
 #[compio::test]
 async fn deploy_to_nonexistent_app_does_not_write_blobs() {
     let db_url = db_url();
@@ -1039,8 +1050,8 @@ async fn deploy_to_nonexistent_app_does_not_write_blobs() {
 
     assert_eq!(
         status,
-        StatusCode::NOT_FOUND,
-        "deploying to an app that does not exist must 404",
+        StatusCode::FORBIDDEN,
+        "deploying to an app the caller is not a member of must be refused at the gate",
     );
     // Assert on the blob directory, not the store root: the store creates
     // `blobs/` and `manifests/` when it is constructed, so the root is never
