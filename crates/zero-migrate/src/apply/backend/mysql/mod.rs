@@ -1858,10 +1858,21 @@ mod render_tests {
             // An ordinary text default that happens to call uuid() must remain
             // outside the narrow ID-default comparison surface without an
             // engine-owned UUID format CHECK.
+            //
+            // `text`, NOT `varchar(191)`, because that is what the engine deploys for
+            // a plain `ColType::Text` column - measured against a live MySQL server by
+            // `tests/drift_column_physical_type.rs`, whose `body` column authors `text`
+            // and introspects back as `Lob { tier: "text" }`. The `varchar(191)`
+            // spelling belongs to the two columns ABOVE, which carry a `value_format`
+            // and so need an indexable width. This row read `varchar(191)` until the
+            // drift report learned to print the physical contract: the comparator had
+            // always answered "different" here, and the report dropped the answer
+            // because `mysql_canonical_type` folds `varchar(191)` to the same literal
+            // `text` the fold emits.
             catalog_column_with_generation(
                 "ids",
                 "ordinary",
-                "varchar(191)",
+                "text",
                 Some("utf8mb4"),
                 Some("utf8mb4_bin"),
                 false,
