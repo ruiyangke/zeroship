@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
 use ntex::web;
 use ntex::web::types::{Json, Path, State};
 use serde::{Deserialize, Serialize};
@@ -34,41 +33,8 @@ struct RoleResponse {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct NetGrantBody {
-    host: String,
-    port: u16,
-    #[serde(default)]
-    note: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct FrontableSuffixesBody {
     suffixes: Vec<String>,
-}
-
-#[derive(Serialize)]
-struct AppNetGrantResponse {
-    app_id: Uuid,
-    host: String,
-    port: u16,
-    granted_by: String,
-    granted_at: DateTime<Utc>,
-    note: Option<String>,
-}
-
-#[derive(Clone, Serialize)]
-struct AppNetRequestResponse {
-    host: String,
-    port: u16,
-    reason: String,
-}
-
-#[derive(Serialize)]
-struct AppNetGrantListResponse {
-    app_id: Uuid,
-    grants: Vec<AppNetGrantResponse>,
-    requests: Vec<AppNetRequestResponse>,
-    pending_requests: Vec<AppNetRequestResponse>,
 }
 
 #[derive(Serialize)]
@@ -215,118 +181,6 @@ pub async fn get_platform_role(
     }
 }
 
-pub async fn list_app_net_grants(
-    guard: AuthzGuard,
-    state: State<Arc<AppState>>,
-    app_id: Path<String>,
-) -> web::HttpResponse {
-    if let Err(resp) = require_admin_or_support(&guard, &state).await {
-        return resp;
-    }
-
-    let app_id = match parse_app_uuid(&app_id) {
-        Ok(id) => id,
-        Err(resp) => return resp,
-    };
-    match net_grants::list_grants(state.control_pg.as_ref(), app_id).await {
-        Ok(list) => web::HttpResponse::Ok().json(&list),
-        Err(err) => err.into_response(),
-    }
-}
-
-pub async fn grant_app_net(
-    req: web::HttpRequest,
-    guard: AuthzGuard,
-    state: State<Arc<AppState>>,
-    app_id: Path<String>,
-    body: Json<net_grants::NetGrantBody>,
-) -> web::HttpResponse {
-    if let Err(resp) = require_platform_admin(&guard, &state).await {
-        return resp;
-    }
-
-    let app_id = match parse_app_uuid(&app_id) {
-        Ok(id) => id,
-        Err(resp) => return resp,
-    };
-    let granted_by = guard.principal_id.to_string();
-    let grant = match net_grants::upsert_grant(state.control_pg.as_ref(), app_id, &body, &granted_by)
-        .await
-    {
-        Ok(grant) => grant,
-        Err(err) => return err.into_response(),
-    };
-
-    if let Err(resp) = audit_event(
-        &req,
-        &state,
-        &guard,
-        "app_net_grant_upserted",
-        json!({
-            "actor": guard.principal_id,
-            "app_id": app_id,
-            "host": grant.host,
-            "port": grant.port,
-        }),
-    )
-    .await
-    {
-        return resp;
-    }
-
-    web::HttpResponse::Ok().json(&grant)
-}
-
-pub async fn revoke_app_net(
-    req: web::HttpRequest,
-    guard: AuthzGuard,
-    state: State<Arc<AppState>>,
-    app_id: Path<String>,
-    body: Json<net_grants::NetGrantBody>,
-) -> web::HttpResponse {
-    if let Err(resp) = require_platform_admin(&guard, &state).await {
-        return resp;
-    }
-
-    let app_id = match parse_app_uuid(&app_id) {
-        Ok(id) => id,
-        Err(resp) => return resp,
-    };
-    // A revoke that matched nothing is still audited (`deleted: 0`), as it was
-    // before; only a malformed request or a database fault short-circuits.
-    let revoked =
-        net_grants::revoke_grant(state.control_pg.as_ref(), app_id, &body.host, body.port).await;
-    let deleted = match revoked {
-        Ok(()) => 1_u32,
-        Err(net_grants::NetGrantError::GrantNotFound) => 0,
-        Err(err) => return err.into_response(),
-    };
-
-    if let Err(resp) = audit_event(
-        &req,
-        &state,
-        &guard,
-        "app_net_grant_revoked",
-        json!({
-            "actor": guard.principal_id,
-            "app_id": app_id,
-            "host": net_grants::normalize_host_text(&body.host),
-            "port": body.port,
-            "deleted": deleted,
-        }),
-    )
-    .await
-    {
-        return resp;
-    }
-
-    if deleted == 0 {
-        net_grants::NetGrantError::GrantNotFound.into_response()
-    } else {
-        web::HttpResponse::NoContent().finish()
-    }
-}
-
 pub async fn get_frontable_suffixes(
     guard: AuthzGuard,
     state: State<Arc<AppState>>,
@@ -410,15 +264,6 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route(web::get().to(get_platform_role)),
     )
     .service(
-        web::resource("/admin/apps/{app_id}/net-grants")
-            .route(web::get().to(list_app_net_grants))
-            .route(web::post().to(grant_app_net)),
-    )
-    .service(
-        web::resource("/admin/apps/{app_id}/net-grants/revoke")
-            .route(web::post().to(revoke_app_net)),
-    )
-    .service(
         web::resource("/admin/net-policy/frontable-wildcard-suffixes")
             .route(web::get().to(get_frontable_suffixes))
             .route(web::put().to(put_frontable_suffixes)),
@@ -462,11 +307,6 @@ async fn require_admin_or_support(
 fn parse_uuid(raw: &str) -> Result<Uuid, web::HttpResponse> {
     Uuid::parse_str(raw)
         .map_err(|_| web::HttpResponse::BadRequest().json(&json!({"error": "invalid user id"})))
-}
-
-fn parse_app_uuid(raw: &str) -> Result<Uuid, web::HttpResponse> {
-    Uuid::parse_str(raw)
-        .map_err(|_| web::HttpResponse::BadRequest().json(&json!({"error": "invalid app id"})))
 }
 
 fn validate_role(role: &str) -> Option<&'static str> {
