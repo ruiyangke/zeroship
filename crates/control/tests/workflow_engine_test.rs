@@ -4458,6 +4458,90 @@ async fn schedule_normal_cadence_fires_one_tick_and_rearms() {
     common::drain_pg().await;
 }
 
+/// A sweeper fires every schedule it claimed even when the batch lease it was
+/// claimed under has already expired.
+///
+/// `claim_ttl_ms = 0` makes `lease_expires` equal the claim transaction's
+/// `now()`, so it is unconditionally in the past by the time the separate fire
+/// transaction re-reads the row - the same state a loaded machine reaches by
+/// spending the real 1.5s budget on connection setup and the app journal's
+/// first `CREATE TABLE`, but reached by construction instead of by luck.
+///
+/// Restore `AND s.lease_expires > now()` in `load_claimed_schedule` and this
+/// reports `fired` 0, both `schedule_run_count`s 0. That is the one claim this
+/// case licenses: the sweep no longer drops a claim it still exclusively owns.
+/// It says nothing about a takeover by a second sweeper, which
+/// `claim_due_schedules` still gates on the lease and no test here covers.
+///
+/// Deliberately NOT wrapped in `compio::time::timeout`: the wrappers in this
+/// file put a fixed 10s wall-clock budget around unbounded database work, which
+/// is a second, independent load coupling measured here (batch_step_result_
+/// applies_atomically_and_preserves_effn1 died on exactly that at load ~45).
+/// Adding a wrapper would reintroduce into this case the property it exists to
+/// remove.
+#[compio::test]
+async fn schedule_sweep_fires_claims_whose_batch_lease_already_expired() {
+    let Some(fx) = isolated_fixture("schedule-expired-lease").await else {
+        return;
+    };
+    let (app_id, deploy_id) = seed_app_and_deploy(&fx, "schedule-expired-lease").await;
+    let interval_ms = 1_000;
+    let planned = aligned_planned_instant(4, interval_ms);
+
+    // Two schedules so the case also covers the LATER claims in one batch: they
+    // share the single lease deadline the claim transaction stamped.
+    let first_id = insert_interval_schedule(
+        &fx,
+        app_id,
+        &deploy_id,
+        "expired-lease-first",
+        "TestWorkflow",
+        "allow",
+        "skip",
+        0,
+        interval_ms,
+        planned,
+    )
+    .await;
+    let second_id = insert_interval_schedule(
+        &fx,
+        app_id,
+        &deploy_id,
+        "expired-lease-second",
+        "TestWorkflow",
+        "allow",
+        "skip",
+        0,
+        interval_ms,
+        planned,
+    )
+    .await;
+
+    let mut config = schedule_policy_config("schedule-expired-lease");
+    config.claim_ttl_ms = 0;
+    let fired = workflow_schedules::tick_with_config(&fx.state, config)
+        .await
+        .expect("expired-lease schedule sweep");
+
+    assert_eq!(
+        fired, 2,
+        "an expired batch lease must not cost the owning sweeper its claims"
+    );
+    assert_eq!(schedule_run_count(&fx, &first_id).await, 1);
+    assert_eq!(schedule_run_count(&fx, &second_id).await, 1);
+    assert_eq!(
+        schedule_run_started_instants(&fx, &first_id).await,
+        vec![planned]
+    );
+    assert_eq!(
+        schedule_run_started_instants(&fx, &second_id).await,
+        vec![planned]
+    );
+
+    drop(fx);
+    common::drain_pg().await;
+}
+
 #[compio::test]
 async fn batch_step_result_applies_atomically_and_preserves_effn1() {
     let Some(fx) = isolated_fixture("batch-apply").await else {
