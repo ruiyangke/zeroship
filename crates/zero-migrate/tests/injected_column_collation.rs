@@ -477,6 +477,137 @@ async fn injected_id_with_a_pinned_bytewise_collation_keeps_creation_order() {
     result.unwrap_or_else(|error| panic!("{error}"));
 }
 
+// ── MySQL: the SAME two claims, on a live server ───────────────────────────────
+//
+// This was the asymmetry. The defect these tests exist for was wrong on PostgreSQL
+// AND on MySQL, and accidentally right on SQLite. The PostgreSQL half was closed by
+// the row-ordering pair above; the MySQL half was pinned only by
+// `a_pinned_bytewise_collation_is_spelled_per_dialect`, which greps the emitted DDL
+// for `utf8mb4_0900_bin` - the exact "measures how the engine spells itself" check
+// this file's own header calls insufficient. No live MySQL ordering run had ever
+// been made from Rust, because no Rust test of any kind had ever driven a live
+// MySQL server.
+//
+// The two legs mirror the PostgreSQL pair exactly, including the neuter check, and
+// the neuter is if anything sharper here. On MySQL the unpinned charter does NOT
+// fall back to the server default: it emits an explicit `utf8mb4_0900_as_cs`, which
+// is case-SENSITIVE and still not bytewise, because the 0900 family weights case as
+// a UCA tertiary difference rather than comparing encoded bytes. Measured on MySQL
+// 8.4.11, `ORDER BY id` under `_as_cs` returns aaa, AAA, zzz, Zzz - adjacent case
+// pairs, not creation order.
+
+/// Create the injected table in its own DATABASE (MySQL's "schema"), insert
+/// [`CREATION_ORDER`], and read the ids back with `ORDER BY id`.
+async fn live_order_mysql(
+    session: &support::mysql::MysqlDevSession,
+    database: &str,
+    collation: Option<&str>,
+) -> Result<Vec<String>, String> {
+    use zero_migrate::driver::SqlSession as _;
+
+    let quoted = support::mysql::quote_ident(database);
+    session
+        .batch(&format!("CREATE DATABASE {quoted}"))
+        .await
+        .map_err(|error| format!("create the probe database: {error}"))?;
+    let ddl = injected_ddl(SqlDialect::Mysql, database, "notes", collation);
+    session
+        .batch(&ddl)
+        .await
+        .map_err(|error| format!("apply the engine-emitted DDL: {error}\n{ddl}"))?;
+    for (index, id) in CREATION_ORDER.iter().enumerate() {
+        session
+            .batch(&format!(
+                "INSERT INTO {quoted}.`notes` \
+                 (id, created_at, created_by, version, title) \
+                 VALUES ('{id}', NOW(6), 'someone', {index}, 'title')"
+            ))
+            .await
+            .map_err(|error| format!("insert {id}: {error}"))?;
+    }
+    let rows = session
+        .query(&format!("SELECT id FROM {quoted}.`notes` ORDER BY id"), &[])
+        .await
+        .map_err(|error| format!("read the ordered ids: {error}"))?;
+    rows.iter()
+        .map(|row| {
+            row.try_get::<_, String>("id")
+                .map_err(|error| format!("an id column did not decode as text: {error}"))
+        })
+        .collect()
+}
+
+/// The instrument check, and the MySQL analogue of [`database_collation`]. Every
+/// ordering claim below is void if this server's default collation is already
+/// bytewise, because then the pinned and the unpinned fixture agree and neither test
+/// proves anything.
+async fn server_collation(session: &support::mysql::MysqlDevSession) -> Result<String, String> {
+    use zero_migrate::driver::SqlSession as _;
+
+    let row = session
+        .query_one("SELECT @@collation_server AS collation_server", &[])
+        .await
+        .map_err(|error| format!("read the server collation: {error}"))?;
+    row.try_get::<_, String>("collation_server")
+        .map_err(|error| format!("@@collation_server did not decode as text: {error}"))
+}
+
+#[compio::test]
+async fn injected_id_with_a_pinned_bytewise_collation_keeps_creation_order_on_mysql() {
+    let url = skip_if_no_mysql!();
+    let session = support::mysql::MysqlDevSession::connect(&url);
+    let database = support::mysql::database_token("pinned");
+    let _guard = support::mysql::DatabaseGuard::arm(&session, [database.clone()]);
+
+    let result: Result<(), String> = async {
+        let collation = server_collation(&session).await?;
+        if collation.ends_with("_bin") || collation == "binary" {
+            return Err(format!(
+                "this server's default collation is {collation}, so an ordering \
+                 assertion here cannot distinguish the fix from its absence"
+            ));
+        }
+        let read = live_order_mysql(&session, &database, Some("bytewise")).await?;
+        if read != CREATION_ORDER {
+            return Err(format!(
+                "ORDER BY id must be creation order under a pinned bytewise \
+                 collation on a {collation} server; got {read:?}"
+            ));
+        }
+        Ok(())
+    }
+    .await;
+    result.unwrap_or_else(|error| panic!("{error}"));
+}
+
+#[compio::test]
+async fn injected_id_without_a_pinned_collation_loses_creation_order_on_mysql() {
+    let url = skip_if_no_mysql!();
+    let session = support::mysql::MysqlDevSession::connect(&url);
+    let database = support::mysql::database_token("unpinned");
+    let _guard = support::mysql::DatabaseGuard::arm(&session, [database.clone()]);
+
+    let result: Result<(), String> = async {
+        let collation = server_collation(&session).await?;
+        if collation.ends_with("_bin") || collation == "binary" {
+            return Err(format!(
+                "this server's default collation is {collation}, so the neuter \
+                 check cannot run and the pinned test above proves nothing"
+            ));
+        }
+        let read = live_order_mysql(&session, &database, None).await?;
+        if read == CREATION_ORDER {
+            return Err(format!(
+                "the unpinned fixture came back in creation order on a {collation} \
+                 server, so the pinned test above is not measuring the fix"
+            ));
+        }
+        Ok(())
+    }
+    .await;
+    result.unwrap_or_else(|error| panic!("{error}"));
+}
+
 #[compio::test]
 async fn injected_id_without_a_pinned_collation_loses_creation_order() {
     let url = skip_if_no_pg!();
