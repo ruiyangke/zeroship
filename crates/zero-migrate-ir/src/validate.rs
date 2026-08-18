@@ -354,14 +354,29 @@ pub enum Dialect {
 }
 
 impl Dialect {
+    /// The open [`DialectId`](crate::dialect::DialectId) this closed variant
+    /// denotes.
+    ///
+    /// One-way, exactly like [`SqlDialect::id`](crate::dialect::SqlDialect::id):
+    /// an id does NOT convert back to a variant, because that is the direction a
+    /// fourth backend cannot satisfy.
+    #[must_use]
+    pub const fn id(self) -> crate::dialect::DialectId {
+        match self {
+            Self::Postgres => crate::dialect::POSTGRES,
+            Self::Sqlite => crate::dialect::SQLITE,
+            Self::Mysql => crate::dialect::MYSQL,
+        }
+    }
+
     /// The lower-case wire spelling used in the structured payload.
+    ///
+    /// This IS the id's string, and the `dialect_wire_spelling_is_the_id` test
+    /// pins that: the structured-rejection payload and the dialect id must never
+    /// drift into two spellings of one dialect.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Postgres => "postgres",
-            Self::Sqlite => "sqlite",
-            Self::Mysql => "mysql",
-        }
+        self.id().as_str()
     }
 }
 

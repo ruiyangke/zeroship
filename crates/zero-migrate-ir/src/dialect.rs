@@ -18,6 +18,7 @@
 //! grow a variant from a crate that does not own it.
 
 use core::fmt;
+use std::borrow::Cow;
 
 /// The SQL dialect a migration renders/applies against.
 ///
@@ -143,106 +144,94 @@ impl fmt::Display for DialectId {
     }
 }
 
-/// A set of dialect identities.
+/// A set of dialect identities, with NO cap on how many it can hold.
+///
+/// This replaces `DialectSet(u8)`, whose three used bits and five spare ones put
+/// a hard ceiling of EIGHT backends on the engine. The ceiling was never the
+/// bits alone: the set was keyed by a closed three-variant enum, so an id with
+/// no variant had no bit to occupy and vanished on insertion. Both are gone —
+/// membership is now the id itself.
+///
+/// Members are kept sorted and deduplicated, so `PartialEq` is SET equality
+/// (insertion order does not matter) and lookup is a binary search.
 ///
 /// Lifted here from `zero_migrate::model::support` (which re-exports it
 /// unchanged) so the [`crate::backend::BackendRegistry`] can key on the same set
 /// type the support matrix uses, rather than growing a second one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DialectSet(u8);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DialectSet(Cow<'static, [DialectId]>);
 
 impl DialectSet {
-    const POSTGRES: u8 = 0b001;
-    const SQLITE: u8 = 0b010;
-    const MYSQL: u8 = 0b100;
-
     /// The empty set.
     #[must_use]
     pub const fn empty() -> Self {
-        Self(0)
+        Self(Cow::Borrowed(&[]))
     }
 
     /// Every dialect the engine currently ships.
     #[must_use]
-    pub const fn all() -> Self {
-        Self(Self::POSTGRES | Self::SQLITE | Self::MYSQL)
+    pub fn all() -> Self {
+        Self::from_ids([POSTGRES, SQLITE, MYSQL])
     }
 
-    /// Build from the three per-dialect support booleans.
+    /// Build from the three per-dialect support booleans of the closed-enum era.
     #[must_use]
-    pub const fn from_bools(postgres: bool, sqlite: bool, mysql: bool) -> Self {
-        let mut bits = 0;
+    pub fn from_bools(postgres: bool, sqlite: bool, mysql: bool) -> Self {
+        let mut ids = Vec::with_capacity(3);
         if postgres {
-            bits |= Self::POSTGRES;
+            ids.push(POSTGRES);
         }
         if sqlite {
-            bits |= Self::SQLITE;
+            ids.push(SQLITE);
         }
         if mysql {
-            bits |= Self::MYSQL;
+            ids.push(MYSQL);
         }
-        Self(bits)
+        Self::from_ids(ids)
     }
 
-    /// Build from an arbitrary run of dialect identities.
+    /// Build from an arbitrary run of dialect identities. Duplicates collapse.
     #[must_use]
     pub fn from_ids(ids: impl IntoIterator<Item = DialectId>) -> Self {
-        let mut bits = 0u8;
-        for id in ids {
-            if id == POSTGRES {
-                bits |= Self::POSTGRES;
-            } else if id == SQLITE {
-                bits |= Self::SQLITE;
-            } else if id == MYSQL {
-                bits |= Self::MYSQL;
-            }
-        }
-        Self(bits)
+        let mut members: Vec<DialectId> = ids.into_iter().collect();
+        members.sort_unstable();
+        members.dedup();
+        Self(Cow::Owned(members))
     }
 
-    /// Whether the closed [`SqlDialect`]-era variant is a member.
+    /// Whether the closed [`crate::validate::Dialect`] variant is a member.
     #[must_use]
-    pub const fn contains(self, dialect: crate::validate::Dialect) -> bool {
-        let bit = match dialect {
-            crate::validate::Dialect::Postgres => Self::POSTGRES,
-            crate::validate::Dialect::Sqlite => Self::SQLITE,
-            crate::validate::Dialect::Mysql => Self::MYSQL,
-        };
-        self.0 & bit != 0
+    pub fn contains(&self, dialect: crate::validate::Dialect) -> bool {
+        self.contains_id(dialect.id())
     }
 
     /// Whether an id is a member.
     #[must_use]
-    pub fn contains_id(self, id: DialectId) -> bool {
-        self.iter().any(|member| member == id)
+    pub fn contains_id(&self, id: DialectId) -> bool {
+        self.0.binary_search(&id).is_ok()
     }
 
     /// How many dialects the set holds.
     #[must_use]
-    pub fn len(self) -> usize {
-        self.iter().count()
+    pub fn len(&self) -> usize {
+        self.0.len()
     }
 
     /// Whether the set is empty.
     #[must_use]
-    pub const fn is_empty(self) -> bool {
-        self.0 == 0
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 
     /// The members, in ascending id order.
-    pub fn iter(self) -> impl Iterator<Item = DialectId> {
-        let mut out = Vec::new();
-        if self.0 & Self::POSTGRES != 0 {
-            out.push(POSTGRES);
-        }
-        if self.0 & Self::SQLITE != 0 {
-            out.push(SQLITE);
-        }
-        if self.0 & Self::MYSQL != 0 {
-            out.push(MYSQL);
-        }
-        out.sort_unstable();
-        out.into_iter()
+    pub fn iter(&self) -> impl Iterator<Item = DialectId> + '_ {
+        self.0.iter().copied()
+    }
+}
+
+impl FromIterator<DialectId> for DialectSet {
+    fn from_iter<T: IntoIterator<Item = DialectId>>(iter: T) -> Self {
+        Self::from_ids(iter)
     }
 }
 
@@ -290,6 +279,58 @@ mod tests {
                 "{good:?} must satisfy the id rule"
             );
         }
+    }
+
+    #[test]
+    fn dialect_wire_spelling_is_the_id() {
+        // `Dialect::as_str` is the `dialect` field of the structured authoring
+        // rejection — a WIRE spelling. It is derived from the id, so this pins
+        // that the two can never drift into two names for one dialect.
+        for dialect in [
+            crate::validate::Dialect::Postgres,
+            crate::validate::Dialect::Sqlite,
+            crate::validate::Dialect::Mysql,
+        ] {
+            assert_eq!(dialect.as_str(), dialect.id().as_str());
+        }
+        assert_eq!(crate::validate::Dialect::Postgres.as_str(), "postgres");
+        assert_eq!(crate::validate::Dialect::Sqlite.as_str(), "sqlite");
+        assert_eq!(crate::validate::Dialect::Mysql.as_str(), "mysql");
+    }
+
+    #[test]
+    fn a_dialect_set_is_unbounded_and_order_free() {
+        let many: Vec<DialectId> = (0..64)
+            .map(|i| {
+                let name: &'static str = Box::leak(format!("backend_{i}").into_boxed_str());
+                DialectId::new(name)
+            })
+            .collect();
+        let set = DialectSet::from_ids(many.iter().copied());
+        assert_eq!(set.len(), 64);
+        for id in &many {
+            assert!(set.contains_id(*id), "{id} must be a member");
+        }
+        assert!(!set.contains_id(DialectId::new("absent")));
+
+        // Set equality, not sequence equality.
+        let mut reversed = many.clone();
+        reversed.reverse();
+        assert_eq!(DialectSet::from_ids(reversed), set);
+        // Duplicates collapse.
+        let doubled = many.iter().copied().chain(many.iter().copied());
+        assert_eq!(DialectSet::from_ids(doubled).len(), 64);
+    }
+
+    #[test]
+    fn from_bools_agrees_with_the_ids_it_names() {
+        assert_eq!(DialectSet::from_bools(false, false, false), DialectSet::empty());
+        assert_eq!(DialectSet::from_bools(true, true, true), DialectSet::all());
+        let pg_mysql = DialectSet::from_bools(true, false, true);
+        assert!(pg_mysql.contains_id(POSTGRES));
+        assert!(pg_mysql.contains_id(MYSQL));
+        assert!(!pg_mysql.contains_id(SQLITE));
+        assert_eq!(pg_mysql.len(), 2);
     }
 
     #[test]

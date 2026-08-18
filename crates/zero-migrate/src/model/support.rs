@@ -128,8 +128,10 @@ impl DialectSupport {
         }
     }
 
+    // Not `const`: a `DialectSet` is no longer a bitfield, because a bitfield is
+    // what capped the engine at eight backends.
     #[must_use]
-    pub const fn supported_dialects(self) -> DialectSet {
+    pub fn supported_dialects(self) -> DialectSet {
         DialectSet::from_bools(
             self.postgres.is_supported(),
             self.sqlite.is_supported(),
@@ -244,7 +246,7 @@ impl Support {
     }
 
     #[must_use]
-    pub const fn supported_dialects(&self) -> DialectSet {
+    pub fn supported_dialects(&self) -> DialectSet {
         self.dialects.supported_dialects()
     }
 }
