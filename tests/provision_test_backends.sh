@@ -65,6 +65,51 @@ READY_TIMEOUT_SECONDS="${READY_TIMEOUT_SECONDS:-60}"
 
 fatal() { echo "FATAL: $*" >&2; exit 1; }
 
+# ---------------------------------------------------------------------------
+# The placeholder env file, and why `docker compose up -d postgres redis` needs
+# one.
+#
+# MEASURED 2026-08-18 on a checkout with no `deploy/compose/.env`: that command
+# exits 1 having started nothing, with fourteen lines of
+#   error while interpolating services.worker.environment.ZEROSHIP_WORKER_KEY:
+#   required variable ZEROSHIP_WORKER_KEY is missing a value: run zeroship dev init
+# Compose interpolates the WHOLE file before it selects services, so the `:?`
+# guards on the PLATFORM services (auth, control, gateway, worker, migrated)
+# reject a run that would not have started any of them. Those guards are right
+# and stay: booting the platform with junk credentials is exactly what they
+# exist to stop.
+#
+# So the parse is satisfied and the boot is not. `up` below names `postgres` and
+# `redis` and nothing else, so no service that reads any of these values is ever
+# created - the placeholders make the file PARSE, they cannot make anything RUN.
+# A real `deploy/compose/.env` is loaded after this one and wins, so on a
+# machine that has run `zeroship dev init` the real values are what compose
+# sees.
+#
+# The names are SCANNED out of the compose file rather than listed here. A list
+# would be a second copy of the platform's required-secret set, and it would go
+# stale the first time a service gained one - as a failure that reads as
+# "provisioning is broken" rather than "the list is short".
+# ---------------------------------------------------------------------------
+PLACEHOLDER_ENV=""
+cleanup() { [ -n "$PLACEHOLDER_ENV" ] && rm -f "$PLACEHOLDER_ENV"; return 0; }
+trap cleanup EXIT
+
+compose_env_args() {
+  PLACEHOLDER_ENV="$(mktemp -t zeroship-provision-env.XXXXXX)"
+  grep -oE '\$\{[A-Z0-9_]+:\?[^}]*\}' "$COMPOSE_FILE" \
+    | grep -oE '\{[A-Z0-9_]+' | tr -d '{' | sort -u \
+    | sed 's/$/=provision-placeholder-no-service-reads-this/' >"$PLACEHOLDER_ENV"
+  printf '%s\n%s\n' --env-file "$PLACEHOLDER_ENV"
+  if [ -f "$(dirname "$COMPOSE_FILE")/.env" ]; then
+    printf '%s\n%s\n' --env-file "$(dirname "$COMPOSE_FILE")/.env"
+  fi
+}
+
+mapfile -t ENV_ARGS < <(compose_env_args)
+
+dc() { docker compose "${ENV_ARGS[@]}" -f "$COMPOSE_FILE" "$@"; }
+
 # Is a TCP port accepting connections? bash's /dev/tcp, so this needs no nc, no
 # psql and no redis-cli - none of which are guaranteed on a fresh checkout, and
 # the whole point of this script is to work on the machine that has nothing.
@@ -73,11 +118,38 @@ port_open() {
   return 1
 }
 
-wait_for_port() {
-  local host="$1" port="$2" label="$3" deadline
+# Ready means the SERVICE answers, not that the port is bound.
+#
+# MEASURED 2026-08-18, and it is why this is not a plain TCP probe. On a first
+# `up` the docker proxy publishes 5432 immediately while `initdb` is still
+# running inside the container, so `/dev/tcp` connects within a second and the
+# server refuses queries for another ten. The first version of this script
+# returned "ready" there and then reported `wal_level=unknown` from a psql that
+# could not connect - a provisioning step that hands back an unusable server and
+# says it is fine is worse than none.
+#
+# So: the compose HEALTHCHECK is the signal when there is a container to ask
+# (postgres runs `pg_isready`, redis runs `redis-cli ping` - both real
+# protocol-level probes), and the TCP check is the fallback for a server this
+# script did not start, where there is no container to inspect and the caller
+# has pointed PG_TEST_URL somewhere of their own.
+wait_for_backend() {
+  local service="$1" host="$2" port="$3" label="$4" deadline cid state
   deadline=$(( $(date +%s) + READY_TIMEOUT_SECONDS ))
+  cid=""
+  command -v docker >/dev/null 2>&1 && cid="$(dc ps -q "$service" 2>/dev/null || true)"
+
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    if port_open "$host" "$port"; then
+    if [ -n "$cid" ]; then
+      state="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' "$cid" 2>/dev/null || true)"
+      if [ "$state" = "healthy" ]; then
+        echo "  ok   ${label} healthy on ${host}:${port}"
+        return 0
+      fi
+      # A service with no healthcheck cannot be waited on this way; fall through
+      # to the port probe rather than looping to the deadline on nothing.
+      [ "$state" = "no-healthcheck" ] && cid=""
+    elif port_open "$host" "$port"; then
       echo "  ok   ${label} answering on ${host}:${port}"
       return 0
     fi
@@ -99,7 +171,7 @@ if [ "$CHECK_ONLY" -eq 0 ]; then
   # `--` nothing clever: only the two services, so this does not drag the
   # gateway, worker, control, auth, Caddy, verdaccio or redpanda along with it.
   # A test run needs two servers, not the platform.
-  docker compose -f "$COMPOSE_FILE" up -d postgres redis \
+  dc up -d postgres redis \
     || fatal "docker compose could not start postgres and redis.
        If the port is already taken by a container this file does not own,
        that container is what your tests have been running against - stop it
@@ -108,10 +180,10 @@ if [ "$CHECK_ONLY" -eq 0 ]; then
 fi
 
 echo "==> waiting for the backends (bound: ${READY_TIMEOUT_SECONDS}s each)"
-wait_for_port "$PG_HOST" "$PG_PORT" "PostgreSQL" \
+wait_for_backend postgres "$PG_HOST" "$PG_PORT" "PostgreSQL" \
   || fatal "PostgreSQL never came up on ${PG_HOST}:${PG_PORT} within ${READY_TIMEOUT_SECONDS}s.
        docker compose -f $COMPOSE_FILE logs postgres"
-wait_for_port "$REDIS_HOST" "$REDIS_PORT" "Redis" \
+wait_for_backend redis "$REDIS_HOST" "$REDIS_PORT" "Redis" \
   || fatal "Redis never came up on ${REDIS_HOST}:${REDIS_PORT} within ${READY_TIMEOUT_SECONDS}s.
        docker compose -f $COMPOSE_FILE logs redis"
 
@@ -128,7 +200,7 @@ wait_for_port "$REDIS_HOST" "$REDIS_PORT" "Redis" \
 # suites do not need logical decoding, and failing them for a plugin-db
 # requirement would be its own kind of wrong. The line is loud enough to act on.
 if command -v docker >/dev/null 2>&1; then
-  pg_cid="$(docker compose -f "$COMPOSE_FILE" ps -q postgres 2>/dev/null || true)"
+  pg_cid="$(dc ps -q postgres 2>/dev/null || true)"
   if [ -n "$pg_cid" ]; then
     wal="$(docker exec "$pg_cid" psql -U postgres -tAc 'show wal_level' 2>/dev/null || true)"
     if [ "$wal" = "logical" ]; then
