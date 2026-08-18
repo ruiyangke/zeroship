@@ -255,9 +255,7 @@ fn pool_error(msg: impl Into<String>) -> Error {
 /// rejected: it permits plaintext, which is what it gets. See the `Transport`
 /// section of the module docs for why it does not get TLS.
 #[cfg(not(feature = "tls"))]
-fn reject_unsatisfiable_tls(url: &str) -> Result<(), Error> {
-    let config: Config = url.parse()?;
-
+fn reject_unsatisfiable_tls(config: &Config) -> Result<(), Error> {
     if config.get_ssl_mode() == SslMode::Require {
         return Err(pool_error(
             "sslmode=require cannot be satisfied: compio-postgres was built without the `tls` \
@@ -292,9 +290,7 @@ fn reject_unsatisfiable_tls(url: &str) -> Result<(), Error> {
 /// not be used with sslnegotiation=direct"); rejecting it here just moves the
 /// same verdict ahead of the retry loop.
 #[cfg(feature = "tls")]
-fn reject_unsatisfiable_tls(url: &str) -> Result<(), Error> {
-    let config: Config = url.parse()?;
-
+fn reject_unsatisfiable_tls(config: &Config) -> Result<(), Error> {
     if config.get_ssl_negotiation() == SslNegotiation::Direct
         && config.get_ssl_mode() == SslMode::Prefer
     {
@@ -308,6 +304,86 @@ fn reject_unsatisfiable_tls(url: &str) -> Result<(), Error> {
 }
 
 // ---------------------------------------------------------------------------
+// Transport — everything needed to open one connection, resolved once
+// ---------------------------------------------------------------------------
+
+/// The pool's connection recipe, resolved from the URL exactly once.
+///
+/// Both halves are here for the same reason. The parsed [`Config`] is cheap but
+/// pointless to redo; the TLS connector is *not* cheap - building it reads the
+/// certificate authority from disk (`sslrootcert=system` walks the operating
+/// system's store) - and the pool opens connections not just at warm-up but on
+/// demand and on every reconnect after an eviction. Resolving per attempt would
+/// put a filesystem scan on the reconnect path.
+///
+/// It also moves a broken `sslrootcert` to where it belongs: `Pool::connect`
+/// fails immediately naming the file, rather than after the retry loop.
+struct Transport {
+    config: Config,
+    /// Present only when the URL asks for encryption. See the `Transport`
+    /// section of the module docs for which modes those are.
+    #[cfg(feature = "tls")]
+    tls: Option<crate::tls_rustls::MakeRustlsConnect>,
+}
+
+impl Transport {
+    fn resolve(url: &str) -> Result<Transport, Error> {
+        let config: Config = url.parse()?;
+        reject_unsatisfiable_tls(&config)?;
+
+        #[cfg(feature = "tls")]
+        let tls = if config.get_ssl_mode() == SslMode::Require {
+            Some(crate::tls_rustls::MakeRustlsConnect::from_config(&config)?)
+        } else {
+            None
+        };
+
+        Ok(Transport {
+            config,
+            #[cfg(feature = "tls")]
+            tls,
+        })
+    }
+
+    /// Open a single client + spawn its Connection task. Returns the Client;
+    /// the task is detached and self-terminates when the Client's sender is
+    /// closed (i.e. when the Client is dropped).
+    async fn connect_one(&self) -> Result<Client, Error> {
+        #[cfg(feature = "tls")]
+        if let Some(tls) = &self.tls {
+            let (client, connection) = self.config.connect(tls.clone()).await?;
+            spawn_connection_task(connection);
+            return Ok(client);
+        }
+
+        let (client, connection) = self.config.connect(NoTls).await?;
+        spawn_connection_task(connection);
+        Ok(client)
+    }
+
+    /// Retry [`Transport::connect_one`] up to 3 times with 100ms, 400ms, 1.6s
+    /// backoff. Only used for pool warm-up - `get_inner`'s on-demand connect
+    /// stays single-shot to keep the latency budget tight.
+    async fn connect_with_retry(&self) -> Result<Client, Error> {
+        let mut delay = Duration::from_millis(100);
+        let mut last_err: Option<Error> = None;
+        for attempt in 0..3 {
+            match self.connect_one().await {
+                Ok(client) => return Ok(client),
+                Err(e) => {
+                    last_err = Some(e);
+                    if attempt < 2 {
+                        compio::time::sleep(delay).await;
+                        delay *= 4;
+                    }
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| pool_error("connect retries exhausted")))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Pool
 // ---------------------------------------------------------------------------
 
@@ -318,7 +394,7 @@ fn reject_unsatisfiable_tls(url: &str) -> Result<(), Error> {
 /// refill). Without the housekeeper, the pool still works but connections
 /// are never proactively evicted.
 pub struct Pool {
-    url: String,
+    transport: Transport,
     config: PoolConfig,
     /// Idle connections available for checkout.
     idle: RefCell<Vec<PoolEntry>>,
@@ -363,12 +439,12 @@ impl Pool {
     /// is retried with exponential backoff (3 attempts: 100ms, 400ms, 1.6s)
     /// to survive Docker ordering, DNS blips, and brief PG restarts.
     pub async fn connect_with_config(url: &str, config: PoolConfig) -> Result<Self, Error> {
-        reject_unsatisfiable_tls(url)?;
+        let transport = Transport::resolve(url)?;
 
         let warm = config.min_idle.max(1);
         let mut entries: Vec<PoolEntry> = Vec::with_capacity(warm);
         for i in 0..warm {
-            match Self::connect_with_retry(url).await {
+            match transport.connect_with_retry().await {
                 Ok(client) => entries.push(PoolEntry::new(client, config.max_lifetime)),
                 Err(e) => {
                     // Drop any already-opened clients (Client drop closes the
@@ -387,7 +463,7 @@ impl Pool {
 
         let total = entries.len();
         let pool = Self {
-            url: url.to_string(),
+            transport,
             config,
             idle: RefCell::new(entries),
             active: Cell::new(0),
@@ -400,49 +476,6 @@ impl Pool {
             pool.metrics.inc_created();
         }
         Ok(pool)
-    }
-
-    /// Retry [`Self::connect_one`] up to 3 times with 100ms, 400ms, 1.6s backoff.
-    /// Only used for pool warm-up — `get_inner`'s on-demand connect stays
-    /// single-shot to keep the latency budget tight.
-    async fn connect_with_retry(url: &str) -> Result<Client, Error> {
-        let mut delay = Duration::from_millis(100);
-        let mut last_err: Option<Error> = None;
-        for attempt in 0..3 {
-            match Self::connect_one(url).await {
-                Ok(client) => return Ok(client),
-                Err(e) => {
-                    last_err = Some(e);
-                    if attempt < 2 {
-                        compio::time::sleep(delay).await;
-                        delay *= 4;
-                    }
-                }
-            }
-        }
-        Err(last_err.unwrap_or_else(|| pool_error("connect retries exhausted")))
-    }
-
-    /// Open a single client + spawn its Connection task. Returns the Client;
-    /// the task is detached and self-terminates when the Client's sender is
-    /// closed (i.e. when the Client is dropped).
-    ///
-    /// `sslmode=require` takes the rustls path; everything else stays on
-    /// [`NoTls`]. See the `Transport` section of the module docs.
-    async fn connect_one(url: &str) -> Result<Client, Error> {
-        let config: Config = url.parse()?;
-
-        #[cfg(feature = "tls")]
-        if config.get_ssl_mode() == SslMode::Require {
-            let connector = crate::tls_rustls::MakeRustlsConnect::from_config(&config)?;
-            let (client, connection) = config.connect(connector).await?;
-            spawn_connection_task(connection);
-            return Ok(client);
-        }
-
-        let (client, connection) = config.connect(NoTls).await?;
-        spawn_connection_task(connection);
-        Ok(client)
     }
 
     /// Start the background housekeeper task. Runs every 30 seconds:
@@ -585,7 +618,7 @@ impl Pool {
             // forever (POOL-1). On Err the guard also releases it on return.
             if self.total.get() < self.config.max_size {
                 let permit = PermitGuard::reserve(self);
-                let client = match Self::connect_one(&self.url).await {
+                let client = match self.transport.connect_one().await {
                     Ok(c) => c,
                     Err(e) => {
                         // `permit` drops here -> total -= 1.
@@ -825,7 +858,7 @@ impl Pool {
             // bumped `total`, and let the guard release it on Err / cancellation
             // (the housekeeper runs as a detached task and can be dropped).
             let permit = PermitGuard::reserve(self);
-            match Self::connect_one(&self.url).await {
+            match self.transport.connect_one().await {
                 Ok(client) => {
                     self.metrics.inc_created();
                     created += 1;
