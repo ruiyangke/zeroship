@@ -66,7 +66,7 @@ impl Fixture {
     #[allow(clippy::future_not_send)]
     async fn boot(kind: ClientKind, previous: Option<&[u8]>) -> Option<Self> {
         let Some(db_url) = db_url() else {
-            zeroship_test_support::skip("[oidc_brokered_login_test] skip (AUTH_DB_URL or CONTROL_TEST_DB unset)");
+            zeroship_test_support::skip("[oidc_brokered_login_test] skip (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
             return None;
         };
         let (pg_client, pg_connection) = connect(&db_url, NoTls).await.expect("connect pg");
@@ -397,8 +397,7 @@ fn write_owner_only(path: &std::path::Path, bytes: &[u8]) {
 }
 
 fn db_url() -> Option<String> {
-    zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)
-        .or_else(|| zeroship_core::test_env!("CONTROL_TEST_DB"))
+    zeroship_core::config::test_database_url_opt()
 }
 
 fn test_issuer() -> Issuer {

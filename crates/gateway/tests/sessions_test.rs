@@ -1,7 +1,8 @@
 //! Live-PG smoke test for `gateway::sessions`.
 //!
-//! Skipped silently when `AUTH_DB_URL` is unset (the same convention every
-//! live-PG test under `crates/auth/tests/` uses).
+//! Skipped silently when there is no test database (set `PG_TEST_URL` or run
+//! `tests/provision_test_backends.sh`; the same convention every live-PG
+//! test under `crates/auth/tests/` uses).
 //!
 //! Runs the full CRUD round-trip: create → validate (positive) →
 //! validate w/ wrong `app_id` (negative) → revoke (per-app) → validate
@@ -18,8 +19,8 @@ use zeroship_gateway::sessions::{create, revoke_app_sessions_for_user, validate,
 
 #[compio::test]
 async fn create_validate_revoke_roundtrip() {
-    let Some(dsn) = zeroship_core::test_env!("AUTH_DB_URL") else {
-        zeroship_test_support::skip("skipping (no AUTH_DB_URL)");
+    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
+        zeroship_test_support::skip("skipping (no test database; set PG_TEST_URL)");
         return;
     };
 

@@ -1,6 +1,6 @@
 //! TOTP 2FA store + crypto lifecycle — live PG (ISS-11).
 //!
-//! Skipped unless `AUTH_DB_URL` (or `PG_TEST_URL`) is set. These drive the REAL
+//! Skipped unless a test database (`PG_TEST_URL` or the TOML overlay) is available. These drive the REAL
 //! `store::totp` transactions and the REAL `identity::totp` crypto/verify — no
 //! shims — so a green run exercises the same code the `/me/2fa/*` handlers and
 //! the login challenge call in production. Run with `--test-threads=1`.
@@ -15,8 +15,7 @@ use zeroship_auth::store::{totp as totp_store, users};
 
 #[allow(clippy::future_not_send)]
 async fn pg() -> Option<Client> {
-    let dsn = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)
-        .or_else(|| zeroship_core::test_env!("PG_TEST_URL"))?;
+    let dsn = zeroship_core::config::test_database_url_opt()?;
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
@@ -49,7 +48,7 @@ async fn cleanup(db: &Client, ids: &[Uuid]) {
 #[compio::test]
 async fn enroll_stores_encrypted_and_unconfirmed() {
     let Some(db) = pg().await else {
-        zeroship_test_support::skip("skipping totp_store_test (no AUTH_DB_URL/PG_TEST_URL)");
+        zeroship_test_support::skip("skipping totp_store_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
     let tag = Uuid::new_v4().simple().to_string();

@@ -1,7 +1,7 @@
 //! End-to-end Google federation flow against the in-process `crates/auth`
 //! server + an in-process mock Google provider.
 //!
-//! Skips if `AUTH_DB_URL` is unset. The mock provider (see
+//! Skips if no test database is configured. The mock provider (see
 //! `tests/common/mock_provider.rs`) is in-process so no real Google credentials
 //! are required in CI.
 //!
@@ -40,8 +40,8 @@ use common::{
 #[ntex::test]
 async fn google_federation_creates_new_user() {
     // 0. Env-skip check.
-    let Some(db_url) = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) else {
-        zeroship_test_support::skip("[e2e_google] skip (need AUTH_DB_URL)");
+    let Some(db_url) = zeroship_core::config::test_database_url_opt() else {
+        zeroship_test_support::skip("[e2e_google] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -295,8 +295,8 @@ async fn google_federation_creates_new_user() {
 
 #[ntex::test]
 async fn google_federation_rejects_untrusted_domain_without_hd() {
-    let Some(db_url) = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) else {
-        zeroship_test_support::skip("[e2e_google untrusted] skip (need AUTH_DB_URL)");
+    let Some(db_url) = zeroship_core::config::test_database_url_opt() else {
+        zeroship_test_support::skip("[e2e_google untrusted] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 

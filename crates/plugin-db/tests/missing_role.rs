@@ -35,7 +35,7 @@ use compio_postgres::NoTls;
 use zeroship_plugin_db::error::DbError;
 
 fn test_url() -> String {
-    zeroship_core::test_env!("PG_TEST_URL")
+    zeroship_core::config::test_database_url_opt()
         .unwrap_or_else(|| "postgres://postgres:test@localhost:5434/postgres".to_string())
 }
 

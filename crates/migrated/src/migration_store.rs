@@ -559,10 +559,7 @@ mod tests {
         "invalid migration transition: expected approved status";
 
     fn test_dsn() -> String {
-        zeroship_core::test_env!("MIGRATED_TEST_DB")
-            .or_else(|| zeroship_core::test_env!("CONTROL_TEST_DB"))
-            .or_else(|| zeroship_core::test_env!("PG_TEST_URL"))
-            .unwrap_or_else(|| DEFAULT_TEST_DSN.to_string())
+        zeroship_core::config::test_database_url_opt().unwrap_or_else(|| DEFAULT_TEST_DSN.to_string())
     }
 
     async fn test_client() -> Client {
@@ -624,8 +621,9 @@ mod tests {
     ///
     /// Checked up front rather than left to the insert so the failure names the cause,
     /// the variable to set, and a database that works. CI is unaffected either way -
-    /// `tests/run_billing_suite.sh` creates a fresh migrated database and exports
-    /// `MIGRATED_TEST_DB`, so this check passes there and only ever fires locally.
+    /// `tests/run_billing_suite.sh` provisions a fresh migrated test database (resolved
+    /// via `zeroship_core::config::test_database_url_opt()`), so this check passes
+    /// there and only ever fires locally.
     async fn assert_platform_schema_present(client: &Client) {
         let rows = client
             .query(
@@ -649,12 +647,12 @@ mod tests {
             "the target database has no platform schema - missing zeroship.{}.\n\
              This suite needs a database the PLATFORM migrations have been applied to; \
              it creates only its own migrated_migrations table.\n\
-             Point it at one, e.g.:\n  \
-             MIGRATED_TEST_DB=\"host=localhost port=5440 user=postgres password=zeroship \
-             dbname=zeroship_billing_test\" cargo test -p zeroship-migrated \
-             --features live-db-tests\n\
-             Resolution order is MIGRATED_TEST_DB, CONTROL_TEST_DB, PG_TEST_URL, then the \
-             built-in default ({}), which on a stock dev box is NOT migrated.",
+             Point it at one, e.g. run `tests/provision_test_backends.sh` to provision \
+             a migrated test database and generate the TOML overlay, then:\n  \
+             cargo test -p zeroship-migrated --features live-db-tests\n\
+             The DSN is resolved by `zeroship_core::config::test_database_url_opt()`, \
+             which falls back to the built-in default ({}) when nothing is configured - \
+             NOT migrated on a stock dev box.",
             missing.join(", zeroship."),
             DEFAULT_TEST_DSN,
         );

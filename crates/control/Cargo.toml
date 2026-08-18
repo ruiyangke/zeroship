@@ -136,9 +136,10 @@ tracing-subscriber = { workspace = true }
 # Live-database test gate
 # ---------------------------------------------------------------------------
 # `live-db-tests` gates every integration target that CANNOT run without a
-# reachable, migrated PostgreSQL. Those targets resolve their DSN from
-# CONTROL_TEST_DB / AUTH_DB_URL and fall back to the dev Postgres on :5440; with
-# no server there they panic on connect ("error connecting to server"), so
+# reachable, migrated PostgreSQL. Those targets resolve their DSN via
+# `zeroship_core::config::test_database_url_opt()` and fall back to the dev
+# Postgres on :5440; with no server there they panic on connect ("error
+# connecting to server"), so
 # `cargo test --workspace` - which provisions no database - could never be green.
 #
 # The failing-without-a-database property is what this feature encodes, and the

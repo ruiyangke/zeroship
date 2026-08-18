@@ -48,7 +48,7 @@ use zeroship_runtime::runtime::Runtime;
 use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, SettledFetch};
 
 fn pg_url() -> String {
-    zeroship_core::test_env!("PG_TEST_URL")
+    zeroship_core::config::test_database_url_opt()
         .unwrap_or_else(|| "postgres://postgres:test@localhost:5434/postgres".to_string())
 }
 

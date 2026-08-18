@@ -182,15 +182,19 @@ echo "------------------------------------------------------------------"
 #
 # `oidc_rp_e2e` used to be excluded BY NAME here, on the stated ground that it
 # "also wants CONTROL_TEST_DB, which this script does not provision, so it would
-# skip". That reason was wrong, and the file says so: `db_url()` at
-# crates/gateway/tests/oidc_rp_e2e.rs:47 is
-# `test_env!("AUTH_DB_URL").or_else(|| test_env!("CONTROL_TEST_DB"))` - EITHER
-# variable satisfies it, and this script exports the first one. Measured
-# 2026-08-16 with CONTROL_TEST_DB explicitly unset and only AUTH_DB_URL set:
-# "3 passed in 6.73s", against the "3 passed in 0.00s" the same target reports
-# with neither. The exclusion cost real coverage for a provisioning gap that did
-# not exist, and this is the branch's strongest new assertion (the projected
-# identity check) - which no gate ran.
+# skip". That reason was wrong even then - its `db_url()` read
+# `test_env!("AUTH_DB_URL").or_else(|| test_env!("CONTROL_TEST_DB"))`, so EITHER
+# variable satisfied it and this script exported the first. Measured 2026-08-16
+# with CONTROL_TEST_DB explicitly unset and only AUTH_DB_URL set: "3 passed in
+# 6.73s", against the "3 passed in 0.00s" the same target reports with neither.
+# The exclusion cost real coverage for a provisioning gap that did not exist.
+#
+# The two-variable `or_else` is gone: `db_url()` at
+# crates/gateway/tests/oidc_rp_e2e.rs:46 is now
+# `zeroship_core::config::test_database_url_opt()`, one source for every target
+# in the workspace. The measurement above is why the collapse is safe here - the
+# target was already satisfied by whichever name happened to be exported, which
+# is another way of saying the two names never meant different things.
 #
 # It is in the list below now. It needs no allowlist entry and gets none: it
 # announces through `zeroship_test_support::skip`, so if it ever stops seeing a

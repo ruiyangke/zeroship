@@ -1,6 +1,6 @@
 //! Live-PG roundtrip for `auth::identity::verification`.
 //!
-//! Skipped unless `AUTH_DB_URL` is set. Each test scopes itself with a
+//! Skipped unless a test database is available (`PG_TEST_URL` or the TOML overlay). Each test scopes itself with a
 //! random email so concurrent runs don't collide; the cleanup at the end
 //! removes every row that test inserted (verifications + the seeded user).
 
@@ -14,7 +14,7 @@ use zeroship_auth::store::{users};
 // structurally. The lint is informational, not actionable here.
 #[allow(clippy::future_not_send)]
 async fn pg() -> Option<compio_postgres::Client> {
-    let dsn = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)?;
+    let dsn = zeroship_core::config::test_database_url_opt()?;
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
@@ -82,15 +82,15 @@ async fn drop_verifications_insert_delay(client: &Client) {
 
 #[compio::test]
 async fn concurrent_issue_leaves_one_active_verification_token() {
-    let dsn = match zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) {
+    let dsn = match zeroship_core::config::test_database_url_opt() {
         Some(dsn) => dsn,
         None => {
-            zeroship_test_support::skip("skipping verification_test (no AUTH_DB_URL)");
+            zeroship_test_support::skip("skipping verification_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
             return;
         }
     };
     let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping verification_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping verification_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -148,7 +148,7 @@ async fn concurrent_issue_leaves_one_active_verification_token() {
 #[compio::test]
 async fn issue_then_redeem_roundtrip() {
     let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping verification_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping verification_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -198,7 +198,7 @@ async fn issue_then_redeem_roundtrip() {
 #[compio::test]
 async fn redeem_and_mark_verified_rolls_back_token_consume_with_transaction() {
     let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping verification_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping verification_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -259,7 +259,7 @@ async fn redeem_and_mark_verified_rolls_back_token_consume_with_transaction() {
 #[compio::test]
 async fn new_issue_supersedes_previous() {
     let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping verification_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping verification_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 

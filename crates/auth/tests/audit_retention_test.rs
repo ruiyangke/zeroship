@@ -1,4 +1,4 @@
-//! Audit-retention cron — live PG. Skip when `AUTH_DB_URL` unset.
+//! Audit-retention cron — live PG. Skip when no test database is configured.
 //!
 //! Drives [`audit_retention::tick`] directly so the sweep is observable
 //! inside a single test run (the real cron sleeps 1 h between ticks).
@@ -11,8 +11,8 @@ use zeroship_auth::cron::audit_retention;
 
 #[compio::test]
 async fn retention_deletes_old_security_events() {
-    let Some(dsn) = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) else {
-        zeroship_test_support::skip("skip: AUTH_DB_URL unset");
+    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
+        zeroship_test_support::skip("skip: no test database (set PG_TEST_URL or run tests/provision_test_backends.sh)");
         return;
     };
     let (client, conn) = connect(&dsn, NoTls).await.expect("connect");
@@ -70,8 +70,8 @@ async fn retention_deletes_old_security_events() {
 
 #[compio::test]
 async fn retention_keeps_refresh_reuse_detected_forever() {
-    let Some(dsn) = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) else {
-        zeroship_test_support::skip("skip: AUTH_DB_URL unset");
+    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
+        zeroship_test_support::skip("skip: no test database (set PG_TEST_URL or run tests/provision_test_backends.sh)");
         return;
     };
     let (client, conn) = connect(&dsn, NoTls).await.expect("connect");
@@ -138,8 +138,8 @@ async fn retention_keeps_refresh_reuse_detected_forever() {
 ///      trigger — i.e. the trigger is ARMED for everything but the sweep.
 #[compio::test]
 async fn sweep_guc_does_not_leak_past_its_transaction() {
-    let Some(dsn) = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) else {
-        zeroship_test_support::skip("skip: AUTH_DB_URL unset");
+    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
+        zeroship_test_support::skip("skip: no test database (set PG_TEST_URL or run tests/provision_test_backends.sh)");
         return;
     };
     let (mut client, conn) = connect(&dsn, NoTls).await.expect("connect");

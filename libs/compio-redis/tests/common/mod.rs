@@ -20,6 +20,25 @@ use std::io::Write;
 
 use compio_redis::{Client, Pool};
 
+/// The skip token, declared here rather than taken from `crates/test-support`.
+///
+/// THIS DUPLICATION IS DELIBERATE AND MUST STAY. `compio-redis` is a
+/// standalone, publishable driver with no zeroship dependency - the property
+/// AGENTS.md states for everything under `libs/` - and `cargo test` builds
+/// dev-dependencies, so depending on `zeroship-test-support` for four lines
+/// would put a zeroship crate in this one's build graph and end that. The same
+/// reasoning is already recorded at `libs/compio-postgres/tests/common/mod.rs`,
+/// which is why that crate's copy was DELETED rather than shared: it had no
+/// optional backend left to announce, so the right move there was removal, not
+/// extraction.
+///
+/// The one remaining sibling is `libs/compio-s3/tests/common/mod.rs`, for the
+/// same reason. Two copies of four lines is the price of two publishable
+/// crates; a shared helper would be cheaper and wrong.
+///
+/// What keeps the copies honest is that the CONSUMER is shared:
+/// `tests/lib/skip_census.sh` greps for this exact string, so a copy that
+/// drifted would stop being counted and the suite gates would notice.
 pub const SKIP_MARKER: &str = "ZEROSHIP-TEST-SKIPPED";
 
 /// The single-node Redis every target in this crate dials when `REDIS_TEST_URL`

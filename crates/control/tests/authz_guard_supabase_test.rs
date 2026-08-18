@@ -29,9 +29,7 @@ const SUPABASE_ANON_KEY: &str = "test-anon-key";
 const SUPABASE_JWT_SECRET: &str = "test-supabase-jwt-secret-at-least-32-bytes";
 
 fn db_url() -> String {
-    zeroship_core::test_env!("CONTROL_TEST_DB")
-        .or_else(|| zeroship_core::test_env!("AUTH_DB_URL"))
-        .or_else(|| zeroship_core::test_env!("PG_TEST_URL"))
+    zeroship_core::config::test_database_url_opt()
         .filter(|u| !u.trim().is_empty())
         .unwrap_or_else(|| {
             "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()

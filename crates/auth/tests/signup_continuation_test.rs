@@ -14,7 +14,7 @@
 //! test that composes the URL instead is testing its own author's idea of a
 //! valid continuation, which is exactly how this shipped.
 //!
-//! Skips when `AUTH_DB_URL` is unset (`tests/run_auth_suite.sh` provisions it
+//! Skips when no test database is configured (`tests/run_auth_suite.sh` provisions it
 //! and fails the run on a skip).
 
 use std::net::{IpAddr, Ipv4Addr};
@@ -62,7 +62,7 @@ fn test_cfg(db_url: &str) -> AuthConfig {
 #[allow(clippy::future_not_send)]
 async fn pg() -> Option<(String, compio_postgres::Client)> {
     let dsn =
-        zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)?;
+        zeroship_core::config::test_database_url_opt()?;
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
@@ -192,7 +192,7 @@ macro_rules! signup_app {
 #[allow(clippy::future_not_send)]
 async fn the_login_pages_own_signup_link_creates_an_account() {
     let Some((dsn, client)) = pg().await else {
-        zeroship_test_support::skip("skipping signup_continuation_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping signup_continuation_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
     let pg = Arc::new(client);
@@ -271,7 +271,7 @@ async fn the_login_pages_own_signup_link_creates_an_account() {
 #[allow(clippy::future_not_send)]
 async fn a_bare_signup_url_renders_the_form() {
     let Some((dsn, client)) = pg().await else {
-        zeroship_test_support::skip("skipping signup_continuation_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping signup_continuation_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
     let pg = Arc::new(client);
@@ -306,7 +306,7 @@ async fn a_bare_signup_url_renders_the_form() {
 #[allow(clippy::future_not_send)]
 async fn a_duplicate_signup_is_indistinguishable_from_a_fresh_one() {
     let Some((dsn, client)) = pg().await else {
-        zeroship_test_support::skip("skipping signup_continuation_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping signup_continuation_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
     let pg = Arc::new(client);
@@ -389,7 +389,7 @@ async fn a_duplicate_signup_is_indistinguishable_from_a_fresh_one() {
 #[allow(clippy::future_not_send)]
 async fn a_duplicate_insert_reports_its_sqlstate() {
     let Some((_dsn, client)) = pg().await else {
-        zeroship_test_support::skip("skipping signup_continuation_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping signup_continuation_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
     let email = format!("signup-code-{}@zeroship.test", Uuid::new_v4().simple());
@@ -417,7 +417,7 @@ async fn a_duplicate_insert_reports_its_sqlstate() {
 #[allow(clippy::future_not_send)]
 async fn an_off_origin_continuation_is_replaced_not_echoed() {
     let Some((dsn, client)) = pg().await else {
-        zeroship_test_support::skip("skipping signup_continuation_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping signup_continuation_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
     let pg = Arc::new(client);

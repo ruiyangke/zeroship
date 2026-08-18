@@ -14,8 +14,9 @@
 //!   * `payment_success_reactivates`        (suspended → active, reversible)
 //!   * `out_of_order_paid_then_failed_does_not_resuspend`   (critic #1 regression)
 //!
-//! Gated on `CONTROL_TEST_DB`; silent skip otherwise. The DB must have changeset
-//! 0045 applied.
+//! Gated on a configured test database
+//! (`zeroship_core::config::test_database_url_opt`); silent skip otherwise.
+//! The DB must have changeset 0045 applied.
 
 mod common;
 

@@ -2,9 +2,10 @@
 //!
 //! These tests exercise `zeroship_control::deploy::ingest` directly
 //! against an on-disk `LocalDiskBlobStore` (under a tmpdir). The DB
-//! step is exercised end-to-end against a real Postgres only when
-//! `CONTROL_TEST_DB` is set — otherwise the registry-side asserts
-//! are skipped silently, matching the pattern in `env_store.rs`.
+//! step is exercised end-to-end against a real Postgres only when a test
+//! database is configured (`zeroship_core::config::test_database_url_opt`)
+//! — otherwise the registry-side asserts are skipped silently, matching the
+//! pattern in `env_store.rs`.
 //!
 //! The deploy pipeline is structured so its core (`ingest`) is a pure
 //! function over `(blob_store, app_id, compressed_bytes) -> result`.
@@ -30,8 +31,7 @@ mod common;
 // ---------------------------------------------------------------------------
 
 fn db_url() -> String {
-    zeroship_core::test_env!("CONTROL_TEST_DB")
-        .or_else(|| zeroship_core::test_env!("PG_TEST_URL"))
+    zeroship_core::config::test_database_url_opt()
         .filter(|u| !u.trim().is_empty())
         .unwrap_or_else(|| {
             "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()

@@ -33,10 +33,7 @@ const DEAD_DSN: &str =
     "host=127.0.0.1 port=9199 user=postgres password=zeroship dbname=zeroship connect_timeout=2";
 
 fn live_dsn() -> String {
-    zeroship_core::test_env!("MIGRATED_TEST_DB")
-        .or_else(|| zeroship_core::test_env!("CONTROL_TEST_DB"))
-        .or_else(|| zeroship_core::test_env!("PG_TEST_URL"))
-        .unwrap_or_else(|| DEFAULT_DSN.to_string())
+    zeroship_core::config::test_database_url_opt().unwrap_or_else(|| DEFAULT_DSN.to_string())
 }
 
 /// Readiness never consults the authenticator, so the stub only has to exist.

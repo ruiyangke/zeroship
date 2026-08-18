@@ -584,26 +584,61 @@ Examples: `OPENAI_API_KEY` `ANTHROPIC_API_KEY` `BASE_URL` `CHROMIUM_PATH`
 
 Reachable only from test code. Setting them in a deployment does nothing.
 
-`CONTROL_TEST_DB` `MIGRATED_TEST_DB` `PG_TEST_URL` `REDIS_TEST_URL`
-`LIVE_DB_TEST_URL` `ZEROSHIP_SCHEDULER_TEST_DB` `ZERO_MIGRATE_TEST_PG_URL`
-`GATEWAY_ANCHORS_DB_URL` `GATEWAY_POOL_SMOKE_URL` `DRAGONFLY_CLUSTER_SEEDS`
-`AUTH_TEST_SMTP_SINK` `KV_REQUIRE_REDIS`
+### The test backends live in a config file, not in variables
+
+The one test PostgreSQL is named ONCE, in `deploy/ops/zeroship.test.toml`,
+written by `tests/provision_test_backends.sh` beside the servers it starts and
+read through the platform's own `FileConfig` parser
+(`zeroship_core::config::test_overlay` in Rust, `tests/lib/test_config.sh` in
+shell). `deny_unknown_fields` applies, so a misspelled key in it is an error
+rather than a value that silently configures nothing.
+
+It is generated and gitignored rather than committed because every
+`*.database_url` and `worker.kv_url` leaf is `secret`-classed, and check 8 of
+`tests/config_name_alignment_gate.sh` fails any TRACKED `*.toml` holding a
+literal at a secret-classed leaf - with no exception list, by design. That same
+gate exempts untracked overlays deliberately, which is exactly what this is.
+
+**Eight names became one.** `AUTH_DB_URL`, `CONTROL_TEST_DB`,
+`GATEWAY_ANCHORS_DB_URL`, `GATEWAY_POOL_SMOKE_URL`, `LIVE_DB_TEST_URL`,
+`MIGRATED_TEST_DB`, `ZERO_MIGRATE_TEST_PG_URL` and `ZEROSHIP_SCHEDULER_TEST_DB`
+each named the same server, each was read by one crate, and each had to be
+exported by whichever suite remembered it. `GATEWAY_POOL_SMOKE_URL` was set
+NOWHERE in the repository, so its one test had never executed;
+`GATEWAY_ANCHORS_DB_URL` was in the same state until 2026-08-18. All eight are
+DELETED. `PG_TEST_URL` is the single override, and `REDIS_TEST_URL` its Redis
+peer.
+
+`KV_REQUIRE_REDIS` is also deleted. Its comment claimed CI set it; nothing in
+the tree ever did, so its panic arm was unreachable and the Redis backend tests
+had been skipping-as-passing behind a comment saying they could not. Redis is
+required now, like Postgres, for the same reason
+`ZEROSHIP_REQUIRE_LIVE_BACKENDS` was deleted.
+
+### The surviving test-only names
+
+`PG_TEST_URL` `REDIS_TEST_URL` `DRAGONFLY_CLUSTER_SEEDS`
+`AUTH_TEST_SMTP_SINK`
 `ZEROSHIP_SESSION_SECRET` `ZEROSHIP_SESSION_SECRET_PREV`
 `ZEROSHIP_SESSION_NONCE_CAPACITY` `ZEROSHIP_DW_E2E*` `ZEROSHIP_DW23_BENCH_*`
 `ZEROSHIP_NET_TEST_DNS_HANG_HOST` `ZEROSHIP_NET_TEST_DNS_HANG_MS`
 
 CI also sets `PG_CONTAINER` `PG_HOST` `PG_PORT` `PG_USER` `PG_PASS`
 `POSTGRES_USER` `POSTGRES_PASSWORD` `REDPANDA_BROKERS` `ZS_FRESHNESS_STRICT`.
+`PG_HOST`/`PG_PORT`/`PG_USER`/`PG_PASS` are INPUTS to
+`tests/provision_test_backends.sh`, which writes what they resolve to into the
+overlay; no harness carries its own copy of the defaults any more.
 
-`PG_TEST_URL` and `REDIS_TEST_URL` REDIRECT the driver suites; they do not
-enable them. Unset, `libs/compio-postgres` dials
-`postgres://postgres:zeroship@localhost:5440/zeroship` and `libs/compio-redis`
-dials `redis://127.0.0.1:6390` - the two addresses
-`tests/provision_test_backends.sh` publishes from `deploy/compose` - and a
-server that does not answer FAILS the test with the address it tried and the
-command that provisions one. There is no variable that turns that back into a
-skip. `ZEROSHIP_REQUIRE_LIVE_BACKENDS` was that variable, opt-in and therefore
-unset in every run it would have helped; it is deleted, not renamed.
+`PG_TEST_URL` and `REDIS_TEST_URL` REDIRECT the suites; they do not enable
+them. Unset, everything resolves from the overlay - and `libs/compio-postgres`,
+`libs/compio-redis` and `libs/compio-s3` keep their own compiled defaults
+(`postgres://postgres:zeroship@localhost:5440/zeroship`,
+`redis://127.0.0.1:6390`) because they are standalone publishable drivers with
+no zeroship dependency and cannot read the overlay. A server that does not
+answer FAILS the test with the address it tried and the command that provisions
+one. There is no variable that turns that back into a skip.
+`ZEROSHIP_REQUIRE_LIVE_BACKENDS` was that variable, opt-in and therefore unset
+in every run it would have helped; it is deleted, not renamed.
 
 ---
 

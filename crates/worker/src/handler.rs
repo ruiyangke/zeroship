@@ -1697,8 +1697,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
     }
 
     fn workflow_test_db_url() -> Option<String> {
-        zeroship_core::test_env!("CONTROL_TEST_DB")
-            .or_else(|| zeroship_core::test_env!("PG_TEST_URL"))
+        zeroship_core::config::test_database_url_opt()
     }
 
     // (app_id, blob_store, envs, logs, config, blob_root)
@@ -1977,7 +1976,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
 
         runtime.block_on(async {
             let Some(db_url) = workflow_test_db_url() else {
-                eprintln!("skipping (set CONTROL_TEST_DB or PG_TEST_URL for workflow apply test)");
+                eprintln!("skipping (set PG_TEST_URL for workflow apply test)");
                 return;
             };
             let (app_id, blob_store, envs, logs, config, blob_root) = workflow_test_state(4);
@@ -2031,7 +2030,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
 
         runtime.block_on(async {
             let Some(db_url) = workflow_test_db_url() else {
-                eprintln!("skipping (set CONTROL_TEST_DB or PG_TEST_URL for workflow apply test)");
+                eprintln!("skipping (set PG_TEST_URL for workflow apply test)");
                 return;
             };
             let (app_id, blob_store, envs, logs, config, blob_root) = workflow_test_state(4);
@@ -2088,7 +2087,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
 
         runtime.block_on(async {
             let Some(db_url) = workflow_test_db_url() else {
-                eprintln!("skipping (set CONTROL_TEST_DB or PG_TEST_URL for workflow apply test)");
+                eprintln!("skipping (set PG_TEST_URL for workflow apply test)");
                 return;
             };
             let (app_id, blob_store, envs, logs, config, blob_root) = workflow_test_state(4);
@@ -2142,7 +2141,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
 
         runtime.block_on(async {
             let Some(db_url) = workflow_test_db_url() else {
-                eprintln!("skipping (set CONTROL_TEST_DB or PG_TEST_URL for workflow apply test)");
+                eprintln!("skipping (set PG_TEST_URL for workflow apply test)");
                 return;
             };
             let (app_id, blob_store, envs, logs, config, meter, blob_root) =
@@ -2221,7 +2220,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
 
         runtime.block_on(async {
             let Some(db_url) = workflow_test_db_url() else {
-                eprintln!("skipping (set CONTROL_TEST_DB or PG_TEST_URL for workflow apply test)");
+                eprintln!("skipping (set PG_TEST_URL for workflow apply test)");
                 return;
             };
             let (app_id, blob_store, envs, logs, config, blob_root) = workflow_test_state(4);
@@ -2286,7 +2285,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
 
         runtime.block_on(async {
             let Some(db_url) = workflow_test_db_url() else {
-                eprintln!("skipping (set CONTROL_TEST_DB or PG_TEST_URL for workflow apply test)");
+                eprintln!("skipping (set PG_TEST_URL for workflow apply test)");
                 return;
             };
             let (app_id, blob_store, envs, logs, config, blob_root) = workflow_test_state(4);
@@ -2339,7 +2338,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
 
         runtime.block_on(async {
             let Some(db_url) = workflow_test_db_url() else {
-                eprintln!("skipping (set CONTROL_TEST_DB or PG_TEST_URL for workflow apply test)");
+                eprintln!("skipping (set PG_TEST_URL for workflow apply test)");
                 return;
             };
             let (app_id, blob_store, envs, logs, config, blob_root) = workflow_test_state(1);
@@ -3525,25 +3524,22 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
     /// `DbPlugin` + `AuthPlugin`, so `typeof env.kv` / `typeof env.storage`
     /// were `"undefined"` and the handler's assertion would 500.
     ///
-    /// Service dependency: a single-node Redis reachable at `REDIS_TEST_URL`
-    /// (e.g. `redis://127.0.0.1:6379`). When unset the KV leg can't run
-    /// faithfully, so the test SKIPS (matching
-    /// `crates/plugin-kv/tests/redis_backend.rs`); set `KV_REQUIRE_REDIS=1` to turn the skip
-    /// into a hard failure in CI. Storage + db + auth need no external
-    /// service.
+    /// Service dependency: a single-node Redis, resolved from the test overlay
+    /// that `tests/provision_test_backends.sh` writes, or from `REDIS_TEST_URL`
+    /// overriding it. REQUIRED, not optional. Storage + db + auth need no
+    /// external service.
+    ///
+    /// This used to skip when `REDIS_TEST_URL` was unset unless
+    /// `KV_REQUIRE_REDIS=1` turned the skip into a failure, "in CI". Nothing in
+    /// this repository ever set `KV_REQUIRE_REDIS` - not a workflow, not a
+    /// script - so the panic was unreachable and the skip was the only
+    /// behaviour, matching `crates/plugin-kv/tests/redis_backend.rs`, which had
+    /// the same dead flag and the same untrue comment. Both are resolved the
+    /// way `ZEROSHIP_REQUIRE_LIVE_BACKENDS` was: the flag is deleted and Redis
+    /// is simply required, because the provisioner now supplies it.
     #[test]
     fn dispatch_resolves_full_kernel_kv_storage_db_auth() {
-        let Some(kv_url) = zeroship_core::test_env!("REDIS_TEST_URL").filter(|s| !s.is_empty())
-        else {
-            if zeroship_core::test_env!("KV_REQUIRE_REDIS").as_deref() == Some("1") {
-                panic!("KV_REQUIRE_REDIS=1 but REDIS_TEST_URL is unset");
-            }
-            eprintln!(
-                "skipping dispatch_resolves_full_kernel_kv_storage_db_auth \
-                 (set REDIS_TEST_URL=redis://127.0.0.1:6379)"
-            );
-            return;
-        };
+        let kv_url = zeroship_core::config::test_kv_url();
 
         let Ok(runtime) = compio::runtime::Runtime::new() else {
             eprintln!("skipping (cannot create compio runtime)");

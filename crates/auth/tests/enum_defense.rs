@@ -12,7 +12,7 @@
 //! If these diverge in status, body length, or wall time, the dummy-hash
 //! arm has regressed and an attacker can probe for valid emails.
 //!
-//! Skips when `AUTH_DB_URL` is unset.
+//! Skips when no test database is configured.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -94,8 +94,8 @@ const N_PAIRS: usize = 4;
 #[ntex::test]
 async fn login_failure_responses_are_indistinguishable() {
     // 0. Env-skip check.
-    let Some(db_url) = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) else {
-        zeroship_test_support::skip("[enum_defense] skip (need AUTH_DB_URL)");
+    let Some(db_url) = zeroship_core::config::test_database_url_opt() else {
+        zeroship_test_support::skip("[enum_defense] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 

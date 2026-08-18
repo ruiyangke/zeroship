@@ -1,6 +1,6 @@
 //! Live-PG roundtrip for `auth::identity::password_reset`.
 //!
-//! Skipped unless `AUTH_DB_URL` is set. Each test scopes itself with a
+//! Skipped unless a test database is available (`PG_TEST_URL` or the TOML overlay). Each test scopes itself with a
 //! random email so concurrent runs don't collide; the cleanup at the end
 //! removes every row the test inserted.
 
@@ -47,7 +47,7 @@ fn read_set_cookie(headers: &ntex::http::HeaderMap, name: &str) -> Option<String
 // structurally. The lint is informational, not actionable here.
 #[allow(clippy::future_not_send)]
 async fn pg() -> Option<compio_postgres::Client> {
-    let dsn = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)?;
+    let dsn = zeroship_core::config::test_database_url_opt()?;
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
@@ -133,15 +133,15 @@ async fn drop_magic_links_insert_delay(client: &Client) {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reset_post_revokes_all_sessions_and_audits_counts() {
-    let dsn = match zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) {
+    let dsn = match zeroship_core::config::test_database_url_opt() {
         Some(dsn) => dsn,
         None => {
-            zeroship_test_support::skip("skipping password_reset_test (no AUTH_DB_URL)");
+            zeroship_test_support::skip("skipping password_reset_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
             return;
         }
     };
     let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping password_reset_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping password_reset_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -297,15 +297,15 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reset_post_consumes_magic_login_state_for_same_email() {
-    let dsn = match zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) {
+    let dsn = match zeroship_core::config::test_database_url_opt() {
         Some(dsn) => dsn,
         None => {
-            zeroship_test_support::skip("skipping password_reset_test (no AUTH_DB_URL)");
+            zeroship_test_support::skip("skipping password_reset_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
             return;
         }
     };
     let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping password_reset_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping password_reset_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -406,15 +406,15 @@ async fn reset_post_consumes_magic_login_state_for_same_email() {
 
 #[compio::test]
 async fn concurrent_issue_leaves_one_active_reset_token() {
-    let dsn = match zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) {
+    let dsn = match zeroship_core::config::test_database_url_opt() {
         Some(dsn) => dsn,
         None => {
-            zeroship_test_support::skip("skipping password_reset_test (no AUTH_DB_URL)");
+            zeroship_test_support::skip("skipping password_reset_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
             return;
         }
     };
     let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping password_reset_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping password_reset_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -471,7 +471,7 @@ async fn concurrent_issue_leaves_one_active_reset_token() {
 #[compio::test]
 async fn issue_then_redeem_roundtrip() {
     let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping password_reset_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping password_reset_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -520,7 +520,7 @@ async fn issue_then_redeem_roundtrip() {
 #[compio::test]
 async fn complete_rolls_back_token_consume_with_transaction() {
     let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping password_reset_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping password_reset_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -623,15 +623,15 @@ async fn complete_rolls_back_token_consume_with_transaction() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
-    let dsn = match zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) {
+    let dsn = match zeroship_core::config::test_database_url_opt() {
         Some(dsn) => dsn,
         None => {
-            zeroship_test_support::skip("skipping password_reset_test (no AUTH_DB_URL)");
+            zeroship_test_support::skip("skipping password_reset_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
             return;
         }
     };
     let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping password_reset_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping password_reset_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -888,7 +888,7 @@ async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
 #[compio::test]
 async fn complete_binds_issue_time_user_not_current_email_owner() {
     let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping password_reset_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping password_reset_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -991,7 +991,7 @@ async fn complete_binds_issue_time_user_not_current_email_owner() {
 #[compio::test]
 async fn new_issue_supersedes_previous_reset_token() {
     let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping password_reset_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping password_reset_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 

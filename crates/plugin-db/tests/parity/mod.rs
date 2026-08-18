@@ -26,7 +26,7 @@ pub fn sqlite_url(root: &tempfile::TempDir) -> String {
     reason = "the Postgres parity target uses this helper; sqlite_integration compiles the shared module without calling it"
 )]
 pub async fn maybe_pg_url() -> Option<String> {
-    let url = zeroship_core::test_env!("PG_TEST_URL")
+    let url = zeroship_core::config::test_database_url_opt()
         .unwrap_or_else(|| "postgres://postgres:test@localhost:5434/postgres".to_string());
     match compio_postgres::connect(&url, compio_postgres::NoTls).await {
         Ok((client, connection)) => {
