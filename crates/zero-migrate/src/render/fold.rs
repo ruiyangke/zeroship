@@ -3929,7 +3929,18 @@ fn constraint_local_columns_contain(definition: &str, column: &str) -> bool {
 /// `"a""""b"`, fails the compare, and is left alone. The same guard catches a name
 /// carrying a `,` or a `)`, both of which the split-on-comma / first-`)` parse gets
 /// wrong. It lives in the shared [`rename_definition_column_group`] speller.
-fn rename_constraint_definition_column(definition: &str, from: &str, to: &str) -> Option<String> {
+///
+/// Also the SQLite rename REBUILD's rewrite, through
+/// [`crate::render::declarative::rename_column_in_constraint_definitions`]. That
+/// replay splices this same `definition` into the rebuilt table's `CREATE TABLE`, so
+/// both replays that own a `TableSnapshot` now spell a moved column through THIS
+/// function - not through the quoted-run walk the inline-CHECK rewrite uses, which
+/// cannot tell the FK's LOCAL column list from its REFERENCED one.
+pub(crate) fn rename_constraint_definition_column(
+    definition: &str,
+    from: &str,
+    to: &str,
+) -> Option<String> {
     rename_definition_column_group(definition, definition.find('(')?, from, to)
 }
 

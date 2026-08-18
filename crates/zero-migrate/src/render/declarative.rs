@@ -2993,6 +2993,67 @@ pub(crate) fn rename_column_in_inline_checks(
     }
 }
 
+/// Follow a COLUMN rename into the LOCAL column list of every constraint
+/// `definition` this table carries.
+///
+/// The third carrier of the shape [`rename_column_in_generated_columns`] and
+/// [`rename_column_in_inline_checks`] repaired, and the one that could NOT be repaired
+/// where they were. `ConstraintSnapshot::definition` is rendered SQL that the SQLite
+/// rebuild's snapshot renderer splices into the new table verbatim, so a rename left it
+/// saying `FOREIGN KEY (owner_id) REFERENCES owners(owner_id)` over a table whose
+/// column had become `holder_id`. SQLite resolves a foreign key's CHILD column list at
+/// CREATE TABLE time, so it REFUSES that (`unknown column "owner_id" in foreign key
+/// definition`) at the rebuild's leading statement - a failed migration inside the
+/// transaction, and this one does not depend on `SQLITE_DBCONFIG_DQS_DDL` the way the
+/// stale CHECK did, because a column list is not an expression.
+///
+/// WHERE this runs is load-bearing. `ConstraintSnapshot`'s `PartialEq` COMPARES
+/// `definition` (unlike `ColumnSnapshot`'s, which excludes both `inline_checks` and
+/// `generated` - which is exactly why those two are rewritten into the DESIRED
+/// snapshot). Rewriting `definition` there would make the desired table differ from the
+/// renamed live one, flip [`pure_sqlite_column_rename`] to `None`, turn
+/// `preserve_stored_shape` OFF, and stop the CATALOG path replaying SQLite's own stored
+/// body - a regression on the leg that actually deploys. So the only sound seam is
+/// AFTER that decision, inside
+/// [`DeclarativeAuthor::render_create_table_sqlite_rebuild`] and after its stored-shape
+/// arm has already returned. The sole caller is there.
+///
+/// The rewrite REUSES the fold's [`crate::render::fold::rename_constraint_definition_column`],
+/// which re-renders only the LEADING parenthesized group. That is the whole distinction
+/// an FK needs and the quoted-run walk behind `rename_column_in_inline_checks` cannot
+/// make: a `definition` spells its columns through `constraintdef_cols`, which quotes
+/// CONDITIONALLY, so a plain lowercase column is BARE and the quoted-run walk would
+/// rewrite nothing at all, while a reserved-word column is quoted on BOTH sides of
+/// `REFERENCES` and it would rewrite the REFERENCED column too - pointing the child at
+/// a parent column that does not exist, which SQLite ACCEPTS at CREATE and only reports
+/// on the first write that fires the constraint. Wrong in both regimes.
+///
+/// KIND-GATED to the three definitions whose leading group is a local column list, the
+/// same gate the fold applies and for the same reason: a `CHECK`'s leading group is an
+/// EXPRESSION, where a string literal may spell a column name, and an `EXCLUDE` carries
+/// no comparable body at all.
+pub(crate) fn rename_column_in_constraint_definitions(
+    snapshot: &mut TableSnapshot,
+    from: &str,
+    to: &str,
+) {
+    for constraint in &mut snapshot.constraints {
+        if !matches!(
+            constraint.kind.as_str(),
+            "UNIQUE" | "PRIMARY KEY" | "FOREIGN KEY"
+        ) {
+            continue;
+        }
+        if let Some(renamed) = crate::render::fold::rename_constraint_definition_column(
+            &constraint.definition,
+            from,
+            to,
+        ) {
+            constraint.definition = renamed;
+        }
+    }
+}
+
 /// Follow a TABLE rename into every generated expression this table carries.
 ///
 /// A generated expression may QUALIFY its column references with the enclosing
@@ -6673,6 +6734,13 @@ impl DeclarativeAuthor {
     /// author order. Shapes with facets that require the richer snapshot renderer
     /// stay on that renderer. Both arms receive the already-validated explicit
     /// policy shape; neither consults an ambient system-field definition.
+    ///
+    /// **This is the seam a column rename's constraint rewrite runs at**, and it is
+    /// here rather than in the desired snapshot for a reason recorded in full on
+    /// [`rename_column_in_constraint_definitions`]: `ConstraintSnapshot`'s equality
+    /// COMPARES `definition`, so rewriting it any earlier flips
+    /// `preserve_stored_shape` off. `column_renames` is the resolved rename set for
+    /// this table, empty for every rebuild that is not a rename.
     fn render_create_table_sqlite_rebuild(
         &self,
         table: &str,
@@ -6680,6 +6748,7 @@ impl DeclarativeAuthor {
         desired: &DesiredSchema,
         effective: &zero_migrate_policy::EffectivePolicy,
         preserve_stored_shape: bool,
+        column_renames: &[&ResolvedRename],
     ) -> Result<String, DeclarativeError> {
         let snapshot = desired.snapshot.tables.get(table).ok_or_else(|| {
             DeclarativeError::Invalid(format!(
@@ -6692,15 +6761,36 @@ impl DeclarativeAuthor {
             ))
         })?;
 
+        // BEFORE the rename rewrite, and that ordering is the fix rather than an
+        // accident of layout: the stored-shape arm replays SQLite's OWN `CREATE TABLE`
+        // text and lets its `ALTER TABLE … RENAME COLUMN` (emitted by the executor
+        // after the dependent replay) move every column reference the body carries.
+        // Rewriting a constraint for it would desynchronise that body from the rename
+        // SQLite is about to perform.
         if preserve_stored_shape {
             return sqlite_stored_create_for_pure_rename(table, tmp_table, snapshot);
         }
+
+        // The rename-follow the desired snapshot could NOT carry. Renaming
+        // `ColumnSnapshot::name` leaves every constraint `definition` on this table
+        // naming the PRE-rename column, and both arms below spell a constraint from
+        // that text: the snapshot renderer splices a FOREIGN KEY / UNIQUE / composite
+        // PRIMARY KEY body in whole, and the SDK-value arm reads the PRIMARY KEY's
+        // local column list back out through `sqlite_authored_primary_key_clause`. The
+        // rewrite cannot live in the desired snapshot because `ConstraintSnapshot`'s
+        // equality compares `definition` and would flip `preserve_stored_shape` off -
+        // see `rename_column_in_constraint_definitions`, which also says why the FK's
+        // REFERENCED column list is deliberately untouched.
+        let mut snapshot = snapshot.clone();
+        for rename in column_renames {
+            rename_column_in_constraint_definitions(&mut snapshot, &rename.from, &rename.to);
+        }
+        let snapshot = &mut snapshot;
 
         if has_generated_or_identity(snapshot)
             || has_inline_checks(snapshot)
             || has_case_insensitive_text(snapshot)
         {
-            let mut snapshot = snapshot.clone();
             for constraint in &mut snapshot.constraints {
                 if constraint.kind == "FOREIGN KEY"
                     && fk_target_table(&constraint.definition).as_deref() == Some(table)
@@ -6718,7 +6808,7 @@ impl DeclarativeAuthor {
                 }
             }
             return self
-                .render_create_table_sqlite_snapshot_statements(table, &snapshot, inject)
+                .render_create_table_sqlite_snapshot_statements(table, snapshot, inject)
                 .into_iter()
                 .next()
                 .ok_or_else(|| {
@@ -7127,6 +7217,7 @@ impl DeclarativeAuthor {
             desired_full,
             effective,
             preserve_stored_shape,
+            table_renames,
         )?;
         let real_q = quote_ident(table);
         let tmp_q = quote_ident(&tmp);
@@ -7433,25 +7524,23 @@ impl DeclarativeAuthor {
         // rebuild through the snapshot renderer at all, so the stale body is not
         // merely carried - it is the reason the renderer was chosen.
         rename_column_in_inline_checks(&mut desired_table, from, to, self.dialect);
-        // STILL STALE HERE, and MEASURED rather than assumed: a FOREIGN KEY
-        // `ConstraintSnapshot::definition`. A fold-seeded live table carrying both an
-        // inline CHECK (which selects the snapshot renderer) and a column-level `ref`
-        // emits `CONSTRAINT "issues_owner_id_fkey" FOREIGN KEY (owner_id) …` after
-        // `owner_id` became `holder_id`. The fold's `Op::RenameColumn` arm already
-        // rewrites that definition; this one does not, and the repair is NOT the one
-        // more line it looks like. `ConstraintSnapshot`'s `PartialEq` COMPARES
-        // `definition`, so rewriting it here changes what `pure_sqlite_column_rename`
-        // sees, turns `preserve_stored_shape` off, and stops the CATALOG path replaying
-        // its stored body - a regression on the leg that is actually deployed. The
-        // rename-follow has to run AFTER that decision, which is a restructuring of
-        // this seam rather than an addition to it. `inline_checks` and `generated` are
-        // safe to rewrite in place only because both are EXCLUDED from column equality.
+        // The THIRD carrier, `ConstraintSnapshot::definition`, is DELIBERATELY not
+        // rewritten here, and the reason is the whole shape of that fix.
+        // `ConstraintSnapshot`'s `PartialEq` COMPARES `definition` (`ColumnSnapshot`'s
+        // excludes both `inline_checks` and `generated`, which is precisely why the two
+        // rewrites above are safe in place). Rewriting a definition into THIS desired
+        // snapshot would make it differ from the renamed live one, flip
+        // `pure_sqlite_column_rename` to `None`, turn `preserve_stored_shape` off and
+        // stop the CATALOG path replaying its stored body - a regression on the leg
+        // that actually deploys. So the rename-follow runs one layer down, in
+        // `render_create_table_sqlite_rebuild`, AFTER that decision is taken and after
+        // the stored-shape arm has returned. See
+        // `rename_column_in_constraint_definitions`.
         //
-        // Two carriers audited and found NOT exposed, so the list above is closed
-        // rather than merely unfinished: a table-level CHECK or UNIQUE never reaches a
-        // SQLite snapshot (the fold refuses both, by name), and a `default` cannot
-        // reference a column on SQLite - a literal DEFAULT 'status' beside a renamed
-        // `status` column comes through untouched.
+        // Two further carriers audited and found NOT exposed: a table-level CHECK never
+        // reaches a SQLite snapshot (the fold refuses it by name), and a `default`
+        // cannot reference a column on SQLite - a literal DEFAULT 'status' beside a
+        // renamed `status` column comes through untouched.
 
         // ---- desired (post-rename) SDK schema `Value` ----
         // The shared SQLite emitter renders the new-table CREATE from this Value.

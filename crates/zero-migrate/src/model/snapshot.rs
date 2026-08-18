@@ -1183,6 +1183,32 @@ pub struct ConstraintSnapshot {
     /// export a PG-shaped concession to every consumer. A consumer that wants the
     /// differ's semantics applies them itself - `tests/fold_roundtrip_sqlite.rs` does,
     /// and says why at its `canonicalize`.
+    ///
+    /// That same `PartialEq` is why the SQLite rename REBUILD - the OTHER replay that
+    /// owns a `TableSnapshot`, and one that DOES splice a folded `definition` into
+    /// `CREATE TABLE` - cannot follow a rename here the way it does for
+    /// [`ColumnSnapshot::inline_checks`] and [`ColumnSnapshot::generated`]. Those two
+    /// are EXCLUDED from column equality, so the rebuild rewrites them straight into
+    /// its desired snapshot. Rewriting a `definition` there would make the desired
+    /// table unequal to the renamed live one, flip `pure_sqlite_column_rename` to
+    /// `None`, turn `preserve_stored_shape` off and stop the CATALOG path replaying
+    /// SQLite's own stored body. The rewrite therefore runs one layer down, in
+    /// `render_create_table_sqlite_rebuild`, AFTER that decision and after the
+    /// stored-shape arm has returned - see
+    /// `render::declarative::rename_column_in_constraint_definitions`. Read this as the
+    /// standing rule: a rename-follow on a field this `PartialEq` compares has to run
+    /// after every decision that equality drives, not beside the fields it does not.
+    ///
+    /// The cost of getting it wrong was measured, and it is not the same failure a
+    /// stale `inline_checks` produces. SQLite resolves a foreign key's CHILD column
+    /// list at CREATE TABLE time, so a stale local column is `unknown column "…" in
+    /// foreign key definition` at the rebuild's leading statement - loud, and NOT
+    /// dependent on `SQLITE_DBCONFIG_DQS_DDL`, because a column list is not an
+    /// expression. The REFERENCED list is the opposite: a parent column that does not
+    /// exist is ACCEPTED at CREATE and surfaces only as `foreign key mismatch` on the
+    /// first write that fires the constraint, and not at all while
+    /// `PRAGMA foreign_keys` is off. That asymmetry is why the rewrite touches only the
+    /// LEADING parenthesized group.
     pub definition: String,
     /// User-authored catalog comment on this constraint.
     pub comment: Option<String>,
