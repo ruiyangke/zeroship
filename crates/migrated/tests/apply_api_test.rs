@@ -347,12 +347,13 @@ fn state_for_with_ceiling_version(
 ///
 /// Every policy fixture below is a hand-written TOML literal, and the engine's
 /// accepted-document set moves under it. When `runtime.lock_timeout_ms` stopped
-/// being loadable (2026-08-10), `tighter_policy()` kept granting it and SIX tests
+/// being loadable (2026-08-10), `tighter_policy()` kept granting it and FIVE tests
 /// across five unrelated behaviours went red at once: error redaction saw 422 where
 /// it asserted 503, the stored-policy fallback saw 422 where it asserted 200, and so
-/// on. A 422 for an unparseable draft is indistinguishable, at the assertion level,
-/// from the status each test meant to exercise, so none of them were testing what
-/// their name claims and nothing in the output said "fixture".
+/// on for repreflight, request-id propagation and the versioned policy API. A 422 for
+/// an unparseable draft is indistinguishable, at the assertion level, from the status
+/// each test meant to exercise, so none of them were testing what their name claims
+/// and nothing in the output said "fixture".
 ///
 /// This runs on the one funnel every service-level test goes through, and states the
 /// intent of each fixture as an assertion:
