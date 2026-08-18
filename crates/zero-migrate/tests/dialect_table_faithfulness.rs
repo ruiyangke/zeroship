@@ -157,7 +157,6 @@ fn schema_op_tags() -> BTreeSet<String> {
         .collect()
 }
 
-
 // What now guards what.
 //
 // `Op::support` READS the dialect table (looking the disposition up by
