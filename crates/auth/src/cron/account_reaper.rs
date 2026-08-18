@@ -40,8 +40,8 @@
 //!
 //! The reaper runs on the auth service's DB connection. It must be able to
 //! `UPDATE`/`DELETE` `zeroship.users` AND `SET NULL` the attribution FK columns
-//! in control-owned tables (`app_members.added_by`, `platform_admin_roles.granted_by`,
-//! `platform_policies.updated_by`, `oauth_clients.created_by`) — all in the one
+//! in control-owned tables (`app_members.added_by`,
+//! `platform_admin_roles.granted_by`, `oauth_clients.created_by`) — all in the one
 //! shared `zeroship` schema. Verify the `zeroship_auth` role's grants cover
 //! these cross-table writes in any RLS / least-privilege hardening pass
 //! (`0025_roles_rls.sql`).
@@ -72,12 +72,10 @@ const INTERVAL_SECS: u64 = 60 * 60;
 /// `(table, column)`. Sourced from the schema FK inventory (0003/0004):
 ///   - `app_members.added_by`
 ///   - `platform_admin_roles.granted_by`
-///   - `platform_policies.updated_by`
 ///   - `oauth_clients.created_by`
 const ATTRIBUTION_FKS: &[(&str, &str)] = &[
     ("zeroship.app_members", "added_by"),
     ("zeroship.platform_admin_roles", "granted_by"),
-    ("zeroship.platform_policies", "updated_by"),
     ("zeroship.oauth_clients", "created_by"),
 ];
 
@@ -356,10 +354,9 @@ mod tests {
         // anonymize/retain branch, NOT nulled). If a new attribution FK is
         // added to the schema, it MUST be added here or a hard DELETE will be
         // blocked — this assertion is the reminder.
-        assert_eq!(ATTRIBUTION_FKS.len(), 4);
+        assert_eq!(ATTRIBUTION_FKS.len(), 3);
         assert!(ATTRIBUTION_FKS.contains(&("zeroship.app_members", "added_by")));
         assert!(ATTRIBUTION_FKS.contains(&("zeroship.platform_admin_roles", "granted_by")));
-        assert!(ATTRIBUTION_FKS.contains(&("zeroship.platform_policies", "updated_by")));
         assert!(ATTRIBUTION_FKS.contains(&("zeroship.oauth_clients", "created_by")));
     }
 

@@ -1,6 +1,5 @@
-//! Platform-admin handlers for roles and operator policy overrides.
+//! Platform-admin handlers for roles and operator net policy.
 
-use std::str::FromStr;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -8,10 +7,9 @@ use ntex::web;
 use ntex::web::types::{Json, Path, State};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zeroship_auth::audit::{self as auth_audit, AuditEvent};
-use zeroship_authz::{Action, EntityCache, PolicySet, Resource};
+use zeroship_authz::{Action, EntityCache, Resource};
 use zeroship_core::net_policy::{normalize_frontable_suffixes, FRONTABLE_WILDCARD_SUFFIXES};
 
 use crate::auth_audit as control_auth_audit;
@@ -36,12 +34,6 @@ struct RoleResponse {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct PlatformPolicyBody {
-    cedar_source: String,
-    enabled: bool,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct NetGrantBody {
     host: String,
     port: u16,
@@ -52,16 +44,6 @@ pub struct NetGrantBody {
 #[derive(Debug, Deserialize)]
 pub struct FrontableSuffixesBody {
     suffixes: Vec<String>,
-}
-
-#[derive(Serialize)]
-struct PlatformPolicySummary {
-    id: String,
-    enabled: bool,
-    updated_at: DateTime<Utc>,
-    updated_by: Option<Uuid>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cedar_source: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -420,146 +402,6 @@ pub async fn put_frontable_suffixes(
     })
 }
 
-pub async fn upsert_platform_policy(
-    req: web::HttpRequest,
-    guard: AuthzGuard,
-    state: State<Arc<AppState>>,
-    id: Path<String>,
-    body: Json<PlatformPolicyBody>,
-) -> web::HttpResponse {
-    if let Err(resp) = require_platform_admin(&guard, &state).await {
-        return resp;
-    }
-    if let Err(err) = PolicySet::from_str(&body.cedar_source) {
-        return web::HttpResponse::BadRequest()
-            .json(&json!({"error": "invalid cedar policy", "detail": err.to_string()}));
-    }
-
-    let policy_id = id.into_inner();
-    let previous = match load_platform_policy(&state, &policy_id).await {
-        Ok(previous) => previous,
-        Err(resp) => return resp,
-    };
-
-    if let Err(err) = state
-        .control_pg
-        .execute(
-            "INSERT INTO zeroship.platform_policies (id, cedar_source, enabled, updated_by) \
-             VALUES ($1, $2, $3, $4) \
-             ON CONFLICT (id) DO UPDATE \
-             SET cedar_source = $2, enabled = $3, updated_by = $4, updated_at = NOW()",
-            &[&policy_id, &body.cedar_source, &body.enabled, &guard.principal_id],
-        )
-        .await
-    {
-        tracing::error!(error = %err, policy_id = %policy_id, "control: platform policy upsert failed");
-        return db_error();
-    }
-
-    let diff = json!({
-        "id": policy_id,
-        "old_enabled": previous.as_ref().map(|p| p.enabled),
-        "new_enabled": body.enabled,
-        "old_cedar_sha256": previous.as_ref().map(|p| sha256_hex(&p.cedar_source)),
-        "new_cedar_sha256": sha256_hex(&body.cedar_source),
-    });
-    if let Err(resp) = audit_event(
-        &req,
-        &state,
-        &guard,
-        "platform_policy_updated",
-        json!({
-            "actor": guard.principal_id,
-            "diff": diff,
-        }),
-    )
-    .await
-    {
-        return resp;
-    }
-
-    web::HttpResponse::NoContent().finish()
-}
-
-pub async fn delete_platform_policy(
-    req: web::HttpRequest,
-    guard: AuthzGuard,
-    state: State<Arc<AppState>>,
-    id: Path<String>,
-) -> web::HttpResponse {
-    if let Err(resp) = require_platform_admin(&guard, &state).await {
-        return resp;
-    }
-
-    let policy_id = id.into_inner();
-    if let Err(err) = state
-        .control_pg
-        .execute("DELETE FROM zeroship.platform_policies WHERE id = $1", &[&policy_id])
-        .await
-    {
-        tracing::error!(error = %err, policy_id = %policy_id, "control: platform policy delete failed");
-        return db_error();
-    }
-
-    if let Err(resp) = audit_event(
-        &req,
-        &state,
-        &guard,
-        "platform_policy_deleted",
-        json!({
-            "actor": guard.principal_id,
-            "id": policy_id,
-        }),
-    )
-    .await
-    {
-        return resp;
-    }
-
-    web::HttpResponse::NoContent().finish()
-}
-
-pub async fn list_platform_policies(
-    guard: AuthzGuard,
-    state: State<Arc<AppState>>,
-) -> web::HttpResponse {
-    let caller_role = match require_admin_or_support(&guard, &state).await {
-        Ok(role) => role,
-        Err(resp) => return resp,
-    };
-    let include_source = caller_role == ROLE_ADMIN;
-
-    let rows = match state
-        .control_pg
-        .query(
-            "SELECT id, cedar_source, enabled, updated_at, updated_by \
-             FROM zeroship.platform_policies \
-             ORDER BY id ASC",
-            &[],
-        )
-        .await
-    {
-        Ok(rows) => rows,
-        Err(err) => {
-            tracing::error!(error = %err, "control: platform policy list failed");
-            return db_error();
-        }
-    };
-
-    let policies = rows
-        .iter()
-        .map(|row| PlatformPolicySummary {
-            id: row.get("id"),
-            enabled: row.get("enabled"),
-            updated_at: row.get("updated_at"),
-            updated_by: row.get("updated_by"),
-            cedar_source: include_source.then(|| row.get("cedar_source")),
-        })
-        .collect::<Vec<_>>();
-
-    web::HttpResponse::Ok().json(&policies)
-}
-
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::resource("/admin/users/{user_id}/role")
@@ -580,15 +422,6 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         web::resource("/admin/net-policy/frontable-wildcard-suffixes")
             .route(web::get().to(get_frontable_suffixes))
             .route(web::put().to(put_frontable_suffixes)),
-    )
-    .service(
-        web::resource("/admin/platform-policies")
-            .route(web::get().to(list_platform_policies)),
-    )
-    .service(
-        web::resource("/admin/platform-policies/{id}")
-            .route(web::put().to(upsert_platform_policy))
-            .route(web::delete().to(delete_platform_policy)),
     );
 }
 
@@ -673,32 +506,6 @@ async fn platform_role(
     Ok(rows.first().map(|row| row.get("role")))
 }
 
-struct ExistingPlatformPolicy {
-    cedar_source: String,
-    enabled: bool,
-}
-
-async fn load_platform_policy(
-    state: &AppState,
-    id: &str,
-) -> Result<Option<ExistingPlatformPolicy>, web::HttpResponse> {
-    let rows = state
-        .control_pg
-        .query(
-            "SELECT cedar_source, enabled FROM zeroship.platform_policies WHERE id = $1",
-            &[&id],
-        )
-        .await
-        .map_err(|err| {
-            tracing::error!(error = %err, policy_id = %id, "control: platform policy lookup failed");
-            db_error()
-        })?;
-    Ok(rows.first().map(|row| ExistingPlatformPolicy {
-        cedar_source: row.get("cedar_source"),
-        enabled: row.get("enabled"),
-    }))
-}
-
 async fn audit_event(
     req: &web::HttpRequest,
     state: &AppState,
@@ -732,12 +539,6 @@ async fn audit_event(
     }
 
     Ok(())
-}
-
-fn sha256_hex(source: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(source.as_bytes());
-    hex::encode(hasher.finalize())
 }
 
 fn db_error() -> web::HttpResponse {
