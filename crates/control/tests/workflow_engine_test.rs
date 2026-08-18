@@ -524,6 +524,7 @@ async fn seed_app_and_deploy_on_plan(
         )
         .await
         .expect("insert app");
+    common::provision_app_workflow_schema(fx.pg.inner.as_ref(), &app_id).await;
     PgStore::provision(fx.pg.inner.as_ref(), &app_id)
         .await
         .expect("provision workflow journal");
@@ -634,6 +635,7 @@ async fn seed_run(
     dispatch_nonce: Option<&str>,
 ) -> String {
     fx.pg.set_default_app_id(app_id);
+    common::provision_app_workflow_schema(fx.pg.inner.as_ref(), &app_id).await;
     PgStore::provision(fx.pg.inner.as_ref(), &app_id)
         .await
         .expect("provision workflow journal for run seed");
