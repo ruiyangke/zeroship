@@ -175,6 +175,7 @@ async fn seed_app_on_plan(
         )
         .await
         .expect("insert app");
+    common::provision_app_workflow_schema(fx.pg.as_ref(), &app_id).await;
     PgStore::provision(fx.pg.as_ref(), &app_id)
         .await
         .expect("provision workflow journal");
@@ -250,6 +251,7 @@ async fn seed_app_without_deploy(fx: &Fixture, label: &str) -> Uuid {
         )
         .await
         .expect("insert app without deploy");
+    common::provision_app_workflow_schema(fx.pg.as_ref(), &app_id).await;
     PgStore::provision(fx.pg.as_ref(), &app_id)
         .await
         .expect("provision workflow journal");

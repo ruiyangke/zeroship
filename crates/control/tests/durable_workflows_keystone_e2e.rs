@@ -210,6 +210,7 @@ async fn build_fixture(db_url: &str, gateway_url: &str, app_id: Uuid, deploy_id:
             .expect("workflow blob store"),
     );
     let control_pg = Arc::new(pg(db_url).await);
+    common::provision_app_workflow_schema(control_pg.as_ref(), &app_id).await;
     PgStore::provision(control_pg.as_ref(), &app_id)
         .await
         .expect("provision workflow journal");
