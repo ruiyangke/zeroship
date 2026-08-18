@@ -239,12 +239,14 @@ pub(crate) fn workflow_journal_schema_sql(app_schema: &str) -> String {
 /// Idempotently provision an app's workflow journal schema, as an admin
 /// principal.
 ///
-/// This is the ONLY place the platform creates `app_<uuid>`. The worker and the
-/// control plane provision the journal TABLES into it
-/// (`PgStore::provision`) holding no CREATE on the database and no authority to
-/// make a schema of their own - a process running creator code must not be able
-/// to author schemas (2a44ea8ef). So the schema has to exist first, and it
-/// exists because a deploy's migration apply ran this.
+/// Runs [`workflow_journal_schema_sql`], the one generator for this DDL; the
+/// apply path embeds the same text (`apply::runtime_dependents_sql`). Nothing
+/// else in the platform creates `app_<uuid>`: the worker and the control plane
+/// provision the journal TABLES into it (`PgStore::provision`) holding no
+/// CREATE on the database and no authority to make a schema of their own - a
+/// process running creator code must not be able to author schemas
+/// (2a44ea8ef). So the schema has to exist first, and in production it exists
+/// because a deploy's migration apply created it.
 ///
 /// Exported because callers outside the apply path need a deployed app's
 /// journal schema to exist and must get it from the production statement rather
@@ -253,8 +255,8 @@ pub(crate) fn workflow_journal_schema_sql(app_schema: &str) -> String {
 /// this.
 ///
 /// # Errors
-/// Any database error from the DDL; the caller has no admin rights if it is a
-/// permission failure.
+/// Any database error from the DDL - including a permission failure, when the
+/// connection is not the admin principal this expects.
 pub async fn provision_workflow_journal_schema(
     admin: &Client,
     app_id: &Uuid,
