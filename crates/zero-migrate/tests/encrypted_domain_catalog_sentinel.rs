@@ -128,9 +128,7 @@ fn enc_sentinels(sql: &str) -> Vec<String> {
     let mut rest = sql;
     while let Some(at) = rest.find("zero-migrate:enc:") {
         let tail = &rest[at..];
-        let end = tail
-            .find([' ', '*', '\'', ';'])
-            .unwrap_or(tail.len());
+        let end = tail.find([' ', '*', '\'', ';']).unwrap_or(tail.len());
         found.push(tail[..end].to_string());
         rest = &tail[end..];
     }
