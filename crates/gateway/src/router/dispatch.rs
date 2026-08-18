@@ -862,26 +862,43 @@ pub(crate) fn compute_bucket_id(
     }
 }
 
+/// Bucket discriminator for a caller whose address could not be resolved.
+/// One shared bucket, deliberately: an unresolvable caller must not get a
+/// private allowance just for being unresolvable.
+const UNKNOWN_CLIENT_IP: &str = "unknown";
+
+/// The client address, as a bare IP.
+///
+/// Deferring to ntex's `connection_info().remote()` was wrong three ways, and
+/// all three ended up in a rate-limit bucket key or an audit row:
+///
+/// * it returns the LEFTMOST `X-Forwarded-For` token, which is whatever the
+///   caller sent, while `zeroship-control` and `zeroship-auth` both read the
+///   rightmost (the entry the fronting proxy authored);
+/// * it reads a `Forwarded` header ahead of `X-Forwarded-For`, and nothing in
+///   this deployment emits one, so honouring it only ever honoured a caller;
+/// * it validates nothing, so a value with a port -- including its own peer
+///   fallback, `format!("{addr}")` over a `SocketAddr` -- reached the bucket
+///   key verbatim and gave every TCP connection a bucket of its own.
+///
+/// The resolution itself lives in [`zeroship_core::client_ip`], shared with
+/// control and auth so the three cannot drift apart again.
 pub(crate) fn client_ip(req: &HttpRequest, trust_proxy: bool) -> String {
-    let peer_ip = req.peer_addr().map(|addr| addr.ip().to_string());
-    let conn = req.connection_info();
-    let proxy_remote = if trust_proxy { conn.remote() } else { None };
-    client_ip_from(peer_ip, proxy_remote, trust_proxy)
+    resolve_client_ip(req, trust_proxy)
+        .map_or_else(|| UNKNOWN_CLIENT_IP.to_string(), |ip| ip.to_string())
 }
 
-fn client_ip_from(
-    peer_ip: Option<String>,
-    proxy_remote: Option<&str>,
-    trust_proxy: bool,
-) -> String {
-    if trust_proxy {
-        if let Some(remote) = proxy_remote {
-            if !remote.is_empty() {
-                return remote.to_string();
-            }
-        }
-    }
-    peer_ip.unwrap_or_else(|| "unknown".to_string())
+/// [`client_ip`] before it is stringified, for callers that want the address.
+fn resolve_client_ip(req: &HttpRequest, trust_proxy: bool) -> Option<std::net::IpAddr> {
+    let forwarded_for = req
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok());
+    zeroship_core::client_ip::resolve_client_ip(
+        forwarded_for,
+        req.peer_addr().map(|addr| addr.ip()),
+        trust_proxy,
+    )
 }
 
 /// True when the request carries the RFC 6455 upgrade headers we
@@ -1145,10 +1162,7 @@ fn build_auth_upstream_headers(
 /// Returns `None` when no parseable IP is available, in which case no
 /// `X-Forwarded-For` is injected and the auth side falls back to its own peer.
 fn auth_forward_client_ip(req: &HttpRequest, trust_proxy: bool) -> Option<std::net::IpAddr> {
-    let ip = client_ip(req, trust_proxy);
-    ip.parse::<std::net::IpAddr>()
-        .ok()
-        .or_else(|| ip.parse::<std::net::SocketAddr>().ok().map(|sa| sa.ip()))
+    resolve_client_ip(req, trust_proxy)
 }
 
 // ---------------------------------------------------------------------------
