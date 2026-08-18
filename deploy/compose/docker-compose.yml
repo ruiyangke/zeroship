@@ -95,11 +95,19 @@ services:
     # flags pending_restart. So it must be on the command line here; putting it
     # in postgres-init.sql would appear to succeed and change nothing.
     #
-    # CONCRETE COST of leaving it at the default: 12 plugin-db integration tests
-    # skip themselves on a `replica` server (`pg_has_logical_wal`), and
+    # CONCRETE COST of leaving it at the default: TEN plugin-db integration
+    # tests skip themselves on a `replica` server (`pg_has_logical_wal`), and
     # crates/plugin-db/tests/integration.rs:2243 already anticipates this,
     # saying CI's pg-test image gets `-c wal_level=logical` "once the rollout
     # lands". This is that rollout for the compose stack.
+    #
+    # TEN, not the 12 this said until 2026-08-18. Counted three ways that day
+    # and they agree: `pg_has_logical_wal` has 10 call sites, a full run on a
+    # `replica` server announces 10 wal-worded ZEROSHIP-TEST-SKIPPED markers
+    # (plus one for postgis), and the same run on a `logical` server announces
+    # none of them. Nearby comments still say eleven and twelve - the number was
+    # written once and copied, and nothing re-ran it. See NOTES-s31.md for the
+    # two-server transcript.
     command:
       - postgres
       - -c

@@ -18,6 +18,42 @@ Scratch notes. Committed as they land, not when a conclusion exists.
   compose one runs `-c wal_level=logical`; the hand-started one did not, which
   is why the reading above says `replica`.
 
+## OUTSTANDING, and it needs a quiet machine rather than a code change
+
+`127.0.0.1:5440` is still held by `zs-auth-pg-5440`. Nothing in this tree
+creates that container, and `deploy/compose`'s own `postgres` service publishes
+exactly that port, so the two cannot both be up. Every suite defaults to 5440
+and therefore runs against whichever one is there.
+
+Nothing needs editing to fix it - the compose file already publishes 5440 and
+the suites already default to it. What it needs is the port free:
+
+    docker stop zs-auth-pg-5440 && docker rm zs-auth-pg-5440
+    tests/provision_test_backends.sh
+
+NOT done here, because another agent was running suites against that container
+at the time and `docker rm` would have destroyed a live run. Whoever does it
+should check nothing is mid-suite first.
+
+WHAT IT BUYS, measured 2026-08-18 on two servers differing in nothing but
+`wal_level`, running `cargo test -p zeroship-plugin-db --features test-helpers
+--test integration`:
+
+    replica  11 ZEROSHIP-TEST-SKIPPED markers (10 wal-guarded + 1 postgis)
+    logical   1 ZEROSHIP-TEST-SKIPPED marker  (postgis only)
+
+Both printed `98 passed; 4 failed; 7 ignored` and the SAME four failure names,
+so the ten tests execute and pass on `logical` and the cargo tally cannot tell
+the two runs apart. (The four failures are unrelated to wal_level: two need
+pgvector, one needs the platform migrations for `zeroship_workflow_owner`, and
+`direct_connection_sites_do_not_grow` is a source-count assertion at 120 vs its
+pinned 119.)
+
+The compose service comment says the cost of `replica` is "12 plugin-db
+integration tests"; `tests/run_plugin_db_live_suite.sh` and ci.yml both say
+eleven. The guard `pg_has_logical_wal` has TEN call sites, and ten is what the
+run announces.
+
 ## TARGETS: 45 test targets carry `required-features = ["live-db-tests"]`
 
 Source: the `[[test]]` blocks in the three Cargo.toml files.
