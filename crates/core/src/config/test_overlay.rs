@@ -88,46 +88,92 @@ pub fn load() -> FileConfig {
     }
 }
 
-/// The one PostgreSQL every test in this workspace dials.
+/// Load the overlay if it has been generated, else `None`.
 ///
-/// `PG_TEST_URL` overrides it. That is how a suite hands its per-run scratch
-/// database name down (`tests/lib/scratch_db.sh`), and how two concurrent runs
-/// stay disjoint - a per-run value cannot live in a tracked or generated file
-/// shared by both.
+/// The `_opt` accessors below use this so a checkout that has never run the
+/// provisioner keeps whatever each call site already did about an absent
+/// database, instead of every one of them turning into a panic in the same
+/// commit that renamed them.
+fn load_opt() -> Option<FileConfig> {
+    let path = overlay_path();
+    if !path.exists() {
+        return None;
+    }
+    // A file that EXISTS and does not parse is fatal. That is the whole value
+    // of putting the test topology under `deny_unknown_fields`: a misspelled
+    // key must not read as "no configuration".
+    match FileConfig::resolve(Some(path.as_path()), false) {
+        Ok(overlay) => Some(overlay.config),
+        Err(error) => panic!(
+            "test overlay {} exists but does not parse: {error}\n\
+             It is generated - fix {PROVISION_COMMAND} rather than the file.",
+            path.display()
+        ),
+    }
+}
+
+/// The one PostgreSQL every test in this workspace dials, or `None`.
+///
+/// THIS IS THE DROP-IN for the eight `test_env!("...")` chains it replaced, and
+/// it returns an `Option` for exactly that reason: those call sites decide for
+/// themselves what an absent database means - most announce a skip, a few
+/// panic, `crates/plugin-db/tests/distributed_live.rs` substitutes a default.
+/// Collapsing eight names into one is a naming change; deciding on their behalf
+/// what happens when there is no database is not, and belongs to whoever owns
+/// each test.
+///
+/// `PG_TEST_URL` wins over the overlay. That is how a suite hands its per-run
+/// scratch database name down (`tests/lib/scratch_db.sh`) and how two
+/// concurrent runs stay disjoint - a per-run value cannot live in a file both
+/// of them read.
+#[must_use]
+pub fn database_url_opt() -> Option<String> {
+    crate::test_env!("PG_TEST_URL")
+        .filter(|url| !url.is_empty())
+        .or_else(|| load_opt().and_then(|config| config.control.database_url))
+        .filter(|url| !url.is_empty())
+}
+
+/// The one Redis every test in this workspace dials, or `None`.
+///
+/// `REDIS_TEST_URL` wins over the overlay, for the same reason `PG_TEST_URL`
+/// does.
+#[must_use]
+pub fn kv_url_opt() -> Option<String> {
+    crate::test_env!("REDIS_TEST_URL")
+        .filter(|url| !url.is_empty())
+        .or_else(|| load_opt().and_then(|config| config.worker.kv_url))
+        .filter(|url| !url.is_empty())
+}
+
+/// [`database_url_opt`], for a caller that cannot proceed without one.
 ///
 /// # Panics
 ///
-/// When neither `PG_TEST_URL` nor the overlay supplies one.
+/// When neither `PG_TEST_URL` nor the overlay supplies one, naming the
+/// provisioning command.
 #[must_use]
 pub fn database_url() -> String {
-    if let Some(url) = crate::test_env!("PG_TEST_URL").filter(|url| !url.is_empty()) {
-        return url;
-    }
-    load().control.database_url.unwrap_or_else(|| {
+    database_url_opt().unwrap_or_else(|| {
         panic!(
-            "neither PG_TEST_URL nor control.database_url in {} names a PostgreSQL.\n\
+            "no PostgreSQL: neither PG_TEST_URL nor control.database_url in {}.\n\
              Provision the test backends and their configuration with:\n    {PROVISION_COMMAND}",
             overlay_path().display()
         )
     })
 }
 
-/// The one Redis every test in this workspace dials.
-///
-/// `REDIS_TEST_URL` overrides it, for the same reason `PG_TEST_URL` overrides
-/// the DSN.
+/// [`kv_url_opt`], for a caller that cannot proceed without one.
 ///
 /// # Panics
 ///
-/// When neither `REDIS_TEST_URL` nor the overlay supplies one.
+/// When neither `REDIS_TEST_URL` nor the overlay supplies one, naming the
+/// provisioning command.
 #[must_use]
 pub fn kv_url() -> String {
-    if let Some(url) = crate::test_env!("REDIS_TEST_URL").filter(|url| !url.is_empty()) {
-        return url;
-    }
-    load().worker.kv_url.unwrap_or_else(|| {
+    kv_url_opt().unwrap_or_else(|| {
         panic!(
-            "neither REDIS_TEST_URL nor worker.kv_url in {} names a Redis.\n\
+            "no Redis: neither REDIS_TEST_URL nor worker.kv_url in {}.\n\
              Provision the test backends and their configuration with:\n    {PROVISION_COMMAND}",
             overlay_path().display()
         )
