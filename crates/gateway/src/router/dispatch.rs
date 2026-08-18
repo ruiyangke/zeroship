@@ -862,26 +862,43 @@ pub(crate) fn compute_bucket_id(
     }
 }
 
+/// Bucket discriminator for a caller whose address could not be resolved.
+/// One shared bucket, deliberately: an unresolvable caller must not get a
+/// private allowance just for being unresolvable.
+const UNKNOWN_CLIENT_IP: &str = "unknown";
+
+/// The client address, as a bare IP.
+///
+/// Deferring to ntex's `connection_info().remote()` was wrong three ways, and
+/// all three ended up in a rate-limit bucket key or an audit row:
+///
+/// * it returns the LEFTMOST `X-Forwarded-For` token, which is whatever the
+///   caller sent, while `zeroship-control` and `zeroship-auth` both read the
+///   rightmost (the entry the fronting proxy authored);
+/// * it reads a `Forwarded` header ahead of `X-Forwarded-For`, and nothing in
+///   this deployment emits one, so honouring it only ever honoured a caller;
+/// * it validates nothing, so a value with a port -- including its own peer
+///   fallback, `format!("{addr}")` over a `SocketAddr` -- reached the bucket
+///   key verbatim and gave every TCP connection a bucket of its own.
+///
+/// The resolution itself lives in [`zeroship_core::client_ip`], shared with
+/// control and auth so the three cannot drift apart again.
 pub(crate) fn client_ip(req: &HttpRequest, trust_proxy: bool) -> String {
-    let peer_ip = req.peer_addr().map(|addr| addr.ip().to_string());
-    let conn = req.connection_info();
-    let proxy_remote = if trust_proxy { conn.remote() } else { None };
-    client_ip_from(peer_ip, proxy_remote, trust_proxy)
+    resolve_client_ip(req, trust_proxy)
+        .map_or_else(|| UNKNOWN_CLIENT_IP.to_string(), |ip| ip.to_string())
 }
 
-fn client_ip_from(
-    peer_ip: Option<String>,
-    proxy_remote: Option<&str>,
-    trust_proxy: bool,
-) -> String {
-    if trust_proxy {
-        if let Some(remote) = proxy_remote {
-            if !remote.is_empty() {
-                return remote.to_string();
-            }
-        }
-    }
-    peer_ip.unwrap_or_else(|| "unknown".to_string())
+/// [`client_ip`] before it is stringified, for callers that want the address.
+fn resolve_client_ip(req: &HttpRequest, trust_proxy: bool) -> Option<std::net::IpAddr> {
+    let forwarded_for = req
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok());
+    zeroship_core::client_ip::resolve_client_ip(
+        forwarded_for,
+        req.peer_addr().map(|addr| addr.ip()),
+        trust_proxy,
+    )
 }
 
 /// True when the request carries the RFC 6455 upgrade headers we
@@ -1145,10 +1162,7 @@ fn build_auth_upstream_headers(
 /// Returns `None` when no parseable IP is available, in which case no
 /// `X-Forwarded-For` is injected and the auth side falls back to its own peer.
 fn auth_forward_client_ip(req: &HttpRequest, trust_proxy: bool) -> Option<std::net::IpAddr> {
-    let ip = client_ip(req, trust_proxy);
-    ip.parse::<std::net::IpAddr>()
-        .ok()
-        .or_else(|| ip.parse::<std::net::SocketAddr>().ok().map(|sa| sa.ip()))
+    resolve_client_ip(req, trust_proxy)
 }
 
 // ---------------------------------------------------------------------------
@@ -3856,10 +3870,14 @@ mod tests {
 
     #[test]
     fn client_ip_ignores_forwarded_headers_without_trust_proxy() {
-        assert_eq!(
-            client_ip_from(Some("192.0.2.10".to_string()), Some("203.0.113.77"), false),
-            "192.0.2.10"
-        );
+        // Default posture: the gateway IS the edge, so a forwarded header is
+        // just caller-supplied text. This fixture has no peer, so the only
+        // honest answer is the shared "unknown" bucket.
+        let req = ntex::web::test::TestRequest::default()
+            .header("x-forwarded-for", "203.0.113.77")
+            .header("forwarded", "for=198.51.100.9")
+            .to_http_request();
+        assert_eq!(client_ip(&req, false), "unknown");
     }
 
     #[test]
@@ -3873,6 +3891,146 @@ mod tests {
             compute_bucket_id(&req, RateLimitPer::Ip, true, true),
             "203.0.113.77"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // The bucket key must be an IP, never an `ip:port` socket address.
+    //
+    // A `RateLimitPer::Ip` bucket is keyed on `compute_bucket_id`'s return
+    // value verbatim (`enforce.rs`, `PerRuleKey { bucket }`), so any port that
+    // survives into that string splits one client across a fresh bucket per
+    // TCP connection and the per-IP limit stops limiting.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn compute_bucket_id_ip_ignores_the_source_port_of_one_client() {
+        // The reviewer's report, end to end through a real `HttpRequest` and
+        // real header parsing rather than by reading code.
+        //
+        // Two requests from ONE client on two connections differ only in the
+        // ephemeral source port. Before the fix each got its OWN bucket
+        // (`192.0.2.43:40001` and `192.0.2.43:40002` were distinct keys), so a
+        // client that reconnected drew a fresh allowance every time and the
+        // per-IP limit limited nothing. They must share one bucket.
+        let from_port = |port: u16| {
+            let req = ntex::web::test::TestRequest::default()
+                .header("x-forwarded-for", format!("192.0.2.43:{port}"))
+                .to_http_request();
+            compute_bucket_id(&req, RateLimitPer::Ip, true, true)
+        };
+        let conn_a = from_port(40001);
+        let conn_b = from_port(40002);
+        assert_eq!(conn_a, "192.0.2.43");
+        assert_eq!(conn_a, conn_b, "same client, two connections, one bucket");
+    }
+
+    #[test]
+    fn one_client_on_two_connections_shares_one_rate_limit_allowance() {
+        // The whole point, proved at the layer that enforces it rather than by
+        // comparing two strings: run `compute_bucket_id` into the real
+        // `PerRuleRateLimitRegistry` exactly as `handle_request` does.
+        //
+        // rps=1, so the bucket admits one request and refuses the next within
+        // the same second. If the two connections key differently they each
+        // get their own allowance and BOTH are admitted -- which is what the
+        // limiter did before the fix, for every reconnect, forever.
+        use crate::enforce::PerRuleRateLimitRegistry;
+        use zeroship_bundle::RateLimit;
+
+        let registry = PerRuleRateLimitRegistry::new();
+        let app = uuid::Uuid::nil();
+        let limit = RateLimit {
+            rpm: None,
+            rps: Some(1),
+            per: RateLimitPer::Ip,
+        };
+
+        let admit = |port: u16| {
+            let req = ntex::web::test::TestRequest::default()
+                .header("x-forwarded-for", format!("192.0.2.43:{port}"))
+                .to_http_request();
+            let bucket_id = compute_bucket_id(&req, limit.per, true, true);
+            registry
+                .check(&app, 0, limit.per, &bucket_id, &limit)
+                .is_ok()
+        };
+
+        assert!(admit(40001), "first connection draws the single token");
+        assert!(
+            !admit(40002),
+            "a reconnect from the same client must NOT draw a second token"
+        );
+    }
+
+    #[test]
+    fn compute_bucket_id_ip_ignores_the_source_port_of_an_ipv6_client() {
+        let req = ntex::web::test::TestRequest::default()
+            .header("x-forwarded-for", "[2001:db8::1]:8080")
+            .to_http_request();
+        assert_eq!(
+            compute_bucket_id(&req, RateLimitPer::Ip, true, true),
+            "2001:db8::1"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Which `X-Forwarded-For` entry the gateway reads. `zeroship-control`
+    // (http_util.rs) and `zeroship-auth` (headers.rs) both take the RIGHTMOST
+    // token; the gateway must agree, or one recorded client address is wrong.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn client_ip_takes_the_rightmost_forwarded_for_entry() {
+        // Caddy appends the address it actually accepted the connection from,
+        // so the closest hop is last. Everything to its left is what the
+        // caller CLAIMED. ntex's `connection_info().remote()` took the
+        // leftmost and so returned "1.2.3.4" here.
+        let req = ntex::web::test::TestRequest::default()
+            .header("x-forwarded-for", "1.2.3.4, 203.0.113.7")
+            .to_http_request();
+        assert_eq!(client_ip(&req, true), "203.0.113.7");
+    }
+
+    #[test]
+    fn client_ip_ignores_a_forwarded_header_entirely() {
+        // ntex reads `Forwarded` BEFORE `X-Forwarded-For` (ntex 3.7.2
+        // web/info.rs:35-59 runs ahead of :101), so a test matrix built only
+        // around XFF cannot catch this.
+        //
+        // Measured against this deployment's own proxy (caddy:2-alpine, the
+        // image and `reverse_proxy` shape of deploy/ops/Caddyfile, probed
+        // 2026-08-18): Caddy REPLACES `X-Forwarded-For` with the peer it
+        // accepted -- a caller's `X-Forwarded-For: 1.2.3.4` arrived as
+        // `127.0.0.1` -- but it neither sets nor strips `Forwarded`, and
+        // passed `Forwarded: for=9.9.9.9` through verbatim. So the one header
+        // ntex preferred is the one the caller still controls, and preferring
+        // it handed the caller their own bucket. Control and auth read
+        // `X-Forwarded-For` only; this is the gateway agreeing with them.
+        let req = ntex::web::test::TestRequest::default()
+            .header("forwarded", "for=1.2.3.4")
+            .header("x-forwarded-for", "203.0.113.7")
+            .to_http_request();
+        assert_eq!(client_ip(&req, true), "203.0.113.7");
+
+        // Alone, it resolves nothing: this fixture has no peer address.
+        let only_forwarded = ntex::web::test::TestRequest::default()
+            .header("forwarded", "for=1.2.3.4")
+            .to_http_request();
+        assert_eq!(client_ip(&only_forwarded, true), "unknown");
+    }
+
+    #[test]
+    fn client_ip_rejects_a_forwarded_for_token_that_is_not_an_address() {
+        // `unknown` and `_obfuscated` are legal RFC 7239 identifiers, and a
+        // caller can send arbitrary bytes. None of them is an IP, so none may
+        // become an IP bucket key. With no peer to fall back to, the request
+        // lands in the shared "unknown" bucket rather than one of its own.
+        for junk in ["unknown", "_hidden", "not-an-ip"] {
+            let req = ntex::web::test::TestRequest::default()
+                .header("x-forwarded-for", junk)
+                .to_http_request();
+            assert_eq!(client_ip(&req, true), "unknown", "token {junk:?}");
+        }
     }
 
     #[test]
@@ -4778,6 +4936,24 @@ mod tests {
         let req = ntex::web::test::TestRequest::default().to_http_request();
         // No headers, no remote — falls back to "ip:unknown".
         assert_eq!(subscription_affinity_key(&req, false), "ip:unknown");
+    }
+
+    #[test]
+    fn subscription_affinity_pins_one_client_to_one_worker_across_reconnects() {
+        // The second consumer of the same resolver, and a second consequence
+        // of the same defect: this key picks the CHWBL worker, and a
+        // subscription's per-connection state lives on the worker it picked.
+        // While the source port rode along in the key, an anonymous caller
+        // hashed somewhere new on every reconnect and never found their state
+        // again -- the exact opposite of what this function exists to do.
+        let from_port = |port: u16| {
+            let req = ntex::web::test::TestRequest::default()
+                .header("x-forwarded-for", format!("192.0.2.43:{port}"))
+                .to_http_request();
+            subscription_affinity_key(&req, true)
+        };
+        assert_eq!(from_port(40001), "ip:192.0.2.43");
+        assert_eq!(from_port(40001), from_port(40002));
     }
 
     /// Session-affinity invariant: the same `(app_id, principal)` always
