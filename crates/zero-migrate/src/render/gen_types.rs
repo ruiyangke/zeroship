@@ -180,190 +180,15 @@ pub(crate) fn add_runtime_index(
     }
 }
 
+/// The name `createTable` gives the index a `unique` column creates implicitly.
+///
+/// Called ONCE per such column, at `createTable`, by the single fold - which then
+/// carries the result on `AuthoredTable::implicit_unique_indexes` rather than letting
+/// any projection re-derive it. See `render/fold/single_fold.rs`'s
+/// `ImplicitUniqueIndex` for why the name is state and not a function of the current
+/// table and column names.
 pub(crate) fn derived_unique_index_name(table: &str, field: &str) -> String {
     crate::plan::author::cap_ident_name(&format!("{table}_{field}_key"))
-}
-
-fn derived_plain_index_name(table: &str, fields: &[String]) -> String {
-    crate::plan::author::cap_ident_name(&format!("{table}_{}_idx", fields.join("_")))
-}
-
-fn record_plain_index(
-    metadata: &mut BTreeMap<String, RuntimeCollectionMetadata>,
-    table: &str,
-    columns: &[crate::IndexElement],
-    name: Option<&str>,
-    unique: Option<bool>,
-    using: Option<crate::IndexMethod>,
-    predicate: Option<&crate::model::expr::Expr>,
-) {
-    // A functional / partial / method-qualified index carries no plain (name,
-    // fields) projection the runtime descriptor can express — skip it (the column
-    // still types; the index is just not surfaced as a plain descriptor entry).
-    if using.is_some() || predicate.is_some() {
-        return;
-    }
-    let Some(fields) = plain_index_fields(columns) else {
-        return;
-    };
-    if fields.is_empty() {
-        return;
-    }
-    let index_name = name
-        .map(str::to_string)
-        .unwrap_or_else(|| derived_plain_index_name(table, &fields));
-    add_runtime_index(
-        &mut metadata.entry(table.to_string()).or_default().indexes,
-        RuntimeIndexDescriptor {
-            name: index_name,
-            fields,
-            unique: unique.unwrap_or(false),
-        },
-    );
-}
-
-/// Replay the ops for the runtime-VISIBLE collection metadata (options + plain
-/// indexes) the FieldDef map does not carry. Table lifecycle (create/drop/rename)
-/// and index lifecycle (create/drop, column drop/rename) are all tracked so the
-/// metadata stays in lock-step with the folded field map.
-///
-/// Takes the `dialect` and expands through `flatten_dialectal_ops` for the same
-/// reason its siblings do: an index or runtime option authored inside a `dialect()`
-/// leg belongs to the table the target actually gets. Walking the raw list let the
-/// `Op::Dialectal` wrapper fall through the catch-all arm, so the field map (which
-/// expands) and this map (which did not) described different tables - fields present,
-/// indexes and options missing, on the very dialect whose leg declared them.
-///
-/// Expands the SELECTED leg only, never the union: an index declared in an inactive
-/// leg is one the target never creates, so naming it would describe an object the
-/// database does not have.
-fn runtime_metadata_from_ops(
-    ops: &[Op],
-    dialect: SqlDialect,
-) -> Result<BTreeMap<String, RuntimeCollectionMetadata>, crate::FoldError> {
-    let mut metadata: BTreeMap<String, RuntimeCollectionMetadata> = BTreeMap::new();
-
-    for op in crate::render::fold::flatten_dialectal_ops(ops, dialect)? {
-        match op {
-            Op::CreateTable {
-                name,
-                columns,
-                indexes,
-                runtime_options,
-                ..
-            } => {
-                metadata.insert(
-                    name.clone(),
-                    RuntimeCollectionMetadata {
-                        options: runtime_options.clone().unwrap_or_default(),
-                        indexes: Vec::new(),
-                    },
-                );
-                for column in columns {
-                    if column.unique.unwrap_or(false) {
-                        add_runtime_index(
-                            &mut metadata.entry(name.clone()).or_default().indexes,
-                            RuntimeIndexDescriptor {
-                                name: derived_unique_index_name(name, &column.name),
-                                fields: vec![column.name.clone()],
-                                unique: true,
-                            },
-                        );
-                    }
-                }
-                for index in indexes {
-                    record_plain_index(
-                        &mut metadata,
-                        name,
-                        &index.columns,
-                        index.name.as_deref(),
-                        index.unique,
-                        index.using,
-                        index.r#where.as_ref(),
-                    );
-                }
-            }
-            Op::SetTableOptions { table, options, .. } => {
-                let table_meta = metadata.entry(table.clone()).or_default();
-                if let Some(soft_delete) = options.soft_delete {
-                    table_meta.options.soft_delete = soft_delete;
-                }
-                if let Some(versioning) = options.versioning {
-                    table_meta.options.versioning = versioning;
-                }
-                if let Some(strictness) = options.strictness {
-                    table_meta.options.strictness = strictness;
-                }
-            }
-            Op::DropTable { table, .. } => {
-                metadata.remove(table);
-            }
-            Op::DropPartition { name, .. } => {
-                metadata.remove(name);
-            }
-            Op::CreatePartition { .. }
-            | Op::AttachPartition { .. }
-            | Op::DetachPartition { .. } => {}
-            Op::RenameTable { table, to, .. } => {
-                if let Some(table_meta) = metadata.remove(table) {
-                    metadata.insert(to.clone(), table_meta);
-                }
-            }
-            Op::CreateIndex {
-                table,
-                columns,
-                name,
-                unique,
-                using,
-                r#where,
-                ..
-            } => {
-                record_plain_index(
-                    &mut metadata,
-                    table,
-                    columns,
-                    name.as_deref(),
-                    *unique,
-                    *using,
-                    r#where.as_ref(),
-                );
-            }
-            Op::DropIndex { name, table, .. } => {
-                if let Some(table) = table {
-                    if let Some(table_meta) = metadata.get_mut(table) {
-                        table_meta.indexes.retain(|idx| idx.name != *name);
-                    }
-                } else {
-                    for table_meta in metadata.values_mut() {
-                        table_meta.indexes.retain(|idx| idx.name != *name);
-                    }
-                }
-            }
-            Op::DropColumn { table, column, .. } => {
-                if let Some(table_meta) = metadata.get_mut(table) {
-                    table_meta
-                        .indexes
-                        .retain(|idx| !idx.fields.iter().any(|f| f == column));
-                }
-            }
-            Op::RenameColumn {
-                table, from, to, ..
-            } => {
-                if let Some(table_meta) = metadata.get_mut(table) {
-                    for idx in &mut table_meta.indexes {
-                        for field in &mut idx.fields {
-                            if field == from {
-                                *field = to.clone();
-                            }
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    Ok(metadata)
 }
 
 fn render_runtime_descriptor_v1(
@@ -442,7 +267,20 @@ pub fn render_artifacts(
     )
     .map_err(|error| GenTypesError::Fold(crate::FoldError::Render(error.to_string())))?;
     let ops = resolved.ops.as_slice();
-    let metadata = runtime_metadata_from_ops(ops, dialect).map_err(GenTypesError::Fold)?;
+    // Step 4 of `docs/proposals/single-fold-and-effects.md` section G, consumer 1:
+    // the runtime collection metadata is a PROJECTION of the one traversal, not a
+    // private replay of the op stream. `runtime_metadata_from_ops` is gone.
+    //
+    // This does not change which streams `render_artifacts` accepts.
+    // `single_fold::fold` runs the structural catalog replay through `fold_ops_onto`,
+    // and `render_runtime_descriptor_v1` below already reached the SAME replay through
+    // `fold_to_field_defs` -> `fold_ops` -> `fold_ops_onto(&default, ..)`, so every
+    // stream this refuses was already refused a few lines later. The cost is that the
+    // replay now runs twice per render; collapsing the two is the `fold_ops_onto`
+    // extraction the proposal assigns to the LAST consumer, not this one.
+    let folded = crate::render::fold::single_fold::fold(ops, dialect, project_schema, effective)
+        .map_err(GenTypesError::Fold)?;
+    let metadata = folded.project_runtime_metadata();
     let authoring_tables = authoring_tables_from_ops(ops, dialect).map_err(GenTypesError::Fold)?;
 
     // (a) RuntimeSchemaDescriptor v1 — fields plus runtime-visible collection
@@ -513,9 +351,11 @@ pub(crate) struct AuthoringTable {
 ///
 /// `dialect` selects the `Op::Dialectal` leg, so it must be the SAME dialect
 /// `render_runtime_descriptor_v1` folds under or the two artifacts describe
-/// different tables. This does not cover `runtime_metadata_from_ops`, which reads
-/// the unflattened op list and so has never seen inside a dialectal leg on any
-/// target. NOTHING ELSE COVERS IT: `render_runtime_descriptor_v1` takes that map as
+/// different tables. The runtime collection metadata is no longer a third answer to
+/// cover here: since step 4 it is `FoldedSchema::project_runtime_metadata`, which
+/// reads the SAME flattened traversal, so the leg-selection hole this paragraph used
+/// to warn about (a walker reading the unflattened list) cannot reopen. What still
+/// holds is the consequence: `render_runtime_descriptor_v1` takes that map as
 /// given and falls back to `unwrap_or_default()` for a collection it lacks, and the
 /// map has no other producer, so a table created only inside an `Op::Dialectal` leg
 /// emits its FIELDS but loses its runtime options and plain indexes. A hole, not a
@@ -2251,8 +2091,14 @@ mod tests {
         }];
         let ops = crate::descriptors_to_create_ops(&descriptors, "app", &effective)
             .expect("confined descriptor resolves");
-        let metadata = runtime_metadata_from_ops(&ops, SqlDialect::Postgres)
-            .expect("confined descriptor ops carry no dialectal wrapper");
+        let metadata = crate::render::fold::single_fold::fold(
+            &ops,
+            SqlDialect::Postgres,
+            DEFAULT_PROJECT_SCHEMA,
+            &effective,
+        )
+        .expect("confined descriptor ops fold")
+        .project_runtime_metadata();
         let value = render_runtime_descriptor_v1(
             &ops,
             SqlDialect::Postgres,
@@ -2428,10 +2274,10 @@ mod tests {
     }
 }
 
-// The differential corpus over the four op-stream replays -- an in-crate test
-// module because two of the four (`runtime_metadata_from_ops`,
-// `authoring_tables_from_ops`) are private here, and the alternative is widening
-// two production functions so a test can reach them.
+// The differential corpus over the four op-stream answers -- an in-crate test
+// module because `authoring_tables_from_ops` is private here (as
+// `runtime_metadata_from_ops` was before step 4 deleted it), and the alternative is
+// widening a production function so a test can reach it.
 #[cfg(test)]
 mod differential_corpus;
 

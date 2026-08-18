@@ -1,9 +1,12 @@
 //! **The differential corpus.** Step 1 of `docs/proposals/single-fold-and-effects.md`.
 //!
-//! One op stream is replayed through all four independent walkers -
+//! One op stream is replayed through all four independent answers -
 //! [`fold_ops`], [`fold_to_field_defs`], [`super::authoring_tables_from_ops`]
-//! and [`super::runtime_metadata_from_ops`] - and what each one produces is
-//! recorded. It fixes nothing. It makes every later step of that proposal
+//! and the runtime collection metadata - and what each one produces is
+//! recorded. The fourth was `super::runtime_metadata_from_ops` until step 4 of
+//! that proposal deleted it; its entry point is now
+//! `FoldedSchema::project_runtime_metadata`, so this corpus keeps cross-checking
+//! the same QUESTION against a different producer. It fixes nothing. It makes every later step of that proposal
 //! falsifiable, and it turns into a suite the comparison the review log has
 //! been running BY HAND for every row of the proposal's section B.
 //!
@@ -57,10 +60,9 @@
 //! # Where this lives, and why
 //!
 //! In-crate rather than under `tests/`, for the same reason as
-//! `guard_vendor_lower_tests`: `runtime_metadata_from_ops` and
-//! `authoring_tables_from_ops` are private to [`super`], and the alternative to
-//! a child module is widening two production functions' visibility so a test
-//! can reach them. This module is `cfg(test)` and ships in nothing.
+//! `guard_vendor_lower_tests`: `authoring_tables_from_ops` is private to [`super`],
+//! and the alternative to a child module is widening a production function's
+//! visibility so a test can reach it. This module is `cfg(test)` and ships in nothing.
 //!
 //! Offline throughout. These are fold and replay functions; no database is
 //! opened, so there is no skip that could read as a pass. Runtime is under two
@@ -80,7 +82,7 @@ use crate::model::ir::{MigrationIr, Op};
 use crate::render::fold::{fold_ops, fold_to_field_defs};
 use crate::SqlDialect;
 
-use super::{authoring_tables_from_ops, runtime_metadata_from_ops};
+use super::authoring_tables_from_ops;
 
 /// The schema unqualified objects resolve under.
 pub(super) const SCHEMA: &str = "public";
@@ -463,7 +465,9 @@ enum Walker {
     Ffd,
     /// `authoring_tables_from_ops` -> the `env.db.ts` source model.
     Ato,
-    /// `runtime_metadata_from_ops` -> collection options and plain indexes.
+    /// The runtime collection metadata - options and plain indexes. Since step 4
+    /// moved the consumer, its real entry point is
+    /// `FoldedSchema::project_runtime_metadata` and the walker it replaced is gone.
     Rmo,
 }
 
@@ -505,7 +509,9 @@ impl Replay {
             fo: fold_ops(ops, d, SCHEMA, &p).map_err(|e| e.to_string()),
             ffd: fold_to_field_defs(ops, d, SCHEMA, &p).map_err(|e| e.to_string()),
             ato: authoring_tables_from_ops(ops, d).map_err(|e| e.to_string()),
-            rmo: runtime_metadata_from_ops(ops, d).map_err(|e| e.to_string()),
+            rmo: crate::render::fold::single_fold::fold(ops, d, SCHEMA, &p)
+                .map(|folded| folded.project_runtime_metadata())
+                .map_err(|e| e.to_string()),
         }
     }
 
@@ -1168,17 +1174,22 @@ const A_NAMED_TYPE_HAS_THREE_TRUE_SPELLINGS: &str =
 /// cannot tell that apart from a disagreement. Named so the rows that hit it are
 /// readable rather than alarming, and so the limitation is stated once.
 const A_TEXT_PROBE_CANNOT_SEE_AN_EMPTY_VOCABULARY: &str =
-    "fold_to_field_defs carries no constraint and runtime_metadata_from_ops \
+    "fold_to_field_defs carries no constraint and the runtime metadata \
      carries only plain indexes, so their 'no' is the absence of a vocabulary \
-     rather than a contradiction; the two walkers that DO name constraints agree";
+     rather than a contradiction; the two answers that DO name constraints agree";
 
-/// `render_artifacts` runs `runtime_metadata_from_ops` and
-/// `authoring_tables_from_ops` BEFORE `fold_to_field_defs`, and returns the
-/// fold's error, so a stream the fold refuses emits no artifact even though two
-/// walkers built one. Verified by reading `render_artifacts`; recorded because
-/// the corpus can see the asymmetry and a reader would otherwise ask.
+/// ONE walker left in this corpus has no coherence gate.
+///
+/// It was two until step 4. The runtime collection metadata became a projection of
+/// the fold, which fails closed, so it now refuses every stream the catalog replay
+/// refuses - which is why the rows carrying this note read `RMO=refused` where they
+/// used to carry an answer. `authoring_tables_from_ops` is the one that still
+/// answers, and it is harmless at the composite entry point for the same reason it
+/// always was: `render_artifacts` returns the fold's error and emits neither
+/// artifact. Verified by reading `render_artifacts` and pinned by
+/// `tests/gen_types_runtime_metadata_from_the_fold.rs`'s over-refusal control.
 const ONLY_THE_FOLD_BACKED_WALKERS_FAIL_CLOSED: &str =
-    "the two artifact walkers have no coherence gate and answer about a stream \
+    "authoring_tables_from_ops has no coherence gate and answers about a stream \
      the fold refuses; harmless at the composite entry point, because \
      render_artifacts returns the fold's error and emits neither artifact";
 
@@ -1307,9 +1318,9 @@ const ROWS: &[Row] = &[
     // docs/review-log.md:26663-26715): the verdict there was REFUSE, and the two
     // fold-backed walkers now do. The other two do not, which is what this row
     // is really recording.
-    Row { key: "c_retype_of_a_value_format_column|Postgres|tables", verdict: "DIVERGENT FO=refused FFD=refused ATO={refs} RMO={refs}", status: Status::ByDesign(ONLY_THE_FOLD_BACKED_WALKERS_FAIL_CLOSED) },
-    Row { key: "c_retype_of_a_value_format_column|Sqlite|tables", verdict: "DIVERGENT FO=refused FFD=refused ATO={refs} RMO={refs}", status: Status::ByDesign(ONLY_THE_FOLD_BACKED_WALKERS_FAIL_CLOSED) },
-    Row { key: "c_retype_of_a_value_format_column|Mysql|tables", verdict: "DIVERGENT FO=refused FFD=refused ATO={refs} RMO={refs}", status: Status::ByDesign(ONLY_THE_FOLD_BACKED_WALKERS_FAIL_CLOSED) },
+    Row { key: "c_retype_of_a_value_format_column|Postgres|tables", verdict: "DIVERGENT FO=refused FFD=refused ATO={refs} RMO=refused", status: Status::ByDesign(ONLY_THE_FOLD_BACKED_WALKERS_FAIL_CLOSED) },
+    Row { key: "c_retype_of_a_value_format_column|Sqlite|tables", verdict: "DIVERGENT FO=refused FFD=refused ATO={refs} RMO=refused", status: Status::ByDesign(ONLY_THE_FOLD_BACKED_WALKERS_FAIL_CLOSED) },
+    Row { key: "c_retype_of_a_value_format_column|Mysql|tables", verdict: "DIVERGENT FO=refused FFD=refused ATO={refs} RMO=refused", status: Status::ByDesign(ONLY_THE_FOLD_BACKED_WALKERS_FAIL_CLOSED) },
 
     // Row 9 (named enum members, docs/review-log.md:27941-27944): FIXED --
     // fold_to_field_defs carries the membership on all three dialects. Note what
@@ -1338,11 +1349,11 @@ const ROWS: &[Row] = &[
     // the COLUMN-level inline check was fixed. A TABLE-level CHECK's
     // `definition` is a different carrier and is still stale.
     Row { key: "c_rename_column_inline_check_body|Postgres|columns(issues)", verdict: "AGREED {id,status_token}", status: Status::Consistent },
-    Row { key: "c_rename_column_inline_check_body|Sqlite|columns(issues)", verdict: "DIVERGENT FO=refused FFD=refused ATO={id,status_token}", status: Status::ByDesign(PG_ONLY_TABLE_LEVEL_CHECK) },
-    Row { key: "c_rename_column_inline_check_body|Mysql|columns(issues)", verdict: "DIVERGENT FO=refused FFD=refused ATO={id,status_token}", status: Status::ByDesign(PG_ONLY_TABLE_LEVEL_CHECK) },
+    Row { key: "c_rename_column_inline_check_body|Sqlite|columns(issues)", verdict: "DIVERGENT FO=refused FFD=refused ATO={id,status_token} RMO=refused", status: Status::ByDesign(PG_ONLY_TABLE_LEVEL_CHECK) },
+    Row { key: "c_rename_column_inline_check_body|Mysql|columns(issues)", verdict: "DIVERGENT FO=refused FFD=refused ATO={id,status_token} RMO=refused", status: Status::ByDesign(PG_ONLY_TABLE_LEVEL_CHECK) },
     Row { key: "c_rename_column_inline_check_body|Postgres|carries(state_token)", verdict: "AGREED no", status: Status::Consistent },
-    Row { key: "c_rename_column_inline_check_body|Sqlite|carries(state_token)", verdict: "DIVERGENT FO=refused FFD=refused ATO=no RMO=no", status: Status::ByDesign(PG_ONLY_TABLE_LEVEL_CHECK) },
-    Row { key: "c_rename_column_inline_check_body|Mysql|carries(state_token)", verdict: "DIVERGENT FO=refused FFD=refused ATO=no RMO=no", status: Status::ByDesign(PG_ONLY_TABLE_LEVEL_CHECK) },
+    Row { key: "c_rename_column_inline_check_body|Sqlite|carries(state_token)", verdict: "DIVERGENT FO=refused FFD=refused ATO=no RMO=refused", status: Status::ByDesign(PG_ONLY_TABLE_LEVEL_CHECK) },
+    Row { key: "c_rename_column_inline_check_body|Mysql|carries(state_token)", verdict: "DIVERGENT FO=refused FFD=refused ATO=no RMO=refused", status: Status::ByDesign(PG_ONLY_TABLE_LEVEL_CHECK) },
 
     // Row 12 (`renameColumn` + FK constraint definition,
     // docs/review-log.md:28404-28416): FIXED, no walker keeps the old name.
@@ -1364,21 +1375,21 @@ const ROWS: &[Row] = &[
     // OPEN defect, which is the one thing that proves it can see one.
     Row { key: "c_rename_column_index_expression|Postgres|carries(legacy_qty)", verdict: "AGREED no", status: Status::Consistent },
     Row { key: "c_rename_column_index_expression|Sqlite|carries(legacy_qty)", verdict: "AGREED no", status: Status::Consistent },
-    Row { key: "c_rename_column_index_expression|Mysql|carries(legacy_qty)", verdict: "DIVERGENT FO=refused FFD=refused ATO=no RMO=no", status: Status::ByDesign(MYSQL_HAS_NO_EXPRESSION_OR_PARTIAL_INDEX) },
+    Row { key: "c_rename_column_index_expression|Mysql|carries(legacy_qty)", verdict: "DIVERGENT FO=refused FFD=refused ATO=no RMO=refused", status: Status::ByDesign(MYSQL_HAS_NO_EXPRESSION_OR_PARTIAL_INDEX) },
     Row { key: "c_rename_column_index_include_and_predicate|Postgres|carries(legacy_qty)", verdict: "AGREED no", status: Status::Consistent },
     Row { key: "c_rename_column_index_include_and_predicate|Sqlite|carries(legacy_qty)", verdict: "AGREED no", status: Status::Consistent },
-    Row { key: "c_rename_column_index_include_and_predicate|Mysql|carries(legacy_qty)", verdict: "DIVERGENT FO=refused FFD=refused ATO=no RMO=no", status: Status::ByDesign(MYSQL_HAS_NO_EXPRESSION_OR_PARTIAL_INDEX) },
+    Row { key: "c_rename_column_index_include_and_predicate|Mysql|carries(legacy_qty)", verdict: "DIVERGENT FO=refused FFD=refused ATO=no RMO=refused", status: Status::ByDesign(MYSQL_HAS_NO_EXPRESSION_OR_PARTIAL_INDEX) },
 
     // Row 14 (`dropColumn` cascade + `Expr::Dialectal`,
     // docs/review-log.md:6873-6878): FIXED on Postgres -- the CHECK whose
     // SELECTED leg names only the surviving column is kept by both walkers that
     // model constraints.
     Row { key: "c_drop_column_cascade_dialectal_expr|Postgres|columns(legs)", verdict: "AGREED {id,kept}", status: Status::Consistent },
-    Row { key: "c_drop_column_cascade_dialectal_expr|Sqlite|columns(legs)", verdict: "DIVERGENT FO=refused FFD=refused ATO={id,kept}", status: Status::ByDesign(PG_ONLY_TABLE_LEVEL_CHECK) },
-    Row { key: "c_drop_column_cascade_dialectal_expr|Mysql|columns(legs)", verdict: "DIVERGENT FO=refused FFD=refused ATO={id,kept}", status: Status::ByDesign(PG_ONLY_TABLE_LEVEL_CHECK) },
+    Row { key: "c_drop_column_cascade_dialectal_expr|Sqlite|columns(legs)", verdict: "DIVERGENT FO=refused FFD=refused ATO={id,kept} RMO=refused", status: Status::ByDesign(PG_ONLY_TABLE_LEVEL_CHECK) },
+    Row { key: "c_drop_column_cascade_dialectal_expr|Mysql|columns(legs)", verdict: "DIVERGENT FO=refused FFD=refused ATO={id,kept} RMO=refused", status: Status::ByDesign(PG_ONLY_TABLE_LEVEL_CHECK) },
     Row { key: "c_drop_column_cascade_dialectal_expr|Postgres|carries(legs_leg_ck)", verdict: "DIVERGENT FO=yes FFD=no ATO=yes RMO=no", status: Status::ByDesign(A_TEXT_PROBE_CANNOT_SEE_AN_EMPTY_VOCABULARY) },
-    Row { key: "c_drop_column_cascade_dialectal_expr|Sqlite|carries(legs_leg_ck)", verdict: "DIVERGENT FO=refused FFD=refused ATO=no RMO=no", status: Status::ByDesign(PG_ONLY_TABLE_LEVEL_CHECK) },
-    Row { key: "c_drop_column_cascade_dialectal_expr|Mysql|carries(legs_leg_ck)", verdict: "DIVERGENT FO=refused FFD=refused ATO=yes RMO=no", status: Status::ByDesign(PG_ONLY_TABLE_LEVEL_CHECK) },
+    Row { key: "c_drop_column_cascade_dialectal_expr|Sqlite|carries(legs_leg_ck)", verdict: "DIVERGENT FO=refused FFD=refused ATO=no RMO=refused", status: Status::ByDesign(PG_ONLY_TABLE_LEVEL_CHECK) },
+    Row { key: "c_drop_column_cascade_dialectal_expr|Mysql|carries(legs_leg_ck)", verdict: "DIVERGENT FO=refused FFD=refused ATO=yes RMO=refused", status: Status::ByDesign(PG_ONLY_TABLE_LEVEL_CHECK) },
 
     // --- multi-op streams ---------------------------------------------------
     //
@@ -1430,24 +1441,24 @@ const ROWS: &[Row] = &[
 /// per `variant|Dialect`. Cells are `FO FFD ATO RMO`, `R`eaches / `S`ilent /
 /// `-` unobserved.
 const REACH: &[&str] = &[
-    "addColumn|Mysql|RRRS",
-    "addColumn|Postgres|RRRS",
-    "addColumn|Sqlite|RRRS",
-    "addConstraint|Mysql|RRRS",
-    "addConstraint|Postgres|RRRS",
-    "addConstraint|Sqlite|RRRS",
-    "alterPrimaryKey|Mysql|RRSS",
-    "alterPrimaryKey|Postgres|RRSS",
-    "alterPrimaryKey|Sqlite|RRSS",
+    "addColumn|Mysql|RRRR",
+    "addColumn|Postgres|RRRR",
+    "addColumn|Sqlite|RRRR",
+    "addConstraint|Mysql|RRRR",
+    "addConstraint|Postgres|RRRR",
+    "addConstraint|Sqlite|RRRR",
+    "alterPrimaryKey|Mysql|RRSR",
+    "alterPrimaryKey|Postgres|RRSR",
+    "alterPrimaryKey|Sqlite|RRSR",
     "alterRole|Mysql|SSSS",
     "alterRole|Postgres|SSSS",
     "alterRole|Sqlite|SSSS",
     "alterSequence|Mysql|RSSS",
     "alterSequence|Postgres|RSSS",
     "alterSequence|Sqlite|RSSS",
-    "attachPartition|Mysql|RRSS",
-    "attachPartition|Postgres|RRSS",
-    "attachPartition|Sqlite|RRSS",
+    "attachPartition|Mysql|RRSR",
+    "attachPartition|Postgres|RRSR",
+    "attachPartition|Sqlite|RRSR",
     "backfill|Mysql|SSSS",
     "backfill|Postgres|SSSS",
     "backfill|Sqlite|SSSS",
@@ -1512,7 +1523,7 @@ const REACH: &[&str] = &[
     "dropColumnNotNull|Postgres|RRRS",
     "dropColumnNotNull|Sqlite|RRRS",
     "dropConstraint|Mysql|RSRS",
-    "dropConstraint|Postgres|RRRS",
+    "dropConstraint|Postgres|RRRR",
     "dropConstraint|Sqlite|RSRS",
     "dropDomain|Mysql|SSSS",
     "dropDomain|Postgres|RSSS",
@@ -1532,9 +1543,9 @@ const REACH: &[&str] = &[
     "dropOwnedBy|Mysql|SSSS",
     "dropOwnedBy|Postgres|SSSS",
     "dropOwnedBy|Sqlite|SSSS",
-    "dropPartition|Mysql|RRSS",
-    "dropPartition|Postgres|RRSS",
-    "dropPartition|Sqlite|RRSS",
+    "dropPartition|Mysql|RRSR",
+    "dropPartition|Postgres|RRSR",
+    "dropPartition|Sqlite|RRSR",
     "dropPolicy|Mysql|RSSS",
     "dropPolicy|Postgres|RSSS",
     "dropPolicy|Sqlite|RSSS",
@@ -1544,18 +1555,18 @@ const REACH: &[&str] = &[
     "dropSchema|Mysql|RSSS",
     "dropSchema|Postgres|RSSS",
     "dropSchema|Sqlite|RSSS",
-    "dropSequence|Mysql|RRSS",
-    "dropSequence|Postgres|RRSS",
-    "dropSequence|Sqlite|RRSS",
+    "dropSequence|Mysql|RRSR",
+    "dropSequence|Postgres|RRSR",
+    "dropSequence|Sqlite|RRSR",
     "dropTable|Mysql|RRRR",
     "dropTable|Postgres|RRRR",
     "dropTable|Sqlite|RRRR",
     "dropTrigger|Mysql|RSSS",
     "dropTrigger|Postgres|RSSS",
     "dropTrigger|Sqlite|RSSS",
-    "dropView|Mysql|RRSS",
-    "dropView|Postgres|RRSS",
-    "dropView|Sqlite|RRSS",
+    "dropView|Mysql|RRSR",
+    "dropView|Postgres|RRSR",
+    "dropView|Sqlite|RRSR",
     "grant|Mysql|SSSS",
     "grant|Postgres|SSSS",
     "grant|Sqlite|SSSS",
@@ -1580,18 +1591,18 @@ const REACH: &[&str] = &[
     "setColumnNotNull|Mysql|RRRS",
     "setColumnNotNull|Postgres|RRRS",
     "setColumnNotNull|Sqlite|RRRS",
-    "setColumnType|Mysql|RRRS",
-    "setColumnType|Postgres|RRRS",
-    "setColumnType|Sqlite|RRRS",
+    "setColumnType|Mysql|RRRR",
+    "setColumnType|Postgres|RRRR",
+    "setColumnType|Sqlite|RRRR",
     "setRls|Mysql|RSSS",
     "setRls|Postgres|RSSS",
     "setRls|Sqlite|RSSS",
     "setTableOptions|Mysql|RSSR",
     "setTableOptions|Postgres|RSSR",
     "setTableOptions|Sqlite|RSSR",
-    "synchronizeIdentity|Mysql|RRSS",
-    "synchronizeIdentity|Postgres|RRSS",
-    "synchronizeIdentity|Sqlite|RRSS",
+    "synchronizeIdentity|Mysql|RRSR",
+    "synchronizeIdentity|Postgres|RRSR",
+    "synchronizeIdentity|Sqlite|RRSR",
     "update|Mysql|SSSS",
     "update|Postgres|SSSS",
     "update|Sqlite|SSSS",

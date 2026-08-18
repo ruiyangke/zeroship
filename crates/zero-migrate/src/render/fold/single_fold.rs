@@ -1,17 +1,38 @@
 //! **The single fold, and its four projections.** Step 3 of
-//! `docs/proposals/single-fold-and-effects.md` section G.
+//! `docs/proposals/single-fold-and-effects.md` section G, with step 4's first
+//! consumer moved.
 //!
 //! ONE traversal decides what an op means; four typed projections read the value it
 //! produces. A projection here MAY NOT walk the op stream, and none of them takes
 //! `&[Op]` - that is the rule enforced by the signatures below rather than by review.
 //!
-//! # This ships DEAD
+//! # One projection is LIVE; three are not
 //!
-//! Nothing in production calls [`fold`]. `#![cfg_attr(not(test), allow(dead_code))]`
-//! below is that statement in the compiler's words: outside `cfg(test)` every item in
-//! this module is unreachable, and if a consumer is ever wired to it that attribute
-//! stops being needed and the diff that removes it is the diff that moved the
-//! consumer. Step 4 moves them, one at a time, in blast-radius order.
+//! Step 3 shipped this module dead. Step 4 moves the consumers one at a time in
+//! blast-radius order, and the FIRST is done: `render_artifacts` builds the runtime
+//! collection metadata from [`FoldedSchema::project_runtime_metadata`], and the
+//! walker it replaced (`runtime_metadata_from_ops`) is deleted. `fold` itself is
+//! therefore production code, and so is everything the runtime-metadata projection
+//! reads.
+//!
+//! The remaining three projections are still reachable only from tests, which is what
+//! `#![cfg_attr(not(test), allow(dead_code))]` below still covers. The attribute goes
+//! when the last consumer moves; until then it is load-bearing for
+//! `project_snapshot`, `project_field_defs` and `project_authoring_tables` and for
+//! nothing else.
+//!
+//! # What the live projection cost the model
+//!
+//! Moving a consumer is where a projection's claim to be DERIVED gets tested, and the
+//! first move failed that test in one place. `project_runtime_metadata` re-derived the
+//! implicit unique index name `{table}_{column}_key` from the columns it could see -
+//! which silently renamed the index on every `renameTable` and `renameColumn`, naming
+//! an object no catalog has. The fix is [`ImplicitUniqueIndex`], carried by this
+//! traversal, and it is decision 4 of the proposal working as written: a projection
+//! that needs a fact the model does not carry is a MODEL change, not a second replay.
+//! The step 3 corpus could not see it - no stream there crosses a `unique` column with
+//! a rename - so it was found by writing streams for the carriers rather than by
+//! re-running the gate.
 //!
 //! # What the model carries, measured rather than promised
 //!
@@ -96,6 +117,32 @@ pub(crate) struct AuthoredTable {
     /// renames and drops. Without it a projection would have to re-resolve the
     /// charter, which means re-walking the op stream.
     pub id_primary_key_columns: BTreeSet<String>,
+    /// The indexes `createTable` creates implicitly for a `unique` column, in column
+    /// declaration order. See [`ImplicitUniqueIndex`] for why a NAME has to be state
+    /// rather than something the projection re-derives.
+    pub implicit_unique_indexes: Vec<ImplicitUniqueIndex>,
+}
+
+/// One index a `createTable` column's `unique: true` creates without naming it.
+///
+/// The two fields move differently under a rename, and that asymmetry is the whole
+/// reason this is state:
+///
+/// * `name` is FROZEN at `createTable`. PostgreSQL and SQLite store an index name
+///   independently of the table and the column it covers, so neither
+///   `ALTER TABLE ... RENAME TO` nor `ALTER TABLE ... RENAME COLUMN` renames it -
+///   the rule [`super::fold_ops`]'s `Op::RenameTable` arm states for the catalog
+///   half, measured against live servers by `fold_roundtrip_pg.rs`. A projection
+///   that re-derived `{table}_{column}_key` from the CURRENT names would invent a
+///   rename no server performs and name an index the database does not have.
+/// * `column` FOLLOWS a column rename, because the field the index covers is the
+///   same attribute under its new name.
+#[derive(Debug, Clone)]
+pub(crate) struct ImplicitUniqueIndex {
+    /// The catalog name, as `createTable` derived it. Never re-derived.
+    pub name: String,
+    /// The column it covers, under that column's current name.
+    pub column: String,
 }
 
 /// The value ONE traversal produces.
@@ -196,12 +243,19 @@ impl AuthoredState {
                     .map_err(|error| FoldError::Render(error.to_string()))?;
                 let injected_prefix_len = resolved_inject_prefix_len(columns, &resolved_inject);
                 let mut id_primary_key_columns = BTreeSet::new();
+                let mut implicit_unique_indexes = Vec::new();
                 for (index, column) in columns.iter().enumerate() {
                     if index < injected_prefix_len
                         && column.name == "id"
                         && resolved_inject.owns_id_primary_key()
                     {
                         id_primary_key_columns.insert(column.name.clone());
+                    }
+                    if column.unique.unwrap_or(false) {
+                        implicit_unique_indexes.push(ImplicitUniqueIndex {
+                            name: derived_unique_index_name(name, &column.name),
+                            column: column.name.clone(),
+                        });
                     }
                 }
                 self.tables.insert(
@@ -227,6 +281,7 @@ impl AuthoredState {
                         },
                         runtime_options: runtime_options.clone().unwrap_or_default(),
                         id_primary_key_columns,
+                        implicit_unique_indexes,
                     },
                 );
             }
@@ -343,6 +398,11 @@ impl AuthoredState {
                         .core
                         .indexes
                         .retain(|index| !index_uses_column(index, table, column, dialect));
+                    // A dropped column takes its implicit unique index with it, the
+                    // same cascade the named indexes above take.
+                    state
+                        .implicit_unique_indexes
+                        .retain(|index| index.column != *column);
                 }
             }
             Op::RenameColumn {
@@ -367,6 +427,13 @@ impl AuthoredState {
                     }
                     for index in &mut state.core.indexes {
                         rename_index_column(index, from, to);
+                    }
+                    // The COLUMN follows the rename and the NAME does not - see
+                    // `ImplicitUniqueIndex`.
+                    for index in &mut state.implicit_unique_indexes {
+                        if index.column == *from {
+                            index.column.clone_from(to);
+                        }
                     }
                 }
                 for state in self.tables.values_mut() {
@@ -521,12 +588,18 @@ impl AuthoredState {
                 }
             }
             Op::DropIndex { table, name, .. } => {
+                // An implicit unique index is a droppable catalog object under the name
+                // `createTable` gave it, so `dropIndex` has to reach it too. Dropping it
+                // leaves the COLUMN in place; only the index goes.
                 if let Some(table) = table {
                     if let Some(state) = self.tables.get_mut(table) {
                         state
                             .core
                             .indexes
                             .retain(|index| effective_index_name(table, index) != *name);
+                        state
+                            .implicit_unique_indexes
+                            .retain(|index| index.name != *name);
                     }
                 } else {
                     for (table, state) in &mut self.tables {
@@ -534,6 +607,9 @@ impl AuthoredState {
                             .core
                             .indexes
                             .retain(|index| effective_index_name(table, index) != *name);
+                        state
+                            .implicit_unique_indexes
+                            .retain(|index| index.name != *name);
                     }
                 }
             }
@@ -734,10 +810,18 @@ impl FoldedSchema {
     /// `runtime_metadata_from_ops` output: the collection options and the PLAIN
     /// indexes the `FieldDef` map cannot carry.
     ///
-    /// Derived, not tracked. `runtime_metadata_from_ops` runs its own index lifecycle
+    /// Derived, not tracked. `runtime_metadata_from_ops` ran its own index lifecycle
     /// - create, drop, column-drop, column-rename - beside the two that already run
-    /// one; here the index set is a READ of the authored indexes, so there is no
+    /// one; here the NAMED index set is a READ of the authored indexes, so there is no
     /// second lifecycle to keep in step.
+    ///
+    /// The IMPLICIT unique indexes are the one thing this projection cannot read off
+    /// the columns, and the reason is a rule rather than an omission: their names are
+    /// frozen at `createTable` and survive both renames, so they are carried on
+    /// [`AuthoredTable::implicit_unique_indexes`] by the one traversal. Re-deriving
+    /// `{table}_{column}_key` here from the CURRENT names would rename an index on
+    /// every `renameTable` and `renameColumn` - a rename PostgreSQL and SQLite do not
+    /// perform, which would put a name in `schema.runtime.json` that no catalog has.
     #[must_use]
     pub(crate) fn project_runtime_metadata(&self) -> BTreeMap<String, RuntimeCollectionMetadata> {
         let mut out: BTreeMap<String, RuntimeCollectionMetadata> = BTreeMap::new();
@@ -746,17 +830,15 @@ impl FoldedSchema {
                 options: table.runtime_options.clone(),
                 indexes: Vec::new(),
             };
-            for (column_name, column) in &table.core.columns {
-                if column.unique.unwrap_or(false) {
-                    add_runtime_index(
-                        &mut metadata.indexes,
-                        RuntimeIndexDescriptor {
-                            name: derived_unique_index_name(name, column_name),
-                            fields: vec![column_name.clone()],
-                            unique: true,
-                        },
-                    );
-                }
+            for index in &table.implicit_unique_indexes {
+                add_runtime_index(
+                    &mut metadata.indexes,
+                    RuntimeIndexDescriptor {
+                        name: index.name.clone(),
+                        fields: vec![index.column.clone()],
+                        unique: true,
+                    },
+                );
             }
             for index in &table.core.indexes {
                 // A functional / partial / method-qualified index carries no plain

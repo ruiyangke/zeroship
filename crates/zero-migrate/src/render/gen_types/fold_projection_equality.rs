@@ -1,5 +1,8 @@
 //! **The step 3 gate: every projection reproduces its walker, byte for byte.**
 //!
+//! Three legs, not four. Step 4 retired the `runtime_metadata` leg with the walker it
+//! compared against - see [`Projection`].
+//!
 //! `docs/proposals/single-fold-and-effects.md` section G step 3:
 //!
 //! > Write `fold(ops) -> SchemaModel` and the four projections. Gate: every projection
@@ -36,19 +39,19 @@
 //! # What this gate CANNOT see
 //!
 //! The fold fails CLOSED: it runs the structural catalog replay, so a stream that
-//! replay refuses produces no projection at all. `authoring_tables_from_ops` and
-//! `runtime_metadata_from_ops` apply no coherence gate and answer about such a stream
-//! anyway - `differential_corpus`'s `ONLY_THE_FOLD_BACKED_WALKERS_FAIL_CLOSED` records
-//! the same asymmetry. Those observations are counted separately as
+//! replay refuses produces no projection at all. `authoring_tables_from_ops` applies
+//! no coherence gate and answers about such a stream anyway -
+//! `differential_corpus`'s `ONLY_THE_FOLD_BACKED_WALKERS_FAIL_CLOSED` records the
+//! same asymmetry, and records that it used to name TWO walkers. Those observations are counted separately as
 //! [`Verdict::FoldRefused`] and are NOT equality evidence; the count is pinned so the
 //! gate cannot quietly lose coverage by refusing more.
 
 use std::collections::BTreeMap;
 
+use super::authoring_tables_from_ops;
 use super::differential_corpus::{
     parse, policy, read_golden, CASES, DIALECTS, SCHEMA, STEMS, STREAMS,
 };
-use super::{authoring_tables_from_ops, runtime_metadata_from_ops};
 use crate::model::ir::Op;
 use crate::model::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, SchemaSnapshot, TableSnapshot,
@@ -57,7 +60,17 @@ use crate::render::fold::single_fold;
 use crate::render::fold::{fold_ops, fold_to_field_defs};
 use crate::SqlDialect;
 
-/// The four projections, named for the walker each must reproduce.
+/// The projections still measurable here, named for the walker each must reproduce.
+///
+/// `RuntimeMetadata` is NOT in this list any more, and its absence is the shape of
+/// step 4 rather than a gap. This gate compares a projection to the WALKER it
+/// replaces, and step 4 consumer 1 deleted `runtime_metadata_from_ops`: there is no
+/// second answer left to compare `project_runtime_metadata` against, and keeping the
+/// leg would have compared the projection to itself. What replaces it is a gate at
+/// the ARTIFACT level - `tests/gen_types_runtime_metadata_from_the_fold.rs`, whose
+/// golden was captured from the walker before it was deleted, so the evidence the
+/// walker used to provide outlives the walker. Each later consumer move retires its
+/// leg here the same way.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Projection {
     /// `FoldedSchema::project_snapshot` against `fold_ops`.
@@ -66,15 +79,12 @@ enum Projection {
     FieldDefs,
     /// `FoldedSchema::project_authoring_tables` against `authoring_tables_from_ops`.
     AuthoringTables,
-    /// `FoldedSchema::project_runtime_metadata` against `runtime_metadata_from_ops`.
-    RuntimeMetadata,
 }
 
-const PROJECTIONS: [Projection; 4] = [
+const PROJECTIONS: [Projection; 3] = [
     Projection::Snapshot,
     Projection::FieldDefs,
     Projection::AuthoringTables,
-    Projection::RuntimeMetadata,
 ];
 
 impl Projection {
@@ -83,7 +93,6 @@ impl Projection {
             Projection::Snapshot => "snapshot",
             Projection::FieldDefs => "field_defs",
             Projection::AuthoringTables => "authoring_tables",
-            Projection::RuntimeMetadata => "runtime_metadata",
         }
     }
 }
@@ -108,9 +117,6 @@ fn walker_answer(
         Projection::AuthoringTables => authoring_tables_from_ops(ops, dialect)
             .map(|v| format!("{v:#?}"))
             .map_err(|e| e.to_string()),
-        Projection::RuntimeMetadata => runtime_metadata_from_ops(ops, dialect)
-            .map(|v| format!("{v:#?}"))
-            .map_err(|e| e.to_string()),
     }
 }
 
@@ -127,7 +133,6 @@ fn projection_answer(
         Projection::FieldDefs => serde_json::to_string_pretty(&folded.project_field_defs())
             .expect("field defs serialize"),
         Projection::AuthoringTables => format!("{:#?}", folded.project_authoring_tables()),
-        Projection::RuntimeMetadata => format!("{:#?}", folded.project_runtime_metadata()),
     })
 }
 
@@ -486,13 +491,30 @@ fn the_gate_has_the_shape_it_claims() {
 }
 
 /// Byte-identical comparisons across the whole corpus.
-const EQUAL_COMPARISONS: usize = 2720;
+///
+/// Was 2,720 over FOUR projections. Step 4 consumer 1 deleted
+/// `runtime_metadata_from_ops`, so the `runtime_metadata` leg has no walker left to
+/// compare against and retired; 2,720 - 2,037 = 683 is that leg's share and NOT a
+/// stream that stopped being measured. What now covers it is
+/// `tests/gen_types_runtime_metadata_from_the_fold.rs`, whose golden was captured
+/// from the walker before it was deleted.
+const EQUAL_COMPARISONS: usize = 2037;
 /// Comparisons whose two texts differ. Every one is attributed in [`DIVERGENCES`].
+///
+/// UNCHANGED at 12 across the retirement, which says something worth keeping: every
+/// recorded divergence belonged to one of the three surviving legs, and the retired
+/// leg contributed none.
 const DIFFERING_COMPARISONS: usize = 12;
 /// Prefixes both sides refuse.
 const BOTH_REFUSED: usize = 392;
 /// Prefixes the fold refuses and a walker answers about.
-const FOLD_REFUSED: usize = 392;
+///
+/// Halved from 392 to 196 because there is now ONE walker in this gate that answers
+/// where the fold refuses (`authoring_tables_from_ops`) rather than two. The
+/// runtime-metadata answer became fail-closed when it became a projection of the
+/// fold, which moved three of the four artifact producers onto the same coherence
+/// gate.
+const FOLD_REFUSED: usize = 196;
 
 // ---------------------------------------------------------------------------
 // The per-field probe
