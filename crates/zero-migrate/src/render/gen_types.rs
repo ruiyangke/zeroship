@@ -2419,3 +2419,10 @@ mod tests {
         );
     }
 }
+
+// The differential corpus over the four op-stream replays -- an in-crate test
+// module because two of the four (`runtime_metadata_from_ops`,
+// `authoring_tables_from_ops`) are private here, and the alternative is widening
+// two production functions so a test can reach them.
+#[cfg(test)]
+mod differential_corpus;
