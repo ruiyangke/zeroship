@@ -213,6 +213,18 @@ Then open `http://localhost:8000/apps/db-todos/`.
 
 ## Tests
 
+Provision the backends first. PostgreSQL and Redis are required, not optional:
+the driver suites fail when nothing answers, and they name the address they
+tried and this command.
+
+```bash
+tests/provision_test_backends.sh   # deploy/compose's postgres (:5440) + redis (:6390)
+```
+
+That is the whole setup. `PG_TEST_URL` and `REDIS_TEST_URL` default to exactly
+those two addresses, so nothing needs exporting; set them only to point a run
+somewhere else.
+
 ```bash
 cargo test -p zeroship-core
 cargo test -p zeroship-gateway

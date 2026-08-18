@@ -168,9 +168,11 @@ if [ "$CHECK_ONLY" -eq 0 ]; then
   [ -f "$COMPOSE_FILE" ] || fatal "compose file not found: $COMPOSE_FILE"
 
   echo "==> docker compose up -d postgres redis"
-  # `--` nothing clever: only the two services, so this does not drag the
-  # gateway, worker, control, auth, Caddy, verdaccio or redpanda along with it.
-  # A test run needs two servers, not the platform.
+  # Two service names and no more, so this does not drag the gateway, worker,
+  # control, auth, Caddy, verdaccio or redpanda along with it. A test run needs
+  # two servers, not the platform - and this is also what makes the placeholder
+  # env file above harmless, since no service that reads one of those values is
+  # ever created.
   dc up -d postgres redis \
     || fatal "docker compose could not start postgres and redis.
        If the port is already taken by a container this file does not own,
