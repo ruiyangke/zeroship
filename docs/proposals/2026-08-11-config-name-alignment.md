@@ -773,6 +773,60 @@ This gate's set-but-unread guarantee covers variables supplied to a checked-in
 platform service. It cannot see an arbitrary extra variable that exists only in
 an operator's host shell or `.env` and is never forwarded by Compose.
 
+### RECOMMENDATION 2026-08-18 on 4.2 and 4.3: do not finish them as written
+
+NOT A DECISION. This records what was built instead, and what that costs, so
+the choice can be made deliberately rather than by the sections quietly never
+being done. Sections 4.2 and 4.3 above are unedited.
+
+**What exists.** Neither section was built to its specification, and both were
+substituted by checks inside `tests/config_name_alignment_gate.sh`, which runs
+in CI as a named step with a self-test (`.github/workflows/ci.yml:488`, `:490`):
+
+- For 4.2: `crates/config-contract/tests/ops_toml.rs` does not exist. Check 7
+  walks `deploy/ops/zeroship.toml` and `deploy/ops/zeroship.example.toml` with
+  awk and joins each leaf against the compiled contract dump
+  (`config_name_alignment_gate.sh:446`, driven at `:778-780`). Check 8, armed
+  2026-08-17, extends the no-plaintext-secret rule to EVERY tracked `*.toml`
+  rather than the two named files, which is wider than 4.2 asked for.
+- For 4.3: no `check-compose` subcommand and no `docker compose config --format
+  json` model. Checks 6, 6b and 6c parse the raw YAML with awk
+  (`config_name_alignment_gate.sh:260`, `:321`, `:391`).
+
+**Why finishing them as written is hard to justify.** Two of 4.2's six
+assertions - 3 and 4, the lexical `urn:zeroship:env:NAME` scan and the parsed
+env-to-env alias - are moot, because `SecretRef` now has exactly two variants,
+`Literal` and `File` (`crates/core/src/config/secrets.rs:260-265`). A spelling
+the parser refuses outright needs no gate. (The count is two of six, not half;
+assertions 1, 5 and 6 remain live and are what check 7 covers.) The substitutes
+also carry the anti-vacuity guards the sections asked for: check 6 fails rather
+than passes when it sees under 5 services or under 20 variables
+(`:269-274`, `:298-302`).
+
+**THE TWO PROPERTIES THE SUBSTITUTE DOES NOT COVER.** Both must be accepted
+explicitly if this recommendation is taken:
+
+1. **`env_file`.** Section 4.3 requires rejecting `env_file` on platform
+   services, because its keys sit outside the checked model entirely. Nothing
+   enforces that. `deploy/compose/*.yml` uses no `env_file` today (zero hits),
+   so the rule is currently unviolated - but it is unviolated by accident, and
+   adding one line to a compose file would silently reopen the whole
+   set-but-unread hole with no gate firing.
+2. **`command:` argv.** Checks 6 and 6b read `environment:` alone. The gate
+   says so itself: "Every flag and every VALUE in a command block is therefore
+   invisible to checks 6 and 6b" (`config_name_alignment_gate.sh:159-163`).
+   Check 6c does read argv, but it looks for CREDENTIALS only - userinfo in a
+   URL, and a secret's value flag - not for whether a flag names a setting the
+   binary declares. So the set-but-unread property has no argv half. This is
+   the blind spot that already hid a live superuser DSN passed as
+   `--database-url <dsn>` on the platform-migrate one-shot, described at
+   `config_name_alignment_gate.sh:164-167`.
+
+The honest summary is that the awk substitute is cheaper, is armed, and is
+wider than 4.2 in one respect - and that it trades away an `env_file` rejection
+and the argv half of set-but-unread. Whether that trade is right is an operator
+call.
+
 ### 4.4 Set-but-unread check at process startup
 
 Static CI only covers checked-in deployments. At `bootstrap`, enumerate names
