@@ -65,16 +65,19 @@ pub fn resolve_client_ip(
     peer_ip
 }
 
-/// The rightmost non-empty `X-Forwarded-For` token that parses as an address.
+/// The rightmost non-empty `X-Forwarded-For` token, if it is an address.
 ///
 /// Empty tokens are skipped rather than treated as a terminator, so a
-/// trailing comma does not silently discard the hop that wrote it.
+/// trailing comma does not silently discard the hop that wrote it. A non-empty
+/// token that is NOT an address ends the search: everything further left was
+/// copied forward from the caller, so scanning past it would answer with a
+/// value the caller chose. The peer is the safer answer.
 fn trusted_forwarded_ip(header: &str) -> Option<IpAddr> {
     header
         .rsplit(',')
         .map(str::trim)
-        .filter(|token| !token.is_empty())
-        .find_map(parse_client_ip)
+        .find(|token| !token.is_empty())
+        .and_then(parse_client_ip)
 }
 
 /// Parse one forwarded token into a bare address.
@@ -176,15 +179,16 @@ mod tests {
     }
 
     #[test]
-    fn a_forged_rightmost_token_is_skipped_only_as_far_as_the_next_parseable_one() {
-        // Documents a real limit rather than a guarantee: with one trusted
-        // hop the rightmost token is proxy-authored, so this fallback is
-        // unreachable. Reached only when the deployment's assumptions are
-        // already broken, it degrades to the next-closest claim rather than
-        // to no limiting at all.
+    fn an_unparseable_closest_hop_does_not_promote_the_entry_left_of_it() {
+        // The trusted hop's own entry is the rightmost. If it is not an
+        // address, the deployment's assumption is already broken -- and
+        // "203.0.113.7" here is then a value the CALLER wrote, since callers
+        // own everything left of the trusted hop. Answer with the peer, which
+        // no caller can choose, rather than walking left until something
+        // happens to parse.
         assert_eq!(
             resolve_client_ip(Some("203.0.113.7, junk"), Some(ip("10.0.0.1")), true),
-            Some(ip("203.0.113.7"))
+            Some(ip("10.0.0.1"))
         );
     }
 }
