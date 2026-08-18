@@ -4457,10 +4457,12 @@ pub fn fold_to_field_defs(
     // the brand cannot express, `IrColumn.references`) recovers through
     // `ir_column_to_field` and needs no lift.
     let mut fks: BTreeMap<String, Vec<RecoveredFk>> = BTreeMap::new();
-    // The named-type definitions the column types only NAME. `ColType::Enum` carries
-    // `{ name, schema }` and nothing else, so the members a `t.enum("x")` column is
-    // closed over are not on the column at all - they arrive in a separate
-    // `Op::CreateEnum`. This is the SAME registry the DDL lower
+    // The named-type definitions the column types only NAME. `ColType::Enum` and
+    // `ColType::Domain` each carry `{ name, schema }` and nothing else, so neither the
+    // members a `t.enum("x")` column is closed over nor the base type a
+    // `t.domain("y")` column is really stored as is on the column at all - both arrive
+    // in a separate `Op::CreateEnum` / `Op::CreateDomain`. This is the SAME registry
+    // the DDL lower
     // (`apply_named_type_column_metadata`) and the snapshot fold
     // (`apply_fold_named_type_column_metadata`) resolve those names through, reused
     // rather than re-spelled so the three replays cannot disagree about which
@@ -4490,7 +4492,7 @@ pub fn fold_to_field_defs(
                         && c.name == "id"
                         && resolved_inject.owns_id_primary_key();
                     let mut field = fold_create_column_to_field(c, in_resolved_id_primary_key);
-                    lift_named_enum_membership(&mut field, &c.ty, &named_types);
+                    lift_named_type_facets(&mut field, &c.ty, &named_types);
                     cols.insert(c.name.clone(), field);
                 }
                 tables.insert(name.clone(), cols);
@@ -4622,7 +4624,7 @@ pub fn fold_to_field_defs(
                         generated: generated.clone(),
                         identity: *identity,
                     });
-                    lift_named_enum_membership(&mut field, ty, &named_types);
+                    lift_named_type_facets(&mut field, ty, &named_types);
                     cols.insert(column.clone(), field);
                 }
             }
@@ -4666,8 +4668,9 @@ pub fn fold_to_field_defs(
                     // membership is a contract over storage the column no longer has.
                     // A retype INTO a named enum re-earns it from the target type's
                     // own definition, so a retype to `T` and a create of `T` still
-                    // describe the same column.
-                    lift_named_enum_membership(field, to_type, &named_types);
+                    // describe the same column. A retype INTO a named DOMAIN re-earns
+                    // its base type the same way, off the same registry.
+                    lift_named_type_facets(field, to_type, &named_types);
                 }
             }
             Op::SetColumnNotNull { table, column, .. } => {
@@ -4833,6 +4836,43 @@ pub fn fold_to_field_defs(
             Op::DropEnum { name, .. } => {
                 named_types.drop_enum(name);
             }
+            // THE DOMAIN'S BASE TYPE, which no column carries either.
+            //
+            // Same shape, different facet. `ColType::Domain { name, schema }` is a
+            // NAME; the base type a `t.domain("positive_number")` column is really
+            // stored as arrives here. It used to be dropped on the catch-all below,
+            // so `col_type_to_token`'s shared `Enum | Domain` arm had the last word
+            // and every domain column - over `int`, over `varchar(40)`, over
+            // `timestamp` - reported `{"type":"string"}` while the database stored
+            // the base type on all three dialects.
+            //
+            // Registering the definition puts nothing in the DDL: the base type
+            // reaches the rendered column through `fold_ops` and the lower, which
+            // resolve this same registry into `ColumnSnapshot::data_type` and the
+            // inline CHECK. Measured byte-identical across this change, including
+            // the SQLite 12-step rebuild that DOES read this replay's output.
+            Op::CreateDomain {
+                name,
+                as_type,
+                check,
+                default,
+                not_null,
+                ..
+            } => {
+                named_types
+                    .create_domain(
+                        name,
+                        project_schema,
+                        as_type,
+                        check,
+                        default,
+                        not_null.unwrap_or(false),
+                    )
+                    .map_err(fold_named_type_error)?;
+            }
+            Op::DropDomain { name, .. } => {
+                named_types.drop_domain(name);
+            }
             // Every other op (DML, index, type/nullability alters, drop*) does not
             // change the reconstructed column-facet shape.
             // EXHAUSTIVE FROM HERE, and that is the point of this arm rather than a
@@ -4876,10 +4916,8 @@ pub fn fold_to_field_defs(
             | Op::Update { .. }
             | Op::Delete { .. }
             | Op::Backfill { .. }
-            // Named-type and vendor objects: they live outside the per-table
-            // column map this replay builds.
-            | Op::CreateDomain { .. }
-            | Op::DropDomain { .. }
+            // Vendor and schema objects: they live outside the per-table column map
+            // this replay builds.
             | Op::CreateSchema { .. }
             | Op::DropSchema { .. }
             | Op::CreateExtension { .. }
@@ -4981,7 +5019,8 @@ pub fn fold_to_field_defs(
 /// bytes satisfy, and `field_check_constraints` would turn it into a CHECK no row
 /// could pass. `ColType::Domain` is excluded for its own reason: a domain's
 /// constraint is an arbitrary predicate, not a closed value set, and `enum_values`
-/// asserts a closed set.
+/// asserts a closed set - and the domain's own defect is the TYPE TOKEN, which
+/// [`lift_named_domain_base_type`] fixes separately.
 fn lift_named_enum_membership(
     field: &mut crate::render::declarative::FieldDescriptor,
     ty: &ColType,
@@ -5001,6 +5040,140 @@ fn lift_named_enum_membership(
             .map(|value| serde_json::Value::String(value.clone()))
             .collect(),
     );
+}
+
+/// Lift a NAMED domain type's BASE TYPE onto the column descriptor that only names it.
+///
+/// # The defect
+///
+/// `ColType::Enum` and `ColType::Domain` shared one arm in `col_type_to_token`, so
+/// a column typed by a domain over `int` reported the token `"string"`. The database
+/// stores an integer on every dialect - measured, `createDomain positive_number AS int`
+/// plus a column of it renders
+///
+/// ```text
+///   postgres  CREATE DOMAIN "public"."positive_number" AS integer ...
+///             CREATE TABLE  ... ("amount" "public"."positive_number" NOT NULL, ...)
+///   sqlite    CREATE TABLE  ... ("amount" INTEGER NOT NULL CHECK (("amount" > 0)), ...)
+///   mysql     CREATE TABLE  ... (`amount` INT NOT NULL CHECK ((`amount` > 0)), ...)
+/// ```
+///
+/// - and only the `RuntimeSchemaDescriptor`, which is what a deployed app installs
+/// `env.db` from, called it a string. So the app validated an integer column as text.
+///
+/// # Why this is not a line in `col_type_to_token`, either
+///
+/// Same shape as the enum half: `ColType::Domain { name, schema }` carries the NAME
+/// only, and the base type lives in a separate [`Op::CreateDomain`]. No function whose
+/// whole input is one [`IrColumn`] can know it. This runs where the op stream is in
+/// scope and the registry has already seen the definition, and it re-derives the
+/// STORAGE-SHAPE facets through the SAME
+/// [`apply_col_type_to_field_descriptor`](crate::render::lower::apply_col_type_to_field_descriptor)
+/// a `setColumnType` uses - because the token is not the whole type. A domain over
+/// `varchar(40)` must carry `maxLength: 40` beside its `"string"`, and before this it
+/// carried neither.
+///
+/// # Unchanged beats invented
+///
+/// The token is not optional: something is always emitted, so the enum half's "leave
+/// the slot ABSENT" has no analogue. An unresolvable name therefore leaves the
+/// descriptor EXACTLY as `col_type_to_token` left it (`"string"`), which is the
+/// pre-fix behaviour and asserts nothing new. The case is PostgreSQL-only and exactly
+/// parallel to the enum half: a native domain reference needs only the NAME, so
+/// `apply_fold_named_type_column_metadata` folds without the definition, while SQLite
+/// and MySQL INLINE the base type into the column's storage and already fail closed
+/// with `domain "..." is not registered`.
+///
+/// # Termination
+///
+/// [`Op::CreateDomain`]'s `as` is a full `ColType`, so it can name another domain -
+/// and the fold does NOT refuse that on PostgreSQL (it resolves the use site by name
+/// alone), so `domain a AS domain b AS int`, and even the cycle `a AS b, b AS a`,
+/// reach this function through the real `genArtifacts` API. The walk therefore carries
+/// a `seen` set: every iteration that does not return inserts a name not already in
+/// it, and a name absent from the registry ends the walk, so the walk runs at most
+/// once per registered domain. A cycle resolves to nothing and leaves the token
+/// unchanged.
+///
+/// # Not through `ColType::Encrypted`
+///
+/// Deliberately no recursion into the wrapped type, and for a MEASURED reason rather
+/// than the enum half's. An encrypted column's descriptor `ty` IS the plaintext token
+/// and its `encrypted.wraps` is derived from the same inner type, but `wraps` is also
+/// stamped into the catalog as the `zero-migrate:enc:randomised:default:string`
+/// sentinel by the LOWER, which has no registry:
+///
+/// ```text
+///   postgres  "amount" bytea /* zero-migrate:enc:randomised:default:string */ NOT NULL
+///   sqlite    "amount" BLOB  /* zero-migrate:enc:randomised:default:string */ NOT NULL
+/// ```
+///
+/// Resolving the domain on this side only would make the runtime descriptor say
+/// `"int"`/`"number"` while the comment the introspector recovers the facet from still
+/// said `string`. That is a wider fix with a different blast radius, so an encrypted
+/// domain column keeps today's answer and the gap is recorded rather than half-closed.
+fn lift_named_domain_base_type(
+    field: &mut crate::render::declarative::FieldDescriptor,
+    ty: &ColType,
+    named_types: &NamedTypeRegistry,
+) {
+    let ColType::Domain { name, .. } = ty else {
+        return;
+    };
+    let Some(base) = resolve_domain_base_type(name, named_types) else {
+        return;
+    };
+    crate::render::lower::apply_col_type_to_field_descriptor(field, base);
+}
+
+/// Walk a domain name to the first base type that is not itself a domain.
+///
+/// `None` when the name is not registered, when the walk leaves the registry, or when
+/// it revisits a name (a cycle) - all three are "no provable base type", and the
+/// caller leaves the descriptor alone rather than inventing one.
+///
+/// A base type that is an ENUM stops the walk and is returned as itself: its token is
+/// `"string"`, the same token the domain already had, so a domain over an enum keeps
+/// today's answer. Its MEMBERS are deliberately not lifted - a domain's own `CHECK` may
+/// narrow the base enum's set, which would make the members an upper bound rather than
+/// the contract, and `field_check_constraints` renders `enum_values` as a hard
+/// `CHECK (<col> IN (...))`.
+fn resolve_domain_base_type<'a>(
+    name: &str,
+    named_types: &'a NamedTypeRegistry,
+) -> Option<&'a ColType> {
+    let mut seen: std::collections::BTreeSet<&'a str> = std::collections::BTreeSet::new();
+    let mut def = named_types.domain_def(name).ok()?;
+    loop {
+        match &def.as_type {
+            ColType::Domain { name, .. } => {
+                if !seen.insert(name.as_str()) {
+                    return None;
+                }
+                def = named_types.domain_def(name).ok()?;
+            }
+            base => return Some(base),
+        }
+    }
+}
+
+/// Resolve every named-type facet a column's declared type only NAMES.
+///
+/// The single call site for the two per-kind lifts, so the THREE places a column
+/// acquires a type (`createTable`, `addColumn`, `setColumnType`) cannot drift from one
+/// another as named-type kinds are added. Order is irrelevant: the two lifts match
+/// disjoint `ColType` variants.
+///
+/// The `id` token a policy-owned primary key carries is never at risk here: an injected
+/// column's type comes from `inject_column_to_ir`'s three-token lexicon
+/// (`text`/`timestamptz`/`integer`), which cannot spell a named type at all.
+fn lift_named_type_facets(
+    field: &mut crate::render::declarative::FieldDescriptor,
+    ty: &ColType,
+    named_types: &NamedTypeRegistry,
+) {
+    lift_named_enum_membership(field, ty, named_types);
+    lift_named_domain_base_type(field, ty, named_types);
 }
 
 fn fold_create_column_to_field(

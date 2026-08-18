@@ -10364,34 +10364,7 @@ pub(crate) fn ir_column_to_field_resolved_create(c: &IrColumn) -> FieldDescripto
 /// database keeps a contract this side can no longer describe. The full
 /// measurement is recorded at that refusal.
 pub(crate) fn retype_field_descriptor(field: &mut FieldDescriptor, to_type: &ColType) {
-    // Build the target column's descriptor through the SAME translation a
-    // `createTable` column goes through, so a retype to `T` and a create of `T`
-    // can never disagree about what `T` is. Re-spelling the type→facet mapping
-    // here is exactly how this replay drifted from the other two.
-    let retyped = ir_column_to_field(&IrColumn {
-        name: field.name.clone(),
-        ty: to_type.clone(),
-        nullable: None,
-        default: None,
-        unique: None,
-        value_format: None,
-        references: None,
-        id_prefix: None,
-        collation: None,
-        vector_metric: None,
-        case_sensitive: None,
-        mask: None,
-        generated: None,
-        identity: None,
-    });
-
-    // Re-derived from the target type.
-    field.ty = retyped.ty;
-    field.max_length = retyped.max_length;
-    field.char_len = retyped.char_len;
-    field.vector_dims = retyped.vector_dims;
-    field.unbounded_text = retyped.unbounded_text;
-    field.encrypted = retyped.encrypted;
+    apply_col_type_to_field_descriptor(field, to_type);
 
     // Cleared.
     field.case_sensitive = None;
@@ -10406,6 +10379,51 @@ pub(crate) fn retype_field_descriptor(field: &mut FieldDescriptor, to_type: &Col
     // `required`, `unique`, `default`, `references` / `reference_column` /
     // `reference_name` / `on_delete` / `on_update` / `deferrable`, `generated`,
     // `identity`, `fts` / `fts_language`, `mask`, and `name`.
+}
+
+/// Re-derive the STORAGE-SHAPE facets of an existing descriptor from a
+/// [`ColType`], leaving every other facet alone.
+///
+/// The type token is not the whole type: `String { length }`, `Char { length }`
+/// and `Vector { vector }` carry their parameter in a SIBLING descriptor field,
+/// and `Encrypted { of }` splits into an inner token plus the `encrypted` facet.
+/// So anything that decides "this column is really shaped like `T`" has to move
+/// all five together or it emits a token whose parameters describe the old type.
+///
+/// Extracted so the two callers cannot drift: [`retype_field_descriptor`] (a
+/// `setColumnType` replacing the type outright) and the fold's named-domain lift
+/// (a column whose declared type NAMES a domain whose base type is `T`). The
+/// difference between them is what they additionally CLEAR, not what they derive,
+/// so only the retype clears.
+pub(crate) fn apply_col_type_to_field_descriptor(field: &mut FieldDescriptor, ty: &ColType) {
+    // Build the target column's descriptor through the SAME translation a
+    // `createTable` column goes through, so a retype to `T`, a domain over `T`
+    // and a create of `T` can never disagree about what `T` is. Re-spelling the
+    // type-to-facet mapping here is exactly how this replay drifted from the other
+    // two.
+    let derived = ir_column_to_field(&IrColumn {
+        name: field.name.clone(),
+        ty: ty.clone(),
+        nullable: None,
+        default: None,
+        unique: None,
+        value_format: None,
+        references: None,
+        id_prefix: None,
+        collation: None,
+        vector_metric: None,
+        case_sensitive: None,
+        mask: None,
+        generated: None,
+        identity: None,
+    });
+
+    field.ty = derived.ty;
+    field.max_length = derived.max_length;
+    field.char_len = derived.char_len;
+    field.vector_dims = derived.vector_dims;
+    field.unbounded_text = derived.unbounded_text;
+    field.encrypted = derived.encrypted;
 }
 
 /// The MySQL storage the declared facets of an authored column render into.
