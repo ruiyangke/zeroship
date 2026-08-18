@@ -1114,6 +1114,19 @@ enum Status {
     /// They differ, or they agree, and at least one of them is WRONG. This row
     /// records WHAT HAPPENS TODAY AND IT IS WRONG. It is not a specification,
     /// and the single fold must NOT be held to it.
+    ///
+    /// Currently UNCONSTRUCTED: the rename carrier sweep re-measured the last
+    /// three defect rows to `AGREED`. The variant stays because the corpus's
+    /// job is to have somewhere honest to put the next one - deleting the
+    /// vocabulary the moment the count reaches zero is how a corpus stops being
+    /// able to record bad news. `the_corpus_has_the_shape_it_claims` counts it,
+    /// and `every_defect_row_names_its_evidence` still governs how one is
+    /// written.
+    #[expect(
+        dead_code,
+        reason = "the defect vocabulary outlives the current defect count; see the \
+                  doc comment"
+    )]
     Defect(&'static str),
     /// Fewer than two walkers can answer. Recorded, uncorroborated: a defect
     /// here is invisible to this corpus, by construction.
@@ -1168,22 +1181,35 @@ const ONLY_THE_FOLD_BACKED_WALKERS_FAIL_CLOSED: &str =
      the fold refuses; harmless at the composite entry point, because \
      render_artifacts returns the fold's error and emits neither artifact";
 
-/// The rename carrier this corpus found. The log's own list of still-open
-/// carriers names four; this is a fifth of the same kind.
-const A_CHECK_BODY_IS_A_FIFTH_RENAME_CARRIER: &str =
-    "UNRECORDED before this corpus. docs/review-log.md:6837-6847 lists four \
-     rendered-SQL carriers a renameColumn does not follow (UNIQUE and FK \
-     definitions, index predicate, index expression); a table-level CHECK's \
-     ConstraintSnapshot::definition is a fifth, and definition IS compared by \
-     ConstraintSnapshot's hand-written PartialEq";
-
-const INDEX_PREDICATE_CARRIER: &str =
-    "docs/review-log.md:6837-6847 -- IndexSnapshot::predicate is one of the four \
-     rendered-SQL carriers recorded as STILL OPEN there, and it still is";
-
-const INDEX_EXPRESSION_CARRIER: &str =
-    "docs/review-log.md:6837-6847 -- IndexElementSnapshot::Expr is one of the four \
-     rendered-SQL carriers recorded as STILL OPEN there, and it still is";
+// THE THREE RENDERED-SQL RENAME CARRIERS THIS CORPUS FOUND ARE NOW CLOSED, and
+// their rows below read `AGREED no` / `Consistent` rather than
+// `DIVERGENT FO=yes` / `Defect`. Recorded here because the constants that named
+// them are gone and a reader diffing this file deserves to know why.
+//
+//   c_rename_column_inline_check_body|Postgres|carries(state_token)
+//     -- a table-level CHECK's `ConstraintSnapshot::definition`. This corpus
+//        found it; `docs/review-log.md:6837-6847` had listed four carriers and
+//        this was a fifth of the same kind, and the field IS compared by
+//        `ConstraintSnapshot`'s hand-written `PartialEq`.
+//   c_rename_column_index_expression|{Postgres,Sqlite}|carries(legacy_qty)
+//     -- `IndexElementSnapshot::Expr`, one of that list's four.
+//   c_rename_column_index_include_and_predicate|{Postgres,Sqlite}|carries(legacy_qty)
+//     -- `IndexSnapshot::predicate`, another of them.
+//
+// What changed is the TOOL, not the appetite for risk. Every one of them was
+// left stale on the stated grounds that substituting a column name inside
+// rendered SQL would corrupt a string literal spelling the same word
+// (`WHERE (note <> 'a')` becoming `WHERE (note <> 'b')`). That reason outlived
+// the objection it answered: `render::declarative::rename_quoted_column_in_sql`
+// walks the fragment as QUOTED RUNS, so a literal is copied through whole and
+// the trap is structurally unreachable. It was written for `inline_checks` and
+// nobody went back to the three siblings it also solved - which is the F113
+// pattern (fixing one instance suppresses the search for its class) with the
+// tool, rather than the fix, as the thing not carried across.
+//
+// Measured end to end against live PostgreSQL 18.4 and real SQLite by
+// `rename_carrier_sweep_pg` / `rename_carrier_sweep_sqlite`, which also pin the
+// literal's SURVIVAL - a rewrite that corrupts it is worse than the staleness.
 
 const MYSQL_HAS_NO_EXPRESSION_OR_PARTIAL_INDEX: &str =
     "MySQL has no partial or expression index in this engine, so the two \
@@ -1313,7 +1339,7 @@ const ROWS: &[Row] = &[
     Row { key: "c_rename_column_inline_check_body|Postgres|columns(issues)", verdict: "AGREED {id,status_token}", status: Status::Consistent },
     Row { key: "c_rename_column_inline_check_body|Sqlite|columns(issues)", verdict: "DIVERGENT FO=refused FFD=refused ATO={id,status_token}", status: Status::ByDesign(PG_ONLY_TABLE_LEVEL_CHECK) },
     Row { key: "c_rename_column_inline_check_body|Mysql|columns(issues)", verdict: "DIVERGENT FO=refused FFD=refused ATO={id,status_token}", status: Status::ByDesign(PG_ONLY_TABLE_LEVEL_CHECK) },
-    Row { key: "c_rename_column_inline_check_body|Postgres|carries(state_token)", verdict: "DIVERGENT FO=yes FFD=no ATO=no RMO=no", status: Status::Defect(A_CHECK_BODY_IS_A_FIFTH_RENAME_CARRIER) },
+    Row { key: "c_rename_column_inline_check_body|Postgres|carries(state_token)", verdict: "AGREED no", status: Status::Consistent },
     Row { key: "c_rename_column_inline_check_body|Sqlite|carries(state_token)", verdict: "DIVERGENT FO=refused FFD=refused ATO=no RMO=no", status: Status::ByDesign(PG_ONLY_TABLE_LEVEL_CHECK) },
     Row { key: "c_rename_column_inline_check_body|Mysql|carries(state_token)", verdict: "DIVERGENT FO=refused FFD=refused ATO=no RMO=no", status: Status::ByDesign(PG_ONLY_TABLE_LEVEL_CHECK) },
 
@@ -1335,11 +1361,11 @@ const ROWS: &[Row] = &[
     // ... and the two rendered-SQL index carriers that entry recorded as still
     // open at 6837-6847 are still open. This is the corpus reproducing an
     // OPEN defect, which is the one thing that proves it can see one.
-    Row { key: "c_rename_column_index_expression|Postgres|carries(legacy_qty)", verdict: "DIVERGENT FO=yes FFD=no ATO=no RMO=no", status: Status::Defect(INDEX_EXPRESSION_CARRIER) },
-    Row { key: "c_rename_column_index_expression|Sqlite|carries(legacy_qty)", verdict: "DIVERGENT FO=yes FFD=no ATO=no RMO=no", status: Status::Defect(INDEX_EXPRESSION_CARRIER) },
+    Row { key: "c_rename_column_index_expression|Postgres|carries(legacy_qty)", verdict: "AGREED no", status: Status::Consistent },
+    Row { key: "c_rename_column_index_expression|Sqlite|carries(legacy_qty)", verdict: "AGREED no", status: Status::Consistent },
     Row { key: "c_rename_column_index_expression|Mysql|carries(legacy_qty)", verdict: "DIVERGENT FO=refused FFD=refused ATO=no RMO=no", status: Status::ByDesign(MYSQL_HAS_NO_EXPRESSION_OR_PARTIAL_INDEX) },
-    Row { key: "c_rename_column_index_include_and_predicate|Postgres|carries(legacy_qty)", verdict: "DIVERGENT FO=yes FFD=no ATO=no RMO=no", status: Status::Defect(INDEX_PREDICATE_CARRIER) },
-    Row { key: "c_rename_column_index_include_and_predicate|Sqlite|carries(legacy_qty)", verdict: "DIVERGENT FO=yes FFD=no ATO=no RMO=no", status: Status::Defect(INDEX_PREDICATE_CARRIER) },
+    Row { key: "c_rename_column_index_include_and_predicate|Postgres|carries(legacy_qty)", verdict: "AGREED no", status: Status::Consistent },
+    Row { key: "c_rename_column_index_include_and_predicate|Sqlite|carries(legacy_qty)", verdict: "AGREED no", status: Status::Consistent },
     Row { key: "c_rename_column_index_include_and_predicate|Mysql|carries(legacy_qty)", verdict: "DIVERGENT FO=refused FFD=refused ATO=no RMO=no", status: Status::ByDesign(MYSQL_HAS_NO_EXPRESSION_OR_PARTIAL_INDEX) },
 
     // Row 14 (`dropColumn` cascade + `Expr::Dialectal`,
@@ -1707,8 +1733,8 @@ fn the_corpus_has_the_shape_it_claims() {
     let defects = count(|r| matches!(r.status, Status::Defect(_)));
 
     assert_eq!(ROWS.len(), 114, "recorded rows");
-    assert_eq!(agreed, 71, "AGREED rows");
-    assert_eq!(divergent, 40, "DIVERGENT rows");
+    assert_eq!(agreed, 76, "AGREED rows");
+    assert_eq!(divergent, 35, "DIVERGENT rows");
     assert_eq!(sole, 3, "SOLE rows, which cross-check nothing");
     assert_eq!(
         agreed + divergent + sole,
@@ -1716,13 +1742,24 @@ fn the_corpus_has_the_shape_it_claims() {
         "no other verdict shape"
     );
     assert_eq!(
-        defects, 5,
+        defects, 0,
         "rows recording a defect. Lowering this number means a walker was fixed \
          AND its row re-measured, or that evidence was deleted; the two read the \
          same in a diff, so the number is stated here. It went 8 -> 5 when the \
          MySQL retype stopped folding the pre-retype physical contract: three rows \
          on one defect, all re-measured to AGREED against a live MySQL oracle \
-         (tests/fold_retype_physical_type_mysql.rs)"
+         (tests/fold_retype_physical_type_mysql.rs). It went 5 -> 0 with the RENAME \
+         CARRIER SWEEP, which closed the corpus's last three defects at once rather \
+         than one at a time: a CHECK ConstraintSnapshot::definition (the fifth \
+         carrier this corpus itself found), IndexSnapshot::predicate and an \
+         IndexElementSnapshot::Expr, five rows across two dialects, all re-measured \
+         to AGREED with live oracles in tests/rename_carrier_sweep_pg.rs \
+         (PostgreSQL 18.4) and tests/rename_carrier_sweep_sqlite.rs. \
+         ZERO IS NOT A CLAIM THAT THE WALKERS ARE CORRECT. It says every \
+         disagreement THIS corpus can see is now agreed or recorded as by-design, \
+         and its sight is bounded by CASES - the sweep itself found a carrier no \
+         case here probes (TableSnapshot::partition_by, which TableSnapshot's \
+         PartialEq compares and which therefore reported real drift)"
     );
     assert_eq!(CASES.len(), 20, "differential cases");
     assert_eq!(

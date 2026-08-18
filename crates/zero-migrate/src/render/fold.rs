@@ -1968,9 +1968,13 @@ pub fn fold_ops_onto(
                 // matching for a CHECK body is structurally unreachable - see
                 // `rename_constraint_definition_column`, which also carries the
                 // round-trip guard that leaves a definition the parser mishandles STALE
-                // rather than CORRUPT. A CHECK body stays stale here (it reads its
-                // columns out of an expression, needs the `Expr` the snapshot
-                // discarded, and reports nothing because the differ exempts it).
+                // rather than CORRUPT.
+                //
+                // A CHECK body is the FOURTH kind and needs the OTHER tool, applied
+                // just below: its leading group is an arbitrary EXPRESSION, so a column
+                // LIST re-render cannot spell it, and the quoted-run walk can. An
+                // EXCLUDE carries an EMPTY definition by construction and has nothing
+                // to follow.
                 for constraint in &mut snap.constraints {
                     if let Some(cascade_columns) = &mut constraint.cascade_columns {
                         for local in cascade_columns.iter_mut() {
@@ -1991,6 +1995,17 @@ pub fn fold_ops_onto(
                         }
                     }
                 }
+                // The CHECK body, through the quoted-run walk rather than the column-list
+                // re-render above. Measured against live PostgreSQL 18.4: after
+                // `rename qty_on_hand -> amount_on_hand` the server deparses
+                // `CHECK (((amount_on_hand > 0) AND (note <> 'qty_on_hand'::text)))` -
+                // the REFERENCE moves and the LITERAL does not - and the fold now says
+                // the same thing about both halves. See
+                // `render::declarative::rename_column_in_check_definitions` for why the
+                // walk is sound here and what it still leaves stale.
+                crate::render::declarative::rename_column_in_check_definitions(
+                    snap, from, to, dialect,
+                );
                 // An index names columns too, and a rename has to follow it for the
                 // same reason. `pg_index` references the attribute by `attnum`, never
                 // by name, so PG renames the attribute in place and every index over
@@ -2018,17 +2033,18 @@ pub fn fold_ops_onto(
                 // meaning here (unlike the positional key and INCLUDE lists), so it is
                 // re-sorted back to the canonical form `create_index_snapshot` emits.
                 //
-                // STILL NOT rewritten, and measured stale on PG 18.4: the rendered text
-                // in `predicate` and in an `IndexElementSnapshot::Expr` key, both of
-                // which drift DOES compare. After `rename a -> b` the fold keeps
-                // `("a" > 0)` / `expr:("a" + 1)` while live reports `(b > 0)` /
-                // `expr:(b + 1)`. A column LIST cannot fix that - re-rendering needs the
-                // `Expr` the snapshot discarded - and swapping the name inside the text
-                // is the exact false-positive the provenance above exists to avoid
-                // (`WHERE (note <> 'a')` would become `WHERE (note <> 'b')`). That trap
-                // is why the `ConstraintSnapshot::definition` rewrite above is confined
-                // to a leading COLUMN LIST, where a string literal cannot appear: these
-                // two sites are arbitrary expressions and admit no such argument.
+                // The two RENDERED-SQL sites - `predicate` and an
+                // `IndexElementSnapshot::Expr` key - follow the rename too, applied just
+                // below. They were left stale for as long as the only tool was naive
+                // substitution, whose false positive (`WHERE (note <> 'a')` becoming
+                // `WHERE (note <> 'b')`) is real and is why the rewrite waited. It no
+                // longer has to: the quoted-run walk copies a string literal through
+                // WHOLE, so the trap is structurally unreachable, and the fold renders
+                // both bodies through `render_expr_inline`, which quotes every `ColRef`
+                // with the same speller the walk's round-trip guard re-quotes with. What
+                // stays stale is a CATALOG-derived body, whose identifiers are BARE and
+                // which carries no AST to re-render from - see
+                // `render::declarative::rename_column_in_index_bodies`.
                 for index in &mut snap.indexes {
                     for column in &mut index.columns {
                         if column == from {
@@ -2054,6 +2070,28 @@ pub fn fold_ops_onto(
                             }
                         }
                         expr_cascade_columns.sort();
+                    }
+                }
+                crate::render::declarative::rename_column_in_index_bodies(snap, from, to, dialect);
+                // The PARTITION KEY names columns, and it is the carrier with the worst
+                // failure mode of the set: `TableSnapshot::eq` COMPARES `partition_by`,
+                // so a stale key is drift the differ REPORTS - on every introspection,
+                // forever, with no apply able to clear it. The other rendered-SQL
+                // carriers at least fail quietly.
+                //
+                // PostgreSQL holds the key in `pg_partitioned_table.partattrs` as
+                // attribute NUMBERS, so `pg_get_partkeydef` deparses the new name the
+                // instant the rename commits (measured on 18.4:
+                // `RANGE (created_at)` -> `RANGE (event_day)`), and live introspection
+                // expands those same `partattrs` through `pg_attribute`. The key is a
+                // STRUCTURED column list, so this is a name compare like `columns` and
+                // `include` above - no text surgery, and POSITIONAL, so it is rewritten
+                // in place and never re-sorted.
+                if let Some(partition_by) = snap.partition_by.as_mut() {
+                    for column in partition_by.columns_mut() {
+                        if column == from {
+                            column.clone_from(to);
+                        }
                     }
                 }
                 // A FK in ANOTHER table names this column in its REFERENCES tail, and

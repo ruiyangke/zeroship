@@ -2960,6 +2960,121 @@ fn rename_quoted_column_in_sql(
     rewrote.then_some(out)
 }
 
+/// Follow a COLUMN rename into the two RENDERED-SQL sites an index carries: the
+/// partial-index `predicate` and the body of an [`IndexElementSnapshot::Expr`] key.
+///
+/// # Why this is now sound, when the arm's own comment used to say it was not
+///
+/// Both sites were left STALE on purpose for as long as the only tool on offer was
+/// NAIVE SUBSTITUTION, and the reason recorded in `render::fold`'s `Op::RenameColumn`
+/// arm was correct as far as it went: "swapping the name inside the text ...
+/// `WHERE (note <> 'a')` would become `WHERE (note <> 'b')`". What changed is that
+/// [`rename_quoted_column_in_sql`] exists. It is not a substitution - it walks the
+/// fragment as QUOTED RUNS, so a `'…'` string literal is copied through WHOLE and can
+/// never be mistaken for a column reference, which is precisely the false positive that
+/// ruled the rewrite out. The reason survived the tool that invalidated it; this is the
+/// sweep that noticed.
+///
+/// The match is EXACT on the decoded identifier and carries a round-trip guard, and
+/// every body these two fields hold on the fold's side was rendered by
+/// `render::dml::render_expr_inline`, which spells a `ColRef` through
+/// `quote_ident_for_dialect` - the SAME function the guard re-quotes with - over an
+/// identifier charset restricted to `[A-Za-z_][A-Za-z0-9_]*`. So for a FOLD-produced
+/// body the guard cannot spuriously decline, and a literal cannot spuriously match.
+///
+/// # What is still left stale, and why that is the honest outcome
+///
+/// A CATALOG-derived body. `pg_get_indexdef` deparses `(qty_on_hand > 0)` with the
+/// identifier BARE, and a bare token is not rewritten at all - matching one would mean
+/// matching a function name, a type name after `::`, or a qualifier, which is the
+/// corrupt-rather-than-stale direction this crate refuses. Introspection recovers no
+/// AST either, so there is nothing to re-render from. A catalog body therefore stays
+/// stale, exactly as `GeneratedColumnSnapshot::source: None` stays stale, and the
+/// differ already declines to compare either body
+/// (`apply::drift::index_expression_bodies_are_comparable`) so no drift is reported for
+/// it. The reach of this rewrite is the fold's own renderings, which is where the
+/// emitted DDL comes from.
+///
+/// # What it costs to skip
+///
+/// All three dialect emitters splice both fields into `CREATE INDEX` verbatim
+/// (`... ({col_list}){}` with `idx.predicate` as the `WHERE` tail), so a stale body is
+/// not merely a comparison artifact: it is `CREATE INDEX … WHERE ("qty_on_hand" > 0)`
+/// against a table whose column is now `amount_on_hand`.
+pub(crate) fn rename_column_in_index_bodies(
+    snapshot: &mut TableSnapshot,
+    from: &str,
+    to: &str,
+    dialect: SqlDialect,
+) {
+    for index in &mut snapshot.indexes {
+        if let Some(predicate) = index.predicate.as_mut() {
+            if let Some(renamed) = rename_quoted_column_in_sql(predicate, from, to, dialect) {
+                *predicate = renamed;
+            }
+        }
+        for element in &mut index.elements {
+            match element {
+                IndexElementSnapshot::Expr(expr) => {
+                    if let Some(renamed) = rename_quoted_column_in_sql(expr, from, to, dialect) {
+                        *expr = renamed;
+                    }
+                }
+                // The plain-column key is a STRUCTURED name, rewritten by the caller
+                // against the column list rather than by a text walk.
+                IndexElementSnapshot::Column { .. } => {}
+            }
+        }
+    }
+}
+
+/// Follow a COLUMN rename into a table-level CHECK constraint's `definition`.
+///
+/// The FOURTH rendered-SQL carrier, and the one
+/// [`crate::render::fold::rename_constraint_definition_column`] deliberately cannot
+/// reach: that function re-renders a definition's LEADING PARENTHESIZED GROUP as a
+/// COLUMN LIST, which is right for `UNIQUE` / `PRIMARY KEY` / `FOREIGN KEY` and wrong
+/// for a `CHECK`, whose leading group is an arbitrary EXPRESSION. So the CHECK body
+/// needs the other tool - the quoted-run walk - for the same reason
+/// [`rename_column_in_inline_checks`] does, and for the same reason it is safe:
+/// `CHECK ((("qty_on_hand" > 0) AND ("note" <> 'qty_on_hand')))` must come out with the
+/// REFERENCE moved and the LITERAL untouched, and a run walk is what tells them apart.
+///
+/// KIND-GATED to `CHECK`. The three column-list kinds keep their existing re-render
+/// (quoting there is CONDITIONAL, so a run walk would rewrite nothing for a bare
+/// lowercase column and would rewrite the REFERENCED side too for a quoted one - wrong
+/// in both regimes), and an `EXCLUDE` carries an EMPTY definition by construction.
+///
+/// # Why the fold, and only the fold
+///
+/// `ConstraintSnapshot`'s `PartialEq` COMPARES `definition`, and the note on that field
+/// records the standing rule: a rename-follow on a compared field has to run after every
+/// decision that equality drives. In the FOLD that is unconditional - the arm already
+/// rewrites the other three kinds in the same loop, and the fold is building the
+/// authoritative post-rename state rather than deciding whether a rebuild can be skipped.
+/// The SQLite rename REBUILD is the case that cannot do this here, which is why its own
+/// rewrite lives one layer down in `render_create_table_sqlite_rebuild`; it is not
+/// extended to `CHECK` because the fold REFUSES to put a table-level CHECK in a SQLite
+/// snapshot at all (`createTable table-level CHECK is PostgreSQL-only`), so there is no
+/// SQLite CHECK definition for a rebuild to splice.
+pub(crate) fn rename_column_in_check_definitions(
+    snapshot: &mut TableSnapshot,
+    from: &str,
+    to: &str,
+    dialect: SqlDialect,
+) {
+    for constraint in &mut snapshot.constraints {
+        if constraint.kind != "CHECK" {
+            continue;
+        }
+        if let Some(renamed) =
+            rename_quoted_column_in_sql(&constraint.definition, from, to, dialect)
+        {
+            constraint.definition = renamed;
+        }
+    }
+}
+
 /// Follow a COLUMN rename into every inline CHECK body this table carries.
 ///
 /// The sibling of [`rename_column_in_generated_columns`], one field over and reached

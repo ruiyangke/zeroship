@@ -1,27 +1,48 @@
-//! Live PostgreSQL oracle for the STALE INDEX BODY a column rename leaves in the fold.
+//! Live PostgreSQL oracle for the two RENDERED-SQL index bodies a column rename has to
+//! follow, and for the differ exemption that still covers their SPELLING.
 //!
-//! The `Op::RenameColumn` arm of `render/fold.rs` rewrites every STRUCTURED column
-//! name an index carries - `IndexSnapshot::columns`, the `Column` variant of
-//! `elements`, the `INCLUDE` payload and the `expr_cascade_columns` provenance - and
-//! deliberately rewrites NEITHER rendered-SQL site: the partial-index `predicate` and
-//! the text inside an `IndexElementSnapshot::Expr` key. Repairing those needs the
-//! closed `Expr` the snapshot discarded, and substituting a name inside rendered SQL
-//! is the false positive the provenance exists to avoid (`WHERE (note <> 'a')` would
-//! become `WHERE (note <> 'b')`).
+//! ## What this file used to assert, and why that changed
+//!
+//! It used to pin the partial-index `predicate` and the text inside an
+//! `IndexElementSnapshot::Expr` key as deliberately STALE. The `Op::RenameColumn` arm
+//! rewrote every STRUCTURED column name an index carries - `IndexSnapshot::columns`,
+//! the `Column` variant of `elements`, the `INCLUDE` payload and the
+//! `expr_cascade_columns` provenance - and neither rendered-SQL site, on the grounds
+//! that repairing them needed the closed `Expr` the snapshot discarded and that
+//! substituting a name inside rendered SQL is the false positive the provenance exists
+//! to avoid (`WHERE (note <> 'a')` would become `WHERE (note <> 'b')`).
+//!
+//! The trap is real; the conclusion was not. `rename_quoted_column_in_sql` walks a
+//! fragment as QUOTED RUNS, so a `'…'` literal is copied through whole and the false
+//! positive is structurally unreachable - and the fold renders both bodies through
+//! `render_expr_inline`, which quotes every `ColRef` with the same speller that walk's
+//! round-trip guard re-quotes with. The RENAME CARRIER SWEEP applied it to both sites,
+//! so the fold now projects `("amount_on_hand" > 0)` and `("amount_on_hand" + 1)`. The
+//! two `must stay stale` assertions below are INVERTED rather than relaxed.
+//!
+//! What is still left stale, and stated so it is not mistaken for completeness: a
+//! CATALOG-derived body. `pg_get_indexdef` deparses its identifiers BARE, the walk
+//! matches only QUOTED ones, and introspection recovers no AST to re-render from - so a
+//! snapshot projected onto a live base keeps the old spelling. That is the
+//! stale-not-corrupt line this crate draws everywhere else, and the differ exemption
+//! below is what keeps it from reporting.
+//!
+//! ## What it still asserts, unchanged
 //!
 //! PostgreSQL holds `indpred` / `indexprs` as parse trees over ATTRIBUTE NUMBERS, so
 //! `pg_get_indexdef` deparses the NEW name the instant the rename commits. Measured
-//! here on PostgreSQL 18.4: the fold projects `("qty_on_hand" > 0)` and
-//! `("qty_on_hand" + 1)` where live reports `(amount_on_hand > 0)` and
-//! `(amount_on_hand + 1)`.
+//! here on PostgreSQL 18.4, the two sides still DIVERGE - the fold QUOTES every
+//! identifier and the deparser does not - so `("amount_on_hand" > 0)` meets
+//! `(amount_on_hand > 0)` and every assertion below keeps two distinct strings to
+//! compare.
 //!
 //! The differ used to byte-compare both, so that disagreement reported as drift on
 //! every introspection, forever, and no apply could clear it. It no longer compares
 //! either BODY (`apply::drift::index_expression_bodies_are_comparable`) and compares
 //! the REFERENCED-COLUMN SET instead, recovered structurally from `pg_depend` on the
 //! live side. This test refuses to take "the differ is quiet" as evidence: it asserts
-//! each side of the disagreement separately - the fold naming the old column, live
-//! naming the new one - and only then asserts what the differ says about the pair.
+//! each side of the disagreement separately and only then asserts what the differ says
+//! about the pair.
 //!
 //! The last two arms are what keep the exemption from being a capitulation. A fold
 //! whose predicate and expression key read a DIFFERENT column than live's must still
@@ -377,7 +398,7 @@ async fn measure() -> Option<Measured> {
 }
 
 #[compio::test]
-async fn a_rename_leaves_both_folded_index_bodies_stale_and_unreported() {
+async fn a_rename_moves_both_folded_index_bodies_and_their_spelling_stays_unreported() {
     let Some(measured) = measure().await else {
         return;
     };
@@ -394,20 +415,24 @@ async fn a_rename_leaves_both_folded_index_bodies_stale_and_unreported() {
         no_predicate_report,
     } = measured;
 
-    // The fold's rendered predicate still names the PRE-rename column. Deliberate: a
-    // column LIST cannot repair an arbitrary expression, and substituting the name
-    // inside the text would rewrite a string literal that merely spells it.
+    // Both rendered bodies FOLLOW the rename. They are the second and third carriers of
+    // the rename carrier sweep, rewritten through the quoted-run walk: a column LIST
+    // cannot repair an arbitrary expression, but a walk that copies string literals
+    // through whole can move the reference without touching a literal beside it. All
+    // three dialect emitters splice these two fields into `CREATE INDEX` verbatim, so a
+    // stale body is not a comparison artifact - it is DDL naming a dead column.
     assert!(
-        fold_predicate.contains(OLD_COLUMN) && !fold_predicate.contains(NEW_COLUMN),
-        "the fold's partial-index predicate must stay stale after \
-         `rename {OLD_COLUMN} -> {NEW_COLUMN}`, naming {OLD_COLUMN} and not {NEW_COLUMN}; it \
-         read `{fold_predicate}`. A rename arm that rewrites a predicate is rewriting an \
-         EXPRESSION as if it were a column list - regenerate it from the closed AST instead"
+        fold_predicate.contains(NEW_COLUMN) && !fold_predicate.contains(OLD_COLUMN),
+        "the fold's partial-index predicate must follow \
+         `rename {OLD_COLUMN} -> {NEW_COLUMN}`, naming {NEW_COLUMN} and not {OLD_COLUMN}; it \
+         read `{fold_predicate}`. Every dialect emitter renders this text straight into \
+         `CREATE INDEX ... WHERE <predicate>`, so a stale one is SQL over a column the \
+         table no longer has"
     );
     assert!(
-        fold_expr_element.contains(OLD_COLUMN) && !fold_expr_element.contains(NEW_COLUMN),
-        "the fold's expression KEY must stay stale for the same reason, naming {OLD_COLUMN} \
-         and not {NEW_COLUMN}; it read `{fold_expr_element}`"
+        fold_expr_element.contains(NEW_COLUMN) && !fold_expr_element.contains(OLD_COLUMN),
+        "the fold's expression KEY must follow the rename for the same reason, naming \
+         {NEW_COLUMN} and not {OLD_COLUMN}; it read `{fold_expr_element}`"
     );
 
     // The witness that makes the quiet-differ assertion mean anything: live genuinely

@@ -28,6 +28,12 @@
 /// DSN skips loudly and fails under `ZERO_MIGRATE_REQUIRE_LIVE_DB`.
 pub mod mysql;
 
+/// The RENAME CARRIER INVENTORY shared by `rename_carrier_sweep_pg` and
+/// `rename_carrier_sweep_sqlite`: every field of a `TableSnapshot` that can spell a
+/// column name, enumerated by exhaustive destructuring so a new field cannot be added
+/// without classifying it.
+pub mod carriers;
+
 use std::cell::{Cell, RefCell};
 
 use bytes::BytesMut;

@@ -1,40 +1,48 @@
-//! Live PostgreSQL oracle for the STALE CHECK body a column rename leaves in the fold.
+//! Live PostgreSQL oracle for the CHECK body a column rename leaves in the fold, and
+//! for the two consumers that must not read it.
 //!
-//! The `Op::RenameColumn` arm of `render/fold.rs` re-renders
-//! `ConstraintSnapshot::definition` for UNIQUE / PRIMARY KEY / FOREIGN KEY and for
-//! nothing else. Those three open with a LOCAL COLUMN LIST - a closed identifier
-//! grammar where a string literal cannot appear - so rewriting the leading group is
-//! sound. A CHECK's leading group is the EXPRESSION, where the trap that rules out
-//! text matching for a CHECK body is live: `CHECK ((status <> 'qty'::text))` survives
-//! dropping `qty` (measured on PostgreSQL 18.4). So the fold DELIBERATELY leaves a
-//! CHECK body naming the OLD column after a rename, while `pg_get_constraintdef`
-//! deparses the NEW name the instant the rename commits. Measured here on the same
-//! server: the fold projects `CHECK (("qty_on_hand" > 0))` where live reports
-//! `CHECK ((amount_on_hand > 0))`.
+//! ## What this file used to assert, and why that changed
 //!
-//! That divergence is harmless for exactly one reason: NOTHING READS the folded copy.
-//! `apply::drift::constraint_definition_is_comparable` exempts CHECK, so the differ
-//! never compares the stale text; and the existence guard's fail-closed refusal
+//! It used to pin the fold's CHECK body as deliberately STALE. The `Op::RenameColumn`
+//! arm re-rendered `ConstraintSnapshot::definition` for UNIQUE / PRIMARY KEY / FOREIGN
+//! KEY and for nothing else, on the grounds that those three open with a LOCAL COLUMN
+//! LIST - a closed identifier grammar where a string literal cannot appear - while a
+//! CHECK's leading group is an EXPRESSION, where `CHECK ((status <> 'qty'::text))`
+//! survives dropping `qty` (measured on PostgreSQL 18.4). Substituting a name inside
+//! that text would corrupt the literal, so the arm left the body alone.
+//!
+//! The trap is real; the conclusion was not. `rename_quoted_column_in_sql` walks a
+//! fragment as QUOTED RUNS, so a `'…'` literal is copied through whole and can never be
+//! mistaken for a column reference - it was written for `ColumnSnapshot::inline_checks`
+//! and it solves the CHECK body identically. The RENAME CARRIER SWEEP applied it, so
+//! the fold now projects `CHECK (("amount_on_hand" > 0))` where it used to project
+//! `CHECK (("qty_on_hand" > 0))`, and `tests/rename_carrier_sweep_pg.rs` pins the
+//! literal's survival beside the reference's move. This file's first assertion is
+//! INVERTED rather than relaxed: it now demands the follow it used to forbid.
+//!
+//! ## What it still asserts, unchanged, and why that is the point
+//!
+//! The two sides still DIVERGE, because the fold quotes every identifier and
+//! `pg_get_constraintdef` does not: the fold says `CHECK (("amount_on_hand" > 0))` and
+//! live says `CHECK ((amount_on_hand > 0))`. So every downstream assertion here keeps
+//! its subject, and the file keeps its real job - proving that NOTHING READS the folded
+//! copy. `apply::drift::constraint_definition_is_comparable` exempts CHECK, so the
+//! differ never compares the text; and the existence guard's fail-closed refusal
 //! (`render::existence_probe::decide_constraint`, `GuardVerdict::FailDrift` ->
 //! `ApplyError::ExistenceGuardDrift`) quotes `actual` out of a snapshot introspected
-//! under the held lock inside the guarded transaction, never out of a fold. Both
-//! halves are load-bearing and neither is pinned by the fold==live oracles next door,
-//! because a stale CHECK body is invisible to a drift comparison by construction.
+//! under the held lock inside the guarded transaction, never out of a fold. Neither
+//! half is pinned by the fold==live oracles next door, because the differ's exemption
+//! makes a CHECK body invisible to a drift comparison by construction.
 //!
-//! So this test refuses to take "the differ is quiet" as evidence. It asserts each
-//! side of the disagreement separately - the fold naming the old column, live naming
-//! the new one - so the refusal check below is not comparing two identical strings,
-//! and only then drives a guarded `addConstraint ifNotExists` under the SAME
-//! constraint name to the refusal a user would read.
+//! So this test still refuses to take "the differ is quiet" as evidence. It asserts
+//! each side of the disagreement separately, so the refusal check below is not
+//! comparing two identical strings, and only then drives a guarded
+//! `addConstraint ifNotExists` under the SAME constraint name to the refusal a user
+//! would read.
 //!
-//! A failure here means the staleness stopped being private. If the guard is ever
+//! A failure here means the folded body stopped being private. If the guard is ever
 //! wired to a folded snapshot instead of a fresh introspection, its refusal starts
-//! telling a user their database holds a constraint over a column that was renamed
-//! away - and if the differ's CHECK exemption is ever dropped, the same stale text
-//! reports as permanent drift on every introspection after a rename. If instead the
-//! rename arm grows a CHECK rewrite, assertion `fold_definition` fails, and the right
-//! reading is not to relax it: a CHECK body must be regenerated from the closed AST,
-//! never repaired by substituting a name inside rendered SQL.
+//! quoting a rendering the user's database does not hold.
 //!
 //! The rename runs as native `ALTER TABLE ... RENAME COLUMN` rather than through the
 //! engine's `renameColumn` op - see `drift_between_fold_and_live` in
@@ -310,7 +318,7 @@ async fn measure() -> Option<Measured> {
 }
 
 #[compio::test]
-async fn a_rename_leaves_the_folded_check_body_stale_and_unread() {
+async fn a_rename_moves_the_folded_check_body_and_nothing_reads_it_anyway() {
     let Some(measured) = measure().await else {
         return;
     };
@@ -322,21 +330,27 @@ async fn a_rename_leaves_the_folded_check_body_stale_and_unread() {
         guarded_readd,
     } = measured;
 
-    // The fold's projected CHECK body still names the PRE-rename column. Deliberate:
-    // the rename arm's text rewrite is confined to the three kinds whose leading group
-    // is a column list, and a CHECK body must be regenerated from its closed AST rather
-    // than repaired by substituting a name inside rendered SQL.
+    // The fold's projected CHECK body FOLLOWS the rename. It is the fourth carrier of
+    // the rename carrier sweep, rewritten through the quoted-run walk rather than the
+    // column-list re-render the other three constraint kinds use: a CHECK's leading
+    // group is an expression, so only a walk that copies string literals through whole
+    // can move the reference without corrupting a literal beside it. The anti-corruption
+    // half is pinned by `rename_carrier_sweep_pg`, which plants a literal spelling the
+    // old column name inside the body and demands it survive byte for byte.
     assert!(
-        fold_definition.contains(OLD_COLUMN) && !fold_definition.contains(NEW_COLUMN),
-        "the fold's CHECK body must stay stale after `rename {OLD_COLUMN} -> {NEW_COLUMN}`, \
-         naming {OLD_COLUMN} and not {NEW_COLUMN}; it read `{fold_definition}`. A rename arm \
-         that rewrites a CHECK body is rewriting an EXPRESSION as if it were a column list - \
-         regenerate the clause from the closed AST instead"
+        fold_definition.contains(NEW_COLUMN) && !fold_definition.contains(OLD_COLUMN),
+        "the fold's CHECK body must follow `rename {OLD_COLUMN} -> {NEW_COLUMN}`, naming \
+         {NEW_COLUMN} and not {OLD_COLUMN}; it read `{fold_definition}`. A folded body \
+         naming a column the table no longer has is a snapshot describing a schema that \
+         does not exist - and on SQLite it is `CREATE TABLE` DDL that the server refuses"
     );
 
     // The witness that makes the refusal assertion mean anything: live genuinely
     // disagrees. `pg_constraint.conkey` holds attribute NUMBERS, so
     // `pg_get_constraintdef` deparses the NEW name the instant the rename commits.
+    // The two now name the SAME column and still differ, because the fold QUOTES every
+    // identifier and the deparser does not - which is what keeps every assertion below
+    // pointed at two distinct strings.
     assert!(
         live_definition.contains(NEW_COLUMN) && !live_definition.contains(OLD_COLUMN),
         "PostgreSQL deparses a CHECK over the renamed attribute under its NEW name, so the \
@@ -381,14 +395,16 @@ async fn a_rename_leaves_the_folded_check_body_stale_and_unread() {
     );
     assert!(
         !refusal.contains(&fold_definition),
-        "the existence-guard refusal must not quote the fold's stale body \
+        "the existence-guard refusal must not quote the fold's rendering \
          `{fold_definition}`; wiring the guard to a folded snapshot makes it tell a user \
-         their database holds a constraint over a column that was renamed away. It read: \
-         {refusal}"
+         their database holds a body it does not hold. The two agree on the COLUMN now \
+         and still differ on QUOTING, which is exactly why this assertion survives the \
+         rename-follow that inverted the first one. It read: {refusal}"
     );
     assert!(
         !refusal.contains(OLD_COLUMN),
         "no identifier in this fixture except the pre-rename column spells {OLD_COLUMN}, so \
-         a refusal mentioning it can only have come from the stale fold; it read: {refusal}"
+         a refusal mentioning it can only have come from a projection that missed the \
+         rename; it read: {refusal}"
     );
 }

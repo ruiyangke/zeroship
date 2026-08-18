@@ -1923,6 +1923,26 @@ impl PartitionSpec {
         }
     }
 
+    /// Partition key columns, mutably.
+    ///
+    /// The partition key is a CARRIER of column names: renaming a column has to follow
+    /// it or the snapshot keeps describing a key over a column the table no longer has.
+    /// PostgreSQL holds the key as attribute NUMBERS (`pg_partitioned_table.partattrs`),
+    /// so it re-spells itself on a rename and the offline fold has to match - and
+    /// because `TableSnapshot`'s equality COMPARES `partition_by`, a stale key is drift
+    /// the differ reports rather than a quiet inconsistency. `render::fold`'s
+    /// `Op::RenameColumn` arm is the caller.
+    ///
+    /// The slice is POSITIONAL - `RANGE (a, b)` is not `RANGE (b, a)` - so a caller
+    /// rewrites in place and must not sort.
+    pub fn columns_mut(&mut self) -> &mut [String] {
+        match self {
+            Self::Range { columns, .. }
+            | Self::List { columns, .. }
+            | Self::Hash { columns, .. } => columns,
+        }
+    }
+
     /// Whether the author affirmed collapse for unsupported dialects.
     #[must_use]
     pub const fn collapse(&self) -> bool {
