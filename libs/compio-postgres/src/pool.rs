@@ -304,7 +304,7 @@ fn reject_unsatisfiable_tls(config: &Config) -> Result<(), Error> {
 }
 
 // ---------------------------------------------------------------------------
-// Transport — everything needed to open one connection, resolved once
+// Transport - everything needed to open one connection, resolved once
 // ---------------------------------------------------------------------------
 
 /// The pool's connection recipe, resolved from the URL exactly once.
