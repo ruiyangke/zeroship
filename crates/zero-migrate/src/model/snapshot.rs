@@ -16,7 +16,7 @@ use crate::model::ir::{
 /// attribute**: it
 /// carries the column `DEFAULT` clause the declarative author wants emitted at
 /// CREATE / ADD COLUMN time (#4). It is deliberately EXCLUDED from `PartialEq` /
-/// `Eq` / `Hash` (see the manual impls below) because Postgres normalises a
+/// `Eq` (see the manual impl below) because Postgres normalises a
 /// stored default (`'{}'` → `'{}'::jsonb`, `NOW()` → `now()`, …) so a byte
 /// compare of the authored default against the introspected one would
 /// phantom-drift, AND plugin-db itself never re-diffs column defaults (a default
@@ -115,7 +115,7 @@ pub struct ColumnSnapshot {
     /// `apply::drift::comparable_generated_column` declines rather than accusing
     /// those engines of having dropped a generated column they never modeled.
     ///
-    /// Excluded from `PartialEq` / `Eq` / `Hash` for the same reason
+    /// Excluded from `PartialEq` / `Eq` for the same reason
     /// [`Self::generated`] is: adding it would change what every consumer of column
     /// equality means by "the same column", including the fold and dedup paths, when
     /// only the drift comparator is asking.
@@ -148,7 +148,7 @@ pub struct ColumnSnapshot {
     /// This exists so a reference whose target has no authored contract can
     /// still be proved from the catalog. It is INTROSPECTION-ONLY metadata and
     /// MUST NOT be compared: author-built desired snapshots always leave it
-    /// `false`, so it is excluded from `PartialEq`, `Hash`, and the drift
+    /// `false`, so it is excluded from `PartialEq` / `Eq` and the drift
     /// attribute diff. Comparing it would report permanent phantom drift on
     /// every UUID column, and on SQLite a column-attribute difference is
     /// reconciled by a full table rebuild.
@@ -170,7 +170,7 @@ pub struct ColumnSnapshot {
     ///
     /// Live MySQL snapshots retain this only for expected-driven ID-default
     /// classification. It is introspection metadata, not an independently
-    /// drift-comparable portable facet, and is excluded from equality/hashing.
+    /// drift-comparable portable facet, and is excluded from equality.
     pub mysql_default_generated: Option<bool>,
     /// `Some(false)` means this logical text column is case-insensitive. It is a
     /// drift-comparable catalog attribute on engines where the intent is
@@ -192,7 +192,7 @@ pub struct ColumnSnapshot {
     /// `information_schema.COLUMNS`. This is introspection-only metadata used
     /// to validate character foreign-key compatibility; author-built desired
     /// snapshots leave it `None`. It is deliberately excluded from structural
-    /// drift equality and hashing because the portable schema surface records
+    /// drift equality because the portable schema surface records
     /// collation intent, not a server-default MySQL collation name.
     pub mysql_text_storage: Option<MysqlTextStorageSnapshot>,
     /// The parsed physical identity of a MySQL column, when the snapshot came from
@@ -204,7 +204,7 @@ pub struct ColumnSnapshot {
     /// declared `varchar(255)` are the same string by the time they are compared.
     ///
     /// Like [`MysqlTextStorageSnapshot`] above it is excluded from this type's
-    /// `PartialEq` and `Hash`, but for the OPPOSITE reason. That one is excluded
+    /// `PartialEq` / `Eq`, but for the OPPOSITE reason. That one is excluded
     /// because it is not part of the portable schema surface at all. This one is
     /// excluded because it is dialect-specific: folding it into the general equality
     /// would change what every consumer of `ColumnSnapshot` equality means by "the
@@ -222,7 +222,7 @@ pub struct ColumnSnapshot {
     /// Emission-only, exactly like `default`: it is NOT a drift-comparable
     /// attribute (introspection's `snapshot_schema` leaves it `None`; only
     /// `desired_snapshot` populates it), so it is EXCLUDED from `PartialEq` /
-    /// `Eq` / `Hash`. The sentinel is built by the shared
+    /// `Eq`. The sentinel is built by the shared
     /// [`crate::schema::query`] kernel — never re-spelled here.
     pub encryption_sentinel: Option<String>,
     /// The body of a `COMMENT ON COLUMN` sentinel to attach to
@@ -235,7 +235,7 @@ pub struct ColumnSnapshot {
     ///     the encryption metadata from `pg_description` at runtime.
     ///
     /// Built by the shared codecs ([`crate::schema::mask_codec`]) — never
-    /// re-spelled here. EXCLUDED from `PartialEq` / `Eq` / `Hash`: desired
+    /// re-spelled here. EXCLUDED from `PartialEq` / `Eq`: desired
     /// snapshots use it to emit runtime metadata, and PostgreSQL introspection
     /// classifies matching catalog comments back into this field instead of the
     /// user-facing `comment` facet.
@@ -708,6 +708,12 @@ pub struct MysqlTextStorageSnapshot {
     pub collation: String,
 }
 
+// No `Hash`: this `PartialEq` deliberately ignores fields (`default`,
+// `mysql_physical_type`, the sentinels, …), so a DERIVED `Hash` would hash fields
+// equality does not read and break the `Eq`/`Hash` contract. Nothing in the crate
+// hashes a `ColumnSnapshot` - every keyed collection over one keys by `&str` name -
+// so the trait is simply absent rather than hand-written to stay in step. Anyone
+// adding a hash consumer must hand-write it against exactly the fields below.
 impl PartialEq for ColumnSnapshot {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
@@ -723,27 +729,6 @@ impl PartialEq for ColumnSnapshot {
     }
 }
 impl Eq for ColumnSnapshot {}
-impl std::hash::Hash for ColumnSnapshot {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.name.hash(state);
-        self.data_type.hash(state);
-        self.nullable.hash(state);
-        self.identity.map(|identity| identity.always).hash(state);
-        self.sqlite_rowid.hash(state);
-        match &self.value_format {
-            None => 0_u8.hash(state),
-            Some(ValueFormat::TypeId { prefix }) => {
-                1_u8.hash(state);
-                prefix.hash(state);
-            }
-            Some(ValueFormat::Ulid) => 2_u8.hash(state),
-        }
-        self.id_default.hash(state);
-        self.case_sensitive.hash(state);
-        self.collation.hash(state);
-        self.comment.hash(state);
-    }
-}
 
 /// One ordered key element of an index snapshot. The expression arm stores the
 /// dialect-rendered expression text produced from a closed [`crate::model::expr::Expr`]
@@ -759,11 +744,11 @@ pub enum IndexElementSnapshot {
         /// **Emission-only** PG-vendor per-column operator class (e.g.
         /// `text_pattern_ops`). Like the index-level ANN `opclass`, live
         /// introspection cannot recover it cheaply, so it is EXCLUDED from
-        /// canonical equality / hashing (`index_elements_canonically_eq`) and is
+        /// canonical equality (`index_elements_canonically_eq`) and is
         /// spelled by the PG emitter only. `None` for every non-opclass element.
         opclass: Option<String>,
         /// **Emission-only** PG-vendor per-column collation (e.g. `"C"`).
-        /// Excluded from canonical equality / hashing for the same reason as
+        /// Excluded from canonical equality for the same reason as
         /// `opclass`. `None` for every non-collated element.
         collation: Option<String>,
     },
@@ -893,7 +878,7 @@ pub(crate) fn index_predicates_canonically_eq(left: Option<&str>, right: Option<
 ///
 /// `opclass` is **emission-only** (like `ColumnSnapshot::default` /
 /// `encryption_sentinel`): it is NOT recovered by `snapshot_schema` and NOT a
-/// drift attribute, so it is EXCLUDED from `PartialEq` / `Eq` / `Hash`. It rides
+/// drift attribute, so it is EXCLUDED from `PartialEq` / `Eq`. It rides
 /// on a desired snapshot so `render_create_index` can spell the per-column
 /// operator class (`vector_cosine_ops`, …) an `ivfflat` ANN index needs; live
 /// introspection cannot recover it cheaply, so comparing it would make every
@@ -921,7 +906,7 @@ pub struct IndexSnapshot {
     pub with: Option<IndexStorageParams>,
     /// **Emission-only** PostgreSQL `ON ONLY` for partitioned parents. Like
     /// [`Self::opclass`] and [`Self::nulls_not_distinct`] it is spelled by the PG
-    /// emitter and EXCLUDED from equality / hashing, because the catalog cannot
+    /// emitter and EXCLUDED from equality, because the catalog cannot
     /// report it back.
     ///
     /// Measured on PostgreSQL 18.4. `pg_get_indexdef` renders `ON ONLY` for EVERY
@@ -947,7 +932,7 @@ pub struct IndexSnapshot {
     pub opclass: Option<String>,
     /// **Emission-only** PG 15+ `NULLS NOT DISTINCT` flag on a UNIQUE index.
     /// Like `opclass`, it is spelled by the PG emitter but EXCLUDED from drift
-    /// equality / hashing (live introspection recovery is out of scope for this
+    /// equality (live introspection recovery is out of scope for this
     /// render-only enrichment). `false` for every ordinary index.
     pub nulls_not_distinct: bool,
     /// User-authored catalog comment on this index.
@@ -984,7 +969,7 @@ pub struct IndexSnapshot {
     /// and the drift comparison unions both sides before comparing
     /// (`apply::drift::index_referenced_columns`).
     ///
-    /// EXCLUDED from equality / hashing for the same reason as `opclass` and
+    /// EXCLUDED from equality for the same reason as `opclass` and
     /// `nulls_not_distinct`: it is provenance rather than identity, and comparing a
     /// field one side never populates would report drift on every index that has one.
     pub expr_cascade_columns: Option<Vec<String>>,
@@ -1068,40 +1053,17 @@ impl IndexSnapshot {
     }
 }
 
+// No `Hash`, for the same reason as `ColumnSnapshot`: equality here is CANONICAL
+// (sort orders and SQL text are normalised, `opclass` / `nulls_not_distinct` /
+// `only` / `expr_cascade_columns` are skipped entirely), so a derived `Hash` would
+// separate values this `eq` calls equal. Nothing in the crate hashes an
+// `IndexSnapshot`; index maps key by `&str` name.
 impl PartialEq for IndexSnapshot {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name && self.same_definition_except_name(other)
     }
 }
 impl Eq for IndexSnapshot {}
-impl std::hash::Hash for IndexSnapshot {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.name.hash(state);
-        self.unique.hash(state);
-        self.columns.hash(state);
-        for element in &self.elements {
-            match element {
-                IndexElementSnapshot::Column { name, order, .. } => {
-                    0_u8.hash(state);
-                    name.hash(state);
-                    canonical_index_sort_order(*order).hash(state);
-                }
-                IndexElementSnapshot::Expr(expr) => {
-                    1_u8.hash(state);
-                    canonical_index_sql_text(expr).hash(state);
-                }
-            }
-        }
-        self.access_method.hash(state);
-        self.predicate
-            .as_deref()
-            .map(canonical_index_sql_text)
-            .hash(state);
-        self.include.hash(state);
-        self.with.hash(state);
-        self.comment.hash(state);
-    }
-}
 
 impl IndexSnapshot {
     /// A plain B-tree index over `columns` (the default kind every column-list
@@ -1270,7 +1232,7 @@ pub struct TableSnapshot {
     pub comment: Option<String>,
     /// **Introspection-only** verbatim `CREATE TABLE` text (`SQLite`
     /// `sqlite_master.sql`). `None` on the Postgres path and on author-built
-    /// desired snapshots. EXCLUDED from equality / hashing.
+    /// desired snapshots. EXCLUDED from equality.
     pub stored_create_sql: Option<String>,
 }
 

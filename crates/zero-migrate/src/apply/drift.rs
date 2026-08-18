@@ -3359,7 +3359,7 @@ fn effective_index_predicate(predicate: Option<&str>) -> Option<&str> {
 /// still have to agree, and only the rendered text inside an expression key is skipped.
 ///
 /// Deliberately NOT a change to `index_elements_canonically_eq` itself: that predicate
-/// backs `IndexSnapshot`'s `PartialEq` / `Hash` and the declarative index pairing,
+/// backs `IndexSnapshot`'s `PartialEq` / `Eq` and the declarative index pairing,
 /// where a refusal is a human-readable stop rather than a silently wrong answer. This
 /// exemption is drift-local.
 fn index_element_shapes_eq(left: &[IndexElementSnapshot], right: &[IndexElementSnapshot]) -> bool {
