@@ -211,15 +211,21 @@ AMENDED 2026-08-18: the three gates above did not land equally, and the status
 line said "implemented" over all three. Re-verified against the tree today:
 
 **Gate 1 - landed.** `dev_insecure` / `insecure_dev` / `--dev-insecure` /
-`ZEROSHIP_DEV_INSECURE` return ZERO hits anywhere under `crates/`, `sdks/`,
-`libs/`, `tests/` or `deploy/`; the surviving hits are all historical prose in
-`ISSUES.md` and `docs/archive/`. Each of the five binaries carries its own
-parser-rejection test (`crates/control/src/main.rs:1684`,
-`crates/gateway/src/main.rs:768` and `:778`, `crates/worker/src/main.rs:664`
-and `:671`), and `crates/cli/tests/dev_init_test.rs:662` is the cross-crate
-backstop that keys on the clap DECLARATION so a re-added flag fails even in a
-crate whose own suite was not run. That test guards its own input list
-(`dev_init_test.rs:668`, `sources.len() > 50`), so it cannot pass over nothing.
+`ZEROSHIP_DEV_INSECURE` have ZERO production occurrences. Counted 2026-08-18:
+0 hits under `sdks/`, `libs/`, `deploy/`, `db/`, `schema/` and `examples/`, and
+24 under `crates/` of which every one sits inside a `mod tests` block - they
+are the rejection tests themselves asserting the flag is refused. The remaining
+tree hits are historical prose in `ISSUES.md` and `docs/archive/`.
+
+All FIVE binaries carry their own parser-rejection test, not three:
+`crates/control/src/main.rs:1685`, `crates/gateway/src/main.rs:769` and `:782`,
+`crates/worker/src/main.rs:665`, `crates/auth/src/config.rs:1226` and `:1237`,
+`crates/migrated/src/config.rs:152`. `crates/cli/tests/dev_init_test.rs:662` is
+the cross-crate backstop that keys on the clap DECLARATION, so a re-added flag
+fails even in a crate whose own suite was not run; it guards its own input list
+(`dev_init_test.rs:668`, `sources.len() > 50`) so it cannot pass over nothing.
+`tests/compose_port_exposure_gate.sh:119` independently detects the flag
+reappearing in the control service's compose block.
 Its stated blind spot is a hand-rolled `std::env::var("ZEROSHIP_DEV_INSECURE")`
 that never reaches clap - which `crates/core/tests/config_env_access_gate.rs`
 closes from the other side, since `crates/core/src/config/env.rs` is the only
