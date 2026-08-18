@@ -3925,6 +3925,44 @@ mod tests {
     }
 
     #[test]
+    fn one_client_on_two_connections_shares_one_rate_limit_allowance() {
+        // The whole point, proved at the layer that enforces it rather than by
+        // comparing two strings: run `compute_bucket_id` into the real
+        // `PerRuleRateLimitRegistry` exactly as `handle_request` does.
+        //
+        // rps=1, so the bucket admits one request and refuses the next within
+        // the same second. If the two connections key differently they each
+        // get their own allowance and BOTH are admitted -- which is what the
+        // limiter did before the fix, for every reconnect, forever.
+        use crate::enforce::PerRuleRateLimitRegistry;
+        use zeroship_bundle::RateLimit;
+
+        let registry = PerRuleRateLimitRegistry::new();
+        let app = uuid::Uuid::nil();
+        let limit = RateLimit {
+            rpm: None,
+            rps: Some(1),
+            per: RateLimitPer::Ip,
+        };
+
+        let mut admit = |port: u16| {
+            let req = ntex::web::test::TestRequest::default()
+                .header("x-forwarded-for", format!("192.0.2.43:{port}"))
+                .to_http_request();
+            let bucket_id = compute_bucket_id(&req, limit.per, true, true);
+            registry
+                .check(&app, 0, limit.per, &bucket_id, &limit)
+                .is_ok()
+        };
+
+        assert!(admit(40001), "first connection draws the single token");
+        assert!(
+            !admit(40002),
+            "a reconnect from the same client must NOT draw a second token"
+        );
+    }
+
+    #[test]
     fn compute_bucket_id_ip_ignores_the_source_port_of_an_ipv6_client() {
         let req = ntex::web::test::TestRequest::default()
             .header("x-forwarded-for", "[2001:db8::1]:8080")
