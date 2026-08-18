@@ -85,7 +85,7 @@ run_psql() { PGPASSWORD="$PG_PASS" "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -U "$PG_U
 # often enough for that to be the common case rather than the exotic one.
 LOG=""
 cleanup() {
-  [ -n "$LOG" ] && rm -f "$LOG"
+  if [ -n "$LOG" ]; then rm -f "$LOG"; fi
   zs_scratch_db_cleanup
   return 0
 }
