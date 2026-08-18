@@ -5,9 +5,9 @@ The Connect peer of `tests/e2e_stripe_billing.sh` (the infrastructure billing pa
 webhooks). It drives zeroship's **Stripe Connect payment** path against
 **REAL Stripe TEST mode** (`api.stripe.com`), not the in-repo mock: the cyper
 `StripeClient` Connect calls (`create_connect_account`, `create_account_link`,
-`retrieve_account`, `create_connect_payment_intent`), the server-held `FeePolicy`
-(`crates/control/src/fee_policy.rs`), the `connect_checkout` / `callback` /
-`set_fee_policy` handlers, and the signature-verified `/internal/webhooks/stripe`
+`retrieve_account`, `create_connect_payment_intent`), the server-held `FeePolicy` (seeded directly in the database now that the operator PUT is deleted)
+(`crates/control/src/fee_policy.rs`), the `connect_checkout` / `callback`
+handlers, and the signature-verified `/internal/webhooks/stripe`
 ingest of `account.updated` / `invoice.paid` (Connect payment) / `payout.failed`.
 
 ## Connect is currently DISABLED on the test account — the harness SKIPs cleanly
@@ -103,9 +103,8 @@ down control and deletes the test-mode connected accounts it minted on exit.
    no-op.
 
 Code map: handlers in `crates/control/src/stripe_handlers.rs`
-(`onboard` :120, `connect_checkout` :456 / M1 gate :503, `set_fee_policy` :585,
-`dispatch_event` :1174, M4 settling-account check :1353, `handle_account_updated`
-:1511, `handle_payout_failed` :2175); fee math in
+(`onboard` :128, `callback` :329, `connect_checkout` :459, `dispatch_event`
+:1107, `handle_account_updated` :1440, `handle_payout_failed` :2121); fee math in
 `crates/control/src/fee_policy.rs` (`fee_cents`); store ownership in
 `crates/control/src/stripe_store.rs` (`account_belongs_to_creator` :295,
 `get_creator_by_account` :316, `update_account_flags_by_account_id` :228); Connect
