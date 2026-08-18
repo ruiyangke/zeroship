@@ -6398,6 +6398,26 @@ mod render_tests {
             backend.evaluate_preconditions(&cfg, &m_pc).await.is_err(),
             "a DECLARED precondition fails closed on MySQL",
         );
+        // The PLAN-WIDE seam ABSTAINS from the trait default. MySQL has no
+        // evaluator, so it forms no plan-level opinion and the per-migration
+        // refusal above stays the only judge - the same error, at the same seam,
+        // in the same words as before the plan-wide phase existed. Abstain, NOT
+        // `Met`: a backend that cannot answer must never wave a plan through.
+        assert_eq!(
+            backend
+                .evaluate_plan_precondition(
+                    &cfg,
+                    "v_any",
+                    &crate::model::precondition::Precondition::ColumnHasNoBlockingDependents {
+                        table: "t".into(),
+                        column: "c".into(),
+                    },
+                )
+                .await
+                .expect("abstaining is not an error"),
+            crate::apply::backend::PlanPreconditionVerdict::Abstain,
+            "a backend with no precondition evaluator says nothing at plan level",
+        );
         assert!(backend.baseline_one(&cfg, &m, "t").await.is_err());
         assert!(backend.record_squash(&cfg, &m, "t", &["v1"]).await.is_err());
         assert!(backend.online().is_none(), "no online harness on MySQL");

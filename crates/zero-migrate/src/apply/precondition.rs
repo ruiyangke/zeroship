@@ -265,57 +265,17 @@ pub(crate) async fn evaluate_all<D: SqlSession>(
 ) -> Result<PreconditionVerdict, ApplyError> {
     let mut verdict = PreconditionVerdict::AllMet;
     for pc in &m.preconditions {
-        // An evaluation ERROR (guard denial, invalid identifier, malformed
-        // SqlBoolean, DB error) is ALWAYS fatal — fail-closed, regardless of
-        // on_unmet. A precondition that cannot be checked must never wave the
-        // migration through.
-        // A blocked-column assertion needs the returned object descriptions after
-        // evaluation, not only a boolean, so its refusal can name what PostgreSQL
-        // says depends on the column. Keep that vector in this per-migration loop;
-        // projecting it through `evaluate` would discard the reason for refusal.
-        // Both blocked-column assertions do this, and they ask DIFFERENT questions
-        // of the catalog - see `Precondition::ColumnTypeChangeHasNoBlockers`.
-        let (met, blockers) = match &pc.check {
-            Precondition::ColumnHasNoBlockingDependents { table, column } => {
-                let blockers = drop_column_blockers(conn, cfg, table, column)
-                    .await
-                    .map_err(|e| ApplyError::PreconditionFailed {
-                        version: m.version.as_str().to_string(),
-                        which: format!("{:?} could not be evaluated: {e}", pc.check),
-                    })?;
-                (blockers.is_empty(), Some(blockers))
-            }
-            Precondition::ColumnTypeChangeHasNoBlockers { table, column } => {
-                let blockers = retype_column_blockers(conn, cfg, table, column)
-                    .await
-                    .map_err(|e| ApplyError::PreconditionFailed {
-                        version: m.version.as_str().to_string(),
-                        which: format!("{:?} could not be evaluated: {e}", pc.check),
-                    })?;
-                (blockers.is_empty(), Some(blockers))
-            }
-            _ => {
-                let met = evaluate(conn, cfg, &pc.check).await.map_err(|e| {
-                    ApplyError::PreconditionFailed {
-                        version: m.version.as_str().to_string(),
-                        which: format!("{:?} could not be evaluated: {e}", pc.check),
-                    }
-                })?;
-                (met, None)
-            }
-        };
+        let (met, blockers) = evaluate_one(conn, cfg, m.version.as_str(), &pc.check).await?;
         if met {
             continue;
         }
         match pc.on_unmet {
             OnUnmet::Halt => {
-                let blocker_detail = blockers.map_or_else(String::new, |blockers| {
-                    format!(": blocking dependents {blockers:?}")
-                });
-                return Err(ApplyError::PreconditionFailed {
-                    version: m.version.as_str().to_string(),
-                    which: format!("{:?} is unmet (OnUnmet::Halt){blocker_detail}", pc.check),
-                });
+                return Err(unmet_halt_error(
+                    m.version.as_str(),
+                    &pc.check,
+                    blockers.as_deref(),
+                ));
             }
             OnUnmet::Skip => {
                 // Record that we will skip, but keep scanning: a LATER Halt check
@@ -325,6 +285,76 @@ pub(crate) async fn evaluate_all<D: SqlSession>(
         }
     }
     Ok(verdict)
+}
+
+/// Evaluate ONE precondition, returning both the verdict and - for the two
+/// blocked-column assertions - the object descriptions the refusal names.
+///
+/// The shared body behind BOTH seams that ask this question: the per-migration
+/// [`evaluate_all`] and the plan-wide preflight
+/// ([`crate::apply::plan_precondition`], via
+/// `MigrationBackend::evaluate_plan_precondition`). One body so the two can never
+/// come to different conclusions, or word the same refusal differently.
+///
+/// An evaluation ERROR (guard denial, invalid identifier, malformed `SqlBoolean`,
+/// DB error) is ALWAYS fatal - fail-closed, regardless of `on_unmet`. A
+/// precondition that cannot be checked must never wave a migration through.
+///
+/// The blocked-column assertions need the returned object descriptions after
+/// evaluation, not only a boolean, so their refusal can name what PostgreSQL says
+/// depends on the column; projecting them through [`evaluate`] would discard the
+/// reason for refusal. The two ask DIFFERENT questions of the catalog - see
+/// [`Precondition::ColumnTypeChangeHasNoBlockers`].
+///
+/// # Errors
+/// [`ApplyError::PreconditionFailed`] when the check cannot be evaluated.
+#[cfg(pg_seam)]
+pub(crate) async fn evaluate_one<D: SqlSession>(
+    conn: &D,
+    cfg: &ExecutorConfig,
+    version: &str,
+    check: &Precondition,
+) -> Result<(bool, Option<Vec<String>>), ApplyError> {
+    let inevaluable = |e: PreconditionError| ApplyError::PreconditionFailed {
+        version: version.to_string(),
+        which: format!("{check:?} could not be evaluated: {e}"),
+    };
+    match check {
+        Precondition::ColumnHasNoBlockingDependents { table, column } => {
+            let blockers = drop_column_blockers(conn, cfg, table, column)
+                .await
+                .map_err(inevaluable)?;
+            Ok((blockers.is_empty(), Some(blockers)))
+        }
+        Precondition::ColumnTypeChangeHasNoBlockers { table, column } => {
+            let blockers = retype_column_blockers(conn, cfg, table, column)
+                .await
+                .map_err(inevaluable)?;
+            Ok((blockers.is_empty(), Some(blockers)))
+        }
+        _ => {
+            let met = evaluate(conn, cfg, check).await.map_err(inevaluable)?;
+            Ok((met, None))
+        }
+    }
+}
+
+/// The refusal an unmet [`OnUnmet::Halt`] check produces.
+///
+/// Shared by the per-migration seam and the plan-wide preflight so that moving
+/// WHEN a refusal fires never changes WHAT the operator reads.
+pub(crate) fn unmet_halt_error(
+    version: &str,
+    check: &Precondition,
+    blockers: Option<&[String]>,
+) -> ApplyError {
+    let blocker_detail = blockers.map_or_else(String::new, |blockers| {
+        format!(": blocking dependents {blockers:?}")
+    });
+    ApplyError::PreconditionFailed {
+        version: version.to_string(),
+        which: format!("{check:?} is unmet (OnUnmet::Halt){blocker_detail}"),
+    }
 }
 
 /// Ask the PostgreSQL backend's measured dependency predicate which objects block

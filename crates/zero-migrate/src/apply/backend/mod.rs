@@ -280,6 +280,29 @@ pub enum ProjectLockAcquisition {
     Busy(Vec<ProjectLockHolder>),
 }
 
+/// One backend's answer about a single precondition asked of the PRE-PLAN
+/// database, before any of the plan's steps has run.
+///
+/// [`Abstain`](Self::Abstain) is not "met". It says this backend has no
+/// plan-level evaluator, so the plan-wide phase must say nothing at all and leave
+/// the per-migration seam as the only judge - which is what keeps a backend
+/// without a catalog to consult behaving exactly as it does today.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanPreconditionVerdict {
+    /// No plan-level evaluator on this backend. The plan-wide phase declines to
+    /// form an opinion.
+    Abstain,
+    /// The assertion HOLDS against the pre-plan database.
+    Met,
+    /// The assertion is UNMET. `blockers` carries the object descriptions the two
+    /// blocked-column assertions return, so the refusal can name what the
+    /// database says is in the way; empty for every other variant.
+    Unmet {
+        /// What the catalog says blocks the operation, when the assertion can say.
+        blockers: Vec<String>,
+    },
+}
+
 /// The dialect seam over execution I/O, journal I/O, parse-time non-txn
 /// validation, and drift introspection.
 ///
@@ -570,6 +593,35 @@ pub trait MigrationBackend {
         cfg: &ExecutorConfig,
         m: &Migration,
     ) -> Result<crate::apply::executor::PreconditionVerdict, ApplyError>;
+
+    /// Evaluate ONE precondition against the PRE-PLAN database, before any of the
+    /// plan's steps has run - the seam behind
+    /// [`crate::apply::plan_precondition`]'s plan-wide phase.
+    ///
+    /// Read-only, and called under the project advisory lock, so the state it
+    /// reads is the state the first step will meet.
+    ///
+    /// The default ABSTAINS, and that is the honest answer rather than a stub. A
+    /// backend with no precondition evaluator has no plan-level opinion to offer,
+    /// and its per-migration seam already fails closed on a declared precondition
+    /// ([`Self::evaluate_preconditions`]). Abstaining leaves SQLite and MySQL
+    /// byte-identical: the same refusal, at the same seam, with the same wording.
+    /// Only the PostgreSQL impl answers, routing to the SAME
+    /// `apply::precondition` body the per-migration seam uses, so the two cannot
+    /// disagree about one assertion.
+    ///
+    /// # Errors
+    /// [`ApplyError::PreconditionFailed`] when the check cannot be EVALUATED
+    /// (guard denial, invalid identifier, DB error) - fail-closed, exactly as the
+    /// per-migration seam is.
+    async fn evaluate_plan_precondition(
+        &self,
+        _cfg: &ExecutorConfig,
+        _version: &str,
+        _check: &crate::model::precondition::Precondition,
+    ) -> Result<PlanPreconditionVerdict, ApplyError> {
+        Ok(PlanPreconditionVerdict::Abstain)
+    }
 
     /// Describe the objects that would make the database REFUSE a bare
     /// `DROP COLUMN` of `column` on `table`, or an empty list when the drop would

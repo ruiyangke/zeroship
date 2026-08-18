@@ -6,7 +6,7 @@ mod support;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::apply::backend::MigrationBackend;
+use zero_migrate::apply::backend::{MigrationBackend, PlanPreconditionVerdict};
 use zero_migrate::apply::journal::Phase;
 use zero_migrate::conn::ExecutorConfig;
 use zero_migrate::model::migration::{
@@ -470,6 +470,28 @@ async fn evaluate_preconditions_through_sqlite_backend() {
     assert!(
         msg.contains("sqlite") && msg.contains("precondition"),
         "error must name the dialect + that precondition eval is unsupported, got: {msg}"
+    );
+
+    // The PLAN-WIDE seam ABSTAINS from the trait default. SQLite has no catalog
+    // to consult for a blocked-column question, so it forms no plan-level opinion
+    // and the per-migration seam above stays the only judge - the same refusal, at
+    // the same place, in the same words as before the plan-wide phase existed.
+    let verdict = MigrationBackend::evaluate_plan_precondition(
+        &be,
+        &c,
+        "v_any",
+        &Precondition::ColumnHasNoBlockingDependents {
+            table: "t".to_string(),
+            column: "c".to_string(),
+        },
+    )
+    .await
+    .expect("abstaining is not an error");
+    assert_eq!(
+        verdict,
+        PlanPreconditionVerdict::Abstain,
+        "a backend with no precondition evaluator must say nothing at plan level, \
+         and must NOT answer `Met`"
     );
 }
 

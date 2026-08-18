@@ -314,6 +314,25 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
     ///
     /// `pg_describe_object` renders each blocker the way PostgreSQL's own error
     /// DETAIL does, so the refusal names what the server would have named.
+    /// Answer one plan-wide precondition through the SAME body the per-migration
+    /// seam uses, so the two seams cannot reach different conclusions about one
+    /// assertion or word the same refusal differently.
+    async fn evaluate_plan_precondition(
+        &self,
+        cfg: &ExecutorConfig,
+        version: &str,
+        check: &crate::model::precondition::Precondition,
+    ) -> Result<crate::apply::backend::PlanPreconditionVerdict, ApplyError> {
+        let (met, blockers) =
+            crate::apply::precondition::evaluate_one(self.conn, cfg, version, check).await?;
+        if met {
+            return Ok(crate::apply::backend::PlanPreconditionVerdict::Met);
+        }
+        Ok(crate::apply::backend::PlanPreconditionVerdict::Unmet {
+            blockers: blockers.unwrap_or_default(),
+        })
+    }
+
     async fn blocking_column_dependents(
         &self,
         cfg: &ExecutorConfig,
