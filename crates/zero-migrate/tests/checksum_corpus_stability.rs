@@ -109,7 +109,8 @@ fn corpus_checksums_are_byte_stable() {
     const EXPECTED_AGGREGATE: &str =
         "65504d0ea9159e5a912f1d61888441e6377faebef87ae4fbc1cc8034d9de61d2";
     assert_eq!(
-        aggregate, EXPECTED_AGGREGATE,
+        aggregate,
+        EXPECTED_AGGREGATE,
         "the op-list wire format moved: {} corpus rows re-hashed. \
          Re-recording this constant invalidates every deployed journal.",
         rows.len()

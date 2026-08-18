@@ -1,5 +1,7 @@
 //! Low-level lowered-plan step values.
 
+use zero_migrate_ir::dialect::DialectId;
+
 use crate::model::backfill::BackfillSpec;
 use crate::model::ir::AlterPrimaryKeyAction;
 use crate::model::migration::{Checksum, Migration, MigrationId};
@@ -8,13 +10,36 @@ use crate::render::expand_contract::{ExpandContractPlan, OnlineIntent};
 
 /// The dialect reach of an applied plan, derived from its ops. A separate,
 /// journaled facet — **not** folded into the identity checksum.
+///
+/// The pinned arm carries a [`DialectId`] rather than naming a vendor in its own
+/// variant. `PgOnly` could only ever say "Postgres", so a MySQL-only or
+/// DuckDB-only artifact had no way to describe itself; `Only(id)` does, and it
+/// does so without this enum growing a variant per backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DialectScope {
-    /// Applies faithfully to both Postgres and SQLite.
-    Both,
-    /// Postgres-only (a `PgOnly` `op.raw` artifact); refused against a SQLite
-    /// deploy target at load. Never produced by the `.sql` path.
-    PgOnly,
+    /// Applies faithfully to every dialect the artifact's ops support.
+    Portable,
+    /// Pinned to ONE dialect (a vendor `op.raw` artifact); refused against any
+    /// other deploy target at load. Never produced by the `.sql` path.
+    Only(DialectId),
+}
+
+impl DialectScope {
+    /// The reach an artifact pinned to PostgreSQL has. The spelling `PgOnly`
+    /// used to be a variant; it is now the one value that variant could hold.
+    #[must_use]
+    pub const fn pg_only() -> Self {
+        Self::Only(zero_migrate_ir::dialect::POSTGRES)
+    }
+
+    /// Whether this plan may be applied against `target`.
+    #[must_use]
+    pub fn admits(self, target: DialectId) -> bool {
+        match self {
+            Self::Portable => true,
+            Self::Only(id) => id == target,
+        }
+    }
 }
 
 /// A rename lowered to ONE of two **dialect-distinct executable shapes**, chosen

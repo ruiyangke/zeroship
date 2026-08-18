@@ -120,7 +120,9 @@ fn a_duplicate_id_is_refused_naming_both_registrants() {
                 ("Postgres Compatible", 2)
             );
         }
-        other => panic!("expected a duplicate-id refusal, got {other:?}"),
+        other @ RegistryError::MalformedId { .. } => {
+            panic!("expected a duplicate-id refusal, got {other:?}")
+        }
     }
 
     // The diagnostic must name BOTH, not just the loser.
@@ -147,9 +149,8 @@ fn a_malformed_id_is_refused_at_registration() {
         &BAD_DASH,
         &BAD_EMPTY,
     ] {
-        let err = BackendRegistry::build(&[&B1, bad]).expect_err(
-            "a malformed id must be refused at REGISTRATION rather than trusted",
-        );
+        let err = BackendRegistry::build(&[&B1, bad])
+            .expect_err("a malformed id must be refused at REGISTRATION rather than trusted");
         match err {
             RegistryError::MalformedId {
                 id,
@@ -160,7 +161,9 @@ fn a_malformed_id_is_refused_at_registration() {
                 assert_eq!(display_name, bad.display_name);
                 assert_eq!(index, 1);
             }
-            other => panic!("expected a malformed-id refusal for {bad:?}, got {other:?}"),
+            other @ RegistryError::DuplicateId { .. } => {
+                panic!("expected a malformed-id refusal for {bad:?}, got {other:?}")
+            }
         }
     }
 }
@@ -195,7 +198,8 @@ fn the_shipping_registry_builds() {
         let descriptor = registry.get(id).expect("a shipping dialect resolves");
         assert_eq!(descriptor.display_name, display_name);
         assert_eq!(
-            descriptor, dialect.descriptor(),
+            descriptor,
+            dialect.descriptor(),
             "the registry and the closed-enum bridge must resolve to ONE descriptor"
         );
     }

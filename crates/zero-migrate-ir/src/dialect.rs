@@ -259,13 +259,13 @@ mod tests {
     #[test]
     fn the_id_rule_refuses_the_shapes_it_names() {
         for bad in [
-            "",           // empty
-            "Postgres",   // uppercase
-            "1postgres",  // leading digit
-            "_postgres",  // leading underscore
-            "post-gres",  // dash
-            "post.gres",  // dot
-            "post gres",  // space
+            "",                   // empty
+            "Postgres",           // uppercase
+            "1postgres",          // leading digit
+            "_postgres",          // leading underscore
+            "post-gres",          // dash
+            "post.gres",          // dot
+            "post gres",          // space
             "postgresql\u{00e9}", // non-ASCII
         ] {
             assert!(
@@ -324,7 +324,10 @@ mod tests {
 
     #[test]
     fn from_bools_agrees_with_the_ids_it_names() {
-        assert_eq!(DialectSet::from_bools(false, false, false), DialectSet::empty());
+        assert_eq!(
+            DialectSet::from_bools(false, false, false),
+            DialectSet::empty()
+        );
         assert_eq!(DialectSet::from_bools(true, true, true), DialectSet::all());
         let pg_mysql = DialectSet::from_bools(true, false, true);
         assert!(pg_mysql.contains_id(POSTGRES));

@@ -275,7 +275,7 @@ impl AppliedPlan {
             database_requirements: DatabaseRequirements::default(),
             checksum,
             flags,
-            dialect_scope: DialectScope::Both,
+            dialect_scope: DialectScope::Portable,
             rollbackable,
             owner_app,
             depends_on,

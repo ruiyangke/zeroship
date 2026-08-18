@@ -14,7 +14,9 @@ use zero_migrate::approval::Approval;
 use zero_migrate::conn::ExecutorConfig;
 use zero_migrate::model::migration::Migration;
 use zero_migrate::ops::status::{AppliedPlanStatus, MigrationStatus, PlanStatusManifest};
-use zero_migrate::{LiveSchema, MigrationEngine, SqlDialect};
+use zero_migrate::{
+    BackendRegistry, DialectId, LiveSchema, MigrationEngine, SqlDialect, MYSQL, POSTGRES,
+};
 
 use crate::wire::{
     ApplyPendingContractDto, ApplyReply, BlockedPlanDto, PendingContractStatusDto, PlanStatusDto,
@@ -24,6 +26,13 @@ use crate::wire::{
 /// The dialect a host-driven `apply` targets over the `SqlSession` seam. Only the
 /// two NETWORK dialects reach the host driver: `SQLite` is in-process rusqlite and
 /// never crosses the seam, so it is not a host-apply target.
+///
+/// Each variant CARRIES its [`DialectId`] rather than being one. The wire
+/// spelling a host sends is matched against registered backend ids, not against
+/// string literals, so `"postgres"` cannot mean one thing here and another in
+/// the dialect table. The variants stay because `bridge.rs` selects a concrete
+/// backend type per arm and that dispatch must remain exhaustive until the
+/// backend crates exist to be dispatched to.
 #[derive(Debug, Clone, Copy)]
 pub enum ApplyDialect {
     Postgres,
@@ -31,21 +40,41 @@ pub enum ApplyDialect {
 }
 
 impl ApplyDialect {
-    /// Map the wire dialect spelling to the host-apply backend selector. `"sqlite"`
-    /// is rejected here: it has no host-driver path (in-process rusqlite).
-    pub fn parse(s: &str) -> std::result::Result<Self, String> {
-        match s {
-            "postgres" => Ok(Self::Postgres),
-            "mysql" => Ok(Self::Mysql),
-            "sqlite" => Err(
-                "sqlite has no host-driver apply path (it runs in-process via rusqlite); \
-                 pass a postgres or mysql driver"
-                    .to_string(),
-            ),
-            other => Err(format!(
-                "unknown dialect {other:?} (expected postgres|mysql for host apply)"
-            )),
+    /// The id this target denotes.
+    #[must_use]
+    pub const fn id(self) -> DialectId {
+        match self {
+            Self::Postgres => POSTGRES,
+            Self::Mysql => MYSQL,
         }
+    }
+
+    /// Map the wire dialect spelling to the host-apply backend selector.
+    ///
+    /// A spelling must first name a REGISTERED backend; only then is it asked
+    /// whether it has a host-driver path. `"sqlite"` names a registered backend
+    /// and is still refused, because it runs in-process via rusqlite — that is a
+    /// posture, not an unknown dialect, and the two get different diagnostics.
+    pub fn parse(s: &str) -> std::result::Result<Self, String> {
+        let registry = BackendRegistry::shipping();
+        let descriptor = registry
+            .iter()
+            .find(|descriptor| descriptor.id.as_str() == s)
+            .ok_or_else(|| {
+                format!("unknown dialect {s:?} (expected postgres|mysql for host apply)")
+            })?;
+
+        for target in [Self::Postgres, Self::Mysql] {
+            if target.id() == descriptor.id {
+                return Ok(target);
+            }
+        }
+
+        Err(format!(
+            "{} has no host-driver apply path (it runs in-process via rusqlite); \
+             pass a postgres or mysql driver",
+            descriptor.id
+        ))
     }
 }
 
@@ -68,14 +97,14 @@ pub fn effective_policy_from_wire_layers(
 /// [`ApplyDialect::parse`] this accepts `"sqlite"`: an offline render needs no
 /// host driver.
 pub fn preview_dialect(s: &str) -> std::result::Result<SqlDialect, String> {
-    match s {
-        "postgres" => Ok(SqlDialect::Postgres),
-        "sqlite" => Ok(SqlDialect::Sqlite),
-        "mysql" => Ok(SqlDialect::Mysql),
-        other => Err(format!(
-            "unknown dialect {other:?} (expected postgres|sqlite|mysql)"
-        )),
+    for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+        if dialect.id().as_str() == s {
+            return Ok(dialect);
+        }
     }
+    Err(format!(
+        "unknown dialect {s:?} (expected postgres|sqlite|mysql)"
+    ))
 }
 
 /// Project an [`ApplyOutcome`] and the lock-coherent outstanding rename set into
@@ -1198,6 +1227,35 @@ mod status_projection_tests {
         // The offline renderer has no host driver to route at, so it takes sqlite.
         assert_eq!(preview_dialect("sqlite"), Ok(SqlDialect::Sqlite));
         assert!(preview_dialect("oracle").is_err());
+    }
+
+    /// The wire spelling a host sends and the id a backend is filed under must be
+    /// ONE string. If they ever diverge, `parse` accepts a name the dialect table
+    /// does not know, or refuses one it does.
+    #[test]
+    fn the_host_apply_spelling_is_the_backend_id() {
+        assert_eq!(ApplyDialect::Postgres.id(), POSTGRES);
+        assert_eq!(ApplyDialect::Mysql.id(), MYSQL);
+
+        for target in [ApplyDialect::Postgres, ApplyDialect::Mysql] {
+            let parsed =
+                ApplyDialect::parse(target.id().as_str()).expect("a host-apply id round-trips");
+            assert_eq!(parsed.id(), target.id());
+            assert!(
+                BackendRegistry::shipping().get(target.id()).is_some(),
+                "{} must be a registered backend",
+                target.id()
+            );
+        }
+
+        // A registered backend with no host-driver path and an unregistered name
+        // are DIFFERENT refusals, not one catch-all.
+        let in_process = ApplyDialect::parse("sqlite").expect_err("sqlite is in-process");
+        assert!(in_process.contains("rusqlite"), "{in_process}");
+        assert!(!in_process.contains("unknown dialect"), "{in_process}");
+        let unregistered = ApplyDialect::parse("duckdb").expect_err("duckdb is not registered");
+        assert!(unregistered.contains("unknown dialect"), "{unregistered}");
+        assert!(!unregistered.contains("rusqlite"), "{unregistered}");
     }
 
     #[test]

@@ -3348,7 +3348,7 @@ mod rollback_selection_tests {
             database_requirements: crate::render::plan::DatabaseRequirements::default(),
             checksum: migration.checksum.clone(),
             flags: migration.flags,
-            dialect_scope: crate::render::step::DialectScope::Both,
+            dialect_scope: crate::render::step::DialectScope::Portable,
             rollbackable: false,
             owner_app: migration.owner_app.clone(),
             depends_on: vec![],

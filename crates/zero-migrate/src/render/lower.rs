@@ -3580,7 +3580,7 @@ impl IrAuthor {
             // folds this override domain, so status, execution, and identity cannot
             // disagree about (for example) repeatable or timeout semantics.
             flags,
-            dialect_scope: crate::render::step::DialectScope::Both,
+            dialect_scope: crate::render::step::DialectScope::Portable,
             rollbackable,
             owner_app: ir.owner_app.clone(),
             depends_on: Vec::new(),

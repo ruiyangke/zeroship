@@ -312,11 +312,8 @@ pub const MYSQL_DESCRIPTOR: BackendDescriptor = BackendDescriptor {
 };
 
 /// Every backend this build ships, in registration order.
-pub const SHIPPING_DESCRIPTORS: &[&BackendDescriptor] = &[
-    &POSTGRES_DESCRIPTOR,
-    &SQLITE_DESCRIPTOR,
-    &MYSQL_DESCRIPTOR,
-];
+pub const SHIPPING_DESCRIPTORS: &[&BackendDescriptor] =
+    &[&POSTGRES_DESCRIPTOR, &SQLITE_DESCRIPTOR, &MYSQL_DESCRIPTOR];
 
 impl SqlDialect {
     /// The descriptor for this closed variant.

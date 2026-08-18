@@ -225,6 +225,15 @@ pub use render::gen_types::{
 // The deploy-target dialect — re-exported so an embedding host's deploy
 // path can thread it into `IrAuthor::new`.
 pub use schema::query::SqlDialect;
+// The OPEN dialect identity and the backend contract keyed by it. A backend is
+// named by a `DialectId`, describes itself with a `BackendDescriptor`, and is
+// admitted by a `BackendRegistry` that refuses a duplicate id rather than
+// picking a winner. Re-exported so an embedding host names one vocabulary.
+pub use zero_migrate_ir::backend::{
+    BackendDescriptor, BackendRegistry, Capability, CapabilitySet, IdentifierLimit, Limits,
+    RegistryError, MYSQL_DESCRIPTOR, POSTGRES_DESCRIPTOR, SHIPPING_DESCRIPTORS, SQLITE_DESCRIPTOR,
+};
+pub use zero_migrate_ir::dialect::{DialectId, DialectSet, MYSQL, POSTGRES, SQLITE};
 // Dialect-neutral journal types (the SQLite path constructs/imports these too).
 pub use apply::journal::{
     AppliedEntry, HistoryEvent, HistoryKind, JournalError, JournaledKind, PendingContract,
