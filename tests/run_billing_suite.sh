@@ -151,6 +151,18 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+# Reachability BEFORE the create, so "no server" reads as "no server" rather
+# than as a CREATE DATABASE that failed for reasons unknown. The auth gate has
+# carried this probe for a while; the difference here is that both now name the
+# command that fixes it, which is the whole point of deleting the flag - a
+# developer should never have to guess which server was missing or how to get
+# one.
+run_psql -d postgres -v ON_ERROR_STOP=1 -tAc "select 1" >/dev/null 2>&1 \
+  || { echo "FATAL: no PostgreSQL answering at ${PG_HOST}:${PG_PORT}" >&2
+       echo "       Provision a server first: tests/provision_test_backends.sh" >&2
+       echo "       (or set PG_HOST/PG_PORT/PG_USER/PG_PASS to reach your own)" >&2
+       exit 2; }
+
 if [ -z "${SKIP_DB_RECREATE:-}" ]; then
   echo "==> Recreating ${TEST_DB} on ${PG_HOST}:${PG_PORT}"
   run_psql -d postgres -v ON_ERROR_STOP=1 \

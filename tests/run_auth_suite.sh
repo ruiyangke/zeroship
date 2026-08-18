@@ -118,7 +118,10 @@ fi
 
 # Prove the database is actually reachable before trusting any result below.
 run_psql -d "$TEST_DB" -v ON_ERROR_STOP=1 -tAc "select 1" >/dev/null \
-  || { echo "FATAL: ${TEST_DB} unreachable at ${PG_HOST}:${PG_PORT}" >&2; exit 2; }
+  || { echo "FATAL: ${TEST_DB} unreachable at ${PG_HOST}:${PG_PORT}" >&2
+       echo "       Provision a server first: tests/provision_test_backends.sh" >&2
+       echo "       (or set PG_HOST/PG_PORT/PG_USER/PG_PASS to reach your own)" >&2
+       exit 2; }
 
 LOG="$(mktemp -t zeroship-auth-suite.XXXXXX.log)"
 
