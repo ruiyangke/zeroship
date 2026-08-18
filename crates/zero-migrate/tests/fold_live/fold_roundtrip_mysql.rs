@@ -361,7 +361,69 @@ async fn fold_equals_introspect_mysql() {
 
         let renamed = registry(&[("notes", OWNER), ("labels", OWNER)]);
 
-        // (9) dropTable last: the fold must forget the table AND everything hanging
+        // (9) NAMED TYPES, which is the one stage here whose answer is not in the op
+        // that asks for it. `createEnum` and `createDomain` state the members and the
+        // base type; the `createTable` TWO OPS LATER is what needs them. So this stage
+        // measures the fold's CROSS-OP state rather than any single arm.
+        //
+        // MySQL is the dialect where that state is checked STRUCTURALLY: it inlines a
+        // domain as its BASE type, so the registry's answer lands in
+        // `ColumnSnapshot::data_type`, which `diff_snapshots` compares against
+        // `information_schema.COLUMNS.COLUMN_TYPE`. `bigInt` rather than `int` on
+        // purpose - a registry that answered with the wrong base type has to be
+        // DISTINGUISHABLE from one that answered with the column's own declared type.
+        // On PostgreSQL the type is MATERIALIZED and `domain_schema_or` /
+        // `enum_schema_or` fall back to the project schema, so a fold that lost the
+        // registry answers IDENTICALLY there. Measured: resetting the registry per op
+        // fails this stage and the SQLite one and leaves
+        // `fold_roundtrip_pg::named_type_lifecycle` green.
+        //
+        // NO ENUM COLUMN HERE, and the reason is a defect this stage found rather than
+        // a gap in it. MySQL inlines an enum as the column type `enum('free','pro')`,
+        // which would make this the only oracle that compares the MEMBERSHIP in a
+        // compared field. But `mysql_type_takes_collation`
+        // (`render/declarative.rs`) lists VARCHAR/CHAR/TEXT and NOT ENUM, while MySQL
+        // treats ENUM as a character type. So every other character column is emitted
+        // with an explicit `COLLATE utf8mb4_0900_as_cs` and an enum column is emitted
+        // with none, inherits the `utf8mb4_0900_ai_ci` default, and introspects to
+        // `case_sensitive: false` against a fold that says nothing:
+        //
+        //     altered_objects: [ accounts / column tier / case_sensitive
+        //                        expected "" actual "false" ]
+        //
+        // That is permanent phantom drift on every MySQL enum column, and the drift is
+        // the SMALLER half - the column is genuinely case-INSENSITIVE on MySQL and
+        // case-sensitive on the other two backends, so `'FREE'` and `'free'` are one
+        // value there and two values everywhere else. Neither half is caused by the
+        // fold, and fixing it is a renderer change with its own live gate; recorded
+        // here so the next reader does not rediscover it by writing this same fixture.
+        let named_types = r#"{"ir_version":1,"name":"named_types","ops":[
+            {"op":"createEnum","name":"plan_tier","values":["free","pro"]},
+            {"op":"createDomain","name":"seat_quota","as":"bigInt"},
+            {"op":"createTable","name":"accounts","columns":[
+                {"name":"id","type":"int","nullable":false},
+                {"name":"seats","type":{"domain":{"name":"seat_quota"}},"nullable":true}
+            ],
+            "primaryKey":["id"]}
+        ]}"#;
+        all_ops.extend(
+            apply_doc(
+                &session,
+                &cfg,
+                named_types,
+                &renamed,
+                &live,
+                Approval::Approved,
+            )
+            .await?,
+        );
+        tables.insert("accounts".to_string());
+        live = LiveSchema::from_tables(tables.clone());
+        assert_matches_live(&session, &cfg, &all_ops, "create table using named types").await?;
+
+        let with_accounts = registry(&[("notes", OWNER), ("labels", OWNER), ("accounts", OWNER)]);
+
+        // (10) dropTable last: the fold must forget the table AND everything hanging
         // off it - its columns, its indexes, its constraints - and a fold that
         // dropped the table while keeping a child object would drift only here.
         let drop_table = r#"{"ir_version":1,"name":"drop_tbl","ops":[
@@ -372,7 +434,7 @@ async fn fold_equals_introspect_mysql() {
                 &session,
                 &cfg,
                 drop_table,
-                &renamed,
+                &with_accounts,
                 &live,
                 Approval::Approved,
             )

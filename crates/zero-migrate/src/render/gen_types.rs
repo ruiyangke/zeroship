@@ -280,19 +280,25 @@ pub fn render_artifacts(
     // traversal, not a private replay of the op stream. `runtime_metadata_from_ops`,
     // `authoring_tables_from_ops` and `fold_to_field_defs` are all gone.
     //
-    // Consumer 3 changes no refusal. `fold_to_field_defs` ran `fold_ops` itself as its
-    // fail-closed gate and `single_fold::fold` runs the same catalog replay through
-    // `fold_ops_onto` before any authored rule executes, so the two refusal sets are
-    // equal by construction — measured over 702 prefix/dialect pairs, of which 486 were
+    // Consumer 3 changed no refusal. `fold_to_field_defs` ran `fold_ops` itself as its
+    // fail-closed gate and `single_fold::fold` runs the same catalog rules, so the two
+    // refusal sets are equal — measured over 702 prefix/dialect pairs, of which 486 were
     // answered by both and 216 refused by both, with none on which one refused and the
     // other did not. Pinned as a biconditional by
     // `tests/gen_types_field_defs_from_the_fold.rs`.
     //
-    // The structural catalog replay now runs ONCE per render. It ran twice until this
-    // consumer moved — once here and once under `render_runtime_descriptor_v1` ->
-    // `fold_to_field_defs` -> `fold_ops` — and the second one leaves with the walker.
-    // That is a consequence of the move rather than its purpose; the `fold_ops_onto`
-    // extraction the proposal assigns to the LAST consumer is still outstanding.
+    // "By construction" no longer holds as the REASON, and the change that broke it is
+    // worth naming here. The catalog rules used to run to completion inside
+    // `fold_ops_onto` before any authored rule executed; they are now driven one op at a
+    // time beside the authored half, so a stream both halves refuse could in principle
+    // report the authored half's reason where it used to report the catalog's. It does
+    // not, for a structural reason rather than a lucky one: each of the authored half's
+    // three fallible sites is the same call the catalog arm for that same op already
+    // makes, and the catalog half advances first. `the_folds_refusal_set_is_the_catalog_
+    // replays_refusal_set` now compares the refusal REASON as well as the set.
+    //
+    // The structural catalog replay runs ONCE per render, and since the extraction so
+    // does `flatten_dialectal_ops`.
     let folded = crate::render::fold::single_fold::fold(ops, dialect, project_schema, effective)
         .map_err(GenTypesError::Fold)?;
     let metadata = folded.project_runtime_metadata();

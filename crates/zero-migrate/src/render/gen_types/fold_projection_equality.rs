@@ -837,6 +837,7 @@ const TABLES_PROBED_PER_FIELD: usize = 97;
 fn the_folds_refusal_set_is_the_catalog_replays_refusal_set() {
     let mut fold_only = Vec::new();
     let mut catalog_only = Vec::new();
+    let mut different_reason = Vec::new();
     let mut refused = 0usize;
     let mut accepted = 0usize;
     for (name, ops, confined) in corpus_streams() {
@@ -846,17 +847,22 @@ fn the_folds_refusal_set_is_the_catalog_replays_refusal_set() {
                 let prefix = &ops[..i];
                 let mine = single_fold::fold(prefix, dialect, SCHEMA, &effective);
                 let catalog = fold_ops(prefix, dialect, SCHEMA, &effective);
-                match (mine.is_err(), catalog.is_err()) {
-                    (true, true) => refused += 1,
-                    (false, false) => accepted += 1,
-                    (true, false) => fold_only.push(format!(
-                        "{name}|{dialect:?}|{i} ops -> {}",
-                        mine.expect_err("the fold refused")
-                    )),
-                    (false, true) => catalog_only.push(format!(
-                        "{name}|{dialect:?}|{i} ops -> {}",
-                        catalog.expect_err("the catalog replay refused")
-                    )),
+                match (mine, catalog) {
+                    (Err(mine), Err(catalog)) => {
+                        refused += 1;
+                        if mine.to_string() != catalog.to_string() {
+                            different_reason.push(format!(
+                                "{name}|{dialect:?}|{i} ops -> fold: {mine} / catalog: {catalog}"
+                            ));
+                        }
+                    }
+                    (Ok(_), Ok(_)) => accepted += 1,
+                    (Err(mine), Ok(_)) => {
+                        fold_only.push(format!("{name}|{dialect:?}|{i} ops -> {mine}"));
+                    }
+                    (Ok(_), Err(catalog)) => {
+                        catalog_only.push(format!("{name}|{dialect:?}|{i} ops -> {catalog}"));
+                    }
                 }
             }
         }
@@ -872,6 +878,37 @@ fn the_folds_refusal_set_is_the_catalog_replays_refusal_set() {
         "the catalog replay refuses prefixes the fold accepts, which would make the \
          fold LESS fail-closed than the walker it replaces:\n  {}",
         catalog_only.join("\n  ")
+    );
+    // THE ONE THING THE PER-OP DRIVE CAN CHANGE, and the SET assertions above cannot
+    // see it. Since the catalog rules moved into `CatalogFold::advance`, `fold` no
+    // longer runs the whole catalog replay before the authored half starts: the two
+    // halves advance on the same op, catalog first. So a stream the AUTHORED half
+    // refuses at op i and the CATALOG half refuses at some later op j now reports op
+    // i's reason where it used to report op j's. The refusal SET is unchanged either
+    // way - refusing is a disjunction over the same two predicates - which is exactly
+    // why an `is_err()` comparison would pass through the change without noticing.
+    //
+    // UNREACHABLE ON TODAY'S CORPUS, and saying so is the point rather than an
+    // admission. The assertion right above already states that
+    // `AuthoredState::advance`'s three fallible sites add nothing here; measured
+    // harder for this check, the authored half never refuses AT ALL on this corpus.
+    // Neuter: give the authored `createEnum` and `createTable` sites a distinct error
+    // string AND run the authored half first - both halves of what this check exists to
+    // catch - and it still reports empty. So this is a GUARD, not evidence: it costs a
+    // string compare on 196 prefixes and it starts speaking the day a corpus stream
+    // reaches an authored-only refusal, which is also the day the ORDER of the two
+    // `advance` calls in `single_fold::fold` starts being observable. Do not read a
+    // green here as a measurement that the order is right.
+    //
+    // The order is right for a structural reason instead: each of the three authored
+    // fallible sites is the SAME call the catalog arm for that SAME op already makes,
+    // so the catalog half reaches the refusal first or together, and it runs first.
+    assert!(
+        different_reason.is_empty(),
+        "the fold and the catalog replay refuse the same prefixes for DIFFERENT \
+         reasons, so the per-op drive changed which half reports an incoherent \
+         stream:\n  {}",
+        different_reason.join("\n  ")
     );
     // Two-sided floor. All-accepted would pass while proving nothing about refusals,
     // and all-refused would prove nothing about the streams that still fold.

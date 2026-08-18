@@ -325,11 +325,15 @@ async fn fold_equals_introspect_sqlite() {
     // (6) The ops PostgreSQL's fold sweep covers and this one did not.
     //
     // `fold_roundtrip_pg.rs` folds 35 op kinds; this file folded 7. Most of the
-    // difference is PostgreSQL-only surface (domains, enums, functions, triggers,
-    // partitions, sequences) or ops SQLite refuses outright (alter-column,
-    // constraint add/drop), and their absence is correct. These are the ones
-    // SQLite genuinely supports, where a fold that disagreed with the live catalog
-    // would go unnoticed.
+    // difference is PostgreSQL-only surface (functions, triggers, partitions,
+    // sequences) or ops SQLite refuses outright (alter-column, constraint add/drop),
+    // and their absence is correct. These are the ones SQLite genuinely supports,
+    // where a fold that disagreed with the live catalog would go unnoticed.
+    //
+    // DOMAINS AND ENUMS USED TO BE ON THAT PostgreSQL-only list, and they do not
+    // belong there: `dialect-support.toml` rates `createEnum` and `createDomain`
+    // `portable` on all three dialects, and SQLite inlines them. Stage (8) below is
+    // what the entry was hiding.
     let rename = r#"{"ir_version":1,"name":"rename_tbl","ops":[
         {"op":"renameTable","table":"folded","to":"folded_renamed"}
     ]}"#;
@@ -357,6 +361,58 @@ async fn fold_equals_introspect_sqlite() {
     all_ops.extend(apply_doc(&be, drop_view, &renamed_reg, &live_tables, Approval::None).await);
     assert_matches_live(&be, &all_ops, "drop view").await;
 
+    // (8) NAMED TYPES, which is the one stage here whose answer is not in the op that
+    // asks for it. `createEnum` and `createDomain` state the members and the base type;
+    // the `createTable` TWO OPS LATER is what needs them. So this stage measures the
+    // fold's CROSS-OP state rather than any single arm, and it is the direct oracle for
+    // the registry `CatalogFold` carries.
+    //
+    // SQLite is the sharp dialect for it, and PostgreSQL is the blunt one. On SQLite an
+    // enum column is `text` plus an inline `CHECK (col IN (...))` and a domain column is
+    // its BASE type, so both answers come out of the registry and a fold that lost it
+    // fails closed at `enum_def` / `domain_def`. On PostgreSQL both types are
+    // materialized and `enum_schema_or` falls back to the project schema, so the same
+    // loss is SILENT for a same-schema type - which is why `fold_roundtrip_pg.rs`'s
+    // `named_type_lifecycle` did not cover this and this file had to.
+    //
+    // The file header used to list domains and enums under "PostgreSQL-only surface".
+    // Measured against `dialect-support.toml`, `createEnum` and `createDomain` are
+    // `portable` on all three dialects; the entry was wrong, and this stage is what
+    // found it.
+    let named_types = r#"{"ir_version":1,"name":"named_types","ops":[
+        {"op":"createEnum","name":"plan_tier","values":["free","pro"]},
+        {"op":"createDomain","name":"seat_quota","as":"int"},
+        {"op":"createTable","name":"accounts","columns":[
+            {"name":"tier","type":{"enum":{"name":"plan_tier"}},"nullable":false},
+            {"name":"seats","type":{"domain":{"name":"seat_quota"}},"nullable":true}
+        ]}
+    ]}"#;
+    all_ops.extend(apply_doc(&be, named_types, &renamed_reg, &live_tables, Approval::None).await);
+    live_tables.insert("accounts".to_string());
+
+    // THE ORACLE, asserted BEFORE the fold's answer. SQLite stores the `CREATE TABLE`
+    // text verbatim in `sqlite_master`, so the membership the enum declared two ops
+    // earlier is readable back out of the database itself. `ColumnSnapshot`'s equality
+    // does not compare `inline_checks`, so the snapshot comparison below would not see
+    // a wrong membership; this does.
+    let stored = be
+        .snapshot_schema_sqlite()
+        .await
+        .expect("introspect live SQLite for the named-type stage")
+        .tables
+        .get("accounts")
+        .and_then(|table| table.stored_create_sql.clone())
+        .expect("SQLite stores the CREATE TABLE text for `accounts`");
+    assert!(
+        stored.contains("'free'") && stored.contains("'pro'"),
+        "the SERVER must hold the enum membership declared two ops earlier, or this \
+         stage adjudicates nothing:\n{stored}"
+    );
+
+    assert_matches_live(&be, &all_ops, "create table using named types").await;
+
+    let with_accounts = registry(&[("notes", APP), ("folded_renamed", APP), ("accounts", APP)]);
+
     // dropTable last: the fold must forget the table AND everything hanging off
     // it — its columns, its indexes, its constraints — and a fold that dropped the
     // table while keeping a child object would drift only here.
@@ -367,7 +423,7 @@ async fn fold_equals_introspect_sqlite() {
         apply_doc(
             &be,
             drop_tbl,
-            &renamed_reg,
+            &with_accounts,
             &live_tables,
             Approval::Approved,
         )

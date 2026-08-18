@@ -1068,42 +1068,141 @@ pub fn fold_ops(
     )
 }
 
-/// Replay an ordered [`Op`] list on top of an existing logical snapshot.
+/// The catalog half's state, seeded ONCE and advanced ONE OP AT A TIME.
 ///
-/// This is the catalog-seeded form of [`fold_ops`]. It uses the same exhaustive
-/// structural replay, including dialectal selection and DML no-ops, while
-/// preserving objects that predate the supplied migration set.
+/// This is [`fold_ops_onto`]'s body turned inside out. It used to be fifteen locals and
+/// a `for` loop, so the ONLY way to put a stream through the catalog rules was to hand
+/// the whole stream to `fold_ops_onto` - which is why the single fold could compose with
+/// them only by calling out once, as an opaque block, and why its module doc recorded
+/// that call as the last thing still breaking "ONE traversal decides what an op means".
 ///
-/// # Errors
-/// See [`FoldError`] for incoherent transitions relative to `base`.
-pub fn fold_ops_onto(
-    base: &SchemaSnapshot,
-    ops: &[Op],
+/// # Why a per-op drive could not just call `fold_ops_onto` per op
+///
+/// Three of these fields ACCUMULATE ACROSS OPS and are NOT recoverable from a
+/// [`SchemaSnapshot`], so re-entering `fold_ops_onto` once per op would silently reset
+/// them:
+///
+/// * `named_types` - the enum MEMBERS and the domain BASE TYPES. The snapshot's own
+///   `named_types` map carries a kind and a comment and nothing else
+///   ([`NamedTypeSnapshot`]), so a `createEnum` followed by a `createTable` using that
+///   enum would reach the second op with an empty registry. Off PostgreSQL that is a
+///   hard [`FoldError`]; ON PostgreSQL it is SILENT for a same-schema type, because
+///   `enum_schema_or` falls back to the project schema - so the dialect with the most
+///   live coverage is the one that would not have reported it.
+/// * `attached_partition_tables` and `created_partition_comments` - the same shape.
+///   `attachPartition` parks a table shape that a LATER `createPartition` or `comment`
+///   collects, and the snapshot has no slot to park it in.
+///
+/// So the blocker was never WHERE the registry is seeded from - there is nowhere in
+/// `base` to seed it from, `SchemaSnapshot` cannot state a member list. It was that the
+/// state had to be CARRIED. That is what this type is.
+pub(crate) struct CatalogFold<'a> {
+    /// The snapshot this fold CONTINUES. Read again at `finish` for the two decisions
+    /// that depend on what the base already said rather than on what the ops said.
+    base: &'a SchemaSnapshot,
     dialect: SqlDialect,
-    project_schema: &str,
-    effective: &EffectivePolicy,
-) -> Result<SchemaSnapshot, FoldError> {
-    let mut tables: BTreeMap<String, TableSnapshot> = base.tables.clone();
-    // Per-table RLS, carried alongside `tables` because it lives on the schema
-    // snapshot rather than on TableSnapshot. Seeded from the base so a fold onto an
-    // existing snapshot keeps what the base already knew.
-    let mut table_rls: BTreeMap<String, bool> = base.table_rls.clone();
-    let mut partitions: BTreeMap<String, PartitionSnapshot> = base.partitions.clone();
-    let mut attached_partition_tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
-    let mut created_partition_comments: BTreeMap<String, Option<String>> = BTreeMap::new();
-    let mut views: BTreeMap<String, ViewSnapshot> = base.views.clone();
-    let mut sequences: BTreeMap<String, SequenceSnapshot> = base.sequences.clone();
-    let mut named_types = NamedTypeRegistry::default();
-    let mut named_type_snapshots: BTreeMap<String, NamedTypeSnapshot> = base.named_types.clone();
-    let mut roles: BTreeMap<String, RoleSnapshot> = base.roles.clone();
-    let mut schemas: BTreeMap<String, SchemaObjectSnapshot> = base.schemas.clone();
-    let mut extensions: BTreeMap<String, ExtensionSnapshot> = base.extensions.clone();
-    let mut functions: BTreeMap<FunctionKey, FunctionSnapshot> = base.functions.clone();
-    let mut policies: BTreeMap<PolicyKey, PolicySnapshot> = base.policies.clone();
-    let mut triggers: BTreeMap<TriggerKey, TriggerSnapshot> = base.triggers.clone();
+    project_schema: &'a str,
+    effective: &'a EffectivePolicy,
+    tables: BTreeMap<String, TableSnapshot>,
+    /// Per-table RLS, carried alongside `tables` because it lives on the schema
+    /// snapshot rather than on TableSnapshot. Seeded from the base so a fold onto an
+    /// existing snapshot keeps what the base already knew.
+    table_rls: BTreeMap<String, bool>,
+    partitions: BTreeMap<String, PartitionSnapshot>,
+    /// NOT seeded from the base: a shape parked by `attachPartition` for a later op in
+    /// the SAME stream to collect. See the type doc.
+    attached_partition_tables: BTreeMap<String, TableSnapshot>,
+    /// NOT seeded from the base, for the same reason as `attached_partition_tables`.
+    created_partition_comments: BTreeMap<String, Option<String>>,
+    views: BTreeMap<String, ViewSnapshot>,
+    sequences: BTreeMap<String, SequenceSnapshot>,
+    /// The named-type DEFINITIONS. Starts empty on every fold, base or no base, because
+    /// [`SchemaSnapshot`] cannot state them. See the type doc.
+    named_types: NamedTypeRegistry,
+    /// The catalog PRESENCE of those same types, which the snapshot CAN state and which
+    /// is therefore seeded from the base.
+    named_type_snapshots: BTreeMap<String, NamedTypeSnapshot>,
+    roles: BTreeMap<String, RoleSnapshot>,
+    schemas: BTreeMap<String, SchemaObjectSnapshot>,
+    extensions: BTreeMap<String, ExtensionSnapshot>,
+    functions: BTreeMap<FunctionKey, FunctionSnapshot>,
+    policies: BTreeMap<PolicyKey, PolicySnapshot>,
+    triggers: BTreeMap<TriggerKey, TriggerSnapshot>,
+}
 
-    let replay_ops = flatten_dialectal_ops(ops, dialect)?;
-    for op in replay_ops {
+impl<'a> CatalogFold<'a> {
+    /// Start a fold that CONTINUES `base`.
+    pub(crate) fn seed(
+        base: &'a SchemaSnapshot,
+        dialect: SqlDialect,
+        project_schema: &'a str,
+        effective: &'a EffectivePolicy,
+    ) -> Self {
+        Self {
+            base,
+            dialect,
+            project_schema,
+            effective,
+            tables: base.tables.clone(),
+            table_rls: base.table_rls.clone(),
+            partitions: base.partitions.clone(),
+            attached_partition_tables: BTreeMap::new(),
+            created_partition_comments: BTreeMap::new(),
+            views: base.views.clone(),
+            sequences: base.sequences.clone(),
+            named_types: NamedTypeRegistry::default(),
+            named_type_snapshots: base.named_types.clone(),
+            roles: base.roles.clone(),
+            schemas: base.schemas.clone(),
+            extensions: base.extensions.clone(),
+            functions: base.functions.clone(),
+            policies: base.policies.clone(),
+            triggers: base.triggers.clone(),
+        }
+    }
+
+    /// Advance the catalog half by ONE op.
+    ///
+    /// The match is EXHAUSTIVE over [`Op`] with no `_` arm: the ops that contribute
+    /// nothing to a structural snapshot are NAMED in the last two arms rather than swept
+    /// up by a catch-all, so an `Op` variant added to the IR is a compile error here.
+    ///
+    /// Section A of `docs/proposals/single-fold-and-effects.md` tabulates this walker as
+    /// "56 arms, 4 `_ =>`", which is measurably not what it is. The four `_` arms it
+    /// counted are nested matches INSIDE four op arms - over `IndexElementSnapshot`,
+    /// `ColType`, `IrConstraintKind` and an `Option<&ViewSnapshot>`. None of them can
+    /// swallow an op. The catch-all worry the proposal attaches to this walker belongs
+    /// to the two artifact walkers it also tabulates, which are now deleted.
+    ///
+    /// # Errors
+    /// See [`FoldError`] for incoherent transitions relative to the state so far.
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn advance(&mut self, op: &Op) -> Result<(), FoldError> {
+        let dialect = self.dialect;
+        let project_schema = self.project_schema;
+        let effective = self.effective;
+        // Destructured rather than reached through `self.` so the match below is the
+        // moved body VERBATIM. That is the only reviewable form for 1,844 lines: the
+        // diff for them is a pure move, and the three `continue`s the loop used to own
+        // are the whole of the semantic edit.
+        let Self {
+            tables,
+            table_rls,
+            partitions,
+            attached_partition_tables,
+            created_partition_comments,
+            views,
+            sequences,
+            named_types,
+            named_type_snapshots,
+            roles,
+            schemas,
+            extensions,
+            functions,
+            policies,
+            triggers,
+            ..
+        } = self;
         match op {
             Op::CreateEnum { name, values, .. } => {
                 named_types
@@ -1241,7 +1340,7 @@ pub fn fold_ops_onto(
                 // than the CREATE that made the table.
                 let columns: Vec<IrColumn> = columns
                     .iter()
-                    .map(|c| resolve_encrypted_inner_domain_in_column(c, &named_types))
+                    .map(|c| resolve_encrypted_inner_domain_in_column(c, named_types))
                     .collect();
                 let columns = &columns[..];
                 let desc = create_table_descriptor(name, columns, runtime_options.as_ref());
@@ -1256,12 +1355,7 @@ pub fn fold_ops_onto(
                 snap.partition_by = partition_by.clone();
                 if let Some(pk) = primary_key {
                     let primary_key_name = implicit_primary_key_name(
-                        name,
-                        dialect,
-                        &tables,
-                        &partitions,
-                        &views,
-                        &sequences,
+                        name, dialect, tables, partitions, views, sequences,
                     );
                     push_primary_key_snapshot(&mut snap, pk, &primary_key_name);
                 }
@@ -1271,7 +1365,7 @@ pub fn fold_ops_onto(
                     name,
                     columns,
                     &mut snap,
-                    &named_types,
+                    named_types,
                     dialect,
                     effective_schema,
                     effective,
@@ -1438,12 +1532,7 @@ pub fn fold_ops_onto(
                                     ));
                                 }
                                 implicit_primary_key_name(
-                                    name,
-                                    dialect,
-                                    &tables,
-                                    &partitions,
-                                    &views,
-                                    &sequences,
+                                    name, dialect, tables, partitions, views, sequences,
                                 )
                             }
                             Some("UNIQUE") => {
@@ -1455,12 +1544,7 @@ pub fn fold_ops_onto(
                                 }
                                 let base = derived_constraint_name(name, &index.columns, "key");
                                 allocate_implicit_relation_name(
-                                    &base,
-                                    dialect,
-                                    &tables,
-                                    &partitions,
-                                    &views,
-                                    &sequences,
+                                    &base, dialect, tables, partitions, views, sequences,
                                 )
                             }
                             _ => {
@@ -1486,12 +1570,7 @@ pub fn fold_ops_onto(
                                     derived_constraint_name(name, &columns, "idx")
                                 };
                                 allocate_implicit_relation_name(
-                                    &base,
-                                    dialect,
-                                    &tables,
-                                    &partitions,
-                                    &views,
-                                    &sequences,
+                                    &base, dialect, tables, partitions, views, sequences,
                                 )
                             }
                         };
@@ -1562,7 +1641,7 @@ pub fn fold_ops_onto(
                 }
             }
             Op::SetTableOptions { table, options, .. } => {
-                let snap = table_mut(&mut tables, table)?;
+                let snap = table_mut(tables, table)?;
                 if let Some(soft_delete) = options.soft_delete {
                     snap.runtime_options.soft_delete = soft_delete;
                 }
@@ -1680,7 +1759,7 @@ pub fn fold_ops_onto(
                 // OID, so the FK `definition` in OTHER tables now reports the NEW
                 // name. Mirror that, or the renamed table phantom-drifts for every
                 // table that referenced it.
-                rewrite_incoming_fk_targets(&mut tables, project_schema, table, to);
+                rewrite_incoming_fk_targets(tables, project_schema, table, to);
             }
             Op::AddColumn {
                 table,
@@ -1696,7 +1775,7 @@ pub fn fold_ops_onto(
                 identity,
                 ..
             } => {
-                let snap = table_mut(&mut tables, table)?;
+                let snap = table_mut(tables, table)?;
                 if snap.columns.iter().any(|c| &c.name == column) {
                     return Err(FoldError::DuplicateColumn {
                         table: table.clone(),
@@ -1708,7 +1787,7 @@ pub fn fold_ops_onto(
                 // (this snapshot feeds the `--sql` plan preview + the apply path), and grow
                 // the `<col>_masked` sibling for a masked column so the offline fold matches
                 // the live apply.
-                let resolved_ty = resolve_encrypted_inner_domain(ty, &named_types);
+                let resolved_ty = resolve_encrypted_inner_domain(ty, named_types);
                 let ty = resolved_ty.as_ref().unwrap_or(ty);
                 let (col, masked_sibling) = add_column_snapshot(
                     table,
@@ -1746,7 +1825,7 @@ pub fn fold_ops_onto(
                     table,
                     &source_col,
                     &mut col,
-                    &named_types,
+                    named_types,
                     dialect,
                     project_schema,
                     effective,
@@ -1771,7 +1850,7 @@ pub fn fold_ops_onto(
                 snap.columns.sort_by(|a, b| a.name.cmp(&b.name));
             }
             Op::DropColumn { table, column, .. } => {
-                let snap = table_mut(&mut tables, table)?;
+                let snap = table_mut(tables, table)?;
                 let before = snap.columns.len();
                 snap.columns.retain(|c| &c.name != column);
                 if snap.columns.len() == before {
@@ -1894,7 +1973,7 @@ pub fn fold_ops_onto(
             Op::RenameColumn {
                 table, from, to, ..
             } => {
-                let snap = table_mut(&mut tables, table)?;
+                let snap = table_mut(tables, table)?;
                 // A pure rename keeps the column's type/nullable/default/sentinels;
                 // only the NAME changes (the IR carries `ty` for the live-rename type
                 // reconciliation the lower does, but the fold trusts the EXISTING
@@ -2115,7 +2194,7 @@ pub fn fold_ops_onto(
                 // That constraint lives outside `snap`, so it needs its own walk - the
                 // column-rename analogue of what `rewrite_incoming_fk_targets` does for
                 // a table rename.
-                rewrite_incoming_fk_column_targets(&mut tables, project_schema, table, from, to);
+                rewrite_incoming_fk_column_targets(tables, project_schema, table, from, to);
             }
             Op::SetColumnType {
                 table,
@@ -2199,7 +2278,7 @@ pub fn fold_ops_onto(
                                 table,
                                 &source_col,
                                 &mut new_col,
-                                &named_types,
+                                named_types,
                                 dialect,
                                 project_schema,
                                 effective,
@@ -2209,7 +2288,7 @@ pub fn fold_ops_onto(
                 }
                 let target_has_sentinel =
                     new_col.encryption_sentinel.is_some() || new_col.comment_sentinel.is_some();
-                let snap = table_mut(&mut tables, table)?;
+                let snap = table_mut(tables, table)?;
                 let col = snap
                     .columns
                     .iter_mut()
@@ -2335,7 +2414,7 @@ pub fn fold_ops_onto(
                 }
             }
             Op::SetColumnNotNull { table, column, .. } => {
-                let snap = table_mut(&mut tables, table)?;
+                let snap = table_mut(tables, table)?;
                 let col = snap
                     .columns
                     .iter_mut()
@@ -2347,7 +2426,7 @@ pub fn fold_ops_onto(
                 col.nullable = false;
             }
             Op::DropColumnNotNull { table, column, .. } => {
-                let snap = table_mut(&mut tables, table)?;
+                let snap = table_mut(tables, table)?;
                 let col = snap
                     .columns
                     .iter_mut()
@@ -2364,7 +2443,7 @@ pub fn fold_ops_onto(
                 value,
                 ..
             } => {
-                let snap = table_mut(&mut tables, table)?;
+                let snap = table_mut(tables, table)?;
                 let col = snap
                     .columns
                     .iter_mut()
@@ -2447,7 +2526,7 @@ pub fn fold_ops_onto(
                 }
             }
             Op::DropColumnDefault { table, column, .. } => {
-                let snap = table_mut(&mut tables, table)?;
+                let snap = table_mut(tables, table)?;
                 let col = snap
                     .columns
                     .iter_mut()
@@ -2462,19 +2541,13 @@ pub fn fold_ops_onto(
                 }
             }
             Op::AlterPrimaryKey { table, action, .. } => {
-                let primary_key_name = implicit_primary_key_name(
-                    table,
-                    dialect,
-                    &tables,
-                    &partitions,
-                    &views,
-                    &sequences,
-                );
-                let snap = table_mut(&mut tables, table)?;
+                let primary_key_name =
+                    implicit_primary_key_name(table, dialect, tables, partitions, views, sequences);
+                let snap = table_mut(tables, table)?;
                 apply_fold_alter_primary_key(table, snap, action, dialect, &primary_key_name)?;
             }
             Op::SynchronizeIdentity { table, column, .. } => {
-                let snap = table_mut(&mut tables, table)?;
+                let snap = table_mut(tables, table)?;
                 if !snap
                     .columns
                     .iter()
@@ -2511,7 +2584,7 @@ pub fn fold_ops_onto(
                     }
                     _ => None,
                 };
-                let snap = table_mut(&mut tables, table)?;
+                let snap = table_mut(tables, table)?;
                 push_folded_constraint(table, snap, folded)?;
                 if let Some((constraint_name, columns)) = fk_support {
                     // Stand-alone composite FK lowering emits an explicit child-side
@@ -2530,7 +2603,7 @@ pub fn fold_ops_onto(
                 snap.indexes.sort_by(|a, b| a.name.cmp(&b.name));
             }
             Op::DropConstraint { table, name, .. } => {
-                let snap = table_mut(&mut tables, table)?;
+                let snap = table_mut(tables, table)?;
                 // Capture the dropped constraint's KIND before the retain so the
                 // index-cascade below can discriminate. Only UNIQUE / PRIMARY KEY
                 // constraints back an implicit same-named index that PG cascades on
@@ -2564,7 +2637,7 @@ pub fn fold_ops_onto(
                     snap.indexes
                         .retain(|index| index.name != name.as_str() || !index.unique);
                     if snap.indexes.len() != index_before {
-                        continue;
+                        return Ok(());
                     }
                 }
                 if !removed_constraint {
@@ -2638,7 +2711,7 @@ pub fn fold_ops_onto(
                     dialect,
                 )
                 .map_err(fold_lower_error)?;
-                let snap = table_mut(&mut tables, table)?;
+                let snap = table_mut(tables, table)?;
                 if snap.indexes.iter().any(|i| i.name == idx.name) {
                     return Err(FoldError::DuplicateIndex(idx.name));
                 }
@@ -2652,7 +2725,7 @@ pub fn fold_ops_onto(
                 // at validate; the fold accepts either since it has the whole schema).
                 let removed = match table {
                     Some(t) => {
-                        let snap = table_mut(&mut tables, t)?;
+                        let snap = table_mut(tables, t)?;
                         let before = snap.indexes.len();
                         snap.indexes.retain(|i| &i.name != name);
                         snap.indexes.len() != before
@@ -2739,18 +2812,18 @@ pub fn fold_ops_onto(
                 if let CommentTarget::Table { name, .. } = target {
                     if let Some(attached) = attached_partition_tables.get_mut(name) {
                         attached.comment.clone_from(comment);
-                        continue;
+                        return Ok(());
                     }
                     if partitions.contains_key(name) {
                         created_partition_comments.insert(name.clone(), comment.clone());
-                        continue;
+                        return Ok(());
                     }
                 }
                 apply_comment(
-                    &mut tables,
-                    &mut views,
-                    &mut named_type_snapshots,
-                    &mut sequences,
+                    tables,
+                    views,
+                    named_type_snapshots,
+                    sequences,
                     target,
                     comment.clone(),
                 )?;
@@ -2949,68 +3022,123 @@ pub fn fold_ops_onto(
             | Op::PgRaw { .. } => {}
             Op::Dialectal { .. } => {}
         }
+        Ok(())
     }
 
-    if dialect == SqlDialect::Sqlite {
-        for snap in tables.values_mut() {
-            apply_fold_sqlite_rowid_metadata(snap)?;
+    /// Close the fold and emit the snapshot.
+    ///
+    /// # Errors
+    /// See [`FoldError`]; only the SQLite rowid pass can fail here.
+    pub(crate) fn finish(self) -> Result<SchemaSnapshot, FoldError> {
+        let Self {
+            base,
+            dialect,
+            mut tables,
+            table_rls,
+            partitions,
+            views,
+            sequences,
+            named_type_snapshots,
+            roles,
+            schemas,
+            extensions,
+            functions,
+            policies,
+            triggers,
+            ..
+        } = self;
+        if dialect == SqlDialect::Sqlite {
+            for snap in tables.values_mut() {
+                apply_fold_sqlite_rowid_metadata(snap)?;
+            }
         }
+
+        // The expected side of the vendor-object comparison: what the authored history
+        // says exists, reduced to the identity a catalog read can also produce. The
+        // three maps this derives FROM keep their authored definitions for every
+        // dialect - they are rollback history, and a SQLite trigger is still restorable.
+        //
+        // POSTGRESQL ONLY, for the reason the row-level-security seeding above is:
+        // SQLite and MySQL introspection reads none of these catalogs and leaves the
+        // field `None`, so filling it for them would make every folded snapshot differ
+        // from the live one it is supposed to equal. Equality compares the field plainly
+        // and cannot skip an absent side the way the diff does.
+        //
+        // OR THE BASE ALREADY SPOKE, which is the carry-through every other map here
+        // gets. Folding onto a base is a continuation, so a base that asserted "this
+        // schema holds no policies" must not have that assertion ERASED by a fold under
+        // another dialect - a no-op op would then change the snapshot. Measured:
+        // `synchronize_identity_fold_validates_target_without_changing_schema` folds a
+        // PostgreSQL base under all three dialects and asserts the result is unchanged,
+        // and the dialect test alone failed it on `None` against `Some({})`.
+        let speaks = dialect == SqlDialect::Postgres || base.vendor_objects.is_some();
+        let vendor_objects = speaks.then(|| VendorObjectIdentities {
+            // The body comes from the SAME `functions` map the rollback history uses, so
+            // a `CREATE OR REPLACE` that overwrote an entry above contributes the LAST
+            // body rather than the first - which is what PostgreSQL holds too.
+            functions: functions
+                .iter()
+                .map(|(key, snapshot)| (key.canonicalized(), FunctionIdentity::of(snapshot)))
+                .collect(),
+            policies: policies
+                .iter()
+                .map(|(key, snapshot)| (key.clone(), PolicyIdentity::of(snapshot)))
+                .collect(),
+            triggers: triggers
+                .iter()
+                .map(|(key, snapshot)| (key.clone(), TriggerIdentity::of(snapshot)))
+                .collect(),
+        });
+
+        restamp_mysql_physical_types(&mut tables, base, dialect);
+
+        Ok(SchemaSnapshot {
+            tables,
+            table_rls,
+            partitions,
+            views,
+            named_types: named_type_snapshots,
+            sequences,
+            roles,
+            schemas,
+            extensions,
+            functions,
+            policies,
+            triggers,
+            vendor_objects,
+        })
     }
+}
 
-    // The expected side of the vendor-object comparison: what the authored history
-    // says exists, reduced to the identity a catalog read can also produce. The
-    // three maps this derives FROM keep their authored definitions for every
-    // dialect - they are rollback history, and a SQLite trigger is still restorable.
-    //
-    // POSTGRESQL ONLY, for the reason the row-level-security seeding above is:
-    // SQLite and MySQL introspection reads none of these catalogs and leaves the
-    // field `None`, so filling it for them would make every folded snapshot differ
-    // from the live one it is supposed to equal. Equality compares the field plainly
-    // and cannot skip an absent side the way the diff does.
-    //
-    // OR THE BASE ALREADY SPOKE, which is the carry-through every other map here
-    // gets. Folding onto a base is a continuation, so a base that asserted "this
-    // schema holds no policies" must not have that assertion ERASED by a fold under
-    // another dialect - a no-op op would then change the snapshot. Measured:
-    // `synchronize_identity_fold_validates_target_without_changing_schema` folds a
-    // PostgreSQL base under all three dialects and asserts the result is unchanged,
-    // and the dialect test alone failed it on `None` against `Some({})`.
-    let speaks = dialect == SqlDialect::Postgres || base.vendor_objects.is_some();
-    let vendor_objects = speaks.then(|| VendorObjectIdentities {
-        // The body comes from the SAME `functions` map the rollback history uses, so
-        // a `CREATE OR REPLACE` that overwrote an entry above contributes the LAST
-        // body rather than the first - which is what PostgreSQL holds too.
-        functions: functions
-            .iter()
-            .map(|(key, snapshot)| (key.canonicalized(), FunctionIdentity::of(snapshot)))
-            .collect(),
-        policies: policies
-            .iter()
-            .map(|(key, snapshot)| (key.clone(), PolicyIdentity::of(snapshot)))
-            .collect(),
-        triggers: triggers
-            .iter()
-            .map(|(key, snapshot)| (key.clone(), TriggerIdentity::of(snapshot)))
-            .collect(),
-    });
-
-    restamp_mysql_physical_types(&mut tables, base, dialect);
-
-    Ok(SchemaSnapshot {
-        tables,
-        table_rls,
-        partitions,
-        views,
-        named_types: named_type_snapshots,
-        sequences,
-        roles,
-        schemas,
-        extensions,
-        functions,
-        policies,
-        triggers,
-        vendor_objects,
-    })
+/// Replay an ordered [`Op`] list on top of an existing logical snapshot.
+///
+/// This is the catalog-seeded form of [`fold_ops`]. It uses the same exhaustive
+/// structural replay, including dialectal selection and DML no-ops, while
+/// preserving objects that predate the supplied migration set.
+///
+/// It is a DRIVER over `CatalogFold` rather than a walker of its own: seed once,
+/// advance per op, finish. `single_fold::fold` drives those same three calls with the
+/// authored half interleaved, so the catalog rules are stated once and read twice
+/// instead of being reachable only as one opaque call.
+///
+/// (Backticks rather than an intra-doc link on `CatalogFold` deliberately: it is
+/// `pub(crate)`, and a `pub` item's docs cannot link to one at any path. That is the
+/// same trap `single_fold`'s module doc records, and the rustdoc gate counts it.)
+///
+/// # Errors
+/// See [`FoldError`] for incoherent transitions relative to `base`.
+pub fn fold_ops_onto(
+    base: &SchemaSnapshot,
+    ops: &[Op],
+    dialect: SqlDialect,
+    project_schema: &str,
+    effective: &EffectivePolicy,
+) -> Result<SchemaSnapshot, FoldError> {
+    let mut state = CatalogFold::seed(base, dialect, project_schema, effective);
+    for op in flatten_dialectal_ops(ops, dialect)? {
+        state.advance(op)?;
+    }
+    state.finish()
 }
 
 /// Re-derive every REPLAY-DECIDED column's MySQL physical contract from the column

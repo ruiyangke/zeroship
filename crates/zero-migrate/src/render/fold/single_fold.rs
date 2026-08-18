@@ -34,15 +34,15 @@
 //! `project_snapshot`'s neutral/vendor split.
 //!
 //! `project_snapshot` is the last one still reachable only from tests, which is what
-//! `#![cfg_attr(not(test), allow(dead_code))]` below still covers. The attribute goes
-//! when consumer 4 moves `fold_ops`; until then it is load-bearing for that one
-//! projection and for nothing else.
+//! `#![cfg_attr(not(test), allow(dead_code))]` below still covers - it and the two
+//! `FoldedSchema` fields it reads, measured by deleting the attribute. See the last
+//! section for why the `fold_ops_onto` extraction did not retire it.
 //!
 //! CONSUMER 3 also collapsed a duplicate: `render_artifacts` ran the structural catalog
-//! replay TWICE per render until this move - once through `fold`, once through
-//! `fold_to_field_defs` -> `fold_ops` - and the second one left with the walker. That is
-//! a consequence rather than the purpose; the `fold_ops_onto` extraction the proposal
-//! assigns to the last consumer is still outstanding.
+//! replay TWICE per render until that move - once through `fold`, once through
+//! `fold_to_field_defs` -> `fold_ops` - and the second one left with the walker. The
+//! `fold_ops_onto` extraction has since collapsed the second duplicate below it:
+//! `flatten_dialectal_ops` ran twice per `fold` and now runs once.
 //!
 //! # What the live projections cost the model
 //!
@@ -115,17 +115,41 @@
 //!
 //! # Where the catalog half comes from, stated plainly
 //!
-//! The catalog rules still live in [`crate::render::fold::fold_ops_onto`], and this
-//! fold calls it
-//! rather than restating 1,989 lines of them. That is ONE call, not a per-op drive:
-//! `fold_ops_onto` seeds its named-type registry with `NamedTypeRegistry::default()`
-//! rather than from `base`, so folding it one op at a time would lose every enum and
-//! domain definition between ops - measured, not assumed. Bringing the catalog rules
-//! INTO this traversal means extracting that loop body into an advance function, which
-//! is a production refactor of the most dangerous walker in the tree; step 3 ships
-//! dead, so it is step 4's opening move and not step 3's. Until then this module is
-//! honest about being one traversal of the AUTHORED rules composed with the catalog
-//! replay it does not yet own.
+//! The catalog rules are DRIVEN BY THIS TRAVERSAL. They live in
+//! `CatalogFold::advance` next door, which is `fold_ops_onto`'s former loop body, and
+//! the loop below calls it one op at a time beside `AuthoredState::advance`. So there
+//! is no longer any op-stream walking here that a projection could be accused of, and
+//! no opaque block: both halves see the same op before either sees the next, and
+//! `flatten_dialectal_ops` runs ONCE for the pair rather than once per half.
+//!
+//! `fold_ops_onto` survives and is unchanged in behaviour - it is now `seed`, a loop of
+//! `advance`, and `finish` - because drift, the MySQL expected state,
+//! `engine::refresh_historical_live` and the node host's rollback and inverse recovery
+//! all fold onto a LIVE base, which this module never does.
+//!
+//! The blocker this doc used to record was stated slightly wrong, and the correction is
+//! the load-bearing part. It read: the registry is seeded from
+//! `NamedTypeRegistry::default()` "rather than from `base`". There is nowhere in `base`
+//! to seed it from - [`SchemaSnapshot`]'s `named_types` map carries a kind and a
+//! comment, never a member list or a base type - so seeding was never the fix. CARRYING
+//! was. The registry is a field of `CatalogFold`, written by `createEnum` and
+//! `createDomain` and read by every later `createTable`, `addColumn` and
+//! `setColumnType`; a drive that re-entered `fold_ops_onto` per op would reset it, which
+//! is exactly what the old wording predicted and is measured here rather than assumed:
+//! rebuilding this loop that way makes the corpus refuse eight prefixes with ``enum
+//! `tier` is not registered`` - on SQLite and MySQL, and never on PostgreSQL, because
+//! `enum_schema_or` falls back to the project schema there and answers identically.
+//! Two more fields have the same shape and no snapshot slot either,
+//! `attached_partition_tables` and `created_partition_comments`.
+//!
+//! One honest limit survives the move. NOTHING IN PRODUCTION READS THE CATALOG HALF
+//! THIS FOLD PRODUCES: all three live projections read `authored` and `named_types`
+//! only, so `model` and `unmodelled` exist here for `project_snapshot`, which is still
+//! test-only, and for the fail-closed refusal every projection inherits. That is why
+//! `#![cfg_attr(not(test), allow(dead_code))]` below is STILL load-bearing - measured
+//! by deleting it, which warns on exactly `project_snapshot` and the two fields it
+//! reads, and on nothing else. It goes when a consumer reads the catalog half, which is
+//! the `refresh_historical_live` / drift move, not this one.
 
 #![cfg_attr(not(test), allow(dead_code))]
 
@@ -134,9 +158,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use indexmap::IndexMap;
 
 use super::{
-    flatten_dialectal_ops, fold_create_column_to_field, fold_named_type_error, fold_ops_onto,
+    flatten_dialectal_ops, fold_create_column_to_field, fold_named_type_error,
     lift_named_type_facets, recover_check_facet, recover_fk_policy, resolved_inject_prefix_len,
-    FoldError, RecoveredCheck, FOLD_OWNER_APP,
+    CatalogFold, FoldError, RecoveredCheck, FOLD_OWNER_APP,
 };
 use crate::model::ir::{ColType, IrColumn, IrConstraintKind, IrIndex, Op, TableRuntimeOptions};
 use crate::model::schema_model::SchemaModel;
@@ -249,24 +273,26 @@ pub fn fold(
     project_schema: &str,
     effective: &EffectivePolicy,
 ) -> Result<FoldedSchema, FoldError> {
-    let mut catalog = fold_ops_onto(
-        &SchemaSnapshot::default(),
-        ops,
-        dialect,
-        project_schema,
-        effective,
-    )?;
-    let tables = std::mem::take(&mut catalog.tables);
-
+    let empty = SchemaSnapshot::default();
+    let mut catalog = CatalogFold::seed(&empty, dialect, project_schema, effective);
     let mut state = AuthoredState {
         tables: BTreeMap::new(),
         named_types: NamedTypeRegistry::default(),
         dialect,
         project_schema: project_schema.to_string(),
     };
+    // ONE traversal. Both halves advance on the SAME op before either sees the next
+    // one, which is the whole of what "the fold owns the catalog rules" means here -
+    // and the stream is flattened ONCE rather than once per half.
+    //
+    // The catalog half advances FIRST so that an op both halves refuse is reported by
+    // the catalog, which is the precedence the single opaque `fold_ops_onto` call had.
     for op in flatten_dialectal_ops(ops, dialect)? {
+        catalog.advance(op)?;
         state.advance(op, effective)?;
     }
+    let mut catalog = catalog.finish()?;
+    let tables = std::mem::take(&mut catalog.tables);
 
     Ok(FoldedSchema {
         model: SchemaModel::from_tables(&tables),
