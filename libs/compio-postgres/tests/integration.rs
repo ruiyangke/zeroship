@@ -112,20 +112,23 @@ async fn connect(url: &str) -> Result<Client, Error> {
 /// locks and replication slots are database-wide. A test using one of those
 /// still has to pick a name no other test can be holding - see
 /// `notify_delivered_on_idle_listener`.
+///
+/// THE `None` ARM IS NOW UNREACHABLE. A database this crate cannot reach panics
+/// here rather than announcing a skip, so the 38 callers keep their
+/// `let Some(url) = require_pg().await else { return; }` and never take the
+/// else. The shape is left alone deliberately: this change is about whether the
+/// tests RUN, and rewriting 38 call sites would put what they ASSERT in the
+/// same diff.
 async fn require_pg() -> Option<String> {
     let url = test_url();
     let client = match connect(&url).await {
         Ok(client) => client,
-        Err(e) => {
-            // exit(0) here would end the WHOLE binary with a success status the
-            // moment any one test can't reach Postgres, discarding every result
-            // already produced -- including failures already reported by cargo
-            // for earlier tests in this run. Returning None instead lets each
-            // caller skip itself while its siblings (and any prior failures)
-            // stand.
-            common::skip(&format!("Skipping - Postgres not reachable: {e}"));
-            return None;
-        }
+        // `process::exit(0)` would have ended the WHOLE binary with a success
+        // status the moment one test could not reach Postgres, discarding every
+        // result already produced. A panic ends only this test, so its siblings
+        // and any failure already reported still stand - and unlike the skip
+        // that used to be here, the run goes red.
+        Err(e) => common::postgres_unreachable(&url, &e),
     };
 
     let schema = test_schema();

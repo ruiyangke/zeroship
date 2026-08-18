@@ -58,7 +58,16 @@
 #   TEST_DB=mine SKIP_DB_RECREATE=1 tests/run_billing_suite.sh  # reuse that one
 #   PG_PORT=5440 PG_USER=postgres PG_PASS=zeroship tests/run_billing_suite.sh
 #
-# ENV (defaults target the dev compose Postgres on :5440)
+# PROVISION FIRST. This script creates and migrates a DATABASE; it does not
+# create a SERVER. Stand one up with `tests/provision_test_backends.sh`, which
+# brings up deploy/compose's postgres on the port below.
+#
+# ENV (defaults target deploy/compose's postgres service, published on :5440)
+#   The comment here read "the dev compose Postgres on :5440" for months while
+#   the server actually answering was `zs-auth-pg-5440`, started by hand and
+#   owned by no file in this tree. The address was right, the provenance was
+#   not, and the wrong half is the one that reads as though somebody maintains
+#   that server.
 #   PG_HOST (localhost)  PG_PORT (5440)  PG_USER (postgres)  PG_PASS (zeroship)
 #   TEST_DB (per run: zeroship_billing_test_<pid>_<nanos>, dropped on exit)
 #   PSQL    (auto-detected; override with an explicit psql path)
@@ -89,10 +98,28 @@ cd "$ROOT"
 # product defects. `tests/lib_scratch_db_selftest.sh` covers both directions.
 . "$ROOT/tests/lib/scratch_db.sh"
 
-# Skips this gate reports but does not fail on. Empty means "report every skip":
-# the census treats an empty allowlist as matching NOTHING, never as matching
-# everything, which is the one way this could fail open.
-BILLING_SKIP_ALLOWLIST="${BILLING_SKIP_ALLOWLIST:-}"
+# Skips this gate TOLERATES. Everything else fails it, the same way
+# run_auth_suite.sh has always worked. The census treats an empty allowlist as
+# matching NOTHING, never as matching everything, which is the one way this
+# could fail open - so each entry has to be added deliberately.
+#
+# MEASURED 2026-08-18 on a full green run (748 passed, 0 failed): exactly six
+# tests announce, and both reasons below account for all six.
+#
+#   ZEROSHIP_DW_E2E   five tests in durable_workflows_keystone_e2e. They are the
+#                     durable-workflows end-to-end spine and belong to a
+#                     DIFFERENT gate - tests/e2e_durable_workflows.sh sets the
+#                     variable and runs them. Running them here would run them
+#                     twice, not once more.
+#   REDPANDA_BROKERS  one test, the real-broker half of the billing pipeline.
+#                     This script runs it when the variable is set (CI sets it,
+#                     see the redpanda block below); locally it needs a broker
+#                     this script does not stand up.
+#
+# NEITHER IS POSTGRES OR REDIS. That is the line: the two backends the operator
+# decision names are provisioned before the run and a skip announcing either one
+# fails this gate. Do not add an entry here for a database.
+BILLING_SKIP_ALLOWLIST="${BILLING_SKIP_ALLOWLIST:-ZEROSHIP_DW_E2E|REDPANDA_BROKERS}"
 
 PG_HOST="${PG_HOST:-localhost}"
 PG_PORT="${PG_PORT:-5440}"
@@ -141,6 +168,18 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+# Reachability BEFORE the create, so "no server" reads as "no server" rather
+# than as a CREATE DATABASE that failed for reasons unknown. The auth gate has
+# carried this probe for a while; the difference here is that both now name the
+# command that fixes it, which is the whole point of deleting the flag - a
+# developer should never have to guess which server was missing or how to get
+# one.
+run_psql -d postgres -v ON_ERROR_STOP=1 -tAc "select 1" >/dev/null 2>&1 \
+  || { echo "FATAL: no PostgreSQL answering at ${PG_HOST}:${PG_PORT}" >&2
+       echo "       Provision a server first: tests/provision_test_backends.sh" >&2
+       echo "       (or set PG_HOST/PG_PORT/PG_USER/PG_PASS to reach your own)" >&2
+       exit 2; }
 
 if [ -z "${SKIP_DB_RECREATE:-}" ]; then
   echo "==> Recreating ${TEST_DB} on ${PG_HOST}:${PG_PORT}"
@@ -325,14 +364,24 @@ echo "=================================================================="
 # runs - it just does not test anything. Only the announcement distinguishes
 # them, so count it and print it next to the tally.
 #
-# REPORTED, NOT FAILED, and that is a deliberate boundary. This gate provisions
-# Postgres and Redpanda but not every backend the control suite can reach, and
-# deciding which of the remainder CI should stand up is an operator call, not
-# something to smuggle in as a gate change. To turn the report into a gate once
-# that decision is made, drop the `|| true` and set `fail=1` - or export
-# ZEROSHIP_REQUIRE_LIVE_BACKENDS=1, which makes each skip fail at its own call
-# site with the missing variable named.
-zs_skip_census "$SUITE_LOG" "$BILLING_SKIP_ALLOWLIST" || true
+# FAILED, NOT MERELY REPORTED. This was `|| true` with a comment saying the
+# report becomes a gate "once that decision is made" and offering
+# ZEROSHIP_REQUIRE_LIVE_BACKENDS=1 as the alternative. The decision is made and
+# that flag is deleted: Postgres and Redis are required, this script provisions
+# a database and fails at the top if no server answers, and the two remaining
+# tolerated absences are named in BILLING_SKIP_ALLOWLIST above with the gate
+# that does cover them.
+#
+# The auth gate has worked this way throughout, and the asymmetry was the whole
+# problem: the same announcement failed one suite and was printed by the other,
+# so which of two gates you ran decided whether a missing backend counted.
+if ! zs_skip_census "$SUITE_LOG" "$BILLING_SKIP_ALLOWLIST"; then
+  echo "FAIL: ${ZS_SKIP_COUNT} test(s) skipped that this gate does not tolerate." >&2
+  echo "A skipped billing test is a silent pass. Offending lines:" >&2
+  zs_skip_lines "$SUITE_LOG" "$BILLING_SKIP_ALLOWLIST" | sort -u | head -20 >&2
+  fail=1
+  failed+=("skip-census")
+fi
 billing_skips="$ZS_SKIP_COUNT"
 
 if [ "$fail" -ne 0 ]; then
@@ -385,4 +434,9 @@ fi
 # the same line for the same reason - "ALL GROUPS PASSED (713 tests)" is exactly
 # the sentence that made a skipping test invisible, so the qualifier belongs
 # where that sentence is read, not 40 lines earlier in the scrollback.
-echo "LIVE-DATABASE SUITE: ALL GROUPS PASSED (${passed} tests, floor ${BILLING_MIN_PASSED}, ${billing_skips} skipped)"
+#
+# BOTH numbers, not one. `billing_skips` is the count this gate does NOT
+# tolerate, and with the allowlist populated it reads 0 on a healthy run - so
+# printing it alone would say "0 skipped" on a run where six tests announced,
+# which is the sentence this whole census exists to stop being printed.
+echo "LIVE-DATABASE SUITE: ALL GROUPS PASSED (${passed} tests, floor ${BILLING_MIN_PASSED}, ${billing_skips} unexpected skips, ${ZS_SKIP_TOLERATED} allowlisted)"

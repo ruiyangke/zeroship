@@ -6,34 +6,28 @@
 //! dependency, and it does not grow one for a test helper. What must stay
 //! identical is the MARKER TEXT: one search over a run log has to find every
 //! skip in the workspace, whichever side of that line it came from.
-
-pub mod env;
+//!
+//! NO `env` MODULE, and its absence is deliberate. This crate had a sealed
+//! `tests/common/env.rs` whose enum carried exactly ONE variant,
+//! `ZEROSHIP_REQUIRE_LIVE_BACKENDS`. With that flag deleted the enum had no
+//! variants left, so the sealed accessor was reading nothing; the file went
+//! rather than lingering as an empty frame that the next name to come along
+//! would be dropped into unexamined. `libs/compio-s3` now reads no environment
+//! at all, in tests or in production, which is the strongest form of the rule
+//! that `crates/core/tests/config_env_access_gate.rs` enforces.
+//!
+//! WHY THIS CRATE STILL SKIPS while `compio-postgres` and `compio-redis` no
+//! longer do. What `minio_smoke.rs` announces is a missing DOCKER DAEMON and a
+//! MinIO container that would not start - not a backend anything provisions
+//! ahead of the run. The operator decision that removed the flag names Postgres
+//! and Redis; `tests/provision_test_backends.sh` stands up those two and not
+//! this. A skip here is an honest absence, not a hidden pass, and the suite
+//! gates count it: `tests/lib/skip_census.sh` reads this marker.
 
 use std::io::Write;
 
-use env::TestEnvKey;
-
 pub const SKIP_MARKER: &str = "ZEROSHIP-TEST-SKIPPED";
-
-/// Opt-in strictness, kept identical to `crates/test-support` for the same
-/// reason the marker text is: a run that declares its backends are provisioned
-/// must be held to that on BOTH sides of the standalone/workspace line, or the
-/// strict gate silently exempts whichever crates copied the helper.
-pub const REQUIRE_LIVE_BACKENDS_ENV: &str = "ZEROSHIP_REQUIRE_LIVE_BACKENDS";
-
-pub fn require_live_backends() -> bool {
-    matches!(
-        env::get(TestEnvKey::RequireLiveBackends).as_deref(),
-        Some("1")
-    )
-}
 
 pub fn skip(reason: &str) {
     let _ = std::io::stderr().write_all(format!("{SKIP_MARKER}: {reason}\n").as_bytes());
-    if require_live_backends() {
-        panic!(
-            "{REQUIRE_LIVE_BACKENDS_ENV}=1 declares the live backends are provisioned, \
-             but this test skipped: {reason}"
-        );
-    }
 }
