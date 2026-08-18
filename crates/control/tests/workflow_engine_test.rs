@@ -377,11 +377,11 @@ async fn scrub_cloned_fixture_data(pg: &TestPg) {
     pg.batch_execute(
         "DO $$ \
          BEGIN \
-           IF to_regclass('workflow_scheduler.inflight') IS NOT NULL THEN \
-             TRUNCATE TABLE workflow_scheduler.inflight; \
+           IF to_regclass('zeroship.workflow_scheduler_inflight') IS NOT NULL THEN \
+             TRUNCATE TABLE zeroship.workflow_scheduler_inflight; \
            END IF; \
-           IF to_regclass('workflow_scheduler.timers') IS NOT NULL THEN \
-             TRUNCATE TABLE workflow_scheduler.timers; \
+           IF to_regclass('zeroship.workflow_scheduler_timers') IS NOT NULL THEN \
+             TRUNCATE TABLE zeroship.workflow_scheduler_timers; \
            END IF; \
            IF to_regclass('zeroship.workflow_e2e_side_effects') IS NOT NULL THEN \
              TRUNCATE TABLE zeroship.workflow_e2e_side_effects; \
@@ -524,6 +524,7 @@ async fn seed_app_and_deploy_on_plan(
         )
         .await
         .expect("insert app");
+    common::provision_app_workflow_schema(fx.pg.inner.as_ref(), &app_id).await;
     PgStore::provision(fx.pg.inner.as_ref(), &app_id)
         .await
         .expect("provision workflow journal");
@@ -634,6 +635,7 @@ async fn seed_run(
     dispatch_nonce: Option<&str>,
 ) -> String {
     fx.pg.set_default_app_id(app_id);
+    common::provision_app_workflow_schema(fx.pg.inner.as_ref(), &app_id).await;
     PgStore::provision(fx.pg.inner.as_ref(), &app_id)
         .await
         .expect("provision workflow journal for run seed");
@@ -682,7 +684,7 @@ async fn wait_for_scheduler_timer(fx: &Fixture, run_id: &str) -> DateTime<Utc> {
         if let Some(row) = fx
             .pg
             .query(
-                "SELECT wake_at FROM workflow_scheduler.timers WHERE run_id = $1",
+                "SELECT wake_at FROM zeroship.workflow_scheduler_timers WHERE run_id = $1",
                 &[&run_id],
             )
             .await
@@ -857,7 +859,7 @@ async fn schedule_run_scheduler_timer_count(fx: &Fixture, schedule_id: &str) -> 
     fx.pg
         .query_one(
             "SELECT COUNT(*)::bigint AS n \
-               FROM workflow_scheduler.timers t \
+               FROM zeroship.workflow_scheduler_timers t \
                JOIN zeroship.workflow_runs r ON r.id = t.run_id \
               WHERE r.dedup_key LIKE $1",
             &[&prefix],
@@ -1877,7 +1879,7 @@ async fn control_scheduler_reconcile_seeds_from_per_app_journal() {
     .await;
 
     fx.pg
-        .batch_execute("TRUNCATE TABLE workflow_scheduler.inflight, workflow_scheduler.timers")
+        .batch_execute("TRUNCATE TABLE zeroship.workflow_scheduler_inflight, zeroship.workflow_scheduler_timers")
         .await
         .expect("clear scheduler store before boot reconcile");
     let store = WorkflowSchedulerStore::new(fx.db_url.clone());
@@ -6355,7 +6357,7 @@ async fn per_app_cap_does_not_livelock_queued_runs() {
         let elapsed_deadline = Utc::now() - ChronoDuration::milliseconds(1);
         fx.pg
             .execute(
-                "UPDATE workflow_scheduler.inflight \
+                "UPDATE zeroship.workflow_scheduler_inflight \
                     SET deadline = $2 \
                   WHERE run_id = ANY($1)",
                 &[&run_ids, &elapsed_deadline],

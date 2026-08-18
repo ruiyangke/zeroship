@@ -223,6 +223,7 @@ async fn seed_app(fx: &Fixture, workflows: &[&str]) -> Uuid {
         )
         .await
         .expect("insert app");
+    common::provision_app_workflow_schema(fx.pg.as_ref(), &app_id).await;
     PgStore::provision(fx.pg.as_ref(), &app_id)
         .await
         .expect("provision workflow journal");
