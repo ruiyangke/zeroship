@@ -10,6 +10,50 @@
 //! threshold turns into a flake on a loaded machine and says nothing about
 //! complexity; the ratio between two sizes is what distinguishes O(n log n) from
 //! O(n^2). Doubling N must not quadruple the work.
+//!
+//! # Why every test here is `#[ignore]`, and where they DO run
+//!
+//! A ratio of two timings is still a timing, and this file produced false failures
+//! repeatedly on a loaded machine: 3.6x/3.6x/3.8x at load average 26 and
+//! 3.5x/3.6x/3.9x at load average 30, a DIFFERENT arm each time, each one green on
+//! an idle re-run. Nothing was wrong with the code under test on any of those runs.
+//!
+//! Two things follow, and only one of them is about this file. A false red teaches
+//! people to re-run builds instead of reading them, which is corrosive on its own.
+//! And a live-database conformance matrix multiplies load on the same runners, so a
+//! known flake sitting next to a NEW suite gets the new suite blamed for it.
+//!
+//! So these run in their own CI job (`scaling` in `.github/workflows/ci.yml`) with no
+//! service containers and nothing else on the machine, reached with
+//! `cargo test -- --ignored`. `#[ignore]` rather than a cargo feature ON PURPOSE:
+//! an ignored test is still COMPILED and still linted by
+//! `cargo clippy --all-targets`, so it cannot rot into something that no longer
+//! builds while nobody is looking. A `required-features` gate would hide it from
+//! both.
+//!
+//! # The threshold is NOT weakened, and CPU time was measured and rejected
+//!
+//! Raising the 3.0x ceiling would discard the signal these guards exist for - they
+//! caught a 5x, a 4.5x and a 4.53x, all of which sit above a "relaxed" ceiling too.
+//!
+//! Switching the instrument from wall clock to CPU time is the obvious other idea,
+//! and it was MEASURED rather than assumed. On a 16-core machine at load average
+//! 20-35, the same fixtures timed simultaneously with `Instant` and with per-thread
+//! CPU nanoseconds (`/proc/thread-self/schedstat`) agreed to within about 1% on
+//! EVERY arm:
+//!
+//!   dropColumn   wall 2.232 / cpu 2.230, 2.203 / 2.197, 2.175 / 2.182
+//!   renameTable  wall 2.111 / cpu 2.111, 2.121 / 2.114, 2.120 / 2.123
+//!   renameColumn wall 2.079 / cpu 2.089, 2.048 / 2.062, 2.030 / 2.037
+//!   dropTable    wall 1.744 / cpu 1.748, 2.094 / 2.095, 2.187 / 2.191
+//!
+//! `best_of` already takes the MINIMUM of five runs, and a single CPU-bound thread on
+//! a 16-core box gets a whole core in at least one of five attempts even with a long
+//! run queue - so preemption is not what inflated those ratios. What inflates them is
+//! that the work itself gets more expensive under memory and I/O pressure (page
+//! faults, allocator behaviour, cache pressure), and a CPU clock counts that extra
+//! work just as faithfully as a wall clock does. Changing clocks would have added a
+//! platform-specific dependency and moved no number.
 use std::time::Instant;
 
 /// The best of `REPEATS` timings of `run`.
@@ -45,6 +89,7 @@ fn validate_n(n: usize) -> f64 {
 }
 
 #[test]
+#[ignore = "wall-clock complexity guard: needs an idle machine. Runs in the `scaling` CI job via `cargo test -- --ignored`; see this file's header"]
 fn validate_ir_does_not_scale_quadratically_in_op_count() {
     // Warm up so allocator and cache effects do not land entirely on the first
     // measured run and inflate the ratio.
@@ -87,6 +132,7 @@ fn validate_ir_does_not_scale_quadratically_in_op_count() {
 /// still dominated -- which is why the two landed together and why this asserts
 /// the ratio rather than a duration.
 #[test]
+#[ignore = "wall-clock complexity guard: needs an idle machine. Runs in the `scaling` CI job via `cargo test -- --ignored`; see this file's header"]
 fn validate_ir_does_not_scale_quadratically_in_create_table_count() {
     fn validate_creates(n: usize) -> f64 {
         let ops: Vec<String> = (0..n)
@@ -140,6 +186,7 @@ fn validate_ir_does_not_scale_quadratically_in_create_table_count() {
 /// produces OP_INVALID rather than a measurement -- an invalid fixture that would
 /// otherwise have been read as "this kind is fine".
 #[test]
+#[ignore = "wall-clock complexity guard: needs an idle machine. Runs in the `scaling` CI job via `cargo test -- --ignored`; see this file's header"]
 fn validate_ir_does_not_scale_quadratically_in_any_op_kind() {
     /// `n` ops of `kind`, half seeding tables where the kind needs one.
     fn envelope(kind: &str, n: usize) -> String {
@@ -232,6 +279,7 @@ fn validate_ir_does_not_scale_quadratically_in_any_op_kind() {
 /// measured as worthless against the wrong fixture and was correctly reverted.
 /// The fixture, not the code, was what changed here.
 #[test]
+#[ignore = "wall-clock complexity guard: needs an idle machine. Runs in the `scaling` CI job via `cargo test -- --ignored`; see this file's header"]
 fn validate_ir_does_not_scale_quadratically_in_any_envelope_shape() {
     fn envelope(shape: &str, n: usize) -> String {
         let half = n / 2;

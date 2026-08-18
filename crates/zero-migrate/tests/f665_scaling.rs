@@ -20,7 +20,36 @@
 //! THE ASSERTION IS THE SHAPE OF THE CURVE, not a wall-clock budget, for the
 //! reason spelled out in f664_scaling.rs: a timing threshold flakes on a loaded
 //! machine and says nothing about complexity.
+//!
+//! `#[ignore]`d and run in the `scaling` CI job, for the reasons f664_scaling.rs
+//! sets out in full, including why the 3.0x ceiling is not relaxed and why CPU time
+//! was measured and rejected as an instrument.
+//!
+//! # Why this file now takes the best of five, like its sibling
+//!
+//! It used to take ONE timing of each shape. Measured side by side on the same
+//! machine at load average 20-35, eight rounds of this exact fixture gave:
+//!
+//!   single shot   1.920, 1.601, 1.743, 1.871, 1.973, 1.747, 1.855, 1.917
+//!   best of five  1.855, 1.890, 1.890, 1.899, 1.879, 1.849, 1.847, 1.883
+//!
+//! A 0.37 spread against a 0.05 spread - roughly seven times tighter - for four
+//! extra seconds on a job that has the machine to itself. That is not a relaxed
+//! threshold; the 3.0x ceiling is untouched. It is the same measurement taken
+//! properly, and it cuts BOTH failure modes: a false red, and a real
+//! sub-threshold regression hiding inside a noise floor a third as wide as the
+//! margin being defended.
 use std::time::Instant;
+
+/// The best of `REPEATS` timings of `run` - the same instrument, and the same
+/// argument for it, as `f664_scaling.rs::best_of`. Scheduler noise, page faults and
+/// a busy machine only ever ADD time, so the smallest observation is the closest one
+/// to the real cost, and this file compares a RATIO of two such numbers where noise
+/// in the denominator inflates the result twice over.
+fn best_of(run: impl Fn() -> f64) -> f64 {
+    const REPEATS: usize = 5;
+    (0..REPEATS).map(|_| run()).fold(f64::INFINITY, f64::min)
+}
 
 use zero_migrate::model::ir::MigrationIr;
 use zero_migrate::model::validate::{validate_ir, Dialect};
@@ -49,6 +78,7 @@ fn validate_shape(n: usize, c: usize) -> f64 {
 }
 
 #[test]
+#[ignore = "wall-clock complexity guard: needs an idle machine. Runs in the `scaling` CI job via `cargo test -- --ignored`; see this file's header"]
 fn validate_ir_does_not_scale_quadratically_in_column_count() {
     const OPS: usize = 3_000;
 
@@ -56,8 +86,8 @@ fn validate_ir_does_not_scale_quadratically_in_column_count() {
     // measured run and inflate the ratio.
     validate_shape(500, 4);
 
-    let narrow = validate_shape(OPS, 4).max(0.001);
-    let wide = validate_shape(OPS, 8);
+    let narrow = best_of(|| validate_shape(OPS, 4)).max(0.001);
+    let wide = best_of(|| validate_shape(OPS, 8));
     let ratio = wide / narrow;
 
     // The op count is IDENTICAL in both runs, so a well-behaved gate does at most
