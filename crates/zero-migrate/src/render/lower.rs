@@ -1696,6 +1696,36 @@ pub enum IrLowerError {
         /// The rendered spelling of the type the op asked for.
         to_type: String,
     },
+    /// An `alterSequence` that carries no option, so there is no action to render.
+    ///
+    /// `ALTER SEQUENCE <name>` with an empty action list is not a statement in
+    /// PostgreSQL's grammar. MEASURED on PostgreSQL 18.4 against the engine's own
+    /// emitted text: `ALTER SEQUENCE "s"` answers `syntax error at end of input`.
+    ///
+    /// Refused here rather than lowered to nothing. A no-op would still take a
+    /// journal row and move the drift anchor while changing no sequence, so the
+    /// history would record an alter that never happened - and the likeliest cause
+    /// of an option-less alter is an author who meant to set something. This is the
+    /// same posture the renderer already takes for the other empty payloads it
+    /// meets (`exclusion constraint needs at least one element`, `malformed insert
+    /// into "t": no rows`, `trigger events`): a payload that renders no SQL is
+    /// malformed, not trivially satisfied.
+    ///
+    /// PRESENCE is the test, not the inner value. `restart: null` is a bare
+    /// `RESTART`, `minValue: null` is `NO MINVALUE` and `ownedBy: null` is
+    /// `OWNED BY NONE` - each is a present option carrying a null payload, and each
+    /// is a real action.
+    #[error(
+        "alterSequence {name:?} names no action, so it renders `ALTER SEQUENCE` with \
+         nothing after the name - which PostgreSQL rejects outright (`syntax error at \
+         end of input`) and the whole migration dies partway through applying. Give \
+         the alter at least one of increment, restart, minValue, maxValue, cache, \
+         cycle or ownedBy, or drop the operation."
+    )]
+    AlterSequenceHasNoAction {
+        /// The sequence the op names.
+        name: String,
+    },
     /// A `createIndex` whose name already exists LIVE with a DIFFERENT shape.
     ///
     /// The emitters render `CREATE INDEX IF NOT EXISTS` whether or not the author
@@ -8778,6 +8808,20 @@ fn render_sequence_op(
             owned_by,
             ..
         } => {
+            // An alter that asks for nothing renders `ALTER SEQUENCE <name>` with no
+            // action clause, which is not a statement. PRESENCE of the option is the
+            // test, never its inner value: `restart: null` is a bare RESTART,
+            // `min_value: null` is NO MINVALUE and `owned_by: null` is OWNED BY NONE.
+            if increment.is_none()
+                && restart.is_none()
+                && min_value.is_none()
+                && max_value.is_none()
+                && cache.is_none()
+                && cycle.is_none()
+                && owned_by.is_none()
+            {
+                return Err(IrLowerError::AlterSequenceHasNoAction { name: name.clone() });
+            }
             let qname = pg_sequence_qname(eff_schema, name)?;
             let mut up = format!("ALTER SEQUENCE {qname}");
             if let Some(n) = increment {
