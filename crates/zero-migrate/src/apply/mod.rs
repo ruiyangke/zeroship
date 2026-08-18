@@ -3,6 +3,7 @@ pub mod baseline;
 pub mod drift;
 pub mod executor;
 pub mod journal;
+pub mod plan_precondition;
 pub mod precondition;
 pub mod role;
 pub mod timeout;
