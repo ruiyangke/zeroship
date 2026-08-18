@@ -397,6 +397,7 @@ fn builtin_plans() -> Vec<Plan> {
         net: AppNetPolicyLimits {
             max_sockets: 32,
             egress_ceiling_bytes: 256 * 1024 * 1024,
+            max_grants: 50,
         },
         archived: false,
         assignable_by_creator: true,
@@ -421,6 +422,7 @@ fn builtin_plans() -> Vec<Plan> {
         net: AppNetPolicyLimits {
             max_sockets: 256,
             egress_ceiling_bytes: 1024 * 1024 * 1024,
+            max_grants: 512,
         },
         archived: false,
         assignable_by_creator: false,

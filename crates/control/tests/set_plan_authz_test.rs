@@ -193,6 +193,7 @@ async fn seed_plan(catalog: &PlanCatalog, name: &str, assignable: bool) -> Plan 
         net: AppNetPolicyLimits {
             max_sockets: 32,
             egress_ceiling_bytes: 256 * 1024 * 1024,
+            max_grants: 8,
         },
         archived: false,
         assignable_by_creator: assignable,

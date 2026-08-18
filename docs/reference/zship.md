@@ -76,8 +76,16 @@ build-discovered workflow schedule registrations.
 ```
 
 The manifest never grants network access. Control compares these requests
-against operator-authored rows in `zeroship.app_net_grants`; ungranted
-host/port pairs remain denied until a grant row exists.
+against rows in `zeroship.app_net_grants`; ungranted host/port pairs remain
+denied until a grant row exists.
+
+You write those rows yourself, out of band, with
+`POST /api/apps/{app_id}/net-grants` (`env:write` on the app; `GET` lists,
+`DELETE` revokes). Deploying a bundle grants nothing: the entries above stay
+inert hints, and the API refuses bare `*`, malformed wildcards, registry-level
+suffixes such as `*.co.uk`, and wildcards over shared hosting. Your plan caps
+how many grants an app may hold (`max_grants`), how many sockets it may open,
+and how much it may send.
 
 ## Deprecated field
 
