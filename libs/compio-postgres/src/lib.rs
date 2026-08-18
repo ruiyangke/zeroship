@@ -60,7 +60,7 @@
 //! The `tls` Cargo feature adds [`MakeRustlsConnect`], a rustls backend that reads its trust anchors from the
 //! connection string (`sslrootcert`, plus `sslcert`/`sslkey` for client-certificate auth) and implements
 //! `tls-server-end-point` channel binding. With that feature on, [`Pool`] builds one automatically for a
-//! `sslmode=require` URL; see [`tls_rustls`] and the `Transport` section of the [`pool`] module docs.
+//! `sslmode=require` URL; see [`tls_rustls`] and the `Transport` section of the `pool` module docs (`src/pool.rs`).
 
 #![warn(rust_2018_idioms, clippy::all)]
 #![allow(clippy::needless_lifetimes)]

@@ -21,7 +21,7 @@
 //!
 //! [`RustlsStream`] implements `tls-server-end-point` (RFC 5929 §4.1), so
 //! `channel_binding=require` and SCRAM-SHA-256-PLUS work over a rustls
-//! connection. See [`tls_server_end_point`] for the certificates that are *not*
+//! connection. See `tls_server_end_point` for the certificates that are *not*
 //! covered - it reports no binding rather than a wrong one.
 
 use std::future::Future;
