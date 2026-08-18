@@ -53,15 +53,16 @@
 #
 # USAGE
 # -----
-#   tests/run_billing_suite.sh                      # recreate DB + migrate + run
-#   SKIP_DB_RECREATE=1 tests/run_billing_suite.sh   # reuse an already-migrated DB
+#   tests/run_billing_suite.sh                      # per-run DB + migrate + run
+#   TEST_DB=mine tests/run_billing_suite.sh         # name it, and keep it after
+#   TEST_DB=mine SKIP_DB_RECREATE=1 tests/run_billing_suite.sh  # reuse that one
 #   PG_PORT=5440 PG_USER=postgres PG_PASS=zeroship tests/run_billing_suite.sh
 #
 # ENV (defaults target the dev compose Postgres on :5440)
 #   PG_HOST (localhost)  PG_PORT (5440)  PG_USER (postgres)  PG_PASS (zeroship)
-#   TEST_DB (zeroship_billing_test)
+#   TEST_DB (per run: zeroship_billing_test_<pid>_<nanos>, dropped on exit)
 #   PSQL    (auto-detected; override with an explicit psql path)
-#   SKIP_DB_RECREATE (unset)  - set to skip the drop/create/migrate step
+#   SKIP_DB_RECREATE (unset)  - reuse a TEST_DB you named; needs one
 #   TEST_THREADS (1)          - passed to each binary's `--test-threads`
 #   REDPANDA_BROKERS (unset)  - set to gate the real Kafka-wire stream path
 #
@@ -81,6 +82,12 @@ cd "$ROOT"
 # Counts the tests that announced they did nothing, so "ALL GROUPS PASSED"
 # cannot hide one; `tests/lib_skip_census_selftest.sh` covers both directions.
 . "$ROOT/tests/lib/skip_census.sh"
+# Names the database per run. This script drops its database WITH (FORCE) at
+# the top, which terminates every other backend on it first - so a fixed name
+# means a second run of this script, or of the auth suite pointed at the same
+# name, destroys the first one's database mid-run and its failures read as
+# product defects. `tests/lib_scratch_db_selftest.sh` covers both directions.
+. "$ROOT/tests/lib/scratch_db.sh"
 
 # Skips this gate reports but does not fail on. Empty means "report every skip":
 # the census treats an empty allowlist as matching NOTHING, never as matching
@@ -91,7 +98,8 @@ PG_HOST="${PG_HOST:-localhost}"
 PG_PORT="${PG_PORT:-5440}"
 PG_USER="${PG_USER:-postgres}"
 PG_PASS="${PG_PASS:-zeroship}"
-TEST_DB="${TEST_DB:-zeroship_billing_test}"
+
+zs_scratch_db_resolve zeroship_billing_test || exit $?
 
 # psql: prefer an explicit $PSQL, else PATH, else the pinned Nix store path used
 # in this repo's runbooks.
@@ -118,6 +126,21 @@ export AUTH_DB_URL="$DSN"
 export MIGRATED_TEST_DB="$DSN"
 
 run_psql() { PGPASSWORD="$PG_PASS" "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" "$@"; }
+
+# Armed BEFORE the database is created: a migration that fails leaves one behind
+# exactly as a failing test does, and a per-run name is never reused, so nothing
+# would ever clean it up. INT and TERM route through `exit` so a cancelled run
+# reaches this trap too - bash runs the EXIT trap on a signal only if the
+# handler exits.
+SUITE_LOG=""
+cleanup() {
+  [ -n "$SUITE_LOG" ] && rm -f "$SUITE_LOG"
+  zs_scratch_db_cleanup
+  return 0
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 if [ -z "${SKIP_DB_RECREATE:-}" ]; then
   echo "==> Recreating ${TEST_DB} on ${PG_HOST}:${PG_PORT}"
@@ -155,7 +178,6 @@ THREAD_ARG=(--test-threads "${TEST_THREADS:-1}")
 # `--test <target>` is NOT exposed to this: an unmet required-feature or a
 # missing target both exit 101, checked. Only filters degrade silently.
 SUITE_LOG="$(mktemp)"
-trap 'rm -f "$SUITE_LOG"' EXIT
 
 # Run a group, tee its output into SUITE_LOG, return the CARGO exit status.
 #
