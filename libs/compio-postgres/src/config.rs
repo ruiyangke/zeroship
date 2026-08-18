@@ -169,6 +169,16 @@ pub enum Host {
 /// * `application_name` - Sets the `application_name` parameter on the server.
 /// * `sslmode` - Controls usage of TLS. If set to `disable`, TLS will not be used. If set to `prefer`, TLS will be used
 ///     if available, but not used otherwise. If set to `require`, TLS will be forced to be used. Defaults to `prefer`.
+///     Unlike libpq, `require` here means encrypted *and verified*: whichever connector is in use decides, and the
+///     built-in rustls one (`tls` feature) always verifies. Note that [`Pool`](crate::Pool) reads `prefer` as
+///     plaintext - see the `Transport` section of the `pool` module docs (`src/pool.rs`).
+/// * `sslrootcert` - Trust anchors for server-certificate verification: a path to a PEM file, or the keyword `system`
+///     for the operating system's store. Defaults to `system`. Point it at your CA (or at the server's own
+///     certificate, if self-signed) when the server does not chain to a public root. Read only by a connector that
+///     consults it; the built-in rustls one does.
+/// * `sslcert` - Path to the client certificate chain (PEM) for client-certificate authentication. Must be given
+///     together with `sslkey`.
+/// * `sslkey` - Path to the private key (PEM) matching `sslcert`.
 /// * `host` - The host to connect to. On Unix platforms, if the host starts with a `/` character it is treated as the
 ///     path to the directory containing Unix domain sockets. Otherwise, it is treated as a hostname. Multiple hosts
 ///     can be specified, separated by commas. Each host will be tried in turn when connecting. Required if connecting
@@ -1327,6 +1337,7 @@ impl<'a> UrlParser<'a> {
 mod tests {
     use std::net::IpAddr;
 
+    use crate::config::SslRootCert;
     use crate::{Config, config::Host};
 
     #[test]
@@ -1358,5 +1369,72 @@ mod tests {
     fn test_invalid_hostaddr_parsing() {
         let s = "user=pass_user dbname=postgres host=host1 hostaddr=127.0.0 port=26257";
         s.parse::<Config>().err().unwrap();
+    }
+
+    #[test]
+    fn tls_file_parameters_are_recognised() {
+        let config = "host=h sslrootcert=/etc/ca.pem sslcert=/etc/c.pem sslkey=/etc/k.pem"
+            .parse::<Config>()
+            .unwrap();
+        assert_eq!(
+            config.get_ssl_root_cert(),
+            &SslRootCert::File("/etc/ca.pem".to_string())
+        );
+        assert_eq!(config.get_ssl_cert(), Some("/etc/c.pem"));
+        assert_eq!(config.get_ssl_key(), Some("/etc/k.pem"));
+    }
+
+    /// `system` is the one `sslrootcert` value that is a keyword rather than a
+    /// path, and it is also the default - so this pins that a URL asking for
+    /// the OS store is parsed as the OS store and not as a file named
+    /// "system".
+    #[test]
+    fn sslrootcert_system_is_the_keyword_and_the_default() {
+        assert_eq!(
+            "host=h sslrootcert=system".parse::<Config>().unwrap().get_ssl_root_cert(),
+            &SslRootCert::System
+        );
+        assert_eq!(
+            "host=h".parse::<Config>().unwrap().get_ssl_root_cert(),
+            &SslRootCert::System
+        );
+    }
+
+    /// The recognised-key set stays closed: a plausible neighbour of the three
+    /// keys added above is still an error, not a silently ignored parameter.
+    /// libpq has `sslpassword` and `sslcrl`; this driver does not.
+    #[test]
+    fn unknown_ssl_parameters_are_still_rejected() {
+        for s in [
+            "host=h sslpassword=hunter2",
+            "host=h sslcrl=/etc/crl.pem",
+            "host=h sslrootcrt=/etc/ca.pem",
+        ] {
+            let err = s.parse::<Config>().err().unwrap_or_else(|| {
+                panic!("{s} parsed, so an unrecognised parameter is being ignored")
+            });
+            let cause = std::error::Error::source(&err)
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            assert!(
+                cause.contains("unknown option"),
+                "{s}: expected an unknown-option error, got {cause:?}"
+            );
+        }
+    }
+
+    /// An empty value is a misconfiguration - almost always an unset shell
+    /// variable that expanded to nothing - and must not read as "not set".
+    #[test]
+    fn empty_tls_file_parameters_are_rejected() {
+        for s in [
+            "host=h sslrootcert=",
+            "host=h sslcert=",
+            "host=h sslkey=",
+        ] {
+            s.parse::<Config>()
+                .err()
+                .unwrap_or_else(|| panic!("{s} parsed, so an empty path reads as absent"));
+        }
     }
 }
