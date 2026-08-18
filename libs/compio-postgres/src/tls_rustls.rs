@@ -19,7 +19,7 @@
 //!
 //! # Channel binding
 //!
-//! [`RustlsStream`] implements `tls-server-end-point` (RFC 5929 §4.1), so
+//! [`RustlsStream`] implements `tls-server-end-point` (RFC 5929 section 4.1), so
 //! `channel_binding=require` and SCRAM-SHA-256-PLUS work over a rustls
 //! connection. See `tls_server_end_point` for the certificates that are *not*
 //! covered - it reports no binding rather than a wrong one.
@@ -248,7 +248,7 @@ impl<S: AsyncRead + AsyncWrite + 'static> TlsStream for RustlsStream<S> {
     }
 }
 
-/// Compute `tls-server-end-point` for a server certificate (RFC 5929 §4.1).
+/// Compute `tls-server-end-point` for a server certificate (RFC 5929 section 4.1).
 ///
 /// The binding is a hash of the DER certificate, and the hash is the one named
 /// by the certificate's own `signatureAlgorithm`, except that MD5 and SHA-1 are
