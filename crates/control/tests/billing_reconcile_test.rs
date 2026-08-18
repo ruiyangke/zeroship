@@ -2525,9 +2525,9 @@ async fn billing_setup_is_self_service_and_blocks_cross_creator() {
     let fx = build_fixture(&url, "authz").await;
 
     // A normal (non-operator) creator principal. Its PAT user_id IS the creator.
-    let creator_a = common::authz_fixture::non_admin_principal(&fx.state).await;
+    let creator_a = common::authz_fixture::seeded_principal(&fx.state).await;
     // A second creator (a different user id) — the cross-creator target.
-    let creator_b = common::authz_fixture::non_admin_principal(&fx.state).await;
+    let creator_b = common::authz_fixture::seeded_principal(&fx.state).await;
 
     let app = test::init_service(
         web::App::new().state(fx.state.clone()).configure(billing_setup_route),
@@ -2561,37 +2561,6 @@ async fn billing_setup_is_self_service_and_blocks_cross_creator() {
 
     creator_a.cleanup(&fx.state).await;
     creator_b.cleanup(&fx.state).await;
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
-}
-
-/// CRIT-10 (operator path): a platform billing operator may set up ANY
-/// creator's billing (foreign id) — the admin PAT carries BillingWrite.
-#[compio::test]
-async fn billing_setup_allows_platform_operator_for_any_creator() {
-    let url = db_url();
-    let fx = build_fixture(&url, "authz-op").await;
-
-    let operator = common::authz_fixture::admin_principal(&fx.state).await;
-    let creator = make_user(&fx.state, "op-target").await;
-
-    let app = test::init_service(
-        web::App::new().state(fx.state.clone()).configure(billing_setup_route),
-    )
-    .await;
-
-    // Status only: a retained `WebResponse` keeps the app state - and its
-    // Postgres client - alive past the teardown below.
-    let req = test::TestRequest::post()
-        .uri(&format!("/api/creators/{creator}/billing/setup"))
-        .header("authorization", operator.bearer())
-        .to_request();
-    let status = test::call_service(&app, req).await.status();
-    assert_eq!(status, StatusCode::OK, "a billing operator may set up any creator");
-
-    operator.cleanup(&fx.state).await;
 
     drop(app);
     drop(fx);

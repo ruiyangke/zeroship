@@ -7,14 +7,14 @@ use zeroship_control::AppState;
 ///
 /// The bearer is a console-client platform token, not a first-party CLI one:
 /// control narrows `zeroship-cli` scopes against the principal's live grant
-/// rows, and the operator surfaces these fixtures drive are outside the CLI's
-/// issuable set. See `common::CONSOLE_CLIENT_ID`.
-pub struct AdminPrincipal {
+/// rows, and not every surface these fixtures drive is in the CLI's issuable
+/// set. See `common::CONSOLE_CLIENT_ID`.
+pub struct SeededPrincipal {
     pub user_id: Uuid,
     pub token: String,
 }
 
-impl AdminPrincipal {
+impl SeededPrincipal {
     pub fn bearer(&self) -> String {
         format!("Bearer {}", self.token)
     }
@@ -29,50 +29,31 @@ impl AdminPrincipal {
             .await;
         let _ = state
             .control_pg
-            .execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&self.user_id])
-            .await;
-        let _ = state
-            .control_pg
             .execute("DELETE FROM zeroship.users WHERE id = $1", &[&self.user_id])
             .await;
     }
 }
 
-/// A platform admin holding EVERY OAuth scope.
+/// A creator holding EVERY OAuth scope.
 ///
-/// The scope set is the whole closed vocabulary, so the wrapper policy the
-/// bearer path derives never narrows the platform role away. Two Cedar actions
-/// One Cedar action has no scope at all - `migrations:approve` - and no bearer
-/// can carry it; see the note on `zeroship_authz::Action::AppsApproveMigration`.
-pub async fn admin_principal(state: &AppState) -> AdminPrincipal {
-    seed_principal(state, true).await
-}
-
-/// A creator with NO platform role, holding the same full scope set.
+/// This used to come in two flavours, `admin_principal` and
+/// `non_admin_principal`, differing only in whether a `platform_admin_roles`
+/// row was written. There is no platform role any more - the staff policies
+/// were cross-tenant grants and are deleted - so the two collapsed into one:
+/// every principal is a creator, authorized by the self-scoped baseline and by
+/// whatever `app_members` rows it holds.
 ///
-/// Same scopes as [`admin_principal`] on purpose: the wrapper policy is a
-/// narrowing filter, so an empty one would 403 every request and prove nothing
-/// about the role. Holding everything the vocabulary can express makes the
-/// Cedar role check the only thing that can refuse - which is what the callers
-/// of this fixture assert (a creator who is not a platform admin cannot grant
-/// platform roles; a creator may set up their OWN billing but not another's).
+/// The scope set is the whole closed vocabulary on purpose. The wrapper policy
+/// the bearer path derives is a NARROWING filter, so holding everything the
+/// vocabulary can express leaves the Cedar decision as the only thing that can
+/// refuse - which is what the callers of this fixture assert. One Cedar action
+/// has no scope at all - `migrations:approve` - and no bearer can carry it; see
+/// the note on `zeroship_authz::Action::AppsApproveMigration`.
 ///
 /// `#[allow(dead_code)]`: `common` is shared across every control test crate;
 /// only some of them use this, so the others would warn.
 #[allow(dead_code)]
-pub async fn non_admin_principal(state: &AppState) -> AdminPrincipal {
-    seed_principal(state, false).await
-}
-
-fn all_scopes() -> String {
-    Scope::ALL
-        .iter()
-        .map(|scope| scope.as_str())
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-async fn seed_principal(state: &AppState, admin: bool) -> AdminPrincipal {
+pub async fn seeded_principal(state: &AppState) -> SeededPrincipal {
     let user_id = Uuid::new_v4();
     let email = format!("bearer-{user_id}@zeroship.test");
     state
@@ -84,20 +65,17 @@ async fn seed_principal(state: &AppState, admin: bool) -> AdminPrincipal {
         )
         .await
         .expect("insert bearer user");
-    if admin {
-        state
-            .control_pg
-            .execute(
-                "INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by) \
-                 VALUES ($1, 'admin', $1)",
-                &[&user_id],
-            )
-            .await
-            .expect("insert admin role");
-    }
 
-    AdminPrincipal {
+    SeededPrincipal {
         user_id,
         token: super::platform_token_for_client(user_id, &all_scopes(), super::CONSOLE_CLIENT_ID),
     }
+}
+
+fn all_scopes() -> String {
+    Scope::ALL
+        .iter()
+        .map(|scope| scope.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
 }

@@ -431,7 +431,6 @@ INTERNAL_INV="$(psql_db -tA -c "SELECT id FROM zeroship.invoices WHERE creator_i
 SCOPE="billing:read billing:write"
 ADMIN="$CREATOR"   # reuse the creator as the admin principal
 psql_db -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
-INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by) VALUES ('$ADMIN','admin','$ADMIN') ON CONFLICT DO NOTHING;
 SQL
 JOSE_JS="$ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index.js"
 ADMIN_TOKEN=""

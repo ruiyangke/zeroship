@@ -341,52 +341,21 @@ pub async fn list_apps(
         return resp;
     }
     // The self-service policy grants every creator `apps:read` on the platform
-    // surface, so the gate above passes for ordinary creators too. The DATA must
-    // therefore be scoped to ownership: only platform staff with a fleet-wide
-    // read role (admin/readonly/support/billing) see every app; everyone else
-    // sees only the apps they are a member of. Without this scope the broadened
-    // gate would be a fleet-wide cross-tenant read (the exact C1 leak, just at
-    // the list endpoint).
-    let result = match fleet_wide_reader(&state, authz.principal_id).await {
-        Ok(true) => state.registry.list_apps().await,
-        Ok(false) => state.registry.list_apps_for_owner(&authz.principal_id).await,
-        Err(resp) => return resp,
-    };
-    match result {
+    // surface, so the gate above passes for ordinary creators too. The DATA is
+    // therefore scoped to membership, always: a caller sees the apps they are a
+    // member of and nothing else. Without that scope the broadened gate would
+    // be a fleet-wide cross-tenant read (the exact C1 leak, at the list
+    // endpoint).
+    //
+    // There is no fleet-wide arm any more. It was selected by a direct SQL read
+    // of `platform_admin_roles` rather than by Cedar - so it was invisible to
+    // every audit of the policy set - and it returned every tenant's apps to any
+    // of the four deleted staff roles. A vendor wanting a fleet-wide list builds
+    // it in the portal against its own copy of the data.
+    match state.registry.list_apps_for_owner(&authz.principal_id).await {
         Ok(apps) => web::HttpResponse::Ok().json(&apps),
         Err(e) => error_response(e),
     }
-}
-
-/// Returns true when the principal holds a platform role that authorizes a
-/// fleet-wide read (admin / readonly / support / billing). These are the roles
-/// whose Cedar policy permits `apps:read` on an unconstrained resource
-/// (`billing.cedar` grants it too, so `get_app` already lets billing staff read
-/// any single app by id) — so they are the principals allowed to see every
-/// tenant's apps in the list endpoint. This SQL role set MUST stay in sync with
-/// the Cedar policies that grant unconstrained `apps:read`; omitting a role here
-/// under-scopes its list relative to its actual authority (the 7.0 defect, where
-/// `billing` was missing and billing staff got an empty `/api/apps`).
-async fn fleet_wide_reader(
-    state: &AppState,
-    principal_id: Uuid,
-) -> Result<bool, web::HttpResponse> {
-    let rows = state
-        .control_pg
-        .query(
-            "SELECT 1 FROM zeroship.platform_admin_roles \
-             WHERE user_id = $1 AND role IN ('admin', 'readonly', 'support', 'billing')",
-            &[&principal_id],
-        )
-        .await
-        .map_err(|err| {
-            infrastructure_error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "platform role lookup",
-                err,
-            )
-        })?;
-    Ok(!rows.is_empty())
 }
 
 pub async fn get_app(
@@ -874,44 +843,39 @@ pub async fn set_plan(
         }
     };
 
-    // MAJOR-4: two authority levels for assigning a plan.
-    //   * OPERATOR — BillingWrite on Resource::Any (master-key / operator) — may
-    //     assign ANY plan (including operator-only tiers).
-    //   * app_owner / CREATOR — BillingWrite on Resource::App{id} — may assign
-    //     ONLY a plan flagged `assignable_by_creator = true`. Without this gate a
-    //     creator could PUT a cheaper operator plan (e.g. unlimited/console) and
-    //     underpay — the asymmetry the reduction-only spend-limit override
-    //     already closes for caps.
-    // We probe the operator grant first; if it is denied we fall back to the
-    // app-scoped grant AND enforce the creator-assignability guardrail.
-    let is_operator = authz
-        .require(Action::BillingWrite, Resource::Any, &state)
+    // MAJOR-4: assigning a plan needs `BillingWrite` on the app AND a target
+    // plan flagged `assignable_by_creator = true`. Without the second gate a
+    // creator could PUT a cheaper operator-only tier (unlimited/console) and
+    // underpay - the asymmetry the reduction-only spend-limit override already
+    // closes for caps.
+    //
+    // This used to probe `BillingWrite` on `Resource::Any` first and skip the
+    // assignability gate for an "operator". That arm was satisfiable only by
+    // the deleted universal-allow policy - `enforce` intersects a bearer's
+    // wrapper with the static set, so no token could reach it either - and it
+    // is gone with it. Operator-only tiers are now assigned by editing the
+    // catalog row, not by holding a cross-tenant grant.
+    if let Err(resp) = authz
+        .require(Action::BillingWrite, Resource::App { id: uid.to_string() }, &state)
         .await
-        .is_ok();
-    if !is_operator {
-        if let Err(resp) = authz
-            .require(Action::BillingWrite, Resource::App { id: uid.to_string() }, &state)
-            .await
-        {
-            return resp;
+    {
+        return resp;
+    }
+    let catalog = crate::plan_catalog::PlanCatalog::new(state.registry.clone());
+    match catalog.get(&body.plan_id).await {
+        Ok(Some(plan)) if plan.assignable_by_creator => { /* allowed */ }
+        Ok(Some(_)) => {
+            return web::HttpResponse::Forbidden().json(&serde_json::json!({
+                "error": "plan not assignable by creator",
+                "detail": "this plan can only be assigned by an operator; choose a \
+                           creator-assignable plan or contact support to upgrade",
+            }));
         }
-        // app_owner principal: the target plan MUST be creator-assignable.
-        let catalog = crate::plan_catalog::PlanCatalog::new(state.registry.clone());
-        match catalog.get(&body.plan_id).await {
-            Ok(Some(plan)) if plan.assignable_by_creator => { /* allowed */ }
-            Ok(Some(_)) => {
-                return web::HttpResponse::Forbidden().json(&serde_json::json!({
-                    "error": "plan not assignable by creator",
-                    "detail": "this plan can only be assigned by an operator; choose a \
-                               creator-assignable plan or contact support to upgrade",
-                }));
-            }
-            Ok(None) => {
-                return web::HttpResponse::BadRequest()
-                    .json(&serde_json::json!({"error": "unknown plan"}));
-            }
-            Err(e) => return error_response(e),
+        Ok(None) => {
+            return web::HttpResponse::BadRequest()
+                .json(&serde_json::json!({"error": "unknown plan"}));
         }
+        Err(e) => return error_response(e),
     }
 
     // Record a plan-change event with a cumulative usage_at_change snapshot IN
@@ -1207,7 +1171,12 @@ async fn owner_of_app(state: &AppState, app_id: &Uuid) -> Result<Option<Uuid>, R
 /// (editor/viewer with `billing:read` on this one app) must NOT see the owner's
 /// whole billing envelope. We gate `BillingRead on App{id}` (capability +
 /// existence), then require the caller to BE the owner of `{id}`
-/// (`owner_of_app(id) == principal_id`) OR an operator (`Resource::Any`).
+/// (`owner_of_app(id) == principal_id`).
+///
+/// There is no operator escape from that any more. The arm that let a
+/// `BillingRead`-on-`Resource::Any` caller read another creator's invoices was
+/// satisfiable only by the deleted universal-allow policy, so it was a
+/// cross-tenant read with no remaining principal behind it.
 pub async fn list_app_invoices(
     id: Path<String>,
     query: web::types::Query<InvoiceListQuery>,
@@ -1232,17 +1201,10 @@ pub async fn list_app_invoices(
         Ok(None) => return web::HttpResponse::Ok().json(&serde_json::json!({ "invoices": [] })),
         Err(e) => return error_response(e),
     };
-    // OWNER-or-operator: only the app's OWNER (the invoice creator) reads the
-    // owner's cross-app invoice history; a non-owner member does not.
+    // OWNER only: the app's OWNER is the invoice creator and reads their own
+    // cross-app invoice history; a non-owner member does not.
     if creator_id != authz.principal_id {
-        match authz.is_operator(Action::BillingRead, &state).await {
-            Ok(true) => {}
-            Ok(false) => {
-                return web::HttpResponse::Forbidden()
-                    .json(&serde_json::json!({"error": "forbidden"}))
-            }
-            Err(resp) => return resp,
-        }
+        return web::HttpResponse::Forbidden().json(&serde_json::json!({"error": "forbidden"}));
     }
     let limit = query.limit.unwrap_or(50).clamp(1, 200);
     let offset = query.offset.unwrap_or(0).max(0);
@@ -1260,13 +1222,12 @@ pub async fn list_app_invoices(
 /// AUTHZ GRAIN — CREATOR-LEVEL (SEC, CRITICAL-1). An invoice is creator-keyed:
 /// the reconciler stamps `invoice.creator_id` as the `role='owner'` user
 /// (`cron/billing_reconcile.rs`). The invoice envelope spans EVERY app that
-/// creator owns, so the caller must BE that creator OR an operator
-/// (`Resource::Any`). We do NOT loop the creator's apps and accept any
-/// `BillingRead` grant: `list_apps_for_owner` is role-AGNOSTIC, so a creator who
-/// is merely a viewer/editor on the attacker's app would appear in the list and
-/// let the attacker read the victim's whole invoice. A single
-/// `creator_id == principal_id || is_operator` check closes that cross-creator
-/// hole AND removes the per-app Cedar-loop audit amplification.
+/// creator owns, so the caller must BE that creator. We do NOT loop the
+/// creator's apps and accept any `BillingRead` grant: `list_apps_for_owner` is
+/// role-AGNOSTIC, so a creator who is merely a viewer/editor on the attacker's
+/// app would appear in the list and let the attacker read the victim's whole
+/// invoice. A single `creator_id == principal_id` check closes that
+/// cross-creator hole AND removes the per-app Cedar-loop audit amplification.
 pub async fn get_invoice(
     id: Path<String>,
     authz: AuthzGuard,
@@ -1292,16 +1253,9 @@ pub async fn get_invoice(
         Err(e) => return error_response(e),
     };
 
-    // The caller is the invoice's creator, OR an operator. Nothing else reads it.
+    // The caller is the invoice's creator. Nothing else reads it.
     if detail.creator_id != authz.principal_id {
-        match authz.is_operator(Action::BillingRead, &state).await {
-            Ok(true) => {}
-            Ok(false) => {
-                return web::HttpResponse::Forbidden()
-                    .json(&serde_json::json!({"error": "forbidden"}))
-            }
-            Err(resp) => return resp,
-        }
+        return web::HttpResponse::Forbidden().json(&serde_json::json!({"error": "forbidden"}));
     }
     web::HttpResponse::Ok().json(&detail)
 }
@@ -1406,20 +1360,19 @@ pub async fn get_billing_status(
 
 /// Resolve the target creator for a creator-keyed billing read.
 ///
-/// - **Operator** (`BillingRead` on `Resource::Any`): may target any creator via
-///   the optional `creator_id`; absent it, targets self.
-/// - **Creator** (billing-capable on at least one owned app): forced to `self`.
-///   A `creator_id` naming ANOTHER creator is 403; a caller with NO billing
-///   capability anywhere is 403.
+/// The caller is ALWAYS forced to `self`: they must be billing-capable on at
+/// least one owned app, and a `creator_id` naming ANOTHER creator is 403. A
+/// caller with no billing capability anywhere is 403.
+///
+/// The `?creator_id=` parameter therefore now only confirms or contradicts the
+/// caller's own id. It is kept rather than removed because the contradiction is
+/// worth answering with a 403 instead of silently reading the caller's own
+/// data under someone else's name.
 async fn resolve_creator_target(
     authz: &AuthzGuard,
     state: &AppState,
     requested: Option<Uuid>,
 ) -> Result<Uuid, web::HttpResponse> {
-    let is_op = authz.is_operator(Action::BillingRead, state).await?;
-    if is_op {
-        return Ok(requested.unwrap_or(authz.principal_id));
-    }
     if !authz.can_act_anywhere(Action::BillingRead, state).await? {
         return Err(web::HttpResponse::Forbidden()
             .json(&serde_json::json!({"error": "forbidden"})));
@@ -1428,7 +1381,7 @@ async fn resolve_creator_target(
         if req != authz.principal_id {
             return Err(web::HttpResponse::Forbidden().json(&serde_json::json!({
                 "error": "forbidden",
-                "detail": "only an operator may read another creator's billing",
+                "detail": "a creator may read only their own billing",
             })));
         }
     }
@@ -1456,673 +1409,6 @@ async fn resolve_plan_default_cents(
         .map(|p| p.price.spend_limit_default_cents))
 }
 
-// ---------------------------------------------------------------------------
-// Plan catalog — operator-editable, server-side pricing catalog.
-//
-// Reads (`GET /api/plans`, `GET /api/plans/:id`) require BillingRead on
-// `Resource::Any` (a fleet-wide read — the catalog is global operator config,
-// not tenant data). Writes (`PUT`/`DELETE`) require BillingWrite on
-// `Resource::Any` (operator / master-key authority). DELETE archives (soft
-// delete) so existing `apps.plan_id` FKs + historical billing runs stay
-// resolvable — there is no hard DELETE.
-// ---------------------------------------------------------------------------
-
-/// JSON shape for a plan in the catalog API. `price`/`runtime` serialize the
-/// pure types verbatim (the same JSON the DB JSONB columns hold).
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct PlanDto {
-    pub id: String,
-    pub name: String,
-    pub price: crate::pricing::PlanPrice,
-    pub runtime: zeroship_core::types::AppRuntimeLimits,
-    pub net: zeroship_core::types::AppNetPolicyLimits,
-    #[serde(default)]
-    pub archived: bool,
-    /// MAJOR-4: whether a creator (app_owner) may self-assign this plan. Surfaced
-    /// in the read so operators can see/audit which tiers are creator-assignable.
-    #[serde(default)]
-    pub assignable_by_creator: bool,
-}
-
-impl From<crate::plan_catalog::Plan> for PlanDto {
-    fn from(p: crate::plan_catalog::Plan) -> Self {
-        Self {
-            id: p.id,
-            name: p.name,
-            price: p.price,
-            runtime: p.runtime,
-            net: p.net,
-            archived: p.archived,
-            assignable_by_creator: p.assignable_by_creator,
-        }
-    }
-}
-
-/// Body for `PUT /api/plans/:id`. `id` comes from the path; the body carries
-/// the editable fields. A new id mints a row; an existing id updates it.
-///
-/// `archived` is OPTIONAL: omitting it preserves the existing row's archived
-/// flag (a name/price edit must not silently un-archive a plan). Send
-/// `"archived": false` explicitly to un-archive, `true` to archive.
-#[derive(Debug, Deserialize)]
-pub struct UpsertPlanBody {
-    pub name: String,
-    pub price: crate::pricing::PlanPrice,
-    pub runtime: zeroship_core::types::AppRuntimeLimits,
-    #[serde(default)]
-    pub net: zeroship_core::types::AppNetPolicyLimits,
-    #[serde(default)]
-    pub archived: Option<bool>,
-    /// MAJOR-4: operator-controlled flag — may a creator self-assign this plan?
-    /// Defaults to `false` (fail-closed: an operator-minted plan is NOT
-    /// creator-assignable unless explicitly opted in).
-    #[serde(default)]
-    pub assignable_by_creator: bool,
-}
-
-pub async fn list_plans(
-    authz: AuthzGuard,
-    state: State<Arc<AppState>>,
-) -> web::HttpResponse {
-    if let Err(resp) = authz.require(Action::BillingRead, Resource::Any, &state).await {
-        return resp;
-    }
-    let catalog = crate::plan_catalog::PlanCatalog::new(state.registry.clone());
-    match catalog.list().await {
-        Ok(plans) => {
-            let dtos: Vec<PlanDto> = plans.into_iter().map(PlanDto::from).collect();
-            web::HttpResponse::Ok().json(&dtos)
-        }
-        Err(e) => error_response(e),
-    }
-}
-
-pub async fn get_plan(
-    id: Path<String>,
-    authz: AuthzGuard,
-    state: State<Arc<AppState>>,
-) -> web::HttpResponse {
-    if let Err(resp) = authz.require(Action::BillingRead, Resource::Any, &state).await {
-        return resp;
-    }
-    let catalog = crate::plan_catalog::PlanCatalog::new(state.registry.clone());
-    match catalog.get(&id).await {
-        Ok(Some(plan)) => web::HttpResponse::Ok().json(&PlanDto::from(plan)),
-        Ok(None) => {
-            web::HttpResponse::NotFound().json(&serde_json::json!({"error":"plan not found"}))
-        }
-        Err(e) => error_response(e),
-    }
-}
-
-pub async fn upsert_plan(
-    id: Path<String>,
-    authz: AuthzGuard,
-    state: State<Arc<AppState>>,
-    body: Json<UpsertPlanBody>,
-) -> web::HttpResponse {
-    if let Err(resp) = authz.require(Action::BillingWrite, Resource::Any, &state).await {
-        return resp;
-    }
-    // The plan id MUST be a well-formed `pln_<base62>` typed id so the catalog
-    // namespace can't be polluted with free-text ids (the CT-A1 class).
-    let id = id.into_inner();
-    if zeroship_core::typed_id::parse_with_prefix(&id, zeroship_core::typed_id::PLAN_PREFIX)
-        .is_err()
-    {
-        return web::HttpResponse::BadRequest()
-            .json(&serde_json::json!({"error":"plan id must be a pln_<base62> typed id"}));
-    }
-    let body = body.into_inner();
-    // Semantic validation at the write boundary: a malformed price model
-    // (e.g. non-monotonic tier boundaries) is a 400, not a silently-wrong
-    // charge later (#13/#4).
-    if let Err(msg) = body.price.validate() {
-        return web::HttpResponse::BadRequest()
-            .json(&serde_json::json!({"error": format!("invalid price model: {msg}")}));
-    }
-    let archived = body.archived;
-    let plan = crate::plan_catalog::Plan {
-        id,
-        name: body.name,
-        price: body.price,
-        runtime: body.runtime,
-        net: body.net,
-        // Placeholder — the upsert uses the `archived` arg, not this field;
-        // `None` ⇒ preserve existing (a PUT without `archived` can't un-archive).
-        archived: archived.unwrap_or(false),
-        assignable_by_creator: body.assignable_by_creator,
-    };
-    let catalog = crate::plan_catalog::PlanCatalog::new(state.registry.clone());
-    match catalog.upsert(&plan, archived).await {
-        Ok(written) => {
-            // MINOR-1: a plan's FX/price is the highest-leverage money lever —
-            // audit WHO wrote it + the new price model (mirrors SetSpendLimit's
-            // actor logging), so an unexpected price change is attributable.
-            crate::audit::log_with_detail(
-                &state.registry,
-                crate::audit::AuditEntry {
-                    app_id: None,
-                    creator_id: None,
-                    actor_user_id: Some(authz.principal_id),
-                    action: crate::audit::Action::PlanUpserted,
-                    resource: Some(&written.id),
-                    source_ip: None,
-                },
-                &serde_json::json!({
-                    "plan_id": written.id,
-                    "name": written.name,
-                    "base_fee_cents": written.price.base_fee_cents,
-                    "included_units": written.price.included_units,
-                    "fx_pico_cents_per_unit": written.price.fx_pico_cents_per_unit,
-                    "spend_limit_default_cents": written.price.spend_limit_default_cents,
-                    "net_max_sockets": written.net.max_sockets,
-                    "net_egress_ceiling_bytes": written.net.egress_ceiling_bytes,
-                    "archived": written.archived,
-                }),
-            )
-            .await;
-            web::HttpResponse::Ok().json(&PlanDto::from(written))
-        }
-        Err(e) => error_response(e),
-    }
-}
-
-pub async fn archive_plan(
-    id: Path<String>,
-    authz: AuthzGuard,
-    state: State<Arc<AppState>>,
-) -> web::HttpResponse {
-    if let Err(resp) = authz.require(Action::BillingWrite, Resource::Any, &state).await {
-        return resp;
-    }
-    let id = id.into_inner();
-    let catalog = crate::plan_catalog::PlanCatalog::new(state.registry.clone());
-    match catalog.archive(&id).await {
-        Ok(true) => {
-            // MINOR-1: archiving removes a tier from new-app assignment — a money
-            // lever change. Audit WHO archived which plan (mirrors SetSpendLimit).
-            crate::audit::log_with_detail(
-                &state.registry,
-                crate::audit::AuditEntry {
-                    app_id: None,
-                    creator_id: None,
-                    actor_user_id: Some(authz.principal_id),
-                    action: crate::audit::Action::PlanArchived,
-                    resource: Some(&id),
-                    source_ip: None,
-                },
-                &serde_json::json!({ "plan_id": id, "archived": true }),
-            )
-            .await;
-            web::HttpResponse::Ok().json(&serde_json::json!({"archived": true}))
-        }
-        Ok(false) => {
-            web::HttpResponse::NotFound().json(&serde_json::json!({"error":"plan not found"}))
-        }
-        Err(e) => error_response(e),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Global pricing config (gap #28) — the operator-editable GLOBAL default FX.
-//
-// The global default FX (`pricing_config.id='global'.fx_pico_cents_per_unit`) is
-// the price a CU sells for when a plan does NOT override it (`plans.fx == NULL`).
-// Per-plan FX is already operator-editable via `PUT /api/plans/:id`; this is the
-// missing runtime lever for the GLOBAL default — previously seed/DB-only, so an
-// operator had to ship a migration to reprice globally.
-//
-// Both routes are OPERATOR-ONLY: `BillingRead`/`BillingWrite` on `Resource::Any`
-// — the SAME fleet-wide gate the plan-catalog + fee-policy writes use. A creator
-// (app-scoped `Resource::App{id}` grant) is NOT reachable here and gets a 403.
-//
-// The write enforces the near-zero FX floor (`>= MIN_FX_PICO_CENTS_PER_UNIT`)
-// with a clean 400 BEFORE touching the DB (fail closed — never rely solely on
-// the DB CHECK), and AUDITS the actor + old→new value (it reprices everyone).
-//
-// Reproducibility: changing the global default FX affects FUTURE pricing only.
-// Finalized invoices snapshot their effective FX onto each line at finalize time,
-// so a re-priced default never rewrites a settled invoice (no invoices are
-// finalized in this config-write flow — no code needed here, only the guarantee).
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize)]
-pub struct SetPricingConfigBody {
-    /// New global default FX in pico-cents per CU. Must be
-    /// `>= MIN_FX_PICO_CENTS_PER_UNIT`.
-    pub fx_pico_cents_per_unit: u64,
-}
-
-pub async fn get_pricing_config(
-    authz: AuthzGuard,
-    state: State<Arc<AppState>>,
-) -> web::HttpResponse {
-    if let Err(resp) = authz.require(Action::BillingRead, Resource::Any, &state).await {
-        return resp;
-    }
-    let store = crate::pricing_store::PricingStore::new(state.registry.clone());
-    match store.default_fx_pico_cents_per_unit().await {
-        // `None` here means the singleton is MISSING or stored below the floor —
-        // a platform misconfiguration the reader logs loudly. Surface it as a
-        // pricing-misconfigured 500 (the same fail-closed posture the sweeps take)
-        // rather than fabricating a default the operator never set.
-        Ok(Some(fx)) => web::HttpResponse::Ok()
-            .json(&serde_json::json!({ "fx_pico_cents_per_unit": fx })),
-        Ok(None) => infrastructure_error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "pricing misconfigured",
-            "global default FX missing or below floor",
-        ),
-        Err(e) => error_response(e),
-    }
-}
-
-pub async fn set_pricing_config(
-    authz: AuthzGuard,
-    state: State<Arc<AppState>>,
-    body: Json<SetPricingConfigBody>,
-) -> web::HttpResponse {
-    // OPERATOR-ONLY — the SAME `Resource::Any` gate the plan/fee-policy writes
-    // use. A creator's app-scoped `BillingWrite` is denied (403).
-    if let Err(resp) = authz.require(Action::BillingWrite, Resource::Any, &state).await {
-        return resp;
-    }
-    // Enforce the near-zero FX floor at the boundary (fail closed) — a clean 400
-    // rather than relying on the DB CHECK to surface as an opaque 500.
-    if body.fx_pico_cents_per_unit < crate::pricing::MIN_FX_PICO_CENTS_PER_UNIT {
-        return web::HttpResponse::BadRequest().json(&serde_json::json!({
-            "error": "fx below floor",
-            "detail": format!(
-                "fx_pico_cents_per_unit must be >= {} (a near-zero global FX prices all overage \
-                 to ~$0; raise a plan's included_units to make a tier free instead)",
-                crate::pricing::MIN_FX_PICO_CENTS_PER_UNIT
-            ),
-            "floor_pico_cents_per_unit": crate::pricing::MIN_FX_PICO_CENTS_PER_UNIT,
-        }));
-    }
-
-    let store = crate::pricing_store::PricingStore::new(state.registry.clone());
-    match store.set_default_fx(body.fx_pico_cents_per_unit).await {
-        Ok(old_fx) => {
-            // Audit WHO repriced the global default + the old→new transition. The
-            // global FX is the highest-leverage money lever (it reprices every
-            // inheriting plan), so an unexpected change must be attributable.
-            crate::audit::log_with_detail(
-                &state.registry,
-                crate::audit::AuditEntry {
-                    app_id: None,
-                    creator_id: None,
-                    actor_user_id: Some(authz.principal_id),
-                    action: crate::audit::Action::SetGlobalFx,
-                    resource: Some("pricing_config"),
-                    source_ip: None,
-                },
-                &serde_json::json!({
-                    "old_fx_pico_cents_per_unit": old_fx,
-                    "new_fx_pico_cents_per_unit": body.fx_pico_cents_per_unit,
-                }),
-            )
-            .await;
-            web::HttpResponse::Ok().json(&serde_json::json!({
-                "fx_pico_cents_per_unit": body.fx_pico_cents_per_unit,
-            }))
-        }
-        // `error_response` maps the store's below-floor/overflow rejection
-        // (`RegistryError::InvalidInput`) to a 400 — defense in depth, the handler
-        // already rejected below-floor above; any other error maps as usual.
-        Err(e) => error_response(e),
-    }
-}
-
-/// Operator credit-grant endpoint `POST /api/billing/credit` (billing-ops gap #26,
-/// PR-2). OPERATOR-ONLY: `Action::BillingWrite` on `Resource::Any` (master-key /
-/// operator). A creator/app token — which can at most hold `BillingWrite` on
-/// `Resource::App{id}` — is 403 here (credit is a fleet-wide money lever, never
-/// self-grantable). Requires an `Idempotency-Key` header; a reused key with the
-/// SAME body returns the first grant (safe retry), a reused key with a DIFFERENT
-/// body is 409 (no silent second grant). Currency is USD-pinned (v1).
-pub async fn grant_credit(
-    req: web::HttpRequest,
-    authz: AuthzGuard,
-    state: State<Arc<AppState>>,
-    body: Json<GrantCreditBody>,
-) -> web::HttpResponse {
-    // OPERATOR-ONLY on Resource::Any. No App-scoped fallback: a creator may never
-    // grant themselves credit.
-    if let Err(resp) = authz.require(Action::BillingWrite, Resource::Any, &state).await {
-        return resp;
-    }
-
-    // The idempotency key is a required header (the body carries the grant facts).
-    let idem_key = req
-        .headers()
-        .get("idempotency-key")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string)
-        .unwrap_or_default();
-    if idem_key.is_empty() {
-        return web::HttpResponse::BadRequest().json(&serde_json::json!({
-            "error": "missing Idempotency-Key header",
-            "detail": "POST /api/billing/credit requires an Idempotency-Key header so a \
-                       retried grant is a no-op (no double grant)",
-        }));
-    }
-
-    let body = body.into_inner();
-    // The creator must have a `creator_billing` row (the FK target). Ensure it
-    // exists — the same lazy create the Stripe-store / account-status paths use —
-    // so an operator can grant credit before the creator's first invoice. A missing
-    // `users` row surfaces as a clean FK error → 400, not a 500.
-    //
-    // MINOR-4: the lazy `creator_billing` upsert and the `credit_ledger` grant
-    // INSERT run in ONE `conn.transaction()` so the endpoint's atomicity matches
-    // its prose. (Grant idempotency already covers a retry; the txn makes the
-    // upsert+grant a single unit so a half-applied grant can never be observed.)
-    let mut conn = match state.registry.conn().await {
-        Ok(c) => c,
-        Err(e) => return error_response(RegistryError::Database(e.to_string())),
-    };
-    let tx = match conn.transaction().await {
-        Ok(t) => t,
-        Err(e) => return error_response(RegistryError::Database(e.to_string())),
-    };
-    if let Err(e) = tx
-        .execute(
-            "INSERT INTO zeroship.creator_billing (creator_id) VALUES ($1) \
-             ON CONFLICT (creator_id) DO NOTHING",
-            &[&body.creator_id],
-        )
-        .await
-    {
-        // MINOR-5: classify by SQLSTATE. Only a foreign_key_violation (23503) —
-        // a non-existent `users` row — is a genuine "unknown creator" 400. Any
-        // OTHER error (a transient DB failure, etc.) must NOT be mis-labelled a
-        // 400; it falls through to the standard `error_response` → 500.
-        if e.code() == Some(&compio_postgres::error::SqlState::FOREIGN_KEY_VIOLATION) {
-            return web::HttpResponse::BadRequest().json(&serde_json::json!({
-                "error": "unknown creator",
-                "detail": format!("no billable creator for creator_id {}", body.creator_id),
-            }));
-        }
-        return error_response(RegistryError::Database(e.to_string()));
-    }
-
-    let outcome = crate::credit::grant(&tx, &body.creator_id, crate::credit::GrantRequest { amount_cents: body.amount_cents, currency: &body.currency, kind: &body.kind, expires_at: body.expires_at, note: body.note.as_deref(), idempotency_key: &idem_key })
-    .await;
-
-    // On a grant error, roll back (drop the tx) and surface it — never commit a
-    // half-applied unit. On success, commit the upsert+grant together; a commit
-    // failure is a 500 (the grant did not durably land).
-    let outcome = match outcome {
-        Ok(o) => o,
-        Err(e) => return error_response(e),
-    };
-    if let Err(e) = tx.commit().await {
-        return error_response(RegistryError::Database(e.to_string()));
-    }
-
-    match outcome {
-        crate::credit::GrantOutcome::Created(id) => {
-            crate::audit::log_with_detail(
-                &state.registry,
-                crate::audit::AuditEntry {
-                    app_id: None,
-                    creator_id: Some(body.creator_id),
-                    actor_user_id: Some(authz.principal_id),
-                    action: crate::audit::Action::CreditGranted,
-                    resource: Some(&id),
-                    source_ip: None,
-                },
-                &serde_json::json!({
-                    "credit_id": id,
-                    "creator_id": body.creator_id,
-                    "amount_cents": body.amount_cents,
-                    "kind": body.kind,
-                    "currency": body.currency,
-                    "expires_at": body.expires_at,
-                }),
-            )
-            .await;
-            web::HttpResponse::Created().json(&serde_json::json!({
-                "credit_id": id,
-                "created": true,
-            }))
-        }
-        // Same key + same body — return the first grant (safe retry, no second grant).
-        crate::credit::GrantOutcome::Duplicate(id) => {
-            web::HttpResponse::Ok().json(&serde_json::json!({
-                "credit_id": id,
-                "created": false,
-            }))
-        }
-        // Same key + DIFFERENT body — reject (mirrors Stripe's idempotency-conflict).
-        crate::credit::GrantOutcome::Conflict => web::HttpResponse::Conflict()
-            .json(&serde_json::json!({
-                "error": "idempotency-key-reuse-conflict",
-                "detail": "the Idempotency-Key was reused with a different request body; \
-                           a credit grant key is bound to its exact (creator, amount, \
-                           currency, kind, expiry, note) — no second grant was created",
-            })),
-    }
-}
-
-/// Operator refund endpoint `POST /api/invoices/{id}/refunds` (billing-ops gap #26,
-/// PR-3). OPERATOR-ONLY: `Action::BillingWrite` on `Resource::Any`. A creator/app
-/// token (which can at most hold `BillingWrite` on `Resource::App{id}`) is 403 — a
-/// refund moves real money / grants credit and is never self-serve in v1 (DECISION 5).
-/// Requires an `Idempotency-Key` header; a reused key with the SAME body returns the
-/// first refund (safe retry), a reused key with a DIFFERENT body is 409. The `{id}` is
-/// the internal `inv_…` invoice id.
-pub async fn refund_invoice(
-    req: web::HttpRequest,
-    id: Path<String>,
-    authz: AuthzGuard,
-    state: State<Arc<AppState>>,
-    body: Json<RefundBody>,
-) -> web::HttpResponse {
-    // OPERATOR-ONLY on Resource::Any. No App-scoped fallback.
-    if let Err(resp) = authz.require(Action::BillingWrite, Resource::Any, &state).await {
-        return resp;
-    }
-    let invoice_id = id.into_inner();
-    let body = body.into_inner();
-
-    let idem_key = req
-        .headers()
-        .get("idempotency-key")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string)
-        .unwrap_or_default();
-    if idem_key.is_empty() {
-        return web::HttpResponse::BadRequest().json(&serde_json::json!({
-            "error": "missing Idempotency-Key header",
-            "detail": "POST /api/invoices/{id}/refunds requires an Idempotency-Key header so a \
-                       retried refund is a no-op (no double refund)",
-        }));
-    }
-
-    let Some(destination) = crate::refund::RefundDestination::parse(&body.destination) else {
-        return web::HttpResponse::BadRequest().json(&serde_json::json!({
-            "error": "invalid destination",
-            "detail": "refund destination must be 'cash' or 'credit'",
-        }));
-    };
-
-    let mut conn = match state.registry.conn().await {
-        Ok(c) => c,
-        Err(e) => return error_response(RegistryError::Database(e.to_string())),
-    };
-
-    // Resolve the tax split. If the operator supplied both subtotal+tax, use them
-    // verbatim (the helper validates the split). Otherwise derive a PROPORTIONAL tax
-    // split from the invoice's frozen tax ratio (MISSING-6 — a refund of a taxed
-    // invoice returns proportional tax): tax = round_half_up(amount × inv.tax / inv.total).
-    let (subtotal_cents, tax_cents) = match (body.subtotal_cents, body.tax_cents) {
-        (Some(s), Some(t)) => (s, t),
-        _ => {
-            let inv = match conn
-                .query(
-                    "SELECT tax_cents, total_cents FROM zeroship.invoices WHERE id = $1",
-                    &[&invoice_id],
-                )
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => return error_response(RegistryError::Database(e.to_string())),
-            };
-            let Some(row) = inv.first() else {
-                return web::HttpResponse::NotFound().json(&serde_json::json!({
-                    "error": "no such invoice",
-                    "detail": format!("no invoice {invoice_id}"),
-                }));
-            };
-            let inv_tax: i64 = row.get("tax_cents");
-            let inv_total: i64 = row.get("total_cents");
-            // round_half_up(amount × inv_tax / inv_total); 0 when the invoice is untaxed.
-            let tax = if inv_total > 0 && inv_tax > 0 {
-                let num = i128::from(body.amount_cents) * i128::from(inv_tax);
-                let half = i128::from(inv_total) / 2;
-                i64::try_from((num + half) / i128::from(inv_total)).unwrap_or(0)
-            } else {
-                0
-            };
-            (body.amount_cents - tax, tax)
-        }
-    };
-
-    // Build the Stripe-backed refund provider (the cash leg). The credit leg never
-    // touches it.
-    let stripe = crate::stripe_client::StripeClient::new(crate::SecretString::new(
-        state.stripe_secret_key.expose_secret().to_string(),
-    ))
-    .with_base_url(state.stripe_base_url.clone());
-    let provider = crate::refund::StripeRefundProvider { stripe: &stripe };
-
-    let outcome = crate::refund::issue_refund(
-        &mut conn,
-        &provider,
-        &invoice_id,
-        body.amount_cents,
-        subtotal_cents,
-        tax_cents,
-        destination,
-        body.reason.as_deref(),
-        &idem_key,
-    )
-    .await;
-    let outcome = match outcome {
-        Ok(o) => o,
-        Err(e) => return error_response(e),
-    };
-
-    use crate::refund::RefundOutcome;
-    match outcome {
-        RefundOutcome::Issued { refund_id, provider_ref } => {
-            crate::audit::log_with_detail(
-                &state.registry,
-                crate::audit::AuditEntry {
-                    app_id: None,
-                    creator_id: None,
-                    actor_user_id: Some(authz.principal_id),
-                    action: crate::audit::Action::InvoiceRefunded,
-                    resource: Some(&refund_id),
-                    source_ip: None,
-                },
-                &serde_json::json!({
-                    "refund_id": refund_id,
-                    "invoice_id": invoice_id,
-                    "amount_cents": body.amount_cents,
-                    "subtotal_cents": subtotal_cents,
-                    "tax_cents": tax_cents,
-                    "destination": destination.as_str(),
-                    "provider_ref": provider_ref,
-                }),
-            )
-            .await;
-            web::HttpResponse::Created().json(&serde_json::json!({
-                "refund_id": refund_id,
-                "destination": destination.as_str(),
-                "provider_ref": provider_ref,
-                "created": true,
-            }))
-        }
-        RefundOutcome::Duplicate(refund_id) => web::HttpResponse::Ok().json(&serde_json::json!({
-            "refund_id": refund_id,
-            "created": false,
-        })),
-        RefundOutcome::Conflict => web::HttpResponse::Conflict().json(&serde_json::json!({
-            "error": "idempotency-key-reuse-conflict",
-            "detail": "the Idempotency-Key was reused with a different request body; a refund \
-                       key is bound to its exact (invoice, amount, split, destination) — no \
-                       second refund was created",
-        })),
-        RefundOutcome::OverRefund(detail) => {
-            web::HttpResponse::UnprocessableEntity().json(&serde_json::json!({
-                "error": "over-refund",
-                "detail": detail,
-            }))
-        }
-        RefundOutcome::InvalidInvoice(detail) => {
-            web::HttpResponse::BadRequest().json(&serde_json::json!({
-                "error": "invalid invoice",
-                "detail": detail,
-            }))
-        }
-    }
-}
-
-/// Operator void+reissue endpoint `POST /api/invoices/{id}/void` (billing-ops gap #26,
-/// PR-3). OPERATOR-ONLY: `Action::BillingWrite` on `Resource::Any`. Voids a finalized
-/// invoice (the only legal `finalized→void` transition), restores any credit it
-/// consumed (`void_reversal`), reissues a corrected invoice for the same period, and
-/// auto-refunds any over-collection (the true-up bridge) — all under the per-creator
-/// advisory lock. The `{id}` is the internal `inv_…` invoice id.
-pub async fn void_invoice(
-    id: Path<String>,
-    authz: AuthzGuard,
-    state: State<Arc<AppState>>,
-) -> web::HttpResponse {
-    if let Err(resp) = authz.require(Action::BillingWrite, Resource::Any, &state).await {
-        return resp;
-    }
-    let invoice_id = id.into_inner();
-
-    let stripe = crate::stripe_client::StripeClient::new(crate::SecretString::new(
-        state.stripe_secret_key.expose_secret().to_string(),
-    ))
-    .with_base_url(state.stripe_base_url.clone());
-
-    match crate::void_reissue::void_and_reissue(&state, &stripe, &invoice_id).await {
-        Ok(outcome) => {
-            crate::audit::log_with_detail(
-                &state.registry,
-                crate::audit::AuditEntry {
-                    app_id: None,
-                    creator_id: None,
-                    actor_user_id: Some(authz.principal_id),
-                    action: crate::audit::Action::InvoiceVoided,
-                    resource: Some(&outcome.voided_invoice_id),
-                    source_ip: None,
-                },
-                &serde_json::json!({
-                    "voided_invoice_id": outcome.voided_invoice_id,
-                    "reissued_invoice_id": outcome.reissued_invoice_id,
-                    "true_up_refund_id": outcome.true_up_refund_id,
-                    "true_up_cents": outcome.true_up_cents,
-                }),
-            )
-            .await;
-            web::HttpResponse::Ok().json(&serde_json::json!({
-                "voided_invoice_id": outcome.voided_invoice_id,
-                "reissued_invoice_id": outcome.reissued_invoice_id,
-                "true_up_refund_id": outcome.true_up_refund_id,
-                "true_up_cents": outcome.true_up_cents,
-            }))
-        }
-        Err(e) => error_response(e),
-    }
-}
 
 pub async fn get_usage(
     id: Path<String>,

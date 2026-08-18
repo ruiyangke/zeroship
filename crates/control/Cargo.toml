@@ -172,11 +172,6 @@ path = "tests/account_status_test.rs"
 required-features = ["live-db-tests"]
 
 [[test]]
-name = "admin_handlers_test"
-path = "tests/admin_handlers_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
 name = "app_logs_http_test"
 path = "tests/app_logs_http_test.rs"
 required-features = ["live-db-tests"]
@@ -303,8 +298,8 @@ path = "tests/oauth_grants_handlers_test.rs"
 required-features = ["live-db-tests"]
 
 [[test]]
-name = "oauth_handlers_test"
-path = "tests/oauth_handlers_test.rs"
+name = "oauth_clients_test"
+path = "tests/oauth_clients_test.rs"
 required-features = ["live-db-tests"]
 
 [[test]]
@@ -315,11 +310,6 @@ required-features = ["live-db-tests"]
 [[test]]
 name = "plan_catalog"
 path = "tests/plan_catalog.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "pricing_config_test"
-path = "tests/pricing_config_test.rs"
 required-features = ["live-db-tests"]
 
 [[test]]

@@ -179,10 +179,14 @@ impl FeePolicyStore {
         }
     }
 
-    /// Upsert the fee policy for `creator_id`. OPERATOR-ONLY: the caller MUST
-    /// have gated on Cedar `BillingWrite`/`Resource::Any` before invoking this —
-    /// a creator may never set/lower their own fee. Idempotent (ON CONFLICT
-    /// UPDATE).
+    /// Upsert the fee policy for `creator_id`. Idempotent (ON CONFLICT UPDATE).
+    ///
+    /// There is NO HTTP route to this. The operator PUT that used to front it
+    /// was gated on `BillingWrite`/`Resource::Any`, which nothing grants since
+    /// the platform staff roles were deleted, so it went with them. The rule it
+    /// enforced still holds and is now structural rather than checked: a creator
+    /// cannot set or lower their own fee because no request path reaches here.
+    /// Callers are the reconciler and tests.
     pub async fn set(&self, creator_id: Uuid, policy: FeePolicy) -> Result<(), StripeError> {
         let conn = self
             .registry

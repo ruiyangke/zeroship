@@ -171,7 +171,7 @@ grep -qE '"rpc:envp\.report":\{[^}]*"auth":"anon"' "$d/manifest.json" \
 
 # --- 2. real stack, real bearer ------------------------------------------------
 stack_up || { fail "stack bring-up failed"; exit 1; }   # stack_up resets $WORK
-mint_admin_bearer || exit 1
+mint_creator_bearer || exit 1
 
 APP_JSON="$(curl -s -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" \
   -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" \

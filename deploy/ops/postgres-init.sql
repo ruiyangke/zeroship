@@ -7,7 +7,7 @@
 -- deliberately NOT on any role's search_path, since every statement against it
 -- is qualified. Most queries here are fully qualified
 -- (`zeroship.apps`), but a few reference objects UNQUALIFIED (e.g.
--- `crates/control/src/admin_handlers.rs` `UPDATE apps ...`), so every connection
+-- `crates/control/src/api.rs` `UPDATE apps ...`), so every connection
 -- needs `zeroship` on its search_path. Postgres's default role search_path
 -- ("$user", public) omits it, which makes those queries fail with
 -- `relation "apps" does not exist`.

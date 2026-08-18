@@ -29,6 +29,7 @@ use zeroship_control::pricing::{PlanPrice, FX_SCALE};
 use zeroship_control::{
     net_grants, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
+use zeroship_core::net_policy::FrontableSuffixCatalog;
 use zeroship_core::types::{AppNetPolicyLimits, AppRuntimeLimits};
 
 mod common;
@@ -59,7 +60,22 @@ impl Drop for Fixture {
     }
 }
 
+/// The frontable-suffix catalog a configured deployment resolves at boot.
+/// `shared.example.test` is an operator EXTENSION of the compiled-in backstop,
+/// so a test using this fixture can tell the two rules apart.
+fn configured_catalog() -> FrontableSuffixCatalog {
+    FrontableSuffixCatalog::from_config(Some(&["shared.example.test".to_string()]))
+}
+
 async fn build_test_state(db_url: &str, label: &str) -> Fixture {
+    build_test_state_with_catalog(db_url, label, configured_catalog()).await
+}
+
+async fn build_test_state_with_catalog(
+    db_url: &str,
+    label: &str,
+    catalog: FrontableSuffixCatalog,
+) -> Fixture {
     let (control_pg_client, control_pg_conn) =
         connect(db_url, NoTls).await.expect("control-pg connect");
     compio::runtime::spawn(async move {
@@ -69,7 +85,10 @@ async fn build_test_state(db_url: &str, label: &str) -> Fixture {
 
     let blob_root = tmpdir(&format!("blob-{label}"));
     let deploy_tmp_dir = tmpdir(&format!("dtmp-{label}"));
-    let registry = Registry::new(db_url).await.expect("registry");
+    let registry = Registry::new(db_url)
+        .await
+        .expect("registry")
+        .with_frontable_suffixes(catalog);
     zeroship_control::plan_catalog::seed_plans(&registry)
         .await
         .expect("seed built-in plans");
@@ -184,7 +203,7 @@ async fn cleanup_app(pg: &Client, app_id: Uuid) {
 async fn owner_can_grant_list_and_revoke_their_own_app() {
     let db_url = db_url();
     let fx = build_test_state(&db_url, "owner").await;
-    let owner = common::authz_fixture::non_admin_principal(&fx.state).await;
+    let owner = common::authz_fixture::seeded_principal(&fx.state).await;
     let app_record = fx
         .state
         .registry
@@ -268,8 +287,8 @@ async fn owner_can_grant_list_and_revoke_their_own_app() {
 async fn a_creator_cannot_touch_another_creators_app() {
     let db_url = db_url();
     let fx = build_test_state(&db_url, "stranger").await;
-    let owner = common::authz_fixture::non_admin_principal(&fx.state).await;
-    let stranger = common::authz_fixture::non_admin_principal(&fx.state).await;
+    let owner = common::authz_fixture::seeded_principal(&fx.state).await;
+    let stranger = common::authz_fixture::seeded_principal(&fx.state).await;
     let app_record = fx
         .state
         .registry
@@ -293,6 +312,7 @@ async fn a_creator_cannot_touch_another_creators_app() {
             note: None,
         },
         &owner.user_id.to_string(),
+        fx.state.registry.frontable_suffixes(),
     )
     .await
     .expect("owner seed grant");
@@ -352,7 +372,7 @@ async fn a_creator_cannot_touch_another_creators_app() {
 async fn forbidden_hosts_are_refused_and_leave_the_plan_caps_alone() {
     let db_url = db_url();
     let fx = build_test_state(&db_url, "forbidden").await;
-    let owner = common::authz_fixture::non_admin_principal(&fx.state).await;
+    let owner = common::authz_fixture::seeded_principal(&fx.state).await;
     let app_record = fx
         .state
         .registry
@@ -371,10 +391,14 @@ async fn forbidden_hosts_are_refused_and_leave_the_plan_caps_alone() {
     )
     .await;
 
-    // `*` and `*.com` are shape refusals; `*.workers.dev` is the compiled-in
-    // frontable backstop; `*.co.uk` is the registry-level suffix rule. All four
-    // are 400 and none writes a row.
-    for host in ["*", "*.com", "*.workers.dev", "*.co.uk"] {
+    // Each host trips a DIFFERENT rule, so the loop discriminates between them
+    // rather than passing on one: `*` and `*.com` are shape refusals,
+    // `*.workers.dev` is the compiled-in frontable backstop, `*.co.uk` is the
+    // registry-level suffix rule, and `*.shared.example.test` is the
+    // configured catalog's own extension. The fixture's catalog is AVAILABLE,
+    // so none of these is refused merely because wildcards are switched off -
+    // which is what a fail-closed catalog would have made this loop assert.
+    for host in ["*", "*.com", "*.workers.dev", "*.co.uk", "*.shared.example.test"] {
         let req = test::TestRequest::post()
             .uri(&format!("/api/apps/{}/net-grants", app_record.id))
             .header("authorization", owner.bearer())
@@ -424,7 +448,7 @@ async fn a_grant_past_the_plan_cap_is_refused() {
     let fx = build_test_state(&db_url, "cap").await;
     let catalog = PlanCatalog::new(fx.state.registry.clone());
     let plan = seed_plan_with_max_grants(&catalog, 1).await;
-    let owner = common::authz_fixture::non_admin_principal(&fx.state).await;
+    let owner = common::authz_fixture::seeded_principal(&fx.state).await;
     let app_record = fx
         .state
         .registry
@@ -491,4 +515,70 @@ async fn a_grant_past_the_plan_cap_is_refused() {
     drop(catalog);
     drop(fx);
     common::drain_pg().await;
+}
+
+/// A deployment that never configured `[control] frontable_wildcard_suffixes`
+/// refuses EVERY wildcard grant, and the same host under a configured catalog
+/// is accepted.
+///
+/// The pair is the point. `*.creator.example` trips no other rule - it is
+/// well-formed, not registry-level, not under the compiled-in backstop, and
+/// not under the configured extension - so the only variable between the two
+/// halves is whether the catalog RESOLVED. Asserting only the 400 would pass
+/// just as well if wildcards were refused for some unrelated reason, which is
+/// exactly how the old catalog-row fixture read.
+#[compio::test]
+async fn an_unresolved_suffix_catalog_refuses_a_wildcard_a_resolved_one_accepts() {
+    let db_url = db_url();
+    const HOST: &str = "*.creator.example";
+
+    for (label, catalog, expected) in [
+        (
+            "closed",
+            FrontableSuffixCatalog::from_config(None),
+            StatusCode::BAD_REQUEST,
+        ),
+        ("open", configured_catalog(), StatusCode::OK),
+    ] {
+        let fx = build_test_state_with_catalog(&db_url, label, catalog).await;
+        let owner = common::authz_fixture::seeded_principal(&fx.state).await;
+        let app_record = fx
+            .state
+            .registry
+            .create_app(
+                &format!("net-closed-{}", Uuid::new_v4().simple()),
+                &zeroship_control::plan_catalog::free_plan_id(),
+                &owner.user_id,
+            )
+            .await
+            .expect("create app");
+
+        let app = test::init_service(
+            web::App::new()
+                .state(fx.state.clone())
+                .configure(net_grants::configure),
+        )
+        .await;
+        let req = test::TestRequest::post()
+            .uri(&format!("/api/apps/{}/net-grants", app_record.id))
+            .header("authorization", owner.bearer())
+            .set_json(&serde_json::json!({"host": HOST, "port": 443}))
+            .to_request();
+        assert_eq!(
+            test::call_service(&app, req).await.status(),
+            expected,
+            "{HOST} under the {label} catalog"
+        );
+        assert_eq!(
+            count_grants(&fx.state.control_pg, app_record.id).await,
+            i64::from(expected == StatusCode::OK),
+            "row count under the {label} catalog"
+        );
+
+        cleanup_app(&fx.state.control_pg, app_record.id).await;
+        owner.cleanup(&fx.state).await;
+        drop(app);
+        drop(fx);
+        common::drain_pg().await;
+    }
 }

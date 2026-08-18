@@ -14,16 +14,6 @@ use crate::{Action, AuthzError, Resource};
 const ENTITY_CACHE_TTL: Duration = Duration::from_secs(30);
 const ENTITY_CACHE_CAPACITY: usize = 1024;
 
-/// Platform role assigned to a principal with no row in
-/// `platform_admin_roles`. This is the *default* for every ordinary creator.
-///
-/// It MUST be a true zero-privilege role: no platform Cedar policy matches it,
-/// so an un-roled creator is authorized solely through their `app_members`-bound
-/// creator policies (app_owner / app_editor / app_viewer). Using a privileged
-/// default such as `"readonly"` here is a fleet-wide cross-tenant read IDOR,
-/// because `readonly.cedar` permits reads on an unconstrained resource.
-pub const DEFAULT_PLATFORM_ROLE: &str = "none";
-
 static ENTITY_CACHE: LazyLock<Mutex<LruCache<EntityCacheKey, CacheEntry>>> =
     LazyLock::new(|| {
         Mutex::new(LruCache::new(
@@ -90,7 +80,7 @@ struct Memberships {
 /// Assemble Cedar entities for a principal/resource authorization request.
 ///
 /// The store contains the principal `User`, all app membership targets, the
-/// requested resource entity, and the P11 placeholder org when needed.
+/// requested resource entity.
 pub async fn assemble_entities(
     pg: &Client,
     principal_id: Uuid,
@@ -130,10 +120,6 @@ pub async fn assemble_entities(
         entities.push(empty_entity("App", &app_id)?);
     }
 
-    if let Resource::Org { id } = &resource {
-        entities.push(empty_entity("Org", id)?);
-    }
-
     let entities = Entities::from_entities(entities, None)
         .map_err(|err| AuthzError::CedarEntities(err.to_string()))?;
     cache_put(key, entities.clone());
@@ -143,25 +129,24 @@ pub async fn assemble_entities(
 struct UserAttrs {
     email_verified: bool,
     account_locked: bool,
-    platform_role: String,
 }
 
+/// Load the principal's Cedar attributes.
+///
+/// There is no `platform_role` any more, and with it goes the LEFT JOIN onto
+/// `zeroship.platform_admin_roles` this query used to carry: the staff roles it
+/// fed were cross-tenant grants and are deleted. A creator is authorized SOLELY
+/// through the self-scoped baseline and their `app_members`-bound per-app
+/// policies, which is what the zero-privilege default role was approximating.
 async fn load_user(pg: &Client, principal_id: Uuid) -> Result<UserAttrs, AuthzError> {
-    // `DEFAULT_PLATFORM_ROLE` ("none") is a true zero-privilege role: no
-    // platform Cedar policy matches it, so an un-roled creator is authorized
-    // ONLY through their `app_members`-bound creator policies. Defaulting to a
-    // privileged role (e.g. "readonly", which permits reads on an unconstrained
-    // resource) would grant every creator fleet-wide cross-tenant read.
     let rows = pg
         .query(
             "SELECT \
                 u.email_verified_at IS NOT NULL AS email_verified, \
-                (u.locked_until IS NOT NULL AND u.locked_until > NOW()) AS account_locked, \
-                COALESCE(r.role, $2) AS platform_role \
+                (u.locked_until IS NOT NULL AND u.locked_until > NOW()) AS account_locked \
              FROM zeroship.users u \
-             LEFT JOIN zeroship.platform_admin_roles r ON r.user_id = u.id \
              WHERE u.id = $1",
-            &[&principal_id, &DEFAULT_PLATFORM_ROLE],
+            &[&principal_id],
         )
         .await
         .map_err(|err| AuthzError::Db(format!("load user entities: {err}")))?;
@@ -173,7 +158,6 @@ async fn load_user(pg: &Client, principal_id: Uuid) -> Result<UserAttrs, AuthzEr
     Ok(UserAttrs {
         email_verified: row.get("email_verified"),
         account_locked: row.get("account_locked"),
-        platform_role: row.get("platform_role"),
     })
 }
 
@@ -216,10 +200,6 @@ fn user_entity(
 ) -> Result<Entity, AuthzError> {
     let attrs = HashMap::from([
         (
-            "platform_role".to_owned(),
-            restricted_string(&user.platform_role)?,
-        ),
-        (
             "email_verified".to_owned(),
             restricted_bool(user.email_verified)?,
         ),
@@ -261,10 +241,6 @@ fn restricted_bool(value: bool) -> Result<RestrictedExpression, AuthzError> {
     restricted(if value { "true" } else { "false" })
 }
 
-fn restricted_string(value: &str) -> Result<RestrictedExpression, AuthzError> {
-    restricted(&cedar_string(value))
-}
-
 fn restricted(source: &str) -> Result<RestrictedExpression, AuthzError> {
     RestrictedExpression::from_str(source)
         .map_err(|err| AuthzError::CedarEntities(err.to_string()))
@@ -295,7 +271,6 @@ pub(crate) fn cedar_string(value: &str) -> String {
 fn resource_cache_key(resource: &Resource) -> String {
     match resource {
         Resource::App { id } => format!("app:{id}"),
-        Resource::Org { id } => format!("org:{id}"),
         Resource::Any => "any:*".to_owned(),
     }
 }

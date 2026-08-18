@@ -483,27 +483,22 @@ async fn reaper_sets_null_attribution_fk_pointing_at_deleted_user() {
         .await
         .unwrap();
 
-    // platform_admin_roles.granted_by → victim (a NON-cascade attribution FK).
-    db.execute(
-        "INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by) \
-         VALUES ($1, 'support', $2)",
-        &[&victim.id, &victim.id],
-    )
-    .await
-    .unwrap();
-    // Make the role row's user_id a different, surviving user so CASCADE on
-    // user_id doesn't remove the attribution row before we observe SET NULL.
+    // `oauth_clients.created_by` -> victim (a NON-cascade attribution FK).
+    // This used to use `platform_admin_roles.granted_by`; that table is gone
+    // with the platform staff roles, and the two FKs it left behind are the
+    // ones the reaper still has to null.
     let bystander =
         users::create(&db, &format!("acctdel-bystander-{tag}@zeroship.test"), "Bystander", None)
             .await
             .unwrap();
-    db.execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&victim.id])
-        .await
-        .unwrap();
+    let client_id = format!("acctdel-client-{tag}");
     db.execute(
-        "INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by) \
-         VALUES ($1, 'support', $2)",
-        &[&bystander.id, &victim.id],
+        "INSERT INTO zeroship.oauth_clients \
+            (client_id, client_name, redirect_uris, scopes, skip_consent, created_by, \
+             refresh_allowed, token_endpoint_auth_method) \
+         VALUES ($1, 'Attribution Probe', ARRAY['https://probe.zeroship.test/cb'], \
+                 ARRAY['apps:read'], FALSE, $2, FALSE, 'none')",
+        &[&client_id, &victim.id],
     )
     .await
     .unwrap();
@@ -523,17 +518,17 @@ async fn reaper_sets_null_attribution_fk_pointing_at_deleted_user() {
         .await
         .unwrap();
     assert!(victim_rows.is_empty(), "victim row deleted despite the inbound attribution FK");
-    let granted_by: Option<Uuid> = db
+    let created_by: Option<Uuid> = db
         .query_one(
-            "SELECT granted_by FROM zeroship.platform_admin_roles WHERE user_id = $1",
-            &[&bystander.id],
+            "SELECT created_by FROM zeroship.oauth_clients WHERE client_id = $1",
+            &[&client_id],
         )
         .await
         .unwrap()
-        .get("granted_by");
-    assert!(granted_by.is_none(), "attribution FK SET NULL");
+        .get("created_by");
+    assert!(created_by.is_none(), "attribution FK SET NULL");
 
-    db.execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&bystander.id])
+    db.execute("DELETE FROM zeroship.oauth_clients WHERE client_id = $1", &[&client_id])
         .await
         .unwrap();
     cleanup(&db, &[victim.id, bystander.id]).await;

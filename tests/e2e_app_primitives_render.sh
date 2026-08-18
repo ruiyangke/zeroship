@@ -93,7 +93,7 @@ stack_up || { fail "stack bring-up failed"; exit 1; }
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Stage 3: mint admin bearer from the harness OP ==="
-mint_admin_bearer || exit 1
+mint_creator_bearer || exit 1
 
 # --- helper: create an app, deploy a built .zship, return the app slug -------
 # usage: deploy_app <slug> <path-to-.zship>  → sets global APP_ID

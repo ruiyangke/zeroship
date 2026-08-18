@@ -13,11 +13,12 @@
 //! 1. **Deny by default.** An app with no rows gets `NetPolicy::Denied` and
 //!    cannot resolve `node:net` at all. Nothing here changes that.
 //! 2. **Shape.** Every host goes through
-//!    [`HostPort::try_new_with_frontable_suffixes`] with the operator's
+//!    [`HostPort::try_new_with_frontable_suffixes`] with the deployment's
 //!    frontable-suffix catalog, which rejects bare `*`, malformed wildcards,
 //!    registry-level suffixes, and wildcards fronting shared infrastructure.
-//!    A missing or invalid catalog row fails CLOSED: wildcards are refused,
-//!    never permitted.
+//!    The catalog is read once at boot from `[control]
+//!    frontable_wildcard_suffixes` in the config overlay, and absent or
+//!    invalid config fails CLOSED: wildcards are refused, never permitted.
 //! 3. **Plan caps.** `max_grants` bounds the row count; `max_sockets` and
 //!    `egress_ceiling_bytes` bound concurrency and volume. All three come from
 //!    the plan catalog and a creator can never raise them.
@@ -40,7 +41,7 @@ use serde_json::json;
 use compio_postgres::Client;
 use uuid::Uuid;
 use zeroship_authz::{Action as AuthzAction, Resource};
-use zeroship_core::net_policy::{normalize_frontable_suffixes, HostPort};
+use zeroship_core::net_policy::{FrontableSuffixCatalog, HostPort};
 use zeroship_core::types::{AppNetPolicyLimits, FREE_TIER_NET_POLICY_LIMITS};
 
 use crate::audit::{self, Action as AuditAction, AuditEntry};
@@ -142,80 +143,6 @@ impl NetGrantError {
             }
             Self::Db => web::HttpResponse::InternalServerError()
                 .json(&json!({"error": "database error"})),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Frontable-suffix catalog
-// ---------------------------------------------------------------------------
-
-/// The operator's wildcard-suffix catalog, plus whether it could be read.
-///
-/// `available: false` is the fail-closed state: every wildcard grant is
-/// refused while the catalog is missing or unparsable. Exact hosts do not
-/// consult it and are unaffected.
-#[derive(Debug, Clone)]
-pub struct FrontableSuffixCatalog {
-    pub suffixes: Vec<String>,
-    pub available: bool,
-}
-
-impl FrontableSuffixCatalog {
-    const fn unavailable() -> Self {
-        Self {
-            suffixes: Vec::new(),
-            available: false,
-        }
-    }
-}
-
-/// Load the operator-editable frontable-suffix catalog.
-///
-/// Every failure mode - the row missing, the JSON not being a string array, a
-/// suffix failing normalization - resolves to `unavailable()`, which refuses
-/// wildcards. A `Db` error is only returned when the QUERY itself fails, so a
-/// transport fault surfaces as a 500 rather than as a silent narrowing.
-pub async fn load_frontable_suffix_catalog(
-    pg: &Client,
-) -> Result<FrontableSuffixCatalog, NetGrantError> {
-    let rows = pg
-        .query(
-            "SELECT value_json FROM zeroship.net_policy_catalog \
-             WHERE key = 'frontable_wildcard_suffixes'",
-            &[],
-        )
-        .await
-        .map_err(|err| {
-            tracing::error!(error = %err, "control: frontable suffix catalog lookup failed");
-            NetGrantError::Db
-        })?;
-    let Some(row) = rows.first() else {
-        tracing::error!("control: frontable suffix catalog row missing; wildcard grants fail closed");
-        return Ok(FrontableSuffixCatalog::unavailable());
-    };
-    let value: serde_json::Value = row.get("value_json");
-    let raw = match serde_json::from_value::<Vec<String>>(value) {
-        Ok(raw) => raw,
-        Err(err) => {
-            tracing::error!(
-                error = %err,
-                "control: frontable suffix catalog row invalid; wildcard grants fail closed"
-            );
-            return Ok(FrontableSuffixCatalog::unavailable());
-        }
-    };
-    match normalize_frontable_suffixes(&raw) {
-        Ok(suffixes) => Ok(FrontableSuffixCatalog {
-            suffixes,
-            available: true,
-        }),
-        Err(err) => {
-            tracing::error!(
-                error = %err,
-                "control: frontable suffix catalog contains invalid suffix; wildcard grants fail closed"
-            );
-            Ok(FrontableSuffixCatalog::unavailable())
         }
     }
 }
@@ -342,9 +269,9 @@ pub async fn upsert_grant(
     app_id: Uuid,
     body: &NetGrantBody,
     granted_by: &str,
+    catalog: &FrontableSuffixCatalog,
 ) -> Result<NetGrant, NetGrantError> {
     let caps = plan_net_limits(pg, app_id).await?;
-    let catalog = load_frontable_suffix_catalog(pg).await?;
     let reviewed = HostPort::try_new_with_frontable_suffixes(
         body.host.clone(),
         body.port,
@@ -561,6 +488,7 @@ pub async fn create(
         app_id,
         &body,
         &authz.principal_id.to_string(),
+        state.registry.frontable_suffixes(),
     )
     .await
     {

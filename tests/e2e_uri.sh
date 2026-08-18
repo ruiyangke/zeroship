@@ -42,7 +42,7 @@ echo "  zeroship E2E — complex URI forwarding"
 echo "============================================"
 
 stack_up        || { echo "stack bring-up failed"; exit 1; }
-mint_admin_bearer  || exit 1
+mint_creator_bearer  || exit 1
 
 ZSHIP="$ROOT/examples/uri-echo/dist/app.zship"
 [ -f "$ZSHIP" ] || { echo "missing $ZSHIP — run: pnpm --filter ./examples/uri-echo build"; exit 2; }

@@ -401,18 +401,13 @@ async fn make_user(state: &AppState, label: &str) -> Uuid {
     id
 }
 
-async fn issue_bearer(state: &AppState, user_id: Uuid, role: Option<&str>, scope: &str) -> Caller {
-    if let Some(role) = role {
-        state
-            .control_pg
-            .execute(
-                "INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by) \
-                 VALUES ($1, $2, $1) ON CONFLICT DO NOTHING",
-                &[&user_id, &role],
-            )
-            .await
-            .expect("insert platform role");
-    }
+/// Issue a platform OAuth bearer for `user_id` carrying `scope`.
+///
+/// It used to take an optional platform role and seed a `platform_admin_roles`
+/// row for the operator paths. That table and those roles are deleted, so every
+/// principal this mints is an ordinary creator.
+async fn issue_bearer(state: &AppState, user_id: Uuid, scope: &str) -> Caller {
+    let _ = state;
     Caller {
         user_id,
         token: common::platform_token_for_client(user_id, scope, common::CONSOLE_CLIENT_ID),
@@ -422,15 +417,12 @@ async fn issue_bearer(state: &AppState, user_id: Uuid, role: Option<&str>, scope
 // The scope vocabulary is resource-blind: a scope always lowers to
 // `Resource::Any`, so per-app narrowing now comes from Cedar app membership
 // rather than from the caller-supplied wrapper policy a PAT used to carry.
-// The old "creator self" fixture modeled BillingWrite scoped to ONE app (not
-// Resource::Any) — self-service `onboard`/`callback`/`connect_checkout` don't
-// actually consult that grant anyway (they bind `:id` to the principal and
-// only fall back to `require(BillingWrite, Any)` when the caller is NOT the
-// path creator), and the ALWAYS-operator `set_fee_policy` never had a
-// self-service branch to begin with. So a "billing:read" scope (no
-// billing:write) reproduces both outcomes: self-service still succeeds via
-// the principal-id bind, and `set_fee_policy` still denies the creator.
-// "billing:write" is the fleet-wide operator scope.
+// The creator-facing Stripe routes bind `:id` to the principal and consult no
+// grant at all beyond that, so the scope a bearer carries does not decide them
+// - the principal id does. There is no longer any fleet-wide scope that would
+// change the answer: the arms that used to fall back to
+// `require(BillingWrite, Any)` for a NON-path creator are deleted, because
+// nothing grants that once the platform staff roles are gone.
 
 async fn cleanup(state: &AppState, creators: &[Uuid], callers: &[&Caller]) {
     let pg = &state.control_pg;
@@ -442,7 +434,6 @@ async fn cleanup(state: &AppState, creators: &[Uuid], callers: &[&Caller]) {
     }
     for caller in callers {
         let _ = pg.execute("DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1", &[&caller.user_id]).await;
-        let _ = pg.execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&caller.user_id]).await;
     }
     let _ = pg.execute("DELETE FROM zeroship.users WHERE id = ANY($1)", &[&creators.to_vec()]).await;
 }
@@ -456,7 +447,7 @@ async fn onboard_returns_real_account_link() {
     let url = db_url();
     let fx = build_fixture(&url, "onboard").await;
     let creator = make_user(&fx.state, "creator").await;
-    let caller = issue_bearer(&fx.state, creator, None, "billing:read").await;
+    let caller = issue_bearer(&fx.state, creator, "billing:read").await;
 
     let svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
@@ -509,7 +500,7 @@ async fn callback_rejects_acct_not_owned_by_creator() {
     let fx = build_fixture(&url, "callback-forge").await;
     let creator = make_user(&fx.state, "creator").await;
     let attacker = make_user(&fx.state, "attacker").await;
-    let caller = issue_bearer(&fx.state, creator, None, "billing:read").await;
+    let caller = issue_bearer(&fx.state, creator, "billing:read").await;
 
     let svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
@@ -567,7 +558,7 @@ async fn callback_accepts_owned_account_and_persists_flags() {
     let url = db_url();
     let fx = build_fixture(&url, "callback-ok").await;
     let creator = make_user(&fx.state, "creator").await;
-    let caller = issue_bearer(&fx.state, creator, None, "billing:read").await;
+    let caller = issue_bearer(&fx.state, creator, "billing:read").await;
     fx.mock.set_flags(true, true, true);
 
     let svc = test::init_service(
@@ -624,7 +615,7 @@ async fn checkout_stamps_server_fee_not_client_value() {
     let url = db_url();
     let fx = build_fixture(&url, "checkout-fee").await;
     let creator = make_user(&fx.state, "creator").await;
-    let caller = issue_bearer(&fx.state, creator, None, "billing:read").await;
+    let caller = issue_bearer(&fx.state, creator, "billing:read").await;
 
     let svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
@@ -699,21 +690,20 @@ async fn checkout_stamps_server_fee_not_client_value() {
 }
 
 #[compio::test]
-async fn checkout_honors_operator_set_fee_policy() {
+async fn checkout_stamps_the_stored_fee_policy_with_its_cap() {
     let url = db_url();
     let fx = build_fixture(&url, "checkout-policy").await;
     let creator = make_user(&fx.state, "creator").await;
     let op = make_user(&fx.state, "operator").await;
-    let creator_caller = issue_bearer(&fx.state, creator, None, "billing:read").await;
-    let op_caller = issue_bearer(&fx.state, op, Some("billing"), "billing:write").await;
+    let creator_caller = issue_bearer(&fx.state, creator, "billing:read").await;
+    let op_caller = issue_bearer(&fx.state, op, "billing:write").await;
 
     let svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
             web::scope("/api/creators/{id}")
                 .service(web::resource("/stripe/onboard").route(web::post().to(stripe_handlers::onboard)))
                 .service(web::resource("/stripe/callback").route(web::post().to(stripe_handlers::callback)))
-                .service(web::resource("/connect/checkout").route(web::post().to(stripe_handlers::connect_checkout)))
-                .service(web::resource("/fee-policy").route(web::put().to(stripe_handlers::set_fee_policy))),
+                .service(web::resource("/connect/checkout").route(web::post().to(stripe_handlers::connect_checkout))),
         ),
     )
     .await;
@@ -731,17 +721,25 @@ async fn checkout_honors_operator_set_fee_policy() {
         .to_request();
     assert_eq!(test::call_service(&svc, cb).await.status(), StatusCode::OK);
 
-    // Operator sets a 25% policy capped at $40 (4000 cents).
-    let set = test::TestRequest::put()
-        .uri(&format!("/api/creators/{creator}/fee-policy"))
-        .header("authorization", op_caller.bearer())
-        .set_json(&serde_json::json!({ "kind": "percent", "percent_bps": 2500, "cap_cents": 4000 }))
-        .to_request();
-    assert_eq!(
-        test::call_service(&svc, set).await.status(),
-        StatusCode::NO_CONTENT,
-        "operator may set the fee policy"
-    );
+    // A 25% policy capped at $40 (4000 cents), written straight to the store.
+    //
+    // It used to be set through `PUT /api/creators/:id/fee-policy`, which is
+    // deleted along with the rest of the vendor-commercial surface. The
+    // behaviour under test was never that route: it is that CHECKOUT stamps the
+    // stored policy server-side, and `connect_checkout` is very much alive. So
+    // the policy is seeded through `FeePolicyStore` and the assertion below is
+    // unchanged.
+    zeroship_control::fee_policy::FeePolicyStore::new(fx.state.registry.clone())
+        .set(
+            creator,
+            zeroship_control::fee_policy::FeePolicy::Percent {
+                bps: 2500,
+                cap_cents: Some(4000),
+                floor_cents: None,
+            },
+        )
+        .await
+        .expect("seed the fee policy");
 
     // Charge $200 → 25% = 5000, capped to 4000.
     let checkout = test::TestRequest::post()
@@ -770,7 +768,7 @@ async fn checkout_rejected_when_charges_not_enabled() {
     let url = db_url();
     let fx = build_fixture(&url, "checkout-not-ready").await;
     let creator = make_user(&fx.state, "creator").await;
-    let caller = issue_bearer(&fx.state, creator, None, "billing:read").await;
+    let caller = issue_bearer(&fx.state, creator, "billing:read").await;
     // The account exists but onboarding is incomplete: charges are NOT enabled.
     fx.mock.set_flags(false, false, false);
 
@@ -849,7 +847,7 @@ async fn checkout_rejects_empty_cart_id_no_stale_replay() {
     let url = db_url();
     let fx = build_fixture(&url, "checkout-cartid").await;
     let creator = make_user(&fx.state, "creator").await;
-    let caller = issue_bearer(&fx.state, creator, None, "billing:read").await;
+    let caller = issue_bearer(&fx.state, creator, "billing:read").await;
     fx.mock.set_flags(true, true, true);
 
     let svc = test::init_service(
@@ -942,55 +940,6 @@ async fn checkout_rejects_empty_cart_id_no_stale_replay() {
     common::drain_pg().await;
 }
 
-/// m2 (RED→GREEN): an operator cannot set floor_cents > cap_cents (it would pin
-/// every fee to the cap regardless of percent). The handler rejects it 400.
-#[compio::test]
-async fn fee_policy_rejects_floor_above_cap() {
-    let url = db_url();
-    let fx = build_fixture(&url, "fee-floor-cap").await;
-    let creator = make_user(&fx.state, "creator").await;
-    let op = make_user(&fx.state, "operator").await;
-    let op_caller = issue_bearer(&fx.state, op, Some("billing"), "billing:write").await;
-
-    let svc = test::init_service(
-        web::App::new().state(fx.state.clone()).service(
-            web::resource("/api/creators/{id}/fee-policy")
-                .route(web::put().to(stripe_handlers::set_fee_policy)),
-        ),
-    )
-    .await;
-
-    let set = test::TestRequest::put()
-        .uri(&format!("/api/creators/{creator}/fee-policy"))
-        .header("authorization", op_caller.bearer())
-        .set_json(&serde_json::json!({
-            "kind": "percent", "percent_bps": 1500, "floor_cents": 1000, "cap_cents": 100
-        }))
-        .to_request();
-    // Status only: a retained `WebResponse` keeps the app state - and its
-    // Postgres client - alive past the teardown at the end of this test.
-    let status = test::call_service(&svc, set).await.status();
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "floor_cents > cap_cents must be rejected (m2)"
-    );
-    let n = fx
-        .state
-        .control_pg
-        .query("SELECT 1 FROM zeroship.creator_fee_policy WHERE creator_id = $1", &[&creator])
-        .await
-        .expect("query")
-        .len();
-    assert_eq!(n, 0, "the rejected floor>cap policy must not persist");
-
-    cleanup(&fx.state, &[creator, op], &[&op_caller]).await;
-
-    drop(svc);
-    drop(fx);
-    common::drain_pg().await;
-}
-
 /// m1 (RED→GREEN): a malformed currency is rejected with 400 before any Stripe
 /// call.
 #[compio::test]
@@ -998,7 +947,7 @@ async fn checkout_rejects_bad_currency() {
     let url = db_url();
     let fx = build_fixture(&url, "checkout-currency").await;
     let creator = make_user(&fx.state, "creator").await;
-    let caller = issue_bearer(&fx.state, creator, None, "billing:read").await;
+    let caller = issue_bearer(&fx.state, creator, "billing:read").await;
     fx.mock.set_flags(true, true, true);
 
     let svc = test::init_service(
@@ -1044,65 +993,100 @@ async fn checkout_rejects_bad_currency() {
     common::drain_pg().await;
 }
 
+
+/// `GET /api/creators/{id}/earnings` and `DELETE /api/creators/{id}/stripe` are
+/// SELF-SERVICE: `:id` is bound to the principal, exactly like `onboard`.
+///
+/// Both used to require `BillingRead`/`BillingWrite` on `Resource::Any` - an
+/// operator grant - so the creator who owns the payout history could not read
+/// it and the creator who linked the Stripe account could not unlink it. Only
+/// platform staff could, and those roles are deleted, which would have left two
+/// creator capabilities reachable by nobody at all.
+///
+/// The assertions run in BOTH directions on the same request shape, so the pair
+/// distinguishes "bound to the principal" from "allows everyone" - a test that
+/// only checked the owner's 200 would pass just as happily with no gate at all.
 #[compio::test]
-async fn fee_policy_set_is_operator_only() {
+async fn earnings_and_unlink_are_bound_to_the_path_creator() {
     let url = db_url();
-    let fx = build_fixture(&url, "fee-authz").await;
-    let creator = make_user(&fx.state, "creator").await;
-    let op = make_user(&fx.state, "operator").await;
-    // The creator holds "billing:read" — no billing:write, so the operator-only
-    // gate below denies them regardless of being the path creator.
-    let creator_caller = issue_bearer(&fx.state, creator, None, "billing:read").await;
-    let op_caller = issue_bearer(&fx.state, op, Some("billing"), "billing:write").await;
+    let fx = build_fixture(&url, "self-serve").await;
+    let owner = make_user(&fx.state, "owner").await;
+    let other = make_user(&fx.state, "other").await;
+    let owner_caller = issue_bearer(&fx.state, owner, "billing:read billing:write").await;
+    let other_caller = issue_bearer(&fx.state, other, "billing:read billing:write").await;
 
     let svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
-            web::resource("/api/creators/{id}/fee-policy")
-                .route(web::put().to(stripe_handlers::set_fee_policy)),
+            web::scope("/api/creators/{id}")
+                .service(web::resource("/stripe/onboard").route(web::post().to(stripe_handlers::onboard)))
+                .service(web::resource("/earnings").route(web::get().to(stripe_handlers::earnings)))
+                .service(web::resource("/stripe").route(web::delete().to(stripe_handlers::unlink))),
         ),
     )
     .await;
 
-    // A creator trying to set THEIR OWN fee policy → 403 (privilege escalation).
-    let creator_set = test::TestRequest::put()
-        .uri(&format!("/api/creators/{creator}/fee-policy"))
-        .header("authorization", creator_caller.bearer())
-        .set_json(&serde_json::json!({ "kind": "percent", "percent_bps": 0 }))
+    // Give the owner a real Connect account so `unlink` has something to remove
+    // and does not answer 404 for a reason unrelated to authorization.
+    let onboard = test::TestRequest::post()
+        .uri(&format!("/api/creators/{owner}/stripe/onboard"))
+        .header("authorization", owner_caller.bearer())
         .to_request();
-    // Status only: a shadowed `resp` binding would NOT drop the earlier
-    // `WebResponse` (Rust drops locals in reverse declaration order only once
-    // the scope ends), so both calls here keep the app state - and its
-    // Postgres client - alive past the teardown at the end of this test unless
-    // each is reduced to just its status.
-    let creator_set_status = test::call_service(&svc, creator_set).await.status();
+    assert_eq!(test::call_service(&svc, onboard).await.status(), StatusCode::OK);
+
+    // The owner reads their OWN earnings.
+    let status = test::call_service(
+        &svc,
+        test::TestRequest::get()
+            .uri(&format!("/api/creators/{owner}/earnings"))
+            .header("authorization", owner_caller.bearer())
+            .to_request(),
+    )
+    .await
+    .status();
+    assert_eq!(status, StatusCode::OK, "a creator reads their own earnings");
+
+    // A DIFFERENT creator, same request, is refused.
+    let status = test::call_service(
+        &svc,
+        test::TestRequest::get()
+            .uri(&format!("/api/creators/{owner}/earnings"))
+            .header("authorization", other_caller.bearer())
+            .to_request(),
+    )
+    .await
+    .status();
+    assert_eq!(status, StatusCode::FORBIDDEN, "nobody reads another creator's earnings");
+
+    // Unlink: the stranger first, so a wrongly-allowed call would be caught by
+    // the owner's own unlink answering 404 "not linked" afterwards.
+    let status = test::call_service(
+        &svc,
+        test::TestRequest::delete()
+            .uri(&format!("/api/creators/{owner}/stripe"))
+            .header("authorization", other_caller.bearer())
+            .to_request(),
+    )
+    .await
+    .status();
+    assert_eq!(status, StatusCode::FORBIDDEN, "nobody unlinks another creator's account");
+
+    let status = test::call_service(
+        &svc,
+        test::TestRequest::delete()
+            .uri(&format!("/api/creators/{owner}/stripe"))
+            .header("authorization", owner_caller.bearer())
+            .to_request(),
+    )
+    .await
+    .status();
     assert_eq!(
-        creator_set_status,
-        StatusCode::FORBIDDEN,
-        "a creator must NOT set/lower their own fee policy (ISS-29)"
+        status,
+        StatusCode::NO_CONTENT,
+        "a creator unlinks their own account, and it was still linked - so the \
+         stranger's DELETE above really was refused rather than silently applied",
     );
-    // No row was written.
-    let n = fx
-        .state
-        .control_pg
-        .query(
-            "SELECT 1 FROM zeroship.creator_fee_policy WHERE creator_id = $1",
-            &[&creator],
-        )
-        .await
-        .expect("query")
-        .len();
-    assert_eq!(n, 0, "the rejected creator write must not persist a policy");
 
-    // An operator may set it.
-    let op_set = test::TestRequest::put()
-        .uri(&format!("/api/creators/{creator}/fee-policy"))
-        .header("authorization", op_caller.bearer())
-        .set_json(&serde_json::json!({ "kind": "percent", "percent_bps": 1000 }))
-        .to_request();
-    let op_set_status = test::call_service(&svc, op_set).await.status();
-    assert_eq!(op_set_status, StatusCode::NO_CONTENT, "operator may set the fee policy");
-
-    cleanup(&fx.state, &[creator, op], &[&creator_caller, &op_caller]).await;
+    cleanup(&fx.state, &[owner, other], &[&owner_caller, &other_caller]).await;
 
     drop(svc);
     drop(fx);

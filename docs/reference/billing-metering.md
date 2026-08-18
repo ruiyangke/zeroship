@@ -134,8 +134,11 @@ retries from double-counting.
 
 ## Pricing Catalog
 
-The platform plan catalog remains data-driven and operator editable in
-`crates/control/src/plan_catalog.rs`. Per tier:
+The platform plan catalog is data-driven, held in `zeroship.plans` and read
+through `crates/control/src/plan_catalog.rs`. It is edited in the DATABASE:
+the operator HTTP surface that used to front it (`/api/plans`,
+`/api/pricing-config`) was gated on a fleet-wide grant that no principal holds
+since the platform staff roles were deleted, and it went with them. Per tier:
 
 - `base_fee_cents`
 - included quota by metric
@@ -215,6 +218,7 @@ For production billing:
 4. Put provider config in `ZEROSHIP_CONTROL_PROVIDER_CONFIG` using secret handles, not plaintext
    secrets.
 5. Keep plan catalog pricing, included quotas, spend-limit defaults, and network
-   backstops aligned with the tier you sell.
+   backstops aligned with the tier you sell. These are database rows, not an
+   API: there is no operator endpoint to change them.
 6. Monitor event-forwarder retries, provider dead letters, reconciliation
    findings, spend-state transitions, and gateway 402/degrade rates.

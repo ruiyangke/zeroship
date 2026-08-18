@@ -1901,36 +1901,37 @@ operations; the registration-method mismatch is Finding 19
 
 ```text
 +------------------------------------------------------------+
-| Platform administrator holds a Control-accepted bearer     |
+| Deployment config carries the client and its secret        |
 +------------------------------------------------------------+
                               |
                               v
 +------------------------------------------------------------+
-| TRUST BOUNDARY: administrator to Control OAuth-client API  |
+| TRUST BOUNDARY: config overlay to Control at boot          |
 +------------------------------------------------------------+
                               |
                               v
 +------------------------------------------------------------+
-| Control verifies bearer and decides PlatformPoliciesWrite  |
-| Control generates 32 random bytes; signs nothing           |
+| Control validates the registration; signs nothing          |
 +------------------------------------------------------------+
                               |
                               v
 +------------------------------------------------------------+
 | Postgres stores only the secret hash                       |
-| Administrator receives plaintext once and must hold it     |
 +------------------------------------------------------------+
 ```
 
-VERIFIED: Control first applies the normal `AuthzGuard`, then requires the
-global `PlatformPoliciesWrite` Cedar action, which the shipped policy grants to
-platform administrators rather than ordinary creators. For a non-public client it
-generates 32 random bytes, persists only `hash_api_key(secret)`, and includes
-the plaintext exactly in the create response; no credential is signed in this
-flow (`crates/control/src/oauth_handlers.rs:63-127`,
-`deploy/policies/platform/admin.cedar:1-10`,
-`crates/control/src/oauth_handlers.rs:374-409`,
-`crates/control/src/oauth_handlers.rs:440-444`).
+VERIFIED: there is no runtime registration API and no administrator in this
+flow. Control reads `[auth] oauth_clients` from the config overlay at boot,
+validates each registration against the closed scope vocabulary and the
+redirect-URI rules, and persists only `hash_api_key(secret)`; the plaintext
+never reaches a column and is never returned by an endpoint
+(`crates/control/src/oauth_clients.rs`).
+
+Control no longer GENERATES the secret, and that is the substantive change
+rather than a relocation: a config file cannot be handed a value it never saw,
+so a confidential client supplies its own and a registration that omits one is
+rejected at boot. A public client (`token_endpoint_auth_method = "none"`)
+carries no secret at all and is rejected if it supplies one.
 
 ### 5.8 Confidential OAuth client authentication
 
@@ -1970,7 +1971,7 @@ without signing a new credential
 `crates/auth/src/oidc/refresh.rs:628-708`). Control's registration API accepts
 only Basic or public `none`, and its two automatic writers hardcode Basic, so
 the non-brokered stored-POST branch has no production writer
-(`crates/control/src/oauth_handlers.rs:245-274`,
+(`crates/control/src/oauth_clients.rs`,
 `crates/control/src/bootstrap_builder.rs:128-155`,
 `crates/control/src/app_oauth_client.rs:555-574`); see Finding 28. Brokered
 clients are a separate branch and deliberately accept their derived secret by
@@ -2104,7 +2105,7 @@ INFERRED consequences appear only where explicitly labeled in FINDINGS.
 | App-scoped Control HMAC | Worker Rust derives | Control | `control_key` lifetime | Yes, global rotation only | Workflow operations for asserted app ID (`crates/core/src/auth/mod.rs:157-174`, `crates/control/src/workflow_instance_api.rs:326-405`) |
 | Workflow signal capability `wst_` | Control per-app HMAC signer | Control | At most 24h; run once per allowed type, topic once total | No general revoke; run epoch may stale on deploy-changing restart | Post an allowed signal to one bound run or topic (`crates/core/src/typed_id.rs:526-622`, `crates/control/src/workflow_instance_api.rs:2350-2587`, `crates/control/src/workflow_instance_api.rs:2746-2757`, `crates/control/src/workflow_instance_api.rs:2852-2888`) |
 | Broker-derived client secret | Gateway derives from master | Auth re-derives | Master lifetime with current/previous overlap | Yes, master rotation | Per-client code, refresh, introspection, and revoke authentication (`crates/core/src/auth/mod.rs:83-96`, `crates/auth/src/oidc/issuer.rs:853-860`, `crates/auth/src/oidc/introspect.rs:58-66`) |
-| Registered OAuth client secret | Control random generator | Auth stored-hash verifier | Until client deletion or replacement | Yes, delete or replace client | Confidential-client code, refresh, introspection, and revoke authentication (`crates/control/src/oauth_handlers.rs:63-127`, `crates/auth/src/oidc/refresh.rs:910-958`) |
+| Registered OAuth client secret | Control random generator | Auth stored-hash verifier | Until client deletion or replacement | Yes, delete or replace client | Confidential-client code, refresh, introspection, and revoke authentication (`crates/control/src/oauth_clients.rs`, `crates/auth/src/oidc/refresh.rs:910-958`) |
 | Legacy `X-Api-Key` | Route configuration | Unwired Gateway helper | Config lifetime | Yes, route change | Nothing on current dispatch path; see Finding 28 (`crates/gateway/src/auth.rs:1-27`) |
 
 ## Trust-boundary summary
@@ -2611,9 +2612,9 @@ VERIFIED: Control requires `grant_types` and `response_types` in registration
 JSON, but validation checks neither. Persistence uses only the presence of
 literal `refresh_token` to set `refresh_allowed` and discards every response
 type and all other grant values
-(`crates/control/src/oauth_handlers.rs:20-32`,
-`crates/control/src/oauth_handlers.rs:245-274`,
-`crates/control/src/oauth_handlers.rs:374-409`). Auth permits authorization code
+(`crates/control/src/oauth_clients.rs`,
+`crates/control/src/oauth_clients.rs`,
+`crates/control/src/oauth_clients.rs`). Auth permits authorization code
 for every loaded client and device flow for every public, non-brokered client,
 regardless of those advertised grant lists; only refresh checks the stored flag
 (`crates/auth/src/oidc/authorization_code.rs:290-330`,
@@ -2743,7 +2744,7 @@ directly from the pairwise value; it first requires a live
 `app_user_identities` reverse-map row and returns `invalid_token` when none exists
 (`crates/auth/src/oidc/userinfo.rs:109-166`). Control can register public OAuth
 clients and the OP device flow can issue their tokens without any Gateway hop
-(`crates/control/src/oauth_handlers.rs:63-100`,
+(`crates/control/src/oauth_clients.rs`,
 `crates/auth/src/oidc/device_token.rs:124-187`,
 `crates/auth/src/oidc/device_token.rs:468-511`).
 
@@ -2818,7 +2819,7 @@ VERIFIED items, each paired with a positive live path or complete scoped search:
   Control's registration API accepts only Basic or public `none` and both
   automatic client writers hardcode Basic
   (`crates/auth/src/oidc/refresh.rs:937-958`,
-  `crates/control/src/oauth_handlers.rs:245-274`,
+  `crates/control/src/oauth_clients.rs`,
   `crates/control/src/bootstrap_builder.rs:128-155`,
   `crates/control/src/app_oauth_client.rs:559-574`). A full-tree search for
   `client_secret_post` found metadata, parsing, verification, and tests but no
@@ -2844,7 +2845,7 @@ VERIFIED items, each paired with a positive live path or complete scoped search:
 - `BearerVerifier.trusted_oauth_clients` is stored and exposed but not used in
   bearer verification (`crates/authn/src/lib.rs:173-203`). Searches for the
   getter and field uses found no decision-path read; Control separately uses its
-  own set during client registration (`crates/control/src/oauth_handlers.rs:85`).
+  own set during client registration (`crates/control/src/oauth_clients.rs`).
 
 ### 29. LOW: Comments and reference docs describe auth that no longer exists
 
@@ -2961,21 +2962,19 @@ it, a PAT's stored wrapper policy was authored as arbitrary Cedar and could
 name any action, so the operator path existed only because a second issuance
 authority existed.
 
-The same defect had a second instance that is already fixed, which is worth
-recording because it shows the shape of the available answers. Control's three
-`/admin/oauth-clients` routes required `Action::PlatformPoliciesWrite`, which
-likewise had no scope. They were moved onto the gate every other `/admin/*`
-route uses - `team:write` on the synthetic platform org, which IS in the
-vocabulary - and `PlatformPoliciesWrite` was deleted
-(`crates/control/src/admin_handlers.rs`, `require_platform_admin`;
-`crates/control/src/oauth_handlers.rs:68`,
-`crates/control/src/oauth_handlers.rs:131`,
-`crates/control/src/oauth_handlers.rs:162`).
+The same defect had a second instance, and its history is worth recording
+because it shows how these end. Control's three `/admin/oauth-clients` routes
+required `Action::PlatformPoliciesWrite`, which likewise had no scope; they were
+moved onto the operator gate, and then BOTH went away. The routes became
+`[auth] oauth_clients` config reconciled at boot
+(`crates/control/src/oauth_clients.rs`), and the operator gate went with the
+admin surface it protected. Deleting the guarded code is the disposition that
+leaves nothing to be wrong about.
 
 Not fixed here for `migrations:approve`, and deliberately not fixed by
 inventing a scope: whether it should get a scope token (widening the
 creator-facing consent vocabulary with an operator power), be re-gated on an
-existing operator-only resource the way the `/admin/*` routes were, or move
+existing operator-only resource, or move
 behind a separate operator credential class is an open design decision, and
 picking one in a documentation pass would be picking it by accident. Note that
 the re-gating answer is not a drop-in here: `migrations:approve` is deliberately

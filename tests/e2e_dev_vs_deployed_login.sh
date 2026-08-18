@@ -29,7 +29,7 @@
 #     -> 200 {user, expires_at} + the three real Set-Cookies
 #
 # so the deployed half stands up FOUR services (auth + control + worker +
-# gateway). `mint_admin_bearer` still mints the *operator* token that creates
+# gateway). `mint_creator_bearer` still mints the *operator* token that creates
 # and deploys the app, from the harness's own issuer rather than the OP booted
 # here -- that is the deploy path, not the login path, and it is what every
 # harness in this family does. Control trusts one issuer and this harness
@@ -671,7 +671,7 @@ for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/ready
 curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 \
   && pass "gateway healthy (auth-ui-url=$AUTH_URL)" || { fail "gateway unhealthy"; tail -20 "$WORK/gate.log"; exit 1; }
 
-mint_admin_bearer || exit 1
+mint_creator_bearer || exit 1
 APP_ID="$(deploy_zship "$APP_SLUG" "$ZSHIP")" || { fail "deploy auth-probe"; exit 1; }
 pass "deployed auth-probe ($APP_ID)"
 

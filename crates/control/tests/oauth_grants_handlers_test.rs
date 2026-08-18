@@ -1204,13 +1204,20 @@ async fn app_delete_returns_200_atomic() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "atomic-ok").await;
 
-    // create_app binds an owner membership (FK → zeroship.users); seed one.
-    let owner_id = insert_user(&fx.state, "atomic-owner").await;
+    // The caller OWNS the app: `create_app` binds the owner `app_members` row,
+    // and that row is the only thing that authorizes `apps:delete` now. This
+    // used to seed an unrelated owner and delete as a platform admin, which
+    // worked only because of the deleted universal-allow policy.
+    let caller = common::authz_fixture::seeded_principal(&fx.state).await;
     let app_name = format!("atomicok{}", Uuid::new_v4().simple());
     let record = fx
         .state
         .registry
-        .create_app(&app_name, &zeroship_control::plan_catalog::free_plan_id(), &owner_id)
+        .create_app(
+            &app_name,
+            &zeroship_control::plan_catalog::free_plan_id(),
+            &caller.user_id,
+        )
         .await
         .expect("create app");
     let app_id = record.id;
@@ -1222,7 +1229,6 @@ async fn app_delete_returns_200_atomic() {
     )
     .await;
 
-    let caller = common::authz_fixture::admin_principal(&fx.state).await;
     let req = test::TestRequest::delete()
         .uri(&format!("/api/apps/{app_id}"))
         .header("authorization", caller.bearer())
@@ -1240,7 +1246,7 @@ async fn app_delete_returns_200_atomic() {
 
     caller.cleanup(&fx.state).await;
     // App delete cascaded the membership; remove the orphan owner user.
-    cleanup_user(&fx.state, owner_id).await;
+    cleanup_user(&fx.state, caller.user_id).await;
 
     drop(app);
     drop(fx);

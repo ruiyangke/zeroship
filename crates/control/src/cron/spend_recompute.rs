@@ -693,6 +693,29 @@ mod live_db_tests {
             )
             .await
             .expect("seed requests weight");
+        // The global default FX must EXIST, even though this test's own plan
+        // carries an explicit fx: `evaluate_all` sweeps every app in the
+        // database, and any app on a plan with a NULL fx inherits the global.
+        // Missing it aborts the whole sweep rather than billing an unpriceable
+        // $0, so the sweep fails for reasons that have nothing to do with this
+        // test's apps.
+        //
+        // It is seeded by migration 0041, but `billing_reconcile_test` DELETEs
+        // the singleton to prove the fail-closed path and restores it a few
+        // statements later; a panic in between (there are `.expect`s in that
+        // window) leaks the deletion into the shared database and, because the
+        // database outlives a single `cargo test`, into LATER RUNS. That is what
+        // made this test fail, pass, then fail again on identical code. Seeding
+        // it here makes the precondition this test's own business instead of a
+        // wager on what ran before it.
+        client
+            .execute(
+                "INSERT INTO zeroship.pricing_config (id, fx_pico_cents_per_unit) \
+                 VALUES ('global', 30000000) ON CONFLICT (id) DO NOTHING",
+                &[],
+            )
+            .await
+            .expect("seed global default fx");
         let plan_id = format!("pln_recompute_{}", Uuid::new_v4().simple());
         let fx_one_cent: i64 = 1_000_000_000_000;
         client

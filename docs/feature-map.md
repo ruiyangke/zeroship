@@ -1,3 +1,6 @@
+| Static platform + creator Cedar policies | 🟢 | internal | `deploy/policies/platform/`, `deploy/policies/creator/`, `crates/authz/src/engine.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/platform_policies_test.rs` | 4 policies (self-service + 3 creator); build.rs parses at compile. |
+| OAuth client registration (config) | 🟢 | boot-time reconcile | `crates/control/src/oauth_clients.rs` | — | `crates/control/tests/oauth_clients_test.rs` | Scope + redirect validation; fatal on reject. |
+| First-party OAuth client registration | 🟢 | config `[auth] oauth_clients` | `crates/control/src/oauth_clients.rs` | — | `crates/control/tests/oauth_clients_test.rs` | Reconciled at boot; upsert + prune. |
 # zeroship Feature Map
 
 zeroship is a platform where anyone can create, launch, and run software without
@@ -534,9 +537,10 @@ are internally accessed; end-users hit it indirectly via HTTP.
 
 ## 10. Control plane (crates/control)
 
-The creator/admin API server: app CRUD, deploy ingest, env/secrets, route and version feeds,
-billing/Stripe Connect, platform admin, Cedar authz, OAuth client management,
-audit, and crons. It is a pure REST resource server (no OIDC RP of its own after R5); every
+The creator API server: app CRUD, deploy ingest, env/secrets, route and version feeds,
+billing/Stripe Connect, Cedar authz, per-app OAuth client management,
+audit, and crons. There is no platform admin surface: the staff roles and their
+policies are deleted, and there is no super admin. It is a pure REST resource server (no OIDC RP of its own after R5); every
 caller authenticates with an OAuth access token introspected via the native OP; the platform has
 no second issuance authority.
 `@zeroship/control` wraps the HTTP surface for platform-owned code.
@@ -558,9 +562,7 @@ no second issuance authority.
 | Secret process.env exposure list | 🟢 | GET/PUT /api/apps/{id}/env/expose | `crates/control/src/env_handlers.rs`, `env_store.rs` | `docs/reference/control.md` | — | Atomic; audited. |
 | Audit log read (per-app) | 🟢 | GET /api/apps/{id}/audit | `crates/control/src/env_handlers.rs`, `audit.rs` | `docs/reference/control.md` | — | Append-only with tamper trigger. |
 | Cedar-backed authorization (AuthzGuard) | 🟢 | internal | `crates/control/src/authz_guard.rs` | — | `crates/control/tests/authz_guard_oauth_test.rs` | Native OP introspection is the only bearer path. |
-| Platform admin role management | 🟢 | POST/DELETE/GET /api/admin/users/{id}/role | `crates/control/src/admin_handlers.rs` | — | `crates/control/tests/admin_handlers_test.rs` | Invalidates EntityCache. |
-| Platform Cedar policy CRUD | 🟢 | GET/PUT/DELETE /api/admin/platform-policies | `crates/control/src/admin_handlers.rs` | — | `crates/control/tests/admin_handlers_test.rs` | Validated before write; audit diff. |
-| First-party OAuth client registration | 🟢 | POST/GET/DELETE /api/admin/oauth-clients | `crates/control/src/oauth_handlers.rs` | — | `crates/control/tests/oauth_handlers_test.rs` | Native OP registry rows. |
+| First-party OAuth client registration | 🟢 | config `[auth] oauth_clients` | `crates/control/src/oauth_clients.rs` | — | `crates/control/tests/oauth_clients_test.rs` | Reconciled at boot; upsert + prune. |
 | Per-app OAuth client provisioning (auto) | 🟢 | internal (create_app + deploy) | `crates/control/src/app_oauth_client.rs` | — | `crates/control/tests/app_oauth_client_test.rs` | Idempotent; non-destructive URI merge. |
 | Custom-domain OAuth redirect URI sync | 🟡 | internal (sync_app_redirect_uris) | `crates/control/src/app_oauth_client.rs` | — | — | Implemented/tested; no production caller. |
 | App-declared OAuth scope registry | 🟢 | internal (deploy) | `crates/control/src/app_oauth_client.rs`, `api.rs` | — | `crates/control/tests/app_oauth_client_test.rs` | Hard-fails deploy on vocab collision. |
@@ -598,22 +600,19 @@ code on disk**.
 | Resource enum (App, Org, Any) | 🟢 | internal | `crates/authz/src/resource.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/scaffold_test.rs` | Org for P11; no org CRUD yet. |
 | Condition library (IpRange/TimeWindow/Mfa) | 🟡 | internal | `crates/authz/src/condition.rs`, `lower.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/engine_test.rs` | IpRange/TimeWindow work; MFA conditions not enforced; TimeWindow UTC-only. |
 | Cedar source lowering (lower()) | 🟢 | internal | `crates/authz/src/lower.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/injection_test.rs` | Injection-hardened. |
-| Static platform + creator Cedar policies | 🟢 | internal | `deploy/policies/platform/`, `deploy/policies/creator/`, `crates/authz/src/engine.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/platform_policies_test.rs` | 8 policies; build.rs parses at compile. |
+| Static platform + creator Cedar policies | 🟢 | internal | `deploy/policies/platform/`, `deploy/policies/creator/`, `crates/authz/src/engine.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/platform_policies_test.rs` | 4 policies (self-service + 3 creator); build.rs parses at compile. |
 | Entity assembly + LRU cache | 🟢 | internal | `crates/authz/src/entities.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/two_call_test.rs` | 30s TTL; default role 'none' (C1 fix). |
 | enforce() — two-call TOKEN⊂USER | 🟢 | internal | `crates/authz/src/eval.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/two_call_test.rs` | Both must allow; 100% audited (no sampling). |
 | is_authorized_anywhere() | 🟢 | internal | `crates/authz/src/eval.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/anywhere_uuid_regression_test.rs` | Consent gate + creator self-scope probe. |
 | AuthzGuard ntex extractor | 🟢 | internal | `crates/control/src/authz_guard.rs` | `docs/proposals/authorization.md` | `crates/control/tests/authz_guard_oauth_test.rs` | Bearer-only (R5); MFA context always false. |
 | OAuth scope vocabulary (Scope enum) | 🟢 | internal | `crates/authz/src/scope.rs` | `docs/proposals/authorization.md` | `crates/authz/src/scope.rs` | 16-scope 1:1 with Action; no PlatformPoliciesWrite scope. |
 | OAuth consent UI with authz gate | 🟢 | internal | `crates/auth/src/ui/consent.rs` | `docs/proposals/authorization.md` | — | Identity scopes bypass gate. |
-| Platform RBAC role management | 🟢 | HTTP endpoint | `crates/control/src/admin_handlers.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/two_call_test.rs` | admin grants; admin+support read. |
-| Operator platform policy CRUD | 🟡 | HTTP endpoint | `crates/control/src/admin_handlers.rs` | `docs/proposals/authorization.md` | — | Persisted but NOT merged into running engine. |
 | policy_hash (SHA-256 canonical) | 🟢 | internal | `crates/authz/src/engine.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/engine_test.rs` | Key-sorted; drift detection. |
 | Authorization audit log | 🟢 | internal | `crates/authz/src/eval.rs` | `docs/proposals/authorization.md` | `crates/authz/tests/two_call_test.rs` | Fire-and-forget; 100% audited. |
 | Build-time Cedar lint (build.rs) | 🟢 | internal | `crates/authz/build.rs` | `docs/proposals/authorization.md` | — | Panics on invalid Cedar. |
-| DEFAULT_PLATFORM_ROLE ('none') | 🟢 | internal | `crates/authz/src/entities.rs` | — | `crates/authz/tests/platform_policies_test.rs` | Zero-privilege default (C1 IDOR fix). |
 | OAuth native OP introspection in AuthzGuard | 🟢 | internal | `crates/control/src/authz_guard.rs` | `docs/proposals/authorization.md` | — | Audience check; unknown scope → 401. |
 | OAuth Device Authorization Grant UI | 🟢 | HTTP endpoint | `crates/auth/src/ui/device.rs` | `docs/proposals/authorization.md` | — | CSRF; emits device_grant_accepted. |
-| OAuth client registration (admin) | 🟢 | HTTP endpoint | `crates/control/src/oauth_handlers.rs` | — | — | Scope validation; DB transactional. |
+| OAuth client registration (config) | 🟢 | boot-time reconcile | `crates/control/src/oauth_clients.rs` | — | `crates/control/tests/oauth_clients_test.rs` | Scope + redirect validation; fatal on reject. |
 | User OAuth grant listing/revocation | 🟢 | HTTP endpoint | `crates/control/src/oauth_grants_handlers.rs` | — | — | Deletes consent grants and revokes token families. |
 | P10: Toggle-matrix UI for token policies | 🔵 | internal | — | `docs/proposals/authorization.md` | — | No dashboard route; no cedar-wasm. |
 | P11: Orgs + analyzer + incident lock | 🔵 | internal | — | `docs/proposals/authorization.md` | — | No org CRUD/table/analyzer/lock policy. |
@@ -1134,7 +1133,6 @@ recount and run low):
 
 **Authorization P10–P12 are documented but unbuilt:**
 - 🔵 P10 toggle-matrix token-policy UI, 🔵 P11 orgs + Cedar analyzer + incident lock, 🔵 P12 end-user `env.authz` (no `plugin-authz` crate, no `@zeroship/permissions`, no manifest `authz` field), 🔵 CLI `zeroship policy edit`.
-- 🟡 Operator platform-policy CRUD — rows persist but are **not merged into the running Cedar engine** (no hot-reload).
 - 🟡 MFA Cedar conditions (`RequireMfa`/`MfaWithin`) — lowered correctly but never populated from session state; `TimeWindow` is UTC-only.
 
 **Runtime / Node gaps:**
@@ -1216,15 +1214,14 @@ PG pool, RLS GUC tenant isolation, the `x-wall-time-ms` header, global rate limi
 limiting config, insecure-dev semantics, Ed25519 key rotation, and the Redis idempotency-store
 backend contract.
 
-**Control plane:** per-app OAuth client lifecycle, the platform admin
-surface (roles, Cedar policies), OAuth grant management, the two crons,
-console bootstrap, secret key rotation, rate-limit config, trust-proxy, and the
-Cedar AuthzGuard bearer path.
+**Control plane:** per-app OAuth client lifecycle, OAuth grant management, the
+two crons, console bootstrap, secret key rotation, rate-limit config,
+trust-proxy, and the Cedar AuthzGuard bearer path. (The platform admin surface -
+staff roles and operator Cedar policy overrides - is deleted, not undocumented.)
 
-**Authorization:** OAuth client
-registration, user OAuth grant endpoints, the `DEFAULT_PLATFORM_ROLE='none'` invariant (C1 IDOR
-fix), operator platform-policy CRUD (+ its unimplemented hot-reload), and the MFA / TimeWindow
-condition limitations — all documented only in proposal/code comments.
+**Authorization:** OAuth client registration, user OAuth grant endpoints, and
+the MFA / TimeWindow condition limitations - all documented only in
+proposal/code comments.
 
 **Billing:** the account-history endpoint + soft-delete semantics, `plan_id` semantics, usage
 history snapshots, the planned `env.meter.*`, platform-fee policy, and the worker-side usage

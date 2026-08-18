@@ -443,8 +443,8 @@ The platform meters the infrastructure each app consumes and provides a
 Stripe-based payment integration. Two independent subsystems.
 
 **Infrastructure usage metering (shipped).** Usage is measured server-side so
-app code can neither forge nor suppress it. Pricing is a data-driven,
-operator-editable plan catalog — per tier: `base_fee`, `included_quota[metric]`,
+app code can neither forge nor suppress it. Pricing is a data-driven
+plan catalog in the database (no operator API) — per tier: `base_fee`, `included_quota[metric]`,
 `overage_rate[metric]`, `spend_limit_default`. Usage beyond the included quota
 is metered as overage (the app keeps running, not blocked):
 `charge = base_fee + Σ max(0, usage[m] − included[m]) × overage_rate[m]`. A

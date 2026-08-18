@@ -304,6 +304,7 @@ async fn get_versions_projects_app_net_grants_with_plan_caps() {
             note: Some("primary".to_string()),
         },
         &owner.to_string(),
+        registry.frontable_suffixes(),
     )
     .await
     .expect("creator grant");
@@ -330,6 +331,7 @@ async fn get_versions_projects_app_net_grants_with_plan_caps() {
                 note: None,
             },
             &owner.to_string(),
+            registry.frontable_suffixes(),
         )
         .await
         .expect("grants within the cap");
@@ -343,6 +345,7 @@ async fn get_versions_projects_app_net_grants_with_plan_caps() {
             note: None,
         },
         &owner.to_string(),
+        registry.frontable_suffixes(),
     )
     .await;
     assert!(
