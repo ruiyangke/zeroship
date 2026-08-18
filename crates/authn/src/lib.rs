@@ -1,21 +1,24 @@
 //! Shared bearer authentication for control-like services.
 
+pub mod rejection;
 pub mod service_replay;
 
 use std::collections::HashSet;
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use ntex::web;
-use ntex::web::HttpResponse;
-use serde_json::json;
 use uuid::Uuid;
 use zeroship_authz as authz;
 use zeroship_core::auth_provider::{AuthProvider, ProviderAuthz, VerifyTokenError};
 use zeroship_core::device_grant::{PLATFORM_CLI_CLIENT_ID, PLATFORM_CLI_ISSUABLE_SCOPES};
 use zeroship_authz::wrapper_revocation::{family_revoked_at, revoked_after_for};
 
-pub type HttpRejection = web::Error;
+pub use rejection::AuthnRejection;
+
+/// Every authn refusal is boxed into ntex's error container, so a handler can
+/// return one directly. Build them ONLY through [`AuthnRejection`] - see that
+/// module for what ntex's own helpers get wrong about `status_code()`.
+pub type HttpRejection = ntex::web::Error;
 
 #[derive(Debug)]
 pub struct VerifiedPrincipal {
@@ -113,7 +116,7 @@ impl BearerVerifier {
                     sub,
                     "control: token revocation lookup failed"
                 );
-                unauthorized_json("revocation_check_failed")
+                AuthnRejection::unauthorized("revocation_check_failed").into()
             })
     }
 
@@ -139,13 +142,12 @@ impl BearerVerifier {
         iat: Option<u64>,
     ) -> Result<(), HttpRejection> {
         let (Some(client_id), Some(iat)) = (client_id, iat) else {
-            return Err(unauthorized_json("token_revocation_claims_missing"));
+            return Err(AuthnRejection::unauthorized("token_revocation_claims_missing").into());
         };
-        let iat =
-            i64::try_from(iat).map_err(|_| web::error::ErrorUnauthorized("invalid token iat"))?;
+        let iat = i64::try_from(iat).map_err(|_| AuthnRejection::unauthorized("invalid_token_iat"))?;
         let revoked_after = self.platform_revoked_after_for(client_id, sub).await?;
         if family_revoked_at(revoked_after, iat) {
-            return Err(unauthorized_json("token_revoked"));
+            return Err(AuthnRejection::unauthorized("token_revoked").into());
         }
         Ok(())
     }
@@ -175,10 +177,10 @@ impl BearerVerifier {
                     principal_id = %principal_id,
                     "control: principal eligibility lookup failed"
                 );
-                web::error::ErrorInternalServerError("principal eligibility lookup failed")
+                AuthnRejection::internal("principal_eligibility_lookup_failed")
             })?;
         if rows.is_empty() {
-            return Err(unauthorized_json("principal_inactive"));
+            return Err(AuthnRejection::unauthorized("principal_inactive").into());
         }
         Ok(())
     }
@@ -194,16 +196,16 @@ impl BearerVerifier {
             .verify_token(token)
             .await
             .map_err(|err| match err {
-                VerifyTokenError::InactiveToken => unauthorized_json("inactive_token"),
+                VerifyTokenError::InactiveToken => AuthnRejection::unauthorized("inactive_token"),
                 VerifyTokenError::MissingSubject => {
-                    web::error::ErrorUnauthorized("missing oauth sub").into()
+                    AuthnRejection::unauthorized("missing_oauth_sub")
                 }
                 VerifyTokenError::MissingIssuer | VerifyTokenError::UnknownIssuer(_) => {
-                    web::error::ErrorUnauthorized("unknown oauth issuer").into()
+                    AuthnRejection::unauthorized("unknown_oauth_issuer")
                 }
                 VerifyTokenError::PlatformVerification(err) => {
                     tracing::warn!(error = %err, "control: platform token verify failed");
-                    web::error::ErrorUnauthorized("platform token verification failed").into()
+                    AuthnRejection::unauthorized("platform_token_verification_failed")
                 }
             })?;
         let (principal_id, token_policy, seed_platform_cli_grants) = match &verified.provider_authz
@@ -214,7 +216,7 @@ impl BearerVerifier {
                         .iter()
                         .any(|audience| audience == &self.expected_oauth_audience)
                 }) {
-                    return Err(unauthorized_json("wrong_audience"));
+                    return Err(AuthnRejection::unauthorized("wrong_audience").into());
                 }
                 self.reject_revoked_platform_token(
                     verified.client_id.as_deref(),
@@ -224,9 +226,9 @@ impl BearerVerifier {
                 .await?;
 
                 let principal_id = Uuid::parse_str(&verified.provider_subject)
-                    .map_err(|_| web::error::ErrorUnauthorized("invalid oauth sub"))?;
+                    .map_err(|_| AuthnRejection::unauthorized("invalid_oauth_sub"))?;
                 let mut scopes = authz::parse_scope_string(raw_scope)
-                    .map_err(|_| web::error::ErrorUnauthorized("invalid oauth scope"))?;
+                    .map_err(|_| AuthnRejection::unauthorized("invalid_oauth_scope"))?;
                 let mut seed = false;
                 if verified.client_id.as_deref() == Some(PLATFORM_CLI_CLIENT_ID) {
                     let entitlement = self.platform_cli_entitlement(principal_id).await?;
@@ -237,14 +239,14 @@ impl BearerVerifier {
             }
             ProviderAuthz::GoTrueRole(role) => {
                 if role != "authenticated" {
-                    return Err(web::error::ErrorUnauthorized("unauthenticated gotrue role").into());
+                    return Err(AuthnRejection::unauthorized("unauthenticated_gotrue_role").into());
                 }
 
                 let principal_id =
                     self.resolve_supabase_principal(&verified.provider_subject).await?;
                 let grants = self.load_principal_grants(principal_id).await?;
                 let raw_scope = grants.join(" ");
-                let token_policy = policy_from_scope_string(&raw_scope, "invalid principal grant")?;
+                let token_policy = policy_from_scope_string(&raw_scope, "invalid_principal_grant")?;
                 (principal_id, token_policy, false)
             }
         };
@@ -278,11 +280,11 @@ impl BearerVerifier {
                     error = %err,
                     "control: supabase identity link lookup failed"
                 );
-                web::error::ErrorInternalServerError("identity link lookup failed")
+                AuthnRejection::internal("identity_link_lookup_failed")
             })?;
         let row = rows
             .first()
-            .ok_or_else(|| web::error::ErrorUnauthorized("unlinked supabase principal"))?;
+            .ok_or_else(|| AuthnRejection::unauthorized("unlinked_supabase_principal"))?;
         Ok(row.get("principal_id"))
     }
 
@@ -328,7 +330,7 @@ impl BearerVerifier {
                     error = %err,
                     "control: platform CLI entitlement lookup failed"
                 );
-                web::error::ErrorInternalServerError("principal grant lookup failed")
+                AuthnRejection::internal("principal_grant_lookup_failed")
             })?;
 
         if !row.get::<_, bool>("seeded") {
@@ -383,7 +385,7 @@ impl BearerVerifier {
                     error = %err,
                     "control: principal grant lookup failed"
                 );
-                web::error::ErrorInternalServerError("principal grant lookup failed")
+                AuthnRejection::internal("principal_grant_lookup_failed")
             })?;
         Ok(rows
             .iter()
@@ -394,19 +396,11 @@ impl BearerVerifier {
 
 fn policy_from_scope_string(
     raw_scope: &str,
-    error: &'static str,
-) -> Result<authz::Policy, web::Error> {
+    code: &'static str,
+) -> Result<authz::Policy, HttpRejection> {
     let scopes =
-        authz::parse_scope_string(raw_scope).map_err(|_| web::error::ErrorUnauthorized(error))?;
+        authz::parse_scope_string(raw_scope).map_err(|_| AuthnRejection::unauthorized(code))?;
     Ok(authz::scopes_to_policy(&scopes))
-}
-
-fn unauthorized_json(error: &'static str) -> web::Error {
-    web::error::InternalError::from_response(
-        error,
-        HttpResponse::Unauthorized().json(&json!({ "error": error })),
-    )
-    .into()
 }
 
 const ACTIVE_PRINCIPAL_SQL: &str =
