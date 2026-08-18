@@ -529,7 +529,7 @@ cp "$DEV_WORK/dev.txt" "$WORK/dev.txt"
 cp "$DEV_WORK/dev.raw" "$WORK/dev.raw"
 cp "$DEV_WORK/dev.dtxt" "$WORK/dev.dtxt"
 cp "$DEV_WORK/dev.draw" "$WORK/dev.draw"
-mint_admin_bearer || exit 1
+mint_creator_bearer || exit 1
 
 APP_ID="$(deploy_zship "$APP_SLUG" "$ZSHIP")" || { fail "deploy error-probe"; exit 1; }
 pass "deployed error-probe ($APP_ID)"

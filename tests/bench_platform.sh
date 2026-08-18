@@ -106,7 +106,7 @@ sleep 3
 WORK="$BENCH_SECURITY_DIR"
 PG_CONTAINER=pg-test
 E2E_PG_DATABASE=postgres
-mint_admin_bearer || { echo "FAIL: could not mint the benchmark admin bearer" >&2; exit 1; }
+mint_creator_bearer || { echo "FAIL: could not mint the benchmark admin bearer" >&2; exit 1; }
 APP=$(curl -sf -X POST http://localhost:9090/api/apps \
     -H 'Content-Type: application/json' \
     -H "Authorization: Bearer $ADMIN_TOKEN" \

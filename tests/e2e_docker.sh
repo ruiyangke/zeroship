@@ -116,7 +116,7 @@ ZEROSHIP_AUTH_PLATFORM_ISSUER="$(docker compose exec -T control printenv ZEROSHI
 [ -n "$ZEROSHIP_AUTH_PLATFORM_ISSUER" ] || { fail "control container names no platform issuer"; exit 1; }
 export ZEROSHIP_AUTH_PLATFORM_ISSUER
 e2e_platform_op_up "$SECRETS/auth-signing.pem" "$WORK" || { fail "configure the compose issuer"; exit 1; }
-mint_admin_bearer || { fail "mint compose admin bearer"; exit 1; }
+mint_creator_bearer || { fail "mint compose admin bearer"; exit 1; }
 
 # --- Create + Deploy 20 apps ---
 echo ""

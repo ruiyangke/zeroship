@@ -183,7 +183,6 @@ INSERT INTO zeroship.users (id,email,name,email_verified_at) VALUES
  ('$ADMIN','e2e-mapp-admin-$ADMIN@zeroship.test'::citext,'Admin',NOW()),
  ('$C1','e2e-mapp-c1-$C1@zeroship.test'::citext,'Creator One',NOW()),
  ('$C2','e2e-mapp-c2-$C2@zeroship.test'::citext,'Creator Two',NOW());
-INSERT INTO zeroship.platform_admin_roles (user_id,role,granted_by) VALUES ('$ADMIN','admin','$ADMIN');
 SQL
 ADMIN_TOKEN="$(e2e_mint_platform_bearer "$ADMIN" "$SCOPE")"
 [ "$(echo -n "$ADMIN_TOKEN" | awk -F. '{print NF}')" = "3" ] && pass "minted admin bearer (admin=$ADMIN, C1=$C1, C2=$C2)" || { fail "bearer mint"; exit 1; }

@@ -226,7 +226,7 @@ curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && pas
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Stage 3: mint the admin bearer ==="
-mint_admin_bearer || { fail "admin bearer mint failed"; exit 1; }
+mint_creator_bearer || { fail "admin bearer mint failed"; exit 1; }
 
 # ---------------------------------------------------------------------------
 echo ""

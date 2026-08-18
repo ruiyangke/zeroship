@@ -288,8 +288,6 @@ OWNER="$(node -e 'console.log(require("crypto").randomUUID())')"
 docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.users (id, email, name, email_verified_at)
 VALUES ('$OWNER', 'e2e-$OWNER@zeroship.test'::citext, 'E2E Admin', NOW());
-INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by)
-VALUES ('$OWNER', 'admin', '$OWNER');
 SQL
 
 ADMIN_TOKEN="$(e2e_mint_platform_bearer "$OWNER" "$SCOPE")"

@@ -17,11 +17,11 @@
 #                   the function returns once all three are health-green.
 #                   A harness whose topology differs (e.g. e2e_platform.sh's
 #                   three workers) calls stack_workspace + stack_pg_up +
-#                   mint_admin_bearer and starts its own binaries.
-#   mint_admin_bearer
-#                   seeds a platform-admin principal (users +
-#                   platform_admin_roles rows) and mints a platform OAuth access
-#                   token for it from the harness OP. Exports $ADMIN_TOKEN.
+#                   mint_creator_bearer and starts its own binaries.
+#   mint_creator_bearer
+#                   seeds a creator principal (a `users` row) and mints a
+#                   platform OAuth access token for it from the harness OP.
+#                   Exports $ADMIN_TOKEN.
 #   deploy_zship    create an app named <slug> via the control API and deploy a
 #                   prebuilt .zship with `zeroship deploy --token=$ADMIN_TOKEN`;
 #                   echoes the created app id on stdout (return 0), or returns 1.
@@ -294,38 +294,36 @@ stack_up() {
   return 0
 }
 
-# --- mint_admin_bearer: platform-admin OAuth access token, exports $ADMIN_TOKEN
+# --- mint_creator_bearer: creator OAuth access token, exports $ADMIN_TOKEN
 #
 # Two halves, and both are load-bearing:
 #
 #   the principal   control resolves the token's `sub` against `zeroship.users`
-#                   and refuses a missing or lifecycle-disabled row, and the
-#                   `platform_admin_roles` row is what makes Cedar's OWNER pass
-#                   allow platform-wide `Resource::Any`.
+#                   and refuses a missing or lifecycle-disabled row. There is no
+#                   platform role to seed any more: the staff roles and their
+#                   universal-allow policy are deleted, so this principal's
+#                   authority is the self-service baseline plus the `app_members`
+#                   rows it gains by CREATING the apps the harness then drives.
 #   the token       an `at+jwt` from the harness OP. `scope` becomes the token
 #                   policy, which is intersected with the owner's authority, so
 #                   this is the ceiling on what the harness may do.
 #
-# The scope list is the exact action list the deleted `permission_tokens` policy
-# carried, one scope string per Cedar action. Billing is NOT in it, because it
-# was not in that policy either; a harness that needs `billing:*` passes its own
-# list as the first argument.
-mint_admin_bearer() {
+# The scope list is one scope string per Cedar action. Billing is NOT in it; a
+# harness that needs `billing:*` passes its own list as the first argument.
+mint_creator_bearer() {
   local scope="${1:-apps:read apps:write apps:deploy apps:delete deployments:read deployments:rollback env:read env:write secrets:read secrets:write}"
   local owner pg_database
   pg_database="${E2E_PG_DATABASE:-zeroship}"
   owner="$(node -e 'console.log(require("crypto").randomUUID())')"
   docker exec -i "$PG_CONTAINER" psql -U postgres -d "$pg_database" -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.users (id, email, name, email_verified_at)
-VALUES ('$owner', 'e2e-$owner@zeroship.test'::citext, 'E2E Stack Admin', NOW());
-INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by)
-VALUES ('$owner', 'admin', '$owner');
+VALUES ('$owner', 'e2e-$owner@zeroship.test'::citext, 'E2E Stack Creator', NOW());
 SQL
   ADMIN_TOKEN="$(e2e_mint_platform_bearer "$owner" "$scope")"
   ADMIN_SUBJECT="$owner"
   export ADMIN_TOKEN ADMIN_SUBJECT
   if [ "$(echo -n "$ADMIN_TOKEN" | awk -F. '{print NF}')" = "3" ]; then
-    _stk_ok "minted platform admin bearer (sub=$owner)"
+    _stk_ok "minted platform creator bearer (sub=$owner)"
     return 0
   else
     _stk_bad "admin bearer mint failed: $ADMIN_TOKEN"

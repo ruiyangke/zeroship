@@ -166,8 +166,6 @@ OWNER="$(node -e 'console.log(require("crypto").randomUUID())')"
 docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.users (id, email, name, email_verified_at)
 VALUES ('$OWNER', 'projcfg-$OWNER@zeroship.test'::citext, 'ProjCfg E2E', NOW());
-INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by)
-VALUES ('$OWNER', 'admin', '$OWNER');
 SQL
 ADMIN_TOKEN="$(e2e_mint_platform_bearer "$OWNER" "$SCOPE")"
 [ "$(echo -n "$ADMIN_TOKEN" | awk -F. '{print NF}')" = "3" ] && pass "minted platform bearer" || { fail "bearer mint failed"; exit 1; }

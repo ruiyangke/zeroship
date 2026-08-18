@@ -1,11 +1,15 @@
 # Control plane
 
-`crates/control` owns the creator/admin API, auth endpoints, deploy ingest, env/secrets, and the registry feeds that gateway and worker poll.
+`crates/control` owns the creator API, auth endpoints, deploy ingest, env/secrets, and the registry feeds that gateway and worker poll.
+
+There is no platform admin surface. The staff role table, the four staff Cedar
+policies and every `/admin/*` route are deleted; what those routes managed is
+either gone, deployment configuration read at boot, or creator self-service.
 
 ## HTTP surface
 
 ```text
-/api/*      creator/admin API
+/api/*      creator API
 /auth/*     creator + end-user auth/session routes
 /internal/* gateway/worker feeds and usage reporting
 ```
@@ -19,8 +23,10 @@ Current internal endpoints are:
 - `POST /internal/usage`
 - `POST /internal/webhooks/stripe`
 
-Mutating `/api/*` endpoints accept either an authenticated admin session or the master-key bearer. `/internal/*` is always gated by the control-key bearer.
-The master-key is the human or automation credential for creator/admin control-plane mutations, while the control-key is the machine-to-machine bearer gateway and worker use for `/internal/*` feeds and usage reporting.
+Mutating `/api/*` endpoints are authorized per request through the Cedar
+`AuthzGuard` against the caller OAuth access token. `/internal/*` is always gated
+by the control-key bearer, the machine-to-machine credential gateway and worker
+use for feeds and usage reporting.
 
 ## Module map
 
@@ -29,10 +35,10 @@ main.rs            boot, config, route registration
 lib.rs             `AppState`, shared services, secret wrappers
 api.rs             app CRUD, deploy, plan, usage reads
 internal.rs        route/version/env feeds, usage ingest
-oauth_handlers.rs  admin OAuth-client CRUD for the native OP registry
+oauth_clients.rs   boot-time OAuth-client reconcile from `[auth] oauth_clients`
 oauth_grants_handlers.rs  per-app OAuth grant management
 authz_guard.rs     Cedar-backed request authorization (crates/authz)
-admin_handlers.rs  platform-admin surface
+net_grants.rs      creator self-service raw-TCP egress grants
 env_handlers.rs    vars/secrets CRUD + process.env exposure list
 env_store.rs       encrypted-at-rest env/secrets storage
 registry.rs        PostgreSQL-backed app registry

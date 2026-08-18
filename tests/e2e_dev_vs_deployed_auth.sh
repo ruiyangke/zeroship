@@ -489,7 +489,7 @@ fi
 DEV_WORK="$WORK"
 stack_up || { fail "stack bring-up failed"; exit 1; }   # stack_up resets $WORK
 cp "$DEV_WORK/dev.txt" "$WORK/dev.txt"
-mint_admin_bearer || exit 1
+mint_creator_bearer || exit 1
 
 APP_ID="$(deploy_zship "$APP_SLUG" "$ZSHIP")" || { fail "deploy auth-probe"; exit 1; }
 pass "deployed auth-probe ($APP_ID)"
