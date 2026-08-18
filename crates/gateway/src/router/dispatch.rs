@@ -3945,7 +3945,7 @@ mod tests {
             per: RateLimitPer::Ip,
         };
 
-        let mut admit = |port: u16| {
+        let admit = |port: u16| {
             let req = ntex::web::test::TestRequest::default()
                 .header("x-forwarded-for", format!("192.0.2.43:{port}"))
                 .to_http_request();
