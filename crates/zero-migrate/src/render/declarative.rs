@@ -3111,12 +3111,41 @@ pub(crate) fn column_snapshot_for_field(
     let encryption_sentinel = crate::schema::query::encryption_sentinel_for_field(&sdk_def);
     let comment_sentinel = encryption_meta_for_field(&sdk_def)
         .map(|m| crate::schema::mask_codec::build_encryption_sentinel(&m));
-    let case_sensitive =
-        if matches!(f.case_sensitive, Some(false)) && !matches!(dialect, SqlDialect::Mysql) {
-            Some(false)
-        } else {
-            None
-        };
+    // Dialect-blind, and it has to be. `ColumnSnapshot::case_sensitive` is documented
+    // as "a drift-comparable catalog attribute on engines where the intent is
+    // recoverable (Postgres `citext`, SQLite `COLLATE NOCASE`, and MySQL
+    // `information_schema.COLUMNS.COLLATION_NAME`)", and `diff_snapshots` compares it
+    // with no dialect test at all.
+    //
+    // It used to be suppressed on MySQL (`&& !matches!(dialect, SqlDialect::Mysql)`),
+    // which was true when it was written and stopped being true later: MySQL had NO
+    // live introspection at the time, so nothing could disagree with the folded
+    // `None`. `mysql/drift_sql.rs` later learned to recover the intent from
+    // `COLLATION_NAME` through `case_sensitive_from_collation`, and from that point
+    // the two halves of the same fact disagreed by construction - the fold said
+    // `None`, the catalog said `Some(false)`, and every MySQL table with a
+    // case-insensitive text column reported drift from the instant it was created and
+    // for as long as it existed.
+    //
+    // Nothing could see it. MySQL had no live Rust coverage of any kind, so the only
+    // comparison that puts the two producers side by side did not exist until
+    // `fold_roundtrip_mysql.rs`, which found this on its first green run of the
+    // preceding stages:
+    //
+    //     AlteredObject { table: "tags", object: "column email",
+    //                     field: "case_sensitive", expected: "", actual: "false" }
+    //
+    // The facet is NOT double-counted by removing the exclusion.
+    // `mysql_text_storage` carries the exact character set and collation name, but
+    // `ColumnSnapshot` deliberately excludes that field from `PartialEq` and from
+    // structural drift precisely because a server-default collation name is not part
+    // of the portable schema surface. The portable intent has exactly one comparable
+    // home, and this is it.
+    let case_sensitive = if matches!(f.case_sensitive, Some(false)) {
+        Some(false)
+    } else {
+        None
+    };
     // On MySQL, every character column carries an EXPLICIT collation so that string
     // equality and uniqueness match Postgres/SQLite (case-SENSITIVE) instead of
     // depending on the MySQL server default (typically `utf8mb4_0900_ai_ci`, which is
