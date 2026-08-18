@@ -23,15 +23,16 @@
 #
 # USAGE
 # -----
-#   tests/run_auth_suite.sh                    # recreate DB + migrate + run all
-#   SKIP_DB_RECREATE=1 tests/run_auth_suite.sh # reuse an already-migrated DB
+#   tests/run_auth_suite.sh                    # per-run DB + migrate + run all
+#   TEST_DB=mine tests/run_auth_suite.sh       # name it, and keep it afterwards
+#   TEST_DB=mine SKIP_DB_RECREATE=1 tests/run_auth_suite.sh   # reuse that one
 #   PG_PORT=5440 tests/run_auth_suite.sh
 #
 # ENV (defaults target the dev compose Postgres on :5440)
 #   PG_HOST (localhost)  PG_PORT (5440)  PG_USER (postgres)  PG_PASS (zeroship)
-#   TEST_DB (zeroship_auth_test)
+#   TEST_DB (per run: zeroship_auth_test_<pid>_<nanos>, dropped on exit)
 #   PSQL    (auto-detected; override with an explicit psql path)
-#   SKIP_DB_RECREATE (unset) - skip the drop/create/migrate step
+#   SKIP_DB_RECREATE (unset) - reuse a TEST_DB you named; needs one
 #   TEST_THREADS (1)         - live-database tests share rows, so serialize
 # ============================================================================
 set -euo pipefail
@@ -45,13 +46,18 @@ cd "$ROOT"
 # Counts the tests that announced they did nothing, so a green tally cannot hide
 # them; `tests/lib_skip_census_selftest.sh` covers both directions.
 . "$ROOT/tests/lib/skip_census.sh"
+# Names the database per run, so a second run of this script cannot drop this
+# one's out from under it. See that file's header for the measured collision;
+# `tests/lib_scratch_db_selftest.sh` covers both directions.
+. "$ROOT/tests/lib/scratch_db.sh"
 
 PG_HOST="${PG_HOST:-localhost}"
 PG_PORT="${PG_PORT:-5440}"
 PG_USER="${PG_USER:-postgres}"
 PG_PASS="${PG_PASS:-zeroship}"
-TEST_DB="${TEST_DB:-zeroship_auth_test}"
 TEST_THREADS="${TEST_THREADS:-1}"
+
+zs_scratch_db_resolve zeroship_auth_test || exit $?
 
 PSQL="${PSQL:-}"
 if [ -z "$PSQL" ]; then
@@ -71,6 +77,22 @@ export PG_TEST_URL="$DSN"
 
 run_psql() { PGPASSWORD="$PG_PASS" "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" "$@"; }
 
+# Armed BEFORE the database is created, not after the tests start: a migration
+# that fails leaves a database behind exactly like a failing test does, and the
+# per-run name means nothing would ever reuse it. INT and TERM are routed
+# through `exit` so they reach this trap too - bash runs an EXIT trap on a
+# signal only if the handler exits, and a suite this long is cancelled by hand
+# often enough for that to be the common case rather than the exotic one.
+LOG=""
+cleanup() {
+  if [ -n "$LOG" ]; then rm -f "$LOG"; fi
+  zs_scratch_db_cleanup
+  return 0
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 if [ -z "${SKIP_DB_RECREATE:-}" ]; then
   echo "==> Recreating ${TEST_DB} on ${PG_HOST}:${PG_PORT}"
   run_psql -d postgres -v ON_ERROR_STOP=1 \
@@ -88,14 +110,37 @@ run_psql -d "$TEST_DB" -v ON_ERROR_STOP=1 -tAc "select 1" >/dev/null \
   || { echo "FATAL: ${TEST_DB} unreachable at ${PG_HOST}:${PG_PORT}" >&2; exit 2; }
 
 LOG="$(mktemp -t zeroship-auth-suite.XXXXXX.log)"
-trap 'rm -f "$LOG"' EXIT
 
 echo "==> Running the auth suite against ${TEST_DB}"
 status=0
 # --nocapture is no longer what makes the skip check work - the announcer writes
 # straight to the stderr handle, which the harness's capture never touches. It
 # stays for everything else a gated test prints on its way to a decision.
-cargo test -p zeroship-auth -- --test-threads "$TEST_THREADS" --nocapture 2>&1 | tee "$LOG" || status=1
+#
+# --no-fail-fast because cargo otherwise STOPS at the first failing binary, and
+# the tally this gate checks against its floor is a sum over binaries. This
+# crate has 55 of them and the LIB is the first cargo runs, so a single red lib
+# test used to discard the other 54.
+#
+# MEASURED 2026-08-17 by forcing one lib test red (csrf.rs `matches_exact`) and
+# changing NOTHING ELSE but this flag:
+#   clean, with the flag       55 binaries, 475 auth passes, gate tally 637
+#   red lib, WITHOUT the flag   1 binary,   217 auth passes, gate tally 108
+#   red lib, WITH the flag     55 binaries, 474 auth passes, gate tally 419
+# The mutation costs exactly one test (475 -> 474). The flag costs 54 binaries.
+#
+# The truncated run ALSO invented 36 failures further down this script, in
+# zeroship-authz and zeroship-gateway, every one of them `Key (plan_id)=(free)
+# is not present in table "plans"` - rows an auth integration binary seeds and
+# the truncated invocation never reached. So the missing flag does not merely
+# understate the count; it manufactures failures in other crates that look
+# exactly like real ones.
+#
+# The floor caught the 108 only because it is so far under it. A red in a LATE
+# binary truncates by a handful instead of by 54, lands ABOVE the floor, and
+# nobody learns the number was truncated - which is the failure this whole gate
+# exists to prevent, arriving through the gate's own instrument.
+cargo test -p zeroship-auth --no-fail-fast -- --test-threads "$TEST_THREADS" --nocapture 2>&1 | tee "$LOG" || status=1
 
 echo "------------------------------------------------------------------"
 # Every other AUTH_DB_URL-gated binary in the workspace. These self-skip exactly
@@ -182,11 +227,18 @@ for spec in \
 ; do
   pkg="${spec%%:*}"
   bin="${spec#*:}"
+  # --no-fail-fast on both arms, but it earns its place only on the second: a
+  # bare `-p <pkg>` runs every target in the package (lib, each integration
+  # binary, doctests) and cargo stops at the first that fails, so a red
+  # zeroship-authn lib test would drop its six service_replay_pg_test results
+  # from the tally below. `--test <bin>` selects ONE binary, where the flag
+  # changes nothing today; it is there so that stays true if a second target is
+  # ever added to that arm.
   if [ -n "$bin" ]; then
-    cargo test -p "$pkg" --test "$bin" -- \
+    cargo test -p "$pkg" --test "$bin" --no-fail-fast -- \
       --test-threads "$TEST_THREADS" --nocapture 2>&1 | tee -a "$LOG" || status=1
   else
-    cargo test -p "$pkg" -- \
+    cargo test -p "$pkg" --no-fail-fast -- \
       --test-threads "$TEST_THREADS" --nocapture 2>&1 | tee -a "$LOG" || status=1
   fi
 done
