@@ -130,6 +130,51 @@ export interface SetExposeInput {
   keys: string[];
 }
 
+/** One allowed raw-TCP destination for an app. */
+export interface NetGrant {
+  app_id: string;
+  host: string;
+  port: number;
+  granted_by: string;
+  granted_at: string;
+  note: string | null;
+}
+
+/** A `net.requests` hint from the app's manifest. Inert until granted. */
+export interface NetRequest {
+  host: string;
+  port: number;
+  reason: string;
+}
+
+/** The plan ceiling on egress. A creator cannot raise any of these. */
+export interface NetGrantLimits {
+  max_grants: number;
+  used_grants: number;
+  max_sockets: number;
+  egress_ceiling_bytes: number;
+}
+
+export interface ListNetGrantsResult {
+  app_id: string;
+  grants: NetGrant[];
+  requests: NetRequest[];
+  /** Manifest hints with no matching grant: what is still denied. */
+  pending_requests: NetRequest[];
+  limits: NetGrantLimits;
+}
+
+export interface NetGrantInput {
+  host: string;
+  port: number;
+  note?: string;
+}
+
+export interface RevokeNetGrantInput {
+  host: string;
+  port: number;
+}
+
 export interface AuditEntry {
   id: string;
   actor: string;
@@ -269,6 +314,30 @@ export class ControlClient {
     ): Promise<ListAuditResult> =>
       this.request(`/api/apps/${pathPart(appId)}/audit`, {
         query: { limit: options.limit },
+      }),
+  };
+
+  /**
+   * The app's raw-TCP (`node:net`) egress allowlist. An app with no grants
+   * cannot open a socket at all; `grant` names one `host:port` within the
+   * plan's caps, and the server refuses bare `*`, malformed wildcards,
+   * registry-level suffixes and wildcards over shared hosting.
+   *
+   * Same authority as `env`: `env:read` to list, `env:write` to change.
+   */
+  readonly netGrants = {
+    list: (appId: string): Promise<ListNetGrantsResult> =>
+      this.request(`/api/apps/${pathPart(appId)}/net-grants`),
+    grant: (appId: string, input: NetGrantInput): Promise<NetGrant> =>
+      this.request(`/api/apps/${pathPart(appId)}/net-grants`, {
+        method: "POST",
+        body: input,
+      }),
+    revoke: (appId: string, input: RevokeNetGrantInput): Promise<void> =>
+      this.request(`/api/apps/${pathPart(appId)}/net-grants`, {
+        method: "DELETE",
+        body: input,
+        parseAs: "void",
       }),
   };
 

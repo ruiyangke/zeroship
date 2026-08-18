@@ -87,6 +87,17 @@ impl Scope {
         }
     }
 
+    /// The consent-screen copy for each scope (`crates/auth/src/ui/consent.rs`
+    /// and `device.rs` render exactly these strings).
+    ///
+    /// `env:*` covers everything that configures an app without redeploying
+    /// it, which since creator self-service egress
+    /// (`/api/apps/{id}/net-grants`) includes the raw-TCP host allowlist. The
+    /// label names both, because a screen that says only "environment
+    /// variables" while the token can widen an app's network reach is a lie
+    /// told at the exact moment consent is given. No `net:*` scope was added:
+    /// the vocabulary is closed and shown to humans, and the capability is
+    /// already bounded by plan caps and the operator's suffix catalog.
     #[must_use]
     pub const fn human_label(self) -> &'static str {
         match self {
@@ -94,8 +105,8 @@ impl Scope {
             Self::AppsWrite => "Create and modify your apps",
             Self::AppsDeploy => "Deploy code to your apps",
             Self::AppsDelete => "Delete your apps",
-            Self::EnvRead => "Read environment variables",
-            Self::EnvWrite => "Modify environment variables",
+            Self::EnvRead => "Read environment variables and allowed network hosts",
+            Self::EnvWrite => "Modify environment variables and allowed network hosts",
             Self::SecretsRead => "Read secrets (names only)",
             Self::SecretsWrite => "Set and rotate secrets",
             Self::BillingRead => "View billing and earnings",
@@ -212,6 +223,26 @@ mod tests {
             Scope::SecretsRead.human_label(),
             "Read secrets (names only)"
         );
+    }
+
+    /// `env:*` authorizes `/api/apps/{id}/net-grants` as well as vars, so the
+    /// consent copy has to name the network capability. This pins the wording
+    /// against a future edit that trims it back to "environment variables"
+    /// and silently understates what the user is approving.
+    ///
+    /// What this does NOT check: that the copy is accurate about anything
+    /// else, or that the endpoint still uses `env:write`. It fails only on the
+    /// label losing the network clause.
+    #[test]
+    fn env_scope_labels_name_the_network_capability() {
+        for scope in [Scope::EnvRead, Scope::EnvWrite] {
+            let label = scope.human_label();
+            assert!(
+                label.contains("network hosts"),
+                "{} consent copy must name egress hosts, got {label:?}",
+                scope.as_str()
+            );
+        }
     }
 
     #[test]

@@ -251,9 +251,12 @@ impl AuthConfig {
 
 /// Inert outbound raw-TCP request hints carried by the manifest.
 ///
-/// These entries are creator-authored and therefore never become enforcement
-/// policy by themselves. Control surfaces them as pending review until an
-/// operator writes the corresponding `app_net_grants` table row.
+/// These entries never become enforcement policy by themselves: deploying a
+/// bundle grants nothing. Control surfaces them as pending until the
+/// corresponding `zeroship.app_net_grants` row exists, which the creator
+/// writes out of band through `/api/apps/{id}/net-grants` — an authenticated
+/// call subject to their plan's caps and the frontable-suffix catalog, not a
+/// self-declaration the running app can make.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct NetConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

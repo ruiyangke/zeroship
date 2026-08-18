@@ -1,9 +1,17 @@
 //! Shared raw-TCP allowlist validation.
 //!
-//! Runtime owns enforcement, but the control plane also needs the exact same
-//! reviewed host/port checks at the operator authoring boundary. Keep this
-//! module V8-free so control can reject bad grants without depending on the
-//! runtime crate.
+//! Runtime owns enforcement, but the control plane needs the exact same
+//! host/port checks at the AUTHORING boundary — which is a creator-facing API
+//! (`/api/apps/{id}/net-grants`), not an operator's console. Keep this module
+//! V8-free so control can reject bad grants without depending on the runtime
+//! crate.
+//!
+//! Because the author is the creator, these checks are the shape bound on
+//! creator input, not a guardrail on an operator's typing. They constrain
+//! WILDCARDS only: an exact `host:port` is accepted for any public host. What
+//! keeps the resulting reach narrow is elsewhere — deny-by-default per app,
+//! the plan's `max_grants`/`max_sockets`/`egress_ceiling_bytes` caps, and the
+//! runtime's SSRF check on the connect itself.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewedAllowlist {
@@ -166,6 +174,12 @@ fn validate_wildcard_suffix(
     if suffix.parse::<std::net::IpAddr>().is_ok() {
         return Err("wildcard allowlist suffix must be a DNS name, not an IP".to_string());
     }
+    if is_registry_level_suffix(suffix) {
+        return Err(format!(
+            "wildcard allowlist suffix '{suffix}' is a registry-level suffix; \
+             name a registrable domain instead"
+        ));
+    }
     if !catalog_available {
         return Err(
             "wildcard allowlist suffix review catalog unavailable; refusing wildcard grant"
@@ -186,6 +200,27 @@ fn validate_wildcard_suffix(
     Ok(())
 }
 
+/// Whether `suffix` is a registry-level suffix such as `co.uk` — one under
+/// which anyone can register a domain, so a `*.co.uk` wildcard reaches every
+/// registrant rather than one organisation.
+///
+/// This is a structural test, not a public-suffix list: exactly two labels, a
+/// two-letter ccTLD, and a generic second level. It therefore catches the
+/// `co.uk` / `com.br` / `ac.jp` family without carrying a PSL dependency, and
+/// deliberately does not catch anything else. `*.example.co.uk` (three labels)
+/// and `*.example.io` (non-generic second level) stay legal.
+fn is_registry_level_suffix(suffix: &str) -> bool {
+    const GENERIC_SECOND_LEVELS: &[&str] = &[
+        "ac", "biz", "co", "com", "edu", "go", "gov", "gr", "info", "int", "mil", "ne", "net",
+        "nom", "or", "org", "sch", "web",
+    ];
+    let labels: Vec<&str> = suffix.split('.').collect();
+    labels.len() == 2
+        && labels[1].len() == 2
+        && labels[1].bytes().all(|b| b.is_ascii_alphabetic())
+        && GENERIC_SECOND_LEVELS.contains(&labels[0])
+}
+
 fn suffix_matches(suffix: &str, blocked: &str) -> bool {
     let blocked = normalize_host(blocked);
     suffix == blocked || suffix.ends_with(&format!(".{blocked}"))
@@ -194,6 +229,17 @@ fn suffix_matches(suffix: &str, blocked: &str) -> bool {
 /// Compiled-in backstop for the operator-editable frontable-suffix catalog.
 /// Exact host entries remain possible for reviewed destinations; broad
 /// wildcards are refused.
+///
+/// The membership criterion is a single question: **can an arbitrary third
+/// party obtain a hostname under this suffix?** If yes, a wildcard over it
+/// reaches other tenants' deployments rather than the grantee's own, which is
+/// the reach the allowlist exists to deny. Suffixes an organisation controls
+/// end to end do not belong here; name them exactly instead.
+///
+/// This list is a backstop, not a public-suffix list, and does not pretend to
+/// be exhaustive — operators extend it through `net_policy_catalog`. The
+/// registry-level shapes (`co.uk`, `com.br`) are caught structurally by
+/// [`is_registry_level_suffix`] rather than by enumeration.
 pub const FRONTABLE_WILDCARD_SUFFIXES: &[&str] = &[
     "workers.dev",
     "pages.dev",
@@ -208,6 +254,32 @@ pub const FRONTABLE_WILDCARD_SUFFIXES: &[&str] = &[
     "supabase.co",
     "amazonaws.com",
     "cloudfront.net",
+    // Added when creator self-service made wildcard grants a creator input
+    // rather than an operator's typing: each is a suffix under which anyone
+    // can obtain a hostname.
+    "appspot.com",
+    "azureedge.net",
+    "azurewebsites.net",
+    "cloudflarestorage.com",
+    "cloudfunctions.net",
+    "core.windows.net",
+    "deno.dev",
+    "digitaloceanspaces.com",
+    "firebaseapp.com",
+    "github.io",
+    "githubusercontent.com",
+    "gitlab.io",
+    "glitch.me",
+    "googleapis.com",
+    "ngrok.app",
+    "ngrok.io",
+    "pythonanywhere.com",
+    "repl.co",
+    "replit.dev",
+    "run.app",
+    "surge.sh",
+    "trycloudflare.com",
+    "web.app",
 ];
 
 #[cfg(test)]
@@ -251,6 +323,46 @@ mod tests {
             HostPort::try_new("*.*.example.com", 443).is_err(),
             "additional wildcards must be rejected"
         );
+    }
+
+    /// A wildcard suffix that is itself a registry-level suffix (`co.uk`)
+    /// grants every registrable domain under it. The check that catches this is
+    /// structural, not a public-suffix list: two labels, a two-letter ccTLD, and
+    /// a generic second level. `*.example.co.uk` is three labels and stays
+    /// legal; `*.example.io` keeps a non-generic second level and stays legal.
+    ///
+    /// What this does NOT check: suffixes outside that shape. `*.example.com`
+    /// remains as broad as the registrable domain the creator names, by design.
+    #[test]
+    fn operator_review_rejects_registry_level_wildcard_suffixes() {
+        assert!(HostPort::try_new("*.co.uk", 443).is_err());
+        assert!(HostPort::try_new("*.com.br", 443).is_err());
+        assert!(HostPort::try_new("*.ac.jp", 443).is_err());
+        assert!(HostPort::try_new("*.example.co.uk", 443).is_ok());
+        assert!(HostPort::try_new("*.example.io", 443).is_ok());
+        assert!(HostPort::try_new("*.example.com", 443).is_ok());
+    }
+
+    /// The backstop names suffixes under which an arbitrary third party can
+    /// obtain a hostname, so a wildcard over one reaches other tenants'
+    /// deployments rather than the creator's own.
+    #[test]
+    fn operator_review_rejects_multi_tenant_hosting_suffixes() {
+        for host in [
+            "*.github.io",
+            "*.appspot.com",
+            "*.azurewebsites.net",
+            "*.blob.core.windows.net",
+            "*.run.app",
+            "*.deno.dev",
+            "*.ngrok.io",
+            "*.trycloudflare.com",
+        ] {
+            assert!(
+                HostPort::try_new(host, 443).is_err(),
+                "{host} fronts shared multi-tenant infrastructure"
+            );
+        }
     }
 
     #[test]
