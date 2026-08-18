@@ -26,6 +26,7 @@
 /// and the `ZERO_MIGRATE_MYSQL_URL` gate. It shares this module's
 /// [`announce_live_db_skip`] / [`live_db_required`] discipline, so a missing MySQL
 /// DSN skips loudly and fails under `ZERO_MIGRATE_REQUIRE_LIVE_DB`.
+#[macro_use]
 pub mod mysql;
 
 /// The RENAME CARRIER INVENTORY shared by `rename_carrier_sweep_pg` and
