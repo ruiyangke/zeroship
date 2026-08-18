@@ -4938,6 +4938,24 @@ mod tests {
         assert_eq!(subscription_affinity_key(&req, false), "ip:unknown");
     }
 
+    #[test]
+    fn subscription_affinity_pins_one_client_to_one_worker_across_reconnects() {
+        // The second consumer of the same resolver, and a second consequence
+        // of the same defect: this key picks the CHWBL worker, and a
+        // subscription's per-connection state lives on the worker it picked.
+        // While the source port rode along in the key, an anonymous caller
+        // hashed somewhere new on every reconnect and never found their state
+        // again -- the exact opposite of what this function exists to do.
+        let from_port = |port: u16| {
+            let req = ntex::web::test::TestRequest::default()
+                .header("x-forwarded-for", format!("192.0.2.43:{port}"))
+                .to_http_request();
+            subscription_affinity_key(&req, true)
+        };
+        assert_eq!(from_port(40001), "ip:192.0.2.43");
+        assert_eq!(from_port(40001), from_port(40002));
+    }
+
     /// Session-affinity invariant: the same `(app_id, principal)` always
     /// resolves to the same worker, even when the ring has many candidates
     /// and capacity is unbounded. Different principals on the same app
