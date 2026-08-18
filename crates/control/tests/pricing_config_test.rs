@@ -173,18 +173,13 @@ async fn make_user(state: &AppState, label: &str) -> Uuid {
     id
 }
 
-async fn issue_bearer(state: &AppState, user_id: Uuid, role: Option<&str>, scope: &str) -> Caller {
-    if let Some(role) = role {
-        state
-            .control_pg
-            .execute(
-                "INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by) \
-                 VALUES ($1, $2, $1) ON CONFLICT DO NOTHING",
-                &[&user_id, &role],
-            )
-            .await
-            .expect("insert platform role");
-    }
+/// Issue a platform OAuth bearer for `user_id` carrying `scope`.
+///
+/// It used to take an optional platform role and seed a `platform_admin_roles`
+/// row for the operator paths. That table and those roles are deleted, so every
+/// principal this mints is an ordinary creator.
+async fn issue_bearer(state: &AppState, user_id: Uuid, scope: &str) -> Caller {
+    let _ = state;
     Caller {
         user_id,
         token: common::platform_token_for_client(user_id, scope, common::CONSOLE_CLIENT_ID),
@@ -219,9 +214,6 @@ async fn cleanup(state: &AppState, callers: &[&Caller]) {
                 "DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1",
                 &[&p.user_id],
             )
-            .await;
-        let _ = pg
-            .execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&p.user_id])
             .await;
         let _ = pg
             .execute("DELETE FROM zeroship.users WHERE id = $1", &[&p.user_id])
@@ -276,7 +268,7 @@ async fn operator_put_updates_and_get_reflects_with_audit() {
     let seed = current_fx(&fx.state).await;
 
     let op = make_user(&fx.state, "operator").await;
-    let op_caller = issue_bearer(&fx.state, op, Some("billing"), "billing:read billing:write").await;
+    let op_caller = issue_bearer(&fx.state, op, "billing:read billing:write").await;
 
     let svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
@@ -369,7 +361,7 @@ async fn creator_put_is_forbidden_and_value_unchanged() {
     // No platform role: the bearer scope covers billing:read/write, but the
     // static Cedar gate on this route needs `platform_role == "billing"` (or
     // "admin"), which this caller does not have.
-    let creator_caller = issue_bearer(&fx.state, creator, None, "billing:read billing:write").await;
+    let creator_caller = issue_bearer(&fx.state, creator, "billing:read billing:write").await;
 
     let svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
@@ -426,7 +418,7 @@ async fn below_floor_put_is_rejected_400_value_unchanged() {
     let seed = current_fx(&fx.state).await;
 
     let op = make_user(&fx.state, "operator").await;
-    let op_caller = issue_bearer(&fx.state, op, Some("billing"), "billing:read billing:write").await;
+    let op_caller = issue_bearer(&fx.state, op, "billing:read billing:write").await;
 
     let svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(

@@ -155,18 +155,13 @@ impl Caller {
     }
 }
 
-async fn issue_bearer(state: &AppState, user_id: Uuid, role: Option<&str>, scope: &str) -> Caller {
-    if let Some(role) = role {
-        state
-            .control_pg
-            .execute(
-                "INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by) \
-                 VALUES ($1, $2, $1) ON CONFLICT DO NOTHING",
-                &[&user_id, &role],
-            )
-            .await
-            .expect("insert platform role");
-    }
+/// Issue a platform OAuth bearer for `user_id` carrying `scope`.
+///
+/// It used to take an optional platform role and seed a `platform_admin_roles`
+/// row for the operator paths. That table and those roles are deleted, so every
+/// principal this mints is an ordinary creator.
+async fn issue_bearer(state: &AppState, user_id: Uuid, scope: &str) -> Caller {
+    let _ = state;
     Caller {
         user_id,
         token: common::platform_token_for_client(user_id, scope, common::CONSOLE_CLIENT_ID),
@@ -418,7 +413,6 @@ async fn cleanup(pg: &Client, creator_ids: &[Uuid], app_ids: &[Uuid], callers: &
     }
     for caller in callers {
         let _ = pg.execute("DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1", &[&caller.user_id]).await;
-        let _ = pg.execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&caller.user_id]).await;
         let _ = pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&caller.user_id]).await;
     }
     let _ = pg.execute("DELETE FROM zeroship.users WHERE id = ANY($1)", &[&creator_ids.to_vec()]).await;
@@ -487,10 +481,10 @@ async fn invoice_history_is_creator_scoped_operator_sees_any() {
             .await;
 
     // PATs: creator A (read on app A), creator B (read on app B), operator.
-    let pat_a = issue_bearer(&fx.state, creator_a, None, "billing:read").await;
-    let pat_b = issue_bearer(&fx.state, creator_b, None, "billing:read").await;
+    let pat_a = issue_bearer(&fx.state, creator_a, "billing:read").await;
+    let pat_b = issue_bearer(&fx.state, creator_b, "billing:read").await;
     let op_user = make_user(&pg, "operator").await;
-    let pat_op = issue_bearer(&fx.state, op_user, Some("billing"), "billing:read").await;
+    let pat_op = issue_bearer(&fx.state, op_user, "billing:read").await;
 
     let svc = test::init_service(web::App::new().state(fx.state.clone()).configure(full_router()))
         .await;
@@ -565,7 +559,7 @@ async fn unauthorized_token_is_forbidden_on_billing_reads() {
 
     // A token with NO billing grant whatsoever.
     let stranger = make_user(&pg, "stranger").await;
-    let pat_none = issue_bearer(&fx.state, stranger, None, "apps:read").await;
+    let pat_none = issue_bearer(&fx.state, stranger, "apps:read").await;
 
     let svc = test::init_service(web::App::new().state(fx.state.clone()).configure(full_router()))
         .await;
@@ -631,7 +625,7 @@ async fn invoice_line_detail_reproduces_amount_from_frozen_snapshot() {
         seed_finalized_invoice(&pg, &creator, &app, &plan, period, &price, &usage, &weights).await;
     assert_eq!(amt, 750, "sanity: seeded amount is the overage+base total");
 
-    let pat = issue_bearer(&fx.state, creator, None, "billing:read").await;
+    let pat = issue_bearer(&fx.state, creator, "billing:read").await;
     let svc = test::init_service(web::App::new().state(fx.state.clone()).configure(full_router()))
         .await;
 
@@ -717,7 +711,7 @@ async fn projected_charge_is_non_authoritative_and_cache_budget_holds() {
     // 300 live rpc_calls ⇒ 300 CU × 1c + 200c base = 500c projected.
     seed_usage(&pg, &app, period, "rpc_calls", 300).await;
 
-    let pat = issue_bearer(&fx.state, creator, None, "billing:read").await;
+    let pat = issue_bearer(&fx.state, creator, "billing:read").await;
     let svc = test::init_service(web::App::new().state(fx.state.clone()).configure(full_router()))
         .await;
 
@@ -829,10 +823,10 @@ async fn credit_balance_pm_and_billing_status_are_creator_scoped() {
     .await
     .expect("grant B");
 
-    let pat_a = issue_bearer(&fx.state, creator_a, None, "billing:read").await;
-    let pat_b = issue_bearer(&fx.state, creator_b, None, "billing:read").await;
+    let pat_a = issue_bearer(&fx.state, creator_a, "billing:read").await;
+    let pat_b = issue_bearer(&fx.state, creator_b, "billing:read").await;
     let op_user = make_user(&pg, "operator").await;
-    let pat_op = issue_bearer(&fx.state, op_user, Some("billing"), "billing:read").await;
+    let pat_op = issue_bearer(&fx.state, op_user, "billing:read").await;
 
     let svc = test::init_service(web::App::new().state(fx.state.clone()).configure(full_router()))
         .await;
@@ -985,10 +979,10 @@ async fn invoice_detail_denies_a_different_creator() {
     )
     .await;
 
-    let pat_a = issue_bearer(&fx.state, creator_a, None, "billing:read").await;
-    let pat_b = issue_bearer(&fx.state, creator_b, None, "billing:read").await;
+    let pat_a = issue_bearer(&fx.state, creator_a, "billing:read").await;
+    let pat_b = issue_bearer(&fx.state, creator_b, "billing:read").await;
     let op_user = make_user(&pg, "operator").await;
-    let pat_op = issue_bearer(&fx.state, op_user, Some("billing"), "billing:read").await;
+    let pat_op = issue_bearer(&fx.state, op_user, "billing:read").await;
 
     let svc = test::init_service(web::App::new().state(fx.state.clone()).configure(full_router()))
         .await;
@@ -1080,7 +1074,7 @@ async fn invoice_read_denied_via_shared_app_membership() {
     .await;
 
     // Attacker A holds BillingRead on the app they own (Z) — nothing more.
-    let pat_a = issue_bearer(&fx.state, attacker_a, None, "billing:read").await;
+    let pat_a = issue_bearer(&fx.state, attacker_a, "billing:read").await;
 
     let svc = test::init_service(web::App::new().state(fx.state.clone()).configure(full_router()))
         .await;
@@ -1159,10 +1153,10 @@ async fn app_invoice_history_denied_to_non_owner_member() {
     .await;
 
     // Both PATs carry BillingRead on app O; the difference is owner-vs-member.
-    let pat_owner = issue_bearer(&fx.state, owner, None, "billing:read").await;
-    let pat_viewer = issue_bearer(&fx.state, viewer, None, "billing:read").await;
+    let pat_owner = issue_bearer(&fx.state, owner, "billing:read").await;
+    let pat_viewer = issue_bearer(&fx.state, viewer, "billing:read").await;
     let op_user = make_user(&pg, "operator").await;
-    let pat_op = issue_bearer(&fx.state, op_user, Some("billing"), "billing:read").await;
+    let pat_op = issue_bearer(&fx.state, op_user, "billing:read").await;
 
     let svc = test::init_service(web::App::new().state(fx.state.clone()).configure(full_router()))
         .await;

@@ -992,18 +992,13 @@ impl Caller {
     }
 }
 
-async fn issue_bearer(state: &AppState, user_id: Uuid, role: Option<&str>, scope: &str) -> Caller {
-    if let Some(role) = role {
-        state
-            .control_pg
-            .execute(
-                "INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by) \
-                 VALUES ($1, $2, $1) ON CONFLICT DO NOTHING",
-                &[&user_id, &role],
-            )
-            .await
-            .expect("insert platform role");
-    }
+/// Issue a platform OAuth bearer for `user_id` carrying `scope`.
+///
+/// It used to take an optional platform role and seed a `platform_admin_roles`
+/// row for the operator paths. That table and those roles are deleted, so every
+/// principal this mints is an ordinary creator.
+async fn issue_bearer(state: &AppState, user_id: Uuid, scope: &str) -> Caller {
+    let _ = state;
     Caller {
         token: common::platform_token_for_client(user_id, scope, common::CONSOLE_CLIENT_ID),
     }
@@ -1040,8 +1035,8 @@ async fn refund_endpoint_operator_only_and_idempotency_conflict() {
     append_payment(&fx.state, &inv, 10_000, "in_endpoint").await;
 
     let op_user = make_user(&fx.state, "operator").await;
-    let op_caller = issue_bearer(&fx.state, op_user, Some("admin"), "billing:write").await;
-    let creator_caller = issue_bearer(&fx.state, creator, None, "billing:read").await;
+    let op_caller = issue_bearer(&fx.state, op_user, "billing:write").await;
+    let creator_caller = issue_bearer(&fx.state, creator, "billing:read").await;
 
     let svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
