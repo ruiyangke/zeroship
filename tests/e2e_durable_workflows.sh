@@ -666,7 +666,7 @@ pass "gateway/worker warmed real deployed app"
 if [ "${ZEROSHIP_DW23_BENCH_ONLY:-0}" = "1" ]; then
   echo "=== DW-23 workflow engine load bench ==="
   ZEROSHIP_DW_E2E=1 \
-  CONTROL_TEST_DB="$DBURL" \
+  PG_TEST_URL="$DBURL" \
   ZEROSHIP_DW_E2E_CONTROL_URL="http://localhost:$ZEROSHIP_CONTROL_PORT" \
   ZEROSHIP_DW_E2E_GATEWAY_URL="http://localhost:$ZEROSHIP_GATEWAY_PORT" \
   ZEROSHIP_DW_E2E_APP_ID="$APP_ID" \
@@ -692,7 +692,7 @@ fi
 
 echo "=== DW-07 keystone assertions ==="
 ZEROSHIP_DW_E2E=1 \
-CONTROL_TEST_DB="$DBURL" \
+PG_TEST_URL="$DBURL" \
 ZEROSHIP_DW_E2E_CONTROL_URL="http://localhost:$ZEROSHIP_CONTROL_PORT" \
 ZEROSHIP_DW_E2E_GATEWAY_URL="http://localhost:$ZEROSHIP_GATEWAY_PORT" \
 ZEROSHIP_DW_E2E_APP_ID="$APP_ID" \
@@ -713,7 +713,7 @@ ZEROSHIP_DW_E2E_PG_DB="$PG_DB" \
     exit 1
   }
 ZEROSHIP_DW_E2E=1 \
-CONTROL_TEST_DB="$DBURL" \
+PG_TEST_URL="$DBURL" \
 ZEROSHIP_DW_E2E_CONTROL_URL="http://localhost:$ZEROSHIP_CONTROL_PORT" \
 ZEROSHIP_DW_E2E_GATEWAY_URL="http://localhost:$ZEROSHIP_GATEWAY_PORT" \
 ZEROSHIP_DW_E2E_APP_ID="$APP_ID" \
@@ -741,7 +741,7 @@ terminate_pg_db_connections
 pass "stopped real services; workflow engine regression runs alone"
 
 echo "=== DW-07 workflow engine regression ==="
-CONTROL_TEST_DB="$DBURL" \
+PG_TEST_URL="$DBURL" \
   cargo test -p zeroship-control --features live-db-tests --test workflow_engine_test -- --nocapture --test-threads=1 || {
     fail "DW-07 workflow engine regression failed"
     echo "--- control.log ---"

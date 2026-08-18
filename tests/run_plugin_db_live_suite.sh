@@ -68,12 +68,23 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-: "${PG_TEST_URL:?PG_TEST_URL must point at a logical-WAL Postgres with pgvector}"
+# The server may come from the generated overlay, so this no longer demands
+# PG_TEST_URL be exported - it demands that SOMETHING names a Postgres. The
+# overlay is written by tests/provision_test_backends.sh; PG_TEST_URL overrides
+# it, and this gate additionally needs logical WAL and pgvector, which the
+# compose server provides and an arbitrary one may not.
+. "$ROOT/tests/lib/test_config.sh"
+if [ -z "${PG_TEST_URL:-}" ]; then
+  zs_test_config_load "$ROOT" || exit 2
+  export PG_TEST_URL="$ZS_TEST_PG_DSN"
+fi
 
-# `distributed_live` predates this gate and reads `LIVE_DB_TEST_URL`; keep it
-# on the same provisioned server as every target unless the caller explicitly
-# supplies a separate URL.
-export LIVE_DB_TEST_URL="${LIVE_DB_TEST_URL:-$PG_TEST_URL}"
+# LIVE_DB_TEST_URL is GONE. `distributed_live` predated this gate and read its
+# own name for the same server, so this script re-exported one variable as the
+# other to keep them on one database - a workaround for the sprawl rather than a
+# fix for it. That target now resolves through
+# zeroship_core::config::test_database_url_opt like every other, so there is
+# nothing left to bridge.
 
 SUITE_LOG="${SUITE_LOG:-${TMPDIR:-/tmp}/plugin-db-live.log}"
 
