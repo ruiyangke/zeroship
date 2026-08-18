@@ -1059,42 +1059,6 @@ fn main() -> std::io::Result<()> {
                 web::resource("/api/billing/payment-method")
                     .route(web::get().to(api::get_payment_method)),
             )
-            // --- Plan catalog: operator-editable pricing catalog ---
-            .service(
-                web::resource("/api/plans")
-                    .route(web::get().to(api::list_plans)),
-            )
-            .service(
-                web::resource("/api/plans/{id}")
-                    .route(web::get().to(api::get_plan))
-                    .route(web::put().to(api::upsert_plan))
-                    .route(web::delete().to(api::archive_plan)),
-            )
-            // Global default FX (gap #28) — operator-only (BillingRead/Write on
-            // Resource::Any); the missing runtime lever for the GLOBAL FX a plan
-            // inherits when `plans.fx` is NULL.
-            .service(
-                web::resource("/api/pricing-config")
-                    .route(web::get().to(api::get_pricing_config))
-                    .route(web::put().to(api::set_pricing_config)),
-            )
-            // Operator credit grant (billing-ops gap #26, PR-2) — OPERATOR-ONLY
-            // (BillingWrite on Resource::Any). Idempotency-Key header required.
-            .service(
-                web::resource("/api/billing/credit")
-                    .route(web::post().to(api::grant_credit)),
-            )
-            // Operator refund + void/reissue (billing-ops gap #26, PR-3) —
-            // OPERATOR-ONLY (BillingWrite on Resource::Any). Refund requires an
-            // Idempotency-Key header. {id} is the internal inv_… invoice id.
-            .service(
-                web::resource("/api/invoices/{id}/refunds")
-                    .route(web::post().to(api::refund_invoice)),
-            )
-            .service(
-                web::resource("/api/invoices/{id}/void")
-                    .route(web::post().to(api::void_invoice)),
-            )
             .service(
                 web::resource("/api/apps/{id}/usage")
                     .route(web::get().to(api::get_usage)),
@@ -1170,14 +1134,10 @@ fn main() -> std::io::Result<()> {
                 web::resource("/api/creators/{id}/stripe/callback")
                     .route(web::post().to(stripe_handlers::callback)),
             )
-            // --- Stream-2 Connect: server-stamped checkout + operator fee policy (G1) ---
+            // --- Stream-2 Connect: server-stamped checkout ---
             .service(
                 web::resource("/api/creators/{id}/connect/checkout")
                     .route(web::post().to(stripe_handlers::connect_checkout)),
-            )
-            .service(
-                web::resource("/api/creators/{id}/fee-policy")
-                    .route(web::put().to(stripe_handlers::set_fee_policy)),
             )
             // --- Infrastructure-billing setup: platform Customer + card ---
             .service(

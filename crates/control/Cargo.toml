@@ -313,11 +313,6 @@ path = "tests/plan_catalog.rs"
 required-features = ["live-db-tests"]
 
 [[test]]
-name = "pricing_config_test"
-path = "tests/pricing_config_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
 name = "registry_schema_test"
 path = "tests/registry_schema_test.rs"
 required-features = ["live-db-tests"]

@@ -693,7 +693,7 @@ async fn checkout_stamps_server_fee_not_client_value() {
 }
 
 #[compio::test]
-async fn checkout_honors_operator_set_fee_policy() {
+async fn checkout_stamps_the_stored_fee_policy_with_its_cap() {
     let url = db_url();
     let fx = build_fixture(&url, "checkout-policy").await;
     let creator = make_user(&fx.state, "creator").await;
@@ -706,8 +706,7 @@ async fn checkout_honors_operator_set_fee_policy() {
             web::scope("/api/creators/{id}")
                 .service(web::resource("/stripe/onboard").route(web::post().to(stripe_handlers::onboard)))
                 .service(web::resource("/stripe/callback").route(web::post().to(stripe_handlers::callback)))
-                .service(web::resource("/connect/checkout").route(web::post().to(stripe_handlers::connect_checkout)))
-                .service(web::resource("/fee-policy").route(web::put().to(stripe_handlers::set_fee_policy))),
+                .service(web::resource("/connect/checkout").route(web::post().to(stripe_handlers::connect_checkout))),
         ),
     )
     .await;
@@ -725,17 +724,25 @@ async fn checkout_honors_operator_set_fee_policy() {
         .to_request();
     assert_eq!(test::call_service(&svc, cb).await.status(), StatusCode::OK);
 
-    // Operator sets a 25% policy capped at $40 (4000 cents).
-    let set = test::TestRequest::put()
-        .uri(&format!("/api/creators/{creator}/fee-policy"))
-        .header("authorization", op_caller.bearer())
-        .set_json(&serde_json::json!({ "kind": "percent", "percent_bps": 2500, "cap_cents": 4000 }))
-        .to_request();
-    assert_eq!(
-        test::call_service(&svc, set).await.status(),
-        StatusCode::NO_CONTENT,
-        "operator may set the fee policy"
-    );
+    // A 25% policy capped at $40 (4000 cents), written straight to the store.
+    //
+    // It used to be set through `PUT /api/creators/:id/fee-policy`, which is
+    // deleted along with the rest of the vendor-commercial surface. The
+    // behaviour under test was never that route: it is that CHECKOUT stamps the
+    // stored policy server-side, and `connect_checkout` is very much alive. So
+    // the policy is seeded through `FeePolicyStore` and the assertion below is
+    // unchanged.
+    zeroship_control::fee_policy::FeePolicyStore::new(fx.state.registry.clone())
+        .set(
+            creator,
+            zeroship_control::fee_policy::FeePolicy::Percent {
+                bps: 2500,
+                cap_cents: Some(4000),
+                floor_cents: None,
+            },
+        )
+        .await
+        .expect("seed the fee policy");
 
     // Charge $200 → 25% = 5000, capped to 4000.
     let checkout = test::TestRequest::post()
@@ -936,55 +943,6 @@ async fn checkout_rejects_empty_cart_id_no_stale_replay() {
     common::drain_pg().await;
 }
 
-/// m2 (RED→GREEN): an operator cannot set floor_cents > cap_cents (it would pin
-/// every fee to the cap regardless of percent). The handler rejects it 400.
-#[compio::test]
-async fn fee_policy_rejects_floor_above_cap() {
-    let url = db_url();
-    let fx = build_fixture(&url, "fee-floor-cap").await;
-    let creator = make_user(&fx.state, "creator").await;
-    let op = make_user(&fx.state, "operator").await;
-    let op_caller = issue_bearer(&fx.state, op, "billing:write").await;
-
-    let svc = test::init_service(
-        web::App::new().state(fx.state.clone()).service(
-            web::resource("/api/creators/{id}/fee-policy")
-                .route(web::put().to(stripe_handlers::set_fee_policy)),
-        ),
-    )
-    .await;
-
-    let set = test::TestRequest::put()
-        .uri(&format!("/api/creators/{creator}/fee-policy"))
-        .header("authorization", op_caller.bearer())
-        .set_json(&serde_json::json!({
-            "kind": "percent", "percent_bps": 1500, "floor_cents": 1000, "cap_cents": 100
-        }))
-        .to_request();
-    // Status only: a retained `WebResponse` keeps the app state - and its
-    // Postgres client - alive past the teardown at the end of this test.
-    let status = test::call_service(&svc, set).await.status();
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "floor_cents > cap_cents must be rejected (m2)"
-    );
-    let n = fx
-        .state
-        .control_pg
-        .query("SELECT 1 FROM zeroship.creator_fee_policy WHERE creator_id = $1", &[&creator])
-        .await
-        .expect("query")
-        .len();
-    assert_eq!(n, 0, "the rejected floor>cap policy must not persist");
-
-    cleanup(&fx.state, &[creator, op], &[&op_caller]).await;
-
-    drop(svc);
-    drop(fx);
-    common::drain_pg().await;
-}
-
 /// m1 (RED→GREEN): a malformed currency is rejected with 400 before any Stripe
 /// call.
 #[compio::test]
@@ -1038,67 +996,3 @@ async fn checkout_rejects_bad_currency() {
     common::drain_pg().await;
 }
 
-#[compio::test]
-async fn fee_policy_set_is_operator_only() {
-    let url = db_url();
-    let fx = build_fixture(&url, "fee-authz").await;
-    let creator = make_user(&fx.state, "creator").await;
-    let op = make_user(&fx.state, "operator").await;
-    // The creator holds "billing:read" — no billing:write, so the operator-only
-    // gate below denies them regardless of being the path creator.
-    let creator_caller = issue_bearer(&fx.state, creator, "billing:read").await;
-    let op_caller = issue_bearer(&fx.state, op, "billing:write").await;
-
-    let svc = test::init_service(
-        web::App::new().state(fx.state.clone()).service(
-            web::resource("/api/creators/{id}/fee-policy")
-                .route(web::put().to(stripe_handlers::set_fee_policy)),
-        ),
-    )
-    .await;
-
-    // A creator trying to set THEIR OWN fee policy → 403 (privilege escalation).
-    let creator_set = test::TestRequest::put()
-        .uri(&format!("/api/creators/{creator}/fee-policy"))
-        .header("authorization", creator_caller.bearer())
-        .set_json(&serde_json::json!({ "kind": "percent", "percent_bps": 0 }))
-        .to_request();
-    // Status only: a shadowed `resp` binding would NOT drop the earlier
-    // `WebResponse` (Rust drops locals in reverse declaration order only once
-    // the scope ends), so both calls here keep the app state - and its
-    // Postgres client - alive past the teardown at the end of this test unless
-    // each is reduced to just its status.
-    let creator_set_status = test::call_service(&svc, creator_set).await.status();
-    assert_eq!(
-        creator_set_status,
-        StatusCode::FORBIDDEN,
-        "a creator must NOT set/lower their own fee policy (ISS-29)"
-    );
-    // No row was written.
-    let n = fx
-        .state
-        .control_pg
-        .query(
-            "SELECT 1 FROM zeroship.creator_fee_policy WHERE creator_id = $1",
-            &[&creator],
-        )
-        .await
-        .expect("query")
-        .len();
-    assert_eq!(n, 0, "the rejected creator write must not persist a policy");
-
-    // An operator may set it.
-    let op_set = test::TestRequest::put()
-        .uri(&format!("/api/creators/{creator}/fee-policy"))
-        .header("authorization", op_caller.bearer())
-        .set_json(&serde_json::json!({ "kind": "percent", "percent_bps": 1000 }))
-        .to_request();
-    let op_set_status = test::call_service(&svc, op_set).await.status();
-    assert_eq!(op_set_status, StatusCode::NO_CONTENT, "operator may set the fee policy");
-
-    cleanup(&fx.state, &[creator, op], &[&creator_caller, &op_caller]).await;
-
-    drop(svc);
-    drop(fx);
-    common::drain_pg().await;
-}
