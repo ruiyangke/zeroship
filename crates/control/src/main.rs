@@ -18,7 +18,7 @@ use zeroship_bundle::{
 };
 use zeroship_control::config::{ControlSettings, ControlSettingsSources};
 use zeroship_control::{
-    admin_handlers, api, device_handlers, env_handlers,
+    api, device_handlers, env_handlers,
     internal, migrations_api, oauth_grants_handlers, plan_catalog, stripe_handlers,
     workflow_instance_api,
     AppState, EnvStore, Quota, RateLimiter, Registry, StripeStore,
@@ -1001,7 +1001,6 @@ fn main() -> std::io::Result<()> {
         web::App::new()
             .state(state.clone())
             .state(readiness.clone())
-            .configure(admin_handlers::configure)
             // --- Admin API ---
             .service(
                 web::resource("/api/apps")

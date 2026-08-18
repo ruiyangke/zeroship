@@ -147,7 +147,7 @@ fn spend_limit_route(cfg: &mut web::ServiceConfig) {
 async fn get_spend_limit_returns_the_app_spend_limit_override() {
     let url = db_url();
     let (state, blob_root, deploy_tmp_dir) = build_state(&url).await;
-    let pat = common::authz_fixture::admin_principal(&state).await;
+    let pat = common::authz_fixture::seeded_principal(&state).await;
 
     // Plan default 1000c; no override yet ⇒ effective == plan default.
     let app = make_app_with_plan_default(&state, 1000).await;

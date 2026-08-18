@@ -9,7 +9,7 @@ use zeroship_authz::{
 #[test]
 fn owner_authorized_token_authorized_returns_allow() {
     run_db_test(|pg| async move {
-        let fixture = Fixture::new(&pg, "admin_allow", Some("admin"), None).await;
+        let fixture = Fixture::new(&pg, "owner_allow", Some("owner")).await;
         let wrapper = Policy {
             name: "deploy token".to_owned(),
             statements: vec![allow(vec![Action::AppsDeploy], vec![fixture.app()])],
@@ -31,7 +31,7 @@ fn owner_authorized_token_authorized_returns_allow() {
 #[test]
 fn owner_unauthorized_returns_deny_even_if_token_grants() {
     run_db_test(|pg| async move {
-        let fixture = Fixture::new(&pg, "viewer_token_grants", None, Some("viewer")).await;
+        let fixture = Fixture::new(&pg, "viewer_token_grants", Some("viewer")).await;
         let wrapper = Policy {
             name: "overbroad token".to_owned(),
             statements: vec![allow(vec![Action::AppsDeploy], vec![fixture.app()])],
@@ -53,7 +53,7 @@ fn owner_unauthorized_returns_deny_even_if_token_grants() {
 #[test]
 fn token_denies_returns_deny_even_if_owner_allowed() {
     run_db_test(|pg| async move {
-        let fixture = Fixture::new(&pg, "admin_token_denies", Some("admin"), None).await;
+        let fixture = Fixture::new(&pg, "owner_token_denies", Some("owner")).await;
         let wrapper = Policy {
             name: "read env token".to_owned(),
             statements: vec![allow(vec![Action::EnvRead], vec![fixture.app()])],
@@ -75,7 +75,7 @@ fn token_denies_returns_deny_even_if_owner_allowed() {
 #[test]
 fn no_token_uses_owner_policies_only() {
     run_db_test(|pg| async move {
-        let fixture = Fixture::new(&pg, "admin_no_token", Some("admin"), None).await;
+        let fixture = Fixture::new(&pg, "owner_no_token", Some("owner")).await;
 
         let decision = enforce(&pg, &load_platform_policies().unwrap(), &fixture.ctx())
             .await
@@ -154,21 +154,30 @@ fn time_window_policy_enforces_utc_hours() {
     });
 }
 
+/// A grant written AFTER a decision was cached must take effect once the
+/// principal's entities are invalidated. This used to add a
+/// `platform_admin_roles` row; the surviving authority a principal can gain is
+/// an `app_members` row, so that is what it adds now.
+///
+/// The first `Deny` is the control: without it, the `Allow` would prove only
+/// that owners are allowed, not that the cache was refreshed.
 #[test]
-fn entity_cache_invalidation_refreshes_platform_role() {
+fn entity_cache_invalidation_refreshes_app_membership() {
     run_db_test(|pg| async move {
-        let fixture = Fixture::new(&pg, "cache-invalidate", None, None).await;
+        let fixture = Fixture::new(&pg, "cache-invalidate", Some("viewer")).await;
         let policies = load_platform_policies().unwrap();
 
+        // A viewer cannot deploy.
         let denied = enforce(&pg, &policies, &fixture.ctx()).await.unwrap();
         assert_eq!(denied, AuthzDecision::Deny);
 
         pg.execute(
-            "INSERT INTO zeroship.platform_admin_roles (user_id, role) VALUES ($1, 'admin')",
-            &[&fixture.user_id],
+            "UPDATE zeroship.app_members SET role = 'owner' \
+             WHERE app_id = $1 AND user_id = $2",
+            &[&fixture.app_db_id.expect("seeded app"), &fixture.user_id],
         )
         .await
-        .expect("insert platform role");
+        .expect("promote to owner");
         EntityCache::invalidate(fixture.user_id);
 
         let allowed = enforce(&pg, &policies, &fixture.ctx()).await.unwrap();
@@ -181,7 +190,7 @@ fn entity_cache_invalidation_refreshes_platform_role() {
 #[test]
 fn audit_decision_recorded() {
     run_db_test(|pg| async move {
-        let fixture = Fixture::new(&pg, "audit", Some("admin"), None).await;
+        let fixture = Fixture::new(&pg, "audit", Some("owner")).await;
 
         let decision = enforce(&pg, &load_platform_policies().unwrap(), &fixture.ctx())
             .await
@@ -222,22 +231,22 @@ fn audit_decision_recorded() {
 }
 
 /// Regression for finding C1 (cross-tenant read IDOR), exercised end-to-end
-/// through the real `enforce` path (which runs the `COALESCE(r.role, ...)`
-/// default-role SQL in `load_user`).
+/// through the real `enforce` path.
 ///
-/// An ordinary creator with NO `platform_admin_roles` row and NO membership of
-/// the target app must be DENIED reads on that app. Before the fix the default
-/// resolved to `"readonly"`, whose Cedar policy permits reads on an
-/// unconstrained resource, so this returned Allow — a fleet-wide cross-tenant
-/// read of app metadata / env-var names / secret names / billing / deploy
-/// history. Requires AUTH_DB_URL (live PG).
+/// An ordinary creator with NO membership of the target app must be DENIED
+/// reads on it. The original defect was an un-roled principal defaulting to
+/// `"readonly"`, whose policy permitted reads on an unconstrained resource -
+/// a fleet-wide cross-tenant read of app metadata, env-var names, secret
+/// names, billing and deploy history. Both the default role and that policy
+/// are deleted, and this pins the property they threatened. Requires
+/// AUTH_DB_URL (live PG).
 #[test]
 fn unroled_creator_denied_cross_tenant_reads() {
     run_db_test(|pg| async move {
         // Victim's app, owned by someone else. `victim` is the owner.
-        let victim = Fixture::new(&pg, "c1-victim", None, Some("owner")).await;
+        let victim = Fixture::new(&pg, "c1-victim", Some("owner")).await;
 
-        // Attacker: an ordinary creator, no platform role, member of nothing.
+        // Attacker: an ordinary creator, member of nothing.
         let attacker_id = Uuid::new_v4();
         pg.execute(
             "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2::citext, $3)",
@@ -250,7 +259,7 @@ fn unroled_creator_denied_cross_tenant_reads() {
         .await
         .expect("insert attacker");
 
-        // Force a fresh entity-cache read so the attacker's (lack of) role is
+        // Force a fresh entity-cache read so the attacker.s (lack of) membership is
         // evaluated by load_user rather than a stale cache entry.
         EntityCache::invalidate(attacker_id);
 
@@ -352,12 +361,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    async fn new(
-        pg: &Client,
-        label: &str,
-        platform_role: Option<&str>,
-        app_role: Option<&str>,
-    ) -> Self {
+    async fn new(pg: &Client, label: &str, app_role: Option<&str>) -> Self {
         let user_id = Uuid::new_v4();
         // `app_members.app_id` and `apps.id` are `UUID` columns; seed a real
         // UUID and bind it as `Uuid` (binding the String panics ToSql, which
@@ -372,15 +376,6 @@ impl Fixture {
         )
         .await
         .expect("insert user");
-
-        if let Some(role) = platform_role {
-            pg.execute(
-                "INSERT INTO zeroship.platform_admin_roles (user_id, role) VALUES ($1, $2)",
-                &[&user_id, &role],
-            )
-            .await
-            .expect("insert platform role");
-        }
 
         let app_db_id = if let Some(role) = app_role {
             // A membership row requires the FK-referenced `apps` row to exist.
@@ -496,9 +491,6 @@ impl Fixture {
                 "DELETE FROM zeroship.app_members WHERE user_id = $1",
                 &[&self.user_id],
             )
-            .await;
-        let _ = pg
-            .execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&self.user_id])
             .await;
         if let Some(app_db_id) = self.app_db_id {
             let _ = pg

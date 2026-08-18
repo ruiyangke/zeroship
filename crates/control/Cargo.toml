@@ -172,11 +172,6 @@ path = "tests/account_status_test.rs"
 required-features = ["live-db-tests"]
 
 [[test]]
-name = "admin_handlers_test"
-path = "tests/admin_handlers_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
 name = "app_logs_http_test"
 path = "tests/app_logs_http_test.rs"
 required-features = ["live-db-tests"]

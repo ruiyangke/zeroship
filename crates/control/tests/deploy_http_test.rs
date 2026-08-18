@@ -404,7 +404,7 @@ async fn deploy_happy_path_returns_200_with_deploy_hash() {
     )
     .await;
 
-    let pat = common::authz_fixture::admin_principal(&fx.state).await;
+    let pat = common::authz_fixture::seeded_principal(&fx.state).await;
     let req = test::TestRequest::post()
         .uri(&format!("/api/apps/{app_id}/deploy"))
         .header("authorization", pat.bearer())
@@ -488,7 +488,7 @@ async fn deploy_wrong_content_type_returns_415_without_consuming_body() {
     )
     .await;
 
-    let pat = common::authz_fixture::admin_principal(&fx.state).await;
+    let pat = common::authz_fixture::seeded_principal(&fx.state).await;
     let req = test::TestRequest::post()
         .uri(&format!("/api/apps/{app_id}/deploy"))
         .header("authorization", pat.bearer())
@@ -609,7 +609,7 @@ async fn deploy_manifest_not_first_returns_400() {
     )
     .await;
 
-    let pat = common::authz_fixture::admin_principal(&fx.state).await;
+    let pat = common::authz_fixture::seeded_principal(&fx.state).await;
     let req = test::TestRequest::post()
         .uri(&format!("/api/apps/{app_id}/deploy"))
         .header("authorization", pat.bearer())
@@ -686,7 +686,7 @@ async fn deploy_colliding_scope_returns_400_invalid_scope() {
     )
     .await;
 
-    let pat = common::authz_fixture::admin_principal(&fx.state).await;
+    let pat = common::authz_fixture::seeded_principal(&fx.state).await;
     let req = test::TestRequest::post()
         .uri(&format!("/api/apps/{app_id}/deploy"))
         .header("authorization", pat.bearer())
@@ -777,7 +777,7 @@ async fn deploy_noncolliding_scope_returns_200() {
     )
     .await;
 
-    let pat = common::authz_fixture::admin_principal(&fx.state).await;
+    let pat = common::authz_fixture::seeded_principal(&fx.state).await;
     let req = test::TestRequest::post()
         .uri(&format!("/api/apps/{app_id}/deploy"))
         .header("authorization", pat.bearer())
@@ -901,7 +901,7 @@ async fn deploy_rejects_legacy_migration_approval_query() {
         .await
         .expect("create app");
     let app_id = record.id;
-    let pat = common::authz_fixture::admin_principal(&fx.state).await;
+    let pat = common::authz_fixture::seeded_principal(&fx.state).await;
     let bundle = worker_only_zship();
 
     let req = test::TestRequest::post()
@@ -947,7 +947,7 @@ async fn deploy_rejects_legacy_manifest_migrations_and_runs_no_migration() {
         .await
         .expect("create app");
     let app_id = record.id;
-    let pat = common::authz_fixture::admin_principal(&fx.state).await;
+    let pat = common::authz_fixture::seeded_principal(&fx.state).await;
     let bundle = zship_with_legacy_migrations_key();
 
     let req = test::TestRequest::post()
@@ -1026,7 +1026,7 @@ async fn deploy_to_nonexistent_app_does_not_write_blobs() {
 
     // Never created through the registry, so no app row exists for it.
     let ghost_id = Uuid::new_v4();
-    let pat = common::authz_fixture::admin_principal(&fx.state).await;
+    let pat = common::authz_fixture::seeded_principal(&fx.state).await;
     let req = test::TestRequest::post()
         .uri(&format!("/api/apps/{ghost_id}/deploy"))
         .header("authorization", pat.bearer())
@@ -1087,7 +1087,7 @@ async fn deploy_is_rate_limited() {
     .await;
 
     // The admin bucket allows 30/minute per caller; go one past it.
-    let pat = common::authz_fixture::admin_principal(&fx.state).await;
+    let pat = common::authz_fixture::seeded_principal(&fx.state).await;
     // Unique caller identity so this test owns its bucket outright.
     // Wide random space: the bucket persists in the database between runs, so a
     // narrow one would eventually reuse an identity that still has tokens spent.

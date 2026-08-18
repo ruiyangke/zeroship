@@ -6,7 +6,6 @@
 
 pub mod account_status;
 pub mod api;
-pub mod admin_handlers;
 pub mod app_oauth_client;
 pub mod audit;
 pub mod auth_audit;
