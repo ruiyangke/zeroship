@@ -4851,6 +4851,16 @@ impl IrAuthor {
                 runtime_options,
                 ..
             } => {
+                // An ENCRYPTED column's inner domain is resolved to its base type
+                // BEFORE the descriptor bridge, so the `zero-migrate:enc:…:<wraps>`
+                // sentinel this CREATE stamps into the catalog describes the plaintext
+                // the runtime will actually type-check. A plain domain column is
+                // untouched and still renders as its named type.
+                let columns: Vec<IrColumn> = columns
+                    .iter()
+                    .map(|c| resolve_encrypted_inner_domain_in_column(c, named_types))
+                    .collect();
+                let columns = &columns[..];
                 let desc = self.create_table_descriptor(name, columns, runtime_options.as_ref());
                 let inject = self.resolved_inject(&eff_schema, name)?;
                 let mut snap =
@@ -4970,6 +4980,11 @@ impl IrAuthor {
                 // SEPARATE physical column the shared builder injects for a masked column —
                 // capture it so the ADD path lowers it too (otherwise the runtime mask
                 // read-pass has no sibling to write to; the bug the PG round-trip caught).
+                // Same resolution as `createTable`: an ADD COLUMN carrying an encrypted
+                // domain column stamps the same sentinel and must describe the same
+                // plaintext.
+                let resolved_ty = resolve_encrypted_inner_domain(ty, named_types);
+                let ty = resolved_ty.as_ref().unwrap_or(ty);
                 let (mut col, masked_sibling) = self.add_column_snapshot_with_sibling(
                     &eff_schema,
                     table,
@@ -10507,6 +10522,98 @@ fn encrypted_wraps_token(of: &ColType) -> &'static str {
         | ColType::Decimal { .. } => "number",
         ColType::Bytes => "bytes",
         _ => "string",
+    }
+}
+
+/// Walk a domain name to the first base type that is not itself a domain.
+///
+/// `None` when the name is not registered, when the walk leaves the registry, or when
+/// it revisits a name (a cycle) - all three are "no provable base type", and every
+/// caller leaves the column exactly as it was rather than inventing an answer.
+///
+/// Termination: each iteration either returns or inserts a name not yet seen, so the
+/// walk runs at most once per registered domain. A domain over a domain and a cycle
+/// both fold `ok=true` on PostgreSQL and reach these replays, so this is load-bearing
+/// rather than defensive.
+///
+/// Lives here, next to [`NamedTypeRegistry`], because BOTH the DDL lower and the
+/// offline fold resolve against it. It was originally private to the fold; the
+/// encrypted-column fix needed the same walk on the lower's side, and a second walk
+/// is exactly how the two producers would drift apart again.
+pub(crate) fn resolve_domain_base_type<'a>(
+    name: &str,
+    named_types: &'a NamedTypeRegistry,
+) -> Option<&'a ColType> {
+    let mut seen: std::collections::BTreeSet<&'a str> = std::collections::BTreeSet::new();
+    let mut def = named_types.domain_def(name).ok()?;
+    loop {
+        match &def.as_type {
+            ColType::Domain { name, .. } => {
+                if !seen.insert(name.as_str()) {
+                    return None;
+                }
+                def = named_types.domain_def(name).ok()?;
+            }
+            base => return Some(base),
+        }
+    }
+}
+
+/// Rewrite `Encrypted { of: Domain }` to `Encrypted { of: <the domain's base type> }`,
+/// and leave every other [`ColType`] alone (`None` = nothing to rewrite).
+///
+/// # Why the ENCRYPTED inner, and nothing else
+///
+/// A PLAIN domain column must keep NAMING its domain: on PostgreSQL the column's
+/// rendered type IS `"schema"."domain_name"`, so resolving it here would change the
+/// DDL. An ENCRYPTED column's physical type is `BYTEA`/`BLOB`/`LONGBLOB` regardless of
+/// what it wraps, so the inner type reaches the catalog through exactly one channel -
+/// the `zero-migrate:enc:<mode>:<keyId>:<wraps>` sentinel - and through the runtime
+/// descriptor's type token. Both are DESCRIPTIONS of the plaintext, and both were
+/// describing a domain over `int` as `string`.
+///
+/// # Why the normalisation is applied to the TYPE, not patched onto the descriptor
+///
+/// `wraps` and the descriptor's `ty` are derived from the inner type by two different
+/// functions ([`encrypted_wraps_token`] and [`col_type_to_token`]) reached through the
+/// single shared [`ir_column_to_field`]. Resolving the inner type BEFORE it enters that
+/// bridge makes both derivations agree by construction, on every caller, instead of
+/// leaving a second site that has to remember to patch the facet afterwards. That
+/// forgotten second site is the defect this fixes.
+///
+/// An unresolvable name, a cycle, or a base that is itself an ENUM all return the
+/// column unchanged: the sentinel is not optional, so "absent beats wrong" is
+/// "unchanged beats invented" here too. An enum base's token is `"string"`, which is
+/// the answer the column already had.
+pub(crate) fn resolve_encrypted_inner_domain(
+    ty: &ColType,
+    named_types: &NamedTypeRegistry,
+) -> Option<ColType> {
+    let ColType::Encrypted { of } = ty else {
+        return None;
+    };
+    let ColType::Domain { name, .. } = of.as_ref() else {
+        return None;
+    };
+    let base = resolve_domain_base_type(name, named_types)?;
+    Some(ColType::Encrypted {
+        of: Box::new(base.clone()),
+    })
+}
+
+/// [`resolve_encrypted_inner_domain`] over a column: returns an owned column whose
+/// encrypted inner domain is resolved, or the column untouched.
+pub(crate) fn resolve_encrypted_inner_domain_in_column(
+    c: &IrColumn,
+    named_types: &NamedTypeRegistry,
+) -> IrColumn {
+    match resolve_encrypted_inner_domain(&c.ty, named_types) {
+        Some(ty) => {
+            let mut resolved = c.clone();
+            resolved.ty = ty;
+            resolved
+        }
+        None => c.clone(),
     }
 }
 

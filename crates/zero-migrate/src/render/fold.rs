@@ -102,7 +102,8 @@ use crate::render::lower::{
     index_method_access, ir_column_to_field, ir_column_to_field_resolved_create, mysql_enum_type,
     postgres_named_type_metadata, render_container_default_for_data_type, render_domain_check,
     render_exclusion_constraint_body, render_ir_default, render_ir_default_for_type,
-    render_json_default_for_data_type, IrLowerError, NamedTypeRegistry,
+    render_json_default_for_data_type, resolve_domain_base_type, resolve_encrypted_inner_domain,
+    resolve_encrypted_inner_domain_in_column, IrLowerError, NamedTypeRegistry,
 };
 use crate::render::renderer::{Capability, DialectSupports};
 use crate::render::value_format::{
@@ -1218,6 +1219,15 @@ pub fn fold_ops_onto(
                     return Err(FoldError::DuplicateTable(name.clone()));
                 }
                 let effective_schema = schema.as_deref().unwrap_or(project_schema);
+                // The snapshot fold seeds the SQLite 12-step rebuild, so it has to
+                // resolve an encrypted column's inner domain exactly as the lower does
+                // - otherwise a rebuild re-stamps the sentinel with a different answer
+                // than the CREATE that made the table.
+                let columns: Vec<IrColumn> = columns
+                    .iter()
+                    .map(|c| resolve_encrypted_inner_domain_in_column(c, &named_types))
+                    .collect();
+                let columns = &columns[..];
                 let desc = create_table_descriptor(name, columns, runtime_options.as_ref());
                 let resolved_inject = ResolvedInject::for_table(effective, effective_schema, name)
                     .map_err(|error| FoldError::Render(error.to_string()))?;
@@ -1637,6 +1647,8 @@ pub fn fold_ops_onto(
                 // (this snapshot feeds the `--sql` plan preview + the apply path), and grow
                 // the `<col>_masked` sibling for a masked column so the offline fold matches
                 // the live apply.
+                let resolved_ty = resolve_encrypted_inner_domain(ty, &named_types);
+                let ty = resolved_ty.as_ref().unwrap_or(ty);
                 let (col, masked_sibling) = add_column_snapshot(
                     table,
                     column,
@@ -4491,6 +4503,10 @@ pub fn fold_to_field_defs(
                     let in_resolved_id_primary_key = idx < injected_prefix_len
                         && c.name == "id"
                         && resolved_inject.owns_id_primary_key();
+                    // Resolved on the TYPE, upstream of the descriptor, so the runtime
+                    // descriptor's `ty` and its `encrypted.wraps` are derived from the
+                    // same base type the catalog sentinel was stamped from.
+                    let c = &resolve_encrypted_inner_domain_in_column(c, &named_types);
                     let mut field = fold_create_column_to_field(c, in_resolved_id_primary_key);
                     lift_named_type_facets(&mut field, &c.ty, &named_types);
                     cols.insert(c.name.clone(), field);
@@ -4608,6 +4624,8 @@ pub fn fold_to_field_defs(
                     // `mask` facets, so the reconstructed descriptor for an added vector /
                     // masked column round-trips the metric opclass / `zero-migrate:mask` mask
                     // through the offline fold.
+                    let resolved_ty = resolve_encrypted_inner_domain(ty, &named_types);
+                    let ty = resolved_ty.as_ref().unwrap_or(ty);
                     let mut field = ir_column_to_field(&IrColumn {
                         name: column.clone(),
                         ty: ty.clone(),
@@ -5089,29 +5107,26 @@ fn lift_named_enum_membership(
 /// [`Op::CreateDomain`]'s `as` is a full `ColType`, so it can name another domain -
 /// and the fold does NOT refuse that on PostgreSQL (it resolves the use site by name
 /// alone), so `domain a AS domain b AS int`, and even the cycle `a AS b, b AS a`,
-/// reach this function through the real `genArtifacts` API. The walk therefore carries
-/// a `seen` set: every iteration that does not return inserts a name not already in
-/// it, and a name absent from the registry ends the walk, so the walk runs at most
-/// once per registered domain. A cycle resolves to nothing and leaves the token
-/// unchanged.
+/// reach this function through the real `genArtifacts` API. Termination is the shared
+/// [`crate::render::lower::resolve_domain_base_type`]'s `seen`-set walk, proven there.
 ///
-/// # Not through `ColType::Encrypted`
+/// A base type that is an ENUM stops the walk and is returned as itself: its token is
+/// `"string"`, the same token the domain already had, so a domain over an enum keeps
+/// today's answer. Its MEMBERS are deliberately not lifted - a domain's own `CHECK` may
+/// narrow the base enum's set, which would make the members an upper bound rather than
+/// the contract, and `field_check_constraints` renders `enum_values` as a hard
+/// `CHECK (<col> IN (...))`.
 ///
-/// Deliberately no recursion into the wrapped type, and for a MEASURED reason rather
-/// than the enum half's. An encrypted column's descriptor `ty` IS the plaintext token
-/// and its `encrypted.wraps` is derived from the same inner type, but `wraps` is also
-/// stamped into the catalog as the `zero-migrate:enc:randomised:default:string`
-/// sentinel by the LOWER, which has no registry:
+/// # Not through `ColType::Encrypted`, and no longer because it is unfixed
 ///
-/// ```text
-///   postgres  "amount" bytea /* zero-migrate:enc:randomised:default:string */ NOT NULL
-///   sqlite    "amount" BLOB  /* zero-migrate:enc:randomised:default:string */ NOT NULL
-/// ```
-///
-/// Resolving the domain on this side only would make the runtime descriptor say
-/// `"int"`/`"number"` while the comment the introspector recovers the facet from still
-/// said `string`. That is a wider fix with a different blast radius, so an encrypted
-/// domain column keeps today's answer and the gap is recorded rather than half-closed.
+/// Still no recursion into the wrapped type HERE, but the reason changed. An encrypted
+/// column's inner domain is resolved UPSTREAM of the descriptor, on the `ColType`
+/// itself, by [`crate::render::lower::resolve_encrypted_inner_domain`] - so by the time
+/// a column reaches this lift its `Encrypted { of }` already names a base type and
+/// there is nothing left to lift. That is deliberate: `wraps` is ALSO stamped into the
+/// catalog sentinel by the lower, and patching the descriptor here would have fixed the
+/// runtime's copy while leaving the catalog's saying `string`. Normalising the type
+/// makes both derivations agree by construction rather than by two sites remembering.
 fn lift_named_domain_base_type(
     field: &mut crate::render::declarative::FieldDescriptor,
     ty: &ColType,
@@ -5124,37 +5139,6 @@ fn lift_named_domain_base_type(
         return;
     };
     crate::render::lower::apply_col_type_to_field_descriptor(field, base);
-}
-
-/// Walk a domain name to the first base type that is not itself a domain.
-///
-/// `None` when the name is not registered, when the walk leaves the registry, or when
-/// it revisits a name (a cycle) - all three are "no provable base type", and the
-/// caller leaves the descriptor alone rather than inventing one.
-///
-/// A base type that is an ENUM stops the walk and is returned as itself: its token is
-/// `"string"`, the same token the domain already had, so a domain over an enum keeps
-/// today's answer. Its MEMBERS are deliberately not lifted - a domain's own `CHECK` may
-/// narrow the base enum's set, which would make the members an upper bound rather than
-/// the contract, and `field_check_constraints` renders `enum_values` as a hard
-/// `CHECK (<col> IN (...))`.
-fn resolve_domain_base_type<'a>(
-    name: &str,
-    named_types: &'a NamedTypeRegistry,
-) -> Option<&'a ColType> {
-    let mut seen: std::collections::BTreeSet<&'a str> = std::collections::BTreeSet::new();
-    let mut def = named_types.domain_def(name).ok()?;
-    loop {
-        match &def.as_type {
-            ColType::Domain { name, .. } => {
-                if !seen.insert(name.as_str()) {
-                    return None;
-                }
-                def = named_types.domain_def(name).ok()?;
-            }
-            base => return Some(base),
-        }
-    }
 }
 
 /// Resolve every named-type facet a column's declared type only NAMES.

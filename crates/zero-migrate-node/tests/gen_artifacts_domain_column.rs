@@ -461,23 +461,12 @@ fn a_domain_chain_resolves_and_a_domain_cycle_terminates() {
     }
 }
 
-/// `ColType::Encrypted` recurses into its inner type in `col_type_to_token`, so an
-/// encrypted DOMAIN column routes through the same arm. It is deliberately left
-/// alone, and this pins that.
-///
-/// MEASURED, and the reason: the descriptor's `encrypted.wraps` is also stamped into
-/// the catalog by the LOWER, which has no registry, as
-/// `zero-migrate:enc:randomised:default:string`. With the recursion enabled as a
-/// scaffold, an unrelated column rename on SQLite rebuilt the table as
-/// `"amount" BLOB /* zero-migrate:enc:randomised:default:number */` - silently
-/// rewriting a live table's recorded encryption posture. Closing this half needs the
-/// lower's sentinel moved with it; recorded in `docs/review-log.md` as its own defect.
-#[test]
-fn an_encrypted_domain_column_is_left_exactly_as_it_was() {
-    let history = vec![envelope(
+/// An encrypted DOMAIN column's history, with the domain's base type as a parameter.
+fn encrypted_domain_history(base: Value) -> Vec<Value> {
+    vec![envelope(
         "encrypted_domain",
         json!([
-            { "op": "createDomain", "name": "positive_number", "as": "int" },
+            { "op": "createDomain", "name": "positive_number", "as": base },
             {
                 "op": "createTable",
                 "name": "amounts",
@@ -491,18 +480,159 @@ fn an_encrypted_domain_column_is_left_exactly_as_it_was() {
                 "primaryKey": null,
             },
         ]),
-    )];
+    )]
+}
+
+/// `ColType::Encrypted` recurses into its inner type in `col_type_to_token`, so an
+/// encrypted DOMAIN column routes through the same resolution - and it now completes
+/// it, on BOTH producers.
+///
+/// This test used to be `an_encrypted_domain_column_is_left_exactly_as_it_was`, which
+/// pinned `type: "string"` / `wraps: "string"` for a domain over `int`. That pin was
+/// deliberate: resolving the runtime descriptor alone would have left the catalog
+/// sentinel the LOWER stamps still saying `string`, so the two would disagree about how
+/// a live column is encrypted. The lower now resolves the same domain through the same
+/// walk, so the pin is replaced by the correct answer rather than deleted.
+///
+/// `wraps` is not decoration: it selects which type-checker validates the plaintext
+/// before the encrypt pass swaps bytes in (`schema::diff::EncryptionMeta::wraps`), so
+/// `string` over an integer domain ran the wrong validator on every write.
+///
+/// Asserted on CONTENT, never on `ok` - the pre-fix answer was `ok=true` too.
+#[test]
+fn an_encrypted_domain_column_reports_its_base_type_and_wraps() {
     for dialect in DIALECTS {
-        let (fields, runtime_json) = fields_for(&history, dialect);
+        let (fields, runtime_json) = fields_for(&encrypted_domain_history(json!("int")), dialect);
         assert_eq!(
-            fields["amount"]["type"], "string",
-            "{dialect}: an encrypted domain column keeps the pre-fix token:\n{runtime_json}"
+            fields["amount"]["type"], "int",
+            "{dialect}: an encrypted domain column reports the domain's BASE token:\n{runtime_json}"
         );
         assert_eq!(
-            fields["amount"]["encrypted"]["wraps"], "string",
+            fields["amount"]["encrypted"]["wraps"], "number",
             "{dialect}: and the `wraps` that must agree with the catalog \
              sentinel:\n{runtime_json}"
         );
+    }
+}
+
+/// The control that proves the value is RESOLVED rather than hardcoded to `number`:
+/// a domain over a string base still reports `string`/`string`.
+#[test]
+fn an_encrypted_domain_over_a_string_base_still_reports_string() {
+    for dialect in DIALECTS {
+        let (fields, runtime_json) = fields_for(
+            &encrypted_domain_history(json!({ "string": { "length": 40 } })),
+            dialect,
+        );
+        assert_eq!(
+            fields["amount"]["type"], "string",
+            "{dialect}: a domain over varchar keeps the string token:\n{runtime_json}"
+        );
+        assert_eq!(
+            fields["amount"]["encrypted"]["wraps"], "string",
+            "{dialect}: and wraps stays string:\n{runtime_json}"
+        );
+    }
+}
+
+/// A domain over a domain resolves to the ULTIMATE base, and a CYCLE leaves the column
+/// exactly as it was instead of hanging.
+///
+/// Both shapes fold `ok=true` on PostgreSQL and reach this replay, so the `seen`-set
+/// walk in `resolve_domain_base_type` is load-bearing rather than defensive. A hang
+/// here fails the test by timing out the suite, which is the point.
+#[test]
+fn an_encrypted_domain_chain_resolves_and_a_cycle_terminates_unchanged() {
+    let chain = vec![envelope(
+        "encrypted_domain_chain",
+        json!([
+            { "op": "createDomain", "name": "inner_number", "as": "int" },
+            { "op": "createDomain", "name": "outer_number", "as": { "domain": { "name": "inner_number" } } },
+            {
+                "op": "createTable",
+                "name": "amounts",
+                "columns": [
+                    {
+                        "name": "amount",
+                        "type": { "encrypted": { "of": { "domain": { "name": "outer_number" } } } },
+                        "nullable": false,
+                    },
+                ],
+                "primaryKey": null,
+            },
+        ]),
+    )];
+    let cycle = vec![envelope(
+        "encrypted_domain_cycle",
+        json!([
+            { "op": "createDomain", "name": "a", "as": { "domain": { "name": "b" } } },
+            { "op": "createDomain", "name": "b", "as": { "domain": { "name": "a" } } },
+            {
+                "op": "createTable",
+                "name": "amounts",
+                "columns": [
+                    {
+                        "name": "amount",
+                        "type": { "encrypted": { "of": { "domain": { "name": "a" } } } },
+                        "nullable": false,
+                    },
+                ],
+                "primaryKey": null,
+            },
+        ]),
+    )];
+
+    for dialect in DIALECTS {
+        let (fields, runtime_json) = fields_for(&chain, dialect);
+        assert_eq!(
+            fields["amount"]["encrypted"]["wraps"], "number",
+            "{dialect}: a domain over a domain resolves to the ultimate base:\n{runtime_json}"
+        );
+
+        let reply =
+            gen_artifacts_from_envelopes(&cycle, dialect, Some(SCHEMA), &[charter().as_str()]);
+        // A cycle may be refused outright; what it must never do is hang or invent a
+        // base type. Only the answered case carries an assertion.
+        if let Some(runtime_json) = reply.runtime_json {
+            let fields = runtime_fields(&runtime_json, "amounts");
+            assert_eq!(
+                fields["amount"]["encrypted"]["wraps"], "string",
+                "{dialect}: a cycle leaves the column unchanged, never invented:\n{runtime_json}"
+            );
+        }
+    }
+}
+
+/// A domain that is never declared is unresolvable, and an unresolvable name leaves the
+/// column exactly as it was - "unchanged beats invented", the same rule the plain-domain
+/// half established.
+#[test]
+fn an_encrypted_column_over_an_undeclared_domain_is_unchanged() {
+    let orphan = vec![envelope(
+        "encrypted_orphan_domain",
+        json!([{
+            "op": "createTable",
+            "name": "amounts",
+            "columns": [
+                {
+                    "name": "amount",
+                    "type": { "encrypted": { "of": { "domain": { "name": "never_declared" } } } },
+                    "nullable": false,
+                },
+            ],
+            "primaryKey": null,
+        }]),
+    )];
+    for dialect in DIALECTS {
+        let reply =
+            gen_artifacts_from_envelopes(&orphan, dialect, Some(SCHEMA), &[charter().as_str()]);
+        if let Some(runtime_json) = reply.runtime_json {
+            let fields = runtime_fields(&runtime_json, "amounts");
+            assert_eq!(
+                fields["amount"]["encrypted"]["wraps"], "string",
+                "{dialect}: an undeclared domain leaves wraps alone:\n{runtime_json}"
+            );
+        }
     }
 }
 
