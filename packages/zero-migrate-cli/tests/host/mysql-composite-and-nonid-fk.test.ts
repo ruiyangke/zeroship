@@ -151,6 +151,11 @@ test("MySQL applies a composite foreign key and a non-`id` one", async (ctx) => 
   const connection = await mysql.createConnection({ uri: MYSQL_URL });
 
   const database = uniqueNamespace("fkmy");
+  // The engine creates `<database>_migrations` itself on the first `ensure_journal`,
+  // so a teardown that names only the project database leaks one meta database per
+  // run. Derived here, next to the name it follows, so the two cannot drift apart -
+  // the same rule `DatabaseGuard` enforces on the Rust side.
+  const meta = `${database}_migrations`;
   const work = project(database);
   try {
     await connection.query(`CREATE DATABASE \`${database}\``);
@@ -199,6 +204,7 @@ test("MySQL applies a composite foreign key and a non-`id` one", async (ctx) => 
     );
   } finally {
     await connection.query(`DROP DATABASE IF EXISTS \`${database}\``).catch(() => {});
+    await connection.query(`DROP DATABASE IF EXISTS \`${meta}\``).catch(() => {});
     await connection.end().catch(() => {});
     rmSync(work, { recursive: true, force: true });
   }
