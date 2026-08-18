@@ -409,6 +409,8 @@ jobs:
       #   skip_census.sh:105   count forced to 0     ->  17/0 becomes 8 passed, 9 failed
       #   e2e_stack.sh:85      SKIPPED stops rising  ->   9/0 becomes 9 checks, 1 failed
       #   binary_freshness.sh:104  `if false; then`  ->  12/0 becomes 7 passed, 5 failed
+      #   scratch_db.sh:69     fixed name, no token  ->  20/0 becomes 17 passed, 3 failed
+      #   scratch_db.sh:85     drop regardless of owner -> 20/0 becomes 19 passed, 1 failed
       #
       # THE FOURTH IS DIFFERENT AND THE DIFFERENCE MATTERS. known_catchall_selftest
       # RE-IMPLEMENTS the counters and exit rule of tests/e2e_app_primitives.sh
@@ -430,6 +432,7 @@ jobs:
           set -e
           tests/lib_binary_freshness_selftest.sh
           tests/lib_skip_census_selftest.sh
+          tests/lib_scratch_db_selftest.sh
           tests/lib/e2e_stack_selftest.sh
           tests/lib/known_catchall_selftest.sh
       # e2d0cba4c changed three harnesses from 100755 to 100644 in a commit about
