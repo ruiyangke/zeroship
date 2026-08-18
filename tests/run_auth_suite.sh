@@ -118,11 +118,28 @@ status=0
 # stays for everything else a gated test prints on its way to a decision.
 #
 # --no-fail-fast because cargo otherwise STOPS at the first failing binary, and
-# the count this gate reports is a sum over binaries. MEASUREMENT PENDING.
-# The floor caught the truncation only because it was so far under it. A red in a LATE
-# binary truncates by 20 rather than by 485, lands above the floor, and nobody
-# learns the number was truncated - which is the failure mode this gate exists
-# to remove, arriving through the gate's own instrument.
+# the tally this gate checks against its floor is a sum over binaries. This
+# crate has 55 of them and the LIB is the first cargo runs, so a single red lib
+# test used to discard the other 54.
+#
+# MEASURED 2026-08-17 by forcing one lib test red (csrf.rs `matches_exact`) and
+# changing NOTHING ELSE but this flag:
+#   clean, with the flag       55 binaries, 475 auth passes, gate tally 637
+#   red lib, WITHOUT the flag   1 binary,   217 auth passes, gate tally 108
+#   red lib, WITH the flag     55 binaries, 474 auth passes, gate tally 419
+# The mutation costs exactly one test (475 -> 474). The flag costs 54 binaries.
+#
+# The truncated run ALSO invented 36 failures further down this script, in
+# zeroship-authz and zeroship-gateway, every one of them `Key (plan_id)=(free)
+# is not present in table "plans"` - rows an auth integration binary seeds and
+# the truncated invocation never reached. So the missing flag does not merely
+# understate the count; it manufactures failures in other crates that look
+# exactly like real ones.
+#
+# The floor caught the 108 only because it is so far under it. A red in a LATE
+# binary truncates by a handful instead of by 54, lands ABOVE the floor, and
+# nobody learns the number was truncated - which is the failure this whole gate
+# exists to prevent, arriving through the gate's own instrument.
 cargo test -p zeroship-auth --no-fail-fast -- --test-threads "$TEST_THREADS" --nocapture 2>&1 | tee "$LOG" || status=1
 
 echo "------------------------------------------------------------------"
