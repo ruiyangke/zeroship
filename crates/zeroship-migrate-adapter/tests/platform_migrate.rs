@@ -39,7 +39,7 @@ mod platform_cli {
     /// How many files `db/migrations-ts` holds. Asserted rather than derived so
     /// that a discovery bug which silently drops a file fails loudly instead of
     /// agreeing with itself. Adding a migration updates this one constant.
-    const PLATFORM_MIGRATION_FILES: usize = 28;
+    const PLATFORM_MIGRATION_FILES: usize = 29;
 
     const DURABLE_WORKFLOW_JOURNAL_TABLES: [&str; 10] = [
         "app_deploys",

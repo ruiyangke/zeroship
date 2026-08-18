@@ -305,22 +305,6 @@ impl Registry {
         Ok(rows.first().map(row_to_record))
     }
 
-    /// List all apps ordered by name. Fleet-wide — for platform staff
-    /// (admin/readonly/support) only. Ordinary creators must use
-    /// [`Registry::list_apps_for_owner`] so the list never leaks other tenants'
-    /// apps.
-    pub async fn list_apps(&self) -> Result<Vec<AppRecord>, RegistryError> {
-        let conn = self.conn().await?;
-        let rows = conn
-            .query(
-                "SELECT id, name, plan_id, deploy_hash, api_key, created_at::text, updated_at::text \
-                 FROM zeroship.apps ORDER BY name",
-                &[],
-            )
-            .await?;
-        Ok(rows.iter().map(row_to_record).collect())
-    }
-
     /// List the apps `owner_id` is a member of (any role), ordered by name.
     ///
     /// This is the creator-facing listing: the `/api/apps` GET grants every

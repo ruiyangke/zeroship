@@ -341,52 +341,21 @@ pub async fn list_apps(
         return resp;
     }
     // The self-service policy grants every creator `apps:read` on the platform
-    // surface, so the gate above passes for ordinary creators too. The DATA must
-    // therefore be scoped to ownership: only platform staff with a fleet-wide
-    // read role (admin/readonly/support/billing) see every app; everyone else
-    // sees only the apps they are a member of. Without this scope the broadened
-    // gate would be a fleet-wide cross-tenant read (the exact C1 leak, just at
-    // the list endpoint).
-    let result = match fleet_wide_reader(&state, authz.principal_id).await {
-        Ok(true) => state.registry.list_apps().await,
-        Ok(false) => state.registry.list_apps_for_owner(&authz.principal_id).await,
-        Err(resp) => return resp,
-    };
-    match result {
+    // surface, so the gate above passes for ordinary creators too. The DATA is
+    // therefore scoped to membership, always: a caller sees the apps they are a
+    // member of and nothing else. Without that scope the broadened gate would
+    // be a fleet-wide cross-tenant read (the exact C1 leak, at the list
+    // endpoint).
+    //
+    // There is no fleet-wide arm any more. It was selected by a direct SQL read
+    // of `platform_admin_roles` rather than by Cedar - so it was invisible to
+    // every audit of the policy set - and it returned every tenant's apps to any
+    // of the four deleted staff roles. A vendor wanting a fleet-wide list builds
+    // it in the portal against its own copy of the data.
+    match state.registry.list_apps_for_owner(&authz.principal_id).await {
         Ok(apps) => web::HttpResponse::Ok().json(&apps),
         Err(e) => error_response(e),
     }
-}
-
-/// Returns true when the principal holds a platform role that authorizes a
-/// fleet-wide read (admin / readonly / support / billing). These are the roles
-/// whose Cedar policy permits `apps:read` on an unconstrained resource
-/// (`billing.cedar` grants it too, so `get_app` already lets billing staff read
-/// any single app by id) — so they are the principals allowed to see every
-/// tenant's apps in the list endpoint. This SQL role set MUST stay in sync with
-/// the Cedar policies that grant unconstrained `apps:read`; omitting a role here
-/// under-scopes its list relative to its actual authority (the 7.0 defect, where
-/// `billing` was missing and billing staff got an empty `/api/apps`).
-async fn fleet_wide_reader(
-    state: &AppState,
-    principal_id: Uuid,
-) -> Result<bool, web::HttpResponse> {
-    let rows = state
-        .control_pg
-        .query(
-            "SELECT 1 FROM zeroship.platform_admin_roles \
-             WHERE user_id = $1 AND role IN ('admin', 'readonly', 'support', 'billing')",
-            &[&principal_id],
-        )
-        .await
-        .map_err(|err| {
-            infrastructure_error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "platform role lookup",
-                err,
-            )
-        })?;
-    Ok(!rows.is_empty())
 }
 
 pub async fn get_app(
@@ -874,44 +843,39 @@ pub async fn set_plan(
         }
     };
 
-    // MAJOR-4: two authority levels for assigning a plan.
-    //   * OPERATOR — BillingWrite on Resource::Any (master-key / operator) — may
-    //     assign ANY plan (including operator-only tiers).
-    //   * app_owner / CREATOR — BillingWrite on Resource::App{id} — may assign
-    //     ONLY a plan flagged `assignable_by_creator = true`. Without this gate a
-    //     creator could PUT a cheaper operator plan (e.g. unlimited/console) and
-    //     underpay — the asymmetry the reduction-only spend-limit override
-    //     already closes for caps.
-    // We probe the operator grant first; if it is denied we fall back to the
-    // app-scoped grant AND enforce the creator-assignability guardrail.
-    let is_operator = authz
-        .require(Action::BillingWrite, Resource::Any, &state)
+    // MAJOR-4: assigning a plan needs `BillingWrite` on the app AND a target
+    // plan flagged `assignable_by_creator = true`. Without the second gate a
+    // creator could PUT a cheaper operator-only tier (unlimited/console) and
+    // underpay - the asymmetry the reduction-only spend-limit override already
+    // closes for caps.
+    //
+    // This used to probe `BillingWrite` on `Resource::Any` first and skip the
+    // assignability gate for an "operator". That arm was satisfiable only by
+    // the deleted universal-allow policy - `enforce` intersects a bearer's
+    // wrapper with the static set, so no token could reach it either - and it
+    // is gone with it. Operator-only tiers are now assigned by editing the
+    // catalog row, not by holding a cross-tenant grant.
+    if let Err(resp) = authz
+        .require(Action::BillingWrite, Resource::App { id: uid.to_string() }, &state)
         .await
-        .is_ok();
-    if !is_operator {
-        if let Err(resp) = authz
-            .require(Action::BillingWrite, Resource::App { id: uid.to_string() }, &state)
-            .await
-        {
-            return resp;
+    {
+        return resp;
+    }
+    let catalog = crate::plan_catalog::PlanCatalog::new(state.registry.clone());
+    match catalog.get(&body.plan_id).await {
+        Ok(Some(plan)) if plan.assignable_by_creator => { /* allowed */ }
+        Ok(Some(_)) => {
+            return web::HttpResponse::Forbidden().json(&serde_json::json!({
+                "error": "plan not assignable by creator",
+                "detail": "this plan can only be assigned by an operator; choose a \
+                           creator-assignable plan or contact support to upgrade",
+            }));
         }
-        // app_owner principal: the target plan MUST be creator-assignable.
-        let catalog = crate::plan_catalog::PlanCatalog::new(state.registry.clone());
-        match catalog.get(&body.plan_id).await {
-            Ok(Some(plan)) if plan.assignable_by_creator => { /* allowed */ }
-            Ok(Some(_)) => {
-                return web::HttpResponse::Forbidden().json(&serde_json::json!({
-                    "error": "plan not assignable by creator",
-                    "detail": "this plan can only be assigned by an operator; choose a \
-                               creator-assignable plan or contact support to upgrade",
-                }));
-            }
-            Ok(None) => {
-                return web::HttpResponse::BadRequest()
-                    .json(&serde_json::json!({"error": "unknown plan"}));
-            }
-            Err(e) => return error_response(e),
+        Ok(None) => {
+            return web::HttpResponse::BadRequest()
+                .json(&serde_json::json!({"error": "unknown plan"}));
         }
+        Err(e) => return error_response(e),
     }
 
     // Record a plan-change event with a cumulative usage_at_change snapshot IN
@@ -1207,7 +1171,12 @@ async fn owner_of_app(state: &AppState, app_id: &Uuid) -> Result<Option<Uuid>, R
 /// (editor/viewer with `billing:read` on this one app) must NOT see the owner's
 /// whole billing envelope. We gate `BillingRead on App{id}` (capability +
 /// existence), then require the caller to BE the owner of `{id}`
-/// (`owner_of_app(id) == principal_id`) OR an operator (`Resource::Any`).
+/// (`owner_of_app(id) == principal_id`).
+///
+/// There is no operator escape from that any more. The arm that let a
+/// `BillingRead`-on-`Resource::Any` caller read another creator's invoices was
+/// satisfiable only by the deleted universal-allow policy, so it was a
+/// cross-tenant read with no remaining principal behind it.
 pub async fn list_app_invoices(
     id: Path<String>,
     query: web::types::Query<InvoiceListQuery>,
@@ -1232,17 +1201,10 @@ pub async fn list_app_invoices(
         Ok(None) => return web::HttpResponse::Ok().json(&serde_json::json!({ "invoices": [] })),
         Err(e) => return error_response(e),
     };
-    // OWNER-or-operator: only the app's OWNER (the invoice creator) reads the
-    // owner's cross-app invoice history; a non-owner member does not.
+    // OWNER only: the app's OWNER is the invoice creator and reads their own
+    // cross-app invoice history; a non-owner member does not.
     if creator_id != authz.principal_id {
-        match authz.is_operator(Action::BillingRead, &state).await {
-            Ok(true) => {}
-            Ok(false) => {
-                return web::HttpResponse::Forbidden()
-                    .json(&serde_json::json!({"error": "forbidden"}))
-            }
-            Err(resp) => return resp,
-        }
+        return web::HttpResponse::Forbidden().json(&serde_json::json!({"error": "forbidden"}));
     }
     let limit = query.limit.unwrap_or(50).clamp(1, 200);
     let offset = query.offset.unwrap_or(0).max(0);
@@ -1260,13 +1222,12 @@ pub async fn list_app_invoices(
 /// AUTHZ GRAIN — CREATOR-LEVEL (SEC, CRITICAL-1). An invoice is creator-keyed:
 /// the reconciler stamps `invoice.creator_id` as the `role='owner'` user
 /// (`cron/billing_reconcile.rs`). The invoice envelope spans EVERY app that
-/// creator owns, so the caller must BE that creator OR an operator
-/// (`Resource::Any`). We do NOT loop the creator's apps and accept any
-/// `BillingRead` grant: `list_apps_for_owner` is role-AGNOSTIC, so a creator who
-/// is merely a viewer/editor on the attacker's app would appear in the list and
-/// let the attacker read the victim's whole invoice. A single
-/// `creator_id == principal_id || is_operator` check closes that cross-creator
-/// hole AND removes the per-app Cedar-loop audit amplification.
+/// creator owns, so the caller must BE that creator. We do NOT loop the
+/// creator's apps and accept any `BillingRead` grant: `list_apps_for_owner` is
+/// role-AGNOSTIC, so a creator who is merely a viewer/editor on the attacker's
+/// app would appear in the list and let the attacker read the victim's whole
+/// invoice. A single `creator_id == principal_id` check closes that
+/// cross-creator hole AND removes the per-app Cedar-loop audit amplification.
 pub async fn get_invoice(
     id: Path<String>,
     authz: AuthzGuard,
@@ -1292,16 +1253,9 @@ pub async fn get_invoice(
         Err(e) => return error_response(e),
     };
 
-    // The caller is the invoice's creator, OR an operator. Nothing else reads it.
+    // The caller is the invoice's creator. Nothing else reads it.
     if detail.creator_id != authz.principal_id {
-        match authz.is_operator(Action::BillingRead, &state).await {
-            Ok(true) => {}
-            Ok(false) => {
-                return web::HttpResponse::Forbidden()
-                    .json(&serde_json::json!({"error": "forbidden"}))
-            }
-            Err(resp) => return resp,
-        }
+        return web::HttpResponse::Forbidden().json(&serde_json::json!({"error": "forbidden"}));
     }
     web::HttpResponse::Ok().json(&detail)
 }
@@ -1406,20 +1360,19 @@ pub async fn get_billing_status(
 
 /// Resolve the target creator for a creator-keyed billing read.
 ///
-/// - **Operator** (`BillingRead` on `Resource::Any`): may target any creator via
-///   the optional `creator_id`; absent it, targets self.
-/// - **Creator** (billing-capable on at least one owned app): forced to `self`.
-///   A `creator_id` naming ANOTHER creator is 403; a caller with NO billing
-///   capability anywhere is 403.
+/// The caller is ALWAYS forced to `self`: they must be billing-capable on at
+/// least one owned app, and a `creator_id` naming ANOTHER creator is 403. A
+/// caller with no billing capability anywhere is 403.
+///
+/// The `?creator_id=` parameter therefore now only confirms or contradicts the
+/// caller's own id. It is kept rather than removed because the contradiction is
+/// worth answering with a 403 instead of silently reading the caller's own
+/// data under someone else's name.
 async fn resolve_creator_target(
     authz: &AuthzGuard,
     state: &AppState,
     requested: Option<Uuid>,
 ) -> Result<Uuid, web::HttpResponse> {
-    let is_op = authz.is_operator(Action::BillingRead, state).await?;
-    if is_op {
-        return Ok(requested.unwrap_or(authz.principal_id));
-    }
     if !authz.can_act_anywhere(Action::BillingRead, state).await? {
         return Err(web::HttpResponse::Forbidden()
             .json(&serde_json::json!({"error": "forbidden"})));
@@ -1428,7 +1381,7 @@ async fn resolve_creator_target(
         if req != authz.principal_id {
             return Err(web::HttpResponse::Forbidden().json(&serde_json::json!({
                 "error": "forbidden",
-                "detail": "only an operator may read another creator's billing",
+                "detail": "a creator may read only their own billing",
             })));
         }
     }

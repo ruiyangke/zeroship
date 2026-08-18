@@ -1222,7 +1222,7 @@ async fn app_delete_returns_200_atomic() {
     )
     .await;
 
-    let caller = common::authz_fixture::admin_principal(&fx.state).await;
+    let caller = common::authz_fixture::seeded_principal(&fx.state).await;
     let req = test::TestRequest::delete()
         .uri(&format!("/api/apps/{app_id}"))
         .header("authorization", caller.bearer())

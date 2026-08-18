@@ -42,14 +42,9 @@ struct ConsentTestApp {
 
 impl ConsentTestApp {
     #[allow(clippy::future_not_send)]
-    async fn boot(
-        scopes: &[&str],
-        platform_role: Option<&str>,
-        app_role: Option<&str>,
-        skip: bool,
-    ) -> Self {
+    async fn boot(scopes: &[&str], app_role: Option<&str>, skip: bool) -> Self {
         let client_id = format!("zeroship-builder-{}", Uuid::new_v4().simple());
-        Self::boot_inner(scopes, platform_role, app_role, skip, &client_id, None, &[]).await
+        Self::boot_inner(scopes, app_role, skip, &client_id, None, &[]).await
     }
 
     /// Boot a per-app end-user OAuth client (`oac_<base62-app-id>`) — the Slice
@@ -61,13 +56,12 @@ impl ConsentTestApp {
     async fn boot_app_client(requested: &[&str], declared: &[AppScope]) -> Self {
         let app_uuid = Uuid::new_v4();
         let client_id = client_id_for_app(&app_uuid);
-        Self::boot_inner(requested, None, None, false, &client_id, Some(app_uuid), declared).await
+        Self::boot_inner(requested, None, false, &client_id, Some(app_uuid), declared).await
     }
 
     #[allow(clippy::future_not_send, clippy::too_many_arguments)]
     async fn boot_inner(
         scopes: &[&str],
-        platform_role: Option<&str>,
         app_role: Option<&str>,
         skip: bool,
         client_id: &str,
@@ -101,15 +95,6 @@ impl ConsentTestApp {
         )
         .await
         .expect("insert consent test user");
-        if let Some(role) = platform_role {
-            pg.execute(
-                "INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by) \
-                 VALUES ($1, $2, $1)",
-                &[&user_id, &role],
-            )
-            .await
-            .expect("insert platform role");
-        }
         if let Some(seed_app_id) = seeded_app_uuid {
             let plan_id = "consent-test-plan";
             let limits = json!({
@@ -213,10 +198,6 @@ impl ConsentTestApp {
             .await;
         let _ = self
             .pg
-            .execute("DELETE FROM zeroship.platform_admin_roles WHERE user_id = $1", &[&self.user_id])
-            .await;
-        let _ = self
-            .pg
             .execute(
                 "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
                 &[&self.client_id],
@@ -273,7 +254,7 @@ impl ConsentTestApp {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn consent_deny_redirect_includes_issuer_parameter() {
-    let app = ConsentTestApp::boot(&["openid"], None, None, false).await;
+    let app = ConsentTestApp::boot(&["openid"], None, false).await;
     let issuer = Arc::new(test_issuer());
     let service = test::init_service(
         web::App::new()
@@ -321,7 +302,7 @@ async fn consent_deny_redirect_includes_issuer_parameter() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn missing_csrf_returns_403() {
-    let app = ConsentTestApp::boot(&["apps:deploy"], Some("admin"), None, false).await;
+    let app = ConsentTestApp::boot(&["apps:deploy"], None, false).await;
 
     let status = app.post_accept_status(None).await;
     assert_eq!(status, 403);

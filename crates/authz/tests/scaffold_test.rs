@@ -77,13 +77,6 @@ fn resource_cedar_uids_are_canonical() {
         .cedar_uid(),
         "App::\"blog\""
     );
-    assert_eq!(
-        Resource::Org {
-            id: "acme".to_owned()
-        }
-        .cedar_uid(),
-        "Org::\"acme\""
-    );
     assert_eq!(Resource::Any.cedar_uid(), "*");
 }
 

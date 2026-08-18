@@ -161,7 +161,7 @@ async fn app_logs_route_proxies_worker_lines() {
         .expect("unauthenticated control response");
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
-    let pat = common::authz_fixture::admin_principal(&fixture.state).await;
+    let pat = common::authz_fixture::seeded_principal(&fixture.state).await;
     let response = control
         .get(format!("/api/apps/{app_id}/logs"))
         .header("authorization", pat.bearer())

@@ -203,7 +203,7 @@ async fn cleanup_app(pg: &Client, app_id: Uuid) {
 async fn owner_can_grant_list_and_revoke_their_own_app() {
     let db_url = db_url();
     let fx = build_test_state(&db_url, "owner").await;
-    let owner = common::authz_fixture::non_admin_principal(&fx.state).await;
+    let owner = common::authz_fixture::seeded_principal(&fx.state).await;
     let app_record = fx
         .state
         .registry
@@ -287,8 +287,8 @@ async fn owner_can_grant_list_and_revoke_their_own_app() {
 async fn a_creator_cannot_touch_another_creators_app() {
     let db_url = db_url();
     let fx = build_test_state(&db_url, "stranger").await;
-    let owner = common::authz_fixture::non_admin_principal(&fx.state).await;
-    let stranger = common::authz_fixture::non_admin_principal(&fx.state).await;
+    let owner = common::authz_fixture::seeded_principal(&fx.state).await;
+    let stranger = common::authz_fixture::seeded_principal(&fx.state).await;
     let app_record = fx
         .state
         .registry
@@ -372,7 +372,7 @@ async fn a_creator_cannot_touch_another_creators_app() {
 async fn forbidden_hosts_are_refused_and_leave_the_plan_caps_alone() {
     let db_url = db_url();
     let fx = build_test_state(&db_url, "forbidden").await;
-    let owner = common::authz_fixture::non_admin_principal(&fx.state).await;
+    let owner = common::authz_fixture::seeded_principal(&fx.state).await;
     let app_record = fx
         .state
         .registry
@@ -448,7 +448,7 @@ async fn a_grant_past_the_plan_cap_is_refused() {
     let fx = build_test_state(&db_url, "cap").await;
     let catalog = PlanCatalog::new(fx.state.registry.clone());
     let plan = seed_plan_with_max_grants(&catalog, 1).await;
-    let owner = common::authz_fixture::non_admin_principal(&fx.state).await;
+    let owner = common::authz_fixture::seeded_principal(&fx.state).await;
     let app_record = fx
         .state
         .registry
@@ -541,7 +541,7 @@ async fn an_unresolved_suffix_catalog_refuses_a_wildcard_a_resolved_one_accepts(
         ("open", configured_catalog(), StatusCode::OK),
     ] {
         let fx = build_test_state_with_catalog(&db_url, label, catalog).await;
-        let owner = common::authz_fixture::non_admin_principal(&fx.state).await;
+        let owner = common::authz_fixture::seeded_principal(&fx.state).await;
         let app_record = fx
             .state
             .registry

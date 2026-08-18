@@ -90,31 +90,9 @@ impl AuthzGuard {
         }
     }
 
-    /// Whether this caller holds `action` on `Resource::Any` — the OPERATOR
-    /// (fleet-wide) probe, TOKEN-AWARE (it runs through `require`, so a bearer
-    /// whose scopes do not cover the action returns `false`). Used by the creator-keyed
-    /// billing reads to decide whether the caller may target ANOTHER creator via
-    /// `?creator_id`. A plain 403 is "not operator"; any other status is an
-    /// infrastructure failure propagated as `Err(HttpResponse)` (fail closed).
-    pub async fn is_operator(
-        &self,
-        action: Action,
-        state: &AppState,
-    ) -> Result<bool, HttpResponse> {
-        match self.require(action, Resource::Any, state).await {
-            Ok(()) => Ok(true),
-            Err(resp) => {
-                if resp.status() == ntex::http::StatusCode::FORBIDDEN {
-                    Ok(false)
-                } else {
-                    Err(resp)
-                }
-            }
-        }
-    }
-
-    /// Whether this caller can perform `action` ANYWHERE they control: operator
-    /// (`Resource::Any`) OR owner/member of at least one app carrying the grant.
+    /// Whether this caller can perform `action` ANYWHERE they control:
+    /// platform-wide (`Resource::Any`) OR owner/member of at least one app
+    /// carrying the grant.
     /// The self-scope gate for the creator-keyed billing reads (the caller
     /// reading their OWN creator data must be a billing-capable creator, not
     /// merely any authenticated token), via [`authz::is_authorized_anywhere`].
