@@ -16,6 +16,10 @@
 //!                two UNIQUEs of one name          ER_DUP_KEYNAME
 //!   SQLite       two CHECKs of one name           ACCEPTED
 //!                two UNIQUEs of one name          ACCEPTED
+//!                two FKs of one name              ACCEPTED (measured 2026-08-18,
+//!                                                  in-process SQLite; SQLite has
+//!                                                  no constraint-name namespace,
+//!                                                  which is why all three agree)
 //!
 //! SQLite IS THEREFORE NOT REFUSED, and that is the whole reason this check is
 //! dialect-aware instead of uniform. Refusing there would reject a migration
@@ -42,6 +46,16 @@ const T: &str = r#"{"op":"createTable","name":"a","columns":[{"name":"c0","type"
 fn uniq(name: &str, column: &str) -> String {
     format!(
         r#"{{"op":"addConstraint","table":"a","constraint":{{"name":"{name}","kind":{{"kind":"unique","columns":["{column}"]}}}}}}"#
+    )
+}
+
+/// A SELF-REFERENCING foreign key, which is the only `addConstraint` kind still
+/// AUTHORABLE on SQLite: `check` expression rendering is PostgreSQL-only and
+/// `unique` is declared `unsupported` there (SQLite has no in-place ADD
+/// CONSTRAINT). Self-referencing so the fixture needs no second table.
+fn fk(name: &str, column: &str) -> String {
+    format!(
+        r#"{{"op":"addConstraint","table":"a","constraint":{{"name":"{name}","kind":{{"kind":"fk","columns":["{column}"],"referencesTable":"a","referencesColumns":["c0"]}}}}}}"#
     )
 }
 
@@ -133,11 +147,16 @@ fn sqlite_still_accepts_what_sqlite_accepts() {
     // engine must not refuse it. Without this the natural "tidy" fix is a
     // dialect-uniform rule, which would reject a migration SQLite runs.
     //
-    // UNIQUE for the same reason as the MySQL case: a CHECK here fails on
-    // "expression rendering is PostgreSQL-only" and measures nothing about names.
+    // FK, and the carrier matters as much as it does in the MySQL case above. A
+    // CHECK fails on "expression rendering is PostgreSQL-only" and a UNIQUE now
+    // fails on `addConstraint/unique` being `unsupported` on SQLite - both would
+    // make this control pass for a reason that has NOTHING to do with names, which
+    // is exactly the failure mode the MySQL comment warns about. A self-referencing
+    // FK is the one `addConstraint` kind still authorable on SQLite, so the
+    // duplicate-name rule is actually REACHED and can be observed not to fire.
     verdict(
         Dialect::Sqlite,
-        &format!("{T},{},{}", uniq("same", "v"), uniq("same", "w")),
+        &format!("{T},{},{}", fk("same", "v"), fk("same", "w")),
     )
     .expect("SQLite accepts duplicate constraint names; the engine must too");
 }

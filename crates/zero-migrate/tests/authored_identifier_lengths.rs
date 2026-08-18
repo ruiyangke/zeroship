@@ -23,6 +23,14 @@
 //! bytes and SQLite has no identifier cap at all, so a universal drop-side bound would
 //! refuse a name that legitimately exists in those catalogs and strand the object.
 //!
+//! One create-side OP is narrower than the bound, and the distinction matters:
+//! `addConstraint(unique)` is not AUTHORABLE on SQLite at all (see
+//! [`ADD_CONSTRAINT_DIALECTS`]), so there is no name for the bound to judge there.
+//! That is a support fact, not a hole - constraint-NAME length is still covered on
+//! SQLite by the `createTable inline constraint` fixture. Do not "restore symmetry"
+//! by asserting SQLite accepts a 63-byte `addConstraint` name; that assertion passed
+//! only while the dialect table wrongly declared the op portable.
+//!
 //! The bound is enforced at three seams, because each one is reachable without the
 //! others:
 //!
@@ -218,16 +226,36 @@ fn validate_constraint(name: &str) -> Op {
 /// An op constructor under test, paired with the label its assertions report.
 type NamedOpFactory = (&'static str, fn(&str) -> Op);
 
-/// Every CREATE-side op factory that carries an author-supplied identifier.
-fn create_side_factories() -> Vec<NamedOpFactory> {
-    vec![
-        ("addConstraint", add_constraint as fn(&str) -> Op),
+/// The dialects on which `addConstraint(unique)` is AUTHORABLE at all.
+///
+/// SQLite is absent, and that is a support fact rather than a gap in this file.
+/// SQLite has no in-place `ADD CONSTRAINT`: a unique constraint is added only by
+/// the declarative differ's 12-step table rebuild, so `dialect-support.toml`
+/// declares `addConstraint/unique` `unsupported` there and validate refuses the op
+/// as UNSUPPORTED before any identifier bound is consulted. Asserting either
+/// acceptance or a length refusal on SQLite would be asserting the OLD, wrong
+/// declaration. (The `fk*` variants of the same op ARE authorable on SQLite - the
+/// gap is per-variant.)
+///
+/// Constraint-NAME length stays covered on SQLite by the `createTable inline
+/// constraint` factory below, which is portable on all three dialects, so nothing
+/// this file exists to prove is lost.
+const ADD_CONSTRAINT_DIALECTS: [Dialect; 2] = [Dialect::Postgres, Dialect::Mysql];
+
+/// Every CREATE-side op factory that carries an author-supplied identifier and is
+/// authorable on `dialect`.
+fn create_side_factories(dialect: Dialect) -> Vec<NamedOpFactory> {
+    let mut factories: Vec<NamedOpFactory> = vec![
         (
             "createTable inline constraint",
-            create_table_with_constraint_name,
+            create_table_with_constraint_name as fn(&str) -> Op,
         ),
         ("createTable inline index", create_table_with_index_name),
-    ]
+    ];
+    if ADD_CONSTRAINT_DIALECTS.contains(&dialect) {
+        factories.push(("addConstraint", add_constraint));
+    }
+    factories
 }
 
 /// Every DROP-side op factory that names an object PostgreSQL may already have
@@ -264,9 +292,9 @@ fn assert_not_refused_for_length(label: &str, dialect: Dialect, op: Op) {
 }
 
 #[test]
-fn add_constraint_refuses_a_64_byte_name_on_every_dialect() {
+fn add_constraint_refuses_a_64_byte_name_on_every_dialect_that_can_author_it() {
     let name = ascii_name(MAX + 1);
-    for dialect in DIALECTS {
+    for dialect in ADD_CONSTRAINT_DIALECTS {
         assert_refused_for_length("addConstraint", dialect, add_constraint(&name));
     }
 }
@@ -329,7 +357,7 @@ fn a_63_byte_name_is_accepted_on_every_op_and_every_dialect() {
         "the boundary fixture must be exactly {MAX} bytes"
     );
     for dialect in DIALECTS {
-        for (label, factory) in create_side_factories() {
+        for (label, factory) in create_side_factories(dialect) {
             validate(factory(&name), dialect).unwrap_or_else(|e| {
                 panic!("{label} on {dialect:?} must accept {MAX} bytes: {e:?}")
             });
@@ -353,7 +381,7 @@ fn a_multi_byte_name_over_63_bytes_is_refused_where_the_bound_applies() {
         name.len()
     );
     for dialect in DIALECTS {
-        for (label, factory) in create_side_factories() {
+        for (label, factory) in create_side_factories(dialect) {
             assert_refused_for_length(label, dialect, factory(&name));
         }
     }

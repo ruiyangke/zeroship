@@ -20,14 +20,16 @@
 //       nothing about the declaration and everything about the corpus, and they
 //       are the reason a live layer needs its own fixture review.
 //   (B) DECLARATION ERROR. The sidecar says supported and the engine itself
-//       refuses, cleanly, every time. These are real defects in
-//       `dialect-support.toml`. They are RECORDED rather than fixed because the
-//       fix is NOT the one-line sidecar change it looks like: `Op::support()`
-//       reads the table, so flipping a cell to `unsupported` routes the operator
-//       message through `op_support.rs::unsupported_reason`, which has no arm for
-//       any of these (kind, variant) pairs and answers the literal string
-//       "internal: supported cell has no refusal reason". Each fix is a sidecar
-//       line PLUS a reason arm PLUS a regenerate of two artifacts.
+//       refuses, cleanly, every time. Six were recorded here; FIVE HAVE SINCE
+//       BEEN FIXED and their allowances removed, each as a sidecar line PLUS an
+//       `op_support.rs::unsupported_reason` arm PLUS a regenerate of both
+//       generated artifacts - the arm is not optional, because `Op::support()`
+//       reads the table and a flip without it hands the operator the literal
+//       string "internal: supported cell has no refusal reason".
+//       The sixth was REFUTED and moved to (A): see `dropConstraint/base` below.
+//       Before flipping a cell, check whether the gate that refuses it is
+//       unconditional or conditional on the payload. A conditional gate means the
+//       representative measured one SHAPE, not the op.
 //   (C) ENGINE DEFECT. The declaration is defensible and the engine still gets it
 //       wrong at or after render. There are two, and one of them is a
 //       `ServerError`.
@@ -126,69 +128,44 @@ const ALLOWANCES: &[Allowance] = &[
         words: "omits its owning table",
         why: "(A) same representative defect as the postgres row above.",
     },
-    // (B) DECLARATION ERRORS. Five rows declare `portable` on SQLite while the
-    // lowerer refuses them with `IrLowerError::SqliteRebuildOnly`: the imperative
-    // op lane has no SQLite render for these, only the declarative differ's
-    // 12-step rebuild does. `render/lower.rs`'s own comment on
-    // `require_alter_column_rendering` records the PRECEDENT - F674 corrected
-    // exactly this class for `setColumnNotNull`, `dropColumnNotNull` and
-    // `dropColumnDefault`, and stopped there. These five are the rest of it.
+    // (B) DECLARATION ERRORS - FIVE OF THE SIX ARE NOW FIXED, so their allowances
+    // are GONE rather than re-worded. `setColumnType/base`, `setColumnDefault/base`,
+    // `setColumnDefault/containerOrJson`, `addConstraint/unique` and
+    // `createTrigger/bodyMultipleEvents` now declare `unsupported` on SQLite, which
+    // is what the server said, so they no longer disagree and a lingering allowance
+    // here would fail as STALE. Each flip came with the matching
+    // `op_support.rs::unsupported_reason` arm, so none of them ships the internal
+    // placeholder - see PLACEHOLDER_REASONS below, now empty.
+    //
+    // (A) THE SIXTH WAS REFUTED, and it is the interesting one. This row was
+    // recorded as a (B) declaration error on the same evidence as the other five: it
+    // refuses with `SqliteRebuildOnly`. But SQLite HAS a dropConstraint lane. When
+    // the live snapshot carries the table and the named constraint is a FOREIGN KEY,
+    // `render/lower.rs` lowers the op to a 12-step rebuild and it APPLIES. The
+    // refusal is reached only for a missing snapshot or a NON-FK constraint, and the
+    // representative below drops `c`, which is not a foreign key.
+    //
+    // So the observation was right and the classification was not: this is a
+    // DEGENERATE REPRESENTATIVE, not a wrong declaration. Flipping the cell was
+    // tried and REVERTED - `tests/sqlite_declaration_flip_over_refusal_control.rs`
+    // drives a foreign-key drop through validate + lower + apply, and the flip made
+    // it fail with `UNSUPPORTED`, refusing a migration that works today. There is
+    // one row for all constraint kinds, so `portable` is the only disposition that
+    // does not break the working case.
+    //
+    // The general lesson, which is why this comment is long: a refusal measured from
+    // ONE representative bounds what that SHAPE does, not what the OP does. Five of
+    // these six generalized safely because their gate is unconditional; this one did
+    // not, because its gate is conditional on the constraint kind.
     Allowance {
         kind: "dropConstraint",
         variant: "base",
         dialect: "sqlite",
         observed: Outcome::RefusedByCapability,
         words: "needs the 12-step table rebuild",
-        why: "(B) sidecar says portable; lower refuses SqliteRebuildOnly. F674 class.",
-    },
-    Allowance {
-        kind: "setColumnType",
-        variant: "base",
-        dialect: "sqlite",
-        observed: Outcome::RefusedByCapability,
-        words: "needs the 12-step table rebuild",
-        why: "(B) sidecar says portable; lower refuses SqliteRebuildOnly. F674 class.",
-    },
-    Allowance {
-        kind: "setColumnDefault",
-        variant: "base",
-        dialect: "sqlite",
-        observed: Outcome::RefusedByCapability,
-        words: "needs the 12-step table rebuild",
-        why: "(B) sidecar says portable; lower refuses SqliteRebuildOnly. F674 class.",
-    },
-    Allowance {
-        kind: "setColumnDefault",
-        variant: "containerOrJson",
-        dialect: "sqlite",
-        observed: Outcome::RefusedByCapability,
-        words: "needs the 12-step table rebuild",
-        why: "(B) sidecar says portable; lower refuses SqliteRebuildOnly. F674 class.",
-    },
-    Allowance {
-        kind: "addConstraint",
-        variant: "unique",
-        dialect: "sqlite",
-        observed: Outcome::RefusedByCapability,
-        words: "needs the 12-step table rebuild",
-        why: "(B) sidecar says portable; lower refuses SqliteRebuildOnly. The FK \
-               variants of this same op DO apply, so this is a per-variant gap.",
-    },
-    // (B) DECLARATION ERROR, and this one has its correction already written down
-    // in the adjacent table. `support.rs`'s `Feature::TriggerMultipleEvents` cell
-    // declares SQLite UNSUPPORTED, with a comment recording that SQLite "used to be
-    // declared supported beside a message that already spelled out why it could
-    // not be". The op-level sidecar still says `portable`. Both SQLite's and
-    // MySQL's grammars take exactly one trigger event; only PostgreSQL accepts
-    // `INSERT OR UPDATE`.
-    Allowance {
-        kind: "createTrigger",
-        variant: "bodyMultipleEvents",
-        dialect: "sqlite",
-        observed: Outcome::RefusedByCapability,
-        words: "SQLite CREATE TRIGGER accepts exactly one trigger event",
-        why: "(B) the FEATURE table already says unsupported; the OP sidecar still \
-               says portable. The two disagree and the feature gate wins.",
+        why: "(A) the representative drops a NON-FK constraint, the one shape SQLite's \
+               rebuild lane does not cover. FK drops apply end to end; flipping this \
+               cell was measured to be an over-refusal and was reverted.",
     },
     // (C) ENGINE DEFECT, and the sharpest one here: a `portable` declaration whose
     // op clears validate, clears lower, and DIES AGAINST THE DATABASE. SQLite
@@ -259,47 +236,27 @@ const ALLOWANCES: &[Allowance] = &[
 ];
 
 /// Rows that hand the operator `op_support.rs`'s internal placeholder instead of a
-/// reason. MEASURED, all four on SQLite, all four from the SAME earlier fix.
+/// reason.
 ///
-/// `render/lower.rs` records F674 as having moved `setColumnNotNull`,
-/// `dropColumnNotNull` and `dropColumnDefault` to `unsupported` on SQLite because
-/// the gate refused what the cells declared. That correction was right, and it
-/// stopped at the sidecar: `op_support.rs::unsupported_reason` has no arm for any
-/// of them, so `Op::support()` returns the sentinel and the operator is told
-/// "internal: supported cell has no refusal reason" for an ordinary,
-/// well-understood SQLite limitation. `validateConstraint` is the fourth, from the
-/// same shape.
+/// EMPTY, and that is a repair rather than a relaxation. Four rows were pinned
+/// here - `setColumnNotNull/base`, `dropColumnNotNull/base`,
+/// `dropColumnDefault/base` and `validateConstraint/base` - because
+/// `op_support.rs::unsupported_reason` had no arm for them and so answered
+/// "internal: supported cell has no refusal reason". Three of the four were
+/// F674's own: it moved the cells to `unsupported` and did not write the arms.
+/// The arms are now written and every one of these rows names a real limit.
 ///
-/// This is the concrete cost of the fix this file DECLINED to make for the six
-/// (B)-family rows above: flipping a cell without adding the arm ships an internal
-/// string as the user-facing diagnosis. Recorded here rather than repaired because
-/// repairing it is engine work, not conformance work.
-const PLACEHOLDER_REASONS: &[PlaceholderReason] = &[
-    PlaceholderReason {
-        kind: "setColumnNotNull",
-        variant: "base",
-        dialect: "sqlite",
-        why: "F674 flipped the cell and left unsupported_reason without an arm",
-    },
-    PlaceholderReason {
-        kind: "dropColumnNotNull",
-        variant: "base",
-        dialect: "sqlite",
-        why: "F674 flipped the cell and left unsupported_reason without an arm",
-    },
-    PlaceholderReason {
-        kind: "dropColumnDefault",
-        variant: "base",
-        dialect: "sqlite",
-        why: "F674 flipped the cell and left unsupported_reason without an arm",
-    },
-    PlaceholderReason {
-        kind: "validateConstraint",
-        variant: "base",
-        dialect: "sqlite",
-        why: "same shape: an unsupported cell with no unsupported_reason arm",
-    },
-];
+/// The sweep above stays, and it is what keeps this list empty: it fails on any
+/// row that starts showing the sentinel, and on any pin left here once its row
+/// stops. Do not re-populate this list to make a red run green - a sentinel in
+/// the output means a cell was declared `unsupported` without its reason arm.
+///
+/// Note this list could only ever have held SEVEN of the affected cells' four
+/// rows partially: this suite covers PostgreSQL and SQLite, and three of the four
+/// rows shipped the placeholder on MYSQL too, which no live suite here reaches.
+/// The offline sweep in `tests/unsupported_reason_is_operator_facing.rs` covers
+/// all three dialects and is the primary guard for that reason.
+const PLACEHOLDER_REASONS: &[PlaceholderReason] = &[];
 
 /// Rows whose representative could not be made executable, with the reason.
 ///

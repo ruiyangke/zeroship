@@ -456,13 +456,28 @@ fn ordered_unique_creation_is_visible_to_a_later_composite_fk_on_every_dialect()
                 panic!("ordered unique-index delta then FK must lower on {dialect:?}: {error}")
             });
 
-        // SQLite has no native ALTER TABLE ADD UNIQUE lifecycle operation, but
-        // its ordered logical replay must still recognize the candidate-key state;
-        // executable all-target coverage is provided by the unique-index artifact.
-        validate_ir(&constraint_ir, validator_dialect(dialect)).unwrap_or_else(|error| {
-            panic!("add UNIQUE constraint then FK must validate on {dialect:?}: {error}")
-        });
-        if dialect != SqlDialect::Sqlite {
+        // SQLite has no native ALTER TABLE ADD UNIQUE lifecycle operation. This
+        // block used to assert that SQLite nonetheless CLEARED validate, and then
+        // skipped lower on SQLite alone - the gate accepting work the lowerer
+        // rejects, which is the exact defect `dialect-support.toml` now records by
+        // declaring `addConstraint/unique` `unsupported` there. Validate and lower
+        // agree from here: both refuse. The candidate-key replay this test is about
+        // keeps its executable all-target coverage from the unique-INDEX artifact
+        // above, which IS portable on SQLite.
+        if dialect == SqlDialect::Sqlite {
+            let error = validate_ir(&constraint_ir, validator_dialect(dialect))
+                .expect_err("addConstraint(unique) is not authorable on SQLite");
+            assert!(
+                error
+                    .to_string()
+                    .contains("SQLite cannot add or drop a table constraint in place"),
+                "SQLite must refuse addConstraint(unique) as an unsupported op, not for \
+                 some other reason: {error}"
+            );
+        } else {
+            validate_ir(&constraint_ir, validator_dialect(dialect)).unwrap_or_else(|error| {
+                panic!("add UNIQUE constraint then FK must validate on {dialect:?}: {error}")
+            });
             IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect, &no_inject_policy())
                 .lower_steps(&constraint_ir, &LiveSchema::default())
                 .unwrap_or_else(|error| {
@@ -524,10 +539,20 @@ fn dropping_the_only_ordered_candidate_key_before_a_composite_fk_is_rejected_eve
         ValidatorDialect::Mysql,
         ValidatorDialect::Sqlite,
     ] {
-        for (label, ir) in [
-            ("drop unique index", &index_ir),
-            ("drop UNIQUE constraint", &constraint_ir),
-        ] {
+        // The UNIQUE-CONSTRAINT artifact is PostgreSQL/MySQL-only. `addConstraint`
+        // of a unique constraint is declared `unsupported` on SQLite (there is no
+        // in-place ADD CONSTRAINT), so on SQLite that IR is refused at its FIRST op
+        // and never reaches the candidate-key check this test exists to pin. The
+        // unique-INDEX artifact is portable on all three and carries SQLite here.
+        let artifacts: Vec<(&str, &MigrationIr)> = if matches!(dialect, ValidatorDialect::Sqlite) {
+            vec![("drop unique index", &index_ir)]
+        } else {
+            vec![
+                ("drop unique index", &index_ir),
+                ("drop UNIQUE constraint", &constraint_ir),
+            ]
+        };
+        for (label, ir) in artifacts {
             let error = validate_ir(ir, dialect)
                 .expect_err("dropping the only candidate key before its FK must fail");
             assert!(

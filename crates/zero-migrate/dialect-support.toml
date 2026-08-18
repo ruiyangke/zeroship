@@ -114,6 +114,20 @@ pg = "portable"
 sqlite = "unsupported"
 mysql = "portable"
 
+# dropConstraint stays `portable` on SQLite, and the reason is MEASURED rather
+# than assumed. SQLite HAS a drop lane (`render/lower.rs`): when the live snapshot
+# carries the table and the named constraint is a FOREIGN KEY, the op lowers to a
+# 12-step rebuild and APPLIES end to end - proven through validate + lower + apply
+# by `tests/sqlite_declaration_flip_over_refusal_control.rs`. It refuses
+# `SqliteRebuildOnly` only for a missing snapshot or a NON-FK constraint.
+#
+# The live conformance suite recorded this row as a wrong declaration, but its
+# representative drops a constraint that is not a foreign key, so it measured the
+# narrow refusal and generalized it. Flipping this cell was TRIED here: the control
+# above went red with `UNSUPPORTED ... SQLite cannot add or drop a table constraint
+# in place`, i.e. the correction would have refused a migration that works today.
+# There is one row for all constraint kinds and no variant split, so `portable` is
+# the only disposition that does not break the working case.
 [[row]]
 kind = "dropConstraint"
 variant = "base"
@@ -465,12 +479,15 @@ pg = "portable"
 sqlite = "portable"
 mysql = "unsupported"
 
-# setColumnType — portable base; a `using` expression is deferred everywhere.
+# setColumnType — a `using` expression is deferred everywhere. The base retype is
+# PG-native; on SQLite the imperative op lane refuses it unconditionally
+# (`require_capability_for(NativeAlterColumn)`) because a retype is reconciled ONLY
+# by the differ's 12-step rebuild. MEASURED against a live SQLite: refuses.
 [[row]]
 kind = "setColumnType"
 variant = "base"
 pg = "portable"
-sqlite = "portable"
+sqlite = "unsupported"
 mysql = "portable"
 
 [[row]]
@@ -480,20 +497,23 @@ pg = "unsupported"
 sqlite = "unsupported"
 mysql = "unsupported"
 
-# setColumnDefault — plain/expression/container/json defaults are portable;
-# nextval defaults are PG-only.
+# setColumnDefault — plain/expression/container/json defaults are portable on
+# PG/MySQL; nextval defaults are PG-only. On SQLite the imperative op lane refuses
+# every shape unconditionally (same `NativeAlterColumn` gate as setColumnType): a
+# default change is reconciled only by the differ's 12-step rebuild. MEASURED
+# against a live SQLite: both variants refuse.
 [[row]]
 kind = "setColumnDefault"
 variant = "base"
 pg = "portable"
-sqlite = "portable"
+sqlite = "unsupported"
 mysql = "portable"
 
 [[row]]
 kind = "setColumnDefault"
 variant = "containerOrJson"
 pg = "portable"
-sqlite = "portable"
+sqlite = "unsupported"
 mysql = "portable"
 
 [[row]]
@@ -530,11 +550,14 @@ pg = "portable"
 sqlite = "portable"
 mysql = "portable"
 
+# SQLite's addConstraint rebuild lane covers FOREIGN KEYS only (`IrConstraintKind::Fk`);
+# a UNIQUE constraint falls through to the PG-shaped renderer and is refused. MEASURED
+# against a live SQLite: the three fk* variants APPLY, `unique` refuses. Per-variant.
 [[row]]
 kind = "addConstraint"
 variant = "unique"
 pg = "portable"
-sqlite = "portable"
+sqlite = "unsupported"
 mysql = "portable"
 
 [[row]]
@@ -708,11 +731,16 @@ pg = "unsupported"
 sqlite = "unsupported"
 mysql = "unsupported"
 
+# SQLite's CREATE TRIGGER grammar takes exactly one event, and
+# `support.rs`'s `Feature::TriggerMultipleEvents` has declared SQLite unsupported
+# for some time. This row said `portable`; the two contradicted each other and the
+# feature gate won, so the op was already refused. MEASURED against a live SQLite:
+# refuses with "SQLite CREATE TRIGGER accepts exactly one trigger event".
 [[row]]
 kind = "createTrigger"
 variant = "bodyMultipleEvents"
 pg = "unsupported"
-sqlite = "portable"
+sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
