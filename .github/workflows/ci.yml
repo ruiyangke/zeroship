@@ -90,6 +90,22 @@ jobs:
       - name: Project config contract
         run: bash tests/project_config_gate.sh
       - run: cargo check --workspace
+      # PROVISION BEFORE TESTING, and this step is what makes the deletion of
+      # `ZEROSHIP_REQUIRE_LIVE_BACKENDS` safe here rather than merely correct.
+      #
+      # `cargo test --workspace` below runs `compio-postgres` and `compio-redis`.
+      # Until now this job ran them with no servers at all: they returned early
+      # and cargo counted every one as a pass, so 42 Postgres tests and 14 Redis
+      # tests reported green in a job that had neither backend. Those targets now
+      # FAIL when nothing answers, so the backends have to be here.
+      #
+      # The SAME script a developer runs, not a `services:` block that would be a
+      # second definition of the same two servers. `services:` also cannot pass
+      # `-c wal_level=logical`, which is why plugin-db-live-gate below uses an
+      # explicit `docker run`; going through compose keeps this job on the
+      # definition the compose file already carries.
+      - name: Provision the required test backends (postgres, redis)
+        run: bash tests/provision_test_backends.sh
       # `--no-fail-fast` because cargo otherwise stops at the FIRST failing
       # target and never builds or runs the ones after it. Those targets do not
       # report as failed, they report as nothing at all, so one known-failing
@@ -731,13 +747,19 @@ jobs:
   # and GitHub service containers accept none. Same reason golden-path and
   # dev-vs-deployed launch theirs this way.
   #
-  # WITHOUT that flag ELEVEN TESTS SKIP AND STILL COUNT AS PASSED. Measured on
+  # WITHOUT that flag TEN TESTS SKIP AND STILL COUNT AS PASSED. Measured on
   # two servers differing in nothing else, both printing the IDENTICAL
   # `103 passed; 0 failed; 8 ignored` and both clearing the floor:
-  #     logical  -> exit 0, census 1 allowlisted / 0 not
-  #     replica  -> exit 1, census 12 total / 11 not allowlisted
+  #     logical  -> exit 0, census  1 allowlisted /  0 not
+  #     replica  -> exit 1, census 11 total       / 10 not allowlisted
   # The census is the ONLY thing that tells them apart, which is why the script
   # treats it as a failure rather than a report.
+  #
+  # The figures above read 12/11 until 2026-08-18. Re-measured that day on the
+  # full target against two servers differing only in wal_level: 11 markers on
+  # `replica` (10 wal-worded, 1 postgis) against 1 on `logical`, and
+  # `pg_has_logical_wal` has exactly 10 call sites. Ten is what the tree does
+  # today; the old number was copied into three files and re-run in none.
   plugin-db-live-gate:
     runs-on: ubuntu-latest
     steps:

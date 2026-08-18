@@ -587,13 +587,23 @@ Reachable only from test code. Setting them in a deployment does nothing.
 `CONTROL_TEST_DB` `MIGRATED_TEST_DB` `PG_TEST_URL` `REDIS_TEST_URL`
 `LIVE_DB_TEST_URL` `ZEROSHIP_SCHEDULER_TEST_DB` `ZERO_MIGRATE_TEST_PG_URL`
 `GATEWAY_ANCHORS_DB_URL` `GATEWAY_POOL_SMOKE_URL` `DRAGONFLY_CLUSTER_SEEDS`
-`AUTH_TEST_SMTP_SINK` `KV_REQUIRE_REDIS` `ZEROSHIP_REQUIRE_LIVE_BACKENDS`
+`AUTH_TEST_SMTP_SINK` `KV_REQUIRE_REDIS`
 `ZEROSHIP_SESSION_SECRET` `ZEROSHIP_SESSION_SECRET_PREV`
 `ZEROSHIP_SESSION_NONCE_CAPACITY` `ZEROSHIP_DW_E2E*` `ZEROSHIP_DW23_BENCH_*`
 `ZEROSHIP_NET_TEST_DNS_HANG_HOST` `ZEROSHIP_NET_TEST_DNS_HANG_MS`
 
 CI also sets `PG_CONTAINER` `PG_HOST` `PG_PORT` `PG_USER` `PG_PASS`
 `POSTGRES_USER` `POSTGRES_PASSWORD` `REDPANDA_BROKERS` `ZS_FRESHNESS_STRICT`.
+
+`PG_TEST_URL` and `REDIS_TEST_URL` REDIRECT the driver suites; they do not
+enable them. Unset, `libs/compio-postgres` dials
+`postgres://postgres:zeroship@localhost:5440/zeroship` and `libs/compio-redis`
+dials `redis://127.0.0.1:6390` - the two addresses
+`tests/provision_test_backends.sh` publishes from `deploy/compose` - and a
+server that does not answer FAILS the test with the address it tried and the
+command that provisions one. There is no variable that turns that back into a
+skip. `ZEROSHIP_REQUIRE_LIVE_BACKENDS` was that variable, opt-in and therefore
+unset in every run it would have helped; it is deleted, not renamed.
 
 ---
 
