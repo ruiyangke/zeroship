@@ -76,8 +76,27 @@ WORK="$(mktemp -d)"
 
 PG_CONTAINER="${PG_CONTAINER:-compose-postgres-1}"
 PG_USER="${PG_USER:-postgres}"
-PG_DB="${PG_DB:-zeroship_storageleg}"
+# Per-RUN database name, so a second run of this harness cannot DROP ... WITH
+# (FORCE) this one's database out from under it fifteen minutes in. FORCE
+# terminates every other backend on the database first, so against a fixed name
+# the drop always succeeds - including when the other backend is that second
+# run. tests/lib/scratch_db.sh carries the measured collision and
+# `tests/lib_scratch_db_selftest.sh` covers both directions.
+#
+# PG_DB stays the caller's knob and a database the caller named is NEVER
+# dropped on exit - that is how you inspect a failed run. DATABASE_URL is
+# deliberately NOT read for the name: it has never been coupled to PG_DB here
+# (the recreate targets $PG_DB while the services get $DATABASE_URL), and
+# deriving the name from it would aim WITH (FORCE) at whatever that DSN names.
+# shellcheck source=tests/lib/scratch_db.sh
+. "$ROOT/tests/lib/scratch_db.sh"
+TEST_DB="${TEST_DB:-${PG_DB:-}}"
+zs_scratch_db_resolve zeroship_storageleg || exit $?
+PG_DB="$TEST_DB"
 DB_URL="${DATABASE_URL:-postgres://postgres:zeroship@localhost:5440/$PG_DB}"
+# zs_scratch_db_cleanup reaches the server through `run_psql`; without it the
+# generated database is leaked and the library says so rather than pretending.
+run_psql() { docker exec "$PG_CONTAINER" psql -U "$PG_USER" "$@"; }
 # A band of its own: kv uses 9392/8392/8302/3011, streaming 9394/8394/8304/3061,
 # golden_path 9390/8390/8300 -- so all four can run at once.
 ZEROSHIP_CONTROL_PORT="${ZEROSHIP_CONTROL_PORT:-9396}"
@@ -120,6 +139,11 @@ cleanup() {
   [ -f "$WORK/config.ts.bak" ] && cp "$WORK/config.ts.bak" "$APP/src/server/config.ts"
   # ...and the app source if a source mutation edited it.
   [ -f "${MUTATE_BAK:-}" ] && cp "$MUTATE_BAK" "$APP/src/index.ts"
+  # Drops the per-run database, ABOVE the KEEP_WORK return: KEEP_WORK keeps the
+  # work dir, and letting it also keep a database nobody named would leak one
+  # per run under a name no later run reuses. To keep the data, name it -
+  # TEST_DB=<name> is never dropped.
+  zs_scratch_db_cleanup
   # KEEP_WORK=1 leaves the service logs behind. A storage divergence is almost
   # always explained by a line in worker.log, and that line is gone by the time
   # the diff is on screen otherwise.

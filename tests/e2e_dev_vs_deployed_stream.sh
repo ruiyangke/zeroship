@@ -82,8 +82,27 @@ WORK="$(mktemp -d)"
 
 PG_CONTAINER="${PG_CONTAINER:-compose-postgres-1}"
 PG_USER="${PG_USER:-postgres}"
-PG_DB="${PG_DB:-zeroship_stream}"
+# Per-RUN database name, so a second run of this harness cannot DROP ... WITH
+# (FORCE) this one's database out from under it fifteen minutes in. FORCE
+# terminates every other backend on the database first, so against a fixed name
+# the drop always succeeds - including when the other backend is that second
+# run. tests/lib/scratch_db.sh carries the measured collision and
+# `tests/lib_scratch_db_selftest.sh` covers both directions.
+#
+# PG_DB stays the caller's knob and a database the caller named is NEVER
+# dropped on exit - that is how you inspect a failed run. DATABASE_URL is
+# deliberately NOT read for the name: it has never been coupled to PG_DB here
+# (the recreate targets $PG_DB while the services get $DATABASE_URL), and
+# deriving the name from it would aim WITH (FORCE) at whatever that DSN names.
+# shellcheck source=tests/lib/scratch_db.sh
+. "$ROOT/tests/lib/scratch_db.sh"
+TEST_DB="${TEST_DB:-${PG_DB:-}}"
+zs_scratch_db_resolve zeroship_stream || exit $?
+PG_DB="$TEST_DB"
 DB_URL="${DATABASE_URL:-postgres://postgres:zeroship@localhost:5440/$PG_DB}"
+# zs_scratch_db_cleanup reaches the server through `run_psql`; without it the
+# generated database is leaked and the library says so rather than pretending.
+run_psql() { docker exec "$PG_CONTAINER" psql -U "$PG_USER" "$@"; }
 ZEROSHIP_CONTROL_PORT="${ZEROSHIP_CONTROL_PORT:-9394}"
 ZEROSHIP_WORKER_PORT="${ZEROSHIP_WORKER_PORT:-8394}"
 ZEROSHIP_GATEWAY_PORT="${ZEROSHIP_GATEWAY_PORT:-8304}"
@@ -135,6 +154,8 @@ cleanup() {
     ( cd "$ROOT" && pnpm --filter @zeroship/bootstrap build ) >/dev/null 2>&1 \
       || echo "  WARNING: bootstrap restore build FAILED -- run 'pnpm --filter @zeroship/bootstrap build' by hand"
   fi
+  # Drops the per-run database. A no-op when the caller named it.
+  zs_scratch_db_cleanup
   rm -rf "$WORK"
 }
 trap cleanup EXIT

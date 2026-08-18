@@ -63,8 +63,32 @@ fi
 # PG_CONTAINER when running against a differently-named container.
 PG_CONTAINER="${PG_CONTAINER:-compose-postgres-1}"
 PG_USER="${PG_USER:-postgres}"
-PG_DB="${PG_DB:-zeroship_golden}"
+# The database name carries a per-RUN token, because the recreate below is
+# `DROP DATABASE ... WITH (FORCE)`: FORCE terminates every other backend on
+# that database first, so against a fixed name the drop always succeeds -
+# including when the other backend is a second run of this harness that is
+# fifteen minutes into its own work. tests/lib/scratch_db.sh carries the
+# measured collision and `tests/lib_scratch_db_selftest.sh` covers it.
+#
+# PG_DB stays the caller's knob, and a database the caller named is NEVER
+# dropped on exit - that is how you inspect a failed run.
+#
+# GOLDEN_PATH_DSN is deliberately NOT read for the name. It carries one in its
+# path, but the two have never been coupled here: the recreate below has always
+# targeted $PG_DB while the services got $GOLDEN_PATH_DSN, so a DSN naming the
+# shared `zeroship` database already means "migrate one database and test
+# another". Deriving the name from it would fix that mismatch by pointing WITH
+# (FORCE) at whatever the DSN names, which for that DSN is the shared database.
+# Left as found; the coupling is a separate change with a separate argument.
+# shellcheck source=tests/lib/scratch_db.sh
+. "$ROOT/tests/lib/scratch_db.sh"
+TEST_DB="${TEST_DB:-${PG_DB:-}}"
+zs_scratch_db_resolve zeroship_golden || exit $?
+PG_DB="$TEST_DB"
 DB_URL="${GOLDEN_PATH_DSN:-postgres://postgres:zeroship@localhost:5440/$PG_DB}"
+# zs_scratch_db_cleanup reaches the server through `run_psql`; without it the
+# generated database is leaked and the library says so rather than pretending.
+run_psql() { docker exec "$PG_CONTAINER" psql -U "$PG_USER" "$@"; }
 # Distinct ports so this never clashes with a running dev stack.
 ZEROSHIP_CONTROL_PORT="${ZEROSHIP_CONTROL_PORT:-9390}"
 ZEROSHIP_WORKER_PORT="${ZEROSHIP_WORKER_PORT:-8390}"
@@ -221,6 +245,11 @@ cleanup() {
   # checkout -- fail for a reason that has nothing to do with what they changed.
   [ -n "${PF_GEN_DIR:-}" ] && chmod u+w "$PF_GEN_DIR" \
     "$PF_GEN_DIR"/env.db.ts "$PF_GEN_DIR"/schema.runtime.json 2>/dev/null || true
+  # Drops the per-run database. A no-op when the caller named it, and armed
+  # here rather than after step 2 because a migration that fails leaves a
+  # database behind exactly like a failing assertion does - and with a per-run
+  # name nothing would ever reuse it.
+  zs_scratch_db_cleanup
   wait 2>/dev/null || true
 }
 trap cleanup EXIT
