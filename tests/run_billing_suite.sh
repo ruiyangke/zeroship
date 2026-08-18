@@ -161,6 +161,25 @@ DSN="postgresql://${PG_USER}:${PG_PASS}@${PG_HOST}:${PG_PORT}/${TEST_DB}"
 # cannot live in the shared file, which is exactly what that tier is for.
 export PG_TEST_URL="$DSN"
 
+# ONE BRIDGE REMAINS, and it is temporary and load-bearing.
+#
+# crates/control/tests/workflow_engine_test.rs still reads CONTROL_TEST_DB. It
+# was the single file left unconverted, because another worktree is editing it
+# and converting it here would have produced a conflict rather than a change.
+#
+# Dropping the export without converting the file is NOT harmless, and this
+# gate is what proved it: with only PG_TEST_URL exported, that binary's 93 tests
+# announced "skip: CONTROL_TEST_DB not set" and the skip census failed the run.
+# 0 failed, 751 passed, and 93 tests that had silently stopped executing - which
+# is precisely the failure mode this whole change exists to remove, reproduced
+# by the change itself.
+#
+# So the name is exported until that file lands. DELETE THIS EXPORT in the same
+# commit that converts workflow_engine_test.rs to
+# zeroship_core::config::test_database_url_opt; the skip census will tell you
+# immediately if you delete it too early.
+export CONTROL_TEST_DB="$DSN"
+
 run_psql() { PGPASSWORD="$PG_PASS" "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" "$@"; }
 
 # Armed BEFORE the database is created: a migration that fails leaves one behind
