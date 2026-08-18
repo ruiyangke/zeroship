@@ -26,7 +26,20 @@ with-geo-types-0_7 = ["postgres-types/with-geo-types-0_7"]
 with-jiff-0_2 = ["postgres-types/with-jiff-0_2"]
 with-smol_str-01 = ["postgres-types/with-smol_str-01"]
 with-cidr-0_3 = ["postgres-types/with-cidr-0_3"]
-tls = ["dep:compio-tls"]
+# rustls-backed TLS: `MakeRustlsConnect` (src/tls_rustls.rs) plus the pool's
+# ability to open encrypted connections. rustls is pinned to `aws-lc-rs`, the
+# workspace's single crypto provider (see the root Cargo.toml comment on
+# `compio-tls`); the connector installs that provider explicitly rather than
+# relying on a process-global default, so a binary that never calls
+# `install_default` still works.
+tls = [
+    "dep:compio-tls",
+    "dep:futures-rustls",
+    "dep:rustls",
+    "dep:rustls-native-certs",
+    "dep:sha2",
+    "dep:x509-parser",
+]
 # Test-only surface for downstream bench / unit-test crates that need to
 # synthesise `Row` / `Statement` / `Column` values without a live
 # Postgres. The feature is dev-only (consumers add it under
@@ -55,6 +68,40 @@ compio = { workspace = true }
 socket2 = { workspace = true }
 
 [dependencies.compio-tls]
+workspace = true
+optional = true
+
+# `compio_tls::TlsStream` is the compio-side AsyncRead/AsyncWrite adapter, but
+# it exposes only the negotiated ALPN - not the peer certificate chain, which
+# `tls-server-end-point` channel binding needs. So we drive the handshake with
+# futures-rustls directly (reading `peer_certificates()` off the
+# `ClientConnection` before converting), and hand the finished stream to
+# compio-tls via its `From` impl. Same version and features compio-tls itself
+# pins, so this adds no crate to the lock.
+[dependencies.futures-rustls]
+version = "0.26"
+default-features = false
+features = ["logging", "tls12"]
+optional = true
+
+[dependencies.rustls]
+version = "0.23"
+default-features = false
+features = ["std", "logging", "tls12", "aws-lc-rs"]
+optional = true
+
+[dependencies.rustls-native-certs]
+version = "0.8"
+optional = true
+
+# `tls-server-end-point` is the hash of the server's DER certificate, and RFC
+# 5929 picks the hash from the certificate's own signatureAlgorithm - so we
+# have to read that OID out of the DER.
+[dependencies.x509-parser]
+version = "0.18"
+optional = true
+
+[dependencies.sha2]
 workspace = true
 optional = true
 
