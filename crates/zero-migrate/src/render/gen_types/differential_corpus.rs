@@ -1168,16 +1168,6 @@ const ONLY_THE_FOLD_BACKED_WALKERS_FAIL_CLOSED: &str =
      the fold refuses; harmless at the composite entry point, because \
      render_artifacts returns the fold's error and emits neither artifact";
 
-/// The MySQL retype residue this corpus found. Same shape as the section B row
-/// that shipped, on the dialect that row never measured.
-const MYSQL_RETYPE_KEEPS_THE_OLD_PHYSICAL_TYPE: &str =
-    "UNRECORDED before this corpus. On MySQL a setColumnType re-derives \
-     data_type and ddl_type_override but leaves ColumnSnapshot::mysql_physical_type \
-     holding the PRE-RETYPE type, and apply::drift::column_data_types_eq makes \
-     that field the type AUTHORITY whenever both sides carry one -- so the \
-     shipped fix for the same shape (docs/review-log.md:26717-26733) is inert on \
-     MySQL, where data_type is never consulted";
-
 /// The rename carrier this corpus found. The log's own list of still-open
 /// carriers names four; this is a fifth of the same kind.
 const A_CHECK_BODY_IS_A_FIFTH_RENAME_CARRIER: &str =
@@ -1270,14 +1260,18 @@ const ROWS: &[Row] = &[
     Row { key: "c_retype_drops_case_sensitivity|Mysql|column_carries(labels.tag ~ case_sensitive: Some(|\"caseSensitive\")", verdict: "AGREED no", status: Status::Consistent },
 
     // Row 4 (`setColumnType` losing a parameter going in and keeping it coming
-    // out, docs/review-log.md:26632-26654): FIXED on Postgres and SQLite. NOT
-    // fixed on MySQL, in a field that row never looked at.
+    // out, docs/review-log.md:26632-26654): FIXED on Postgres and SQLite when that
+    // row shipped, and FIXED on MySQL afterwards - the MySQL half rode on
+    // `mysql_physical_type`, a field that row never looked at, and the fold now
+    // re-derives that contract from the column the replay finished with rather than
+    // from the type it briefly had. The three walkers needed no matching change:
+    // FFD and ATO already answered `no` here, and only FO was wrong.
     Row { key: "c_retype_type_parameters|Postgres|column_carries(shapes.narrow ~ 24)", verdict: "AGREED no", status: Status::Consistent },
     Row { key: "c_retype_type_parameters|Sqlite|column_carries(shapes.narrow ~ 24)", verdict: "AGREED no", status: Status::Consistent },
-    Row { key: "c_retype_type_parameters|Mysql|column_carries(shapes.narrow ~ 24)", verdict: "DIVERGENT FO=yes FFD=no ATO=no", status: Status::Defect(MYSQL_RETYPE_KEEPS_THE_OLD_PHYSICAL_TYPE) },
+    Row { key: "c_retype_type_parameters|Mysql|column_carries(shapes.narrow ~ 24)", verdict: "AGREED no", status: Status::Consistent },
     Row { key: "c_retype_type_parameters|Postgres|column_carries(shapes.fixed ~ 8)", verdict: "AGREED no", status: Status::Consistent },
     Row { key: "c_retype_type_parameters|Sqlite|column_carries(shapes.fixed ~ 8)", verdict: "AGREED no", status: Status::Consistent },
-    Row { key: "c_retype_type_parameters|Mysql|column_carries(shapes.fixed ~ 8)", verdict: "DIVERGENT FO=yes FFD=no ATO=no", status: Status::Defect(MYSQL_RETYPE_KEEPS_THE_OLD_PHYSICAL_TYPE) },
+    Row { key: "c_retype_type_parameters|Mysql|column_carries(shapes.fixed ~ 8)", verdict: "AGREED no", status: Status::Consistent },
     Row { key: "c_retype_type_parameters|Postgres|column_carries(shapes.embedding ~ 3)", verdict: "AGREED no", status: Status::Consistent },
     Row { key: "c_retype_type_parameters|Sqlite|column_carries(shapes.embedding ~ 3)", verdict: "AGREED no", status: Status::Consistent },
     Row { key: "c_retype_type_parameters|Mysql|column_carries(shapes.embedding ~ 3)", verdict: "AGREED no", status: Status::Consistent },
@@ -1363,15 +1357,16 @@ const ROWS: &[Row] = &[
     //
     // Several of the defects in section B appeared only in sequence. These three
     // streams are the sequences, and one of them is where the MySQL retype
-    // residue above shows up a second time, through addColumn rather than
-    // createTable -- so the defect is in the retype arm, not in one column
-    // constructor.
+    // residue above showed up a second time, through addColumn rather than
+    // createTable -- which is what said the defect was in the retype arm and not
+    // in one column constructor. Both rows moved together when it was fixed,
+    // which is the same evidence read the other way round.
     Row { key: "c_create_then_add_then_retype|Postgres|columns(invoices)", verdict: "AGREED {id,total}", status: Status::Consistent },
     Row { key: "c_create_then_add_then_retype|Sqlite|columns(invoices)", verdict: "AGREED {id,total}", status: Status::Consistent },
     Row { key: "c_create_then_add_then_retype|Mysql|columns(invoices)", verdict: "AGREED {id,total}", status: Status::Consistent },
     Row { key: "c_create_then_add_then_retype|Postgres|column_carries(invoices.total ~ 24)", verdict: "AGREED no", status: Status::Consistent },
     Row { key: "c_create_then_add_then_retype|Sqlite|column_carries(invoices.total ~ 24)", verdict: "AGREED no", status: Status::Consistent },
-    Row { key: "c_create_then_add_then_retype|Mysql|column_carries(invoices.total ~ 24)", verdict: "DIVERGENT FO=yes FFD=no ATO=no", status: Status::Defect(MYSQL_RETYPE_KEEPS_THE_OLD_PHYSICAL_TYPE) },
+    Row { key: "c_create_then_add_then_retype|Mysql|column_carries(invoices.total ~ 24)", verdict: "AGREED no", status: Status::Consistent },
 
     Row { key: "c_two_renames_in_sequence|Postgres|columns(stages)", verdict: "AGREED {derived,id,last_name}", status: Status::Consistent },
     Row { key: "c_two_renames_in_sequence|Sqlite|columns(stages)", verdict: "AGREED {derived,id,last_name}", status: Status::Consistent },
@@ -1712,8 +1707,8 @@ fn the_corpus_has_the_shape_it_claims() {
     let defects = count(|r| matches!(r.status, Status::Defect(_)));
 
     assert_eq!(ROWS.len(), 114, "recorded rows");
-    assert_eq!(agreed, 68, "AGREED rows");
-    assert_eq!(divergent, 43, "DIVERGENT rows");
+    assert_eq!(agreed, 71, "AGREED rows");
+    assert_eq!(divergent, 40, "DIVERGENT rows");
     assert_eq!(sole, 3, "SOLE rows, which cross-check nothing");
     assert_eq!(
         agreed + divergent + sole,
@@ -1721,10 +1716,13 @@ fn the_corpus_has_the_shape_it_claims() {
         "no other verdict shape"
     );
     assert_eq!(
-        defects, 8,
+        defects, 5,
         "rows recording a defect. Lowering this number means a walker was fixed \
          AND its row re-measured, or that evidence was deleted; the two read the \
-         same in a diff, so the number is stated here"
+         same in a diff, so the number is stated here. It went 8 -> 5 when the \
+         MySQL retype stopped folding the pre-retype physical contract: three rows \
+         on one defect, all re-measured to AGREED against a live MySQL oracle \
+         (tests/fold_retype_physical_type_mysql.rs)"
     );
     assert_eq!(CASES.len(), 20, "differential cases");
     assert_eq!(

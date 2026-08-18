@@ -3189,23 +3189,54 @@ pub(crate) fn column_snapshot_for_field(
         comment_sentinel,
         ..Default::default()
     };
-    if matches!(dialect, SqlDialect::Mysql) {
-        // Derived from what the renderer DECIDES, not from `data_type`, so it accounts
-        // for `ddl_type_override` and the unbounded-text spelling the same way the
-        // emitted DDL does. Reading the renderer's input instead would describe a
-        // column this engine never creates.
-        //
-        // `inline_pk` is false because it is read only on the SQLite rowid-alias leg
-        // (`sqlite_auto_increment_identity_pk`); the MySQL arm never consults it.
-        //
-        // The live side parses MySQL's own `COLUMN_TYPE` through the same function.
-        // That is what lets the two sides agree despite spelling apart: the renderer
-        // emits `DECIMAL(65, 30)` and MySQL stores `decimal(65,30)`, and both parse
-        // to the same values.
-        let rendered = column_type_for_render(&column, dialect, false);
-        column.mysql_physical_type = Some(MysqlPhysicalType::parse(&rendered));
-    }
+    stamp_mysql_physical_type(&mut column, dialect);
     Ok(column)
+}
+
+/// Stamp [`ColumnSnapshot::mysql_physical_type`] from the column's FINAL rendered
+/// type. A no-op off MySQL.
+///
+/// Derived from what the renderer DECIDES, not from `data_type`, so it accounts for
+/// `ddl_type_override` and the unbounded-text spelling the same way the emitted DDL
+/// does. Reading the renderer's input instead would describe a column this engine
+/// never creates.
+///
+/// `inline_pk` is false because it is read only on the SQLite rowid-alias leg
+/// (`sqlite_auto_increment_identity_pk`); the MySQL arm never consults it.
+///
+/// The live side parses MySQL's own `COLUMN_TYPE` through the same function. That is
+/// what lets the two sides agree despite spelling apart: the renderer emits
+/// `DECIMAL(65, 30)` and MySQL stores `decimal(65,30)`, and both parse to the same
+/// values.
+///
+/// # Why this is a FUNCTION rather than three lines at the end of one builder
+///
+/// The field is a PROJECTION of the finished column, and this builder is not the last
+/// writer of what it projects. `data_type` and `ddl_type_override` are rewritten
+/// AFTER it returns by every facet the builder cannot see from a `FieldDescriptor`
+/// alone - the author type override (`numeric`/`DECIMAL(p, s)`), the UUID column
+/// metadata, the value-format metadata, the bytewise collation override, and the
+/// named-type metadata - in the fold replay and in the lowerer alike. A stamp taken
+/// before those ran describes the type the column briefly had.
+///
+/// MEASURED on live MySQL 8.4, through the real pipeline: a `createTable` carrying
+/// `decimal(12, 2)` folded `Plain { kind: "double" }` while the server held
+/// `Decimal { precision: 12, scale: 2 }`, and structural drift reported
+/// `column amount data_type expected "numeric" actual "decimal"` against a database
+/// that was exactly what had been deployed. A `uuid` column folded
+/// `Character { length: 191 }` against a live `Character { length: 36 }` at the same
+/// time. So the derivation has ONE spelling and gets applied wherever a column stops
+/// changing - see `render::fold::restamp_mysql_physical_types`.
+///
+/// **Only MySQL.** `apply::drift::column_data_types_eq` consults the contract only
+/// when BOTH sides carry one, and PostgreSQL/SQLite introspection leaves it `None`;
+/// filling it on either would compare a contract against an absent one.
+pub(crate) fn stamp_mysql_physical_type(column: &mut ColumnSnapshot, dialect: SqlDialect) {
+    if !matches!(dialect, SqlDialect::Mysql) {
+        return;
+    }
+    let rendered = column_type_for_render(column, dialect, false);
+    column.mysql_physical_type = Some(MysqlPhysicalType::parse(&rendered));
 }
 
 /// Stamp a named primary-key constraint and its backing index onto a snapshot.

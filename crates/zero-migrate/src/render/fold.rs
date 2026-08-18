@@ -2254,6 +2254,14 @@ pub fn fold_ops_onto(
                 //     case-insensitivity IS the `citext` type, so the retype destroys
                 //     it; measured, `citext → character varying(40)` reported
                 //     `case_sensitive expected "false" actual ""` forever after.
+                //
+                // `mysql_physical_type` is NOT copied here, and that is the point of
+                // where it IS handled: it is a projection of the finished column, so
+                // `restamp_mysql_physical_types` re-derives it for every column this
+                // replay decided, after every arm has stopped writing. Copying it
+                // from `new_col` would have been a second correct-looking spelling
+                // that the arms below (`ColType::Uuid`, `source_was_native_uuid`)
+                // could still invalidate.
                 col.inline_checks = new_col.inline_checks;
                 col.collation = new_col.collation;
                 col.case_sensitive = new_col.case_sensitive;
@@ -2932,6 +2940,8 @@ pub fn fold_ops_onto(
             .collect(),
     });
 
+    restamp_mysql_physical_types(&mut tables, base, dialect);
+
     Ok(SchemaSnapshot {
         tables,
         table_rls,
@@ -2947,6 +2957,103 @@ pub fn fold_ops_onto(
         triggers,
         vendor_objects,
     })
+}
+
+/// Re-derive every REPLAY-DECIDED column's MySQL physical contract from the column
+/// the replay FINISHED with. A no-op off MySQL.
+///
+/// `ColumnSnapshot::mysql_physical_type` is not an independent fact about a column,
+/// it is a projection of the type the renderer would emit for it - which is why the
+/// derivation lives in exactly one place (`declarative::stamp_mysql_physical_type`)
+/// and why this runs LAST rather than inside the arms.
+///
+/// Running it per arm was the shape that failed. The shared column builder stamps the
+/// contract, and then the arms keep deciding: the author type override rewrites
+/// `data_type`/`ddl_type_override` for a decimal, the UUID / value-format / bytewise
+/// collation / named-type appliers each rewrite `ddl_type_override` again, and
+/// `SetColumnType` rewrites both. Every one of those is a place a future arm can
+/// forget, and the differ cannot tell a forgotten stamp from a real difference - so
+/// the projection is derived once, from the finished column, where no arm can miss
+/// it.
+///
+/// # A carried-through base column is left ALONE, and that is not an optimization
+///
+/// [`fold_ops_onto`] folds onto a base that is routinely a LIVE CATALOG READ (the
+/// napi lowerer hands `snapshot_schema`'s output straight in). A live MySQL column
+/// carries the contract `MysqlPhysicalType::parse` recovered from the server's own
+/// `COLUMN_TYPE`, which is strictly better information than anything re-derivable
+/// from a snapshot: introspection stores `data_type` "decimal" with no
+/// `ddl_type_override`, so re-rendering it would answer `Plain { kind: "decimal" }`
+/// and LOSE the precision and scale the server reported. Re-deriving a column the
+/// replay never touched would therefore corrupt the base rather than repair it.
+///
+/// The test is the derivation's own inputs - the three fields
+/// `declarative::column_type_for_render` reads on MySQL. When all three are what the
+/// base had, the column renders to the same type it always did and its existing
+/// contract still describes it; when any moved, this fold decided the type and owes
+/// the matching contract.
+///
+/// Keyed on the column NAME, and that is sound HERE rather than in general: on MySQL
+/// a column's name never moves. `renameColumn` is `unsupported` on MySQL in
+/// `dialect-table.ts`, `render::lower`'s `refuse_mysql_alter_column` refuses every
+/// alter-column op, and the differential corpus measures `fold_ops` itself answering
+/// `refused` for a MySQL `renameColumn`. A renamed column WOULD defeat a name key -
+/// its live-read contract carries information the derivation cannot rebuild, and it
+/// would look like a column the base never had - so if that cell ever becomes
+/// supported, this lookup needs the rename alias before the op does.
+///
+/// Idempotent on what it does touch: the input is the finished column and the
+/// derivation is pure, so re-deriving a contract that is already right rewrites it to
+/// itself.
+///
+/// MySQL alone, deliberately. `apply::drift::column_data_types_eq` reads the contract
+/// only when BOTH sides carry one, and PostgreSQL and SQLite introspection leave the
+/// field `None` - so populating it under another dialect would compare a contract
+/// against an absent one, which that function says "would report a difference that
+/// says nothing about the database".
+fn restamp_mysql_physical_types(
+    tables: &mut BTreeMap<String, TableSnapshot>,
+    base: &SchemaSnapshot,
+    dialect: SqlDialect,
+) {
+    if !matches!(dialect, SqlDialect::Mysql) {
+        return;
+    }
+    for (name, table) in tables.iter_mut() {
+        let base_table = base.tables.get(name);
+        for column in &mut table.columns {
+            let carried_through = base_table
+                .and_then(|base_table| {
+                    base_table
+                        .columns
+                        .iter()
+                        .find(|candidate| candidate.name == column.name)
+                })
+                .is_some_and(|base_column| renders_the_same_mysql_type(base_column, column));
+            if carried_through {
+                continue;
+            }
+            crate::render::declarative::stamp_mysql_physical_type(column, dialect);
+        }
+    }
+}
+
+/// Whether two columns feed `declarative::column_type_for_render` identical inputs on
+/// MySQL, and therefore render to the same physical type.
+///
+/// These three fields are that function's whole MySQL input: `ddl_type_override` wins
+/// outright when present, the case-insensitive `text` spelling is chosen from
+/// `case_sensitive` plus `data_type`, and everything else falls through to
+/// `mysql_ddl_type(data_type)`. Its two remaining branches are SQLite-only.
+///
+/// Deliberately NOT `ColumnSnapshot`'s `PartialEq`, which EXCLUDES
+/// `ddl_type_override` - the single field most likely to have moved when a fold
+/// decides a column's MySQL type, and the one that would make this answer "unchanged"
+/// about a column whose rendered type changed completely.
+fn renders_the_same_mysql_type(left: &ColumnSnapshot, right: &ColumnSnapshot) -> bool {
+    left.data_type == right.data_type
+        && left.ddl_type_override == right.ddl_type_override
+        && left.case_sensitive == right.case_sensitive
 }
 
 fn apply_fold_sqlite_rowid_metadata(snap: &mut TableSnapshot) -> Result<(), FoldError> {
