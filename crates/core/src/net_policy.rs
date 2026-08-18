@@ -291,6 +291,11 @@ fn suffix_matches(suffix: &str, blocked: &str) -> bool {
 /// the reach the allowlist exists to deny. Suffixes an organisation controls
 /// end to end do not belong here; name them exactly instead.
 ///
+/// Owning the registration is not the test — this platform's own apex is
+/// listed, because signing up is how a third party obtains a hostname under
+/// it. What "controls end to end" excludes is a suffix whose every hostname
+/// stays with one organisation.
+///
 /// This list is a backstop, not a public-suffix list, and does not pretend to
 /// be exhaustive — operators extend it through the config overlay's
 /// `[control] frontable_wildcard_suffixes`. The
@@ -336,6 +341,17 @@ pub const FRONTABLE_WILDCARD_SUFFIXES: &[&str] = &[
     "surge.sh",
     "trycloudflare.com",
     "web.app",
+    // This deployment's own tenant apex, by the same criterion as the rest:
+    // a creator app named `myapp` serves at `myapp.zeroship.ai`
+    // (`control.app_base_domain`, crates/control/src/config.rs), so every
+    // creator obtains a hostname under it, and `auth.`/`console.`/`api.` are
+    // platform hosts under the same suffix. This is the compiled default
+    // value; a deployment that overrides `control.app_base_domain` names its
+    // own apex in `[control] frontable_wildcard_suffixes`. The dev/compose
+    // apex `zeroship.localhost` is deliberately absent: it resolves to
+    // loopback, which the runtime's SSRF check refuses at connect
+    // (crates/runtime/src/transport/ssrf.rs).
+    "zeroship.ai",
 ];
 
 #[cfg(test)]
@@ -413,12 +429,47 @@ mod tests {
             "*.deno.dev",
             "*.ngrok.io",
             "*.trycloudflare.com",
+            "*.zeroship.ai",
         ] {
             assert!(
                 HostPort::try_new(host, 443).is_err(),
                 "{host} fronts shared multi-tenant infrastructure"
             );
         }
+    }
+
+    /// This platform's own tenant apex is multi-tenant by the list's criterion:
+    /// creator apps serve at `{name}.zeroship.ai`, so a `*.zeroship.ai`
+    /// wildcard fronts every other creator's app plus `auth.`/`console.`.
+    ///
+    /// Both directions matter, and the positive arm is the one that fails if
+    /// the entry is written too broadly: an exact host stays grantable, so
+    /// naming one app or the auth host is unaffected.
+    ///
+    /// What this does NOT assert: that traffic to another creator's app is
+    /// blocked. It is not — `fetch` was never gated, and reaching
+    /// `https://victim.zeroship.ai` needs no grant at all. This covers the
+    /// raw-TCP wildcard authoring boundary only. It also says nothing about a
+    /// deployment that overrides `control.app_base_domain`; that apex reaches
+    /// the check through the operator catalog, not this backstop.
+    #[test]
+    fn operator_review_rejects_wildcards_over_the_platform_apex() {
+        assert!(
+            HostPort::try_new("*.zeroship.ai", 443).is_err(),
+            "a wildcard over the platform apex fronts every other creator's app"
+        );
+        assert!(
+            HostPort::try_new("*.internal.zeroship.ai", 443).is_err(),
+            "a deeper wildcard under the platform apex is the same reach"
+        );
+        assert!(
+            HostPort::try_new("auth.zeroship.ai", 443).is_ok(),
+            "an exact host under the platform apex stays grantable"
+        );
+        assert!(
+            HostPort::try_new("myapp.zeroship.ai", 443).is_ok(),
+            "naming one app exactly stays grantable"
+        );
     }
 
     #[test]
