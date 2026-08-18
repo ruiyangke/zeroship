@@ -30,6 +30,16 @@
 # inspects a failed run's data afterwards. An explicitly named database is
 # therefore also NEVER dropped on exit: the caller owns its lifetime.
 #
+# WHAT THIS DOES NOT BUY YOU. Per-run names make concurrent runs SAFE, not
+# unconditionally green: they still share one server. MEASURED 2026-08-17, two
+# auth suites started together against the dev Postgres on :5440
+# (max_connections 100, nothing else connected): the pair peaked at 96 of 100
+# backends, one finished 637 passed / 0 failed and the other lost 4 tests to
+# `SqlState 53300 sorry, too many clients already`. Both ran all 77 test
+# binaries and neither lost its database, which is the property this file is
+# about; the ceiling is the server's, and a third concurrent suite needs a
+# bigger max_connections rather than a change here.
+#
 # tests/lib_scratch_db_selftest.sh covers both directions of both functions.
 # ============================================================================
 
