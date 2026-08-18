@@ -38,9 +38,9 @@ async fn a_raw_begin_does_not_leak_to_the_next_borrower() {
         min_idle: 1,
         ..PoolConfig::default()
     };
-    let Ok(pool) = Pool::connect_with_config(&url, config).await else {
-        common::skip("pool_transaction_isolation (no reachable database)");
-        return;
+    let pool = match Pool::connect_with_config(&url, config).await {
+        Ok(pool) => pool,
+        Err(e) => common::postgres_unreachable(&url, &e),
     };
 
     {

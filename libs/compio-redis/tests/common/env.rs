@@ -22,12 +22,11 @@
 /// Every environment name this crate's tests are permitted to read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TestEnvKey {
-    /// Connection string for the gated single-node Redis suites.
+    /// Connection string for the single-node Redis suites. Absent means
+    /// `common::DEFAULT_REDIS_URL`, never "do not run".
     RedisTestUrl,
     /// Comma-separated seed list for the gated cluster suite.
     DragonflyClusterSeeds,
-    /// Opt-in strictness: a skip becomes a failure when this is `1`.
-    RequireLiveBackends,
 }
 
 impl TestEnvKey {
@@ -36,7 +35,6 @@ impl TestEnvKey {
         match self {
             Self::RedisTestUrl => "REDIS_TEST_URL",
             Self::DragonflyClusterSeeds => "DRAGONFLY_CLUSTER_SEEDS",
-            Self::RequireLiveBackends => "ZEROSHIP_REQUIRE_LIVE_BACKENDS",
         }
     }
 }

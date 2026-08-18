@@ -4,11 +4,19 @@ Scratch notes. Committed as they land, not when a conclusion exists.
 
 ## Instrument
 
-- `ZEROSHIP_REQUIRE_LIVE_BACKENDS=1` turns a self-skip into a hard failure.
-  Used on TARGETED runs only; on a whole-suite run it also panics on the one
-  legitimate allowlisted skip (`AUTH_TEST_SMTP_SINK`).
+- `ZEROSHIP_REQUIRE_LIVE_BACKENDS=1` turned a self-skip into a hard failure.
+  DELETED 2026-08-18. It was opt-in, so on a whole-suite run it also panicked
+  on the one legitimate allowlisted skip (`AUTH_TEST_SMTP_SINK`) - which is why
+  nobody set it, which is why it caught nothing. Postgres and Redis are now
+  required unconditionally: `tests/provision_test_backends.sh` stands them up,
+  the driver suites fail with the address they dialled, and the suite gates fail
+  on any announced skip they do not allowlist.
 - Skip announcements carry `ZEROSHIP-TEST-SKIPPED` (tests/lib/skip_census.sh:38).
 - Live PG confirmed on 127.0.0.1:5440 (PostgreSQL 16.14, `wal_level=replica`).
+  That server was `zs-auth-pg-5440`, started by hand and owned by no file in
+  this tree, squatting the port `deploy/compose`'s own postgres publishes. The
+  compose one runs `-c wal_level=logical`; the hand-started one did not, which
+  is why the reading above says `replica`.
 
 ## TARGETS: 45 test targets carry `required-features = ["live-db-tests"]`
 

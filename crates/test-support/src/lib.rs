@@ -26,53 +26,6 @@ use std::io::Write;
 /// zero occurrences before it was introduced here.
 pub const SKIP_MARKER: &str = "ZEROSHIP-TEST-SKIPPED";
 
-/// Set to `1` in a context that DECLARES the live backends are present. Then a
-/// skip is a misconfiguration rather than an expected absence, and [`skip`]
-/// turns it into a test failure instead of a silent pass.
-///
-/// This generalises the shape `crates/plugin-kv/tests/redis_backend.rs` already
-/// used for one variable (`KV_REQUIRE_REDIS=1` panics when `REDIS_TEST_URL` is
-/// unset) to every announcement site at once, without touching any call site:
-/// the check lives in the announcer, so every existing `skip()` caller inherits
-/// it.
-///
-/// Deliberately opt-in and deliberately not the default. An optional live
-/// backend is legitimate, and a suite that hard-fails on a developer laptop
-/// with no Redis is worse than one that skips: it trains people to ignore the
-/// failure, which is the same disease one stage later. The default stays a
-/// visible announcement; only an environment that claims to have provisioned
-/// the backend asks to be held to it.
-///
-/// This constant is the spelling the panic message interpolates. The READ
-/// below inlines the literal instead of using it, because the source gate
-/// lifts key literals out of the syntax tree and cannot see a name behind a
-/// `&str` constant. Keep the two in step.
-pub const REQUIRE_LIVE_BACKENDS_ENV: &str = "ZEROSHIP_REQUIRE_LIVE_BACKENDS";
-
-zeroship_core::declare_env_consumer!(
-    /// This crate's own environment reads.
-    ///
-    /// A LIBRARY consumer, so `target` is the cargo package: it is linked into
-    /// many test binaries and shipped in none.
-    pub TestSupportConsumer,
-    target = "zeroship-test-support",
-    scope = "test_support");
-
-/// `true` when the environment declares every live backend should be reachable.
-pub fn require_live_backends() -> bool {
-    // Class `test`: meaningless in a shipped image, and this crate is a
-    // dev-dependency that never links into one.
-    matches!(
-        zeroship_core::declared_env!(
-            test,
-            "ZEROSHIP_REQUIRE_LIVE_BACKENDS",
-            crate::TestSupportConsumer
-        )
-        .as_deref(),
-        Some("1")
-    )
-}
-
 /// Announce that a test did nothing because the backend it needs is absent.
 ///
 /// `reason` is carried through verbatim after the marker and should name what
@@ -91,17 +44,26 @@ pub fn require_live_backends() -> bool {
 /// The write is best-effort. A test that cannot reach stderr is not a test
 /// worth failing over, and a panicking announcer would turn a skip into a
 /// failure with a misleading cause.
-/// Under [`REQUIRE_LIVE_BACKENDS_ENV`]`=1` this PANICS rather than returning,
-/// so the skip lands in the harness's failure list instead of its pass count.
-/// The announcement is written FIRST and the panic raised second, on purpose: a
-/// gate that counts markers still sees the line, so the strict run and the
-/// permissive run produce the same census and differ only in the verdict.
+///
+/// THIS ANNOUNCES; IT DOES NOT DECIDE. There used to be a
+/// `ZEROSHIP_REQUIRE_LIVE_BACKENDS=1` arm here that turned every announcement
+/// into a panic, so whether an absent backend was fatal depended on an
+/// environment variable the failing developer had not set. Postgres and Redis
+/// are not optional for this workspace's tests, so the decision moved to the
+/// two places that can state it precisely and cannot be forgotten:
+///
+///   - the call site, for a backend the test cannot do without. It panics with
+///     the address it dialled and the command that provisions it, rather than
+///     calling this function at all. `libs/compio-postgres/tests/integration.rs`
+///     and `libs/compio-redis/tests/integration.rs` are the worked examples.
+///   - the suite gate, for everything else. `tests/lib/skip_census.sh` counts
+///     these markers, and `tests/run_auth_suite.sh` /
+///     `tests/run_billing_suite.sh` FAIL on any that is not named in an
+///     allowlist with a reason.
+///
+/// What is left for this function is the genuinely optional: a MinIO container
+/// on a machine with no docker, `pg_dump` off PATH, a pgvector extension that
+/// is not installed. Announcing those is right and failing on them is not.
 pub fn skip(reason: &str) {
     let _ = std::io::stderr().write_all(format!("{SKIP_MARKER}: {reason}\n").as_bytes());
-    if require_live_backends() {
-        panic!(
-            "{REQUIRE_LIVE_BACKENDS_ENV}=1 declares the live backends are provisioned, \
-             but this test skipped: {reason}"
-        );
-    }
 }

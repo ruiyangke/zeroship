@@ -159,10 +159,16 @@ async fn non_cluster_redis_behavior_is_bounded() {
     //     fails with ClusterBootstrap.
     // We don't assert a specific variant — just that the failure is
     // observable and doesn't hang.
-    let Some(url) = common::env::get(common::env::TestEnvKey::RedisTestUrl) else {
-        common::skip("skip: REDIS_TEST_URL not set");
-        return;
-    };
+    // The SINGLE-NODE Redis, which this suite requires and no longer skips for.
+    //
+    // Reachability is proved with a plain client FIRST, and that ordering is
+    // the point: with no server at all, `ClusterClient::connect` also returns
+    // Err, and the `Err` arm below would then be judging a connection refusal
+    // against `ClusterBootstrap` - a red test whose message names the wrong
+    // problem. Proving the node is up first means the match below is only ever
+    // read as what it is about.
+    let url = common::test_url();
+    drop(common::connect(&url).await);
     match ClusterClient::connect(&[url.as_str()], 4).await {
         Ok(cc) => {
             // Empty-topology case: slot lookup must return NoRoute.
