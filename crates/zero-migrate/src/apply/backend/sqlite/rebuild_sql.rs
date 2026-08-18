@@ -16,6 +16,34 @@
 //! genuinely cannot be replayed (it references a now-dropped column) FAILS CLOSED
 //! ([`RebuildError::DependentReplayFailed`]) — it is never silently destroyed.
 //!
+//! # A rebuild that MOVES a column renames it on the live table FIRST
+//!
+//! Verbatim replay has exactly one enemy: a rebuild whose new shape spells a
+//! column DIFFERENTLY from the one the captured DDL names. That is a column
+//! RENAME, and unlike a DROP it cannot be skipped — the dependent is meant to
+//! survive, over the moved column.
+//!
+//! The rebuild refuses to token-rewrite the captured text. A `CREATE INDEX` names
+//! its column bare or quoted, inside an expression, behind `COLLATE`/`DESC`, or in
+//! a trailing partial `WHERE`; a `CREATE TRIGGER` names it in an `UPDATE OF` list,
+//! a `WHEN` clause, `OLD.`/`NEW.` references and a whole statement body. Getting
+//! either subtly wrong does not fail loudly: a UNIQUE index rebuilt over the wrong
+//! column changes what rows the table accepts, and SQLite accepts a `CREATE
+//! TRIGGER` naming a column that does not exist AT ALL — the trigger is stored and
+//! then simply never fires again.
+//!
+//! So the executor delegates to SQLite's own parser, at the ONE point in the
+//! sequence where the whole schema is still self-consistent: BEFORE anything is
+//! dropped, it runs `ALTER TABLE <t> RENAME COLUMN <from> TO <to>` on the LIVE
+//! table. SQLite rewrites the table body, every index, every trigger, every view
+//! and every other table's `REFERENCES` clause in one consistent step (measured:
+//! independent of whether `foreign_keys` is on); the capture below then reads DDL
+//! that already names the new column, and the replay stays verbatim. This is the
+//! same delegation [`SqliteRebuildSpec::column_renames`] makes on the stored-shape
+//! leg, at the other end of the rebuild — that leg creates the table under the OLD
+//! name and renames LAST, this one has the new name baked into `new_table_create`
+//! and must rename FIRST.
+//!
 //! # The EXACT statement / mode / PRAGMA sequence (the crux a critic attacks)
 //!
 //! `PRAGMA foreign_keys` is a **NO-OP inside a transaction** (a hard SQLite rule),
@@ -25,6 +53,8 @@
 //! ```text
 //! (engine, AUTOCOMMIT, EngineJournal) PRAGMA foreign_keys = OFF
 //! (engine, EngineJournal) BEGIN IMMEDIATE
+//! (engine, EngineJournal) <read <t>'s live column names> [main]
+//! (engine→CreatorUp) <ALTER TABLE <t> RENAME COLUMN for each IMPLIED rename> [main]
 //! (engine, EngineJournal) <capture verbatim sql FROM sqlite_master
 //! for <t>'s indexes + triggers> [main, read]
 //! (engine, EngineJournal) <capture sqlite_sequence high-water mark, if preserving>
@@ -391,6 +421,14 @@ async fn run_rebuild_steps(
     // cleanly. Views are DB-global (not dropped WITH the table) and are left
     // untouched; if a view referenced a now-removed column SQLite surfaces that
     // at query time, not here.
+    // (0-) BEFORE the capture, and before anything is dropped: move any column this
+    // rebuild RENAMES, on the live table, with SQLite's own `RENAME COLUMN`. The
+    // capture below then reads dependent DDL that already names the new column, so
+    // the replay can stay VERBATIM instead of token-rewriting two grammars it would
+    // be silently wrong about. See the module header for why silence is the risk.
+    // The returned list is what was ACTUALLY renamed — a rename the live shape
+    // cannot accept is left alone and the rebuild proceeds exactly as it did before.
+    let renamed_columns = rename_live_columns(actor, spec).await?;
     let captured = capture_dependents(actor, &spec.table).await?;
     // AUTOINCREMENT's contract is stronger than "next value exceeds the largest
     // surviving row": SQLite must never reuse a ROWID that was previously handed
@@ -442,10 +480,19 @@ async fn run_rebuild_steps(
             .map(|(d, _)| quote_ident(d))
             .collect::<Vec<_>>()
             .join(", ");
+        // A column already renamed on the live table above is now spelled by its
+        // DEST name there, so the SELECT must read it under that name. A mapping
+        // whose rename was declined still reads the original source column.
         let src = spec
             .copy_columns
             .iter()
-            .map(|(_, s)| quote_ident(s))
+            .map(|(d, s)| {
+                if renamed_columns.iter().any(|(_, to)| to == d) {
+                    quote_ident(d)
+                } else {
+                    quote_ident(s)
+                }
+            })
             .collect::<Vec<_>>()
             .join(", ");
         actor
@@ -579,6 +626,115 @@ async fn run_rebuild_steps(
         .map_err(|e| step_err(table, e))?;
 
     Ok(())
+}
+
+/// The column renames a rebuild carries IMPLICITLY, as `(from, to)` pairs.
+///
+/// `SqliteRebuildSpec` states a rename in ONE place the executor can read on every
+/// leg: the copy mapping. `copy_columns` is `(dest, src)`, and the planner emits a
+/// pair whose `dest` differs from its `src` for exactly one reason — the data is
+/// moving from an old column name into a new one. Every other producer of the field
+/// (the stored-shape rename leg, the constraint rebuild, the primary-key rebuild)
+/// emits identity pairs only, so this is empty for all of them and the pre-rename
+/// below is inert outside the leg that needs it.
+///
+/// `column_renames` is NOT the source: it is populated only when the stored shape is
+/// preserved, and that leg deliberately renames AFTER the dependent replay, from DDL
+/// that still spells the old name. The two are complementary, never both non-empty.
+///
+/// A pair differing only in ASCII CASE is not a rename here: SQLite resolves an
+/// identifier case-insensitively, so the captured DDL replays fine against the new
+/// spelling and a `RENAME COLUMN` would be pure churn.
+fn implied_column_renames(spec: &SqliteRebuildSpec) -> Vec<(String, String)> {
+    spec.copy_columns
+        .iter()
+        .filter(|(dest, src)| !dest.eq_ignore_ascii_case(src))
+        .map(|(dest, src)| (src.clone(), dest.clone()))
+        .collect()
+}
+
+/// The live column names of `table`, lowercased (SQLite identifiers are
+/// case-insensitive). Read under EngineJournal — an engine read of `main`.
+async fn live_column_names(
+    actor: &MigrationActor,
+    table: &str,
+) -> Result<Vec<String>, RebuildError> {
+    actor
+        .set_mode(Mode::EngineJournal)
+        .await
+        .map_err(|error| step_err(table, error))?;
+    let rows = actor
+        .query(&format!("PRAGMA main.table_info({})", quote_ident(table)))
+        .await
+        .map_err(|error| step_err(table, error))?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| row.get(1).and_then(Clone::clone))
+        .map(|name| name.to_ascii_lowercase())
+        .collect())
+}
+
+/// Apply this rebuild's IMPLIED column renames to the LIVE table, before anything is
+/// captured or dropped, and return the pairs that were actually applied.
+///
+/// A rename is applied only when the live table still has the `from` column and does
+/// NOT already have the `to` column. The second condition is the one that matters:
+/// SQLite refuses `RENAME COLUMN` onto an existing name (`error in table 't' after
+/// rename: duplicate column name`), and a rebuild MAY legitimately move a column onto
+/// the name of one it is discarding. Declining such a pair leaves the rebuild exactly
+/// as it behaved before this step existed — the copy still reads the original source
+/// column, and a dependent naming it still fails closed on replay. Renames are
+/// re-tried while any of them makes progress, so an ordering that frees a name for a
+/// later pair resolves rather than being declined for good.
+///
+/// Runs under CreatorUp: `ALTER TABLE` on `main` is engine-authored here but operates
+/// on the creator's app schema, the same privilege the rest of the rebuild DDL uses.
+async fn rename_live_columns(
+    actor: &MigrationActor,
+    spec: &SqliteRebuildSpec,
+) -> Result<Vec<(String, String)>, RebuildError> {
+    let mut pending = implied_column_renames(spec);
+    if pending.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let table = spec.table.as_str();
+    let mut live = live_column_names(actor, table).await?;
+    actor
+        .set_mode(Mode::CreatorUp)
+        .await
+        .map_err(|error| step_err(table, error))?;
+    let table_q = quote_ident(table);
+    let mut applied: Vec<(String, String)> = Vec::new();
+    loop {
+        let mut progressed = false;
+        let mut deferred = Vec::new();
+        for (from, to) in std::mem::take(&mut pending) {
+            let from_key = from.to_ascii_lowercase();
+            let to_key = to.to_ascii_lowercase();
+            if !live.contains(&from_key) || live.contains(&to_key) {
+                deferred.push((from, to));
+                continue;
+            }
+            actor
+                .exec(&format!(
+                    "ALTER TABLE {table_q} RENAME COLUMN {} TO {}",
+                    quote_ident(&from),
+                    quote_ident(&to)
+                ))
+                .await
+                .map_err(|error| step_err(table, error))?;
+            live.retain(|name| name != &from_key);
+            live.push(to_key);
+            applied.push((from, to));
+            progressed = true;
+        }
+        pending = deferred;
+        if !progressed || pending.is_empty() {
+            break;
+        }
+    }
+    Ok(applied)
 }
 
 /// One dependent object captured VERBATIM from `sqlite_master` before the drop, so
@@ -828,5 +984,49 @@ mod tests {
             "drop_me"
         ));
         assert!(!ddl_references_column("anything", ""));
+    }
+
+    fn spec_with(copy_columns: &[(&str, &str)]) -> SqliteRebuildSpec {
+        SqliteRebuildSpec {
+            table: "t".to_string(),
+            tmp_table: SqliteRebuildSpec::tmp_name("t"),
+            new_table_create: String::new(),
+            copy_columns: copy_columns
+                .iter()
+                .map(|(dest, src)| ((*dest).to_string(), (*src).to_string()))
+                .collect(),
+            recreate_objects: Vec::new(),
+            column_renames: Vec::new(),
+            dropped_columns: Vec::new(),
+            sequence_policy: SqliteSequencePolicy::Preserve,
+            reason: String::new(),
+        }
+    }
+
+    // The copy mapping is the ONLY statement of a rename the executor gets on the
+    // fold-seeded leg, and `(dest, src)` differ for exactly that reason.
+    #[test]
+    fn an_implied_rename_is_a_copy_pair_whose_dest_differs_from_its_source() {
+        assert_eq!(
+            implied_column_renames(&spec_with(&[("id", "id"), ("amount", "qty")])),
+            vec![("qty".to_string(), "amount".to_string())],
+            "the pair is reported as (from, to) — the order RENAME COLUMN takes"
+        );
+    }
+
+    // Every rebuild that is NOT a rename copies each column onto itself, so this
+    // step is inert for the stored-shape rename leg, the constraint rebuild and the
+    // primary-key rebuild alike.
+    #[test]
+    fn an_identity_copy_mapping_implies_no_rename() {
+        assert!(implied_column_renames(&spec_with(&[("id", "id"), ("qty", "qty")])).is_empty());
+        assert!(implied_column_renames(&spec_with(&[])).is_empty());
+    }
+
+    // SQLite resolves identifiers case-insensitively, so a case-only difference needs
+    // no RENAME COLUMN: the captured DDL already replays against the new spelling.
+    #[test]
+    fn a_case_only_difference_is_not_a_rename() {
+        assert!(implied_column_renames(&spec_with(&[("QTY", "qty")])).is_empty());
     }
 }
