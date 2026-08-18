@@ -1689,15 +1689,16 @@ mod tests {
 
     /// The apply path and the exported
     /// [`provision_workflow_journal_schema`](crate::provisioning::provision_workflow_journal_schema)
-    /// create the journal schema with ONE statement, not two that resemble each
-    /// other. A caller outside the apply path (control's workflow test seeding)
+    /// build the journal schema DDL from ONE generator, not two that resemble
+    /// each other. A caller outside the apply path (control's workflow seeding)
     /// therefore reproduces the deployed privilege shape - owner role, ownership
     /// transfer and grant - rather than a CREATE SCHEMA of its own.
     ///
-    /// Text equality on the generator, so it fails if either side is edited
-    /// alone. It says nothing about whether the statement is CORRECT; the
-    /// assertions above cover the shape, and only a live apply covers the
-    /// effect.
+    /// Asserts the apply path's SQL CONTAINS the exported generator's output
+    /// verbatim, so editing either generator alone fails here. It says nothing
+    /// about whether the statement is correct, and nothing about whether any
+    /// caller actually calls the exported one - the assertions above cover the
+    /// shape, and only a live apply covers the effect.
     #[test]
     fn the_apply_path_and_the_exported_helper_share_one_journal_statement() {
         let app_id = uuid::Uuid::parse_str("0191e7a2-b3c4-4d5e-8f90-123456789abc").expect("uuid");
