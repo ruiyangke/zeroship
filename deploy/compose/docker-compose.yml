@@ -621,6 +621,25 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+    # PUBLISHED, unlike every other compose revision before this one. The
+    # in-compose services reach this by service name and need no host port, so
+    # it had none - which meant `docker compose up` gave the HOST no Redis at
+    # all, and `cargo test -p compio-redis` had nothing to dial. Those tests
+    # returned early and counted as passes; the flag that was supposed to catch
+    # that (`ZEROSHIP_REQUIRE_LIVE_BACKENDS=1`) was opt-in and nothing set it.
+    # `tests/provision_test_backends.sh` brings this up and the test default
+    # dials exactly this address.
+    #
+    # 6390, not 6379. 6379 is the conventional default and is therefore the
+    # port some other project's container is already holding on a shared
+    # development machine - one was holding it when this line was written. A
+    # test suite that silently connects to a stranger's Redis is a worse
+    # outcome than one that cannot connect at all.
+    #
+    # Loopback-bound, like every non-edge port here; tests/compose_port_exposure_gate.sh
+    # enforces that.
+    ports:
+      - "127.0.0.1:6390:6379"
     volumes:
       - redis-data:/data
 
