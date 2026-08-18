@@ -32,10 +32,28 @@
 //!
 //! Transport
 //! ---------
-//! The pool opens its connections with [`NoTls`], so it cannot satisfy a
-//! connection string that requires encryption. Rather than let that surface
-//! as a server-dependent handshake error several hundred milliseconds into a
-//! retry loop, [`Pool::connect_with_config`] rejects such a URL outright.
+//! What the pool opens depends on `sslmode` and on whether the crate was built
+//! with the `tls` feature:
+//!
+//! * `sslmode=require` (with `tls`) - a rustls connection, verified against the
+//!   trust anchors the URL names in `sslrootcert` (default: the OS store). See
+//!   [`crate::tls_rustls`].
+//! * `sslmode=require` (without `tls`) - rejected outright by
+//!   [`Pool::connect_with_config`], rather than surfacing as a
+//!   server-dependent handshake error several hundred milliseconds into a retry
+//!   loop.
+//! * `sslmode=prefer` (the default) and `sslmode=disable` - [`NoTls`],
+//!   i.e. plaintext.
+//!
+//! That last line is the surprising one, so: `prefer` does *not* opt into
+//! encryption here even when TLS is compiled in. This driver has no
+//! reconnect-in-plaintext fallback for a handshake that fails *after* the
+//! server accepted `SSLRequest` (`connect_tls.rs` returns the error), which
+//! libpq does have. Handing `prefer` a verifying connector would therefore
+//! convert every deployment whose server presents an untrusted certificate from
+//! "works, in plaintext" to "fails", silently and at the worst moment. `prefer`
+//! keeps its current, honest meaning - plaintext - and encryption is something
+//! a URL asks for with `require`.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -223,27 +241,28 @@ fn pool_error(msg: impl Into<String>) -> Error {
 
 /// Reject a connection string whose TLS settings this pool can never satisfy.
 ///
-/// The pool builds its connections with [`NoTls`], so `sslmode=require` and
-/// `sslnegotiation=direct` have no way to succeed against any server. The
-/// driver already fails closed on both - `connect_tls` errors rather than
-/// falling back to plaintext, so nothing is silently downgraded - but the
-/// error it raises describes the server ("server does not support TLS" when
-/// the server answers `N`) rather than the real, permanent cause, and it
-/// arrives only after `connect_with_config`'s three-attempt backoff has spent
-/// about two seconds on a URL that could never have worked. Answering here
-/// names the cause and answers immediately.
+/// What is unsatisfiable depends on the build, so this function has two
+/// versions. Both exist for the same reason: the driver already fails closed on
+/// an impossible TLS setting - `connect_tls` errors rather than falling back to
+/// plaintext, so nothing is silently downgraded - but the error it raises
+/// describes the server ("server does not support TLS" when the server answers
+/// `N`) rather than the real, permanent cause, and it arrives only after
+/// `connect_with_config`'s three-attempt backoff has spent about two seconds on
+/// a URL that could never have worked. Answering here names the cause and
+/// answers immediately.
 ///
-/// `sslmode=prefer` (libpq's default, and therefore the default here) is not
-/// rejected: it asks for encryption where available and permits plaintext
-/// otherwise, which is exactly what it gets.
+/// `sslmode=prefer` (libpq's default, and therefore the default here) is never
+/// rejected: it permits plaintext, which is what it gets. See the `Transport`
+/// section of the module docs for why it does not get TLS.
+#[cfg(not(feature = "tls"))]
 fn reject_unsatisfiable_tls(url: &str) -> Result<(), Error> {
     let config: Config = url.parse()?;
 
     if config.get_ssl_mode() == SslMode::Require {
         return Err(pool_error(
-            "sslmode=require cannot be satisfied: the connection pool connects with NoTls \
-             and has no TLS connector. Use compio_postgres::connect with a TLS connector, \
-             or drop to sslmode=prefer if plaintext is acceptable.",
+            "sslmode=require cannot be satisfied: compio-postgres was built without the `tls` \
+             feature, so no TLS connector exists. Rebuild with `--features tls`, or drop to \
+             sslmode=prefer if plaintext is acceptable.",
         ));
     }
 
@@ -256,8 +275,32 @@ fn reject_unsatisfiable_tls(url: &str) -> Result<(), Error> {
         && config.get_ssl_mode() != SslMode::Disable
     {
         return Err(pool_error(
-            "sslnegotiation=direct cannot be satisfied: the connection pool connects with \
-             NoTls and has no TLS connector.",
+            "sslnegotiation=direct cannot be satisfied: compio-postgres was built without the \
+             `tls` feature, so no TLS connector exists.",
+        ));
+    }
+
+    Ok(())
+}
+
+/// See the `cfg(not(feature = "tls"))` twin above for why this exists.
+///
+/// With TLS compiled in, `sslmode=require` is satisfiable and no longer
+/// rejected. What remains is the one combination no build can serve:
+/// `sslnegotiation=direct` under a mode that permits plaintext. `connect_tls`
+/// refuses that pairing itself (`connect_tls.rs`: "weak sslmode \"prefer\" may
+/// not be used with sslnegotiation=direct"); rejecting it here just moves the
+/// same verdict ahead of the retry loop.
+#[cfg(feature = "tls")]
+fn reject_unsatisfiable_tls(url: &str) -> Result<(), Error> {
+    let config: Config = url.parse()?;
+
+    if config.get_ssl_negotiation() == SslNegotiation::Direct
+        && config.get_ssl_mode() == SslMode::Prefer
+    {
+        return Err(pool_error(
+            "sslnegotiation=direct cannot be satisfied under sslmode=prefer: a mode that permits \
+             plaintext must not drive a TLS-only handshake. Use sslmode=require.",
         ));
     }
 
@@ -383,8 +426,21 @@ impl Pool {
     /// Open a single client + spawn its Connection task. Returns the Client;
     /// the task is detached and self-terminates when the Client's sender is
     /// closed (i.e. when the Client is dropped).
+    ///
+    /// `sslmode=require` takes the rustls path; everything else stays on
+    /// [`NoTls`]. See the `Transport` section of the module docs.
     async fn connect_one(url: &str) -> Result<Client, Error> {
-        let (client, connection) = crate::connect(url, NoTls).await?;
+        let config: Config = url.parse()?;
+
+        #[cfg(feature = "tls")]
+        if config.get_ssl_mode() == SslMode::Require {
+            let connector = crate::tls_rustls::MakeRustlsConnect::from_config(&config)?;
+            let (client, connection) = config.connect(connector).await?;
+            spawn_connection_task(connection);
+            return Ok(client);
+        }
+
+        let (client, connection) = config.connect(NoTls).await?;
         spawn_connection_task(connection);
         Ok(client)
     }
@@ -951,7 +1007,10 @@ impl std::fmt::Debug for Pool {
 /// terminates when the Client is dropped (causing the sender to close, which
 /// causes the Connection's receiver to return `None`, which triggers the
 /// graceful Terminate+drain+exit path in `Connection::run`).
-fn spawn_connection_task(connection: Connection<Socket, crate::tls::NoTlsStream>) {
+fn spawn_connection_task<T>(connection: Connection<Socket, T>)
+where
+    T: compio::io::AsyncRead + compio::io::AsyncWrite + Unpin + 'static,
+{
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
             // Connection terminated with an error (I/O failure, protocol

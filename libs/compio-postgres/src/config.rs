@@ -65,6 +65,34 @@ pub enum SslNegotiation {
     Direct,
 }
 
+/// Where the trust anchors for server-certificate verification come from.
+///
+/// This is the `sslrootcert` connection parameter. It exists because the only
+/// channel that reaches every caller of this driver is the connection string:
+/// [`Pool::connect`](crate::Pool::connect) takes a URL and nothing else, so a
+/// deployment whose Postgres presents a private-CA or self-signed certificate
+/// has no other place to name the CA that signed it.
+///
+/// There is deliberately no "trust anything" variant. A `sslmode=require`
+/// connection here means encrypted *and verified*; libpq's weaker reading of
+/// `require` (encrypt, do not verify) is reachable only by naming the exact
+/// certificate to trust.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum SslRootCert {
+    /// Use the operating system's certificate store (`sslrootcert=system`).
+    ///
+    /// The default, matching the trust discipline the rest of this workspace
+    /// uses for outbound TLS.
+    #[default]
+    System,
+    /// Trust exactly the certificates in this PEM file, and nothing else.
+    ///
+    /// This is the private-CA and self-signed-server path: point it at the CA
+    /// certificate (or at the server's own certificate, if self-signed).
+    File(String),
+}
+
 /// Channel binding configuration.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -247,6 +275,9 @@ pub struct Config {
     pub(crate) application_name: Option<String>,
     pub(crate) ssl_mode: SslMode,
     pub(crate) ssl_negotiation: SslNegotiation,
+    pub(crate) ssl_root_cert: SslRootCert,
+    pub(crate) ssl_cert: Option<String>,
+    pub(crate) ssl_key: Option<String>,
     pub(crate) host: Vec<Host>,
     pub(crate) hostaddr: Vec<IpAddr>,
     pub(crate) port: Vec<u16>,
@@ -278,6 +309,9 @@ impl Config {
             application_name: None,
             ssl_mode: SslMode::Prefer,
             ssl_negotiation: SslNegotiation::Postgres,
+            ssl_root_cert: SslRootCert::System,
+            ssl_cert: None,
+            ssl_key: None,
             host: vec![],
             hostaddr: vec![],
             port: vec![],
@@ -388,6 +422,43 @@ impl Config {
     /// Gets the SSL negotiation method.
     pub fn get_ssl_negotiation(&self) -> SslNegotiation {
         self.ssl_negotiation
+    }
+
+    /// Sets the trust anchors used to verify the server's certificate.
+    ///
+    /// Defaults to [`SslRootCert::System`].
+    pub fn ssl_root_cert(&mut self, ssl_root_cert: SslRootCert) -> &mut Config {
+        self.ssl_root_cert = ssl_root_cert;
+        self
+    }
+
+    /// Gets the trust anchors used to verify the server's certificate.
+    pub fn get_ssl_root_cert(&self) -> &SslRootCert {
+        &self.ssl_root_cert
+    }
+
+    /// Sets the path to the client certificate chain (PEM) sent to the server.
+    ///
+    /// Must be paired with [`Config::ssl_key`].
+    pub fn ssl_cert(&mut self, ssl_cert: impl Into<String>) -> &mut Config {
+        self.ssl_cert = Some(ssl_cert.into());
+        self
+    }
+
+    /// Gets the path to the client certificate chain, if one has been set.
+    pub fn get_ssl_cert(&self) -> Option<&str> {
+        self.ssl_cert.as_deref()
+    }
+
+    /// Sets the path to the client private key (PEM) matching [`Config::ssl_cert`].
+    pub fn ssl_key(&mut self, ssl_key: impl Into<String>) -> &mut Config {
+        self.ssl_key = Some(ssl_key.into());
+        self
+    }
+
+    /// Gets the path to the client private key, if one has been set.
+    pub fn get_ssl_key(&self) -> Option<&str> {
+        self.ssl_key.as_deref()
     }
 
     /// Adds a host to the configuration.
@@ -647,6 +718,29 @@ impl Config {
                 };
                 self.ssl_negotiation(mode);
             }
+            "sslrootcert" => {
+                // libpq 16+ spells the OS trust store `system`; anything else
+                // is a path. A path literally named "system" is therefore
+                // unreachable, which is the same corner libpq has.
+                let root = match value {
+                    "system" => SslRootCert::System,
+                    "" => return Err(Error::config_parse(Box::new(InvalidValue("sslrootcert")))),
+                    path => SslRootCert::File(path.to_string()),
+                };
+                self.ssl_root_cert(root);
+            }
+            "sslcert" => {
+                if value.is_empty() {
+                    return Err(Error::config_parse(Box::new(InvalidValue("sslcert"))));
+                }
+                self.ssl_cert(value);
+            }
+            "sslkey" => {
+                if value.is_empty() {
+                    return Err(Error::config_parse(Box::new(InvalidValue("sslkey"))));
+                }
+                self.ssl_key(value);
+            }
             "host" => {
                 for host in value.split(',') {
                     self.host(host);
@@ -837,6 +931,10 @@ impl fmt::Debug for Config {
             .field("options", &self.options)
             .field("application_name", &self.application_name)
             .field("ssl_mode", &self.ssl_mode)
+            .field("ssl_negotiation", &self.ssl_negotiation)
+            .field("ssl_root_cert", &self.ssl_root_cert)
+            .field("ssl_cert", &self.ssl_cert)
+            .field("ssl_key", &self.ssl_key)
             .field("host", &self.host)
             .field("hostaddr", &self.hostaddr)
             .field("port", &self.port)

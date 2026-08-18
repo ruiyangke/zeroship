@@ -54,8 +54,13 @@
 //!
 //! # SSL/TLS support
 //!
-//! TLS support is implemented via external libraries. `Client::connect` and `Config::connect` take a TLS implementation
-//! as an argument. The `NoTls` type in this crate can be used when TLS is not required.
+//! `Client::connect` and `Config::connect` take a TLS implementation as an argument. The `NoTls` type in this crate can
+//! be used when TLS is not required.
+//!
+//! The `tls` Cargo feature adds [`MakeRustlsConnect`], a rustls backend that reads its trust anchors from the
+//! connection string (`sslrootcert`, plus `sslcert`/`sslkey` for client-certificate auth) and implements
+//! `tls-server-end-point` channel binding. With that feature on, [`Pool`] builds one automatically for a
+//! `sslmode=require` URL; see [`tls_rustls`] and the `Transport` section of the [`pool`] module docs.
 
 #![warn(rust_2018_idioms, clippy::all)]
 #![allow(clippy::needless_lifetimes)]
@@ -80,6 +85,8 @@ pub use crate::simple_query::{SimpleColumn, SimpleQueryStream};
 pub use crate::socket::Socket;
 pub use crate::statement::{Column, Statement};
 pub use crate::tls::NoTls;
+#[cfg(feature = "tls")]
+pub use crate::tls_rustls::{MakeRustlsConnect, RustlsConnect, RustlsStream};
 pub use crate::to_statement::ToStatement;
 pub use crate::transaction::Transaction;
 pub use crate::transaction_builder::{IsolationLevel, TransactionBuilder};
@@ -118,6 +125,8 @@ mod simple_query;
 mod socket;
 mod statement;
 pub mod tls;
+#[cfg(feature = "tls")]
+pub mod tls_rustls;
 mod to_statement;
 pub mod replication;
 mod transaction;
