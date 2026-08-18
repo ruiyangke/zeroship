@@ -28,8 +28,8 @@ use zero_migrate::model::ir::{
     AlterPrimaryKeyAction, BackfillSetValue, ColType, EmptyContainerKind, ExclusionMethod, ForEach,
     GrantTarget, IdentityCol, IndexElement, IndexMethod, IrColumn, IrConstraint, IrConstraintKind,
     IrDefault, IrIndex, IrValue, Op, PartitionBounds, PartitionSpec, PolicyCmd, Privilege,
-    RaiseLevel, SafeU64, SelectAst, SequenceRef, TableRef, TableRuntimeOptionsPatch, TriggerAction,
-    TriggerEvent, TriggerStmt, TriggerTiming, ViewQuery,
+    RaiseLevel, SafeI64, SafeU64, SelectAst, SequenceRef, TableRef, TableRuntimeOptionsPatch,
+    TriggerAction, TriggerEvent, TriggerStmt, TriggerTiming, ViewQuery,
 };
 
 fn col_ref() -> Expr {
@@ -175,9 +175,22 @@ fn trigger(
     action: TriggerAction,
     when: Option<Expr>,
 ) -> Op {
+    trigger_on("t", variant_events, timing, for_each, action, when)
+}
+
+/// A trigger on a named target. Only the `INSTEAD OF` row needs one that is not
+/// `t`, because only that timing requires a VIEW.
+fn trigger_on(
+    target: &str,
+    variant_events: Vec<TriggerEvent>,
+    timing: TriggerTiming,
+    for_each: ForEach,
+    action: TriggerAction,
+    when: Option<Expr>,
+) -> Op {
     Op::CreateTrigger {
         name: "tg".into(),
-        table: "t".into(),
+        table: target.into(),
         schema: None,
         timing,
         events: variant_events,
@@ -482,13 +495,21 @@ pub fn corpus() -> Vec<(&'static str, &'static str, Op)> {
             owned_by: None,
         },
     ));
+    // `alterSequence` has ONE variant, so any option selects the same branch - and
+    // an alter carrying NONE of them is degenerate in the same way `insert` with
+    // `rows: []` is. `ALTER SEQUENCE <name>` with no action clause is not a
+    // statement (PostgreSQL: `syntax error at end of input`), so the option-less
+    // shape could never apply on any dialect and the row measured nothing. The
+    // increment makes the representative executable; the refusal that the
+    // option-less shape now earns is pinned by
+    // `tests/alter_sequence_needs_an_action.rs`.
     c.push((
         "alterSequence",
         "base",
         Op::AlterSequence {
             name: "s".into(),
             schema: None,
-            increment: None,
+            increment: Some(SafeI64::new(2).expect("safe i64")),
             restart: None,
             min_value: None,
             max_value: None,
@@ -1099,10 +1120,20 @@ pub fn corpus() -> Vec<(&'static str, &'static str, Op)> {
             None,
         ),
     ));
+    // The ONLY row whose target is `v` rather than `t`, and it has to be. An
+    // INSTEAD OF trigger exists to make a VIEW writable, and both dialects that
+    // have the timing refuse it on a table in their own words - SQLite `cannot
+    // create INSTEAD OF trigger on table: t`, PostgreSQL `"t" is a table`. A
+    // representative aimed at a table could therefore never apply anywhere, so it
+    // measured the engine's missing gate rather than the declaration. The gate now
+    // exists (`IrLowerError::InsteadOfTriggerTargetIsATable`) and is pinned by
+    // `tests/instead_of_trigger_needs_a_view.rs`; this row measures the
+    // declaration, which is about the timing, not the target.
     c.push((
         "createTrigger",
         "bodyInsteadOf",
-        trigger(
+        trigger_on(
+            "v",
             vec![TriggerEvent::Insert],
             TriggerTiming::InsteadOf,
             ForEach::Row,

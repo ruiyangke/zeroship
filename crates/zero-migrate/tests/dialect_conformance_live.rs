@@ -329,7 +329,10 @@ const OWNER: &str = "app_conformance";
 
 /// Tables the corpus and its preludes can name. Pre-registered so an ownership
 /// refusal never masquerades as a capability answer.
-const OWNED_TABLES: &[&str] = &["t", "t2", "other", "p"];
+/// `v` is here because `Op::touched_table` answers with a trigger's TARGET, and
+/// the `INSTEAD OF` row's target is a view. Without it that row would report an
+/// ownership refusal instead of the capability answer it is asking about.
+const OWNED_TABLES: &[&str] = &["t", "t2", "other", "p", "v"];
 
 fn registry() -> BTreeMap<String, String> {
     OWNED_TABLES
@@ -739,6 +742,16 @@ fn prelude(kind: &str, variant: &str, dialect: SqlDialect, probe: &Names) -> Vec
         ],
 
         ("createTrigger", "executeFunction") => vec![text(), create_function()],
+
+        // The ONLY row whose target is a VIEW. An INSTEAD OF trigger has no valid
+        // form on a table on either dialect, so the representative names `v` and
+        // the prelude has to supply it. See `IrLowerError::InsteadOfTriggerTargetIsATable`.
+        ("createTrigger", "bodyInsteadOf") => vec![
+            text(),
+            json!({ "op": "createView", "name": "v",
+                    "query": { "kind": "structured",
+                               "select": { "from": { "name": "t" }, "projection": [] } } }),
+        ],
 
         // Everything else needs a plain `t` with a text `a` and a boolean `x`.
         _ => vec![text()],

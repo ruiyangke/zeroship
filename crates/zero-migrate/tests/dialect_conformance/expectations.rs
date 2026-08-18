@@ -31,8 +31,17 @@
 //       unconditional or conditional on the payload. A conditional gate means the
 //       representative measured one SHAPE, not the op.
 //   (C) ENGINE DEFECT. The declaration is defensible and the engine still gets it
-//       wrong at or after render. There are two, and one of them is a
-//       `ServerError`.
+//       wrong at or after render. There were two, `alterSequence/base` on
+//       PostgreSQL and `createTrigger/bodyInsteadOf` on SQLite, and BOTH ARE GONE:
+//       the engine now refuses an option-less `alterSequence` and an `INSTEAD OF`
+//       trigger aimed at a table, and both representatives - which were degenerate
+//       in the (A) sense, since neither shape could apply on any dialect - were
+//       corrected, so both rows APPLY. There is no (C) entry left in this file and
+//       there should never be one for long: a (C) entry is a bug with a note on it.
+//       The refusals themselves are pinned by
+//       `tests/alter_sequence_needs_an_action.rs` and
+//       `tests/instead_of_trigger_needs_a_view.rs`, each with its over-refusal
+//       control.
 //
 // The full accounting is in `docs/review-log.md`.
 
@@ -51,19 +60,6 @@ const ALLOWANCES: &[Allowance] = &[
         words: "omits its owning table",
         why: "(A) representative carries table: None; refused identically on sqlite. \
                The refusal is correct, its CODE_UNSUPPORTED spelling is not.",
-    },
-    // (C) ENGINE DEFECT. `alterSequence` with no options renders `ALTER SEQUENCE
-    // "s"` - a statement with no action - and the only thing that catches it is
-    // the SQL guard's PARSER. Nothing in validate or lower objects. With the guard
-    // absent this reaches the server.
-    Allowance {
-        kind: "alterSequence",
-        variant: "base",
-        dialect: "postgres",
-        observed: Outcome::RefusedByPolicy,
-        words: "syntax error at end of input",
-        why: "(C) an option-less alterSequence renders unparseable SQL; the guard's \
-               parser is the only gate that notices.",
     },
     // (A) A collapse-affirmed partitioned parent needs a default child in the SAME
     // recording. The representative carries no child, so it cannot apply anywhere.
@@ -166,20 +162,6 @@ const ALLOWANCES: &[Allowance] = &[
         why: "(A) the representative drops a NON-FK constraint, the one shape SQLite's \
                rebuild lane does not cover. FK drops apply end to end; flipping this \
                cell was measured to be an over-refusal and was reverted.",
-    },
-    // (C) ENGINE DEFECT, and the sharpest one here: a `portable` declaration whose
-    // op clears validate, clears lower, and DIES AGAINST THE DATABASE. SQLite
-    // accepts INSTEAD OF triggers on VIEWS only, and nothing in the engine checks
-    // the target's kind. The declaration is defensible - the op IS supported, on a
-    // view - so the missing gate is the defect, not the cell.
-    Allowance {
-        kind: "createTrigger",
-        variant: "bodyInsteadOf",
-        dialect: "sqlite",
-        observed: Outcome::ServerError,
-        words: "cannot create INSTEAD OF trigger on table",
-        why: "(C) no gate checks that an INSTEAD OF trigger's target is a view; the \
-               refusal arrives from SQLite, mid-apply.",
     },
     // (A) Partition collapse is a whole-recording property, so a single-op
     // representative can never reach the degraded leg. Three rows, one cause.
