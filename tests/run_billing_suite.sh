@@ -58,7 +58,16 @@
 #   TEST_DB=mine SKIP_DB_RECREATE=1 tests/run_billing_suite.sh  # reuse that one
 #   PG_PORT=5440 PG_USER=postgres PG_PASS=zeroship tests/run_billing_suite.sh
 #
-# ENV (defaults target the dev compose Postgres on :5440)
+# PROVISION FIRST. This script creates and migrates a DATABASE; it does not
+# create a SERVER. Stand one up with `tests/provision_test_backends.sh`, which
+# brings up deploy/compose's postgres on the port below.
+#
+# ENV (defaults target deploy/compose's postgres service, published on :5440)
+#   The comment here read "the dev compose Postgres on :5440" for months while
+#   the server actually answering was `zs-auth-pg-5440`, started by hand and
+#   owned by no file in this tree. The address was right, the provenance was
+#   not, and the wrong half is the one that reads as though somebody maintains
+#   that server.
 #   PG_HOST (localhost)  PG_PORT (5440)  PG_USER (postgres)  PG_PASS (zeroship)
 #   TEST_DB (per run: zeroship_billing_test_<pid>_<nanos>, dropped on exit)
 #   PSQL    (auto-detected; override with an explicit psql path)

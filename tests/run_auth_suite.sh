@@ -28,7 +28,18 @@
 #   TEST_DB=mine SKIP_DB_RECREATE=1 tests/run_auth_suite.sh   # reuse that one
 #   PG_PORT=5440 tests/run_auth_suite.sh
 #
-# ENV (defaults target the dev compose Postgres on :5440)
+# PROVISION FIRST. This script creates and migrates a DATABASE; it does not
+# create a SERVER, and it fails at line ~110 if none is listening. Stand one up
+# with `tests/provision_test_backends.sh`, which brings up deploy/compose's
+# postgres on the port below.
+#
+# ENV (defaults target deploy/compose's postgres service, published on :5440)
+#   The comment here read "the dev compose Postgres on :5440" for months while
+#   the server actually answering was `zs-auth-pg-5440`, started by hand, owned
+#   by no file in this tree, and running the postgres:16 default wal_level
+#   instead of compose's `logical`. The address was right and the provenance was
+#   wrong, which is the worse of the two failures: it read as though something
+#   maintained that server.
 #   PG_HOST (localhost)  PG_PORT (5440)  PG_USER (postgres)  PG_PASS (zeroship)
 #   TEST_DB (per run: zeroship_auth_test_<pid>_<nanos>, dropped on exit)
 #   PSQL    (auto-detected; override with an explicit psql path)
