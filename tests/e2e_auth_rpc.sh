@@ -67,7 +67,7 @@ echo "  zeroship E2E — authenticated gateway RPC (ISS-64)"
 echo "============================================"
 
 stack_up       || { echo "stack bring-up failed"; exit 1; }
-mint_admin_bearer || exit 1
+mint_creator_bearer || exit 1
 
 ZSHIP="$ROOT/examples/auth-notes/dist/app.zship"
 [ -f "$ZSHIP" ] || { echo "missing $ZSHIP — run: pnpm --filter ./examples/auth-notes build"; exit 2; }

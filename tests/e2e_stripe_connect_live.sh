@@ -335,8 +335,6 @@ SCOPE="billing:read billing:write"
 psql_db -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL || { fail "creator/bearer seed failed"; exit 1; }
 INSERT INTO zeroship.users (id, email, name, email_verified_at)
 VALUES ('$CREATOR', 'connect-$CREATOR@zeroship.test'::citext, 'E2E Connect Creator', NOW());
-INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by)
-VALUES ('$CREATOR','admin','$CREATOR') ON CONFLICT DO NOTHING;
 SQL
 pass "seeded creator $CREATOR + operator role"
 
