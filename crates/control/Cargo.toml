@@ -303,8 +303,8 @@ path = "tests/oauth_grants_handlers_test.rs"
 required-features = ["live-db-tests"]
 
 [[test]]
-name = "oauth_handlers_test"
-path = "tests/oauth_handlers_test.rs"
+name = "oauth_clients_test"
+path = "tests/oauth_clients_test.rs"
 required-features = ["live-db-tests"]
 
 [[test]]

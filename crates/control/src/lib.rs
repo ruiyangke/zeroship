@@ -32,7 +32,7 @@ pub mod migrations_api;
 pub mod net_grants;
 pub mod notify;
 pub mod oauth_grants_handlers;
-pub mod oauth_handlers;
+pub mod oauth_clients;
 pub mod openmeter_client;
 pub mod plan_catalog;
 pub mod pricing;

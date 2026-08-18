@@ -176,16 +176,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     );
 }
 
-/// The platform-operator gate every `/admin/*` route shares: `team:write` on
-/// the synthetic platform org, which only `admin.cedar`'s universal allow
-/// grants (no creator policy names an `Org` resource at all).
-///
-/// `pub(crate)` because the operator OAuth-client routes in `oauth_handlers`
-/// use it too. They used to require `Action::PlatformPoliciesWrite`, which had
-/// no entry in the OAuth scope vocabulary, so once personal access tokens were
-/// removed no bearer could carry it and those three routes were unreachable.
-/// That action is deleted; this gate is what every other operator route uses.
-pub(crate) async fn require_platform_admin(
+/// The platform-operator gate the surviving `/admin/*` routes share:
+/// `team:write` on the synthetic platform org, which only `admin.cedar`'s
+/// universal allow grants (no creator policy names an `Org` resource at all).
+async fn require_platform_admin(
     guard: &AuthzGuard,
     state: &AppState,
 ) -> Result<(), web::HttpResponse> {

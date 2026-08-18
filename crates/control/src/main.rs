@@ -19,7 +19,7 @@ use zeroship_bundle::{
 use zeroship_control::config::{ControlSettings, ControlSettingsSources};
 use zeroship_control::{
     admin_handlers, api, device_handlers, env_handlers,
-    internal, migrations_api, oauth_grants_handlers, oauth_handlers, plan_catalog, stripe_handlers,
+    internal, migrations_api, oauth_grants_handlers, plan_catalog, stripe_handlers,
     workflow_instance_api,
     AppState, EnvStore, Quota, RateLimiter, Registry, StripeStore,
 };
@@ -279,6 +279,7 @@ fn main() -> std::io::Result<()> {
     // only, so an absent key resolves UNAVAILABLE and every creator wildcard
     // grant is refused - the same fail-closed state the missing catalog row
     // used to produce, now decided at boot instead of per request.
+    let configured_oauth_clients = file.auth.oauth_clients.clone();
     let frontable_suffixes = zeroship_core::net_policy::FrontableSuffixCatalog::from_config(
         file.control.frontable_wildcard_suffixes.as_deref(),
     );
@@ -669,6 +670,32 @@ fn main() -> std::io::Result<()> {
         Arc::new(pg_client)
     };
 
+    // The first-party relying parties of the platform OP, from the config
+    // overlay. This is what the three deleted `/admin/oauth-clients` routes
+    // became: registering an RP of your own OP is a deployment decision, so it
+    // happens once here rather than through an operator credential at runtime.
+    //
+    // FATAL on failure, deliberately. The route answered a human with a 400;
+    // nobody is watching this one, and a skipped registration is a login
+    // surface that silently does not exist.
+    match zeroship_control::oauth_clients::reconcile_oauth_clients(
+        &control_pg,
+        configured_oauth_clients.as_deref(),
+        &trusted_oauth_clients,
+    )
+    .await
+    {
+        Ok(report) => tracing::info!(
+            registered = report.registered,
+            pruned = report.pruned,
+            "control: first-party OAuth clients reconciled from config"
+        ),
+        Err(message) => {
+            eprintln!("control: {message}");
+            std::process::exit(2);
+        }
+    }
+
     // Console seed (R5): make the console deployable + served as a platform-owned
     // regular app. In-process + idempotent + trusted; NEVER an HTTP route.
     // Runs AFTER migrate (zeroship-migrate, out of band), AFTER the registry / env
@@ -975,7 +1002,6 @@ fn main() -> std::io::Result<()> {
             .state(state.clone())
             .state(readiness.clone())
             .configure(admin_handlers::configure)
-            .configure(oauth_handlers::configure)
             // --- Admin API ---
             .service(
                 web::resource("/api/apps")
