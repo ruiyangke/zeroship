@@ -1614,6 +1614,51 @@ pub fn fold_ops_onto(
                     &mut snap, table, to, dialect,
                 )
                 .map_err(|error| FoldError::Render(error.to_string()))?;
+                // MySQL is the one dialect where a table rename ALSO renames the
+                // primary key, and the reason is that MySQL never stored a primary-key
+                // name to begin with. `information_schema` reports every primary key
+                // under the fixed catalog name `PRIMARY`, so
+                // `mysql/drift_sql.rs` synthesizes `<table>_pkey` from the CURRENT
+                // table name - which means the name the catalog reports after a rename
+                // is a function of the NEW name and can be nothing else.
+                //
+                // PostgreSQL and SQLite are untouched here and must be: PostgreSQL
+                // stores the constraint name independently of the table, so
+                // `ALTER TABLE tags RENAME TO labels` genuinely leaves `tags_pkey`
+                // named `tags_pkey`, and `fold_roundtrip_pg.rs` pins exactly that.
+                // Applying MySQL's re-derivation there would invent a rename the
+                // server does not perform.
+                //
+                // Measured, not reasoned about: before this, the rename stage of
+                // `fold_roundtrip_mysql.rs` reported
+                //   missing:    labels constraint tags_pkey / labels index tags_pkey
+                //   unexpected: labels constraint labels_pkey / labels index labels_pkey
+                // so every MySQL deploy that renamed a table with a primary key drifted
+                // permanently from that moment on. Nothing could see it, because no
+                // Rust test had ever introspected a live MySQL server.
+                if matches!(dialect, SqlDialect::Mysql) {
+                    let renamed_pk = format!("{to}_pkey");
+                    // The index is matched by the constraint's OLD name rather than by
+                    // a second `format!`, so a primary key the author named something
+                    // else still moves together with its implicit index instead of
+                    // splitting into a renamed constraint and an orphaned index.
+                    let previous: Vec<String> = snap
+                        .constraints
+                        .iter()
+                        .filter(|constraint| constraint.kind == "PRIMARY KEY")
+                        .map(|constraint| constraint.name.clone())
+                        .collect();
+                    for constraint in &mut snap.constraints {
+                        if constraint.kind == "PRIMARY KEY" {
+                            constraint.name.clone_from(&renamed_pk);
+                        }
+                    }
+                    for index in &mut snap.indexes {
+                        if previous.contains(&index.name) {
+                            index.name.clone_from(&renamed_pk);
+                        }
+                    }
+                }
                 tables.insert(to.clone(), snap);
                 // Live PG/SQLite re-target every INCOMING FK to the renamed table by
                 // OID, so the FK `definition` in OTHER tables now reports the NEW
