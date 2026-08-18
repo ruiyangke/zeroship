@@ -1510,13 +1510,7 @@ mod access_identity_tests {
     }
 
     async fn mint_fixture() -> Option<(String, Client, Client, Client, Uuid, OAuthClient, Issuer)> {
-        let dsn = zeroship_core::declared_env!(
-            external,
-            "AUTH_DB_URL",
-            zeroship_core::config::TestHarness
-        )
-        .or_else(|| zeroship_core::test_env!("PG_TEST_URL"))
-        .or_else(|| zeroship_core::test_env!("CONTROL_TEST_DB"))?;
+        let dsn = zeroship_core::config::test_database_url_opt()?;
         let setup = pg_connect(&dsn).await;
         let mint = pg_connect(&dsn).await;
         let deletion = pg_connect(&dsn).await;
@@ -1626,7 +1620,7 @@ mod access_identity_tests {
         let Some((_dsn, setup, mut mint, _deletion, user_id, client, issuer)) =
             mint_fixture().await
         else {
-            eprintln!("skip: AUTH_DB_URL/PG_TEST_URL unset");
+            eprintln!("skip: no test database (set PG_TEST_URL or run tests/provision_test_backends.sh)");
             return;
         };
         let tx = mint.transaction().await.expect("mint transaction");
@@ -1656,7 +1650,7 @@ mod access_identity_tests {
         let Some((_dsn, mut setup, mut mint, _deletion, user_id, client, issuer)) =
             mint_fixture().await
         else {
-            eprintln!("skip: AUTH_DB_URL/PG_TEST_URL unset");
+            eprintln!("skip: no test database (set PG_TEST_URL or run tests/provision_test_backends.sh)");
             return;
         };
         crate::store::users::request_deletion(&mut setup, user_id, 30)
@@ -1680,7 +1674,7 @@ mod access_identity_tests {
         let Some((_dsn, setup, mut mint, mut deletion, user_id, client, issuer)) =
             mint_fixture().await
         else {
-            eprintln!("skip: AUTH_DB_URL/PG_TEST_URL unset");
+            eprintln!("skip: no test database (set PG_TEST_URL or run tests/provision_test_backends.sh)");
             return;
         };
         let tx = mint.transaction().await.expect("mint transaction");

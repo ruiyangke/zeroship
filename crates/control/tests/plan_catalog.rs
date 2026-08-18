@@ -7,8 +7,10 @@
 //! is rejected) and that `get_versions` derives runtime limits from the catalog
 //! row rather than a hardcoded plan-name table.
 //!
-//! Set `CONTROL_TEST_DB` to run; tests silently skip otherwise (CI without a DB
-//! stays green). The pure tier math is unit-tested DB-free in `src/pricing.rs`.
+//! Configure a test database (`zeroship_core::config::test_database_url_opt`;
+//! run `tests/provision_test_backends.sh` to provision one) to run; tests
+//! silently skip otherwise (CI without a DB stays green). The pure tier math
+//! is unit-tested DB-free in `src/pricing.rs`.
 
 mod common;
 

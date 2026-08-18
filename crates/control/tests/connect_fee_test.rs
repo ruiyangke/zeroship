@@ -9,8 +9,9 @@
 //! `/v1/payment_intents` shapes and RECORDS every request. No stubbed client on
 //! the wire path: form encoding, headers, round-trip, and JSON parse all run.
 //!
-//! Requires `CONTROL_TEST_DB`; silent skip otherwise. The DB must have changeset
-//! 0044 applied.
+//! Requires a configured test database
+//! (`zeroship_core::config::test_database_url_opt`); silent skip otherwise.
+//! The DB must have changeset 0044 applied.
 
 #![allow(clippy::future_not_send)]
 

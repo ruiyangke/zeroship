@@ -6,8 +6,9 @@
 //! mock-Stripe HTTP server, and the REAL `billing_reconcile::tick_with` /
 //! `proration::record_plan_change` — NO shims. The plan-change write path is the
 //! exact server-side code `api.rs::set_plan` runs (`record_plan_change` in a
-//! per-creator-advisory-locked txn). Real Postgres via `CONTROL_TEST_DB`; silent
-//! skip otherwise. The DB must have changesets 0050 + 0051 applied.
+//! per-creator-advisory-locked txn). Real Postgres via a configured test
+//! database (`zeroship_core::config::test_database_url_opt`); silent skip
+//! otherwise. The DB must have changesets 0050 + 0051 applied.
 
 mod common;
 

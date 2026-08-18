@@ -33,8 +33,7 @@ const ISSUER: &str = "https://auth.zeroship.test/oauth2";
 /// state this repo just finished getting out of, and this target has no
 /// `required-features` gate to keep it out of that run.
 async fn boot() -> Option<(web::test::TestServer, cyper::Client)> {
-    let db_url = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)
-        .or_else(|| zeroship_core::test_env!("PG_TEST_URL"))?;
+    let db_url = zeroship_core::config::test_database_url_opt()?;
 
     let (pg_client, pg_connection) = connect(&db_url, NoTls).await.expect("connect pg");
     compio::runtime::spawn(async move {
@@ -100,7 +99,7 @@ async fn cache_control(srv: &web::test::TestServer, http: &cyper::Client, path: 
 #[allow(clippy::future_not_send)]
 async fn jwks_reaches_the_wire_cacheable() {
     let Some((srv, http)) = boot().await else {
-        zeroship_test_support::skip("[metadata_cache_headers] skip (need AUTH_DB_URL)");
+        zeroship_test_support::skip("[metadata_cache_headers] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
     let value = cache_control(&srv, &http, "/oauth2/.well-known/jwks.json").await;
@@ -121,7 +120,7 @@ async fn jwks_reaches_the_wire_cacheable() {
 #[allow(clippy::future_not_send)]
 async fn discovery_reaches_the_wire_cacheable_on_every_mounted_path() {
     let Some((srv, http)) = boot().await else {
-        zeroship_test_support::skip("[metadata_cache_headers] skip (need AUTH_DB_URL)");
+        zeroship_test_support::skip("[metadata_cache_headers] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
     for path in [
@@ -151,7 +150,7 @@ async fn discovery_reaches_the_wire_cacheable_on_every_mounted_path() {
 #[allow(clippy::future_not_send)]
 async fn routes_without_an_explicit_value_still_default_to_no_store() {
     let Some((srv, http)) = boot().await else {
-        zeroship_test_support::skip("[metadata_cache_headers] skip (need AUTH_DB_URL)");
+        zeroship_test_support::skip("[metadata_cache_headers] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
     let resp = http

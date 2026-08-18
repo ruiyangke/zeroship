@@ -1051,7 +1051,7 @@ fn dw23_workflow_engine_load_bench() {
             return;
         }
 
-        let db_url = required_env("CONTROL_TEST_DB", zeroship_core::test_env!("CONTROL_TEST_DB"));
+        let db_url = required_env("a test database", zeroship_core::config::test_database_url_opt());
         let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_GATEWAY_URL"));
         let app_id: Uuid = required_env("ZEROSHIP_DW_E2E_APP_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_APP_ID"))
             .parse()
@@ -2897,7 +2897,7 @@ async fn durable_workflows_m1_keystone_real_spine() {
         return;
     }
 
-    let db_url = required_env("CONTROL_TEST_DB", zeroship_core::test_env!("CONTROL_TEST_DB"));
+    let db_url = required_env("a test database", zeroship_core::config::test_database_url_opt());
     let control_url = required_env("ZEROSHIP_DW_E2E_CONTROL_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_CONTROL_URL"));
     let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_GATEWAY_URL"));
     let app_id: Uuid = required_env("ZEROSHIP_DW_E2E_APP_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_APP_ID"))
@@ -5020,7 +5020,7 @@ async fn bare_await_body_io_is_rejected() {
         return;
     }
 
-    let db_url = required_env("CONTROL_TEST_DB", zeroship_core::test_env!("CONTROL_TEST_DB"));
+    let db_url = required_env("a test database", zeroship_core::config::test_database_url_opt());
     let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_GATEWAY_URL"));
     let app_id: Uuid = required_env("ZEROSHIP_DW_E2E_APP_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_APP_ID"))
         .parse()
@@ -5067,7 +5067,7 @@ async fn scheduler_misfire_lost_register_recovers() {
         return;
     }
 
-    let db_url = required_env("CONTROL_TEST_DB", zeroship_core::test_env!("CONTROL_TEST_DB"));
+    let db_url = required_env("a test database", zeroship_core::config::test_database_url_opt());
     let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_GATEWAY_URL"));
     let app_id: Uuid = required_env("ZEROSHIP_DW_E2E_APP_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_APP_ID"))
         .parse()
@@ -5183,7 +5183,7 @@ async fn scheduler_overfire_duplicate_dispatch_noops() {
         return;
     }
 
-    let db_url = required_env("CONTROL_TEST_DB", zeroship_core::test_env!("CONTROL_TEST_DB"));
+    let db_url = required_env("a test database", zeroship_core::config::test_database_url_opt());
     let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_GATEWAY_URL"));
     let app_id: Uuid = required_env("ZEROSHIP_DW_E2E_APP_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_APP_ID"))
         .parse()
@@ -5301,7 +5301,7 @@ async fn compensation_saga_rollback_real_spine() {
         return;
     }
 
-    let db_url = required_env("CONTROL_TEST_DB", zeroship_core::test_env!("CONTROL_TEST_DB"));
+    let db_url = required_env("a test database", zeroship_core::config::test_database_url_opt());
     let control_url = required_env("ZEROSHIP_DW_E2E_CONTROL_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_CONTROL_URL"));
     let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_GATEWAY_URL"));
     let app_id: Uuid = required_env("ZEROSHIP_DW_E2E_APP_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_APP_ID"))

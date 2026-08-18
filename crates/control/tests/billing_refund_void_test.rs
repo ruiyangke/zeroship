@@ -4,7 +4,8 @@
 //! endpoint, and the void+reissue + `void_reversal` + negative-invoice true-up bridge.
 //!
 //! FAITHFUL by construction: every assertion runs against a live, migrated Postgres
-//! (`CONTROL_TEST_DB`; silent skip otherwise) and exercises the REAL paths —
+//! (a configured test database, `zeroship_core::config::test_database_url_opt`;
+//! silent skip otherwise) and exercises the REAL paths —
 //!   * the REAL `refunds` table / domains / over-refund trigger / immutability trigger;
 //!   * the REAL `refund::issue_refund` + `void_reissue::void_and_reissue` helpers (so the
 //!     claim-then-call, the `void_reversal` append, and the true-up math all run for real);

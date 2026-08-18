@@ -32,8 +32,7 @@ const TEST_CONTROL_KEY: &str = "test-control-key";
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
 fn db_url() -> Option<String> {
-    zeroship_core::test_env!("CONTROL_TEST_DB")
-        .or_else(|| zeroship_core::test_env!("PG_TEST_URL"))
+    zeroship_core::config::test_database_url_opt()
 }
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -572,7 +571,7 @@ async fn v8_binding_getter_exclusions_are_undefined() {
 #[compio::test]
 async fn v8_binding_round_trips_through_the_control_instance_api() {
     let Some(db_url) = db_url() else {
-        zeroship_test_support::skip("skipping workflow plugin control round-trip (no CONTROL_TEST_DB)");
+        zeroship_test_support::skip("skipping workflow plugin control round-trip (no test database)");
         return;
     };
     let fx = build_fixture(&db_url, "round-trip").await;

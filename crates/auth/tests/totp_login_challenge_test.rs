@@ -9,7 +9,7 @@
 //! (3) the second-factor evaluation the handler performs (valid TOTP code OR a
 //! single-use backup code) accepts/rejects correctly against the real store.
 //!
-//! Skipped unless `AUTH_DB_URL` (or `PG_TEST_URL`) is set. Run `--test-threads=1`.
+//! Skipped unless a test database (`PG_TEST_URL` or the TOML overlay) is available. Run `--test-threads=1`.
 
 use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;
@@ -20,8 +20,7 @@ use zeroship_auth::store::{totp as totp_store, users};
 
 #[allow(clippy::future_not_send)]
 async fn pg() -> Option<Client> {
-    let dsn = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)
-        .or_else(|| zeroship_core::test_env!("PG_TEST_URL"))?;
+    let dsn = zeroship_core::config::test_database_url_opt()?;
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
@@ -54,7 +53,7 @@ async fn cleanup(db: &Client, ids: &[Uuid]) {
 #[compio::test]
 async fn only_confirmed_credential_gates_login() {
     let Some(db) = pg().await else {
-        zeroship_test_support::skip("skipping totp_login_challenge_test (no AUTH_DB_URL/PG_TEST_URL)");
+        zeroship_test_support::skip("skipping totp_login_challenge_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
     let tag = Uuid::new_v4().simple().to_string();

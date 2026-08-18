@@ -1,6 +1,6 @@
 //! Live-PG roundtrip for `auth::identity::magic_link`.
 //!
-//! Skipped unless `AUTH_DB_URL` is set. Each test scopes itself with a
+//! Skipped unless a test database is available (`PG_TEST_URL` or the TOML overlay). Each test scopes itself with a
 //! random email so concurrent runs don't collide; the cleanup at the end
 //! removes every row that test inserted.
 
@@ -17,7 +17,7 @@ use zeroship_auth::ui::magic::completions_store::{self, ConsumeError};
 // structurally. The lint is informational, not actionable here.
 #[allow(clippy::future_not_send)]
 async fn pg() -> Option<compio_postgres::Client> {
-    let dsn = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)?;
+    let dsn = zeroship_core::config::test_database_url_opt()?;
     Some(pg_connect(&dsn).await)
 }
 
@@ -129,15 +129,15 @@ fn sha256(s: &str) -> [u8; 32] {
 
 #[compio::test]
 async fn wrong_code_does_not_mutate_reserved_completion() {
-    let dsn = match zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) {
+    let dsn = match zeroship_core::config::test_database_url_opt() {
         Some(dsn) => dsn,
         None => {
-            zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
+            zeroship_test_support::skip("skipping magic_link_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
             return;
         }
     };
     let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping magic_link_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -225,15 +225,15 @@ async fn wrong_code_does_not_mutate_reserved_completion() {
 
 #[compio::test]
 async fn concurrent_issue_leaves_one_active_token() {
-    let dsn = match zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) {
+    let dsn = match zeroship_core::config::test_database_url_opt() {
         Some(dsn) => dsn,
         None => {
-            zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
+            zeroship_test_support::skip("skipping magic_link_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
             return;
         }
     };
     let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping magic_link_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -280,7 +280,7 @@ async fn concurrent_issue_leaves_one_active_token() {
 #[compio::test]
 async fn issue_then_redeem_happy_path() {
     let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping magic_link_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -321,7 +321,7 @@ async fn issue_then_redeem_happy_path() {
 #[compio::test]
 async fn second_redeem_returns_none() {
     let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping magic_link_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -361,7 +361,7 @@ async fn second_redeem_returns_none() {
 #[compio::test]
 async fn pending_consume_can_be_cleared_and_retried_before_finalize() {
     let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping magic_link_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -429,7 +429,7 @@ async fn pending_consume_can_be_cleared_and_retried_before_finalize() {
 #[compio::test]
 async fn stale_magic_link_reservation_cannot_finalize_or_clear_newer_reservation() {
     let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping magic_link_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -506,7 +506,7 @@ async fn stale_magic_link_reservation_cannot_finalize_or_clear_newer_reservation
 #[compio::test]
 async fn second_redeem_while_pending_returns_in_flight() {
     let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping magic_link_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -544,7 +544,7 @@ async fn second_redeem_while_pending_returns_in_flight() {
 #[compio::test]
 async fn stale_pending_redeem_burns_link_as_consumed() {
     let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping magic_link_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -601,7 +601,7 @@ async fn stale_pending_redeem_burns_link_as_consumed() {
 #[compio::test]
 async fn redeem_rejects_reset_purpose_row_without_consuming_it() {
     let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping magic_link_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -657,7 +657,7 @@ async fn redeem_rejects_reset_purpose_row_without_consuming_it() {
 #[compio::test]
 async fn expired_token_returns_none() {
     let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping magic_link_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -693,7 +693,7 @@ async fn expired_token_returns_none() {
 #[compio::test]
 async fn new_issue_supersedes_previous_unconsumed() {
     let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping magic_link_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -726,7 +726,7 @@ async fn new_issue_supersedes_previous_unconsumed() {
 #[compio::test]
 async fn login_issue_does_not_supersede_reset_token() {
     let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping magic_link_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -768,7 +768,7 @@ async fn login_issue_does_not_supersede_reset_token() {
 #[compio::test]
 async fn magic_completion_invalidates_after_five_wrong_codes() {
     let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping magic_link_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -841,11 +841,11 @@ async fn magic_completion_invalidates_after_five_wrong_codes() {
 #[compio::test]
 async fn concurrent_correct_magic_completions_do_not_count_as_wrong_attempts() {
     let Some(seed_client) = pg().await else {
-        zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping magic_link_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
-    let dsn = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)
-        .expect("AUTH_DB_URL present after pg");
+    let dsn = zeroship_core::config::test_database_url_opt()
+        .expect("test database URL present after pg");
 
     let csrf_nonce = format!("completion-race-{}", Uuid::new_v4().simple());
     let email = format!("magic-race-{}@example.test", Uuid::new_v4().simple());
@@ -920,7 +920,7 @@ async fn concurrent_correct_magic_completions_do_not_count_as_wrong_attempts() {
 #[compio::test]
 async fn stale_magic_completion_reservation_cannot_finalize_newer_reservation() {
     let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping magic_link_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping magic_link_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 

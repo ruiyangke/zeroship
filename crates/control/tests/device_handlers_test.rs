@@ -6,9 +6,9 @@
 //! one thing control still serves an unauthenticated CLI - the document naming
 //! the authorization server whose tokens control accepts.
 //!
-//! This test intentionally hard-fails without CONTROL_TEST_DB: `AppState` owns
-//! a live `Registry`, and a fixture that silently skipped would report a green
-//! that measured nothing.
+//! This test intentionally hard-fails without a test database: `AppState`
+//! owns a live `Registry`, and a fixture that silently skipped would report
+//! a green that measured nothing.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -46,8 +46,8 @@ const SUPABASE_URL: &str = "https://project.supabase.test";
 const SUPABASE_ISSUER: &str = "https://project.supabase.test/auth/v1";
 
 fn db_url() -> String {
-    zeroship_core::test_env!("CONTROL_TEST_DB")
-        .expect("CONTROL_TEST_DB must be set so device_handlers_test runs against Postgres")
+    zeroship_core::config::test_database_url_opt()
+        .expect("a test database must be configured (zeroship_core::config::test_database_url_opt) so device_handlers_test runs against Postgres")
 }
 
 fn tmpdir(label: &str) -> PathBuf {

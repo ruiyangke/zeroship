@@ -16,7 +16,7 @@
 //! that were actually used - a magic-link user must not end up holding a
 //! session that claims a password login.
 //!
-//! Skipped unless `AUTH_DB_URL` is set; the skip is announced so
+//! Skipped unless a test database is available; the skip is announced so
 //! `tests/run_auth_suite.sh` can tell a skip from a pass.
 
 use std::sync::{Arc, Mutex};
@@ -90,7 +90,7 @@ struct Fixture {
 impl Fixture {
     #[allow(clippy::future_not_send)]
     async fn boot() -> Option<Self> {
-        let db_url = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)?;
+        let db_url = zeroship_core::config::test_database_url_opt()?;
 
         let (pg_client, pg_connection) = connect(&db_url, NoTls).await.expect("connect pg");
         compio::runtime::spawn(async move {
@@ -349,7 +349,7 @@ async fn start_magic(fx: &Fixture, email: &str, return_to: &str) -> (String, Str
 async fn magic_same_device_redeem_demands_second_factor() {
     let Some(fx) = Fixture::boot().await else {
         zeroship_test_support::skip(
-            "[totp_gates_every_mint_path same-device] skip (need AUTH_DB_URL)",
+            "[totp_gates_every_mint_path same-device] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))",
         );
         return;
     };
@@ -441,7 +441,7 @@ async fn magic_same_device_redeem_demands_second_factor() {
 async fn magic_cross_device_complete_demands_second_factor() {
     let Some(fx) = Fixture::boot().await else {
         zeroship_test_support::skip(
-            "[totp_gates_every_mint_path cross-device] skip (need AUTH_DB_URL)",
+            "[totp_gates_every_mint_path cross-device] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))",
         );
         return;
     };
@@ -542,7 +542,7 @@ async fn magic_cross_device_complete_demands_second_factor() {
 #[allow(clippy::future_not_send)]
 async fn link_confirm_demands_second_factor_before_linking() {
     let Some(fx) = Fixture::boot().await else {
-        zeroship_test_support::skip("[totp_gates_every_mint_path link] skip (need AUTH_DB_URL)");
+        zeroship_test_support::skip("[totp_gates_every_mint_path link] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
     let email = format!("totp-link-{}@zeroship.test", Uuid::new_v4().simple());

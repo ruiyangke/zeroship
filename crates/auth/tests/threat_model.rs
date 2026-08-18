@@ -9,7 +9,7 @@
 //! 5. `login_rate_limit_kicks_in` — `LOGIN_EIP` bucket throttles the 6th attempt
 //! 6. `session_id_rotates_post_login_success` — session cookie value differs across two logins
 //!
-//! Every test skips when `AUTH_DB_URL` is unset.
+//! Every test skips when no test database is configured.
 
 use uuid::Uuid;
 
@@ -43,7 +43,7 @@ fn login_url(fx: &Fixture, return_to: &str) -> String {
 #[ntex::test]
 async fn login_csrf_missing_field_rejected() {
     let Some(fx) = Fixture::boot("threat").await else {
-        zeroship_test_support::skip("[threat_model::csrf_missing] skip (need AUTH_DB_URL)");
+        zeroship_test_support::skip("[threat_model::csrf_missing] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -95,7 +95,7 @@ async fn login_csrf_missing_field_rejected() {
 #[ntex::test]
 async fn login_csrf_mismatched_token_rejected() {
     let Some(fx) = Fixture::boot("threat").await else {
-        zeroship_test_support::skip("[threat_model::csrf_mismatch] skip (need AUTH_DB_URL)");
+        zeroship_test_support::skip("[threat_model::csrf_mismatch] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -159,7 +159,7 @@ async fn login_csrf_mismatched_token_rejected() {
 #[ntex::test]
 async fn login_clickjacking_headers_present() {
     let Some(fx) = Fixture::boot("threat").await else {
-        zeroship_test_support::skip("[threat_model::clickjacking] skip (need AUTH_DB_URL)");
+        zeroship_test_support::skip("[threat_model::clickjacking] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -248,7 +248,7 @@ async fn login_clickjacking_headers_present() {
 #[ntex::test]
 async fn login_referrer_policy_set() {
     let Some(fx) = Fixture::boot("threat").await else {
-        zeroship_test_support::skip("[threat_model::referrer] skip (need AUTH_DB_URL)");
+        zeroship_test_support::skip("[threat_model::referrer] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -282,7 +282,7 @@ async fn login_referrer_policy_set() {
 #[ntex::test]
 async fn login_rate_limit_kicks_in() {
     let Some(fx) = Fixture::boot("threat").await else {
-        zeroship_test_support::skip("[threat_model::rate_limit] skip (need AUTH_DB_URL)");
+        zeroship_test_support::skip("[threat_model::rate_limit] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -416,7 +416,7 @@ async fn one_login(fx: &Fixture, email: &str, password: &str, xff_ip: &str) -> S
 #[ntex::test]
 async fn session_id_rotates_post_login_success() {
     let Some(fx) = Fixture::boot("threat").await else {
-        zeroship_test_support::skip("[threat_model::rotate] skip (need AUTH_DB_URL)");
+        zeroship_test_support::skip("[threat_model::rotate] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 

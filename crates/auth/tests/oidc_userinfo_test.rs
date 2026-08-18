@@ -59,7 +59,7 @@ impl Fixture {
     #[allow(clippy::future_not_send)]
     async fn boot() -> Option<Self> {
         let Some(db_url) = db_url() else {
-            zeroship_test_support::skip("[oidc_userinfo_test] skip (AUTH_DB_URL or CONTROL_TEST_DB unset)");
+            zeroship_test_support::skip("[oidc_userinfo_test] skip (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
             return None;
         };
         let (pg_client, pg_connection) = connect(&db_url, NoTls).await.expect("connect pg");
@@ -329,8 +329,7 @@ async fn userinfo_rejects_disabled_user() {
 }
 
 fn db_url() -> Option<String> {
-    zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)
-        .or_else(|| zeroship_core::test_env!("CONTROL_TEST_DB"))
+    zeroship_core::config::test_database_url_opt()
 }
 
 fn test_issuer(issuer: &str) -> Issuer {

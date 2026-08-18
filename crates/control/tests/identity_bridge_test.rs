@@ -12,14 +12,14 @@ mod common;
 const PROVIDER: &str = "supabase";
 
 fn db_url() -> String {
-    zeroship_core::test_env!("CONTROL_TEST_DB")
-        .expect("CONTROL_TEST_DB must be set so identity_bridge_test runs against Postgres")
+    zeroship_core::config::test_database_url_opt()
+        .expect("a test database must be configured (zeroship_core::config::test_database_url_opt) so identity_bridge_test runs against Postgres")
 }
 
 async fn open_conn() -> Client {
     let (client, connection) = connect(&db_url(), NoTls)
         .await
-        .expect("connect CONTROL_TEST_DB");
+        .expect("connect test database");
     compio::runtime::spawn(async move {
         if let Err(err) = connection.run().await {
             eprintln!("[identity_bridge_test] pg connection error: {err}");

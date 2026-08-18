@@ -78,9 +78,8 @@ struct Fixture {
 impl Fixture {
     #[allow(clippy::future_not_send)]
     async fn boot(kind: ClientKind) -> Self {
-        let db_url = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)
-            .or_else(|| zeroship_core::test_env!("CONTROL_TEST_DB"))
-            .expect("AUTH_DB_URL is required for oidc_token_client_auth_test");
+        let db_url = zeroship_core::config::test_database_url_opt()
+            .expect("a test database is required for oidc_token_client_auth_test (set PG_TEST_URL or run tests/provision_test_backends.sh)");
         let (pg_client, pg_connection) = connect(&db_url, NoTls).await.expect("connect pg");
         compio::runtime::spawn(async move {
             if let Err(err) = pg_connection.run().await {

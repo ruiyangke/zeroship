@@ -11,7 +11,8 @@
 //!       concurrent `usage_aggregates.app_id` CASCADE removes the rows FIRST.
 //!
 //! FAITHFUL: drives the REAL `Registry::create_app` / `Registry::delete_app`
-//! against a live, migrated Postgres. Gated on `CONTROL_TEST_DB`; silent skip.
+//! against a live, migrated Postgres. Gated on a configured test database
+//! (`zeroship_core::config::test_database_url_opt`); silent skip.
 
 mod common;
 

@@ -2,8 +2,9 @@
 //! the per-app, RLS-scoped session-revocation path used by the OIDC
 //! Back-Channel Logout 1.0 handler.
 //!
-//! Skipped silently when `AUTH_DB_URL` is unset (same convention as
-//! the rest of the gateway PG smoke tests, e.g. `sessions_test.rs`).
+//! Skipped silently when there is no test database (same convention as
+//! the rest of the gateway PG smoke tests, e.g. `sessions_test.rs`; set
+//! `PG_TEST_URL`).
 //!
 //! Coverage:
 //!   - Seed two live sessions for the same user_id (different app_ids)
@@ -49,8 +50,8 @@ use zeroship_gateway::{
 
 #[compio::test]
 async fn revoke_app_sessions_for_user_revokes_only_the_target_app_and_user() {
-    let Some(dsn) = zeroship_core::test_env!("AUTH_DB_URL") else {
-        zeroship_test_support::skip("skipping (no AUTH_DB_URL)");
+    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
+        zeroship_test_support::skip("skipping (no test database; set PG_TEST_URL)");
         return;
     };
 
@@ -516,8 +517,8 @@ async fn audit_count(client: &Client, jti: &str) -> i64 {
 
 #[ntex::test]
 async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit() {
-    let Some(dsn) = zeroship_core::test_env!("AUTH_DB_URL") else {
-        zeroship_test_support::skip("skipping (no AUTH_DB_URL)");
+    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
+        zeroship_test_support::skip("skipping (no test database; set PG_TEST_URL)");
         return;
     };
 
@@ -659,8 +660,8 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
 
 #[ntex::test]
 async fn concurrent_same_jti_logout_token_runs_side_effects_once() {
-    let Some(dsn) = zeroship_core::test_env!("AUTH_DB_URL") else {
-        zeroship_test_support::skip("skipping (no AUTH_DB_URL)");
+    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
+        zeroship_test_support::skip("skipping (no test database; set PG_TEST_URL)");
         return;
     };
 
@@ -814,8 +815,8 @@ async fn concurrent_same_jti_logout_token_runs_side_effects_once() {
 
 #[ntex::test]
 async fn handler_db_failure_returns_5xx_without_burning_jti_retry_succeeds() {
-    let Some(dsn) = zeroship_core::test_env!("AUTH_DB_URL") else {
-        zeroship_test_support::skip("skipping (no AUTH_DB_URL)");
+    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
+        zeroship_test_support::skip("skipping (no test database; set PG_TEST_URL)");
         return;
     };
 
@@ -1002,8 +1003,8 @@ async fn handler_db_failure_returns_5xx_without_burning_jti_retry_succeeds() {
 
 #[ntex::test]
 async fn handler_valid_logout_token_revokes_matching_sid_only() {
-    let Some(dsn) = zeroship_core::test_env!("AUTH_DB_URL") else {
-        zeroship_test_support::skip("skipping (no AUTH_DB_URL)");
+    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
+        zeroship_test_support::skip("skipping (no test database; set PG_TEST_URL)");
         return;
     };
 
@@ -1150,8 +1151,8 @@ async fn handler_valid_logout_token_revokes_matching_sid_only() {
 
 #[ntex::test]
 async fn handler_sid_miss_falls_back_to_app_scoped_sub_revoke() {
-    let Some(dsn) = zeroship_core::test_env!("AUTH_DB_URL") else {
-        zeroship_test_support::skip("skipping (no AUTH_DB_URL)");
+    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
+        zeroship_test_support::skip("skipping (no test database; set PG_TEST_URL)");
         return;
     };
 
@@ -1323,8 +1324,8 @@ async fn handler_sid_miss_falls_back_to_app_scoped_sub_revoke() {
 
 #[ntex::test]
 async fn handler_sid_miss_without_sub_returns_5xx_without_burning_jti_retry_succeeds() {
-    let Some(dsn) = zeroship_core::test_env!("AUTH_DB_URL") else {
-        zeroship_test_support::skip("skipping (no AUTH_DB_URL)");
+    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
+        zeroship_test_support::skip("skipping (no test database; set PG_TEST_URL)");
         return;
     };
 
@@ -1475,8 +1476,8 @@ async fn handler_sid_miss_without_sub_returns_5xx_without_burning_jti_retry_succ
 
 #[ntex::test]
 async fn handler_rejects_invalid_logout_tokens_without_revoking_session() {
-    let Some(dsn) = zeroship_core::test_env!("AUTH_DB_URL") else {
-        zeroship_test_support::skip("skipping (no AUTH_DB_URL)");
+    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
+        zeroship_test_support::skip("skipping (no test database; set PG_TEST_URL)");
         return;
     };
 
@@ -1716,8 +1717,8 @@ fn build_handler_state_with_route(
 /// auth arms key it — reports a still-live token as revoked. PG-gated.
 #[ntex::test]
 async fn per_app_bcl_writes_token_family_marker() {
-    let Some(dsn) = zeroship_core::test_env!("AUTH_DB_URL") else {
-        zeroship_test_support::skip("skipping (no AUTH_DB_URL)");
+    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
+        zeroship_test_support::skip("skipping (no test database; set PG_TEST_URL)");
         return;
     };
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
@@ -1869,8 +1870,8 @@ async fn per_app_bcl_writes_token_family_marker() {
 /// CANONICAL `pws_` reports the live token revoked. PG-gated.
 #[ntex::test]
 async fn per_app_bcl_marker_is_invariant_to_non_canonical_sub_spelling() {
-    let Some(dsn) = zeroship_core::test_env!("AUTH_DB_URL") else {
-        zeroship_test_support::skip("skipping (no AUTH_DB_URL)");
+    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
+        zeroship_test_support::skip("skipping (no test database; set PG_TEST_URL)");
         return;
     };
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
@@ -2035,8 +2036,8 @@ async fn per_app_bcl_marker_is_invariant_to_non_canonical_sub_spelling() {
 /// to read. Pre-fix this assertion FAILS (the anchor survives). PG-gated.
 #[ntex::test]
 async fn per_app_bcl_deletes_reload_recovery_anchor() {
-    let Some(dsn) = zeroship_core::test_env!("AUTH_DB_URL") else {
-        zeroship_test_support::skip("skipping (no AUTH_DB_URL)");
+    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
+        zeroship_test_support::skip("skipping (no test database; set PG_TEST_URL)");
         return;
     };
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");

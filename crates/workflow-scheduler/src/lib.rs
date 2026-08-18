@@ -112,13 +112,12 @@ mod tests {
     use uuid::Uuid;
 
     fn test_db_url() -> Option<String> {
-        zeroship_core::test_env!("ZEROSHIP_SCHEDULER_TEST_DB")
-            .or_else(|| zeroship_core::test_env!("CONTROL_TEST_DB"))
+        zeroship_core::config::test_database_url_opt()
     }
 
     async fn store(label: &str) -> Option<WorkflowSchedulerStore> {
         let Some(db_url) = test_db_url() else {
-            eprintln!("skip: ZEROSHIP_SCHEDULER_TEST_DB/CONTROL_TEST_DB not set");
+            eprintln!("skip: no test database (run tests/provision_test_backends.sh)");
             return None;
         };
         let store = WorkflowSchedulerStore::new(db_url);

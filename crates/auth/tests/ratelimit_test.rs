@@ -7,7 +7,7 @@ use zeroship_auth::ratelimit::{consume, Bucket, RateLimitDecision};
 // handle). All async helpers that touch it inherit that.
 #[allow(clippy::future_not_send)]
 async fn pg_or_skip() -> Option<compio_postgres::Client> {
-    let dsn = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)?;
+    let dsn = zeroship_core::config::test_database_url_opt()?;
     let client = pg_connect(&dsn).await;
     Some(client)
 }
@@ -27,7 +27,7 @@ async fn pg_connect(dsn: &str) -> compio_postgres::Client {
 #[compio::test]
 async fn consumes_until_throttled() {
     let Some(client) = pg_or_skip().await else {
-        zeroship_test_support::skip("skip (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skip (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -59,11 +59,11 @@ async fn consumes_until_throttled() {
 #[compio::test]
 async fn concurrent_consumes_are_atomic() {
     let Some(seed_client) = pg_or_skip().await else {
-        zeroship_test_support::skip("skip (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skip (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
-    let dsn = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)
-        .expect("AUTH_DB_URL present after pg_or_skip");
+    let dsn = zeroship_core::config::test_database_url_opt()
+        .expect("test database URL present after pg_or_skip");
 
     let key = format!("test:atomic:{}", uuid::Uuid::new_v4().simple());
     seed_client
