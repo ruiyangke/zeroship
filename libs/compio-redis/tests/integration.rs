@@ -1,25 +1,20 @@
-//! Integration tests against a real Redis. Set `REDIS_TEST_URL` to run;
-//! otherwise tests are skipped.
+//! Integration tests against a real Redis. There is no way to opt out of the
+//! server: with `REDIS_TEST_URL` unset these dial `common::DEFAULT_REDIS_URL`
+//! and FAIL if nothing answers. They used to return early instead, so an unset
+//! variable produced eleven passes against no server at all.
 //!
-//! For local dev:
-//!   docker run -d --name zs-redis-test -p 6390:6379 redis:7-alpine
+//! Provision it first:
+//!   tests/provision_test_backends.sh
+//!
+//! Or point them elsewhere:
 //!   REDIS_TEST_URL=redis://127.0.0.1:6390 cargo test -p compio-redis -- --nocapture
-
-use compio_redis::{Client, Pool};
 
 mod common;
 
-fn test_url() -> Option<String> {
-    common::env::get(common::env::TestEnvKey::RedisTestUrl)
-}
-
 #[compio::test]
 async fn ping_set_get_del_roundtrip() {
-    let Some(url) = test_url() else {
-        common::skip("skip: REDIS_TEST_URL not set");
-        return;
-    };
-    let mut c = Client::connect(&url).await.expect("connect");
+    let url = common::test_url();
+    let mut c = common::connect(&url).await;
     c.ping().await.expect("ping");
 
     c.set("zs:test:k1", b"hello", None).await.expect("set");
@@ -35,8 +30,8 @@ async fn ping_set_get_del_roundtrip() {
 
 #[compio::test]
 async fn ttl_ms_expires() {
-    let Some(url) = test_url() else { return; };
-    let mut c = Client::connect(&url).await.expect("connect");
+    let url = common::test_url();
+    let mut c = common::connect(&url).await;
     c.set("zs:test:ttl", b"bye", Some(100)).await.expect("set ttl");
     assert_eq!(c.get("zs:test:ttl").await.unwrap().as_deref(), Some(b"bye".as_ref()));
     compio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -45,8 +40,8 @@ async fn ttl_ms_expires() {
 
 #[compio::test]
 async fn incr_is_atomic_and_correct() {
-    let Some(url) = test_url() else { return; };
-    let mut c = Client::connect(&url).await.expect("connect");
+    let url = common::test_url();
+    let mut c = common::connect(&url).await;
     c.del("zs:test:counter").await.ok();
 
     // Serial incr — correctness.
@@ -64,8 +59,8 @@ async fn incr_is_atomic_and_correct() {
 
 #[compio::test]
 async fn scan_prefix_returns_matching_keys() {
-    let Some(url) = test_url() else { return; };
-    let mut c = Client::connect(&url).await.expect("connect");
+    let url = common::test_url();
+    let mut c = common::connect(&url).await;
 
     // Seed a few keys under a unique prefix so the test is isolated.
     let prefix = "zs:scan:42";
@@ -96,8 +91,8 @@ async fn scan_prefix_returns_matching_keys() {
 
 #[compio::test]
 async fn pool_acquire_and_reuse() {
-    let Some(url) = test_url() else { return; };
-    let pool = Pool::connect(&url, 4).await.expect("pool");
+    let url = common::test_url();
+    let pool = common::connect_pool(&url, 4).await;
     // Five sequential acquires share the same underlying 1-conn pool.
     for i in 0..5 {
         let mut c = pool.acquire().await.expect("acquire");
@@ -110,8 +105,8 @@ async fn pool_acquire_and_reuse() {
 
 #[compio::test]
 async fn null_reply_on_missing_key() {
-    let Some(url) = test_url() else { return; };
-    let mut c = Client::connect(&url).await.expect("connect");
+    let url = common::test_url();
+    let mut c = common::connect(&url).await;
     c.del("zs:test:missing").await.ok();
     let v = c.get("zs:test:missing").await.expect("get");
     assert!(v.is_none());
@@ -119,8 +114,8 @@ async fn null_reply_on_missing_key() {
 
 #[compio::test]
 async fn binary_safe_values() {
-    let Some(url) = test_url() else { return; };
-    let mut c = Client::connect(&url).await.expect("connect");
+    let url = common::test_url();
+    let mut c = common::connect(&url).await;
     // NUL bytes + non-UTF8 sequences must survive round-trip.
     let value: Vec<u8> = (0..=255u8).collect();
     c.set("zs:test:bin", &value, None).await.unwrap();
@@ -131,8 +126,8 @@ async fn binary_safe_values() {
 
 #[compio::test]
 async fn set_nx_acts_as_lock() {
-    let Some(url) = test_url() else { return; };
-    let mut c = Client::connect(&url).await.expect("connect");
+    let url = common::test_url();
+    let mut c = common::connect(&url).await;
     c.del("zs:test:lock").await.ok();
 
     // First acquire: key doesn't exist, SET NX succeeds.
@@ -148,8 +143,8 @@ async fn set_nx_acts_as_lock() {
 
 #[compio::test]
 async fn exists_pexpire_pttl_lifecycle() {
-    let Some(url) = test_url() else { return; };
-    let mut c = Client::connect(&url).await.expect("connect");
+    let url = common::test_url();
+    let mut c = common::connect(&url).await;
     c.del("zs:test:life").await.ok();
 
     // Missing key: EXISTS=false, PTTL=-2.
@@ -173,8 +168,8 @@ async fn exists_pexpire_pttl_lifecycle() {
 
 #[compio::test]
 async fn decr_by_and_strlen() {
-    let Some(url) = test_url() else { return; };
-    let mut c = Client::connect(&url).await.expect("connect");
+    let url = common::test_url();
+    let mut c = common::connect(&url).await;
     c.del("zs:test:cnt").await.ok();
 
     // Seed via incr, then decrement.
@@ -192,8 +187,8 @@ async fn decr_by_and_strlen() {
 
 #[compio::test]
 async fn mget_mset_batch_roundtrip() {
-    let Some(url) = test_url() else { return; };
-    let mut c = Client::connect(&url).await.expect("connect");
+    let url = common::test_url();
+    let mut c = common::connect(&url).await;
 
     let keys = ["zs:test:m1", "zs:test:m2", "zs:test:m3"];
     for k in &keys { c.del(k).await.ok(); }

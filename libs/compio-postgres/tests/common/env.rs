@@ -25,10 +25,9 @@
 /// Every environment name this crate's tests are permitted to read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TestEnvKey {
-    /// Connection string for the gated PostgreSQL integration suites.
+    /// Connection string for the PostgreSQL integration suites. Absent means
+    /// the default DSN in each target, never "do not run".
     PgTestUrl,
-    /// Opt-in strictness: a skip becomes a failure when this is `1`.
-    RequireLiveBackends,
 }
 
 impl TestEnvKey {
@@ -36,7 +35,6 @@ impl TestEnvKey {
     const fn name(self) -> &'static str {
         match self {
             Self::PgTestUrl => "PG_TEST_URL",
-            Self::RequireLiveBackends => "ZEROSHIP_REQUIRE_LIVE_BACKENDS",
         }
     }
 }

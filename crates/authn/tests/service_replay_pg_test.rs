@@ -12,8 +12,12 @@
 //! "exactly one succeeded" is equally consistent with a harness that never
 //! interleaved, which would make the whole test vacuous.
 //!
-//! Skips when `AUTH_DB_URL` is unset. Under `ZEROSHIP_REQUIRE_LIVE_BACKENDS=1`
-//! a skip is a failure instead.
+//! Announces a skip when `AUTH_DB_URL` is unset, and that skip is a FAILURE in
+//! the gate that provisions the database: `tests/run_auth_suite.sh` exports the
+//! DSN and then fails on any announcement not named in its allowlist. This is
+//! not one of them. There is no environment variable that changes the verdict -
+//! `ZEROSHIP_REQUIRE_LIVE_BACKENDS=1` used to, and being opt-in it was set by
+//! everyone except the person whose run it would have saved.
 
 #![allow(clippy::future_not_send)]
 

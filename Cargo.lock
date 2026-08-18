@@ -7396,9 +7396,6 @@ dependencies = [
 [[package]]
 name = "zeroship-test-support"
 version = "0.1.0"
-dependencies = [
- "zeroship-core",
-]
 
 [[package]]
 name = "zeroship-worker"
