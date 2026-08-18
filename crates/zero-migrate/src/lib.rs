@@ -271,12 +271,23 @@ pub use model::migration::{
     migration_id_for_version, Checksum, ChecksumInput, IdError, Migration, MigrationFlags,
     MigrationId, OnlinePhase, MIGRATION_PREFIX,
 };
+// The NEUTRAL schema model of `docs/proposals/single-fold-and-effects.md` section D:
+// derived `PartialEq` on the model, vendor facts in a side table they cannot be reached
+// from, and one NAMED comparator per question instead of one hand-written `eq` every
+// consumer silently inherits. No consumer reads it yet - that is step 4.
+pub use model::schema_model;
+pub use model::schema_model::{
+    column_shape_identity, constraint_shape_identity, drift_identity, index_pairing_identity,
+    index_shape_identity, rename_equivalence_identity, table_shape_identity, ColumnKey,
+    IndexElementKey, IndexKey, SchemaModel, TableKey, VendorFacts,
+};
 pub use model::snapshot::{
     ColumnCollationSnapshot, ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot, FunctionKey,
-    FunctionSnapshot, GeneratedColumnSnapshot, GeneratedKindSnapshot, IndexElementSnapshot,
-    IndexSnapshot, MysqlTextStorageSnapshot, NamedTypeSnapshot, PartitionSnapshot, PolicyKey,
-    PolicySnapshot, RoleSnapshot, SchemaObjectSnapshot, SchemaSnapshot, SequenceDataTypeSnapshot,
-    SequenceSnapshot, TableSnapshot, TriggerKey, TriggerSnapshot, ViewSnapshot,
+    FunctionSnapshot, GeneratedColumnSnapshot, GeneratedKindSnapshot, IdDefaultSnapshot,
+    IndexElementSnapshot, IndexSnapshot, MysqlPhysicalType, MysqlTextStorageSnapshot,
+    NamedTypeSnapshot, PartitionSnapshot, PolicyKey, PolicySnapshot, RoleSnapshot,
+    SchemaObjectSnapshot, SchemaSnapshot, SequenceDataTypeSnapshot, SequenceSnapshot,
+    TableSnapshot, TriggerKey, TriggerSnapshot, ViewSnapshot,
 };
 pub use plan::manifest::{
     compute_manifest, verify_manifest, ManifestError, ManifestHash, MismatchKind,

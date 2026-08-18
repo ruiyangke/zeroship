@@ -34,6 +34,16 @@ pub mod mysql;
 /// without classifying it.
 pub mod carriers;
 
+/// The FIELD PROBE inventory shared by `structural_equality_field_sensitivity.rs` and
+/// `support::model_equivalence`: one mutation per field of every snapshot type, so a new
+/// field is a compile error until both consumers cover it.
+pub mod field_probes;
+
+/// The behaviour-preservation kernel for the neutral `schema_model`: the lossless
+/// round trip and the named-comparator equivalence, shared by the PostgreSQL and MySQL
+/// legs so the two cannot measure different things.
+pub mod model_equivalence;
+
 use std::cell::{Cell, RefCell};
 
 use bytes::BytesMut;
