@@ -134,7 +134,7 @@ run_psql() { PGPASSWORD="$PG_PASS" "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -U "$PG_U
 # handler exits.
 SUITE_LOG=""
 cleanup() {
-  [ -n "$SUITE_LOG" ] && rm -f "$SUITE_LOG"
+  if [ -n "$SUITE_LOG" ]; then rm -f "$SUITE_LOG"; fi
   zs_scratch_db_cleanup
   return 0
 }
