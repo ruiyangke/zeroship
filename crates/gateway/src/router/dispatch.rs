@@ -3957,11 +3957,17 @@ mod tests {
     fn client_ip_ignores_a_forwarded_header_entirely() {
         // ntex reads `Forwarded` BEFORE `X-Forwarded-For` (ntex 3.7.2
         // web/info.rs:35-59 runs ahead of :101), so a test matrix built only
-        // around XFF cannot catch this. Nothing in this deployment emits
-        // `Forwarded` -- Caddy emits the `X-Forwarded-*` family -- so a
-        // `Forwarded` that reaches the gateway was authored by the caller.
-        // Honouring it ahead of the proxy's own header let the caller pick
-        // their bucket. Control and auth never read it either.
+        // around XFF cannot catch this.
+        //
+        // Measured against this deployment's own proxy (caddy:2-alpine, the
+        // image and `reverse_proxy` shape of deploy/ops/Caddyfile, probed
+        // 2026-08-18): Caddy REPLACES `X-Forwarded-For` with the peer it
+        // accepted -- a caller's `X-Forwarded-For: 1.2.3.4` arrived as
+        // `127.0.0.1` -- but it neither sets nor strips `Forwarded`, and
+        // passed `Forwarded: for=9.9.9.9` through verbatim. So the one header
+        // ntex preferred is the one the caller still controls, and preferring
+        // it handed the caller their own bucket. Control and auth read
+        // `X-Forwarded-For` only; this is the gateway agreeing with them.
         let req = ntex::web::test::TestRequest::default()
             .header("forwarded", "for=1.2.3.4")
             .header("x-forwarded-for", "203.0.113.7")
