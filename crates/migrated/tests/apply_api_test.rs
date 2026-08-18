@@ -343,12 +343,91 @@ fn state_for_with_ceiling_version(
     )
 }
 
+/// Fail as "the fixture is stale" before any test can fail as a wrong status code.
+///
+/// Every policy fixture below is a hand-written TOML literal, and the engine's
+/// accepted-document set moves under it. When `runtime.lock_timeout_ms` stopped
+/// being loadable (2026-08-10), `tighter_policy()` kept granting it and FIVE tests
+/// across five unrelated behaviours went red at once: error redaction saw 422 where
+/// it asserted 503, the stored-policy fallback saw 422 where it asserted 200, and so
+/// on for repreflight, request-id propagation and the versioned policy API. A 422 for
+/// an unparseable draft is indistinguishable, at the assertion level, from the status
+/// each test meant to exercise, so none of them were testing what their name claims
+/// and nothing in the output said "fixture".
+///
+/// This runs on the one funnel every service-level test goes through, and states the
+/// intent of each fixture as an assertion:
+///
+/// * the three accepted drafts must PARSE and must ADMIT against the operator
+///   ceiling (parse alone would not have caught a ceiling-side tightening);
+/// * `escalating_policy` must parse but must be REFUSED by `admit` (it is what
+///   `policy_api_rejects_escalating_draft_at_submit_pg` exercises);
+/// * `malformed_policy` must NOT parse (same, for the 422 path).
+///
+/// NOT DERIVED from the registry, deliberately. The knob set is enumerable
+/// (`PolicyRegistry::iter` plus each `KnobDef`'s `enforcement`/`default`), so a
+/// fixture could be generated from the loadable keys. But these fixtures are not
+/// "some accepted document": the tests assert on their MEANING (`effective_profile
+/// .destructive_ops == "Forbid"`, an escalation that must be refused, two drafts that
+/// must differ), and a generated document would restate whatever the registry
+/// happens to hold rather than the posture the test is about. Generation would also
+/// silently change the fixture bodies under assertions that compare `raw_toml`. So
+/// the literals stay readable and this guard carries the currency check.
+fn assert_policy_fixtures_are_current(policy_config: &ManagedPolicyConfig) {
+    let app_id = Uuid::now_v7();
+    let parse = |body: &str| {
+        policy_config.parse_draft(&zeroship_migrated::policy::CreatorPolicyDraft {
+            filename: MIGRATE_POLICY_FILENAME,
+            body,
+        })
+    };
+
+    for (name, body) in [
+        ("tighter_policy", tighter_policy()),
+        ("second_tighter_policy", second_tighter_policy()),
+        ("require_approval_policy", require_approval_policy()),
+    ] {
+        let draft = parse(body).unwrap_or_else(|err| {
+            panic!(
+                "policy fixture {name} no longer parses: {err:?}\n\
+                 the engine's accepted-document set moved; fix the fixture, not the \
+                 test that asserted a status code\nbody:\n{body}"
+            )
+        });
+        policy_config
+            .compose_effective_for_app(&app_id, None, Some(&draft))
+            .unwrap_or_else(|err| {
+                panic!(
+                    "policy fixture {name} parses but no longer admits against the \
+                     operator ceiling: {err:?}\nbody:\n{body}"
+                )
+            });
+    }
+
+    let escalating = parse(escalating_policy())
+        .expect("escalating_policy must PARSE; it is refused at admit, not at load");
+    assert!(
+        policy_config
+            .compose_effective_for_app(&app_id, None, Some(&escalating))
+            .is_err(),
+        "escalating_policy must be refused by admit; a fixture the ceiling now grants \
+         would turn policy_api_rejects_escalating_draft_at_submit_pg into a no-op"
+    );
+
+    assert!(
+        parse(malformed_policy()).is_err(),
+        "malformed_policy must NOT parse; a fixture the loader now accepts would turn \
+         policy_api_rejects_malformed_toml_at_submit_pg into a no-op"
+    );
+}
+
 fn state_for_with_policy_config(
     authenticator: Arc<dyn Authenticator>,
     provision_dsn: String,
     policy_store_dsn: String,
     policy_config: ManagedPolicyConfig,
 ) -> (Arc<MigrationServiceState>, PathBuf) {
+    assert_policy_fixtures_are_current(&policy_config);
     let tmp = tmpdir("tmp");
     (
         Arc::new(MigrationServiceState::new(
@@ -427,10 +506,20 @@ fn with_policy(mut request: Value, body: &str) -> Value {
 
 // The creator policy draft is now a `zero-migrate-policy` `PolicyDoc` (grant rules
 // against the operator ceiling), not the old `PolicyProfile` TOML. A draft may only
-// TIGHTEN: `safety.destructive_ops` composes forbid ⊑ warn ⊑ allow, and `runtime.lock_timeout_ms`
-// is a UintCeiling (a draft value ≤ the ceiling's 30000ms).
+// TIGHTEN: `safety.destructive_ops` orders forbid <= warn <= allow, so `forbid` is
+// admissible under the confined ceiling's `allow`.
+//
+// This draft ALSO carried `runtime.lock_timeout_ms = 1000`. It cannot: every
+// `runtime.*` knob is registered `DeclaredOnly` with default 1, and the engine's
+// II.6 load gate refuses ANY document raising one above its default
+// (`DeclaredOnlyNonDefault`), in an operator ceiling or a creator draft alike. The
+// grant was dropped from the shipped ceilings and the `policy.rs` unit tests on
+// 2026-08-10 (see `crates/migrated/policies/confined.policy.toml`) and not from
+// here, so every test that PUT this fixture got a 422 for a parse failure instead
+// of exercising the behaviour its name claims. `assert_policy_fixtures_are_current`
+// below is what makes the next such removal fail as a stale fixture.
 fn tighter_policy() -> &'static str {
-    "policy_version = 1\n\n[[grant]]\nkey = \"runtime.lock_timeout_ms\"\nvalue = 1000\nscope = \"all\"\n\n[[grant]]\nkey = \"safety.destructive_ops\"\nvalue = \"forbid\"\nscope = \"all\"\n"
+    "policy_version = 1\n\n[[grant]]\nkey = \"safety.destructive_ops\"\nvalue = \"forbid\"\nscope = \"all\"\n"
 }
 
 // Approval is now the SEALED `safety.require_approval` obligation the engine declares and
@@ -445,8 +534,13 @@ fn require_approval_policy() -> &'static str {
     "policy_version = 1\n\n[[require]]\nkey = \"safety.require_approval\"\nvalue = \"always\"\nscope = \"all\"\n\n[[grant]]\nkey = \"safety.destructive_ops\"\nvalue = \"allow\"\nscope = \"all\"\n"
 }
 
+// A SECOND, textually distinct tightening, so the versioned-policy test can submit
+// two drafts and tell version 1 from version 2 by `raw_toml`. It used to differ by a
+// lower `runtime.lock_timeout_ms`, which the engine no longer loads at any non-default
+// value; it now also revokes `schema.rename`, a real tightening of a grant the
+// confined ceiling does carry (`value = true`).
 fn second_tighter_policy() -> &'static str {
-    "policy_version = 1\n\n[[grant]]\nkey = \"runtime.lock_timeout_ms\"\nvalue = 500\nscope = \"all\"\n\n[[grant]]\nkey = \"safety.destructive_ops\"\nvalue = \"forbid\"\nscope = \"all\"\n"
+    "policy_version = 1\n\n[[grant]]\nkey = \"safety.destructive_ops\"\nvalue = \"forbid\"\nscope = \"all\"\n\n[[grant]]\nkey = \"schema.rename\"\nvalue = false\nscope = \"all\"\n"
 }
 
 // A draft that grants a capability the confined ceiling does not (`sql.raw`):
