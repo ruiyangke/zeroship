@@ -1,20 +1,22 @@
 //! **The single fold, and its four projections.** Step 3 of
-//! `docs/proposals/single-fold-and-effects.md` section G, with step 4's first TWO
+//! `docs/proposals/single-fold-and-effects.md` section G, with step 4's first THREE
 //! consumers moved.
 //!
 //! ONE traversal decides what an op means; four typed projections read the value it
 //! produces. A projection here MAY NOT walk the op stream, and none of them takes
 //! `&[Op]` - that is the rule enforced by the signatures below rather than by review.
 //!
-//! # Two projections are LIVE; two are not
+//! # Three projections are LIVE; one is not
 //!
 //! Step 3 shipped this module dead. Step 4 moves the consumers one at a time in
-//! blast-radius order, and the first two are done. ONE `fold` call inside
-//! `render_artifacts` now feeds both:
+//! blast-radius order, and the first three are done. ONE `fold` call inside
+//! `render_artifacts` now feeds all three:
 //!
 //! * `FoldedSchema::project_runtime_metadata` replaced `runtime_metadata_from_ops`;
 //! * `FoldedSchema::project_authoring_tables` replaced `authoring_tables_from_ops`,
-//!   and is the source model `env.db.ts` is rendered from.
+//!   and is the source model `env.db.ts` is rendered from;
+//! * `FoldedSchema::project_field_defs` replaced `fold_to_field_defs`, and is the wire
+//!   `FieldDef` map behind `schema.runtime.json` and behind `LiveSchema::sqlite_schemas`.
 //!
 //! (Backticks rather than intra-doc links on purpose. `cargo doc` cannot resolve a
 //! `pub(crate)` method of this module from a module-level doc comment, and
@@ -23,13 +25,20 @@
 //! crate emits 14 such warnings on `38f9abc6` and 13 here - demoting these two costs
 //! one warning and adds none.)
 //!
-//! Both walkers are deleted. `fold` itself is production code, and so is everything
-//! those two projections read - which is now most of `AuthoredState`.
+//! All three walkers are deleted. `fold` itself is production code, and so is everything
+//! those three projections read - which is now the whole of `AuthoredState` except
+//! `project_snapshot`'s neutral/vendor split.
 //!
-//! The remaining two projections are still reachable only from tests, which is what
+//! `project_snapshot` is the last one still reachable only from tests, which is what
 //! `#![cfg_attr(not(test), allow(dead_code))]` below still covers. The attribute goes
-//! when the last consumer moves; until then it is load-bearing for
-//! `project_snapshot` and `project_field_defs` and for nothing else.
+//! when consumer 4 moves `fold_ops`; until then it is load-bearing for that one
+//! projection and for nothing else.
+//!
+//! CONSUMER 3 also collapsed a duplicate: `render_artifacts` ran the structural catalog
+//! replay TWICE per render until this move - once through `fold`, once through
+//! `fold_to_field_defs` -> `fold_ops` - and the second one left with the walker. That is
+//! a consequence rather than the purpose; the `fold_ops_onto` extraction the proposal
+//! assigns to the last consumer is still outstanding.
 //!
 //! # What the live projections cost the model
 //!
@@ -59,6 +68,26 @@
 //!
 //! The `Op::DropPartition` arm below moved with the same consumer, from "recorded as a
 //! choice" to measured; see its comment.
+//!
+//! CONSUMER 3 found the same shape as consumer 2, five times over. The step 3 gate had
+//! recorded ONE divergence for `project_field_defs`; a sweep of the walker against it
+//! over every PREFIX of the corpus and of a carrier set written for the constraint
+//! LIFECYCLE found FIVE, and the 27 recorded fixtures contributed none of them. All five
+//! are one rule: `fold_to_field_defs` lifted a constraint's facet onto a column eagerly
+//! and kept a private side map to un-lift from, and never kept that side map in step
+//! with the constraint - so a dropped `UNIQUE`, a dropped `CHECK` bound, a dropped
+//! `CHECK` membership, and a column re-added under a dropped column's name all carried
+//! facets the catalog does not have. This projection derives every one of them from the
+//! constraints the model still holds, which is why `Op::DropConstraint` and
+//! `Op::DropColumn` below need no un-lift arm: there is nothing to un-lift.
+//!
+//! What consumer 3 did NOT get is a live adjudication of the rebuild DDL, and the reason
+//! is worth carrying here. `LiveSchema::sqlite_schemas` is read by exactly one caller,
+//! `render/lower.rs`'s SQLite `renameColumn`, and on the deploy path that rename takes
+//! the `preserve_stored_shape` arm - which replays SQLite's own `CREATE TABLE` and never
+//! looks inside the map. Measured: corrupting every column in the map the engine builds
+//! fails NOTHING in the 229-binary suite; emptying it fails one test, on absence.
+//! `tests/sqlite_rebuild_field_defs_live.rs` pins both halves and covers the other arm.
 //!
 //! # What the model carries, measured rather than promised
 //!
@@ -177,17 +206,24 @@ pub(crate) struct ImplicitUniqueIndex {
 /// The rename is the finding: the neutral model does not yet reach 12 of the 13
 /// object families `fold_ops` produces, so a type that claimed to be `SchemaModel`
 /// would be claiming a completeness nothing has.
+///
+/// The TYPE is public since step 4 consumer 3 - `fold_to_field_defs` was a public
+/// entry point and its replacement has to be reachable from outside the crate - but
+/// every FIELD stays `pub(crate)`. A `pub` field would leak `AuthoredTable`,
+/// `SchemaModel` and `NamedTypeRegistry` into the public API, which is a far larger
+/// commitment than the one this move needs to make and is what `private_interfaces`
+/// would report.
 #[derive(Debug, Clone)]
-pub(crate) struct FoldedSchema {
+pub struct FoldedSchema {
     /// The neutral catalog half plus its vendor side table.
-    pub model: SchemaModel,
+    pub(crate) model: SchemaModel,
     /// Catalog objects the neutral model does not carry. `tables` is always empty.
-    pub unmodelled: SchemaSnapshot,
+    pub(crate) unmodelled: SchemaSnapshot,
     /// The authored half, keyed by the table's CURRENT name.
-    pub authored: BTreeMap<String, AuthoredTable>,
+    pub(crate) authored: BTreeMap<String, AuthoredTable>,
     /// Named-type definitions the op stream declared. `ColType::Enum`/`Domain` carry
     /// a NAME and nothing else; the members and the base type arrive here.
-    pub named_types: NamedTypeRegistry,
+    pub(crate) named_types: NamedTypeRegistry,
 }
 
 // ---------------------------------------------------------------------------
@@ -201,7 +237,7 @@ pub(crate) struct FoldedSchema {
 /// every projection: a stream the catalog refuses yields no artifact at all, which is
 /// what `render_artifacts` already does by returning the fold's error, and is the
 /// behaviour `docs/review-log.md` records for the two fold-backed walkers.
-pub(crate) fn fold(
+pub fn fold(
     ops: &[Op],
     dialect: SqlDialect,
     project_schema: &str,
@@ -511,13 +547,77 @@ impl AuthoredState {
                     .get_mut(table)
                     .and_then(|state| state.core.columns.get_mut(column))
                 {
-                    // Every parameterised facet rides INSIDE `ColType` (`String {
-                    // length }`, `Char { length }`, `Vector { vector }`), so assigning
-                    // `ty` re-derives them by construction. The facets that do NOT ride
-                    // inside it are the five `Op::SetColumnType` has no slot to
-                    // re-declare, and a retype that kept them would be describing the
-                    // type the column no longer has - section B's five `setColumnType`
-                    // rows in one line.
+                    // THE PER-FACET VERDICT for `Op::SetColumnType`: what a change of
+                    // base type does to every OTHER facet the column carries. It lived
+                    // on `render::lower::retype_field_descriptor` until step 4 consumer
+                    // 3, which deleted that function because the walker was its only
+                    // caller - so the verdict lives HERE now, in the one traversal, and
+                    // `set_column_type_facets` pins it.
+                    //
+                    // WHY THE MOVE MATTERS. The verdict used to be stated three times:
+                    // once for the authoring tables, once for the `FieldDef` map, and
+                    // once in the catalog fold's `ColumnSnapshot` terms. The first two
+                    // are now ONE statement with two readers - this arm - which is the
+                    // whole point of the proposal. Two statements remain: this one and
+                    // `fold_ops`'s, plus `model::validate`'s `declare_logical_column`
+                    // for the logical-column contract. They still have to agree, and
+                    // `set_column_type_facets` is still what makes them.
+                    //
+                    // RE-DERIVED. Every parameterised facet rides INSIDE `ColType`
+                    // (`String { length }`, `Char { length }`, `Vector { vector }`,
+                    // `Encrypted { of }`), so assigning `ty` re-derives `max_length`,
+                    // `char_len`, `vector_dims`, `unbounded_text` and `encrypted` by
+                    // construction, at projection time, through the same
+                    // `ir_column_to_field` a `createTable` column goes through. A replay
+                    // that assigned only the TOKEN was wrong in both directions: it kept
+                    // `maxLength: 24` on a column widened to `varchar(40)` and emitted a
+                    // bare `{"type":"char"}` - which is not a type - for a retype INTO
+                    // `char(8)`.
+                    //
+                    // CLEARED, because `Op::SetColumnType` has no slot to re-declare
+                    // them and a retype that kept them would describe the type the
+                    // column no longer has - section B's five `setColumnType` rows in
+                    // one line:
+                    //
+                    // * `case_sensitive` - on PostgreSQL case-insensitivity IS the
+                    //   `citext` TYPE, so changing the type destroys it. Measured on
+                    //   live PostgreSQL 18.4: `citext -> character varying(40)` leaves a
+                    //   plain case-SENSITIVE column, and because `case_sensitive` is
+                    //   DRIFT-COMPARED, keeping it reported drift on a schema that was
+                    //   exactly what had been deployed.
+                    // * `vector_metric` - a DECLARED-ONLY opclass selector with no
+                    //   catalog trace, meaningless off a `vector` type.
+                    // * `id_prefix` - the legacy text-shaped brand, whose writer owns
+                    //   the storage type. `declare_logical_column` already clears it.
+                    // * `value_format` - see the refusal below; cleared here so the
+                    //   authored half cannot carry it past a refusal the catalog half
+                    //   raises.
+                    //
+                    // `min`, `max`, `enum_values` and `literal_value` need no clearing
+                    // in this model and that is a PROPERTY rather than an omission: they
+                    // are not column state at all, they are derived at projection time
+                    // from the constraints the table still holds. The walker had to
+                    // clear them by hand because it kept them in a side map, and the
+                    // same side map is what let a DROPPED constraint's bound outlive it.
+                    //
+                    // KEPT, measured on live PostgreSQL 18.4 with one
+                    // `ALTER TABLE … ALTER COLUMN … TYPE` per row: `nullable`
+                    // (`attnotnull` survives), `unique` (the index is REBUILT and
+                    // survives), `default` (PostgreSQL re-casts it and REFUSES the whole
+                    // ALTER when it cannot, so a default that reaches a fold is one the
+                    // server kept), `references` and its policies (a separate
+                    // constraint, and PostgreSQL refuses the ALTER when the result is
+                    // FK-incompatible), `generated` (`attgenerated` survives),
+                    // `identity` (`attidentity` survives; a non-integer target is
+                    // refused outright), `mask` and `collation`.
+                    //
+                    // REFUSED, by the structural catalog replay this fold runs FIRST:
+                    // `value_format` and the encryption/mask sentinels are neither
+                    // cleared nor kept - `fold_ops`'s own `Op::SetColumnType` arm fails
+                    // closed on them, because the apply path emits ONLY
+                    // `ALTER COLUMN … TYPE` and the database would keep a contract this
+                    // side can no longer describe. The full measurement is recorded at
+                    // that refusal.
                     column.ty.clone_from(to_type);
                     column.value_format = None;
                     column.vector_metric = None;
@@ -745,16 +845,25 @@ impl FoldedSchema {
         snapshot
     }
 
-    /// **Projection 2: the per-table wire `FieldDef` map.** Today's
-    /// `fold_to_field_defs` output, which feeds `schema.runtime.json` and, on SQLite,
-    /// `live.sqlite_schemas` and therefore the 12-step rebuild.
+    /// **Projection 2: the per-table wire `FieldDef` map.** LIVE since step 4 consumer
+    /// 3, which deleted the `fold_to_field_defs` walker that used to produce it. It
+    /// feeds `schema.runtime.json` and, on SQLite, `live.sqlite_schemas`.
+    ///
+    /// The `live.sqlite_schemas` half is READ by exactly one caller - `render/lower.rs`'s
+    /// SQLite `renameColumn` - and only its PRESENCE is load-bearing on the deploy path:
+    /// that rename takes `render_create_table_sqlite_rebuild`'s `preserve_stored_shape`
+    /// arm, which replays SQLite's own `CREATE TABLE` text. The map's CONTENT reaches a
+    /// rebuilt `CREATE TABLE` only on the SDK-value arm, which needs a live snapshot with
+    /// no `stored_create_sql` - the shape `engine::refresh_historical_live` builds. Both
+    /// halves are measured in `tests/sqlite_rebuild_field_defs_live.rs`; do not read
+    /// "therefore the 12-step rebuild" into this without reading that file first.
     ///
     /// Every facet is DERIVED FROM THE MODEL, never recovered from a rendered
     /// artifact - decision 5. The CHECK and FK facets come from the authored
     /// constraints the model holds, so `recover_check_facet` reads a closed AST the
     /// fold carried forward rather than SQL text some other projection emitted.
     #[must_use]
-    pub(crate) fn project_field_defs(&self) -> BTreeMap<String, serde_json::Value> {
+    pub fn project_field_defs(&self) -> BTreeMap<String, serde_json::Value> {
         let mut out = BTreeMap::new();
         for (name, table) in &self.authored {
             let mut fields: IndexMap<String, crate::render::declarative::FieldDescriptor> =

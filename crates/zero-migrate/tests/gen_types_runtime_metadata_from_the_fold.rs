@@ -942,15 +942,25 @@ const REFUSAL_PROBES: &[(&str, &str)] = &[
 /// **The over-refusal control: this move added no refusal.**
 ///
 /// Before step 4, the ONLY thing that could make `render_artifacts` refuse a stream
-/// (after the policy resolution it still performs first) was
-/// `fold_to_field_defs`: `runtime_metadata_from_ops` and `authoring_tables_from_ops`
-/// applied no coherence gate at all, and the one fallible call they shared -
-/// `flatten_dialectal_ops` - `fold_to_field_defs` makes too. After the move,
-/// `single_fold::fold` runs FIRST and brings `AuthoredState::advance` with it, whose
-/// three fallible sites have no counterpart in that old path.
+/// (after the policy resolution it still performs first) was `fold_to_field_defs`:
+/// `runtime_metadata_from_ops` and `authoring_tables_from_ops` applied no coherence gate
+/// at all, and the one fallible call they shared - `flatten_dialectal_ops` -
+/// `fold_to_field_defs` made too. After the move, `single_fold::fold` runs FIRST and
+/// brings `AuthoredState::advance` with it, whose three fallible sites have no
+/// counterpart in that old path.
+///
+/// Step 4 consumer 3 then deleted `fold_to_field_defs`, and the comparison below moved
+/// to `fold_ops` for a reason worth stating: the deleted walker ran `fold_ops` itself,
+/// so it was a genuinely SECOND opinion, while the projection that replaced it is read
+/// off the very call `render_artifacts` makes first. Comparing against the projection
+/// would have turned this biconditional into a comparison of the fold with itself.
+/// `fold_ops` is the half of the old gate that still exists independently, and the half
+/// that is lost with it - a refusal the walker's AUTHORED replay made and the catalog
+/// replay does not - is covered instead by the `refused|` lines in
+/// `tests/goldens/field_defs_artifacts.txt`, captured from that walker before it went.
 ///
 /// So the property is a BICONDITIONAL, and it is asserted rather than argued:
-/// `render_artifacts` accepts a stream exactly when `fold_to_field_defs` accepts it,
+/// `render_artifacts` accepts a stream exactly when `fold_ops` accepts it,
 /// and when both refuse they refuse with the SAME message. A refusal `advance` adds
 /// makes the left side `Err` while the right side is `Ok`, and this test goes red.
 ///
@@ -1002,7 +1012,14 @@ fn the_move_added_no_refusal_that_the_old_path_did_not_already_make() {
                 // a stream it rejects reaches neither side.
                 continue;
             };
-            let old_gate = zero_migrate::fold_to_field_defs(&resolved.ops, dialect, SCHEMA, policy);
+            // The independent oracle is `fold_ops`, NOT the fold. This comparison was
+            // written against `fold_to_field_defs`, which ran `fold_ops` itself and was
+            // therefore a second opinion; step 4 consumer 3 deleted it, and rewriting
+            // this line to `single_fold::fold(…).project_field_defs()` would have made
+            // the biconditional compare `render_artifacts` to the very call it makes
+            // first - a control that can only ever agree with itself. `fold_ops` is the
+            // half of the old gate that still exists independently.
+            let old_gate = zero_migrate::fold_ops(&resolved.ops, dialect, SCHEMA, policy);
             let now = render_artifacts(ops, dialect, SCHEMA, policy);
 
             match (&old_gate, &now) {
@@ -1017,13 +1034,13 @@ fn the_move_added_no_refusal_that_the_old_path_did_not_already_make() {
                     );
                 }
                 (Ok(_), Err(new)) => panic!(
-                    "{label}/{dialect:?}: OVER-REFUSAL. `fold_to_field_defs` - the whole \
+                    "{label}/{dialect:?}: OVER-REFUSAL. `fold_ops` - the surviving half of the \
                      of the coherence gate `render_artifacts` had before step 4 - accepts \
                      this stream, and `render_artifacts` now refuses it:\n  {new}\nThat is \
                      a stream that used to produce artifacts and now produces none."
                 ),
                 (Err(old), Ok(_)) => panic!(
-                    "{label}/{dialect:?}: UNDER-REFUSAL. `fold_to_field_defs` refuses this \
+                    "{label}/{dialect:?}: UNDER-REFUSAL. `fold_ops` refuses this \
                      stream and `render_artifacts` renders it anyway:\n  {old}"
                 ),
             }

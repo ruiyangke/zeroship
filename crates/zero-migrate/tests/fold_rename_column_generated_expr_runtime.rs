@@ -1,7 +1,7 @@
 //! A column rename must follow the generated expressions that READ that column,
 //! in the descriptor lane that produces `schema.runtime.json`.
 //!
-//! `fold_to_field_defs` keeps a generated column's expression as STRUCTURED IR
+//! The `FieldDef` projection keeps a generated column's expression as STRUCTURED IR
 //! (`GeneratedCol.expr` is a closed `Expr`, never rendered SQL), which is what makes
 //! this fixable at all: the rename walks the AST and matches only column references,
 //! so a string literal spelling the old name is left alone. That is the same
@@ -25,9 +25,10 @@
 
 mod support;
 
+use zero_migrate::render::fold::single_fold;
 use zero_migrate::{
-    diff_snapshots, fold_ops, fold_to_field_defs, BinaryOp, ColType, Expr, GeneratedCol, IrColumn,
-    IrConstraint, IrConstraintKind, IrScalar, Op, SqlDialect,
+    diff_snapshots, fold_ops, BinaryOp, ColType, Expr, GeneratedCol, IrColumn, IrConstraint,
+    IrConstraintKind, IrScalar, Op, SqlDialect,
 };
 
 const SCHEMA: &str = "app";
@@ -120,7 +121,8 @@ fn col_refs(value: &serde_json::Value, found: &mut Vec<String>) {
 fn a_rename_follows_the_generated_expressions_that_read_the_column() {
     let effective = support::confined_charter();
     let ops = vec![create_line_items(), rename_qty_to_quantity()];
-    let fields = fold_to_field_defs(&ops, SqlDialect::Postgres, SCHEMA, &effective)
+    let fields = single_fold::fold(&ops, SqlDialect::Postgres, SCHEMA, &effective)
+        .map(|folded| folded.project_field_defs())
         .expect("the op stream folds");
 
     let table = &fields["line_items"];
@@ -316,12 +318,13 @@ fn create_bounded() -> Op {
 fn a_rename_carries_a_recovered_check_bound_onto_the_new_column_name() {
     let effective = support::confined_charter();
 
-    let before = fold_to_field_defs(
+    let before = single_fold::fold(
         &[create_bounded()],
         SqlDialect::Postgres,
         SCHEMA,
         &effective,
     )
+    .map(|folded| folded.project_field_defs())
     .expect("the unrenamed stream folds");
     let bounded = &before["line_items"]["qty"];
     assert_eq!(
@@ -335,12 +338,13 @@ fn a_rename_carries_a_recovered_check_bound_onto_the_new_column_name() {
         "the control: the bound is recovered without a rename: {bounded}"
     );
 
-    let after = fold_to_field_defs(
+    let after = single_fold::fold(
         &[create_bounded(), rename_qty_to_quantity()],
         SqlDialect::Postgres,
         SCHEMA,
         &effective,
     )
+    .map(|folded| folded.project_field_defs())
     .expect("the renamed stream folds");
     let renamed = &after["line_items"]["quantity"];
     assert_eq!(

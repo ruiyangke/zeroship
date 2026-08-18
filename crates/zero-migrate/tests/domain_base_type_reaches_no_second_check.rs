@@ -1,6 +1,6 @@
 //! **Reporting a domain column's base type must not change one byte of DDL.**
 //!
-//! `fold_to_field_defs` now resolves a `ColType::Domain` column's BASE TYPE off the
+//! The `FieldDef` projection resolves a `ColType::Domain` column's BASE TYPE off the
 //! `Op::CreateDomain` that declares it, so the runtime descriptor stops describing an
 //! integer column as text. That slot has other readers: `field_data_type` picks the
 //! rendered storage from `ty`, and `field_check_constraints` turns `min`/`max` into a
@@ -12,7 +12,7 @@
 //! `apply_fold_named_type_column_metadata`, never from a `FieldDescriptor`.
 //!
 //! THE ONE PLACE THIS REPLAY IS LOAD-BEARING FOR DDL is the SQLite 12-step rebuild -
-//! `engine` seeds `live.sqlite_schemas` from `fold_to_field_defs` and the rebuild
+//! `engine` seeds `live.sqlite_schemas` from the `FieldDef` projection and the rebuild
 //! renders `CREATE TABLE` from that `Value`. Measured with the lift disabled and
 //! enabled: the rebuilt CREATE is BYTE-IDENTICAL, because the rebuilt column's storage
 //! and its inline CHECK both come from the `ColumnSnapshot` `fold_ops` produced.
@@ -25,8 +25,9 @@
 mod support;
 
 use zero_migrate::model::ir::{ColType, IrFlagsOverride, MigrationIr, Op};
+use zero_migrate::render::fold::single_fold;
 use zero_migrate::render::lower::{IrAuthor, LiveSchema};
-use zero_migrate::{fold_ops, fold_to_field_defs, PlanStep, RenameStep, SqlDialect};
+use zero_migrate::{fold_ops, PlanStep, RenameStep, SqlDialect};
 
 const PROJECT: &str = "public";
 const APP: &str = "app_domain";
@@ -142,7 +143,7 @@ fn an_inlined_domain_column_stores_the_base_type_with_exactly_one_check() {
     assert_eq!(mysql.matches("CHECK").count(), 1, "and once only:\n{mysql}");
 }
 
-/// THE REPLAY AGREEMENT. `fold_ops` and `fold_to_field_defs` fold the SAME op stream
+/// THE REPLAY AGREEMENT. `fold_ops` and the `FieldDef` projection describe the SAME op stream
 /// and must not describe the same column differently. Before this change `fold_ops`
 /// said the SQLite column stores `INTEGER` while `fold_to_field_defs` said `"string"`.
 #[test]
@@ -169,7 +170,8 @@ fn the_snapshot_fold_and_the_field_def_fold_agree_about_the_storage() {
             "{dialect:?}: the snapshot fold's storage for the domain column"
         );
 
-        let defs = fold_to_field_defs(&ops, dialect, PROJECT, &effective)
+        let defs = single_fold::fold(&ops, dialect, PROJECT, &effective)
+            .map(|folded| folded.project_field_defs())
             .expect("the field-def replay folds");
         assert_eq!(
             defs["amounts"]["amount"]["type"], "int",
@@ -190,7 +192,7 @@ fn the_snapshot_fold_and_the_field_def_fold_agree_about_the_storage() {
     }
 }
 
-/// The one place `fold_to_field_defs`' output IS load-bearing for DDL: the engine seeds
+/// The one place the `FieldDef` map IS load-bearing for DDL: the engine seeds
 /// `live.sqlite_schemas` from it and the SQLite 12-step rebuild renders `CREATE TABLE`
 /// from that `Value`. So the descriptor now carrying `"int"` has to be checked against
 /// real rebuild DDL, not argued about.
@@ -207,7 +209,8 @@ fn a_sqlite_rebuild_keeps_the_domain_storage_and_one_check() {
         fold_ops(&ops, SqlDialect::Sqlite, PROJECT, &effective).expect("the history folds");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
     // Seeded EXACTLY as `engine::refresh_historical_live` seeds it.
-    live.sqlite_schemas = fold_to_field_defs(&ops, SqlDialect::Sqlite, PROJECT, &effective)
+    live.sqlite_schemas = single_fold::fold(&ops, SqlDialect::Sqlite, PROJECT, &effective)
+        .map(|folded| folded.project_field_defs())
         .expect("the field-def replay folds");
 
     let rename = MigrationIr {

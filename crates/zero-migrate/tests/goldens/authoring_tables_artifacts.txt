@@ -25,10 +25,19 @@
 # `_then_` streams are compositions of ops each of which IS adjudicated there.
 #
 # NOTHING ELSE MOVED, and that is the load-bearing half. All 27 recorded op fixtures
-# are byte-identical across the move. Every `sha|runtime.json` line is unchanged -
-# `schema.runtime.json` is rendered by `fold_to_field_defs` and the runtime-metadata
-# projection, neither of which this move touches. No `constraint`, `index`,
+# are byte-identical across the move. Every `sha|runtime.json` line was unchanged -
+# `schema.runtime.json` is rendered from the `FieldDef` map and the runtime-metadata
+# projection, neither of which CONSUMER 2 touches. No `constraint`, `index`,
 # `partition_by`, `schema` or `options` line moved on any stream.
+#
+# SIX `sha|runtime.json` LINES MOVED LATER, under step 4 consumer 3, which replaced the
+# `fold_to_field_defs` walker that produced the `FieldDef` map. They are
+# `carrier:attached_partition_dropped` and `carrier:unique_constraint_lifecycle`, on
+# three dialects each - the two carriers here that cross a divergence that move fixed (a
+# dropped partition left in the map, and a dropped UNIQUE outliving its constraint). The
+# control worked: zero `sha|env.db.ts` lines and zero per-field lines moved, so consumer 3
+# stayed inside the artifact it owns. `tests/goldens/field_defs_artifacts.txt` records the
+# same two hashes, reduced by different code from the same `render_artifacts` call.
 #
 # The net line count fell by 9 = 3 dialects x 3 lines, which is the `p1` table
 # leaving `carrier:attached_partition_dropped` - the one table this move removes from
@@ -69,19 +78,19 @@ carrier:attached_partition_dropped|Mysql|column|par|1|payload: t.text(),
 carrier:attached_partition_dropped|Mysql|partition_by|par|partitionBy: { range: ["bucket"] }
 carrier:attached_partition_dropped|Mysql|primary_key|par|primaryKey: null
 carrier:attached_partition_dropped|Mysql|sha|env.db.ts|55efb0a0e1f3056e7ee10cb2414aab4a0be1f3e51c1589420f2aaab23b9cd9c1
-carrier:attached_partition_dropped|Mysql|sha|runtime.json|f8e30813693cda1046eb253ac6f46a3ca22283ccaf022c1e5a7433bbdb2a9c69
+carrier:attached_partition_dropped|Mysql|sha|runtime.json|364cad35352a12be196776dca4f7337ae3a6dbdb4a022fe0cc2328854e036e13
 carrier:attached_partition_dropped|Postgres|column|par|0|bucket: t.int().notNull(),
 carrier:attached_partition_dropped|Postgres|column|par|1|payload: t.text(),
 carrier:attached_partition_dropped|Postgres|partition_by|par|partitionBy: { range: ["bucket"] }
 carrier:attached_partition_dropped|Postgres|primary_key|par|primaryKey: null
 carrier:attached_partition_dropped|Postgres|sha|env.db.ts|55efb0a0e1f3056e7ee10cb2414aab4a0be1f3e51c1589420f2aaab23b9cd9c1
-carrier:attached_partition_dropped|Postgres|sha|runtime.json|f8e30813693cda1046eb253ac6f46a3ca22283ccaf022c1e5a7433bbdb2a9c69
+carrier:attached_partition_dropped|Postgres|sha|runtime.json|364cad35352a12be196776dca4f7337ae3a6dbdb4a022fe0cc2328854e036e13
 carrier:attached_partition_dropped|Sqlite|column|par|0|bucket: t.int().notNull(),
 carrier:attached_partition_dropped|Sqlite|column|par|1|payload: t.text(),
 carrier:attached_partition_dropped|Sqlite|partition_by|par|partitionBy: { range: ["bucket"] }
 carrier:attached_partition_dropped|Sqlite|primary_key|par|primaryKey: null
 carrier:attached_partition_dropped|Sqlite|sha|env.db.ts|55efb0a0e1f3056e7ee10cb2414aab4a0be1f3e51c1589420f2aaab23b9cd9c1
-carrier:attached_partition_dropped|Sqlite|sha|runtime.json|f8e30813693cda1046eb253ac6f46a3ca22283ccaf022c1e5a7433bbdb2a9c69
+carrier:attached_partition_dropped|Sqlite|sha|runtime.json|364cad35352a12be196776dca4f7337ae3a6dbdb4a022fe0cc2328854e036e13
 carrier:attached_partition|Mysql|column|p1|0|bucket: t.int().notNull(),
 carrier:attached_partition|Mysql|column|p1|1|payload: t.text(),
 carrier:attached_partition|Mysql|column|par|0|bucket: t.int().notNull(),
@@ -393,21 +402,21 @@ carrier:unique_constraint_lifecycle|Mysql|column|users|2|handle: t.text().notNul
 carrier:unique_constraint_lifecycle|Mysql|constraint|users|0|{ name: "users_email_uq", columns: ["email"] },
 carrier:unique_constraint_lifecycle|Mysql|primary_key|users|single:id
 carrier:unique_constraint_lifecycle|Mysql|sha|env.db.ts|d22dabc4855ee2e73ae00a14381de79e579243ffa2a9d77ab017d245a2e21a4a
-carrier:unique_constraint_lifecycle|Mysql|sha|runtime.json|c95b24b066fe30e09470eb857500a464aed9d9cbeea289f34f308d2035b46ee6
+carrier:unique_constraint_lifecycle|Mysql|sha|runtime.json|113ea73e021a8df608f3ad1d1f80e0163e0f743ce03ff7fbfa8516ab1f35ea00
 carrier:unique_constraint_lifecycle|Postgres|column|users|0|id: t.text().primaryKey(),
 carrier:unique_constraint_lifecycle|Postgres|column|users|1|email: t.text().notNull(),
 carrier:unique_constraint_lifecycle|Postgres|column|users|2|handle: t.text().notNull(),
 carrier:unique_constraint_lifecycle|Postgres|constraint|users|0|{ name: "users_email_uq", columns: ["email"] },
 carrier:unique_constraint_lifecycle|Postgres|primary_key|users|single:id
 carrier:unique_constraint_lifecycle|Postgres|sha|env.db.ts|d22dabc4855ee2e73ae00a14381de79e579243ffa2a9d77ab017d245a2e21a4a
-carrier:unique_constraint_lifecycle|Postgres|sha|runtime.json|c95b24b066fe30e09470eb857500a464aed9d9cbeea289f34f308d2035b46ee6
+carrier:unique_constraint_lifecycle|Postgres|sha|runtime.json|113ea73e021a8df608f3ad1d1f80e0163e0f743ce03ff7fbfa8516ab1f35ea00
 carrier:unique_constraint_lifecycle|Sqlite|column|users|0|id: t.text().primaryKey(),
 carrier:unique_constraint_lifecycle|Sqlite|column|users|1|email: t.text().notNull(),
 carrier:unique_constraint_lifecycle|Sqlite|column|users|2|handle: t.text().notNull(),
 carrier:unique_constraint_lifecycle|Sqlite|constraint|users|0|{ name: "users_email_uq", columns: ["email"] },
 carrier:unique_constraint_lifecycle|Sqlite|primary_key|users|single:id
 carrier:unique_constraint_lifecycle|Sqlite|sha|env.db.ts|d22dabc4855ee2e73ae00a14381de79e579243ffa2a9d77ab017d245a2e21a4a
-carrier:unique_constraint_lifecycle|Sqlite|sha|runtime.json|c95b24b066fe30e09470eb857500a464aed9d9cbeea289f34f308d2035b46ee6
+carrier:unique_constraint_lifecycle|Sqlite|sha|runtime.json|113ea73e021a8df608f3ad1d1f80e0163e0f743ce03ff7fbfa8516ab1f35ea00
 fixture:alter_primary_key|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
 fixture:alter_primary_key|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
 fixture:alter_primary_key|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist

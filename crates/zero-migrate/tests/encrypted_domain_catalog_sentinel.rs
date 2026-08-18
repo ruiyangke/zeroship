@@ -34,9 +34,10 @@ use std::collections::BTreeSet;
 
 use serde_json::json;
 use zero_migrate::model::ir::{MigrationIr, Op};
+use zero_migrate::render::fold::single_fold;
 use zero_migrate::render::lower::IrAuthor;
 use zero_migrate::schema::query::SqlDialect;
-use zero_migrate::{fold_ops, fold_to_field_defs, resolve_create_table_policy, LiveSchema};
+use zero_migrate::{fold_ops, resolve_create_table_policy, LiveSchema};
 
 const SCHEMA: &str = "app";
 const OWNER: &str = "app_test";
@@ -370,7 +371,7 @@ fn an_unrelated_rename_carries_the_encrypted_domain_columns_sentinel_unchanged()
 ///
 /// The sentinel has three producers that must not drift: the DDL lower
 /// (`IrAuthor::lower`), the snapshot fold (`fold_ops`, which SEEDS the SQLite 12-step
-/// rebuild), and the field-def replay (`fold_to_field_defs`, which produces the runtime
+/// rebuild), and the field-def replay (the `FieldDef` projection, which produces the runtime
 /// descriptor). The previous defect was precisely that the third disagreed with the
 /// first two. All three are asserted here, in one test, on the same ops.
 #[test]
@@ -412,7 +413,8 @@ fn the_lower_the_snapshot_fold_and_the_field_defs_agree_on_wraps() {
         }
 
         // 3. The field-def replay — the runtime descriptor.
-        let defs = fold_to_field_defs(&ops, dialect, SCHEMA, &support::confined_charter())
+        let defs = single_fold::fold(&ops, dialect, SCHEMA, &support::confined_charter())
+            .map(|folded| folded.project_field_defs())
             .expect("field-def fold succeeds");
         let amounts = defs.get("amounts").expect("amounts in the field defs");
         assert_eq!(

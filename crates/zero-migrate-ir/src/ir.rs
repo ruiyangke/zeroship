@@ -1180,9 +1180,11 @@ impl IrClassification {
 ///
 /// **Why CARRIED, not recovered (unlike the runtime path).** The runtime recovers a
 /// mask from the LIVE `zero-migrate:mask` COMMENT sentinel on the `_masked` sibling
-/// (`crates/plugin-db .../introspect_schema.rs`). But the OFFLINE op fold
-/// (`zero_migrate::fold_to_field_defs`) and `gen-types` have NO live DB - there is no
-/// sentinel to read. So a STANDALONE `.mask()` on a plaintext column must be carried
+/// (`crates/plugin-db .../introspect_schema.rs`). But the OFFLINE op fold - the wire
+/// `FieldDef` map, produced by `zero_migrate`'s single-fold `project_field_defs`
+/// projection since step 4 consumer 3 of `docs/proposals/single-fold-and-effects.md`
+/// deleted the `fold_to_field_defs` walker - and `gen-types` have NO live DB, so there
+/// is no sentinel to read. So a STANDALONE `.mask()` on a plaintext column must be carried
 /// on the IR or it is DROPPED through author→generate→fold (the creator's
 /// `MaskedValue<T>` silently downgrades to `T`, and the runtime — which DOES read the
 /// sentinel — never gets a sentinel emitted because the op lower had no mask to emit).

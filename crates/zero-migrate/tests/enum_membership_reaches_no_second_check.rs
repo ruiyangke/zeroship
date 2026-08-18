@@ -1,6 +1,6 @@
 //! **Populating `enum_values` from a named enum type must not put a CHECK in the DDL.**
 //!
-//! `fold_to_field_defs` now lifts a `ColType::Enum` column's members off the
+//! The `FieldDef` projection lifts a `ColType::Enum` column's members off the
 //! `Op::CreateEnum` that declares them, so the runtime descriptor stops describing a
 //! closed set as free text. The slot it fills has a SECOND reader:
 //! `field_check_constraints` turns `enum_values` into `CHECK (<col> IN (...))`. Feeding
@@ -15,7 +15,7 @@
 //! from the descriptor would be a duplicate on SQLite and a redundant constraint on a
 //! native enum on PostgreSQL.
 //!
-//! WHY IT CANNOT ARRIVE. `fold_to_field_defs` ends at `descriptor_to_sdk_schema`; the
+//! WHY IT CANNOT ARRIVE. The `FieldDef` projection ends at `descriptor_to_sdk_schema`; the
 //! DDL is built by `fold_ops` / the lower, which never see its `FieldDescriptor`s.
 //! The one place its output IS load-bearing for DDL is the SQLite 12-step rebuild
 //! (`engine`'s `live.sqlite_schemas`), and that case is measured below rather than
@@ -28,8 +28,9 @@
 mod support;
 
 use zero_migrate::model::ir::{ColType, IrFlagsOverride, MigrationIr, Op};
+use zero_migrate::render::fold::single_fold;
 use zero_migrate::render::lower::{IrAuthor, LiveSchema};
-use zero_migrate::{fold_ops, fold_to_field_defs, PlanStep, RenameStep, SqlDialect};
+use zero_migrate::{fold_ops, PlanStep, RenameStep, SqlDialect};
 
 const PROJECT: &str = "public";
 const APP: &str = "app_enum";
@@ -111,7 +112,7 @@ fn an_inlined_enum_column_gets_exactly_one_membership_check() {
     );
 }
 
-/// The one place `fold_to_field_defs`' output IS load-bearing for DDL: the engine
+/// The one place the `FieldDef` map IS load-bearing for DDL: the engine
 /// seeds `live.sqlite_schemas` from it (`engine::refresh_historical_live`) and the
 /// SQLite 12-step rebuild consumes that `Value`. So the descriptor now carrying a
 /// membership has to be checked against real rebuild DDL, not argued about.
@@ -144,7 +145,8 @@ fn a_sqlite_rebuild_carries_the_membership_exactly_once() {
         fold_ops(&ops, SqlDialect::Sqlite, PROJECT, &effective).expect("the history folds");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
     // Seeded EXACTLY as `engine::refresh_historical_live` seeds it.
-    live.sqlite_schemas = fold_to_field_defs(&ops, SqlDialect::Sqlite, PROJECT, &effective)
+    live.sqlite_schemas = single_fold::fold(&ops, SqlDialect::Sqlite, PROJECT, &effective)
+        .map(|folded| folded.project_field_defs())
         .expect("the field-def replay folds");
 
     let rename = MigrationIr {

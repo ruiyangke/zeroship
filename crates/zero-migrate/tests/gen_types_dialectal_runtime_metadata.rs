@@ -2,16 +2,20 @@
 //!
 //! `render_artifacts` builds its two projections from the SAME op stream, and there
 //! was a time when only one of the producers expanded `Op::Dialectal`.
-//! `fold_to_field_defs` and the authoring tables both route through
+//! The `FieldDef` map and the authoring tables both route through
 //! `flatten_dialectal_ops`, so COLUMNS authored inside a `dialect()` leg reach the
-//! artifact. `runtime_metadata_from_ops` walked the raw list with a catch-all
+//! artifact. (That claim was first written of `fold_to_field_defs`, which produced the
+//! map until step 4 consumer 3 deleted it; the claim is unchanged because
+//! `FoldedSchema::project_field_defs` reads a traversal that makes the same call, one
+//! op earlier.) `runtime_metadata_from_ops` walked the raw list with a catch-all
 //! `_ => {}` arm, so the wrapper fell through and the runtime OPTIONS and plain
 //! INDEXES authored in that same leg did not.
 //!
-//! Both artifact walkers are gone: step 4 of
+//! All THREE artifact walkers are gone: step 4 of
 //! `docs/proposals/single-fold-and-effects.md` replaced them with
-//! `FoldedSchema::project_runtime_metadata` and
-//! `FoldedSchema::project_authoring_tables`, two reads of ONE traversal that
+//! `FoldedSchema::project_runtime_metadata`,
+//! `FoldedSchema::project_authoring_tables` and
+//! `FoldedSchema::project_field_defs`, reads of ONE traversal that
 //! `flatten_dialectal_ops` opens. The hole this file pins therefore cannot reopen the
 //! way it opened; the file stays because "cannot reopen by construction" is a claim
 //! worth a test rather than a comment.

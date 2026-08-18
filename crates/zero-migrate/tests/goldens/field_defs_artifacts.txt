@@ -1,0 +1,625 @@
+# The `schema.runtime.json` FieldDef corpus for step 4 consumer 3 of
+# docs/proposals/single-fold-and-effects.md section G. Owned by
+# crates/zero-migrate/tests/gen_types_field_defs_from_the_fold.rs.
+#
+# PROVENANCE, because a golden's worth is entirely its provenance.
+#
+# CAPTURED from the OLD path - `render_artifacts` driven by `fold_to_field_defs` - by a
+# separate, since-deleted binary, BEFORE the consumer was switched. Then 41 lines were
+# REMOVED and 34 ADDED by hand. Every one of those 75 lines belongs to one of EIGHT
+# carrier streams, and every one is a place where the deleted walker described a
+# database the catalog does not have:
+#
+#   carrier:unique_constraint_dropped            `unique: true` outlived its dropped constraint
+#   carrier:unique_constraint_kept               the same, with the un-dropped one as control
+#   carrier:unique_column_facet_survives_a_drop  the same, with the COLUMN facet as control
+#   carrier:check_bound_dropped                  `min`/`max` outlived their dropped CHECK
+#   carrier:check_membership_dropped             `enum` outlived its dropped CHECK
+#   carrier:check_column_dropped_and_readded     a re-added column inherited the bound
+#   carrier:fk_column_dropped_and_readded        a re-added column inherited `onDelete`
+#   carrier:attached_partition_dropped           a dropped partition stayed in the map
+#
+# NOT ONE line of the 27 RECORDED FIXTURES moved, and no other carrier moved. That is
+# the behaviour-preservation result, and it is the reason the edits are auditable: the
+# streams that changed are exactly the streams written to make the change visible.
+#
+# The 7-line net (-41 +34) is `attached_partition_dropped` alone: the relation `p1` is
+# gone from the map, taking its two `field` rows on three dialects and its one
+# `sqlite_create` row with it. Every other edit replaces a line with its successor.
+#
+# WHICH SIDE IS RIGHT is not decided by this file. For the first seven carriers it is
+# decided by `fold_ops`, the structural catalog oracle the live PostgreSQL, SQLite and
+# MySQL suites run against real servers, which has removed the constraint at the point
+# the two answers differ. For the eighth it was decided by a live PostgreSQL in
+# consumer 2's tests/env_db_ts_matches_the_server_pg.rs.
+#
+# THE SQLITE `sqlite_create` ROWS are the DDL leg: the `CREATE TABLE` the 12-step table
+# rebuild renders from this map, through the same emitter and the same arguments
+# render/declarative.rs passes. Exactly ONE of them moved, and
+# tests/sqlite_rebuild_field_defs_live.rs measures - against a real SQLite database -
+# that no stream carrying any of these five differences can be deployed there at all.
+#
+# There is deliberately NO re-bless environment variable, matching
+# tests/op_fixture_goldens.rs and both predecessors.
+fixture:alter_primary_key|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
+fixture:alter_primary_key|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
+fixture:alter_primary_key|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
+fixture:comments_indexes|Postgres|sha|runtime.json|2a85398851fe4451d7198ce0a770690e2fc0ff2ca7556f52a3a036247fb09885
+fixture:comments_indexes|Postgres|sha|env.db.ts|db42bb14431b5afa26bab972df8bc194b507ead38d934eeed46207fbdcdb29c9
+fixture:comments_indexes|Postgres|field|users|id|{"type":"string","maxLength":255,"required":true}
+fixture:comments_indexes|Postgres|field|users|created_at|{"type":"date","required":true}
+fixture:comments_indexes|Postgres|field|users|updated_at|{"type":"date","required":true}
+fixture:comments_indexes|Postgres|field|users|created_by|{"type":"string","maxLength":255}
+fixture:comments_indexes|Postgres|field|users|updated_by|{"type":"string","maxLength":255}
+fixture:comments_indexes|Postgres|field|users|version|{"type":"int","required":true}
+fixture:comments_indexes|Postgres|field|users|deleted_at|{"type":"date"}
+fixture:comments_indexes|Postgres|field|users|email|{"type":"string","required":true,"unique":true}
+fixture:comments_indexes|Postgres|field|users|active|{"type":"boolean","required":true,"default":true}
+fixture:comments_indexes|Postgres|field|users|status|{"type":"string","enum":["active","disabled"]}
+fixture:comments_indexes|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: createTable table-level UNIQUE on SQLite (the SQLite CREATE renders from the descriptor; a table-level UNIQUE is not threaded into the emitter)
+fixture:comments_indexes|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: render error: IrAuthor::lower does not yet compile op "validated createIndex expression elements on MySQL reached lower" (DDL ops only)
+fixture:constraint_not_valid|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: table `line_items` does not exist
+fixture:constraint_not_valid|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: table `line_items` does not exist
+fixture:constraint_not_valid|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: table `line_items` does not exist
+fixture:ddl_addcol_constraints|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: table `accounts` does not exist
+fixture:ddl_addcol_constraints|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: table `accounts` does not exist
+fixture:ddl_addcol_constraints|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: table `accounts` does not exist
+fixture:ddl_alter|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
+fixture:ddl_alter|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
+fixture:ddl_alter|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
+fixture:ddl_create|Postgres|sha|runtime.json|973aa7e5dea383494b2403d3246f48d0e3b5d51360b2700597c783e3a99d29b3
+fixture:ddl_create|Postgres|sha|env.db.ts|1d94733e9824b8049b0369e392abce301a3045a3b9c4e622421c95f978b34243
+fixture:ddl_create|Postgres|field|orders|id|{"type":"string","maxLength":255,"required":true}
+fixture:ddl_create|Postgres|field|orders|created_at|{"type":"date","required":true}
+fixture:ddl_create|Postgres|field|orders|updated_at|{"type":"date","required":true}
+fixture:ddl_create|Postgres|field|orders|created_by|{"type":"string","maxLength":255}
+fixture:ddl_create|Postgres|field|orders|updated_by|{"type":"string","maxLength":255}
+fixture:ddl_create|Postgres|field|orders|version|{"type":"int","required":true}
+fixture:ddl_create|Postgres|field|orders|deleted_at|{"type":"date"}
+fixture:ddl_create|Postgres|field|orders|total|{"type":"int","required":true,"default":0}
+fixture:ddl_create|Postgres|field|orders|note|{"type":"string"}
+fixture:ddl_create|Postgres|field|orders|status|{"type":"string","required":true,"default":"new"}
+fixture:ddl_create|Sqlite|sha|runtime.json|973aa7e5dea383494b2403d3246f48d0e3b5d51360b2700597c783e3a99d29b3
+fixture:ddl_create|Sqlite|sha|env.db.ts|1d94733e9824b8049b0369e392abce301a3045a3b9c4e622421c95f978b34243
+fixture:ddl_create|Sqlite|field|orders|id|{"type":"string","maxLength":255,"required":true}
+fixture:ddl_create|Sqlite|field|orders|created_at|{"type":"date","required":true}
+fixture:ddl_create|Sqlite|field|orders|updated_at|{"type":"date","required":true}
+fixture:ddl_create|Sqlite|field|orders|created_by|{"type":"string","maxLength":255}
+fixture:ddl_create|Sqlite|field|orders|updated_by|{"type":"string","maxLength":255}
+fixture:ddl_create|Sqlite|field|orders|version|{"type":"int","required":true}
+fixture:ddl_create|Sqlite|field|orders|deleted_at|{"type":"date"}
+fixture:ddl_create|Sqlite|field|orders|total|{"type":"int","required":true,"default":0}
+fixture:ddl_create|Sqlite|field|orders|note|{"type":"string"}
+fixture:ddl_create|Sqlite|field|orders|status|{"type":"string","required":true,"default":"new"}
+fixture:ddl_create|Sqlite|sqlite_create_refused|orders|reserved system field name: Field name 'id' is reserved by the active table-injection policy. Injected fields (id, created_at, updated_at, created_by, updated_by, version, deleted_at) are managed by the platform and cannot be overridden.
+fixture:ddl_create|Mysql|sha|runtime.json|973aa7e5dea383494b2403d3246f48d0e3b5d51360b2700597c783e3a99d29b3
+fixture:ddl_create|Mysql|sha|env.db.ts|1d94733e9824b8049b0369e392abce301a3045a3b9c4e622421c95f978b34243
+fixture:ddl_create|Mysql|field|orders|id|{"type":"string","maxLength":255,"required":true}
+fixture:ddl_create|Mysql|field|orders|created_at|{"type":"date","required":true}
+fixture:ddl_create|Mysql|field|orders|updated_at|{"type":"date","required":true}
+fixture:ddl_create|Mysql|field|orders|created_by|{"type":"string","maxLength":255}
+fixture:ddl_create|Mysql|field|orders|updated_by|{"type":"string","maxLength":255}
+fixture:ddl_create|Mysql|field|orders|version|{"type":"int","required":true}
+fixture:ddl_create|Mysql|field|orders|deleted_at|{"type":"date"}
+fixture:ddl_create|Mysql|field|orders|total|{"type":"int","required":true,"default":0}
+fixture:ddl_create|Mysql|field|orders|note|{"type":"string"}
+fixture:ddl_create|Mysql|field|orders|status|{"type":"string","required":true,"default":"new"}
+fixture:ddl_drop|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
+fixture:ddl_drop|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
+fixture:ddl_drop|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
+fixture:ddl_rename_table|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: table `accounts` does not exist
+fixture:ddl_rename_table|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: table `accounts` does not exist
+fixture:ddl_rename_table|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: table `accounts` does not exist
+fixture:dialectal_ops|Postgres|sha|runtime.json|731b2f0508849e2e1c9c100ab1f74b124ff2e7c055e29d471c28b991ad9dcf5f
+fixture:dialectal_ops|Postgres|sha|env.db.ts|0e86a8cb73947cd55e4c22a4d52cf7f19d0c757e3ecae3f7dde690fa210df141
+fixture:dialectal_ops|Postgres|field|docs|id|{"type":"string","maxLength":255,"required":true}
+fixture:dialectal_ops|Postgres|field|docs|created_at|{"type":"date","required":true}
+fixture:dialectal_ops|Postgres|field|docs|updated_at|{"type":"date","required":true}
+fixture:dialectal_ops|Postgres|field|docs|created_by|{"type":"string","maxLength":255}
+fixture:dialectal_ops|Postgres|field|docs|updated_by|{"type":"string","maxLength":255}
+fixture:dialectal_ops|Postgres|field|docs|version|{"type":"int","required":true}
+fixture:dialectal_ops|Postgres|field|docs|deleted_at|{"type":"date"}
+fixture:dialectal_ops|Postgres|field|docs|embedding|{"type":"vector","vectorDims":3,"vectorMetric":"cosine"}
+fixture:dialectal_ops|Sqlite|sha|runtime.json|731b2f0508849e2e1c9c100ab1f74b124ff2e7c055e29d471c28b991ad9dcf5f
+fixture:dialectal_ops|Sqlite|sha|env.db.ts|a5ce483ecc6079bc4c0ae56a34095838edd39f5866006075b4905b0b4e4084ef
+fixture:dialectal_ops|Sqlite|field|docs|id|{"type":"string","maxLength":255,"required":true}
+fixture:dialectal_ops|Sqlite|field|docs|created_at|{"type":"date","required":true}
+fixture:dialectal_ops|Sqlite|field|docs|updated_at|{"type":"date","required":true}
+fixture:dialectal_ops|Sqlite|field|docs|created_by|{"type":"string","maxLength":255}
+fixture:dialectal_ops|Sqlite|field|docs|updated_by|{"type":"string","maxLength":255}
+fixture:dialectal_ops|Sqlite|field|docs|version|{"type":"int","required":true}
+fixture:dialectal_ops|Sqlite|field|docs|deleted_at|{"type":"date"}
+fixture:dialectal_ops|Sqlite|field|docs|embedding|{"type":"vector","vectorDims":3,"vectorMetric":"cosine"}
+fixture:dialectal_ops|Sqlite|sqlite_create_refused|docs|reserved system field name: Field name 'id' is reserved by the active table-injection policy. Injected fields (id, created_at, updated_at, created_by, updated_by, version, deleted_at) are managed by the platform and cannot be overridden.
+fixture:dialectal_ops|Mysql|sha|runtime.json|731b2f0508849e2e1c9c100ab1f74b124ff2e7c055e29d471c28b991ad9dcf5f
+fixture:dialectal_ops|Mysql|sha|env.db.ts|a5ce483ecc6079bc4c0ae56a34095838edd39f5866006075b4905b0b4e4084ef
+fixture:dialectal_ops|Mysql|field|docs|id|{"type":"string","maxLength":255,"required":true}
+fixture:dialectal_ops|Mysql|field|docs|created_at|{"type":"date","required":true}
+fixture:dialectal_ops|Mysql|field|docs|updated_at|{"type":"date","required":true}
+fixture:dialectal_ops|Mysql|field|docs|created_by|{"type":"string","maxLength":255}
+fixture:dialectal_ops|Mysql|field|docs|updated_by|{"type":"string","maxLength":255}
+fixture:dialectal_ops|Mysql|field|docs|version|{"type":"int","required":true}
+fixture:dialectal_ops|Mysql|field|docs|deleted_at|{"type":"date"}
+fixture:dialectal_ops|Mysql|field|docs|embedding|{"type":"vector","vectorDims":3,"vectorMetric":"cosine"}
+fixture:dml|Postgres|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:dml|Postgres|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:dml|Sqlite|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:dml|Sqlite|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:dml|Mysql|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:dml|Mysql|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:dml_upsert|Postgres|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:dml_upsert|Postgres|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:dml_upsert|Sqlite|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:dml_upsert|Sqlite|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:dml_upsert|Mysql|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:dml_upsert|Mysql|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:edge_scalars|Postgres|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:edge_scalars|Postgres|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:edge_scalars|Sqlite|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:edge_scalars|Sqlite|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:edge_scalars|Mysql|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:edge_scalars|Mysql|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:enums_domains|Postgres|sha|runtime.json|99de44572f7a1ffa1af569c92c766c54775d806dbfcd8926326d8faee48a7ad8
+fixture:enums_domains|Postgres|sha|env.db.ts|d62c80b2a268550240637cbeb77ec89108db05371bfc6e6c357b2b1b3bb51e73
+fixture:enums_domains|Postgres|field|pg_expr_checks|id|{"type":"string","maxLength":255,"required":true}
+fixture:enums_domains|Postgres|field|pg_expr_checks|created_at|{"type":"date","required":true}
+fixture:enums_domains|Postgres|field|pg_expr_checks|updated_at|{"type":"date","required":true}
+fixture:enums_domains|Postgres|field|pg_expr_checks|created_by|{"type":"string","maxLength":255}
+fixture:enums_domains|Postgres|field|pg_expr_checks|updated_by|{"type":"string","maxLength":255}
+fixture:enums_domains|Postgres|field|pg_expr_checks|version|{"type":"int","required":true}
+fixture:enums_domains|Postgres|field|pg_expr_checks|deleted_at|{"type":"date"}
+fixture:enums_domains|Postgres|field|pg_expr_checks|status|{"type":"string","required":true}
+fixture:enums_domains|Postgres|field|pg_expr_checks|name|{"type":"string","required":true}
+fixture:enums_domains|Postgres|field|pg_expr_checks|data|{"type":"json","required":true}
+fixture:enums_domains|Postgres|field|subscriptions|id|{"type":"string","maxLength":255,"required":true}
+fixture:enums_domains|Postgres|field|subscriptions|created_at|{"type":"date","required":true}
+fixture:enums_domains|Postgres|field|subscriptions|updated_at|{"type":"date","required":true}
+fixture:enums_domains|Postgres|field|subscriptions|created_by|{"type":"string","maxLength":255}
+fixture:enums_domains|Postgres|field|subscriptions|updated_by|{"type":"string","maxLength":255}
+fixture:enums_domains|Postgres|field|subscriptions|version|{"type":"int","required":true}
+fixture:enums_domains|Postgres|field|subscriptions|deleted_at|{"type":"date"}
+fixture:enums_domains|Postgres|field|subscriptions|tier|{"type":"string","required":true,"enum":["free","pro"]}
+fixture:enums_domains|Postgres|field|subscriptions|period|{"type":"int"}
+fixture:enums_domains|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: createTable table-level CHECK is PostgreSQL-only
+fixture:enums_domains|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: createTable table-level CHECK is PostgreSQL-only
+fixture:fluent_ddl|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: constraint `accounts_legacy_chk` does not exist on `accounts`
+fixture:fluent_ddl|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: createTable table-level UNIQUE on SQLite (the SQLite CREATE renders from the descriptor; a table-level UNIQUE is not threaded into the emitter)
+fixture:fluent_ddl|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: createTable table-level CHECK is PostgreSQL-only
+fixture:fluent_dml|Postgres|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:fluent_dml|Postgres|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:fluent_dml|Sqlite|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:fluent_dml|Sqlite|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:fluent_dml|Mysql|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:fluent_dml|Mysql|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:fluent_scalars|Postgres|sha|runtime.json|5d4b23729088f21d71958727e10d0644c353635622a1d2a55e2aae94f79c753c
+fixture:fluent_scalars|Postgres|sha|env.db.ts|67a5508ffd185bf168beab43b56d94de375f6b07b3943dfabc7b0fe6c013e5e7
+fixture:fluent_scalars|Postgres|field|ledger|id|{"type":"string","maxLength":255,"required":true}
+fixture:fluent_scalars|Postgres|field|ledger|created_at|{"type":"date","required":true}
+fixture:fluent_scalars|Postgres|field|ledger|updated_at|{"type":"date","required":true}
+fixture:fluent_scalars|Postgres|field|ledger|created_by|{"type":"string","maxLength":255}
+fixture:fluent_scalars|Postgres|field|ledger|updated_by|{"type":"string","maxLength":255}
+fixture:fluent_scalars|Postgres|field|ledger|version|{"type":"int","required":true}
+fixture:fluent_scalars|Postgres|field|ledger|deleted_at|{"type":"date"}
+fixture:fluent_scalars|Postgres|field|ledger|seq|{"type":"number","required":true,"default":"9007199254740993"}
+fixture:fluent_scalars|Postgres|field|ledger|salt|{"type":"bytes","default":"AQID/w=="}
+fixture:fluent_scalars|Sqlite|sha|runtime.json|5d4b23729088f21d71958727e10d0644c353635622a1d2a55e2aae94f79c753c
+fixture:fluent_scalars|Sqlite|sha|env.db.ts|67a5508ffd185bf168beab43b56d94de375f6b07b3943dfabc7b0fe6c013e5e7
+fixture:fluent_scalars|Sqlite|field|ledger|id|{"type":"string","maxLength":255,"required":true}
+fixture:fluent_scalars|Sqlite|field|ledger|created_at|{"type":"date","required":true}
+fixture:fluent_scalars|Sqlite|field|ledger|updated_at|{"type":"date","required":true}
+fixture:fluent_scalars|Sqlite|field|ledger|created_by|{"type":"string","maxLength":255}
+fixture:fluent_scalars|Sqlite|field|ledger|updated_by|{"type":"string","maxLength":255}
+fixture:fluent_scalars|Sqlite|field|ledger|version|{"type":"int","required":true}
+fixture:fluent_scalars|Sqlite|field|ledger|deleted_at|{"type":"date"}
+fixture:fluent_scalars|Sqlite|field|ledger|seq|{"type":"number","required":true,"default":"9007199254740993"}
+fixture:fluent_scalars|Sqlite|field|ledger|salt|{"type":"bytes","default":"AQID/w=="}
+fixture:fluent_scalars|Sqlite|sqlite_create_refused|ledger|reserved system field name: Field name 'id' is reserved by the active table-injection policy. Injected fields (id, created_at, updated_at, created_by, updated_by, version, deleted_at) are managed by the platform and cannot be overridden.
+fixture:fluent_scalars|Mysql|sha|runtime.json|5d4b23729088f21d71958727e10d0644c353635622a1d2a55e2aae94f79c753c
+fixture:fluent_scalars|Mysql|sha|env.db.ts|67a5508ffd185bf168beab43b56d94de375f6b07b3943dfabc7b0fe6c013e5e7
+fixture:fluent_scalars|Mysql|field|ledger|id|{"type":"string","maxLength":255,"required":true}
+fixture:fluent_scalars|Mysql|field|ledger|created_at|{"type":"date","required":true}
+fixture:fluent_scalars|Mysql|field|ledger|updated_at|{"type":"date","required":true}
+fixture:fluent_scalars|Mysql|field|ledger|created_by|{"type":"string","maxLength":255}
+fixture:fluent_scalars|Mysql|field|ledger|updated_by|{"type":"string","maxLength":255}
+fixture:fluent_scalars|Mysql|field|ledger|version|{"type":"int","required":true}
+fixture:fluent_scalars|Mysql|field|ledger|deleted_at|{"type":"date"}
+fixture:fluent_scalars|Mysql|field|ledger|seq|{"type":"number","required":true,"default":"9007199254740993"}
+fixture:fluent_scalars|Mysql|field|ledger|salt|{"type":"bytes","default":"AQID/w=="}
+fixture:fluent_scalars_dml|Postgres|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:fluent_scalars_dml|Postgres|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:fluent_scalars_dml|Sqlite|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:fluent_scalars_dml|Sqlite|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:fluent_scalars_dml|Mysql|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:fluent_scalars_dml|Mysql|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:grouped_views|Postgres|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:grouped_views|Postgres|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:grouped_views|Sqlite|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:grouped_views|Sqlite|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:grouped_views|Mysql|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:grouped_views|Mysql|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:in_list_scalars|Postgres|sha|runtime.json|a5e370efbe529b2cb0c0be2d1879212e3e625b7549d28ffc2c872a168033bf1b
+fixture:in_list_scalars|Postgres|sha|env.db.ts|e969f871c55023e71668517269f75c24b63a6ff26255893e985663cd122f344a
+fixture:in_list_scalars|Postgres|field|scalar_membership|id|{"type":"string","maxLength":255,"required":true}
+fixture:in_list_scalars|Postgres|field|scalar_membership|created_at|{"type":"date","required":true}
+fixture:in_list_scalars|Postgres|field|scalar_membership|updated_at|{"type":"date","required":true}
+fixture:in_list_scalars|Postgres|field|scalar_membership|created_by|{"type":"string","maxLength":255}
+fixture:in_list_scalars|Postgres|field|scalar_membership|updated_by|{"type":"string","maxLength":255}
+fixture:in_list_scalars|Postgres|field|scalar_membership|version|{"type":"int","required":true}
+fixture:in_list_scalars|Postgres|field|scalar_membership|deleted_at|{"type":"date"}
+fixture:in_list_scalars|Postgres|field|scalar_membership|http_status|{"type":"int","required":true}
+fixture:in_list_scalars|Postgres|field|scalar_membership|enabled|{"type":"boolean","required":true}
+fixture:in_list_scalars|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: createTable table-level CHECK is PostgreSQL-only
+fixture:in_list_scalars|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: createTable table-level CHECK is PostgreSQL-only
+fixture:p2a_facets|Postgres|sha|runtime.json|50d14d129186b3558cbc0616dda689334b9f53c6be4fc267bbc2c2fdf3c5ac4a
+fixture:p2a_facets|Postgres|sha|env.db.ts|7323fc56b70e3502d57fdf81357dd91ad82011f009953a9a1dfad895bc3d8647
+fixture:p2a_facets|Postgres|field|posts|id|{"type":"string","maxLength":255,"required":true}
+fixture:p2a_facets|Postgres|field|posts|created_at|{"type":"date","required":true}
+fixture:p2a_facets|Postgres|field|posts|updated_at|{"type":"date","required":true}
+fixture:p2a_facets|Postgres|field|posts|created_by|{"type":"string","maxLength":255}
+fixture:p2a_facets|Postgres|field|posts|updated_by|{"type":"string","maxLength":255}
+fixture:p2a_facets|Postgres|field|posts|version|{"type":"int","required":true}
+fixture:p2a_facets|Postgres|field|posts|deleted_at|{"type":"date"}
+fixture:p2a_facets|Postgres|field|posts|title|{"type":"string","required":true}
+fixture:p2a_facets|Postgres|field|posts|embedding|{"type":"vector","vectorDims":1536,"vectorMetric":"cosine"}
+fixture:p2a_facets|Postgres|field|posts|secondary_embedding|{"type":"vector","vectorDims":768}
+fixture:p2a_facets|Sqlite|sha|runtime.json|50d14d129186b3558cbc0616dda689334b9f53c6be4fc267bbc2c2fdf3c5ac4a
+fixture:p2a_facets|Sqlite|sha|env.db.ts|7323fc56b70e3502d57fdf81357dd91ad82011f009953a9a1dfad895bc3d8647
+fixture:p2a_facets|Sqlite|field|posts|id|{"type":"string","maxLength":255,"required":true}
+fixture:p2a_facets|Sqlite|field|posts|created_at|{"type":"date","required":true}
+fixture:p2a_facets|Sqlite|field|posts|updated_at|{"type":"date","required":true}
+fixture:p2a_facets|Sqlite|field|posts|created_by|{"type":"string","maxLength":255}
+fixture:p2a_facets|Sqlite|field|posts|updated_by|{"type":"string","maxLength":255}
+fixture:p2a_facets|Sqlite|field|posts|version|{"type":"int","required":true}
+fixture:p2a_facets|Sqlite|field|posts|deleted_at|{"type":"date"}
+fixture:p2a_facets|Sqlite|field|posts|title|{"type":"string","required":true}
+fixture:p2a_facets|Sqlite|field|posts|embedding|{"type":"vector","vectorDims":1536,"vectorMetric":"cosine"}
+fixture:p2a_facets|Sqlite|field|posts|secondary_embedding|{"type":"vector","vectorDims":768}
+fixture:p2a_facets|Sqlite|sqlite_create_refused|posts|reserved system field name: Field name 'id' is reserved by the active table-injection policy. Injected fields (id, created_at, updated_at, created_by, updated_by, version, deleted_at) are managed by the platform and cannot be overridden.
+fixture:p2a_facets|Mysql|sha|runtime.json|50d14d129186b3558cbc0616dda689334b9f53c6be4fc267bbc2c2fdf3c5ac4a
+fixture:p2a_facets|Mysql|sha|env.db.ts|7323fc56b70e3502d57fdf81357dd91ad82011f009953a9a1dfad895bc3d8647
+fixture:p2a_facets|Mysql|field|posts|id|{"type":"string","maxLength":255,"required":true}
+fixture:p2a_facets|Mysql|field|posts|created_at|{"type":"date","required":true}
+fixture:p2a_facets|Mysql|field|posts|updated_at|{"type":"date","required":true}
+fixture:p2a_facets|Mysql|field|posts|created_by|{"type":"string","maxLength":255}
+fixture:p2a_facets|Mysql|field|posts|updated_by|{"type":"string","maxLength":255}
+fixture:p2a_facets|Mysql|field|posts|version|{"type":"int","required":true}
+fixture:p2a_facets|Mysql|field|posts|deleted_at|{"type":"date"}
+fixture:p2a_facets|Mysql|field|posts|title|{"type":"string","required":true}
+fixture:p2a_facets|Mysql|field|posts|embedding|{"type":"vector","vectorDims":1536,"vectorMetric":"cosine"}
+fixture:p2a_facets|Mysql|field|posts|secondary_embedding|{"type":"vector","vectorDims":768}
+fixture:partition|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: table `events_2026_05` does not exist
+fixture:partition|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: table `events_2026_05` does not exist
+fixture:partition|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: table `events_2026_05` does not exist
+fixture:pg_aggregates|Postgres|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:pg_aggregates|Postgres|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:pg_aggregates|Sqlite|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:pg_aggregates|Sqlite|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:pg_aggregates|Mysql|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
+fixture:pg_aggregates|Mysql|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:pg_vendor|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: table `events` does not exist
+fixture:pg_vendor|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: table `events` does not exist
+fixture:pg_vendor|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: table `events` does not exist
+fixture:runtime_options|Postgres|sha|runtime.json|e0d2b2d35c77786057d2599de5bccc9f8043a74ef34c29f217aa77e4b304d7c4
+fixture:runtime_options|Postgres|sha|env.db.ts|4e1944efa2458d90045b0a14cc407982dac0007738868d805da75088f55707a4
+fixture:runtime_options|Postgres|field|posts|id|{"type":"string","maxLength":255,"required":true}
+fixture:runtime_options|Postgres|field|posts|created_at|{"type":"date","required":true}
+fixture:runtime_options|Postgres|field|posts|updated_at|{"type":"date","required":true}
+fixture:runtime_options|Postgres|field|posts|created_by|{"type":"string","maxLength":255}
+fixture:runtime_options|Postgres|field|posts|updated_by|{"type":"string","maxLength":255}
+fixture:runtime_options|Postgres|field|posts|version|{"type":"int","required":true}
+fixture:runtime_options|Postgres|field|posts|deleted_at|{"type":"date"}
+fixture:runtime_options|Postgres|field|posts|title|{"type":"string","required":true}
+fixture:runtime_options|Postgres|field|posts|author_id|{"type":"string","required":true}
+fixture:runtime_options|Postgres|field|posts|status|{"type":"string","required":true,"default":"draft"}
+fixture:runtime_options|Sqlite|sha|runtime.json|e0d2b2d35c77786057d2599de5bccc9f8043a74ef34c29f217aa77e4b304d7c4
+fixture:runtime_options|Sqlite|sha|env.db.ts|4e1944efa2458d90045b0a14cc407982dac0007738868d805da75088f55707a4
+fixture:runtime_options|Sqlite|field|posts|id|{"type":"string","maxLength":255,"required":true}
+fixture:runtime_options|Sqlite|field|posts|created_at|{"type":"date","required":true}
+fixture:runtime_options|Sqlite|field|posts|updated_at|{"type":"date","required":true}
+fixture:runtime_options|Sqlite|field|posts|created_by|{"type":"string","maxLength":255}
+fixture:runtime_options|Sqlite|field|posts|updated_by|{"type":"string","maxLength":255}
+fixture:runtime_options|Sqlite|field|posts|version|{"type":"int","required":true}
+fixture:runtime_options|Sqlite|field|posts|deleted_at|{"type":"date"}
+fixture:runtime_options|Sqlite|field|posts|title|{"type":"string","required":true}
+fixture:runtime_options|Sqlite|field|posts|author_id|{"type":"string","required":true}
+fixture:runtime_options|Sqlite|field|posts|status|{"type":"string","required":true,"default":"draft"}
+fixture:runtime_options|Sqlite|sqlite_create_refused|posts|reserved system field name: Field name 'id' is reserved by the active table-injection policy. Injected fields (id, created_at, updated_at, created_by, updated_by, version, deleted_at) are managed by the platform and cannot be overridden.
+fixture:runtime_options|Mysql|sha|runtime.json|e0d2b2d35c77786057d2599de5bccc9f8043a74ef34c29f217aa77e4b304d7c4
+fixture:runtime_options|Mysql|sha|env.db.ts|4e1944efa2458d90045b0a14cc407982dac0007738868d805da75088f55707a4
+fixture:runtime_options|Mysql|field|posts|id|{"type":"string","maxLength":255,"required":true}
+fixture:runtime_options|Mysql|field|posts|created_at|{"type":"date","required":true}
+fixture:runtime_options|Mysql|field|posts|updated_at|{"type":"date","required":true}
+fixture:runtime_options|Mysql|field|posts|created_by|{"type":"string","maxLength":255}
+fixture:runtime_options|Mysql|field|posts|updated_by|{"type":"string","maxLength":255}
+fixture:runtime_options|Mysql|field|posts|version|{"type":"int","required":true}
+fixture:runtime_options|Mysql|field|posts|deleted_at|{"type":"date"}
+fixture:runtime_options|Mysql|field|posts|title|{"type":"string","required":true}
+fixture:runtime_options|Mysql|field|posts|author_id|{"type":"string","required":true}
+fixture:runtime_options|Mysql|field|posts|status|{"type":"string","required":true,"default":"draft"}
+fixture:sequences_exclusion|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: sequence `old_invoice_seq` does not exist
+fixture:sequences_exclusion|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: sequence `old_invoice_seq` does not exist
+fixture:sequences_exclusion|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: sequence `old_invoice_seq` does not exist
+fixture:synchronize_identity|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
+fixture:synchronize_identity|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
+fixture:synchronize_identity|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
+fixture:views|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: view `old_users` does not exist
+fixture:views|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: view `old_users` does not exist
+fixture:views|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: view `old_users` does not exist
+carrier:unique_constraint_dropped|Postgres|sha|runtime.json|fea063c94498df7b15a856d5aa56f3f1bf45233c47ad8589b40b1e041831cf1f
+carrier:unique_constraint_dropped|Postgres|sha|env.db.ts|9c33d863de48b31f6a32c32512bcfa52b6d97fc27bd7f307c9af18e4185be79c
+carrier:unique_constraint_dropped|Postgres|field|users|id|{"type":"string","required":true}
+carrier:unique_constraint_dropped|Postgres|field|users|email|{"type":"string","required":true}
+carrier:unique_constraint_dropped|Sqlite|sha|runtime.json|fea063c94498df7b15a856d5aa56f3f1bf45233c47ad8589b40b1e041831cf1f
+carrier:unique_constraint_dropped|Sqlite|sha|env.db.ts|9c33d863de48b31f6a32c32512bcfa52b6d97fc27bd7f307c9af18e4185be79c
+carrier:unique_constraint_dropped|Sqlite|field|users|id|{"type":"string","required":true}
+carrier:unique_constraint_dropped|Sqlite|field|users|email|{"type":"string","required":true}
+carrier:unique_constraint_dropped|Sqlite|sqlite_create|users|CREATE TABLE IF NOT EXISTS "users" ( "id" TEXT NOT NULL, "email" TEXT NOT NULL )
+carrier:unique_constraint_dropped|Mysql|sha|runtime.json|fea063c94498df7b15a856d5aa56f3f1bf45233c47ad8589b40b1e041831cf1f
+carrier:unique_constraint_dropped|Mysql|sha|env.db.ts|9c33d863de48b31f6a32c32512bcfa52b6d97fc27bd7f307c9af18e4185be79c
+carrier:unique_constraint_dropped|Mysql|field|users|id|{"type":"string","required":true}
+carrier:unique_constraint_dropped|Mysql|field|users|email|{"type":"string","required":true}
+carrier:unique_constraint_kept|Postgres|sha|runtime.json|113ea73e021a8df608f3ad1d1f80e0163e0f743ce03ff7fbfa8516ab1f35ea00
+carrier:unique_constraint_kept|Postgres|sha|env.db.ts|d22dabc4855ee2e73ae00a14381de79e579243ffa2a9d77ab017d245a2e21a4a
+carrier:unique_constraint_kept|Postgres|field|users|id|{"type":"string","required":true}
+carrier:unique_constraint_kept|Postgres|field|users|email|{"type":"string","required":true,"unique":true}
+carrier:unique_constraint_kept|Postgres|field|users|handle|{"type":"string","required":true}
+carrier:unique_constraint_kept|Sqlite|sha|runtime.json|113ea73e021a8df608f3ad1d1f80e0163e0f743ce03ff7fbfa8516ab1f35ea00
+carrier:unique_constraint_kept|Sqlite|sha|env.db.ts|d22dabc4855ee2e73ae00a14381de79e579243ffa2a9d77ab017d245a2e21a4a
+carrier:unique_constraint_kept|Sqlite|field|users|id|{"type":"string","required":true}
+carrier:unique_constraint_kept|Sqlite|field|users|email|{"type":"string","required":true,"unique":true}
+carrier:unique_constraint_kept|Sqlite|field|users|handle|{"type":"string","required":true}
+carrier:unique_constraint_kept|Sqlite|sqlite_create|users|CREATE TABLE IF NOT EXISTS "users" ( "id" TEXT NOT NULL, "email" TEXT NOT NULL, "handle" TEXT NOT NULL )
+carrier:unique_constraint_kept|Mysql|sha|runtime.json|113ea73e021a8df608f3ad1d1f80e0163e0f743ce03ff7fbfa8516ab1f35ea00
+carrier:unique_constraint_kept|Mysql|sha|env.db.ts|d22dabc4855ee2e73ae00a14381de79e579243ffa2a9d77ab017d245a2e21a4a
+carrier:unique_constraint_kept|Mysql|field|users|id|{"type":"string","required":true}
+carrier:unique_constraint_kept|Mysql|field|users|email|{"type":"string","required":true,"unique":true}
+carrier:unique_constraint_kept|Mysql|field|users|handle|{"type":"string","required":true}
+carrier:unique_column_facet_survives_a_drop|Postgres|sha|runtime.json|7bc5e0b931711a00e37546968bd702c50ab34bf1d0f4471936be07c7a46cdbbd
+carrier:unique_column_facet_survives_a_drop|Postgres|sha|env.db.ts|035c0869ef16ed9a08959dc041a6e28cbf63d3d7fd73a65de0adc2df17f0527c
+carrier:unique_column_facet_survives_a_drop|Postgres|field|users|id|{"type":"string","required":true}
+carrier:unique_column_facet_survives_a_drop|Postgres|field|users|email|{"type":"string","required":true,"unique":true}
+carrier:unique_column_facet_survives_a_drop|Postgres|field|users|handle|{"type":"string","required":true}
+carrier:unique_column_facet_survives_a_drop|Sqlite|sha|runtime.json|7bc5e0b931711a00e37546968bd702c50ab34bf1d0f4471936be07c7a46cdbbd
+carrier:unique_column_facet_survives_a_drop|Sqlite|sha|env.db.ts|035c0869ef16ed9a08959dc041a6e28cbf63d3d7fd73a65de0adc2df17f0527c
+carrier:unique_column_facet_survives_a_drop|Sqlite|field|users|id|{"type":"string","required":true}
+carrier:unique_column_facet_survives_a_drop|Sqlite|field|users|email|{"type":"string","required":true,"unique":true}
+carrier:unique_column_facet_survives_a_drop|Sqlite|field|users|handle|{"type":"string","required":true}
+carrier:unique_column_facet_survives_a_drop|Sqlite|sqlite_create|users|CREATE TABLE IF NOT EXISTS "users" ( "id" TEXT NOT NULL, "email" TEXT NOT NULL, "handle" TEXT NOT NULL )
+carrier:unique_column_facet_survives_a_drop|Mysql|sha|runtime.json|7bc5e0b931711a00e37546968bd702c50ab34bf1d0f4471936be07c7a46cdbbd
+carrier:unique_column_facet_survives_a_drop|Mysql|sha|env.db.ts|035c0869ef16ed9a08959dc041a6e28cbf63d3d7fd73a65de0adc2df17f0527c
+carrier:unique_column_facet_survives_a_drop|Mysql|field|users|id|{"type":"string","required":true}
+carrier:unique_column_facet_survives_a_drop|Mysql|field|users|email|{"type":"string","required":true,"unique":true}
+carrier:unique_column_facet_survives_a_drop|Mysql|field|users|handle|{"type":"string","required":true}
+carrier:check_bound_dropped|Postgres|sha|runtime.json|5e738b9b562145658e491f90c53682737ff21e9a17a4613b5157d9e009b830a3
+carrier:check_bound_dropped|Postgres|sha|env.db.ts|4b29603197beb0e5ab491526d6636185985c70d8f3701ccd5a8207e54b4905d5
+carrier:check_bound_dropped|Postgres|field|scores|id|{"type":"string","required":true}
+carrier:check_bound_dropped|Postgres|field|scores|score|{"type":"int"}
+carrier:check_bound_dropped|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: addConstraint(check) is PostgreSQL-only
+carrier:check_bound_dropped|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: addConstraint(check) is PostgreSQL-only
+carrier:check_bound_kept|Postgres|sha|runtime.json|4118bb58dc65ae1b2be5cfa654958f5a2ea273d06b5646d44de659facd14a194
+carrier:check_bound_kept|Postgres|sha|env.db.ts|4b951ba9c8eab83673e6cde2ba91ec7cdc7fff749049f86273d6707864948e68
+carrier:check_bound_kept|Postgres|field|scores|id|{"type":"string","required":true}
+carrier:check_bound_kept|Postgres|field|scores|score|{"type":"int","min":1.0,"max":9.0}
+carrier:check_bound_kept|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: addConstraint(check) is PostgreSQL-only
+carrier:check_bound_kept|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: addConstraint(check) is PostgreSQL-only
+carrier:check_membership_dropped|Postgres|sha|runtime.json|a3126c5e9ec8b387af0ceef17e2be7274e442e643a9497009e738b62491ccc6b
+carrier:check_membership_dropped|Postgres|sha|env.db.ts|1b6b43b89f6ec2200eb71988ca9926baa7dde4df722bca4313effbbd17d419fa
+carrier:check_membership_dropped|Postgres|field|issues|id|{"type":"string","required":true}
+carrier:check_membership_dropped|Postgres|field|issues|status|{"type":"string"}
+carrier:check_membership_dropped|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: addConstraint(check) is PostgreSQL-only
+carrier:check_membership_dropped|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: addConstraint(check) is PostgreSQL-only
+carrier:named_fk_policy_dropped|Postgres|sha|runtime.json|e90b7993b952deaeb98d9a06043d616eb9a4f6c76d5f2b76b0cee149fa5a5b72
+carrier:named_fk_policy_dropped|Postgres|sha|env.db.ts|c1d0a5709b12cdd5205932ed561b290105953dd78455302613c0a828559f0760
+carrier:named_fk_policy_dropped|Postgres|field|accounts|id|{"type":"string","required":true}
+carrier:named_fk_policy_dropped|Postgres|field|orders|id|{"type":"string","required":true}
+carrier:named_fk_policy_dropped|Postgres|field|orders|owner_id|{"type":"ref","refTarget":"accounts"}
+carrier:named_fk_policy_dropped|Sqlite|sha|runtime.json|e90b7993b952deaeb98d9a06043d616eb9a4f6c76d5f2b76b0cee149fa5a5b72
+carrier:named_fk_policy_dropped|Sqlite|sha|env.db.ts|c1d0a5709b12cdd5205932ed561b290105953dd78455302613c0a828559f0760
+carrier:named_fk_policy_dropped|Sqlite|field|accounts|id|{"type":"string","required":true}
+carrier:named_fk_policy_dropped|Sqlite|sqlite_create|accounts|CREATE TABLE IF NOT EXISTS "accounts" ( "id" TEXT NOT NULL )
+carrier:named_fk_policy_dropped|Sqlite|field|orders|id|{"type":"string","required":true}
+carrier:named_fk_policy_dropped|Sqlite|field|orders|owner_id|{"type":"ref","refTarget":"accounts"}
+carrier:named_fk_policy_dropped|Sqlite|sqlite_create|orders|CREATE TABLE IF NOT EXISTS "orders" ( "id" TEXT NOT NULL, "owner_id" TEXT, CONSTRAINT "orders_owner_id_fkey" FOREIGN KEY ("owner_id") REFERENCES "accounts" (id) )
+carrier:named_fk_policy_dropped|Mysql|sha|runtime.json|e90b7993b952deaeb98d9a06043d616eb9a4f6c76d5f2b76b0cee149fa5a5b72
+carrier:named_fk_policy_dropped|Mysql|sha|env.db.ts|c1d0a5709b12cdd5205932ed561b290105953dd78455302613c0a828559f0760
+carrier:named_fk_policy_dropped|Mysql|field|accounts|id|{"type":"string","required":true}
+carrier:named_fk_policy_dropped|Mysql|field|orders|id|{"type":"string","required":true}
+carrier:named_fk_policy_dropped|Mysql|field|orders|owner_id|{"type":"ref","refTarget":"accounts"}
+carrier:unnamed_fk_policy_dropped_by_derived_name|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: constraint `orders_owner_id_fkey` already exists on `orders`
+carrier:unnamed_fk_policy_dropped_by_derived_name|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: constraint `orders_owner_id_fkey` already exists on `orders`
+carrier:unnamed_fk_policy_dropped_by_derived_name|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: constraint `orders_owner_id_fkey` already exists on `orders`
+carrier:unnamed_fk_policy_kept|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: constraint `orders_owner_id_fkey` already exists on `orders`
+carrier:unnamed_fk_policy_kept|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: constraint `orders_owner_id_fkey` already exists on `orders`
+carrier:unnamed_fk_policy_kept|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: constraint `orders_owner_id_fkey` already exists on `orders`
+carrier:fk_column_dropped_and_readded|Postgres|sha|runtime.json|e90b7993b952deaeb98d9a06043d616eb9a4f6c76d5f2b76b0cee149fa5a5b72
+carrier:fk_column_dropped_and_readded|Postgres|sha|env.db.ts|c1d0a5709b12cdd5205932ed561b290105953dd78455302613c0a828559f0760
+carrier:fk_column_dropped_and_readded|Postgres|field|accounts|id|{"type":"string","required":true}
+carrier:fk_column_dropped_and_readded|Postgres|field|orders|id|{"type":"string","required":true}
+carrier:fk_column_dropped_and_readded|Postgres|field|orders|owner_id|{"type":"ref","refTarget":"accounts"}
+carrier:fk_column_dropped_and_readded|Sqlite|sha|runtime.json|e90b7993b952deaeb98d9a06043d616eb9a4f6c76d5f2b76b0cee149fa5a5b72
+carrier:fk_column_dropped_and_readded|Sqlite|sha|env.db.ts|c1d0a5709b12cdd5205932ed561b290105953dd78455302613c0a828559f0760
+carrier:fk_column_dropped_and_readded|Sqlite|field|accounts|id|{"type":"string","required":true}
+carrier:fk_column_dropped_and_readded|Sqlite|sqlite_create|accounts|CREATE TABLE IF NOT EXISTS "accounts" ( "id" TEXT NOT NULL )
+carrier:fk_column_dropped_and_readded|Sqlite|field|orders|id|{"type":"string","required":true}
+carrier:fk_column_dropped_and_readded|Sqlite|field|orders|owner_id|{"type":"ref","refTarget":"accounts"}
+carrier:fk_column_dropped_and_readded|Sqlite|sqlite_create|orders|CREATE TABLE IF NOT EXISTS "orders" ( "id" TEXT NOT NULL, "owner_id" TEXT, CONSTRAINT "orders_owner_id_fkey" FOREIGN KEY ("owner_id") REFERENCES "accounts" (id) )
+carrier:fk_column_dropped_and_readded|Mysql|sha|runtime.json|e90b7993b952deaeb98d9a06043d616eb9a4f6c76d5f2b76b0cee149fa5a5b72
+carrier:fk_column_dropped_and_readded|Mysql|sha|env.db.ts|c1d0a5709b12cdd5205932ed561b290105953dd78455302613c0a828559f0760
+carrier:fk_column_dropped_and_readded|Mysql|field|accounts|id|{"type":"string","required":true}
+carrier:fk_column_dropped_and_readded|Mysql|field|orders|id|{"type":"string","required":true}
+carrier:fk_column_dropped_and_readded|Mysql|field|orders|owner_id|{"type":"ref","refTarget":"accounts"}
+carrier:check_column_dropped_and_readded|Postgres|sha|runtime.json|5e738b9b562145658e491f90c53682737ff21e9a17a4613b5157d9e009b830a3
+carrier:check_column_dropped_and_readded|Postgres|sha|env.db.ts|4b29603197beb0e5ab491526d6636185985c70d8f3701ccd5a8207e54b4905d5
+carrier:check_column_dropped_and_readded|Postgres|field|scores|id|{"type":"string","required":true}
+carrier:check_column_dropped_and_readded|Postgres|field|scores|score|{"type":"int"}
+carrier:check_column_dropped_and_readded|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: addConstraint(check) is PostgreSQL-only
+carrier:check_column_dropped_and_readded|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: addConstraint(check) is PostgreSQL-only
+carrier:check_column_renamed|Postgres|sha|runtime.json|f935a0b823dece3fc82a672757b96b23e3c7a6dc48dbbb283575b927dde6cfd4
+carrier:check_column_renamed|Postgres|sha|env.db.ts|a5942790c40ceff8b1b83ecf38dd4a5bfb2cd52b8f2c98813047e948da3ab5b3
+carrier:check_column_renamed|Postgres|field|scores|id|{"type":"string","required":true}
+carrier:check_column_renamed|Postgres|field|scores|points|{"type":"int","min":1.0,"max":9.0}
+carrier:check_column_renamed|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: addConstraint(check) is PostgreSQL-only
+carrier:check_column_renamed|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: addConstraint(check) is PostgreSQL-only
+carrier:table_dropped_with_its_constraints|Postgres|sha|runtime.json|5e738b9b562145658e491f90c53682737ff21e9a17a4613b5157d9e009b830a3
+carrier:table_dropped_with_its_constraints|Postgres|sha|env.db.ts|4b29603197beb0e5ab491526d6636185985c70d8f3701ccd5a8207e54b4905d5
+carrier:table_dropped_with_its_constraints|Postgres|field|scores|id|{"type":"string","required":true}
+carrier:table_dropped_with_its_constraints|Postgres|field|scores|score|{"type":"int"}
+carrier:table_dropped_with_its_constraints|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: addConstraint(check) is PostgreSQL-only
+carrier:table_dropped_with_its_constraints|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: addConstraint(check) is PostgreSQL-only
+carrier:column_level_reference_policy|Postgres|sha|runtime.json|7fa4395a4dd865393fd353e6c245e520ad7f62fdae2a9cbd9baf98edb8aedc6d
+carrier:column_level_reference_policy|Postgres|sha|env.db.ts|c52300ac189bd28f5c1c8b3d13392ee1dfe6831db550bb428d201ed9f693d291
+carrier:column_level_reference_policy|Postgres|field|accounts|id|{"type":"string","required":true}
+carrier:column_level_reference_policy|Postgres|field|orders|id|{"type":"string","required":true}
+carrier:column_level_reference_policy|Postgres|field|orders|owner_id|{"type":"string","refTarget":"accounts","refColumn":"id","onDelete":"cascade","onUpdate":"restrict"}
+carrier:column_level_reference_policy|Sqlite|sha|runtime.json|7fa4395a4dd865393fd353e6c245e520ad7f62fdae2a9cbd9baf98edb8aedc6d
+carrier:column_level_reference_policy|Sqlite|sha|env.db.ts|c52300ac189bd28f5c1c8b3d13392ee1dfe6831db550bb428d201ed9f693d291
+carrier:column_level_reference_policy|Sqlite|field|accounts|id|{"type":"string","required":true}
+carrier:column_level_reference_policy|Sqlite|sqlite_create|accounts|CREATE TABLE IF NOT EXISTS "accounts" ( "id" TEXT NOT NULL )
+carrier:column_level_reference_policy|Sqlite|field|orders|id|{"type":"string","required":true}
+carrier:column_level_reference_policy|Sqlite|field|orders|owner_id|{"type":"string","refTarget":"accounts","refColumn":"id","onDelete":"cascade","onUpdate":"restrict"}
+carrier:column_level_reference_policy|Sqlite|sqlite_create|orders|CREATE TABLE IF NOT EXISTS "orders" ( "id" TEXT NOT NULL, "owner_id" TEXT, CONSTRAINT "orders_owner_id_fkey" FOREIGN KEY ("owner_id") REFERENCES "accounts" (id) ON DELETE CASCADE ON UPDATE RESTRICT )
+carrier:column_level_reference_policy|Mysql|sha|runtime.json|7fa4395a4dd865393fd353e6c245e520ad7f62fdae2a9cbd9baf98edb8aedc6d
+carrier:column_level_reference_policy|Mysql|sha|env.db.ts|c52300ac189bd28f5c1c8b3d13392ee1dfe6831db550bb428d201ed9f693d291
+carrier:column_level_reference_policy|Mysql|field|accounts|id|{"type":"string","required":true}
+carrier:column_level_reference_policy|Mysql|field|orders|id|{"type":"string","required":true}
+carrier:column_level_reference_policy|Mysql|field|orders|owner_id|{"type":"string","refTarget":"accounts","refColumn":"id","onDelete":"cascade","onUpdate":"restrict"}
+carrier:retype_across_parameterised_types|Postgres|sha|runtime.json|797cabc0d91388ce125dca5e8301c17c75ddac4bfc76448489d27a1938e3f710
+carrier:retype_across_parameterised_types|Postgres|sha|env.db.ts|a656996fc7ce7fa9a89efcae9577ff5cfd000c576ed45cf5c2b3e6d9571de9d2
+carrier:retype_across_parameterised_types|Postgres|field|shapes|id|{"type":"string","required":true}
+carrier:retype_across_parameterised_types|Postgres|field|shapes|narrow|{"type":"string","maxLength":40}
+carrier:retype_across_parameterised_types|Postgres|field|shapes|fixed|{"type":"char","charLen":8}
+carrier:retype_across_parameterised_types|Sqlite|sha|runtime.json|797cabc0d91388ce125dca5e8301c17c75ddac4bfc76448489d27a1938e3f710
+carrier:retype_across_parameterised_types|Sqlite|sha|env.db.ts|a656996fc7ce7fa9a89efcae9577ff5cfd000c576ed45cf5c2b3e6d9571de9d2
+carrier:retype_across_parameterised_types|Sqlite|field|shapes|id|{"type":"string","required":true}
+carrier:retype_across_parameterised_types|Sqlite|field|shapes|narrow|{"type":"string","maxLength":40}
+carrier:retype_across_parameterised_types|Sqlite|field|shapes|fixed|{"type":"char","charLen":8}
+carrier:retype_across_parameterised_types|Sqlite|sqlite_create|shapes|CREATE TABLE IF NOT EXISTS "shapes" ( "id" TEXT NOT NULL, "narrow" TEXT, "fixed" TEXT )
+carrier:retype_across_parameterised_types|Mysql|sha|runtime.json|797cabc0d91388ce125dca5e8301c17c75ddac4bfc76448489d27a1938e3f710
+carrier:retype_across_parameterised_types|Mysql|sha|env.db.ts|a656996fc7ce7fa9a89efcae9577ff5cfd000c576ed45cf5c2b3e6d9571de9d2
+carrier:retype_across_parameterised_types|Mysql|field|shapes|id|{"type":"string","required":true}
+carrier:retype_across_parameterised_types|Mysql|field|shapes|narrow|{"type":"string","maxLength":40}
+carrier:retype_across_parameterised_types|Mysql|field|shapes|fixed|{"type":"char","charLen":8}
+carrier:nullability_and_default_both_ways|Postgres|sha|runtime.json|c1f84950d64ef2ea2885e50b41c67cf7d35f076c979ae89a896c772ec7318333
+carrier:nullability_and_default_both_ways|Postgres|sha|env.db.ts|d453155916a5e28814b480aca6fedf76ee5a044661a26487ae106d0c9abebdbc
+carrier:nullability_and_default_both_ways|Postgres|field|prefs|id|{"type":"string","required":true}
+carrier:nullability_and_default_both_ways|Postgres|field|prefs|theme|{"type":"string","default":"dark"}
+carrier:nullability_and_default_both_ways|Postgres|field|prefs|count|{"type":"int"}
+carrier:nullability_and_default_both_ways|Sqlite|sha|runtime.json|c1f84950d64ef2ea2885e50b41c67cf7d35f076c979ae89a896c772ec7318333
+carrier:nullability_and_default_both_ways|Sqlite|sha|env.db.ts|d453155916a5e28814b480aca6fedf76ee5a044661a26487ae106d0c9abebdbc
+carrier:nullability_and_default_both_ways|Sqlite|field|prefs|id|{"type":"string","required":true}
+carrier:nullability_and_default_both_ways|Sqlite|field|prefs|theme|{"type":"string","default":"dark"}
+carrier:nullability_and_default_both_ways|Sqlite|field|prefs|count|{"type":"int"}
+carrier:nullability_and_default_both_ways|Sqlite|sqlite_create|prefs|CREATE TABLE IF NOT EXISTS "prefs" ( "id" TEXT NOT NULL, "theme" TEXT DEFAULT 'dark', "count" INTEGER )
+carrier:nullability_and_default_both_ways|Mysql|sha|runtime.json|c1f84950d64ef2ea2885e50b41c67cf7d35f076c979ae89a896c772ec7318333
+carrier:nullability_and_default_both_ways|Mysql|sha|env.db.ts|d453155916a5e28814b480aca6fedf76ee5a044661a26487ae106d0c9abebdbc
+carrier:nullability_and_default_both_ways|Mysql|field|prefs|id|{"type":"string","required":true}
+carrier:nullability_and_default_both_ways|Mysql|field|prefs|theme|{"type":"string","default":"dark"}
+carrier:nullability_and_default_both_ways|Mysql|field|prefs|count|{"type":"int"}
+carrier:named_enum_and_domain_columns|Postgres|sha|runtime.json|8ea7ec991ee37f5d83916db6f332fa7913597a676cfab20312af5388aa6649aa
+carrier:named_enum_and_domain_columns|Postgres|sha|env.db.ts|5bb8df6d34dbe97170424fb27c0d20b334933002f25f0b4c2c84dfc4168bcac2
+carrier:named_enum_and_domain_columns|Postgres|field|accounts|id|{"type":"string","required":true}
+carrier:named_enum_and_domain_columns|Postgres|field|accounts|plan|{"type":"string","enum":["free","paid"]}
+carrier:named_enum_and_domain_columns|Postgres|field|accounts|credit|{"type":"int"}
+carrier:named_enum_and_domain_columns|Sqlite|sha|runtime.json|8ea7ec991ee37f5d83916db6f332fa7913597a676cfab20312af5388aa6649aa
+carrier:named_enum_and_domain_columns|Sqlite|sha|env.db.ts|5bb8df6d34dbe97170424fb27c0d20b334933002f25f0b4c2c84dfc4168bcac2
+carrier:named_enum_and_domain_columns|Sqlite|field|accounts|id|{"type":"string","required":true}
+carrier:named_enum_and_domain_columns|Sqlite|field|accounts|plan|{"type":"string","enum":["free","paid"]}
+carrier:named_enum_and_domain_columns|Sqlite|field|accounts|credit|{"type":"int"}
+carrier:named_enum_and_domain_columns|Sqlite|sqlite_create|accounts|CREATE TABLE IF NOT EXISTS "accounts" ( "id" TEXT NOT NULL, "plan" TEXT CHECK ("plan" IN ('free', 'paid')), "credit" INTEGER )
+carrier:named_enum_and_domain_columns|Mysql|sha|runtime.json|8ea7ec991ee37f5d83916db6f332fa7913597a676cfab20312af5388aa6649aa
+carrier:named_enum_and_domain_columns|Mysql|sha|env.db.ts|5bb8df6d34dbe97170424fb27c0d20b334933002f25f0b4c2c84dfc4168bcac2
+carrier:named_enum_and_domain_columns|Mysql|field|accounts|id|{"type":"string","required":true}
+carrier:named_enum_and_domain_columns|Mysql|field|accounts|plan|{"type":"string","enum":["free","paid"]}
+carrier:named_enum_and_domain_columns|Mysql|field|accounts|credit|{"type":"int"}
+carrier:table_renamed_with_a_ref_column|Postgres|sha|runtime.json|2589469cc7ada91ae8db7c7b2ac5e746bd93f9fd4a14238016450910523f34bc
+carrier:table_renamed_with_a_ref_column|Postgres|sha|env.db.ts|3651f4283deee14a3ac37c1be073e77ddc8c2b60644aa742efed26d79b444f56
+carrier:table_renamed_with_a_ref_column|Postgres|field|orders|id|{"type":"string","required":true}
+carrier:table_renamed_with_a_ref_column|Postgres|field|orders|owner_id|{"type":"ref","refTarget":"tenants"}
+carrier:table_renamed_with_a_ref_column|Postgres|field|tenants|id|{"type":"string","required":true}
+carrier:table_renamed_with_a_ref_column|Sqlite|sha|runtime.json|2589469cc7ada91ae8db7c7b2ac5e746bd93f9fd4a14238016450910523f34bc
+carrier:table_renamed_with_a_ref_column|Sqlite|sha|env.db.ts|3651f4283deee14a3ac37c1be073e77ddc8c2b60644aa742efed26d79b444f56
+carrier:table_renamed_with_a_ref_column|Sqlite|field|orders|id|{"type":"string","required":true}
+carrier:table_renamed_with_a_ref_column|Sqlite|field|orders|owner_id|{"type":"ref","refTarget":"tenants"}
+carrier:table_renamed_with_a_ref_column|Sqlite|sqlite_create|orders|CREATE TABLE IF NOT EXISTS "orders" ( "id" TEXT NOT NULL, "owner_id" TEXT, CONSTRAINT "orders_owner_id_fkey" FOREIGN KEY ("owner_id") REFERENCES "tenants" (id) )
+carrier:table_renamed_with_a_ref_column|Sqlite|field|tenants|id|{"type":"string","required":true}
+carrier:table_renamed_with_a_ref_column|Sqlite|sqlite_create|tenants|CREATE TABLE IF NOT EXISTS "tenants" ( "id" TEXT NOT NULL )
+carrier:table_renamed_with_a_ref_column|Mysql|sha|runtime.json|2589469cc7ada91ae8db7c7b2ac5e746bd93f9fd4a14238016450910523f34bc
+carrier:table_renamed_with_a_ref_column|Mysql|sha|env.db.ts|3651f4283deee14a3ac37c1be073e77ddc8c2b60644aa742efed26d79b444f56
+carrier:table_renamed_with_a_ref_column|Mysql|field|orders|id|{"type":"string","required":true}
+carrier:table_renamed_with_a_ref_column|Mysql|field|orders|owner_id|{"type":"ref","refTarget":"tenants"}
+carrier:table_renamed_with_a_ref_column|Mysql|field|tenants|id|{"type":"string","required":true}
+carrier:generated_column_follows_a_rename|Postgres|sha|runtime.json|542dccef29eed997e4ba70c03b17e9cc4dd98f5697029146ac5ae23aa2a44c61
+carrier:generated_column_follows_a_rename|Postgres|sha|env.db.ts|b9c3f781964bcf1519fb096131cd885c634a791d1ba221c102ae22014cd48ba2
+carrier:generated_column_follows_a_rename|Postgres|field|line_items|id|{"type":"string","required":true}
+carrier:generated_column_follows_a_rename|Postgres|field|line_items|qty|{"type":"int"}
+carrier:generated_column_follows_a_rename|Postgres|field|line_items|total_cents|{"type":"int","generated":{"expr":{"node":"binOp","op":"mul","lhs":{"node":"colRef","name":"qty"},"rhs":{"node":"literal","value":100}},"stored":true}}
+carrier:generated_column_follows_a_rename|Sqlite|sha|runtime.json|542dccef29eed997e4ba70c03b17e9cc4dd98f5697029146ac5ae23aa2a44c61
+carrier:generated_column_follows_a_rename|Sqlite|sha|env.db.ts|b9c3f781964bcf1519fb096131cd885c634a791d1ba221c102ae22014cd48ba2
+carrier:generated_column_follows_a_rename|Sqlite|field|line_items|id|{"type":"string","required":true}
+carrier:generated_column_follows_a_rename|Sqlite|field|line_items|qty|{"type":"int"}
+carrier:generated_column_follows_a_rename|Sqlite|field|line_items|total_cents|{"type":"int","generated":{"expr":{"node":"binOp","op":"mul","lhs":{"node":"colRef","name":"qty"},"rhs":{"node":"literal","value":100}},"stored":true}}
+carrier:generated_column_follows_a_rename|Sqlite|sqlite_create|line_items|CREATE TABLE IF NOT EXISTS "line_items" ( "id" TEXT NOT NULL, "qty" INTEGER, "total_cents" INTEGER )
+carrier:generated_column_follows_a_rename|Mysql|sha|runtime.json|542dccef29eed997e4ba70c03b17e9cc4dd98f5697029146ac5ae23aa2a44c61
+carrier:generated_column_follows_a_rename|Mysql|sha|env.db.ts|b9c3f781964bcf1519fb096131cd885c634a791d1ba221c102ae22014cd48ba2
+carrier:generated_column_follows_a_rename|Mysql|field|line_items|id|{"type":"string","required":true}
+carrier:generated_column_follows_a_rename|Mysql|field|line_items|qty|{"type":"int"}
+carrier:generated_column_follows_a_rename|Mysql|field|line_items|total_cents|{"type":"int","generated":{"expr":{"node":"binOp","op":"mul","lhs":{"node":"colRef","name":"qty"},"rhs":{"node":"literal","value":100}},"stored":true}}
+carrier:identity_kept|Postgres|sha|runtime.json|feec809ccfdcb5fbe0d86b3463a92cc1b95757c02e4f0b6d818fb7b6b5016b72
+carrier:identity_kept|Postgres|sha|env.db.ts|f9de952517d5eeb1abc87d7e66977047de159a7cbe8c23bc79a6240bc2f4008f
+carrier:identity_kept|Postgres|field|orders|id|{"type":"int","identity":{"always":false},"required":true}
+carrier:identity_kept|Postgres|field|orders|legacy_id|{"type":"string","required":true,"unique":true}
+carrier:identity_kept|Sqlite|sha|runtime.json|feec809ccfdcb5fbe0d86b3463a92cc1b95757c02e4f0b6d818fb7b6b5016b72
+carrier:identity_kept|Sqlite|sha|env.db.ts|f9de952517d5eeb1abc87d7e66977047de159a7cbe8c23bc79a6240bc2f4008f
+carrier:identity_kept|Sqlite|field|orders|id|{"type":"int","identity":{"always":false},"required":true}
+carrier:identity_kept|Sqlite|field|orders|legacy_id|{"type":"string","required":true,"unique":true}
+carrier:identity_kept|Sqlite|sqlite_create|orders|CREATE TABLE IF NOT EXISTS "orders" ( "id" INTEGER NOT NULL, "legacy_id" TEXT NOT NULL )
+carrier:identity_kept|Mysql|sha|runtime.json|feec809ccfdcb5fbe0d86b3463a92cc1b95757c02e4f0b6d818fb7b6b5016b72
+carrier:identity_kept|Mysql|sha|env.db.ts|f9de952517d5eeb1abc87d7e66977047de159a7cbe8c23bc79a6240bc2f4008f
+carrier:identity_kept|Mysql|field|orders|id|{"type":"int","identity":{"always":false},"required":true}
+carrier:identity_kept|Mysql|field|orders|legacy_id|{"type":"string","required":true,"unique":true}
+carrier:identity_cleared_by_a_primary_key_replace|Postgres|sha|runtime.json|85563a7d96488b631880d1e7bef0b19259b18bd362b738790757bf19c6c8bedf
+carrier:identity_cleared_by_a_primary_key_replace|Postgres|sha|env.db.ts|6371c3cf20422a5459fb0f64d87d3c14bc7a7e11480cfcfb06f8e1e7adfe7c97
+carrier:identity_cleared_by_a_primary_key_replace|Postgres|field|orders|id|{"type":"int","required":true}
+carrier:identity_cleared_by_a_primary_key_replace|Postgres|field|orders|legacy_id|{"type":"string","required":true,"unique":true}
+carrier:identity_cleared_by_a_primary_key_replace|Sqlite|sha|runtime.json|85563a7d96488b631880d1e7bef0b19259b18bd362b738790757bf19c6c8bedf
+carrier:identity_cleared_by_a_primary_key_replace|Sqlite|sha|env.db.ts|6371c3cf20422a5459fb0f64d87d3c14bc7a7e11480cfcfb06f8e1e7adfe7c97
+carrier:identity_cleared_by_a_primary_key_replace|Sqlite|field|orders|id|{"type":"int","required":true}
+carrier:identity_cleared_by_a_primary_key_replace|Sqlite|field|orders|legacy_id|{"type":"string","required":true,"unique":true}
+carrier:identity_cleared_by_a_primary_key_replace|Sqlite|sqlite_create|orders|CREATE TABLE IF NOT EXISTS "orders" ( "id" INTEGER NOT NULL, "legacy_id" TEXT NOT NULL )
+carrier:identity_cleared_by_a_primary_key_replace|Mysql|sha|runtime.json|85563a7d96488b631880d1e7bef0b19259b18bd362b738790757bf19c6c8bedf
+carrier:identity_cleared_by_a_primary_key_replace|Mysql|sha|env.db.ts|6371c3cf20422a5459fb0f64d87d3c14bc7a7e11480cfcfb06f8e1e7adfe7c97
+carrier:identity_cleared_by_a_primary_key_replace|Mysql|field|orders|id|{"type":"int","required":true}
+carrier:identity_cleared_by_a_primary_key_replace|Mysql|field|orders|legacy_id|{"type":"string","required":true,"unique":true}
+carrier:attached_partition_dropped|Postgres|sha|runtime.json|364cad35352a12be196776dca4f7337ae3a6dbdb4a022fe0cc2328854e036e13
+carrier:attached_partition_dropped|Postgres|sha|env.db.ts|55efb0a0e1f3056e7ee10cb2414aab4a0be1f3e51c1589420f2aaab23b9cd9c1
+carrier:attached_partition_dropped|Postgres|field|par|bucket|{"type":"int","required":true}
+carrier:attached_partition_dropped|Postgres|field|par|payload|{"type":"string"}
+carrier:attached_partition_dropped|Sqlite|sha|runtime.json|364cad35352a12be196776dca4f7337ae3a6dbdb4a022fe0cc2328854e036e13
+carrier:attached_partition_dropped|Sqlite|sha|env.db.ts|55efb0a0e1f3056e7ee10cb2414aab4a0be1f3e51c1589420f2aaab23b9cd9c1
+carrier:attached_partition_dropped|Sqlite|field|par|bucket|{"type":"int","required":true}
+carrier:attached_partition_dropped|Sqlite|field|par|payload|{"type":"string"}
+carrier:attached_partition_dropped|Sqlite|sqlite_create|par|CREATE TABLE IF NOT EXISTS "par" ( "bucket" INTEGER NOT NULL, "payload" TEXT )
+carrier:attached_partition_dropped|Mysql|sha|runtime.json|364cad35352a12be196776dca4f7337ae3a6dbdb4a022fe0cc2328854e036e13
+carrier:attached_partition_dropped|Mysql|sha|env.db.ts|55efb0a0e1f3056e7ee10cb2414aab4a0be1f3e51c1589420f2aaab23b9cd9c1
+carrier:attached_partition_dropped|Mysql|field|par|bucket|{"type":"int","required":true}
+carrier:attached_partition_dropped|Mysql|field|par|payload|{"type":"string"}
+carrier:attached_partition_detached|Postgres|sha|runtime.json|f8e30813693cda1046eb253ac6f46a3ca22283ccaf022c1e5a7433bbdb2a9c69
+carrier:attached_partition_detached|Postgres|sha|env.db.ts|aaa426ddccb84f6f5d881f105d46c3dd400422f3229293d2e83ef1217bd69c8a
+carrier:attached_partition_detached|Postgres|field|p1|bucket|{"type":"int","required":true}
+carrier:attached_partition_detached|Postgres|field|p1|payload|{"type":"string"}
+carrier:attached_partition_detached|Postgres|field|par|bucket|{"type":"int","required":true}
+carrier:attached_partition_detached|Postgres|field|par|payload|{"type":"string"}
+carrier:attached_partition_detached|Sqlite|sha|runtime.json|f8e30813693cda1046eb253ac6f46a3ca22283ccaf022c1e5a7433bbdb2a9c69
+carrier:attached_partition_detached|Sqlite|sha|env.db.ts|aaa426ddccb84f6f5d881f105d46c3dd400422f3229293d2e83ef1217bd69c8a
+carrier:attached_partition_detached|Sqlite|field|p1|bucket|{"type":"int","required":true}
+carrier:attached_partition_detached|Sqlite|field|p1|payload|{"type":"string"}
+carrier:attached_partition_detached|Sqlite|sqlite_create|p1|CREATE TABLE IF NOT EXISTS "p1" ( "bucket" INTEGER NOT NULL, "payload" TEXT )
+carrier:attached_partition_detached|Sqlite|field|par|bucket|{"type":"int","required":true}
+carrier:attached_partition_detached|Sqlite|field|par|payload|{"type":"string"}
+carrier:attached_partition_detached|Sqlite|sqlite_create|par|CREATE TABLE IF NOT EXISTS "par" ( "bucket" INTEGER NOT NULL, "payload" TEXT )
+carrier:attached_partition_detached|Mysql|sha|runtime.json|f8e30813693cda1046eb253ac6f46a3ca22283ccaf022c1e5a7433bbdb2a9c69
+carrier:attached_partition_detached|Mysql|sha|env.db.ts|aaa426ddccb84f6f5d881f105d46c3dd400422f3229293d2e83ef1217bd69c8a
+carrier:attached_partition_detached|Mysql|field|p1|bucket|{"type":"int","required":true}
+carrier:attached_partition_detached|Mysql|field|p1|payload|{"type":"string"}
+carrier:attached_partition_detached|Mysql|field|par|bucket|{"type":"int","required":true}
+carrier:attached_partition_detached|Mysql|field|par|payload|{"type":"string"}

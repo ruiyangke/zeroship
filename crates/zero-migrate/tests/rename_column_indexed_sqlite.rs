@@ -54,10 +54,11 @@ use tempfile::TempDir;
 use zero_migrate::apply::backend::sqlite::Mode;
 use zero_migrate::apply::executor::LockMode;
 use zero_migrate::model::ir::IrFlagsOverride;
+use zero_migrate::render::fold::single_fold;
 use zero_migrate::render::lower::{IrAuthor, LiveSchema};
 use zero_migrate::{
-    fold_ops, fold_to_field_defs, resolve_create_table_policy, Approval, ColType, ExecutorConfig,
-    Migration, MigrationEngine, MigrationIr, Op, PlanStep, RenameStep, SqlDialect, SqliteBackend,
+    fold_ops, resolve_create_table_policy, Approval, ColType, ExecutorConfig, Migration,
+    MigrationEngine, MigrationIr, Op, PlanStep, RenameStep, SqlDialect, SqliteBackend,
     SqliteRebuildSpec, SqliteSequencePolicy,
 };
 
@@ -268,14 +269,15 @@ fn exec_cfg() -> ExecutorConfig {
 }
 
 /// The SQLite live schema `engine::refresh_historical_live` builds: table snapshots
-/// from `fold_ops`, SDK field maps from `fold_to_field_defs`, over the same ops. This is
+/// from `fold_ops`, SDK field maps from the `FieldDef` projection, over the same ops. This is
 /// the leg with NO `stored_create_sql`, so `preserve_stored_shape` is off and the
 /// rebuild renders the new table with the POST-rename column name.
 fn folded_live_schema(history: &[Op]) -> LiveSchema {
     let effective = charter();
     let snapshot =
         fold_ops(history, SqlDialect::Sqlite, PROJECT, &effective).expect("the history folds");
-    let sqlite_schemas = fold_to_field_defs(history, SqlDialect::Sqlite, PROJECT, &effective)
+    let sqlite_schemas = single_fold::fold(history, SqlDialect::Sqlite, PROJECT, &effective)
+        .map(|folded| folded.project_field_defs())
         .expect("the history folds to field defs");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
     live.sqlite_schemas = sqlite_schemas;
@@ -805,7 +807,8 @@ async fn a_catalog_sourced_rename_of_an_indexed_column_still_replays_the_stored_
          through the replay arm"
     );
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
-    live.sqlite_schemas = fold_to_field_defs(&create_ops, SqlDialect::Sqlite, PROJECT, &effective)
+    live.sqlite_schemas = single_fold::fold(&create_ops, SqlDialect::Sqlite, PROJECT, &effective)
+        .map(|folded| folded.project_field_defs())
         .expect("the history folds to field defs");
 
     let steps = author
@@ -1193,7 +1196,7 @@ async fn a_rebuild_that_renames_one_column_and_drops_another_keeps_only_the_surv
 /// `render_create_table_sqlite_rebuild` has two arms. A table with a generated column,
 /// an inline CHECK or a case-insensitive text column goes through the SNAPSHOT renderer;
 /// an ordinary table goes through the SDK-VALUE arm, which re-emits from
-/// `LiveSchema::sqlite_schemas` - the map `fold_to_field_defs` builds, exactly as
+/// `LiveSchema::sqlite_schemas` - the map the `FieldDef` projection builds, exactly as
 /// `engine::refresh_historical_live` does in production. Under a charter with a
 /// MANDATORY `[[inject]]`, that map contains the injected columns, and the emitter
 /// refuses its own input:
@@ -1275,7 +1278,8 @@ columns = [
     let snapshot =
         fold_ops(&create.ops, SqlDialect::Sqlite, PROJECT, &effective).expect("the history folds");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
-    live.sqlite_schemas = fold_to_field_defs(&create.ops, SqlDialect::Sqlite, PROJECT, &effective)
+    live.sqlite_schemas = single_fold::fold(&create.ops, SqlDialect::Sqlite, PROJECT, &effective)
+        .map(|folded| folded.project_field_defs())
         .expect("the history folds to field defs");
 
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite, &effective);

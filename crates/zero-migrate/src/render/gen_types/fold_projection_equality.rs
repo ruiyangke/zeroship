@@ -1,8 +1,10 @@
 //! **The step 3 gate: every projection reproduces its walker, byte for byte.**
 //!
-//! TWO legs, not four. Step 4 retires a leg with each walker it deletes: consumer 1
-//! took `runtime_metadata` and consumer 2 took `authoring_tables` - see
-//! [`Projection`].
+//! ONE leg, not four. Step 4 retires a leg with each walker it deletes: consumer 1 took
+//! `runtime_metadata`, consumer 2 took `authoring_tables` and consumer 3 took
+//! `field_defs` - see [`Projection`]. Only `fold_ops` is left to compare against, and
+//! that leg retires with consumer 4, at which point this file has nothing to measure and
+//! goes with it.
 //!
 //! `docs/proposals/single-fold-and-effects.md` section G step 3:
 //!
@@ -40,19 +42,20 @@
 //! # What this gate CANNOT see
 //!
 //! The fold fails CLOSED: it runs the structural catalog replay, so a stream that
-//! replay refuses produces no projection at all. Both walkers still compared here -
-//! `fold_ops` and `fold_to_field_defs` - are fold-backed and fail closed the same way,
-//! so [`Verdict::FoldRefused`] is now **zero** and `BOTH_REFUSED` carries every
-//! refused prefix. That was not true while `authoring_tables_from_ops` was in this
-//! gate: it applied no coherence gate at all and answered about streams the fold
-//! refused, which is what the 196 fold-refused prefixes were.
+//! replay refuses produces no projection at all. The one walker still compared here -
+//! `fold_ops` - IS that replay, so [`Verdict::FoldRefused`] is **zero** and
+//! `BOTH_REFUSED` carries every refused prefix. That was not true while
+//! `authoring_tables_from_ops` was in this gate: it applied no coherence gate at all and
+//! answered about streams the fold refused, which is what the 196 fold-refused prefixes
+//! were.
 //!
 //! The consequence is worth stating rather than celebrating. A `FOLD_REFUSED` of zero
 //! does not mean the gate sees more; it means the last walker whose answer could have
 //! contradicted the fold on a refused stream is gone, so there is nothing left here to
 //! contradict it. What replaces that evidence is an OVER-REFUSAL control at the
-//! artifact level, in `tests/gen_types_authoring_tables_from_the_fold.rs`, because an
-//! equality gate is blind to a refusal change by construction.
+//! artifact level, in `tests/gen_types_authoring_tables_from_the_fold.rs` and
+//! `tests/gen_types_field_defs_from_the_fold.rs`, because an equality gate is blind to a
+//! refusal change by construction.
 
 use std::collections::BTreeMap;
 
@@ -63,37 +66,35 @@ use crate::model::ir::Op;
 use crate::model::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, SchemaSnapshot, TableSnapshot,
 };
+use crate::render::fold::fold_ops;
 use crate::render::fold::single_fold;
-use crate::render::fold::{fold_ops, fold_to_field_defs};
 use crate::SqlDialect;
 
 /// The projections still measurable here, named for the walker each must reproduce.
 ///
-/// `RuntimeMetadata` and `AuthoringTables` are NOT in this list any more, and their
-/// absence is the shape of step 4 rather than a gap. This gate compares a projection
-/// to the WALKER it replaces; consumer 1 deleted `runtime_metadata_from_ops` and
-/// consumer 2 deleted `authoring_tables_from_ops`, so for each of those there is no
-/// second answer left and keeping the leg would have compared the projection to
-/// itself. What replaces each is a gate at the ARTIFACT level -
-/// `tests/gen_types_runtime_metadata_from_the_fold.rs` and
-/// `tests/gen_types_authoring_tables_from_the_fold.rs` - whose goldens were captured
-/// from the walkers before they were deleted, so the evidence a walker used to
-/// provide outlives the walker. Each later consumer move retires its leg the same way.
+/// `RuntimeMetadata`, `AuthoringTables` and `FieldDefs` are NOT in this list any more,
+/// and their absence is the shape of step 4 rather than a gap. This gate compares a
+/// projection to the WALKER it replaces; consumer 1 deleted `runtime_metadata_from_ops`,
+/// consumer 2 deleted `authoring_tables_from_ops` and consumer 3 deleted
+/// `fold_to_field_defs`, so for each of those there is no second answer left and keeping
+/// the leg would have compared the projection to itself. What replaces each is a gate at
+/// the ARTIFACT level - `tests/gen_types_runtime_metadata_from_the_fold.rs`,
+/// `tests/gen_types_authoring_tables_from_the_fold.rs` and
+/// `tests/gen_types_field_defs_from_the_fold.rs` - whose goldens were captured from the
+/// walkers before they were deleted, so the evidence a walker used to provide outlives
+/// the walker. Consumer 4 retires the last leg the same way.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Projection {
     /// `FoldedSchema::project_snapshot` against `fold_ops`.
     Snapshot,
-    /// `FoldedSchema::project_field_defs` against `fold_to_field_defs`.
-    FieldDefs,
 }
 
-const PROJECTIONS: [Projection; 2] = [Projection::Snapshot, Projection::FieldDefs];
+const PROJECTIONS: [Projection; 1] = [Projection::Snapshot];
 
 impl Projection {
     fn label(self) -> &'static str {
         match self {
             Projection::Snapshot => "snapshot",
-            Projection::FieldDefs => "field_defs",
         }
     }
 }
@@ -112,9 +113,6 @@ fn walker_answer(
         Projection::Snapshot => fold_ops(ops, dialect, SCHEMA, &effective)
             .map(|v| format!("{v:#?}"))
             .map_err(|e| e.to_string()),
-        Projection::FieldDefs => fold_to_field_defs(ops, dialect, SCHEMA, &effective)
-            .map(|v| serde_json::to_string_pretty(&v).expect("field defs serialize"))
-            .map_err(|e| e.to_string()),
     }
 }
 
@@ -128,8 +126,6 @@ fn projection_answer(
     };
     Ok(match projection {
         Projection::Snapshot => format!("{:#?}", folded.project_snapshot()),
-        Projection::FieldDefs => serde_json::to_string_pretty(&folded.project_field_defs())
-            .expect("field defs serialize"),
     })
 }
 
@@ -274,24 +270,25 @@ fn measure() -> Vec<Measured> {
 /// Which side a recorded divergence believes. There is no "unknown" arm on purpose:
 /// a difference this gate cannot attribute is a difference nobody has triaged, and
 /// step 3 says every one is triaged individually.
+///
+/// BOTH arms are unconstructed now that [`DIVERGENCES`] is empty, and the whole type
+/// stays for the same reason `ByDesign` stayed while `WalkerDefect` was in use: a gate
+/// that deletes its triage vocabulary the moment nothing needs it has nowhere honest to
+/// put the next difference, and the next consumer move is the one most likely to
+/// produce one. `differential_corpus::Status::Defect` records the mirror of this
+/// reasoning for its own unconstructed arm.
 #[derive(Clone, Copy)]
+#[expect(
+    dead_code,
+    reason = "the triage vocabulary outlives the current (empty) divergence set; see \
+              the doc comment"
+)]
 enum Side {
     /// The WALKER is wrong and the projection is right. The fold must not be held to
     /// it, and the evidence is stated so the claim can be argued with.
     WalkerDefect(&'static str),
     /// Neither is wrong: the two answers are equally true statements about different
     /// things, and the reason says which.
-    ///
-    /// Currently UNCONSTRUCTED. The variant stays because both recorded divergences
-    /// happen to be walker defects, and a gate that deletes the "neither is wrong"
-    /// vocabulary the moment nothing needs it has nowhere honest to put the next
-    /// difference - which is the same reasoning `differential_corpus::Status::Defect`
-    /// records for its own unconstructed arm, in the mirror direction.
-    #[expect(
-        dead_code,
-        reason = "the by-design vocabulary outlives the current divergence set; see the \
-                  doc comment"
-    )]
     ByDesign(&'static str),
 }
 
@@ -305,50 +302,43 @@ struct Divergence {
     side: Side,
 }
 
-/// `fold_to_field_defs` lifts a single-column `UNIQUE` onto the column descriptor and
-/// never un-lifts it. The FK half of exactly this lift IS un-lifted - the walker's
-/// `Op::DropConstraint` arm exists and its comment says why ("the policy outlived the
-/// constraint and gen-types kept emitting an ON DELETE the database no longer has") -
-/// but the arm only touches `fks`, so the uniqueness the same `dropConstraint` removed
-/// survives in the artifact. One fix, one instance, the sibling left open: the F113
-/// pattern the review log names.
-const FFD_NEVER_UNLIFTS_A_DROPPED_UNIQUE: &str =
-    "fold_to_field_defs keeps `unique: true` on a column whose UNIQUE constraint the \
-     same stream dropped. fold_ops - the catalog oracle the live suites anchor - has \
-     already removed the constraint at that prefix, so the two disagree about the \
-     database. The projection derives uniqueness from the constraints the model still \
-     holds, so it cannot outlive one. Measured by \
-     `a_dropped_unique_constraint_outlives_itself_in_the_field_def_map`; \
-     docs/review-log.md has no entry for this one, so this gate is its first record.";
-
 /// The recorded set. EMPTY is not the goal and a shrinking count is not automatically
 /// progress - see `the_gate_has_the_shape_it_claims`.
+///
+/// It is empty NOW, and the reason is worth stating rather than leaving to be inferred
+/// from a bare `&[]`: every divergence this gate ever recorded belonged to a leg that
+/// has since retired with its walker, so there is no longer a second answer to differ
+/// from. The one leg left compares `project_snapshot` to `fold_ops`, and those two have
+/// agreed byte for byte on the whole corpus since step 3.
 #[rustfmt::skip]
 const DIVERGENCES: &[Divergence] = &[
-    // `[createTable(users), createIndex, addConstraint UNIQUE(email), validateConstraint,
-    //  dropConstraint]`. The walker's descriptor still carries `unique`, so the
-    // projection's object ends one key earlier and the first differing line is the one
-    // BEFORE it - which is why the detail reads `"required": true` against
-    // `"required": true,`. Both spellings are shown verbatim rather than paraphrased.
-    Divergence { key: "v_index_and_constraint|Postgres|field_defs", at: 5, detail: "line 9: fold \"\\\"required\\\": true\" walker \"\\\"required\\\": true,\"", side: Side::WalkerDefect(FFD_NEVER_UNLIFTS_A_DROPPED_UNIQUE) },
-    Divergence { key: "v_index_and_constraint|Sqlite|field_defs", at: 5, detail: "line 9: fold \"\\\"required\\\": true\" walker \"\\\"required\\\": true,\"", side: Side::WalkerDefect(FFD_NEVER_UNLIFTS_A_DROPPED_UNIQUE) },
-    Divergence { key: "v_index_and_constraint|Mysql|field_defs", at: 5, detail: "line 9: fold \"\\\"required\\\": true\" walker \"\\\"required\\\": true,\"", side: Side::WalkerDefect(FFD_NEVER_UNLIFTS_A_DROPPED_UNIQUE) },
-
-    // THREE ROWS RETIRED WITH THEIR LEG, not fixed away and not lost.
+    // SIX ROWS RETIRED WITH THEIR LEG, not fixed away and not lost.
     //
     // `v_primary_key|{Postgres,Sqlite,Mysql}|authoring_tables` recorded
     // `line 45: fold "legacy_id," walker "id,"` - `authoring_tables_from_ops` had no
     // `Op::AlterPrimaryKey` arm, so `env.db.ts` kept the primary key the migration
-    // replaced. Step 4 consumer 2 deleted that walker, so the row has no second side
-    // to differ from and cannot be measured here any more.
+    // replaced. Step 4 consumer 2 deleted that walker. The defect it named is now pinned
+    // FIVE ways at the artifact level in
+    // `tests/gen_types_authoring_tables_from_the_fold.rs` and adjudicated against a live
+    // PostgreSQL in `tests/env_db_ts_matches_the_server_pg.rs`.
     //
-    // It is not evidence that evaporated. The defect it named is now pinned FIVE ways
-    // at the artifact level in `tests/gen_types_authoring_tables_from_the_fold.rs` -
-    // one per `AlterPrimaryKeyAction` shape plus the identity facet - and adjudicated
-    // against a live PostgreSQL in `tests/env_db_ts_matches_the_server_pg.rs`, which
-    // applies the migration, reads the key out of `pg_catalog`, and asserts the
-    // artifact declares THAT key. A recorded divergence traded for a live oracle is
-    // the trade this gate exists to make.
+    // `v_index_and_constraint|{Postgres,Sqlite,Mysql}|field_defs` recorded
+    // `line 9: fold "\"required\": true" walker "\"required\": true,"` -
+    // `fold_to_field_defs` lifted a single-column `UNIQUE` onto the column descriptor
+    // and had no arm that could take it back, so `schema.runtime.json` kept calling a
+    // column unique after the `dropConstraint` that removed the constraint. (The FK half
+    // of exactly that lift WAS un-lifted; the walker's `Op::DropConstraint` arm existed
+    // and touched `fks` only - the F113 pattern the review log names, one fix with its
+    // sibling left open.) Step 4 consumer 3 deleted that walker, so the row has no
+    // second side to differ from.
+    //
+    // It is not evidence that evaporated, and it did not shrink either: measured through
+    // the artifact rather than through this gate's canonical text, the same walker was
+    // wrong in FIVE families, not one. All five are pinned in
+    // `tests/gen_types_field_defs_from_the_fold.rs`, and the claim that none of them can
+    // reach a SQLite table rebuild is measured against a real database in
+    // `tests/sqlite_rebuild_field_defs_live.rs`. A recorded divergence traded for a live
+    // oracle is the trade this gate exists to make.
 ];
 
 // ---------------------------------------------------------------------------
@@ -486,10 +476,10 @@ fn the_gate_has_the_shape_it_claims() {
 
 /// Byte-identical comparisons across the whole corpus.
 ///
-/// The number has fallen twice and BOTH falls are a leg retiring with the walker it
-/// compared against, not a stream leaving the corpus. A shrinking coverage count is
-/// the one number here that reads as progress and is usually a leak, so the drop is
-/// accounted for EXACTLY rather than plausibly.
+/// The number has fallen three times and ALL THREE falls are a leg retiring with the
+/// walker it compared against, not a stream leaving the corpus. A shrinking coverage
+/// count is the one number here that reads as progress and is usually a leak, so each
+/// drop is accounted for EXACTLY rather than plausibly.
 ///
 /// Every leg measures the same set of prefixes, and that set is
 /// `sum over streams of (len + 1) * DIALECTS` = **879**. The four counters for one leg
@@ -498,14 +488,16 @@ fn the_gate_has_the_shape_it_claims() {
 /// | | equal | differs | both refused | fold refused | sum |
 /// |---|---|---|---|---|---|
 /// | `snapshot` | 683 | 0 | 196 | 0 | 879 |
-/// | `field_defs` | 677 | 6 | 196 | 0 | 879 |
-/// | `authoring_tables` (retired here) | 677 | 6 | 0 | 196 | 879 |
+/// | `field_defs` (retired here) | 677 | 6 | 196 | 0 | 879 |
+/// | `authoring_tables` (retired by consumer 2) | 677 | 6 | 0 | 196 | 879 |
 /// | `runtime_metadata` (retired by consumer 1) | 683 | 0 | 0 | 196 | 879 |
 ///
 /// So: 2,720 over FOUR legs at step 3; 2,037 over THREE when consumer 1 deleted
 /// `runtime_metadata_from_ops` (2,720 - 2,037 = 683, that leg's equal share); 1,360
-/// over TWO now (2,037 - 1,360 = 677, this leg's equal share). The two retired legs
-/// differ by exactly the 6 divergences one of them recorded and the other did not.
+/// over TWO when consumer 2 deleted `authoring_tables_from_ops` (2,037 - 1,360 = 677);
+/// and 683 over ONE now (1,360 - 683 = 677, this leg's equal share, the same figure
+/// because the two artifact legs measured the same corpus and diverged on the same
+/// count of prefixes).
 ///
 /// The CORPUS itself is unchanged across this move, which is the claim the arithmetic
 /// above is only circumstantial evidence for and which is checked directly: `STEMS`,
@@ -515,32 +507,35 @@ fn the_gate_has_the_shape_it_claims() {
 /// on `PROJECTIONS` at all - is still 97. A stream deleted from the corpus would move
 /// both of those; retiring a leg moves neither.
 ///
-/// What now covers the retired legs is `tests/gen_types_runtime_metadata_from_the_fold.rs`
-/// and `tests/gen_types_authoring_tables_from_the_fold.rs`, whose goldens were
-/// captured from the walkers before they were deleted.
-const EQUAL_COMPARISONS: usize = 1360;
+/// What now covers the retired legs is
+/// `tests/gen_types_runtime_metadata_from_the_fold.rs`,
+/// `tests/gen_types_authoring_tables_from_the_fold.rs` and
+/// `tests/gen_types_field_defs_from_the_fold.rs`, whose goldens were captured from the
+/// walkers before they were deleted.
+const EQUAL_COMPARISONS: usize = 683;
 /// Comparisons whose two texts differ. Every one is attributed in [`DIVERGENCES`].
 ///
-/// Was 12; it is 6 because the three `v_primary_key|*|authoring_tables` rows retired
-/// with their leg. It was UNCHANGED at 12 across consumer 1's retirement, and the
-/// contrast is the point: the runtime-metadata leg genuinely contributed no
-/// divergence, and this one contributed exactly half of them.
-const DIFFERING_COMPARISONS: usize = 6;
+/// Was 12, then 6, and now ZERO - and zero here is NOT "the divergences were fixed".
+/// Every one of the 12 belonged to a leg that has retired, and the `snapshot` leg
+/// contributed none of them at any point. What the number says is that the only
+/// comparison left in this file is one that has never differed; what it does not say is
+/// anything at all about the three artifact projections, whose evidence now lives in
+/// three artifact-level gates.
+const DIFFERING_COMPARISONS: usize = 0;
 /// Prefixes both sides refuse.
 ///
-/// UNCHANGED at 392, and that it did not move is the check on the story above: the
-/// retired leg contributed ZERO to this column (its walker refused nothing the fold
-/// also refused), so its whole refusal share was the 196 in [`FOLD_REFUSED`]. A leg
-/// leaving that had contributed here would have shown up as a fall in this number too.
-const BOTH_REFUSED: usize = 392;
+/// 392 -> 196, which is exactly the retired leg's own 196 and nothing else. The
+/// remaining leg's share is unchanged, and [`FOLD_REFUSAL_PREFIXES`] - measured without
+/// reference to any leg - is still 196, which is the check that the fold's refusal set
+/// did not move when a leg left.
+const BOTH_REFUSED: usize = 196;
 /// Prefixes the fold refuses and a walker answers about.
 ///
-/// ZERO. `authoring_tables_from_ops` was the last walker in this gate with no
-/// coherence gate of its own, and consumer 2 deleted it; `fold_ops` and
-/// `fold_to_field_defs` are both fold-backed and fail closed exactly where the
-/// projection does. Pinned rather than deleted, because a return to non-zero would
-/// mean the fold started refusing something a surviving walker still answers - the
-/// direction this gate cannot otherwise see.
+/// ZERO. `authoring_tables_from_ops` was the last walker in this gate with no coherence
+/// gate of its own, and consumer 2 deleted it; the one walker left, `fold_ops`, IS the
+/// coherence gate the fold runs. Pinned rather than deleted, because a return to
+/// non-zero would mean the fold started refusing something the surviving walker still
+/// answers - the direction this gate cannot otherwise see.
 const FOLD_REFUSED: usize = 0;
 
 // ---------------------------------------------------------------------------
@@ -914,15 +909,21 @@ fn corpus_stream(name: &str) -> Vec<Op> {
         .unwrap_or_else(|| panic!("the step 1 corpus has no stream named {name}"))
 }
 
-/// **Evidence for [`FFD_NEVER_UNLIFTS_A_DROPPED_UNIQUE`].**
+/// **The retired `field_defs` divergence, restated as the agreement that replaced it.**
+///
+/// This test used to assert the defect - `TODAY: the FieldDef map still calls the column
+/// unique after its constraint was dropped`. `fold_to_field_defs` lifted a single-column
+/// `UNIQUE` onto the column descriptor and had no arm that could take it back, so
+/// `schema.runtime.json` kept describing a database the catalog did not have. Step 4
+/// consumer 3 removed the walker that produced that answer, so what is left to state is
+/// that the catalog oracle and the shipped artifact now say the same thing about the
+/// same column out of the same stream.
 ///
 /// The anchor is `fold_ops`, not this file's opinion: it is the structural oracle the
 /// live PostgreSQL, SQLite and MySQL suites already run against a real server, and at
-/// this prefix it has removed the constraint. So the artifact and the catalog disagree
-/// about whether the column is unique, and the artifact is the one describing a
-/// database that does not exist.
+/// this prefix it has removed the constraint.
 #[test]
-fn a_dropped_unique_constraint_outlives_itself_in_the_field_def_map() {
+fn the_catalog_and_the_runtime_artifact_agree_about_a_dropped_unique_constraint() {
     let stream = corpus_stream("v_index_and_constraint");
     // createTable, createIndex, addConstraint UNIQUE(email), validateConstraint,
     // dropConstraint - the prefix that ADDS and then DROPS the uniqueness.
@@ -939,15 +940,6 @@ fn a_dropped_unique_constraint_outlives_itself_in_the_field_def_map() {
          evidence of anything"
     );
 
-    let defs = fold_to_field_defs(ops, SqlDialect::Postgres, SCHEMA, &effective)
-        .expect("fold_to_field_defs");
-    assert_eq!(
-        defs["users"]["email"].get("unique"),
-        Some(&serde_json::json!(true)),
-        "TODAY: the FieldDef map still calls the column unique after its constraint \
-         was dropped"
-    );
-
     let folded = single_fold::fold(ops, SqlDialect::Postgres, SCHEMA, &effective).expect("fold");
     assert_eq!(
         folded.project_field_defs()["users"]["email"].get("unique"),
@@ -955,18 +947,39 @@ fn a_dropped_unique_constraint_outlives_itself_in_the_field_def_map() {
         "the projection derives uniqueness from the constraints the model still holds, \
          so a dropped constraint cannot outlive itself"
     );
+
+    // The SHIPPED consequence, not just the intermediate. `schema.runtime.json` is what
+    // a deployed app installs its `env.db` types from, and - on SQLite - the same map
+    // is what a table rebuild renders its `CREATE TABLE` from.
+    let artifacts = super::render_artifacts(ops, SqlDialect::Postgres, SCHEMA, &effective)
+        .expect("render artifacts");
+    let runtime: serde_json::Value =
+        serde_json::from_str(&artifacts.runtime_json).expect("runtime.json parses");
+    assert_eq!(
+        runtime["collections"]["users"]["fields"]["email"].get("unique"),
+        None,
+        "and the artifact stops declaring a uniqueness the catalog does not have:\n{}",
+        artifacts.runtime_json
+    );
 }
 
 /// **The same un-lift hole, on a facet the step 1 corpus cannot see.**
 ///
-/// The gate above found the UNIQUE half because `v_index_and_constraint` adds and then
-/// drops one. No corpus stream drops a CHECK, so the gate is blind to the `min`/`max`
-/// half of the same hole - which is stated here rather than left for the next reader
-/// to rediscover, because "the gate is green" is only as strong as what the gate can
-/// see. The projection derives both from the constraints the model still holds, so one
-/// rule covers the whole family instead of one arm per facet.
+/// The test above found the UNIQUE half because `v_index_and_constraint` adds and then
+/// drops one. No corpus stream drops a CHECK, so this gate is blind to the `min`/`max`
+/// half of the same hole - which is stated here rather than left for the next reader to
+/// rediscover, because "the gate is green" is only as strong as what the gate can see.
+/// The projection derives both from the constraints the model still holds, so one rule
+/// covers the whole family instead of one arm per facet.
+///
+/// That blindness is exactly what step 4 consumer 3 measured rather than inherited. A
+/// sweep of the deleted walker against this projection over every prefix of the corpus
+/// AND of a carrier set written for the constraint lifecycle found FIVE divergence
+/// families where this gate had recorded ONE. The other four - the CHECK bound below,
+/// a CHECK membership, a re-added column inheriting a dropped column's facets, and
+/// `dropPartition` - are pinned in `tests/gen_types_field_defs_from_the_fold.rs`.
 #[test]
-fn a_dropped_check_constraint_outlives_itself_in_the_field_def_map() {
+fn a_dropped_check_constraint_does_not_outlive_itself_in_the_field_def_map() {
     let ops: Vec<Op> = parse(
         r#"[
   {"op":"createTable","name":"scores","columns":[{"name":"id","type":"text","nullable":false},{"name":"score","type":"int"}],"primaryKey":["id"]},
@@ -977,9 +990,11 @@ fn a_dropped_check_constraint_outlives_itself_in_the_field_def_map() {
     let effective = policy(false);
 
     // The bound is really recovered while the constraint is live, or the drop below
-    // proves nothing.
-    let with_check = fold_to_field_defs(&ops[..2], SqlDialect::Postgres, SCHEMA, &effective)
-        .expect("fold_to_field_defs");
+    // proves nothing. Measured through the projection, since the walker that used to
+    // answer this is gone.
+    let with_check = single_fold::fold(&ops[..2], SqlDialect::Postgres, SCHEMA, &effective)
+        .expect("fold")
+        .project_field_defs();
     assert_eq!(
         with_check["scores"]["score"].get("min"),
         Some(&serde_json::json!(1.0)),
@@ -993,14 +1008,6 @@ fn a_dropped_check_constraint_outlives_itself_in_the_field_def_map() {
             .iter()
             .any(|constraint| constraint.name == "scores_score_ck"),
         "the catalog oracle must agree the constraint is gone"
-    );
-
-    let defs =
-        fold_to_field_defs(&ops, SqlDialect::Postgres, SCHEMA, &effective).expect("field defs");
-    assert_eq!(
-        defs["scores"]["score"].get("min"),
-        Some(&serde_json::json!(1.0)),
-        "TODAY: the recovered min/max outlives the CHECK that granted it"
     );
 
     let folded = single_fold::fold(&ops, SqlDialect::Postgres, SCHEMA, &effective).expect("fold");

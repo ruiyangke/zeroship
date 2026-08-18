@@ -53,10 +53,11 @@ use tempfile::TempDir;
 use zero_migrate::apply::backend::sqlite::Mode;
 use zero_migrate::apply::executor::LockMode;
 use zero_migrate::model::ir::IrFlagsOverride;
+use zero_migrate::render::fold::single_fold;
 use zero_migrate::render::lower::{IrAuthor, LiveSchema};
 use zero_migrate::{
-    fold_ops, fold_to_field_defs, resolve_create_table_policy, Approval, ColType, ExecutorConfig,
-    MigrationEngine, MigrationIr, Op, PlanStep, RenameStep, SqlDialect, SqliteBackend,
+    fold_ops, resolve_create_table_policy, Approval, ColType, ExecutorConfig, MigrationEngine,
+    MigrationIr, Op, PlanStep, RenameStep, SqlDialect, SqliteBackend,
 };
 
 const PROJECT: &str = "prj_fk_definition";
@@ -220,12 +221,13 @@ fn exec_cfg() -> ExecutorConfig {
 }
 
 /// The SQLite live schema `engine::refresh_historical_live` builds: table snapshots
-/// from `fold_ops`, SDK field maps from `fold_to_field_defs`, over the same ops.
+/// from `fold_ops`, SDK field maps from the `FieldDef` projection, over the same ops.
 fn folded_live_schema(history: &[Op]) -> LiveSchema {
     let effective = charter();
     let snapshot =
         fold_ops(history, SqlDialect::Sqlite, PROJECT, &effective).expect("the history folds");
-    let sqlite_schemas = fold_to_field_defs(history, SqlDialect::Sqlite, PROJECT, &effective)
+    let sqlite_schemas = single_fold::fold(history, SqlDialect::Sqlite, PROJECT, &effective)
+        .map(|folded| folded.project_field_defs())
         .expect("the history folds to field defs");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
     live.sqlite_schemas = sqlite_schemas;
@@ -552,7 +554,8 @@ async fn the_stored_shape_decision_is_unchanged_by_the_constraint_rewrite() {
         .expect("the catalog snapshot reads");
     let mut catalog_live = LiveSchema::from_catalog_snapshot(snapshot, APP);
     catalog_live.sqlite_schemas =
-        fold_to_field_defs(&create_ops, SqlDialect::Sqlite, PROJECT, &effective)
+        single_fold::fold(&create_ops, SqlDialect::Sqlite, PROJECT, &effective)
+            .map(|folded| folded.project_field_defs())
             .expect("the history folds to field defs");
 
     let decision = |live: &LiveSchema| {
@@ -628,7 +631,8 @@ async fn a_catalog_sourced_rename_still_replays_the_stored_body() {
         .expect("the stored CREATE text");
 
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
-    live.sqlite_schemas = fold_to_field_defs(&create_ops, SqlDialect::Sqlite, PROJECT, &effective)
+    live.sqlite_schemas = single_fold::fold(&create_ops, SqlDialect::Sqlite, PROJECT, &effective)
+        .map(|folded| folded.project_field_defs())
         .expect("the history folds to field defs");
 
     let steps = author

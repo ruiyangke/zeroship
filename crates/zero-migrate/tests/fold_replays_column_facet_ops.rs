@@ -1,6 +1,6 @@
 //! The offline op fold must replay the ops that change a column's shape.
 //!
-//! `fold_to_field_defs` reconstructs a per-table FieldDescriptor map by replaying
+//! The `FieldDef` projection reconstructs a per-table FieldDescriptor map from
 //! an envelope's ops. It handles eight of them - createTable, addColumn,
 //! dropColumn, renameColumn, dropTable, renameTable, addConstraint,
 //! alterPrimaryKey - and its catch-all drops the rest. The ops that change a
@@ -8,14 +8,17 @@
 //! accepted, and then ignored by the reconstruction.
 //!
 //! WHY THIS IS NOT A COHERENCE BUG, which matters for where the fix belongs:
-//! `fold_to_field_defs` calls `fold_ops` FIRST, and that is the fail-closed
+//! The fold behind it runs the catalog replay FIRST, and that is the fail-closed
 //! structural oracle (add-to-missing-table, drop-absent-column, duplicate-create).
 //! Coherence is already enforced. What leaks is FIDELITY - the op is legal and the
 //! reconstruction simply does not reflect it.
 //!
 //! THE CONSUMER IS CODEGEN, which is what makes it user-facing rather than
-//! internal. The IR schema records it directly: "the OFFLINE op fold
-//! (`zero_migrate::fold_to_field_defs`) and `gen-types` have NO live DB". So a
+//! internal. The IR schema records it directly: "the OFFLINE op fold ... and
+//! `gen-types` have NO live DB". (That sentence named
+//! `zero_migrate::fold_to_field_defs` until step 4 consumer 3 of
+//! `docs/proposals/single-fold-and-effects.md` deleted the walker; the map is a
+//! projection of the single fold now and the claim is unchanged - still no live DB.) So a
 //! migration that widens a column to `bigInt`, or tightens one to NOT NULL,
 //! produces generated TypeScript that still describes the old shape - a
 //! type-safety claim the codegen makes and the schema no longer honours.
@@ -42,7 +45,7 @@
 mod support;
 
 use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::render::fold::fold_to_field_defs;
+use zero_migrate::render::fold::single_fold;
 use zero_migrate::schema::query::SqlDialect;
 
 /// The folded FieldDescriptor map for table `a`, as JSON.
@@ -52,7 +55,8 @@ fn folded(ops_after_create: &str) -> serde_json::Value {
     );
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
     let effective = support::operator_charter("public");
-    let map = fold_to_field_defs(&ir.ops, SqlDialect::Postgres, "public", &effective)
+    let map = single_fold::fold(&ir.ops, SqlDialect::Postgres, "public", &effective)
+        .map(|folded| folded.project_field_defs())
         .expect("the fold succeeds");
     map.get("a").cloned().expect("table a is in the fold")
 }
@@ -139,7 +143,8 @@ fn folded_with_default(ops_after_create: &str) -> serde_json::Value {
     );
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
     let effective = support::operator_charter("public");
-    let map = fold_to_field_defs(&ir.ops, SqlDialect::Postgres, "public", &effective)
+    let map = single_fold::fold(&ir.ops, SqlDialect::Postgres, "public", &effective)
+        .map(|folded| folded.project_field_defs())
         .expect("the fold succeeds");
     map.get("a").cloned().expect("table a is in the fold")
 }
@@ -203,7 +208,8 @@ fn folded_ref(a_table: &str, rest: &str) -> serde_json::Value {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{REF_TARGET},{a_table}{rest}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
     let effective = support::operator_charter("public");
-    let map = fold_to_field_defs(&ir.ops, SqlDialect::Postgres, "public", &effective)
+    let map = single_fold::fold(&ir.ops, SqlDialect::Postgres, "public", &effective)
+        .map(|folded| folded.project_field_defs())
         .expect("the fold succeeds");
     map.get("a").cloned().expect("table a is in the fold")
 }
@@ -276,7 +282,8 @@ fn folded_table(a_table: &str, rest: &str) -> serde_json::Value {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{a_table}{rest}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
     let effective = support::operator_charter("public");
-    let map = fold_to_field_defs(&ir.ops, SqlDialect::Postgres, "public", &effective)
+    let map = single_fold::fold(&ir.ops, SqlDialect::Postgres, "public", &effective)
+        .map(|folded| folded.project_field_defs())
         .expect("the fold succeeds");
     map.get("a").cloned().expect("table a is in the fold")
 }

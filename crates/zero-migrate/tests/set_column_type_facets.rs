@@ -6,17 +6,24 @@
 //! | replay                      | artifact                                    |
 //! |-----------------------------|---------------------------------------------|
 //! | the authoring tables *      | `env.db.ts`                                 |
-//! | `fold_to_field_defs`        | `schema.runtime.json` AND, on SQLite, the   |
+//! | the `FieldDef` map *        | `schema.runtime.json` AND, on SQLite, the   |
 //! |                             | DESIRED snapshot the 12-step rebuild        |
 //! |                             | renders `CREATE TABLE` from                 |
 //! | `fold_ops`                  | the snapshot drift compares                 |
 //!
-//! \* was `authoring_tables_from_ops` until step 4 consumer 2 of
-//! `docs/proposals/single-fold-and-effects.md` deleted it; `env.db.ts` is now
-//! rendered from `FoldedSchema::project_authoring_tables`. This file drives
-//! `render_artifacts`, so it measures whichever producer is wired in and needed no
-//! change across that move - which is itself the claim it makes about the retype
-//! verdict surviving a producer swap.
+//! \* both were private walkers until step 4 of
+//! `docs/proposals/single-fold-and-effects.md`: `authoring_tables_from_ops` until
+//! consumer 2 and `fold_to_field_defs` until consumer 3. They are
+//! `FoldedSchema::project_authoring_tables` and `FoldedSchema::project_field_defs` now,
+//! and - the point of the proposal - they are two READS of ONE traversal, so the top two
+//! rows of that table are no longer two replays that can disagree. The retype verdict
+//! they must agree on lives on that traversal's `Op::SetColumnType` arm; it lived on
+//! `render::lower::retype_field_descriptor` until consumer 3 deleted it, the walker
+//! having been its only caller.
+//!
+//! This file drives `render_artifacts`, so it measures whichever producer is wired in
+//! and needed no change across either move - which is itself the claim it makes about
+//! the retype verdict surviving a producer swap.
 //!
 //! They disagreed. `fold_to_field_defs` replayed a retype by assigning the TYPE
 //! TOKEN and nothing else, which is wrong in BOTH directions because the token is
@@ -49,7 +56,8 @@
 mod support;
 
 use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::render::fold::{fold_ops, fold_to_field_defs};
+use zero_migrate::render::fold::fold_ops;
+use zero_migrate::render::fold::single_fold;
 use zero_migrate::schema::query::SqlDialect;
 
 const SCHEMA: &str = "public";
@@ -68,12 +76,13 @@ fn envelope(create_col: &str, to_type: &str) -> MigrationIr {
     serde_json::from_str(&bytes).expect("the envelope parses")
 }
 
-/// What `fold_to_field_defs` says column `v` is - the `schema.runtime.json` entry
+/// What the `FieldDef` projection says column `v` is - the `schema.runtime.json` entry
 /// and, on SQLite, the desired-snapshot input for the rebuild.
 fn descriptor(create_col: &str, to_type: &str) -> serde_json::Value {
     let ir = envelope(create_col, to_type);
     let effective = support::operator_charter(SCHEMA);
-    fold_to_field_defs(&ir.ops, SqlDialect::Postgres, SCHEMA, &effective)
+    single_fold::fold(&ir.ops, SqlDialect::Postgres, SCHEMA, &effective)
+        .map(|folded| folded.project_field_defs())
         .expect("the descriptor fold succeeds")
         .get("a")
         .and_then(|table| table.get("v"))
@@ -432,11 +441,12 @@ fn a_retype_off_a_value_format_column_is_refused_rather_than_folded() {
 
 #[test]
 fn the_value_format_refusal_reaches_both_artifact_replays() {
-    // `fold_to_field_defs` runs `fold_ops` FIRST as its fail-closed structural
+    // the fold runs the catalog replay FIRST as its fail-closed structural
     // oracle, so one refusal covers `schema.runtime.json` and `env.db.ts` too.
     let ir = envelope(TYPE_ID, TO_INT);
     let effective = support::operator_charter(SCHEMA);
-    let error = fold_to_field_defs(&ir.ops, SqlDialect::Postgres, SCHEMA, &effective)
+    let error = single_fold::fold(&ir.ops, SqlDialect::Postgres, SCHEMA, &effective)
+        .map(|folded| folded.project_field_defs())
         .expect_err("the descriptor fold inherits the refusal");
     assert!(error.to_string().contains("value format"), "{error}");
 

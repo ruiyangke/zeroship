@@ -9,9 +9,11 @@
 //! WHY THE FIX IS NOT A MATCH ARM. `ColType::Enum { name, schema }` carries the
 //! NAME ONLY - the members live in a separate `Op::CreateEnum`. So no signature
 //! given `&IrColumn` alone can populate `enum_values`; the members have to be
-//! resolved from the op stream, which is what `fold_to_field_defs` now does through
-//! the same `NamedTypeRegistry` the DDL lower and the snapshot fold resolve them
-//! through.
+//! resolved from the op stream, which is what the fold behind the `FieldDef` map does
+//! through the same `NamedTypeRegistry` the DDL lower and the snapshot fold resolve them
+//! through. (That was `fold_to_field_defs`'s registry until step 4 consumer 3 of
+//! `docs/proposals/single-fold-and-effects.md` deleted the walker; the registry is
+//! carried on `FoldedSchema` now and `project_field_defs` reads it.)
 //!
 //! WHAT IS ASSERTED. Content, never `ok`: a silently dropped enum also returns
 //! `ok=true`. The members must be present, in DECLARATION order, on the right

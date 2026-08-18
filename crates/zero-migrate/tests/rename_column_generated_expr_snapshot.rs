@@ -20,7 +20,7 @@
 //! rebuild transaction, so the migration cannot apply at all.
 //!
 //! The live schema used here is the one `engine::refresh_historical_live` builds for
-//! SQLite: table snapshots from `fold_ops`, SDK schemas from `fold_to_field_defs`.
+//! SQLite: table snapshots from `fold_ops`, SDK schemas from the `FieldDef` projection.
 //! That is a production shape, not a fixture convenience — it is what the SQLite
 //! rerun path (`lower_completed_historical`) lowers against.
 //!
@@ -38,11 +38,11 @@ use tempfile::TempDir;
 use zero_migrate::apply::backend::sqlite::Mode;
 use zero_migrate::apply::executor::LockMode;
 use zero_migrate::model::ir::IrFlagsOverride;
+use zero_migrate::render::fold::single_fold;
 use zero_migrate::render::lower::{IrAuthor, LiveSchema};
 use zero_migrate::{
-    fold_ops, fold_to_field_defs, resolve_create_table_policy, Approval, BinaryOp, ColType,
-    ExecutorConfig, Expr, GeneratedCol, IrColumn, IrScalar, MigrationEngine, MigrationIr, Op,
-    SqlDialect, SqliteBackend,
+    fold_ops, resolve_create_table_policy, Approval, BinaryOp, ColType, ExecutorConfig, Expr,
+    GeneratedCol, IrColumn, IrScalar, MigrationEngine, MigrationIr, Op, SqlDialect, SqliteBackend,
 };
 
 const PROJECT: &str = "prj_gen_rename";
@@ -156,12 +156,13 @@ fn exec_cfg() -> ExecutorConfig {
 }
 
 /// The SQLite live schema `engine::refresh_historical_live` builds: table snapshots
-/// from `fold_ops`, SDK field maps from `fold_to_field_defs`, over the same ops.
+/// from `fold_ops`, SDK field maps from the `FieldDef` projection, over the same ops.
 fn folded_live_schema(history: &[Op]) -> LiveSchema {
     let effective = support::confined_charter();
     let snapshot =
         fold_ops(history, SqlDialect::Sqlite, PROJECT, &effective).expect("the history folds");
-    let sqlite_schemas = fold_to_field_defs(history, SqlDialect::Sqlite, PROJECT, &effective)
+    let sqlite_schemas = single_fold::fold(history, SqlDialect::Sqlite, PROJECT, &effective)
+        .map(|folded| folded.project_field_defs())
         .expect("the history folds to field defs");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
     live.sqlite_schemas = sqlite_schemas;

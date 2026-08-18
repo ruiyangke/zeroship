@@ -113,6 +113,7 @@ use zero_migrate::apply::executor::{ApplyError, LockMode};
 use zero_migrate::driver::{DbError, SqlSession};
 use zero_migrate::model::dialect_table::{Disposition, DIALECT_TABLE};
 use zero_migrate::model::ir::Op;
+use zero_migrate::render::fold::single_fold;
 use zero_migrate::render::lower::{
     IrGuardedLowerError, IrLowerError, LoadAndLowerGuardedError, LoweredArtifact,
 };
@@ -983,8 +984,8 @@ async fn run_row<B: MigrationBackend>(
             .iter()
             .filter_map(|op| serde_json::from_value(op.clone()).ok())
             .collect();
-        if let Ok(defs) =
-            zero_migrate::fold_to_field_defs(&history, dialect, &cfg.project_schema, policy)
+        if let Ok(defs) = single_fold::fold(&history, dialect, &cfg.project_schema, policy)
+            .map(|folded| folded.project_field_defs())
         {
             live.sqlite_schemas = defs;
         }

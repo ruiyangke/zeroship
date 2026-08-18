@@ -207,9 +207,15 @@ pub use zero_migrate_policy::{seal, SealError, SealedPolicy};
 // The composed policy-decision point the injection + guard share. Re-exported at
 // the crate root so the napi addon (`gen_artifacts_*`, the schema-emit path) can
 // name it without reaching into the `zero-migrate-policy` crate directly.
+// `fold_to_field_defs` is NOT in this list any more. Step 4 consumer 3 of
+// `docs/proposals/single-fold-and-effects.md` section G deleted it; the wire `FieldDef`
+// map it produced is now `single_fold::fold(…)?.project_field_defs()`, reached through
+// `render::fold::single_fold`. The replacement is deliberately not a renamed function:
+// one traversal decides what an op means and a projection READS the value, which is the
+// shape the proposal's decision 1 asks for and the shape a second walker would hide.
 pub use render::fold::{
-    descriptors_to_create_ops, fold_ops, fold_ops_onto, fold_to_field_defs,
-    history_carries_dialectal_ops, recover_check_facet, FoldError, ProduceError, RecoveredCheck,
+    descriptors_to_create_ops, fold_ops, fold_ops_onto, history_carries_dialectal_ops,
+    recover_check_facet, FoldError, ProduceError, RecoveredCheck,
 };
 pub use zero_migrate_policy::EffectivePolicy;
 // The `gen-types` schema-artifact emitter: fold a schema source (op.* migrations or

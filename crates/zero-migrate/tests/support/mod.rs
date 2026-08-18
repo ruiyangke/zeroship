@@ -44,6 +44,12 @@ pub mod field_probes;
 /// legs so the two cannot measure different things.
 pub mod model_equivalence;
 
+/// The step 4 consumer 3 corpus and its reduction to golden lines, shared by the
+/// capture binary that recorded the golden from the OLD path and by
+/// `gen_types_field_defs_from_the_fold.rs`, which compares against it. Two binaries so
+/// a capture harness can never re-bless the file the comparison reads.
+pub mod field_defs_corpus;
+
 use std::cell::{Cell, RefCell};
 
 use bytes::BytesMut;

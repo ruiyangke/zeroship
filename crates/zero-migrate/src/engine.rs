@@ -37,7 +37,7 @@ use crate::model::migration::{Checksum, Migration, MigrationId};
 use crate::model::table_shape::resolve_create_table_policy;
 use crate::ops::status::PlanStatusManifest;
 use crate::plan::manifest::{compute_manifest, verify_manifest, ManifestError, ManifestHash};
-use crate::render::fold::{fold_ops, fold_to_field_defs};
+use crate::render::fold::{fold_ops, single_fold};
 use crate::render::lower::{IrAuthor, LiveSchema, LoweredArtifact};
 use crate::render::plan::AppliedPlan;
 use crate::render::step::{PlanStep, RenameStep};
@@ -392,9 +392,14 @@ fn refresh_historical_live(
     *historical_live = LiveSchema::from_catalog_snapshot(snapshot, app);
     if dialect == SqlDialect::Sqlite {
         historical_live.logical_columns = logical_columns;
+        // The SDK-shaped field map the 12-step rebuild renders its `CREATE TABLE` from,
+        // as a PROJECTION of the single fold rather than a fourth replay of the op
+        // stream (step 4 consumer 3 of `docs/proposals/single-fold-and-effects.md`
+        // section G).
         historical_live.sqlite_schemas =
-            fold_to_field_defs(cumulative_ops, dialect, project, policy)
-                .map_err(|error| error.to_string())?;
+            single_fold::fold(cumulative_ops, dialect, project, policy)
+                .map_err(|error| error.to_string())?
+                .project_field_defs();
     }
     Ok(())
 }
@@ -615,14 +620,22 @@ impl MigrationEngine {
                     .map_err(drift_to_engine_error)?;
                 live = LiveSchema::from_catalog_snapshot(snapshot, app);
                 live.logical_columns = logical_columns;
-                live.sqlite_schemas = fold_to_field_defs(&cumulative_ops, dialect, project, policy)
+                // THE REBUILD LEG. This map is what `render/lower.rs`'s SQLite
+                // `renameColumn` hands the declarative differ, and what the 12-step
+                // rebuild's `CREATE TABLE` — the table every row is copied into — is
+                // rendered from. It is a PROJECTION of the single fold since step 4
+                // consumer 3; `tests/sqlite_rebuild_field_defs_live.rs` deploys through
+                // this function against a real SQLite file and reads the server's own
+                // `PRAGMA`s back across the rebuild.
+                live.sqlite_schemas = single_fold::fold(&cumulative_ops, dialect, project, policy)
                     .map_err(|error| {
                         envelope_deploy_error(
                             &migration_name,
                             "SQLite rebuild-facet supplementation",
                             error,
                         )
-                    })?;
+                    })?
+                    .project_field_defs();
             } else {
                 let snapshot = backend
                     .snapshot_schema(exec_cfg)

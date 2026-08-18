@@ -120,7 +120,14 @@ use zero_migrate_policy::EffectivePolicy;
 /// helpers here (`fold_create_column_to_field`, `recover_check_facet`,
 /// `recover_fk_policy`, `resolved_inject_prefix_len`) without widening a dozen
 /// production functions to `pub(crate)` for a module that ships dead.
-pub(crate) mod single_fold;
+///
+/// PUBLIC since step 4 consumer 3. `fold_to_field_defs` was the crate's public entry
+/// point to the wire `FieldDef` map and it is deleted; what replaces it is not a
+/// renamed function but the fold itself plus a READ of it, so the entry point callers
+/// name is `single_fold::fold(…)?.project_field_defs()`. Only [`single_fold::fold`],
+/// [`single_fold::FoldedSchema`] and that one projection are public - the remaining
+/// projections and the whole authored accumulator stay `pub(crate)`.
+pub mod single_fold;
 
 /// The owner-app stamp the fold gives every `CollectionDescriptor`. `owner_app` is
 /// drift-irrelevant — it never enters `SchemaSnapshot` equality (the snapshot only
@@ -4607,608 +4614,6 @@ fn recover_fk_policy(
     })
 }
 
-/// The FieldDef reconstruction seam.
-///
-/// Replay `ops` into the coherent folded state (fail-closed via [`fold_ops`]),
-/// then reconstruct, per table, the wire-`FieldDef` map (`{ <col>: { type, … } }`)
-/// the built-in db type inference consumes — recovering each facet from the
-/// applied shape:
-///
-/// - **type / vector dims / encrypted(default) / ref / id_prefix / vector_metric**
-///   from the op `IrColumn` via `ir_column_to_field` (reusing the shared
-///   descriptor machinery — the carried fields + structural ones);
-/// - **enum / min / max** LIFTED from canonical CHECKs ([`recover_check_facet`]),
-///   bounded to recognized shapes;
-/// - the column SET (after `addColumn` / `dropColumn` / `renameColumn`) tracked so
-///   the reconstructed map matches the FOLDED logical state, never a stale
-///   createTable snapshot.
-///
-/// The returned `Value` per table is exactly what
-/// [`descriptor_to_sdk_schema`](crate::render::declarative::descriptor_to_sdk_schema)
-/// emits — the SAME shape the declarative differ consumes losslessly — so the
-/// `.d.ts` emitter maps `descriptor → t.*()` builder calls off one facet table.
-///
-/// # Errors
-/// Any structural-incoherence [`FoldError`] [`fold_ops`] raises (the stream must
-/// be coherent first), or an unrepresentable inject rule in `effective`.
-pub fn fold_to_field_defs(
-    ops: &[Op],
-    dialect: SqlDialect,
-    project_schema: &str,
-    effective: &EffectivePolicy,
-) -> Result<BTreeMap<String, serde_json::Value>, FoldError> {
-    // 1. Fail-closed coherence. `fold_ops` is the structural-coherence oracle
-    //    (add-to-missing-table, drop-absent-column, duplicate-create, …).
-    fold_ops(ops, dialect, project_schema, effective)?;
-
-    // 2. Build a per-table FieldDescriptor map by replaying the ops' column shapes.
-    //    We track FieldDescriptors (not snapshots) because the descriptor carries
-    //    the recoverable facets (encrypted/vector*/ref/id_prefix) the snapshot
-    //    flattens to a `data_type` string. Drops/renames keep it in lock-step with
-    //    the folded state — this replay IS the live column set (no snapshot needed).
-    //
-    //    COLUMN ORDER is preserved with `IndexMap` so the reconstructed FieldDef map
-    //    matches the createTable column order (the SAME order `descriptor_to_sdk_schema`
-    //    emits from `descriptor.fields`) — the round-trip parity compares the
-    //    serialized maps, so a sorted-vs-declared order would false-mismatch.
-    let mut tables: BTreeMap<
-        String,
-        indexmap::IndexMap<String, crate::render::declarative::FieldDescriptor>,
-    > = BTreeMap::new();
-    // Per-table CHECK facets to lift onto the matching column at the end. A CHECK
-    // over an unrecognized shape is left unprojected (the column types as its base
-    // scalar) — NOT an error.
-    let mut checks: BTreeMap<String, Vec<RecoveredCheck>> = BTreeMap::new();
-    // Per-table recovered FK policy (`onDelete`/`onUpdate`) to lift onto the
-    // referencing column at the end. A reference authored as a TABLE-LEVEL
-    // `IrConstraintKind::Fk` (a `foreignKeys` entry, or a later `addConstraint`)
-    // keeps its policy on the constraint, where `ir_column_to_field` cannot see it,
-    // so we lift it here -- the "recover from the applied FK constraint" path. A
-    // reference carried on the column itself (`ColType::Ref` plus, for the facets
-    // the brand cannot express, `IrColumn.references`) recovers through
-    // `ir_column_to_field` and needs no lift.
-    let mut fks: BTreeMap<String, Vec<RecoveredFk>> = BTreeMap::new();
-    // The named-type definitions the column types only NAME. `ColType::Enum` and
-    // `ColType::Domain` each carry `{ name, schema }` and nothing else, so neither the
-    // members a `t.enum("x")` column is closed over nor the base type a
-    // `t.domain("y")` column is really stored as is on the column at all - both arrive
-    // in a separate `Op::CreateEnum` / `Op::CreateDomain`. This is the SAME registry
-    // the DDL lower
-    // (`apply_named_type_column_metadata`) and the snapshot fold
-    // (`apply_fold_named_type_column_metadata`) resolve those names through, reused
-    // rather than re-spelled so the three replays cannot disagree about which
-    // definition a name resolves to after a drop-and-recreate.
-    let mut named_types = NamedTypeRegistry::default();
-
-    let replay_ops = flatten_dialectal_ops(ops, dialect)?;
-    for op in replay_ops {
-        match op {
-            Op::CreateTable {
-                name,
-                columns,
-                constraints,
-                schema,
-                ..
-            } => {
-                let effective_schema = schema.as_deref().unwrap_or(project_schema);
-                let resolved_inject = ResolvedInject::for_table(effective, effective_schema, name)
-                    .map_err(|error| FoldError::Render(error.to_string()))?;
-                let injected_prefix_len = resolved_inject_prefix_len(columns, &resolved_inject);
-                let mut cols: indexmap::IndexMap<
-                    String,
-                    crate::render::declarative::FieldDescriptor,
-                > = indexmap::IndexMap::new();
-                for (idx, c) in columns.iter().enumerate() {
-                    let in_resolved_id_primary_key = idx < injected_prefix_len
-                        && c.name == "id"
-                        && resolved_inject.owns_id_primary_key();
-                    // Resolved on the TYPE, upstream of the descriptor, so the runtime
-                    // descriptor's `ty` and its `encrypted.wraps` are derived from the
-                    // same base type the catalog sentinel was stamped from.
-                    let c = &resolve_encrypted_inner_domain_in_column(c, &named_types);
-                    let mut field = fold_create_column_to_field(c, in_resolved_id_primary_key);
-                    lift_named_type_facets(&mut field, &c.ty, &named_types);
-                    cols.insert(c.name.clone(), field);
-                }
-                tables.insert(name.clone(), cols);
-                for c in constraints {
-                    match &c.kind {
-                        IrConstraintKind::Check { expr, .. } => {
-                            if let Some(facet) = recover_check_facet(expr) {
-                                checks.entry(name.clone()).or_default().push(facet);
-                            }
-                        }
-                        IrConstraintKind::Fk {
-                            columns,
-                            on_delete,
-                            on_update,
-                            ..
-                        } => {
-                            if let Some(mut recovered) =
-                                recover_fk_policy(columns, *on_delete, *on_update)
-                            {
-                                recovered.name = c.name.clone();
-                                fks.entry(name.clone()).or_default().push(recovered);
-                            }
-                        }
-                        // A SINGLE-COLUMN UNIQUE IS A COLUMN FACET. Authoring it as
-                        // `t.string().unique()` set `unique` on the descriptor;
-                        // authoring the same constraint at table level did not, so
-                        // two routes to one uniqueness produced different generated
-                        // types. Multi-column unique is a table KEY, not a column
-                        // facet - the same single-column line `recover_fk_policy`
-                        // already draws for foreign keys.
-                        IrConstraintKind::Unique { columns } if columns.len() == 1 => {
-                            if let Some(field) = tables
-                                .get_mut(name)
-                                .and_then(|c| c.get_mut(&columns[0]))
-                            {
-                                field.unique = true;
-                            }
-                        }
-                        // Exhaustive: a multi-column unique is a table key, and an
-                        // exclusion constraint has no FieldDescriptor slot at all
-                        // (its access method, elements and predicate are
-                        // table-level).
-                        IrConstraintKind::Unique { .. } | IrConstraintKind::Exclusion { .. } => {}
-                    }
-                }
-            }
-            Op::DropTable { table, .. } => {
-                tables.remove(table);
-                checks.remove(table);
-                fks.remove(table);
-            }
-            Op::RenameTable { table, to, .. } => {
-                // Re-key the table's reconstructed column map AND its pending
-                // CHECK / FK facets from the old name to the new one, so gen-types
-                // sees the RENAMED table (the same wholesale move the structural
-                // `fold_ops` does). A column dropped/renamed/added under the new
-                // name afterward resolves; the old name no longer does.
-                if let Some(mut cols) = tables.remove(table) {
-                    // A generated expression may QUALIFY its column references with
-                    // the enclosing table. The `env.db.ts` replay in `gen_types`
-                    // rewrites that qualifier on a table rename and this one did not,
-                    // so the two artifacts shipped side by side described the same
-                    // column under different table names - the runtime descriptor
-                    // still naming the collection that no longer exists.
-                    for field in cols.values_mut() {
-                        if let Some(generated) = field.generated.as_mut() {
-                            crate::render::gen_types::rename_expr_table(
-                                &mut generated.expr,
-                                table,
-                                to,
-                            );
-                        }
-                    }
-                    tables.insert(to.clone(), cols);
-                }
-                if let Some(c) = checks.remove(table) {
-                    checks.insert(to.clone(), c);
-                }
-                if let Some(f) = fks.remove(table) {
-                    fks.insert(to.clone(), f);
-                }
-                // INCOMING references must follow the rename for gen-types too:
-                // every OTHER table's `ref` column whose target is the renamed table
-                // points at a now-dead collection name. Re-target it to the new name
-                // so the emitted TS `ref` resolves (the gen-types twin
-                // of the `fold_ops` incoming-FK rewrite). A self-ref (a `ref` column
-                // in the renamed table pointing at itself) is re-targeted too.
-                for cols in tables.values_mut() {
-                    for f in cols.values_mut() {
-                        if f.references.as_deref() == Some(table.as_str()) {
-                            f.references = Some(to.clone());
-                        }
-                    }
-                }
-            }
-            Op::AddColumn {
-                table,
-                column,
-                ty,
-                nullable,
-                default,
-                value_format,
-                vector_metric,
-                case_sensitive,
-                mask,
-                generated,
-                identity,
-                ..
-            } => {
-                if let Some(cols) = tables.get_mut(table) {
-                    // AddColumn carries no `id_prefix` (an added column is never
-                    // the system PK), but it DOES carry the `vector_metric` + standalone
-                    // `mask` facets, so the reconstructed descriptor for an added vector /
-                    // masked column round-trips the metric opclass / `zero-migrate:mask` mask
-                    // through the offline fold.
-                    let resolved_ty = resolve_encrypted_inner_domain(ty, &named_types);
-                    let ty = resolved_ty.as_ref().unwrap_or(ty);
-                    let mut field = ir_column_to_field(&IrColumn {
-                        name: column.clone(),
-                        ty: ty.clone(),
-                        nullable: *nullable,
-                        default: default.clone(),
-                        unique: None,
-                        value_format: value_format.clone(),
-                        references: None,
-                        id_prefix: None,
-                        collation: None,
-                        case_sensitive: *case_sensitive,
-                        vector_metric: *vector_metric,
-                        mask: *mask,
-                        generated: generated.clone(),
-                        identity: *identity,
-                    });
-                    lift_named_type_facets(&mut field, ty, &named_types);
-                    cols.insert(column.clone(), field);
-                }
-            }
-            Op::DropColumn { table, column, .. } => {
-                if let Some(cols) = tables.get_mut(table) {
-                    // `shift_remove` preserves the relative order of the surviving
-                    // columns (vs `swap_remove`, which would reorder).
-                    cols.shift_remove(column);
-                }
-            }
-            // THE FACET OPS. These change a column's shape without adding or
-            // removing one, and the replay used to drop them on its catch-all -
-            // so a migration that widened a type or tightened a NOT NULL produced
-            // generated types describing the OLD shape.
-            //
-            // The new shape comes from `retype_field_descriptor`, which builds the
-            // target column through the SAME `ir_column_to_field` a createTable
-            // column goes through. A second mapping here would drift from it
-            // invisibly: the fold would emit a shape that no longer matches what a
-            // create of the same ColType produces.
-            //
-            // This arm used to assign `col_type_to_token(to_type)` and NOTHING ELSE,
-            // which is wrong in both directions, because the token is not the whole
-            // type - `String { length }`, `Char { length }` and `Vector { vector }`
-            // carry their parameter in a SIBLING descriptor field. It kept
-            // `maxLength: 24` on a column widened to `varchar(40)`, and emitted a
-            // bare `{"type":"char"}` for a retype INTO `char(8)`. On SQLite this map
-            // is the DESIRED snapshot the 12-step rebuild renders `CREATE TABLE`
-            // from (`engine`'s `sqlite_schemas`), so the shape is DDL, not just
-            // codegen. The per-facet verdict and its measurements live on
-            // `retype_field_descriptor`.
-            Op::SetColumnType {
-                table,
-                column,
-                to_type,
-                ..
-            } => {
-                if let Some(field) = tables.get_mut(table).and_then(|c| c.get_mut(column)) {
-                    crate::render::lower::retype_field_descriptor(field, to_type);
-                    // `retype_field_descriptor` CLEARS `enum_values` - the old type's
-                    // membership is a contract over storage the column no longer has.
-                    // A retype INTO a named enum re-earns it from the target type's
-                    // own definition, so a retype to `T` and a create of `T` still
-                    // describe the same column. A retype INTO a named DOMAIN re-earns
-                    // its base type the same way, off the same registry.
-                    lift_named_type_facets(field, to_type, &named_types);
-                }
-            }
-            Op::SetColumnNotNull { table, column, .. } => {
-                if let Some(field) = tables.get_mut(table).and_then(|c| c.get_mut(column)) {
-                    field.required = true;
-                }
-            }
-            Op::DropColumnNotNull { table, column, .. } => {
-                if let Some(field) = tables.get_mut(table).and_then(|c| c.get_mut(column)) {
-                    field.required = false;
-                }
-            }
-            // The DEFAULT facet, both directions. `ir_default_to_value` is the same
-            // conversion `ir_column_to_field` applies to a createTable column, so a
-            // default set by an op serialises identically to one declared inline.
-            Op::SetColumnDefault {
-                table,
-                column,
-                value,
-                ..
-            } => {
-                if let Some(field) = tables.get_mut(table).and_then(|c| c.get_mut(column)) {
-                    field.default = crate::render::lower::ir_default_to_value(value);
-                }
-            }
-            Op::DropColumnDefault { table, column, .. } => {
-                if let Some(field) = tables.get_mut(table).and_then(|c| c.get_mut(column)) {
-                    field.default = None;
-                }
-            }
-            // UN-LIFT the FK policy the dropped constraint granted. addConstraint
-            // was already replayed (it FEEDS the lift); its inverse was not, so the
-            // policy outlived the constraint and gen-types kept emitting an
-            // ON DELETE the database no longer has.
-            Op::DropConstraint { table, name, .. } => {
-                if let Some(recovered) = fks.get_mut(table) {
-                    recovered.retain(|fk| fk.name.as_deref() != Some(name.as_str()));
-                }
-            }
-            Op::RenameColumn {
-                table, from, to, ..
-            } => {
-                if let Some(cols) = tables.get_mut(table) {
-                    // Preserve the renamed column's POSITION: find its index, remove,
-                    // re-insert at the same slot under the new key.
-                    if let Some(idx) = cols.get_index_of(from) {
-                        if let Some((_, mut field)) = cols.shift_remove_index(idx) {
-                            field.name = to.clone();
-                            cols.shift_insert(idx, to.clone(), field);
-                        }
-                    }
-                    // A generated expression reads OTHER columns, so the rename has
-                    // to walk the whole table rather than just the renamed column.
-                    // `FieldDescriptor.generated` keeps the closed `Expr` rather than
-                    // rendered SQL, so the rewrite matches column references and
-                    // cannot corrupt a string literal that spells the old name.
-                    // Without it the descriptor this fold ships describes a column
-                    // the database no longer has, while the authoring types emitted
-                    // beside it - which run this same rewrite - describe the new one.
-                    for field in cols.values_mut() {
-                        if let Some(generated) = field.generated.as_mut() {
-                            crate::render::gen_types::rename_expr_column(
-                                &mut generated.expr,
-                                table,
-                                from,
-                                to,
-                                true,
-                            );
-                        }
-                    }
-                }
-                // The CHECK and foreign-key facets recovered from this table's
-                // constraints are lifted onto columns BY NAME once the op stream has
-                // been walked. They still carry the pre-rename name, and the lift
-                // looks the column up rather than failing, so leaving them would
-                // silently drop a `min`/`max` bound or an `onDelete`/`onUpdate`
-                // policy instead of reporting anything.
-                if let Some(recovered) = checks.get_mut(table) {
-                    for check in recovered.iter_mut() {
-                        match check {
-                            RecoveredCheck::Range { column, .. }
-                            | RecoveredCheck::Enum { column, .. } => {
-                                if column == from {
-                                    column.clone_from(to);
-                                }
-                            }
-                        }
-                    }
-                }
-                if let Some(recovered) = fks.get_mut(table) {
-                    for fk in recovered.iter_mut() {
-                        if &fk.column == from {
-                            fk.column.clone_from(to);
-                        }
-                    }
-                }
-            }
-            Op::AlterPrimaryKey { table, action, .. } => {
-                if let Some(columns) = tables.get_mut(table) {
-                    for column in action.drop_identity_from() {
-                        if let Some(field) = columns.get_mut(column) {
-                            field.identity = None;
-                        }
-                    }
-                }
-            }
-            Op::AddConstraint {
-                table, constraint, ..
-            } => {
-                if let IrConstraintKind::Fk {
-                    columns,
-                    on_delete,
-                    on_update,
-                    ..
-                } = &constraint.kind
-                {
-                    if let Some(mut recovered) = recover_fk_policy(columns, *on_delete, *on_update)
-                    {
-                        recovered.name = constraint.name.clone();
-                        fks.entry(table.clone()).or_default().push(recovered);
-                    }
-                }
-                if let IrConstraintKind::Check { expr, .. } = &constraint.kind {
-                    if let Some(facet) = recover_check_facet(expr) {
-                        checks.entry(table.clone()).or_default().push(facet);
-                    }
-                }
-                // The addConstraint route to the same single-column uniqueness the
-                // inline createTable route sets. Handling only one leaves two
-                // authoring forms disagreeing in the generated types.
-                if let IrConstraintKind::Unique { columns } = &constraint.kind {
-                    if columns.len() == 1 {
-                        if let Some(field) = tables
-                            .get_mut(table)
-                            .and_then(|c| c.get_mut(&columns[0]))
-                        {
-                            field.unique = true;
-                        }
-                    }
-                }
-            }
-            // THE ENUM'S MEMBERS, which no column carries.
-            //
-            // `ColType::Enum { name, schema }` is a NAME. The closed set a
-            // `t.enum("issue_status")` column is validated against arrives here, in a
-            // separate op, and used to be dropped on the catch-all - so `envDbTs`
-            // emitted `t.enum("issue_status")` while `runtimeJson`, folded from the
-            // same op stream in the same call, described the column as a bare
-            // `{"type":"string"}`. The database enforced the set (a native
-            // `CREATE TYPE` on PostgreSQL, an inlined `CHECK (... IN (...))` on SQLite,
-            // an inlined `ENUM(...)` on MySQL) and only the artifact the deployed app
-            // installs `env.db` from forgot it.
-            //
-            // Registering the definition does NOT put a CHECK in the DDL: this replay
-            // ends at `descriptor_to_sdk_schema`, and the membership becomes the wire
-            // `FieldDef`'s `enum` key. The DDL comes from `fold_ops` / the lower,
-            // which resolve the same registry into the storage each dialect wants.
-            Op::CreateEnum { name, values, .. } => {
-                named_types
-                    .create_enum(name, project_schema, values)
-                    .map_err(fold_named_type_error)?;
-            }
-            Op::DropEnum { name, .. } => {
-                named_types.drop_enum(name);
-            }
-            // THE DOMAIN'S BASE TYPE, which no column carries either.
-            //
-            // Same shape, different facet. `ColType::Domain { name, schema }` is a
-            // NAME; the base type a `t.domain("positive_number")` column is really
-            // stored as arrives here. It used to be dropped on the catch-all below,
-            // so `col_type_to_token`'s shared `Enum | Domain` arm had the last word
-            // and every domain column - over `int`, over `varchar(40)`, over
-            // `timestamp` - reported `{"type":"string"}` while the database stored
-            // the base type on all three dialects.
-            //
-            // Registering the definition puts nothing in the DDL: the base type
-            // reaches the rendered column through `fold_ops` and the lower, which
-            // resolve this same registry into `ColumnSnapshot::data_type` and the
-            // inline CHECK. Measured byte-identical across this change, including
-            // the SQLite 12-step rebuild that DOES read this replay's output.
-            Op::CreateDomain {
-                name,
-                as_type,
-                check,
-                default,
-                not_null,
-                ..
-            } => {
-                named_types
-                    .create_domain(
-                        name,
-                        project_schema,
-                        as_type,
-                        check,
-                        default,
-                        not_null.unwrap_or(false),
-                    )
-                    .map_err(fold_named_type_error)?;
-            }
-            Op::DropDomain { name, .. } => {
-                named_types.drop_domain(name);
-            }
-            // Every other op (DML, index, type/nullability alters, drop*) does not
-            // change the reconstructed column-facet shape.
-            // EXHAUSTIVE FROM HERE, and that is the point of this arm rather than a
-            // `_`. Six stale facets shipped behind the catch-all this file used to
-            // end with - a column type, nullability both ways, a default both
-            // ways, and an FK policy that outlived its constraint. Each was legal,
-            // accepted, and then dropped on the floor by the replay, so gen-types
-            // described a schema the database no longer had. Listing every variant
-            // makes the next op that touches a column a COMPILE ERROR here.
-            //
-            // `synchronizeIdentity` is a MEASURED no-op: it advances a live
-            // sequence value to clear existing rows and does not alter the identity
-            // DECLARATION, so the descriptor correctly does not move.
-            Op::SynchronizeIdentity { .. }
-            // `dialectal` never reaches here - `flatten_dialectal_ops` expands it
-            // into the replay list above - but the match must still name it.
-            | Op::Dialectal { .. }
-            // Relation-level ops: they create, move or drop whole relations that
-            // are not this map's tables, or alter table-level settings that carry
-            // no column facet.
-            | Op::CreatePartition { .. }
-            | Op::AttachPartition { .. }
-            | Op::DetachPartition { .. }
-            | Op::DropPartition { .. }
-            | Op::SetTableOptions { .. }
-            | Op::CreateView { .. }
-            | Op::DropView { .. }
-            | Op::CreateSequence { .. }
-            | Op::AlterSequence { .. }
-            | Op::DropSequence { .. }
-            // Index and comment ops: an index is not a column facet, and a comment
-            // is not projected into the FieldDescriptor at all.
-            | Op::CreateIndex { .. }
-            | Op::DropIndex { .. }
-            | Op::Comment { .. }
-            // `validateConstraint` promotes a NOT VALID constraint to validated;
-            // the policy it carries was already lifted when it was added.
-            | Op::ValidateConstraint { .. }
-            // DML moves ROWS, never column shape.
-            | Op::Insert { .. }
-            | Op::Update { .. }
-            | Op::Delete { .. }
-            | Op::Backfill { .. }
-            // Vendor and schema objects: they live outside the per-table column map
-            // this replay builds.
-            | Op::CreateSchema { .. }
-            | Op::DropSchema { .. }
-            | Op::CreateExtension { .. }
-            | Op::DropExtension { .. }
-            | Op::CreateRole { .. }
-            | Op::AlterRole { .. }
-            | Op::DropRole { .. }
-            | Op::DropOwnedBy { .. }
-            | Op::Grant { .. }
-            | Op::Revoke { .. }
-            | Op::SetRls { .. }
-            | Op::CreatePolicy { .. }
-            | Op::DropPolicy { .. }
-            | Op::CreateTrigger { .. }
-            | Op::DropTrigger { .. }
-            | Op::CreateFunction { .. }
-            | Op::DropFunction { .. }
-            // Raw SQL is opaque; nothing can be recovered from it by construction.
-            | Op::PgRaw { .. } => {}
-        }
-    }
-
-    // 3. Lift the recovered CHECK facets onto their columns, then emit the
-    //    wire-FieldDef map. `cols` IS the folded logical column set — `dropColumn`
-    //    removed its entry and `renameColumn` re-keyed it during the replay above —
-    //    so a column dropped after a CHECK that referenced it never resurrects (the
-    //    facet's `cols.get_mut` simply finds nothing).
-    let mut out: BTreeMap<String, serde_json::Value> = BTreeMap::new();
-    for (table, mut cols) in tables {
-        for facet in checks.remove(&table).unwrap_or_default() {
-            match facet {
-                RecoveredCheck::Range { column, min, max } => {
-                    if let Some(f) = cols.get_mut(&column) {
-                        if min.is_some() {
-                            f.min = min;
-                        }
-                        if max.is_some() {
-                            f.max = max;
-                        }
-                    }
-                }
-                RecoveredCheck::Enum { column, values } => {
-                    if let Some(f) = cols.get_mut(&column) {
-                        f.enum_values = Some(values);
-                    }
-                }
-            }
-        }
-        // Lift the recovered FK policy onto the ref column. `on_delete`/`on_update`
-        // come from the Fk constraint; `deferrable` stays unset because the FK IR
-        // has no explicit deferrable bit and omitted means the SQL/Postgres default.
-        for fk in fks.remove(&table).unwrap_or_default() {
-            if let Some(f) = cols.get_mut(&fk.column) {
-                if f.ty == "ref" {
-                    f.on_delete = fk.on_delete;
-                    f.on_update = fk.on_update;
-                }
-            }
-        }
-        let desc = CollectionDescriptor {
-            name: table.clone(),
-            owner_app: FOLD_OWNER_APP.to_string(),
-            fields: cols.into_values().collect(),
-            indexes: Vec::new(),
-            runtime_options: Default::default(),
-        };
-        out.insert(
-            table,
-            crate::render::declarative::descriptor_to_sdk_schema(&desc),
-        );
-    }
-    Ok(out)
-}
-
 /// Lift a NAMED enum type's members onto the column descriptor that only names it.
 ///
 /// # Why this is not a line in `col_type_to_token`
@@ -5428,14 +4833,17 @@ fn resolved_injected_column_matches(
 // ===========================================================================
 // The createTable producer: descriptor → op.* `createTable`.
 //
-// `fold_to_field_defs` (above) is the RECOVERY direction (ops → FieldDef map);
-// this is its faithful INVERSE over the authoring surface (descriptor → ops),
-// the structural inverse of `ir_column_to_field` + `recover_check_facet`. It is
-// the producer the round-trip parity test threads:
+// The `FieldDef` PROJECTION is the RECOVERY direction (ops → FieldDef map); this is
+// its faithful INVERSE over the authoring surface (descriptor → ops), the structural
+// inverse of `ir_column_to_field` + `recover_check_facet`. The recovery direction used
+// to be the `fold_to_field_defs` walker in this file; step 4 consumer 3 of
+// `docs/proposals/single-fold-and-effects.md` section G deleted it and the answer is
+// now `single_fold::fold(ops)?.project_field_defs()`. The round-trip parity claim is
+// unchanged - only the name of the side that produces the right-hand column moved:
 //
 //   author (declarative)         descriptor_to_sdk_schema(descriptor)   ─┐
 //        │                                                               ├─ MUST be byte-identical
-//   descriptors_to_create_ops  → ops → fold_to_field_defs(ops)         ─┘
+//   descriptors_to_create_ops  → ops → project_field_defs(fold(ops))   ─┘
 //
 // WHY a NEW producer (closing the producer gap): the existing
 // `generate_ops` (`scaffold.rs`) derives ops from a `SchemaSnapshot`, whose
@@ -6290,7 +5698,7 @@ columns = [
             "the scoped injected prefix is recognized by snapshot folding"
         );
 
-        let fields = fold_to_field_defs(&resolved.ops, SqlDialect::Postgres, SCHEMA, &effective)
+        let fields = field_defs_of(&resolved.ops, SqlDialect::Postgres, SCHEMA, &effective)
             .expect("runtime recovery uses the create op's explicit schema");
         assert_eq!(fields["events"]["id"]["type"], serde_json::json!("id"));
         assert_eq!(
@@ -7184,7 +6592,7 @@ columns = [
 
     #[test]
     fn rename_table_rewrites_incoming_ref_target_for_gen_types() {
-        // REGRESSION (gen-types twin): `fold_to_field_defs` must re-target
+        // REGRESSION (gen-types twin): the `FieldDef` projection must re-target
         // the INCOMING `ref` column in OTHER tables to the renamed table's new name, or
         // gen-types emits a TS `ref` to a non-existent collection. Pre-fix the arm
         // re-keyed only the renamed table's own column map, leaving `orders.account_id`
@@ -8829,13 +8237,29 @@ columns = [
     }
 
     // ===================================================================
-    // Fold-and-RECOVER (`fold_to_field_defs` + the CHECK-lift recognizer).
+    // Fold-and-RECOVER (the `FieldDef` projection + the CHECK-lift recognizer).
     // The facet assertions (id_prefix, vector_metric, enum/min/max lift) all
     // depend on the carry + lift logic.
     // ===================================================================
 
+    /// The wire `FieldDef` map for `ops`.
+    ///
+    /// Step 4 consumer 3 of `docs/proposals/single-fold-and-effects.md` section G
+    /// deleted `fold_to_field_defs`; the map is a PROJECTION of the one fold now, and
+    /// this is the whole of the difference at a call site. The tests below are
+    /// unchanged otherwise, which is the claim - they were written against the walker's
+    /// answers and they still hold.
+    fn field_defs_of(
+        ops: &[Op],
+        dialect: SqlDialect,
+        schema: &str,
+        effective: &EffectivePolicy,
+    ) -> Result<std::collections::BTreeMap<String, serde_json::Value>, FoldError> {
+        Ok(single_fold::fold(ops, dialect, schema, effective)?.project_field_defs())
+    }
+
     fn defs(ops: &[Op]) -> std::collections::BTreeMap<String, serde_json::Value> {
-        fold_to_field_defs(
+        field_defs_of(
             ops,
             SqlDialect::Postgres,
             SCHEMA,
@@ -9698,7 +9122,7 @@ indexes = [
             inject.indexes(),
             "producer carries resolved indexes"
         );
-        let defs = fold_to_field_defs(&ops, SqlDialect::Postgres, SCHEMA, &effective).unwrap();
+        let defs = field_defs_of(&ops, SqlDialect::Postgres, SCHEMA, &effective).unwrap();
         let keys: Vec<&str> = defs["t"]
             .as_object()
             .unwrap()
@@ -9751,7 +9175,7 @@ columns = [
             ],
         );
         let ops = descriptors_to_create_ops(&[d], "app", &effective).expect("descriptor resolves");
-        let defs = fold_to_field_defs(&ops, SqlDialect::Postgres, SCHEMA, &effective)
+        let defs = field_defs_of(&ops, SqlDialect::Postgres, SCHEMA, &effective)
             .expect("custom policy prefix recovers");
         let entries = defs["entries"].as_object().expect("entries FieldDef map");
         assert_eq!(

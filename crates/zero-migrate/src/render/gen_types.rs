@@ -1,9 +1,17 @@
 //! **`gen-types` — the schema-artifact emitter.** Emit a typed authoring-schema
 //! artifact FROM the schema source (op.* migrations OR a declared
-//! `CollectionDescriptor` set). The runtime projection consumes the
-//! fold-and-recover seam ([`crate::fold_to_field_defs`]); the TypeScript projection
+//! `CollectionDescriptor` set). The runtime projection consumes the fold-and-recover
+//! seam - `FoldedSchema::project_field_defs`, which replaced the `fold_to_field_defs`
+//! walker in step 4 consumer 3 of `docs/proposals/single-fold-and-effects.md` and reads
+//! the same value the other two projections are read from; the TypeScript projection
 //! replays the richer IR so physical types, defaults, value formats, and keys are
 //! not collapsed by the runtime `FieldDef` vocabulary.
+//!
+//! (Backticks rather than an intra-doc link: the replacement is a `pub` method on a type
+//! this module does not import, and the link this line used to carry became the crate's
+//! only NEW `unresolved link` warning the moment the walker was deleted. Measured with
+//! `cargo doc -p zero-migrate --no-deps`, which no gate in this repo runs - so a dangling
+//! link here would have shipped green.)
 //!
 //! Two projections are produced from ONE snapshot, in ONE pass ([`render_artifacts`]):
 //!
@@ -191,15 +199,15 @@ pub(crate) fn derived_unique_index_name(table: &str, field: &str) -> String {
     crate::plan::author::cap_ident_name(&format!("{table}_{field}_key"))
 }
 
+/// Render the v1 runtime descriptor from an ALREADY-FOLDED `FieldDef` map.
+///
+/// Takes the map rather than the op stream since step 4 consumer 3: the map is
+/// `FoldedSchema::project_field_defs`, read off the same fold the other two projections
+/// come from, so this function no longer folds anything and cannot fail.
 fn render_runtime_descriptor_v1(
-    ops: &[Op],
-    dialect: SqlDialect,
-    project_schema: &str,
-    effective: &EffectivePolicy,
+    defs: &BTreeMap<String, Value>,
     metadata: &BTreeMap<String, RuntimeCollectionMetadata>,
-) -> Result<Value, GenTypesError> {
-    let defs = crate::fold_to_field_defs(ops, dialect, project_schema, effective)
-        .map_err(GenTypesError::Fold)?;
+) -> Value {
     let mut metadata = metadata.clone();
     let collections = defs
         .iter()
@@ -215,11 +223,11 @@ fn render_runtime_descriptor_v1(
             )
         })
         .collect();
-    Ok(serde_json::to_value(RuntimeSchemaDescriptorV1 {
+    serde_json::to_value(RuntimeSchemaDescriptorV1 {
         version: 1,
         collections,
     })
-    .expect("runtime descriptor v1 serializes"))
+    .expect("runtime descriptor v1 serializes")
 }
 
 /// Fold `ops` to per-collection wire-`FieldDef` maps and render both artifacts.
@@ -267,32 +275,33 @@ pub fn render_artifacts(
     )
     .map_err(|error| GenTypesError::Fold(crate::FoldError::Render(error.to_string())))?;
     let ops = resolved.ops.as_slice();
-    // Step 4 of `docs/proposals/single-fold-and-effects.md` section G, consumers 1 and
-    // 2: BOTH halves of `env.db.ts` and the runtime collection metadata are
-    // PROJECTIONS of the one traversal, not private replays of the op stream.
-    // `runtime_metadata_from_ops` and `authoring_tables_from_ops` are both gone, and
-    // ONE `fold` call now feeds both.
+    // Step 4 of `docs/proposals/single-fold-and-effects.md` section G, consumers 1, 2
+    // and 3: EVERY value both artifacts are rendered from is a PROJECTION of ONE
+    // traversal, not a private replay of the op stream. `runtime_metadata_from_ops`,
+    // `authoring_tables_from_ops` and `fold_to_field_defs` are all gone.
     //
-    // Consumer 2 changes no refusal. `single_fold::fold` was already on this path -
-    // consumer 1 put it there - and `project_authoring_tables` is infallible, so the
-    // set of streams `render_artifacts` accepts is exactly what it was. The walker
-    // deleted here had one fallible call, `flatten_dialectal_ops`, which `fold` makes
-    // too and BEFORE the point the walker reached it. Pinned as a biconditional by
-    // `tests/gen_types_authoring_tables_from_the_fold.rs`.
+    // Consumer 3 changes no refusal. `fold_to_field_defs` ran `fold_ops` itself as its
+    // fail-closed gate and `single_fold::fold` runs the same catalog replay through
+    // `fold_ops_onto` before any authored rule executes, so the two refusal sets are
+    // equal by construction — measured over 702 prefix/dialect pairs, of which 486 were
+    // answered by both and 216 refused by both, with none on which one refused and the
+    // other did not. Pinned as a biconditional by
+    // `tests/gen_types_field_defs_from_the_fold.rs`.
     //
-    // The structural catalog replay still runs twice per render (once here, once under
-    // `render_runtime_descriptor_v1` -> `fold_to_field_defs` -> `fold_ops`); collapsing
-    // the two is the `fold_ops_onto` extraction the proposal assigns to the LAST
-    // consumer, not this one.
+    // The structural catalog replay now runs ONCE per render. It ran twice until this
+    // consumer moved — once here and once under `render_runtime_descriptor_v1` ->
+    // `fold_to_field_defs` -> `fold_ops` — and the second one leaves with the walker.
+    // That is a consequence of the move rather than its purpose; the `fold_ops_onto`
+    // extraction the proposal assigns to the LAST consumer is still outstanding.
     let folded = crate::render::fold::single_fold::fold(ops, dialect, project_schema, effective)
         .map_err(GenTypesError::Fold)?;
     let metadata = folded.project_runtime_metadata();
     let authoring_tables = folded.project_authoring_tables();
+    let field_defs = folded.project_field_defs();
 
     // (a) RuntimeSchemaDescriptor v1 — fields plus runtime-visible collection
     // options and plain indexes.
-    let runtime_value =
-        render_runtime_descriptor_v1(ops, dialect, project_schema, effective, &metadata)?;
+    let runtime_value = render_runtime_descriptor_v1(&field_defs, &metadata);
     let mut runtime_json =
         serde_json::to_string_pretty(&runtime_value).expect("serialize FieldDef map");
     runtime_json.push('\n');
@@ -1794,22 +1803,17 @@ mod tests {
         }];
         let ops = crate::descriptors_to_create_ops(&descriptors, "app", &effective)
             .expect("confined descriptor resolves");
-        let metadata = crate::render::fold::single_fold::fold(
+        let folded = crate::render::fold::single_fold::fold(
             &ops,
             SqlDialect::Postgres,
             DEFAULT_PROJECT_SCHEMA,
             &effective,
         )
-        .expect("confined descriptor ops fold")
-        .project_runtime_metadata();
+        .expect("confined descriptor ops fold");
         let value = render_runtime_descriptor_v1(
-            &ops,
-            SqlDialect::Postgres,
-            DEFAULT_PROJECT_SCHEMA,
-            &effective,
-            &metadata,
-        )
-        .expect("runtime descriptor renders");
+            &folded.project_field_defs(),
+            &folded.project_runtime_metadata(),
+        );
         assert_eq!(value["version"], 1);
         let fields = &value["collections"]["hits"]["fields"];
         let inject = ResolvedInject::for_table(&effective, DEFAULT_PROJECT_SCHEMA, "hits")

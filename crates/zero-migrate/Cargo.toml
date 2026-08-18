@@ -57,9 +57,13 @@ base64 = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-# `fold_to_field_defs` preserves the createTable column ORDER (the parity check
+# The wire `FieldDef` map preserves the createTable column ORDER (the parity check
 # compares serialized FieldDef maps, so a sorted-vs-declared order would
-# false-mismatch). An insertion-ordered map is the clean carrier.
+# false-mismatch). An insertion-ordered map is the clean carrier. The map was built by
+# the `fold_to_field_defs` walker until step 4 consumer 3 of
+# docs/proposals/single-fold-and-effects.md; it is a projection of the single fold now,
+# and the ordering requirement is unchanged - the fold's authored column map is an
+# `IndexMap` for this reason.
 indexmap = { workspace = true }
 # The wire contract: MigrationIr, the closed Op enum, the
 # closed Expr AST, IrScalar, the precondition/probe vocabulary, the typed-id

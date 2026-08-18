@@ -33,6 +33,7 @@ use std::path::PathBuf;
 
 use support::carriers::{carriers_of_schema, REQUIRED_CARRIER_FIELDS};
 use tempfile::TempDir;
+use zero_migrate::render::fold::single_fold;
 use zero_migrate::{
     apply::executor::LockMode, fold_ops, model::ir::Op, resolve_create_table_policy, Approval,
     ExecutorConfig, IrAuthor, LiveSchema, MigrationEngine, MigrationIr, SchemaSnapshot, SqlDialect,
@@ -183,7 +184,7 @@ const RENAME_FORMAT_IR: &str = r#"{
 /// Apply one IR doc through the REAL SQLite pipeline and return its ordered ops so the
 /// caller accumulates the stream the fold replays.
 /// The SQLite live schema `engine::refresh_historical_live` builds: table snapshots from
-/// `fold_ops`, SDK field maps from `fold_to_field_defs`, over the ops applied so far.
+/// `fold_ops`, SDK field maps from the `FieldDef` projection, over the ops applied so far.
 ///
 /// A SQLite `renameColumn` is LIVE-RESOLVED and needs the live COLUMN, not just the
 /// table name, so `LiveSchema::from_tables` is not enough (`RenameNeedsLiveColumn`), and
@@ -196,9 +197,9 @@ fn folded_live_schema(history: &[Op]) -> LiveSchema {
     let effective = support::no_inject(APP);
     let snapshot =
         fold_ops(history, SqlDialect::Sqlite, PROJECT, &effective).expect("the history folds");
-    let sqlite_schemas =
-        zero_migrate::fold_to_field_defs(history, SqlDialect::Sqlite, PROJECT, &effective)
-            .expect("the history folds to field defs");
+    let sqlite_schemas = single_fold::fold(history, SqlDialect::Sqlite, PROJECT, &effective)
+        .map(|folded| folded.project_field_defs())
+        .expect("the history folds to field defs");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
     live.sqlite_schemas = sqlite_schemas;
     live

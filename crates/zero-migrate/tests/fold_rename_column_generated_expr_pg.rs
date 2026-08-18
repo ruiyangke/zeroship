@@ -10,8 +10,13 @@
 //! | side                  | generated expression      |
 //! |-----------------------|---------------------------|
 //! | `fold_ops` (was)      | `("qty_on_hand" + 1)`     |
-//! | `fold_to_field_defs`  | `amount_on_hand`          |
+//! | the `FieldDef` map *  | `amount_on_hand`          |
 //! | live `pg_get_expr`    | `(amount_on_hand + 1)`    |
+//!
+//! \* measured when `fold_to_field_defs` produced it; step 4 consumer 3 of
+//! `docs/proposals/single-fold-and-effects.md` deleted that walker and the map is a
+//! projection of the single fold now. The measurement stands - this test reads the
+//! catalog rather than either replay, which is the whole point of it.
 //!
 //! So the snapshot fold was the wrong one. This test does not take the docs' word for
 //! it: it reads the catalog and asserts the fold names the column the SERVER names.
@@ -35,11 +40,12 @@ use support::PgDevSession;
 use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::model::ir::IrFlagsOverride;
+use zero_migrate::render::fold::single_fold;
 use zero_migrate::schema::query::quote_ident;
 use zero_migrate::{
-    fold_ops, fold_to_field_defs, resolve_create_table_policy, Approval, BinaryOp, ColType,
-    EffectivePolicy, ExecutorConfig, Expr, GeneratedCol, GuardConfig, IrAuthor, IrColumn, IrScalar,
-    LiveSchema, LockMode, MigrationEngine, MigrationIr, Op, PostgresBackend, SqlDialect,
+    fold_ops, resolve_create_table_policy, Approval, BinaryOp, ColType, EffectivePolicy,
+    ExecutorConfig, Expr, GeneratedCol, GuardConfig, IrAuthor, IrColumn, IrScalar, LiveSchema,
+    LockMode, MigrationEngine, MigrationIr, Op, PostgresBackend, SqlDialect,
 };
 
 const OWNER: &str = "app_fold_generated_expr_pg";
@@ -149,7 +155,7 @@ struct Measured {
     live: String,
     /// What `fold_ops` renders into the snapshot.
     folded: String,
-    /// What `fold_to_field_defs` puts in the runtime descriptor.
+    /// What the `FieldDef` projection puts in the runtime descriptor.
     descriptor: String,
 }
 
@@ -262,7 +268,8 @@ async fn measure() -> Option<Measured> {
             .map(|generated| generated.expr.clone())
             .ok_or_else(|| "the folded snapshot carries no generated body".to_string())?;
 
-        let fields = fold_to_field_defs(&ops, SqlDialect::Postgres, &cfg.project_schema, &policy)
+        let fields = single_fold::fold(&ops, SqlDialect::Postgres, &cfg.project_schema, &policy)
+            .map(|folded| folded.project_field_defs())
             .map_err(|error| format!("fold the ops to field defs: {error}"))?;
         let descriptor = fields
             .get(TABLE)

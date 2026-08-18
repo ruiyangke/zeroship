@@ -1,6 +1,6 @@
 //! **Standalone `.mask()` ROUND-TRIPS through the op.* fold.**
 //!
-//! `fold_to_field_defs` has always recovered the ENCRYPTED auto-mask (the fail-safe
+//! The `FieldDef` map has always carried the ENCRYPTED auto-mask (the fail-safe
 //! `{ full, pii }` every `t.encrypted()` column carries), because
 //! that mask is the kernel default a `ColType::Encrypted` column unambiguously implies.
 //!
@@ -16,7 +16,7 @@
 //!      the produced `IrColumn`;
 //!   2. the lower `ir_column_to_field` maps `IrColumn.mask` → `FieldDescriptor.mask`
 //!      (explicit mask WINS over the encrypted auto-mask);
-//!   3. so `fold_to_field_defs` recovers it AND the op lower emits the `zero-migrate:mask`
+//!   3. so the `FieldDef` projection recovers it AND the op lower emits the `zero-migrate:mask`
 //!      sentinel + `_masked` sibling (closing the runtime masking-fidelity gap too).
 //!
 //! This test PINS the round-trip: a standalone mask authored on a plaintext column
@@ -28,7 +28,8 @@ mod support;
 use zero_migrate::render::declarative::{
     descriptor_to_sdk_schema, CollectionDescriptor, FieldDescriptor,
 };
-use zero_migrate::{descriptors_to_create_ops, fold_to_field_defs, SqlDialect};
+use zero_migrate::render::fold::single_fold;
+use zero_migrate::{descriptors_to_create_ops, SqlDialect};
 
 const SCHEMA: &str = "public";
 
@@ -62,8 +63,9 @@ fn standalone_mask_on_plaintext_column_round_trips_through_the_fold() {
     // GENERATED side: produce ops + fold-and-recover.
     let effective = support::confined_charter();
     let ops = descriptors_to_create_ops(&[descriptor], SCHEMA, &effective).expect("producer");
-    let generated =
-        fold_to_field_defs(&ops, SqlDialect::Postgres, SCHEMA, &effective).expect("fold");
+    let generated = single_fold::fold(&ops, SqlDialect::Postgres, SCHEMA, &effective)
+        .map(|folded| folded.project_field_defs())
+        .expect("fold");
     let ssn = &generated["people"]["ssn"];
 
     // RECOVERED: the standalone mask now SURVIVES the op.* fold (carried on the IR,

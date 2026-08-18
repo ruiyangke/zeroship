@@ -1,7 +1,7 @@
 //! **The differential corpus.** Step 1 of `docs/proposals/single-fold-and-effects.md`.
 //!
 //! One op stream is replayed through all four independent answers -
-//! [`fold_ops`], [`fold_to_field_defs`], the authoring tables and the runtime
+//! [`fold_ops`], the wire `FieldDef` map, the authoring tables and the runtime
 //! collection metadata - and what each one produces is recorded.
 //!
 //! TWO of the four no longer have a private walker behind them. The runtime metadata
@@ -89,7 +89,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::model::ir::{MigrationIr, Op};
-use crate::render::fold::{fold_ops, fold_to_field_defs};
+use crate::render::fold::fold_ops;
 use crate::SqlDialect;
 
 /// The schema unqualified objects resolve under.
@@ -469,7 +469,9 @@ fn variant(op: &Op) -> String {
 enum Walker {
     /// `fold_ops` -> `SchemaSnapshot`.
     Fo,
-    /// `fold_to_field_defs` -> the per-table wire `FieldDef` map.
+    /// The per-table wire `FieldDef` map. Since step 4 consumer 3 moved that consumer,
+    /// its real entry point is `FoldedSchema::project_field_defs` and the walker it
+    /// replaced (`fold_to_field_defs`) is gone.
     Ffd,
     /// The `env.db.ts` source model. Since step 4 consumer 2 moved that consumer, its
     /// real entry point is `FoldedSchema::project_authoring_tables` and the walker it
@@ -515,14 +517,17 @@ pub(super) fn policy(confined: bool) -> crate::EffectivePolicy {
 impl Replay {
     fn run(ops: &[Op], d: SqlDialect, confined: bool) -> Self {
         let p = policy(confined);
-        // ONE fold, TWO projections read off it - the same value `render_artifacts`
-        // reads both from. Folding twice would be two traversals, which is the thing
-        // the proposal removes.
+        // ONE fold, THREE projections read off it - the same value `render_artifacts`
+        // reads all three from. Folding three times would be three traversals, which is
+        // the thing the proposal removes.
         let folded =
             crate::render::fold::single_fold::fold(ops, d, SCHEMA, &p).map_err(|e| e.to_string());
         Self {
             fo: fold_ops(ops, d, SCHEMA, &p).map_err(|e| e.to_string()),
-            ffd: fold_to_field_defs(ops, d, SCHEMA, &p).map_err(|e| e.to_string()),
+            ffd: folded
+                .as_ref()
+                .map(super::super::fold::single_fold::FoldedSchema::project_field_defs)
+                .map_err(Clone::clone),
             ato: folded
                 .as_ref()
                 .map(super::super::fold::single_fold::FoldedSchema::project_authoring_tables)
@@ -1184,7 +1189,7 @@ const PK_IS_AN_INDEX_ONLY_IN_A_CATALOG: &str =
 const A_NAMED_TYPE_HAS_THREE_TRUE_SPELLINGS: &str =
     "the three column-describing answers speak three vocabularies about a named \
      type: fold_ops reports the STORAGE the dialect gives it, the authoring tables \
-     keep the type NAME the author wrote, and fold_to_field_defs reports the \
+     keep the type NAME the author wrote, and the FieldDef projection reports the \
      resolved base the runtime validates against (docs/review-log.md:29149-29156)";
 
 /// A `Carries` question over a walker whose vocabulary cannot contain the thing
@@ -1192,7 +1197,7 @@ const A_NAMED_TYPE_HAS_THREE_TRUE_SPELLINGS: &str =
 /// cannot tell that apart from a disagreement. Named so the rows that hit it are
 /// readable rather than alarming, and so the limitation is stated once.
 const A_TEXT_PROBE_CANNOT_SEE_AN_EMPTY_VOCABULARY: &str =
-    "fold_to_field_defs carries no constraint and the runtime metadata \
+    "the FieldDef map carries no constraint and the runtime metadata \
      carries only plain indexes, so their 'no' is the absence of a vocabulary \
      rather than a contradiction; the two answers that DO name constraints agree";
 
@@ -1353,7 +1358,7 @@ const ROWS: &[Row] = &[
     Row { key: "c_retype_of_a_value_format_column|Mysql|tables", verdict: "AGREED refused", status: Status::Consistent },
 
     // Row 9 (named enum members, docs/review-log.md:27941-27944): FIXED --
-    // fold_to_field_defs carries the membership on all three dialects. Note what
+    // the FieldDef projection carries the membership on all three dialects. Note what
     // the row also shows: on Postgres NOTHING ELSE carries it, so nothing here
     // cross-checks the fix.
     Row { key: "c_named_enum_membership|Postgres|column_carries(issues.status ~ open)", verdict: "DIVERGENT FO=no FFD=yes ATO=no", status: Status::ByDesign(A_NAMED_TYPE_HAS_THREE_TRUE_SPELLINGS) },
@@ -1361,7 +1366,7 @@ const ROWS: &[Row] = &[
     Row { key: "c_named_enum_membership|Mysql|column_carries(issues.status ~ open)", verdict: "DIVERGENT FO=yes FFD=yes ATO=no", status: Status::ByDesign(A_NAMED_TYPE_HAS_THREE_TRUE_SPELLINGS) },
 
     // Row 10 (domain base type, docs/review-log.md:29149-29156): FIXED --
-    // fold_to_field_defs reports the base type rather than "string".
+    // the FieldDef projection reports the base type rather than "string".
     Row { key: "c_domain_base_type|Postgres|column_carries(amounts.amount ~ positive_number)", verdict: "DIVERGENT FO=yes FFD=no ATO=yes", status: Status::ByDesign(A_NAMED_TYPE_HAS_THREE_TRUE_SPELLINGS) },
     Row { key: "c_domain_base_type|Sqlite|column_carries(amounts.amount ~ positive_number)", verdict: "DIVERGENT FO=no FFD=no ATO=yes", status: Status::ByDesign(A_NAMED_TYPE_HAS_THREE_TRUE_SPELLINGS) },
     Row { key: "c_domain_base_type|Mysql|column_carries(amounts.amount ~ positive_number)", verdict: "DIVERGENT FO=no FFD=no ATO=yes", status: Status::ByDesign(A_NAMED_TYPE_HAS_THREE_TRUE_SPELLINGS) },
@@ -1370,7 +1375,7 @@ const ROWS: &[Row] = &[
     Row { key: "c_domain_base_type|Mysql|column_carries(amounts.amount ~ int|Int|integer|INTEGER)", verdict: "DIVERGENT FO=yes FFD=yes ATO=no", status: Status::ByDesign(A_NAMED_TYPE_HAS_THREE_TRUE_SPELLINGS) },
 
     // The encrypted-domain sentinel fix (docs/review-log.md:29643-29667): the
-    // resolved base reaches fold_to_field_defs on all three dialects.
+    // the resolved base reaches the FieldDef projection on all three dialects.
     Row { key: "c_encrypted_domain_column|Postgres|column_carries(amounts.amount ~ int|Int|integer|INTEGER)", verdict: "DIVERGENT FO=no FFD=yes ATO=no", status: Status::ByDesign(A_NAMED_TYPE_HAS_THREE_TRUE_SPELLINGS) },
     Row { key: "c_encrypted_domain_column|Sqlite|column_carries(amounts.amount ~ int|Int|integer|INTEGER)", verdict: "DIVERGENT FO=no FFD=yes ATO=no", status: Status::ByDesign(A_NAMED_TYPE_HAS_THREE_TRUE_SPELLINGS) },
     Row { key: "c_encrypted_domain_column|Mysql|column_carries(amounts.amount ~ int|Int|integer|INTEGER)", verdict: "DIVERGENT FO=no FFD=yes ATO=no", status: Status::ByDesign(A_NAMED_TYPE_HAS_THREE_TRUE_SPELLINGS) },
@@ -1563,9 +1568,17 @@ const REACH: &[&str] = &[
     "dropColumnNotNull|Mysql|RRRS",
     "dropColumnNotNull|Postgres|RRRS",
     "dropColumnNotNull|Sqlite|RRRS",
-    "dropConstraint|Mysql|RSRS",
+    // FFD S -> R on Sqlite and Mysql, moved by step 4 consumer 3 and the ONLY reach
+    // cell that move touches. `fold_to_field_defs`'s `Op::DropConstraint` arm reached
+    // into its recovered-FK side map and nothing else, so a `dropConstraint` that
+    // removed a UNIQUE changed the `FieldDef` map on no dialect and the op read as
+    // SILENT off Postgres. The projection derives every lifted facet from the
+    // constraints the model still holds, so dropping one is visible wherever it
+    // happens. Postgres was already `R` because its corpus stream drops an FK too,
+    // which is the half the walker did handle.
+    "dropConstraint|Mysql|RRRS",
     "dropConstraint|Postgres|RRRR",
-    "dropConstraint|Sqlite|RSRS",
+    "dropConstraint|Sqlite|RRRS",
     "dropDomain|Mysql|SSSS",
     "dropDomain|Postgres|RSSS",
     "dropDomain|Sqlite|SSSS",

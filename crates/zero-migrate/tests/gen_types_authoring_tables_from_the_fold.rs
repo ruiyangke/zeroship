@@ -10,9 +10,23 @@
 //! # What the move can actually change, measured rather than assumed
 //!
 //! [`zero_migrate::render_artifacts`] emits two files. `schema.runtime.json` is
-//! rendered from `fold_to_field_defs` plus the runtime-metadata projection, and this
-//! move touches neither - so its content hash is a CONTROL here, pinned in the corpus
-//! golden beside `env.db.ts`'s and expected not to move at all.
+//! rendered from the `FieldDef` map plus the runtime-metadata projection, and consumer 2
+//! touches neither - so its content hash is a CONTROL here, pinned in the corpus golden
+//! beside `env.db.ts`'s and expected not to move for THIS consumer's reasons.
+//!
+//! STEP 4 CONSUMER 3 MOVED SIX OF THOSE CONTROL LINES, and the control working is the
+//! reason they are worth reading rather than a reason to loosen it. That consumer
+//! replaced `fold_to_field_defs` - the walker that produced the `fields` block - and its
+//! own golden records five families in which the walker described a database the catalog
+//! does not have. Two of those families are reachable from carriers in THIS file:
+//! `carrier:attached_partition_dropped` (a dropped partition stayed in the map) and
+//! `carrier:unique_constraint_lifecycle` (a dropped `UNIQUE` outlived its constraint).
+//! Six `sha|runtime.json` lines moved, on those two carriers, on three dialects each.
+//!
+//! What did NOT move is the claim this file is actually about: ZERO `sha|env.db.ts`
+//! lines and ZERO per-field lines changed, so consumer 3 is confined to the artifact it
+//! owns. The two goldens agree on the new hashes independently, having been reduced by
+//! different code from the same `render_artifacts` call.
 //!
 //! `env.db.ts` is rendered from `AuthoringTable`, whose six fields reach it like this:
 //!
@@ -1199,7 +1213,7 @@ fn control_cases() -> Vec<(String, Vec<Op>, &'static str)> {
 /// compares streams that produced an answer on both sides: a stream that starts
 /// erroring simply leaves the sample and the count falls, which reads as green
 /// everywhere except in a pinned total. So the property is asserted as a
-/// BICONDITIONAL against `fold_to_field_defs` - the whole of the coherence gate
+/// BICONDITIONAL against `fold_ops` - the surviving half of the coherence gate
 /// `render_artifacts` applies beside the fold - and both directions panic.
 ///
 /// Be precise about how much this proves FOR THIS MOVE, because it is less than it
@@ -1247,7 +1261,14 @@ fn the_move_changed_no_refusal_that_the_old_path_already_made() {
                 // a stream it rejects reaches neither side.
                 continue;
             };
-            let old_gate = zero_migrate::fold_to_field_defs(&resolved.ops, dialect, SCHEMA, policy);
+            // The independent oracle is `fold_ops`, NOT the fold. This comparison was
+            // written against `fold_to_field_defs`, which ran `fold_ops` itself and was
+            // therefore a second opinion; step 4 consumer 3 deleted it, and rewriting
+            // this line to `single_fold::fold(…).project_field_defs()` would have made
+            // the biconditional compare `render_artifacts` to the very call it makes
+            // first - a control that can only ever agree with itself. `fold_ops` is the
+            // half of the old gate that still exists independently.
+            let old_gate = zero_migrate::fold_ops(&resolved.ops, dialect, SCHEMA, policy);
             let now = render_artifacts(&ops, dialect, SCHEMA, policy);
 
             match (&old_gate, &now) {
@@ -1262,12 +1283,12 @@ fn the_move_changed_no_refusal_that_the_old_path_already_made() {
                     );
                 }
                 (Ok(_), Err(new)) => panic!(
-                    "{label}/{dialect:?}: OVER-REFUSAL. `fold_to_field_defs` accepts this \
+                    "{label}/{dialect:?}: OVER-REFUSAL. `fold_ops` accepts this \
                      stream and `render_artifacts` now refuses it:\n  {new}\nThat is a \
                      stream that used to produce artifacts and now produces none."
                 ),
                 (Err(old), Ok(_)) => panic!(
-                    "{label}/{dialect:?}: UNDER-REFUSAL. `fold_to_field_defs` refuses this \
+                    "{label}/{dialect:?}: UNDER-REFUSAL. `fold_ops` refuses this \
                      stream and `render_artifacts` renders it anyway:\n  {old}"
                 ),
             }
@@ -1393,7 +1414,7 @@ fn the_corpus_golden_records_both_refusals_and_renders() {
 /// The two artifacts out of ONE `render_artifacts` call must describe the same
 /// database. Section B row 2 of the proposal is a case where they did not, and this
 /// move is the last chance to check it for the primary key specifically: the runtime
-/// descriptor's `fields` come from `fold_to_field_defs`, which DOES handle
+/// descriptor's `fields` come from the `FieldDef` projection, which DOES handle
 /// `alterPrimaryKey`, and `env.db.ts` came from a walker that did not.
 #[test]
 fn both_artifacts_agree_about_the_key_the_op_installed() {
@@ -1407,7 +1428,7 @@ fn both_artifacts_agree_about_the_key_the_op_installed() {
         .expect("the stream renders");
         let runtime: Value =
             serde_json::from_str(&rendered.runtime_json).expect("`schema.runtime.json` parses");
-        // `fold_to_field_defs` clears the identity facet on `dropIdentityFrom`; this is
+        // the `FieldDef` projection clears the identity facet on `dropIdentityFrom`; this is
         // the half that was ALREADY right, asserted so the fix cannot be "make them
         // agree by breaking the other one".
         let id = runtime
