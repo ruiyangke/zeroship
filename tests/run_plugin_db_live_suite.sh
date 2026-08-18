@@ -25,13 +25,23 @@
 #   + pgvector image, wal_level=logical    102 passed /  1 failed
 #   + `CREATE EXTENSION vector` in the DB  103 passed /  0 failed, 8 ignored
 #
-#   1. `-c wal_level=logical`. WITHOUT IT, ELEVEN TESTS SKIP AND STILL REPORT
+#   1. `-c wal_level=logical`. WITHOUT IT, TEN TESTS SKIP AND STILL REPORT
 #      PASSED. Measured on two servers differing in nothing else:
 #        replica  test result: ok. 11 passed; 0 failed; 1 ignored;  3.31s
 #        logical  test result: ok. 11 passed; 0 failed; 1 ignored; 11.25s
-#      IDENTICAL result lines. On replica all eleven skipped; on logical all
-#      eleven executed. That is the entire reason the census below is a hard
+#      IDENTICAL result lines. On replica all of them skipped; on logical all
+#      of them executed. That is the entire reason the census below is a hard
 #      failure rather than a report: the cargo tally cannot see the difference.
+#
+#      TEN, not the eleven this said until 2026-08-18. Re-measured that day on
+#      the FULL target against two servers differing only in wal_level:
+#        replica  11 ZEROSHIP-TEST-SKIPPED markers (10 wal-worded + 1 postgis)
+#        logical   1 marker (postgis)
+#      and `pg_has_logical_wal` has exactly 10 call sites. The older figure was
+#      taken on a filtered run and copied into three files; the re-measurement
+#      differs from it by one and I did not reproduce the original setup, so
+#      treat ten as "what the tree does today" rather than as a correction of
+#      what it did then.
 #      NOTE this cannot be expressed in a GitHub `services:` block, which takes
 #      no command arguments - hence the explicit `docker run` in ci.yml, the
 #      same pattern golden-path and dev-vs-deployed already use.
@@ -152,7 +162,7 @@ if [ "$passed" -lt "$PLUGIN_DB_MIN_PASSED" ]; then
   echo "      a prerequisite. Check the census below before assuming a product" >&2
   echo "      regression: a suite that cannot reach Postgres reports few passes," >&2
   echo "      and one that reaches a REPLICA server reports the full count with" >&2
-  echo "      eleven of them hollow." >&2
+  echo "      ten of them hollow." >&2
   rc=1
 fi
 
@@ -163,7 +173,7 @@ fi
 if ! zs_skip_census "$SUITE_LOG" "$PLUGIN_DB_SKIP_ALLOWLIST"; then
   echo "FAIL: ${ZS_SKIP_COUNT} test(s) announced they exercised nothing." >&2
   echo "      The likeliest cause is a Postgres that came up WITHOUT" >&2
-  echo "      -c wal_level=logical, which makes eleven replication tests skip" >&2
+  echo "      -c wal_level=logical, which makes ten replication tests skip" >&2
   echo "      while the cargo tally still reads '11 passed; 0 failed'." >&2
   rc=1
 fi
