@@ -4,8 +4,6 @@
 //! handlers — env_handlers and stripe_handlers used to duplicate this
 //! code 1:1, which a critic flagged as a drift hazard.
 
-use std::net::IpAddr;
-
 use ntex::web::{self, HttpRequest};
 use zeroship_auth::ratelimit::{self, Bucket, RateLimitDecision};
 
@@ -28,31 +26,21 @@ const UNRESOLVED_CLIENT_IDENTITY: &str = "unresolved";
 /// untrusted. Operators must only set --trust-proxy when the control
 /// plane is bound behind a load balancer they trust to overwrite XFF.
 /// A last entry that is not a valid IP is ignored in favor of `peer_addr`.
+///
+/// The resolution itself is [`zeroship_core::client_ip`], shared with the
+/// gateway and the auth service. It used to be a private copy here, which is
+/// how the gateway came to read the opposite end of the same header.
 pub fn source_ip(req: &HttpRequest, trust_proxy: bool) -> Option<String> {
     let xff = req
         .headers()
         .get("x-forwarded-for")
         .and_then(|value| value.to_str().ok());
-    resolve_source_ip(xff, req.peer_addr().map(|addr| addr.ip()), trust_proxy)
-}
-
-fn resolve_source_ip(
-    xff: Option<&str>,
-    peer_ip: Option<IpAddr>,
-    trust_proxy: bool,
-) -> Option<String> {
-    if trust_proxy {
-        if let Some(xff) = xff {
-            // Last entry = closest hop = the trusted proxy's view.
-            if let Some(last) = xff.rsplit(',').next() {
-                let trimmed = last.trim();
-                if trimmed.parse::<IpAddr>().is_ok() {
-                    return Some(trimmed.to_string());
-                }
-            }
-        }
-    }
-    peer_ip.map(|ip| ip.to_string())
+    zeroship_core::client_ip::resolve_client_ip(
+        xff,
+        req.peer_addr().map(|addr| addr.ip()),
+        trust_proxy,
+    )
+    .map(|ip| ip.to_string())
 }
 
 /// DB-backed token-bucket gate. Returns `Some(429)` if the IP is over
@@ -109,13 +97,32 @@ mod tests {
 
     use super::*;
 
+    use ntex::web::test::TestRequest;
+
+    fn source_ip_of(xff: &str, trust_proxy: bool) -> Option<String> {
+        // `TestRequest::peer_addr` is not plumbed into `to_http_request`
+        // (ntex 3.7.2 web/test.rs:1038-1042 asserts exactly that), so these
+        // exercise the header arm; the peer arm is covered in
+        // `zeroship_core::client_ip`.
+        source_ip(
+            &TestRequest::default()
+                .header("x-forwarded-for", xff)
+                .to_http_request(),
+            trust_proxy,
+        )
+    }
+
     #[test]
     fn malformed_trusted_xff_falls_back_to_peer_identity() {
         let peer: IpAddr = "203.0.113.10".parse().unwrap();
 
         assert_eq!(
-            resolve_source_ip(Some("not-an-ip"), Some(peer), true),
-            Some(peer.to_string())
+            zeroship_core::client_ip::resolve_client_ip(
+                Some("not-an-ip"),
+                Some(peer),
+                true
+            ),
+            Some(peer)
         );
     }
 
@@ -125,9 +132,45 @@ mod tests {
         let peer: IpAddr = "203.0.113.20".parse().unwrap();
 
         assert_eq!(
-            resolve_source_ip(Some("198.51.100.20"), Some(peer), true),
-            Some(forwarded.to_string())
+            zeroship_core::client_ip::resolve_client_ip(
+                Some("198.51.100.20"),
+                Some(peer),
+                true
+            ),
+            Some(forwarded)
         );
+    }
+
+    #[test]
+    fn the_audit_source_ip_reads_the_same_xff_entry_as_the_gateway() {
+        // `net_grants` stamps this value on a grant write, and the gateway
+        // keys a rate-limit bucket on its own answer to the same question.
+        // Both must name the hop the fronting proxy authored: the rightmost.
+        assert_eq!(
+            source_ip_of("1.2.3.4, 203.0.113.7", true),
+            Some("203.0.113.7".to_string())
+        );
+    }
+
+    #[test]
+    fn the_audit_source_ip_records_an_address_not_a_socket() {
+        // A port in the audit column is a connection, not a client, and it
+        // makes two rows from one client fail to match on a join.
+        assert_eq!(
+            source_ip_of("192.0.2.43:40001", true),
+            Some("192.0.2.43".to_string())
+        );
+        assert_eq!(
+            source_ip_of("[2001:db8::1]:8080", true),
+            Some("2001:db8::1".to_string())
+        );
+    }
+
+    #[test]
+    fn an_untrusted_xff_never_reaches_the_audit_record() {
+        // Default posture. This fixture carries no peer, so there is nothing
+        // to record rather than something the caller chose.
+        assert_eq!(source_ip_of("203.0.113.7", false), None);
     }
 }
 

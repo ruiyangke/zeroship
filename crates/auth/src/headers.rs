@@ -24,7 +24,7 @@
 //! deployment config (no console host is compiled in); an empty list keeps the
 //! strict default (dev / single-origin), so the relax is a no-op by default.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 
 use ntex::http::header::{HeaderName, HeaderValue};
 use ntex::http::HeaderMap;
@@ -156,25 +156,26 @@ fn framed_route_csp(origins: &[String]) -> String {
 /// let an attacker mint unbounded `zeroship.rate_limits` rows). When the
 /// forwarded value is absent or unparseable we fall back to the raw socket
 /// peer, then the `"0.0.0.0"` sentinel (e.g. unit tests with neither).
+///
+/// The resolution is [`zeroship_core::client_ip`], shared with the gateway and
+/// the control plane. `trust_proxy` is passed as `true` unconditionally here,
+/// and only here: this service is not exposed directly, so the gateway is the
+/// only writer of the header it reads. The gateway and control take the flag
+/// from configuration because they can be the edge.
 #[must_use]
 pub(crate) fn client_ip(req: &HttpRequest) -> String {
-    trusted_forwarded_ip(req.headers())
-        .or_else(|| req.peer_addr().map(|addr| addr.ip()))
+    trusted_client_ip(req.headers(), req.peer_addr().map(|addr| addr.ip()))
         .map_or_else(|| "0.0.0.0".to_string(), |ip| ip.to_string())
 }
 
-/// Extract the trusted client IP from `X-Forwarded-For`: the RIGHTMOST
-/// non-empty token (the value the closest trusted hop — the gateway — authored)
-/// that parses as an [`IpAddr`]. Returns `None` when the header is absent,
-/// empty, or its trusted token is not a valid IP.
-fn trusted_forwarded_ip(headers: &HeaderMap) -> Option<IpAddr> {
-    let value = headers.get("x-forwarded-for")?.to_str().ok()?;
-    let token = value.rsplit(',').map(str::trim).find(|t| !t.is_empty())?;
-    // A bare IP, or an `ip:port` SocketAddr (some proxies append the port).
-    token
-        .parse::<IpAddr>()
-        .ok()
-        .or_else(|| token.parse::<SocketAddr>().ok().map(|addr| addr.ip()))
+/// The trusted client address: the gateway-authored `X-Forwarded-For` entry,
+/// else the socket peer. Delegates to [`zeroship_core::client_ip`], which
+/// documents why the rightmost entry is the trusted one.
+fn trusted_client_ip(headers: &HeaderMap, peer_ip: Option<IpAddr>) -> Option<IpAddr> {
+    let forwarded_for = headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok());
+    zeroship_core::client_ip::resolve_client_ip(forwarded_for, peer_ip, true)
 }
 
 #[must_use]
@@ -327,8 +328,7 @@ impl RequestContext {
             request_id: request_id(req.headers()),
             // SEC-3: the trusted gateway-authored client IP (rightmost
             // validated XFF token), not the spoofable leftmost.
-            ip: trusted_forwarded_ip(req.headers())
-                .or_else(|| req.peer_addr().map(|addr| addr.ip())),
+            ip: trusted_client_ip(req.headers(), req.peer_addr().map(|addr| addr.ip())),
             user_agent: req
                 .headers()
                 .get("user-agent")
@@ -342,8 +342,7 @@ impl RequestContext {
         Self {
             request_id: request_id(req.headers()),
             // SEC-3: trusted gateway-authored client IP, as above.
-            ip: trusted_forwarded_ip(req.headers())
-                .or_else(|| req.peer_addr().map(|addr| addr.ip())),
+            ip: trusted_client_ip(req.headers(), req.peer_addr().map(|addr| addr.ip())),
             user_agent: req
                 .headers()
                 .get("user-agent")
