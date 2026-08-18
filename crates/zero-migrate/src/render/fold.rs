@@ -113,6 +113,15 @@ use crate::render::value_format::{
 use crate::schema::query::SqlDialect;
 use zero_migrate_policy::EffectivePolicy;
 
+/// Step 3 of `docs/proposals/single-fold-and-effects.md`: ONE traversal and four
+/// typed projections, proven equal to the four walkers before any consumer moves.
+///
+/// A CHILD of this module rather than a sibling, so it reaches the per-op decision
+/// helpers here (`fold_create_column_to_field`, `recover_check_facet`,
+/// `recover_fk_policy`, `resolved_inject_prefix_len`) without widening a dozen
+/// production functions to `pub(crate)` for a module that ships dead.
+pub(crate) mod single_fold;
+
 /// The owner-app stamp the fold gives every `CollectionDescriptor`. `owner_app` is
 /// drift-irrelevant — it never enters `SchemaSnapshot` equality (the snapshot only
 /// carries columns/indexes/constraints, none of which embed it), so a fold-internal

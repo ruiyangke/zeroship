@@ -93,9 +93,9 @@ pub struct GeneratedArtifacts {
 }
 
 #[derive(Debug, Clone, Default)]
-struct RuntimeCollectionMetadata {
-    options: crate::TableRuntimeOptions,
-    indexes: Vec<RuntimeIndexDescriptor>,
+pub(crate) struct RuntimeCollectionMetadata {
+    pub(crate) options: crate::TableRuntimeOptions,
+    pub(crate) indexes: Vec<RuntimeIndexDescriptor>,
 }
 
 #[derive(Debug, Serialize)]
@@ -148,18 +148,18 @@ impl From<&crate::TableRuntimeOptions> for RuntimeOptionsDescriptor {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct RuntimeIndexDescriptor {
-    name: String,
-    fields: Vec<String>,
+pub(crate) struct RuntimeIndexDescriptor {
+    pub(crate) name: String,
+    pub(crate) fields: Vec<String>,
     #[serde(skip_serializing_if = "is_false")]
-    unique: bool,
+    pub(crate) unique: bool,
 }
 
 fn is_false(value: &bool) -> bool {
     !*value
 }
 
-fn plain_index_fields(columns: &[crate::IndexElement]) -> Option<Vec<String>> {
+pub(crate) fn plain_index_fields(columns: &[crate::IndexElement]) -> Option<Vec<String>> {
     columns
         .iter()
         .map(|c| match c {
@@ -169,7 +169,10 @@ fn plain_index_fields(columns: &[crate::IndexElement]) -> Option<Vec<String>> {
         .collect()
 }
 
-fn add_runtime_index(indexes: &mut Vec<RuntimeIndexDescriptor>, index: RuntimeIndexDescriptor) {
+pub(crate) fn add_runtime_index(
+    indexes: &mut Vec<RuntimeIndexDescriptor>,
+    index: RuntimeIndexDescriptor,
+) {
     if let Some(existing) = indexes.iter_mut().find(|i| i.name == index.name) {
         *existing = index;
     } else {
@@ -177,7 +180,7 @@ fn add_runtime_index(indexes: &mut Vec<RuntimeIndexDescriptor>, index: RuntimeIn
     }
 }
 
-fn derived_unique_index_name(table: &str, field: &str) -> String {
+pub(crate) fn derived_unique_index_name(table: &str, field: &str) -> String {
     crate::plan::author::cap_ident_name(&format!("{table}_{field}_key"))
 }
 
@@ -494,13 +497,13 @@ pub fn render_artifacts_from_descriptors(
 }
 
 #[derive(Debug, Clone)]
-struct AuthoringTable {
-    columns: IndexMap<String, IrColumn>,
-    primary_key: Option<Vec<String>>,
-    constraints: Vec<IrConstraint>,
-    indexes: Vec<IrIndex>,
-    partition_by: Option<PartitionSpec>,
-    schema: Option<String>,
+pub(crate) struct AuthoringTable {
+    pub(crate) columns: IndexMap<String, IrColumn>,
+    pub(crate) primary_key: Option<Vec<String>>,
+    pub(crate) constraints: Vec<IrConstraint>,
+    pub(crate) indexes: Vec<IrIndex>,
+    pub(crate) partition_by: Option<PartitionSpec>,
+    pub(crate) schema: Option<String>,
 }
 
 /// Replay the IR carriers that the runtime `FieldDef` projection intentionally
@@ -820,7 +823,7 @@ fn authoring_tables_from_ops(
     Ok(tables)
 }
 
-fn replace_name(names: &mut [String], from: &str, to: &str) {
+pub(crate) fn replace_name(names: &mut [String], from: &str, to: &str) {
     for name in names {
         if name == from {
             to.clone_into(name);
@@ -828,7 +831,7 @@ fn replace_name(names: &mut [String], from: &str, to: &str) {
     }
 }
 
-fn constraint_uses_local_column(
+pub(crate) fn constraint_uses_local_column(
     constraint: &IrConstraint,
     table: &str,
     column: &str,
@@ -858,7 +861,7 @@ fn constraint_uses_local_column(
     }
 }
 
-fn rename_constraint_local_column(constraint: &mut IrConstraint, from: &str, to: &str) {
+pub(crate) fn rename_constraint_local_column(constraint: &mut IrConstraint, from: &str, to: &str) {
     match &mut constraint.kind {
         IrConstraintKind::Fk { columns, .. } | IrConstraintKind::Unique { columns } => {
             replace_name(columns, from, to);
@@ -881,7 +884,12 @@ fn rename_constraint_local_column(constraint: &mut IrConstraint, from: &str, to:
     }
 }
 
-fn index_uses_column(index: &IrIndex, table: &str, column: &str, dialect: SqlDialect) -> bool {
+pub(crate) fn index_uses_column(
+    index: &IrIndex,
+    table: &str,
+    column: &str,
+    dialect: SqlDialect,
+) -> bool {
     index.columns.iter().any(|element| match element {
         IndexElement::Column { name, .. } => name == column,
         IndexElement::Expr { expr } => expr_references_column(expr, table, column, true, dialect),
@@ -892,7 +900,7 @@ fn index_uses_column(index: &IrIndex, table: &str, column: &str, dialect: SqlDia
             .is_some_and(|expr| expr_references_column(expr, table, column, true, dialect))
 }
 
-fn rename_index_column(index: &mut IrIndex, from: &str, to: &str) {
+pub(crate) fn rename_index_column(index: &mut IrIndex, from: &str, to: &str) {
     for element in &mut index.columns {
         if let IndexElement::Column { name, .. } = element {
             if name == from {
@@ -903,7 +911,7 @@ fn rename_index_column(index: &mut IrIndex, from: &str, to: &str) {
     replace_name(&mut index.include, from, to);
 }
 
-fn for_each_expr_mut(table: &mut AuthoringTable, mut f: impl FnMut(&mut Expr)) {
+pub(crate) fn for_each_expr_mut(table: &mut AuthoringTable, mut f: impl FnMut(&mut Expr)) {
     for column in table.columns.values_mut() {
         if let Some(generated) = &mut column.generated {
             f(&mut generated.expr);
@@ -1083,7 +1091,7 @@ fn expr_references_column(
     contains(&value, table, column, include_unqualified, dialect)
 }
 
-fn effective_constraint_name(table: &str, constraint: &IrConstraint) -> String {
+pub(crate) fn effective_constraint_name(table: &str, constraint: &IrConstraint) -> String {
     if let Some(name) = &constraint.name {
         return name.clone();
     }
@@ -1103,7 +1111,7 @@ fn effective_constraint_name(table: &str, constraint: &IrConstraint) -> String {
     }
 }
 
-fn named_constraint(table: &str, constraint: &IrConstraint) -> IrConstraint {
+pub(crate) fn named_constraint(table: &str, constraint: &IrConstraint) -> IrConstraint {
     let mut constraint = constraint.clone();
     if constraint.name.is_none() {
         constraint.name = Some(effective_constraint_name(table, &constraint));
@@ -1111,7 +1119,7 @@ fn named_constraint(table: &str, constraint: &IrConstraint) -> IrConstraint {
     constraint
 }
 
-fn effective_index_name(table: &str, index: &IrIndex) -> String {
+pub(crate) fn effective_index_name(table: &str, index: &IrIndex) -> String {
     index.name.clone().unwrap_or_else(|| {
         let parts = index
             .columns
@@ -1125,7 +1133,7 @@ fn effective_index_name(table: &str, index: &IrIndex) -> String {
     })
 }
 
-fn named_index(table: &str, index: &IrIndex) -> IrIndex {
+pub(crate) fn named_index(table: &str, index: &IrIndex) -> IrIndex {
     let mut index = index.clone();
     if index.name.is_none() {
         index.name = Some(effective_index_name(table, &index));
@@ -2426,3 +2434,6 @@ mod tests {
 // two production functions so a test can reach them.
 #[cfg(test)]
 mod differential_corpus;
+
+#[cfg(test)]
+mod fold_projection_equality;

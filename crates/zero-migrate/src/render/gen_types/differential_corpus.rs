@@ -83,24 +83,25 @@ use crate::SqlDialect;
 use super::{authoring_tables_from_ops, runtime_metadata_from_ops};
 
 /// The schema unqualified objects resolve under.
-const SCHEMA: &str = "public";
+pub(super) const SCHEMA: &str = "public";
 
 /// Every walker that takes a dialect is run under all three. Several of the
 /// divergences the log recorded were dialect-specific, and two of the rows this
 /// file records are visible on exactly one dialect.
-const DIALECTS: [SqlDialect; 3] = [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql];
+pub(super) const DIALECTS: [SqlDialect; 3] =
+    [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql];
 
 /// A named op stream, written as the wire JSON an author's recorder emits.
-struct Stream {
-    name: &'static str,
-    ops: &'static str,
+pub(super) struct Stream {
+    pub(super) name: &'static str,
+    pub(super) ops: &'static str,
 }
 
 fn fixtures_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/op_fixtures")
 }
 
-fn read_golden(stem: &str) -> MigrationIr {
+pub(super) fn read_golden(stem: &str) -> MigrationIr {
     let path = fixtures_dir().join(format!("{stem}.golden.json"));
     let text =
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
@@ -112,7 +113,7 @@ fn read_golden(stem: &str) -> MigrationIr {
 /// every one of the 56 `Op` variants - so the reach matrix is measured against
 /// production-shaped streams and not only against streams written to please it.
 /// The list is the same one `tests/op_fixture_goldens.rs` owns.
-const STEMS: [&str; 27] = [
+pub(super) const STEMS: [&str; 27] = [
     "alter_primary_key",
     "comments_indexes",
     "constraint_not_valid",
@@ -144,7 +145,7 @@ const STEMS: [&str; 27] = [
 /// Self-contained op streams. Every stream creates what it later alters, so a
 /// PREFIX of it is coherent too and the prefix sweep below has an observation at
 /// every position.
-const STREAMS: &[Stream] = &[
+pub(super) const STREAMS: &[Stream] = &[
     Stream {
         name: "v_table_lifecycle",
         ops: r#"[
@@ -274,7 +275,7 @@ const STREAMS: &[Stream] = &[
 
 /// The differential cases: one op stream per divergence the review log recorded,
 /// plus the multi-op shapes that only misbehave in sequence.
-const CASES: &[Stream] = &[
+pub(super) const CASES: &[Stream] = &[
     Stream {
         // Section B rows 7 and 8 in one stream: a table that exists ONLY inside
         // an `Op::Dialectal` leg, whose PostgreSQL leg alone declares a runtime
@@ -436,7 +437,7 @@ const CASES: &[Stream] = &[
 ]"#,
     },
 ];
-fn parse(ops: &str) -> Vec<Op> {
+pub(super) fn parse(ops: &str) -> Vec<Op> {
     serde_json::from_str(ops).expect("corpus stream parses")
 }
 
@@ -489,7 +490,7 @@ struct Replay {
     rmo: Result<BTreeMap<String, super::RuntimeCollectionMetadata>, String>,
 }
 
-fn policy(confined: bool) -> crate::EffectivePolicy {
+pub(super) fn policy(confined: bool) -> crate::EffectivePolicy {
     if confined {
         crate::test_fixtures::confined_charter()
     } else {
