@@ -18,12 +18,16 @@
 //! * `FoldedSchema::project_field_defs` replaced `fold_to_field_defs`, and is the wire
 //!   `FieldDef` map behind `schema.runtime.json` and behind `LiveSchema::sqlite_schemas`.
 //!
-//! (Backticks rather than intra-doc links on purpose. `cargo doc` cannot resolve a
-//! `pub(crate)` method of this module from a module-level doc comment, and
-//! `rustdoc::broken_intra_doc_links` fires only under `cargo doc` - which no gate in
-//! this repo's pipeline runs, so a dangling link here would ship green. Measured: the
-//! crate emits 14 such warnings on `38f9abc6` and 13 here - demoting these two costs
-//! one warning and adds none.)
+//! (Backticks rather than intra-doc links on purpose, for a reason narrower than it
+//! first looks. A `//!` module-level comment here resolves paths in the PARENT
+//! module's scope, not this module's: a bare `[FoldedSchema]` fails from `//!` while
+//! the identical bare link resolves from a `///` further down this same file, and
+//! `[super::fold_ops_onto]` resolves against `render` rather than `render::fold`. So
+//! anything named from this block needs an ABSOLUTE `crate::` path, and a
+//! `pub(crate)` item cannot be linked from public docs at all whatever path you give
+//! it. `cargo doc` IS now gated - a counted, two-sided pin - so a dangling link here
+//! no longer ships green, which is why the three that were dangling are fixed rather
+//! than tolerated.)
 //!
 //! All three walkers are deleted. `fold` itself is production code, and so is everything
 //! those three projections read - which is now the whole of `AuthoredState` except
@@ -48,7 +52,7 @@
 //! CONSUMER 1. `project_runtime_metadata` re-derived the implicit unique index name
 //! `{table}_{column}_key` from the columns it could see - which silently renamed the
 //! index on every `renameTable` and `renameColumn`, naming an object no catalog has.
-//! The fix is [`ImplicitUniqueIndex`], carried by this traversal, and it is decision 4
+//! The fix is `ImplicitUniqueIndex`, carried by this traversal, and it is decision 4
 //! of the proposal working as written: a projection that needs a fact the model does
 //! not carry is a MODEL change, not a second replay. The step 3 corpus could not see
 //! it - no stream there crosses a `unique` column with a rename - so it was found by
@@ -95,7 +99,8 @@
 //! bounded to TABLES: it carries 1 of [`SchemaSnapshot`]'s 13 object families. So
 //! `fold(ops) -> SchemaModel` as the proposal spells it CANNOT reproduce `fold_ops`
 //! today, because a stream that creates a view produces a model with nowhere to put
-//! it. [`FoldedSchema`] names that gap instead of hiding it:
+//! it. [`crate::render::fold::single_fold::FoldedSchema`] names that gap instead of
+//! hiding it:
 //!
 //! * `model` - the neutral tables plus their [`crate::model::schema_model::VendorFacts`].
 //! * `unmodelled` - the twelve object families the neutral model does not carry yet
@@ -110,7 +115,8 @@
 //!
 //! # Where the catalog half comes from, stated plainly
 //!
-//! The catalog rules still live in [`super::fold_ops_onto`], and this fold calls it
+//! The catalog rules still live in [`crate::render::fold::fold_ops_onto`], and this
+//! fold calls it
 //! rather than restating 1,989 lines of them. That is ONE call, not a per-op drive:
 //! `fold_ops_onto` seeds its named-type registry with `NamedTypeRegistry::default()`
 //! rather than from `base`, so folding it one op at a time would lose every enum and
