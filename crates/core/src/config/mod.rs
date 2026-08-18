@@ -69,8 +69,8 @@ pub use source::{
     SYSTEM_CONFIG_PATH,
 };
 pub use test_overlay::{
-    database_url as test_database_url, kv_url as test_kv_url, PROVISION_COMMAND,
-    TEST_OVERLAY_PATH,
+    database_url as test_database_url, database_url_opt as test_database_url_opt,
+    kv_url as test_kv_url, kv_url_opt as test_kv_url_opt, PROVISION_COMMAND, TEST_OVERLAY_PATH,
 };
 pub use topology::{
     resolve_origin_scheme, resolve_trusted_origins, OriginScheme, TrustedOrigin,
