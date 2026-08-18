@@ -1839,10 +1839,23 @@ impl MigrationEngine {
         // discharge - every later attempt at the contract hits the same refusal.
         // Ask the database now, while the lock is held and nothing has run, so the
         // rename is declined instead of started.
+        //
+        // Behind the SAME prefix test the precondition phase below uses, and for
+        // the same reason: the question is an OBSTRUCTION question, so its
+        // pre-plan answer is only the answer the rename will meet when no earlier
+        // step of the plan can remove a blocker. `[dropView, renameColumn]`
+        // removes its own blocker one step earlier, and asking unconditionally
+        // refuses it.
+        let mut prefix_clears_nothing = true;
         for step in steps {
+            let clears_nothing = prefix_clears_nothing;
+            prefix_clears_nothing &= crate::apply::plan_precondition::clears_no_obstruction(step);
             let PlanStep::OnlineRename(RenameStep::PgExpandContract(plan)) = step else {
                 continue;
             };
+            if !clears_nothing {
+                continue;
+            }
             let crate::render::expand_contract::OnlineIntent::RenameColumn { table, from, .. } =
                 &plan.intent;
             let blockers = backend
@@ -1860,25 +1873,30 @@ impl MigrationEngine {
             }
         }
 
-        // A `setColumnType` the database will refuse dies at ITS OWN step, which is
-        // not where the damage is. Every lowered unit commits in its own
-        // transaction, so an ordinary two-op envelope - `addColumn` then the
-        // retype - leaves the added column committed and the type unchanged: a
-        // schema that is neither the old shape nor the new one, and the exact
-        // half-migration a per-migration precondition cannot prevent, because by
-        // the time it is evaluated the earlier migration has already committed.
+        // A precondition the database will not satisfy dies at ITS OWN step, which
+        // is not where the damage is. Every lowered unit commits in its own
+        // transaction, so an ordinary two-op envelope - `addColumn` then a
+        // `dropColumn` or a `setColumnType` - leaves the added column committed
+        // and the second op refused: a schema that is neither the old shape nor
+        // the new one, and the exact half-migration a per-migration precondition
+        // cannot prevent, because by the time it is evaluated the earlier
+        // migration has already committed.
         //
-        // So the assertion the lower stamps on the retype's unit is ALSO asked
-        // here, for the whole plan, under the lock and before the first step runs.
-        // The per-migration evaluation stays exactly where it is - it is the seam a
-        // direct executor caller reaches, and re-asking under the same held lock
-        // costs one catalog read and cannot disagree.
+        // So every precondition the engine can prove is answerable against the
+        // PRE-PLAN database is ALSO asked here, for the whole plan, under the lock
+        // and before the first step runs. The per-migration evaluation stays
+        // exactly where it is - it is the seam a direct executor caller reaches,
+        // and it remains the only thing that decides whether a migration APPLIES.
+        // That is what bounds this phase: it can only ever be wrong by REFUSING a
+        // plan that would have succeeded, never by admitting one.
         //
-        // Scoped to this one variant on purpose. `ColumnHasNoBlockingDependents`,
-        // which `dropColumn` stamps, is a shipped gate with its own behaviour at
-        // the per-migration seam, and hoisting it would change when an existing
-        // refusal fires. That is a separate decision, not a side effect of this one.
-        self.preflight_plan_column_retypes(steps, backend, exec_cfg)
+        // Which preconditions those are is decided by `apply::plan_precondition`,
+        // not by variant and not by taste. This replaces the single-variant retype
+        // preflight that stood here, which asked the pre-plan database with no
+        // reading of what the plan itself does and therefore refused
+        // `[dropView, setColumnType]` - a plan that removes its own blocker one
+        // step earlier and that every step of succeeds when run.
+        self.preflight_plan_preconditions(steps, backend, exec_cfg)
             .await?;
 
         // A timeout budget that resolves to zero is refused when the session
@@ -2791,62 +2809,107 @@ impl MigrationEngine {
     /// approval. Any matching inflight/progress evidence remains pending and is
     /// gated before the authored-order loop starts; any checksum disagreement is
     /// drift and wins over the approval error.
-    /// Refuse the whole plan when a `setColumnType` step names a column the
-    /// database will not let it retype, before the authored loop can commit
-    /// anything.
+    /// Refuse the whole plan when a step names a live-database assertion the
+    /// database will not satisfy AND that no earlier step of this plan can
+    /// satisfy, before the authored loop can commit anything.
     ///
-    /// Reads the assertion the LOWER already stamped
-    /// ([`Precondition::ColumnTypeChangeHasNoBlockers`]) rather than re-deriving
-    /// which steps are retypes from their SQL or their op. The stamp is the single
-    /// place that decides a unit is a retype, so this cannot come to a different
-    /// conclusion than the per-migration evaluator does about the same step.
+    /// The general phase the four bespoke plan-level preflights above were each
+    /// approximating for one case. It reads the assertions the LOWER already
+    /// stamped rather than re-deriving which steps are drops or retypes from
+    /// their SQL, so it cannot come to a different conclusion than the
+    /// per-migration evaluator does about the same step, and it evaluates them
+    /// through the same backend body for the same reason.
     ///
-    /// Every other precondition is left to the per-migration seam. That is not
-    /// timidity about the general case: `OnUnmet::Skip` means "leave this migration
-    /// pending", which is a per-migration verdict with no whole-plan reading, and
-    /// hoisting the `dropColumn` assertion would move when an already-shipped
-    /// refusal fires. This variant is `Halt`-only by construction (the lower stamps
-    /// it through `PreconditionCheck::halt`) and is engine-stamped, never authored,
-    /// so hoisting it changes nothing an author can observe except WHEN the refusal
-    /// arrives - which is the entire point.
+    /// WHICH assertions belong here is decided by
+    /// [`crate::apply::plan_precondition`], not by variant and not by taste: an
+    /// assertion is plan-stable only when it asks whether anything is IN THE WAY
+    /// (which only a removal can repair) and no earlier step of the plan can
+    /// remove anything. Everything else stays at the per-migration seam, which
+    /// also stays exactly where it is for the assertions that DO hoist - it is the
+    /// seam a direct executor caller reaches, and re-asking under the same held
+    /// lock costs one catalog read and cannot disagree.
     ///
-    /// Backends with no catalog to consult answer "nothing blocks it" from the
-    /// trait default, so this is a no-op on SQLite and MySQL - which also never
-    /// receive the stamp, since the lower gates it on PostgreSQL.
+    /// A backend with no plan-level evaluator ABSTAINS
+    /// ([`crate::apply::backend::PlanPreconditionVerdict::Abstain`]), so SQLite
+    /// and MySQL are byte-identical: their per-migration seam still fails closed
+    /// on a declared precondition, at the same place, with the same wording.
+    ///
+    /// The refusal is the one the per-migration seam would have produced, for the
+    /// same version, with the same text. Only WHEN it arrives changes - and with
+    /// it, whether the steps before it have committed.
     ///
     /// # Errors
-    /// [`ApplyError::ColumnTypeChangeBlocked`] naming the column and what the
-    /// database says blocks it.
-    async fn preflight_plan_column_retypes<B: MigrationBackend>(
+    /// [`ApplyError::ColumnTypeChangeBlocked`] for an unmet retype assertion -
+    /// the shape that preflight already reported - and
+    /// [`ApplyError::PreconditionFailed`] for every other, byte-identical to the
+    /// per-migration seam's.
+    async fn preflight_plan_preconditions<B: MigrationBackend>(
         &self,
         steps: &[PlanStep],
         backend: &B,
         exec_cfg: &ExecutorConfig,
     ) -> Result<(), DeclarativeApplyError> {
-        for step in steps {
-            let PlanStep::Ddl(m) = step else { continue };
-            for pc in &m.preconditions {
-                let crate::model::precondition::Precondition::ColumnTypeChangeHasNoBlockers {
+        use crate::apply::backend::PlanPreconditionVerdict;
+        use crate::apply::plan_precondition;
+
+        // The overwhelming majority of plans declare no precondition at all. Ask
+        // the cheap structural question before paying for a journal read and a
+        // parse per step.
+        if !plan_precondition::plan_declares_hoistable_shape(steps) {
+            return Ok(());
+        }
+
+        // The executor's pending set is `set - completed - superseded`, and a
+        // migration outside it never has its preconditions evaluated. Judging one
+        // here would not be the same question asked earlier - it would be a NEW
+        // gate on a step this run will not run, and it would refuse a retry that
+        // succeeds today. The single-variant retype preflight this replaces read
+        // every step unconditionally, which is exactly that bug: a completed
+        // retype whose column later acquired a dependent refused its own plan
+        // forever.
+        let mut satisfied: std::collections::BTreeSet<String> = backend
+            .applied(exec_cfg)
+            .await
+            .map_err(|error| EngineError::Apply(ApplyError::Journal(error)))?
+            .into_iter()
+            .filter(|entry| matches!(entry.phase, crate::apply::journal::Phase::Completed))
+            .map(|entry| entry.version)
+            .collect();
+        satisfied.extend(
+            backend
+                .superseded_versions(exec_cfg)
+                .await
+                .map_err(|error| EngineError::Apply(ApplyError::Journal(error)))?,
+        );
+
+        for hoisted in plan_precondition::plan_stable_checks(steps, &satisfied) {
+            let verdict = backend
+                .evaluate_plan_precondition(exec_cfg, hoisted.version, hoisted.check)
+                .await
+                .map_err(EngineError::Apply)?;
+            let PlanPreconditionVerdict::Unmet { blockers } = verdict else {
+                continue;
+            };
+            // The retype keeps the refusal its own preflight shipped, whose text
+            // explains the half-migration this whole phase exists to prevent.
+            // Every other assertion reports what the per-migration seam would
+            // have, so moving the firing point never changes the reading.
+            let error = match hoisted.check {
+                crate::model::precondition::Precondition::ColumnTypeChangeHasNoBlockers {
                     table,
                     column,
-                } = &pc.check
-                else {
-                    continue;
-                };
-                let blockers = backend
-                    .column_type_change_blockers(exec_cfg, table, column)
-                    .await
-                    .map_err(EngineError::Apply)?;
-                if !blockers.is_empty() {
-                    return Err(DeclarativeApplyError::from(EngineError::Apply(
-                        ApplyError::ColumnTypeChangeBlocked {
-                            table: table.clone(),
-                            column: column.clone(),
-                            blockers,
-                        },
-                    )));
-                }
-            }
+                } => ApplyError::ColumnTypeChangeBlocked {
+                    table: table.clone(),
+                    column: column.clone(),
+                    blockers,
+                },
+                check => crate::apply::precondition::unmet_halt_error(
+                    hoisted.version,
+                    check,
+                    Some(&blockers),
+                ),
+            };
+            return Err(DeclarativeApplyError::from(EngineError::Apply(error)));
         }
         Ok(())
     }
