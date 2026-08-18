@@ -2399,7 +2399,6 @@ if [ "$DB9_BUILD_RC" = "0" ] && [ -f "$TODOS/dist/app.zship" ]; then
     DB9_CREATOR="$(node -e 'console.log(require("crypto").randomUUID())')"
     docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.users (id,email,name,email_verified_at) VALUES ('$DB9_CREATOR','golden-db9-$DB9_CREATOR@zeroship.test'::citext,'Golden DB9',NOW());
-INSERT INTO zeroship.platform_admin_roles (user_id,role,granted_by) VALUES ('$DB9_CREATOR','admin','$DB9_CREATOR');
 INSERT INTO zeroship.app_members (app_id,user_id,role) VALUES ('$DB9_APP_ID','$DB9_CREATOR','owner') ON CONFLICT (app_id,user_id) DO UPDATE SET role='owner';
 SQL
     DB9_TOKEN="$(e2e_mint_platform_bearer "$DB9_CREATOR" "$DB9_SCOPE" 2>/tmp/gp-dbtodos9-mint.log)"
@@ -2769,7 +2768,6 @@ else
   SC_CREATOR="$(node -e 'console.log(require("crypto").randomUUID())')"
   docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.users (id,email,name,email_verified_at) VALUES ('$SC_CREATOR','golden-scaffold-$SC_CREATOR@zeroship.test'::citext,'Golden Scaffold',NOW());
-INSERT INTO zeroship.platform_admin_roles (user_id,role,granted_by) VALUES ('$SC_CREATOR','admin','$SC_CREATOR');
 INSERT INTO zeroship.app_members (app_id,user_id,role) VALUES ('$SC_APP_ID','$SC_CREATOR','owner') ON CONFLICT (app_id,user_id) DO UPDATE SET role='owner';
 SQL
   SC_TOKEN="$(e2e_mint_platform_bearer "$SC_CREATOR" "$SC_SCOPE" 2>/tmp/gp-scaffold-mint.log)"

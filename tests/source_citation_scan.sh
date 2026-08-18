@@ -13,7 +13,7 @@
 # wrong answer:
 #
 #   1. TWO BASES, not one. A repo-root-only check reports 106 unresolvable, of
-#      which ~89 are fine: `tests/admin_handlers_test.rs` cited inside
+#      which ~89 are fine: `tests/net_grants_test.rs` cited inside
 #      `crates/control/src/api.rs` means `crates/control/tests/...`, resolved
 #      against the nearest ancestor holding a Cargo.toml or package.json.
 #      Distribution: 235 repo-relative, 124 package-relative, 17 neither.

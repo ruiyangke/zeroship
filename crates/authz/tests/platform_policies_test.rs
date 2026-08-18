@@ -1,3 +1,14 @@
+//! The shipped static Cedar set, after the platform staff roles were deleted.
+//!
+//! The four staff policies (`admin` / `support` / `billing` / `readonly`) each
+//! permitted an unconstrained `resource`, so each was a cross-tenant grant and
+//! `admin` was a literal universal allow. What is left is two families: the
+//! self-scoped creator baseline, and the `app_members`-bound per-app roles.
+//!
+//! The tests that asserted those roles' powers are gone with them. What remains
+//! here is the property they were the threat to: no principal, with or without
+//! app membership, reaches an app it is not a member of.
+
 use std::str::FromStr;
 
 use cedar_policy::{
@@ -12,54 +23,25 @@ const APP_ID: &str = "app_blog";
 fn all_static_policies_parse_cleanly() {
     let policies = load_platform_policies().expect("static policies should parse");
 
-    assert_eq!(policies.policies().count(), 8);
-}
-
-#[test]
-fn admin_role_permits_any_action() {
-    let policies = load_platform_policies().expect("static policies should parse");
-    let request = request("admin_user", "billing:write", APP_ID);
-    let entities = entities("admin_user", "admin");
-
-    let decision = Authorizer::new()
-        .is_authorized(&request, &policies, &entities)
-        .decision();
-
-    assert_eq!(decision, Decision::Allow);
-}
-
-#[test]
-fn non_admin_user_does_not_get_admin_powers() {
-    let policies = load_platform_policies().expect("static policies should parse");
-    let request = request("readonly_user", "apps:write", APP_ID);
-    let entities = entities("readonly_user", "readonly");
-
-    let decision = Authorizer::new()
-        .is_authorized(&request, &policies, &entities)
-        .decision();
-
-    assert_eq!(decision, Decision::Deny);
+    // 1 platform (self_service) + 3 creator (app_owner / app_editor /
+    // app_viewer). It was 8 while the four staff policies shipped.
+    assert_eq!(policies.policies().count(), 4);
 }
 
 /// Regression for finding C1 (cross-tenant read IDOR).
 ///
-/// Every ordinary creator with no `platform_admin_roles` row evaluates as the
-/// `DEFAULT_PLATFORM_ROLE`. That default MUST NOT be authorized for any read on
-/// an app the principal is not a member of — otherwise a freshly signed-up
-/// creator can read every other tenant's app metadata, env-var names, secret
-/// names, billing/earnings and deploy history.
-///
-/// Before the fix the SQL defaulted un-roled principals to `"readonly"`, and
-/// `readonly.cedar` permits these reads on an *unconstrained* resource (no
-/// `resource in principal.app_*_of` clause). With the default-role principal
-/// holding zero memberships of `APP_ID`, the read still resolved to Allow —
-/// this assertion failed. The fix makes the default a true zero-privilege role.
+/// A creator with no membership of `APP_ID` must be denied every read on it.
+/// This used to be about the DEFAULT platform role being zero-privilege, with
+/// the failure mode "the default is `readonly`, and `readonly.cedar` permits
+/// reads on an unconstrained resource". There is no platform role now, so the
+/// hazard is narrower and the assertion is the same one: `self_service.cedar`
+/// is scoped to `resource is Resource` and MUST NOT match a concrete `App`.
 #[test]
-fn default_platform_role_cannot_read_non_member_app() {
+fn a_creator_cannot_read_an_app_they_are_not_a_member_of() {
     let policies = load_platform_policies().expect("static policies should parse");
-    // A principal carrying the *default* platform role and NO membership of
-    // APP_ID (the entities() helper attaches no app_*_of sets).
-    let entities = entities("fresh_creator", zeroship_authz::DEFAULT_PLATFORM_ROLE);
+    // The entities() helper attaches no app_*_of sets, so this principal holds
+    // no membership of APP_ID.
+    let entities = entities("fresh_creator");
 
     for action in [
         "apps:read",
@@ -76,26 +58,9 @@ fn default_platform_role_cannot_read_non_member_app() {
         assert_eq!(
             decision,
             Decision::Deny,
-            "default-role creator must be DENIED cross-tenant {action} on a non-member app",
+            "a non-member creator must be DENIED cross-tenant {action} on that app",
         );
     }
-}
-
-/// A genuine `readonly` *staff* role (explicitly granted via
-/// `platform_admin_roles`) is still allowed to read — that is its purpose. This
-/// pins the contract so the C1 fix does not over-restrict legitimately granted
-/// platform staff.
-#[test]
-fn granted_readonly_staff_role_still_reads() {
-    let policies = load_platform_policies().expect("static policies should parse");
-    let request = request("staff", "apps:read", APP_ID);
-    let entities = entities("staff", "readonly");
-
-    let decision = Authorizer::new()
-        .is_authorized(&request, &policies, &entities)
-        .decision();
-
-    assert_eq!(decision, Decision::Allow);
 }
 
 /// **PR9c CRITICAL regression — operator-vs-creator separation for migration
@@ -103,25 +68,29 @@ fn granted_readonly_staff_role_still_reads() {
 /// over their own app, but MUST be DENIED the operator-only
 /// `migrations:approve` action — otherwise the owner (or a prompt-injected AI
 /// deploying on their behalf) could self-approve a destructive/online go-live by
-/// passing `?approved_versions=`, defeating the anti-bypass. Only the platform
-/// `admin` role grants it.
+/// passing `?approved_versions=`, defeating the anti-bypass.
 ///
 /// Pre-fix `app_owner.cedar` permitted an UNBOUND `action`, so it granted EVERY
 /// action including `migrations:approve`; this assertion would have FAILED RED
 /// (Allow instead of Deny).
+///
+/// NOTHING grants that action now. `admin.cedar`'s universal allow was the only
+/// policy that ever matched it, and the route was already unreachable for a
+/// second, independent reason: `migrations:approve` has no OAuth scope token,
+/// and `enforce` intersects a bearer's wrapper with the static set. Whether it
+/// should become reachable, and how, is deliberately left open.
 #[test]
 fn app_owner_is_denied_operator_only_migration_approval() {
     let policies = load_platform_policies().expect("static policies should parse");
 
-    // Owner of APP_ID, no platform role (a plain creator). `app_owner_of` is a SET
-    // of App entity refs — the same shape `entities::restricted_app_set` builds — so
-    // `resource in principal.app_owner_of` matches APP_ID.
+    // Owner of APP_ID. `app_owner_of` is a SET of App entity refs — the same
+    // shape `entities::restricted_app_set` builds — so `resource in
+    // principal.app_owner_of` matches APP_ID.
     let entities = Entities::from_json_value(
         json!([
             {
                 "uid": { "type": "User", "id": "owner_user" },
                 "attrs": {
-                    "platform_role": zeroship_authz::DEFAULT_PLATFORM_ROLE,
                     "app_owner_of": [ { "__entity": { "type": "App", "id": APP_ID } } ]
                 },
                 "parents": []
@@ -159,26 +128,6 @@ fn app_owner_is_denied_operator_only_migration_approval() {
     );
 }
 
-/// The operator side of the same separation: the platform `admin` role's
-/// universal-allow DOES grant `migrations:approve`, so an operator can drive a
-/// reviewed go-live.
-#[test]
-fn platform_admin_is_allowed_migration_approval() {
-    let policies = load_platform_policies().expect("static policies should parse");
-    let request = request("admin_user", "migrations:approve", APP_ID);
-    let entities = entities("admin_user", "admin");
-
-    let decision = Authorizer::new()
-        .is_authorized(&request, &policies, &entities)
-        .decision();
-
-    assert_eq!(
-        decision,
-        Decision::Allow,
-        "platform admin must be able to approve a reviewed migration go-live"
-    );
-}
-
 fn request(principal_id: &str, action: &str, app_id: &str) -> Request {
     Request::new(
         entity_uid("User", principal_id),
@@ -190,12 +139,12 @@ fn request(principal_id: &str, action: &str, app_id: &str) -> Request {
     .expect("request should be valid")
 }
 
-fn entities(user_id: &str, platform_role: &str) -> Entities {
+fn entities(user_id: &str) -> Entities {
     Entities::from_json_value(
         json!([
             {
                 "uid": { "type": "User", "id": user_id },
-                "attrs": { "platform_role": platform_role },
+                "attrs": {},
                 "parents": []
             },
             {

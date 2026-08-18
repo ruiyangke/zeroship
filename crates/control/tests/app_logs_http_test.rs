@@ -133,7 +133,6 @@ async fn worker_logs(path: web::types::Path<String>) -> web::HttpResponse {
 async fn app_logs_route_proxies_worker_lines() {
     let db_url = db_url();
 
-    let app_id = Uuid::new_v4();
     let worker = test::server(async || {
         web::App::new().service(
             web::resource("/logs/{app_id}").route(web::get().to(worker_logs)),
@@ -141,6 +140,21 @@ async fn app_logs_route_proxies_worker_lines() {
     })
     .await;
     let fixture = build_test_state(&db_url, vec![worker.url("/")]).await;
+    // A REAL app the caller owns. This used to be a bare `Uuid::new_v4()` with
+    // no app row and no membership, which reached the worker proxy only because
+    // the caller held the deleted universal-allow platform role.
+    let pat = common::authz_fixture::seeded_principal(&fixture.state).await;
+    let app_id = fixture
+        .state
+        .registry
+        .create_app(
+            &format!("logs-{}", &Uuid::new_v4().simple().to_string()[..10]),
+            &zeroship_control::plan_catalog::free_plan_id(),
+            &pat.user_id,
+        )
+        .await
+        .expect("create app")
+        .id;
 
     let state = fixture.state.clone();
     let control = test::server(move || {
@@ -161,7 +175,6 @@ async fn app_logs_route_proxies_worker_lines() {
         .expect("unauthenticated control response");
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
-    let pat = common::authz_fixture::admin_principal(&fixture.state).await;
     let response = control
         .get(format!("/api/apps/{app_id}/logs"))
         .header("authorization", pat.bearer())

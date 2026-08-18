@@ -17,7 +17,7 @@ use ntex::web::{self, types::{Path, State}};
 use serde::Deserialize;
 use sha2::Sha256;
 use uuid::Uuid;
-use zeroship_authz::{Action as AuthzAction, Resource};
+
 
 use crate::audit::{self, Action, AuditEntry};
 use crate::authz_guard::AuthzGuard;
@@ -76,6 +76,14 @@ fn stripe_err_response(e: StripeError) -> web::HttpResponse {
 
 fn bad_creator_id() -> web::HttpResponse { err_json(400, "bad creator_id") }
 
+/// Refusal for a principal-bound `:id` route reached for SOMEONE ELSE.
+///
+/// These routes have no cross-creator arm at all now, so this is the whole
+/// answer rather than a fallback before an operator probe.
+fn forbidden_other_creator() -> web::HttpResponse {
+    err_json(403, "creator id does not match the authenticated principal")
+}
+
 /// `true` iff `s` is a 3-letter lowercase ISO currency code (`^[a-z]{3}$`).
 /// Stripe currencies are lowercase 3-letter codes; reject anything else before
 /// it reaches the wire (m1).
@@ -114,9 +122,9 @@ const CONNECT_ACCOUNT_COUNTRY: &str = "US";
 /// persist it, then return a real `account_links` hosted-onboarding URL.
 ///
 /// **`:id` is bound to the principal** (self-service, like `billing_setup`): a
-/// creator onboards their OWN account, OR a platform billing operator
-/// (`BillingWrite`/`Resource::Any`) acts on their behalf. A creator calling
-/// onboard for a DIFFERENT creator's id is denied — closing the cross-creator hole.
+/// creator onboards their OWN account, and only their own. A creator calling
+/// onboard for a DIFFERENT creator's id is denied - closing the cross-creator
+/// hole - and there is no operator-on-behalf arm behind that denial any more.
 pub async fn onboard(
     req: web::HttpRequest,
     path: Path<String>,
@@ -126,11 +134,11 @@ pub async fn onboard(
     if let Some(r) = rate_limit(&req, &state.admin_limiter, "admin", &state).await { return r; }
     let Ok(creator_id) = Uuid::parse_str(&path) else { return bad_creator_id(); };
 
-    // Bind `:id` to the principal: self-service OR an operator with BillingWrite.
+    // `:id` is bound to the principal. The cross-creator arm behind this used
+    // to probe BillingWrite on Resource::Any; no principal can hold that now,
+    // so it was a branch that could only ever deny.
     if authz.principal_id != creator_id {
-        if let Err(resp) = authz.require(AuthzAction::BillingWrite, Resource::Any, &state).await {
-            return resp;
-        }
+        return forbidden_other_creator();
     }
 
     if state.stripe_secret_key.expose_secret().is_empty() {
@@ -221,14 +229,11 @@ pub async fn billing_setup(
     let Ok(creator_id) = Uuid::parse_str(&path) else { return bad_creator_id(); };
 
     // CRIT-10: billing/setup is SELF-SERVICE — a creator sets up their OWN card.
-    // Allow when the authenticated principal IS the creator (`:id` bound to the
-    // principal), OR when a platform billing operator acts (Cedar BillingWrite).
-    // This both opens self-service and closes the cross-creator hole (a creator
-    // calling billing/setup for a DIFFERENT creator's id is denied).
+    // `:id` is bound to the principal, which closes the cross-creator hole. The
+    // operator-acts-on-behalf arm that used to sit here probed BillingWrite on
+    // Resource::Any; nothing grants that now, so it only ever denied.
     if authz.principal_id != creator_id {
-        if let Err(resp) = authz.require(AuthzAction::BillingWrite, Resource::Any, &state).await {
-            return resp;
-        }
+        return forbidden_other_creator();
     }
 
     if state.stripe_secret_key.is_empty() {
@@ -331,11 +336,11 @@ pub async fn callback(
     if let Some(r) = rate_limit(&req, &state.admin_limiter, "admin", &state).await { return r; }
     let Ok(creator_id) = Uuid::parse_str(&path) else { return bad_creator_id(); };
 
-    // Bind `:id` to the principal: self-service OR an operator with BillingWrite.
+    // `:id` is bound to the principal. The cross-creator arm behind this used
+    // to probe BillingWrite on Resource::Any; no principal can hold that now,
+    // so it was a branch that could only ever deny.
     if authz.principal_id != creator_id {
-        if let Err(resp) = authz.require(AuthzAction::BillingWrite, Resource::Any, &state).await {
-            return resp;
-        }
+        return forbidden_other_creator();
     }
 
     if state.stripe_secret_key.expose_secret().is_empty() {
@@ -461,10 +466,9 @@ pub async fn connect_checkout(
     if let Some(r) = rate_limit(&req, &state.admin_limiter, "admin", &state).await { return r; }
     let Ok(creator_id) = Uuid::parse_str(&path) else { return bad_creator_id(); };
 
+    // `:id` is bound to the principal; the operator-on-behalf arm is deleted.
     if authz.principal_id != creator_id {
-        if let Err(resp) = authz.require(AuthzAction::BillingWrite, Resource::Any, &state).await {
-            return resp;
-        }
+        return forbidden_other_creator();
     }
 
     if body.amount_cents == 0 {
@@ -553,105 +557,14 @@ pub async fn connect_checkout(
     }
 }
 
-// ----------------------------------------------------------------
-// Fee policy administration (OPERATOR-ONLY — ISS-29)
-// ----------------------------------------------------------------
-
-#[derive(Debug, Deserialize)]
-pub struct FeePolicyBody {
-    /// "fixed" | "percent".
-    pub kind: String,
-    /// kind="fixed": the flat fee in cents.
-    #[serde(default)]
-    pub amount_cents: Option<u64>,
-    /// kind="percent": basis points (1500 = 15%).
-    #[serde(default)]
-    pub percent_bps: Option<u32>,
-    #[serde(default)]
-    pub cap_cents: Option<u64>,
-    #[serde(default)]
-    pub floor_cents: Option<u64>,
-}
-
-/// `PUT /api/creators/:id/fee-policy` — set a creator's application-fee policy.
-///
-/// **OPERATOR-ONLY (ISS-29).** A creator self-editing their own fee is a
-/// privilege escalation (they could zero it). This handler ALWAYS requires Cedar
-/// `BillingWrite` on `Resource::Any` (the operator/master-key grant) — there is
-/// NO self-service branch, even when the principal IS the path creator. The fee
-/// lives on the server and only the platform may change it.
-pub async fn set_fee_policy(
-    req: web::HttpRequest,
-    path: Path<String>,
-    authz: AuthzGuard,
-    body: web::types::Json<FeePolicyBody>,
-    state: State<Arc<AppState>>,
-) -> web::HttpResponse {
-    if let Some(r) = rate_limit(&req, &state.admin_limiter, "admin", &state).await { return r; }
-    // OPERATOR-ONLY — no self-service branch. A creator principal is denied even
-    // for their OWN id.
-    if let Err(resp) = authz.require(AuthzAction::BillingWrite, Resource::Any, &state).await {
-        return resp;
-    }
-    let Ok(creator_id) = Uuid::parse_str(&path) else { return bad_creator_id(); };
-
-    let policy = match body.kind.as_str() {
-        "fixed" => {
-            let Some(amount) = body.amount_cents else {
-                return err_json(400, "fixed fee requires amount_cents");
-            };
-            crate::fee_policy::FeePolicy::Fixed { amount_cents: amount }
-        }
-        "percent" => {
-            let Some(bps) = body.percent_bps else {
-                return err_json(400, "percent fee requires percent_bps");
-            };
-            if bps > 10_000 {
-                return err_json(400, "percent_bps must be in [0, 10000]");
-            }
-            // m2: a floor above the cap pins every fee to the cap regardless of
-            // percent — almost certainly an operator typo. Reject it (the DB has
-            // a matching CHECK as defense in depth).
-            if let (Some(floor), Some(cap)) = (body.floor_cents, body.cap_cents) {
-                if floor > cap {
-                    return err_json(400, "floor_cents must not exceed cap_cents");
-                }
-            }
-            crate::fee_policy::FeePolicy::Percent {
-                bps,
-                cap_cents: body.cap_cents,
-                floor_cents: body.floor_cents,
-            }
-        }
-        other => return err_json(400, format!("unknown fee policy kind: {}", stripe_store::sanitize_for_display(other))),
-    };
-
-    let store = crate::fee_policy::FeePolicyStore::new(state.registry.clone());
-    match store.set(creator_id, policy).await {
-        Ok(()) => {
-            let ip = source_ip(&req, &state);
-            audit::log_with_detail(&state.registry, AuditEntry {
-                app_id: None,
-                creator_id: Some(creator_id),
-                actor_user_id: Some(authz.principal_id),
-                action: Action::SetFeePolicy,
-                resource: None,
-                source_ip: ip.as_deref(),
-            }, &serde_json::json!({
-                "creator_id": creator_id.to_string(),
-                "kind": body.kind,
-                "amount_cents": body.amount_cents,
-                "percent_bps": body.percent_bps,
-                "cap_cents": body.cap_cents,
-                "floor_cents": body.floor_cents,
-            })).await;
-            web::HttpResponse::NoContent().finish()
-        }
-        Err(e) => stripe_err_response(e),
-    }
-}
-
 /// Dashboard earnings view.
+///
+/// **`:id` is bound to the principal** (self-service, like `billing_setup` and
+/// `onboard`): a creator reads their OWN earnings, and nobody reads anyone
+/// else's. This used to require `BillingRead` on `Resource::Any` - an operator
+/// grant - which meant a creator could not read their own earnings at all and
+/// the whole route hung off the platform staff roles. Reading your own payout
+/// history is self-service; it was mis-gated, not operator-shaped.
 pub async fn earnings(
     req: web::HttpRequest,
     path: Path<String>,
@@ -659,10 +572,10 @@ pub async fn earnings(
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
     if let Some(r) = rate_limit(&req, &state.admin_limiter, "admin", &state).await { return r; }
-    if let Err(resp) = authz.require(AuthzAction::BillingRead, Resource::Any, &state).await {
-        return resp;
-    }
     let Ok(creator_id) = Uuid::parse_str(&path) else { return bad_creator_id(); };
+    if authz.principal_id != creator_id {
+        return forbidden_other_creator();
+    }
 
     let totals = match state.stripe_store.total_earnings(creator_id).await {
         Ok(t) => t,
@@ -693,6 +606,12 @@ pub async fn earnings(
 }
 
 /// Unlink the creator's Stripe account. Cascades and deletes payouts.
+///
+/// **`:id` is bound to the principal** (self-service, like `onboard`): a creator
+/// disconnects their OWN Stripe account. It used to require `BillingWrite` on
+/// `Resource::Any`, so the creator who linked the account could not unlink it -
+/// only platform staff could. Disconnecting your own payment account is the
+/// creator's call.
 pub async fn unlink(
     req: web::HttpRequest,
     path: Path<String>,
@@ -700,10 +619,10 @@ pub async fn unlink(
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
     if let Some(r) = rate_limit(&req, &state.admin_limiter, "admin", &state).await { return r; }
-    if let Err(resp) = authz.require(AuthzAction::BillingWrite, Resource::Any, &state).await {
-        return resp;
-    }
     let Ok(creator_id) = Uuid::parse_str(&path) else { return bad_creator_id(); };
+    if authz.principal_id != creator_id {
+        return forbidden_other_creator();
+    }
 
     match state.stripe_store.unlink_account(creator_id).await {
         Ok(true) => {

@@ -94,7 +94,7 @@ trap cleanup EXIT
 
 echo "=== bring-up ==="
 stack_up || { echo "stack_up failed"; exit 1; }
-mint_admin_bearer || { echo "mint_admin_bearer failed"; exit 1; }
+mint_creator_bearer || { echo "mint_creator_bearer failed"; exit 1; }
 
 # --- fixture ----------------------------------------------------------------
 # The app routes on `new URL(request.url).pathname` -- the same thing every

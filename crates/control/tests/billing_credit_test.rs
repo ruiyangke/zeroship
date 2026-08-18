@@ -917,18 +917,13 @@ impl Caller {
 }
 
 /// Issue a real platform OAuth bearer scoped to `scope` (faithful AuthzGuard path).
-async fn issue_bearer(state: &AppState, user_id: Uuid, role: Option<&str>, scope: &str) -> Caller {
-    if let Some(role) = role {
-        state
-            .control_pg
-            .execute(
-                "INSERT INTO zeroship.platform_admin_roles (user_id, role, granted_by) \
-                 VALUES ($1, $2, $1) ON CONFLICT DO NOTHING",
-                &[&user_id, &role],
-            )
-            .await
-            .expect("insert platform role");
-    }
+/// Issue a platform OAuth bearer for `user_id` carrying `scope`.
+///
+/// It used to take an optional platform role and seed a `platform_admin_roles`
+/// row for the operator paths. That table and those roles are deleted, so every
+/// principal this mints is an ordinary creator.
+async fn issue_bearer(state: &AppState, user_id: Uuid, scope: &str) -> Caller {
+    let _ = state;
     Caller {
         token: common::platform_token_for_client(user_id, scope, common::CONSOLE_CLIENT_ID),
     }
@@ -942,108 +937,6 @@ async fn issue_bearer(state: &AppState, user_id: Uuid, role: Option<&str>, scope
 // deny it; that per-resource narrowing has no OAuth-scope equivalent, so the
 // denied caller below instead carries "billing:read" — a real, plausible
 // creator scope that simply omits the billing:write action under test.
-
-#[compio::test]
-async fn grant_endpoint_operator_only_and_idempotency_conflict() {
-    let url = db_url();
-    let fx = build_fixture(&url, "endpoint").await;
-    let creator = make_user(&fx.state, "endpoint").await;
-    ensure_creator_billing(&fx.state, creator).await;
-
-    // A creator bearer that lacks billing:write (a real creator scope, not the
-    // fleet-wide operator grant) and an operator bearer holding billing:write.
-    let creator_user = make_user(&fx.state, "creator-token").await;
-    let creator_caller = issue_bearer(&fx.state, creator_user, None, "billing:read").await;
-    let op_user = make_user(&fx.state, "operator").await;
-    let op_caller = issue_bearer(&fx.state, op_user, Some("billing"), "billing:write").await;
-
-    let app = test::init_service(
-        web::App::new().state(fx.state.clone()).service(
-            web::resource("/api/billing/credit")
-                .route(web::post().to(zeroship_control::api::grant_credit)),
-        ),
-    )
-    .await;
-    let key = format!("idem-{}", Uuid::new_v4());
-    let body = serde_json::json!({"creator_id": creator, "amount_cents": 500});
-
-    // (1) A creator bearer without billing:write is 403 — credit is never self-grantable.
-    let req = test::TestRequest::post()
-        .uri("/api/billing/credit")
-        .header("idempotency-key", key.as_str())
-        .header("authorization", creator_caller.bearer())
-        .set_json(&body)
-        .to_request();
-    // Status only: a retained `WebResponse` keeps the app state - and its Postgres
-    // client - alive past the teardown at the end of this test.
-    let status = test::call_service(&app, req).await.status();
-    assert_eq!(
-        status,
-        StatusCode::FORBIDDEN,
-        "a creator without billing:write must be 403 on the operator-only credit endpoint",
-    );
-
-    // (2) Operator grant succeeds (201 Created).
-    let req = test::TestRequest::post()
-        .uri("/api/billing/credit")
-        .header("idempotency-key", key.as_str())
-        .header("authorization", op_caller.bearer())
-        .set_json(&body)
-        .to_request();
-    let status = test::call_service(&app, req).await.status();
-    assert_eq!(status, StatusCode::CREATED, "operator grant is 201");
-
-    // (3) Same key + SAME body ⇒ 200 (idempotent retry, no second grant).
-    let req = test::TestRequest::post()
-        .uri("/api/billing/credit")
-        .header("idempotency-key", key.as_str())
-        .header("authorization", op_caller.bearer())
-        .set_json(&body)
-        .to_request();
-    let status = test::call_service(&app, req).await.status();
-    assert_eq!(status, StatusCode::OK, "same key+body is an idempotent 200 retry");
-
-    // (4) Same key + DIFFERENT body ⇒ 409 (no double grant).
-    let body2 = serde_json::json!({"creator_id": creator, "amount_cents": 999});
-    let req = test::TestRequest::post()
-        .uri("/api/billing/credit")
-        .header("idempotency-key", key.as_str())
-        .header("authorization", op_caller.bearer())
-        .set_json(&body2)
-        .to_request();
-    let status = test::call_service(&app, req).await.status();
-    assert_eq!(status, StatusCode::CONFLICT, "same key + different body is a 409");
-
-    // Exactly ONE grant for the key, amount 500.
-    let rows = fx
-        .state
-        .control_pg
-        .query(
-            "SELECT amount_cents FROM zeroship.credit_ledger WHERE idempotency_key = $1",
-            &[&key],
-        )
-        .await
-        .expect("count");
-    assert_eq!(rows.len(), 1, "exactly one grant for the reused key");
-    assert_eq!(rows[0].get::<_, i64>("amount_cents"), 500, "the first body won; no second grant");
-
-    // (5) Missing Idempotency-Key header ⇒ 400.
-    let req = test::TestRequest::post()
-        .uri("/api/billing/credit")
-        .header("authorization", op_caller.bearer())
-        .set_json(&body)
-        .to_request();
-    let status = test::call_service(&app, req).await.status();
-    assert_eq!(status, StatusCode::BAD_REQUEST, "missing Idempotency-Key is a 400");
-
-    // Teardown: the service and the fixture both hold connections, and locals
-    // are dropped only after the body returns - by which point the runtime is
-    // gone and the sockets can no longer be closed. Drop them explicitly, then
-    // wait for the close to land.
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
-}
 
 // ===========================================================================
 // MINOR-2: `note` IS part of the grant fingerprint. A reused key with a DIFFERENT
@@ -1251,54 +1144,6 @@ async fn grant_kind_is_case_insensitive() {
 // FK→400 path and the real→201 path both still hold under the SQLSTATE classifier and
 // the single transaction (a non-FK error now routes to 500 via `error_response`).
 // ===========================================================================
-
-#[compio::test]
-async fn grant_endpoint_unknown_creator_is_fk_400() {
-    let url = db_url();
-    let fx = build_fixture(&url, "fk400").await;
-    let op_user = make_user(&fx.state, "operator-fk").await;
-    let op_caller = issue_bearer(&fx.state, op_user, Some("billing"), "billing:write").await;
-
-    let app = test::init_service(
-        web::App::new().state(fx.state.clone()).service(
-            web::resource("/api/billing/credit")
-                .route(web::post().to(zeroship_control::api::grant_credit)),
-        ),
-    )
-    .await;
-
-    // A creator_id with NO `users` row ⇒ the creator_billing FK violates ⇒ 400.
-    let ghost = Uuid::new_v4();
-    let body = serde_json::json!({"creator_id": ghost, "amount_cents": 500});
-    let req = test::TestRequest::post()
-        .uri("/api/billing/credit")
-        .header("idempotency-key", format!("idem-{}", Uuid::new_v4()))
-        .header("authorization", op_caller.bearer())
-        .set_json(&body)
-        .to_request();
-    let status = test::call_service(&app, req).await.status();
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "a grant for a non-existent creator is a 400 (FK violation classified by SQLSTATE 23503)",
-    );
-
-    // A grant for a REAL creator still succeeds (201) through the same path.
-    let real = make_user(&fx.state, "real-creator").await;
-    let body_ok = serde_json::json!({"creator_id": real, "amount_cents": 500});
-    let req = test::TestRequest::post()
-        .uri("/api/billing/credit")
-        .header("idempotency-key", format!("idem-{}", Uuid::new_v4()))
-        .header("authorization", op_caller.bearer())
-        .set_json(&body_ok)
-        .to_request();
-    let status = test::call_service(&app, req).await.status();
-    assert_eq!(status, StatusCode::CREATED, "a grant for a real creator is 201");
-
-    drop(app);
-    drop(fx);
-    common::drain_pg().await;
-}
 
 // ===========================================================================
 // MAJOR-1: `consume_at_finalize` self-serializes per creator via a

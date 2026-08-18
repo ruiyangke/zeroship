@@ -8,7 +8,7 @@
 //!
 //! Zero tokio: HTTP is `cyper::Client` + `compio::time::timeout`, the SAME idiom
 //! the control plane already uses for outbound provider calls
-//! (`bootstrap_builder.rs`, `oauth_handlers.rs`) and the worker-log GET
+//! (`bootstrap_builder.rs`) and the worker-log GET
 //! (`api.rs::fetch_worker_logs`). Bodies are `application/x-www-form-urlencoded`
 //! (Stripe's wire); we hand-encode so nested params (`period[start]`,
 //! `metadata[creator_id]`) come out in Stripe's bracket form. Money-moving /

@@ -5,11 +5,15 @@ use sha2::{Digest, Sha256};
 
 use crate::{lower, AuthzError, Policy};
 
+/// The whole shipped policy set. There is no platform STAFF policy in it any
+/// more: `admin` / `support` / `billing` / `readonly` each permitted an
+/// unconstrained `resource`, so every one of them was a cross-tenant grant, and
+/// `admin` was a literal universal allow. A hosting vendor's staff permission
+/// model belongs to the vendor's own portal, against its own copy of the data.
+///
+/// What is left is exactly two families: the self-scoped creator baseline, and
+/// the `app_members`-bound per-app roles.
 const PLATFORM_POLICY_SOURCES: &[&str] = &[
-    include_str!("../../../deploy/policies/platform/admin.cedar"),
-    include_str!("../../../deploy/policies/platform/support.cedar"),
-    include_str!("../../../deploy/policies/platform/billing.cedar"),
-    include_str!("../../../deploy/policies/platform/readonly.cedar"),
     include_str!("../../../deploy/policies/platform/self_service.cedar"),
     include_str!("../../../deploy/policies/creator/app_owner.cedar"),
     include_str!("../../../deploy/policies/creator/app_editor.cedar"),

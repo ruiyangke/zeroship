@@ -2,11 +2,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::entities::cedar_string;
 
+/// What an authorization request is ABOUT.
+///
+/// There is no `Org` variant. It existed for exactly one caller - the operator
+/// gate, which probed `team:write` on a synthetic `Org::"zeroship_platform"`
+/// that no migration ever inserted - and only the deleted universal-allow
+/// policy could satisfy it. Reintroducing an org resource later means
+/// introducing real orgs, with rows and membership, rather than a sentinel id.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Resource {
     App { id: String },
-    Org { id: String },
     Any,
 }
 
@@ -15,19 +21,18 @@ impl Resource {
     pub fn cedar_uid(&self) -> String {
         match self {
             Self::App { id } => format!("App::{}", cedar_string(id)),
-            Self::Org { id } => format!("Org::{}", cedar_string(id)),
             Self::Any => "*".to_owned(),
         }
     }
 
     /// Validate resource IDs before they reach Cedar source lowering.
     ///
-    /// App and org ids are platform identifiers, not arbitrary Cedar strings.
+    /// An app id is a platform identifier, not an arbitrary Cedar string.
     /// Keeping the alphabet closed prevents source-level ambiguity in wrapper
     /// policies and fails bad HTTP path/input values before authorization.
     pub fn validate_ids(&self) -> Result<(), &'static str> {
         match self {
-            Self::App { id } | Self::Org { id } if !is_valid_resource_id(id) => {
+            Self::App { id } if !is_valid_resource_id(id) => {
                 Err("resource id must use only ASCII letters, digits, '_' or '-'")
             }
             _ => Ok(()),

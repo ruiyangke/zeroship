@@ -161,7 +161,6 @@ SCOPE="apps:read apps:write apps:deploy billing:read billing:write"
 CREATOR="$(node -e 'console.log(require("crypto").randomUUID())')"
 psql_exec >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.users (id,email,name,email_verified_at) VALUES ('$CREATOR','e2e-acct-$CREATOR@zeroship.test'::citext,'E2E Acct',NOW());
-INSERT INTO zeroship.platform_admin_roles (user_id,role,granted_by) VALUES ('$CREATOR','admin','$CREATOR');
 INSERT INTO zeroship.creator_billing (creator_id) VALUES ('$CREATOR') ON CONFLICT (creator_id) DO NOTHING;
 SQL
 ADMIN_TOKEN="$(e2e_mint_platform_bearer "$CREATOR" "$SCOPE")"

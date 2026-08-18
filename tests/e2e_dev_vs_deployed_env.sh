@@ -318,7 +318,7 @@ fi
 stack_up || { fail "stack bring-up failed"; exit 1; }   # stack_up resets $WORK
 cp "$DEV_WORK/dev.json" "$WORK/dev.json"
 cp "$DEV_WORK/dev.log"  "$WORK/dev.log" 2>/dev/null || true
-mint_admin_bearer || exit 1
+mint_creator_bearer || exit 1
 
 # Create the app FIRST so the vars land before the worker ever loads a bundle
 # (the worker builds its isolate from the env snapshot at load time).

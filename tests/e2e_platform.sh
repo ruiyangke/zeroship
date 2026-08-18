@@ -60,10 +60,10 @@ pass() { PASS=$((PASS + 1)); echo "  ✓ $1"; }
 fail() { FAIL=$((FAIL + 1)); echo "  ✗ $1"; }
 
 # The stack lib is SOURCED for stack_workspace / stack_pg_up /
-# mint_admin_bearer. Sourcing (rather than copying mint_admin_bearer here) is
-# deliberate: the admin credential is a four-part contract — users row,
-# platform_admin_roles row, a JWKS the named issuer actually serves, and the
-# at+jwt header/claim shape control verifies — and a copy of it in this file
+# mint_creator_bearer. Sourcing (rather than copying mint_creator_bearer here) is
+# deliberate: the creator credential is a three-part contract — users row, a
+# JWKS the named issuer actually serves, and the at+jwt header/claim shape
+# control verifies — and a copy of it in this file
 # would drift from the control plane the next time any of the four moves.
 # stack_workspace is what stands the issuer up. stack_up() is defined but
 # never called; its port defaults use `:=` so the ports set above win.
@@ -291,7 +291,7 @@ else fail "gateway unhealthy"; tail -15 "$WORK/gate.log" | sed 's/^/      /'; fi
 # this is the one place that aborts.
 echo ""
 echo "=== Setup: admin bearer ==="
-mint_admin_bearer || { echo "  ✗ cannot mint admin bearer — aborting"; echo "  Results: $PASS passed, $((FAIL + 1)) failed"; exit 1; }
+mint_creator_bearer || { echo "  ✗ cannot mint admin bearer — aborting"; echo "  Results: $PASS passed, $((FAIL + 1)) failed"; exit 1; }
 
 # ---------------------------------------------------------------------------
 # Test 2: App lifecycle

@@ -76,6 +76,6 @@ descriptor.
   frame. It complements, and does not duplicate, the curl harness.
 
 Both harnesses share one bring-up implementation: `tests/lib/e2e_stack.sh`
-(`stack_up` / `mint_admin_bearer` / `deploy_zship` / `stack_down`). The browser
+(`stack_up` / `mint_creator_bearer` / `deploy_zship` / `stack_down`). The browser
 harness uses a private port band (`ZEROSHIP_GATEWAY_PORT=8022`, etc.) and `*-bx` app slugs
 so it can coexist with the `*-e2e` curl-harness apps on the same host.

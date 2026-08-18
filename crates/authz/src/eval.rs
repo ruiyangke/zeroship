@@ -194,7 +194,6 @@ fn utc_minute_of_day(now: i64) -> i64 {
 fn resource_uid(resource: &Resource) -> Result<EntityUid, AuthzError> {
     match resource {
         Resource::App { id } => uid("App", id),
-        Resource::Org { id } => uid("Org", id),
         Resource::Any => uid("Resource", "*"),
     }
 }
@@ -244,7 +243,6 @@ async fn audit_decision(
 fn audit_resource(resource: &Resource) -> (&'static str, Option<String>) {
     match resource {
         Resource::App { id } => ("app", Some(id.clone())),
-        Resource::Org { id } => ("org", Some(id.clone())),
         Resource::Any => ("any", None),
     }
 }

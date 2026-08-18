@@ -6,8 +6,10 @@
 // bundle AUTHOR - the very principal the migration-approval anti-bypass must
 // exclude - so the operator-vs-creator separation requires that owning an app
 // does NOT grant the authority to self-approve that app's destructive
-// migrations. Only the platform `admin` role (admin.cedar, universal allow)
-// grants `migrations:approve`.
+// migrations. NOTHING grants `migrations:approve` now: the only policy that ever
+// matched it was admin.cedar's universal allow, which is deleted, and the action
+// has no OAuth scope token either. What replaces it is tracked separately, and
+// must stay operator-only rather than owner-satisfiable.
 permit (
   principal is User,
   action,

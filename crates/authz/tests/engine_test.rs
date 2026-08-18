@@ -47,7 +47,7 @@ fn multiple_statements_become_multiple_policies() {
             Statement {
                 effect: Effect::Deny,
                 actions: vec![Action::EnvWrite],
-                resources: vec![Resource::Org {
+                resources: vec![Resource::App {
                     id: "acme".to_owned(),
                 }],
                 conditions: vec![],

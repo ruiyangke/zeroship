@@ -178,6 +178,20 @@ pub struct ControlSection {
     pub audit_retention_months: Option<u32>,
     /// Audit retention cron tick in seconds.
     pub audit_retention_check_secs: Option<u64>,
+    /// DNS suffixes a creator's egress grant may NOT front with a wildcard,
+    /// extending the compiled-in `zeroship_core::net_policy` backstop.
+    ///
+    /// File-and-default ONLY, with no flag and no environment variable, so this
+    /// field is where it is actually read from - the `trusted_oauth_clients`
+    /// pattern, for the same reason: it is a list, and the generated
+    /// declarations carry scalars.
+    ///
+    /// `None` (key absent) is UNAVAILABLE and refuses every wildcard grant;
+    /// `Some(vec)` is exactly that extension, where an empty vec leaves only
+    /// the backstop. Absent config denies wildcards, never permits them - this
+    /// bounds creator input now that egress is self-service, so a permissive
+    /// value here is a fleet-wide widening.
+    pub frontable_wildcard_suffixes: Option<Vec<String>>,
 }
 
 /// Gateway operational values supplied by the overlay. See [`ControlSection`].
@@ -327,6 +341,42 @@ pub struct MeteringSection {
     pub outbox_wal_path: Option<String>,
 }
 
+/// One first-party OAuth client registered against the platform OP.
+///
+/// The shape mirrors what the deleted `POST /admin/oauth-clients` body carried,
+/// minus the two things a config file must not be asked to express: the
+/// generated-and-shown-once secret (supply one here, or use a public client),
+/// and `skip_consent`, which stays DERIVED from `trusted_oauth_clients` so a
+/// registration cannot grant itself consent-free access.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OauthClientRegistration {
+    /// Stable client identifier, e.g. `zeroship-console`.
+    pub client_id: String,
+    /// Human-readable name shown on the consent screen.
+    pub client_name: String,
+    /// Optional homepage shown on the consent screen.
+    pub client_uri: Option<String>,
+    /// Optional logo shown on the consent screen.
+    pub logo_uri: Option<String>,
+    /// Registered redirect URIs. HTTPS, or loopback HTTP.
+    pub redirect_uris: Vec<String>,
+    /// Scopes from the closed OAuth vocabulary this client may request.
+    pub scopes: Vec<String>,
+    /// `client_secret_basic` (confidential) or `none` (public).
+    pub token_endpoint_auth_method: String,
+    /// The confidential client's secret. Required for `client_secret_basic`,
+    /// forbidden for `none`. Only its hash is persisted.
+    ///
+    /// A literal is permitted here for the same reason `control_key` admits
+    /// one: the overlay may itself BE a mounted secret. The prohibition on a
+    /// plaintext secret applies to a TRACKED file, not to this format.
+    pub client_secret: Option<String>,
+    /// Whether the token endpoint may issue a refresh token to this client.
+    #[serde(default)]
+    pub refresh_allowed: bool,
+}
+
 /// Auth-domain values that can be supplied by the shared file overlay.
 ///
 /// Like [`ControlSection`], most of this exists so `deny_unknown_fields` still
@@ -410,6 +460,22 @@ pub struct AuthSection {
     /// `None` (key absent) means "use the compiled-in default set"; `Some(vec)`
     /// means exactly that set, where an empty vec is "no trusted clients".
     pub trusted_oauth_clients: Option<Vec<String>>,
+    /// The first-party relying parties registered against the platform's own
+    /// OP, reconciled into `zeroship.oauth_clients` at control boot.
+    ///
+    /// File-and-default ONLY, like `trusted_oauth_clients`: it is a list of
+    /// tables, and the generated declarations carry scalars. Registering an RP
+    /// of your own OP is a deployment decision, not a runtime one, which is why
+    /// this replaced the three `/admin/oauth-clients` routes rather than moving
+    /// them behind a different credential.
+    ///
+    /// `None` (key absent) leaves the table untouched. `Some(list)` makes this
+    /// the AUTHORITATIVE first-party set: entries are upserted, and a
+    /// first-party row that is no longer named is de-registered. Per-app
+    /// end-user clients (`oac_…`) and the platform CLI client are never touched
+    /// by that pruning - they are provisioned by the deploy path and by the
+    /// auth service, not from here.
+    pub oauth_clients: Option<Vec<OauthClientRegistration>>,
     /// Console origin(s) the auth-service login/signup/consent documents admit
     /// via CSP `frame-ancestors` so the console's immersive iframe login can
     /// embed them (design §4.3/§10.1). Deployment-injected, mirroring the
