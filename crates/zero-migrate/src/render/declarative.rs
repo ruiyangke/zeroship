@@ -1307,6 +1307,30 @@ pub(crate) fn mysql_collation_clause(case_sensitive: Option<bool>) -> &'static s
 ///
 /// Idempotent: a spelling that already carries a `COLLATE` is returned untouched, so
 /// re-rendering a column cannot stack two clauses.
+///
+/// # What an ALREADY-DEPLOYED table experiences: nothing, and that is the caveat
+///
+/// This changes what the engine EMITS, so it reaches new `CREATE TABLE` / `ADD COLUMN`
+/// statements only. A table deployed before it keeps its inherited `_ai_ci` enum and
+/// keeps reporting the `case_sensitive expected "" actual "false"` drift line, because
+/// the engine has no path that would fix it: the declarative differ refuses a MySQL
+/// column type change outright, and `SetColumnType` to a named enum on MySQL is
+/// `NamedTypeUnsupported { reason: "unreachable use-site" }`. Closing that gap is a
+/// separate change to the MySQL alter lane.
+///
+/// The manual repair was MEASURED rather than assumed, on MySQL 8.4.11, and it is
+/// cheaper than it looks:
+///
+/// ```sql
+/// ALTER TABLE t MODIFY c ENUM(...) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs
+/// ```
+///
+/// succeeds under `ALGORITHM=INSTANT`, copies no rows and leaves every stored value
+/// byte-identical - MySQL stores an enum as an index into the member list, so
+/// tightening the collation cannot reinterpret the data. What it CANNOT undo is the
+/// coercion that already happened: a row inserted as `'ARCHIVED'` under `_ai_ci` was
+/// stored as `'archived'` at INSERT time, and the original case is gone before any
+/// ALTER runs.
 pub(crate) fn mysql_pin_enum_collation(rendered: &str, case_sensitive: Option<bool>) -> String {
     let lower = rendered.trim().to_ascii_lowercase();
     if !lower.starts_with("enum(") || lower.contains(" collate ") {

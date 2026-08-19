@@ -48,11 +48,15 @@
 
 use crate::support;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::support::mysql::{quote_ident, DatabaseGuard, MysqlDevSession};
 use zero_migrate::apply::backend::MysqlBackend;
 use zero_migrate::driver::SqlSession;
+use zero_migrate::model::snapshot::SchemaSnapshot;
+use zero_migrate::render::declarative::{
+    desired_snapshot_for_dialect, CollectionDescriptor, DeclarativeAuthor, FieldDescriptor,
+};
 use zero_migrate::{
     diff_snapshots, fold_ops, resolve_create_table_policy, Approval, ExecutorConfig, GuardConfig,
     IrAuthor, LiveSchema, LockMode, MigrationBackend, MigrationEngine, MigrationIr, SqlDialect,
@@ -517,4 +521,188 @@ fn an_ir_enum_column_cannot_declare_case_insensitivity() {
         "the refusal must name the facet and the reason, so the pin's precondition is \
          readable from the failure; got: {refusal}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The DESCRIPTOR path, which reaches `ENUM(...)` by a completely different route.
+// ---------------------------------------------------------------------------
+//
+// A collection descriptor never carries an `enum(...)` type. It carries a `string`
+// field plus `enum_values`, which `field_check_constraints` turns into a
+// `CHECK ("col" IN (...))`, which `render_create_table_mysql_snapshot_statements`
+// then folds BACK into a native `ENUM(...)` on MySQL - replacing the column's whole
+// rendered type, and with it the collation `column_type_for_render` had pinned.
+//
+// These two tests exist because a NEUTER found the gap: removing the pin from that
+// one arm broke nothing in the suite while every other neuter was caught, which meant
+// the descriptor route had no coverage at all. That is the difference between a fix
+// that is tested and a fix that merely happens to be present.
+
+/// One collection whose `status` field is a closed set, optionally case-insensitive.
+fn enum_descriptor(case_sensitive: Option<bool>) -> CollectionDescriptor {
+    CollectionDescriptor {
+        name: "issues".to_string(),
+        owner_app: OWNER.to_string(),
+        fields: vec![
+            FieldDescriptor {
+                name: "status".to_string(),
+                ty: "string".to_string(),
+                required: true,
+                enum_values: Some(vec![
+                    serde_json::Value::String("active".to_string()),
+                    serde_json::Value::String("archived".to_string()),
+                ]),
+                case_sensitive,
+                ..Default::default()
+            },
+            FieldDescriptor {
+                name: "label".to_string(),
+                ty: "string".to_string(),
+                ..Default::default()
+            },
+        ],
+        indexes: vec![],
+        runtime_options: Default::default(),
+    }
+}
+
+/// The MySQL `CREATE TABLE` the declarative differ plans for `descriptor` on a first
+/// deploy (an empty live schema).
+fn descriptor_create_ddl(
+    project: &str,
+    descriptor: &CollectionDescriptor,
+) -> Result<String, String> {
+    let effective = support::no_inject(project);
+    let desired = desired_snapshot_for_dialect(
+        project,
+        std::slice::from_ref(descriptor),
+        SqlDialect::Mysql,
+        &effective,
+    )
+    .map_err(|e| format!("build the desired snapshot: {e}"))?;
+    let plan = DeclarativeAuthor::new_for_dialect(project, OWNER, SqlDialect::Mysql)
+        .diff(
+            &desired,
+            &SchemaSnapshot::default(),
+            &HashMap::new(),
+            &[],
+            &effective,
+        )
+        .map_err(|e| format!("diff against an empty live schema: {e}"))?;
+    plan.migrations
+        .iter()
+        .map(|m| m.up.clone())
+        .find(|up| up.contains("CREATE TABLE"))
+        .ok_or_else(|| "the first-deploy plan carried no CREATE TABLE".to_string())
+}
+
+/// A descriptor-authored enum must behave on the server exactly like an IR-authored
+/// one: `'ACTIVE'` is not `'active'`.
+#[compio::test]
+async fn a_descriptor_authored_enum_is_case_sensitive_on_the_server() {
+    let url = skip_if_no_mysql!();
+    let session = MysqlDevSession::connect(&url);
+    let database = support::mysql::database_token("enumdesc");
+    let _guard = DatabaseGuard::arm(&session, [database.clone()]);
+
+    let result: Result<(), String> = async {
+        fresh_database(&session, &database).await?;
+        let collation = database_collation(&session, &database).await?;
+        if !collation.contains("_ci") {
+            return Err(format!(
+                "this database defaults to {collation}; the assertion below cannot \
+                 distinguish the fix from its absence"
+            ));
+        }
+        let ddl = descriptor_create_ddl(&database, &enum_descriptor(None))?;
+        if !ddl.contains("ENUM(") {
+            return Err(format!(
+                "the descriptor route stopped producing a native MySQL ENUM, so this \
+                 test no longer covers the arm it was written for:\n{ddl}"
+            ));
+        }
+        for statement in ddl.split(";\n") {
+            session
+                .batch(statement)
+                .await
+                .map_err(|e| format!("apply {statement}: {e}"))?;
+        }
+
+        let column = catalog_collation(&session, &database, "issues", "status")
+            .await?
+            .ok_or_else(|| "the enum column reported no collation".to_string())?;
+        if column.contains("_ci") {
+            return Err(format!(
+                "a descriptor-authored enum landed on {column} on a {collation} \
+                 database; the create-table arm dropped the pin:\n{ddl}"
+            ));
+        }
+        // The server, not the DDL text, is the witness.
+        let insert = session
+            .batch(&format!(
+                "INSERT INTO {}.`issues` (status, label) VALUES ('ACTIVE', 'x')",
+                quote_ident(&database)
+            ))
+            .await;
+        if insert.is_ok() {
+            return Err(
+                "MySQL accepted 'ACTIVE' into a descriptor-authored ENUM('active','archived')"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+    .await;
+    result.unwrap_or_else(|error| panic!("{error}"));
+}
+
+/// The descriptor route is also the ONE route where `caseSensitive: false` reaches an
+/// enum: the field is a `string`, so the load gate that refuses the facet on an IR
+/// enum column does not apply. The pin must therefore READ the facet rather than
+/// hard-code case sensitivity - which is why `mysql_pin_enum_collation` takes it as a
+/// parameter instead of being a constant suffix.
+#[compio::test]
+async fn a_descriptor_enum_asking_for_case_insensitivity_gets_it() {
+    let url = skip_if_no_mysql!();
+    let session = MysqlDevSession::connect(&url);
+    let database = support::mysql::database_token("enumdescci");
+    let _guard = DatabaseGuard::arm(&session, [database.clone()]);
+
+    let result: Result<(), String> = async {
+        fresh_database(&session, &database).await?;
+        let ddl = descriptor_create_ddl(&database, &enum_descriptor(Some(false)))?;
+        if !ddl.contains("ENUM(") {
+            return Err(format!(
+                "a caseSensitive:false descriptor enum stopped rendering as a native \
+                 ENUM, so the facet claim below is about a different column:\n{ddl}"
+            ));
+        }
+        for statement in ddl.split(";\n") {
+            session
+                .batch(statement)
+                .await
+                .map_err(|e| format!("apply {statement}: {e}"))?;
+        }
+        let column = catalog_collation(&session, &database, "issues", "status")
+            .await?
+            .ok_or_else(|| "the enum column reported no collation".to_string())?;
+        if !column.contains("_ci") {
+            return Err(format!(
+                "caseSensitive:false was declared and the enum landed on {column}; the \
+                 facet the author DID declare was dropped:\n{ddl}"
+            ));
+        }
+        // And the server agrees: the wrong-case member is now accepted, which is the
+        // exact reverse of the default-facet test.
+        session
+            .batch(&format!(
+                "INSERT INTO {}.`issues` (status, label) VALUES ('ACTIVE', 'x')",
+                quote_ident(&database)
+            ))
+            .await
+            .map_err(|e| format!("a caseSensitive:false enum still refused 'ACTIVE': {e}"))?;
+        Ok(())
+    }
+    .await;
+    result.unwrap_or_else(|error| panic!("{error}"));
 }
