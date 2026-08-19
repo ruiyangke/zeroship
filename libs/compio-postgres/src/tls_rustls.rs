@@ -531,6 +531,157 @@ mod tests {
     use super::*;
     use sha2::Digest;
 
+    /// The CA that signed [`SERVER_LOCALHOST`], and nothing else.
+    const CA: &str = include_str!("../tests/data/verifier_ca.pem");
+    /// A server certificate whose only subject-alternative name is `localhost`.
+    const SERVER_LOCALHOST: &str = include_str!("../tests/data/verifier_server_localhost.pem");
+
+    /// 2030-01-01T00:00:00Z, comfortably inside both fixtures' validity
+    /// (2026-08-19 to 2126-07-26).
+    ///
+    /// A fixed instant, not `UnixTime::now()`, so these tests cannot start
+    /// failing on a Tuesday because a certificate expired. If the fixtures are
+    /// ever regenerated, keep this constant inside the new validity window.
+    const AT: UnixTime = UnixTime::since_unix_epoch(std::time::Duration::from_secs(1_893_456_000));
+
+    fn provider() -> CryptoProvider {
+        rustls::crypto::aws_lc_rs::default_provider()
+    }
+
+    fn roots_with(pem: &str) -> Arc<RootCertStore> {
+        let mut roots = RootCertStore::empty();
+        roots
+            .add(CertificateDer::from_pem_slice(pem.as_bytes()).unwrap())
+            .unwrap();
+        Arc::new(roots)
+    }
+
+    /// Run the verifier a given `sslmode` really gets against the fixture
+    /// server certificate, presented under `name`.
+    ///
+    /// Goes through [`verifier_for`], never around it. That is the whole point:
+    /// a test that constructed the verifiers directly would still pass if the
+    /// selection were rewired to hand `verify-full` a permissive one.
+    fn verify_as(
+        mode: SslMode,
+        roots: Arc<RootCertStore>,
+        name: &'static str,
+    ) -> Result<(), String> {
+        let verifier = verifier_for(mode, roots, &provider()).map_err(|e| e.to_string())?;
+        let cert = CertificateDer::from_pem_slice(SERVER_LOCALHOST.as_bytes()).unwrap();
+        verifier
+            .verify_server_cert(&cert, &[], &ServerName::try_from(name).unwrap(), &[], AT)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    /// The mode-to-policy table, asserted arm by arm.
+    ///
+    /// This is one half of the mutation proof. Swapping the `VerifyFull` arm of
+    /// [`VerifyPolicy::select`] for a weaker policy fails here; it is the
+    /// cheapest place such a change can be caught, and it needs no
+    /// certificates.
+    ///
+    /// It does NOT prove the policies *do* anything - a `Chain` variant wired
+    /// to a no-op verifier would still satisfy every assertion below. That is
+    /// what `the_three_policies_discriminate` is for.
+    #[test]
+    fn policy_selection_follows_mode_and_whether_roots_are_configured() {
+        use SslMode::*;
+        use VerifyPolicy::*;
+
+        // No trust anchors: the three weak modes encrypt without
+        // authenticating, and the two verifying modes refuse to run at all.
+        for mode in [Require, Prefer, Allow] {
+            assert_eq!(
+                VerifyPolicy::select(mode, false).unwrap(),
+                AcceptAny,
+                "sslmode={} with no sslrootcert must not claim to verify",
+                mode.as_str()
+            );
+        }
+        for mode in [VerifyCa, VerifyFull] {
+            VerifyPolicy::select(mode, false)
+                .expect_err("a verifying mode with no trust anchors must be an error");
+        }
+
+        // Trust anchors configured: everything checks the chain, and exactly
+        // one mode also checks the host name.
+        for mode in [Require, Prefer, Allow, VerifyCa] {
+            assert_eq!(
+                VerifyPolicy::select(mode, true).unwrap(),
+                Chain,
+                "sslmode={} with sslrootcert must check the chain and NOT the host name",
+                mode.as_str()
+            );
+        }
+        assert_eq!(
+            VerifyPolicy::select(VerifyFull, true).unwrap(),
+            ChainAndHostname
+        );
+
+        VerifyPolicy::select(Disable, true).expect_err("disable has no verification policy");
+    }
+
+    /// The three policies, driven through [`verifier_for`] against real
+    /// certificates, and shown to reach *different* verdicts.
+    ///
+    /// The discriminating pair is the last two assertions: the SAME
+    /// certificate, presented under the SAME wrong name, accepted by
+    /// `verify-ca` and rejected by `verify-full`. One variable differs. A
+    /// verifier that did nothing would pass both, and a verifier that checked
+    /// the name in both would fail the `verify-ca` case, so neither degenerate
+    /// implementation survives.
+    ///
+    /// This is the other half of the mutation proof, and the half that catches
+    /// a swap of the verifier *object* rather than of the selection.
+    #[test]
+    fn the_three_policies_discriminate() {
+        let ca = roots_with(CA);
+
+        // Baseline: the certificate really is valid for `localhost` under the
+        // strictest policy. Without this, every rejection below could be
+        // explained by a broken fixture rather than by a working check.
+        verify_as(SslMode::VerifyFull, ca.clone(), "localhost")
+            .expect("verify-full accepts the right name signed by the configured CA");
+
+        // Chain checking is real: the same certificate, the same right name,
+        // but the CA is not among the trust anchors.
+        let foreign = roots_with(SERVER_LOCALHOST);
+        verify_as(SslMode::VerifyCa, foreign.clone(), "localhost")
+            .expect_err("verify-ca must reject a chain that does not reach a configured anchor");
+        verify_as(SslMode::VerifyFull, foreign.clone(), "localhost")
+            .expect_err("verify-full must reject a chain that does not reach a configured anchor");
+
+        // `require` with no anchors accepts what both of those rejected. This
+        // is libpq's "encrypted, unverified", and it is deliberate.
+        verify_as(SslMode::Require, Arc::new(RootCertStore::empty()), "wrong.example")
+            .expect("sslmode=require without sslrootcert performs no verification");
+
+        // THE PAIR. Same certificate, same wrong name, same trust anchors;
+        // only the mode differs, and the verdicts must differ with it.
+        verify_as(SslMode::VerifyCa, ca.clone(), "wrong.example")
+            .expect("verify-ca must NOT check the host name");
+        verify_as(SslMode::VerifyFull, ca, "wrong.example")
+            .expect_err("verify-full must reject a host name the certificate does not cover");
+    }
+
+    /// `require` and `prefer` are upgraded to chain checking by the presence of
+    /// trust anchors, exactly as libpq's `have_rootcert` does it.
+    ///
+    /// The brief this work started from asserted that `require` never verifies.
+    /// It does, whenever it has something to verify against, and this is the
+    /// test that pins the corrected reading.
+    #[test]
+    fn a_configured_ca_upgrades_require_and_prefer_to_chain_checking() {
+        let foreign = roots_with(SERVER_LOCALHOST);
+        for mode in [SslMode::Require, SslMode::Prefer, SslMode::Allow] {
+            verify_as(mode, Arc::new(RootCertStore::empty()), "localhost")
+                .unwrap_or_else(|e| panic!("sslmode={} unverified must accept: {e}", mode.as_str()));
+            verify_as(mode, foreign.clone(), "localhost").unwrap_err();
+        }
+    }
+
     /// The three-branch hash selection, driven by real certificates rather
     /// than by hand-written OID bytes.
     ///
