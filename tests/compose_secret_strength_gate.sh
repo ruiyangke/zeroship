@@ -109,7 +109,7 @@ echo "  $PASS passed, $FAIL failed, $((PASS+FAIL)) ran"
 
 # Floor counts assertions that RAN, not that PASSED.
 # MEASURED 2026-08-12: 3 enforced secret names, deduplicated across consumers.
-MIN_RAN="${COMPOSE_SECRETS_MIN_RAN:-3}"
+MIN_RAN=3
 RAN=$((PASS + FAIL))
 rc=0
 [ "$FAIL" -eq 0 ] || rc=1

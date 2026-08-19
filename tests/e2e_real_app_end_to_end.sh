@@ -214,7 +214,7 @@ echo "    usage_aggregates.requests for the deployed app = $REQ (settled: two co
 # not exact: it exists to catch DOUBLING, not to pin the count. Stage 6 drives 60
 # requests plus the handful stages 4-5 make, and the observed total is recorded in
 # the commit that set these bounds. Override for a modified traffic profile.
-APP_REQ_MIN="${APP_REQ_MIN:-50}"; APP_REQ_MAX="${APP_REQ_MAX:-100}"
+APP_REQ_MIN=50; APP_REQ_MAX=100
 if [ -n "$REQ" ] && [ "$REQ" -ge "$APP_REQ_MIN" ] 2>/dev/null && [ "$REQ" -le "$APP_REQ_MAX" ] 2>/dev/null; then
   pass "the app's requests were METERED into usage_aggregates ($APP_REQ_MIN <= $REQ <= $APP_REQ_MAX)"
 else
@@ -278,7 +278,7 @@ echo "============================================"
 # moves an outcome BETWEEN those two columns, so a floor on PASS alone goes red
 # on any deliberate red-proof and tells you nothing about coverage; only a LOST
 # assertion drops the sum.
-APP_E2E_MIN_RAN="${APP_E2E_MIN_RAN:-17}"
+APP_E2E_MIN_RAN=17
 RAN=$((PASS + FAIL))
 rc=0
 [ "$FAIL" -eq 0 ] || rc=1

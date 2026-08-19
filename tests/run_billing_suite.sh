@@ -122,7 +122,7 @@ cd "$ROOT"
 # NEITHER IS POSTGRES OR REDIS. That is the line: the two backends the operator
 # decision names are provisioned before the run and a skip announcing either one
 # fails this gate. Do not add an entry here for a database.
-BILLING_SKIP_ALLOWLIST="${BILLING_SKIP_ALLOWLIST:-ZEROSHIP_DW_E2E|REDPANDA_BROKERS}"
+BILLING_SKIP_ALLOWLIST="ZEROSHIP_DW_E2E|REDPANDA_BROKERS"
 
 # The server's coordinates come from the generated overlay, not from four
 # `${PG_x:-...}` lines here and four identical ones in run_auth_suite.sh. See
@@ -453,7 +453,7 @@ passed="$(grep -oE '^test result: ok\. [0-9]+ passed' "$SUITE_LOG" \
 # the same binary, which the `rust` job runs today, so the red is not something
 # this group introduced. When it is corrected, raise this floor by a further 8
 # rather than treating the gap as slack.
-BILLING_MIN_PASSED="${BILLING_MIN_PASSED:-670}"
+BILLING_MIN_PASSED=670
 if [ "$passed" -lt "$BILLING_MIN_PASSED" ]; then
   echo "FAIL: only ${passed} billing tests passed, fewer than the ${BILLING_MIN_PASSED} this gate expects." >&2
   echo "A group that silently stopped running is indistinguishable from a group that passed." >&2

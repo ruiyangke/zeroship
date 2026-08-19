@@ -781,7 +781,7 @@ echo "============================================"
 #
 # WHAT IT DOES NOT CATCH: substitution. Swapping one assertion for an easier
 # one keeps the total at 39. Nothing here can see that; review can.
-BILLING_MIN_RAN="${BILLING_MIN_RAN:-39}"
+BILLING_MIN_RAN=39
 RAN=$((PASS + FAIL))
 rc=0
 [ "$FAIL" -eq 0 ] || rc=1

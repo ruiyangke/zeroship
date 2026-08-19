@@ -674,7 +674,7 @@ console.log(JSON.stringify(r,null,1).split("\n").map(l=>"  "+l).join("\n"));
 #
 # WHAT THE FLOOR DOES NOT CATCH: substitution. Swapping one assertion for an
 # easier one keeps the total at 40. Nothing here can see that; review can.
-ENV_MIN_PASSED="${ENV_MIN_PASSED:-40}"
+ENV_MIN_PASSED=40
 
 echo ""
 echo "  env dev vs deployed: $PASS passed, $FAIL failed, $leaks deployed surfaces leaking a host variable  (floor $ENV_MIN_PASSED)"

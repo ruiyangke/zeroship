@@ -1136,9 +1136,9 @@ fi
 # higher. The floor is a `-lt` guard and the extra row keeps satisfying it;
 # NOT bumped, because a floor nobody re-measured is worse than a floor one row
 # behind. Re-measure and bump together.
-LOGIN_MIN_PASSED="${LOGIN_MIN_PASSED:-30}"
+LOGIN_MIN_PASSED=30
 LOGIN_REQUIRED_DIVERGENT="${LOGIN_REQUIRED_DIVERGENT:-authorize.entry identity.get_session identity.rpc_shape identity.rpc_values identity.values session.exchange session.foreign_origin session.no_xzsauth signout signout.replay_rpc signout.replay_session}"
-LOGIN_EXPECTED_DIVERGENT="${LOGIN_EXPECTED_DIVERGENT:-11}"
+LOGIN_EXPECTED_DIVERGENT=11
 DIVERGENT_ROWS="${DIVERGENT_ROWS:-0}"
 
 echo ""
