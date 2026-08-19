@@ -8,6 +8,7 @@ use futures::channel::mpsc;
 
 use crate::state::{OpError, SharedState};
 use crate::transport::byte_pump::SocketStream;
+use crate::transport::egress::{EgressRefusal, EgressResolver, PreDns};
 
 use super::caps::release_socket_slot;
 #[cfg(feature = "runtime_tls")]
@@ -61,18 +62,29 @@ impl ConnectKind {
         }
     }
 
-    fn connect_denied(self, host: &str, port: u16) -> String {
+    /// The refusal REASON is carried through: 5.7 requires a creator to be
+    /// able to tell "no address survived the platform floor" from "your own
+    /// REJECT rule refused it" from "nothing ACCEPTed it", because a v4-only
+    /// range grant silently drops every AAAA answer and would otherwise look
+    /// exactly like a broken name.
+    fn connect_denied(self, host: &str, port: u16, reason: &str) -> String {
         match self {
-            Self::Net => format!("node:net connect denied for {host}:{port}"),
+            Self::Net => format!("node:net connect denied for {host}:{port}: {reason}"),
             #[cfg(feature = "runtime_tls")]
-            Self::Tls { .. } => format!("node:tls connect denied for {host}:{port}"),
+            Self::Tls { .. } => format!("node:tls connect denied for {host}:{port}: {reason}"),
         }
     }
 }
 
+/// A connect that cleared PHASE 1 of the egress evaluator.
+///
+/// `plan` carries phase 1's conclusion forward so phase 3 does not re-derive it.
+/// Re-deriving `name_accepted` from the resolved address would be a reverse
+/// lookup, which whoever owns the address controls.
 pub(super) struct AuthorizedConnect {
     host: String,
     port: u16,
+    plan: PreDns,
 }
 
 pub(super) fn authorize_connect(
@@ -98,6 +110,7 @@ pub(super) fn authorize_connect(
         validate_tls_policy(reject_unauthorized)?;
     }
 
+    let plan: PreDns;
     {
         let s = state.borrow();
         let socket = s
@@ -114,12 +127,42 @@ pub(super) fn authorize_connect(
         if !s.net_policy.module_allowed() {
             return Err(capability_violation(kind.capability_denied()));
         }
-        if !s.net_policy.allows_host_port(&host, port) {
-            return Err(capability_violation(kind.connect_denied(&host, port)));
+        // PHASE 1 - synchronous, and it performs NO lookup. Running it here
+        // rather than inside the resolve task is the DNS gate: a name this
+        // refuses never reaches a nameserver.
+        plan = match crate::transport::egress::pre_dns(&s.net_policy, &host, port) {
+            Ok(plan) => plan,
+            Err(EgressRefusal::ModuleDenied) => {
+                return Err(capability_violation(kind.capability_denied()));
+            }
+            Err(refusal) => {
+                return Err(capability_violation(kind.connect_denied(
+                    &host,
+                    port,
+                    &refusal.to_string(),
+                )));
+            }
+        };
+
+        // An IP literal needs no resolution at all, so PHASE 3 can run here too
+        // and the refusal stays synchronous.
+        if let PreDns::Literal(ip) = plan {
+            if let Err(refusal) = crate::transport::egress::filter_answer(
+                &s.net_policy,
+                port,
+                false,
+                vec![SocketAddr::new(ip, port)],
+            ) {
+                return Err(capability_violation(kind.connect_denied(
+                    &host,
+                    port,
+                    &refusal.to_string(),
+                )));
+            }
         }
     }
 
-    Ok(AuthorizedConnect { host, port })
+    Ok(AuthorizedConnect { host, port, plan })
 }
 
 #[cfg(feature = "runtime_tls")]
@@ -385,8 +428,18 @@ async fn resolve_authorized_target(
     socket_id: u32,
     target: &AuthorizedConnect,
 ) -> Option<SocketAddr> {
-    let resolve_host = target.host.clone();
     let port = target.port;
+
+    // PHASE 1 already settled an IP literal, including its address phase.
+    // INVARIANT ONE-RESOLUTION: no query is made for one, ever.
+    let name_accepted = match target.plan {
+        PreDns::Literal(ip) => return Some(SocketAddr::new(ip, port)),
+        PreDns::Resolve { name_accepted } => name_accepted,
+    };
+
+    let resolve_host = target.host.clone();
+    // PHASE 2 - the single resolution. Everything downstream consumes THIS
+    // answer; an implementation that resolves again has taken a wrong turn.
     let resolved = compio::time::timeout(
         resolve_timeout(),
         compio::runtime::spawn_blocking(move || {
@@ -399,12 +452,12 @@ async fn resolve_authorized_target(
                     .unwrap_or(250);
                 std::thread::sleep(Duration::from_millis(ms));
             }
-            crate::fetch::resolve_and_check_ssrf(&resolve_host, port)
+            crate::transport::egress::SystemResolver.resolve(&resolve_host, port)
         }),
     )
     .await;
-    let addr = match resolved {
-        Ok(Ok(Ok(addr))) => addr,
+    let answer = match resolved {
+        Ok(Ok(Ok(answer))) => answer,
         Ok(Ok(Err(e))) => {
             push_error_and_close(state, socket_id, format!("SSRF: {e}"), "ERR_NET_SSRF");
             return None;
@@ -424,6 +477,26 @@ async fn resolve_authorized_target(
                 socket_id,
                 "DNS resolve timed out".to_string(),
                 "ERR_NET_DNS_TIMEOUT",
+            );
+            return None;
+        }
+    };
+
+    // PHASE 3 - the platform floor first, then the creator's rules, applied to
+    // EVERY member of the answer. The floor runs inside `filter_answer` and no
+    // verdict here can move it (INVARIANT GRANTS-NARROW).
+    let survivors = {
+        let s = state.borrow();
+        crate::transport::egress::filter_answer(&s.net_policy, port, name_accepted, answer)
+    };
+    let addr = match survivors {
+        Ok(kept) => kept[0],
+        Err(refusal) => {
+            push_error_and_close(
+                state,
+                socket_id,
+                format!("SSRF: {refusal}"),
+                "ERR_NET_SSRF",
             );
             return None;
         }

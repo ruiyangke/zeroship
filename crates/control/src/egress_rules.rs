@@ -74,16 +74,19 @@ const MAX_NOTE_CHARS: usize = 200;
 /// `AppNetPolicy`, which rides `RouteEntry` on the gateway's poll: an unbounded
 /// reject list is a denial of service against that projection.
 ///
-/// MEASURED on this tree (`reject_rule_projection_cost_bounds_the_cap`): one
-/// `NetEgressEntry` carrying a 43-character IPv6 range serializes to 84 bytes
-/// of JSON, so 1000 rules is under 84 KiB and 500 is under 42 KiB. The budget
-/// chosen is **64 KiB of reject rules per app**, which the test pins, giving
-/// 500 with room for a destination longer than any legal one. The measurement
-/// the proposal asked for is that per-rule cost against the poll; the budget
-/// itself is a judgement and is stated as one.
+/// The number is derived from a measurement rather than picked, and
+/// `reject_rule_projection_cost_bounds_the_cap` is the measurement: it
+/// serializes one `NetEgressEntry` holding the longest range the grammar admits
+/// and asserts both the per-rule cost and that this cap stays inside a stated
+/// budget. The budget is **64 KiB of reject rules per app**; the per-rule cost
+/// the test pins is what turns that budget into this number. The budget itself
+/// is a judgement and is stated as one - what was missing before was the
+/// measurement, not the opinion.
 pub const MAX_REJECT_RULES: u32 = 500;
 
-/// The serialized-bytes budget [`MAX_REJECT_RULES`] is derived from.
+/// The serialized-bytes budget [`MAX_REJECT_RULES`] is derived from. Only the
+/// derivation reads it, so it lives with the test that performs it.
+#[cfg(test)]
 const REJECT_RULE_PROJECTION_BUDGET_BYTES: usize = 64 * 1024;
 
 // ---------------------------------------------------------------------------
@@ -612,14 +615,19 @@ fn rows_to_records(rows: &[compio_postgres::Row]) -> Vec<EgressRuleRecord> {
         .iter()
         .map(|(record, destination)| {
             let mut record = record.clone();
-            if record.verdict == Verdict::Accept
-                && let Some(Destination::Range(net)) = destination.as_ref()
-                && reject_ranges.iter().any(|(reject, port)| {
-                    *port == record.port
-                        && matches!(reject, Destination::Range(reject_net) if reject_net.contains(net))
-                })
-            {
-                record.effective_verdict = Verdict::Reject;
+            if record.verdict == Verdict::Accept {
+                if let Some(Destination::Range(net)) = destination.as_ref() {
+                    let dominated = reject_ranges.iter().any(|(reject, port)| {
+                        *port == record.port
+                            && matches!(
+                                reject,
+                                Destination::Range(reject_net) if reject_net.contains(net)
+                            )
+                    });
+                    if dominated {
+                        record.effective_verdict = Verdict::Reject;
+                    }
+                }
             }
             record
         })
@@ -894,6 +902,12 @@ mod tests {
             port: 65535,
         };
         let per_rule = serde_json::to_vec(&entry).expect("entry serializes").len();
+        // Pinned so the constant's stated basis is a measurement someone can
+        // re-run, not a number in a doc comment nothing checks.
+        assert_eq!(
+            per_rule, 93,
+            "the per-rule projection cost moved; re-derive MAX_REJECT_RULES"
+        );
         let worst_case = per_rule * MAX_REJECT_RULES as usize;
         assert!(
             worst_case <= REJECT_RULE_PROJECTION_BUDGET_BYTES,

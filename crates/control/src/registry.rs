@@ -1,7 +1,6 @@
 //! Registry — application CRUD backed by PostgreSQL (compio-postgres).
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use compio_postgres::error::SqlState;
 use compio_postgres::{Client, NoTls};

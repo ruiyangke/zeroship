@@ -169,8 +169,8 @@ pub fn validate_url(url: &str) -> Result<(), String> {
 // resolve_and_check_ssrf — DNS resolution + SSRF revalidation
 // ---------------------------------------------------------------------------
 
-/// Resolve `host:port` to a `SocketAddr` and verify the result is NOT
-/// in any blocked range. Returns the FIRST non-blocked address.
+/// Resolve `host:port`, filter the WHOLE answer set through the blocklist, and
+/// return the first survivor.
 ///
 /// This is the WebSocket-handshake counterpart to `SsrfResolver` (which
 /// hooks into cyper's resolver pipeline). Unlike fetch — where
@@ -181,6 +181,20 @@ pub fn validate_url(url: &str) -> Result<(), String> {
 /// can pin a public hostname's resolution to `127.0.0.1` between the
 /// URL-string check and `connect`.
 ///
+/// **Filter the whole answer, then take the first survivor.** This function
+/// used to return at the first non-blocked address, and its comment argued for
+/// failing fast on the grounds that "the SSRF guard is best served by failing
+/// fast when ANY blocked candidate is returned". That argument does not survive
+/// contact with an allowlist: under one, "the first candidate is not admitted"
+/// is the ordinary case on a dual-stack host rather than an attack signal, and
+/// stopping there hides a later address the policy would admit. **The fail-fast
+/// INTENT is preserved exactly** - a blocked address is still never returned and
+/// still never connected to. Only the ORDER of "filter" and "take first" moved,
+/// which for a pure blocklist selects the identical address; what it buys is an
+/// error naming every blocked candidate rather than the last one seen, and a
+/// shape that matches `transport::egress`, where the creator's rules must be
+/// applied to every member of the answer and the choice is not a no-op.
+///
 /// In dev mode (`ZEROSHIP_DEV=1`) localhost is permitted (matches
 /// `validate_url`), so the WebSocket handshake also reaches the Vite
 /// dev server.
@@ -188,8 +202,6 @@ pub fn validate_url(url: &str) -> Result<(), String> {
 /// This is the explicit DNS-rebinding guard described in
 /// `docs/archive/websocket-native.md` §VIII.1.
 pub fn resolve_and_check_ssrf(host: &str, port: u16) -> Result<SocketAddr, String> {
-    use std::io::{Error, ErrorKind};
-
     let dev_mode = dev_mode_enabled();
 
     // Strip IPv6 literal brackets before to_socket_addrs.
@@ -198,30 +210,28 @@ pub fn resolve_and_check_ssrf(host: &str, port: u16) -> Result<SocketAddr, Strin
 
     // std DNS resolution. The handshake spawns this on a compio task
     // (off the V8 thread); a brief sync DNS call there is acceptable.
-    let mut iter = std::net::ToSocketAddrs::to_socket_addrs(&target)
-        .map_err(|e: Error| format!("DNS resolve failed: {e}"))?;
-
-    // Pick the first non-blocked address. We intentionally don't try
-    // every candidate: the SSRF guard is best served by failing fast
-    // when ANY blocked candidate is returned. The fallback for happy-
-    // eyeballs / multi-AAAA hosts is "try the first allowed one".
-    let mut last_blocked: Option<IpAddr> = None;
-    for addr in &mut iter {
-        let ip = addr.ip();
-        if dev_mode || !is_blocked_ip(ip) {
-            return Ok(addr);
-        }
-        last_blocked = Some(ip);
+    let answer: Vec<SocketAddr> = std::net::ToSocketAddrs::to_socket_addrs(&target)
+        .map_err(|e: std::io::Error| format!("DNS resolve failed: {e}"))?
+        .collect();
+    if answer.is_empty() {
+        return Err(format!("DNS resolve produced no addresses for {host}:{port}"));
     }
-    Err(match last_blocked {
-        Some(ip) => format!(
-            "Blocked: all resolved addresses are in blocked ranges (e.g. {ip}) (SSRF guard)"
-        ),
-        None => format!("DNS resolve produced no addresses for {host}:{port}"),
-    })
-    .inspect_err(|e| {
-        let _ = Error::new(ErrorKind::PermissionDenied, e.clone());
-    })
+
+    let (kept, blocked): (Vec<SocketAddr>, Vec<SocketAddr>) = answer
+        .into_iter()
+        .partition(|addr| dev_mode || !is_blocked_ip(addr.ip()));
+    if let Some(addr) = kept.first() {
+        return Ok(*addr);
+    }
+    let blocked: Vec<IpAddr> = blocked.into_iter().map(|a| a.ip()).collect();
+    Err(format!(
+        "Blocked: all resolved addresses are in blocked ranges ({}) (SSRF guard)",
+        blocked
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
 }
 
 // ---------------------------------------------------------------------------

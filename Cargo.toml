@@ -142,7 +142,7 @@ ada-url = "3.4.4"
 # ONLY: its special-range predicates are not adopted and `is_blocked_ip`
 # stays hand-rolled, because every maintained crate's `is_global()` omits
 # forms `crates/runtime/src/transport/ssrf.rs` handles and adopting one
-# would silently WIDEN the SSRF floor. `default = ["std"]`, `std = []` —
+# would silently WIDEN the SSRF floor. `default = ["std"]`, `std = []` -
 # zero transitive crates, so it adds nothing to the tokio graph.
 ipnet = { version = "2.12", features = ["serde"] }
 
