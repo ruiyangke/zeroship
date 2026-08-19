@@ -948,15 +948,34 @@ async fn null_in_params() {
 #[compio::test]
 async fn pool_exhaustion() {
     let Some(url) = require_pg().await else { return };
-    // Custom config: max_size=2, very short connection_timeout so the test
-    // doesn't wait 30 s for the exhaustion error.
+    // max_size=2 with a very short connection_timeout, so the test does not
+    // wait 30 s to observe the exhaustion error.
+    //
+    // `min_idle: 2`, NOT 0, and that is load-bearing. `connection_timeout`
+    // bounds the WHOLE of `get()` - opening a connection as well as waiting for
+    // one - so with an empty pool the first two acquisitions had to complete a
+    // TCP connect, a startup exchange and SCRAM-SHA-256 (4096 PBKDF2 rounds, in
+    // a debug build) inside the same 200 ms budget meant for the exhaustion
+    // wait. That made a test about CAPACITY fail on a busy machine because of
+    // LATENCY: observed once at 74 s of suite time under load, and passing 3/3
+    // in isolation on the same commit.
+    //
+    // Warming both connections up front removes the unrelated variable. The two
+    // acquisitions below now come from `idle` and open no sockets, so the only
+    // thing the 200 ms budget times is the third `get()`, which is what the
+    // test is named after.
     let config = compio_postgres::PoolConfig {
         max_size: 2,
-        min_idle: 0,
+        min_idle: 2,
         connection_timeout: std::time::Duration::from_millis(200),
         ..compio_postgres::PoolConfig::default()
     };
     let pool = Pool::connect_with_config(&url, config).await.unwrap();
+    assert_eq!(
+        pool.idle_count(),
+        2,
+        "warm-up must fill the pool, or the acquisitions below are timing a connect"
+    );
 
     // Acquire 2 connections without returning them
     let _c1 = pool.get().await.unwrap();
@@ -2165,7 +2184,13 @@ async fn sslmode_require_fails_closed_over_a_plaintext_server() {
         .await
         .err()
         .expect("sslmode=require must not succeed over a plaintext connection");
-    assert_eq!(err.to_string(), "error performing TLS handshake");
+    // "could not be negotiated", NOT "handshake failed". The two are separate
+    // error kinds because `sslmode=prefer` retries a failed HANDSHAKE in
+    // plaintext and must retry nothing else; nothing was handshaken here, so
+    // this is the negotiation kind. Getting the pair backwards would give
+    // `prefer` a plaintext retry after a refusal it should have accepted on
+    // the same socket.
+    assert_eq!(err.to_string(), "TLS could not be negotiated");
 
     let err = Pool::connect(&require, 2)
         .await
@@ -2185,14 +2210,18 @@ async fn sslmode_require_fails_closed_over_a_plaintext_server() {
     );
     #[cfg(feature = "tls")]
     assert!(
-        cause.contains("server does not support TLS"),
+        cause.contains("does not support SSL"),
         "the failure should be the server's refusal, got: {cause}"
     );
 }
 
 /// `sslnegotiation=direct` under `sslmode=prefer` is the one TLS combination no
 /// build can serve: a mode that permits plaintext must not drive a TLS-only
-/// handshake. The pool rejects it before spending its retry budget.
+/// handshake, because a direct handshake sends no `SSLRequest` and so has no
+/// negotiation to fall back from. libpq rejects the pairing in
+/// `connectOptions2`; this driver rejects it in `Config::validate_tls_settings`,
+/// which every entry point calls - so the pool answers before spending its
+/// retry budget, and `Config::connect` answers before opening a socket.
 #[compio::test]
 async fn sslnegotiation_direct_under_prefer_is_rejected_by_the_pool() {
     let Some(url) = require_pg().await else {

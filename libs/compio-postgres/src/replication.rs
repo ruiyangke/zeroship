@@ -64,7 +64,7 @@ use crate::buf_stream::BufStream;
 use crate::codec::FrontendMessage;
 use crate::config::{Config, ReplicationMode};
 use crate::connect_socket::connect_socket;
-use crate::connect_tls::connect_tls;
+use crate::connect_tls::{Encryption, negotiate_tls};
 use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::tls::MakeTlsConnect;
 use crate::{Error, Socket};
@@ -196,9 +196,21 @@ where
         cfg.replication(ReplicationMode::Logical);
     }
 
-    let stream =
-        connect_tls(socket, cfg.get_ssl_mode(), cfg.get_ssl_negotiation(), tls_inst, has_hostname)
-            .await?;
+    // One attempt, no reconnect: this path opens its own socket rather than
+    // going through `connect::connect`, so it does not inherit the `allow` /
+    // `prefer` fallback that lives there. Those two modes therefore get the
+    // transport they try first and stop. A replication connection is a
+    // deliberate, operator-configured thing - it is not the surface where
+    // "whatever the server happens to accept" is worth the plumbing.
+    let stream = negotiate_tls(
+        socket,
+        Encryption::first_for(cfg.get_ssl_mode()),
+        cfg.get_ssl_mode(),
+        cfg.get_ssl_negotiation(),
+        tls_inst,
+        has_hostname,
+    )
+    .await?;
 
     // Run the normal startup + auth handshake — connect_raw_into
     // exposes the post-handshake BufStream that the replication
