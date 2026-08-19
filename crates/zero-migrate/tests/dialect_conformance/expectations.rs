@@ -7,6 +7,15 @@
 // rot into a permanent exemption list. `words` is checked with `contains`, so a
 // changed diagnosis fails here rather than being absorbed.
 //
+// ONE OUTCOME CANNOT APPEAR HERE AT ALL. `observed: Outcome::ServerError` is
+// rejected by a const-eval guard in the including file, so writing one does not
+// fail the suite - it fails the COMPILE of the suite, the way the proposal's
+// "the exception file cannot suppress" asks for. This paragraph used to say a
+// ServerError "is never absorbed by an allowance" and nothing enforced it: such an
+// entry would have matched the fall-through in `judge`, satisfied both of its
+// assertions, and excused a migration that dies partway through applying. It held
+// only because none of the entries below happened to name one.
+//
 // Every entry below was produced by running this suite against PostgreSQL 18.4 on
 // 2026-08-18, against MySQL 8.4.11 on 2026-08-19, and against in-process SQLite.
 // Nothing here is a guess, and the `words` field is the verbatim text that run
@@ -291,7 +300,10 @@ const ALLOWANCES: &[Allowance] = &[
     // mid-apply with `[0A000] Not allowed to return a result set from a trigger` -
     // the outcome class this layer exists to catch, and the reason a ServerError is
     // never absorbed by an allowance. `render/renderer.rs` now refuses the statement
-    // at lower, beside RAISE IGNORE.
+    // at lower, beside RAISE IGNORE. Note what the repair WAS: the ENGINE learned to
+    // refuse, which is the only reason this entry can name `RefusedByCapability`.
+    // Recording the ServerError instead was never an option and is now not even
+    // compilable - see the const-eval guard in the including file.
     //
     // Recorded as (A) and NOT as a declaration error, which is the `dropConstraint`
     // lesson applied a second time: the cell is right and the REPRESENTATIVE is

@@ -13,6 +13,7 @@ mod support;
 mod dialect_corpus;
 
 mod alter_column_dialect_support;
+mod backend_modules_name_one_dialect;
 mod checksum_corpus_stability;
 mod created_tables_dialect_legs;
 mod dialect_conformance_live;
