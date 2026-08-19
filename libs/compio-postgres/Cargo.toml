@@ -40,6 +40,18 @@ tls = [
     "dep:sha2",
     "dep:x509-parser",
 ]
+# Opt-in for `tests/tls_live.rs`, which needs the four PostgreSQL servers
+# `tests/tls_live_setup.sh` stands up.
+#
+# It is a FEATURE rather than a runtime check because the two states have to be
+# distinguishable. A runtime check can only choose between "fail" (hostile to
+# anyone who has not run Docker) and "return early" - and Rust cannot mark a
+# test ignored at runtime, so returning early is counted by the harness as a
+# pass. That is what this suite used to do: eight tests reporting green in a
+# process that had never opened a socket. With `required-features`, cargo does
+# not build the target at all unless it is asked for, so its absence is visible
+# and its presence means it really ran.
+live-tls-tests = ["tls"]
 # Test-only surface for downstream bench / unit-test crates that need to
 # synthesise `Row` / `Statement` / `Column` values without a live
 # Postgres. The feature is dev-only (consumers add it under
@@ -114,6 +126,10 @@ criterion = { workspace = true }
 # adds no new crate to the lock — it only makes the surface visible to the
 # `tests/integration.rs` target.
 futures-util = { version = "0.3", default-features = false, features = ["sink", "async-await"] }
+
+[[test]]
+name = "tls_live"
+required-features = ["tls", "live-tls-tests"]
 
 [[bench]]
 name = "buf_fill"
