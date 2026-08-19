@@ -413,6 +413,52 @@ async fn an_enum_whose_members_differ_only_in_case_deploys_on_mysql() {
                 "the deployed enum lost one of its two case-distinct members:\n{create}"
             ));
         }
+
+        // UNIQUENESS, which on an ENUM is decided by the same collation. A UNIQUE key
+        // over the column must hold BOTH members at once; under the inherited `_ai_ci`
+        // it could not, and not because the key rejected the second row - the two
+        // members could never have become two members in the first place. That is why
+        // the uniqueness question and the membership question have one answer here.
+        session
+            .batch(&format!(
+                "CREATE UNIQUE INDEX `issues_status_uq` ON {}.`issues` (`status`)",
+                quote_ident(&database)
+            ))
+            .await
+            .map_err(|e| format!("create the unique key over the enum column: {e}"))?;
+        for (id, value) in [(1, "active"), (2, "Active")] {
+            session
+                .batch(&format!(
+                    "INSERT INTO {}.`issues` (id, status, label) VALUES ({id}, '{value}', 'x')",
+                    quote_ident(&database)
+                ))
+                .await
+                .map_err(|e| {
+                    format!(
+                        "a unique key over the enum rejected '{value}' as a duplicate of the \
+                         other case, so the column still compares case-insensitively: {e}"
+                    )
+                })?;
+        }
+        let rows = session
+            .query(
+                &format!(
+                    "SELECT status FROM {}.`issues` ORDER BY id",
+                    quote_ident(&database)
+                ),
+                &[],
+            )
+            .await
+            .map_err(|e| format!("read the two stored members back: {e}"))?;
+        let stored: Vec<String> = rows
+            .iter()
+            .filter_map(|row| row.try_get::<_, String>("status").ok())
+            .collect();
+        if stored != vec!["active".to_string(), "Active".to_string()] {
+            return Err(format!(
+                "the two case-distinct members did not survive storage: {stored:?}"
+            ));
+        }
         Ok(())
     }
     .await;
