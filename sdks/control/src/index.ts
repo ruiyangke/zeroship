@@ -184,6 +184,17 @@ export interface EgressRuleLimits {
   /** Bounds accept rules only. A reject rule can only narrow, so it is never charged here. */
   max_accept_rules: number;
   used_accept_rules: number;
+  /**
+   * Reject rules are capped separately, and for an unrelated reason: every
+   * rule rides the projection the runtime polls, so an unbounded reject list
+   * is a load problem. It is never a safety bound - a reject can only narrow.
+   *
+   * Declared because the server has always sent it. Omitting it here meant a
+   * creator's rule set could 409 against a ceiling that appeared in no client
+   * type and no doc.
+   */
+  max_reject_rules: number;
+  used_reject_rules: number;
   max_sockets: number;
   egress_ceiling_bytes: number;
 }
@@ -364,15 +375,21 @@ export class ControlClient {
   };
 
   /**
-   * The app's raw-TCP (`node:net`) egress rules. An app with no accept rule
-   * cannot open a socket at all.
+   * The app's egress rules. They cover every raw byte stream the app can open
+   * - `node:net`, `node:tls` and outbound `WebSocket` - through one rule set.
+   * An app with no accept rule opens none of them. `fetch` is the exception
+   * and reaches any public host with no rule at all.
    *
    * A rule is a verdict, a destination and a port. The destination is either an
    * exact DNS name (`api.example.com`) or an address range in CIDR form
-   * (`198.51.100.0/24`); wildcards such as `*.example.com` are not a grammar
+   * (`93.184.216.0/24`); wildcards such as `*.example.com` are not a grammar
    * this API accepts. Rules are an unordered set, not an ordered list: any
    * matching reject wins, then any matching accept admits, and anything else is
    * refused.
+   *
+   * Use real public space in a range, not the documentation ranges
+   * (`198.51.100.0/24`, `2001:db8::/32`): those are refused by the platform
+   * SSRF floor, so such a rule is accepted here and can never admit a connect.
    *
    * Same authority as `env`: `env:read` to list, `env:write` to change.
    */
