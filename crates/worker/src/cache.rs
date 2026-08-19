@@ -1097,6 +1097,54 @@ mod tests {
         );
     }
 
+    /// The control for the row above, and the one that makes the projection's
+    /// only unsafe direction visible at all: a VALID reject row must survive
+    /// into the rule set.
+    ///
+    /// The unparseable-reject row cannot see this. Dropping every reject on the
+    /// floor leaves it green - the app is denied either way - so without this
+    /// pair `net_policy_from_app`'s own warning, that "a dropped REJECT would
+    /// WIDEN it", is a comment with nothing behind it.
+    #[test]
+    fn net_policy_from_app_keeps_a_valid_reject_row() {
+        let app_id = Uuid::new_v4();
+        let policy = net_policy_from_app(
+            &app_id,
+            &AppNetPolicy {
+                egress: vec![
+                    zeroship_core::types::NetEgressEntry {
+                        verdict: Verdict::Accept,
+                        destination: "93.184.216.0/24".to_string(),
+                        port: 443,
+                    },
+                    zeroship_core::types::NetEgressEntry {
+                        verdict: Verdict::Reject,
+                        destination: "93.184.216.7/32".to_string(),
+                        port: 443,
+                    },
+                ],
+                max_sockets: 4,
+                egress_ceiling_bytes: 1024 * 1024,
+            },
+        );
+        let NetPolicy::Rules { rules, .. } = &policy else {
+            panic!("expected Rules, got {policy:?}");
+        };
+        assert_eq!(
+            rules.address_phase("93.184.216.7".parse().unwrap(), 443, false),
+            zeroship_core::net_policy::AddressPhase::RangeRejected,
+            "the carved-out address must still be refused: a reject the \
+             projection drops WIDENS what the app reaches"
+        );
+        // The control, differing in ONE thing - the address. Everything else in
+        // the accept range is still admitted, so the row above is about the
+        // reject surviving and not about the whole rule set being dropped.
+        assert_eq!(
+            rules.address_phase("93.184.216.34".parse().unwrap(), 443, false),
+            zeroship_core::net_policy::AddressPhase::Admitted
+        );
+    }
+
     /// Wildcards are no longer representable, so a row carrying one is dropped
     /// at load exactly as the API would have refused it at authoring time.
     #[test]
@@ -1118,6 +1166,23 @@ mod tests {
             matches!(policy, NetPolicy::Denied),
             "a wildcard row must be skipped; with no rules left the app is denied"
         );
+
+        // The control, differing in ONE character: the same row without the
+        // `*.`. Without it this row is green against a projection that denies
+        // every app there is.
+        let exact = net_policy_from_app(
+            &app_id,
+            &AppNetPolicy {
+                egress: vec![zeroship_core::types::NetEgressEntry {
+                    verdict: Verdict::Accept,
+                    destination: "shared.example.test".to_string(),
+                    port: 443,
+                }],
+                max_sockets: 4,
+                egress_ceiling_bytes: 1024 * 1024,
+            },
+        );
+        assert!(matches!(exact, NetPolicy::Rules { .. }));
     }
 
     #[test]
