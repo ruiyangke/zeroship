@@ -11324,9 +11324,9 @@ mod mysql_storage_agreement_tests {
         use crate::model::ir::{ColType, IrColumn, MigrationIr, Op};
         use crate::model::validate::{validate_ir, Dialect};
 
-        let bounded_ci_column = || IrColumn {
-            name: "label".into(),
-            ty: ColType::String { length: 64 },
+        let ci_column = |name: &str, ty: ColType| IrColumn {
+            name: name.into(),
+            ty,
             nullable: None,
             default: None,
             unique: None,
@@ -11340,6 +11340,7 @@ mod mysql_storage_agreement_tests {
             generated: None,
             identity: None,
         };
+        let bounded_ci_column = || ci_column("label", ColType::String { length: 64 });
 
         // Every dialect, because the rule is not dialect-gated and MySQL is only the
         // dialect where breaking it costs the width rather than the facet.
@@ -11373,14 +11374,25 @@ mod mysql_storage_agreement_tests {
             );
         }
 
-        // The other half of the invariant, and the reason the refusal is sufficient:
-        // the only ColType that MAY carry the facet has no width to lose in the first
-        // place. If `max_length` ever became derivable from `ColType::Text`, the
-        // refusal above would stop being enough on its own.
-        let text_ci = case_insensitive(field("body_ci", "string"));
+        // The other half of the invariant, and the reason the refusal above is
+        // sufficient on its own: the ONE ColType that may legally carry the facet has
+        // no width to lose. Derived through `ir_column_to_field` - the real producer -
+        // rather than asserted on a hand-built `FieldDescriptor`, because a struct
+        // literal would only pin the literal. (An earlier draft of this test did
+        // exactly that and a neuter that made `max_length` derivable from
+        // `ColType::Text` sailed straight through it.)
+        let derived =
+            crate::render::lower::ir_column_to_field(&ci_column("body_ci", ColType::Text));
         assert_eq!(
-            text_ci.max_length, None,
-            "the only case-insensitive-legal ColType must carry no width"
+            derived.max_length, None,
+            "the only case-insensitive-legal ColType must derive no width; if it ever \
+             does, the facet refusal stops being enough and mysql_base_column_type has \
+             to stop reading the facet ahead of the type map"
+        );
+        assert!(
+            derived.unbounded_text,
+            "a case-insensitive t.text() must still reach the renderer as unbounded, \
+             which is the arm that legitimately renders TEXT"
         );
     }
 }
