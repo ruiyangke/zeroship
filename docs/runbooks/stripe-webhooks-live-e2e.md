@@ -35,8 +35,9 @@ stripe listen --print-secret              → capture the STABLE whsec_…
   creates a **dedicated** DB `zeroship_stripe_e2e` and **never** touches the real
   `zeroship` DB nor the concurrent `zeroship_billing_test` DB.
 - `docker`, the `zeroship-platform-migrate` binary (invoked through
-  `deploy/ops/db-migrate.sh`), `node`, `openssl`, `curl`, and `psql` (default
-  Nix store path; override with `ZEROSHIP_PSQL`).
+  `deploy/ops/db-migrate.sh`), `node`, `openssl`, `curl`, and `psql` (taken from
+  $PATH, else the nix store; override with `PSQL`. Absent psql is a refusal,
+  not a skip).
 - The operator's Stripe **TEST** secret key, sourced from the env file.
 
 ## Run
