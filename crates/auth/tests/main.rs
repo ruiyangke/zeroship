@@ -27,25 +27,32 @@
 //!
 //! Nothing about the merge causes it. Every live-PG test here opens a
 //! connection and drives it with
-//! `compio::runtime::spawn(connection.run()).detach()`, and that connection
-//! is never released until the PROCESS EXITS. Measured 2026-08-19 against
-//! `zs-auth-pg-5440` (`max_connections` = 100) by sampling
-//! `pg_stat_activity` every 2 s while running the OLD, PRE-MERGE
-//! `oidc_refresh_token_test` binary, 30 tests, `--test-threads 1`:
+//! `compio::runtime::spawn(connection.run()).detach()`. `#[compio::test]`
+//! builds a fresh `Runtime` per test and drops it at the end of the test,
+//! and that drop does NOT close a socket owned by a detached task. The
+//! connection survives until the PROCESS EXITS.
+//!
+//! Measured 2026-08-19 against `zs-auth-pg-5440` (`max_connections` = 100)
+//! by sampling `pg_stat_activity` every 2 s while running the OLD,
+//! PRE-MERGE binaries under `--test-threads 1`.
+//!
+//! `totp_store_test` isolates the mechanism: 8 tests, one `connect()` each,
+//! and NO `ntex::web::test::server` anywhere in the file.
+//!
+//!   1 1 1 1 1 2 2 2 2 3 3 3 3 3 4 4 4 4 6 6 6 6 7 8 8 8 8
+//!
+//! Eight tests, eight connections, one per test, none reclaimed, and 0 the
+//! moment the process exited. The HTTP fixtures are not involved.
+//!
+//! `oidc_refresh_token_test` shows the same shape at the scale that
+//! matters - 30 tests, 1.9 connections each because it also boots a server:
 //!
 //!   0 -> 9 -> 17 -> 26 -> 35 -> 45 -> 56, then 0 once the process exited
 //!
-//! Monotonic. Not one connection reclaimed in 13 s of testing; all 56
-//! reclaimed at exit. So ONE of the 52 old binaries already sat at 56% of
-//! the server ceiling, and the only reason the suite ever passed is that
-//! cargo ran the 52 targets as 52 processes.
-//!
-//! Two measured rates, and they differ because the modules differ: the
-//! DB-heavy `oidc_refresh_token_test` costs 1.9 connections per test, while
-//! the merged binary ran 108 tests - a mix, many of which touch no database
-//! - before hitting the ceiling, so 0.9 per test averaged over the front of
-//! the run. Whichever end of that range holds, 254 tests in one process want
-//! 230 to 480 connections against a ceiling of 100.
+//! So ONE of the 52 old binaries already sat at 56% of the server ceiling,
+//! and the only reason the suite ever passed is that cargo ran the 52
+//! targets as 52 processes. Between those two rates, 254 tests in one
+//! process want 230 to 480 connections against a ceiling of 100.
 //!
 //! That makes the fix a prerequisite, not a detail of this refactor, and it
 //! is not in this crate: the leak is in how the driver task is spawned and
