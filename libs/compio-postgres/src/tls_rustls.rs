@@ -9,8 +9,8 @@
 //!
 //! What is checked about the server's certificate is a function of two inputs
 //! and nothing else: the [`SslMode`], and whether [`SslRootCert`] names any
-//! trust anchors. [`VerifyPolicy::select`] is the *only* place that function is
-//! evaluated, and [`verifier_for`] is the only place a policy becomes a rustls
+//! trust anchors. `VerifyPolicy::select` is the *only* place that function is
+//! evaluated, and `verifier_for` is the only place a policy becomes a rustls
 //! [`ServerCertVerifier`]. Both are small on purpose: a mistake in either
 //! silently disables verification for every connection this driver makes, and
 //! the failure mode is a green test suite.
@@ -25,7 +25,7 @@
 //! The pairing that catches a no-op verifier is `verify-ca` and `verify-full`
 //! against the *same* host-name-mismatched server: they must go opposite ways.
 //! `tests/tls_live.rs` runs that live, and
-//! [`tests::the_three_policies_discriminate`] runs it offline against committed
+//! `the_three_policies_discriminate` runs it offline against committed
 //! certificates, so the proof is in CI and not only on a machine with Docker.
 //!
 //! # Channel binding
@@ -559,7 +559,7 @@ mod tests {
     /// Run the verifier a given `sslmode` really gets against the fixture
     /// server certificate, presented under `name`.
     ///
-    /// Goes through [`verifier_for`], never around it. That is the whole point:
+    /// Goes through `verifier_for`, never around it. That is the whole point:
     /// a test that constructed the verifiers directly would still pass if the
     /// selection were rewired to hand `verify-full` a permissive one.
     fn verify_as(
@@ -578,7 +578,7 @@ mod tests {
     /// The mode-to-policy table, asserted arm by arm.
     ///
     /// This is one half of the mutation proof. Swapping the `VerifyFull` arm of
-    /// [`VerifyPolicy::select`] for a weaker policy fails here; it is the
+    /// `VerifyPolicy::select` for a weaker policy fails here; it is the
     /// cheapest place such a change can be caught, and it needs no
     /// certificates.
     ///
@@ -623,7 +623,7 @@ mod tests {
         VerifyPolicy::select(Disable, true).expect_err("disable has no verification policy");
     }
 
-    /// The three policies, driven through [`verifier_for`] against real
+    /// The three policies, driven through `verifier_for` against real
     /// certificates, and shown to reach *different* verdicts.
     ///
     /// The discriminating pair is the last two assertions: the SAME
