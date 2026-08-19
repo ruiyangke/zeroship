@@ -458,9 +458,18 @@ async fn a_drop_cascades_through_dependents_only_the_live_base_carries() {
 /// applying at all is server-side proof that the blocker moved.
 ///
 /// The differ compares NOTHING about a view body, so a clean drift here would be
-/// vacuous for the thing under test. The body assertions below are read off
-/// `ViewSnapshot::definition`, which live introspection populates and the differ
-/// ignores.
+/// vacuous for the thing under test. That is measured, not assumed: neutering the
+/// fold so a `replace` KEEPS the pre-existing body left every test in the
+/// `zero-migrate` crate green - roughly 3300 of them - because `diff_snapshots`
+/// compares only a view's `materialized` flag and `comment`.
+///
+/// So this case reads BOTH bodies itself, off fields the differ ignores: the live one
+/// from `ViewSnapshot::definition` (`pg_get_viewdef`), and the predicted one from
+/// `ViewSnapshot::authored_query`, which is what the fold records. They are different
+/// representations of the same claim - deparsed SQL and the authored AST - so they are
+/// asserted SEPARATELY against the column the body must read rather than against each
+/// other. Two independent readings landing on `b` is the evidence; neither is
+/// normalised into the other.
 #[compio::test]
 async fn a_replaced_view_moves_the_blocker_a_later_drop_needs() {
     let label = "CREATE OR REPLACE VIEW over a pre-existing view, then the drop it unblocks";
@@ -498,6 +507,27 @@ async fn a_replaced_view_moves_the_blocker_a_later_drop_needs() {
     assert!(
         replaced.contains("b AS label"),
         "CREATE OR REPLACE VIEW must have moved the body onto src.b: {replaced}"
+    );
+
+    // And what state_at PREDICTED the view reads, which is the half the live body
+    // cannot speak to. `authored_query` is the fold's own record of the body; a fold
+    // that treated the replace as a no-op would leave the seeded query here, and the
+    // differ would not notice. Asserted through the serialized query so the check is
+    // about the projected COLUMN rather than about the AST's shape.
+    let predicted = serde_json::to_string(
+        measured[1].expected.views["labelled"]
+            .authored_query
+            .as_ref()
+            .expect("state_at must record the authored body of a replaced view"),
+    )
+    .expect("the authored view query serializes");
+    assert!(
+        predicted.contains(r#""name":"b""#),
+        "state_at must predict the replaced body reads src.b: {predicted}"
+    );
+    assert!(
+        !predicted.contains(r#""name":"a""#),
+        "state_at must not still predict the pre-replacement body over src.a: {predicted}"
     );
 
     // And the server accepted DROP COLUMN a, which it refuses while a view depends on
