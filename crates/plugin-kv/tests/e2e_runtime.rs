@@ -819,21 +819,22 @@ fn e2e_scenarios() {
 }
 
 // ---------------------------------------------------------------------------
-// Dragonfly / Redis (live single-node) — runs only when ZEROSHIP_KV_URL is
-// set (e.g. redis://127.0.0.1:6399). Skips (does not fail) when unset so CI
-// without a server is green.
+// Dragonfly / Redis (live single-node) — the ONLY end-to-end coverage of the
+// KV-over-Redis path through the real runtime.
+//
+// It used to be gated on `ZEROSHIP_KV_URL`, which nothing in this repo ever
+// set, so the arm below had never run anywhere. Its sibling
+// `redis_backend.rs` was converted to the overlay on 2026-08-18 (4deef7bdc,
+// "test(kv): delete KV_REQUIRE_REDIS and require the redis these tests name")
+// and this file was missed. `test_kv_url()` resolves `REDIS_TEST_URL` then
+// the generated overlay and panics naming `tests/provision_test_backends.sh`,
+// so a missing Redis is loud rather than a silent pass.
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "redis")]
 #[test]
 fn e2e_dragonfly() {
-    let Some(url) = zeroship_core::test_env!("ZEROSHIP_KV_URL") else {
-        zeroship_test_support::skip(
-            "e2e_dragonfly: ZEROSHIP_KV_URL unset — skipping live-backend test. \
-             Set e.g. ZEROSHIP_KV_URL=redis://127.0.0.1:6399 to run it."
-        );
-        return;
-    };
+    let url = zeroship_core::config::test_kv_url();
     let backend = Redis::new(url);
     let (status, body) = run_e2e(Arc::new(backend));
     assert_ok(status, &body);

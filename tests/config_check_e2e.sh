@@ -771,7 +771,7 @@ fi
 #
 # Raise it when you add cases. If it trips after you deleted a case on purpose,
 # lower it deliberately and say so in the commit -- do not delete the check.
-CONFIG_CHECK_MIN_PASSED="${CONFIG_CHECK_MIN_PASSED:-86}"
+CONFIG_CHECK_MIN_PASSED=86
 if [ "$PASS" -lt "$CONFIG_CHECK_MIN_PASSED" ]; then
     echo "" >&2
     echo "FLOOR: only $PASS assertions passed, expected at least $CONFIG_CHECK_MIN_PASSED." >&2

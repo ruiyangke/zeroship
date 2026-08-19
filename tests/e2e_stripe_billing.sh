@@ -81,8 +81,20 @@ echo "============================================"
 echo "  zeroship E2E — billing→Stripe rail (REAL Stripe TEST mode, not the mock)"
 echo "============================================"
 
-# --- prereq gates: skip cleanly when anything is missing --------------------
-PSQL="${ZEROSHIP_PSQL:-/nix/store/0hzvyg4lmry0cv8pgl1fw9j1rddyqqbj-postgresql-17.7/bin/psql}"
+# --- prereq gates: skip on absent Stripe credentials, REFUSE on absent psql -
+# psql: $PATH first, then any postgresql in the nix store, then refuse. This
+# replaced ZEROSHIP_PSQL, whose default was one pinned /nix/store hash that
+# resolved on exactly one machine; everywhere else it was absent and the
+# absence was `exit 0`, so this suite measured nothing and reported success.
+# Same chain as tests/e2e_auth_ui.sh, same variable name.
+PSQL="${PSQL:-}"
+if [ -z "$PSQL" ]; then
+  if command -v psql >/dev/null 2>&1; then
+    PSQL="$(command -v psql)"
+  else
+    PSQL="$(ls -d /nix/store/*postgresql*/bin/psql 2>/dev/null | head -1 || true)"
+  fi
+fi
 PGHOST=localhost; PGPORT=5440; PGUSER=postgres; PGPW=zeroship
 DB=zeroship_stripe_e2e
 
@@ -95,7 +107,10 @@ case "$STRIPE_TEST_SECRET_KEY" in
   sk_test_*) ;;
   *) echo "  ✗ REFUSING TO RUN: STRIPE_TEST_SECRET_KEY is not an sk_test_ key. This harness only runs against TEST mode."; exit 2 ;;
 esac
-[ -x "$PSQL" ] || { echo "  ⚠ SKIP: psql not found at $PSQL (set ZEROSHIP_PSQL)."; exit 0; }
+[ -n "$PSQL" ] && [ -x "$PSQL" ] || {
+  echo "  x ABORT: no psql on \$PATH or in the nix store; set PSQL to the Postgres client binary." >&2
+  exit 2
+}
 command -v node    >/dev/null 2>&1 || { echo "  ⚠ SKIP: node required."; exit 0; }
 command -v openssl >/dev/null 2>&1 || { echo "  ⚠ SKIP: openssl required."; exit 0; }
 command -v curl    >/dev/null 2>&1 || { echo "  ⚠ SKIP: curl required."; exit 0; }

@@ -1472,7 +1472,7 @@ fi
 # (PASS+FAIL) would read 122 either way and so would not notice the hazard this
 # guard exists for: a lost capture leaves every verdict emitted, turning the
 # `reject`s green and the `want`s red.
-DB_MIN_PASSED="${DB_MIN_PASSED:-121}"
+DB_MIN_PASSED=121
 
 echo ""
 echo "  dev vs deployed (env.db): $PASS passed, $FAIL failed  (floor $DB_MIN_PASSED)"
@@ -1543,8 +1543,8 @@ cut -c1-240 "$WORK/deployed.raw" | sed 's/^/  /'
 # warns that probe ORDER matters because the scope probes contaminate it. What
 # was new was only that the harness could not tell that shape from a regression.
 DB_REQUIRED_DIVERGENT="${DB_REQUIRED_DIVERGENT:-cxPlain cxTotal tsres}"
-DB_TOLERATED_DIVERGENT="${DB_TOLERATED_DIVERGENT:-txBranch txOrphan}"
-DB_EXPECTED_DIVERGENT="${DB_EXPECTED_DIVERGENT:-5}"
+DB_TOLERATED_DIVERGENT="txBranch txOrphan"
+DB_EXPECTED_DIVERGENT=5
 DIVERGENT_ROWS="${DIVERGENT_ROWS:-0}"
 
 rc=0

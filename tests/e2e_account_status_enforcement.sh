@@ -217,7 +217,7 @@ echo "============================================"
 # disabling check_account in the gateway gave 14 passed / 2 failed = 16 RAN, so the
 # denominator held while two verdicts flipped, which is exactly what a floor on
 # PASS alone would have mistaken for a smaller run.
-ACCT_MIN_RAN="${ACCT_MIN_RAN:-16}"
+ACCT_MIN_RAN=16
 RAN=$((PASS + FAIL))
 rc=0
 [ "$FAIL" -eq 0 ] || rc=1

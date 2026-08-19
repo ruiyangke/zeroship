@@ -4408,7 +4408,7 @@ gp_close_step
 #   failures: 15 total, 15 expected, 0 unexpected, 0 stale expectation(s)
 # The delta and the run agree to the assertion, and the 15 reds are the same
 # ticketed set (#260 x6, #236 x2, #332/#333 x3, #331 x4).
-GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-121}"
+GOLDEN_MIN_PASSED=121
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.
@@ -4511,7 +4511,7 @@ rc=0
 # that table carries a BEFORE DELETE append-only trigger, so the cascade aborts
 # the whole transaction. They are listed here for the same reason as the others
 # -- so a NEW failure is still visible -- and not because anyone chose them.
-GOLDEN_EXPECTED_FAILURES=${GOLDEN_EXPECTED_FAILURES:-"scaffold notes.list|scaffold notes.add|scaffold notes.delete|scaffold files.upload|scaffold files.list|scaffold visits.bump|sort({id:-1}) is NOT creation order|DIVERGE on id ordering|DELETE /api/apps/<id> did not succeed|zeroship.apps row SURVIVED the delete|gateway is STILL serving the deleted app|per-app Postgres schema SURVIVED the delete|dev: step 6 drove getMessages on the dev tier|dev and deployed DIVERGE on log visibility|left the creator no log line"}
+GOLDEN_EXPECTED_FAILURES="scaffold notes.list|scaffold notes.add|scaffold notes.delete|scaffold files.upload|scaffold files.list|scaffold visits.bump|sort({id:-1}) is NOT creation order|DIVERGE on id ordering|DELETE /api/apps/<id> did not succeed|zeroship.apps row SURVIVED the delete|gateway is STILL serving the deleted app|per-app Postgres schema SURVIVED the delete|dev: step 6 drove getMessages on the dev tier|dev and deployed DIVERGE on log visibility|left the creator no log line"
 IFS='|' read -r -a _pats <<< "$GOLDEN_EXPECTED_FAILURES"
 # FIXED-STRING matching, both directions, and this is not stylistic. The first
 # draft joined the patterns into one ERE, and one of them - `sort({id:-1}) is
