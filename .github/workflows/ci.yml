@@ -579,6 +579,42 @@ jobs:
           set -o pipefail
           cargo test -p zeroship-migrate-adapter --features platform-cli --test platform_migrate 2>&1 \
             | tee -a "$RUNNER_TEMP/rust-tests.log"
+      # compio-postgres' `tls` feature has never been compiled by any workflow,
+      # let alone run: `tls` appeared ZERO times in .github/ until this step.
+      # The default feature set is empty, so `cargo test --workspace` above
+      # builds none of it - the rustls connector, the six-mode verification
+      # policy and its unit tests were reachable only through
+      # `tests/run_doc_gate.sh --all-features`, which type-checks the module
+      # through rustdoc and executes nothing.
+      #
+      # This is the step that runs the certificate-verifier proofs. They need no
+      # server: they drive the real verifiers, through the real mode-to-verifier
+      # selection, against certificates committed under tests/data/. That is
+      # deliberate - the live suite below needs Docker and four containers,
+      # and the one thing that must never regress unnoticed is which verifier
+      # `verify-full` gets.
+      - run: |
+          set -o pipefail
+          cargo test -p compio-postgres --features tls 2>&1 \
+            | tee -a "$RUNNER_TEMP/rust-tests.log"
+      # The live half: the four servers `tls_live_setup.sh` stands up, and the
+      # 22 checks that read `pg_stat_ssl` to find out what transport the SERVER
+      # thinks it is serving. `--features live-tls-tests` is what builds the
+      # target at all; without it cargo skips it silently, which is why it is
+      # named here rather than left to the feature unification above.
+      #
+      # `sudo` is used by the setup script to chmod the server keys to
+      # root:<postgres gid> 0640, which PostgreSQL insists on. GitHub runners
+      # have passwordless sudo and Docker.
+      - name: Provision the TLS test servers
+        run: bash libs/compio-postgres/tests/tls_live_setup.sh
+      - run: |
+          set -o pipefail
+          cargo test -p compio-postgres --features tls,live-tls-tests --test tls_live \
+            -- --test-threads=1 2>&1 | tee -a "$RUNNER_TEMP/rust-tests.log"
+      - name: Tear down the TLS test servers
+        if: always()
+        run: bash libs/compio-postgres/tests/tls_live_setup.sh --down
       # Every test above that returned early because its backend was absent is
       # inside the "N passed" totals and inside this job's green tick. Nothing
       # said so until this step: Rust cannot mark a test ignored at RUNTIME, so
