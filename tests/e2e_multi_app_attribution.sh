@@ -292,9 +292,9 @@ FLEET=$((N1+N2+N3))
 # an expected 100 - the excess is the metered ready/warm probe traffic (~4-5 per
 # app, and C1 owns two). A leak of A3 would put C1 at ~179. Anything at or above
 # the fleet total cannot be C1's own two apps plus probe noise.
-[ -n "$C1_SUM" ] && [ "$C1_SUM" -lt "${ATTR_C1_CEIL:-$FLEET}" ] 2>/dev/null \
-  && pass "C1 is NOT over-attributed ($C1_SUM < ${ATTR_C1_CEIL:-$FLEET}) — A3's usage did not bleed onto C1" \
-  || fail "over-attribution suspected — C1=$C1_SUM reached the ceiling ${ATTR_C1_CEIL:-$FLEET}; its own apps are only $C1_EXPECT, so something else's usage is on this creator"
+[ -n "$C1_SUM" ] && [ "$C1_SUM" -lt "$FLEET" ] 2>/dev/null \
+  && pass "C1 is NOT over-attributed ($C1_SUM < $FLEET) - A3's usage did not bleed onto C1" \
+  || fail "over-attribution suspected - C1=$C1_SUM reached the ceiling $FLEET; its own apps are only $C1_EXPECT, so something else's usage is on this creator"
 
 # CONSERVATION. Everything above is per-subject, so usage sent to a subject
 # nobody queries is invisible: a resolver returning the WRONG creator id leaves

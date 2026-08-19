@@ -408,7 +408,7 @@ tr -d '\r' < "$WORK/deployed.txt.hdr" | sed 's/^/  /'
 #
 # WHAT THE FLOOR DOES NOT CATCH: substitution. Deleting one assertion and adding
 # an easier one keeps the total at 24. Nothing here can see that; review can.
-STREAM_MIN_PASSED="${STREAM_MIN_PASSED:-24}"
+STREAM_MIN_PASSED=24
 
 echo ""
 # MUTATE_BUFFERED is named in this line too. It is a SEPARATE variable from

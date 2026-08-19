@@ -23,6 +23,20 @@
 
 set -euo pipefail
 
+# `--bench` runs the DW-23 load bench instead of the DW-07 keystone arm. It is
+# an ARGUMENT, not an environment variable. It used to be
+# ZEROSHIP_DW23_BENCH_ONLY, which nothing set, and its three tuning knobs
+# (RUNS / CONCURRENCY / MAX_SECS) were likewise env reads with no setter. The
+# bench parameters are now literals in the Rust test, so the archived run in
+# docs/archive/benchmarks/2026-07-07-durable-workflows-load.md reproduces from
+# the command alone.
+BENCH_ONLY=0
+case "${1:-}" in
+  --bench) BENCH_ONLY=1 ;;
+  "") ;;
+  *) echo "usage: $0 [--bench]" >&2; exit 2 ;;
+esac
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/target/release"
 # shellcheck source=tests/lib/runtime_secrets.sh
@@ -663,7 +677,7 @@ curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/" -H "X-Api-Key
 }
 pass "gateway/worker warmed real deployed app"
 
-if [ "${ZEROSHIP_DW23_BENCH_ONLY:-0}" = "1" ]; then
+if [ "$BENCH_ONLY" = "1" ]; then
   echo "=== DW-23 workflow engine load bench ==="
   ZEROSHIP_DW_E2E=1 \
   PG_TEST_URL="$DBURL" \

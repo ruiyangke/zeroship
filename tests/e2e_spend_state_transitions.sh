@@ -235,7 +235,7 @@ echo "============================================"
 # 25 passed / 1 failed = 26 RAN, not 27: the band's state check failed and its
 # TWO gateway-behaviour assertions never ran at all. So the denominator moves
 # when a band breaks, and a floor phrased on PASS alone would not have seen it.
-SPEND_MIN_RAN="${SPEND_MIN_RAN:-28}"
+SPEND_MIN_RAN=28
 RAN=$((PASS + FAIL))
 rc=0
 [ "$FAIL" -eq 0 ] || rc=1

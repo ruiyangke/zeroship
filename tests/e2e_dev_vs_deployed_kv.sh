@@ -549,7 +549,7 @@ fi
 #
 # WHAT THE FLOOR DOES NOT CATCH: substitution. Swapping one assertion for an
 # easier one keeps the total at 44. Nothing here can see that; review can.
-KV_MIN_PASSED="${KV_MIN_PASSED:-44}"
+KV_MIN_PASSED=44
 
 echo ""
 echo "  dev vs deployed: $PASS passed, $FAIL failed  (mutation: $MUTATE)  (floor $KV_MIN_PASSED)"

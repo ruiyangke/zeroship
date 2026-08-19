@@ -176,7 +176,7 @@ done < <(grep -rn 'zeroship deploy [^`]' \
 # changes), it inspects nothing and exits 0 looking identical to a clean run.
 # The repo ships more than a handful of deploy instructions; a run that found
 # almost none has found a broken scanner, not a clean tree.
-MIN_INSTRUCTIONS="${DEPLOY_GATE_MIN:-5}"
+MIN_INSTRUCTIONS=5
 echo
 echo "deploy instructions checked: $checked (floor $MIN_INSTRUCTIONS)"
 if [ "$checked" -lt "$MIN_INSTRUCTIONS" ]; then

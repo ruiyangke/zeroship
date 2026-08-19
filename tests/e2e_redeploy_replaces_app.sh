@@ -280,7 +280,7 @@ fi
 # A run that lost the four post-redeploy assertions - exactly the ones that
 # make this harness worth having - would still report 4 passed, 0 failed and
 # exit 0.
-REDEPLOY_MIN_PASSED="${REDEPLOY_MIN_PASSED:-8}"
+REDEPLOY_MIN_PASSED=8
 if [ "$PASS" -lt "$REDEPLOY_MIN_PASSED" ]; then
   echo "FAIL: only $PASS assertions passed, fewer than the $REDEPLOY_MIN_PASSED this" >&2
   echo "      harness expects. Assertions do not vanish by accident: either a check" >&2
