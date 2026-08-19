@@ -948,15 +948,34 @@ async fn null_in_params() {
 #[compio::test]
 async fn pool_exhaustion() {
     let Some(url) = require_pg().await else { return };
-    // Custom config: max_size=2, very short connection_timeout so the test
-    // doesn't wait 30 s for the exhaustion error.
+    // max_size=2 with a very short connection_timeout, so the test does not
+    // wait 30 s to observe the exhaustion error.
+    //
+    // `min_idle: 2`, NOT 0, and that is load-bearing. `connection_timeout`
+    // bounds the WHOLE of `get()` - opening a connection as well as waiting for
+    // one - so with an empty pool the first two acquisitions had to complete a
+    // TCP connect, a startup exchange and SCRAM-SHA-256 (4096 PBKDF2 rounds, in
+    // a debug build) inside the same 200 ms budget meant for the exhaustion
+    // wait. That made a test about CAPACITY fail on a busy machine because of
+    // LATENCY: observed once at 74 s of suite time under load, and passing 3/3
+    // in isolation on the same commit.
+    //
+    // Warming both connections up front removes the unrelated variable. The two
+    // acquisitions below now come from `idle` and open no sockets, so the only
+    // thing the 200 ms budget times is the third `get()`, which is what the
+    // test is named after.
     let config = compio_postgres::PoolConfig {
         max_size: 2,
-        min_idle: 0,
+        min_idle: 2,
         connection_timeout: std::time::Duration::from_millis(200),
         ..compio_postgres::PoolConfig::default()
     };
     let pool = Pool::connect_with_config(&url, config).await.unwrap();
+    assert_eq!(
+        pool.idle_count(),
+        2,
+        "warm-up must fill the pool, or the acquisitions below are timing a connect"
+    );
 
     // Acquire 2 connections without returning them
     let _c1 = pool.get().await.unwrap();
