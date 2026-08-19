@@ -30,3 +30,4 @@ mod schema_model_equivalence_pg;
 mod sqlite_decimal_rebuild_live;
 mod sqlite_field_def_type_tokens_live;
 mod sqlite_rebuild_field_defs_live;
+mod state_at_matches_the_server_pg;
