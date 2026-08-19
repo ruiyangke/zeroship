@@ -255,15 +255,25 @@ async fn deploy(backend: &SqliteBackend, tables: &[&str], sources: &[&str]) -> R
 // The migrations
 // ---------------------------------------------------------------------------
 
-/// One `decimal(20, 4)` column beside a `text` column that exists only to be disturbed,
-/// and an `int` column as a live control: the control proves the rebuild re-rendered the
-/// table at all rather than passing everything through untouched.
+/// A `decimal(20, 4)` column declared DIRECTLY (`amount`) and one declared through a
+/// NAMED DOMAIN over the same type (`fee`), beside a `text` column that exists only to
+/// be disturbed and an `int` column as a live control. The control proves the rebuild
+/// re-rendered the table at all rather than passing everything through untouched.
+///
+/// The two decimals reach the descriptor by DIFFERENT routes and that is why both are
+/// here: `amount` through `ir_column_to_field` reading `ColType::Decimal`, `fee` through
+/// `lift_named_domain_base_type` resolving `ColType::Domain` to its base and re-deriving
+/// the storage facets from it. Only the second route runs
+/// `apply_col_type_to_field_descriptor`, so a fix applied to one and not the other is a
+/// column that still loses its digits.
 const CREATE: &str = r#"{"ir_version":1,"name":"create_ledger","owner_app":"app_decimal_rebuild","ops":[
+  {"op":"createDomain","name":"money_t","as":{"decimal":{"precision":20,"scale":4}}},
   {"op":"createTable","name":"ledger","columns":[
     {"name":"id","type":"text","nullable":false},
     {"name":"note","type":"text"},
     {"name":"tally","type":"int"},
-    {"name":"amount","type":{"decimal":{"precision":20,"scale":4}},"nullable":true}
+    {"name":"amount","type":{"decimal":{"precision":20,"scale":4}},"nullable":true},
+    {"name":"fee","type":{"domain":{"name":"money_t"}},"nullable":true}
   ],"primaryKey":["id"]}
 ]}"#;
 
@@ -277,8 +287,8 @@ async fn seed(backend: &SqliteBackend) {
     exec(
         backend,
         &format!(
-            "INSERT INTO main.ledger (id, note, tally, amount) VALUES \
-             ('row_1', 'alpha', 3, '{WIDE}')"
+            "INSERT INTO main.ledger (id, note, tally, amount, fee) VALUES \
+             ('row_1', 'alpha', 3, '{WIDE}', '{WIDE}')"
         ),
     )
     .await
@@ -294,6 +304,7 @@ fn created_shape() -> Vec<(String, String)> {
         ("note".to_string(), "TEXT".to_string()),
         ("tally".to_string(), "INTEGER".to_string()),
         ("amount".to_string(), "TEXT".to_string()),
+        ("fee".to_string(), "TEXT".to_string()),
     ]
 }
 
@@ -338,6 +349,11 @@ async fn a_decimal_column_keeps_its_digits_through_a_fold_seeded_rebuild() {
         seeded_row(),
         "and SQLite stored the wide decimal as exact text, digit for digit"
     );
+    assert_eq!(
+        stored(&backend, "ledger", "fee").await,
+        seeded_row(),
+        "and the same for the one declared through the domain"
+    );
 
     // The map's own claim, asserted before the server's, so a difference below is
     // attributable to the EMITTER rather than to the fold.
@@ -354,6 +370,12 @@ async fn a_decimal_column_keeps_its_digits_through_a_fold_seeded_rebuild() {
          `ColType::Double` gets, with the precision and scale discarded. That collision \
          is the defect under test; if this line changes, re-read what the fix did."
     );
+    assert_eq!(
+        live.sqlite_schemas["ledger"]["fee"].get("type"),
+        Some(&serde_json::json!("number")),
+        "and the domain column collapses to the SAME token: the domain lift resolves \
+         `money_t` to its `Decimal` base and then spells it through the same map"
+    );
 
     apply(&backend, RENAME, &live).await;
 
@@ -369,6 +391,14 @@ async fn a_decimal_column_keeps_its_digits_through_a_fold_seeded_rebuild() {
          storage class here means the copy pushed it through a binary double: \
          12345678901234.5678 is not representable as an IEEE-754 double, so those \
          digits are gone and no later migration can recover them."
+    );
+    assert_eq!(
+        stored(&backend, "ledger", "fee").await,
+        seeded_row(),
+        "and so is the one that reached the descriptor through the DOMAIN lift. This is \
+         a second code path to the same facet - `apply_col_type_to_field_descriptor` \
+         rather than `ir_column_to_field` directly - and a fix applied to one and not \
+         the other loses this column's digits while `amount` keeps its own."
     );
     let mut expected = before.clone();
     expected[1].0 = "memo".to_string();
