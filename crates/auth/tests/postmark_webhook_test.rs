@@ -1,11 +1,11 @@
 //! Postmark webhook handler — Basic auth verification + suppression handling.
 //!
-//! Live-PG tests. Each test connects to the `AUTH_DB_URL` PG, runs
+//! Live-PG tests. Each test connects to the test database, runs
 //! migrations, spins up an `ntex::web::test::server` that registers JUST
 //! the `/webhooks/postmark` route (with config + DB state), then POSTs
 //! representative payloads via `cyper::Client`.
 //!
-//! Skips silently when `AUTH_DB_URL` is unset (CI without PG fixture).
+//! Skips silently when no test database is configured (CI without PG fixture).
 //!
 //! Note: every `compio_postgres::connect` returns `(Client, Connection)`
 //! and the connection driver MUST be `spawn`+`detach`ed on the compio
@@ -46,7 +46,7 @@ fn test_cfg(user: Option<&str>, pass: Option<&str>) -> AuthConfig {
 }
 
 /// Boot PG + register the `/webhooks/postmark` route. Returns `None` if
-/// `AUTH_DB_URL` is unset (test then logs `skip` and exits).
+/// no test database is configured (test then logs `skip` and exits).
 //
 // ntex's `TestServer` future is intentionally `!Send` (holds per-worker
 // state in `Rc`s); the test helper inherits that.
@@ -55,7 +55,7 @@ async fn boot(
     user: Option<&str>,
     pass: Option<&str>,
 ) -> Option<(ntex::web::test::TestServer, Arc<compio_postgres::Client>)> {
-    let dsn = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)?;
+    let dsn = zeroship_core::config::test_database_url_opt()?;
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
@@ -88,7 +88,7 @@ async fn boot(
 #[ntex::test]
 async fn postmark_webhook_handles_hard_bounce() {
     let Some((srv, pg)) = boot(Some("hookuser"), Some("hookpass")).await else {
-        zeroship_test_support::skip("skip (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skip (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -139,7 +139,7 @@ async fn postmark_webhook_handles_hard_bounce() {
 #[ntex::test]
 async fn postmark_webhook_rejects_bad_auth() {
     let Some((srv, _pg)) = boot(Some("hookuser"), Some("hookpass")).await else {
-        zeroship_test_support::skip("skip (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skip (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -186,7 +186,7 @@ async fn postmark_webhook_rejects_bad_auth() {
     //         with `None`/`None`). Even a correct-looking header must 401
     //         because the server has nothing to compare against.
     let Some((srv_unconfigured, _pg2)) = boot(None, None).await else {
-        zeroship_test_support::skip("skip second-stage (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skip second-stage (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
     let some_auth = format!("Basic {}", STANDARD.encode("anyone:anything"));
@@ -218,7 +218,7 @@ async fn postmark_webhook_rejects_bad_auth() {
 #[ntex::test]
 async fn postmark_webhook_handles_spam_complaint() {
     let Some((srv, pg)) = boot(Some("hookuser"), Some("hookpass")).await else {
-        zeroship_test_support::skip("skip (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skip (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 

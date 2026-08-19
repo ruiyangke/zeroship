@@ -69,9 +69,10 @@ jsonwebtoken = { workspace = true }
 # ---------------------------------------------------------------------------
 # Same contract as `zeroship-control`'s feature of the same name: it marks the
 # targets that CANNOT run without a reachable, migrated PostgreSQL. Determined
-# by measurement - the built test executables were run with MIGRATED_TEST_DB /
-# CONTROL_TEST_DB pointed at a dead port, and `apply_api_test` was the one
-# integration target that failed (it panics in `connect`, it does not skip).
+# by measurement - the built test executables were run with the test database
+# (`zeroship_core::config::test_database_url_opt()`) pointed at a dead port,
+# and `apply_api_test` was the one integration target that failed (it panics
+# in `connect`, it does not skip).
 #
 # The feature also gates `migration_store`'s in-crate `mod tests`, whose two
 # `*_pg` cases dial the same database from the LIB target. A `required-features`

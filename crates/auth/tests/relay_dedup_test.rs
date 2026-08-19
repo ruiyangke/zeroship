@@ -1,5 +1,5 @@
 //! Relay `MessageID` idempotency: the reserve/confirm dedup split (sub-spec
-//! §7.1 / §8 never-silent-drop). Live PG (`AUTH_DB_URL`); skips without it.
+//! §7.1 / §8 never-silent-drop). Live PG (`PG_TEST_URL` or the TOML overlay); skips without it.
 //!
 //! The security bug this guards (security review finding 2): the dedup sentinel
 //! must be committed only at a TERMINAL outcome, never before a retryable (503)
@@ -14,7 +14,7 @@ use zeroship_auth::store::relay;
 
 #[allow(clippy::future_not_send)]
 async fn pg_or_skip() -> Option<compio_postgres::Client> {
-    let dsn = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)?;
+    let dsn = zeroship_core::config::test_database_url_opt()?;
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
@@ -35,7 +35,7 @@ async fn pg_or_skip() -> Option<compio_postgres::Client> {
 #[compio::test]
 async fn transient_503_then_retry_is_not_deduped_away() {
     let Some(client) = pg_or_skip().await else {
-        zeroship_test_support::skip("skip (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skip (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
     let message_id = format!("mid-{}", uuid::Uuid::new_v4().simple());
@@ -89,7 +89,7 @@ async fn transient_503_then_retry_is_not_deduped_away() {
 #[compio::test]
 async fn commit_is_idempotent_and_probe_tracks_it() {
     let Some(client) = pg_or_skip().await else {
-        zeroship_test_support::skip("skip (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skip (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
     let message_id = format!("mid-{}", uuid::Uuid::new_v4().simple());

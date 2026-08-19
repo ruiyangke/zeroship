@@ -314,7 +314,7 @@ pub struct Fixture {
 }
 
 impl Fixture {
-    /// Boot a fresh fixture. Returns `None` if `AUTH_DB_URL` is unset.
+    /// Boot a fresh fixture. Returns `None` if no test database is configured.
     ///
     /// `client_id_prefix` is used to disambiguate generated client ids across
     /// concurrent tests / binaries (e.g. `"threat"`, `"enum"`).
@@ -324,7 +324,7 @@ impl Fixture {
     #[allow(clippy::future_not_send)]
     pub async fn boot(client_id_prefix: &str) -> Option<Self> {
         let db_url =
-            zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)?;
+            zeroship_core::config::test_database_url_opt()?;
 
         let (pg_client, pg_connection) =
             compio_postgres::connect(&db_url, compio_postgres::NoTls)

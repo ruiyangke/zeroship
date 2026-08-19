@@ -13,7 +13,7 @@
 //! `None` here is exactly the fail-closed-no-real-email-leak behaviour. This is
 //! the real function the arms call, not a stub.
 //!
-//! Skipped without `AUTH_DB_URL` (1b-anchor convention).
+//! Skipped without a test database (1b-anchor convention; set `PG_TEST_URL`).
 
 use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;
@@ -21,7 +21,7 @@ use zeroship_gateway::identities;
 
 #[allow(clippy::future_not_send)]
 async fn pg_or_skip() -> Option<Client> {
-    let dsn = zeroship_core::test_env!("AUTH_DB_URL")?;
+    let dsn = zeroship_core::config::test_database_url_opt()?;
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
@@ -103,7 +103,7 @@ async fn cleanup(client: &Client, client_id: &str, user_id: Uuid) {
 #[compio::test]
 async fn lookup_relay_email_returns_active_alias_and_fails_closed_on_revoke() {
     let Some(mut client) = pg_or_skip().await else {
-        zeroship_test_support::skip("[identities_relay_test] skip (no AUTH_DB_URL)");
+        zeroship_test_support::skip("[identities_relay_test] skip (no test database; set PG_TEST_URL)");
         return;
     };
     let client_id = format!("oac_relayswap_{}", Uuid::new_v4().simple());
@@ -169,7 +169,7 @@ async fn lookup_relay_email_returns_active_alias_and_fails_closed_on_revoke() {
 #[compio::test]
 async fn upsert_refuses_to_rebind_a_stored_pairwise_subject() {
     let Some(mut client) = pg_or_skip().await else {
-        zeroship_test_support::skip("[identities_relay_test] skip (no AUTH_DB_URL)");
+        zeroship_test_support::skip("[identities_relay_test] skip (no test database; set PG_TEST_URL)");
         return;
     };
     let client_id = format!("oac_rebind_{}", Uuid::new_v4().simple());
@@ -232,7 +232,7 @@ async fn upsert_refuses_to_rebind_a_stored_pairwise_subject() {
 #[compio::test]
 async fn lookup_relay_email_is_none_when_no_alias_minted() {
     let Some(mut client) = pg_or_skip().await else {
-        zeroship_test_support::skip("[identities_relay_test] skip (no AUTH_DB_URL)");
+        zeroship_test_support::skip("[identities_relay_test] skip (no test database; set PG_TEST_URL)");
         return;
     };
     let client_id = format!("oac_noalias_{}", Uuid::new_v4().simple());

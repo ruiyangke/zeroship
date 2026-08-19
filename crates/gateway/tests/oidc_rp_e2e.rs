@@ -44,7 +44,7 @@ const GATEWAY_ISS: &str = "https://api.zeroship.ai";
 const WORKER_KEY: &str = "gateway-e2e-worker-key";
 
 fn db_url() -> Option<String> {
-    zeroship_core::test_env!("AUTH_DB_URL").or_else(|| zeroship_core::test_env!("CONTROL_TEST_DB"))
+    zeroship_core::config::test_database_url_opt()
 }
 
 fn location(resp: &cyper::Response) -> String {
@@ -510,7 +510,8 @@ async fn browser_pkce_tokens(rp: &OidcRp, auth_base: &str, client_id: &str, emai
 /// were value flags, and `crates/auth/src/config.rs` now asserts clap REJECTS
 /// all three. `parse_from` panics on an unknown argument, so this helper was a
 /// hard failure waiting for the first run with a database - it is skipped
-/// today only because `db_url()` returns `None` without `AUTH_DB_URL`.
+/// today only because `db_url()` returns `None` without a test database
+/// (see `PG_TEST_URL`).
 ///
 /// The tempdir is returned, not dropped here: deleting it before the caller is
 /// done would be harmless for the already-resolved config but makes the
@@ -643,7 +644,7 @@ async fn cleanup(db: &Client, user_id: Uuid, app_id: Uuid, client_id: &str) {
 #[allow(clippy::future_not_send)]
 async fn gateway_bearer_rejects_real_op_id_token_but_accepts_access_token() {
     let Some(db_url) = db_url() else {
-        zeroship_test_support::skip("[oidc_rp_e2e] skip (AUTH_DB_URL or CONTROL_TEST_DB unset)");
+        zeroship_test_support::skip("[oidc_rp_e2e] skip (no test database; set PG_TEST_URL)");
         return;
     };
 
@@ -742,7 +743,7 @@ async fn gateway_bearer_rejects_real_op_id_token_but_accepts_access_token() {
 #[allow(clippy::future_not_send)]
 async fn gateway_bearer_rejects_access_token_for_different_resource_audience() {
     let Some(db_url) = db_url() else {
-        zeroship_test_support::skip("[oidc_rp_e2e] skip (AUTH_DB_URL or CONTROL_TEST_DB unset)");
+        zeroship_test_support::skip("[oidc_rp_e2e] skip (no test database; set PG_TEST_URL)");
         return;
     };
 
@@ -803,7 +804,7 @@ async fn gateway_bearer_rejects_access_token_for_different_resource_audience() {
 #[allow(clippy::future_not_send)]
 async fn gateway_oidc_rp_full_dance_against_platform_op() {
     let Some(db_url) = db_url() else {
-        zeroship_test_support::skip("[oidc_rp_e2e] skip (AUTH_DB_URL or CONTROL_TEST_DB unset)");
+        zeroship_test_support::skip("[oidc_rp_e2e] skip (no test database; set PG_TEST_URL)");
         return;
     };
 

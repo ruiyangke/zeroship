@@ -148,9 +148,8 @@ fn wrong_alg_hs256_token(claims: &Value, kid: &str) -> String {
 }
 
 fn db_url() -> String {
-    zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)
-        .or_else(|| zeroship_core::test_env!("CONTROL_TEST_DB"))
-        .expect("AUTH_DB_URL or CONTROL_TEST_DB must be set so op_foundation_test runs against Postgres")
+    zeroship_core::config::test_database_url_opt()
+        .expect("a test database must be set (PG_TEST_URL or the TOML overlay) so op_foundation_test runs against Postgres")
 }
 
 async fn open_conn() -> Client {

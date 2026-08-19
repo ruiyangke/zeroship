@@ -15,7 +15,7 @@
 //!   - it does NOT touch `zeroship.oauth_grants` (so the audit's
 //!     `cross_service_grant_revoke: not_implemented` is the truth).
 //!
-//! Live PG (`AUTH_DB_URL`); skips without it.
+//! Live PG (`PG_TEST_URL` or the TOML overlay); skips without it.
 
 #![allow(clippy::future_not_send)]
 
@@ -24,7 +24,7 @@ use uuid::Uuid;
 use zeroship_auth::store::relay;
 
 async fn pg_or_skip() -> Option<Client> {
-    let dsn = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)?;
+    let dsn = zeroship_core::config::test_database_url_opt()?;
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
@@ -135,7 +135,7 @@ async fn cleanup(db: &Client, user_id: Uuid, client_id: &str) {
 #[compio::test]
 async fn auto_revoke_locally_disables_forwarding_and_leaves_grant_untouched() {
     let Some(db) = pg_or_skip().await else {
-        zeroship_test_support::skip("skip (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skip (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
     let (user_id, client_id, relay_email) = seed_active_alias(&db).await;

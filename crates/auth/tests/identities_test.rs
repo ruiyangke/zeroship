@@ -1,6 +1,6 @@
 //! Live-PG roundtrip for `auth::store::identities`.
 //!
-//! Skipped unless `AUTH_DB_URL` is set. Seeds an OAuth-only user (no password
+//! Skipped unless a test database is available (`PG_TEST_URL` or the TOML overlay). Seeds an OAuth-only user (no password
 //! hash), exercises link/find/list/unlink, then cleans up via FK cascade.
 
 use compio_postgres::{connect, Client, NoTls};
@@ -11,8 +11,8 @@ use zeroship_auth::store::{identities};
 
 #[compio::test]
 async fn identities_link_find_list_unlink_roundtrip() {
-    let Some(dsn) = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) else {
-        zeroship_test_support::skip("skipping identities_test (no AUTH_DB_URL)");
+    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
+        zeroship_test_support::skip("skipping identities_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -105,8 +105,8 @@ async fn identities_link_find_list_unlink_roundtrip() {
 
 #[compio::test]
 async fn guarded_unlink_allows_only_one_concurrent_oauth_only_unlink() {
-    let Some(dsn) = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) else {
-        zeroship_test_support::skip("skipping identities_test (no AUTH_DB_URL)");
+    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
+        zeroship_test_support::skip("skipping identities_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 

@@ -62,7 +62,7 @@ const CSP_DIRECTIVES: [&str; 6] = [
 #[ntex::test]
 async fn every_security_header_is_present_on_a_ui_route() {
     let Some(fx) = Fixture::boot("secheaders").await else {
-        zeroship_test_support::skip("[security_headers] skip (need AUTH_DB_URL)");
+        zeroship_test_support::skip("[security_headers] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 

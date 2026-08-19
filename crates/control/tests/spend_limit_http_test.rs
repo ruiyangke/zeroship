@@ -12,7 +12,8 @@
 //! handler read `s.spend_limit_cents` from `app_spend_state`, a column that no
 //! longer exists there — the query would error.)
 //!
-//! Gated on `CONTROL_TEST_DB`; silent skip otherwise.
+//! Gated on a configured test database
+//! (`zeroship_core::config::test_database_url_opt`); silent skip otherwise.
 
 #![allow(clippy::future_not_send)]
 

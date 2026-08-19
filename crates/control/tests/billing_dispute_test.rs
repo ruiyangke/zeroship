@@ -12,7 +12,8 @@
 //! `record_infra_payment` (charge row + pi_/ch_ linkage) → `charge.dispute.*` →
 //! `disputes::record_dispute_*` → `invoice_payments::append_dispute_row`. The over-refund
 //! interaction runs the REAL `refund::issue_refund` against the REAL trigger. Gated on
-//! `CONTROL_TEST_DB`; silent skip otherwise.
+//! a configured test database (`zeroship_core::config::test_database_url_opt`);
+//! silent skip otherwise.
 //!
 //! These FAIL against the broken resolution (an `in_…`-on-dispute test would resolve
 //! nothing → no dispute recorded → assertions on the debit / cap / reversal all fail):

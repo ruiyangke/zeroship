@@ -11,7 +11,8 @@
 //! VFS with a bundle written to disk, and the actual `cron::orphaned_app_reaper`
 //! tick + the shared `api::purge_app`. No shims.
 //!
-//! All cases gate on `CONTROL_TEST_DB` / `PG_TEST_URL`; silent skip in dev.
+//! All cases gate on a configured test database
+//! (`zeroship_core::config::test_database_url_opt`); silent skip in dev.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -27,8 +28,7 @@ use zeroship_control::{
 mod common;
 
 fn db_url() -> String {
-    zeroship_core::test_env!("CONTROL_TEST_DB")
-        .or_else(|| zeroship_core::test_env!("PG_TEST_URL"))
+    zeroship_core::config::test_database_url_opt()
         .filter(|u| !u.trim().is_empty())
         .unwrap_or_else(|| {
             "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()

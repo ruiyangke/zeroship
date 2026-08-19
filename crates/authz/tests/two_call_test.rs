@@ -238,8 +238,8 @@ fn audit_decision_recorded() {
 /// `"readonly"`, whose policy permitted reads on an unconstrained resource -
 /// a fleet-wide cross-tenant read of app metadata, env-var names, secret
 /// names, billing and deploy history. Both the default role and that policy
-/// are deleted, and this pins the property they threatened. Requires
-/// AUTH_DB_URL (live PG).
+/// are deleted, and this pins the property they threatened. Requires a test
+/// database (live PG; see `PG_TEST_URL`).
 #[test]
 fn unroled_creator_denied_cross_tenant_reads() {
     run_db_test(|pg| async move {
@@ -333,8 +333,8 @@ where
     F: FnOnce(Client) -> Fut,
     Fut: Future<Output = ()>,
 {
-    let Some(dsn) = zeroship_core::test_env!("AUTH_DB_URL") else {
-        zeroship_test_support::skip("skipping (no AUTH_DB_URL)");
+    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
+        zeroship_test_support::skip("skipping (no test database; set PG_TEST_URL)");
         return;
     };
     compio::runtime::Runtime::new()

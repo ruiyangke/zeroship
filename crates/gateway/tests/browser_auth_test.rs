@@ -6,7 +6,7 @@
 //! unconditional tests (authorize URL shape, 503 when un-provisioned,
 //! popup-callback page + CSP + no-reflection) need NO database. The signout revocation
 //! test stands up a loopback MOCK OP (counting `/revoke` hits)
-//! and is DB-gated on `GATEWAY_ANCHORS_DB_URL` (the established skip
+//! and is DB-gated on a test database (set `PG_TEST_URL`; the established skip
 //! convention — no live PG in CI by default), but the same-origin guard +
 //! cookie-clear parts run unconditionally.
 
@@ -543,8 +543,8 @@ async fn signout_with_no_anchor_is_204_and_clears_cookies() {
 /// cleared, (d) OP `/revoke` was hit exactly once.
 #[ntex::test]
 async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_op_revoke() {
-    let Some(dsn) = zeroship_core::test_env!("GATEWAY_ANCHORS_DB_URL") else {
-        zeroship_test_support::skip("skipping (no GATEWAY_ANCHORS_DB_URL)");
+    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
+        zeroship_test_support::skip("skipping (no test database; set PG_TEST_URL)");
         return;
     };
     let db = zeroship_gateway::db::DbConfig::new(dsn.clone(), 4);

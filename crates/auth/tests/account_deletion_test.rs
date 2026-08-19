@@ -1,6 +1,6 @@
 //! Account-deletion / GDPR-erase lifecycle — live PG (ISS-12).
 //!
-//! Skipped unless `AUTH_DB_URL` (or `PG_TEST_URL`) is set. These drive the
+//! Skipped unless a test database (`PG_TEST_URL` or the TOML overlay) is available. These drive the
 //! REAL store transactions and the REAL reaper tick — no shims — so a green
 //! run exercises the same code path the `/me/delete` handler and the
 //! `account_reaper` cron call in production.
@@ -23,8 +23,7 @@ static REAPER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[allow(clippy::future_not_send)]
 async fn pg() -> Option<Client> {
-    let dsn = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)
-        .or_else(|| zeroship_core::test_env!("PG_TEST_URL"))?;
+    let dsn = zeroship_core::config::test_database_url_opt()?;
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
@@ -72,7 +71,7 @@ async fn cleanup(db: &Client, ids: &[Uuid]) {
 #[compio::test]
 async fn request_marks_deletion_and_schedules() {
     let Some(mut db) = pg().await else {
-        zeroship_test_support::skip("skipping account_deletion_test (no AUTH_DB_URL/PG_TEST_URL)");
+        zeroship_test_support::skip("skipping account_deletion_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
     let tag = Uuid::new_v4().simple().to_string();

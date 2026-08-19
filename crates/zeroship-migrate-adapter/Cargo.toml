@@ -51,8 +51,9 @@ zero-migrate-ir = { workspace = true, optional = true }
 # resolver + `load_and_lower_guarded` thread (Stage 4a platform-migrate only).
 zero-migrate-policy = { workspace = true, optional = true }
 # The declared-environment registry. The `zeroship-platform-migrate` bin reads
-# DATABASE_URL and the PG suites read ZERO_MIGRATE_TEST_PG_URL; both go through
-# `zeroship_core::{declared_env,test_env}` so the reads are enumerable
+# DATABASE_URL and the PG suites resolve the test database through
+# `zeroship_core::config::test_database_url_opt` (PG_TEST_URL, falling back to
+# the generated TOML test overlay) so the reads are enumerable
 # (docs/proposals/2026-08-11-config-name-alignment.md, Step 4). Not optional: a
 # `[dev-dependencies]` entry alone would not cover the bin, and an optional dep
 # gated on `platform-cli` would not cover the two feature-free test targets.
@@ -93,8 +94,8 @@ required-features = ["platform-cli"]
 [dev-dependencies]
 compio = { workspace = true }
 tempfile = { workspace = true }
-# Every PG-backed proof in tests/ returns early when ZERO_MIGRATE_TEST_PG_URL is
-# unset, which is the normal state in this repo's CI. The announcement has to go
+# Every PG-backed proof in tests/ returns early when there is no test database
+# (PG_TEST_URL unset), which is the normal state in this repo's CI. The announcement has to go
 # through `skip` rather than `eprintln!`: the harness replays captured output
 # only for a FAILING test, so an eprintln on an early return is invisible on the
 # green run that is exactly when it matters.

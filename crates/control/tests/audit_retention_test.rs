@@ -5,8 +5,10 @@
 //!
 //! Would FAIL pre-fix: before this change the tamper trigger blocked EVERY
 //! DELETE (so the retention sweep could never remove a row), and the sweep
-//! didn't exist. Set `CONTROL_TEST_DB` to a migrated Postgres URL; skipped
-//! otherwise so this file doesn't gate CI without a DB.
+//! didn't exist. Configure a migrated test database
+//! (`zeroship_core::config::test_database_url_opt`; run
+//! `tests/provision_test_backends.sh` to provision one); skipped otherwise
+//! so this file doesn't gate CI without a DB.
 
 use compio_postgres::{connect, NoTls};
 use uuid::Uuid;
@@ -16,7 +18,7 @@ use zeroship_control::Registry;
 mod common;
 
 fn db_url() -> String {
-    zeroship_core::test_env!("CONTROL_TEST_DB")
+    zeroship_core::config::test_database_url_opt()
         .filter(|u| !u.trim().is_empty())
         .unwrap_or_else(|| {
             "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()

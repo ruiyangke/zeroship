@@ -201,14 +201,14 @@ DBURL="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB"
 echo ""
 echo "=== Stage 3: drive the REAL export path (cargo test against REAL Stripe + PG) ==="
 # ===========================================================================
-# The #[ignore]'d live tests are gated on CONTROL_TEST_DB + STRIPE_LIVE_SECRET_KEY
+# The #[ignore]'d live tests are gated on the test DSN + STRIPE_LIVE_SECRET_KEY
 # + STRIPE_LIVE_METER_ID (+ STRIPE_LIVE_METER_EVENT_NAME). They run the SAME
 # hardened metering_export cron through the real cyper StripeClient over the wire
 # to api.stripe.com, then POLL the LIVE event_summaries aggregate for convergence
 # (Stripe aggregates meter events asynchronously — the divergence from the mock).
 TEST_LOG="$WORK/cargo-test.log"
 # Secret key passed via the ENV the test reads (STRIPE_LIVE_SECRET_KEY), never on argv.
-if CONTROL_TEST_DB="$DBURL" \
+if PG_TEST_URL="$DBURL" \
    STRIPE_LIVE_SECRET_KEY="$SK" \
    STRIPE_LIVE_METER_ID="$METER_ID" \
    STRIPE_LIVE_METER_EVENT_NAME="$EVENT_NAME" \

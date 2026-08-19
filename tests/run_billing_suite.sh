@@ -68,16 +68,19 @@
 #   owned by no file in this tree. The address was right, the provenance was
 #   not, and the wrong half is the one that reads as though somebody maintains
 #   that server.
-#   PG_HOST (localhost)  PG_PORT (5440)  PG_USER (postgres)  PG_PASS (zeroship)
+#   PG_HOST PG_PORT PG_USER PG_PASS - INPUTS to
+#     tests/provision_test_backends.sh, which writes the coordinates into
+#     deploy/ops/zeroship.test.toml; this script reads them back from there
+#     rather than carrying a second copy of the defaults.
 #   TEST_DB (per run: zeroship_billing_test_<pid>_<nanos>, dropped on exit)
 #   PSQL    (auto-detected; override with an explicit psql path)
 #   SKIP_DB_RECREATE (unset)  - reuse a TEST_DB you named; needs one
 #   TEST_THREADS (1)          - passed to each binary's `--test-threads`
 #   REDPANDA_BROKERS (unset)  - set to gate the real Kafka-wire stream path
 #
-# The tests never skip for want of a database: CONTROL_TEST_DB / AUTH_DB_URL /
-# MIGRATED_TEST_DB are exported below, and with them unset the targets fall back
-# to the dev DSN and fail loudly if it is unreachable. A missing database can
+# The tests never skip for want of a database: PG_TEST_URL is exported below,
+# and with it unset the targets fall back to the generated overlay and fail
+# loudly if that server is unreachable. A missing database can
 # never masquerade as a pass.
 # ============================================================================
 set -euo pipefail
@@ -121,10 +124,13 @@ cd "$ROOT"
 # fails this gate. Do not add an entry here for a database.
 BILLING_SKIP_ALLOWLIST="${BILLING_SKIP_ALLOWLIST:-ZEROSHIP_DW_E2E|REDPANDA_BROKERS}"
 
-PG_HOST="${PG_HOST:-localhost}"
-PG_PORT="${PG_PORT:-5440}"
-PG_USER="${PG_USER:-postgres}"
-PG_PASS="${PG_PASS:-zeroship}"
+# The server's coordinates come from the generated overlay, not from four
+# `${PG_x:-...}` lines here and four identical ones in run_auth_suite.sh. See
+# tests/lib/test_config.sh; `tests/provision_test_backends.sh` writes the file,
+# and the PG_* names are its INPUTS, so setting one still points a run wherever
+# you like.
+. "$ROOT/tests/lib/test_config.sh"
+zs_test_config_load "$ROOT" || exit 2
 
 zs_scratch_db_resolve zeroship_billing_test || exit $?
 
@@ -143,14 +149,36 @@ if [ -z "$PSQL" ]; then
 fi
 
 DSN="postgresql://${PG_USER}:${PG_PASS}@${PG_HOST}:${PG_PORT}/${TEST_DB}"
-# Three names for one database. The control suite is not consistent about which
-# it reads - the billing and registry targets take CONTROL_TEST_DB, the
-# auth-adjacent ones (admin / oauth / token / device / bootstrap handlers) take
-# AUTH_DB_URL, and zeroship-migrated takes MIGRATED_TEST_DB. Exporting all three
-# is what lets the single cargo invocation below cover all of them.
+# ONE name for one database. This exported CONTROL_TEST_DB, AUTH_DB_URL and
+# MIGRATED_TEST_DB, because the control suite was not consistent about which it
+# read - billing and registry targets took CONTROL_TEST_DB, the auth-adjacent
+# handlers took AUTH_DB_URL, and zeroship-migrated took MIGRATED_TEST_DB.
+# Exporting all three was how one cargo invocation covered all of them, and it
+# is also why adding a target meant guessing which name it had picked.
+#
+# They now read the overlay through zeroship_core::config::test_database_url_opt,
+# whose override tier is PG_TEST_URL. The scratch database name is per run and
+# cannot live in the shared file, which is exactly what that tier is for.
+export PG_TEST_URL="$DSN"
+
+# ONE BRIDGE REMAINS, and it is temporary and load-bearing.
+#
+# crates/control/tests/workflow_engine_test.rs still reads CONTROL_TEST_DB. It
+# was the single file left unconverted, because another worktree is editing it
+# and converting it here would have produced a conflict rather than a change.
+#
+# Dropping the export without converting the file is NOT harmless, and this
+# gate is what proved it: with only PG_TEST_URL exported, that binary's 93 tests
+# announced "skip: CONTROL_TEST_DB not set" and the skip census failed the run.
+# 0 failed, 751 passed, and 93 tests that had silently stopped executing - which
+# is precisely the failure mode this whole change exists to remove, reproduced
+# by the change itself.
+#
+# So the name is exported until that file lands. DELETE THIS EXPORT in the same
+# commit that converts workflow_engine_test.rs to
+# zeroship_core::config::test_database_url_opt; the skip census will tell you
+# immediately if you delete it too early.
 export CONTROL_TEST_DB="$DSN"
-export AUTH_DB_URL="$DSN"
-export MIGRATED_TEST_DB="$DSN"
 
 run_psql() { PGPASSWORD="$PG_PASS" "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" "$@"; }
 
@@ -294,9 +322,10 @@ else
 fi
 
 echo "------------------------------------------------------------------"
-echo "==> zeroship-migrate-adapter live-PG targets (ZERO_MIGRATE_TEST_PG_URL)"
-# ZERO_MIGRATE_TEST_PG_URL was set NOWHERE in this repo. Three targets read it,
-# and each announced a skip and counted as passed on every run:
+echo "==> zeroship-migrate-adapter live-PG targets"
+# ZERO_MIGRATE_TEST_PG_URL was set NOWHERE in this repo, and was this crate's
+# private name for the same server everything else already had. Three targets
+# read it, and each announced a skip and counted as passed on every run:
 #
 #   tests/smoke_apply_pg.rs        1 test of 1
 #   tests/author_and_apply_pg.rs   1 test of 2
@@ -309,6 +338,9 @@ echo "==> zeroship-migrate-adapter live-PG targets (ZERO_MIGRATE_TEST_PG_URL)"
 # The result lines are IDENTICAL. Only the clock and the announcement differ,
 # which is exactly why being named in a script is not evidence of coverage.
 #
+# The private name is gone; the three targets resolve the one test DSN like
+# every other target, so there is nothing left here that can go unexported.
+#
 # The database is the one THIS SCRIPT ALREADY CREATED. Nothing new is
 # provisioned: `smoke_apply_pg` and `author_and_apply_pg` create and drop their
 # own token-suffixed `proj_*` / `meta_*` schemas, and `platform_migrate`
@@ -318,7 +350,7 @@ echo "==> zeroship-migrate-adapter live-PG targets (ZERO_MIGRATE_TEST_PG_URL)"
 # No name list, same as the two groups above: the package invocation runs every
 # target in the crate, so a target added there is covered here the moment it is
 # added.
-if run_group env ZERO_MIGRATE_TEST_PG_URL="$DSN" \
+if run_group env PG_TEST_URL="$DSN" \
      cargo test -p zeroship-migrate-adapter --features platform-cli --no-fail-fast \
      -- "${THREAD_ARG[@]}"; then
   :

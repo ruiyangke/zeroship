@@ -1,6 +1,7 @@
 //! Live-PG mailer test — suppression check + `StdoutMailer` happy path.
 //!
-//! Skips silently when `AUTH_DB_URL` is unset (CI without a PG fixture).
+//! Skips silently when there is no test database (CI without a PG fixture;
+//! set `PG_TEST_URL`).
 //! Mirrors the `migrations_smoke.rs` harness: `connect(...)` returns
 //! `(Client, Connection)` and the connection future must be spawned + detached
 //! on the compio runtime or queries hang.
@@ -12,8 +13,8 @@ use zeroship_mailer::{Address, Email, Mailer, SmtpConfig, SmtpMailer, SmtpTls};
 
 #[compio::test]
 async fn stdout_mailer_sends_when_not_suppressed() {
-    let Some(dsn) = zeroship_core::test_env!("AUTH_DB_URL") else {
-        zeroship_test_support::skip("skip (no AUTH_DB_URL)");
+    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
+        zeroship_test_support::skip("skip (no test database; set PG_TEST_URL)");
         return;
     };
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
@@ -54,8 +55,8 @@ async fn stdout_mailer_sends_when_not_suppressed() {
 
 #[compio::test]
 async fn stdout_mailer_refuses_suppressed() {
-    let Some(dsn) = zeroship_core::test_env!("AUTH_DB_URL") else {
-        zeroship_test_support::skip("skip (no AUTH_DB_URL)");
+    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
+        zeroship_test_support::skip("skip (no test database; set PG_TEST_URL)");
         return;
     };
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
@@ -124,16 +125,19 @@ async fn stdout_mailer_refuses_suppressed() {
 /// message of type InvalidContentType", so every send to a plaintext sink
 /// FAILED. With `SmtpTls::Plaintext` the send must succeed.
 ///
-/// Gated on `AUTH_DB_URL` (suppression check) AND `AUTH_TEST_SMTP_SINK`
-/// (`host:port` of a plaintext sink, e.g. `127.0.0.1:1025`). Skips silently
-/// when either is unset so CI without a sink is unaffected.
+/// Gated on a test database (suppression check; set `PG_TEST_URL`) AND
+/// `AUTH_TEST_SMTP_SINK` (`host:port` of a plaintext sink, e.g.
+/// `127.0.0.1:1025`). Skips silently when either is unset so CI without a
+/// sink is unaffected.
 #[compio::test]
 async fn smtp_plaintext_sink_delivers_relay_forward() {
     let (Some(dsn), Some(sink)) = (
-        zeroship_core::test_env!("AUTH_DB_URL"),
+        zeroship_core::config::test_database_url_opt(),
         zeroship_core::test_env!("AUTH_TEST_SMTP_SINK"),
     ) else {
-        zeroship_test_support::skip("skip (need AUTH_DB_URL + AUTH_TEST_SMTP_SINK=host:port)");
+        zeroship_test_support::skip(
+            "skip (need a test database [PG_TEST_URL] + AUTH_TEST_SMTP_SINK=host:port)",
+        );
         return;
     };
     let (host, port) = sink

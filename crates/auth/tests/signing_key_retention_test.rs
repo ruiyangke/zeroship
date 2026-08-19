@@ -57,12 +57,7 @@ where
 }
 
 async fn pg() -> Option<Client> {
-    let dsn = zeroship_core::declared_env!(
-        external,
-        "AUTH_DB_URL",
-        zeroship_core::config::TestHarness
-    )
-    .or_else(|| zeroship_core::test_env!("PG_TEST_URL"))?;
+    let dsn = zeroship_core::config::test_database_url_opt()?;
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         if let Err(err) = connection.run().await {
@@ -185,7 +180,7 @@ async fn jwks_contains(db: &Client, kid: &str) -> bool {
 #[compio::test]
 async fn retiring_key_inside_horizon_remains_published() {
     let Some(db) = pg().await else {
-        zeroship_test_support::skip("skipping signing_key_retention_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping signing_key_retention_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
     let _guard = RETENTION_TEST_LOCK.lock().expect("retention test lock");
@@ -208,7 +203,7 @@ async fn retiring_key_inside_horizon_remains_published() {
 #[compio::test]
 async fn key_past_horizon_leaves_jwks_with_reason_and_idempotently_keeps_audit_row() {
     let Some(db) = pg().await else {
-        zeroship_test_support::skip("skipping signing_key_retention_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping signing_key_retention_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
     let _guard = RETENTION_TEST_LOCK.lock().expect("retention test lock");
@@ -265,7 +260,7 @@ async fn key_past_horizon_leaves_jwks_with_reason_and_idempotently_keeps_audit_r
 #[compio::test]
 async fn active_and_next_keys_are_never_pruned_regardless_of_age() {
     let Some(db) = pg().await else {
-        zeroship_test_support::skip("skipping signing_key_retention_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping signing_key_retention_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
     let _guard = RETENTION_TEST_LOCK.lock().expect("retention test lock");
@@ -293,7 +288,7 @@ async fn active_and_next_keys_are_never_pruned_regardless_of_age() {
 #[compio::test]
 async fn missing_watermark_uses_full_horizon_from_retiring_at() {
     let Some(db) = pg().await else {
-        zeroship_test_support::skip("skipping signing_key_retention_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping signing_key_retention_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
     let _guard = RETENTION_TEST_LOCK.lock().expect("retention test lock");
@@ -332,14 +327,14 @@ async fn missing_watermark_uses_full_horizon_from_retiring_at() {
 #[compio::test]
 async fn issuance_and_prune_never_return_a_token_without_its_published_key() {
     let Some(db) = pg().await else {
-        zeroship_test_support::skip("skipping signing_key_retention_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping signing_key_retention_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
     let Some(issue_db) = pg().await else {
-        unreachable!("the same AUTH_DB_URL disappeared")
+        unreachable!("the same test database URL disappeared")
     };
     let Some(prune_db) = pg().await else {
-        unreachable!("the same AUTH_DB_URL disappeared")
+        unreachable!("the same test database URL disappeared")
     };
     let _guard = RETENTION_TEST_LOCK.lock().expect("retention test lock");
 
@@ -407,7 +402,7 @@ async fn issuance_and_prune_never_return_a_token_without_its_published_key() {
 #[compio::test]
 async fn every_production_token_kind_advances_the_key_watermark() {
     let Some(db) = pg().await else {
-        zeroship_test_support::skip("skipping signing_key_retention_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping signing_key_retention_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
     let _guard = RETENTION_TEST_LOCK.lock().expect("retention test lock");
@@ -586,14 +581,14 @@ async fn every_production_token_kind_advances_the_key_watermark() {
 #[compio::test]
 async fn concurrent_retirement_cannot_be_undone_by_signer_startup() {
     let Some(db) = pg().await else {
-        zeroship_test_support::skip("skipping signing_key_retention_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping signing_key_retention_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
     let Some(publish_db) = pg().await else {
-        unreachable!("the same AUTH_DB_URL disappeared")
+        unreachable!("the same test database URL disappeared")
     };
     let Some(prune_db) = pg().await else {
-        unreachable!("the same AUTH_DB_URL disappeared")
+        unreachable!("the same test database URL disappeared")
     };
     let _guard = RETENTION_TEST_LOCK.lock().expect("retention test lock");
 

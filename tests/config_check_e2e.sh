@@ -595,8 +595,29 @@ echo "=== Case 13: all five server binaries answer --check-config ==="
 # that binary's canonical secret names, then the binary). A packed argument
 # STRING cannot express that, because the environment assignments have to
 # precede the binary rather than follow it.
-for name in control gateway auth worker migrated; do
-    run_one "$name" "$name-all-five" --check-config --config "$TMPDIR/shared.toml"
+#
+# FOUR BINARIES HERE, NOT FIVE, AND THE WORKER'S ABSENCE IS THE POINT.
+#
+# This loop used to include `worker` and pass it `--config`. The worker has no
+# such flag, so clap rejected the argument with exit 2 while the loop asserted
+# exit 0 - the case could not pass, and had not since the flag was removed.
+#
+# The flag was removed deliberately, in 9b205f6ed "isolate the platform mint
+# credential", and giving it back is the wrong repair. The shared overlay is
+# mounted into services that are not its only consumers (gateway and migrated
+# still load it), and the worker is the one process running untrusted creator
+# code in V8. `crates/worker/src/config.rs` states it - "the worker deliberately
+# has no TOML overlay source" - and the test at
+# `worker_cannot_select_or_discover_a_shared_overlay` pins both halves: no
+# `--config`, no `--no-config`, and `allow_discovery()` false. Every worker
+# input arrives as an explicit flag, a canonical `ZEROSHIP_*` name, or a
+# narrowly mounted secret file, so there is no path by which the worker reads a
+# document some other service's credential was written into.
+#
+# So the worker gets its own case below, asserting the asymmetry rather than
+# leaving a reader to conclude one of the five is a bug.
+for name in control gateway auth migrated; do
+    run_one "$name" "$name-overlay-capable" --check-config --config "$TMPDIR/shared.toml"
     show_last_output
     expect_status 0 "$name exits 0 under --check-config"
     expect_stdout_contains "config_source = $TMPDIR/shared.toml" \
@@ -606,18 +627,36 @@ for name in control gateway auth worker migrated; do
 done
 echo ""
 
+echo "=== Case 13b: the worker answers --check-config and takes NO overlay ==="
+# Both directions, because only the pair discriminates. The positive arm alone
+# would pass against a worker that quietly accepted and ignored `--config`; the
+# negative arm alone would pass against a worker that rejected every argument.
+run_one worker worker-no-overlay --check-config
+show_last_output
+expect_status 0 "worker exits 0 under --check-config"
+expect_stdout_contains "config_source = (none)" \
+    "worker reports no overlay, because it can load none"
+
+run_one worker worker-rejects-config --check-config --config "$TMPDIR/shared.toml"
+show_last_output
+expect_status 2 "worker REJECTS --config rather than silently ignoring it"
+echo ""
+
 echo "=== Case 14: --check-config-format json is machine-readable everywhere ==="
 # Also the negative half of the ValueEnum conversion: an unknown format is now
 # rejected by clap rather than silently falling back to text.
+# The worker is in this list and takes no `--config` with it, for the reason
+# case 13b states: the format flag is shared, the overlay source is not.
 for name in control worker migrated; do
-    run_one "$name" "$name-json" --check-config --check-config-format json \
-        --config "$TMPDIR/shared.toml"
+    CFG=(--config "$TMPDIR/shared.toml")
+    [ "$name" = worker ] && CFG=()
+
+    run_one "$name" "$name-json" --check-config --check-config-format json "${CFG[@]}"
     show_last_output
     expect_status 0 "$name exits 0 with --check-config-format json"
     expect_stdout_contains '{"' "$name emits a JSON object"
 
-    run_one "$name" "$name-bad-format" --check-config --check-config-format yaml \
-        --config "$TMPDIR/shared.toml"
+    run_one "$name" "$name-bad-format" --check-config --check-config-format yaml "${CFG[@]}"
     show_last_output
     expect_status 2 "$name rejects an unknown --check-config-format"
 done

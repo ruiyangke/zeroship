@@ -12,7 +12,9 @@
 //! app_owner satisfies) + an existence/archive check — so a creator could
 //! self-assign a cheaper operator plan and underpay.
 //!
-//! Set `CONTROL_TEST_DB` to run; silently skips otherwise.
+//! Configure a test database (`zeroship_core::config::test_database_url_opt`;
+//! run `tests/provision_test_backends.sh` to provision one) to run; silently
+//! skips otherwise.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -35,7 +37,7 @@ mod common;
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
 fn db_url() -> String {
-    zeroship_core::test_env!("CONTROL_TEST_DB")
+    zeroship_core::config::test_database_url_opt()
         .filter(|u| !u.trim().is_empty())
         .unwrap_or_else(|| {
             "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()

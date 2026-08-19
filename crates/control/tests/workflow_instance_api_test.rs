@@ -1,8 +1,10 @@
 //! HTTP-level tests for the durable-workflows instance API.
 //!
-//! Requires `CONTROL_TEST_DB` pointing at a migrated disposable Postgres
-//! database. This matches the rest of the control integration suite: no DB
-//! means the tests skip without failing local `cargo test`.
+//! Requires a configured test database
+//! (`zeroship_core::config::test_database_url_opt`) pointing at a migrated
+//! disposable Postgres database. This matches the rest of the control
+//! integration suite: no DB means the tests skip without failing local
+//! `cargo test`.
 
 #![allow(clippy::await_holding_lock, clippy::future_not_send)]
 
@@ -29,8 +31,7 @@ const TEST_CONTROL_KEY: &str = "test-control-key";
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
 fn db_url() -> Option<String> {
-    zeroship_core::test_env!("CONTROL_TEST_DB")
-        .or_else(|| zeroship_core::test_env!("PG_TEST_URL"))
+    zeroship_core::config::test_database_url_opt()
 }
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -284,7 +285,7 @@ fn run_id(value: &Value) -> String {
 #[compio::test]
 async fn workflow_routes_reject_missing_auth() {
     let Some(db_url) = db_url() else {
-        zeroship_test_support::skip("skipping workflow_instance_api_test (no CONTROL_TEST_DB)");
+        zeroship_test_support::skip("skipping workflow_instance_api_test (no test database)");
         return;
     };
     let fx = build_fixture(&db_url, "auth-required").await;
@@ -335,7 +336,7 @@ async fn workflow_routes_reject_missing_auth() {
 #[compio::test]
 async fn create_conflicts_status_and_cross_app_isolation() {
     let Some(db_url) = db_url() else {
-        zeroship_test_support::skip("skipping workflow_instance_api_test (no CONTROL_TEST_DB)");
+        zeroship_test_support::skip("skipping workflow_instance_api_test (no test database)");
         return;
     };
     let fx = build_fixture(&db_url, "create").await;
@@ -598,7 +599,7 @@ async fn create_conflicts_status_and_cross_app_isolation() {
 #[compio::test]
 async fn signal_writes_row_and_pulls_matching_wait_wake_at() {
     let Some(db_url) = db_url() else {
-        zeroship_test_support::skip("skipping workflow_instance_api_test (no CONTROL_TEST_DB)");
+        zeroship_test_support::skip("skipping workflow_instance_api_test (no test database)");
         return;
     };
     let fx = build_fixture(&db_url, "signal").await;
@@ -807,7 +808,7 @@ async fn signal_writes_row_and_pulls_matching_wait_wake_at() {
 #[compio::test]
 async fn pause_resume_cancel_transitions_preserve_wake_and_discard_claim() {
     let Some(db_url) = db_url() else {
-        zeroship_test_support::skip("skipping workflow_instance_api_test (no CONTROL_TEST_DB)");
+        zeroship_test_support::skip("skipping workflow_instance_api_test (no test database)");
         return;
     };
     let fx = build_fixture(&db_url, "control").await;
@@ -1068,7 +1069,7 @@ async fn count_runs(fx: &Fixture, app_id: Uuid, workflow_name: &str) -> i64 {
 #[compio::test]
 async fn failed_timer_registration_leaves_no_run_so_a_retry_starts_exactly_one() {
     let Some(db_url) = db_url() else {
-        zeroship_test_support::skip("skipping workflow_instance_api_test (no CONTROL_TEST_DB)");
+        zeroship_test_support::skip("skipping workflow_instance_api_test (no test database)");
         return;
     };
     let fx = build_fixture(&db_url, "timerfail").await;
