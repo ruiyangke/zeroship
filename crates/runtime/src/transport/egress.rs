@@ -54,7 +54,7 @@ use zeroship_core::net_policy::{AddressPhase, NamePhase};
 use super::net_policy::NetPolicy;
 use super::ssrf::{dev_mode_enabled, is_blocked_ip};
 
-/// Count of resolutions the DNS gate OPENED — lookups performed for a name no
+/// Count of resolutions the DNS gate OPENED - lookups performed for a name no
 /// `Name` rule admitted, which happen only because the app holds a `Range`
 /// ACCEPT at the requested port.
 ///
@@ -77,7 +77,7 @@ pub fn gate_opened_resolutions() -> u64 {
 /// claim, and a timing claim cannot distinguish a gate that held from a resolver
 /// that happened to be fast.
 pub trait EgressResolver {
-    /// Resolve to the FULL answer set — every family, every address. Returning
+    /// Resolve to the FULL answer set - every family, every address. Returning
     /// a prefix of the answer would silently reintroduce the first-address
     /// semantics phase 3 exists to replace.
     fn resolve(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>, String>;
@@ -119,11 +119,11 @@ pub enum EgressRefusal {
     ResolveFailed(String),
     /// Step 7. Carries which of steps 4, 5 and 6 emptied the set.
     NoAddressSurvived {
-        /// Step 4 — refused by the platform floor. No rule can change this.
+        /// Step 4 - refused by the platform floor. No rule can change this.
         floor: Vec<IpAddr>,
-        /// Step 5 — refused by the app's OWN `Range` REJECT rules.
+        /// Step 5 - refused by the app's OWN `Range` REJECT rules.
         range_rejected: Vec<IpAddr>,
-        /// Step 6 — matched no ACCEPT rule.
+        /// Step 6 - matched no ACCEPT rule.
         unmatched: Vec<IpAddr>,
     },
 }
@@ -357,7 +357,7 @@ mod tests {
     const IN_RANGE_CARVED: &str = "93.184.216.7";
     const OUT_OF_RANGE: &str = "203.0.114.9";
 
-    /// **E1 — the precedence pin.** The SAME two rules in BOTH orders must give
+    /// **E1 - the precedence pin.** The SAME two rules in BOTH orders must give
     /// identical verdicts. Under first-match-wins the two orders disagree; this
     /// is the row that fails if anyone "improves" the evaluator into an ordered
     /// walk.
@@ -402,7 +402,7 @@ mod tests {
         assert!(evaluate(&backward, "host.example.test", 443, &r4).is_ok());
     }
 
-    /// **E2** — the lattice's REJECT > ACCEPT edge on the degenerate overlap.
+    /// **E2** - the lattice's REJECT > ACCEPT edge on the degenerate overlap.
     #[test]
     fn egress_reject_beats_accept_on_the_same_destination() {
         let p = policy(vec![
@@ -420,7 +420,7 @@ mod tests {
         assert_eq!(r.lookups(), 0, "a name REJECT refuses before DNS");
     }
 
-    /// **E3** — control for E2, differing only by the REJECT row. Without it E2
+    /// **E3** - control for E2, differing only by the REJECT row. Without it E2
     /// is green against an evaluator that refuses everything.
     #[test]
     fn egress_accept_alone_admits() {
@@ -429,7 +429,7 @@ mod tests {
         assert!(evaluate(&p, "api.example.test", 443, &r).is_ok());
     }
 
-    /// **E4 — INVARIANT GRANTS-NARROW.** A granted name resolving into private
+    /// **E4 - INVARIANT GRANTS-NARROW.** A granted name resolving into private
     /// space is refused with the FLOOR's error, not the grant's. Asserting the
     /// error identity is the point: a refusal for the wrong reason passes a
     /// weaker assertion.
@@ -448,7 +448,7 @@ mod tests {
         );
     }
 
-    /// **E5** — control for E4: the same invariant reached through the OTHER
+    /// **E5** - control for E4: the same invariant reached through the OTHER
     /// constructor. A floor applied only on the name path would pass E4 and fail
     /// here.
     #[test]
@@ -468,28 +468,33 @@ mod tests {
         assert_eq!(r.lookups(), 0, "an IP literal is never resolved");
     }
 
-    /// **E6 — the DNS gate.** A names-only app refuses an ungranted host WITHOUT
+    /// **E6 - the DNS gate.** A names-only app refuses an ungranted host WITHOUT
     /// resolving it. Observed by the recording resolver rather than by timing:
     /// a timing assertion cannot tell a gate that held from a fast lookup.
     #[test]
     fn names_only_app_refuses_without_resolving() {
         let p = policy(vec![rule(Verdict::Accept, "api.example.test", 443)]);
         let r = RecordingResolver::new(&[&format!("{IN_RANGE}:443")]);
+        let got = evaluate(&p, "secret-label.evil.test", 443, &r);
+        // The lookup count is asserted FIRST because it is the property. The
+        // refusal below is the consequence; if only that were checked, an
+        // evaluator that resolved and then refused would still read as green.
         assert_eq!(
-            evaluate(&p, "secret-label.evil.test", 443, &r),
+            r.lookups(),
+            0,
+            "a names-only app performed a lookup: the attacker-chosen label \
+             reached a nameserver"
+        );
+        assert_eq!(
+            got,
             Err(EgressRefusal::NoRuleCouldAdmit {
                 target: "secret-label.evil.test".to_string(),
                 port: 443,
             })
         );
-        assert_eq!(
-            r.lookups(),
-            0,
-            "the attacker-chosen label must never reach a nameserver"
-        );
     }
 
-    /// **E7** — control for E6, differing in exactly one rule. Without it E6 is
+    /// **E7** - control for E6, differing in exactly one rule. Without it E6 is
     /// green against an implementation that never resolves anything, which would
     /// be a different bug.
     #[test]
@@ -511,23 +516,28 @@ mod tests {
         );
     }
 
-    /// **E8** — the port-matched refinement. Without this row the gate could be
+    /// **E8** - the port-matched refinement. Without this row the gate could be
     /// implemented as "has any range rule" and still pass E6 and E7.
     #[test]
     fn range_rule_at_another_port_does_not_open_the_gate() {
         let p = policy(vec![rule(Verdict::Accept, PUBLIC_RANGE, 443)]);
         let r = RecordingResolver::new(&[&format!("{IN_RANGE}:25")]);
+        let got = evaluate(&p, "secret-label.evil.test", 25, &r);
         assert_eq!(
-            evaluate(&p, "secret-label.evil.test", 25, &r),
+            r.lookups(),
+            0,
+            "a range rule at another port opened the gate"
+        );
+        assert_eq!(
+            got,
             Err(EgressRefusal::NoRuleCouldAdmit {
                 target: "secret-label.evil.test".to_string(),
                 port: 25,
             })
         );
-        assert_eq!(r.lookups(), 0);
     }
 
-    /// **E9** — step 1 is terminal and precedes the gate. The only row that
+    /// **E9** - step 1 is terminal and precedes the gate. The only row that
     /// fails if the name-REJECT check moves into phase 3.
     #[test]
     fn name_reject_refuses_before_dns() {
@@ -551,7 +561,7 @@ mod tests {
         );
     }
 
-    /// **E10** — the set-filter change to the resolver path. Fails against
+    /// **E10** - the set-filter change to the resolver path. Fails against
     /// first-address semantics, where the leading non-blocked address is
     /// returned and the policy never sees the rest.
     #[test]

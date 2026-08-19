@@ -188,7 +188,7 @@ pub fn validate_url(url: &str) -> Result<(), String> {
 /// contact with an allowlist: under one, "the first candidate is not admitted"
 /// is the ordinary case on a dual-stack host rather than an attack signal, and
 /// stopping there hides a later address the policy would admit. **The fail-fast
-/// INTENT is preserved exactly** — a blocked address is still never returned and
+/// INTENT is preserved exactly** - a blocked address is still never returned and
 /// still never connected to. Only the ORDER of "filter" and "take first" moved,
 /// which for a pure blocklist selects the identical address; what it buys is an
 /// error naming every blocked candidate rather than the last one seen, and a
