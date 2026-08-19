@@ -252,11 +252,16 @@ impl AuthConfig {
 /// Inert outbound raw-TCP request hints carried by the manifest.
 ///
 /// These entries never become enforcement policy by themselves: deploying a
-/// bundle grants nothing. Control surfaces them as pending until the
-/// corresponding `zeroship.app_net_grants` row exists, which the creator
-/// writes out of band through `/api/apps/{id}/net-grants` — an authenticated
-/// call subject to their plan's caps and the frontable-suffix catalog, not a
-/// self-declaration the running app can make.
+/// bundle grants nothing. Control surfaces them as pending until a matching
+/// `zeroship.app_egress_rules` ACCEPT rule exists, which the creator writes out
+/// of band through `/api/apps/{id}/egress-rules` - an authenticated call
+/// subject to their plan's caps, not a self-declaration the running app can
+/// make.
+///
+/// A hint has no verdict, and that is not an omission: it expresses "my code
+/// wants to reach X", and a bundle cannot know what its operator wants refused.
+/// The reject half of the rule set is control-plane authoring with no
+/// deploy-time affordance.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct NetConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -286,16 +291,22 @@ impl NetRequest {
         if self.port == 0 {
             return Err("net.requests port must be between 1 and 65535".to_string());
         }
-        let star_count = host.bytes().filter(|b| *b == b'*').count();
-        if host == "*" {
-            return Err("net.requests host cannot be bare '*'".to_string());
-        }
-        let valid_wildcard = host
-            .strip_prefix("*.")
-            .is_some_and(|suffix| !suffix.is_empty());
-        if star_count > 0 && (star_count != 1 || !valid_wildcard) {
+        // A wildcard is refused because it is UNREPRESENTABLE as a rule: a hint
+        // no rule could ever satisfy would sit in `pending_requests` forever
+        // with nothing to say why. An address range in CIDR form passes, which
+        // is the other half of the destination grammar.
+        //
+        // This is a shape check, not the rule grammar itself. It cannot BE the
+        // rule grammar: `zeroship_core::net_policy::Destination` is the one
+        // authoring boundary, and `zeroship-core` already depends on
+        // `zeroship-bundle` (`crates/core/Cargo.toml:31`), so importing it here
+        // is a dependency cycle. A hint that parses here and not there is
+        // simply a hint that never matches a rule, which is the right outcome
+        // for an inert field.
+        if host.contains('*') {
             return Err(format!(
-                "net.requests host {host:?} must use the '*.example.com' wildcard form"
+                "net.requests host {host:?} must not contain '*'; wildcards are not a \
+                 grantable destination, name each host exactly or give an address range"
             ));
         }
         if self.reason.trim().is_empty() {
@@ -877,26 +888,34 @@ mod net_request_validation_tests {
         }
     }
 
+    /// A hint may name the two things a RULE may name, and nothing else.
+    ///
+    /// The pair is the point: `*.example.com` and `example.com` differ only by
+    /// the wildcard, and a range is accepted alongside the name, so a green
+    /// result says the `*` is what was refused rather than that the validator
+    /// refuses whatever it is handed.
     #[test]
-    fn net_request_host_validation_accepts_literal_and_single_wildcard() {
+    fn net_request_host_validation_accepts_a_name_or_a_range_and_no_wildcard() {
         assert!(request("example.com").validate().is_ok());
-        assert!(request("*.example.com").validate().is_ok());
-    }
-
-    #[test]
-    fn net_request_host_validation_rejects_bare_wildcard_suffix() {
         assert!(
-            request("*.").validate().is_err(),
-            "bare wildcard suffix must be rejected"
+            request("198.51.100.0/24").validate().is_ok(),
+            "an address range is half the destination grammar"
+        );
+        assert!(
+            request("*.example.com").validate().is_err(),
+            "a wildcard is not a grantable destination, so a hint asking for one \
+             could never leave pending_requests"
         );
     }
 
     #[test]
-    fn net_request_host_validation_rejects_additional_wildcards() {
-        assert!(
-            request("*.*.example.com").validate().is_err(),
-            "additional wildcards must be rejected"
-        );
+    fn net_request_host_validation_rejects_every_wildcard_shape() {
+        for host in ["*", "*.", "*.*.example.com"] {
+            assert!(
+                request(host).validate().is_err(),
+                "{host} must be rejected"
+            );
+        }
     }
 }
 

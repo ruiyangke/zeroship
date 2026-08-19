@@ -38,7 +38,7 @@ internal.rs        route/version/env feeds, usage ingest
 oauth_clients.rs   boot-time OAuth-client reconcile from `[auth] oauth_clients`
 oauth_grants_handlers.rs  per-app OAuth grant management
 authz_guard.rs     Cedar-backed request authorization (crates/authz)
-net_grants.rs      creator self-service raw-TCP egress grants
+egress_rules.rs    creator self-service raw-TCP egress rules
 env_handlers.rs    vars/secrets CRUD + process.env exposure list
 env_store.rs       encrypted-at-rest env/secrets storage
 registry.rs        PostgreSQL-backed app registry
