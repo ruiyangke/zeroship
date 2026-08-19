@@ -82,8 +82,8 @@ impl NetPolicy {
     /// type. A single boolean over a name is exactly the shape that cannot
     /// express a `Range` rule, and a caller reaching for one would have to
     /// resolve first to answer it - which is the DNS gate deleted. Use
-    /// [`super::egress::pre_dns`] and [`super::egress::filter_answer`], or
-    /// [`super::egress::evaluate`], which keep the phases in order.
+    /// [`super::egress::evaluate`], which is the only composition of the phases
+    /// and keeps them in order.
     pub fn rules(
         rules: Vec<EgressRule>,
         max_sockets: u32,

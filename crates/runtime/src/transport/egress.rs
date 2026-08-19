@@ -45,14 +45,30 @@
 //! resolving twice has taken a wrong turn, and the likely wrong turn is
 //! evaluating rules in list order.
 
+//! # INVARIANT ONE-COMPOSITION
+//!
+//! [`evaluate`] is the ONLY place the three phases are composed, and every
+//! caller - production and test alike - goes through it. Phase 1 and phase 3
+//! are private to this module for that reason: a second caller that ran them
+//! itself would be a second DNS gate, and a test of one would say nothing
+//! about the other. The `node:net` connect task calls [`evaluate`] and does
+//! nothing with the phases but render the refusal it returns.
+
 use std::fmt;
+use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use zeroship_core::net_policy::{AddressPhase, NamePhase};
 
 use super::net_policy::NetPolicy;
 use super::ssrf::{dev_mode_enabled, is_blocked_ip};
+
+/// Fallback bound on PHASE 2. Overridable with
+/// `ZEROSHIP_NET_RESOLVE_TIMEOUT_MS`; the timeout fails CLOSED.
+const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Count of resolutions the DNS gate OPENED - lookups performed for a name no
 /// `Name` rule admitted, which happen only because the app holds a `Range`
@@ -70,6 +86,21 @@ pub fn gate_opened_resolutions() -> u64 {
     GATE_OPENED_RESOLUTIONS.load(Ordering::Relaxed)
 }
 
+/// A PHASE 2 failure. Not a policy outcome, which is why it carries the error
+/// CODE the socket will report: the caller renders it, it does not re-classify
+/// a string back into a kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolveFailure {
+    pub code: &'static str,
+    pub message: String,
+}
+
+/// The future a resolver returns. Boxed so the resolver can be held as
+/// `dyn EgressResolver` in the runtime state, which is what makes the seam
+/// injectable from an integration test rather than only from a unit test.
+pub type ResolveFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Vec<SocketAddr>, ResolveFailure>> + 'a>>;
+
 /// PHASE 2, as an injectable seam.
 ///
 /// Injectable so a test can observe WHETHER a lookup happened, which is the
@@ -80,27 +111,79 @@ pub trait EgressResolver {
     /// Resolve to the FULL answer set - every family, every address. Returning
     /// a prefix of the answer would silently reintroduce the first-address
     /// semantics phase 3 exists to replace.
-    fn resolve(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>, String>;
+    fn resolve<'a>(&'a self, host: &'a str, port: u16) -> ResolveFuture<'a>;
 }
 
 /// The production resolver: the platform's own, which app code cannot route
 /// around. The runtime registers no `node:dns`, no datagram socket and no raw
 /// socket, so every name an app resolves is resolved here.
+///
+/// It owns the whole of phase 2 - the off-thread lookup AND its timeout - so
+/// that swapping it out in a test swaps out everything between the gate and the
+/// address phase, leaving nothing untested behind the seam.
 pub struct SystemResolver;
 
 impl EgressResolver for SystemResolver {
-    fn resolve(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
-        // Strip IPv6 literal brackets before to_socket_addrs.
-        let host_clean = host.trim_start_matches('[').trim_end_matches(']');
-        let target = format!("{host_clean}:{port}");
-        let addrs: Vec<SocketAddr> = std::net::ToSocketAddrs::to_socket_addrs(&target)
-            .map_err(|e| format!("DNS resolve failed: {e}"))?
-            .collect();
-        if addrs.is_empty() {
-            return Err(format!("DNS resolve produced no addresses for {host}:{port}"));
-        }
-        Ok(addrs)
+    fn resolve<'a>(&'a self, host: &'a str, port: u16) -> ResolveFuture<'a> {
+        let host = host.to_string();
+        Box::pin(async move {
+            let owned = host.clone();
+            let joined = compio::time::timeout(
+                resolve_timeout(),
+                compio::runtime::spawn_blocking(move || blocking_resolve(&owned, port)),
+            )
+            .await;
+            match joined {
+                Ok(Ok(Ok(answer))) => Ok(answer),
+                Ok(Ok(Err(e))) => Err(ResolveFailure {
+                    code: "ERR_NET_SSRF",
+                    message: format!("SSRF: {e}"),
+                }),
+                Ok(Err(_join)) => Err(ResolveFailure {
+                    code: "ERR_NET_DNS",
+                    message: "DNS resolve task failed".to_string(),
+                }),
+                Err(_) => Err(ResolveFailure {
+                    code: "ERR_NET_DNS_TIMEOUT",
+                    message: "DNS resolve timed out".to_string(),
+                }),
+            }
+        })
     }
+}
+
+fn blocking_resolve(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
+    // A debug-only hook so `dns_timeout_fails_closed` can hold the lookup open
+    // without depending on a real slow nameserver.
+    #[cfg(debug_assertions)]
+    if zeroship_core::test_env!("ZEROSHIP_NET_TEST_DNS_HANG_HOST").as_deref() == Some(host) {
+        let ms = zeroship_core::test_env!("ZEROSHIP_NET_TEST_DNS_HANG_MS")
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(250);
+        std::thread::sleep(Duration::from_millis(ms));
+    }
+    // Strip IPv6 literal brackets before to_socket_addrs.
+    let host_clean = host.trim_start_matches('[').trim_end_matches(']');
+    let target = format!("{host_clean}:{port}");
+    let addrs: Vec<SocketAddr> = std::net::ToSocketAddrs::to_socket_addrs(&target)
+        .map_err(|e| format!("DNS resolve failed: {e}"))?
+        .collect();
+    if addrs.is_empty() {
+        return Err(format!("DNS resolve produced no addresses for {host}:{port}"));
+    }
+    Ok(addrs)
+}
+
+fn resolve_timeout() -> Duration {
+    zeroship_core::declared_env!(
+        platform,
+        "ZEROSHIP_NET_RESOLVE_TIMEOUT_MS",
+        crate::RuntimeConsumer
+    )
+    .and_then(|s| s.parse::<u64>().ok())
+    .filter(|ms| *ms > 0)
+    .map(Duration::from_millis)
+    .unwrap_or(RESOLVE_TIMEOUT)
 }
 
 /// Why a connect was refused. The three-way distinction inside
@@ -116,7 +199,7 @@ pub enum EgressRefusal {
     /// Step 3, the DNS gate. Decided before DNS, by absence.
     NoRuleCouldAdmit { target: String, port: u16 },
     /// Phase 2 failed. Not a policy outcome.
-    ResolveFailed(String),
+    ResolveFailed(ResolveFailure),
     /// Step 7. Carries which of steps 4, 5 and 6 emptied the set.
     NoAddressSurvived {
         /// Step 4 - refused by the platform floor. No rule can change this.
@@ -149,7 +232,7 @@ impl fmt::Display for EgressRefusal {
                 "refused before DNS: no egress rule could admit {target}:{port}, \
                  so the name was not resolved"
             ),
-            Self::ResolveFailed(e) => write!(f, "{e}"),
+            Self::ResolveFailed(e) => write!(f, "{}", e.message),
             Self::NoAddressSurvived {
                 floor,
                 range_rejected,
@@ -183,9 +266,10 @@ impl fmt::Display for EgressRefusal {
     }
 }
 
-/// What phase 1 concluded.
+/// What phase 1 concluded. Private: it is a step inside [`evaluate`], never a
+/// value another module carries around and acts on (INVARIANT ONE-COMPOSITION).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PreDns {
+enum PreDns {
     /// `target` was an IP literal: phase 1 was skipped, the answer set is
     /// `{ literal }`, and no query will be made for it. An app connecting by
     /// address leaks nothing regardless of its rule set.
@@ -197,8 +281,10 @@ pub enum PreDns {
 
 /// PHASE 1. Pure, synchronous, and performs no I/O of any kind.
 ///
-/// Callers must run this BEFORE resolving; that ordering is the DNS gate.
-pub fn pre_dns(policy: &NetPolicy, target: &str, port: u16) -> Result<PreDns, EgressRefusal> {
+/// Private, and called from exactly one place: [`evaluate`], immediately before
+/// the resolution it gates. That single call site IS the DNS gate - the
+/// ordering cannot be got wrong somewhere else because there is nowhere else.
+fn pre_dns(policy: &NetPolicy, target: &str, port: u16) -> Result<PreDns, EgressRefusal> {
     if !policy.module_allowed() {
         return Err(EgressRefusal::ModuleDenied);
     }
@@ -233,9 +319,14 @@ pub fn pre_dns(policy: &NetPolicy, target: &str, port: u16) -> Result<PreDns, Eg
 
 /// PHASE 3, applied to EVERY member of `answer`.
 ///
-/// Returns the survivors in the resolver's own order, so happy-eyeballs
+/// Returns ALL the survivors, in the resolver's own order, so happy-eyeballs
 /// preference is preserved among addresses the policy admits.
-pub fn filter_answer(
+/// `filter_answer_keeps_every_survivor_in_resolver_order` is what stops that
+/// becoming a claim nothing holds.
+///
+/// Private for the same reason [`pre_dns`] is: phase 3 reached from anywhere
+/// but [`evaluate`] is a second composition.
+fn filter_answer(
     policy: &NetPolicy,
     port: u16,
     name_accepted: bool,
@@ -285,11 +376,16 @@ pub fn filter_answer(
 
 /// The whole evaluator: phases 1, 2 and 3, with exactly one call into
 /// `resolver` and none at all for an IP literal.
-pub fn evaluate<R: EgressResolver>(
+///
+/// The ONLY entry point (INVARIANT ONE-COMPOSITION). It is `async` because the
+/// composition is sequenced around I/O: a synchronous version could not contain
+/// the resolution, and a caller that supplied the resolution itself would be
+/// composing the phases a second time.
+pub async fn evaluate(
     policy: &NetPolicy,
     target: &str,
     port: u16,
-    resolver: &R,
+    resolver: &dyn EgressResolver,
 ) -> Result<Vec<SocketAddr>, EgressRefusal> {
     match pre_dns(policy, target, port)? {
         PreDns::Literal(ip) => filter_answer(policy, port, false, vec![SocketAddr::new(ip, port)]),
@@ -299,6 +395,7 @@ pub fn evaluate<R: EgressResolver>(
             }
             let answer = resolver
                 .resolve(target, port)
+                .await
                 .map_err(EgressRefusal::ResolveFailed)?;
             filter_answer(policy, port, name_accepted, answer)
         }
@@ -333,10 +430,23 @@ mod tests {
     }
 
     impl EgressResolver for RecordingResolver {
-        fn resolve(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
+        fn resolve<'a>(&'a self, host: &'a str, port: u16) -> ResolveFuture<'a> {
             self.calls.borrow_mut().push((host.to_string(), port));
-            Ok(self.answers.clone())
+            let answers = self.answers.clone();
+            Box::pin(async move { Ok(answers) })
         }
+    }
+
+    /// `evaluate` is async because production's phase 2 is. The recording
+    /// resolver performs no I/O, so a bare executor is enough and no reactor
+    /// needs to exist for these rows.
+    fn evaluate(
+        policy: &NetPolicy,
+        target: &str,
+        port: u16,
+        resolver: &dyn EgressResolver,
+    ) -> Result<Vec<SocketAddr>, EgressRefusal> {
+        futures::executor::block_on(super::evaluate(policy, target, port, resolver))
     }
 
     fn rule(verdict: Verdict, dest: &str, port: u16) -> EgressRule {
