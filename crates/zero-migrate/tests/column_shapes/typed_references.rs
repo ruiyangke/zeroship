@@ -553,11 +553,21 @@ fn declared_reference_targets_must_be_single_column_keys() {
 
 #[test]
 fn explicit_non_id_reference_column_is_preserved() {
+    // BOUNDED, not `text`: this column is UNIQUE and the IR below is lowered under
+    // MySQL, where a key over an unbounded `text` column is error 1170 - refused
+    // offline by `validate_mysql_key_storage` and at lower time by its live-catalog
+    // peer. The subject here is that an explicit non-`id` reference TARGET is
+    // preserved, which the column's width does not touch. The referencing column is
+    // bounded to match, because a reference has to agree with its target's storage.
+    let bounded = json!({"string": {"length": 255}});
     let mut external_key = column("external_key", "text", false, None, None, None);
-    external_key
-        .as_object_mut()
-        .expect("column fixture is an object")
-        .insert("unique".to_string(), json!(true));
+    {
+        let object = external_key
+            .as_object_mut()
+            .expect("column fixture is an object");
+        object.insert("type".to_string(), bounded.clone());
+        object.insert("unique".to_string(), json!(true));
+    }
     let ir = ir(
         "explicit_reference_column",
         vec![
@@ -568,14 +578,21 @@ fn explicit_non_id_reference_column_is_preserved() {
             ),
             create_table(
                 "children",
-                vec![column(
-                    "parent_key",
-                    "text",
-                    true,
-                    None,
-                    None,
-                    Some(reference_column("parents", "external_key", None, None)),
-                )],
+                vec![{
+                    let mut parent_key = column(
+                        "parent_key",
+                        "text",
+                        true,
+                        None,
+                        None,
+                        Some(reference_column("parents", "external_key", None, None)),
+                    );
+                    parent_key
+                        .as_object_mut()
+                        .expect("column fixture is an object")
+                        .insert("type".to_string(), bounded);
+                    parent_key
+                }],
                 None,
             ),
         ],

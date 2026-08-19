@@ -86,7 +86,7 @@ fn create_ir() -> MigrationIr {
                 "op": "createTable",
                 "name": TABLE,
                 "columns": [
-                    { "name": "id", "type": "text", "nullable": false },
+                    { "name": "id", "type": {"string": {"length": 255}}, "nullable": false },
                     { "name": OLD_COLUMN, "type": "int", "nullable": false },
                     { "name": "label", "type": "text", "nullable": false },
                 ],
@@ -148,7 +148,7 @@ fn create_ir_without_indexes() -> MigrationIr {
                 "op": "createTable",
                 "name": TABLE,
                 "columns": [
-                    { "name": "id", "type": "text", "nullable": false },
+                    { "name": "id", "type": {"string": {"length": 255}}, "nullable": false },
                     { "name": OLD_COLUMN, "type": "int", "nullable": false },
                     { "name": "label", "type": "text", "nullable": false },
                 ],
@@ -160,6 +160,15 @@ fn create_ir_without_indexes() -> MigrationIr {
 }
 
 /// The table plus ONE plain index, portable across all three dialects.
+// `id` is a BOUNDED `varchar(255)` in all three fixtures here, not `text`. This one
+// is also lowered under MySQL (see the routing test at the end of the file), and an
+// unbounded `text` PRIMARY KEY is a table MySQL will not create - error 1170, which
+// `validate_mysql_key_storage` refuses offline and its lower-time peer refuses
+// against the live catalog. The fixtures rendered a `text` key only because they
+// call `lower` directly and so never met validate. `label` stays `text` on purpose:
+// it is not keyed, so it is a legal MySQL column, and keeping it unbounded keeps the
+// rebuild's column mix honest. SQLite renders both spellings `TEXT`, so nothing this
+// file asserts about the rebuild changes.
 fn plain_index_create_ir() -> MigrationIr {
     serde_json::from_value(serde_json::json!({
         "ir_version": 1,
@@ -170,7 +179,7 @@ fn plain_index_create_ir() -> MigrationIr {
                 "op": "createTable",
                 "name": TABLE,
                 "columns": [
-                    { "name": "id", "type": "text", "nullable": false },
+                    { "name": "id", "type": {"string": {"length": 255}}, "nullable": false },
                     { "name": OLD_COLUMN, "type": "int", "nullable": false },
                     { "name": "label", "type": "text", "nullable": false },
                 ],

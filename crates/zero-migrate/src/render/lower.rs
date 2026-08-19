@@ -12272,12 +12272,20 @@ mod tests {
             "name": "named_column_reference",
             "owner_app": "app_a",
             "ops": [
+                // BOUNDED, not `text`. This fixture is about the explicit FK
+                // CONSTRAINT NAME, and the key/reference columns are incidental to
+                // that - but an unbounded `text` primary key is a table MySQL will
+                // not create (error 1170), and `validate_mysql_key_storage` has
+                // always refused it. The fixture only rendered because it calls
+                // `lower` directly and so skipped validate; once the same rule ran
+                // at lower time it stopped rendering. `varchar(255)` is what the
+                // engine's own policy-injected `id` uses, for exactly this reason.
                 {
                     "op": "createTable",
                     "name": "accounts",
                     "columns": [{
                         "name": "id",
-                        "type": "text",
+                        "type": {"string": {"length": 255}},
                         "nullable": false
                     }],
                     "primaryKey": ["id"]
@@ -12287,7 +12295,7 @@ mod tests {
                     "name": "entries",
                     "columns": [{
                         "name": "account_id",
-                        "type": "text",
+                        "type": {"string": {"length": 255}},
                         "references": {
                             "table": "accounts",
                             "column": "id",
