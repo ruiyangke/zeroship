@@ -16,8 +16,9 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 use zeroship_runtime::channel::CancelFlag;
-use zeroship_runtime::{
-    EnvSnapshot, FetchOutcome, HostPort, ModuleEntry, NetPolicy, RequestCtx, Runtime, SettledFetch,
+use zeroship_runtime::{EgressRule, Verdict,
+    
+    EnvSnapshot, FetchOutcome, ModuleEntry, NetPolicy, RequestCtx, Runtime, SettledFetch,
 };
 
 struct EnvGuard {
@@ -395,8 +396,8 @@ async fn drive_fetch_outcome(outcome: FetchOutcome, max_wait: Duration) -> JsRes
 }
 
 fn allowlist(addr: SocketAddr, max_sockets: u32) -> NetPolicy {
-    NetPolicy::allowlist(
-        vec![HostPort::new("127.0.0.1", addr.port())],
+    NetPolicy::rules(
+        vec![accept_target("127.0.0.1", addr.port())],
         max_sockets,
         1024 * 1024,
     )
@@ -411,8 +412,17 @@ fn tls_module(body: &str) -> String {
     wrap_module(r#"import tls from "node:tls";"#, body)
 }
 
+/// `node:tls` and `node:net` must refuse an inadmissible target IDENTICALLY -
+/// same code, same moment. That parity is the property; the moment itself
+/// changed with the egress rework and the parity did not.
+///
+/// It used to be a synchronous throw from `connect()`, because admission was a
+/// boolean over the host string. An IP literal is now decided in the address
+/// phase, alongside the platform SSRF floor and after it, so both surfaces
+/// report on the socket's `error` event. A test that still asserted "throws"
+/// would be pinning the delivery mechanism rather than the parity.
 #[test]
-fn tls_connect_admission_errors_match_plain_net_synchronously() {
+fn tls_connect_admission_errors_match_plain_net() {
     let _lock = lock_env();
     let _env = EnvGuard::set(true);
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
@@ -431,18 +441,25 @@ fn tls_connect_admission_errors_match_plain_net_synchronously() {
                 &format!(
                     r#"
 function attempt(label, fn) {{
-    try {{
-        fn();
-        return `${{label}}:allowed`;
-    }} catch (err) {{
-        return `${{label}}:${{err.code}}:${{err.message}}`;
-    }}
+    return new Promise((resolve) => {{
+        let socket;
+        try {{
+            socket = fn();
+        }} catch (err) {{
+            resolve(`${{label}}:threw:${{err.code}}`);
+            return;
+        }}
+        socket.on("error", (err) => resolve(`${{label}}:${{err.code}}`));
+        socket.on("close", () => resolve(`${{label}}:closed-without-error`));
+        setTimeout(() => resolve(`${{label}}:timeout`), 2000);
+    }});
 }}
 
-return [
+const results = await Promise.all([
     attempt("net-allowlist", () => net.connect({{ host: "127.0.0.1", port: {} }})),
     attempt("tls-allowlist", () => tls.connect({{ host: "127.0.0.1", port: {}, servername: "db.local.test" }})),
-].join("|");
+]);
+return results.join("|");
 "#,
                     blocked_port,
                     blocked_port
@@ -456,14 +473,15 @@ return [
     assert_eq!(result.status, 200, "unexpected status/body: {}", result.body);
     for label in ["net-allowlist", "tls-allowlist"] {
         assert!(
-            result.body.contains(&format!("{label}:capability_violation")),
-            "expected synchronous capability violation for {label}, got: {}",
+            result.body
+                .contains(&format!("{label}:ERR_NET_EGRESS_DENIED")),
+            "expected an egress-rule denial for {label}, got: {}",
             result.body
         );
     }
     assert!(
         !result.body.contains(":allowed"),
-        "admission failures must not be deferred past the call site: {}",
+        "an inadmissible target must never connect: {}",
         result.body
     );
 }
@@ -507,7 +525,7 @@ return [
 ].join("|");
 "#,
             ),
-            NetPolicy::allowlist(vec![HostPort::new("127.0.0.1", 443)], 4, 1024 * 1024)
+            NetPolicy::rules(vec![accept_target("127.0.0.1", 443)], 4, 1024 * 1024)
                 .unwrap(),
             Duration::from_secs(3),
         )
@@ -966,7 +984,7 @@ try {
 }
 "#,
             ),
-            NetPolicy::allowlist(vec![HostPort::new("127.0.0.1", 443)], 4, 1024 * 1024)
+            NetPolicy::rules(vec![accept_target("127.0.0.1", 443)], 4, 1024 * 1024)
                 .unwrap(),
             Duration::from_secs(3),
         )
@@ -1076,4 +1094,20 @@ return new Promise((resolve) => {{
         "expected STARTTLS fail-closed, got: {}",
         result.body
     );
+}
+
+/// Build an ACCEPT rule for a `node:net` test target.
+///
+/// These tests target literal addresses, and an IP literal is NOT a
+/// representable `Name` - it must be written as a range, so a reader of a rule
+/// always knows which check decides it. `is_blocked_ip` would refuse loopback
+/// outright; these tests run with `ZEROSHIP_DEV=1`, which bypasses the floor
+/// and nothing else.
+fn accept_target(host: &str, port: u16) -> EgressRule {
+    let destination = match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => format!("{v4}/32"),
+        Ok(std::net::IpAddr::V6(v6)) => format!("{v6}/128"),
+        Err(_) => host.to_string(),
+    };
+    EgressRule::parse(Verdict::Accept, &destination, port).expect("valid test egress rule")
 }

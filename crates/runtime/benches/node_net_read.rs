@@ -16,8 +16,9 @@ use std::time::Duration;
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 
 use zeroship_runtime::channel::CancelFlag;
-use zeroship_runtime::{
-    init_v8, EnvSnapshot, FetchOutcome, HostPort, ModuleEntry, NetPolicy, RequestCtx, Runtime,
+use zeroship_runtime::{EgressRule, Verdict,
+    
+    init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, NetPolicy, RequestCtx, Runtime,
     SettledFetch,
 };
 
@@ -111,8 +112,8 @@ export default {{
     Runtime::builder()
         .modules(modules)
         .net_policy(
-            NetPolicy::allowlist(
-                vec![HostPort::new("127.0.0.1", addr.port())],
+            NetPolicy::rules(
+                vec![accept_target("127.0.0.1", addr.port())],
                 4,
                 PAYLOAD_BYTES as u64,
             )
@@ -209,3 +210,19 @@ fn bench_node_net_read(c: &mut Criterion) {
 
 criterion_group!(benches, bench_node_net_read);
 criterion_main!(benches);
+
+/// Build an ACCEPT rule for a `node:net` test target.
+///
+/// These tests target literal addresses, and an IP literal is NOT a
+/// representable `Name` - it must be written as a range, so a reader of a rule
+/// always knows which check decides it. `is_blocked_ip` would refuse loopback
+/// outright; these tests run with `ZEROSHIP_DEV=1`, which bypasses the floor
+/// and nothing else.
+fn accept_target(host: &str, port: u16) -> EgressRule {
+    let destination = match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => format!("{v4}/32"),
+        Ok(std::net::IpAddr::V6(v6)) => format!("{v6}/128"),
+        Err(_) => host.to_string(),
+    };
+    EgressRule::parse(Verdict::Accept, &destination, port).expect("valid test egress rule")
+}

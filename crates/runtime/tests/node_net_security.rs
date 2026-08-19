@@ -13,8 +13,9 @@ use rustls::sign::CertifiedKey;
 use uuid::Uuid;
 use zeroship_core::usage_event::UsageEvent;
 use zeroship_runtime::channel::CancelFlag;
-use zeroship_runtime::{
-    EnvSnapshot, FetchOutcome, HostPort, ModuleEntry, NetPolicy, RequestCtx, Runtime, SettledFetch,
+use zeroship_runtime::{EgressRule, Verdict,
+    
+    EnvSnapshot, FetchOutcome, ModuleEntry, NetPolicy, RequestCtx, Runtime, SettledFetch,
 };
 
 struct EnvGuard {
@@ -352,8 +353,8 @@ fn trusted(max_sockets: u32, egress_ceiling_bytes: u64) -> NetPolicy {
 }
 
 fn allowlist(host: &str, port: u16, max_sockets: u32, egress_ceiling_bytes: u64) -> NetPolicy {
-    NetPolicy::allowlist(
-        vec![HostPort::new(host, port)],
+    NetPolicy::rules(
+        vec![accept_target(host, port)],
         max_sockets,
         egress_ceiling_bytes,
     )
@@ -560,9 +561,18 @@ return `${{capFailure}}|${{reclaimed}}|${{cycle}}`;
 fn allowlist_denies_miss_and_rejects_broad_entries_at_config_time() {
     let _lock = lock_env();
     let _env = EnvGuard::set(&[("ZEROSHIP_DEV", Some("1".to_string()))]);
-    assert!(HostPort::try_new("*", 443).is_err());
-    assert!(HostPort::try_new("*.workers.dev", 443).is_err());
-    assert!(HostPort::try_new("*.neon.tech", 5432).is_err());
+    // Wildcards are not refused by a curated suffix list any more - they are
+    // not REPRESENTABLE. The `*.` form is no longer a grammar the rule parser
+    // accepts, so `*.workers.dev` cannot be written at all rather than being
+    // written and caught.
+    assert!(EgressRule::parse(Verdict::Accept, "*", 443).is_err());
+    assert!(EgressRule::parse(Verdict::Accept, "*.workers.dev", 443).is_err());
+    assert!(EgressRule::parse(Verdict::Accept, "*.neon.tech", 5432).is_err());
+    // An exact host under the same suffix stays grantable: the deleted list was
+    // enforcing taste, and reckless is the creator's problem now.
+    assert!(EgressRule::parse(Verdict::Accept, "db.neon.tech", 5432).is_ok());
+    // And one ACCEPT rule can no longer be the whole internet.
+    assert!(EgressRule::parse(Verdict::Accept, "0.0.0.0/0", 443).is_err());
 
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         let allowed = spawn_tcp_server(ServerMode::Idle).await;
@@ -570,13 +580,13 @@ fn allowlist_denies_miss_and_rejects_broad_entries_at_config_time() {
         run_net_js(
             &format!(
                 r#"
-try {{
+return new Promise((resolve) => {{
   const s = new net.Socket();
+  s.on("error", (err) => resolve(`${{err.code}}:${{err.message}}`));
+  s.on("close", () => resolve("closed-without-error"));
   s.connect({}, "127.0.0.1");
-  return "allowed";
-}} catch (err) {{
-  return `${{err.code}}:${{err.message}}`;
-}}
+  setTimeout(() => resolve("timeout"), 2000);
+}});
 "#,
                 blocked_port
             ),
@@ -586,9 +596,14 @@ try {{
         .await
     });
     assert_eq!(result.status, 200, "unexpected status/body: {}", result.body);
+    // An IP literal at a port no rule names is refused in the ADDRESS phase,
+    // so the refusal arrives on the `error` event. It used to throw from
+    // `connect()` because the old check was a boolean over the host string;
+    // an address is now decided by the same ordered phase that decides a
+    // resolved one.
     assert!(
-        result.body.contains("capability_violation"),
-        "expected allowlist miss denial, got: {}",
+        result.body.contains("ERR_NET_EGRESS_DENIED"),
+        "expected an egress-rule denial, got: {}",
         result.body
     );
 }
@@ -841,10 +856,10 @@ return `writes=${{refused}}|flushed=${{flushed}}`;
                 idle.port(),
                 echo.port()
             ),
-            NetPolicy::allowlist(
+            NetPolicy::rules(
                 vec![
-                    HostPort::new("127.0.0.1", idle.port()),
-                    HostPort::new("127.0.0.1", echo.port()),
+                    accept_target("127.0.0.1", idle.port()),
+                    accept_target("127.0.0.1", echo.port()),
                 ],
                 4,
                 8 * 1024 * 1024,
@@ -1297,4 +1312,20 @@ try {
         "rejectUnauthorized:false should be denied even for Trusted outside dev, got: {}",
         trusted_denied.body
     );
+}
+
+/// Build an ACCEPT rule for a `node:net` test target.
+///
+/// These tests target literal addresses, and an IP literal is NOT a
+/// representable `Name` - it must be written as a range, so a reader of a rule
+/// always knows which check decides it. `is_blocked_ip` would refuse loopback
+/// outright; these tests run with `ZEROSHIP_DEV=1`, which bypasses the floor
+/// and nothing else.
+fn accept_target(host: &str, port: u16) -> EgressRule {
+    let destination = match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => format!("{v4}/32"),
+        Ok(std::net::IpAddr::V6(v6)) => format!("{v6}/128"),
+        Err(_) => host.to_string(),
+    };
+    EgressRule::parse(Verdict::Accept, &destination, port).expect("valid test egress rule")
 }
