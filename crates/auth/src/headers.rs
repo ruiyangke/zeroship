@@ -145,32 +145,52 @@ fn framed_route_csp(origins: &[String]) -> String {
 
 /// Client IP for rate-limiting and audit, as a string.
 ///
-/// The auth service runs behind the gateway, the SOLE trusted hop. The
-/// gateway strips any client-supplied `X-Forwarded-For` / `Forwarded` /
-/// `X-Real-IP` and re-authors a SINGLE authoritative `X-Forwarded-For` token =
-/// the real socket peer (SEC-3, see the gateway's `build_auth_upstream_headers`).
-/// We therefore read the RIGHTMOST (closest-hop, gateway-authored) XFF token —
-/// NOT the leftmost, which `connection_info().remote()` returns and which a
-/// caller can prepend to spoof a per-IP rate-limit bucket — and REQUIRE it to
-/// parse as an IP before it is used as a bucket key (an unvalidated value would
-/// let an attacker mint unbounded `zeroship.rate_limits` rows). When the
-/// forwarded value is absent or unparseable we fall back to the raw socket
-/// peer, then the `"0.0.0.0"` sentinel (e.g. unit tests with neither).
+/// The auth service runs behind the edge proxy (`deploy/ops/Caddyfile`, which
+/// routes `auth.<domain>` straight to this service), the SOLE trusted hop. We
+/// read the RIGHTMOST XFF token, NOT the leftmost, which
+/// `connection_info().remote()` returns and which a caller can prepend to spoof
+/// a per-IP rate-limit bucket - and REQUIRE it to parse as an IP before it is
+/// used as a bucket key (an unvalidated value would let an attacker mint
+/// unbounded `zeroship.rate_limits` rows). When the forwarded value is absent
+/// or unparseable we fall back to the raw socket peer, then the `"0.0.0.0"`
+/// sentinel (e.g. unit tests with neither).
+///
+/// WHY THE RIGHTMOST TOKEN IS THE PROXY'S, measured against Caddy 2.11.4 on
+/// 2026-08-19 rather than assumed. Caddy's `reverse_proxy` writes XFF two ways
+/// and the rightmost entry is its own under both:
+///
+///   * with no `servers { trusted_proxies }` - the case here, the repo
+///     configures none - it REPLACES the header outright with the peer it
+///     accepted the connection from. A forged `X-Forwarded-For: 1.2.3.4`
+///     arrives at this service as the caller's real address and nothing else.
+///   * with `trusted_proxies` covering the peer it APPENDS, so a forged
+///     `1.2.3.4` becomes `1.2.3.4, <caddy's peer>` - caller text on the left,
+///     the trusted hop's own entry rightmost.
+///
+/// Caddy does NOT scrub `X-Real-IP` or `Forwarded`; both reach this service
+/// verbatim from the caller. That is safe only because nothing here reads
+/// them - [`trusted_client_ip`] consults `x-forwarded-for` and nothing else.
+/// Do not start reading either one without re-checking this.
 ///
 /// The resolution is [`zeroship_core::client_ip`], shared with the gateway and
 /// the control plane. `trust_proxy` is passed as `true` unconditionally here,
-/// and only here: this service is not exposed directly, so the gateway is the
-/// only writer of the header it reads. The gateway and control take the flag
-/// from configuration because they can be the edge.
+/// and only here: this service is never published to the internet (the compose
+/// port-exposure gate, `tests/compose_port_exposure_gate.sh`, allows only the
+/// edge to publish on all interfaces), so the edge proxy is the only writer of
+/// the header it reads. The gateway and control take the flag from
+/// configuration because they can be fronted or not.
 #[must_use]
 pub(crate) fn client_ip(req: &HttpRequest) -> String {
     trusted_client_ip(req.headers(), req.peer_addr().map(|addr| addr.ip()))
         .map_or_else(|| "0.0.0.0".to_string(), |ip| ip.to_string())
 }
 
-/// The trusted client address: the gateway-authored `X-Forwarded-For` entry,
+/// The trusted client address: the proxy-authored `X-Forwarded-For` entry,
 /// else the socket peer. Delegates to [`zeroship_core::client_ip`], which
 /// documents why the rightmost entry is the trusted one.
+///
+/// `x-forwarded-for` is the ONLY header consulted. See [`client_ip`] for why
+/// that is load-bearing and not merely sufficient.
 fn trusted_client_ip(headers: &HeaderMap, peer_ip: Option<IpAddr>) -> Option<IpAddr> {
     let forwarded_for = headers
         .get("x-forwarded-for")
@@ -668,24 +688,65 @@ mod tests {
 
     #[test]
     fn client_ip_takes_trusted_rightmost_xff_token_and_validates_ip() {
-        // SEC-3: the gateway is the only trusted hop. It strips any
-        // client-supplied X-Forwarded-For and re-authors a single token = the
-        // real peer. The auth service must therefore read the RIGHTMOST
-        // (closest-hop, gateway-authored) X-Forwarded-For token, NOT the
-        // leftmost (client-spoofable) one — `connection_info().remote()` takes
-        // the leftmost and is unsafe here.
+        // SEC-3: the edge proxy is the only trusted hop, and the entry it
+        // authors is the RIGHTMOST. This service must key its per-IP rate-limit
+        // buckets on that one, NOT the leftmost (caller-spoofable) token -
+        // `connection_info().remote()` takes the leftmost and is unsafe here.
+        //
+        // This is the ONLY thing standing between a caller and unlimited
+        // rate-limit evasion, and it is load-bearing on its own: the gateway
+        // used to proxy auth.<domain> and scrub the inbound header first, but
+        // it never sat on this path in any shipped topology (Caddy routes
+        // auth.<domain> straight here) and that arm has been deleted. Nothing
+        // sanitises the header before this function now.
         //
         // Pre-fix `client_ip` returns the leftmost `1.2.3.4` (the spoofed
         // value an attacker prepends) → RED.
         let req = test::TestRequest::default()
-            // Attacker prepends a forged leftmost token; the gateway-authored
+            // Attacker prepends a forged leftmost token; the proxy-authored
             // real peer is the rightmost.
             .header("x-forwarded-for", "1.2.3.4, 203.0.113.7")
             .to_http_request();
         assert_eq!(
             client_ip(&req),
             "203.0.113.7",
-            "must use the rightmost (gateway-authored) XFF token, not the spoofable leftmost"
+            "must use the rightmost (proxy-authored) XFF token, not the spoofable leftmost"
+        );
+    }
+
+    #[test]
+    fn client_ip_ignores_the_forwarding_headers_the_edge_does_not_scrub() {
+        // Measured against Caddy 2.11.4 on 2026-08-19: `reverse_proxy` takes
+        // ownership of `X-Forwarded-For` (replacing it outright when no
+        // `trusted_proxies` is configured, as here), but passes `X-Real-IP` and
+        // `Forwarded` through VERBATIM from the caller. Both are therefore
+        // attacker-controlled by the time they reach this service.
+        //
+        // The gateway's deleted auth proxy used to strip all three. Now only
+        // the fact that this service reads none but `x-forwarded-for` keeps a
+        // forged `X-Real-IP` / `Forwarded` out of the rate-limit bucket key.
+        // Wire either one into `trusted_client_ip` and this goes RED.
+        let req = test::TestRequest::default()
+            .header("x-forwarded-for", "203.0.113.7")
+            .header("x-real-ip", "1.2.3.4")
+            .header("forwarded", "for=1.2.3.4")
+            .to_http_request();
+        assert_eq!(
+            client_ip(&req),
+            "203.0.113.7",
+            "only the proxy-owned XFF may key the bucket; X-Real-IP/Forwarded are caller text"
+        );
+
+        // With no XFF at all the spoofable headers still must not win: the
+        // fallback is the socket peer, and in this fixture there is none.
+        let req = test::TestRequest::default()
+            .header("x-real-ip", "1.2.3.4")
+            .header("forwarded", "for=1.2.3.4")
+            .to_http_request();
+        assert_eq!(
+            client_ip(&req),
+            "0.0.0.0",
+            "absent XFF must fall back to peer/sentinel, never to a caller-supplied header"
         );
     }
 
