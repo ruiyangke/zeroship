@@ -12,24 +12,31 @@
 //!
 //! `fold_roundtrip_pg::assert_lifecycle_roundtrip` already applies op-by-op and
 //! compares a fold against live introspection at checkpoints. It proves a great deal
-//! - but it folds with `fold_ops`, which starts from an EMPTY snapshot, and it lowers
-//! against `LiveSchema::default()`. Every object it compares was created by an op in
-//! the same plan.
+//! - but it folds with `fold_ops`, which is `fold_ops_onto(&SchemaSnapshot::default(),
+//! ..)`, and it lowers against `LiveSchema::default()`. Every object it compares was
+//! created by an op in the same plan.
 //!
-//! So the term the identity is actually ABOUT had never been exercised against a
-//! server. `state_at(N) = live_at_0 (+) fold(effects[0..N])` has two terms, and every
-//! live test to date pinned the special case `live_at_0 = {}`, where the identity
+//! `state_at(N) = live_at_0 (+) fold(effects[0..N])` has two terms, and on PostgreSQL
+//! every live test pinned the special case `live_at_0 = {}`, where the identity
 //! degenerates into the round-trip property `fold(plan) == introspect(apply(plan))`.
 //! The in-crate unit tests (`render::fold::effects`) carry the offline half, and the
 //! one that touches a non-empty base -
 //! `state_at_carries_the_base_it_did_not_create` - only checks that a base object the
 //! prefix NEVER TOUCHES survives.
 //!
-//! This file supplies the missing half, and it is also `state_at`'s first live
-//! caller. `live_at_0` here is a schema built by RAW SQL before any op exists,
-//! introspected with the shipped `snapshot_schema`, and then MUTATED by the plan. A
-//! pre-existing index, CHECK constraint, view or partition parent is a dependent the
-//! fold has to follow without ever having seen it created.
+//! The exception, stated because the generalisation would otherwise be wrong:
+//! `fold_retype_physical_type_mysql` DOES fold onto a live-introspected base against a
+//! real server. Its base is built by an earlier ENGINE deploy and read back, so every
+//! object in it is one the fold could have emitted itself, and it compares one final
+//! state rather than a prefix.
+//!
+//! What is new here is therefore narrower than "the base term is untested", and worth
+//! saying exactly: this is `state_at`'s FIRST caller of any kind outside its own
+//! module's unit tests, the first PostgreSQL live test to fold onto an introspected
+//! base, the first on any dialect whose base objects were created by RAW SQL rather
+//! than by the engine, and the first to compare at every PREFIX rather than at the
+//! end. A pre-existing index, CHECK constraint, view or partition parent is a
+//! dependent the fold has to follow without ever having seen it created.
 //!
 //! # The identity is NOT universal, and the last test here is the counter-example
 //!
@@ -460,8 +467,8 @@ async fn a_drop_cascades_through_dependents_only_the_live_base_carries() {
 /// The differ compares NOTHING about a view body, so a clean drift here would be
 /// vacuous for the thing under test. That is measured, not assumed: neutering the
 /// fold so a `replace` KEEPS the pre-existing body left every test in the
-/// `zero-migrate` crate green - roughly 3300 of them - because `diff_snapshots`
-/// compares only a view's `materialized` flag and `comment`.
+/// `zero-migrate` crate green - all 2988 of them, live PostgreSQL suites included -
+/// because `diff_snapshots` compares only a view's `materialized` flag and `comment`.
 ///
 /// So this case reads BOTH bodies itself, off fields the differ ignores: the live one
 /// from `ViewSnapshot::definition` (`pg_get_viewdef`), and the predicted one from
