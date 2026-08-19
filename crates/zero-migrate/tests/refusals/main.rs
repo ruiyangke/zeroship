@@ -22,6 +22,7 @@ mod expr_references_a_dropped_column;
 mod fk_candidate_key_after_alter_primary_key;
 mod grant_targets_a_vacated_table;
 mod instead_of_trigger_needs_a_view;
+mod mysql_trigger_body_cannot_return_a_result_set;
 mod new_rules_do_not_over_refuse;
 mod op_references_a_dropped_column;
 mod op_references_a_dropped_named_object;

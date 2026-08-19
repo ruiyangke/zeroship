@@ -8,8 +8,9 @@
 // changed diagnosis fails here rather than being absorbed.
 //
 // Every entry below was produced by running this suite against PostgreSQL 18.4 on
-// 2026-08-18 and against in-process SQLite. Nothing here is a guess, and the
-// `words` field is the verbatim text that run produced.
+// 2026-08-18, against MySQL 8.4.11 on 2026-08-19, and against in-process SQLite.
+// Nothing here is a guess, and the `words` field is the verbatim text that run
+// produced.
 //
 // The entries fall into three families, and the distinction is the point:
 //
@@ -215,6 +216,122 @@ const ALLOWANCES: &[Allowance] = &[
         words: "malformed insert into \"t\": no rows",
         why: "(A) the representative carries rows: [].",
     },
+
+    // ------------------------------------------------------------------- mysql
+    // Measured against MySQL 8.4.11 on 2026-08-19, the day the MySQL leg was added.
+    //
+    // EIGHT rows, and SEVEN of them are the SAME (A) representative defects the two
+    // older columns already record - which is itself a result: the third dialect
+    // found no new class of fixture problem, only the ones already named. The MySQL
+    // problems that WERE new were all fixable in the PRELUDE and are not here: MySQL
+    // cannot key a TEXT column without a prefix length, and MySQL cannot host a
+    // result-set-returning trigger body. Both were the fixture measuring something
+    // other than the row's question, and `prelude` now supplies a bounded string and
+    // a DELETE-bodied trigger. See its comments.
+    Allowance {
+        kind: "dropIndex",
+        variant: "base",
+        dialect: "mysql",
+        observed: Outcome::RefusedByCapability,
+        words: "omits its owning table",
+        why: "(A) same representative defect as the postgres and sqlite rows above; \
+               the gate is dialect-neutral, so all three columns record it.",
+    },
+    // (A) Partition collapse is a whole-recording property, so a single-op
+    // representative can never reach the degraded leg. The same three rows SQLite
+    // records, for the same cause, with MySQL's own wording for two of them.
+    Allowance {
+        kind: "createPartition",
+        variant: "base",
+        dialect: "mysql",
+        observed: Outcome::RefusedByCapability,
+        words: "collapse-affirmed partitioned parent",
+        why: "(A) the affirmation must be in the SAME recording as the op; a prelude \
+               in a prior recording cannot supply it.",
+    },
+    Allowance {
+        kind: "dropPartition",
+        variant: "base",
+        dialect: "mysql",
+        observed: Outcome::RefusedByCapability,
+        words: "dropPartition needs a collapse-affirmed parent",
+        why: "(A) same whole-recording property. Like SQLite, this row declares \
+               `portable`, not `transparentDegradable`, unlike its two siblings.",
+    },
+    Allowance {
+        kind: "createTable",
+        variant: "partitionedCollapse",
+        dialect: "mysql",
+        observed: Outcome::EngineError,
+        words: "has no default child",
+        why: "(A) same as the postgres and sqlite rows.",
+    },
+    Allowance {
+        kind: "insert",
+        variant: "base",
+        dialect: "mysql",
+        observed: Outcome::EngineError,
+        words: "malformed insert into \"t\": no rows",
+        why: "(A) the representative carries rows: [].",
+    },
+    Allowance {
+        kind: "insert",
+        variant: "onConflictDoUpdate",
+        dialect: "mysql",
+        observed: Outcome::EngineError,
+        words: "malformed insert into \"t\": no rows",
+        why: "(A) the representative carries rows: []. Note the THIRD `insert` row, \
+               onConflictDoNothing, is declared unsupported on MySQL and so refuses \
+               by capability before the empty rows list is ever reached - it agrees \
+               with its declaration and takes no allowance here.",
+    },
+    // (A) THE ONE THAT WAS A SERVER ERROR. `createTrigger/bodySimple`'s body is one
+    // `SELECT <expr>` statement, and MySQL forbids a trigger from returning a result
+    // set. Before the gate, this row cleared validate, the guard and lower and died
+    // mid-apply with `[0A000] Not allowed to return a result set from a trigger` -
+    // the outcome class this layer exists to catch, and the reason a ServerError is
+    // never absorbed by an allowance. `render/renderer.rs` now refuses the statement
+    // at lower, beside RAISE IGNORE.
+    //
+    // Recorded as (A) and NOT as a declaration error, which is the `dropConstraint`
+    // lesson applied a second time: the cell is right and the REPRESENTATIVE is
+    // narrow. MySQL body triggers work - `prelude`'s own `dropTrigger` trigger has a
+    // DELETE body, applies, and `tests/refusals/mysql_trigger_body_cannot_return_a_
+    // result_set.rs` proves it also FIRES. Flipping the cell would refuse every MySQL
+    // body trigger to reject the one statement MySQL cannot host.
+    Allowance {
+        kind: "createTrigger",
+        variant: "bodySimple",
+        dialect: "mysql",
+        observed: Outcome::RefusedByCapability,
+        words: "trigger facet/action \"selectStatement\" is unsupported on Mysql",
+        why: "(A) the representative's body is a bare SELECT, the one trigger \
+               statement MySQL cannot host. It was a ServerError until the engine \
+               learned to refuse it; it is not a wrong declaration.",
+    },
+    // (B) DECLARATION ERROR, and the only one this column found. The sidecar declares
+    // `setColumnType` portable on MySQL, and `render/lower.rs`'s
+    // `refuse_mysql_alter_column` refuses it UNCONDITIONALLY - no payload reaches the
+    // renderer. Its four siblings on the same gate (`setColumnNotNull`,
+    // `dropColumnNotNull`, plus SQLite's whole alter-column family) are already
+    // declared unsupported, so this cell is simply out of step with them.
+    //
+    // Unconditional is the criterion this file's header sets for a SAFE flip, and
+    // `op_support.rs::alter_column_reason` ALREADY returns the MySQL arm, so the flip
+    // would not ship the internal placeholder either. It is recorded rather than
+    // performed only because flipping a cell means regenerating both the Rust and the
+    // TypeScript dialect tables and re-gating the host suite, which is a change to
+    // the engine's declared capability rather than to this instrument.
+    Allowance {
+        kind: "setColumnType",
+        variant: "base",
+        dialect: "mysql",
+        observed: Outcome::RefusedByCapability,
+        words: "MODIFY COLUMN needs the whole column definition restated",
+        why: "(B) the gate is UNCONDITIONAL, so the declaration is wrong rather than \
+               the representative narrow. Flip the mysql cell to `unsupported`; the \
+               reason arm already exists.",
+    },
 ];
 
 /// Rows that hand the operator `op_support.rs`'s internal placeholder instead of a
@@ -233,16 +350,26 @@ const ALLOWANCES: &[Allowance] = &[
 /// stops. Do not re-populate this list to make a red run green - a sentinel in
 /// the output means a cell was declared `unsupported` without its reason arm.
 ///
-/// Note this list could only ever have held SEVEN of the affected cells' four
-/// rows partially: this suite covers PostgreSQL and SQLite, and three of the four
-/// rows shipped the placeholder on MYSQL too, which no live suite here reaches.
-/// The offline sweep in `tests/unsupported_reason_is_operator_facing.rs` covers
-/// all three dialects and is the primary guard for that reason.
+/// This suite now covers all three dialects, so the MySQL column is swept here too
+/// and stays empty with them. The offline sweep in
+/// `tests/dialect_matrix/unsupported_reason_is_operator_facing.rs` remains the
+/// PRIMARY guard: it reaches every cell of the table rather than only the cells a
+/// corpus representative happens to drive.
 const PLACEHOLDER_REASONS: &[PlaceholderReason] = &[];
 
 /// Rows whose representative could not be made executable, with the reason.
 ///
 /// Empty, and that is a measurement rather than an omission: every one of the 92
-/// rows reached the subject op on both dialects. The rows whose representative is
-/// degenerate still got an ANSWER; they are in `ALLOWANCES` above, not here.
+/// rows reached the subject op on ALL THREE dialects - 276 of 276. The rows whose
+/// representative is degenerate still got an ANSWER; they are in `ALLOWANCES` above,
+/// not here.
+///
+/// It was NOT empty for MySQL on the first run. Eight rows demoted to
+/// `NotExecutable` there because their PRELUDE could not be established: seven keyed
+/// a TEXT column, which MySQL refuses without a prefix length, and `dropTrigger`'s
+/// trigger body was a bare `SELECT`, which MySQL will not host. Every one of the
+/// eight was the FIXTURE naming a referent in a shape MySQL cannot build, not the
+/// engine failing, so all eight were repaired in `prelude` rather than pinned here.
+/// That is the order this file's header asks for: ask whether the fixture is wrong
+/// before recording a row as inexecutable.
 const NOT_EXECUTABLE: &[NotExecutableRow] = &[];

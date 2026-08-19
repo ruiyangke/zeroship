@@ -787,10 +787,25 @@ fn render_mysql_trigger_stmt(stmt: &TriggerStmt, eff_schema: &str) -> Result<Str
                 Some(n) => format!("DELETE FROM {qtable} WHERE {pred} LIMIT {}", n.get()),
             })
         }
-        TriggerStmt::Select { expr } => Ok(format!(
-            "SELECT {}",
-            crate::render::dml::render_expr_inline(expr, SqlDialect::Mysql)?
-        )),
+        // MySQL forbids a trigger body that RETURNS A RESULT SET, and it says so when
+        // the `CREATE TRIGGER` is executed, not when the trigger fires: MySQL 8.4.11
+        // answers `[0A000] Not allowed to return a result set from a trigger`. Before
+        // this arm existed, the plan cleared validate, the guard and lower, and died
+        // there - the one outcome class `dialect_conformance_live.rs` exists to catch,
+        // and the row that measured it is `createTrigger/bodySimple` on MySQL.
+        //
+        // Refused rather than rewritten: `SELECT <expr>` has no result-set-free MySQL
+        // spelling, because `SELECT ... INTO` needs a declared target and this closed
+        // trigger-body IR has no way to name one. The refusal sits HERE, beside
+        // `RAISE IGNORE`, and NOT in `dialect-support.toml`, because MySQL body
+        // triggers work - an `INSERT` / `UPDATE` / `DELETE` body applies and fires.
+        // Declaring the whole `bodySimple` cell unsupported would refuse all of them
+        // to reject this one statement. Pinned, with both over-refusal controls, by
+        // `tests/refusals/mysql_trigger_body_cannot_return_a_result_set.rs`.
+        TriggerStmt::Select { .. } => Err(IrLowerError::TriggerUnsupported {
+            kind: "selectStatement",
+            dialect: SqlDialect::Mysql,
+        }),
         TriggerStmt::Raise {
             level: RaiseLevel::Ignore,
             ..

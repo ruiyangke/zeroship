@@ -63,11 +63,16 @@
 //! PostgreSQL sweep counts `pg_namespace` before and after itself and fails if a
 //! `zmconf_%` schema it is answerable for survives - inside the sweep, not beside
 //! it, because a check whose subject is another test's in-flight state cannot be
-//! its own `#[test]`. Every SQLite row runs in its own `TempDir`.
+//! its own `#[test]`. Every SQLite row runs in its own `TempDir`. Every MySQL row
+//! runs in its own throwaway DATABASE plus the `_migrations` meta database the
+//! engine creates beside it, both reclaimed by `support::mysql::DatabaseGuard`, and
+//! the MySQL sweep runs the same before/after census over
+//! `information_schema.SCHEMATA`.
 //!
 //! LEAK CHECK. "Answerable for" is decided by the pid in the schema name, never by
-//! the `zmconf_` prefix alone. One PostgreSQL instance is shared by every agent and
-//! every gate run working in this tree, so at any moment a `zmconf_%` schema is as
+//! the `zmconf_` prefix alone. ONE PostgreSQL instance and ONE MySQL instance are
+//! shared by every agent and every gate run working in this tree, so at any moment a
+//! `zmconf_%` schema or database is as
 //! likely to be a sibling run's live probe as it is to be a leak; a guard that reads
 //! the first as the second fails suites that are working, which is what it used to
 //! do. [`probe_owner`] sorts the prefix match three ways: this process's own pid is
@@ -87,15 +92,18 @@
 //!     gives up only the cross-run half of the check. This run's own leftovers are
 //!     still caught, because "is this pid mine" needs no `/proc`.
 //!
-//! SCOPE. PostgreSQL and SQLite. MySQL is deliberately absent: there is no live
-//! MySQL Rust coverage in this tree at all (`ZERO_MIGRATE_MYSQL_URL` appears in one
-//! non-test file), and adding it is a separate piece of work. What a MySQL author
-//! must add is written down at [`MYSQL_TODO`].
+//! SCOPE. PostgreSQL, SQLite and MySQL - all three dialects the engine emits for.
+//! The MySQL leg's isolation unit is a throwaway DATABASE rather than a schema,
+//! because MySQL has no CREATE SCHEMA that is not a CREATE DATABASE, and its leak
+//! check reads `information_schema.SCHEMATA` where the PostgreSQL leg reads
+//! `pg_namespace`. Both sort the prefix match with the SAME [`probe_owner`], so the
+//! pid discipline below is one rule, not two. What the MySQL leg needed, and what it
+//! turned out NOT to need, is written down at [`MYSQL_LEG`].
 //!
 //! COST. This is a live suite with one schema round-trip per row. Its wall clock is
-//! recorded in `docs/review-log.md`; it is gated on `ZERO_MIGRATE_TEST_PG_URL` for
-//! the PostgreSQL half exactly like every other live suite here, so a database-free
-//! `cargo test` pays only the SQLite half.
+//! recorded in `docs/review-log.md`; it is gated on `ZERO_MIGRATE_TEST_PG_URL` and
+//! `ZERO_MIGRATE_MYSQL_URL` for the two server legs exactly like every other live
+//! suite here, so a database-free `cargo test` pays only the SQLite half.
 
 use crate::dialect_corpus;
 use crate::support;
@@ -106,8 +114,9 @@ use std::path::PathBuf;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
+use crate::support::mysql::{quote_ident, DatabaseGuard, MysqlDevSession};
 use crate::support::PgDevSession;
-use zero_migrate::apply::backend::MigrationBackend;
+use zero_migrate::apply::backend::{MigrationBackend, MysqlBackend};
 use zero_migrate::apply::executor::{ApplyError, LockMode};
 use zero_migrate::driver::{DbError, SqlSession};
 use zero_migrate::model::dialect_table::{Disposition, DIALECT_TABLE};
@@ -122,25 +131,39 @@ use zero_migrate::{
     PostgresBackend, SqlDialect, SqliteBackend,
 };
 
-/// What a MySQL author has to add to make this a three-dialect suite. Recorded as
-/// a constant so it is in the file a MySQL author will open, not only in a doc.
+/// What the MySQL leg needed, and where each piece of it now lives. Recorded as a
+/// constant so it is in the file a MySQL author opens, not only in a doc.
 ///
-/// 1. A live MySQL DSN env var + skip macro in `tests/support/mod.rs`, in the shape
-///    of `PG_URL_ENV` / `skip_if_no_pg!`, and a `MysqlDevSession` implementing
-///    `driver::SqlSession` over a blocking client, in the shape of `PgDevSession`.
-///    None of this exists: `ZERO_MIGRATE_MYSQL_URL` occurs in exactly one file in
-///    `crates/`, and it is `src/apply/backend/mysql/mod.rs`, not a test.
-/// 2. A `Probe` arm for MySQL. MySQL has no CREATE SCHEMA that is not a DATABASE,
-///    so the per-row isolation unit is a throwaway DATABASE, and the `pg_namespace`
-///    leak check becomes a `SHOW DATABASES` check.
-/// 3. Per-row prelude review. [`prelude`] already takes the dialect, and the
-///    PostgreSQL/SQLite split it performs (a trigger prelude is a function on PG
-///    and a body on SQLite) is the same axis MySQL will need.
-/// 4. `expected_outcome` needs nothing: it already reads `row.mysql` from the
-///    generated table.
+/// This list used to be a TODO, and by the time the leg was written three of its
+/// four items were already satisfied elsewhere in the tree. The stale version said
+/// `ZERO_MIGRATE_MYSQL_URL` "occurs in exactly one file in `crates/`, and it is
+/// `src/apply/backend/mysql/mod.rs`, not a test". MEASURED at 9f65095a: it occurs in
+/// NINE files under `crates/`, SEVEN of them under `tests/` - six once this file's
+/// own stale sentence is discounted - and `tests/support/mysql.rs` had already
+/// shipped every piece item 1 asked for.
+///
+/// A doc that asserts a false world-state on the very constant its reader opens
+/// sends that reader off to rebuild infrastructure that exists, so the correction is
+/// part of the same change as the leg.
+///
+/// 1. DONE BEFORE THIS LEG, in `tests/support/mysql.rs`: `MYSQL_URL_ENV`,
+///    `mysql_url()`, `skip_if_no_mysql!`, and `MysqlDevSession`, which implements
+///    `driver::SqlSession` over the blocking `mysql` crate exactly as `PgDevSession`
+///    does over the PostgreSQL one. `DatabaseGuard` is the `SchemaGuard` sibling.
+///    Three live MySQL suites already ride it (`tests/fold_live/*_mysql.rs`).
+/// 2. DONE HERE: [`mysql_verdict`]. MySQL has no CREATE SCHEMA that is not a
+///    DATABASE, so the per-row isolation unit is a throwaway DATABASE and the
+///    `pg_namespace` leak check becomes an `information_schema.SCHEMATA` check -
+///    [`mysql_probe_databases`], sorted by the SAME [`probe_owner`] the PostgreSQL
+///    leg uses, because one MySQL instance is shared by every agent and gate run in
+///    this tree and a sibling's live probe read as a leak fails a working suite.
+/// 3. DONE HERE: the per-row prelude review, [`prelude`]'s `SqlDialect::Mysql`
+///    arms. The findings are recorded beside them.
+/// 4. NEEDED NOTHING, as predicted: `disposition_for` reads `row.mysql` from the
+///    generated table like the other two columns.
 ///
 /// The one thing a MySQL author must NOT do is relax [`Outcome::ServerError`].
-const MYSQL_TODO: &str = "see the module doc and this constant";
+const MYSQL_LEG: &str = "see the module doc and this constant";
 
 // ---------------------------------------------------------------------------
 // Outcome classes
@@ -533,14 +556,18 @@ fn table_t_without_b() -> Value {
 }
 
 /// The FK target the `addConstraint` rows reference.
-fn table_other() -> Value {
+///
+/// `other_col` takes the caller's string type rather than a literal `text`, because
+/// it is UNIQUELY INDEXED below and MySQL refuses a key over a TEXT column with no
+/// prefix length. See [`prelude`]'s `keyable`.
+fn table_other(string_type: Value) -> Value {
     json!({
         "op": "createTable",
         "name": "other",
         "columns": [
             col("id", json!("bigInt"), false),
             col("x", json!("bigInt"), false),
-            col("other_col", json!("text"), false),
+            col("other_col", string_type, false),
         ],
         "primaryKey": ["id"],
         // Unique INDEXES, not table-level unique CONSTRAINTS: SQLite refuses the
@@ -585,6 +612,38 @@ fn create_function() -> Value {
 /// its referents. Authored as IR and applied through the SAME production path -
 /// never hand-written DDL.
 fn prelude(kind: &str, variant: &str, dialect: SqlDialect, probe: &Names) -> Vec<Value> {
+    // THE MySQL AXIS, and it is the exact counterpart of the SQLite one below.
+    //
+    // `text` renders as MySQL TEXT storage, and MySQL refuses a key over a TEXT or
+    // BLOB column that carries no prefix length (error 1170). Wherever THIS FIXTURE
+    // puts a key on a string column - `alterPrimaryKey`'s `id`, the unique constraint
+    // `dropConstraint` drops, the index `dropIndex` drops, the `other_col` the FK rows
+    // reference, and the columns `createIndex` / `addConstraint(unique)` /
+    // `insert(onConflict…)` key - the column has to be a BOUNDED string on MySQL, or
+    // the row measures MySQL's TEXT-key limit rather than the question it is asking.
+    // Same class of fixture choice as `alterPrimaryKey`'s SQLite `id` below: pick the
+    // type that does not provoke an unrelated refusal. `fold_roundtrip_mysql.rs`
+    // records the same rule from the other end ("a key over a bare TEXT column is
+    // MySQL error 1170, so ... every keyed column below is a bounded string").
+    //
+    // MEASURED, and worth recording because it is a real asymmetry in the engine: with
+    // a `text` column here, the engine REFUSES the key at lower when it is written
+    // inside `createTable.indexes` or a `createTable` constraint ("createTable.indexes
+    // keys t.id, which renders as MySQL TEXT storage"), but does NOT refuse it for a
+    // STANDALONE `createIndex` or `addConstraint(unique)`. Those two reached the
+    // server and died there with `[42000] BLOB/TEXT column 'a' used in key
+    // specification without a key length` - a ServerError. Bounding the column is the
+    // FIXTURE half of the answer; the ungated standalone lane is an engine finding,
+    // recorded in `docs/review-log.md`, not something this fixture can repair.
+    let keyable = || {
+        if dialect == SqlDialect::Mysql {
+            json!({ "string": { "length": 24 } })
+        } else {
+            json!("text")
+        }
+    };
+    // A `t` whose `a` (and `b`) this fixture is about to KEY.
+    let keyed = || table_t(keyable(), true, true);
     let text = || table_t(json!("text"), true, true);
     let bigint = || table_t(json!("bigInt"), true, true);
     let boolean = || table_t(json!("boolean"), true, true);
@@ -625,7 +684,7 @@ fn prelude(kind: &str, variant: &str, dialect: SqlDialect, probe: &Names) -> Vec
         ("alterPrimaryKey", _) => vec![json!({
             "op": "createTable", "name": "t",
             "columns": [
-                col("id", json!("text"), false),
+                col("id", keyable(), false),
                 col("a", json!("text"), true),
                 col("b", json!("text"), true),
                 col("x", json!("boolean"), true),
@@ -644,7 +703,7 @@ fn prelude(kind: &str, variant: &str, dialect: SqlDialect, probe: &Names) -> Vec
         })],
 
         ("dropIndex", _) => vec![
-            text(),
+            keyed(),
             json!({ "op": "createIndex", "table": "t", "name": "i",
                     "columns": [{ "kind": "column", "name": "a" }] }),
         ],
@@ -655,13 +714,13 @@ fn prelude(kind: &str, variant: &str, dialect: SqlDialect, probe: &Names) -> Vec
                     "value": { "literal": { "value": 1 } } }),
         ],
         ("dropConstraint", _) => vec![
-            text(),
+            keyed(),
             json!({ "op": "addConstraint", "table": "t",
                     "constraint": { "name": "c",
                                     "kind": { "kind": "unique", "columns": ["a"] } } }),
         ],
         ("validateConstraint", _) => vec![
-            table_other(),
+            table_other(keyable()),
             bigint(),
             json!({ "op": "addConstraint", "table": "t",
                     "constraint": { "name": "c",
@@ -677,7 +736,31 @@ fn prelude(kind: &str, variant: &str, dialect: SqlDialect, probe: &Names) -> Vec
 
         ("dropEnum", _) => vec![json!({ "op": "createEnum", "name": "e", "values": ["a"] })],
         ("dropDomain", _) => vec![json!({ "op": "createDomain", "name": "d", "as": "text" })],
+        // The trigger a `dropTrigger` drops, and the third axis this fixture splits
+        // three ways rather than two. A PostgreSQL trigger EXECUTES A FUNCTION; a
+        // SQLite trigger carries a BODY, and a bare `SELECT x` is a legal SQLite
+        // body. MySQL takes a body too, but MySQL forbids a trigger from returning a
+        // result set (`[0A000] Not allowed to return a result set from a trigger`),
+        // so `SELECT x` cannot establish this row's referent there - MEASURED, that
+        // prelude died on the server and left the row with nothing to drop.
+        //
+        // A DELETE is a legal MySQL trigger statement, provided its target is NOT the
+        // table the trigger is attached to, so the prelude supplies `t2` and deletes
+        // from it. What this row asks is whether `dropTrigger` drops a trigger, not
+        // what the trigger's body says.
         ("dropTrigger", _) => match dialect {
+            SqlDialect::Mysql => vec![
+                text(),
+                json!({ "op": "createTable", "name": "t2",
+                        "columns": [col("id", json!("bigInt"), false),
+                                    col("x", json!("boolean"), true)],
+                        "primaryKey": ["id"], "constraints": [], "indexes": [] }),
+                json!({ "op": "createTrigger", "name": "tg", "table": "t",
+                        "timing": "before", "events": ["insert"], "forEach": "row",
+                        "action": { "kind": "body", "statements": [
+                            { "stmt": "delete", "table": "t2",
+                              "where": { "node": "colRef", "name": "x" } }] } }),
+            ],
             SqlDialect::Postgres => vec![
                 text(),
                 create_function(),
@@ -685,7 +768,7 @@ fn prelude(kind: &str, variant: &str, dialect: SqlDialect, probe: &Names) -> Vec
                         "timing": "before", "events": ["insert"], "forEach": "row",
                         "action": { "kind": "executeFunction", "name": "f" } }),
             ],
-            _ => vec![
+            SqlDialect::Sqlite => vec![
                 text(),
                 json!({ "op": "createTrigger", "name": "tg", "table": "t",
                         "timing": "before", "events": ["insert"], "forEach": "row",
@@ -729,7 +812,7 @@ fn prelude(kind: &str, variant: &str, dialect: SqlDialect, probe: &Names) -> Vec
         ("addColumn", _) => vec![table_t_without_a()],
 
         ("createIndex", "pgOnlyMethodOrFeature") => vec![jsonb()],
-        ("createIndex", _) => vec![text()],
+        ("createIndex", _) => vec![keyed()],
 
         ("setColumnType", _) => vec![varchar()],
         ("setColumnDefault", "base") => vec![int()],
@@ -738,14 +821,14 @@ fn prelude(kind: &str, variant: &str, dialect: SqlDialect, probe: &Names) -> Vec
 
         ("renameColumn", _) => vec![table_t_without_b()],
 
-        ("addConstraint", "fkNonId") => vec![table_other(), text()],
-        ("addConstraint", "unique" | "check") => vec![text()],
+        ("addConstraint", "fkNonId") => vec![table_other(keyable()), keyed()],
+        ("addConstraint", "unique" | "check") => vec![keyed()],
         ("addConstraint", "exclusion") => vec![text()],
-        ("addConstraint", _) => vec![table_other(), bigint()],
+        ("addConstraint", _) => vec![table_other(keyable()), bigint()],
 
         ("insert", "base") => vec![text()],
         ("insert", _) => vec![
-            text(),
+            keyed(),
             json!({ "op": "createIndex", "table": "t", "name": "t_a_uq", "unique": true,
                     "columns": [{ "kind": "column", "name": "a" }] }),
         ],
@@ -869,6 +952,100 @@ async fn pg_verdict(url: &str, kind: &str, variant: &str, op: &Op) -> Verdict {
         .batch(&format!("DROP EXTENSION IF EXISTS {}", probe.extension))
         .await;
     verdict
+}
+
+// ---------------------------------------------------------------------------
+// The MySQL probe
+// ---------------------------------------------------------------------------
+
+/// One row, in its own throwaway MySQL DATABASE.
+///
+/// MySQL has no namespace INSIDE a database, so what the PostgreSQL leg does with a
+/// schema pair this leg does with a database pair: the probe database, and the
+/// `<db>_migrations` meta database the engine's own `ensure_journal` creates beside
+/// it. [`DatabaseGuard`] is armed over both BEFORE the first `CREATE DATABASE`, for
+/// the reason its own header records - a drop written as the last statement of a
+/// test only runs when the test reaches it.
+///
+/// The name is [`nonce`]'s, unchanged, so the pid the leak check reads sits in the
+/// same place on both servers. It fits: MySQL caps an identifier at 64 bytes and
+/// `nonce` yields at most 47, which leaves room for the `_migrations` the engine
+/// appends and the `_aux` a `createSchema` row would add.
+async fn mysql_verdict(url: &str, kind: &str, variant: &str, op: &Op) -> Verdict {
+    let session = MysqlDevSession::connect(url);
+    let base = nonce(kind, variant);
+    let probe = Names {
+        schema: base.clone(),
+        aux_schema: format!("{base}_aux"),
+        role: format!("{base}_role"),
+        extension: "pgcrypto",
+    };
+    let policy = support::operator_charter(&probe.schema);
+    let cfg = ExecutorConfig::new(format!("prj_{base}"), &probe.schema, policy.clone());
+    let _guard = DatabaseGuard::arm(&session, [probe.schema.clone(), probe.aux_schema.clone()]);
+    if let Err(error) = session
+        .batch(&format!("CREATE DATABASE {}", quote_ident(&probe.schema)))
+        .await
+    {
+        return Verdict::of(
+            Outcome::NotExecutable,
+            format!("could not create the probe database: {error}"),
+        );
+    }
+    let backend = MysqlBackend::new_generic(&session);
+    if let Err(error) = backend.ensure_journal(&cfg).await {
+        return Verdict::of(
+            Outcome::NotExecutable,
+            format!("could not create the journal: {error}"),
+        );
+    }
+
+    run_row(
+        kind,
+        variant,
+        op,
+        SqlDialect::Mysql,
+        &probe,
+        &policy,
+        &cfg,
+        &backend,
+    )
+    .await
+}
+
+/// Every `zmconf_%` DATABASE `information_schema` holds, and the whole-server
+/// database count beside it.
+///
+/// The MySQL sibling of [`probe_schemas`], and it answers the same two questions in
+/// the same order: the global count moves for reasons that are not this file's
+/// (every other live MySQL suite in this crate creates `zm_%` databases on the same
+/// server), and the prefixed list is the one [`ProbeCensus`] then sorts by pid.
+///
+/// `information_schema.SCHEMATA` rather than `SHOW DATABASES`, because it takes a
+/// bind and returns a named column, which the seam's `query` contract needs. The
+/// underscore in `zmconf_%` is a LIKE wildcard on both servers and is left as one
+/// for the same reason the PostgreSQL query leaves it: it can only widen the match,
+/// and the census, not the pattern, is what decides ownership.
+async fn mysql_probe_databases(session: &MysqlDevSession) -> (i64, Vec<String>) {
+    let total: i64 = session
+        .query_one("SELECT count(*) AS n FROM information_schema.SCHEMATA", &[])
+        .await
+        .expect("count information_schema.SCHEMATA")
+        .try_get::<_, i64>("n")
+        .expect("decode the information_schema.SCHEMATA count");
+    let rows = session
+        .query(
+            "SELECT SCHEMA_NAME AS nspname FROM information_schema.SCHEMATA \
+             WHERE SCHEMA_NAME LIKE ? ORDER BY SCHEMA_NAME",
+            &[zero_migrate::driver::Bind::Text(format!("{PROBE_PREFIX}%"))],
+        )
+        .await
+        .expect("query information_schema.SCHEMATA for probe databases");
+    let prefixed = rows
+        .iter()
+        .filter_map(|row| row.try_get::<_, String>("nspname").ok())
+        .collect();
+    (total, prefixed)
 }
 
 // ---------------------------------------------------------------------------
@@ -1097,7 +1274,8 @@ fn disposition_for(kind: &str, variant: &str, dialect: &str) -> Disposition {
     match dialect {
         "postgres" => row.postgres,
         "sqlite" => row.sqlite,
-        other => panic!("this suite covers postgres and sqlite, not {other}"),
+        "mysql" => row.mysql,
+        other => panic!("this suite covers postgres, sqlite and mysql, not {other}"),
     }
 }
 
@@ -1351,17 +1529,15 @@ impl ProbeCensus {
     }
 }
 
-/// Re-read the catalog and keep only the `candidates` still there.
+/// Keep only the `candidates` a SECOND catalog read (`present`) still shows.
 ///
-/// [`ProbeCensus`] reads `pg_namespace` and then reads `/proc`, and a sibling can
-/// finish between the two: its rows are already in hand while its pid is already
-/// gone, which reads as abandoned. That sibling dropped its schemas on its way out,
-/// so a second look tells a stale row from a real leak.
-async fn still_in_the_catalog(session: &PgDevSession, candidates: &[String]) -> Vec<String> {
-    if candidates.is_empty() {
-        return Vec::new();
-    }
-    let (_, present) = probe_schemas(session).await;
+/// [`ProbeCensus`] reads the catalog and then reads `/proc`, and a sibling can finish
+/// between the two: its rows are already in hand while its pid is already gone, which
+/// reads as abandoned. That sibling dropped its schemas on its way out, so a second
+/// look tells a stale row from a real leak. The re-read itself belongs to the caller
+/// because the two servers answer it with different SQL; the judgement does not, and
+/// is shared.
+fn still_in_the_catalog(candidates: &[String], present: &[String]) -> Vec<String> {
     candidates
         .iter()
         .filter(|candidate| present.contains(candidate))
@@ -1418,7 +1594,10 @@ async fn every_postgres_row_of_the_dialect_table_answers_to_a_live_server() {
     let me = std::process::id();
     let (before_total, before_prefixed) = probe_schemas(&session).await;
     let mut before = ProbeCensus::take(before_prefixed, me);
-    before.abandoned = still_in_the_catalog(&session, &before.abandoned).await;
+    if !before.abandoned.is_empty() {
+        let (_, present) = probe_schemas(&session).await;
+        before.abandoned = still_in_the_catalog(&before.abandoned, &present);
+    }
     assert!(
         !before.leaked(),
         "probe schemas are on the server that no running process can still drop:\n  \
@@ -1461,7 +1640,70 @@ async fn every_postgres_row_of_the_dialect_table_answers_to_a_live_server() {
 
     report("postgres", &ledger);
     judge("postgres", &ledger);
-    let _ = MYSQL_TODO;
+    let _ = MYSQL_LEG;
+}
+
+#[compio::test]
+async fn every_mysql_row_of_the_dialect_table_answers_to_a_live_server() {
+    let url = skip_if_no_mysql!();
+    let session = MysqlDevSession::connect(&url);
+
+    // Name the server, in the ledger, before anything is measured. The proposal
+    // requires every ledger to name its scope: "F877's first pass was confidently
+    // wrong because it did not."
+    println!("LEDGER mysql SERVER version={}", session.server_version());
+
+    // The same before/after census the PostgreSQL sweep runs, sequenced inside the
+    // sweep for the same reason, and sorted by the SAME `probe_owner`: the MySQL
+    // instance is shared with every other agent in this tree, so a sibling's live
+    // probe database read as a leak fails a run that is working.
+    let me = std::process::id();
+    let (before_total, before_prefixed) = mysql_probe_databases(&session).await;
+    let mut before = ProbeCensus::take(before_prefixed, me);
+    if !before.abandoned.is_empty() {
+        let (_, present) = mysql_probe_databases(&session).await;
+        before.abandoned = still_in_the_catalog(&before.abandoned, &present);
+    }
+    assert!(
+        !before.leaked(),
+        "probe databases are on the server that no running process can still drop:\n  \
+         left by THIS process ({me}): {:?}\n  \
+         left by a process that has since exited: {:?}\n\
+         ({} more carry the pid of a process that is still running - a sibling suite \
+         mid-flight - and are not this run's to judge.)",
+        before.mine,
+        before.abandoned,
+        before.sibling_in_flight.len(),
+    );
+
+    let mut ledger: Vec<(String, String, Verdict)> = Vec::new();
+    for (kind, variant, op) in dialect_corpus::corpus() {
+        let verdict = mysql_verdict(&url, kind, variant, &op).await;
+        ledger.push((kind.to_string(), variant.to_string(), verdict));
+    }
+
+    let (after_total, after_prefixed) = mysql_probe_databases(&session).await;
+    let after = ProbeCensus::take(after_prefixed, me);
+    println!(
+        "LEDGER mysql schemata before={before_total} after={after_total} \
+         probe_databases_mine_before={} probe_databases_mine_after={} \
+         probe_databases_sibling_in_flight_after={}",
+        before.mine.len(),
+        after.mine.len(),
+        after.sibling_in_flight.len(),
+    );
+    assert!(
+        after.mine.is_empty(),
+        "this suite creates a probe database and its `_migrations` meta database per \
+         row and drops both, but information_schema still holds {} of this process's \
+         own ({me}): {:?}. A leaked probe database means a row's guard did not run, and \
+         a run that inherits this pid will fail its CREATE DATABASE against it.",
+        after.mine.len(),
+        after.mine,
+    );
+
+    report("mysql", &ledger);
+    judge("mysql", &ledger);
 }
 
 /// The leak check reads the pid in the name, not just the prefix - measured against
