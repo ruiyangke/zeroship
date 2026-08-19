@@ -8,7 +8,7 @@ use futures::channel::mpsc;
 
 use crate::state::{OpError, SharedState};
 use crate::transport::byte_pump::SocketStream;
-use crate::transport::egress::{EgressRefusal, PreDns};
+use crate::transport::egress::{EgressRefusal, EgressResolver, PreDns};
 
 use super::caps::release_socket_slot;
 #[cfg(feature = "runtime_tls")]
