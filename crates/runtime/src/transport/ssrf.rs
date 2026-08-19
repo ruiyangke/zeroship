@@ -21,7 +21,7 @@
 //! the native fetch cutover; `globalThis.fetch` is now the native
 //! callback installed by `fetch_native::install_fetch_global`.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use cyper::resolve::Resolve;
 use futures::Stream;
@@ -163,75 +163,6 @@ pub fn validate_url(url: &str) -> Result<(), String> {
     }
 
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// resolve_and_check_ssrf — DNS resolution + SSRF revalidation
-// ---------------------------------------------------------------------------
-
-/// Resolve `host:port`, filter the WHOLE answer set through the blocklist, and
-/// return the first survivor.
-///
-/// This is the WebSocket-handshake counterpart to `SsrfResolver` (which
-/// hooks into cyper's resolver pipeline). Unlike fetch — where
-/// `cyper::Client` performs the connect after receiving the filtered
-/// stream of IPs — the WebSocket handshake calls
-/// `compio::net::TcpStream::connect(addr)` directly, so we MUST hand it
-/// a SocketAddr that has already been validated. Otherwise an attacker
-/// can pin a public hostname's resolution to `127.0.0.1` between the
-/// URL-string check and `connect`.
-///
-/// **Filter the whole answer, then take the first survivor.** This function
-/// used to return at the first non-blocked address, and its comment argued for
-/// failing fast on the grounds that "the SSRF guard is best served by failing
-/// fast when ANY blocked candidate is returned". That argument does not survive
-/// contact with an allowlist: under one, "the first candidate is not admitted"
-/// is the ordinary case on a dual-stack host rather than an attack signal, and
-/// stopping there hides a later address the policy would admit. **The fail-fast
-/// INTENT is preserved exactly** - a blocked address is still never returned and
-/// still never connected to. Only the ORDER of "filter" and "take first" moved,
-/// which for a pure blocklist selects the identical address; what it buys is an
-/// error naming every blocked candidate rather than the last one seen, and a
-/// shape that matches `transport::egress`, where the creator's rules must be
-/// applied to every member of the answer and the choice is not a no-op.
-///
-/// In dev mode (`ZEROSHIP_DEV=1`) localhost is permitted (matches
-/// `validate_url`), so the WebSocket handshake also reaches the Vite
-/// dev server.
-///
-/// This is the explicit DNS-rebinding guard described in
-/// `docs/archive/websocket-native.md` §VIII.1.
-pub fn resolve_and_check_ssrf(host: &str, port: u16) -> Result<SocketAddr, String> {
-    let dev_mode = dev_mode_enabled();
-
-    // Strip IPv6 literal brackets before to_socket_addrs.
-    let host_clean = host.trim_start_matches('[').trim_end_matches(']');
-    let target = format!("{host_clean}:{port}");
-
-    // std DNS resolution. The handshake spawns this on a compio task
-    // (off the V8 thread); a brief sync DNS call there is acceptable.
-    let answer: Vec<SocketAddr> = std::net::ToSocketAddrs::to_socket_addrs(&target)
-        .map_err(|e: std::io::Error| format!("DNS resolve failed: {e}"))?
-        .collect();
-    if answer.is_empty() {
-        return Err(format!("DNS resolve produced no addresses for {host}:{port}"));
-    }
-
-    let (kept, blocked): (Vec<SocketAddr>, Vec<SocketAddr>) = answer
-        .into_iter()
-        .partition(|addr| dev_mode || !is_blocked_ip(addr.ip()));
-    if let Some(addr) = kept.first() {
-        return Ok(*addr);
-    }
-    let blocked: Vec<IpAddr> = blocked.into_iter().map(|a| a.ip()).collect();
-    Err(format!(
-        "Blocked: all resolved addresses are in blocked ranges ({}) (SSRF guard)",
-        blocked
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(", ")
-    ))
 }
 
 // ---------------------------------------------------------------------------

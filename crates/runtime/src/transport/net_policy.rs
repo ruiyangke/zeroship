@@ -1,13 +1,17 @@
-//! Outbound raw-TCP policy for `node:net`.
+//! Outbound raw-stream policy, for `node:net`, `node:tls` and outbound
+//! `WebSocket` alike. All three go through
+//! [`super::egress::evaluate`]; `fetch` is the one ungated egress.
 //!
 //! The policy is a trusted-Rust construction property: app JavaScript cannot
-//! request or widen it. `Denied` is the default and makes `node:net`
-//! unresolvable. `Rules` narrows connect targets to the creator's egress rule
-//! set; `Trusted` skips rule matching but still goes through the SSRF floor,
-//! socket caps, and egress caps.
+//! request or widen it. `Denied` is the default: it makes `node:net`
+//! unresolvable AND refuses every outbound `WebSocket`, so an app that has
+//! declared no destinations opens no byte stream by any route. `Rules` narrows
+//! connect targets to the creator's egress rule set; `Trusted` skips rule
+//! matching but still goes through the SSRF floor, socket caps, and egress
+//! caps.
 //!
 //! The rule set is deliberately scoped as a compromised-dependency
-//! blast-radius control on RAW SOCKETS, not a malicious-creator exfiltration
+//! blast-radius control on RAW BYTE STREAMS, not a malicious-creator exfiltration
 //! control and not an egress control in general: `fetch` is not gated and
 //! reaches any public host with no rule at all, which is the surface a
 //! compromised dependency would actually use. The malicious-creator controls

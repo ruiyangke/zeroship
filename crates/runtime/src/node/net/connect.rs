@@ -424,18 +424,6 @@ async fn resolve_authorized_target(
 /// because a v4-only range grant dropping every AAAA answer otherwise looks
 /// identical to a broken name.
 fn report_refusal(state: &SharedState, socket_id: u32, refusal: &EgressRefusal) {
-    if let EgressRefusal::ResolveFailed(failure) = refusal {
-        push_error_and_close(state, socket_id, failure.message.clone(), failure.code);
-        return;
-    }
-    let floor_emptied = matches!(
-        refusal,
-        EgressRefusal::NoAddressSurvived { floor, .. } if !floor.is_empty()
-    );
-    let (code, prefix) = if floor_emptied {
-        ("ERR_NET_SSRF", "SSRF")
-    } else {
-        ("ERR_NET_EGRESS_DENIED", "egress")
-    };
-    push_error_and_close(state, socket_id, format!("{prefix}: {refusal}"), code);
+    let (code, message) = crate::transport::egress::refusal_report(refusal);
+    push_error_and_close(state, socket_id, message, code);
 }
