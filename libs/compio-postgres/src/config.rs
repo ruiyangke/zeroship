@@ -7,6 +7,7 @@
 use crate::Socket;
 use crate::connect::connect;
 use crate::connect_raw::connect_raw;
+use crate::connect_tls::Encryption;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::keepalive::KeepaliveConfig;
 use crate::tls::MakeTlsConnect;
@@ -39,16 +40,98 @@ pub enum TargetSessionAttrs {
     ReadOnly,
 }
 
-/// TLS configuration.
+/// TLS configuration: libpq's `sslmode`, all six values, with libpq's meanings.
+///
+/// The definitions below are the ones in the PostgreSQL documentation for the
+/// `sslmode` connection parameter (<https://www.postgresql.org/docs/current/libpq-connect.html>),
+/// and the fallback mechanics are the ones in libpq's own connection state
+/// machine (`src/interfaces/libpq/fe-connect.c`).
+///
+/// Two axes vary independently, and conflating them is the classic bug:
+///
+/// * **Is TLS mandatory?** [`Require`](SslMode::Require),
+///   [`VerifyCa`](SslMode::VerifyCa) and [`VerifyFull`](SslMode::VerifyFull)
+///   have no plaintext fallback at all - not as a check at the failure site,
+///   but because plaintext is never in the set of transports they may use.
+///   [`Disable`](SslMode::Disable), [`Allow`](SslMode::Allow) and
+///   [`Prefer`](SslMode::Prefer) permit plaintext.
+/// * **Is the server's certificate checked?** That is *not* implied by the
+///   first axis. See [`SslRootCert`] for the table; the short version is that
+///   `require` encrypts without authenticating unless trust anchors are named.
+///
+/// `allow` and `prefer` differ only in which transport is tried *first*.
+/// libpq's `select_next_encryption_method` is literally an ordering swap:
+/// `allow` offers plaintext then TLS, everything else offers TLS then (if
+/// permitted) plaintext.
+///
+/// `sslmode` is ignored for Unix-domain-socket connections, as in libpq.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SslMode {
-    /// Do not use TLS.
+    /// Only try a non-TLS connection.
     Disable,
-    /// Attempt to connect with TLS but allow sessions without.
+    /// First try a non-TLS connection; if that fails, try a TLS connection.
+    ///
+    /// The mirror image of [`Prefer`](SslMode::Prefer). This is the mode for a
+    /// server that *might* insist on TLS (`hostssl` in `pg_hba.conf`): the
+    /// plaintext attempt is rejected during startup, and the retry is the one
+    /// that gets in. TLS is therefore only ever reached here when plaintext
+    /// has already failed.
+    Allow,
+    /// First try a TLS connection; if that fails, try a non-TLS connection.
+    ///
+    /// libpq's default, and this driver's. The documentation's own verdict on
+    /// it is worth repeating: it "makes no sense from a security point of
+    /// view", because a man in the middle need only answer `N` to the
+    /// `SSLRequest` to get a plaintext session. It is the default for
+    /// compatibility, not because it is a good choice.
     Prefer,
-    /// Require the use of TLS.
+    /// Only try a TLS connection. If trust anchors are configured, verify the
+    /// certificate exactly as [`VerifyCa`](SslMode::VerifyCa) would; otherwise
+    /// perform no certificate verification at all.
+    ///
+    /// Encryption without authentication: it stops passive eavesdropping and
+    /// nothing else.
     Require,
+    /// Only try a TLS connection, and verify that the server certificate
+    /// chains to a configured trust anchor. The host name is **not** checked.
+    ///
+    /// Requires trust anchors; see [`SslRootCert`].
+    VerifyCa,
+    /// Only try a TLS connection, verify the chain, **and** verify that the
+    /// host name asked for matches the certificate.
+    ///
+    /// Requires trust anchors; see [`SslRootCert`].
+    VerifyFull,
+}
+
+impl SslMode {
+    /// Whether a plaintext session is an acceptable outcome for this mode.
+    ///
+    /// This is libpq's `ENC_PLAINTEXT` membership test in
+    /// `init_allowed_encryption_methods`, and it is what makes a silent
+    /// downgrade structurally impossible for the three strong modes: they
+    /// never have plaintext in the set to fall back to.
+    pub const fn permits_plaintext(self) -> bool {
+        matches!(self, Self::Disable | Self::Allow | Self::Prefer)
+    }
+
+    /// Whether TLS may be attempted for this mode (libpq's `ENC_SSL`).
+    pub const fn permits_tls(self) -> bool {
+        !matches!(self, Self::Disable)
+    }
+
+    /// The spelling this mode has in a connection string.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Disable => "disable",
+            Self::Allow => "allow",
+            Self::Prefer => "prefer",
+            Self::Require => "require",
+            Self::VerifyCa => "verify-ca",
+            Self::VerifyFull => "verify-full",
+        }
+    }
 }
 
 /// TLS negotiation configuration
@@ -67,30 +150,59 @@ pub enum SslNegotiation {
 
 /// Where the trust anchors for server-certificate verification come from.
 ///
-/// This is the `sslrootcert` connection parameter. It exists because the only
-/// channel that reaches every caller of this driver is the connection string:
-/// [`Pool::connect`](crate::Pool::connect) takes a URL and nothing else, so a
-/// deployment whose Postgres presents a private-CA or self-signed certificate
-/// has no other place to name the CA that signed it.
+/// This is the `sslrootcert` connection parameter, and together with
+/// [`SslMode`] it decides what - if anything - is checked about the server's
+/// certificate. libpq computes that from two facts: whether trust anchors are
+/// available at all (`have_rootcert` in `initialize_SSL`), and whether the
+/// mode is exactly `verify-full` (the only mode whose
+/// `pq_verify_peer_name_matches_certificate` does any work).
 ///
-/// There is deliberately no "trust anything" variant. A `sslmode=require`
-/// connection here means encrypted *and verified*; libpq's weaker reading of
-/// `require` (encrypt, do not verify) is reachable only by naming the exact
-/// certificate to trust.
+/// | `sslmode` | no anchors ([`Unset`](SslRootCert::Unset)) | anchors configured |
+/// | --- | --- | --- |
+/// | `disable` | no TLS | no TLS |
+/// | `allow`, `prefer` | TLS unverified, or plaintext | chain checked when TLS is used |
+/// | `require` | **encrypted, unverified** | chain checked (i.e. `verify-ca`) |
+/// | `verify-ca` | error: no trust anchors | chain checked |
+/// | `verify-full` | error: no trust anchors | chain **and** host name checked |
+///
+/// The one asymmetry worth memorising: `require` does not authenticate the
+/// server unless you give it something to authenticate against. That is
+/// libpq's behaviour, and this driver is a driver.
+///
+/// [`Pool::connect`](crate::Pool::connect) takes a URL and nothing else, so
+/// the connection string is the only channel that reaches every caller: a
+/// deployment whose Postgres presents a private-CA or self-signed certificate
+/// names the signing CA with `sslrootcert=<path>`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum SslRootCert {
+    /// No trust anchors named - the default.
+    ///
+    /// libpq's equivalent is "`~/.postgresql/root.crt` does not exist", which
+    /// is the usual state of a machine. This driver has no home-directory
+    /// default (a published library does not read the user's dotfiles), so
+    /// "unset" is spelled by leaving `sslrootcert` out.
+    #[default]
+    Unset,
     /// Use the operating system's certificate store (`sslrootcert=system`).
     ///
-    /// The default, matching the trust discipline the rest of this workspace
-    /// uses for outbound TLS.
-    #[default]
+    /// libpq restricts this keyword to `sslmode=verify-full`: naming the
+    /// public root program as your trust anchor while skipping the host-name
+    /// check would trust every certificate any public CA has ever issued, for
+    /// any name. Weaker modes are rejected, with the same error libpq raises.
     System,
     /// Trust exactly the certificates in this PEM file, and nothing else.
     ///
     /// This is the private-CA and self-signed-server path: point it at the CA
     /// certificate (or at the server's own certificate, if self-signed).
     File(String),
+}
+
+impl SslRootCert {
+    /// Whether any trust anchors are configured - libpq's `have_rootcert`.
+    pub const fn is_configured(&self) -> bool {
+        !matches!(self, Self::Unset)
+    }
 }
 
 /// Channel binding configuration.
@@ -167,15 +279,15 @@ pub enum Host {
 /// * `dbname` - The name of the database to connect to. Defaults to the username.
 /// * `options` - Command line options used to configure the server.
 /// * `application_name` - Sets the `application_name` parameter on the server.
-/// * `sslmode` - Controls usage of TLS. If set to `disable`, TLS will not be used. If set to `prefer`, TLS will be used
-///     if available, but not used otherwise. If set to `require`, TLS will be forced to be used. Defaults to `prefer`.
-///     Unlike libpq, `require` here means encrypted *and verified*: whichever connector is in use decides, and the
-///     built-in rustls one (`tls` feature) always verifies. Note that [`Pool`](crate::Pool) reads `prefer` as
-///     plaintext - see the `Transport` section of the `pool` module docs (`src/pool.rs`).
+/// * `sslmode` - Controls usage of TLS, with libpq's six values and libpq's meanings: `disable`, `allow`, `prefer`
+///     (the default), `require`, `verify-ca`, `verify-full`. See [`SslMode`] for what each one does, and
+///     [`SslRootCert`] for the certificate-verification table - in particular, `require` encrypts but does *not*
+///     authenticate the server unless `sslrootcert` names trust anchors.
 /// * `sslrootcert` - Trust anchors for server-certificate verification: a path to a PEM file, or the keyword `system`
-///     for the operating system's store. Defaults to `system`. Point it at your CA (or at the server's own
-///     certificate, if self-signed) when the server does not chain to a public root. Read only by a connector that
-///     consults it; the built-in rustls one does.
+///     for the operating system's store. Unset by default, which means no verification for `require`/`prefer`/`allow`
+///     and an error for `verify-ca`/`verify-full`. Point it at your CA (or at the server's own certificate, if
+///     self-signed) when the server does not chain to a public root. `system` may only be combined with
+///     `sslmode=verify-full`.
 /// * `sslcert` - Path to the client certificate chain (PEM) for client-certificate authentication. Must be given
 ///     together with `sslkey`.
 /// * `sslkey` - Path to the private key (PEM) matching `sslcert`.
@@ -319,7 +431,7 @@ impl Config {
             application_name: None,
             ssl_mode: SslMode::Prefer,
             ssl_negotiation: SslNegotiation::Postgres,
-            ssl_root_cert: SslRootCert::System,
+            ssl_root_cert: SslRootCert::Unset,
             ssl_cert: None,
             ssl_key: None,
             host: vec![],
@@ -710,8 +822,11 @@ impl Config {
             "sslmode" => {
                 let mode = match value {
                     "disable" => SslMode::Disable,
+                    "allow" => SslMode::Allow,
                     "prefer" => SslMode::Prefer,
                     "require" => SslMode::Require,
+                    "verify-ca" => SslMode::VerifyCa,
+                    "verify-full" => SslMode::VerifyFull,
                     _ => return Err(Error::config_parse(Box::new(InvalidValue("sslmode")))),
                 };
                 self.ssl_mode(mode);
@@ -888,6 +1003,49 @@ impl Config {
         Ok(())
     }
 
+    /// Reject TLS parameter combinations that contradict each other.
+    ///
+    /// libpq runs these in `connectOptions2`, before a socket is opened, and so
+    /// do we: both rules describe a URL that can never work, so answering at
+    /// connect time is the difference between naming the cause and blaming the
+    /// server for a handshake that was never going to happen.
+    ///
+    /// Both rules are libpq's, including the wording:
+    ///
+    /// * `sslrootcert=system` demands `sslmode=verify-full`. Trusting the
+    ///   public root program *without* checking the host name accepts any
+    ///   certificate any public CA has issued for any name, which is barely
+    ///   better than no verification while looking like the strongest setting
+    ///   on the page.
+    /// * `sslnegotiation=direct` demands a mode with no plaintext fallback. A
+    ///   direct handshake sends no `SSLRequest`, so there is no negotiation to
+    ///   fall back *from*; a mode that permits plaintext must not drive it.
+    pub(crate) fn validate_tls_settings(&self) -> Result<(), Error> {
+        if self.ssl_root_cert == SslRootCert::System && self.ssl_mode != SslMode::VerifyFull {
+            return Err(Error::config(
+                format!(
+                    "weak sslmode \"{}\" may not be used with sslrootcert=system (use \
+                     \"verify-full\")",
+                    self.ssl_mode.as_str()
+                )
+                .into(),
+            ));
+        }
+
+        if self.ssl_negotiation == SslNegotiation::Direct && self.ssl_mode.permits_plaintext() {
+            return Err(Error::config(
+                format!(
+                    "weak sslmode \"{}\" may not be used with sslnegotiation=direct (use \
+                     \"require\", \"verify-ca\", or \"verify-full\")",
+                    self.ssl_mode.as_str()
+                )
+                .into(),
+            ));
+        }
+
+        Ok(())
+    }
+
     /// Opens a connection to a PostgreSQL database.
     pub async fn connect<T>(&self, tls: T) -> Result<(Client, Connection<Socket, T::Stream>), Error>
     where
@@ -899,6 +1057,12 @@ impl Config {
     /// Connects to a PostgreSQL database over an arbitrary stream.
     ///
     /// All of the settings other than `user`, `password`, `dbname`, `options`, and `application_name` name are ignored.
+    ///
+    /// One exception, and it is the reason this is not simply "sslmode is
+    /// ignored": the caller owns the stream, so this entry point cannot open a
+    /// second one. `allow` and `prefer` are therefore reduced to the transport
+    /// they attempt *first* - plaintext and TLS respectively - with no
+    /// reconnect if it fails. Use [`Config::connect`] to get the fallback.
     pub async fn connect_raw<S, T>(
         &self,
         stream: S,
@@ -908,7 +1072,8 @@ impl Config {
         S: AsyncRead + AsyncWrite + Unpin,
         T: TlsConnect<S>,
     {
-        connect_raw(stream, tls, true, self).await
+        self.validate_tls_settings()?;
+        connect_raw(stream, tls, Encryption::first_for(self.ssl_mode), true, self).await
     }
 }
 
@@ -1337,8 +1502,118 @@ impl<'a> UrlParser<'a> {
 mod tests {
     use std::net::IpAddr;
 
-    use crate::config::SslRootCert;
+    use crate::config::{SslMode, SslNegotiation, SslRootCert};
     use crate::{Config, config::Host};
+
+    /// All six libpq spellings parse, to the six distinct modes.
+    ///
+    /// `allow`, `verify-ca` and `verify-full` used to be parse errors, which is
+    /// the failure this pins: a driver that rejects `verify-full` sends every
+    /// deployment that wanted the strongest setting looking for a weaker one
+    /// that parses.
+    #[test]
+    fn all_six_sslmodes_parse() {
+        for (text, expected) in [
+            ("disable", SslMode::Disable),
+            ("allow", SslMode::Allow),
+            ("prefer", SslMode::Prefer),
+            ("require", SslMode::Require),
+            ("verify-ca", SslMode::VerifyCa),
+            ("verify-full", SslMode::VerifyFull),
+        ] {
+            let config = format!("host=h sslmode={text}").parse::<Config>().unwrap();
+            assert_eq!(config.get_ssl_mode(), expected, "sslmode={text}");
+            assert_eq!(expected.as_str(), text, "as_str must round-trip {text}");
+        }
+
+        // The default is libpq's default and stays that way.
+        assert_eq!(
+            "host=h".parse::<Config>().unwrap().get_ssl_mode(),
+            SslMode::Prefer
+        );
+
+        // The set is still closed: neighbouring spellings are errors, not
+        // silent downgrades to the default.
+        for text in ["verify_full", "verifyfull", "VERIFY-FULL", "yes", ""] {
+            format!("host=h sslmode={text}")
+                .parse::<Config>()
+                .err()
+                .unwrap_or_else(|| panic!("sslmode={text} parsed"));
+        }
+    }
+
+    /// The plaintext-permitting set is libpq's `ENC_PLAINTEXT` membership, and
+    /// it is what makes a silent downgrade impossible for the strong modes.
+    #[test]
+    fn only_the_three_weak_modes_permit_plaintext() {
+        for mode in [SslMode::Disable, SslMode::Allow, SslMode::Prefer] {
+            assert!(mode.permits_plaintext(), "{}", mode.as_str());
+        }
+        for mode in [SslMode::Require, SslMode::VerifyCa, SslMode::VerifyFull] {
+            assert!(!mode.permits_plaintext(), "{}", mode.as_str());
+            assert!(mode.permits_tls(), "{}", mode.as_str());
+        }
+        assert!(!SslMode::Disable.permits_tls());
+    }
+
+    /// libpq rejects `sslrootcert=system` under anything weaker than
+    /// `verify-full`, because trusting the public root program without
+    /// checking the host name accepts any certificate any public CA has issued
+    /// for any name.
+    #[test]
+    fn sslrootcert_system_requires_verify_full() {
+        for mode in ["disable", "allow", "prefer", "require", "verify-ca"] {
+            let config = format!("host=h sslmode={mode} sslrootcert=system")
+                .parse::<Config>()
+                .unwrap();
+            let err = config
+                .validate_tls_settings()
+                .expect_err("weaker than verify-full with sslrootcert=system must be rejected");
+            let text = format!("{:?}", std::error::Error::source(&err));
+            assert!(
+                text.contains("sslrootcert=system") && text.contains(mode),
+                "the error must name the mode and the parameter: {text}"
+            );
+        }
+
+        "host=h sslmode=verify-full sslrootcert=system"
+            .parse::<Config>()
+            .unwrap()
+            .validate_tls_settings()
+            .expect("verify-full is the mode sslrootcert=system exists for");
+    }
+
+    /// A direct TLS handshake sends no `SSLRequest`, so there is no negotiation
+    /// to fall back from; libpq refuses to pair it with a mode that permits
+    /// plaintext.
+    #[test]
+    fn direct_negotiation_requires_a_mode_with_no_plaintext_fallback() {
+        for mode in ["disable", "allow", "prefer"] {
+            format!("host=h sslmode={mode} sslnegotiation=direct")
+                .parse::<Config>()
+                .unwrap()
+                .validate_tls_settings()
+                .expect_err("a mode permitting plaintext must not drive a TLS-only handshake");
+        }
+        for mode in ["require", "verify-ca", "verify-full"] {
+            let url = if mode == "require" {
+                format!("host=h sslmode={mode} sslnegotiation=direct")
+            } else {
+                format!("host=h sslmode={mode} sslnegotiation=direct sslrootcert=/ca.pem")
+            };
+            url.parse::<Config>()
+                .unwrap()
+                .validate_tls_settings()
+                .unwrap_or_else(|e| panic!("sslmode={mode} may use direct negotiation: {e}"));
+        }
+        assert_eq!(
+            "host=h sslnegotiation=direct sslmode=require"
+                .parse::<Config>()
+                .unwrap()
+                .get_ssl_negotiation(),
+            SslNegotiation::Direct
+        );
+    }
 
     #[test]
     fn test_simple_parsing() {
@@ -1385,19 +1660,29 @@ mod tests {
     }
 
     /// `system` is the one `sslrootcert` value that is a keyword rather than a
-    /// path, and it is also the default - so this pins that a URL asking for
-    /// the OS store is parsed as the OS store and not as a file named
-    /// "system".
+    /// path, so this pins that a URL asking for the OS store is parsed as the
+    /// OS store and not as a file named "system".
+    ///
+    /// The default is [`SslRootCert::Unset`], NOT `System`. That is libpq's
+    /// shape - its default is a home-directory file that usually does not
+    /// exist - and it is what gives `require` its documented meaning: nothing
+    /// to verify against, so nothing verified. Defaulting to the OS store
+    /// instead would quietly turn `require` into `verify-ca` and would make
+    /// every default connection string illegal under the
+    /// `sslrootcert=system` rule above.
     #[test]
-    fn sslrootcert_system_is_the_keyword_and_the_default() {
+    fn sslrootcert_system_is_a_keyword_and_the_default_is_unset() {
         assert_eq!(
             "host=h sslrootcert=system".parse::<Config>().unwrap().get_ssl_root_cert(),
             &SslRootCert::System
         );
         assert_eq!(
             "host=h".parse::<Config>().unwrap().get_ssl_root_cert(),
-            &SslRootCert::System
+            &SslRootCert::Unset
         );
+        assert!(!SslRootCert::Unset.is_configured());
+        assert!(SslRootCert::System.is_configured());
+        assert!(SslRootCert::File("/ca.pem".into()).is_configured());
     }
 
     /// The recognised-key set stays closed: a plausible neighbour of the three
