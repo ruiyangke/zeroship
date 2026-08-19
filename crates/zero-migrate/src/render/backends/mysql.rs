@@ -3,9 +3,10 @@
 //! This is the only backend module whose trigger spelling actually lives here;
 //! PostgreSQL's is still in `render::vendor` and SQLite's in `render::lower`.
 
-use crate::model::expr::CastTarget;
+use crate::model::expr::{CastTarget, ExtractField, ScalarFn};
 use crate::model::ir::{
-    ForEach, Op, RaiseLevel, TableRef, TriggerAction, TriggerEvent, TriggerStmt, TriggerTiming,
+    ForEach, IrScalar, Op, RaiseLevel, TableRef, TriggerAction, TriggerEvent, TriggerStmt,
+    TriggerTiming,
 };
 use crate::render::dml::{self, DmlError};
 use crate::render::lower::IrLowerError;
@@ -54,6 +55,89 @@ impl DmlRenderer for MysqlDmlRenderer {
             CastTarget::Bytes => "binary",
             CastTarget::Uuid => "char(36)",
         }
+    }
+
+    fn placeholder(&self, _n: usize) -> String {
+        "?".to_string()
+    }
+
+    fn inline_string_literal(&self, s: &str) -> String {
+        // A UTF-8 hex literal, so `NO_BACKSLASH_ESCAPES` (present or absent)
+        // cannot change either the value or the statement shape.
+        format!("_utf8mb4 X'{}'", hex::encode(s.as_bytes()))
+    }
+
+    fn inline_decimal_literal(&self, d: &str) -> String {
+        d.to_string()
+    }
+
+    fn inline_bytes_literal(&self, bytes: &[u8]) -> String {
+        // MySQL requires expression defaults for BLOB columns. Parentheses
+        // keep the same literal valid in defaults and ordinary expressions.
+        format!("(X'{}')", hex::encode(bytes))
+    }
+
+    fn render_in_list(
+        &self,
+        expr: &str,
+        elems: &[IrScalar],
+        negated: bool,
+        joiner: &str,
+    ) -> Result<String, DmlError> {
+        let rendered = elems
+            .iter()
+            .map(|elem| dml::render_in_list_elem_portable(elem, DIALECT))
+            .collect::<Result<Vec<_>, _>>()?;
+        let op = if negated { "NOT IN" } else { "IN" };
+        Ok(format!("({expr} {op} ({}))", rendered.join(joiner)))
+    }
+
+    fn render_regex_match(&self, expr: &str, pattern: &str) -> Result<String, DmlError> {
+        Ok(format!(
+            "({expr} REGEXP {})",
+            dml::in_list_text_literal(pattern, "regex pattern", DIALECT)?
+        ))
+    }
+
+    fn render_extract(&self, field: ExtractField, expr: &str) -> String {
+        match field {
+            ExtractField::Dow => format!("(DAYOFWEEK({expr}) - 1)"),
+            _ => format!(
+                "EXTRACT({} FROM {expr})",
+                dml::extract_field_name(field).to_ascii_uppercase()
+            ),
+        }
+    }
+
+    fn render_concat(&self, l: &str, r: &str) -> String {
+        // MySQL's `||` is *logical OR* absent the non-default `PIPES_AS_CONCAT`
+        // sql_mode, so a `Concat` rendered as `a || b` would silently corrupt to
+        // a boolean.
+        format!("CONCAT({l}, {r})")
+    }
+
+    fn render_distinct_from(&self, l: &str, r: &str) -> String {
+        // MySQL has NO `IS DISTINCT FROM`. `<=>` is its NULL-safe equality
+        // operator, so its negation is exactly the predicate.
+        format!("(NOT ({l} <=> {r}))")
+    }
+
+    fn render_scalar_fn_override(&self, f: ScalarFn, args: &[String]) -> Option<String> {
+        match f {
+            // The portable `length()` intent is CHARACTER length (PG + SQLite
+            // `length(text)`). MySQL's `LENGTH()` is *byte* length — wrong for
+            // any multibyte string — so MySQL must use `CHAR_LENGTH()`.
+            ScalarFn::Length => Some(format!("char_length({})", args.join(", "))),
+            _ => None,
+        }
+    }
+
+    fn render_is_true(&self, operand: &str) -> String {
+        format!("({operand} IS TRUE)")
+    }
+
+    fn render_is_false(&self, operand: &str) -> String {
+        format!("({operand} IS FALSE)")
     }
 
     fn render_concat_ws(&self, rendered: &[String]) -> String {

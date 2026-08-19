@@ -64,6 +64,37 @@
 //!   `set`/`filter` differ per dialect (the `c.fn.splitPart` lowering,
 //!   NULL-skipping `concatWs`); the `BackfillSpec` shape is uniform.
 //!
+//! # What is SPELLING here, and what deliberately is not
+//!
+//! Under `docs/proposals/pluggable-backends.md` step 3 the SQL SPELLING in this
+//! module has moved to `render::backends`, reached through the `DmlRenderer`
+//! trait: placeholders, inline string / decimal / bytes literals, `IN`-list
+//! shape, regex match, date extraction, concatenation, `IS DISTINCT FROM`, the
+//! `IS TRUE` / `IS FALSE` predicates, and the per-vendor scalar-call overrides.
+//! Each moved body is character-for-character what stood here; the three
+//! `Postgres | Sqlite` shared arms became one duplicated line in each of the two
+//! modules, which is the price of the arms being per-vendor impls rather than a
+//! match. (Plain text, not doc links: every name in this section is a private
+//! item, and a link from this module's public docs to one is a rustdoc warning.)
+//!
+//! Three kinds of dialect branch STAYED, on purpose:
+//!
+//! - **Semantics.** `validate_mysql_assignment_semantics` and
+//!   `mysql_expr_references_column` decide whether an authored program MEANS
+//!   the same thing under MySQL's left-to-right SET evaluation. They emit an
+//!   ERROR, never SQL bytes. Core deciding something about a vendor stays in
+//!   core, dialect-parameterized.
+//! - **IR leg selection.** `select_dialect_leg` reads the wire-pinned
+//!   `Expr::Dialectal { pg, sqlite, mysql }` shape. It cannot move; the shape is
+//!   a checksum input.
+//! - **Everything entangled with `BindCtx`.** `push_scalar`'s bytes transport,
+//!   `render_on_conflict_mysql`, and the limited-`DELETE` arms all interleave
+//!   spelling with the bind accumulator, which is not part of the backend
+//!   contract. `push_scalar` additionally asks "does this driver bind bytes
+//!   natively", which is a CAPABILITY the vocabulary does not have yet. Moving
+//!   these means promoting the bind accumulator first — a design decision, not a
+//!   directory move.
+//!
 //! # The shared SQLite-DML module seam
 //!
 //! The SQLite numbered `?n` placeholder emission lives in [`sqlite_placeholder`]
@@ -223,6 +254,24 @@ pub(crate) const MAX_BIND_PARAMS: usize = 65535;
 /// identifier-emission path the assembler uses — a schema-qualified / malformed
 /// name is rejected, so an injection through an identifier slot cannot reach the
 /// DB. Bare-identifier validation mirrors [`crate::model::backfill::BackfillSpec`].
+///
+/// # This wrapper is PostgreSQL-pinned, and that is now a claim about its callers
+///
+/// The dialect-free spelling is `SqlDialect::Postgres`, so this and
+/// [`quote_bare_ident`] / [`quote_ident_checked`] are only safe for callers that
+/// are THEMSELVES PostgreSQL-specific. That used to be untrue:
+/// `render::backends::sqlite` called [`quote_bare_ident`] for all four of its
+/// identifier emissions, so the SQLite backend was quoted by the PostgreSQL
+/// renderer — correct only because both vendors spell an identifier `"x"`, and a
+/// hard blocker on extracting a `zero-migrate-sqlite` crate.
+///
+/// Every backend module now names its own dialect through
+/// [`quote_bare_ident_for_dialect`] / [`quote_ident_checked_for_dialect`]. What
+/// still calls the pinned form is the PostgreSQL executor
+/// (`apply::backend::postgres`, `apply::role`, `apply::journal`,
+/// `render::vendor`), which travels to the PG crate with the pin intact — plus
+/// `render::lower::render_sqlite_trigger_op`, which is the ONE remaining
+/// SQLite-reaches-PG site and belongs to `lower.rs`'s own step-3 pass.
 fn quote_ident(what: &'static str, ident: &str) -> Result<String, DmlError> {
     quote_ident_for_dialect(what, ident, SqlDialect::Postgres)
 }
@@ -392,11 +441,7 @@ fn scalar_to_bind(s: &IrScalar) -> BindValue {
 /// consistent counter.
 #[must_use]
 pub fn placeholder(dialect: SqlDialect, n: usize) -> String {
-    match dialect {
-        SqlDialect::Postgres => format!("${n}"),
-        SqlDialect::Sqlite => sqlite_placeholder(n),
-        SqlDialect::Mysql => "?".to_string(),
-    }
+    crate::render::renderer::renderer(dialect).placeholder(n)
 }
 
 /// The SQLite numbered placeholder (`?n`) — factored out as the shared-module
@@ -437,10 +482,7 @@ pub(crate) fn mysql_grammar_string_literal(s: &str) -> String {
 /// literal so `NO_BACKSLASH_ESCAPES` (present or absent) cannot change either the
 /// value or the statement shape.
 pub(crate) fn inline_string_literal(s: &str, dialect: SqlDialect) -> String {
-    match dialect {
-        SqlDialect::Mysql => format!("_utf8mb4 X'{}'", hex::encode(s.as_bytes())),
-        SqlDialect::Postgres | SqlDialect::Sqlite => sql_string_literal(s),
-    }
+    crate::render::renderer::renderer(dialect).inline_string_literal(s)
 }
 
 pub(crate) fn inline_literal(s: &IrScalar, dialect: SqlDialect) -> Result<String, DmlError> {
@@ -454,24 +496,17 @@ pub(crate) fn inline_literal(s: &IrScalar, dialect: SqlDialect) -> Result<String
             }
         }
         IrScalar::Int(i) | IrScalar::Int64(i) => i.to_string(),
-        IrScalar::Decimal(d) if matches!(dialect, SqlDialect::Sqlite) => sql_string_literal(d),
-        IrScalar::Decimal(d) => d.clone(),
+        IrScalar::Decimal(d) => {
+            crate::render::renderer::renderer(dialect).inline_decimal_literal(d)
+        }
         IrScalar::Str(s) => inline_string_literal(s, dialect),
-        IrScalar::Bytes(bytes) => match dialect {
-            SqlDialect::Postgres => {
-                use base64::Engine as _;
-                let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-                format!("decode({}, 'base64')", sql_string_literal(&encoded))
-            }
-            // MySQL requires expression defaults for BLOB columns. Parentheses
-            // keep the same literal valid in defaults and ordinary expressions.
-            SqlDialect::Mysql => format!("(X'{}')", hex::encode(bytes)),
-            SqlDialect::Sqlite => format!("X'{}'", hex::encode(bytes)),
-        },
+        IrScalar::Bytes(bytes) => {
+            crate::render::renderer::renderer(dialect).inline_bytes_literal(bytes)
+        }
     })
 }
 
-fn pg_text_literal(s: &str, what: &'static str) -> Result<String, DmlError> {
+pub(crate) fn pg_text_literal(s: &str, what: &'static str) -> Result<String, DmlError> {
     if s.is_empty() {
         return Err(DmlError::UnrenderableExpr(format!(
             "{what} must be non-empty"
@@ -485,7 +520,7 @@ fn pg_text_literal(s: &str, what: &'static str) -> Result<String, DmlError> {
     Ok(format!("{}::text", sql_string_literal(s)))
 }
 
-fn in_list_text_literal(
+pub(crate) fn in_list_text_literal(
     s: &str,
     what: &'static str,
     dialect: SqlDialect,
@@ -543,7 +578,7 @@ fn homogeneous_in_list_kind(elems: &[IrScalar]) -> Result<Option<InListScalarKin
     Ok(kind)
 }
 
-fn render_in_list_elem_pg(elem: &IrScalar) -> Result<String, DmlError> {
+pub(crate) fn render_in_list_elem_pg(elem: &IrScalar) -> Result<String, DmlError> {
     Ok(match elem {
         IrScalar::Str(s) => pg_text_literal(s, "inList element")?,
         IrScalar::Int(i) | IrScalar::Int64(i) => i.to_string(),
@@ -565,12 +600,16 @@ fn render_in_list_elem_pg(elem: &IrScalar) -> Result<String, DmlError> {
     })
 }
 
-fn render_in_list_elem_portable(elem: &IrScalar, dialect: SqlDialect) -> Result<String, DmlError> {
+pub(crate) fn render_in_list_elem_portable(
+    elem: &IrScalar,
+    dialect: SqlDialect,
+) -> Result<String, DmlError> {
     Ok(match elem {
         IrScalar::Str(s) => in_list_text_literal(s, "inList element", dialect)?,
         IrScalar::Int(i) | IrScalar::Int64(i) => i.to_string(),
-        IrScalar::Decimal(d) if matches!(dialect, SqlDialect::Sqlite) => sql_string_literal(d),
-        IrScalar::Decimal(d) => d.clone(),
+        IrScalar::Decimal(d) => {
+            crate::render::renderer::renderer(dialect).inline_decimal_literal(d)
+        }
         IrScalar::Bool(b) => {
             if *b {
                 "TRUE".to_string()
@@ -603,24 +642,7 @@ fn render_in_list(
     } else {
         ","
     };
-    match dialect {
-        SqlDialect::Postgres => {
-            let rendered: Result<Vec<_>, _> = elems.iter().map(render_in_list_elem_pg).collect();
-            let (cmp, quantifier) = if negated { ("<>", "ALL") } else { ("=", "ANY") };
-            Ok(format!(
-                "({expr} {cmp} {quantifier} (ARRAY[{}]))",
-                rendered?.join(joiner)
-            ))
-        }
-        SqlDialect::Sqlite | SqlDialect::Mysql => {
-            let rendered = elems
-                .iter()
-                .map(|elem| render_in_list_elem_portable(elem, dialect))
-                .collect::<Result<Vec<_>, _>>()?;
-            let op = if negated { "NOT IN" } else { "IN" };
-            Ok(format!("({expr} {op} ({}))", rendered.join(joiner)))
-        }
-    }
+    crate::render::renderer::renderer(dialect).render_in_list(expr, elems, negated, joiner)
 }
 
 fn render_pg_regex_match(
@@ -628,23 +650,10 @@ fn render_pg_regex_match(
     pattern: &str,
     dialect: SqlDialect,
 ) -> Result<String, DmlError> {
-    match dialect {
-        SqlDialect::Postgres => Ok(format!(
-            "({expr} ~ {})",
-            pg_text_literal(pattern, "PG regex pattern")?
-        )),
-        SqlDialect::Mysql => Ok(format!(
-            "({expr} REGEXP {})",
-            in_list_text_literal(pattern, "regex pattern", SqlDialect::Mysql)?
-        )),
-        SqlDialect::Sqlite => Err(DmlError::UnrenderableExpr(
-            "regex is not supported on SQLite (no stock REGEXP); use dialect({...}) to port"
-                .to_string(),
-        )),
-    }
+    crate::render::renderer::renderer(dialect).render_regex_match(expr, pattern)
 }
 
-fn render_extract_field(field: ExtractField) -> &'static str {
+pub(crate) fn extract_field_name(field: ExtractField) -> &'static str {
     match field {
         ExtractField::Year => "year",
         ExtractField::Month => "month",
@@ -660,27 +669,7 @@ fn render_extract(
     expr: &str,
     dialect: SqlDialect,
 ) -> Result<String, DmlError> {
-    Ok(match dialect {
-        SqlDialect::Postgres => format!("EXTRACT({} FROM {expr})", render_extract_field(field)),
-        SqlDialect::Sqlite => {
-            let fmt = match field {
-                ExtractField::Year => "%Y",
-                ExtractField::Month => "%m",
-                ExtractField::Day => "%d",
-                ExtractField::Hour => "%H",
-                ExtractField::Minute => "%M",
-                ExtractField::Dow => "%w",
-            };
-            format!("CAST(strftime('{fmt}', {expr}) AS INTEGER)")
-        }
-        SqlDialect::Mysql => match field {
-            ExtractField::Dow => format!("(DAYOFWEEK({expr}) - 1)"),
-            _ => format!(
-                "EXTRACT({} FROM {expr})",
-                render_extract_field(field).to_ascii_uppercase()
-            ),
-        },
-    })
+    Ok(crate::render::renderer::renderer(dialect).render_extract(field, expr))
 }
 
 fn render_pg_extract_field(field: PgExtractField) -> &'static str {
@@ -708,7 +697,7 @@ fn render_pg_extract(
     expr: &str,
     dialect: SqlDialect,
 ) -> Result<String, DmlError> {
-    if !matches!(dialect, SqlDialect::Postgres) {
+    if !dialect.supports(Capability::PostgresVendorPrimitives) {
         return Err(DmlError::UnrenderableExpr(
             "PG EXTRACT is PostgreSQL-only".to_string(),
         ));
@@ -723,7 +712,7 @@ fn render_pg_interval_literal(
     duration: &Duration,
     dialect: SqlDialect,
 ) -> Result<String, DmlError> {
-    if !matches!(dialect, SqlDialect::Postgres) {
+    if !dialect.supports(Capability::PostgresVendorPrimitives) {
         return Err(DmlError::UnrenderableExpr(
             "PG interval literal is PostgreSQL-only".to_string(),
         ));
@@ -782,8 +771,8 @@ fn binary_op_sql(op: BinaryOp) -> &'static str {
 /// concatenation is the `CONCAT(a, b)` function. PG and SQLite use the `||`
 /// operator, where it is genuinely concatenation.
 fn render_binop(op: BinaryOp, l: &str, r: &str, dialect: SqlDialect) -> String {
-    if matches!(op, BinaryOp::Concat) && matches!(dialect, SqlDialect::Mysql) {
-        format!("CONCAT({l}, {r})")
+    if matches!(op, BinaryOp::Concat) {
+        crate::render::renderer::renderer(dialect).render_concat(l, r)
     } else {
         format!("({} {} {})", l, binary_op_sql(op), r)
     }
@@ -795,10 +784,7 @@ fn render_binop(op: BinaryOp, l: &str, r: &str, dialect: SqlDialect) -> String {
 /// `NOT (<l> <=> <r>)` — `<=>` is MySQL's NULL-safe equality operator, so its
 /// negation is exactly the "distinct from" (NULL-aware inequality) predicate.
 fn render_distinct_from(l: &str, r: &str, dialect: SqlDialect) -> String {
-    match dialect {
-        SqlDialect::Mysql => format!("(NOT ({l} <=> {r}))"),
-        SqlDialect::Postgres | SqlDialect::Sqlite => format!("({l} IS DISTINCT FROM {r})"),
-    }
+    crate::render::renderer::renderer(dialect).render_distinct_from(l, r)
 }
 
 /// The SQL spelling of an allow-listed named scalar function. These
@@ -842,30 +828,11 @@ fn render_scalar_fn_call(f: ScalarFn, args: &[String], dialect: SqlDialect) -> S
         // for the 2-arg case the builder produces, and never index-panics on a
         // malformed hand-crafted arity.
         ScalarFn::Mod => format!("({})", args.join(" % ")),
-        // The portable `length()` intent is CHARACTER length (PG + SQLite
-        // `length(text)`). MySQL's `LENGTH()` is *byte* length — wrong for any
-        // multibyte string — so MySQL must use `CHAR_LENGTH()`.
-        ScalarFn::Length if matches!(dialect, SqlDialect::Mysql) => {
-            format!("char_length({})", args.join(", "))
-        }
-        // SQLite exposes floor()/ceil() only when it was built with the optional
-        // math extension. Lower both operations to core SQL so the portable DSL
-        // behaves the same on every supported SQLite build. The builder enforces
-        // one argument; indexing defensively falls back to the generic spelling
-        // for malformed hand-authored IR, which validation rejects before render.
-        ScalarFn::Floor if matches!(dialect, SqlDialect::Sqlite) && args.len() == 1 => {
-            let arg = &args[0];
-            format!(
-                "(CASE WHEN {arg} >= 9223372036854775808.0 OR {arg} <= -9223372036854775808.0 THEN {arg} ELSE CAST({arg} AS INTEGER) - (CAST({arg} AS INTEGER) > {arg}) END)"
-            )
-        }
-        ScalarFn::Ceil if matches!(dialect, SqlDialect::Sqlite) && args.len() == 1 => {
-            let arg = &args[0];
-            format!(
-                "(CASE WHEN {arg} >= 9223372036854775808.0 OR {arg} <= -9223372036854775808.0 THEN {arg} ELSE CAST({arg} AS INTEGER) + (CAST({arg} AS INTEGER) < {arg}) END)"
-            )
-        }
-        _ => format!("{}({})", scalar_fn_sql(f), args.join(", ")),
+        // Every other spelling is the vendor's to answer. A backend returning
+        // `None` takes the shared `<name>(<args>)` table below.
+        _ => crate::render::renderer::renderer(dialect)
+            .render_scalar_fn_override(f, args)
+            .unwrap_or_else(|| format!("{}({})", scalar_fn_sql(f), args.join(", "))),
     }
 }
 
@@ -1397,7 +1364,7 @@ fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError>
             render_pg_regex_match(&e, pattern, ctx.dialect)?
         }
         Expr::PgColumnSize { expr } => {
-            if !matches!(ctx.dialect, SqlDialect::Postgres) {
+            if !ctx.dialect.supports(Capability::PostgresVendorPrimitives) {
                 return Err(DmlError::UnrenderableExpr(
                     "pg_column_size is PostgreSQL-only".to_string(),
                 ));
@@ -1470,13 +1437,10 @@ fn render_unary(op: UnaryOp, operand: &str, dialect: SqlDialect) -> String {
         UnaryOp::Not => format!("(NOT {operand})"),
         UnaryOp::IsNull => format!("({operand} IS NULL)"),
         UnaryOp::IsNotNull => format!("({operand} IS NOT NULL)"),
-        // SQLite has no native boolean type (values are 0/1) and rejects the
-        // `IS TRUE` / `IS FALSE` predicates at apply — render them as `= 1` / `= 0`
-        // there. PG and MySQL both support the standard spelling.
-        UnaryOp::IsTrue if matches!(dialect, SqlDialect::Sqlite) => format!("({operand} = 1)"),
-        UnaryOp::IsFalse if matches!(dialect, SqlDialect::Sqlite) => format!("({operand} = 0)"),
-        UnaryOp::IsTrue => format!("({operand} IS TRUE)"),
-        UnaryOp::IsFalse => format!("({operand} IS FALSE)"),
+        // The boolean predicates are the vendor's to spell: SQLite has no native
+        // boolean type (values are 0/1) and rejects `IS TRUE` / `IS FALSE` at apply.
+        UnaryOp::IsTrue => crate::render::renderer::renderer(dialect).render_is_true(operand),
+        UnaryOp::IsFalse => crate::render::renderer::renderer(dialect).render_is_false(operand),
     }
 }
 
@@ -1632,7 +1596,7 @@ where
             render_pg_regex_match(&e, pattern, dialect)?
         }
         Expr::PgColumnSize { expr } => {
-            if !matches!(dialect, SqlDialect::Postgres) {
+            if !dialect.supports(Capability::PostgresVendorPrimitives) {
                 return Err(DmlError::UnrenderableExpr(
                     "pg_column_size is PostgreSQL-only".to_string(),
                 ));
