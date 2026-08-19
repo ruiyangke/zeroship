@@ -106,18 +106,40 @@ async fn apply_doc(
     history: &mut Vec<Op>,
     approval: Approval,
 ) -> Result<Vec<Migration>, String> {
-    let backend = PostgresBackend::new_generic(session);
     let policy = support::no_inject(&cfg.project_schema);
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, &policy);
-    let document = zero_migrate::model::load::load_ir_document(
+    apply_doc_under(session, cfg, &policy, ir, reg, history, approval).await
+}
+
+/// [`apply_doc`] under an explicit charter, for the arms that need a vendor
+/// capability grant. A raw view body is a privileged primitive, so a migration
+/// carrying one does not even LOAD under the default no-inject charter.
+async fn apply_doc_under(
+    session: &PgDevSession,
+    cfg: &ExecutorConfig,
+    policy: &zero_migrate::EffectivePolicy,
+    ir: &str,
+    reg: &BTreeMap<String, String>,
+    history: &mut Vec<Op>,
+    approval: Approval,
+) -> Result<Vec<Migration>, String> {
+    let backend = PostgresBackend::new_generic(session);
+    let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, policy);
+    // Through the AUTHORIZED entry, the same one `IrAuthor` uses: a privileged
+    // primitive's grant is read off the charter, and the plain `load_ir_document`
+    // falls back to the confined creator profile, which grants none of them.
+    let document = zero_migrate::model::load::load_ir_document_authorized(
         ir,
         OWNER,
         zero_migrate::model::validate::Dialect::Postgres,
         reg,
         None,
+        Some(zero_migrate::model::validate::VendorAuthority {
+            effective: policy,
+            default_schema: &cfg.project_schema,
+        }),
     )
     .map_err(|error| format!("load gate (postgres): {error}"))?;
-    let folded = fold_ops(history, SqlDialect::Postgres, &cfg.project_schema, &policy)
+    let folded = fold_ops(history, SqlDialect::Postgres, &cfg.project_schema, policy)
         .map_err(|error| format!("fold the applied history: {error}"))?;
     let live = LiveSchema::from_catalog_snapshot(folded, OWNER);
     history.extend(document.ops.iter().cloned());
@@ -482,6 +504,171 @@ async fn a_table_rename_reaches_the_body_a_dropped_view_is_restored_from() {
             return Err(format!(
                 "the restored view body must match the one that was dropped\n  before: {renamed}\n   after: {after}"
             ));
+        }
+        Ok(())
+    }
+    .await;
+
+    let cleanup = session
+        .batch(&format!(
+            "DROP SCHEMA IF EXISTS {quoted_schema} CASCADE; \
+             DROP SCHEMA IF EXISTS {quoted_meta_schema} CASCADE"
+        ))
+        .await;
+    match (work, cleanup) {
+        (Ok(()), Ok(())) => {}
+        (Err(work), Ok(())) => panic!("{work}"),
+        (Ok(()), Err(cleanup)) => panic!("drop PostgreSQL test schemas: {cleanup}"),
+        (Err(work), Err(cleanup)) => panic!("{work}; cleanup failed: {cleanup}"),
+    }
+}
+
+/// The SAME history with a RAW view body, which the rename does NOT follow.
+///
+/// This is a LIMITATION PIN, not a passing feature. A raw body is author-supplied
+/// SQL text with no AST to re-render from, so following a rename into it would be
+/// the naive substitution this crate refuses everywhere else - nothing in the text
+/// distinguishes a relation reference from `WHERE note <> 'users'`. The fold
+/// therefore carries the body through untouched, and the consequence is measured
+/// here rather than argued: `PostgreSQL` REFUSES the resulting down migration,
+/// naming the pre-rename table.
+///
+/// It is written to go RED the moment a raw body learns to follow a rename. When
+/// that happens the rollback stops failing, this arm fails instead, and the fix is
+/// to replace it with the assertion its structured sibling already makes - that the
+/// restored body reads the table under its CURRENT name.
+#[compio::test]
+async fn a_raw_view_body_does_not_follow_a_table_rename_and_its_inverse_is_refused() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let schema = token();
+    // The operator charter, not `no_inject`: a raw view body is a vendor capability
+    // and a migration carrying one does not load without the grant.
+    let policy = support::operator_charter(&schema);
+    let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy.clone());
+    let quoted_schema = quote_ident(&cfg.project_schema);
+    let quoted_meta_schema = quote_ident(&cfg.pg.meta_schema);
+    let _schema_guard = support::SchemaGuard::arm(
+        &session,
+        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+    );
+    session
+        .batch(&format!("CREATE SCHEMA {quoted_schema}"))
+        .await
+        .expect("create isolated test schema");
+
+    let work: Result<(), String> = async {
+        let backend = PostgresBackend::new_generic(&session);
+        backend
+            .ensure_journal(&cfg)
+            .await
+            .map_err(|error| format!("ensure migration journal: {error}"))?;
+
+        let raw_create = serde_json::json!({
+            "ir_version": 1,
+            "name": "create_active_users_raw",
+            "owner_app": OWNER,
+            "ops": [
+                {
+                    "op": "createTable",
+                    "name": "users",
+                    "columns": [{"name": "email", "type": "text", "nullable": false}]
+                },
+                {
+                    "op": "createView",
+                    "name": VIEW,
+                    "query": {
+                        "kind": "raw",
+                        "sql": format!("SELECT email FROM {quoted_schema}.users")
+                    }
+                }
+            ]
+        })
+        .to_string();
+
+        let mut history: Vec<Op> = Vec::new();
+        let mut migrations = apply_doc_under(
+            &session,
+            &cfg,
+            &policy,
+            &raw_create,
+            &BTreeMap::new(),
+            &mut history,
+            Approval::None,
+        )
+        .await?;
+
+        let registry: BTreeMap<String, String> = [
+            ("users".to_string(), OWNER.to_string()),
+            ("members".to_string(), OWNER.to_string()),
+        ]
+        .into_iter()
+        .collect();
+        migrations.extend(
+            apply_doc_under(
+                &session,
+                &cfg,
+                &policy,
+                &rename_doc("users", "members"),
+                &registry,
+                &mut history,
+                Approval::Approved,
+            )
+            .await?,
+        );
+        migrations.extend(
+            apply_doc_under(
+                &session,
+                &cfg,
+                &policy,
+                &drop_doc(false),
+                &registry,
+                &mut history,
+                Approval::Approved,
+            )
+            .await?,
+        );
+
+        let request = RollbackRequest::new(RollbackTarget::Steps(1));
+        let outcome = rollback(
+            &backend,
+            &cfg,
+            &request,
+            &migrations,
+            Approval::Approved,
+            OWNER,
+            guard_for(&GuardConfig::from_policy(
+                policy.clone(),
+                SqlDialect::Postgres,
+            ))
+            .as_ref(),
+        )
+        .await;
+
+        let error = outcome.err().ok_or_else(|| {
+            "a raw view body still does not follow a table rename, so this rollback \
+             cannot succeed - if it now does, the limitation is FIXED and this arm must \
+             become the assertion its structured sibling makes"
+                .to_string()
+        })?;
+        // Deliberately NOT `contains("users")`. The view is called `active_users` and
+        // the schema is `drop_view_rollback_pg_...`, so a bare `users` match would be
+        // satisfied by almost any failure this arm could produce - a broken instrument
+        // that fails toward a false green. The qualified `.users` cannot be spelled by
+        // `.active_users` (the `users` there is preceded by `_`), so it names the TABLE
+        // and only the table.
+        let rendered = error.to_string();
+        if !rendered.contains(".users") || !rendered.contains("does not exist") {
+            return Err(format!(
+                "the refusal must be PostgreSQL rejecting the pre-rename table the stale \
+                 raw body still reads, not some other failure: {rendered}"
+            ));
+        }
+        if live_view_body(&session, &cfg.project_schema)
+            .await?
+            .is_some()
+        {
+            return Err("the refused rollback must not have re-created the view".into());
         }
         Ok(())
     }
