@@ -32,6 +32,13 @@
 //! the shape of a migration that clears validate and preview and then dies
 //! partway through applying.
 //!
+//! That last sentence is ENFORCED rather than asserted. The exception file cannot
+//! record a `ServerError`: an `ALLOWANCES` entry naming one fails the const-eval
+//! guard beside the `include!` and the suite does not BUILD. It used to be prose
+//! only, and the row would have fallen through the disposition check into the
+//! allowance lookup and been excused - see that guard's own comment for why the
+//! `verdict.outcome != Outcome::ServerError` conjunct in [`judge`] never closed it.
+//!
 //! WHAT HAD TO CHANGE to make the corpus EXECUTABLE. The representatives were
 //! built to be CONSTRUCTIBLE and to select a support branch. Nothing in them
 //! assumes its referents exist, and several of them name objects that are unique
@@ -162,7 +169,9 @@ use zero_migrate::{
 /// 4. NEEDED NOTHING, as predicted: `disposition_for` reads `row.mysql` from the
 ///    generated table like the other two columns.
 ///
-/// The one thing a MySQL author must NOT do is relax [`Outcome::ServerError`].
+/// The one thing a MySQL author must NOT do is relax [`Outcome::ServerError`], and
+/// the obvious way of relaxing it - recording one in the expectations file - is now
+/// refused by the compiler rather than by this sentence.
 const MYSQL_LEG: &str = "see the module doc and this constant";
 
 // ---------------------------------------------------------------------------
@@ -197,6 +206,14 @@ impl Outcome {
             Self::EngineError => "EngineError",
             Self::NotExecutable => "NotExecutable",
         }
+    }
+
+    /// Whether this is the one outcome no allowance may name. `const` because the
+    /// SERVER-ERROR GUARD that reads it - the anonymous `const _` block just below
+    /// the `include!` of the expectations file - runs at COMPILE time, not at test
+    /// time.
+    const fn is_server_error(&self) -> bool {
+        matches!(self, Self::ServerError)
     }
 }
 
@@ -1263,6 +1280,57 @@ struct PlaceholderReason {
 include!("../dialect_conformance/expectations.rs");
 
 // ---------------------------------------------------------------------------
+// THE SERVER-ERROR GUARD
+// ---------------------------------------------------------------------------
+
+/// A [`Outcome::ServerError`] allowance is rejected AT LOAD, and "load" here means
+/// the compiler: this block is const-evaluated, so an `ALLOWANCES` entry naming
+/// `ServerError` does not fail the suite, it fails the BUILD of the suite.
+///
+/// The proposal's required-test matrix says the exception file "cannot suppress"
+/// (`docs/proposals/backend-conformance.md`), and the header of
+/// `tests/dialect_conformance/expectations.rs` says a `ServerError` "is never
+/// absorbed by an allowance". Until this block existed, both were PROSE. The judge
+/// below has a `verdict.outcome != Outcome::ServerError` conjunct, but read what it
+/// buys: `required_outcome` returns only `Applied` or `RefusedByCapability`, never
+/// `ServerError`, so that conjunct is already implied by `verdict.outcome ==
+/// required` and changes nothing. All it does is stop a `ServerError` counting as
+/// AGREEMENT - which it could not have done anyway. The row then FALLS THROUGH to
+/// the `ALLOWANCES` lookup, where an entry carrying `observed: Outcome::ServerError`
+/// would match, satisfy both `assert_eq!(verdict.outcome, allowance.observed)` and
+/// the `words` assertion, land in `used`, and excuse the row. That is the exact
+/// failure this layer exists to catch: a migration that clears validate and preview
+/// and then dies partway through applying, waved through by the exception file.
+///
+/// It held only because no allowance happened to name one. Nobody-has-written-it-yet
+/// is not a guarantee; this block is.
+///
+/// SCOPE, so this is not read as more than it is. This rejects the DECLARATION, not
+/// the observation. A row that actually produces a `ServerError` is still judged at
+/// run time by [`judge`], and with this block in place it can only reach the
+/// `unexplained` list or fail the `assert_eq!` against some other allowance's
+/// `observed` - both of which are red. What this block removes is the one path by
+/// which that red could have been declared away.
+const _: () = {
+    let mut i = 0;
+    while i < ALLOWANCES.len() {
+        assert!(
+            !ALLOWANCES[i].observed.is_server_error(),
+            "an ALLOWANCES entry names Outcome::ServerError. A ServerError is the \
+             server REJECTING engine-emitted SQL - a migration that clears validate \
+             and preview and then dies partway through applying - and it is a \
+             conformance failure on EVERY disposition. It is not an exception that \
+             can be recorded; remove the entry and FIX THE ROW. If the engine should \
+             have refused the op before emitting, teach it to (see \
+             createTrigger/bodySimple on mysql in the expectations file, which was \
+             exactly this and became a RefusedByCapability allowance once \
+             render/renderer.rs learned to refuse the statement at lower)."
+        );
+        i += 1;
+    }
+};
+
+// ---------------------------------------------------------------------------
 // The tests
 // ---------------------------------------------------------------------------
 
@@ -1345,6 +1413,12 @@ fn judge(dialect: &str, ledger: &[(String, String, Verdict)]) {
 
         let declared = disposition_for(kind, variant, dialect);
         let required = required_outcome(declared);
+        // The `!= ServerError` conjunct is belt to the const guard's braces, and it
+        // is the WEAKER of the two: `required_outcome` never returns `ServerError`,
+        // so it can only ever be redundant here. What keeps a `ServerError` from
+        // being excused is that no allowance can name one - the const-eval block
+        // above the tests. Without that, this line only stopped a `ServerError`
+        // reading as AGREEMENT and let it fall through to the allowance lookup.
         if verdict.outcome == required && verdict.outcome != Outcome::ServerError {
             // Agreement. An allowance for an agreeing row is dead weight.
             if let Some(allowance) = ALLOWANCES
