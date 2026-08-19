@@ -211,6 +211,26 @@ pub enum EgressRefusal {
     },
 }
 
+/// The error CODE and message a refusal reports, for every transport.
+///
+/// One function, because 5.7's requirement is a THREE-way distinction the app
+/// can act on - the platform floor, the creator's own REJECT, and a lookup that
+/// simply failed - and two transports classifying it separately is two
+/// classifications that will disagree. `node:net` renders these onto the
+/// socket's `error` event and WebSocket onto its `error` event; neither decides
+/// the split itself.
+#[must_use]
+pub fn refusal_report(refusal: &EgressRefusal) -> (&'static str, String) {
+    match refusal {
+        // Not a policy outcome at all: the resolver already said which code.
+        EgressRefusal::ResolveFailed(failure) => (failure.code, failure.message.clone()),
+        EgressRefusal::NoAddressSurvived { floor, .. } if !floor.is_empty() => {
+            ("ERR_NET_SSRF", format!("SSRF: {refusal}"))
+        }
+        _ => ("ERR_NET_EGRESS_DENIED", format!("egress: {refusal}")),
+    }
+}
+
 fn join(addrs: &[IpAddr]) -> String {
     addrs
         .iter()
@@ -779,6 +799,53 @@ mod tests {
                 format!("{IN_RANGE_CARVED}:443").parse::<SocketAddr>().unwrap(),
             ],
             "every survivor must be returned, in the order the resolver gave"
+        );
+    }
+
+    /// The three-way split 5.7 requires, pinned at the ONE function both
+    /// transports classify through.
+    ///
+    /// `node:net` and WebSocket render it differently - a `code` field on one,
+    /// a close reason on the other - but neither decides it. Without this row
+    /// the split is only asserted end-to-end on the `node:net` path, and
+    /// collapsing two of the three arms here would leave WebSocket silently
+    /// reporting a creator refusal as a platform one.
+    #[test]
+    fn refusal_report_distinguishes_the_floor_from_the_creators_rules() {
+        let floor = EgressRefusal::NoAddressSurvived {
+            floor: vec!["10.0.0.5".parse().unwrap()],
+            range_rejected: vec![],
+            unmatched: vec![],
+        };
+        assert_eq!(refusal_report(&floor).0, "ERR_NET_SSRF");
+
+        // The control, differing in ONE thing - which list the address landed
+        // in. The creator wrote this one, so it must not read as the platform's.
+        let by_creator = EgressRefusal::NoAddressSurvived {
+            floor: vec![],
+            range_rejected: vec!["93.184.216.7".parse().unwrap()],
+            unmatched: vec![],
+        };
+        assert_eq!(refusal_report(&by_creator).0, "ERR_NET_EGRESS_DENIED");
+
+        // And "nothing ACCEPTed it", the arm a v4-only range grant produces for
+        // every AAAA answer, is the creator's too - not a broken name.
+        let unmatched = EgressRefusal::NoAddressSurvived {
+            floor: vec![],
+            range_rejected: vec![],
+            unmatched: vec!["2606:4700::1111".parse().unwrap()],
+        };
+        assert_eq!(refusal_report(&unmatched).0, "ERR_NET_EGRESS_DENIED");
+
+        // A lookup that simply failed is not a policy outcome at all, and
+        // carries the resolver's own code through unchanged.
+        let broken = EgressRefusal::ResolveFailed(ResolveFailure {
+            code: "ERR_NET_DNS_TIMEOUT",
+            message: "DNS resolve timed out".to_string(),
+        });
+        assert_eq!(
+            refusal_report(&broken),
+            ("ERR_NET_DNS_TIMEOUT", "DNS resolve timed out".to_string())
         );
     }
 

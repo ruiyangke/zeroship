@@ -15,10 +15,17 @@
 //! platform's SSRF floor, which no rule in this module can widen
 //! (INVARIANT GRANTS-NARROW, enforced in `zeroship_runtime::transport::egress`).
 //!
-//! **This control covers `node:net` and nothing else.** `fetch` is not gated and
-//! reaches any public host with no rule at all, so this is a raw-socket
-//! blast-radius control against a compromised dependency, not an egress control
-//! in general and not a tenant-isolation control.
+//! **This control covers every RAW BYTE STREAM an app can open: `node:net`,
+//! `node:tls`, and outbound `WebSocket`.** One rule set covers all of them,
+//! because they are one capability: a WebSocket is a bidirectional byte stream
+//! the moment the upgrade completes, and a creator who granted
+//! `api.example.test:443` means that destination, not that transport. Two
+//! grammars would be two things to keep in step.
+//!
+//! **`fetch` is the exception and the only one.** It is not gated and reaches
+//! any public host with no rule at all, so this is a raw-stream blast-radius
+//! control against a compromised dependency, not an egress control in general
+//! and not a tenant-isolation control.
 //!
 //! # Why the queries are split by phase
 //!
