@@ -1431,9 +1431,28 @@ fn mysql_type_override_with_collation(f: &FieldDescriptor, data_type: &str) -> O
 /// validator is what let `text NOT NULL DEFAULT 'new'` render and lint green.
 ///
 /// A `caseSensitive: false` facet or an unbounded `t.text()` renders a bare
-/// `TEXT`; everything else takes the plain type map. Note that the result keys
-/// on RENDERED storage, not the authored type name: a bounded
-/// `t.string({ length })` marked case-insensitive lands on `text` here.
+/// `TEXT`; everything else takes the plain type map. The result keys on RENDERED
+/// storage rather than on the authored type name.
+///
+/// **The `caseSensitive: false` arm is read BEFORE the type map and would drop a
+/// declared width, and nothing in this function stops it.** What stops it is one
+/// rule two modules away: `crate::model::validate::validate_column_facets` refuses
+/// `caseSensitive: false` on any column that is not a `ColType::Text`, for every
+/// dialect, and [`FieldDescriptor::max_length`] is `Some` only for
+/// `ColType::String { length }` (`crate::render::lower::ir_column_to_field`). A
+/// field carrying both a width and the facet therefore cannot be authored;
+/// `t.char({ length })` has no `caseSensitive` option to pair with `char_len` at
+/// all. See `mysql_storage_agreement_tests`, which pins that invariant - this doc
+/// used to assert the opposite as fact, and it has since sent more than one reader
+/// hunting a live width-loss defect that no authored schema can reach.
+///
+/// Measured rather than read off the call graph: a tripwire panicking on this arm
+/// whenever a width was present, run over the whole Rust suite against live
+/// PostgreSQL and MySQL, was tripped by exactly ONE thing - the synthetic
+/// `label_ci` fixture in `mysql_storage_agreement_tests` that exists to document
+/// the shape. The same tripwire widened to ANY `caseSensitive: false` column was
+/// tripped by fourteen tests, every one of them widthless, so the arm is
+/// unreachable-with-a-width rather than merely uncovered.
 pub(crate) fn mysql_base_column_type(f: &FieldDescriptor, data_type: &str) -> String {
     if matches!(f.case_sensitive, Some(false)) || f.unbounded_text {
         "text".to_string()
@@ -11170,7 +11189,10 @@ mod mysql_storage_agreement_tests {
     //!
     //! The table below includes the shape a name-keyed rule misses: a bounded
     //! `t.string({ length })` marked case-insensitive renders a bare MySQL
-    //! `TEXT` while its authored name says "bounded".
+    //! `TEXT` while its authored name says "bounded". That row is a
+    //! COUNTERFACTUAL - a shape the engine refuses rather than one it ships - and
+    //! the refusal it depends on is pinned by
+    //! [`a_bounded_case_insensitive_string_is_refused_before_this_renderer_sees_it`].
     use super::{
         column_snapshot_for_field, column_type_for_render, field_data_type, mysql_base_column_type,
         FieldDescriptor, MysqlStorage,
@@ -11219,7 +11241,10 @@ mod mysql_storage_agreement_tests {
         let cases: Vec<(FieldDescriptor, MysqlStorage)> = vec![
             (unbounded("body"), MysqlStorage::Text),
             (case_insensitive(unbounded("body_ci")), MysqlStorage::Text),
-            // Authored name says "bounded", rendered storage is a bare TEXT.
+            // COUNTERFACTUAL. Authored name says "bounded", rendered storage is a
+            // bare TEXT - the width is dropped, not narrowed. No authored schema
+            // reaches this: the facet gate refuses it (see the test below). Kept as
+            // a case so that relaxing the gate cannot quietly make it reachable.
             (
                 case_insensitive(bounded("label_ci", 50)),
                 MysqlStorage::Text,
@@ -11259,6 +11284,104 @@ mod mysql_storage_agreement_tests {
                 f.name
             );
         }
+    }
+
+    /// The `label_ci` row above is a shape the engine REFUSES, not one it ships.
+    ///
+    /// [`mysql_base_column_type`] reads `caseSensitive: false` ahead of the type map,
+    /// so a field carrying that facet AND a declared width has its width dropped
+    /// outright - not narrowed, dropped. Nothing in the renderer prevents that. The
+    /// invariant that keeps it unreachable lives in
+    /// [`crate::model::validate::validate_column_facets`]: `caseSensitive: false` is
+    /// legal only on a `ColType::Text`, and a `ColType::Text` has no width to lose,
+    /// because `max_length` is derived `Some` only from `ColType::String { length }`.
+    ///
+    /// This test is that invariant's guard on the MySQL side. If the rule is ever
+    /// relaxed - to let a bounded string be case-insensitive, which MySQL itself is
+    /// perfectly happy to store - then `mysql_base_column_type` must stop reading the
+    /// facet first, or the bound silently disappears. Measured on MySQL 8.4.11
+    /// (`@@collation_server = utf8mb4_0900_ai_ci`), the two spellings are not
+    /// equivalent and the difference is not cosmetic:
+    ///
+    ///   - `text CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci` - what this
+    ///     function produces - reports `CHARACTER_MAXIMUM_LENGTH` 65535 and ACCEPTED a
+    ///     200-character value into a column authored `maxLength: 64`, under the
+    ///     server's own strict `sql_mode`. It also refuses a literal `DEFAULT`
+    ///     (error 1101) and refuses a key with no prefix length (error 1170), which is
+    ///     why the two MySQL storage refusals suggest "bound the column with
+    ///     t.string({ length }) so it renders VARCHAR" - advice that would not work
+    ///     for a column that is already bounded.
+    ///   - `varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci` reports
+    ///     `CHARACTER_MAXIMUM_LENGTH` 64, raises error 1406 (`22001`, data too long)
+    ///     on the same insert, takes both the literal default and the unprefixed key,
+    ///     and still compares `'ACTIVE'` EQUAL to a stored `'active'`.
+    ///
+    /// So width and case-insensitivity are independent facets on MySQL, and the
+    /// collapse to `TEXT` is a renderer shortcut the facet gate happens to cover -
+    /// not something MySQL forces.
+    #[test]
+    fn a_bounded_case_insensitive_string_is_refused_before_this_renderer_sees_it() {
+        use crate::model::ir::{ColType, IrColumn, MigrationIr, Op};
+        use crate::model::validate::{validate_ir, Dialect};
+
+        let bounded_ci_column = || IrColumn {
+            name: "label".into(),
+            ty: ColType::String { length: 64 },
+            nullable: None,
+            default: None,
+            unique: None,
+            value_format: None,
+            references: None,
+            id_prefix: None,
+            collation: None,
+            case_sensitive: Some(false),
+            vector_metric: None,
+            mask: None,
+            generated: None,
+            identity: None,
+        };
+
+        // Every dialect, because the rule is not dialect-gated and MySQL is only the
+        // dialect where breaking it costs the width rather than the facet.
+        for dialect in [Dialect::Mysql, Dialect::Postgres, Dialect::Sqlite] {
+            let op = Op::CreateTable {
+                name: "things".into(),
+                columns: vec![bounded_ci_column()],
+                primary_key: None,
+                constraints: vec![],
+                indexes: vec![],
+                partition_by: None,
+                runtime_options: None,
+                schema: None,
+                existence_guard: None,
+            };
+            let ir: MigrationIr = serde_json::from_value(serde_json::json!({
+                "ir_version": 1,
+                "name": "bounded_ci",
+                "ops": [op],
+            }))
+            .expect("the hand-built envelope re-parses");
+
+            let error = validate_ir(&ir, dialect).expect_err(
+                "a bounded case-insensitive string must be refused; \
+                 mysql_base_column_type would otherwise drop its width to TEXT",
+            );
+            assert!(
+                error.reason.contains("caseSensitive:false"),
+                "{dialect:?}: the refusal must name the facet, got {:?}",
+                error.reason
+            );
+        }
+
+        // The other half of the invariant, and the reason the refusal is sufficient:
+        // the only ColType that MAY carry the facet has no width to lose in the first
+        // place. If `max_length` ever became derivable from `ColType::Text`, the
+        // refusal above would stop being enough on its own.
+        let text_ci = case_insensitive(field("body_ci", "string"));
+        assert_eq!(
+            text_ci.max_length, None,
+            "the only case-insensitive-legal ColType must carry no width"
+        );
     }
 }
 
