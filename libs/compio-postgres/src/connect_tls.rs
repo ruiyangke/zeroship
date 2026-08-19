@@ -145,6 +145,230 @@ where
     Ok(MaybeTlsStream::Tls(stream))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tls::{ChannelBinding, TlsStream};
+    use compio::buf::{IoBuf, IoBufMut};
+    use compio::net::{TcpListener, TcpStream};
+    use std::future::Future;
+    use std::pin::Pin;
+
+    /// A real TCP peer that reads the 8-byte `SSLRequest` and replies with a
+    /// fixed script, then closes.
+    ///
+    /// A real socket rather than a hand-rolled mock: the property under test is
+    /// "how many bytes were taken off the wire", and a mock's answer to that is
+    /// whatever the mock was written to say.
+    async fn scripted_server(server_says: Vec<u8>) -> TcpStream {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        compio::runtime::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let compio::BufResult(res, _) = sock.read_exact(vec![0u8; 8]).await;
+            res.unwrap();
+            let compio::BufResult(res, _) = sock.write_all(server_says).await;
+            res.unwrap();
+            sock.flush().await.unwrap();
+        })
+        .detach();
+
+        TcpStream::connect(addr).await.unwrap()
+    }
+
+    /// A connector that performs no handshake and simply hands the socket back,
+    /// so a test can inspect what negotiation left unread on it.
+    struct PassthroughTls;
+
+    struct PassthroughStream<S>(S);
+
+    impl<S: AsyncRead + Unpin> AsyncRead for PassthroughStream<S> {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+            self.0.read(buf).await
+        }
+    }
+    impl<S: AsyncWrite + Unpin> AsyncWrite for PassthroughStream<S> {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> compio::BufResult<usize, B> {
+            self.0.write(buf).await
+        }
+        async fn flush(&mut self) -> std::io::Result<()> {
+            self.0.flush().await
+        }
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            self.0.shutdown().await
+        }
+    }
+    impl<S: AsyncRead + AsyncWrite + Unpin> TlsStream for PassthroughStream<S> {
+        fn channel_binding(&self) -> ChannelBinding {
+            ChannelBinding::none()
+        }
+    }
+
+    impl<S> TlsConnect<S> for PassthroughTls
+    where
+        S: AsyncRead + AsyncWrite + Unpin + 'static,
+    {
+        type Stream = PassthroughStream<S>;
+        type Error = std::io::Error;
+        #[allow(clippy::type_complexity)]
+        type Future = Pin<Box<dyn Future<Output = Result<PassthroughStream<S>, std::io::Error>>>>;
+
+        fn connect(self, stream: S) -> Self::Future {
+            Box::pin(async move { Ok(PassthroughStream(stream)) })
+        }
+
+        fn can_connect(&self, _: ForcePrivateApi) -> bool {
+            true
+        }
+    }
+
+    /// The `SSLRequest` response is read one byte at a time, so bytes a man in
+    /// the middle appends to it stay on the socket instead of being swallowed
+    /// into a buffer the startup parser would later read as authenticated
+    /// server messages.
+    ///
+    /// This is CVE-2021-23222. libpq closes the hole by *detecting* it after
+    /// the handshake ("received unencrypted data after SSL response"); this
+    /// driver closes it by never over-reading, which is why the assertion here
+    /// is about what is still unread rather than about an error. Replace the
+    /// one-byte `read_exact` with any buffered read and this fails: the
+    /// injected bytes vanish from the stream.
+    #[compio::test]
+    async fn ssl_response_read_consumes_exactly_one_byte() {
+        const INJECTED: &[u8] = b"INJECTED-BY-A-MITM";
+
+        let mut script = vec![b'S'];
+        script.extend_from_slice(INJECTED);
+
+        let negotiated = negotiate_tls(
+            scripted_server(script).await,
+            Encryption::Tls,
+            SslMode::Require,
+            SslNegotiation::Postgres,
+            PassthroughTls,
+            true,
+        )
+        .await
+        .expect("the scripted server accepted TLS");
+
+        let mut negotiated = match negotiated {
+            MaybeTlsStream::Tls(s) => s,
+            MaybeTlsStream::Raw(_) => panic!("the server answered S; this must be the TLS arm"),
+        };
+
+        let rest = vec![0u8; INJECTED.len()];
+        let compio::BufResult(read, rest) = negotiated.read(rest).await;
+        assert_eq!(read.unwrap(), INJECTED.len());
+        assert_eq!(
+            rest, INJECTED,
+            "negotiation buffered post-response bytes; they must stay on the socket"
+        );
+    }
+
+    /// The other half: a server that refuses TLS leaves the socket usable, and
+    /// the startup packet goes out on it with no reconnect. Only the one
+    /// negotiation byte is consumed.
+    #[compio::test]
+    async fn a_refusal_reuses_the_socket_for_a_mode_that_permits_plaintext() {
+        let mut script = vec![b'N'];
+        script.extend_from_slice(b"BackendMessages");
+
+        let negotiated = negotiate_tls(
+            scripted_server(script).await,
+            Encryption::Tls,
+            SslMode::Prefer,
+            SslNegotiation::Postgres,
+            PassthroughTls,
+            true,
+        )
+        .await
+        .expect("prefer continues in plaintext when the server answers N");
+
+        let mut raw = match negotiated {
+            MaybeTlsStream::Raw(s) => s,
+            MaybeTlsStream::Tls(_) => panic!("the server answered N; this cannot be encrypted"),
+        };
+
+        let rest = vec![0u8; b"BackendMessages".len()];
+        let compio::BufResult(read, rest) = raw.read(rest).await;
+        read.unwrap();
+        assert_eq!(rest, b"BackendMessages", "the socket must still be usable");
+    }
+
+    /// The same refusal under a mode that requires TLS is an error, and there
+    /// is no arm in which it is not.
+    #[compio::test]
+    async fn a_refusal_is_fatal_for_every_mode_that_requires_tls() {
+        for mode in [SslMode::Require, SslMode::VerifyCa, SslMode::VerifyFull] {
+            let err = negotiate_tls(
+                scripted_server(vec![b'N']).await,
+                Encryption::Tls,
+                mode,
+                SslNegotiation::Postgres,
+                PassthroughTls,
+                true,
+            )
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("sslmode={} accepted a plaintext session", mode.as_str()));
+            assert!(!err.is_tls_handshake(), "a refusal is not a handshake failure");
+        }
+    }
+
+    /// A server error during the SSL exchange is fatal even for the modes that
+    /// permit plaintext. libpq refuses to fall back here - and refuses to read
+    /// the message - because the server has not authenticated itself yet.
+    #[compio::test]
+    async fn an_error_response_during_the_ssl_exchange_is_fatal_in_every_mode() {
+        for mode in [
+            SslMode::Allow,
+            SslMode::Prefer,
+            SslMode::Require,
+            SslMode::VerifyFull,
+        ] {
+            negotiate_tls(
+                scripted_server(vec![b'E']).await,
+                Encryption::Tls,
+                mode,
+                SslNegotiation::Postgres,
+                PassthroughTls,
+                true,
+            )
+            .await
+            .err()
+            .unwrap_or_else(|| {
+                panic!("sslmode={} treated an ErrorResponse as a refusal", mode.as_str())
+            });
+        }
+    }
+
+    /// The ordering swap that is the whole difference between `allow` and
+    /// `prefer`.
+    #[test]
+    fn allow_offers_plaintext_first_and_prefer_offers_tls_first() {
+        assert_eq!(
+            Encryption::first_for(SslMode::Allow),
+            Encryption::Plaintext,
+            "allow is the plaintext-first mode"
+        );
+        assert_eq!(Encryption::first_for(SslMode::Disable), Encryption::Plaintext);
+        for mode in [
+            SslMode::Prefer,
+            SslMode::Require,
+            SslMode::VerifyCa,
+            SslMode::VerifyFull,
+        ] {
+            assert_eq!(
+                Encryption::first_for(mode),
+                Encryption::Tls,
+                "{} offers TLS first",
+                mode.as_str()
+            );
+        }
+    }
+}
+
 /// TLS could not be used on this attempt. Continue in plaintext if the mode
 /// allows it; otherwise report why, in libpq's words.
 ///
