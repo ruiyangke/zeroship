@@ -31,6 +31,13 @@ pub enum RegistryError {
     /// and a billed app must be ANONYMIZED, not deleted). A TYPED conflict so the
     /// caller can map it to a clear status instead of leaking a raw DB error.
     Conflict(String),
+    /// The requested app name is a hostname label the platform edge already
+    /// claims (`crates/control/src/reserved_names.rs`). Typed separately from
+    /// [`Self::InvalidInput`] because the two are different outcomes with
+    /// different fixes: a charset failure says the name is malformed, this says
+    /// a well-formed name is unavailable. A caller that cannot tell them apart
+    /// tells the creator to fix the wrong thing.
+    ReservedName(String),
     /// The global default FX is missing, so the platform cannot price any
     /// inheriting plan (billing-v2 MAJOR-2). A billing sweep that hits this
     /// must ABORT (bill no one) rather than emit base-only $0 invoices — it is
@@ -47,6 +54,7 @@ impl std::fmt::Display for RegistryError {
             Self::Database(s) => write!(f, "database: {s}"),
             Self::InvalidInput(s) => write!(f, "invalid input: {s}"),
             Self::Conflict(s) => write!(f, "conflict: {s}"),
+            Self::ReservedName(s) => write!(f, "reserved name: {s}"),
             Self::FxUnresolved => write!(
                 f,
                 "global default FX missing — platform cannot price; aborting billing sweep \
@@ -238,6 +246,16 @@ impl Registry {
         {
             return Err(RegistryError::InvalidInput(
                 "name must be 1-64 alphanumeric/hyphen/underscore".into(),
+            ));
+        }
+
+        // The name IS the app's hostname label, so a name the platform edge
+        // already routes elsewhere cannot be handed to a creator. Refused here,
+        // at the only point a name is ever claimed, rather than at dispatch —
+        // by the time a request arrives the name is already taken.
+        if crate::reserved_names::is_reserved_app_name(name) {
+            return Err(RegistryError::ReservedName(
+                crate::reserved_names::reserved_name_message(name),
             ));
         }
 
