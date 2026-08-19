@@ -4342,117 +4342,204 @@ async fn schedule_overlap_policy_skip_blocks_live_run_and_allow_fires_concurrent
     common::drain_pg().await;
 }
 
+/// No `compio::time::timeout` wrapper, unlike its neighbours.
+///
+/// A 10s wall-clock budget around this body was a deadline on database work,
+/// not a guard on a wait that can hang: every await below is a finite round
+/// trip against a database this test cloned for itself, and nothing polls. Its
+/// only effect was to convert a busy machine into a red assertion-free panic -
+/// measured on this tree, `expect("schedule catch-up policy test timeout")`
+/// firing at load ~30 in a run where every assertion below was satisfiable.
+/// The assertions are what fail this test, and all of them remain.
 #[compio::test]
 async fn schedule_catch_up_backfill_is_bounded_by_max_and_drops_excess() {
     let Some(fx) = isolated_fixture("schedule-catch-up-policy").await else {
         return;
     };
-    compio::time::timeout(Duration::from_secs(10), async {
-        let (app_id, deploy_id) = seed_app_and_deploy(&fx, "schedule-catch-up-policy").await;
-        let interval_ms = 1_000;
-        let planned = aligned_planned_instant(9, interval_ms);
-        let schedule_id = insert_interval_schedule(
-            &fx,
-            app_id,
-            &deploy_id,
-            "catch-up-bounded",
-            "TestWorkflow",
-            "allow",
-            "backfill",
-            3,
-            interval_ms,
-            planned,
-        )
-        .await;
-        let tick_started = Utc::now();
+    let (app_id, deploy_id) = seed_app_and_deploy(&fx, "schedule-catch-up-policy").await;
+    let interval_ms = 1_000;
+    let planned = aligned_planned_instant(9, interval_ms);
+    let schedule_id = insert_interval_schedule(
+        &fx,
+        app_id,
+        &deploy_id,
+        "catch-up-bounded",
+        "TestWorkflow",
+        "allow",
+        "backfill",
+        3,
+        interval_ms,
+        planned,
+    )
+    .await;
+    let tick_started = Utc::now();
 
-        let fired = workflow_schedules::tick_with_config(
-            &fx.state,
-            schedule_policy_config("schedule-catch-up-bounded"),
-        )
-        .await
-        .expect("catch-up schedule sweep");
-        assert_eq!(
-            fired, 3,
-            "catch-up backfill must create exactly catch_up_max runs"
-        );
-        assert_eq!(schedule_run_count(&fx, &schedule_id).await, 3);
-        assert_eq!(schedule_run_scheduler_timer_count(&fx, &schedule_id).await, 3);
-
-        let expected = vec![
-            planned,
-            planned + ChronoDuration::milliseconds(interval_ms),
-            planned + ChronoDuration::milliseconds(interval_ms * 2),
-        ];
-        assert_eq!(
-            schedule_run_started_instants(&fx, &schedule_id).await,
-            expected
-        );
-        let (last_fire_at, last_fired_epoch, next_fire_at) =
-            schedule_fire_row(&fx, &schedule_id).await;
-        assert_eq!(last_fire_at, expected.last().copied());
-        assert_eq!(
-            last_fired_epoch,
-            expected.last().map(DateTime::<Utc>::timestamp_millis)
-        );
-        assert!(
-            next_fire_at > tick_started,
-            "excess missed ticks should be dropped by rearming after the sweep clock"
-        );
-    })
+    let fired = workflow_schedules::tick_with_config(
+        &fx.state,
+        schedule_policy_config("schedule-catch-up-bounded"),
+    )
     .await
-    .expect("schedule catch-up policy test timeout");
+    .expect("catch-up schedule sweep");
+    assert_eq!(
+        fired, 3,
+        "catch-up backfill must create exactly catch_up_max runs"
+    );
+    assert_eq!(schedule_run_count(&fx, &schedule_id).await, 3);
+    assert_eq!(schedule_run_scheduler_timer_count(&fx, &schedule_id).await, 3);
+
+    let expected = vec![
+        planned,
+        planned + ChronoDuration::milliseconds(interval_ms),
+        planned + ChronoDuration::milliseconds(interval_ms * 2),
+    ];
+    assert_eq!(
+        schedule_run_started_instants(&fx, &schedule_id).await,
+        expected
+    );
+    let (last_fire_at, last_fired_epoch, next_fire_at) =
+        schedule_fire_row(&fx, &schedule_id).await;
+    assert_eq!(last_fire_at, expected.last().copied());
+    assert_eq!(
+        last_fired_epoch,
+        expected.last().map(DateTime::<Utc>::timestamp_millis)
+    );
+    assert!(
+        next_fire_at > tick_started,
+        "excess missed ticks should be dropped by rearming after the sweep clock"
+    );
 
     drop(fx);
     common::drain_pg().await;
 }
 
+/// No `compio::time::timeout` wrapper - see
+/// [`schedule_catch_up_backfill_is_bounded_by_max_and_drops_excess`].
 #[compio::test]
 async fn schedule_normal_cadence_fires_one_tick_and_rearms() {
     let Some(fx) = isolated_fixture("schedule-normal-cadence").await else {
         return;
     };
-    compio::time::timeout(Duration::from_secs(10), async {
-        let (app_id, deploy_id) = seed_app_and_deploy(&fx, "schedule-normal-cadence").await;
-        let interval_ms = 1_000;
-        let planned = aligned_planned_instant(2, interval_ms);
-        let schedule_id = insert_interval_schedule(
-            &fx,
-            app_id,
-            &deploy_id,
-            "normal-cadence",
-            "TestWorkflow",
-            "allow",
-            "skip",
-            0,
-            interval_ms,
-            planned,
-        )
-        .await;
-        let tick_started = Utc::now();
+    let (app_id, deploy_id) = seed_app_and_deploy(&fx, "schedule-normal-cadence").await;
+    let interval_ms = 1_000;
+    let planned = aligned_planned_instant(2, interval_ms);
+    let schedule_id = insert_interval_schedule(
+        &fx,
+        app_id,
+        &deploy_id,
+        "normal-cadence",
+        "TestWorkflow",
+        "allow",
+        "skip",
+        0,
+        interval_ms,
+        planned,
+    )
+    .await;
+    let tick_started = Utc::now();
 
-        let fired = workflow_schedules::tick_with_config(
-            &fx.state,
-            schedule_policy_config("schedule-normal-cadence"),
-        )
-        .await
-        .expect("normal cadence schedule sweep");
-        assert_eq!(fired, 1, "one due tick should create one scheduled run");
-        assert_eq!(schedule_run_count(&fx, &schedule_id).await, 1);
-        assert_eq!(schedule_run_started_instants(&fx, &schedule_id).await, vec![planned]);
-        assert_eq!(schedule_run_scheduler_timer_count(&fx, &schedule_id).await, 1);
-
-        let (last_fire_at, last_fired_epoch, next_fire_at) =
-            schedule_fire_row(&fx, &schedule_id).await;
-        assert_eq!(last_fire_at, Some(planned));
-        assert_eq!(last_fired_epoch, Some(planned.timestamp_millis()));
-        assert!(
-            next_fire_at > tick_started,
-            "normal cadence schedule should rearm to the next future tick"
-        );
-    })
+    let fired = workflow_schedules::tick_with_config(
+        &fx.state,
+        schedule_policy_config("schedule-normal-cadence"),
+    )
     .await
-    .expect("schedule normal cadence test timeout");
+    .expect("normal cadence schedule sweep");
+    assert_eq!(fired, 1, "one due tick should create one scheduled run");
+    assert_eq!(schedule_run_count(&fx, &schedule_id).await, 1);
+    assert_eq!(schedule_run_started_instants(&fx, &schedule_id).await, vec![planned]);
+    assert_eq!(schedule_run_scheduler_timer_count(&fx, &schedule_id).await, 1);
+
+    let (last_fire_at, last_fired_epoch, next_fire_at) =
+        schedule_fire_row(&fx, &schedule_id).await;
+    assert_eq!(last_fire_at, Some(planned));
+    assert_eq!(last_fired_epoch, Some(planned.timestamp_millis()));
+    assert!(
+        next_fire_at > tick_started,
+        "normal cadence schedule should rearm to the next future tick"
+    );
+
+    drop(fx);
+    common::drain_pg().await;
+}
+
+/// A sweeper fires every schedule it claimed even when the batch lease it was
+/// claimed under has already expired.
+///
+/// `claim_ttl_ms = 0` makes `lease_expires` equal the claim transaction's
+/// `now()`, so it is unconditionally in the past by the time the separate fire
+/// transaction re-reads the row - the same state a loaded machine reaches by
+/// spending the real 1.5s budget on connection setup and the app journal's
+/// first `CREATE TABLE`, but reached by construction instead of by luck.
+///
+/// Restore `AND s.lease_expires > now()` in `load_claimed_schedule` and this
+/// reports `fired` 0, both `schedule_run_count`s 0. That is the one claim this
+/// case licenses: the sweep no longer drops a claim it still exclusively owns.
+/// It says nothing about a takeover by a second sweeper, which
+/// `claim_due_schedules` still gates on the lease and no test here covers.
+///
+/// Deliberately NOT wrapped in `compio::time::timeout`: the wrappers in this
+/// file put a fixed 10s wall-clock budget around unbounded database work, which
+/// is a second, independent load coupling measured here (batch_step_result_
+/// applies_atomically_and_preserves_effn1 died on exactly that at load ~45).
+/// Adding a wrapper would reintroduce into this case the property it exists to
+/// remove.
+#[compio::test]
+async fn schedule_sweep_fires_claims_whose_batch_lease_already_expired() {
+    let Some(fx) = isolated_fixture("schedule-expired-lease").await else {
+        return;
+    };
+    let (app_id, deploy_id) = seed_app_and_deploy(&fx, "schedule-expired-lease").await;
+    let interval_ms = 1_000;
+    let planned = aligned_planned_instant(4, interval_ms);
+
+    // Two schedules so the case also covers the LATER claims in one batch: they
+    // share the single lease deadline the claim transaction stamped.
+    let first_id = insert_interval_schedule(
+        &fx,
+        app_id,
+        &deploy_id,
+        "expired-lease-first",
+        "TestWorkflow",
+        "allow",
+        "skip",
+        0,
+        interval_ms,
+        planned,
+    )
+    .await;
+    let second_id = insert_interval_schedule(
+        &fx,
+        app_id,
+        &deploy_id,
+        "expired-lease-second",
+        "TestWorkflow",
+        "allow",
+        "skip",
+        0,
+        interval_ms,
+        planned,
+    )
+    .await;
+
+    let mut config = schedule_policy_config("schedule-expired-lease");
+    config.claim_ttl_ms = 0;
+    let fired = workflow_schedules::tick_with_config(&fx.state, config)
+        .await
+        .expect("expired-lease schedule sweep");
+
+    assert_eq!(
+        fired, 2,
+        "an expired batch lease must not cost the owning sweeper its claims"
+    );
+    assert_eq!(schedule_run_count(&fx, &first_id).await, 1);
+    assert_eq!(schedule_run_count(&fx, &second_id).await, 1);
+    assert_eq!(
+        schedule_run_started_instants(&fx, &first_id).await,
+        vec![planned]
+    );
+    assert_eq!(
+        schedule_run_started_instants(&fx, &second_id).await,
+        vec![planned]
+    );
 
     drop(fx);
     common::drain_pg().await;
