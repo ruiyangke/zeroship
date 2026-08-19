@@ -4841,10 +4841,16 @@ mod tests {
     // through the edge proxy (deploy/ops/Caddyfile), never through here.
     //
     // The test below replaces those two. It does not re-check anchoring -
-    // there is no longer a name to anchor against - it checks the stronger
-    // property that made anchoring unnecessary: EVERY Host, including the ones
-    // that used to be special, is resolved as an ordinary app name against the
-    // registry. A reintroduced special case would have to break this to exist.
+    // there is no longer a name to anchor against - it records that the
+    // formerly-special hosts now resolve as ordinary app names.
+    //
+    // WHAT IT DOES NOT CATCH, so nobody reads it as a guard it is not: it
+    // calls `extract_app_name` directly, not `handle_subdomain`. Someone who
+    // re-added a host special-case ABOVE the `extract_app_name` call would not
+    // turn this red. Only the absence of such an arm keeps the property, and
+    // that is a review question, not something asserted here. What this does
+    // pin is the layer below: name resolution itself has no reserved word, so
+    // a special case cannot be reintroduced by accident inside it.
     // ----------------------------------------------------------------------
 
     fn req_with_host(host: &str) -> HttpRequest {
