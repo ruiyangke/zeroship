@@ -44,7 +44,7 @@
 //! consumes that resolution's output. An implementation that finds itself
 //! resolving twice has taken a wrong turn, and the likely wrong turn is
 //! evaluating rules in list order.
-
+//!
 //! # INVARIANT ONE-COMPOSITION
 //!
 //! [`evaluate`] is the ONLY place the three phases are composed, and every
@@ -556,6 +556,15 @@ mod tests {
             }),
             "the floor must refuse, and must be the arm that reports it"
         );
+
+        // The control, differing in ONE thing - what the name resolved to.
+        // Without it this row is green against a floor that refuses every
+        // address, which would refuse the grant rather than narrow it.
+        let public = RecordingResolver::new(&[&format!("{IN_RANGE}:443")]);
+        assert!(
+            evaluate(&p, "internal.example.test", 443, &public).is_ok(),
+            "the same grant must still admit an address the floor permits"
+        );
     }
 
     /// **E5** - control for E4: the same invariant reached through the OTHER
@@ -576,6 +585,19 @@ mod tests {
             })
         );
         assert_eq!(r.lookups(), 0, "an IP literal is never resolved");
+
+        // The control: the same SHAPE - a `Range` ACCEPT and a literal inside
+        // it - with the range moved out of the space the floor refuses. Both
+        // the range and the literal move because they are one destination
+        // written twice; nothing else about the row changes. Without it the
+        // assertion above is green against a range arm that admits nothing.
+        let permitted = policy(vec![rule(Verdict::Accept, PUBLIC_RANGE, 443)]);
+        let never = RecordingResolver::new(&[]);
+        assert!(
+            evaluate(&permitted, IN_RANGE, 443, &never).is_ok(),
+            "a Range ACCEPT must admit a literal the floor permits"
+        );
+        assert_eq!(never.lookups(), 0, "an IP literal is never resolved");
     }
 
     /// **E6 - the DNS gate.** A names-only app refuses an ungranted host WITHOUT
@@ -669,6 +691,14 @@ mod tests {
             "a creator who knows a bad destination must be able to block it \
              without ever querying for it"
         );
+
+        // The control, differing in ONE thing - the name asked for. The same
+        // rule set still resolves and admits anything the REJECT does not name,
+        // so the row above is about step 1 and not about a policy that refuses
+        // everything before DNS.
+        let other = RecordingResolver::new(&[&format!("{IN_RANGE}:443")]);
+        assert!(evaluate(&p, "other.example.test", 443, &other).is_ok());
+        assert_eq!(other.lookups(), 1);
     }
 
     /// **E10** - the set-filter change to the resolver path. Fails against
@@ -720,14 +750,53 @@ mod tests {
                 unmatched: vec![],
             })
         );
+
+        // The control, differing in ONE thing - the address the name resolved
+        // to. Outside the rejected range the name acceptance still admits, so
+        // the row above is about step 5 winning and not about the name grant
+        // being ignored.
+        let outside = RecordingResolver::new(&[&format!("{OUT_OF_RANGE}:443")]);
+        assert!(evaluate(&p, "api.example.test", 443, &outside).is_ok());
+    }
+
+    /// The survivors are ALL of them, in the resolver's own order. Nothing else
+    /// pins this: every other row has at most one survivor, so truncating to
+    /// the first - or sorting - would leave the suite green while the
+    /// happy-eyeballs claim in `filter_answer`'s doc became false.
+    #[test]
+    fn filter_answer_keeps_every_survivor_in_resolver_order() {
+        let p = policy(vec![rule(Verdict::Accept, PUBLIC_RANGE, 443)]);
+        let r = RecordingResolver::new(&[
+            &format!("{IN_RANGE}:443"),
+            &format!("{OUT_OF_RANGE}:443"),
+            &format!("{IN_RANGE_CARVED}:443"),
+        ]);
+        let kept = evaluate(&p, "many.example.test", 443, &r).expect("two addresses survive");
+        assert_eq!(
+            kept,
+            vec![
+                format!("{IN_RANGE}:443").parse::<SocketAddr>().unwrap(),
+                format!("{IN_RANGE_CARVED}:443").parse::<SocketAddr>().unwrap(),
+            ],
+            "every survivor must be returned, in the order the resolver gave"
+        );
     }
 
     #[test]
     fn a_denied_policy_refuses_the_module_outright() {
+        let never = RecordingResolver::new(&[&format!("{IN_RANGE}:443")]);
         assert_eq!(
-            pre_dns(&NetPolicy::Denied, "api.example.test", 443),
+            evaluate(&NetPolicy::Denied, "api.example.test", 443, &never),
             Err(EgressRefusal::ModuleDenied)
         );
+        assert_eq!(never.lookups(), 0);
+
+        // The control, differing in ONE thing - the policy. Without it this row
+        // is green against an evaluator that returns ModuleDenied for every
+        // policy there is.
+        let p = policy(vec![rule(Verdict::Accept, "api.example.test", 443)]);
+        let r = RecordingResolver::new(&[&format!("{IN_RANGE}:443")]);
+        assert!(evaluate(&p, "api.example.test", 443, &r).is_ok());
     }
 
     /// Trusted holds no creator rules, so the floor is the whole policy - and it
