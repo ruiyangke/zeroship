@@ -629,6 +629,253 @@ pub async fn snapshot_schema<D: SqlSession>(
     snapshot_schema_for(conn, schema).await
 }
 
+/// The savepoint the view-body probe rolls back to. One name, reused per view,
+/// because each probe is released before the next is taken.
+#[cfg(pg_seam)]
+const VIEW_BODY_PROBE_SAVEPOINT: &str = "zm_view_body_probe";
+
+/// The temp view the probe re-prints through. Lives inside a savepoint that is
+/// always rolled back, so it never outlives one iteration.
+#[cfg(pg_seam)]
+const VIEW_BODY_PROBE_VIEW: &str = "zm_view_body_probe";
+
+/// Put a COMPARABLE view body on both sides of a drift check, using the server as
+/// the only normaliser.
+///
+/// **WHY THIS EXISTS AS A SEPARATE STEP.** [`diff_snapshots`] is pure and has no
+/// connection, and the two snapshots it compares do not carry the same
+/// representation of a view body. A folded snapshot carries
+/// [`ViewSnapshot::authored_query`] - the typed `SelectAst` an author wrote - and
+/// leaves [`ViewSnapshot::definition`] `None`. An introspected snapshot carries
+/// `definition` from `pg_get_viewdef` and leaves `authored_query` `None`, because a
+/// catalog cannot yield a typed body. There is NO field populated on both sides, so
+/// before this existed the differ compared a view on `materialized` and `comment`
+/// alone and a `CREATE OR REPLACE VIEW` run out of band reported the schema clean.
+///
+/// **WHY THERE IS NO TEXT NORMALISER HERE, AND WHY THERE MUST NOT BE.** PostgreSQL
+/// does not keep a view body as written. It parses it, discards the text, and
+/// `pg_get_viewdef` RE-PRINTS it from the parse tree. Measured on PostgreSQL 18.4,
+/// authoring `SELECT "id" FROM "s"."src" WHERE "amount" > 10` reads back as
+///
+/// ```text
+///   SELECT id
+///     FROM s.src
+///    WHERE amount > 10::numeric;
+/// ```
+///
+/// - quoting dropped, whitespace reflowed, a trailing semicolon added, and a
+/// `::numeric` cast inserted that nobody wrote. That cast comes from type analysis
+/// against the catalog, not from parsing, so no offline pass - not even the
+/// PostgreSQL parser this workspace already links - can predict it. A hand-written
+/// normaliser would have to erase casts, quoting and whitespace, and one aggressive
+/// enough to do that is aggressive enough to erase the body change it exists to
+/// find.
+///
+/// So this does not normalise. It renders the authored body, hands it to the SERVER
+/// as a temporary view, and reads BOTH bodies back through `pg_get_viewdef` **in one
+/// statement**. Both sides then carry the identical deterministic re-print of the
+/// same server, and the differ compares them with `==`. Measured: an authored body
+/// and a live view built from it come back byte-identical, while a
+/// `CREATE OR REPLACE VIEW` that changes the predicate comes back different.
+///
+/// Reading both in ONE statement is load-bearing rather than tidy.
+/// `pg_get_viewdef` schema-qualifies a relation only when it is outside the current
+/// `search_path`, so two reads taken under different `search_path` settings can
+/// disagree on qualification alone. One statement cannot.
+///
+/// **WHAT IT WRITES.** A `CREATE TEMP VIEW` inside a savepoint that is always rolled
+/// back, so the probe leaves nothing behind in any schema and is invisible to other
+/// sessions - but it IS a write, and a session that cannot write (a read-only
+/// transaction, a hot standby) cannot run it. That is why every failure below
+/// DECLINES for the view it was probing rather than propagating: a body that could
+/// not be re-printed leaves `definition` `None` on the expected side, the differ
+/// skips it, and the result is exactly the pre-existing behaviour. Manufacturing
+/// drift for every view on a replica would be a louder defect than the blind spot.
+///
+/// **WHAT IT DOES NOT COVER.** Only views carrying an `authored_query` and present
+/// on both sides are probed. An adopted view - one introspected rather than authored
+/// - has no typed body anywhere in the history, so there is nothing to compare it
+/// against and it stays uncompared.
+#[cfg(pg_seam)]
+pub async fn resolve_view_bodies<D: SqlSession>(
+    conn: &D,
+    schema: &str,
+    expected: &mut SchemaSnapshot,
+    actual: &mut SchemaSnapshot,
+) -> Result<(), DriftError> {
+    // Nothing to probe: skip the transaction dance entirely rather than open and
+    // roll back a transaction on every drift check of a view-free schema.
+    if !expected
+        .views
+        .iter()
+        .any(|(name, view)| view.authored_query.is_some() && actual.views.contains_key(name))
+    {
+        return Ok(());
+    }
+
+    // A savepoint needs a transaction block. `SAVEPOINT` outside one raises 25P01,
+    // which is a plain recoverable error and NOT an abort, so trying it is a sound
+    // way to ask a question the SQL surface has no function for. Whichever answer
+    // comes back, the probe runs inside a transaction it can undo.
+    let nested = conn
+        .batch(&format!("SAVEPOINT {VIEW_BODY_PROBE_SAVEPOINT}"))
+        .await
+        .is_ok();
+    if !nested {
+        conn.batch("BEGIN").await?;
+    }
+
+    let outcome = resolve_view_bodies_in_transaction(conn, schema, expected, actual).await;
+
+    let unwind = if nested {
+        conn.batch(&format!(
+            "ROLLBACK TO SAVEPOINT {VIEW_BODY_PROBE_SAVEPOINT}; \
+             RELEASE SAVEPOINT {VIEW_BODY_PROBE_SAVEPOINT}"
+        ))
+        .await
+    } else {
+        conn.batch("ROLLBACK").await
+    };
+
+    // The probe's own result wins: an unwind failure on top of a real error would
+    // otherwise hide it.
+    outcome?;
+    unwind?;
+    Ok(())
+}
+
+/// The body of [`resolve_view_bodies`], running with a transaction already open so
+/// every per-view failure has a savepoint to fall back to.
+#[cfg(pg_seam)]
+async fn resolve_view_bodies_in_transaction<D: SqlSession>(
+    conn: &D,
+    schema: &str,
+    expected: &mut SchemaSnapshot,
+    actual: &mut SchemaSnapshot,
+) -> Result<(), DriftError> {
+    let names: Vec<String> = expected
+        .views
+        .iter()
+        .filter(|(name, view)| view.authored_query.is_some() && actual.views.contains_key(*name))
+        .map(|(name, _)| name.clone())
+        .collect();
+
+    for name in names {
+        let Some(exp_view) = expected.views.get(&name) else {
+            continue;
+        };
+        let Some(query) = exp_view.authored_query.as_ref() else {
+            continue;
+        };
+        let view_schema = exp_view.authored_schema.as_deref().unwrap_or(schema);
+        // The authored body rendered the same way `createView` rendered it when the
+        // migration ran. Anything else would be comparing the differ's idea of the
+        // body against the engine's.
+        let Ok(body) =
+            crate::render::lower::render_view_query(query, view_schema, SqlDialect::Postgres, None)
+        else {
+            continue;
+        };
+
+        // Per-view savepoint: a body the server refuses (a dropped dependency, a
+        // permission it lacks) must not abort the whole probe, and rolling back to
+        // this point is also how the temp view is disposed of - no DROP needed,
+        // because temp object creation is transactional.
+        conn.batch(&format!("SAVEPOINT {VIEW_BODY_PROBE_SAVEPOINT}_one"))
+            .await?;
+        let probed = probe_one_view_body(conn, view_schema, &name, &body).await;
+        conn.batch(&format!(
+            "ROLLBACK TO SAVEPOINT {VIEW_BODY_PROBE_SAVEPOINT}_one; \
+             RELEASE SAVEPOINT {VIEW_BODY_PROBE_SAVEPOINT}_one"
+        ))
+        .await?;
+
+        // `Ok(None)` is a DECLINE - the server would not accept the probe view, so
+        // both sides keep what they had and the differ's `both Some` guard skips
+        // this view. `Err` is a HARD failure and propagates.
+        let Some((expected_body, actual_body)) = probed? else {
+            continue;
+        };
+        if let Some(view) = expected.views.get_mut(&name) {
+            view.comparable_body = Some(expected_body);
+        }
+        if let Some(view) = actual.views.get_mut(&name) {
+            view.comparable_body = Some(actual_body);
+        }
+    }
+    Ok(())
+}
+
+/// Re-print one authored body and its live counterpart through the same server, in
+/// the same statement.
+///
+/// The two failure kinds are deliberately NOT the same thing:
+///
+///   * `Ok(None)` - the server refused the probe view. That is the read-only
+///     session, the hot standby, and a body whose dependencies no longer resolve.
+///     The view declines and drift says nothing about its body, which is the
+///     behaviour that existed before any of this.
+///   * `Err(..)` - the catalog would not answer for a view the caller has ALREADY
+///     established is present in the introspected snapshot. A missing row is an
+///     error rather than an absent body, because silently reading it as "no body"
+///     is how a comparison stops running without anyone noticing.
+#[cfg(pg_seam)]
+async fn probe_one_view_body<D: SqlSession>(
+    conn: &D,
+    view_schema: &str,
+    name: &str,
+    body: &str,
+) -> Result<Option<(String, String)>, DriftError> {
+    if conn
+        .batch(&format!(
+            "CREATE TEMP VIEW {VIEW_BODY_PROBE_VIEW} AS {body}"
+        ))
+        .await
+        .is_err()
+    {
+        return Ok(None);
+    }
+
+    // BOTH bodies in ONE statement. `pg_get_viewdef` qualifies a relation only when
+    // it falls outside the current `search_path`, so two reads taken separately can
+    // differ on qualification alone and manufacture drift on an untouched view.
+    //
+    // `$1::text::regclass` rather than `$1::regclass`: the latter makes the driver
+    // infer a `regclass` parameter and refuse to serialize a string into it.
+    let row = conn
+        .query_one(
+            &format!(
+                "SELECT pg_get_viewdef('pg_temp.{VIEW_BODY_PROBE_VIEW}'::regclass, true) \
+                        AS expected_body, \
+                        pg_get_viewdef($1::text::regclass, true) AS actual_body"
+            ),
+            &[format!(
+                "{}.{}",
+                crate::render::dml::escape_quote_ident(view_schema),
+                crate::render::dml::escape_quote_ident(name)
+            )
+            .into()],
+        )
+        .await?;
+
+    let expected_body: Option<String> = row
+        .try_get("expected_body")
+        .map_err(|error| DriftError::Snapshot(format!("re-print authored view {name}: {error}")))?;
+    let actual_body: Option<String> = row
+        .try_get("actual_body")
+        .map_err(|error| DriftError::Snapshot(format!("re-print live view {name}: {error}")))?;
+    match (expected_body, actual_body) {
+        (Some(expected_body), Some(actual_body)) => Ok(Some((expected_body, actual_body))),
+        // A NULL from `pg_get_viewdef` means the relation resolved to something that
+        // is not a view. The caller read this name out of the introspected view map,
+        // so that is a contradiction worth raising, not a body to skip.
+        _ => Err(DriftError::Snapshot(format!(
+            "view {view_schema}.{name} is in the introspected snapshot but the catalog \
+             returned no body for it"
+        ))),
+    }
+}
+
 /// The functions, policies and triggers PostgreSQL actually holds in `schema`,
 /// reduced to the identity drift is allowed to compare.
 ///
@@ -990,6 +1237,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
                 // drop of it stays irreversible.
                 authored_query: None,
                 authored_schema: None,
+                comparable_body: None,
                 comment: r.try_get("comment").ok().flatten(),
             },
         );
@@ -2113,6 +2361,34 @@ pub fn diff_snapshots_with_index_aliases(
                 expected: exp_v.comment.clone().unwrap_or_default(),
                 actual: act_v.comment.clone().unwrap_or_default(),
             });
+        }
+        // The body, and ONLY when both sides carry one. See
+        // [`resolve_view_bodies`] for why that condition is the whole design: the
+        // folded side carries a typed `authored_query` and no text, the
+        // introspected side carries text and no typed query, so nothing here can
+        // compare them. `resolve_view_bodies` is what puts a body on both sides,
+        // and it puts the SERVER's re-print of the same moment on both - so this
+        // stays a plain equality with no normaliser of its own to over-collapse.
+        //
+        // `comparable_body` rather than `definition`, and the difference is
+        // load-bearing: a catalog-seeded fold CLONES an introspected `definition`
+        // onto the expected side, and PostgreSQL follows a table rename into a
+        // dependent view's stored body with no statement naming the view - so that
+        // clone reports drift on a view nobody touched. Only the field
+        // `resolve_view_bodies` writes carries two bodies re-printed together.
+        //
+        // A caller that has not run it leaves both sides `None` and declines here,
+        // which is exactly the behaviour this comparison replaced.
+        if let (Some(exp_body), Some(act_body)) = (&exp_v.comparable_body, &act_v.comparable_body) {
+            if exp_body != act_body {
+                altered.push(AlteredObject {
+                    table: name.clone(),
+                    object: format!("view {name}"),
+                    field: "body".to_string(),
+                    expected: exp_body.clone(),
+                    actual: act_body.clone(),
+                });
+            }
         }
     }
 

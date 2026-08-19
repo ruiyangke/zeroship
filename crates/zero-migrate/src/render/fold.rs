@@ -2875,6 +2875,10 @@ impl<'a> CatalogFold<'a> {
                         // both.
                         authored_query: Some(query.clone()),
                         authored_schema: schema.clone(),
+                        // Only `resolve_view_bodies` fills this, and only against a
+                        // live server: an offline fold has no way to know how
+                        // PostgreSQL will re-print the body it is about to be given.
+                        comparable_body: None,
                         comment: None,
                     },
                 );

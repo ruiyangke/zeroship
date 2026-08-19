@@ -570,6 +570,7 @@ fn fold_records_views_and_drop_removes_them() {
                 select: Box::new(active_users_select()),
             }),
             authored_schema: None,
+            comparable_body: None,
             comment: None,
         },
     );

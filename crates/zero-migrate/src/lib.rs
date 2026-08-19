@@ -171,8 +171,12 @@ pub use render::expand_contract::{
 // `check_checksum_drift` reads the journal over a `&D: SqlSession`; `snapshot_schema`
 // introspects `pg_catalog` — both generic over the seam (SQLite has its own peers).
 // On the whole PG seam.
+// `resolve_view_bodies` is the one drift helper that needs a live connection to
+// make a comparison POSSIBLE rather than to read a catalog: it re-prints an
+// authored view body through the server so `diff_snapshots` has the same
+// representation on both sides. See its own docs for why no offline pass can.
 #[cfg(pg_seam)]
-pub use apply::drift::{check_checksum_drift, snapshot_schema};
+pub use apply::drift::{check_checksum_drift, resolve_view_bodies, snapshot_schema};
 pub use apply::executor::{
     ApplyError, ApplyOutcome, BackendError, LockMode, PreconditionVerdict, RollbackError,
     RollbackOptions, RollbackOutcome, RollbackRequest, RollbackTarget,

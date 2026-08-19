@@ -303,6 +303,7 @@ pub(crate) async fn snapshot_schema_for(
                 // drop of it stays irreversible.
                 authored_query: None,
                 authored_schema: None,
+                comparable_body: None,
                 comment: None,
             },
         );

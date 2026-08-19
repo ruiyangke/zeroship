@@ -1276,9 +1276,40 @@ pub struct ViewSnapshot {
     pub authored_schema: Option<String>,
     /// User-authored catalog comment on this view.
     pub comment: Option<String>,
+    /// This view's body as the SERVER re-prints it, written ONLY by
+    /// [`crate::apply::drift::resolve_view_bodies`] and only onto the two snapshots
+    /// a single drift check is about to compare.
+    ///
+    /// DELIBERATELY NOT [`Self::definition`], and the distinction is the reason this
+    /// field exists rather than reusing that one. `definition` is whatever the
+    /// backend happened to read out of a catalog: `pg_get_viewdef` on PostgreSQL,
+    /// `information_schema.VIEWS` on MySQL, a whole `CREATE VIEW` statement on
+    /// SQLite - three formats, none comparable to another, and on the folded side it
+    /// may be an introspected value CLONED FORWARD by a catalog-seeded fold from a
+    /// schema state that has since moved. PostgreSQL follows a `RENAME TABLE` into a
+    /// dependent view's stored body with no statement naming the view, so such a
+    /// clone goes stale the moment a table is renamed, and comparing it reports
+    /// drift on a view nobody touched.
+    ///
+    /// This field carries only the narrower thing the differ can honestly compare:
+    /// two bodies re-printed by the same server in the same statement, one from the
+    /// live view and one from the authored body rendered into a throwaway temporary
+    /// view. Both went through the identical rewrite, so equality is exact and no
+    /// normaliser stands between them. Absent on both sides means the body is simply
+    /// not compared.
+    pub comparable_body: Option<String>,
 }
 
 impl PartialEq for ViewSnapshot {
+    /// Identity only: `materialized` and `comment`.
+    ///
+    /// [`ViewSnapshot::comparable_body`] is excluded on purpose. It is written after
+    /// a fold, by a step that needs a live connection, onto exactly the two
+    /// snapshots one drift check is comparing - so folding it into structural
+    /// equality would make two otherwise identical snapshots differ on whether
+    /// anyone had run that step. The body comparison lives in
+    /// [`crate::diff_snapshots`], which reports WHICH field differs; this stays the
+    /// cheap identity test its callers already rely on.
     fn eq(&self, other: &Self) -> bool {
         self.materialized == other.materialized && self.comment == other.comment
     }

@@ -16,6 +16,7 @@ mod drift_function_body_pg;
 mod drift_id_facets_pg;
 mod drift_noop_index_predicate_pg;
 mod drift_plain_column_default_pg;
+mod drift_view_body_pg;
 mod f721_unguarded_index_shape;
 mod fold_cross_schema_drift_pg;
 mod fts_index_name_truncation_pg;

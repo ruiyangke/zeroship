@@ -695,6 +695,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
                 definition,
                 authored_query: None,
                 authored_schema: None,
+                comparable_body: None,
                 comment: None,
             },
         );

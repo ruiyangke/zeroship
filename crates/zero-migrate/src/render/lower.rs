@@ -9277,7 +9277,7 @@ fn render_view_op(
     }
 }
 
-fn render_view_query(
+pub(crate) fn render_view_query(
     query: &ViewQuery,
     eff_schema: &str,
     dialect: SqlDialect,
