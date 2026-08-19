@@ -57,9 +57,15 @@
 //!      happens to run in parallel - `drop_extension_rollback_pg.rs` says in its
 //!      own header that it cannot share `citext` with a second creator. Roles and
 //!      the `createSchema`/`dropSchema` name get a per-row unique suffix; the
-//!      extension becomes `pgcrypto`, which no OTHER live test in the tree claims -
-//!      and picking an unclaimed name is only half of it, because two runs of THIS
-//!      suite both claim it, which is what [`EXTENSION_CLAIM_KEY`] is for.
+//!      extension becomes `pgcrypto` and is held under [`EXTENSION_CLAIM_KEY`]
+//!      while a row uses it, because a name cannot isolate this one - see that
+//!      constant. This paragraph used to end "which no live test in the tree
+//!      claims", and that was FALSE when it was written: `code.extension` in
+//!      `support::operator_charter` allowlists exactly `citext` and `pgcrypto`,
+//!      and `drop_extension_rollback_pg.rs` claims BOTH - `citext` as `EXT` and
+//!      `pgcrypto` as `EXT_GUARDED`, the latter in the live
+//!      `a_guarded_extension_drop_keeps_no_inverse`. There was no unclaimed name
+//!      to pick, so the sentence was describing a choice that had not been made.
 //!      `nextval`'s hard-coded `app` schema is retargeted at the probe schema,
 //!      because otherwise a cross-schema POLICY refusal would mask the capability
 //!      answer the row is asking about.
@@ -928,10 +934,20 @@ fn probe_prefix_for(pid: u32) -> String {
 
 /// The extension the `createExtension` and `dropExtension` rows claim.
 ///
-/// `pgcrypto` rather than the corpus's `citext`, because `citext` has a live owner
-/// already - `drop_extension_rollback_pg.rs` says so in its own header - and
-/// `unaccent` has another, `fold_live/fold_role_extension_pg.rs`. Nothing else in
-/// this tree's live suites claims `pgcrypto`.
+/// The name is not free even before concurrency is considered. `support`'s operator
+/// charter allowlists `code.extension = ["citext", "pgcrypto"]`, so a row that named
+/// anything else would be refused by POLICY and would stop asking its question, and
+/// BOTH of those two are claimed by `rollback/drop_extension_rollback_pg.rs` - as
+/// `EXT` and as `EXT_GUARDED`. `pgcrypto` because the `citext` arm there is the
+/// unguarded one and runs more often.
+///
+/// WHAT THIS FILE'S CLAIM DOES AND DOES NOT COVER. [`EXTENSION_CLAIM_KEY`] serializes
+/// the rows in THIS suite against each other, which is the collision that was
+/// measured. It does not reach `drop_extension_rollback_pg.rs`, which takes no
+/// claim: two gate runs whose `rollback` and `dialect_matrix` binaries overlap can
+/// still meet on `pgcrypto`. Closing that needs the same acquire in that file, or a
+/// third allowlisted extension in `support::operator_charter` - both outside this
+/// one, and neither is what went red.
 const PROBE_EXTENSION: &str = "pgcrypto";
 
 /// The advisory-lock key that makes claiming [`PROBE_EXTENSION`] safe across runs.
