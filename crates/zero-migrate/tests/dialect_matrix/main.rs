@@ -26,5 +26,6 @@ mod gen_types_drop_column_dialect_legs;
 mod op_support_matrix;
 mod partition_recording_dialect_legs;
 mod sqlite_declaration_flip_over_refusal_control;
+mod sqlite_trigger_quoting_reaches_postgres;
 mod touched_tables_dialect_legs;
 mod unsupported_reason_is_operator_facing;
