@@ -79,8 +79,19 @@ const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 /// an attacker-chosen nameserver. Counting it is not closing it; it is the one
 /// piece of observability available, and a rate bound on these is the obvious
 /// follow-on.
+///
+/// It counts what SHIPS: [`evaluate`] is the connect path for `node:net`,
+/// `node:tls` and outbound `WebSocket` alike, so every increment is a real
+/// lookup a real app performed. Read it with [`gate_opened_resolutions`] -
+/// process-wide, monotonic, and cheap enough to sample on any interval. It is
+/// paired with a per-occurrence log line, because a counter alone says how many
+/// and never which app or which label.
 static GATE_OPENED_RESOLUTIONS: AtomicU64 = AtomicU64::new(0);
 
+/// Total resolutions the DNS gate has opened in this process.
+///
+/// Monotonic and never reset, so a sampler takes deltas. Exported at the crate
+/// root for the embedding process (worker, CLI) to poll.
 #[must_use]
 pub fn gate_opened_resolutions() -> u64 {
     GATE_OPENED_RESOLUTIONS.load(Ordering::Relaxed)
@@ -412,6 +423,17 @@ pub async fn evaluate(
         PreDns::Resolve { name_accepted } => {
             if !name_accepted {
                 GATE_OPENED_RESOLUTIONS.fetch_add(1, Ordering::Relaxed);
+                // The label is about to reach a nameserver the app does not
+                // control, for a destination no rule names. One line per
+                // occurrence is affordable next to the DNS round trip it
+                // precedes, and it is the only record that says WHICH label
+                // left - the counter says how many and nothing else.
+                tracing::warn!(
+                    target = %target,
+                    port,
+                    "runtime: DNS gate opened - resolving a name no egress rule admits, \
+                     because the app holds a range accept at this port"
+                );
             }
             let answer = resolver
                 .resolve(target, port)
