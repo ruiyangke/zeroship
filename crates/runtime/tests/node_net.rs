@@ -8,8 +8,9 @@ use compio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use compio::net::{TcpListener, TcpStream};
 use socket2::SockRef;
 use zeroship_runtime::channel::CancelFlag;
-use zeroship_runtime::{
-    EnvSnapshot, FetchOutcome, HostPort, ModuleEntry, NetPolicy, RequestCtx, Runtime, SettledFetch,
+use zeroship_runtime::{EgressRule, Verdict,
+    
+    EnvSnapshot, FetchOutcome, ModuleEntry, NetPolicy, RequestCtx, Runtime, SettledFetch,
 };
 
 struct EnvGuard {
@@ -262,8 +263,8 @@ fn trusted(max_sockets: u32) -> NetPolicy {
 }
 
 fn allowlist(addr: SocketAddr, max_sockets: u32) -> NetPolicy {
-    NetPolicy::allowlist(
-        vec![HostPort::new("127.0.0.1", addr.port())],
+    NetPolicy::rules(
+        vec![accept_target("127.0.0.1", addr.port())],
         max_sockets,
         1024 * 1024,
     )
@@ -432,7 +433,7 @@ return new Promise((resolve) => {{
 "#,
                 port
             ),
-            NetPolicy::allowlist(vec![HostPort::new("127.0.0.1", port)], 4, 1024 * 1024)
+            NetPolicy::rules(vec![accept_target("127.0.0.1", port)], 4, 1024 * 1024)
                 .unwrap(),
             Duration::from_secs(5),
         )
@@ -783,8 +784,18 @@ return typeof net;
     );
 }
 
+/// An IP LITERAL the rules do not admit is refused in the address phase, so the
+/// refusal arrives on the socket's `error` event rather than by throwing from
+/// `connect()`.
+///
+/// It used to throw synchronously, because the old check was a boolean over the
+/// host STRING. A literal is now decided by the same address phase that decides
+/// a resolved answer - one ordering, with the platform floor ahead of every
+/// creator rule - and that phase is not reachable before the connect task runs.
+/// `ERR_NET_EGRESS_DENIED` rather than `ERR_NET_SSRF` is the point of the row:
+/// the creator's own rules refused this, not the platform floor.
 #[test]
-fn allowlist_policy_rejects_non_allowlisted_target_synchronously() {
+fn egress_rules_reject_a_non_granted_literal_target_asynchronously() {
     let _lock = lock_env();
     let _env = EnvGuard::set(true, None);
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
@@ -793,13 +804,13 @@ fn allowlist_policy_rejects_non_allowlisted_target_synchronously() {
         run_net_js(
             &format!(
                 r#"
-try {{
+return new Promise((resolve) => {{
     const s = new net.Socket();
+    s.on("error", (err) => resolve(`${{err.code}}:${{err.message}}`));
+    s.on("close", () => resolve("closed-without-error"));
     s.connect({}, "127.0.0.1");
-    return "allowed";
-}} catch (err) {{
-    return `${{err.code}}:${{err.message}}`;
-}}
+    setTimeout(() => resolve("timeout"), 2000);
+}});
 "#,
                 blocked_port
             ),
@@ -810,8 +821,13 @@ try {{
     });
     assert_eq!(result.status, 200, "unexpected status/body: {}", result.body);
     assert!(
-        result.body.contains("capability_violation"),
-        "expected capability violation, got: {}",
+        result.body.contains("ERR_NET_EGRESS_DENIED"),
+        "expected an egress-rule denial, got: {}",
+        result.body
+    );
+    assert!(
+        !result.body.contains("ERR_NET_SSRF"),
+        "the creator's rules refused this, not the platform floor: {}",
         result.body
     );
 }
@@ -926,4 +942,20 @@ return new Promise((resolve) => {{
         "expected global socket cap rejection, got: {}",
         result.body
     );
+}
+
+/// Build an ACCEPT rule for a `node:net` test target.
+///
+/// These tests target literal addresses, and an IP literal is NOT a
+/// representable `Name` - it must be written as a range, so a reader of a rule
+/// always knows which check decides it. `is_blocked_ip` would refuse loopback
+/// outright; these tests run with `ZEROSHIP_DEV=1`, which bypasses the floor
+/// and nothing else.
+fn accept_target(host: &str, port: u16) -> EgressRule {
+    let destination = match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => format!("{v4}/32"),
+        Ok(std::net::IpAddr::V6(v6)) => format!("{v6}/128"),
+        Err(_) => host.to_string(),
+    };
+    EgressRule::parse(Verdict::Accept, &destination, port).expect("valid test egress rule")
 }

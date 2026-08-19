@@ -200,9 +200,10 @@ fn parse_http_method(s: &str) -> Result<http::Method, String> {
     }
 }
 
-// `shared_cyper_client` lives in `crate::transport::client` — the
-// thread-local Client (per-isolate connection pool with SSRF resolver)
-// is now shared between `web::fetch` and any future direct transport
+// `shared_cyper_client` lives in `crate::transport::client` - the
+// thread-local Client (a per-THREAD connection pool carrying the SSRF
+// resolver, shared across every app resident on that thread, NOT per
+// isolate) is shared between `web::fetch` and any future direct transport
 // callers.
 
 #[cfg(test)]

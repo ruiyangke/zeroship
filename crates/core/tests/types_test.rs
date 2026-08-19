@@ -7,6 +7,7 @@ use zeroship_core::types::{
     AccountState, AppNetPolicy, AppRuntimeLimits, AppUsage, AppVersionInfo, ControlEvent,
     NetEgressEntry, RouteEntry, SpendState,
 };
+use zeroship_core::net_policy::Verdict;
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -501,7 +502,7 @@ fn app_version_info_serializes_with_manifest() {
                 },
                 NetEgressEntry {
                     verdict: Verdict::Reject,
-                    destination: "203.0.113.0/24".into(),
+                    destination: "93.184.216.0/24".into(),
                     port: 5432,
                 },
             ],
@@ -513,12 +514,13 @@ fn app_version_info_serializes_with_manifest() {
     assert!(json.contains("\"manifest\""), "manifest is on the wire: {json}");
     assert!(json.contains(SHA_B), "worker module hash present: {json}");
     assert!(json.contains("\"net_policy\""), "net policy is on the wire: {json}");
-    // The verdict rides the wire per rule. Without it the worker could not tell
-    // an allowed destination from a refused one, and the two spellings below
-    // are the whole reason the entry carries a field rather than a convention.
+    // The verdict must survive the wire. A rule that arrives without one is a
+    // rule whose meaning depends on which side of a client upgrade you are on,
+    // and ACCEPT is the wrong thing to guess. BOTH spellings are asserted: one
+    // alone passes against a serializer that emits a constant.
     assert!(
         json.contains("\"verdict\":\"accept\"") && json.contains("\"verdict\":\"reject\""),
-        "both verdicts are on the wire: {json}"
+        "worker-facing net policy carries each rule's verdict: {json}"
     );
 
     let decoded: AppVersionInfo = serde_json::from_str(&json).unwrap();
@@ -529,7 +531,7 @@ fn app_version_info_serializes_with_manifest() {
     assert_eq!(worker.modules.get("index.js").map(String::as_str), Some(SHA_B));
     assert_eq!(decoded.net_policy.egress[0].destination, "db.example.com");
     assert_eq!(decoded.net_policy.egress[0].verdict, Verdict::Accept);
-    assert_eq!(decoded.net_policy.egress[1].destination, "203.0.113.0/24");
+    assert_eq!(decoded.net_policy.egress[1].destination, "93.184.216.0/24");
     assert_eq!(decoded.net_policy.egress[1].verdict, Verdict::Reject);
 }
 
