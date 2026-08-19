@@ -560,6 +560,123 @@ mod tests {
     #[test]
     fn port_zero_is_refused() {
         assert!(EgressRule::parse(Verdict::Accept, "api.example.test", 0).is_err());
+        // The control, differing only in the port: 1 is the first legal one, so
+        // the row above is about zero and not about the destination.
+        assert!(EgressRule::parse(Verdict::Accept, "api.example.test", 1).is_ok());
+    }
+
+    /// The DNS gate is ACCEPT-only. A `Range` REJECT can never turn a refusal
+    /// into an admission, so resolving to test one is pure leak for zero
+    /// benefit - which is what `holds_range_accept_at` asserts in prose.
+    ///
+    /// The pair below differs in the VERDICT and nothing else. Without it,
+    /// dropping the verdict check leaves this crate, the runtime and the worker
+    /// green, and a creator adding the most natural hardening rule there is -
+    /// a defensive reject - would silently move their names-only app into the
+    /// leaking class, where every refused connect carries an attacker-chosen
+    /// label to an attacker-chosen nameserver.
+    #[test]
+    fn only_a_range_accept_opens_the_dns_gate() {
+        let hardened = EgressRules::validated(vec![
+            accept("api.example.test", 443),
+            reject("93.184.216.0/24", 443),
+        ])
+        .unwrap();
+        assert!(!hardened.holds_range_accept_at(443));
+        assert_eq!(
+            hardened.name_phase("evil.example.test", 443),
+            NamePhase::NoRuleCouldAdmit,
+            "a range REJECT opened the gate: an ungranted name was resolved"
+        );
+
+        // The control: the SAME range at the SAME port, as an ACCEPT.
+        let opened = EgressRules::validated(vec![
+            accept("api.example.test", 443),
+            accept("93.184.216.0/24", 443),
+        ])
+        .unwrap();
+        assert!(opened.holds_range_accept_at(443));
+        assert_eq!(
+            opened.name_phase("evil.example.test", 443),
+            NamePhase::Resolve {
+                name_accepted: false
+            }
+        );
+
+        // And the rule a creator hardening their app would actually write.
+        // It has no accept floor, so it is the broadest reject expressible.
+        let blanket = EgressRules::validated(vec![
+            accept("api.example.test", 443),
+            reject("0.0.0.0/0", 443),
+        ])
+        .unwrap();
+        assert_eq!(
+            blanket.name_phase("evil.example.test", 443),
+            NamePhase::NoRuleCouldAdmit
+        );
+    }
+
+    /// Port matching is an equality, not a bound, and the existing rows only
+    /// ever place the RULE above the CONNECT - so they catch a rule leaking
+    /// upward and miss one leaking downward. This is the other direction: a
+    /// rule authored for SMTP must not admit HTTPS, or every port above the
+    /// one the creator wrote comes with it.
+    #[test]
+    fn a_rule_at_one_port_decides_nothing_at_a_higher_one() {
+        let rules = EgressRules::validated(vec![accept("93.184.216.0/24", 25)]).unwrap();
+        let inside: IpAddr = "93.184.216.34".parse().unwrap();
+
+        assert!(rules.holds_range_accept_at(25));
+        assert!(
+            !rules.holds_range_accept_at(443),
+            "a rule at port 25 opened the gate at 443"
+        );
+        assert_eq!(
+            rules.name_phase("evil.example.test", 443),
+            NamePhase::NoRuleCouldAdmit
+        );
+        assert_eq!(
+            rules.address_phase(inside, 443, false),
+            AddressPhase::NoAcceptMatched,
+            "a rule at port 25 admitted an address at 443"
+        );
+
+        // The control, differing only in the connect port.
+        assert_eq!(
+            rules.address_phase(inside, 25, false),
+            AddressPhase::Admitted
+        );
+    }
+
+    /// A range decides addresses of ITS OWN family only. Nothing else asserts
+    /// this directly: the one row that would catch a cross-family match does so
+    /// incidentally, because its answer set happens to contain a v6 address.
+    #[test]
+    fn a_range_never_matches_the_other_address_family() {
+        let v4 = EgressRules::validated(vec![accept("93.184.216.0/24", 443)]).unwrap();
+        assert_eq!(
+            v4.address_phase("2606:4700::1111".parse().unwrap(), 443, false),
+            AddressPhase::NoAcceptMatched,
+            "an IPv4 range admitted an IPv6 address"
+        );
+        // The control: same rule, same port, an address of the rule's family.
+        assert_eq!(
+            v4.address_phase("93.184.216.34".parse().unwrap(), 443, false),
+            AddressPhase::Admitted
+        );
+
+        // And the same claim the other way round, so a matcher that ignores the
+        // family in one direction only is still caught.
+        let v6 = EgressRules::validated(vec![accept("2606:4700::/32", 443)]).unwrap();
+        assert_eq!(
+            v6.address_phase("93.184.216.34".parse().unwrap(), 443, false),
+            AddressPhase::NoAcceptMatched,
+            "an IPv6 range admitted an IPv4 address"
+        );
+        assert_eq!(
+            v6.address_phase("2606:4700::1111".parse().unwrap(), 443, false),
+            AddressPhase::Admitted
+        );
     }
 
     #[test]
@@ -608,6 +725,15 @@ mod tests {
             rules.name_phase("bad.example.test", 443),
             NamePhase::NameRejected
         );
+        // The control, differing only in the NAME asked for: the same rule set
+        // still resolves anything the reject does not name. Without it this row
+        // is green against a phase that rejects every name.
+        assert_eq!(
+            rules.name_phase("other.example.test", 443),
+            NamePhase::Resolve {
+                name_accepted: false
+            }
+        );
     }
 
     #[test]
@@ -620,6 +746,13 @@ mod tests {
         assert_eq!(
             rules.address_phase("93.184.216.34".parse().unwrap(), 443, true),
             AddressPhase::RangeRejected
+        );
+        // The control, differing only in the ADDRESS: outside the rejected
+        // range the name acceptance still admits, so the row above is about the
+        // reject winning and not about `name_accepted` being ignored.
+        assert_eq!(
+            rules.address_phase("203.0.114.9".parse().unwrap(), 443, true),
+            AddressPhase::Admitted
         );
     }
 
@@ -644,5 +777,15 @@ mod tests {
             port: 443,
         };
         assert!(EgressRules::validated(vec![smuggled]).is_err());
+
+        // The control, differing only in the prefix length: a range AT the
+        // floor, assembled the same field-by-field way, is kept. Without it the
+        // row above is green against a `validated` that refuses everything.
+        let at_the_floor = EgressRule {
+            verdict: Verdict::Accept,
+            destination: Destination::Range("93.184.0.0/16".parse().unwrap()),
+            port: 443,
+        };
+        assert!(EgressRules::validated(vec![at_the_floor]).is_ok());
     }
 }
