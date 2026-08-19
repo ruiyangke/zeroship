@@ -1332,15 +1332,56 @@ pub(crate) fn mysql_collation_clause(case_sensitive: Option<bool>) -> &'static s
 /// stored as `'archived'` at INSERT time, and the original case is gone before any
 /// ALTER runs.
 pub(crate) fn mysql_pin_enum_collation(rendered: &str, case_sensitive: Option<bool>) -> String {
-    let lower = rendered.trim().to_ascii_lowercase();
-    if !lower.starts_with("enum(") || lower.contains(" collate ") {
+    if !rendered.trim().to_ascii_lowercase().starts_with("enum(") {
         return rendered.to_string();
     }
-    format!(
-        "{} {}",
-        rendered.trim(),
-        mysql_collation_clause(case_sensitive)
-    )
+    mysql_pin_collation(rendered, case_sensitive)
+}
+
+/// Pin an explicit collation onto ANY rendered MySQL character-type spelling.
+///
+/// The spelling-level half of the engine's collation promise, and the piece
+/// [`mysql_type_override_with_collation`] cannot serve: that one keys on a
+/// [`FieldDescriptor`] and a PostgreSQL-spelled `data_type`, so it is reachable only
+/// from the snapshot carrier. A second renderer -
+/// [`crate::schema::query::renderer`]'s MySQL arm - answers the same question from a
+/// raw SDK field def and has only a rendered STRING to decide from. Both now route
+/// their character spellings through this one function, so the two cannot pin
+/// different collations, and neither can drift from
+/// [`mysql_collation_clause`].
+///
+/// The predicate is [`mysql_spelling_takes_collation`], on the RENDERED text rather
+/// than on a type token, because that is all a spelling-level pin has. A non-character
+/// spelling is returned untouched - `JSON COLLATE ...` is not merely redundant, MySQL
+/// refuses to parse it, so a pin that guessed wrong would fail the `CREATE TABLE`
+/// rather than mis-order a string.
+///
+/// Idempotent: a spelling that already carries a `COLLATE` is returned untouched, so
+/// re-rendering a column cannot stack two clauses.
+pub(crate) fn mysql_pin_collation(rendered: &str, case_sensitive: Option<bool>) -> String {
+    let trimmed = rendered.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if !mysql_spelling_takes_collation(trimmed) || lower.contains(" collate ") {
+        return trimmed.to_string();
+    }
+    format!("{trimmed} {}", mysql_collation_clause(case_sensitive))
+}
+
+/// Whether a RENDERED MySQL type spelling is a CHARACTER type - one whose comparison,
+/// sorting and uniqueness all run under a collation.
+///
+/// The spelling-level sibling of [`mysql_type_takes_collation`], and it names one
+/// family that one does not: `ENUM(...)`. MySQL stores an enum as an index into its
+/// member list but compares and LOOKS UP members as strings, so an uncollated `ENUM`
+/// silently accepts `'ACTIVE'` for a declared `'active'` - see
+/// [`mysql_pin_enum_collation`], which measured it. `SET(...)` is the same shape and
+/// is named here for the same reason, though nothing in the engine emits one today.
+///
+/// Deliberately NOT here: `JSON` (MySQL refuses a collation on it outright), the BLOB
+/// family, the spatial family, and every numeric and temporal type.
+pub(crate) fn mysql_spelling_takes_collation(rendered: &str) -> bool {
+    let u = rendered.trim().to_ascii_uppercase();
+    mysql_type_takes_collation(rendered) || u.starts_with("ENUM(") || u.starts_with("SET(")
 }
 
 /// Whether a MySQL column type spelling is a character type that carries a

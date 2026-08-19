@@ -380,75 +380,23 @@ impl SchemaRenderer for MysqlSchemaRenderer {
         )
     }
 
+    /// The MySQL column type for a field def, with an explicit collation on every
+    /// CHARACTER spelling.
+    ///
+    /// The collation is pinned through
+    /// [`crate::render::declarative::mysql_pin_collation`] - the same function the
+    /// snapshot-carrier renderer pins through - so the two MySQL renderers cannot
+    /// answer the same column with different comparison semantics. Without it every
+    /// character column this arm emits inherits the table default, which on a stock
+    /// MySQL 8 server is `utf8mb4_0900_ai_ci`: `'Active' = 'active'` compares TRUE and
+    /// a UNIQUE index rejects the second of the two, where PostgreSQL and SQLite
+    /// separate them. See [`mysql_base_column_type_for_def`] for which spellings are
+    /// character types and which are deliberately left bare.
     fn column_type(&self, def: &serde_json::Value) -> String {
-        if def.get("encrypted").is_some() {
-            return "LONGBLOB".to_string();
-        }
-
-        if let Some(values) = mysql_native_enum_values(def) {
-            return format!("ENUM({})", values.join(", "));
-        }
-
-        let zs_type = def.get("type").and_then(|t| t.as_str());
-
-        if zs_type == Some("vector") {
-            return "BLOB".to_string();
-        }
-
-        if zs_type == Some("geoPoint") {
-            return "POINT SRID 4326".to_string();
-        }
-
-        // The decimal half of the shared `number` token. `DOUBLE` is right for the
-        // float and wrong for `t.numeric({ precision, scale })`; the MySQL arm of
-        // `render::lower::author_type_override` already spells this column
-        // `DECIMAL(p, s)` on the snapshot carrier, so this is the field-def carrier
-        // catching up rather than a second opinion. Note that a BARE `DECIMAL` would
-        // not do: MySQL reads it as `DECIMAL(10, 0)` and silently truncates the
-        // scale, which is why the parameters have to reach this emitter at all.
-        if zs_type == Some("number") {
-            if let Some((precision, scale)) = decimal_precision_scale(def) {
-                return format!("DECIMAL({precision}, {scale})");
-            }
-        }
-
-        match zs_type {
-            Some("string") => {
-                let max = def
-                    .get("maxLength")
-                    .or_else(|| def.get("max"))
-                    .and_then(serde_json::Value::as_u64)
-                    .filter(|n| *n > 0 && *n <= 65_535);
-                match max {
-                    Some(n) if n <= 16_383 => format!("VARCHAR({n})"),
-                    Some(_) => "LONGTEXT".to_string(),
-                    None => "VARCHAR(191)".to_string(),
-                }
-            }
-            Some("char") => match char_len(def) {
-                Some(len) => format!("CHAR({len})"),
-                None => "CHAR(1)".to_string(),
-            },
-            Some("number") => "DOUBLE".to_string(),
-            Some("real") => "FLOAT".to_string(),
-            Some("boolean") => "TINYINT(1)".to_string(),
-            Some("date") => "DATETIME(6)".to_string(),
-            Some("calendarDate") => "DATE".to_string(),
-            Some("json") | Some("object") | Some("array") | Some("union") => "JSON".to_string(),
-            Some("textArray") => "JSON".to_string(),
-            Some("ref") => "VARCHAR(191)".to_string(),
-            Some("bytes") => "LONGBLOB".to_string(),
-            Some("literal") => match def.get("literalValue") {
-                Some(serde_json::Value::Number(_)) => "DECIMAL(65, 30)".to_string(),
-                Some(serde_json::Value::Bool(_)) => "TINYINT(1)".to_string(),
-                _ => "VARCHAR(191)".to_string(),
-            },
-            Some("bigInt") | Some("bigint") | Some("int8") => "BIGINT".to_string(),
-            Some("integer") | Some("int") | Some("int4") => "INT".to_string(),
-            Some("smallInt") => "SMALLINT".to_string(),
-            Some("inet") => "VARCHAR(43)".to_string(),
-            _ => "VARCHAR(191)".to_string(),
-        }
+        crate::render::declarative::mysql_pin_collation(
+            &mysql_base_column_type_for_def(def),
+            def_case_sensitive(def),
+        )
     }
 
     fn json_object_default(&self) -> String {
@@ -522,6 +470,13 @@ mod schema_renderer_tests {
     /// agree with `render::lower::author_type_override` (`numeric(p, s)` /
     /// `DECIMAL(p, s)` / `TEXT`) rather than leaving one that answers `DOUBLE`; this
     /// line is the whole of its coverage, and no live suite moves if it regresses.
+    ///
+    /// That reachability claim was later MEASURED rather than left as a reading of the
+    /// call graph. `MysqlSchemaRenderer::column_type` was given a tripwire that panics
+    /// on entry and the whole Rust suite was run against live PostgreSQL, MySQL and
+    /// SQLite (37 sections, 3333 tests): exactly EIGHT tests tripped it, and all eight
+    /// are `#[cfg(test)]` unit tests in this file - this one among them. Not one
+    /// integration test and not one live-server leg reached the MySQL arm.
     ///
     /// A bare `number` with no facet must keep the float spelling on all three - that is
     /// the half that must NOT move, and the reason the facet is read rather than the
@@ -2719,6 +2674,107 @@ pub fn def_to_column_type_for_dialect(def: &serde_json::Value, dialect: SqlDiale
     renderer(dialect).column_type(def)
 }
 
+/// The MySQL type spelling for a field def, BEFORE any collation suffix.
+///
+/// Split out of [`MysqlSchemaRenderer::column_type`] so the collation is pinned in
+/// exactly ONE place rather than on each of the nine arms that produce a character
+/// type. Which arms those are is what the split makes checkable:
+///
+/// * CHARACTER, and therefore collated: `string` (`VARCHAR(n)` / `LONGTEXT` /
+///   `VARCHAR(191)`), `char` (`CHAR(n)` / `CHAR(1)`), `ref` and `inet`
+///   (`VARCHAR(191)` / `VARCHAR(43)`), a string-or-null `literal` (`VARCHAR(191)`),
+///   the unknown-token fallback (`VARCHAR(191)`), and the native `ENUM(...)`.
+/// * NOT character, and therefore bare: `LONGBLOB` (encrypted / `bytes`), `BLOB`
+///   (`vector`), `POINT SRID 4326` (`geoPoint`), `JSON` (`json`/`object`/`array`/
+///   `union`/`textArray`), and every numeric and temporal spelling. `JSON COLLATE
+///   ...` is not redundant but a parse error, so the predicate matters.
+///
+/// The classification is [`crate::render::declarative::mysql_spelling_takes_collation`]
+/// reading this function's OUTPUT; nothing here decides it a second time.
+fn mysql_base_column_type_for_def(def: &serde_json::Value) -> String {
+    if def.get("encrypted").is_some() {
+        return "LONGBLOB".to_string();
+    }
+
+    if let Some(values) = mysql_native_enum_values(def) {
+        return format!("ENUM({})", values.join(", "));
+    }
+
+    let zs_type = def.get("type").and_then(|t| t.as_str());
+
+    if zs_type == Some("vector") {
+        return "BLOB".to_string();
+    }
+
+    if zs_type == Some("geoPoint") {
+        return "POINT SRID 4326".to_string();
+    }
+
+    // The decimal half of the shared `number` token. `DOUBLE` is right for the
+    // float and wrong for `t.numeric({ precision, scale })`; the MySQL arm of
+    // `render::lower::author_type_override` already spells this column
+    // `DECIMAL(p, s)` on the snapshot carrier, so this is the field-def carrier
+    // catching up rather than a second opinion. Note that a BARE `DECIMAL` would
+    // not do: MySQL reads it as `DECIMAL(10, 0)` and silently truncates the
+    // scale, which is why the parameters have to reach this emitter at all.
+    if zs_type == Some("number") {
+        if let Some((precision, scale)) = decimal_precision_scale(def) {
+            return format!("DECIMAL({precision}, {scale})");
+        }
+    }
+
+    match zs_type {
+        Some("string") => {
+            let max = def
+                .get("maxLength")
+                .or_else(|| def.get("max"))
+                .and_then(serde_json::Value::as_u64)
+                .filter(|n| *n > 0 && *n <= 65_535);
+            match max {
+                Some(n) if n <= 16_383 => format!("VARCHAR({n})"),
+                Some(_) => "LONGTEXT".to_string(),
+                None => "VARCHAR(191)".to_string(),
+            }
+        }
+        Some("char") => match char_len(def) {
+            Some(len) => format!("CHAR({len})"),
+            None => "CHAR(1)".to_string(),
+        },
+        Some("number") => "DOUBLE".to_string(),
+        Some("real") => "FLOAT".to_string(),
+        Some("boolean") => "TINYINT(1)".to_string(),
+        Some("date") => "DATETIME(6)".to_string(),
+        Some("calendarDate") => "DATE".to_string(),
+        Some("json") | Some("object") | Some("array") | Some("union") => "JSON".to_string(),
+        Some("textArray") => "JSON".to_string(),
+        Some("ref") => "VARCHAR(191)".to_string(),
+        Some("bytes") => "LONGBLOB".to_string(),
+        Some("literal") => match def.get("literalValue") {
+            Some(serde_json::Value::Number(_)) => "DECIMAL(65, 30)".to_string(),
+            Some(serde_json::Value::Bool(_)) => "TINYINT(1)".to_string(),
+            _ => "VARCHAR(191)".to_string(),
+        },
+        Some("bigInt") | Some("bigint") | Some("int8") => "BIGINT".to_string(),
+        Some("integer") | Some("int") | Some("int4") => "INT".to_string(),
+        Some("smallInt") => "SMALLINT".to_string(),
+        Some("inet") => "VARCHAR(43)".to_string(),
+        _ => "VARCHAR(191)".to_string(),
+    }
+}
+
+/// The portable `caseSensitive` intent a field def carries, in the shape
+/// [`crate::render::declarative::mysql_collation_clause`] reads.
+///
+/// The SDK def only ever carries the key when it is FALSE (see
+/// `render::declarative::field_to_sdk_def`), so an absent key is the default
+/// case-SENSITIVE intent and maps to `None` - the same canonical spelling
+/// `ColumnSnapshot::case_sensitive` uses, which is why the two carriers can share one
+/// clause builder.
+fn def_case_sensitive(def: &serde_json::Value) -> Option<bool> {
+    def.get("caseSensitive")
+        .and_then(serde_json::Value::as_bool)
+}
+
 fn char_len(def: &serde_json::Value) -> Option<u64> {
     def.get("charLen")
         .and_then(serde_json::Value::as_u64)
@@ -4555,8 +4611,14 @@ columns = [
             sql.contains("CREATE TABLE IF NOT EXISTS `app1`.`apps`"),
             "{sql}"
         );
+        // The collation is part of the spelling, not decoration: MySQL runs enum
+        // member LOOKUP under it, so an uncollated `ENUM` accepts 'ACTIVE' for a
+        // declared 'active'. Measured in `tests/mysql_engine/mysql_enum_collation.rs`.
         assert!(
-            sql.contains("`status` ENUM(X'616374697665', X'706175736564') NOT NULL"),
+            sql.contains(
+                "`status` ENUM(X'616374697665', X'706175736564') \
+                 CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs NOT NULL"
+            ),
             "{sql}"
         );
         assert!(!sql.contains("CHECK (`status` IN"), "{sql}");
@@ -5643,8 +5705,8 @@ columns = [
             ),
             (
                 SqlDialect::Mysql,
-                "`order` VARCHAR(255) NOT NULL",
-                "`CamelCase` VARCHAR(255) NULL",
+                "`order` VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs NOT NULL",
+                "`CamelCase` VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs NULL",
             ),
         ] {
             let sql = super::build_create_table_with_fks_for_dialect(

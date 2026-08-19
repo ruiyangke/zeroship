@@ -17,6 +17,7 @@ mod enum_membership_reaches_no_second_check;
 mod enums_domains;
 mod generated_identity_columns;
 mod injected_column_collation;
+mod mysql_field_def_carrier_collation;
 mod pg_column_retype_dependency_oracle;
 mod pg_setcolumntype_half_migration;
 mod scalar_precision_boundary_pg;
