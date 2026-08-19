@@ -475,19 +475,26 @@ enum MissingLogicalDeclaration {
     Reject,
 }
 
-/// Live catalog columns a reference check may consult to prove the value format
-/// of a target that has no authored contract.
+/// Live catalog columns a lower-time check may consult about a column no
+/// authored contract in view describes — because an EARLIER ordered migration
+/// declared it, or because the table is unmanaged.
 ///
 /// Keyed by bare table name, exactly like `LiveSchema::table_snapshots`: an
-/// introspected snapshot already covers one project schema, so the reference's
+/// introspected snapshot already covers one project schema, so a reference's
 /// schema qualifier adds nothing here. Load-time validation has no catalog and
 /// uses [`Self::none`], which proves nothing.
+///
+/// EVIDENCE, not an oracle. Every accessor answers `None` for "this catalog
+/// cannot say" as well as for "this catalog says no", and every caller must
+/// treat `None` as permission rather than refusal. Preview lowers against an
+/// EMPTY snapshot, so a check that refused what it could not see would refuse
+/// every preview.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct CatalogFormatEvidence<'a> {
+pub(crate) struct CatalogColumnEvidence<'a> {
     tables: Option<&'a BTreeMap<String, crate::model::snapshot::TableSnapshot>>,
 }
 
-impl<'a> CatalogFormatEvidence<'a> {
+impl<'a> CatalogColumnEvidence<'a> {
     /// Consult this introspected table map.
     pub(crate) const fn new(
         tables: &'a BTreeMap<String, crate::model::snapshot::TableSnapshot>,
@@ -513,6 +520,39 @@ impl<'a> CatalogFormatEvidence<'a> {
             .iter()
             .find(|candidate| candidate.name == column)
     }
+
+    /// `Some(Text | Blob)` only when the live catalog POSITIVELY proves this
+    /// column is a MySQL LOB, which is the one storage family MySQL refuses to
+    /// key without a prefix length (error 1170).
+    ///
+    /// Read from [`ColumnSnapshot::mysql_physical_type`] — the structured
+    /// `information_schema.COLUMNS.COLUMN_TYPE` parse — and DELIBERATELY NOT
+    /// from `ColumnSnapshot::data_type`. `data_type` is the dialect-neutral
+    /// canonical family, and `mysql_canonical_type` folds `varchar(n)` into
+    /// `"text"` and `varbinary(n)` into `"blob"` so the drift comparison can
+    /// treat the string families as one. Classifying THAT would refuse a key
+    /// over every bounded `t.string({ length })` column in the project — the
+    /// exact over-refusal this gate must not commit, measured on live MySQL 8
+    /// before the gate was written. `MysqlPhysicalType` keeps `Character {
+    /// length }` and `Lob { tier }` apart, which is why it is the relation read
+    /// here.
+    ///
+    /// [`ColumnSnapshot::mysql_physical_type`]: crate::model::snapshot::ColumnSnapshot::mysql_physical_type
+    fn mysql_lob_key_storage(
+        self,
+        table: &str,
+        column: &str,
+    ) -> Option<crate::render::declarative::MysqlStorage> {
+        let crate::model::snapshot::MysqlPhysicalType::Lob { tier } =
+            self.column(table, column)?.mysql_physical_type.as_ref()?
+        else {
+            return None;
+        };
+        let storage = crate::render::declarative::MysqlStorage::of(tier);
+        storage
+            .refuses_key_without_prefix_length()
+            .then_some(storage)
+    }
 }
 
 /// Whether the live catalog independently proves the value format that a
@@ -535,7 +575,7 @@ impl<'a> CatalogFormatEvidence<'a> {
 /// or candidate-key eligibility; those remain the separate checks that already
 /// run over the same reference.
 fn catalog_proves_reference_format(
-    catalog: CatalogFormatEvidence<'_>,
+    catalog: CatalogColumnEvidence<'_>,
     target_dialect: Dialect,
     table: &str,
     column: &str,
@@ -2033,7 +2073,7 @@ fn validate_one_column_reference(
     declared: &LogicalColumnContracts,
     schema_mode: LogicalSchemaMode<'_>,
     missing: MissingLogicalDeclaration,
-    catalog: CatalogFormatEvidence<'_>,
+    catalog: CatalogColumnEvidence<'_>,
     target_dialect: Dialect,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
@@ -2194,7 +2234,7 @@ fn validate_column_references_op(
     declared: &LogicalColumnContracts,
     schema_mode: LogicalSchemaMode<'_>,
     missing: MissingLogicalDeclaration,
-    catalog: CatalogFormatEvidence<'_>,
+    catalog: CatalogColumnEvidence<'_>,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::Op;
 
@@ -2290,7 +2330,7 @@ fn validate_column_references(
             &declared,
             schema_mode,
             MissingLogicalDeclaration::DeferToLower,
-            CatalogFormatEvidence::none(),
+            CatalogColumnEvidence::none(),
         )?;
     }
     Ok(())
@@ -2308,10 +2348,14 @@ fn validate_column_references(
 /// renderer degrades every lowering error to a `-- [runtime-resolved]` comment,
 /// so only this gate turns `lint` red, and apply runs it too.
 ///
-/// SCOPE: the referenced column must be declared in the SAME envelope, which is
-/// what the two-pass declaration walk sees. A column from an earlier ordered
-/// artifact or from an unmanaged table carries no type here and is left alone;
-/// closing that needs the lower-time seed or the live catalog.
+/// SCOPE: this OFFLINE entry sees only the envelope in front of it, so the
+/// referenced column must be declared in the SAME envelope — which is what the
+/// two-pass declaration walk sees. A column from an earlier ordered artifact or
+/// from an unmanaged table carries no type here and is left alone. That half is
+/// closed at lower time by [`validate_mysql_key_storage_for_lower`], against the
+/// live catalog. This entry is NOT redundant with that one and must not be
+/// removed in its favour: it needs no connection at all, so it turns `lint` red
+/// and refuses the same-envelope mistake in CI, where no database exists.
 fn validate_mysql_key_storage(
     ir: &crate::model::ir::MigrationIr,
     target_dialect: Dialect,
@@ -2325,19 +2369,85 @@ fn validate_mysql_key_storage(
         collect_logical_declarations_op(op, target_dialect, &mut declared, schema_mode);
     }
     for (op_index, op) in ir.ops.iter().enumerate() {
-        validate_mysql_key_storage_op(op, target_dialect, op_index, &declared, schema_mode)?;
+        validate_mysql_key_storage_op(
+            op,
+            target_dialect,
+            op_index,
+            &declared,
+            schema_mode,
+            CatalogColumnEvidence::none(),
+        )?;
+    }
+    Ok(())
+}
+
+/// The lower-time half of the MySQL key-prefix rule: refuse a key over a column
+/// an EARLIER ordered migration created as `TEXT`/`BLOB`, or over such a column
+/// of a table the engine never authored.
+///
+/// [`validate_mysql_key_storage`] cannot see either, because validation is
+/// offline and reads only the migration in front of it. Lower time can: the
+/// apply path introspects the live catalog BEFORE it lowers, so
+/// `LiveSchema::table_snapshots` already carries every pre-existing column's
+/// resolved MySQL type. Measured on live MySQL 8.4 before this existed, the
+/// missing half cleared validate AND preview and then met MySQL's own `ERROR
+/// 1170` mid-deploy, with the envelope's earlier statements already applied.
+///
+/// PRECEDENCE: an authored declaration in view always wins over the catalog.
+/// `seed` plus this envelope's own declarations describe what the column is
+/// ABOUT TO BE; the catalog describes what it WAS. Consulting the catalog for a
+/// column this envelope re-declares would refuse a migration that repairs the
+/// very shape being complained about.
+///
+/// FAIL-OPEN otherwise, by construction: an absent table, an absent column, a
+/// producer that left `mysql_physical_type` unset, or no catalog at all all read
+/// as "no evidence" and refuse nothing. Preview lowers against an empty
+/// snapshot and must stay quiet.
+///
+/// # Errors
+/// Returns [`CODE_DIALECT_UNSUPPORTED`] naming the keyed column and its storage.
+pub(crate) fn validate_mysql_key_storage_for_lower(
+    ir: &crate::model::ir::MigrationIr,
+    target_dialect: Dialect,
+    seed: &LogicalColumnContracts,
+    project_schema: &str,
+    default_schema: Option<&str>,
+    catalog: CatalogColumnEvidence<'_>,
+) -> Result<(), AuthoringError> {
+    if !matches!(target_dialect, Dialect::Mysql) {
+        return Ok(());
+    }
+    let schema_mode = LogicalSchemaMode::Effective {
+        project_schema,
+        default_schema,
+    };
+    let mut declared = seed.clone();
+    for op in &ir.ops {
+        collect_logical_declarations_op(op, target_dialect, &mut declared, schema_mode);
+    }
+    for (op_index, op) in ir.ops.iter().enumerate() {
+        validate_mysql_key_storage_op(
+            op,
+            target_dialect,
+            op_index,
+            &declared,
+            schema_mode,
+            catalog,
+        )?;
     }
     Ok(())
 }
 
 /// The MySQL key-prefix rule for one op. Every keyed column position an op can
-/// carry is checked against the envelope's declarations.
+/// carry is checked against the declarations in view, falling back to `catalog`
+/// for a column none of them describes.
 fn validate_mysql_key_storage_op(
     op: &crate::model::ir::Op,
     target_dialect: Dialect,
     op_index: usize,
     declared: &LogicalColumnContracts,
     schema_mode: LogicalSchemaMode<'_>,
+    catalog: CatalogColumnEvidence<'_>,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::{IndexMethod, IrConstraintKind, Op};
 
@@ -2347,17 +2457,27 @@ fn validate_mysql_key_storage_op(
                  columns: &[String]|
      -> Result<(), AuthoringError> {
         for column in columns {
-            let Some(contract) =
-                logical_column_matches(declared, schema_mode, schema, table, column).pop()
-            else {
-                continue;
-            };
-            let Some(storage) = crate::render::lower::mysql_storage_for_column_facets(
-                &contract.ty,
-                contract.value_format.as_ref(),
-                contract.id_prefix.as_deref(),
-                contract.case_sensitive,
-            ) else {
+            // An authored declaration in view always wins: it says what the column
+            // is about to be, while the catalog says only what it was. Only a
+            // column NOTHING in view declares - an earlier migration's, or an
+            // unmanaged table's - falls through to the live catalog.
+            let (storage, witness) =
+                match logical_column_matches(declared, schema_mode, schema, table, column).pop() {
+                    Some(contract) => (
+                        crate::render::lower::mysql_storage_for_column_facets(
+                            &contract.ty,
+                            contract.value_format.as_ref(),
+                            contract.id_prefix.as_deref(),
+                            contract.case_sensitive,
+                        ),
+                        "renders as MySQL",
+                    ),
+                    None => (
+                        catalog.mysql_lob_key_storage(table, column),
+                        "the live MySQL catalog reports as",
+                    ),
+                };
+            let Some(storage) = storage else {
                 continue;
             };
             if !storage.refuses_key_without_prefix_length() {
@@ -2369,7 +2489,7 @@ fn validate_mysql_key_storage_op(
                 op_index,
                 dialect: target_dialect,
                 reason: format!(
-                    "{position} keys {table}.{column}, which renders as MySQL {} storage; \
+                    "{position} keys {table}.{column}, which {witness} {} storage; \
                      MySQL refuses a key over a TEXT or BLOB column with no prefix length",
                     storage.label()
                 ),
@@ -2419,6 +2539,7 @@ fn validate_mysql_key_storage_op(
                         op_index,
                         declared,
                         schema_mode,
+                        catalog,
                     )?;
                 }
             }
@@ -2515,7 +2636,7 @@ pub(crate) fn validate_column_references_for_lower(
     seed: &LogicalColumnContracts,
     project_schema: &str,
     default_schema: Option<&str>,
-    catalog: CatalogFormatEvidence<'_>,
+    catalog: CatalogColumnEvidence<'_>,
 ) -> Result<(), AuthoringError> {
     let schema_mode = LogicalSchemaMode::Effective {
         project_schema,
@@ -4726,7 +4847,7 @@ fn validate_table_foreign_key_constraint(
     declared: &LogicalColumnContracts,
     schema_mode: LogicalSchemaMode<'_>,
     missing: MissingLogicalDeclaration,
-    catalog: CatalogFormatEvidence<'_>,
+    catalog: CatalogColumnEvidence<'_>,
     target_dialect: Dialect,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
@@ -4962,7 +5083,7 @@ fn validate_table_foreign_keys_op(
     declared: &mut LogicalColumnContracts,
     schema_mode: LogicalSchemaMode<'_>,
     missing: MissingLogicalDeclaration,
-    catalog: CatalogFormatEvidence<'_>,
+    catalog: CatalogColumnEvidence<'_>,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::Op;
 
@@ -5134,7 +5255,7 @@ fn validate_table_foreign_keys(
             &mut declared,
             schema_mode,
             MissingLogicalDeclaration::DeferToLower,
-            CatalogFormatEvidence::none(),
+            CatalogColumnEvidence::none(),
         )?;
     }
     Ok(())
@@ -5151,7 +5272,7 @@ pub(crate) fn validate_table_foreign_keys_for_lower(
     seed: &LogicalColumnContracts,
     project_schema: &str,
     default_schema: Option<&str>,
-    catalog: CatalogFormatEvidence<'_>,
+    catalog: CatalogColumnEvidence<'_>,
 ) -> Result<(), AuthoringError> {
     let schema_mode = LogicalSchemaMode::Effective {
         project_schema,
@@ -13517,7 +13638,7 @@ mod tests {
             &LogicalColumnContracts::new(),
             "app",
             None,
-            CatalogFormatEvidence::none(),
+            CatalogColumnEvidence::none(),
         )
         .expect_err("a catalog cannot invent missing TypeID metadata");
         assert!(
@@ -13541,7 +13662,7 @@ mod tests {
             &LogicalColumnContracts::new(),
             "app",
             None,
-            CatalogFormatEvidence::none(),
+            CatalogColumnEvidence::none(),
         )
         .expect("a missing primitive target is left for physical catalog validation");
     }
