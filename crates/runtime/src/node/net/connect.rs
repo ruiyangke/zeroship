@@ -144,22 +144,14 @@ pub(super) fn authorize_connect(
             }
         };
 
-        // An IP literal needs no resolution at all, so PHASE 3 can run here too
-        // and the refusal stays synchronous.
-        if let PreDns::Literal(ip) = plan {
-            if let Err(refusal) = crate::transport::egress::filter_answer(
-                &s.net_policy,
-                port,
-                false,
-                vec![SocketAddr::new(ip, port)],
-            ) {
-                return Err(capability_violation(kind.connect_denied(
-                    &host,
-                    port,
-                    &refusal.to_string(),
-                )));
-            }
-        }
+        // PHASE 3 is deliberately NOT run here, not even for an IP literal
+        // whose answer set is already known. It has to stay in one place: the
+        // floor must run before any creator rule is consulted, and splitting
+        // the address phase across a sync and an async site is how that
+        // ordering gets quietly reversed later. The cost is that an IP literal
+        // refused by policy now reports through the socket's `error` event
+        // rather than throwing from `connect()`, which is also what Node does
+        // for an address it cannot reach.
     }
 
     Ok(AuthorizedConnect { host, port, plan })
@@ -430,14 +422,32 @@ async fn resolve_authorized_target(
 ) -> Option<SocketAddr> {
     let port = target.port;
 
-    // PHASE 1 already settled an IP literal, including its address phase.
-    // INVARIANT ONE-RESOLUTION: no query is made for one, ever.
-    let name_accepted = match target.plan {
-        PreDns::Literal(ip) => return Some(SocketAddr::new(ip, port)),
-        PreDns::Resolve { name_accepted } => name_accepted,
+    // PHASE 2. An IP literal is its own answer set and is NEVER resolved
+    // (INVARIANT ONE-RESOLUTION: zero queries for one), but it still goes
+    // through the address phase below - the floor and the creator's rules apply
+    // to an address the app named directly exactly as they do to a resolved one.
+    let (name_accepted, answer) = match target.plan {
+        PreDns::Literal(ip) => (false, vec![SocketAddr::new(ip, port)]),
+        PreDns::Resolve { name_accepted } => (
+            name_accepted,
+            match resolve_once(state, socket_id, &target.host, port).await {
+                Some(answer) => answer,
+                None => return None,
+            },
+        ),
     };
 
-    let resolve_host = target.host.clone();
+    filter_and_pick(state, socket_id, port, name_accepted, answer)
+}
+
+/// PHASE 2 proper: the single lookup, off the V8 thread and bounded.
+async fn resolve_once(
+    state: &SharedState,
+    socket_id: u32,
+    host: &str,
+    port: u16,
+) -> Option<Vec<SocketAddr>> {
+    let resolve_host = host.to_string();
     // PHASE 2 - the single resolution. Everything downstream consumes THIS
     // answer; an implementation that resolves again has taken a wrong turn.
     let resolved = compio::time::timeout(
@@ -481,10 +491,19 @@ async fn resolve_authorized_target(
             return None;
         }
     };
+    Some(answer)
+}
 
-    // PHASE 3 - the platform floor first, then the creator's rules, applied to
-    // EVERY member of the answer. The floor runs inside `filter_answer` and no
-    // verdict here can move it (INVARIANT GRANTS-NARROW).
+/// PHASE 3 - the platform floor first, then the creator's rules, applied to
+/// EVERY member of the answer. The floor runs inside `filter_answer` and no
+/// verdict here can move it (INVARIANT GRANTS-NARROW).
+fn filter_and_pick(
+    state: &SharedState,
+    socket_id: u32,
+    port: u16,
+    name_accepted: bool,
+    answer: Vec<SocketAddr>,
+) -> Option<SocketAddr> {
     let survivors = {
         let s = state.borrow();
         crate::transport::egress::filter_answer(&s.net_policy, port, name_accepted, answer)
@@ -492,12 +511,21 @@ async fn resolve_authorized_target(
     let addr = match survivors {
         Ok(kept) => kept[0],
         Err(refusal) => {
-            push_error_and_close(
-                state,
-                socket_id,
-                format!("SSRF: {refusal}"),
-                "ERR_NET_SSRF",
+            // The floor and the creator's own rules get DIFFERENT codes. They
+            // are different refusals: one the creator cannot change and one
+            // they wrote, and 5.7 asks for exactly this distinction because a
+            // v4-only range grant dropping every AAAA answer otherwise looks
+            // identical to a broken name.
+            let floor_emptied = matches!(
+                &refusal,
+                EgressRefusal::NoAddressSurvived { floor, .. } if !floor.is_empty()
             );
+            let (code, prefix) = if floor_emptied {
+                ("ERR_NET_SSRF", "SSRF")
+            } else {
+                ("ERR_NET_EGRESS_DENIED", "egress")
+            };
+            push_error_and_close(state, socket_id, format!("{prefix}: {refusal}"), code);
             return None;
         }
     };
