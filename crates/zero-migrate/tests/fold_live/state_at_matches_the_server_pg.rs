@@ -56,6 +56,16 @@
 //! why the gap survived. A test that merely omitted the op would leave a reader
 //! believing the identity is total.
 //!
+//! The consequence reaches past this file. Section E promises that five existence
+//! assertions - `TableExists`, `TableNotExists`, `ColumnExists`, `ColumnNotExists`,
+//! `RowCount` - are "answered exactly at `state_at(N)`". Two of them answer WRONG
+//! across this rename, and in the UNSAFE direction: at prefix 1 `state_at` says
+//! `person.nick` does not exist while the server still has it, so a hoisted
+//! `ColumnNotExists("nick")` would be SATISFIED at preflight against a database where
+//! it is false. That is a wrong ACCEPT, which is the opposite of the wrong-refusal
+//! direction `effect_of` is deliberately tuned toward. This file measures it; fixing
+//! it is step 6's problem.
+//!
 //! # The introspection surface, named
 //!
 //! `expected` is `render::fold::effects::state_at(&live_at_0, &ops, k, ..)`.
