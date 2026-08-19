@@ -268,10 +268,34 @@ impl SchemaRenderer for SqliteSchemaRenderer {
                 Some(serde_json::Value::Bool(_)) => "INTEGER".to_string(),
                 _ => "TEXT".to_string(),
             },
-            Some("bigint") | Some("int8") | Some("integer") | Some("int") | Some("int4") => {
-                "INTEGER".to_string()
-            }
+            // `bigInt` is the DSL token — the one `render::lower::col_type_to_token`
+            // emits for `ColType::BigInt` and the one the SDK's `t.bigInt()` writes.
+            // Only the SQL type NAMES (`bigint`, `int8`, `int4`) were listed here, so
+            // the token the rest of this codebase actually produces reached the
+            // `_ => "TEXT"` arm below and the column was declared TEXT — TEXT affinity,
+            // which converts an integer to its decimal string on the way in. The SQLite
+            // 12-step rebuild re-renders `CREATE TABLE` from this map and copies every
+            // existing row through it, so a `renameColumn` on an unrelated column of
+            // the same table silently rewrote a `t.bigInt()` column's values to
+            // strings. Measured against a live database in
+            // `tests/fold_live/sqlite_field_def_type_tokens_live.rs`.
+            //
+            // The two sibling emitters already spelled it this way and this arm was the
+            // odd one out: `def_to_pg_type` maps `Some("bigInt") => "BIGINT"`, the MySQL
+            // arm lists `Some("bigInt") | Some("bigint") | Some("int8")`, and
+            // `def_to_constraints_for_dialect` — 700 lines below in THIS file — already
+            // lists `Some("bigInt")` among the numeric tokens whose DEFAULT it renders.
+            // A `t.bigInt()` column therefore kept its DEFAULT while losing its type.
+            Some("bigInt") | Some("bigint") | Some("int8") | Some("integer") | Some("int")
+            | Some("int4") => "INTEGER".to_string(),
             Some("smallInt") => "INTEGER".to_string(),
+            // `ColType::Bytes`'s own doc-comment is "`BYTEA` on PG, `BLOB` on SQLite",
+            // and the MySQL arm maps it to `LONGBLOB`. SQLite had no arm at all, so a
+            // `bytes` column was re-declared TEXT by a rebuild. TEXT affinity leaves an
+            // already-stored BLOB value alone, so this did not corrupt existing rows the
+            // way the `bigInt` gap did; what it broke is the declared type every later
+            // write and index build resolves against.
+            Some("bytes") => "BLOB".to_string(),
             Some("inet") => "TEXT".to_string(),
             _ => "TEXT".to_string(),
         }
