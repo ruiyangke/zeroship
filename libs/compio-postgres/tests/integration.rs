@@ -2165,7 +2165,13 @@ async fn sslmode_require_fails_closed_over_a_plaintext_server() {
         .await
         .err()
         .expect("sslmode=require must not succeed over a plaintext connection");
-    assert_eq!(err.to_string(), "error performing TLS handshake");
+    // "could not be negotiated", NOT "handshake failed". The two are separate
+    // error kinds because `sslmode=prefer` retries a failed HANDSHAKE in
+    // plaintext and must retry nothing else; nothing was handshaken here, so
+    // this is the negotiation kind. Getting the pair backwards would give
+    // `prefer` a plaintext retry after a refusal it should have accepted on
+    // the same socket.
+    assert_eq!(err.to_string(), "TLS could not be negotiated");
 
     let err = Pool::connect(&require, 2)
         .await
@@ -2185,14 +2191,18 @@ async fn sslmode_require_fails_closed_over_a_plaintext_server() {
     );
     #[cfg(feature = "tls")]
     assert!(
-        cause.contains("server does not support TLS"),
+        cause.contains("does not support SSL"),
         "the failure should be the server's refusal, got: {cause}"
     );
 }
 
 /// `sslnegotiation=direct` under `sslmode=prefer` is the one TLS combination no
 /// build can serve: a mode that permits plaintext must not drive a TLS-only
-/// handshake. The pool rejects it before spending its retry budget.
+/// handshake, because a direct handshake sends no `SSLRequest` and so has no
+/// negotiation to fall back from. libpq rejects the pairing in
+/// `connectOptions2`; this driver rejects it in `Config::validate_tls_settings`,
+/// which every entry point calls - so the pool answers before spending its
+/// retry budget, and `Config::connect` answers before opening a socket.
 #[compio::test]
 async fn sslnegotiation_direct_under_prefer_is_rejected_by_the_pool() {
     let Some(url) = require_pg().await else {

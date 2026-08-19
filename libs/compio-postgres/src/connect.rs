@@ -206,20 +206,21 @@ where
         // TLS first, and the handshake is what failed: dial again, in the clear.
         //
         // KNOWN SHARP EDGE, and it is libpq's. "The handshake failed" includes
-        // "the certificate did not verify", because at this point the two are
-        // the same event - `pqsecure_open_client` reports one status for both,
-        // and so does rustls. So `sslmode=prefer sslrootcert=<ca>` against a
-        // server presenting a bad certificate does not fail: it silently
-        // downgrades to plaintext. That was raised on pgsql-hackers in 2016 and
-        // libpq still behaves this way.
+        // "the certificate did not verify": libpq's retry site is the single
+        // `pollres == PGRES_POLLING_FAILED` arm after `pqsecure_open_client`,
+        // which reports one status for a protocol failure and a verification
+        // failure alike, and rustls gives us one error for both too. So
+        // `sslmode=prefer sslrootcert=<ca>` against a server presenting a bad
+        // certificate does not fail - it silently downgrades to plaintext.
         //
         // We reproduce it because this is a driver and `prefer` is libpq's
         // word, not ours. The mode's own documentation says it "makes no sense
         // from a security point of view"; a deployment that cares names a
         // stronger mode, and `verify-ca`/`verify-full` cannot reach this arm at
-        // all. (Npgsql took the other road and made the unverified outcome an
-        // explicit opt-in. If that is wanted here it is a deliberate
-        // divergence, and it belongs in one place: this arm.)
+        // all. The alternative - refusing to downgrade once trust anchors were
+        // named, on the grounds that naming them is a statement of intent - is
+        // a deliberate divergence from libpq rather than a bug fix, and if it
+        // is ever wanted it belongs here, in this one arm.
         (SslMode::Prefer, Encryption::Tls) if err.is_tls_handshake() => Encryption::Plaintext,
         // Plaintext first, and it failed for any reason: dial again, with TLS.
         (SslMode::Allow, Encryption::Plaintext) => Encryption::Tls,
