@@ -1005,7 +1005,6 @@ mod tests {
                 }],
                 max_sockets: 8,
                 egress_ceiling_bytes: 2 * 1024 * 1024,
-                ..AppNetPolicy::default()
             },
         );
         match &policy {
@@ -1051,7 +1050,6 @@ mod tests {
                 ],
                 max_sockets: 4,
                 egress_ceiling_bytes: 1024 * 1024,
-                ..AppNetPolicy::default()
             },
         );
         let NetPolicy::Rules { rules, .. } = &policy else {
@@ -1135,7 +1133,6 @@ mod tests {
                 }],
                 max_sockets: u32::MAX,
                 egress_ceiling_bytes: u64::MAX,
-                ..AppNetPolicy::default()
             },
         );
         assert!(
@@ -1179,7 +1176,6 @@ mod tests {
                         }],
                         max_sockets: 6,
                         egress_ceiling_bytes: 1024 * 1024,
-                        ..AppNetPolicy::default()
                     },
                     None,
                     None,

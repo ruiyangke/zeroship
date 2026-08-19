@@ -758,7 +758,6 @@ mod tests {
                 }],
                 max_sockets: 4,
                 egress_ceiling_bytes: 1024 * 1024,
-                ..AppNetPolicy::default()
             },
         };
         assert!(

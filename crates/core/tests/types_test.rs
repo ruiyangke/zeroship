@@ -7,7 +7,6 @@ use zeroship_core::types::{
     AccountState, AppNetPolicy, AppRuntimeLimits, AppUsage, AppVersionInfo, ControlEvent,
     NetEgressEntry, RouteEntry, SpendState,
 };
-use zeroship_core::net_policy::Verdict;
 use std::collections::HashMap;
 use uuid::Uuid;
 
