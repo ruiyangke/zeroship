@@ -548,6 +548,18 @@ jobs:
           # its own number, which is the only thing that would justify fitting
           # this to the real value. The step prints the count on every run; the
           # first CI number that appears is what to set here.
+          #
+          # The count is one LOWER than it was, deliberately, and the floor does
+          # not move for it. `libs/compio-postgres/tests/tls_live.rs` used to be
+          # built by this job and contribute nothing: the whole file was
+          # `#![cfg(feature = "tls")]`, so without the feature it compiled to an
+          # empty binary that ran zero tests and reported ok. It now declares
+          # `required-features = ["tls", "live-tls-tests"]`, so it is not built
+          # here at all - a target that is visibly absent rather than one that
+          # is present and hollow. It is built and run by the two
+          # compio-postgres steps further down, which is where it can actually
+          # connect to something. Exactly one target, so the recorded local
+          # measurement of 266 becomes 265, still clear of this floor.
           floor=250
           echo "test targets built: $count (floor $floor)"
           if [ "$count" -lt "$floor" ]; then
