@@ -81,13 +81,38 @@ async fn attempt(
     target_column: &str,
     view: &str,
 ) -> Option<Outcome> {
+    attempt_under(
+        setup,
+        mutation,
+        target_table,
+        target_column,
+        view,
+        support::no_inject,
+    )
+    .await
+}
+
+/// [`attempt`] with the charter chosen by the caller.
+///
+/// A vendor primitive's authority at lower is the charter's capability grant, so an
+/// arm whose fixture emits one - `createView materialized` needs
+/// `code.materialized_view` - has to author it. Every other arm keeps `no_inject`,
+/// so widening the charter here cannot quietly widen theirs.
+async fn attempt_under(
+    setup: &str,
+    mutation: &str,
+    target_table: &str,
+    target_column: &str,
+    view: &str,
+    policy_for: fn(&str) -> zero_migrate::EffectivePolicy,
+) -> Option<Outcome> {
     let Some(url) = support::pg_url() else {
         support::announce_live_db_skip(support::PG_URL_ENV);
         return None;
     };
     let session = PgDevSession::connect(&url);
     let schema = token();
-    let policy = support::no_inject(&schema);
+    let policy = policy_for(&schema);
     let mut cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy.clone());
     cfg.pg.meta_schema = format!("meta_{schema}");
     let quoted_schema = quote_ident(&cfg.project_schema);
@@ -107,7 +132,7 @@ async fn attempt(
             .ensure_journal(&cfg)
             .await
             .map_err(|error| format!("ensure migration journal: {error}"))?;
-        let policy = support::no_inject(&cfg.project_schema);
+        let policy = policy_for(&cfg.project_schema);
 
         apply_envelope(
             &backend,
@@ -224,6 +249,15 @@ async fn column_exists(
         .map_err(|error| format!("decode column presence: {error}"))
 }
 
+/// Whether a relation of ANY kind is live in the project schema.
+///
+/// Read from `pg_class`, NOT from `information_schema.tables`. PostgreSQL omits
+/// materialized views from `information_schema` entirely, so the
+/// `information_schema` form this replaces reports a committed matview as ABSENT -
+/// which is a residue probe that fails toward "nothing was left behind", the exact
+/// direction a half-migration test must never fail in. Measured against the live
+/// server before this was changed: `information_schema.tables` = 0, `pg_class` = 1
+/// for the same matview.
 async fn relation_exists(
     session: &PgDevSession,
     cfg: &ExecutorConfig,
@@ -232,8 +266,9 @@ async fn relation_exists(
     let row = session
         .query_one(
             "SELECT EXISTS (
-                 SELECT 1 FROM information_schema.tables
-                  WHERE table_schema = $1 AND table_name = $2
+                 SELECT 1 FROM pg_class c
+                   JOIN pg_namespace n ON n.oid = c.relnamespace
+                  WHERE n.nspname = $1 AND c.relname = $2
              ) AS present",
             &[cfg.project_schema.as_str().into(), relation.into()],
         )
@@ -348,6 +383,143 @@ async fn a_blocked_drop_behind_a_committing_op_leaves_nothing_behind() {
         !outcome.survivor_present,
         "THE HALF MIGRATION: `addColumn survivor` committed before the drop was \
          refused, leaving a schema that is neither the old shape nor the new one"
+    );
+}
+
+/// **The capability the op-derived prefix test adds, adjudicated by the server.**
+///
+/// `CREATE MATERIALIZED VIEW` is a shape this engine really emits and which
+/// provably clears no obstruction: it creates a NEW relation, and PostgreSQL has no
+/// `CREATE OR REPLACE MATERIALIZED VIEW` at all - the renderer refuses
+/// `materialized + replace` fail-closed - so it can never be the replacing leg that
+/// silently recomputes another object's dependency edges.
+///
+/// The SQL whitelist this replaces could not see that. `CREATE MATERIALIZED VIEW`
+/// parses as a `CreateTableAsStmt`, which was outside the list, so it answered "may
+/// clear an obstruction", the hoist was disarmed, and the plan half-applied. It was
+/// one of five renderer-emitted additive shapes measured to answer that way on
+/// `839b9aca`.
+///
+/// THE ORACLE IS THE SERVER, AND IT IS ASSERTED FIRST. Before anything is claimed
+/// about the engine, this drives a matview and then the blocked drop through raw
+/// SQL on the live connection and reads PostgreSQL's own verdict: the drop is still
+/// refused, and the `DETAIL` names only the ordinary view. That is what "the matview
+/// clears nothing" MEANS, and it is measured rather than reasoned about.
+#[compio::test]
+async fn a_drop_behind_a_created_matview_leaves_nothing_behind() {
+    let Some(url) = support::pg_url() else {
+        support::announce_live_db_skip(support::PG_URL_ENV);
+        return;
+    };
+
+    // ---- STAGE 1: the external oracle. PostgreSQL's answer, before the engine's.
+    {
+        let session = PgDevSession::connect(&url);
+        let schema = token();
+        let quoted = quote_ident(&schema);
+        let _guard = support::SchemaGuard::arm(&session, [schema.clone()]);
+        session
+            .batch(&format!(
+                "CREATE SCHEMA {quoted}; \
+                 CREATE TABLE {quoted}.\"t\" (\"id\" int PRIMARY KEY, \"doomed\" int); \
+                 CREATE VIEW {quoted}.\"reader\" AS SELECT \"doomed\" FROM {quoted}.\"t\"; \
+                 CREATE MATERIALIZED VIEW {quoted}.\"mv\" AS SELECT \"id\" FROM {quoted}.\"t\""
+            ))
+            .await
+            .expect("the oracle fixture must build");
+        session
+            .batch(&format!(
+                "ALTER TABLE {quoted}.\"t\" DROP COLUMN \"doomed\""
+            ))
+            .await
+            .expect_err("the ordinary view still blocks the drop AFTER the matview ran");
+
+        // WHICH objects block it, read straight out of `pg_depend`/`pg_rewrite`
+        // rather than from the engine's own predicate - an engine-authored query
+        // here would be the artifact grading its own homework.
+        let blockers = session
+            .query(
+                "SELECT DISTINCT dependent.relname AS name
+                   FROM pg_depend d
+                   JOIN pg_rewrite r ON r.oid = d.objid
+                   JOIN pg_class dependent ON dependent.oid = r.ev_class
+                   JOIN pg_class src ON src.oid = d.refobjid
+                   JOIN pg_namespace n ON n.oid = src.relnamespace
+                   JOIN pg_attribute a
+                     ON a.attrelid = src.oid AND a.attnum = d.refobjsubid
+                  WHERE n.nspname = $1 AND src.relname = $2 AND a.attname = $3
+                    AND dependent.oid <> src.oid",
+                &[schema.as_str().into(), "t".into(), "doomed".into()],
+            )
+            .await
+            .expect("read the blocker set out of pg_depend");
+        let names: Vec<String> = blockers
+            .iter()
+            .map(|row| row.try_get::<_, String>("name").expect("decode relname"))
+            .collect();
+        assert!(
+            names.iter().any(|n| n == "reader"),
+            "the ordinary view must be in the blocker set: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n == "mv"),
+            "THE ORACLE: the matview must NOT be in the blocker set. It reads a \
+             different column, so creating it neither adds nor removes a blocker on \
+             `doomed` - which is what makes hoisting the drop's assertion behind it \
+             correct rather than merely convenient: {names:?}"
+        );
+        session
+            .batch(&format!("DROP SCHEMA {quoted} CASCADE"))
+            .await
+            .expect("drop the oracle schema");
+    }
+
+    // ---- STAGE 2: the engine, against the answer the server just gave.
+    let Some(outcome) = attempt_under(
+        &fixture("mvsrc", "mvsrc_reader", "doomed"),
+        &format!(
+            r#"{{
+              "ir_version": 1,
+              "name": "drop_behind_a_created_matview",
+              "owner_app": "{OWNER}",
+              "ops": [
+                {{"op":"createView","name":"mvsrc_residue","materialized":true,
+                  "query":{{"kind":"structured","select":{{
+                    "from":{{"name":"mvsrc"}},
+                    "projection":[{{"kind":"colRef","name":"id"}}]}}}}}},
+                {{"op":"dropColumn","table":"mvsrc","column":"doomed"}}
+              ]
+            }}"#
+        ),
+        "mvsrc",
+        "doomed",
+        // The residue probe slot, read from `pg_class` so a committed matview is
+        // actually visible to it.
+        "mvsrc_residue",
+        support::operator_charter,
+    )
+    .await
+    else {
+        return;
+    };
+
+    let error = outcome
+        .applied
+        .expect_err("a view reads the column, so the drop must still be refused");
+    assert!(
+        error.contains("ColumnHasNoBlockingDependents") && error.contains("doomed"),
+        "the refusal must still read as the per-migration one does: {error}"
+    );
+    assert!(
+        outcome.target_column_present,
+        "the refused drop must leave its own column alone"
+    );
+    assert!(
+        !outcome.view_present,
+        "THE HALF MIGRATION THIS CLOSES: the matview must NOT have committed. The \
+         server says it clears no obstruction, so the drop's assertion is answerable \
+         before the plan starts and the whole plan is refused with nothing applied. \
+         A residue here is the SQL whitelist's over-conservative verdict coming back"
     );
 }
 

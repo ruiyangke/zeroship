@@ -30,69 +30,112 @@
 //! to met. `[dropView, dropColumn]` is the ordinary shape: the view the catalog
 //! reports as the blocker is removed by the plan itself, one step earlier.
 //!
-//! # The classification: OBSTRUCTION assertions, and everything else
+//! # The classification: does the assertion range over objects the model carries?
 //!
 //! Classifying by VARIANT ALONE is measurably wrong - every variant can be
-//! flipped from unmet to met by SOME earlier step. But the variants do split
-//! cleanly on how they respond to the ordinary ADDITIVE work a plan does, and
-//! that split is the whole mechanism:
+//! flipped from unmet to met by SOME earlier step. The variants do split cleanly,
+//! but NOT on the axis this module first shipped with.
+//!
+//! The axis used to be "additive versus removal" - a property of how the assertion
+//! responds to the ordinary work a plan does. Since the effect model it is **does
+//! this assertion range over objects the model carries** - a property of the
+//! MODEL'S CLOSURE. The two agree on today's verdicts and disagree about why, and
+//! the second one is the reason the answer cannot be improved by trying harder:
 //!
 //! - An **obstruction** assertion - [`Precondition::ColumnHasNoBlockingDependents`]
-//!   and [`Precondition::ColumnTypeChangeHasNoBlockers`] - asserts that NOTHING IS
-//!   IN THE WAY of an operation on an object that must already exist. It can only
-//!   be repaired by REMOVING something: a dependent object, a dependency edge, an
-//!   inheritance link, a partition-key membership. A step that only ADDS catalog
-//!   facts cannot repair it. (It can BREAK one - `CREATE VIEW` over the column
-//!   does - but that direction is met-to-unmet, which the per-migration seam
-//!   still catches, exactly as today.)
+//!   and [`Precondition::ColumnTypeChangeHasNoBlockers`] - ranges over `pg_depend`
+//!   EDGES, inheritance links and partition-key memberships. Those are not in the
+//!   schema model and CANNOT BE, because the blocker set includes objects this
+//!   engine never created: a DBA's view, another application's foreign key, an
+//!   inheritance child. The effect model can prove a plan REMOVES a named blocker.
+//!   It cannot ENUMERATE the blocker set. **A live query at step 0 is still
+//!   required**, and that is what this phase does. It can only be repaired by
+//!   REMOVING something, so a prefix that removes nothing leaves the pre-plan
+//!   answer valid. (An earlier step can BREAK one - `CREATE VIEW` over the column
+//!   does - but that direction is met-to-unmet, which the per-migration seam still
+//!   catches, exactly as today.)
 //! - An **existence** assertion - [`Precondition::TableExists`],
 //!   [`Precondition::TableNotExists`], [`Precondition::ColumnExists`],
-//!   [`Precondition::ColumnNotExists`], [`Precondition::RowCount`] - is repaired
-//!   by precisely the additive work a plan is made of. `CREATE TABLE` is what
-//!   makes `TableExists` true. For these, ADDITIVITY IS NOT INNOCENCE, it is the
-//!   repair, so no prefix test can license hoisting one. They are answerable
-//!   pre-plan only when there is no earlier step at all, which is a behavioural
-//!   no-op.
+//!   [`Precondition::ColumnNotExists`], [`Precondition::RowCount`] - ranges over
+//!   objects the model NAMES. `render::fold::effects::state_at` answers them
+//!   exactly, given the introspected schema at step 0 and the ops the prefix
+//!   replays. They are STILL `Answerability::PlanDependent` here, and still never
+//!   hoisted, because hoisting them is a NEW GATE that can refuse a plan which
+//!   previously applied - step 6 of the proposal, deliberately behind a flag and
+//!   deliberately after `state_at` has been trusted in production. What changed at
+//!   step 5 is that they became ANSWERABLE; what has not changed is that this
+//!   module does not yet answer them. They stay `Answerability::PlanDependent`.
 //! - [`Precondition::SqlBoolean`] is untrusted opaque SQL. The engine cannot
 //!   enumerate what it reads, so no earlier step can be proven not to repair it,
-//!   and hoisting would run untrusted SQL an extra time.
+//!   and hoisting would run untrusted SQL an extra time. Undecidable, permanently.
 //!
-//! So the prefix test the engine actually needs is ONE boolean per step - "can
-//! this step clear an obstruction?" - rather than a per-object effect ledger.
-//! A ledger would have to be right about creation, deletion, column addition,
-//! column removal and row counts independently, each silently wrong until some
-//! plan exercised it, and each wrong in the over-refusal direction. One boolean
-//! on the axis that matters is auditable by reading the whitelist once.
+//! # The prefix test reads the OP, not the rendered SQL
+//!
+//! The question is still ONE boolean per step - "can this step clear an
+//! obstruction?" - and this module still does not maintain a per-object ledger. The
+//! change is WHERE THE BOOLEAN COMES FROM.
+//!
+//! It used to come from parsing each step's rendered `up` with PostgreSQL's parser
+//! and matching the parse tree against a whitelist. That had three costs, and all
+//! three are gone:
+//!
+//! 1. it made core code hold a VENDOR PARSER and apply it dialect-blind, in a module
+//!    with no [`SqlDialect`](crate::SqlDialect) reference of its own;
+//! 2. it needed a whitelist at all, because a parse tree cannot tell `CREATE VIEW`
+//!    from `CREATE OR REPLACE VIEW` - the shape that silently recomputes a view's
+//!    dependency edges and so removes a column's blocker with no `DROP` anywhere;
+//! 3. its `_ => false` fallback answered for every shape nobody had thought about,
+//!    and it answered CONSERVATIVELY - which is safe, but was measurably
+//!    over-conservative on five shapes this engine really emits, including
+//!    `CREATE MATERIALIZED VIEW`. Each one silently disarmed the hoist and let a
+//!    plan half-apply.
+//!
+//! The verdict now comes from [`Effect`], stamped on each unit at IR-lower time from
+//! the op it was lowered from. `Op::CreateView` carries `replace` as a NAMED FIELD,
+//! so the case the whitelist existed for is right by construction, and the match in
+//! `render::fold::effects::effect_of` is EXHAUSTIVE - a new `Op` variant is a
+//! compile error rather than a silent guess.
 //!
 //! # Direction of every unknown
 //!
-//! [`clears_no_obstruction`] is a WHITELIST. An `up` that does not parse, a
-//! statement shape outside the list, an `ALTER TABLE` subcommand outside the
-//! list, a `DO $$ ... $$` block whose DDL is inside a string, a structured step
-//! whose SQL is generated at apply time - all answer `false`, which means the
-//! precondition behind them is NOT hoisted and lands back on the per-migration
-//! seam. Every unknown therefore falls toward TODAY'S BEHAVIOUR rather than
-//! toward a new refusal.
+//! A step with NO op provenance - a `.sql` migration, a declarative plan, the
+//! empty-plan journal anchor, a hand-built [`PlanStep`] - carries no [`Effect`], and
+//! [`clears_no_obstruction`] reads that absence as "may remove". So does
+//! `Op::PgRaw`, whose SQL this engine did not generate. Every unknown therefore
+//! falls toward TODAY'S BEHAVIOUR - the precondition lands back on the
+//! per-migration seam - rather than toward a new refusal.
+//!
+//! Note the two are different questions with the same answer, and the proposal's
+//! "delete the `_ => false` fallback" means the FIRST one only. An exhaustive op
+//! match has no fallback; an unstamped step has no op. Conflating them would claim
+//! a guarantee this module does not have.
 
 use std::collections::BTreeSet;
 
-use pg_query::protobuf::node::Node as NodeEnum;
-use pg_query::protobuf::AlterTableType;
+use zero_migrate_ir::effect::Effect;
 
 use crate::model::precondition::{OnUnmet, Precondition};
 use crate::render::step::PlanStep;
 
-/// Whether an assertion is one the plan's ADDITIVE work cannot satisfy.
+/// Whether an assertion is one this phase may hoist to the pre-plan database.
 ///
 /// See the module docs. This is the axis the whole mechanism turns on, and it is
 /// a property of the QUESTION, not of the plan.
+///
+/// **NOT retired by the effect model, and that is the honest answer** rather than a
+/// missing feature. `state_at` makes the five existence variants ANSWERABLE; it
+/// cannot make the two obstruction variants answerable, because their blocker set
+/// includes objects the model never carried. So the classification survives, its
+/// axis is redrawn, and its effect inverts: the variants that used to be excluded
+/// for being repairable are now excluded only until step 6 turns them on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Answerability {
-    /// "Nothing is in the way." Repaired only by REMOVAL, so a plan prefix that
-    /// removes nothing leaves the pre-plan answer valid.
+    /// "Nothing is in the way." Ranges over catalog EDGES the model does not carry,
+    /// so it needs a live query - and a plan prefix that removes nothing leaves that
+    /// live answer valid.
     Obstruction,
-    /// Repaired by ordinary additive work, or unknowable. Never hoisted behind
-    /// another step.
+    /// Answerable from the model (the five existence variants) or unknowable
+    /// ([`Precondition::SqlBoolean`]). Never hoisted by THIS phase.
     PlanDependent,
 }
 
@@ -101,7 +144,9 @@ pub(crate) const fn answerability(check: &Precondition) -> Answerability {
     match check {
         // Both read `pg_depend` NORMAL edges pointing AT the column (plus, for the
         // retype, partition-key membership and inheritance). Every one of those is
-        // an existing catalog fact that only a removal can clear.
+        // an existing catalog fact that only a removal can clear, and NONE of them
+        // is reachable from the schema model - which is exactly why this phase
+        // exists and why an effect model cannot replace it.
         Precondition::ColumnHasNoBlockingDependents { .. }
         | Precondition::ColumnTypeChangeHasNoBlockers { .. } => Answerability::Obstruction,
         Precondition::TableExists { .. }
@@ -208,113 +253,39 @@ pub(crate) fn plan_declares_hoistable_shape(steps: &[PlanStep]) -> bool {
 /// `pg_depend` edge pointing at a column, cannot clear an inheritance link, and
 /// cannot clear a partition-key membership.
 ///
-/// A WHITELIST, and deliberately so. The question "does this remove a
-/// dependency?" invites classifying a shape by what it is called - and
-/// `CREATE OR REPLACE VIEW`, which this engine really does emit
-/// (`render/renderer.rs`, PostgreSQL's `CreateOrReplaceView` capability), reads
-/// as a creation while it silently recomputes the view's dependency edges and so
-/// removes a column's blocker with no `DROP` anywhere. Asking instead "is this
-/// one of the shapes proven to add only?" gets that case right by construction,
-/// and gets every shape nobody has thought about yet right too.
+/// Read off the [`Effect`] the lower stamped from the step's OP, never off the
+/// rendered SQL. See the module docs for why the altitude matters: the shape that
+/// forces the question is `CREATE OR REPLACE VIEW`, which reads as a creation while
+/// it silently recomputes the view's dependency edges, and the op settles it with a
+/// named `replace` field where a parse tree needed a whitelist.
+///
+/// An UNSTAMPED `Ddl` step answers `false`. That is the same fail-closed direction
+/// the whitelist's `_ => false` had, for a different reason: no op provenance rather
+/// than no matching shape.
 pub(crate) fn clears_no_obstruction(step: &PlanStep) -> bool {
     match step {
-        PlanStep::Ddl(m) => sql_clears_no_obstruction(&m.up),
+        PlanStep::Ddl(m) => m.effect.is_some_and(Effect::adds_only),
         // A parameterized INSERT/UPDATE/DELETE over a structurally known table.
         // Rows are not catalog facts: no row change can remove a `pg_depend` edge,
         // an inheritance link, or a partition-key membership. The template is
         // built by `render::dml`, which emits those three statements and nothing
-        // else, so a `Dml` step cannot carry DDL.
+        // else, so a `Dml` step cannot carry DDL. Structurally true - these steps
+        // carry no `Migration` and so no stamp.
         PlanStep::Dml { .. } | PlanStep::Backfill { .. } => true,
         // These render their DDL at APPLY time against the live catalog they are
         // validated by, so the step carries the intent and not the statements. A
-        // primary-key replacement in particular drops a constraint and its index.
+        // primary-key replacement in particular drops a constraint and its index,
+        // and an online rename ends by dropping the old column.
+        //
+        // Left as a step-kind verdict rather than routed through the stamp, and the
+        // two agree: `effect_of` classifies `Op::AlterPrimaryKey`,
+        // `Op::SynchronizeIdentity`, `Op::RenameColumn` and `Op::RenameTable` as
+        // removals too. Pinned by `the_step_kind_verdicts_agree_with_the_op_model`
+        // so the duplication cannot drift silently.
         PlanStep::AlterPrimaryKey(_)
         | PlanStep::SynchronizeIdentity(_)
         | PlanStep::OnlineRename(_) => false,
     }
-}
-
-/// Read a rendered statement bundle. A `Migration.up` is `statements.join(";\n")`
-/// and really can carry several, so every statement is judged.
-fn sql_clears_no_obstruction(sql: &str) -> bool {
-    let Ok(parsed) = pg_query::parse(sql) else {
-        return false;
-    };
-    parsed.protobuf.stmts.iter().all(|raw| {
-        raw.stmt
-            .as_ref()
-            .and_then(|node| node.node.as_ref())
-            .is_some_and(statement_clears_no_obstruction)
-    })
-}
-
-/// One statement's verdict.
-fn statement_clears_no_obstruction(node: &NodeEnum) -> bool {
-    match node {
-        NodeEnum::AlterTableStmt(alter) => alter.cmds.iter().all(|cmd| {
-            matches!(cmd.node.as_ref(), Some(NodeEnum::AlterTableCmd(cmd))
-                if subtype_clears_no_obstruction(cmd.subtype))
-        }),
-        // A REPLACE recomputes the object's dependency edges, so a body that stops
-        // reading a column removes that column's blocker without any DROP. Only
-        // the non-replacing forms are additive.
-        NodeEnum::ViewStmt(view) => !view.replace,
-        NodeEnum::CreateFunctionStmt(function) => !function.replace,
-        // Purely additive, and none of them can touch an existing column's
-        // dependency edges, inheritance, or partition-key membership.
-        //
-        // `CreateStmt` covers `CREATE TABLE ... PARTITION OF`, which RAISES the new
-        // child's `attinhcount` rather than lowering anybody's.
-        NodeEnum::CreateStmt(_)
-        | NodeEnum::IndexStmt(_)
-        | NodeEnum::CreateSeqStmt(_)
-        | NodeEnum::CreateEnumStmt(_)
-        | NodeEnum::CreateDomainStmt(_)
-        | NodeEnum::CreateSchemaStmt(_)
-        | NodeEnum::CreateExtensionStmt(_)
-        | NodeEnum::CreateTrigStmt(_)
-        | NodeEnum::CreatePolicyStmt(_)
-        | NodeEnum::CommentStmt(_)
-        // GRANT and REVOKE both parse here. A privilege is not a `pg_depend` edge
-        // on a column.
-        | NodeEnum::GrantStmt(_)
-        // The empty-plan journal anchor renders `SELECT 1`.
-        | NodeEnum::SelectStmt(_) => true,
-        // Everything else. Notably every `DROP`, every `RENAME` (which removes a
-        // name as well as creating one), `DROP OWNED BY`, and every
-        // `DO $$ ... $$` block, whose DDL sits inside a string no parse can see
-        // through.
-        _ => false,
-    }
-}
-
-/// One `ALTER TABLE` subcommand's verdict.
-///
-/// Excluded on purpose, each because it really can clear an obstruction:
-/// `DROP COLUMN` and `DROP CONSTRAINT` remove the dependent outright;
-/// `ALTER COLUMN ... TYPE` rebuilds whatever depended on the old type;
-/// `SET`/`DROP DEFAULT` replaces the `pg_attrdef` entry and its edges;
-/// `DROP EXPRESSION` and `DROP IDENTITY` remove the generated/identity
-/// machinery; `NO INHERIT` clears `attinhcount`; `DETACH PARTITION` clears both
-/// inheritance and partition-key membership on the detached child. Every
-/// subcommand not named below, including any this engine does not emit today,
-/// is excluded as well.
-fn subtype_clears_no_obstruction(subtype: i32) -> bool {
-    matches!(
-        AlterTableType::try_from(subtype),
-        Ok(AlterTableType::AtAddColumn
-            | AlterTableType::AtAddColumnToView
-            | AlterTableType::AtAddConstraint
-            | AlterTableType::AtAddIndex
-            | AlterTableType::AtValidateConstraint
-            | AlterTableType::AtSetNotNull
-            | AlterTableType::AtDropNotNull
-            | AlterTableType::AtAttachPartition
-            | AlterTableType::AtEnableRowSecurity
-            | AlterTableType::AtDisableRowSecurity
-            | AlterTableType::AtForceRowSecurity
-            | AlterTableType::AtNoForceRowSecurity)
-    )
 }
 
 #[cfg(test)]
@@ -325,7 +296,18 @@ mod tests {
     };
     use crate::model::precondition::PreconditionCheck;
 
-    fn ddl(version: &str, up: &str, checks: Vec<PreconditionCheck>) -> PlanStep {
+    /// A `Ddl` step carrying the effect the lower would have stamped on it.
+    ///
+    /// The `up` is now DECORATION for these tests - it is journalled and reported,
+    /// but no longer read to decide anything. That is the change under test, and it
+    /// is why several arms below pair an `up` with an effect the old SQL whitelist
+    /// would have disagreed about.
+    fn ddl(
+        version: &str,
+        up: &str,
+        effect: Option<Effect>,
+        checks: Vec<PreconditionCheck>,
+    ) -> PlanStep {
         let mut m = Migration {
             version: MigrationId::derive(version, up.as_bytes()),
             name: version.to_string(),
@@ -346,9 +328,20 @@ mod tests {
             supersedes: Vec::new(),
             preconditions: checks,
             existence_guard: None,
+            effect,
         };
         m.checksum = Checksum::of(&ChecksumInput::from_migration(&m));
         PlanStep::Ddl(m)
+    }
+
+    /// A step the lower proved additive.
+    fn adds(version: &str, up: &str, checks: Vec<PreconditionCheck>) -> PlanStep {
+        ddl(version, up, Some(Effect::AddsOnly), checks)
+    }
+
+    /// A step the lower could not prove additive.
+    fn removes(version: &str, up: &str, checks: Vec<PreconditionCheck>) -> PlanStep {
+        ddl(version, up, Some(Effect::MayRemove), checks)
     }
 
     fn drop_blocked(table: &str, column: &str) -> Precondition {
@@ -358,72 +351,75 @@ mod tests {
         }
     }
 
-    /// The shapes the engine's PostgreSQL renderer emits that ADD only. A plan
-    /// prefix of these leaves an obstruction assertion's pre-plan answer valid.
+    /// The verdict is read off the STAMP, not off the `up`.
+    ///
+    /// Both arms pair an `up` with the OPPOSITE of what the deleted SQL whitelist
+    /// would have said about it, so a reintroduced parser fails this test rather
+    /// than passing it quietly. The first `up` is `CREATE MATERIALIZED VIEW`, which
+    /// the whitelist could not prove additive and which a live PostgreSQL says
+    /// clears nothing; the second is an `ADD COLUMN`, which it could.
     #[test]
-    fn the_additive_shapes_the_renderer_emits_clear_nothing() {
-        for sql in [
-            r#"ALTER TABLE "s"."t" ADD COLUMN "survivor" text"#,
-            r#"ALTER TABLE "s"."t" ADD COLUMN "a" text, ADD COLUMN "b" text"#,
-            r#"ALTER TABLE "s"."t" ADD CONSTRAINT "u" UNIQUE ("a")"#,
-            r#"ALTER TABLE "s"."t" ADD CONSTRAINT "f" FOREIGN KEY ("a") REFERENCES "s"."o" ("id")"#,
-            r#"ALTER TABLE "s"."t" VALIDATE CONSTRAINT "f""#,
-            r#"ALTER TABLE "s"."t" ALTER COLUMN "a" SET NOT NULL"#,
-            r#"ALTER TABLE "s"."t" ENABLE ROW LEVEL SECURITY"#,
-            r#"CREATE TABLE "s"."t" ("id" int NOT NULL, "v" text)"#,
-            r#"CREATE UNIQUE INDEX IF NOT EXISTS "ix" ON "s"."t" ("a")"#,
-            r#"CREATE VIEW "s"."v" AS SELECT 1 AS a"#,
-            r#"CREATE TYPE "s"."e" AS ENUM ('a')"#,
-            r#"CREATE SEQUENCE "s"."q""#,
-            r#"CREATE POLICY "p" ON "s"."t" FOR SELECT USING (true)"#,
-            r#"COMMENT ON COLUMN "s"."t"."a" IS 'x'"#,
-            r#"GRANT SELECT ON "s"."t" TO "r""#,
-            r#"REVOKE SELECT ON "s"."t" FROM "r""#,
-            "SELECT 1",
-            // A masked addColumn is TWO statements in one `up`.
-            "ALTER TABLE \"s\".\"t\" ADD COLUMN \"secret\" bytea;\nCOMMENT ON COLUMN \"s\".\"t\".\"secret\" IS 'zero-migrate:enc'",
-        ] {
-            assert!(
-                sql_clears_no_obstruction(sql),
-                "{sql} adds only and must leave a pre-plan obstruction answer valid"
-            );
-        }
+    fn the_stamp_decides_and_the_rendered_sql_does_not() {
+        assert!(
+            clears_no_obstruction(&adds(
+                "v0",
+                r#"CREATE MATERIALIZED VIEW "s"."mv" AS SELECT "id" FROM "s"."t""#,
+                vec![],
+            )),
+            "a step the lower proved additive must clear nothing whatever its SQL parses as"
+        );
+        assert!(
+            !clears_no_obstruction(&removes(
+                "v0",
+                r#"ALTER TABLE "s"."t" ADD COLUMN "a" text"#,
+                vec![],
+            )),
+            "a step the lower could not prove additive must send the check back to the \
+             per-migration seam whatever its SQL parses as"
+        );
     }
 
-    /// Every shape that can remove a dependency edge, an inheritance link or a
-    /// partition-key membership. `CREATE OR REPLACE VIEW` is the one that reads
-    /// like a creation and is not.
+    /// A step with NO op provenance - a `.sql` migration, a declarative plan, the
+    /// empty-plan anchor, a hand-built one - falls toward today's behaviour.
     #[test]
-    fn the_removing_shapes_do_not_clear_nothing() {
-        for sql in [
-            r#"CREATE OR REPLACE VIEW "s"."v" AS SELECT 1 AS a"#,
-            r#"CREATE OR REPLACE FUNCTION "s"."f"() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$"#,
-            r#"DROP VIEW "s"."reader""#,
-            r#"DROP INDEX "s"."ix""#,
-            r#"DROP TABLE "s"."t""#,
-            r#"DROP TRIGGER "tg" ON "s"."t""#,
-            r#"DROP POLICY "p" ON "s"."t""#,
-            r#"DROP TYPE "s"."e""#,
-            r#"ALTER TABLE "s"."t" DROP COLUMN "other""#,
-            r#"ALTER TABLE "s"."t" DROP CONSTRAINT "ck""#,
-            r#"ALTER TABLE "s"."t" ALTER COLUMN "a" TYPE bigint"#,
-            r#"ALTER TABLE "s"."t" ALTER COLUMN "a" DROP DEFAULT"#,
-            r#"ALTER TABLE "s"."t" ALTER COLUMN "a" SET DEFAULT 1"#,
-            r#"ALTER TABLE "s"."t" DETACH PARTITION "s"."p""#,
-            r#"ALTER TABLE "s"."t" NO INHERIT "s"."parent""#,
-            r#"ALTER TABLE "s"."t" RENAME COLUMN "a" TO "b""#,
-            r#"ALTER TABLE "s"."t" RENAME TO "u""#,
-            "DO $$ BEGIN EXECUTE 'DROP VIEW v'; END $$",
-            // An additive statement beside a removing one is still a removal.
-            "ALTER TABLE \"s\".\"t\" ADD COLUMN \"a\" text;\nDROP VIEW \"s\".\"v\"",
-            // Unparseable text answers the same way as a removal: fail toward the
-            // per-migration seam.
-            "this is not sql at all",
+    fn an_unstamped_step_clears_nothing_provably() {
+        let steps = vec![
+            ddl("v0", r#"SELECT 1"#, None, vec![]),
+            removes(
+                "v1",
+                r#"ALTER TABLE "s"."t" DROP COLUMN "doomed""#,
+                vec![PreconditionCheck::halt(drop_blocked("t", "doomed"))],
+            ),
+        ];
+        assert!(
+            plan_stable_checks(&steps, &BTreeSet::new()).is_empty(),
+            "an unstamped step carries no proof, so the hoist must be disarmed"
+        );
+    }
+
+    /// The three step kinds decided by KIND rather than by stamp must agree with
+    /// what the op model says about the ops that produce them. The duplication is
+    /// deliberate - those steps carry intent rather than statements - but it must
+    /// not be free to drift.
+    #[test]
+    fn the_step_kind_verdicts_agree_with_the_op_model() {
+        use crate::model::ir::Op;
+        use crate::render::fold::effects::effect_of;
+
+        for source in [
+            r#"{"op":"alterPrimaryKey","table":"t",
+                "action":{"kind":"drop","expectedColumns":["id"]}}"#,
+            r#"{"op":"renameColumn","table":"t","from":"a","to":"b","type":"int"}"#,
+            r#"{"op":"synchronizeIdentity","table":"t","column":"id",
+                "writesQuiesced":"import_window"}"#,
         ] {
-            assert!(
-                !sql_clears_no_obstruction(sql),
-                "{sql} can clear an obstruction and must send the check back to the \
-                 per-migration seam"
+            let op: Op = serde_json::from_str(source)
+                .unwrap_or_else(|error| panic!("{source} must parse as an Op: {error}"));
+            assert_eq!(
+                effect_of(&op),
+                Effect::MayRemove,
+                "{source} produces a step kind `clears_no_obstruction` answers false for, \
+                 so the op model must answer the same way"
             );
         }
     }
@@ -464,8 +460,8 @@ mod tests {
             assert_eq!(
                 answerability(&check),
                 Answerability::PlanDependent,
-                "{check:?} is repaired by the ordinary additive work a plan does, so \
-                 no prefix test can license hoisting it"
+                "{check:?} does not range over catalog edges the model cannot carry, so \
+                 THIS phase is not what answers it"
             );
         }
     }
@@ -474,12 +470,12 @@ mod tests {
     #[test]
     fn a_drop_behind_an_add_is_plan_stable() {
         let steps = vec![
-            ddl(
+            adds(
                 "v0",
                 r#"ALTER TABLE "s"."t" ADD COLUMN "survivor" text"#,
                 vec![],
             ),
-            ddl(
+            removes(
                 "v1",
                 r#"ALTER TABLE "s"."t" DROP COLUMN "doomed""#,
                 vec![PreconditionCheck::halt(drop_blocked("t", "doomed"))],
@@ -492,6 +488,10 @@ mod tests {
     }
 
     /// The over-refusal control: the plan removes its own blocker one step earlier.
+    ///
+    /// `CREATE OR REPLACE VIEW` is the second arm and is the whole of decision 7 -
+    /// it reads as a creation and is not one. The op model gets it from
+    /// `Op::CreateView`'s `replace` field, which is why the whitelist could go.
     #[test]
     fn a_drop_behind_a_removal_is_left_to_the_per_migration_seam() {
         for earlier in [
@@ -499,8 +499,8 @@ mod tests {
             r#"CREATE OR REPLACE VIEW "s"."reader" AS SELECT 1 AS a"#,
         ] {
             let steps = vec![
-                ddl("v0", earlier, vec![]),
-                ddl(
+                removes("v0", earlier, vec![]),
+                removes(
                     "v1",
                     r#"ALTER TABLE "s"."t" DROP COLUMN "doomed""#,
                     vec![PreconditionCheck::halt(drop_blocked("t", "doomed"))],
@@ -519,9 +519,9 @@ mod tests {
     #[test]
     fn a_removal_early_in_the_prefix_disarms_a_later_hoist() {
         let steps = vec![
-            ddl("v0", r#"DROP VIEW "s"."reader""#, vec![]),
-            ddl("v1", r#"ALTER TABLE "s"."t" ADD COLUMN "a" text"#, vec![]),
-            ddl(
+            removes("v0", r#"DROP VIEW "s"."reader""#, vec![]),
+            adds("v1", r#"ALTER TABLE "s"."t" ADD COLUMN "a" text"#, vec![]),
+            removes(
                 "v2",
                 r#"ALTER TABLE "s"."t" DROP COLUMN "doomed""#,
                 vec![PreconditionCheck::halt(drop_blocked("t", "doomed"))],
@@ -533,8 +533,8 @@ mod tests {
     #[test]
     fn a_skip_check_is_never_plan_stable() {
         let steps = vec![
-            ddl("v0", r#"ALTER TABLE "s"."t" ADD COLUMN "a" text"#, vec![]),
-            ddl(
+            adds("v0", r#"ALTER TABLE "s"."t" ADD COLUMN "a" text"#, vec![]),
+            removes(
                 "v1",
                 r#"ALTER TABLE "s"."t" DROP COLUMN "doomed""#,
                 vec![PreconditionCheck::skip(drop_blocked("t", "doomed"))],
@@ -546,7 +546,7 @@ mod tests {
 
     #[test]
     fn a_first_step_check_is_left_where_it_is() {
-        let steps = vec![ddl(
+        let steps = vec![removes(
             "v0",
             r#"ALTER TABLE "s"."t" DROP COLUMN "doomed""#,
             vec![PreconditionCheck::halt(drop_blocked("t", "doomed"))],
@@ -563,12 +563,12 @@ mod tests {
     #[test]
     fn a_journal_satisfied_step_is_not_judged_again() {
         let steps = vec![
-            ddl(
+            adds(
                 "v0",
                 r#"ALTER TABLE "s"."t" ADD COLUMN "survivor" text"#,
                 vec![],
             ),
-            ddl(
+            removes(
                 "v1",
                 r#"ALTER TABLE "s"."t" DROP COLUMN "doomed""#,
                 vec![PreconditionCheck::halt(drop_blocked("t", "doomed"))],

@@ -1651,6 +1651,7 @@ mod pg_confinement_shape_tests {
             supersedes: Vec::new(),
             preconditions: Vec::new(),
             existence_guard: None,
+            effect: None,
         }
     }
 
@@ -1812,6 +1813,7 @@ mod non_transactional_down_tests {
             supersedes: Vec::new(),
             preconditions: Vec::new(),
             existence_guard: None,
+            effect: None,
         }
     }
 
@@ -1902,6 +1904,7 @@ mod non_txn_idempotency_tests {
             supersedes: Vec::new(),
             preconditions: Vec::new(),
             existence_guard: None,
+            effect: None,
         }
     }
 

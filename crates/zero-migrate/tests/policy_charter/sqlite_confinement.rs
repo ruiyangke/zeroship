@@ -110,6 +110,7 @@ fn mig_with_flags(up: &str, flags: MigrationFlags) -> Migration {
         supersedes: Vec::new(),
         preconditions: Vec::new(),
         existence_guard: None,
+        effect: None,
     }
 }
 

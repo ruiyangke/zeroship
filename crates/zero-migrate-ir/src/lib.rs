@@ -31,6 +31,7 @@
 pub mod backend;
 pub mod capability;
 pub mod dialect;
+pub mod effect;
 pub mod expr;
 pub mod id;
 pub mod ir;

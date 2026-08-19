@@ -325,6 +325,7 @@ mod tests {
             supersedes: Vec::new(),
             preconditions: Vec::new(),
             existence_guard: None,
+            effect: None,
         }
     }
 

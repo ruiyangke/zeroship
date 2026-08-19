@@ -454,6 +454,7 @@ async fn sqlite_rename_opens_no_obligation_and_never_gates_a_follow_on_deploy() 
         supersedes: vec![],
         preconditions: vec![],
         existence_guard: None,
+        effect: None,
     };
     engine
         .apply_plan_with_touched(
@@ -529,6 +530,7 @@ async fn sqlite_applies_a_zero_lock_budget_the_server_dialects_refuse() {
         supersedes: vec![],
         preconditions: vec![],
         existence_guard: None,
+        effect: None,
     };
 
     MigrationEngine::new()

@@ -637,6 +637,7 @@ fn rollback_migration_set(
                 supersedes: artifact.plan.supersedes.clone(),
                 preconditions: artifact.plan.preconditions.clone(),
                 existence_guard: None,
+                effect: None,
             });
             set.inverse_plans
                 .insert(forward.version.as_str().to_string(), inverse_plan.clone());

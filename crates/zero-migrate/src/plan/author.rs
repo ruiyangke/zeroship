@@ -274,6 +274,7 @@ impl DeterministicAuthor {
             supersedes: Vec::new(),
             preconditions: Vec::new(),
             existence_guard: None,
+            effect: None,
         }
     }
 }
@@ -463,6 +464,7 @@ impl RawSqlAuthor {
             supersedes: Vec::new(),
             preconditions: Vec::new(),
             existence_guard: None,
+            effect: None,
         })
     }
 }

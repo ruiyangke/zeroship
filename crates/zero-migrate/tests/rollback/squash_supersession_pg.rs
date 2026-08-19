@@ -150,6 +150,7 @@ fn squash_migration(name: &str, up: &str, supersedes: Vec<MigrationId>) -> Migra
         supersedes,
         preconditions: Vec::new(),
         existence_guard: None,
+        effect: None,
     }
 }
 

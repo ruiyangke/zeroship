@@ -747,6 +747,31 @@ pub struct Migration {
     /// when unset; it round-trips only the in-memory plan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub existence_guard: Option<crate::probe::GuardProbe>,
+    /// What the OP this unit was lowered from does to the catalog facts an
+    /// obstruction assertion reads, stamped at IR-lower time by `lower_one_op` -
+    /// the one place that holds an op and the units it produced at the same time.
+    ///
+    /// This is what lets the plan-wide precondition preflight ask "can an earlier
+    /// step of this plan remove the blocker?" WITHOUT parsing the rendered `up`.
+    /// Reading rendered SQL was the wrong altitude: a parse tree cannot tell
+    /// `CREATE VIEW` from `CREATE OR REPLACE VIEW` without a whitelist, while the op
+    /// carries `replace` as a named field. See [`Effect`](crate::effect::Effect).
+    ///
+    /// `None` for every unit with no op provenance - the `.sql` path, the
+    /// declarative lane, the empty-plan journal anchor, and any hand-built
+    /// `Migration`. Every consumer reads `None` as
+    /// [`Effect::MayRemove`](crate::effect::Effect::MayRemove), so an unstamped step
+    /// lands back on the per-migration seam exactly as it does today.
+    ///
+    /// DELIBERATELY EXCLUDED from [`ChecksumInput`] / [`Checksum::of`], for the same
+    /// reason as [`existence_guard`](Migration::existence_guard) directly above: it
+    /// is DERIVED from the op list, which [`Checksum::of_ir`] already folds, so
+    /// folding it again would change every existing golden and checksum while adding
+    /// no tamper evidence. `skip_serializing_if = "Option::is_none"` keeps the
+    /// on-disk wire byte-identical when unset; it round-trips only the in-memory
+    /// plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect: Option<crate::effect::Effect>,
 }
 
 impl Migration {
@@ -1136,6 +1161,7 @@ mod tests {
             supersedes: Vec::new(),
             preconditions: Vec::new(),
             existence_guard: None,
+            effect: None,
         };
         assert_eq!(Checksum::of(&ChecksumInput::from_migration(&m)), expected);
     }

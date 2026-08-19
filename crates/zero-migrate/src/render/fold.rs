@@ -127,6 +127,7 @@ use zero_migrate_policy::EffectivePolicy;
 /// name is `single_fold::fold(…)?.project_field_defs()`. Only [`single_fold::fold`],
 /// [`single_fold::FoldedSchema`] and that one projection are public - the remaining
 /// projections and the whole authored accumulator stay `pub(crate)`.
+pub mod effects;
 pub mod single_fold;
 
 /// The owner-app stamp the fold gives every `CollectionDescriptor`. `owner_app` is

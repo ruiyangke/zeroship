@@ -76,6 +76,7 @@ fn sqlite_migration(up: &str) -> Migration {
         supersedes: Vec::new(),
         preconditions: Vec::new(),
         existence_guard: None,
+        effect: None,
     }
 }
 

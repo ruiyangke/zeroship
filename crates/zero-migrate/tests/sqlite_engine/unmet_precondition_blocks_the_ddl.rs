@@ -89,6 +89,7 @@ fn migration(precondition_on: Option<&str>) -> Migration {
         supersedes: Vec::new(),
         preconditions: checks,
         existence_guard: None,
+        effect: None,
     }
 }
 

@@ -80,6 +80,7 @@ fn migration(schema: &str, gate_on: &str, on_unmet: OnUnmet) -> Migration {
         supersedes: Vec::new(),
         preconditions: checks,
         existence_guard: None,
+        effect: None,
     }
 }
 

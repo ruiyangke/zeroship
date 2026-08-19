@@ -1814,6 +1814,7 @@ mod plan_status_tests {
             supersedes: Vec::new(),
             preconditions: Vec::new(),
             existence_guard: None,
+            effect: None,
         };
         let plan = AppliedPlan {
             version: id(&format!("{seed}_plan")),

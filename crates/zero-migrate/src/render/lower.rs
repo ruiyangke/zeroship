@@ -5029,6 +5029,20 @@ impl IrAuthor {
                 {
                     return Err(IrLowerError::GuardProbeUnbuildable("createTable"));
                 }
+                // The same effect stamp the Ddl tail applies, on the arm that
+                // returns EARLY. A `createTable` reaches the plan as `Ddl` steps -
+                // the CREATE, its index units, and the deferred FK ALTERs it
+                // discharges later - so leaving them unstamped would silently
+                // disarm the hoist behind the commonest additive op there is.
+                let effect = crate::render::fold::effects::effect_of(op);
+                for (migration, _) in &mut lowered.immediate_units {
+                    migration.effect = Some(effect);
+                }
+                for deferred in &mut lowered.deferred_foreign_keys {
+                    if let Some((migration, _)) = deferred.unit.as_mut() {
+                        migration.effect = Some(effect);
+                    }
+                }
                 return Ok(LoweredOp::CreateTable {
                     table: name.clone(),
                     lowered,
@@ -5882,6 +5896,7 @@ impl IrAuthor {
                     supersedes: Vec::new(),
                     preconditions: Vec::new(),
                     existence_guard: None,
+                    effect: None,
                 };
                 return Ok(LoweredOp::PrimaryKey(Box::new(AlterPrimaryKeyStep {
                     migration,
@@ -5927,6 +5942,7 @@ impl IrAuthor {
                     supersedes: Vec::new(),
                     preconditions: Vec::new(),
                     existence_guard: None,
+                    effect: None,
                 };
                 return Ok(LoweredOp::IdentitySynchronization(Box::new(
                     SynchronizeIdentityStep {
@@ -6267,6 +6283,22 @@ impl IrAuthor {
                     return Err(IrLowerError::GuardProbeUnbuildable(op_kind_tag(op)));
                 }
             }
+        }
+        // What this op does to the catalog facts an OBSTRUCTION assertion reads,
+        // recorded HERE because this is the only place that holds an op and the
+        // units it produced at the same time. Everything downstream sees
+        // `&[PlanStep]` and nothing else, which is why the plan-wide precondition
+        // preflight used to reach for a SQL parser: it had rendered statements and
+        // no ops. It now reads this field instead.
+        //
+        // Every unit of one op shares the op's effect. An op that lowers to several
+        // units (a masked `addColumn`, a `createTable` and its index units) does the
+        // same thing to the catalog in each of them as far as this question goes -
+        // the question is about the OP's kind, not about which statement of it a
+        // unit carries.
+        let effect = crate::render::fold::effects::effect_of(op);
+        for (mig, _statements) in &mut migs {
+            mig.effect = Some(effect);
         }
         Ok(LoweredOp::Ddl(migs))
     }
@@ -9699,6 +9731,7 @@ fn empty_ir_plan_anchor(ir: &MigrationIr) -> PlanStep {
         supersedes: Vec::new(),
         preconditions: Vec::new(),
         existence_guard: None,
+        effect: None,
     })
 }
 

@@ -1243,6 +1243,7 @@ mod recording_session_genericity {
                 direction: GuardDir::IfNotExists,
                 expect_columns: Vec::new(),
             }),
+            effect: None,
         }
     }
 
@@ -1528,6 +1529,7 @@ mod recording_session_genericity {
             supersedes: Vec::new(),
             preconditions: Vec::new(),
             existence_guard: None,
+            effect: None,
         };
         let mut plan = AppliedPlan::single_step(migration);
         plan.database_requirements

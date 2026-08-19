@@ -94,6 +94,7 @@ fn step(table: &str, action: AlterPrimaryKeyAction) -> AlterPrimaryKeyStep {
             supersedes: Vec::new(),
             preconditions: Vec::new(),
             existence_guard: None,
+            effect: None,
         },
         schema: String::new(), // filled from ExecutorConfig by `run`
         table: table.into(),

@@ -60,6 +60,7 @@ fn mig(name: &str, up: &str, down: &str) -> Migration {
         supersedes: Vec::new(),
         preconditions: Vec::new(),
         existence_guard: None,
+        effect: None,
     }
 }
 

@@ -2365,6 +2365,7 @@ mod order_tests {
             supersedes: Vec::new(),
             preconditions: Vec::new(),
             existence_guard: None,
+            effect: None,
         }
     }
 
@@ -3266,6 +3267,7 @@ mod rollback_selection_tests {
             supersedes: Vec::new(),
             preconditions: Vec::new(),
             existence_guard: None,
+            effect: None,
         }
     }
 
@@ -3918,6 +3920,7 @@ mod rollback_selection_ordering_tests {
             supersedes: Vec::new(),
             preconditions: Vec::new(),
             existence_guard: None,
+            effect: None,
         }
     }
 
