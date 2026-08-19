@@ -106,8 +106,20 @@ async fn server_reports_ssl(client: &Client) -> (bool, String) {
 }
 
 /// Connect, and report what the SERVER says the transport was.
+///
+/// Prints the verdict as well as returning it. `cargo test ... -- --nocapture`
+/// then emits the whole `pg_stat_ssl` matrix as measured output, which is the
+/// evidence this suite exists to produce - a reader should not have to infer
+/// what the server saw from the names of the tests that passed.
 async fn transport_of(url: &str) -> Result<bool, Error> {
-    let pool = Pool::connect(url, 1).await?;
+    let redacted = url.replace(PASSWORD_MARKER, "***");
+    let pool = match Pool::connect(url, 1).await {
+        Ok(pool) => pool,
+        Err(e) => {
+            println!("  [pg_stat_ssl] REFUSED  {redacted}\n               {}", describe(&e));
+            return Err(e);
+        }
+    };
     let client = pool.get().await?;
     let (ssl, version) = server_reports_ssl(&client).await;
     if ssl {
@@ -118,8 +130,16 @@ async fn transport_of(url: &str) -> Result<bool, Error> {
     } else {
         assert_eq!(version, "", "an unencrypted session reported a TLS version");
     }
+    println!(
+        "  [pg_stat_ssl] ssl={ssl:<5} version={:<8} {redacted}",
+        if version.is_empty() { "-" } else { &version }
+    );
     Ok(ssl)
 }
+
+/// The password the setup script bakes into every URL, kept out of the printed
+/// matrix above.
+const PASSWORD_MARKER: &str = "compio-postgres-tls-test";
 
 fn describe(err: &Error) -> String {
     format!("{err}: {:?}", std::error::Error::source(err))
