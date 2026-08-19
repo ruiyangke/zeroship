@@ -137,6 +137,14 @@ landlock = "0.4"
 itoa = "1"
 socket2 = { version = "0.5", features = ["all"] }
 ada-url = "3.4.4"
+# CIDR parsing + containment for the `node:net` egress rule set
+# (`zeroship_core::net_policy::Destination::Range`). Parse and `contains`
+# ONLY: its special-range predicates are not adopted and `is_blocked_ip`
+# stays hand-rolled, because every maintained crate's `is_global()` omits
+# forms `crates/runtime/src/transport/ssrf.rs` handles and adopting one
+# would silently WIDEN the SSRF floor. `default = ["std"]`, `std = []` —
+# zero transitive crates, so it adds nothing to the tokio graph.
+ipnet = { version = "2.12", features = ["serde"] }
 
 # V8
 v8 = "147"
