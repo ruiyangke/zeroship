@@ -60,19 +60,6 @@ impl ConnectKind {
             Self::Tls { .. } => "node:tls capability denied",
         }
     }
-
-    /// The refusal REASON is carried through: 5.7 requires a creator to be
-    /// able to tell "no address survived the platform floor" from "your own
-    /// REJECT rule refused it" from "nothing ACCEPTed it", because a v4-only
-    /// range grant silently drops every AAAA answer and would otherwise look
-    /// exactly like a broken name.
-    fn connect_denied(self, host: &str, port: u16, reason: &str) -> String {
-        match self {
-            Self::Net => format!("node:net connect denied for {host}:{port}: {reason}"),
-            #[cfg(feature = "runtime_tls")]
-            Self::Tls { .. } => format!("node:tls connect denied for {host}:{port}: {reason}"),
-        }
-    }
 }
 
 /// A connect that cleared the checks a `connect()` call can answer
