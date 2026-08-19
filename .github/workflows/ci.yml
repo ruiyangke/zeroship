@@ -586,9 +586,14 @@ jobs:
       # discovers the variable is unset.
       #
       # This job provisions NO backend at all, so a census here is expected to be
-      # non-zero - the 9 PG-gated proofs in the platform-migrate step above
-      # always skip, because ZERO_MIGRATE_TEST_PG_URL is set nowhere in this
-      # repo. It REPORTS and does not fail, on purpose. Failing a job that
+      # non-zero - the 7 PG-gated proofs in the platform-migrate step above all
+      # skip, because nothing here starts a Postgres and so `PG_TEST_URL` and
+      # the test overlay are both empty. This used to name
+      # ZERO_MIGRATE_TEST_PG_URL as the cause and count 9; 3d03b876e collapsed
+      # that name away and it now has no reader anywhere in the tree, and 9 was
+      # the crate-wide total (7 here plus one each in smoke_apply_pg.rs and
+      # author_and_apply_pg.rs, which run under `cargo test --workspace`).
+      # It REPORTS and does not fail, on purpose. Failing a job that
       # deliberately stands up no services would make the only honest outcome a
       # red tick, and the fix people would reach for is deleting the check.
       # Whether CI should provision any of these is an operator decision; this
