@@ -2,7 +2,7 @@
 # Stand up the PostgreSQL servers `tests/tls_live.rs` needs, and write the
 # descriptor that test reads.
 #
-# FOUR servers, because each one is the control for a claim that would
+# FIVE servers, because each one is the control for a claim that would
 # otherwise be unfalsifiable:
 #
 #   tls       ssl=on, certificate for `localhost` signed by a private CA.
@@ -18,8 +18,11 @@
 #             see `allow` do anything: `allow` tries plaintext FIRST and
 #             reaches TLS only when the plaintext attempt is refused. Against
 #             any ordinary server `allow` is indistinguishable from `disable`.
+#   clientcert ssl=on with ssl_ca_file and `cert` authentication: the client
+#             MUST present a certificate. The only way to tell "sslcert and
+#             sslkey are parsed" from "sslcert and sslkey are sent and used".
 #
-#   usage: tests/tls_live_setup.sh [tls_port] [plain_port] [mismatch_port] [sslonly_port]
+#   usage: tests/tls_live_setup.sh [tls_port] [plain_port] [mismatch_port] [sslonly_port] [clientcert_port]
 #          tests/tls_live_setup.sh --down     # remove the containers
 #
 # Everything it generates lives in tests/data/live/, which is gitignored.
@@ -31,12 +34,13 @@ tls_name=compio-pg-tls-test
 plain_name=compio-pg-plain-test
 mismatch_name=compio-pg-mismatch-test
 sslonly_name=compio-pg-sslonly-test
+clientcert_name=compio-pg-clientcert-test
 password=compio-postgres-tls-test
 
 if [ "${1:-}" = "--down" ]; then
-    docker rm -f "$tls_name" "$plain_name" "$mismatch_name" "$sslonly_name" >/dev/null 2>&1 || true
+    docker rm -f "$tls_name" "$plain_name" "$mismatch_name" "$sslonly_name" "$clientcert_name" >/dev/null 2>&1 || true
     rm -f "$live/tls_live.conf"
-    echo "removed $tls_name, $plain_name, $mismatch_name, $sslonly_name"
+    echo "removed $tls_name, $plain_name, $mismatch_name, $sslonly_name, $clientcert_name"
     exit 0
 fi
 
@@ -44,6 +48,7 @@ tls_port="${1:-5447}"
 plain_port="${2:-5448}"
 mismatch_port="${3:-5449}"
 sslonly_port="${4:-5450}"
+clientcert_port="${5:-5451}"
 
 # Wipe the previous run's material, but keep the .gitignore that keeps all of
 # it out of the repository - `git add -A` after a setup run must not offer to
@@ -72,6 +77,14 @@ printf 'subjectAltName=DNS:not-the-host-you-asked-for.invalid\nextendedKeyUsage=
 openssl x509 -req -in mismatch.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
     -out mismatch.crt -days 3650 -sha256 -extfile mismatch.ext 2>/dev/null
 
+# A CLIENT certificate, signed by the same CA. Its CN must equal the PostgreSQL
+# role name, because `cert` authentication maps one to the other.
+openssl req -newkey rsa:2048 -nodes -keyout client.key -out client.csr \
+    -sha256 -subj "/CN=postgres" 2>/dev/null
+printf 'extendedKeyUsage=clientAuth\n' >client.ext
+openssl x509 -req -in client.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
+    -out client.crt -days 3650 -sha256 -extfile client.ext 2>/dev/null
+
 # `hostssl` only: a plaintext connection is refused during startup, which is
 # the trigger `allow` falls back on.
 cat >pg_hba_sslonly.conf <<'EOF'
@@ -80,12 +93,21 @@ hostssl all all 0.0.0.0/0   scram-sha-256
 hostssl all all ::0/0       scram-sha-256
 EOF
 
+# `cert` authentication: the client MUST present a certificate signed by
+# ssl_ca_file, and no password is accepted. This is what turns "sslcert/sslkey
+# parse" into "sslcert/sslkey are actually sent and actually used".
+cat >pg_hba_clientcert.conf <<'EOF'
+local   all all             trust
+hostssl all all 0.0.0.0/0   cert
+hostssl all all ::0/0       cert
+EOF
+
 # PostgreSQL refuses to start if the key file is group/world readable or owned
 # by anyone but root or the server user. root:<postgres gid> 0640 satisfies it.
 sudo chown 0:999 server.key mismatch.key
 sudo chmod 640 server.key mismatch.key
 
-docker rm -f "$tls_name" "$plain_name" "$mismatch_name" "$sslonly_name" >/dev/null 2>&1 || true
+docker rm -f "$tls_name" "$plain_name" "$mismatch_name" "$sslonly_name" "$clientcert_name" >/dev/null 2>&1 || true
 
 start_pg() {
     local name=$1 port=$2
@@ -105,6 +127,9 @@ start_pg "$mismatch_name" "$mismatch_port" \
 start_pg "$sslonly_name" "$sslonly_port" \
     -c ssl=on -c ssl_cert_file=/certs/server.crt -c ssl_key_file=/certs/server.key \
     -c hba_file=/certs/pg_hba_sslonly.conf
+start_pg "$clientcert_name" "$clientcert_port" \
+    -c ssl=on -c ssl_cert_file=/certs/server.crt -c ssl_key_file=/certs/server.key \
+    -c ssl_ca_file=/certs/ca.crt -c hba_file=/certs/pg_hba_clientcert.conf
 
 docker run -d --name "$plain_name" \
     -e POSTGRES_PASSWORD="$password" \
@@ -112,7 +137,7 @@ docker run -d --name "$plain_name" \
     -p "127.0.0.1:$plain_port:5432" \
     postgres:16 >/dev/null
 
-for name in "$tls_name" "$plain_name" "$mismatch_name" "$sslonly_name"; do
+for name in "$tls_name" "$plain_name" "$mismatch_name" "$sslonly_name" "$clientcert_name"; do
     for _ in $(seq 60); do
         if docker exec "$name" pg_isready -q -U postgres 2>/dev/null; then break; fi
         sleep 1
@@ -151,12 +176,25 @@ if docker exec -e PGPASSWORD="$password" "$sslonly_name" \
     exit 1
 fi
 
+# The client-certificate server really demands one: the same URL that works
+# WITH sslcert/sslkey must fail without them, or the test proving they are
+# wired would pass against a server that never asked.
+if docker exec -e PGPASSWORD="$password" "$clientcert_name" \
+    psql "host=localhost user=postgres dbname=postgres sslmode=verify-ca sslrootcert=/certs/ca.crt" \
+    -tAc "select 1" >/dev/null 2>&1; then
+    echo "FATAL: $clientcert_name accepted a connection with no client certificate" >&2
+    exit 1
+fi
+
 cat >"$live/tls_live.conf" <<EOF
 tls_url=host=localhost port=$tls_port user=postgres password=$password dbname=postgres
 plain_url=host=localhost port=$plain_port user=postgres password=$password dbname=postgres
 mismatch_url=host=localhost port=$mismatch_port user=postgres password=$password dbname=postgres
 sslonly_url=host=localhost port=$sslonly_port user=postgres password=$password dbname=postgres
+clientcert_url=host=localhost port=$clientcert_port user=postgres dbname=postgres
 ca=$live/ca.crt
+client_cert=$live/client.crt
+client_key=$live/client.key
 EOF
 
 echo "wrote $live/tls_live.conf"

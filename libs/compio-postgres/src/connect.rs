@@ -176,7 +176,7 @@ where
 ///   the *stronger* direction carries none of the hazard above.
 ///
 /// A server that answers `N` to `SSLRequest` needs no reconnect at all and
-/// does not get one; that case is handled inside [`negotiate_tls`] on the
+/// does not get one; that case is handled inside `negotiate_tls` on the
 /// original socket.
 async fn connect_once<T>(
     addr: Addr,

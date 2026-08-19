@@ -44,10 +44,17 @@ struct Servers {
     /// `ssl=on`, `pg_hba` accepting `hostssl` only. The one server that makes
     /// `allow` reach its TLS leg.
     sslonly_url: String,
+    /// `ssl=on` with `ssl_ca_file` and `cert` authentication: no password is
+    /// accepted and the client must present a certificate.
+    clientcert_url: String,
     /// The private CA that signed the certificates above. It is in no system
     /// trust store, which is what makes the `sslrootcert=system` case a real
     /// negative.
     ca: String,
+    /// A client certificate signed by `ca`, with `CN=postgres`.
+    client_cert: String,
+    /// The private key for `client_cert`.
+    client_key: String,
 }
 
 impl Servers {
@@ -70,7 +77,10 @@ impl Servers {
             plain_url: field("plain_url"),
             mismatch_url: field("mismatch_url"),
             sslonly_url: field("sslonly_url"),
+            clientcert_url: field("clientcert_url"),
             ca: field("ca"),
+            client_cert: field("client_cert"),
+            client_key: field("client_key"),
         }
     }
 }
@@ -489,6 +499,72 @@ async fn channel_binding_require_fails_without_tls() {
     .expect_err("channel_binding=require must not succeed over plaintext");
     let text = describe(&err);
     assert!(text.contains("channel binding"), "unexpected error: {text}");
+}
+
+// ---------------------------------------------------------------------------
+// Client certificates
+// ---------------------------------------------------------------------------
+
+/// `sslcert` / `sslkey` are not merely parsed - they are sent, and the server
+/// authenticates the session with them.
+///
+/// The server here uses `cert` authentication: `ssl_ca_file` is set and
+/// `pg_hba` accepts no password at all. The URL carries no password either. So
+/// a session that reaches `SELECT` did so because rustls presented the client
+/// certificate and PostgreSQL mapped its `CN=postgres` to the role.
+#[compio::test]
+async fn client_certificates_authenticate_the_session() {
+    let s = servers();
+    let url = format!(
+        "{} sslmode=verify-full sslrootcert={} sslcert={} sslkey={}",
+        s.clientcert_url, s.ca, s.client_cert, s.client_key
+    );
+    assert!(
+        transport_of(&url)
+            .await
+            .expect("the client certificate must authenticate"),
+        "client-certificate session was not encrypted"
+    );
+}
+
+/// The control, differing in one variable: drop `sslcert`/`sslkey` and the same
+/// URL against the same server must fail.
+///
+/// Without this, the test above would also pass against a server that never
+/// asked for a certificate - which is exactly how "wired" and "parsed and
+/// silently ignored" look the same.
+#[compio::test]
+async fn the_same_url_without_a_client_certificate_is_refused() {
+    let s = servers();
+    let url = format!(
+        "{} sslmode=verify-full sslrootcert={}",
+        s.clientcert_url, s.ca
+    );
+    transport_of(&url)
+        .await
+        .expect_err("a server using cert authentication must refuse an anonymous client");
+}
+
+/// Naming one half of the pair is a configuration error, not a connection that
+/// quietly proceeds without client authentication.
+#[compio::test]
+async fn half_a_client_certificate_pair_is_rejected() {
+    let s = servers();
+    for (extra, missing) in [
+        (format!("sslcert={}", s.client_cert), "sslkey"),
+        (format!("sslkey={}", s.client_key), "sslcert"),
+    ] {
+        let url = format!(
+            "{} sslmode=verify-full sslrootcert={} {extra}",
+            s.tls_url, s.ca
+        );
+        let err = transport_of(&url).await.unwrap_err();
+        let text = describe(&err);
+        assert!(
+            text.contains(missing),
+            "the error must name the missing half ({missing}): {text}"
+        );
+    }
 }
 
 /// A `sslrootcert` that names a file which is not a certificate must be an
