@@ -10434,6 +10434,19 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
         ColType::String { length } => Some(i64::from(*length)),
         _ => None,
     };
+    // A fixed-precision decimal carries its two parameters BESIDE the token, because
+    // `col_type_to_token` spells both `Decimal` and `Double` as `"number"` and the
+    // shared `FieldDef` vocabulary has no decimal token to grow. Threading them here
+    // is what lets the field-def carrier reach the same answer `author_type_override`
+    // reaches on the snapshot carrier - the SQLite emitter read the bare `number` and
+    // declared a `t.numeric(20, 4)` column REAL, so a 12-step rebuild copied its rows
+    // through a binary double. See `FieldDescriptor::precision`.
+    let (precision, scale) = match &c.ty {
+        ColType::Decimal { precision, scale } => {
+            (Some(i64::from(*precision)), Some(i64::from(*scale)))
+        }
+        _ => (None, None),
+    };
     // Thread the two DECLARED-ONLY, uncatalogable
     // facets the runtime/gen-types lose if the IR doesn't carry them:
     //   - legacy internal `id_prefix` → the descriptor's `id_prefix` so the
@@ -10473,6 +10486,8 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
         vector_dims,
         char_len,
         max_length,
+        precision,
+        scale,
         unbounded_text,
         vector_metric: c.vector_metric.map(|m| m.as_token().to_string()),
         case_sensitive: c.case_sensitive,
@@ -10490,11 +10505,15 @@ pub(crate) fn ir_column_to_field_resolved_create(c: &IrColumn) -> FieldDescripto
 /// Re-derive the STORAGE-SHAPE facets of an existing descriptor from a
 /// [`ColType`], leaving every other facet alone.
 ///
-/// The type token is not the whole type: `String { length }`, `Char { length }`
-/// and `Vector { vector }` carry their parameter in a SIBLING descriptor field,
-/// and `Encrypted { of }` splits into an inner token plus the `encrypted` facet.
-/// So anything that decides "this column is really shaped like `T`" has to move
-/// all five together or it emits a token whose parameters describe the old type.
+/// The type token is not the whole type: `String { length }`, `Char { length }`,
+/// `Vector { vector }` and `Decimal { precision, scale }` carry their parameters in
+/// SIBLING descriptor fields, and `Encrypted { of }` splits into an inner token plus
+/// the `encrypted` facet. So anything that decides "this column is really shaped like
+/// `T`" has to move all of them together or it emits a token whose parameters
+/// describe the old type. `Decimal`'s two are the sharpest case, because it SHARES
+/// its token with `Double`: a retype from `numeric(20, 4)` to `t.number()` leaves the
+/// token `"number"` unchanged, so a stale `precision` left behind here is the whole
+/// difference between a float column and a decimal one.
 ///
 /// Extracted so the two callers cannot drift: [`retype_field_descriptor`] (a
 /// `setColumnType` replacing the type outright) and the fold's named-domain lift
@@ -10528,6 +10547,8 @@ pub(crate) fn apply_col_type_to_field_descriptor(field: &mut FieldDescriptor, ty
     field.max_length = derived.max_length;
     field.char_len = derived.char_len;
     field.vector_dims = derived.vector_dims;
+    field.precision = derived.precision;
+    field.scale = derived.scale;
     field.unbounded_text = derived.unbounded_text;
     field.encrypted = derived.encrypted;
 }

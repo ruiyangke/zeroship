@@ -1999,6 +1999,34 @@ pub struct FieldDescriptor {
     /// bridge.
     #[serde(default)]
     pub identity: Option<crate::model::ir::IdentityCol>,
+    /// `t.numeric({ precision, scale })` — total digits of a FIXED-PRECISION
+    /// decimal column, and [`Self::scale`] beside it.
+    ///
+    /// **Why a facet and not a token.** `render::lower::col_type_to_token` maps BOTH
+    /// `ColType::Double` and `ColType::Decimal { .. }` to the single token
+    /// `"number"`, because that is the vocabulary the shared SDK `FieldDef` kernel
+    /// speaks and it has no decimal spelling. So the token alone cannot tell a
+    /// float from a fixed-precision decimal, and the SQLite emitter answered `REAL`
+    /// for both — re-declaring a `t.numeric(20, 4)` column REAL inside the 12-step
+    /// rebuild and pushing every stored decimal string through a binary double on
+    /// the way across. Measured against a live database in
+    /// `tests/fold_live/sqlite_decimal_rebuild_live.rs`.
+    ///
+    /// Carrying the parameters BESIDE the token is the same shape `charLen` and
+    /// `maxLength` already use to narrow `char`/`string`: a consumer that ignores
+    /// the facet sees exactly the old `number` behaviour, and one that reads it
+    /// reaches the same answer `render::lower::author_type_override` gives on the
+    /// snapshot carrier (`numeric(p, s)` / `DECIMAL(p, s)` / SQLite `TEXT`). The two
+    /// carriers agree because both are derived from the SAME `ColType`.
+    ///
+    /// `None` ⇒ a genuine `t.number()` float, which keeps `DOUBLE PRECISION` /
+    /// `DOUBLE` / `REAL`.
+    #[serde(default)]
+    pub precision: Option<i64>,
+    /// `t.numeric({ precision, scale })` — digits after the point. Meaningful only
+    /// alongside [`Self::precision`]; see its doc for why this rides as a facet.
+    #[serde(default)]
+    pub scale: Option<i64>,
 }
 
 /// One declared index of a collection (the `_indexes` array entry).
@@ -2160,6 +2188,17 @@ pub fn dsl_to_pg_data_type(dsl_type: &str) -> Result<String, DeclarativeError> {
 fn field_to_sdk_def(f: &FieldDescriptor) -> serde_json::Value {
     let mut def = serde_json::Map::new();
     def.insert("type".into(), serde_json::Value::String(f.ty.clone()));
+    // The two parameters of a FIXED-PRECISION decimal, which the `number` token
+    // cannot carry (it is also `ColType::Double`'s token). Without them the SQLite
+    // emitter reads `number` and answers `REAL`, and a rebuild copies a decimal
+    // column's rows through a binary double. See `FieldDescriptor::precision`.
+    if let Some(precision) = f.precision {
+        def.insert("precision".into(), serde_json::Value::from(precision));
+        def.insert(
+            "scale".into(),
+            serde_json::Value::from(f.scale.unwrap_or(0)),
+        );
+    }
     if let Some(len) = f.char_len {
         def.insert("charLen".into(), serde_json::Value::from(len));
     }

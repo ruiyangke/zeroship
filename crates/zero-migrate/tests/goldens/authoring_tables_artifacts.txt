@@ -46,6 +46,14 @@
 # There is deliberately NO re-bless environment variable, matching
 # tests/op_fixture_goldens.rs. Sorted for a readable diff; the test compares sets and
 # lengths, not order.
+#
+# SECOND EDIT: three `fluent_scalars|*|sha|runtime.json` lines only. The wire `FieldDef`
+# gained `precision`/`scale` so a `t.numeric(p, s)` column stops being spelled as a bare
+# `number` - the collision that made a SQLite rebuild re-declare it REAL and copy its
+# rows through a binary double (`tests/fold_live/sqlite_decimal_rebuild_live.rs`). This
+# artifact does not carry the field defs, so only the `runtime.json` hash moves; ZERO
+# `sha|env.db.ts` lines and ZERO per-column lines moved, which is the same containment
+# control the first edit used.
 carrier:attached_partition_detached|Mysql|column|p1|0|bucket: t.int().notNull(),
 carrier:attached_partition_detached|Mysql|column|p1|1|payload: t.text(),
 carrier:attached_partition_detached|Mysql|column|par|0|bucket: t.int().notNull(),
@@ -630,7 +638,7 @@ fixture:fluent_scalars|Mysql|index|ledger|1|{ name: "ledger_updated_at_idx", on:
 fixture:fluent_scalars|Mysql|index|ledger|2|{ name: "ledger_created_by_idx", on: ["created_by"] },
 fixture:fluent_scalars|Mysql|primary_key|ledger|single:id
 fixture:fluent_scalars|Mysql|sha|env.db.ts|67a5508ffd185bf168beab43b56d94de375f6b07b3943dfabc7b0fe6c013e5e7
-fixture:fluent_scalars|Mysql|sha|runtime.json|5d4b23729088f21d71958727e10d0644c353635622a1d2a55e2aae94f79c753c
+fixture:fluent_scalars|Mysql|sha|runtime.json|0ff164d49748b6cc61904718f8409d8e6e314d93c4669c1fdcdf267ce98aedb3
 fixture:fluent_scalars|Postgres|column|ledger|0|id: t.string({ length: 255 }).primaryKey(),
 fixture:fluent_scalars|Postgres|column|ledger|1|created_at: t.timestamp().notNull(),
 fixture:fluent_scalars|Postgres|column|ledger|2|updated_at: t.timestamp().notNull(),
@@ -645,7 +653,7 @@ fixture:fluent_scalars|Postgres|index|ledger|1|{ name: "ledger_updated_at_idx", 
 fixture:fluent_scalars|Postgres|index|ledger|2|{ name: "ledger_created_by_idx", on: ["created_by"] },
 fixture:fluent_scalars|Postgres|primary_key|ledger|single:id
 fixture:fluent_scalars|Postgres|sha|env.db.ts|67a5508ffd185bf168beab43b56d94de375f6b07b3943dfabc7b0fe6c013e5e7
-fixture:fluent_scalars|Postgres|sha|runtime.json|5d4b23729088f21d71958727e10d0644c353635622a1d2a55e2aae94f79c753c
+fixture:fluent_scalars|Postgres|sha|runtime.json|0ff164d49748b6cc61904718f8409d8e6e314d93c4669c1fdcdf267ce98aedb3
 fixture:fluent_scalars|Sqlite|column|ledger|0|id: t.string({ length: 255 }).primaryKey(),
 fixture:fluent_scalars|Sqlite|column|ledger|1|created_at: t.timestamp().notNull(),
 fixture:fluent_scalars|Sqlite|column|ledger|2|updated_at: t.timestamp().notNull(),
@@ -660,7 +668,7 @@ fixture:fluent_scalars|Sqlite|index|ledger|1|{ name: "ledger_updated_at_idx", on
 fixture:fluent_scalars|Sqlite|index|ledger|2|{ name: "ledger_created_by_idx", on: ["created_by"] },
 fixture:fluent_scalars|Sqlite|primary_key|ledger|single:id
 fixture:fluent_scalars|Sqlite|sha|env.db.ts|67a5508ffd185bf168beab43b56d94de375f6b07b3943dfabc7b0fe6c013e5e7
-fixture:fluent_scalars|Sqlite|sha|runtime.json|5d4b23729088f21d71958727e10d0644c353635622a1d2a55e2aae94f79c753c
+fixture:fluent_scalars|Sqlite|sha|runtime.json|0ff164d49748b6cc61904718f8409d8e6e314d93c4669c1fdcdf267ce98aedb3
 fixture:grouped_views|Mysql|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
 fixture:grouped_views|Mysql|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
 fixture:grouped_views|Postgres|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9

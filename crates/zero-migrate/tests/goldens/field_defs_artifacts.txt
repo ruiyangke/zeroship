@@ -23,6 +23,26 @@
 # the behaviour-preservation result, and it is the reason the edits are auditable: the
 # streams that changed are exactly the streams written to make the change visible.
 #
+# ---------------------------------------------------------------------------------
+# SECOND EDIT, and the first that DOES move a recorded fixture. Six lines: the three
+# `fluent_scalars|*|field|ledger|seq` rows gained `"precision":38,"scale":0`, and the
+# three `runtime.json` shas moved with them.
+#
+# `ledger.seq` is `t.numeric({ precision: 38, scale: 0 })` - `ColType::Decimal` - and
+# this golden had been recording it as a bare `{"type":"number"}`, indistinguishable
+# from a `t.number()` float. That was not a golden defect; it was this corpus faithfully
+# recording a lossy carrier. `col_type_to_token` spells `Decimal` and `Double` alike as
+# `number`, so the SQLite emitter answered `REAL` for both and a 12-step rebuild
+# re-declared the column REAL and copied its rows through a binary double.
+# `tests/fold_live/sqlite_decimal_rebuild_live.rs` measures that against a real
+# database: 12345678901234.5678 came back 12345678901234.6.
+#
+# So this edit is a DELIBERATE contract change, not a re-bless: the wire `FieldDef`
+# gained two keys so the carrier can say "decimal", and these six lines are the whole
+# blast radius across 27 fixtures, 23 carriers and 3 dialects. A reader auditing it
+# should check exactly that - that `seq` is the only column that moved, and that it
+# moved by gaining its authored precision rather than by changing its token.
+#
 # The 7-line net (-41 +34) is `attached_partition_dropped` alone: the relation `p1` is
 # gone from the map, taking its two `field` rows on three dialects and its one
 # `sqlite_create` row with it. Every other edit replaces a line with its successor.
@@ -191,7 +211,7 @@ fixture:fluent_dml|Sqlite|sha|runtime.json|d667b1af00529add869f337953c8cba252e16
 fixture:fluent_dml|Sqlite|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
 fixture:fluent_dml|Mysql|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
 fixture:fluent_dml|Mysql|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
-fixture:fluent_scalars|Postgres|sha|runtime.json|5d4b23729088f21d71958727e10d0644c353635622a1d2a55e2aae94f79c753c
+fixture:fluent_scalars|Postgres|sha|runtime.json|0ff164d49748b6cc61904718f8409d8e6e314d93c4669c1fdcdf267ce98aedb3
 fixture:fluent_scalars|Postgres|sha|env.db.ts|67a5508ffd185bf168beab43b56d94de375f6b07b3943dfabc7b0fe6c013e5e7
 fixture:fluent_scalars|Postgres|field|ledger|id|{"type":"string","maxLength":255,"required":true}
 fixture:fluent_scalars|Postgres|field|ledger|created_at|{"type":"date","required":true}
@@ -200,9 +220,9 @@ fixture:fluent_scalars|Postgres|field|ledger|created_by|{"type":"string","maxLen
 fixture:fluent_scalars|Postgres|field|ledger|updated_by|{"type":"string","maxLength":255}
 fixture:fluent_scalars|Postgres|field|ledger|version|{"type":"int","required":true}
 fixture:fluent_scalars|Postgres|field|ledger|deleted_at|{"type":"date"}
-fixture:fluent_scalars|Postgres|field|ledger|seq|{"type":"number","required":true,"default":"9007199254740993"}
+fixture:fluent_scalars|Postgres|field|ledger|seq|{"type":"number","precision":38,"scale":0,"required":true,"default":"9007199254740993"}
 fixture:fluent_scalars|Postgres|field|ledger|salt|{"type":"bytes","default":"AQID/w=="}
-fixture:fluent_scalars|Sqlite|sha|runtime.json|5d4b23729088f21d71958727e10d0644c353635622a1d2a55e2aae94f79c753c
+fixture:fluent_scalars|Sqlite|sha|runtime.json|0ff164d49748b6cc61904718f8409d8e6e314d93c4669c1fdcdf267ce98aedb3
 fixture:fluent_scalars|Sqlite|sha|env.db.ts|67a5508ffd185bf168beab43b56d94de375f6b07b3943dfabc7b0fe6c013e5e7
 fixture:fluent_scalars|Sqlite|field|ledger|id|{"type":"string","maxLength":255,"required":true}
 fixture:fluent_scalars|Sqlite|field|ledger|created_at|{"type":"date","required":true}
@@ -211,10 +231,10 @@ fixture:fluent_scalars|Sqlite|field|ledger|created_by|{"type":"string","maxLengt
 fixture:fluent_scalars|Sqlite|field|ledger|updated_by|{"type":"string","maxLength":255}
 fixture:fluent_scalars|Sqlite|field|ledger|version|{"type":"int","required":true}
 fixture:fluent_scalars|Sqlite|field|ledger|deleted_at|{"type":"date"}
-fixture:fluent_scalars|Sqlite|field|ledger|seq|{"type":"number","required":true,"default":"9007199254740993"}
+fixture:fluent_scalars|Sqlite|field|ledger|seq|{"type":"number","precision":38,"scale":0,"required":true,"default":"9007199254740993"}
 fixture:fluent_scalars|Sqlite|field|ledger|salt|{"type":"bytes","default":"AQID/w=="}
 fixture:fluent_scalars|Sqlite|sqlite_create_refused|ledger|reserved system field name: Field name 'id' is reserved by the active table-injection policy. Injected fields (id, created_at, updated_at, created_by, updated_by, version, deleted_at) are managed by the platform and cannot be overridden.
-fixture:fluent_scalars|Mysql|sha|runtime.json|5d4b23729088f21d71958727e10d0644c353635622a1d2a55e2aae94f79c753c
+fixture:fluent_scalars|Mysql|sha|runtime.json|0ff164d49748b6cc61904718f8409d8e6e314d93c4669c1fdcdf267ce98aedb3
 fixture:fluent_scalars|Mysql|sha|env.db.ts|67a5508ffd185bf168beab43b56d94de375f6b07b3943dfabc7b0fe6c013e5e7
 fixture:fluent_scalars|Mysql|field|ledger|id|{"type":"string","maxLength":255,"required":true}
 fixture:fluent_scalars|Mysql|field|ledger|created_at|{"type":"date","required":true}
@@ -223,7 +243,7 @@ fixture:fluent_scalars|Mysql|field|ledger|created_by|{"type":"string","maxLength
 fixture:fluent_scalars|Mysql|field|ledger|updated_by|{"type":"string","maxLength":255}
 fixture:fluent_scalars|Mysql|field|ledger|version|{"type":"int","required":true}
 fixture:fluent_scalars|Mysql|field|ledger|deleted_at|{"type":"date"}
-fixture:fluent_scalars|Mysql|field|ledger|seq|{"type":"number","required":true,"default":"9007199254740993"}
+fixture:fluent_scalars|Mysql|field|ledger|seq|{"type":"number","precision":38,"scale":0,"required":true,"default":"9007199254740993"}
 fixture:fluent_scalars|Mysql|field|ledger|salt|{"type":"bytes","default":"AQID/w=="}
 fixture:fluent_scalars_dml|Postgres|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
 fixture:fluent_scalars_dml|Postgres|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9

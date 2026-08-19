@@ -184,6 +184,20 @@ impl SchemaRenderer for PostgresSchemaRenderer {
             }
         }
 
+        // A `number` carrying `precision` is `t.numeric({ precision, scale })`, not
+        // `t.number()`. `def_to_pg_type`'s `DOUBLE PRECISION` is the right answer for
+        // the float and the wrong one for the decimal - and `author_type_override`
+        // already spells this column `numeric(p, s)` on the snapshot carrier, so
+        // reading the facet here is what stops the two carriers describing the same
+        // column differently. The doc on `def_to_pg_type`'s `number` arm explains why
+        // a BARE `number` must stay `DOUBLE PRECISION`: this branch narrows only the
+        // columns that asked for exactness.
+        if zs_type == Some("number") {
+            if let Some((precision, scale)) = decimal_precision_scale(def) {
+                return format!("numeric({precision}, {scale})");
+            }
+        }
+
         def_to_pg_type(def).to_string()
     }
 
@@ -247,6 +261,24 @@ impl SchemaRenderer for SqliteSchemaRenderer {
 
         if zs_type == Some("geoPoint") {
             return "BLOB".to_string();
+        }
+
+        // A `number` carrying `precision` is a FIXED-PRECISION decimal, and SQLite
+        // has no storage class for one. `REAL` is the right answer for the float that
+        // shares this token and a lossy one for the decimal: REAL affinity converts a
+        // stored decimal STRING to a binary double on the way in, and the 12-step
+        // rebuild re-renders `CREATE TABLE` from this map and copies every existing
+        // row through it - so a rebuild triggered by an unrelated column rewrote
+        // `12345678901234.5678` to `12345678901234.6`, measured in
+        // `tests/fold_live/sqlite_decimal_rebuild_live.rs`.
+        //
+        // `TEXT` is not a new opinion: `render::lower::author_type_override` already
+        // answers `text`/`TEXT` for `ColType::Decimal` on SQLite, with this same
+        // reason written beside it, and `sqlite_canonical_type` already folds
+        // `numeric`/`decimal` to `text` affinity. The two carriers disagreed only
+        // because the token map had no way to say "decimal"; it does now.
+        if zs_type == Some("number") && decimal_precision_scale(def).is_some() {
+            return "TEXT".to_string();
         }
 
         match zs_type {
@@ -367,6 +399,19 @@ impl SchemaRenderer for MysqlSchemaRenderer {
             return "POINT SRID 4326".to_string();
         }
 
+        // The decimal half of the shared `number` token. `DOUBLE` is right for the
+        // float and wrong for `t.numeric({ precision, scale })`; the MySQL arm of
+        // `render::lower::author_type_override` already spells this column
+        // `DECIMAL(p, s)` on the snapshot carrier, so this is the field-def carrier
+        // catching up rather than a second opinion. Note that a BARE `DECIMAL` would
+        // not do: MySQL reads it as `DECIMAL(10, 0)` and silently truncates the
+        // scale, which is why the parameters have to reach this emitter at all.
+        if zs_type == Some("number") {
+            if let Some((precision, scale)) = decimal_precision_scale(def) {
+                return format!("DECIMAL({precision}, {scale})");
+            }
+        }
+
         match zs_type {
             Some("string") => {
                 let max = def
@@ -459,6 +504,63 @@ mod schema_renderer_tests {
             renderer(SqlDialect::Mysql).column_type(&def),
             "DECIMAL(65, 30)"
         );
+    }
+
+    /// **The three spellings a `number` field with a `precision` facet renders into.**
+    ///
+    /// A SPELLING PIN, not an oracle, and the distinction matters: this compares one
+    /// function in this repo against a literal in this repo, which proves nothing about
+    /// what a server does. The SQLite line is adjudicated by a real database in
+    /// `tests/fold_live/sqlite_decimal_rebuild_live.rs` - where the un-faceted `REAL`
+    /// answer was measured turning 12345678901234.5678 into 12345678901234.6 through a
+    /// 12-step rebuild - and the PG line by the phantom-rebuild case in the same file.
+    ///
+    /// The MySQL line is neither. `def_to_column_type_for_dialect` is called with
+    /// `Postgres` at both of its production call sites, and the one caller that passes a
+    /// live dialect through is the SQLite rebuild emitter, so nothing reaches the MySQL
+    /// arm for a decimal today. It is changed and pinned here so the three renderers
+    /// agree with `render::lower::author_type_override` (`numeric(p, s)` /
+    /// `DECIMAL(p, s)` / `TEXT`) rather than leaving one that answers `DOUBLE`; this
+    /// line is the whole of its coverage, and no live suite moves if it regresses.
+    ///
+    /// A bare `number` with no facet must keep the float spelling on all three - that is
+    /// the half that must NOT move, and the reason the facet is read rather than the
+    /// token changed.
+    #[test]
+    fn a_number_field_carrying_precision_renders_as_a_decimal_on_every_dialect() {
+        let decimal = serde_json::json!({ "type": "number", "precision": 20, "scale": 4 });
+        assert_eq!(
+            renderer(SqlDialect::Postgres).column_type(&decimal),
+            "numeric(20, 4)"
+        );
+        assert_eq!(renderer(SqlDialect::Sqlite).column_type(&decimal), "TEXT");
+        assert_eq!(
+            renderer(SqlDialect::Mysql).column_type(&decimal),
+            "DECIMAL(20, 4)"
+        );
+
+        // `scale` may be absent; `precision` alone still means fixed-precision.
+        let scaleless = serde_json::json!({ "type": "number", "precision": 20 });
+        assert_eq!(
+            renderer(SqlDialect::Mysql).column_type(&scaleless),
+            "DECIMAL(20, 0)"
+        );
+
+        // The float half, unchanged. A `number` with no precision is `t.number()`, an
+        // IEEE-754 double, and narrowing it to NUMERIC would break the decode path
+        // `def_to_pg_type`'s own doc-comment warns about.
+        let float = serde_json::json!({ "type": "number" });
+        assert_eq!(
+            renderer(SqlDialect::Postgres).column_type(&float),
+            "DOUBLE PRECISION"
+        );
+        assert_eq!(renderer(SqlDialect::Sqlite).column_type(&float), "REAL");
+        assert_eq!(renderer(SqlDialect::Mysql).column_type(&float), "DOUBLE");
+
+        // A zero precision is not a type any dialect accepts, so it falls back to the
+        // float spelling rather than emitting DDL no server would take.
+        let malformed = serde_json::json!({ "type": "number", "precision": 0, "scale": 4 });
+        assert_eq!(renderer(SqlDialect::Sqlite).column_type(&malformed), "REAL");
     }
 
     #[test]
@@ -2627,6 +2729,39 @@ fn max_length(def: &serde_json::Value) -> Option<u64> {
     def.get("maxLength")
         .and_then(serde_json::Value::as_u64)
         .filter(|len| *len > 0)
+}
+
+/// The `(precision, scale)` of a FIXED-PRECISION decimal column, or `None` for a
+/// float.
+///
+/// The `number` token is shared: `render::lower::col_type_to_token` spells BOTH
+/// `ColType::Double` and `ColType::Decimal { .. }` as `"number"`, because that is the
+/// vocabulary the shared `FieldDef` kernel speaks. So no arm of any `column_type`
+/// match below can tell the two apart from the token; the parameters ride beside it,
+/// the way `charLen` and `maxLength` ride beside `char` and `string`.
+///
+/// This is the ONE reader that decides which of the two a `number` field is, so the
+/// three dialect emitters cannot drift from each other - and reading it makes them
+/// agree with `render::lower::author_type_override`, which answers `numeric(p, s)` /
+/// `DECIMAL(p, s)` / SQLite `TEXT` for the same `ColType` on the snapshot carrier.
+/// The disagreement it closes was measured, not inferred: a SQLite rebuild reading the
+/// bare token re-declared a `t.numeric(20, 4)` column `REAL` and copied
+/// `12345678901234.5678` across as `12345678901234.6`
+/// (`tests/fold_live/sqlite_decimal_rebuild_live.rs`).
+///
+/// A zero or absent `precision` is NOT a decimal: `DECIMAL(0, …)` is not a type any
+/// dialect accepts, so a malformed facet falls back to the float spelling the column
+/// had before rather than emitting DDL no server will take.
+fn decimal_precision_scale(def: &serde_json::Value) -> Option<(u64, u64)> {
+    let precision = def
+        .get("precision")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|precision| *precision > 0)?;
+    let scale = def
+        .get("scale")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    Some((precision, scale))
 }
 
 fn parse_character_type_len(data_type: &str) -> Option<u64> {

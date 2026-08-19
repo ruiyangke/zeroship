@@ -19,6 +19,17 @@
 # cascaded it away, which is why the `env.db.ts` hash on that row did NOT move.
 # Every other line here is byte-for-byte what the walker emitted.
 #
+# THE SECOND HAND EDIT. Three lines, all `fixture:fluent_scalars|*|sha|runtime.json`,
+# from 5d4b23729088f21d71958727e10d0644c353635622a1d2a55e2aae94f79c753c to
+# 0ff164d49748b6cc61904718f8409d8e6e314d93c4669c1fdcdf267ce98aedb3. `ledger.seq` is
+# `t.numeric({ precision: 38, scale: 0 })`, and the wire `FieldDef` had no way to say so
+# - `col_type_to_token` spells `Decimal` and `Double` alike as `number` - so a SQLite
+# 12-step rebuild re-declared the column REAL and copied 12345678901234.5678 across as
+# 12345678901234.6, measured in `tests/fold_live/sqlite_decimal_rebuild_live.rs`. The
+# `FieldDef` now carries `precision`/`scale`, and this hash moves because
+# `runtime.json` embeds it. The `sha|env.db.ts` half did NOT move on any row: the
+# authoring surface always replayed the richer IR and already spelled `t.numeric(38, 0)`.
+#
 # There is deliberately no re-bless environment variable, matching
 # tests/op_fixture_goldens.rs: updating a line is a hand edit that shows up in review.
 fixture:alter_primary_key|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
@@ -125,19 +136,19 @@ fixture:fluent_dml|Sqlite|sha|runtime.json|d667b1af00529add869f337953c8cba252e16
 fixture:fluent_dml|Sqlite|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
 fixture:fluent_dml|Mysql|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
 fixture:fluent_dml|Mysql|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
-fixture:fluent_scalars|Postgres|sha|runtime.json|5d4b23729088f21d71958727e10d0644c353635622a1d2a55e2aae94f79c753c
+fixture:fluent_scalars|Postgres|sha|runtime.json|0ff164d49748b6cc61904718f8409d8e6e314d93c4669c1fdcdf267ce98aedb3
 fixture:fluent_scalars|Postgres|sha|env.db.ts|67a5508ffd185bf168beab43b56d94de375f6b07b3943dfabc7b0fe6c013e5e7
 fixture:fluent_scalars|Postgres|options|ledger|softDelete=false|versioning=false|strictness=strict
 fixture:fluent_scalars|Postgres|index|ledger|0|name=ledger_deleted_at_idx|fields=deleted_at|unique=false
 fixture:fluent_scalars|Postgres|index|ledger|1|name=ledger_updated_at_idx|fields=updated_at|unique=false
 fixture:fluent_scalars|Postgres|index|ledger|2|name=ledger_created_by_idx|fields=created_by|unique=false
-fixture:fluent_scalars|Sqlite|sha|runtime.json|5d4b23729088f21d71958727e10d0644c353635622a1d2a55e2aae94f79c753c
+fixture:fluent_scalars|Sqlite|sha|runtime.json|0ff164d49748b6cc61904718f8409d8e6e314d93c4669c1fdcdf267ce98aedb3
 fixture:fluent_scalars|Sqlite|sha|env.db.ts|67a5508ffd185bf168beab43b56d94de375f6b07b3943dfabc7b0fe6c013e5e7
 fixture:fluent_scalars|Sqlite|options|ledger|softDelete=false|versioning=false|strictness=strict
 fixture:fluent_scalars|Sqlite|index|ledger|0|name=ledger_deleted_at_idx|fields=deleted_at|unique=false
 fixture:fluent_scalars|Sqlite|index|ledger|1|name=ledger_updated_at_idx|fields=updated_at|unique=false
 fixture:fluent_scalars|Sqlite|index|ledger|2|name=ledger_created_by_idx|fields=created_by|unique=false
-fixture:fluent_scalars|Mysql|sha|runtime.json|5d4b23729088f21d71958727e10d0644c353635622a1d2a55e2aae94f79c753c
+fixture:fluent_scalars|Mysql|sha|runtime.json|0ff164d49748b6cc61904718f8409d8e6e314d93c4669c1fdcdf267ce98aedb3
 fixture:fluent_scalars|Mysql|sha|env.db.ts|67a5508ffd185bf168beab43b56d94de375f6b07b3943dfabc7b0fe6c013e5e7
 fixture:fluent_scalars|Mysql|options|ledger|softDelete=false|versioning=false|strictness=strict
 fixture:fluent_scalars|Mysql|index|ledger|0|name=ledger_deleted_at_idx|fields=deleted_at|unique=false

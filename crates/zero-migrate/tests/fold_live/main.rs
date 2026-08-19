@@ -27,5 +27,6 @@ mod fold_roundtrip_pg;
 mod fold_roundtrip_sqlite;
 mod schema_model_equivalence_mysql;
 mod schema_model_equivalence_pg;
+mod sqlite_decimal_rebuild_live;
 mod sqlite_field_def_type_tokens_live;
 mod sqlite_rebuild_field_defs_live;

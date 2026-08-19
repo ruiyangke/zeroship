@@ -104,6 +104,8 @@ fn route_the_runtime_descriptor() -> Routing {
         vector_dims,
         char_len,
         max_length,
+        precision,
+        scale,
         unbounded_text,
         vector_metric,
         case_sensitive,
@@ -190,6 +192,22 @@ fn route_the_runtime_descriptor() -> Routing {
          `docs/review-log.md:29149-29156`.",
     );
     routing.would_join_the_model(
+        "precision",
+        precision,
+        "flattened into `data_type` as `numeric(p, s)`. Sharper than the other three \
+         widths, because the TOKEN this parameterises is shared: `col_type_to_token` \
+         spells `Decimal` and `Double` alike as `number`, so a model that dropped this \
+         facet would not merely lose a width - it would lose WHICH TYPE the column is. \
+         `tests/fold_live/sqlite_decimal_rebuild_live.rs` is that loss measured against \
+         a live SQLite: the column came back REAL and 12345678901234.5678 came back \
+         12345678901234.6.",
+    );
+    routing.would_join_the_model(
+        "scale",
+        scale,
+        "as `precision`, and only meaningful with it.",
+    );
+    routing.would_join_the_model(
         "vector_dims",
         vector_dims,
         "pgvector dimensionality. Dialect-neutral as a FACT even though only one backend \
@@ -250,14 +268,18 @@ fn route_the_runtime_descriptor() -> Routing {
 
 /// **The answer.** Counted, pinned, and a compile error to ignore.
 #[test]
-fn the_unified_model_would_grow_eighteen_fields_and_only_one_is_a_projections_private_state() {
+fn the_unified_model_would_grow_twenty_fields_and_only_one_is_a_projections_private_state() {
     let routing = route_the_runtime_descriptor();
     let total = routing.already_in_the_model.len()
         + routing.would_join_the_model.len()
         + routing.vendor_fact.len()
         + routing.projection_local.len();
+    // 28 → 30: `precision` and `scale`, added because the `number` token cannot say
+    // whether a column is a float or a fixed-precision decimal and the SQLite emitter
+    // was answering `REAL` for both. That is the case this file demands be made in a
+    // diff that moves a visible number, and this is it.
     assert_eq!(
-        total, 28,
+        total, 30,
         "`FieldDescriptor` changed field count; every field must be routed: {routing:#?}"
     );
 
@@ -269,7 +291,7 @@ fn the_unified_model_would_grow_eighteen_fields_and_only_one_is_a_projections_pr
     );
     assert_eq!(
         routing.would_join_the_model.len(),
-        18,
+        20,
         "descriptor facts a UNIFIED model would have to grow. This number IS the spike's \
          answer and it is not a threshold to relax - a diff that moves it is a diff that \
          changes how big the neutral model becomes: {:?}",
@@ -291,9 +313,9 @@ fn the_unified_model_would_grow_eighteen_fields_and_only_one_is_a_projections_pr
     );
 
     // The load-bearing conclusion, asserted rather than left in prose: only ONE of the
-    // runtime descriptor's twenty-eight fields is something a neutral model must refuse.
+    // runtime descriptor's thirty fields is something a neutral model must refuse.
     // The unification is therefore NOT blocked by a vocabulary clash - it is blocked, if
-    // at all, by SIZE, and the size is 16 + 18 = 34 neutral column fields.
+    // at all, by SIZE, and the size is 16 + 20 = 36 neutral column fields.
     assert!(
         routing.projection_local.len() <= 1,
         "more than one descriptor field is projection-private, which is the shape that \
@@ -301,8 +323,8 @@ fn the_unified_model_would_grow_eighteen_fields_and_only_one_is_a_projections_pr
     );
     assert_eq!(
         16 + routing.would_join_the_model.len(),
-        34,
-        "the neutral `Column` has 16 fields today; a unified one would have 34. Recorded \
+        36,
+        "the neutral `Column` has 16 fields today; a unified one would have 36. Recorded \
          so the cost is a number in a test rather than an opinion in a proposal."
     );
 }

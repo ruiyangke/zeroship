@@ -5141,6 +5141,12 @@ impl std::error::Error for ProduceError {}
 /// (`"int"`→`Int`→`"int"`, `"string"`→`Text`→`"string"`, `"number"`→`Float`→
 /// `"number"`). The fold compares FieldDef maps by these TOKENS, so the round-trip is
 /// byte-identical for the type field.
+///
+/// Where a token is PARAMETERISED, the parameters ride in sibling facets and this
+/// inverse must read them or the round trip narrows the type: `char` needs
+/// `char_len`, `vector` needs `vector_dims`, and `number` needs `precision` - the one
+/// case where the facet decides WHICH `ColType` the token means (`Decimal` when it is
+/// present, `Double` when it is not) rather than merely parameterising a settled one.
 fn token_to_col_type(f: &crate::render::declarative::FieldDescriptor) -> Option<ColType> {
     let inner = |token: &str| -> Option<ColType> {
         Some(match token {
@@ -5148,7 +5154,18 @@ fn token_to_col_type(f: &crate::render::declarative::FieldDescriptor) -> Option<
             "int" | "integer" => ColType::Int,
             "smallInt" => ColType::SmallInt,
             "bigInt" => ColType::BigInt,
-            "number" | "float" => ColType::Double,
+            // `"number"` is a TWO-type token: `Double` and `Decimal { precision,
+            // scale }` both spell it. The `precision` facet beside it is what tells
+            // them apart, so this inverse reads it rather than collapsing every
+            // `number` to a float - the collapse would turn a `t.numeric(20, 4)`
+            // column into a `t.number()` one on every descriptor→ops round trip.
+            "number" | "float" => match (f.precision, f.scale) {
+                (Some(precision), scale) => ColType::Decimal {
+                    precision: u32::try_from(precision).ok().filter(|p| *p > 0)?,
+                    scale: u32::try_from(scale.unwrap_or(0)).ok()?,
+                },
+                (None, _) => ColType::Double,
+            },
             "real" => ColType::Real,
             "boolean" => ColType::Boolean,
             "json" | "object" | "array" => ColType::Json,

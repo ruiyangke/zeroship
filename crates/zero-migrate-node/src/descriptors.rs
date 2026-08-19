@@ -131,6 +131,8 @@ pub fn field_dto_to_engine(
         vector_dims: dto.vector_dims,
         char_len: dto.char_len,
         max_length: dto.max_length,
+        precision: dto.precision,
+        scale: dto.scale,
         // NOT on the wire, and this is the one facet the round trip deliberately does
         // not carry. The engine marks it `#[serde(skip)]` and calls it render-only: it
         // is DERIVED by `ir_column_to_field` from the column's own `ColType::Text` plus
@@ -247,6 +249,8 @@ pub fn field_to_dto(field: &FieldDescriptor) -> FieldDescriptorDto {
         vector_dims: field.vector_dims,
         char_len: field.char_len,
         max_length: field.max_length,
+        precision: field.precision,
+        scale: field.scale,
         vector_metric: field.vector_metric.clone(),
         case_sensitive: field.case_sensitive,
         encrypted: field.encrypted.clone(),

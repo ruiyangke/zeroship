@@ -814,6 +814,20 @@ pub struct FieldDescriptorDto {
     /// Pinned by `tests/collection_export_round_trip.rs`; the export is the half
     /// that works.
     pub max_length: Option<i64>,
+    /// `t.numeric({ precision, scale })` — total digits of a FIXED-PRECISION decimal,
+    /// with [`Self::scale`] beside it.
+    ///
+    /// Unlike the three widths above, this pair does not merely PARAMETERISE the type
+    /// token - it decides which type the token means. `number` is what both
+    /// `ColType::Double` and `ColType::Decimal` are spelled as, so a wire that dropped
+    /// these two would export a `t.numeric(20, 4)` column as a float, and a host
+    /// feeding it back would get one. It crosses in BOTH directions for that reason
+    /// (`token_to_col_type` reads `precision` to pick the `ColType`), which is the
+    /// respect in which it is stronger than `max_length`'s outbound-only half.
+    pub precision: Option<i64>,
+    /// `t.numeric({ precision, scale })` — digits after the point. See
+    /// [`Self::precision`].
+    pub scale: Option<i64>,
     /// A `t.vector(_, { metric })` distance metric (`cosine`|`l2`|`innerProduct`).
     pub vector_metric: Option<String>,
     /// `t.string({ caseSensitive: false })` — only `Some(false)` is meaningful.
