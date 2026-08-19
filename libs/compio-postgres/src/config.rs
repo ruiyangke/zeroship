@@ -1502,8 +1502,118 @@ impl<'a> UrlParser<'a> {
 mod tests {
     use std::net::IpAddr;
 
-    use crate::config::SslRootCert;
+    use crate::config::{SslMode, SslNegotiation, SslRootCert};
     use crate::{Config, config::Host};
+
+    /// All six libpq spellings parse, to the six distinct modes.
+    ///
+    /// `allow`, `verify-ca` and `verify-full` used to be parse errors, which is
+    /// the failure this pins: a driver that rejects `verify-full` sends every
+    /// deployment that wanted the strongest setting looking for a weaker one
+    /// that parses.
+    #[test]
+    fn all_six_sslmodes_parse() {
+        for (text, expected) in [
+            ("disable", SslMode::Disable),
+            ("allow", SslMode::Allow),
+            ("prefer", SslMode::Prefer),
+            ("require", SslMode::Require),
+            ("verify-ca", SslMode::VerifyCa),
+            ("verify-full", SslMode::VerifyFull),
+        ] {
+            let config = format!("host=h sslmode={text}").parse::<Config>().unwrap();
+            assert_eq!(config.get_ssl_mode(), expected, "sslmode={text}");
+            assert_eq!(expected.as_str(), text, "as_str must round-trip {text}");
+        }
+
+        // The default is libpq's default and stays that way.
+        assert_eq!(
+            "host=h".parse::<Config>().unwrap().get_ssl_mode(),
+            SslMode::Prefer
+        );
+
+        // The set is still closed: neighbouring spellings are errors, not
+        // silent downgrades to the default.
+        for text in ["verify_full", "verifyfull", "VERIFY-FULL", "yes", ""] {
+            format!("host=h sslmode={text}")
+                .parse::<Config>()
+                .err()
+                .unwrap_or_else(|| panic!("sslmode={text} parsed"));
+        }
+    }
+
+    /// The plaintext-permitting set is libpq's `ENC_PLAINTEXT` membership, and
+    /// it is what makes a silent downgrade impossible for the strong modes.
+    #[test]
+    fn only_the_three_weak_modes_permit_plaintext() {
+        for mode in [SslMode::Disable, SslMode::Allow, SslMode::Prefer] {
+            assert!(mode.permits_plaintext(), "{}", mode.as_str());
+        }
+        for mode in [SslMode::Require, SslMode::VerifyCa, SslMode::VerifyFull] {
+            assert!(!mode.permits_plaintext(), "{}", mode.as_str());
+            assert!(mode.permits_tls(), "{}", mode.as_str());
+        }
+        assert!(!SslMode::Disable.permits_tls());
+    }
+
+    /// libpq rejects `sslrootcert=system` under anything weaker than
+    /// `verify-full`, because trusting the public root program without
+    /// checking the host name accepts any certificate any public CA has issued
+    /// for any name.
+    #[test]
+    fn sslrootcert_system_requires_verify_full() {
+        for mode in ["disable", "allow", "prefer", "require", "verify-ca"] {
+            let config = format!("host=h sslmode={mode} sslrootcert=system")
+                .parse::<Config>()
+                .unwrap();
+            let err = config
+                .validate_tls_settings()
+                .expect_err("weaker than verify-full with sslrootcert=system must be rejected");
+            let text = format!("{:?}", std::error::Error::source(&err));
+            assert!(
+                text.contains("sslrootcert=system") && text.contains(mode),
+                "the error must name the mode and the parameter: {text}"
+            );
+        }
+
+        "host=h sslmode=verify-full sslrootcert=system"
+            .parse::<Config>()
+            .unwrap()
+            .validate_tls_settings()
+            .expect("verify-full is the mode sslrootcert=system exists for");
+    }
+
+    /// A direct TLS handshake sends no `SSLRequest`, so there is no negotiation
+    /// to fall back from; libpq refuses to pair it with a mode that permits
+    /// plaintext.
+    #[test]
+    fn direct_negotiation_requires_a_mode_with_no_plaintext_fallback() {
+        for mode in ["disable", "allow", "prefer"] {
+            format!("host=h sslmode={mode} sslnegotiation=direct")
+                .parse::<Config>()
+                .unwrap()
+                .validate_tls_settings()
+                .expect_err("a mode permitting plaintext must not drive a TLS-only handshake");
+        }
+        for mode in ["require", "verify-ca", "verify-full"] {
+            let url = if mode == "require" {
+                format!("host=h sslmode={mode} sslnegotiation=direct")
+            } else {
+                format!("host=h sslmode={mode} sslnegotiation=direct sslrootcert=/ca.pem")
+            };
+            url.parse::<Config>()
+                .unwrap()
+                .validate_tls_settings()
+                .unwrap_or_else(|e| panic!("sslmode={mode} may use direct negotiation: {e}"));
+        }
+        assert_eq!(
+            "host=h sslnegotiation=direct sslmode=require"
+                .parse::<Config>()
+                .unwrap()
+                .get_ssl_negotiation(),
+            SslNegotiation::Direct
+        );
+    }
 
     #[test]
     fn test_simple_parsing() {
@@ -1550,19 +1660,29 @@ mod tests {
     }
 
     /// `system` is the one `sslrootcert` value that is a keyword rather than a
-    /// path, and it is also the default - so this pins that a URL asking for
-    /// the OS store is parsed as the OS store and not as a file named
-    /// "system".
+    /// path, so this pins that a URL asking for the OS store is parsed as the
+    /// OS store and not as a file named "system".
+    ///
+    /// The default is [`SslRootCert::Unset`], NOT `System`. That is libpq's
+    /// shape - its default is a home-directory file that usually does not
+    /// exist - and it is what gives `require` its documented meaning: nothing
+    /// to verify against, so nothing verified. Defaulting to the OS store
+    /// instead would quietly turn `require` into `verify-ca` and would make
+    /// every default connection string illegal under the
+    /// `sslrootcert=system` rule above.
     #[test]
-    fn sslrootcert_system_is_the_keyword_and_the_default() {
+    fn sslrootcert_system_is_a_keyword_and_the_default_is_unset() {
         assert_eq!(
             "host=h sslrootcert=system".parse::<Config>().unwrap().get_ssl_root_cert(),
             &SslRootCert::System
         );
         assert_eq!(
             "host=h".parse::<Config>().unwrap().get_ssl_root_cert(),
-            &SslRootCert::System
+            &SslRootCert::Unset
         );
+        assert!(!SslRootCert::Unset.is_configured());
+        assert!(SslRootCert::System.is_configured());
+        assert!(SslRootCert::File("/ca.pem".into()).is_configured());
     }
 
     /// The recognised-key set stays closed: a plausible neighbour of the three
