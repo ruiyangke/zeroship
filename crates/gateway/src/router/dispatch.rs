@@ -998,13 +998,6 @@ pub async fn handle_subdomain(
     path: web::types::Path<String>,
     body: Bytes,
 ) -> HttpResponse {
-    // `auth.zeroship.ai` is a platform-internal host, not a creator app.
-    // The gateway proxies the self-contained OP protocol surface under
-    // `/oauth2/*`, plus the login UI and webhook surfaces, to `crates/auth`.
-    if is_auth_host(&req) {
-        return route_auth_host(req, state, body).await;
-    }
-
     // OIDC callback for hosted creator apps. Intercepted *before*
     // manifest dispatch so the path can never collide with a route
     // the creator wrote; the `/__zeroship/` prefix is reserved.
@@ -1021,148 +1014,6 @@ pub async fn handle_subdomain(
     };
     let tail = path.into_inner();
     handle_request(req, state, &app_name, &tail, body).await
-}
-
-// ---------------------------------------------------------------------------
-// auth.zeroship.ai routing
-// ---------------------------------------------------------------------------
-
-/// Which upstream a given `auth.zeroship.ai` request path should be
-/// forwarded to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AuthUpstream {
-    /// Self-contained OP endpoints, login UI, OAuth2 consent handlers,
-    /// and webhooks — implemented by `crates/auth`.
-    Auth,
-}
-
-/// Classify an inbound `auth.zeroship.ai` path. The protocol endpoints
-/// listed here are the self-contained OP contract implemented by `crates/auth`:
-///
-///   * `/oauth2/.well-known/openid-configuration`, `/oauth2/.well-known/jwks.json`
-///   * `/oauth2/userinfo`
-///   * `/oauth2/authorize`, `/oauth2/token`, `/oauth2/revoke`
-///   * `/oauth2/device/authorization`, `/oauth2/logout`
-///
-/// Everything else is handled by `crates/auth` (login HTML, consent callbacks,
-/// signup, password reset, …).
-pub(crate) fn classify_auth_path(path: &str) -> AuthUpstream {
-    let _ = path;
-    AuthUpstream::Auth
-}
-
-/// Platform-internal auth hosts. A request whose Host matches one of
-/// these EXACTLY is routed to the internal auth upstream rather
-/// than treated as a creator app. Production is `auth.zeroship.ai`;
-/// `auth.zeroship.localhost` is the dev/compose hostname.
-const AUTH_HOSTS: &[&str] = &["auth.zeroship.ai", "auth.zeroship.localhost"];
-
-/// True when the request's Host header is a platform auth host.
-///
-/// The match is **anchored / exact** (lowercased, port-stripped). A
-/// loose prefix/substring comparison would let a crafted Host —
-/// `auth.zeroship.ai.evil.com` (suffix), `authx.zeroship.ai` (label
-/// prefix-extension), `evil-auth.zeroship.ai` (substring) — reach the
-/// internal auth routing it must never see (finding P2-A2).
-fn is_auth_host(req: &HttpRequest) -> bool {
-    let Some(host_hdr) = req.headers().get("host").and_then(|v| v.to_str().ok()) else {
-        return false;
-    };
-    let host = host_hdr.split(':').next().unwrap_or(host_hdr);
-    let host_lc = host.to_ascii_lowercase();
-    AUTH_HOSTS.contains(&host_lc.as_str())
-}
-
-async fn route_auth_host(
-    req: HttpRequest,
-    state: web::types::State<Arc<GateState>>,
-    body: Bytes,
-) -> HttpResponse {
-    let path = req.uri().path();
-    let _upstream = classify_auth_path(path);
-    let upstream_base = state.config.auth_ui_url.as_str();
-
-    let path_and_query = req
-        .uri()
-        .path_and_query()
-        .map(|p| p.as_str())
-        .unwrap_or("/");
-
-    // SEC-3: the auth upstream keys per-IP rate limits on the forwarded
-    // client address. Scrub any client-supplied `X-Forwarded-For` /
-    // `Forwarded` / `X-Real-IP` and inject a SINGLE authoritative
-    // `X-Forwarded-For` derived from the gateway's own trust_proxy-aware
-    // client-IP policy (the immediate peer when the gateway is the edge; the
-    // fronting proxy's forwarded client when `trust_proxy` is set) — the SAME
-    // address the gateway keys its own rate limits on. A creator app (or any
-    // inbound caller) therefore cannot rotate a spoofed IP to bypass the auth
-    // service's limits, AND a legitimately-fronted (e.g. Caddy) deployment does
-    // not collapse every user onto the proxy's single IP.
-    let client_ip = auth_forward_client_ip(&req, state.config.trust_proxy);
-    let headers = build_auth_upstream_headers(req.headers(), client_ip);
-
-    let method = req.method().as_str();
-
-    match proxy::forward_http(upstream_base, method, path_and_query, &headers, &body).await {
-        Ok(resp) => resp,
-        Err(e) => {
-            tracing::warn!(error = %e, upstream = %upstream_base, "auth-host proxy error");
-            HttpResponse::BadGateway()
-                .json(&serde_json::json!({"error": format!("auth proxy: {e}")}))
-        }
-    }
-}
-
-/// Inbound client-IP spoofing vectors the gateway MUST strip before forwarding
-/// to the trusted auth upstream (SEC-3). The auth service derives its
-/// per-IP rate-limit bucket key from a forwarded client address; if a creator
-/// app's request could carry these verbatim, an attacker would rotate the
-/// value to evade credential-stuffing / email-amplification limits and mint an
-/// unbounded number of `zeroship.rate_limits` rows. Matching is
-/// case-insensitive (HTTP header names are case-insensitive).
-const CLIENT_IP_SPOOF_HEADERS: &[&str] = &["x-forwarded-for", "forwarded", "x-real-ip"];
-
-/// Build the header set forwarded to the auth upstream: drop any
-/// client-supplied forwarding headers ([`CLIENT_IP_SPOOF_HEADERS`]) and inject
-/// a SINGLE authoritative `X-Forwarded-For` carrying the real socket peer.
-///
-/// The injected `X-Forwarded-For` is the ONLY client-IP signal the auth
-/// service sees, so its per-IP rate-limit buckets key on an address the
-/// inbound caller cannot forge. When the peer address is unknown (exotic
-/// transport / test fixture) NO `X-Forwarded-For` is injected — the auth side
-/// falls back to its own socket peer rather than trusting a forged header.
-fn build_auth_upstream_headers(
-    headers: &ntex::http::HeaderMap,
-    peer_ip: Option<std::net::IpAddr>,
-) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = Vec::new();
-    for (name, value) in headers {
-        let lname = name.as_str().to_ascii_lowercase();
-        if CLIENT_IP_SPOOF_HEADERS.contains(&lname.as_str()) {
-            // Drop the inbound copy — we re-author the authoritative value.
-            continue;
-        }
-        if let Ok(v) = value.to_str() {
-            out.push((name.as_str().to_string(), v.to_string()));
-        }
-    }
-    if let Some(ip) = peer_ip {
-        out.push(("X-Forwarded-For".to_string(), ip.to_string()));
-    }
-    out
-}
-
-/// The authoritative client IP the gateway forwards to the auth upstream
-/// (SEC-3). Reuses the gateway's own [`client_ip`] policy so the auth service
-/// keys its per-IP rate-limit buckets on the SAME address the gateway keys its
-/// own limits on: the immediate socket peer when the gateway is the edge, or
-/// the fronting proxy's forwarded client when `trust_proxy` is enabled. Raw
-/// `peer_addr()` would be wrong behind a trusted proxy — it would hand the auth
-/// service the proxy's address and collapse every user onto one shared bucket.
-/// Returns `None` when no parseable IP is available, in which case no
-/// `X-Forwarded-For` is injected and the auth side falls back to its own peer.
-fn auth_forward_client_ip(req: &HttpRequest, trust_proxy: bool) -> Option<std::net::IpAddr> {
-    resolve_client_ip(req, trust_proxy)
 }
 
 // ---------------------------------------------------------------------------
@@ -4316,82 +4167,6 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn auth_forward_client_ip_follows_trust_proxy_not_raw_peer() {
-        // SEC-3: behind a trusted proxy the authoritative IP handed to the auth
-        // service must be the FORWARDED client (so per-IP buckets separate real
-        // users), not the gateway's immediate peer (which would be the proxy and
-        // collapse everyone onto one shared bucket). With trust_proxy=false the
-        // spoofable header is ignored and must NOT become the bucket key.
-        let req = ntex::web::test::TestRequest::default()
-            .header("x-forwarded-for", "203.0.113.7")
-            .to_http_request();
-        assert_eq!(
-            auth_forward_client_ip(&req, true),
-            Some("203.0.113.7".parse().unwrap()),
-            "trust_proxy must forward the proxy-authored client IP"
-        );
-        assert_ne!(
-            auth_forward_client_ip(&req, false),
-            Some("203.0.113.7".parse().unwrap()),
-            "without trust_proxy the spoofable XFF must not become the bucket key"
-        );
-    }
-
-    #[test]
-    fn auth_upstream_headers_drop_spoofed_client_ip_and_inject_peer() {
-        // SEC-3: forwarding to the auth upstream must strip ANY
-        // client-supplied X-Forwarded-For / Forwarded / X-Real-IP and inject a
-        // single authoritative X-Forwarded-For from the real socket peer.
-        // Pre-fix the helper copies headers verbatim and injects nothing → the
-        // spoofed 1.2.3.4 survives and the authoritative peer is absent → RED.
-        let req = ntex::web::test::TestRequest::default()
-            .header("x-forwarded-for", "1.2.3.4")
-            .header("forwarded", "for=1.2.3.4")
-            .header("x-real-ip", "1.2.3.4")
-            .header("cookie", "zsidp_csrf=keep")
-            .header("user-agent", "keep-me/1")
-            .to_http_request();
-
-        let peer: std::net::IpAddr = "9.9.9.9".parse().unwrap();
-        let fwd = build_auth_upstream_headers(req.headers(), Some(peer));
-        let lc: Vec<(String, String)> = fwd
-            .iter()
-            .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
-            .collect();
-
-        // The spoofed value never reaches the auth upstream under any of the
-        // three client-IP header names.
-        for spoof in ["x-forwarded-for", "forwarded", "x-real-ip"] {
-            assert!(
-                !lc.iter().any(|(k, v)| k == spoof && v.contains("1.2.3.4")),
-                "spoofed client IP leaked via `{spoof}`: {lc:?}"
-            );
-        }
-
-        // Exactly one authoritative X-Forwarded-For, set to the real peer.
-        let xff: Vec<&String> = lc
-            .iter()
-            .filter(|(k, _)| k == "x-forwarded-for")
-            .map(|(_, v)| v)
-            .collect();
-        assert_eq!(
-            xff,
-            vec![&"9.9.9.9".to_string()],
-            "auth upstream must receive exactly one authoritative X-Forwarded-For (peer): {lc:?}"
-        );
-
-        // Benign headers survive the scrub.
-        assert!(
-            lc.iter().any(|(k, v)| k == "user-agent" && v == "keep-me/1"),
-            "benign header dropped: {lc:?}"
-        );
-        assert!(
-            lc.iter().any(|(k, _)| k == "cookie"),
-            "auth cookies must still be forwarded: {lc:?}"
-        );
-    }
-
-    #[test]
     fn canonicalize_dispatch_path_rejects_traversal_and_normalizes() {
         // SEC-2: the dispatch layer rejects (400) any path carrying a
         // traversal / empty-interior-segment form a browser's `new URL` would
@@ -5054,66 +4829,28 @@ mod tests {
     }
 
     // ----------------------------------------------------------------------
-    // auth.zeroship.ai routing — classify_auth_path
-    // ----------------------------------------------------------------------
-
-    #[test]
-    fn classify_auth_path_oauth2_routes_to_self_contained_op() {
-        assert_eq!(classify_auth_path("/oauth2/authorize"), AuthUpstream::Auth);
-        assert_eq!(classify_auth_path("/oauth2/token"), AuthUpstream::Auth);
-        assert_eq!(classify_auth_path("/oauth2/revoke"), AuthUpstream::Auth);
-        assert_eq!(classify_auth_path("/oauth2/logout"), AuthUpstream::Auth);
-        assert_eq!(
-            classify_auth_path("/oauth2/.well-known/openid-configuration"),
-            AuthUpstream::Auth
-        );
-        assert_eq!(
-            classify_auth_path("/oauth2/.well-known/jwks.json"),
-            AuthUpstream::Auth
-        );
-    }
-
-    #[test]
-    fn classify_auth_path_well_known_routes_to_self_contained_op() {
-        assert_eq!(
-            classify_auth_path("/.well-known/openid-configuration"),
-            AuthUpstream::Auth
-        );
-        assert_eq!(
-            classify_auth_path("/.well-known/jwks.json"),
-            AuthUpstream::Auth
-        );
-    }
-
-    #[test]
-    fn classify_auth_path_userinfo_routes_to_self_contained_op() {
-        assert_eq!(classify_auth_path("/userinfo"), AuthUpstream::Auth);
-    }
-
-    #[test]
-    fn classify_auth_path_ui_and_callbacks_route_to_auth() {
-        assert_eq!(classify_auth_path("/authorize"), AuthUpstream::Auth);
-        assert_eq!(classify_auth_path("/token"), AuthUpstream::Auth);
-        assert_eq!(classify_auth_path("/revoke"), AuthUpstream::Auth);
-        assert_eq!(classify_auth_path("/login"), AuthUpstream::Auth);
-        assert_eq!(classify_auth_path("/signup"), AuthUpstream::Auth);
-        assert_eq!(classify_auth_path("/consent"), AuthUpstream::Auth);
-        assert_eq!(classify_auth_path("/static/main.css"), AuthUpstream::Auth);
-        // A path that contains but does not start with `/oauth2/` must
-        // still go to auth — the prefix match is anchored.
-        assert_eq!(
-            classify_auth_path("/something/oauth2/auth"),
-            AuthUpstream::Auth
-        );
-        // `/userinfo` is exact-match; substring matches must not steal.
-        assert_eq!(classify_auth_path("/userinfo/foo"), AuthUpstream::Auth);
-    }
-
-    // ----------------------------------------------------------------------
-    // is_auth_host — the Host header that routes to internal auth
-    // MUST be an anchored, exact match. A loose prefix/substring match
-    // lets a crafted Host (`auth.zeroship.ai.evil.com`, `authx.zeroship.ai`,
-    // `evil-auth.zeroship.ai`) reach the platform-internal auth upstream.
+    // Host-based routing has NO platform-internal escape hatch.
+    //
+    // The gateway used to special-case `auth.zeroship.ai` /
+    // `auth.zeroship.localhost` and proxy those hosts to the auth service.
+    // Two anchored-match tests guarded that arm, because a loose
+    // prefix/substring compare let a crafted Host (`auth.zeroship.ai.evil.com`,
+    // `authx.zeroship.ai`, `evil-auth.zeroship.ai`) reach a platform-internal
+    // upstream (finding P2-A2). The arm is gone: the gateway serves apps on the
+    // worker and nothing else, and `auth.<domain>` reaches the auth service
+    // through the edge proxy (deploy/ops/Caddyfile), never through here.
+    //
+    // The test below replaces those two. It does not re-check anchoring -
+    // there is no longer a name to anchor against - it records that the
+    // formerly-special hosts now resolve as ordinary app names.
+    //
+    // WHAT IT DOES NOT CATCH, so nobody reads it as a guard it is not: it
+    // calls `extract_app_name` directly, not `handle_subdomain`. Someone who
+    // re-added a host special-case ABOVE the `extract_app_name` call would not
+    // turn this red. Only the absence of such an arm keeps the property, and
+    // that is a review question, not something asserted here. What this does
+    // pin is the layer below: name resolution itself has no reserved word, so
+    // a special case cannot be reintroduced by accident inside it.
     // ----------------------------------------------------------------------
 
     fn req_with_host(host: &str) -> HttpRequest {
@@ -5123,47 +4860,46 @@ mod tests {
     }
 
     #[test]
-    fn is_auth_host_accepts_exact_production_host() {
-        assert!(is_auth_host(&req_with_host("auth.zeroship.ai")));
-        // Case-insensitive + port-stripped, like the rest of the host logic.
-        assert!(is_auth_host(&req_with_host("AUTH.ZEROSHIP.AI")));
-        assert!(is_auth_host(&req_with_host("auth.zeroship.ai:443")));
-        // Dev host parity is exact too.
-        assert!(is_auth_host(&req_with_host("auth.zeroship.localhost")));
-        assert!(is_auth_host(&req_with_host("auth.zeroship.localhost:8080")));
-    }
+    fn no_host_bypasses_app_name_resolution_for_a_platform_service() {
+        // The formerly-special hosts now resolve like any other subdomain:
+        // to an app NAME that must be looked up in the registry. `auth` is a
+        // name, not a route to `crates/auth`.
+        for host in [
+            "auth.zeroship.ai",
+            "AUTH.ZEROSHIP.AI",
+            "auth.zeroship.ai:443",
+            "auth.zeroship.localhost",
+            "auth.zeroship.localhost:8080",
+        ] {
+            assert_eq!(
+                extract_app_name(&req_with_host(host), None).as_deref(),
+                Some(if host.starts_with("AUTH") { "AUTH" } else { "auth" }),
+                "{host} must resolve to an ordinary app name, not an internal upstream"
+            );
+        }
 
-    #[test]
-    fn is_auth_host_rejects_unanchored_lookalikes() {
-        // Subdomain-suffix: attacker-controlled parent domain.
-        assert!(
-            !is_auth_host(&req_with_host("auth.zeroship.ai.evil.com")),
-            "suffix attack must not match"
+        // The lookalikes the deleted anchoring test enumerated are likewise
+        // just app names now; none of them names a platform component.
+        for host in [
+            "auth.zeroship.ai.evil.com",
+            "authx.zeroship.ai",
+            "auth-evil.com",
+            "evil-auth.zeroship.ai",
+            "auth.zeroship.evil.com",
+        ] {
+            let name = extract_app_name(&req_with_host(host), None);
+            assert!(
+                name.is_some(),
+                "{host} must resolve as an app name like any other host"
+            );
+        }
+
+        // A request with no Host header resolves to no app at all, so it
+        // cannot fall through to some default internal destination.
+        assert_eq!(
+            extract_app_name(&ntex::web::test::TestRequest::default().to_http_request(), None),
+            None
         );
-        // Prefix-extension on the label.
-        assert!(
-            !is_auth_host(&req_with_host("authx.zeroship.ai")),
-            "label prefix-extension must not match"
-        );
-        assert!(
-            !is_auth_host(&req_with_host("auth-evil.com")),
-            "label prefix-extension must not match"
-        );
-        // Substring containment.
-        assert!(
-            !is_auth_host(&req_with_host("evil-auth.zeroship.ai")),
-            "substring must not match"
-        );
-        // The old `starts_with("auth.zeroship.")` prefix arm let any
-        // `auth.zeroship.<anything>` through — this is the exact regression.
-        assert!(
-            !is_auth_host(&req_with_host("auth.zeroship.evil.com")),
-            "former prefix arm must no longer match arbitrary suffixes"
-        );
-        // No host header at all → not an auth host.
-        assert!(!is_auth_host(
-            &ntex::web::test::TestRequest::default().to_http_request()
-        ));
     }
 
     // -----------------------------------------------------------------------
