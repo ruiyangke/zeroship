@@ -1,6 +1,6 @@
 //! OIDC Core §5.3 `/oauth2/userinfo` tests.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};

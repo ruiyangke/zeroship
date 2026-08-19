@@ -1,6 +1,6 @@
 //! P5a-2 gateway-brokered login OP tests.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 
