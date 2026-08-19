@@ -43,6 +43,15 @@
 //!   text(ci) -> int          caseSensitive STALE     t.int()          case_sensitive STALE
 //! ```
 //!
+//! `Decimal { precision, scale }` joined that list later and is the sharpest member,
+//! because it is the only one whose token is SHARED with a different type:
+//! `col_type_to_token` spells `Decimal` and `Double` alike as `number`, so
+//! `precision` does not merely parameterise a settled type - it says WHICH type the
+//! column is. A `numeric(20, 4)` -> `t.double()` retype changes no token at all, and a
+//! stale `precision` left behind makes the SQLite emitter declare the column `TEXT`
+//! when it is now a float. The live half of that seam - the emitter reading the facet,
+//! adjudicated by a real SQLite - is `tests/fold_live/sqlite_decimal_rebuild_live.rs`.
+//!
 //! The last row is the one where `fold_ops` is wrong too, and it is not cosmetic:
 //! `case_sensitive` is DRIFT-COMPARED. So is `collation`, `value_format` and
 //! `id_default`, and `fold_ops` left all four behind.
@@ -144,10 +153,14 @@ const PLAIN_INT: &str = r#"{"name":"v","type":"int"}"#;
 const TYPE_ID: &str = r#"{"name":"v","type":"text","valueFormat":{"typeId":{"prefix":"usr"}}}"#;
 const ULID: &str = r#"{"name":"v","type":"text","valueFormat":"ulid"}"#;
 
+const NUMERIC_20_4: &str = r#"{"name":"v","type":{"decimal":{"precision":20,"scale":4}}}"#;
+
 const TO_INT: &str = r#""int""#;
 const TO_STRING_40: &str = r#"{"string":{"length":40}}"#;
 const TO_CHAR_8: &str = r#"{"char":{"length":8}}"#;
 const TO_VECTOR_5: &str = r#"{"vector":{"vector":5}}"#;
+const TO_NUMERIC_20_4: &str = r#"{"decimal":{"precision":20,"scale":4}}"#;
+const TO_DOUBLE: &str = r#""double""#;
 
 // ---------------------------------------------------------------------------
 // RE-DERIVED FROM THE TARGET TYPE. `ColType` carries the parameter, so the only
@@ -166,6 +179,78 @@ fn a_retype_off_a_bounded_string_drops_the_bound_it_no_longer_has() {
     assert_eq!(
         pg_snapshot(STRING_24, TO_INT).expect("fold").data_type,
         "integer"
+    );
+}
+
+/// **`numeric(20, 4)` -> `t.number()`: the sharpest case in the file.**
+///
+/// Sharper than the two bounded strings below, because there the token at least
+/// PARAMETERISES one settled type. Here the token is SHARED between two different
+/// `ColType`s: `col_type_to_token` spells `Decimal { .. }` and `Double` alike as
+/// `number`, so `precision` is not a width beside a known type - it is the only thing
+/// that says WHICH type the column is.
+///
+/// A replay that assigns the token and nothing else therefore cannot tell this retype
+/// from a no-op, exactly as with `string(24)` -> `string(40)`, but the consequence is
+/// larger: a stale `precision` makes the SQLite emitter declare the column `TEXT` when
+/// it is now a float, and clearing it correctly is what makes the emitter say `REAL`.
+/// `tests/fold_live/sqlite_decimal_rebuild_live.rs` measures the other direction of
+/// the same seam against a live database.
+#[test]
+fn a_retype_off_a_fixed_precision_decimal_drops_the_precision_it_no_longer_has() {
+    assert_eq!(
+        descriptor(NUMERIC_20_4, TO_DOUBLE),
+        serde_json::json!({ "type": "number" }),
+        "the token is unchanged - both types spell `number` - so a leftover \
+         `precision` here is invisible in the token and decisive in the DDL: it is \
+         what makes SQLite declare the column TEXT rather than REAL"
+    );
+    assert_eq!(authoring(NUMERIC_20_4, TO_DOUBLE), "v: t.double(),");
+    assert_eq!(
+        pg_snapshot(NUMERIC_20_4, TO_DOUBLE)
+            .expect("fold")
+            .data_type,
+        "double precision"
+    );
+}
+
+/// **`numeric(20, 4)` -> `int`: the parameters go with the type they belonged to.**
+#[test]
+fn a_retype_off_a_decimal_onto_an_int_drops_both_parameters() {
+    assert_eq!(
+        descriptor(NUMERIC_20_4, TO_INT),
+        serde_json::json!({ "type": "int" }),
+        "`precision`/`scale` are `ColType::Decimal`'s parameters; an int has neither"
+    );
+    assert_eq!(authoring(NUMERIC_20_4, TO_INT), "v: t.int(),");
+    assert_eq!(
+        pg_snapshot(NUMERIC_20_4, TO_INT).expect("fold").data_type,
+        "integer"
+    );
+}
+
+/// **`int` -> `numeric(20, 4)`: the parameters arrive with the type that needs them.**
+///
+/// The direction that was ABSENT rather than STALE, and the one the DDL cannot fake: a
+/// `number` with no `precision` is a float on all three dialects, so a retype that
+/// dropped the parameters would silently give the column IEEE-754 storage under the
+/// name `numeric`.
+#[test]
+fn a_retype_onto_a_fixed_precision_decimal_reports_its_precision() {
+    assert_eq!(
+        descriptor(PLAIN_INT, TO_NUMERIC_20_4),
+        serde_json::json!({ "type": "number", "precision": 20, "scale": 4 }),
+        "the target type carries both parameters, so the descriptor must too"
+    );
+    assert_eq!(
+        authoring(PLAIN_INT, TO_NUMERIC_20_4),
+        "v: t.numeric({ precision: 20, scale: 4 }),"
+    );
+    assert_eq!(
+        pg_snapshot(PLAIN_INT, TO_NUMERIC_20_4)
+            .expect("fold")
+            .data_type,
+        "numeric"
     );
 }
 
