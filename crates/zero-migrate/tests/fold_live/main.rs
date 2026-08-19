@@ -11,6 +11,7 @@
 mod support;
 
 mod env_db_ts_matches_the_server_pg;
+mod field_def_column_facets_pg;
 mod fold_drop_column_check_cascade_pg;
 mod fold_drop_column_exclusion_cascade_pg;
 mod fold_drop_column_index_cascade_pg;

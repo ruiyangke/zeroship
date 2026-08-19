@@ -2603,7 +2603,13 @@ fn check_constraint_name(table: &str, field: &str, kind: &str) -> String {
 ///
 /// Tagged `IrScalar::Int64` defaults bypass this descriptor-value helper and use
 /// the structured-default overlay, preserving their exact i64 tag and spelling.
-fn numeric_default_literal(v: &serde_json::Value) -> Option<String> {
+///
+/// Shared with `schema::query::def_to_constraints_for_dialect`, which renders the
+/// same numeric tokens from the SDK field-def map rather than from a
+/// [`FieldDescriptor`]. The two emitters have to agree digit for digit — they can
+/// describe the same column on two different code paths — so they call one
+/// function instead of spelling the three carriers twice.
+pub(crate) fn numeric_default_literal(v: &serde_json::Value) -> Option<String> {
     if let Some(i) = v.as_i64() {
         Some(i.to_string())
     } else if let Some(f) = v.as_f64() {

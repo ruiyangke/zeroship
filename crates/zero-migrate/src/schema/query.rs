@@ -3007,14 +3007,40 @@ fn def_to_constraints_for_dialect(
     // Default value
     if let Some(default) = def.get("default") {
         match def.get("type").and_then(|t| t.as_str()) {
-            Some("string") => {
+            // The TEXT-shaped tokens. `char` and `inet` join `string` because all
+            // three carry their default as a JSON string and all three take a
+            // single-quoted SQL literal; without them a `t.char()`/`t.inet()`
+            // column's declared DEFAULT was dropped on the floor by the `_` arm
+            // below while a `t.text()` column's survived.
+            Some("string") | Some("char") | Some("inet") => {
                 if let Some(s) = default.as_str() {
                     parts.push(format!("DEFAULT {}", schema_string_literal(s, dialect)));
                 }
             }
-            Some("number") => {
-                if let Some(n) = default.as_f64() {
-                    parts.push(format!("DEFAULT {n}"));
+            // The NUMERIC tokens, all through the one precision-preserving
+            // renderer [`crate::render::declarative::numeric_default_literal`].
+            //
+            // `number` used to sit here alone behind `as_f64`, so every integer
+            // token reached the `_` arm and lost its DEFAULT silently: the emitted
+            // SQL stayed valid, the table was created, and the declaration simply
+            // was not in it. The sibling emitter (`declarative::field_default_expr`,
+            // which renders a `FieldDescriptor` rather than this SDK field-def map)
+            // had already fixed exactly this and lists exactly these tokens; the two
+            // can describe the same column on two different paths, so they now share
+            // the renderer instead of each spelling the carriers.
+            //
+            // Routing through the shared helper rather than `as_f64` is what makes a
+            // `bigInt` exact: `as_f64` rounds anything past 2^53, so a default of
+            // 9007199254740993 was previously unrepresentable even for the tokens
+            // that DID render. Only the tokens `def_to_pg_type` maps to an integer
+            // or float column are listed — no PG type NAME (`int4`, `int8`,
+            // `bigint`) is accepted here either, for the same typo-rejection reason
+            // `def_to_pg_type` gives.
+            Some("number") | Some("int") | Some("integer") | Some("smallInt") | Some("bigInt")
+            | Some("real") => {
+                if let Some(rendered) = crate::render::declarative::numeric_default_literal(default)
+                {
+                    parts.push(format!("DEFAULT {rendered}"));
                 }
             }
             Some("boolean") => {
@@ -3035,22 +3061,54 @@ fn def_to_constraints_for_dialect(
         }
     }
 
-    // Check constraints for min/max
+    // Check constraints for min/max.
+    //
+    // The gate is the NUMERIC token family, not `number` alone. `min`/`max` are a
+    // VALUE range, and the fold recovers them from a live `CHECK` onto whatever
+    // column the constraint bounds — including an `int` one (`project_field_defs`
+    // reads `scores.score: {"type":"int","min":1,"max":9}` straight back out of an
+    // applied `CHECK`). While this read `Some("number")` only, that recovered range
+    // was dropped by the emitter, so a rebuild silently removed a constraint the
+    // server had been enforcing.
+    //
+    // ONE-SIDED ON PURPOSE, and the asymmetry is measured rather than assumed.
+    // `render/declarative.rs`'s `field_check_constraints` carries the SAME
+    // `f.ty == "number"` gate for the DESIRED SNAPSHOT, and it is deliberately left
+    // alone. Widening it would change what the differ asks every dialect for, and
+    // there is no live path on which the two gates can currently disagree: the only
+    // production caller of this emitter is the SQLite 12-step rebuild, and a SQLite
+    // fold cannot produce a `min`/`max` at all — both routes to a CHECK are refused
+    // upstream (`model/op_support.rs`'s `addConstraint(check) … is PostgreSQL-only`
+    // and `render/fold.rs`'s `createTable table-level CHECK is PostgreSQL-only`), so
+    // a SQLite field def never carries the keys this block reads. The range arm here
+    // is therefore correctness for the emitter's own vocabulary, exercised against a
+    // live server through its PostgreSQL arm, and NOT a fix to a shipping SQLite
+    // path. Anyone widening the snapshot's gate to match owes a live-server oracle
+    // for the differ, which this file cannot provide.
+    //
+    // `string` is deliberately NOT in the family even though it accepts a `max`:
+    // there `max` is a LENGTH, read by the MySQL renderer to size a `VARCHAR(N)`
+    // (see `MysqlSchemaRenderer::column_type`). Treating it as a value bound would
+    // emit `CHECK (name <= 255)` and compare text against an integer.
     let col = quote_ident_for_dialect(field, dialect);
-    if let (Some("number"), Some(min)) = (
+    let ranged = matches!(
         def.get("type").and_then(|t| t.as_str()),
-        def.get("min").and_then(|v| v.as_f64()),
-    ) {
-        if let Some(max) = def.get("max").and_then(|v| v.as_f64()) {
+        Some("number" | "int" | "integer" | "smallInt" | "bigInt" | "real")
+    );
+    // Bounds share the DEFAULT's precision-preserving renderer, so a bound past
+    // 2^53 is not silently rounded on its way into the predicate.
+    let bound = |key: &str| -> Option<String> {
+        def.get(key)
+            .filter(|_| ranged)
+            .and_then(crate::render::declarative::numeric_default_literal)
+    };
+    match (bound("min"), bound("max")) {
+        (Some(min), Some(max)) => {
             parts.push(format!("CHECK ({col} >= {min} AND {col} <= {max})"));
-        } else {
-            parts.push(format!("CHECK ({col} >= {min})"));
         }
-    } else if let (Some("number"), Some(max)) = (
-        def.get("type").and_then(|t| t.as_str()),
-        def.get("max").and_then(|v| v.as_f64()),
-    ) {
-        parts.push(format!("CHECK ({col} <= {max})"));
+        (Some(min), None) => parts.push(format!("CHECK ({col} >= {min})")),
+        (None, Some(max)) => parts.push(format!("CHECK ({col} <= {max})")),
+        (None, None) => {}
     }
 
     // Standalone literal field. The value's primitive type is

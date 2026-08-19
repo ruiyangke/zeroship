@@ -578,18 +578,17 @@ async fn a_fold_seeded_rebuild_renders_its_create_table_from_the_map() {
 
     let mut expected = before_columns.clone();
     expected[1].0 = "memo".to_string();
-    // A PRE-EXISTING DEFECT, NOT THIS MOVE'S, characterized rather than expected away.
-    // `schema::query::def_to_constraints_for_dialect` emits a `DEFAULT` for the `string`,
-    // `number` and `boolean` type tokens and has no arm for `int`, so an integer
-    // column's default is dropped by the rebuilt `CREATE TABLE` while a text column's
-    // survives (`"theme" TEXT DEFAULT 'dark'` is in the offline golden, captured from
-    // the OLD path). Both the walker and the projection put `"default": 1` in the map -
-    // the divergence sweep behind this move compared every key over 486 prefix/dialect
-    // pairs and reported no `default` difference anywhere - so the loss is downstream of
-    // the map and is byte-identical before and after the switch. Asserted as the server
-    // actually behaves, with the map's own claim asserted above it, so whoever fixes the
-    // emitter inverts one line here rather than discovering this again.
-    expected[3].3 = None;
+    // `qty`'s `DEFAULT 1` SURVIVES the rebuild, and the line that says so used to say
+    // the opposite. This was a real defect, characterized here rather than expected
+    // away: `schema::query::def_to_constraints_for_dialect` emitted a `DEFAULT` for the
+    // `string`, `number` and `boolean` type tokens and had no arm for `int`, so an
+    // integer column's default was dropped by the rebuilt `CREATE TABLE` while a text
+    // column's survived. Both the walker and the projection put `"default": 1` in the
+    // map (asserted above), so the loss was downstream of the map, in the emitter. The
+    // emitter now renders the numeric and text-shaped token families through the same
+    // renderer its `FieldDescriptor` sibling uses, and the server keeps the default -
+    // so `before_columns` passes through unchanged apart from the rename, which is what
+    // a rebuild is supposed to mean.
     assert_eq!(
         columns(&backend, "orders").await,
         expected,
