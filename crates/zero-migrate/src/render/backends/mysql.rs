@@ -1,0 +1,467 @@
+//! MySQL SQL spelling. The future `zero-migrate-mysql`.
+//!
+//! This is the only backend module whose trigger spelling actually lives here;
+//! PostgreSQL's is still in `render::vendor` and SQLite's in `render::lower`.
+
+use crate::model::expr::CastTarget;
+use crate::model::ir::{
+    ForEach, Op, RaiseLevel, TableRef, TriggerAction, TriggerEvent, TriggerStmt, TriggerTiming,
+};
+use crate::render::dml::{self, DmlError};
+use crate::render::lower::IrLowerError;
+use crate::render::renderer::{Capability, DialectSupports, DmlRenderer};
+use crate::schema::query::SqlDialect;
+
+/// This module's own vendor identity — the ONE dialect literal it is allowed to
+/// name. See `backends/mod.rs`.
+///
+/// Every `dml::*_for_dialect(.., DIALECT)` call below is core's "validate, then
+/// ask the vendor how to spell it" seam: `dml` owns whether an identifier is
+/// LEGAL (semantics), this module owns how it is WRITTEN (spelling), and the
+/// round trip goes back out through the `DmlRenderer` trait object. The const is
+/// what keeps that from being a hard-coded vendor name inside a vendor module.
+const DIALECT: SqlDialect = SqlDialect::Mysql;
+
+pub(super) struct MysqlDmlRenderer;
+
+pub(super) static RENDERER: MysqlDmlRenderer = MysqlDmlRenderer;
+
+impl DmlRenderer for MysqlDmlRenderer {
+    fn quote_ident(&self, ident: &str) -> String {
+        crate::schema::query::mysql_quote_ident(ident)
+    }
+
+    fn qualify_table(&self, project_schema: &str, table: &str) -> Result<String, DmlError> {
+        let t = dml::quote_bare_ident_for_dialect("table", table, DIALECT)?;
+        Ok(format!(
+            "{}.{}",
+            dml::quote_ident_checked_for_dialect(project_schema, DIALECT).map_err(|e| {
+                DmlError::InvalidIdentifier {
+                    what: "schema",
+                    value: e.value,
+                }
+            },)?,
+            t
+        ))
+    }
+
+    fn cast_target(&self, target: CastTarget) -> &'static str {
+        match target {
+            CastTarget::Text => "char",
+            CastTarget::Int => "signed",
+            CastTarget::Real => "double",
+            CastTarget::Boolean => "unsigned",
+            CastTarget::Bytes => "binary",
+            CastTarget::Uuid => "char(36)",
+        }
+    }
+
+    fn render_concat_ws(&self, rendered: &[String]) -> String {
+        format!("concat_ws({})", rendered.join(", "))
+    }
+
+    fn render_split_part(&self, col_sql: &str, delim: &str, n: i64) -> Result<String, DmlError> {
+        let d = dml::inline_string_literal(delim, DIALECT);
+        Ok(format!(
+            "substring_index(substring_index({col_sql}, {d}, {n}), {d}, -1)"
+        ))
+    }
+
+    fn synth_now(&self) -> String {
+        "CURRENT_TIMESTAMP(6)".to_string()
+    }
+
+    fn uuid_v4(&self) -> String {
+        // UUID() is UUIDv1 on MySQL and must never implement the UUIDv4
+        // contract. Consume 16 random bytes across the canonical groups and
+        // mask the relevant octets: version = 0100xxxx, variant = 10xxxxxx.
+        // Parentheses make this valid in MySQL's expression-default grammar.
+        "(lower(concat(hex(random_bytes(4)), '-', hex(random_bytes(2)), '-', \
+         hex((ord(random_bytes(1)) & 15) | 64), hex(random_bytes(1)), '-', \
+         hex((ord(random_bytes(1)) & 63) | 128), hex(random_bytes(1)), '-', \
+         hex(random_bytes(6)))))"
+            .to_string()
+    }
+
+    fn uuid_v7(&self) -> Result<String, DmlError> {
+        Err(DmlError::UnrenderableExpr(
+            "uuidV7 database generation is unsupported on MySQL".to_string(),
+        ))
+    }
+
+    fn validate_view_materialized(&self, materialized: bool) -> Result<(), IrLowerError> {
+        if materialized && !DIALECT.supports(Capability::MaterializedView) {
+            return Err(IrLowerError::ViewUnsupported {
+                kind: "materializedView",
+                dialect: DIALECT,
+            });
+        }
+        Ok(())
+    }
+
+    fn view_create_prefix(
+        &self,
+        materialized: bool,
+        replace: bool,
+    ) -> Result<String, IrLowerError> {
+        self.validate_view_materialized(materialized)?;
+        let mut create = String::from("CREATE ");
+        if replace && DIALECT.supports(Capability::CreateOrReplaceView) {
+            create.push_str("OR REPLACE VIEW ");
+        } else {
+            create.push_str("VIEW ");
+        }
+        Ok(create)
+    }
+
+    fn view_replace_prelude(&self, _qname: &str, _replace: bool) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn view_object_name(&self, name: &str, eff_schema: &str) -> Result<String, IrLowerError> {
+        Ok(format!(
+            "{}.{}",
+            dml::quote_ident_checked_for_dialect(eff_schema, DIALECT).map_err(|e| {
+                DmlError::InvalidIdentifier {
+                    what: "schema",
+                    value: e.value,
+                }
+            })?,
+            dml::quote_bare_ident_for_dialect("view", name, DIALECT)?
+        ))
+    }
+
+    fn render_table_ref(&self, table: &TableRef, eff_schema: &str) -> Result<String, IrLowerError> {
+        let mut sql = {
+            let schema = table.schema.as_deref().unwrap_or(eff_schema);
+            format!(
+                "{}.{}",
+                dml::quote_ident_checked_for_dialect(schema, DIALECT).map_err(|e| {
+                    DmlError::InvalidIdentifier {
+                        what: "schema",
+                        value: e.value,
+                    }
+                },)?,
+                dml::quote_bare_ident_for_dialect("table", &table.name, DIALECT)?
+            )
+        };
+        if let Some(alias) = table.alias.as_deref() {
+            sql.push_str(" AS ");
+            sql.push_str(&dml::quote_bare_ident_for_dialect(
+                "table alias",
+                alias,
+                DIALECT,
+            )?);
+        }
+        Ok(sql)
+    }
+
+    fn render_trigger_op(
+        &self,
+        op: &Op,
+        eff_schema: &str,
+    ) -> Result<Vec<crate::render::vendor::VendorStatement>, IrLowerError> {
+        match op {
+            Op::CreateTrigger {
+                name,
+                table,
+                timing,
+                events,
+                for_each,
+                when,
+                action,
+                ..
+            } => Ok(vec![render_mysql_trigger_create(
+                name,
+                table,
+                *timing,
+                events,
+                *for_each,
+                when.as_ref(),
+                action,
+                eff_schema,
+            )?]),
+            Op::DropTrigger {
+                name,
+                table,
+                if_exists,
+                ..
+            } => {
+                let qname = mysql_trigger_name(name, eff_schema)?;
+                let mut up = String::from("DROP TRIGGER ");
+                if if_exists.unwrap_or(false) {
+                    up.push_str("IF EXISTS ");
+                }
+                up.push_str(&qname);
+                Ok(vec![crate::render::vendor::VendorStatement {
+                    name: format!("drop_trigger_{name}_{table}"),
+                    up,
+                    down: None,
+                }])
+            }
+            _ => Err(IrLowerError::UnsupportedOp(
+                "non-trigger op routed to trigger renderer",
+            )),
+        }
+    }
+}
+
+fn mysql_trigger_name(name: &str, eff_schema: &str) -> Result<String, IrLowerError> {
+    Ok(format!(
+        "{}.{}",
+        dml::quote_ident_checked_for_dialect(eff_schema, DIALECT).map_err(|e| {
+            DmlError::InvalidIdentifier {
+                what: "schema",
+                value: e.value,
+            }
+        },)?,
+        dml::quote_bare_ident_for_dialect("trigger", name, DIALECT)?
+    ))
+}
+
+fn mysql_trigger_table_ref(
+    table: &str,
+    schema: Option<&str>,
+    eff_schema: &str,
+) -> Result<String, IrLowerError> {
+    let schema = schema.unwrap_or(eff_schema);
+    Ok(format!(
+        "{}.{}",
+        dml::quote_ident_checked_for_dialect(schema, DIALECT).map_err(|e| {
+            DmlError::InvalidIdentifier {
+                what: "schema",
+                value: e.value,
+            }
+        },)?,
+        dml::quote_bare_ident_for_dialect("table", table, DIALECT)?
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_mysql_trigger_create(
+    name: &str,
+    table: &str,
+    timing: TriggerTiming,
+    events: &[TriggerEvent],
+    for_each: ForEach,
+    when: Option<&crate::model::expr::Expr>,
+    action: &TriggerAction,
+    eff_schema: &str,
+) -> Result<crate::render::vendor::VendorStatement, IrLowerError> {
+    if events.is_empty() {
+        return Err(IrLowerError::Vendor(
+            crate::render::vendor::VendorError::EmptyList {
+                what: "trigger events",
+            },
+        ));
+    }
+    if events.len() != 1 {
+        return Err(IrLowerError::TriggerUnsupported {
+            kind: "triggerMultipleEvents",
+            dialect: DIALECT,
+        });
+    }
+    if matches!(events[0], TriggerEvent::Truncate) {
+        return Err(IrLowerError::TriggerUnsupported {
+            kind: "triggerEventTruncate",
+            dialect: DIALECT,
+        });
+    }
+    if matches!(timing, TriggerTiming::InsteadOf) {
+        return Err(IrLowerError::TriggerUnsupported {
+            kind: "triggerTimingInsteadOf",
+            dialect: DIALECT,
+        });
+    }
+    if matches!(for_each, ForEach::Statement) {
+        return Err(IrLowerError::TriggerUnsupported {
+            kind: "forEachStatement",
+            dialect: DIALECT,
+        });
+    }
+    if when.is_some() {
+        return Err(IrLowerError::TriggerUnsupported {
+            kind: "triggerWhen",
+            dialect: DIALECT,
+        });
+    }
+    let TriggerAction::Body { statements } = action else {
+        return Err(IrLowerError::TriggerUnsupported {
+            kind: "executeFunction",
+            dialect: DIALECT,
+        });
+    };
+    if statements.is_empty() {
+        return Err(IrLowerError::Vendor(
+            crate::render::vendor::VendorError::EmptyList {
+                what: "trigger body statements",
+            },
+        ));
+    }
+
+    let qname = mysql_trigger_name(name, eff_schema)?;
+    let qtable = mysql_trigger_table_ref(table, None, eff_schema)?;
+    let body: Result<Vec<_>, _> = statements
+        .iter()
+        .map(|stmt| render_mysql_trigger_stmt(stmt, eff_schema))
+        .collect();
+    let mut up = format!(
+        "CREATE TRIGGER {qname} {} {} ON {qtable} FOR EACH ROW BEGIN ",
+        timing.as_sql(),
+        events[0].as_sql()
+    );
+    up.push_str(
+        &body?
+            .into_iter()
+            .map(|s| format!("{s};"))
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    up.push_str(" END");
+    Ok(crate::render::vendor::VendorStatement {
+        name: format!("create_trigger_{name}_{table}"),
+        up,
+        down: Some(format!("DROP TRIGGER IF EXISTS {qname}")),
+    })
+}
+
+fn render_mysql_trigger_stmt(stmt: &TriggerStmt, eff_schema: &str) -> Result<String, IrLowerError> {
+    match stmt {
+        TriggerStmt::Insert {
+            table,
+            columns,
+            rows,
+            schema,
+        } => {
+            if columns.is_empty() {
+                return Err(IrLowerError::DmlAssemble(
+                    crate::render::dml::DmlError::MalformedInsert {
+                        table: table.clone(),
+                        reason: "no columns".to_string(),
+                    },
+                ));
+            }
+            if rows.is_empty() {
+                return Err(IrLowerError::DmlAssemble(
+                    crate::render::dml::DmlError::MalformedInsert {
+                        table: table.clone(),
+                        reason: "no rows".to_string(),
+                    },
+                ));
+            }
+            let qtable = mysql_trigger_table_ref(table, schema.as_deref(), eff_schema)?;
+            let qcols: Result<Vec<_>, _> = columns
+                .iter()
+                .map(|c| dml::quote_bare_ident_for_dialect("column", c, DIALECT))
+                .collect();
+            let mut groups = Vec::with_capacity(rows.len());
+            for (ri, row) in rows.iter().enumerate() {
+                if row.len() != columns.len() {
+                    return Err(IrLowerError::DmlAssemble(
+                        crate::render::dml::DmlError::MalformedInsert {
+                            table: table.clone(),
+                            reason: format!(
+                                "row {ri} has {} value(s) but {} column(s) were named",
+                                row.len(),
+                                columns.len()
+                            ),
+                        },
+                    ));
+                }
+                let vals: Result<Vec<_>, _> = row
+                    .iter()
+                    .map(|value| crate::render::dml::render_value_inline(value, DIALECT))
+                    .collect();
+                groups.push(format!("({})", vals?.join(", ")));
+            }
+            Ok(format!(
+                "INSERT INTO {qtable} ({}) VALUES {}",
+                qcols?.join(", "),
+                groups.join(", ")
+            ))
+        }
+        TriggerStmt::Update {
+            table,
+            set,
+            r#where,
+            schema,
+        } => {
+            if set.is_empty() {
+                return Err(IrLowerError::DmlAssemble(
+                    crate::render::dml::DmlError::EmptySet {
+                        op: "update",
+                        table: table.clone(),
+                    },
+                ));
+            }
+            let qtable = mysql_trigger_table_ref(table, schema.as_deref(), eff_schema)?;
+            let mut assigns = Vec::with_capacity(set.len());
+            for (col, rhs) in set {
+                assigns.push(format!(
+                    "{} = {}",
+                    dml::quote_bare_ident_for_dialect("column", col, DIALECT)?,
+                    crate::render::dml::render_value_inline(rhs, DIALECT)?
+                ));
+            }
+            let mut sql = format!("UPDATE {qtable} SET {}", assigns.join(", "));
+            if let Some(pred) = r#where {
+                sql.push_str(&format!(
+                    " WHERE {}",
+                    crate::render::dml::render_expr_inline(pred, DIALECT)?
+                ));
+            }
+            Ok(sql)
+        }
+        TriggerStmt::Delete {
+            table,
+            r#where,
+            limit,
+            schema,
+        } => {
+            let qtable = mysql_trigger_table_ref(table, schema.as_deref(), eff_schema)?;
+            let pred = crate::render::dml::render_expr_inline(r#where, DIALECT)?;
+            Ok(match limit {
+                None => format!("DELETE FROM {qtable} WHERE {pred}"),
+                Some(n) => format!("DELETE FROM {qtable} WHERE {pred} LIMIT {}", n.get()),
+            })
+        }
+        // MySQL forbids a trigger body that RETURNS A RESULT SET, and it says so when
+        // the `CREATE TRIGGER` is executed, not when the trigger fires: MySQL 8.4.11
+        // answers `[0A000] Not allowed to return a result set from a trigger`. Before
+        // this arm existed, the plan cleared validate, the guard and lower, and died
+        // there - the one outcome class `dialect_conformance_live.rs` exists to catch,
+        // and the row that measured it is `createTrigger/bodySimple` on MySQL.
+        //
+        // Refused rather than rewritten: `SELECT <expr>` has no result-set-free MySQL
+        // spelling, because `SELECT ... INTO` needs a declared target and this closed
+        // trigger-body IR has no way to name one. The refusal sits HERE, beside
+        // `RAISE IGNORE`, and NOT in `dialect-support.toml`, because MySQL body
+        // triggers work - an `INSERT` / `UPDATE` / `DELETE` body applies and fires.
+        // Declaring the whole `bodySimple` cell unsupported would refuse all of them
+        // to reject this one statement. Pinned, with both over-refusal controls, by
+        // `tests/refusals/mysql_trigger_body_cannot_return_a_result_set.rs`.
+        TriggerStmt::Select { .. } => Err(IrLowerError::TriggerUnsupported {
+            kind: "selectStatement",
+            dialect: DIALECT,
+        }),
+        TriggerStmt::Raise {
+            level: RaiseLevel::Ignore,
+            ..
+        } => Err(IrLowerError::TriggerUnsupported {
+            kind: "raiseIgnore",
+            dialect: DIALECT,
+        }),
+        TriggerStmt::Raise {
+            level: _,
+            message,
+            errcode,
+        } => {
+            let errcode = errcode.as_deref().unwrap_or("45000");
+            Ok(format!(
+                "SIGNAL SQLSTATE {} SET MESSAGE_TEXT = {}",
+                crate::render::dml::mysql_grammar_string_literal(errcode),
+                crate::render::dml::inline_string_literal(message, DIALECT)
+            ))
+        }
+    }
+}
