@@ -265,6 +265,242 @@ async fn rolling_back_a_dropped_view_restores_it_on_postgres() {
     }
 }
 
+/// A view whose body names its source table in three distinguishable positions.
+///
+/// The plain `create_doc` body is `SELECT email FROM users` - nothing but the FROM
+/// relation - so it cannot tell a rewrite that follows the rename into QUALIFIERS
+/// from one that only moves the FROM clause. This body carries, deliberately:
+///
+///   - the FROM relation, unaliased, so a qualifier legally spells the table name;
+///   - a QUALIFIED projection item (`users.email`), which `pg_get_viewdef` deparses
+///     under the new name the instant the rename commits;
+///   - a QUALIFIED reference inside a WHERE expression, a different walk from the
+///     projection's;
+///   - a string LITERAL that spells the old table name, which must survive the
+///     rename untouched. That is the control: it is what separates an AST rewrite
+///     from the naive text substitution this crate refuses everywhere else, and
+///     `PostgreSQL` is the one asserting it, because the restored body is compared
+///     against the server's own deparse of the pre-drop body.
+fn qualified_create_doc() -> String {
+    serde_json::json!({
+        "ir_version": 1,
+        "name": "create_active_users",
+        "owner_app": OWNER,
+        "ops": [
+            {
+                "op": "createTable",
+                "name": "users",
+                "columns": [{"name": "email", "type": "text", "nullable": false}]
+            },
+            {
+                "op": "createView",
+                "name": VIEW,
+                "query": {
+                    "kind": "structured",
+                    "select": {
+                        "from": {"name": "users"},
+                        "projection": [
+                            {"kind": "colRef", "table": "users", "name": "email"}
+                        ],
+                        "joins": [],
+                        "where": {
+                            "node": "binOp",
+                            "op": "ne",
+                            "lhs": {"node": "colRef", "table": "users", "name": "email"},
+                            "rhs": {"node": "literal", "value": "users"}
+                        },
+                        "groupBy": []
+                    }
+                }
+            }
+        ]
+    })
+    .to_string()
+}
+
+/// Rename the table the view reads. `PostgreSQL` follows the rename into the
+/// stored view body by OID; the question is whether the FOLD follows it into the
+/// typed body a `dropView` renders its inverse from.
+fn rename_doc(from: &str, to: &str) -> String {
+    serde_json::json!({
+        "ir_version": 1,
+        "name": format!("rename_{from}_to_{to}"),
+        "owner_app": OWNER,
+        "ops": [{"op": "renameTable", "table": from, "to": to}]
+    })
+    .to_string()
+}
+
+/// A table rename must be followed into the typed body a `dropView` reverses from.
+///
+/// `PostgreSQL` records a view's dependency by OID, so `ALTER TABLE ... RENAME TO`
+/// re-renders the stored body under the new name with no statement naming the view
+/// (`fold_live/state_at_matches_the_server_pg.rs` pins that server behaviour), and
+/// the validator deliberately permits the sequence
+/// (`refusals/new_rules_do_not_over_refuse.rs::a_view_may_outlive_a_rename_of_its_source`).
+/// The fold's own record of the body - `ViewSnapshot::authored_query` - is the only
+/// thing `render_view_op`'s `DropView` arm can render a `CREATE VIEW` inverse from.
+///
+/// So this is not a string comparison against a prediction. The rollback is EXECUTED,
+/// and the assertion is that the server accepts it and puts the view back reading the
+/// renamed table. A body still naming the pre-rename table makes `PostgreSQL` itself
+/// reject the down with `relation ... does not exist`.
+#[compio::test]
+async fn a_table_rename_reaches_the_body_a_dropped_view_is_restored_from() {
+    let url = skip_if_no_pg!();
+    let session = PgDevSession::connect(&url);
+    let schema = token();
+    let cfg = ExecutorConfig::new(
+        format!("project_{schema}"),
+        &schema,
+        support::no_inject(&schema),
+    );
+    let quoted_schema = quote_ident(&cfg.project_schema);
+    let quoted_meta_schema = quote_ident(&cfg.pg.meta_schema);
+    let _schema_guard = support::SchemaGuard::arm(
+        &session,
+        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+    );
+    session
+        .batch(&format!("CREATE SCHEMA {quoted_schema}"))
+        .await
+        .expect("create isolated test schema");
+
+    let work: Result<(), String> = async {
+        let backend = PostgresBackend::new_generic(&session);
+        backend
+            .ensure_journal(&cfg)
+            .await
+            .map_err(|error| format!("ensure migration journal: {error}"))?;
+
+        let mut history: Vec<Op> = Vec::new();
+        let mut migrations = apply_doc(
+            &session,
+            &cfg,
+            &qualified_create_doc(),
+            &BTreeMap::new(),
+            &mut history,
+            Approval::None,
+        )
+        .await?;
+
+        let authored = live_view_body(&session, &cfg.project_schema)
+            .await?
+            .ok_or_else(|| "the view must exist before its source is renamed".to_string())?;
+        if !authored.contains("'users'") {
+            return Err(format!(
+                "the seeded body must carry a literal spelling the old table name, or the \
+                 rename has no false-positive control to survive: {authored}"
+            ));
+        }
+
+        let registry: BTreeMap<String, String> = [
+            ("users".to_string(), OWNER.to_string()),
+            ("members".to_string(), OWNER.to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        migrations.extend(
+            apply_doc(
+                &session,
+                &cfg,
+                &rename_doc("users", "members"),
+                &registry,
+                &mut history,
+                Approval::Approved,
+            )
+            .await?,
+        );
+
+        // The server followed the rename into the stored body. Without this the case
+        // would be measuring a rename that never reached the view at all.
+        let renamed = live_view_body(&session, &cfg.project_schema)
+            .await?
+            .ok_or_else(|| "the view must survive the rename of its source".to_string())?;
+        if !renamed.contains("members") {
+            return Err(format!(
+                "PostgreSQL must re-render the view body under the new table name: {renamed}"
+            ));
+        }
+        if renamed.contains("users.") {
+            return Err(format!(
+                "PostgreSQL must move the QUALIFIER too, or this case cannot tell a \
+                 qualifier-following rewrite from a FROM-only one: {renamed}"
+            ));
+        }
+        if !renamed.contains("'users'") {
+            return Err(format!(
+                "PostgreSQL must leave the string literal spelling the old name alone: {renamed}"
+            ));
+        }
+
+        migrations.extend(
+            apply_doc(
+                &session,
+                &cfg,
+                &drop_doc(false),
+                &registry,
+                &mut history,
+                Approval::Approved,
+            )
+            .await?,
+        );
+
+        if live_view_body(&session, &cfg.project_schema).await?.is_some() {
+            return Err("the drop must actually remove the view".into());
+        }
+
+        let request = RollbackRequest::new(RollbackTarget::Steps(1));
+        rollback(
+            &backend,
+            &cfg,
+            &request,
+            &migrations,
+            Approval::Approved,
+            OWNER,
+            guard_for(&GuardConfig::from_policy(
+                support::no_inject(&cfg.project_schema),
+                SqlDialect::Postgres,
+            ))
+            .as_ref(),
+        )
+        .await
+        .map_err(|error| {
+            format!("rolling back a view dropped after its source was renamed: {error}")
+        })?;
+
+        let after = live_view_body(&session, &cfg.project_schema)
+            .await?
+            .ok_or_else(|| "rolling back the drop must put the view back".to_string())?;
+        if !after.contains("members") {
+            return Err(format!(
+                "the restored body must read the table under its CURRENT name: {after}"
+            ));
+        }
+        if after != renamed {
+            return Err(format!(
+                "the restored view body must match the one that was dropped\n  before: {renamed}\n   after: {after}"
+            ));
+        }
+        Ok(())
+    }
+    .await;
+
+    let cleanup = session
+        .batch(&format!(
+            "DROP SCHEMA IF EXISTS {quoted_schema} CASCADE; \
+             DROP SCHEMA IF EXISTS {quoted_meta_schema} CASCADE"
+        ))
+        .await;
+    match (work, cleanup) {
+        (Ok(()), Ok(())) => {}
+        (Err(work), Ok(())) => panic!("{work}"),
+        (Ok(()), Err(cleanup)) => panic!("drop PostgreSQL test schemas: {cleanup}"),
+        (Err(work), Err(cleanup)) => panic!("{work}; cleanup failed: {cleanup}"),
+    }
+}
+
 /// A guarded drop keeps no inverse on `PostgreSQL` either.
 ///
 /// `ifExists` can journal `completed` without running the `DROP`, so re-creating

@@ -78,7 +78,8 @@ use std::collections::BTreeMap;
 use crate::model::ir::{
     AlterPrimaryKeyAction, ColType, ColumnCollation, ColumnOrExpr, ColumnReference, CommentTarget,
     ExclusionElement, IndexElement, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex,
-    Op, RefAction, SafeI64, SafeU64, SequenceOwnedBy, TableRuntimeOptions,
+    Op, OrderItem, RefAction, SafeI64, SafeU64, SelectAst, SelectItem, SequenceOwnedBy, TableRef,
+    TableRuntimeOptions, ViewQuery,
 };
 use crate::model::snapshot::{
     normalize_sequence_max_value, normalize_sequence_min_value, sequence_default_start_value,
@@ -522,6 +523,124 @@ fn rewrite_incoming_fk_targets(
         for c in &mut t.constraints {
             if c.kind == "FOREIGN KEY" && c.definition.contains(&old_ref) {
                 c.definition = c.definition.replace(&old_ref, &new_ref);
+            }
+        }
+    }
+}
+
+/// Rewrite every reference to `renamed` inside a stored view body so it names
+/// `new_name` - the offline mirror of what live PostgreSQL does to a view whose
+/// source table is renamed.
+///
+/// **Why this is required.** PostgreSQL records a view's dependency by OID, so
+/// `ALTER TABLE ... RENAME TO` re-renders the stored body under the new name with no
+/// statement naming the view at all (pinned against a live server by
+/// `fold_live/state_at_matches_the_server_pg.rs::a_table_rename_is_followed_into_a_pre_existing_view`),
+/// and the validator deliberately permits the sequence
+/// (`refusals/new_rules_do_not_over_refuse.rs::a_view_may_outlive_a_rename_of_its_source`).
+/// [`ViewSnapshot::authored_query`] is the fold's own record of that body and the ONLY
+/// thing a later `dropView` can render its `CREATE VIEW` inverse from
+/// (`render::lower::render_view_op`). Leaving it stale does not merely disagree with
+/// the catalog: it makes the down migration name a table that no longer exists, and
+/// PostgreSQL rejects it at rollback time with `relation ... does not exist` - measured
+/// on PG 18.4 by `rollback/drop_view_rollback_pg.rs::a_table_rename_reaches_the_body_a_dropped_view_is_restored_from`.
+///
+/// **Structured bodies only.** A [`ViewQuery::Raw`] body is author-supplied SQL TEXT
+/// with no AST to re-render from, so following a rename into it would be the naive
+/// substitution every other site in this crate refuses - `WHERE note <> 'users'` is
+/// indistinguishable from a relation reference to a text scan. Raw bodies are left
+/// exactly as authored; see the function's own tests for what that still owes.
+///
+/// **Qualifiers follow, aliases do not.** `SELECT users.email FROM users` deparses as
+/// `SELECT members.email FROM members` the instant the rename commits, so a qualifier
+/// spelling the table name has to move with it. An ALIAS does not: `FROM users u`
+/// keeps `u.email` on both sides. So the qualifier rewrite is gated on the renamed
+/// relation appearing UNALIASED, and is suppressed entirely when some other relation
+/// in the same SELECT is aliased to the old name - there the qualifier means the
+/// alias, and rewriting it would turn a stale body into a corrupt one.
+///
+/// A [`TableRef`] carrying an explicit schema that is not the project's names a
+/// relation this fold does not model, so it is left alone.
+fn rewrite_view_bodies_for_table_rename(
+    views: &mut BTreeMap<String, ViewSnapshot>,
+    project_schema: &str,
+    renamed: &str,
+    new_name: &str,
+) {
+    for view in views.values_mut() {
+        let Some(ViewQuery::Structured { select }) = view.authored_query.as_mut() else {
+            continue;
+        };
+        rename_table_in_select(select, project_schema, renamed, new_name);
+    }
+}
+
+/// Whether this `FROM`/`JOIN` relation is the one being renamed.
+fn table_ref_is(table: &TableRef, project_schema: &str, renamed: &str) -> bool {
+    table.name == renamed
+        && table
+            .schema
+            .as_deref()
+            .is_none_or(|schema| schema == project_schema)
+}
+
+/// The `renamed` -> `new_name` rewrite over one closed SELECT body.
+fn rename_table_in_select(
+    select: &mut SelectAst,
+    project_schema: &str,
+    renamed: &str,
+    new_name: &str,
+) {
+    // Decided BEFORE any name moves, or the relation this rewrite just renamed would
+    // no longer answer "was it unaliased under the old name".
+    let relations =
+        || std::iter::once(&select.from).chain(select.joins.iter().map(|join| &join.table));
+    let shadowed_by_alias = relations().any(|table| table.alias.as_deref() == Some(renamed));
+    let qualifiers_follow = !shadowed_by_alias
+        && relations()
+            .any(|table| table_ref_is(table, project_schema, renamed) && table.alias.is_none());
+
+    if table_ref_is(&select.from, project_schema, renamed) {
+        select.from.name = new_name.to_string();
+    }
+    for join in &mut select.joins {
+        if table_ref_is(&join.table, project_schema, renamed) {
+            join.table.name = new_name.to_string();
+        }
+    }
+
+    if !qualifiers_follow {
+        return;
+    }
+    let rename_qualifier = |qualifier: &mut Option<String>| {
+        if qualifier.as_deref() == Some(renamed) {
+            *qualifier = Some(new_name.to_string());
+        }
+    };
+    for item in &mut select.projection {
+        match item {
+            SelectItem::ColRef { table, .. } => rename_qualifier(table),
+            SelectItem::Expr { expr, .. } => {
+                crate::render::gen_types::rename_expr_table(expr, renamed, new_name);
+            }
+        }
+    }
+    for join in &mut select.joins {
+        crate::render::gen_types::rename_expr_table(&mut join.on, renamed, new_name);
+    }
+    for expr in select
+        .r#where
+        .iter_mut()
+        .chain(select.having.iter_mut())
+        .chain(select.group_by.iter_mut())
+    {
+        crate::render::gen_types::rename_expr_table(expr, renamed, new_name);
+    }
+    for item in select.order_by.iter_mut().flatten() {
+        match item {
+            OrderItem::ColRef { table, .. } => rename_qualifier(table),
+            OrderItem::Expr { expr, .. } => {
+                crate::render::gen_types::rename_expr_table(expr, renamed, new_name);
             }
         }
     }
@@ -1838,6 +1957,12 @@ impl<'a> CatalogFold<'a> {
                 // name. Mirror that, or the renamed table phantom-drifts for every
                 // table that referenced it.
                 rewrite_incoming_fk_targets(tables, project_schema, table, to);
+                // A view's stored body READS the renamed table, and PostgreSQL follows
+                // the rename into it by OID for the same reason it re-targets an FK.
+                // The fold's copy of that body is what a later `dropView` renders its
+                // inverse from, so a stale one is a down migration that names a table
+                // the database no longer has. See the helper for what it covers.
+                rewrite_view_bodies_for_table_rename(views, project_schema, table, to);
             }
             Op::AddColumn {
                 table,
@@ -6638,6 +6763,264 @@ columns = [
         assert!(
             t.indexes.iter().any(|i| i.name == "accounts_email_idx"),
             "indexes preserved across table rename"
+        );
+    }
+
+    /// The four discriminations a table rename has to make inside a view body, none
+    /// of which live `PostgreSQL` can select for on its own.
+    ///
+    /// `rollback/drop_view_rollback_pg.rs::a_table_rename_reaches_the_body_a_dropped_view_is_restored_from`
+    /// is the live half: it renames a table under a view, drops the view, and makes
+    /// the SERVER execute the resulting inverse, so the FROM relation, the qualifier
+    /// and the string literal are all adjudicated by `pg_get_viewdef`. What it cannot
+    /// reach is a body `PostgreSQL` would refuse to accept in the first place - an
+    /// alias colliding with a relation name - or a body whose text has no AST. Those
+    /// are constructed directly here.
+    fn view_query(select: SelectAst) -> ViewQuery {
+        ViewQuery::Structured {
+            select: Box::new(select),
+        }
+    }
+
+    fn create_view(name: &str, query: ViewQuery) -> Op {
+        Op::CreateView {
+            name: name.to_string(),
+            schema: None,
+            columns: None,
+            query,
+            replace: None,
+            materialized: None,
+        }
+    }
+
+    fn table_ref(name: &str, alias: Option<&str>, schema: Option<&str>) -> TableRef {
+        TableRef {
+            name: name.to_string(),
+            schema: schema.map(str::to_string),
+            alias: alias.map(str::to_string),
+        }
+    }
+
+    fn select_over(from: TableRef, projection: Vec<SelectItem>) -> SelectAst {
+        SelectAst {
+            from,
+            projection,
+            joins: Vec::new(),
+            r#where: None,
+            group_by: Vec::new(),
+            having: None,
+            order_by: None,
+            limit: None,
+        }
+    }
+
+    fn folded_view_query(ops: &[Op], view: &str) -> ViewQuery {
+        fold(ops)
+            .expect("the history folds")
+            .views
+            .get(view)
+            .expect("the view survives the rename")
+            .authored_query
+            .clone()
+            .expect("the fold keeps the authored body")
+    }
+
+    #[test]
+    fn a_table_rename_follows_an_unaliased_qualifier_into_a_view_body() {
+        let query = folded_view_query(
+            &[
+                create("accounts", vec![col("email", ColType::Text, false)]),
+                create_view(
+                    "member_emails",
+                    view_query(select_over(
+                        table_ref("accounts", None, None),
+                        vec![SelectItem::ColRef {
+                            table: Some("accounts".to_string()),
+                            name: "email".to_string(),
+                            alias: None,
+                        }],
+                    )),
+                ),
+                rename_table("accounts", "members"),
+            ],
+            "member_emails",
+        );
+        let ViewQuery::Structured { select } = query else {
+            panic!("the authored body stays structured");
+        };
+        assert_eq!(
+            select.from.name, "members",
+            "the FROM relation follows the rename"
+        );
+        assert_eq!(
+            select.projection,
+            vec![SelectItem::ColRef {
+                table: Some("members".to_string()),
+                name: "email".to_string(),
+                alias: None,
+            }],
+            "an unaliased relation's qualifier follows the rename, the way pg_get_viewdef \
+             deparses it the instant the rename commits"
+        );
+    }
+
+    #[test]
+    fn a_table_rename_leaves_an_alias_qualifier_alone() {
+        // `FROM accounts a` keeps `a.email` on both sides of the rename: PostgreSQL
+        // deparses `SELECT a.email FROM members a`. Rewriting the alias would invent a
+        // qualifier that resolves to nothing.
+        let query = folded_view_query(
+            &[
+                create("accounts", vec![col("email", ColType::Text, false)]),
+                create_view(
+                    "member_emails",
+                    view_query(select_over(
+                        table_ref("accounts", Some("a"), None),
+                        vec![SelectItem::ColRef {
+                            table: Some("a".to_string()),
+                            name: "email".to_string(),
+                            alias: None,
+                        }],
+                    )),
+                ),
+                rename_table("accounts", "members"),
+            ],
+            "member_emails",
+        );
+        let ViewQuery::Structured { select } = query else {
+            panic!("the authored body stays structured");
+        };
+        assert_eq!(select.from.name, "members", "the relation still follows");
+        assert_eq!(select.from.alias.as_deref(), Some("a"), "the alias is kept");
+        assert_eq!(
+            select.projection,
+            vec![SelectItem::ColRef {
+                table: Some("a".to_string()),
+                name: "email".to_string(),
+                alias: None,
+            }],
+            "an alias qualifier is NOT the table name and must not move"
+        );
+    }
+
+    #[test]
+    fn a_table_rename_leaves_a_qualifier_another_relation_is_aliased_to_alone() {
+        // A qualifier spelling the old name means the ALIAS here, not the renamed
+        // relation. PostgreSQL rejects this body (`table name "accounts" specified more
+        // than once`), so no live case can select this branch - which is exactly why it
+        // is constructed directly. Fail-closed: the FROM relation moves, the ambiguous
+        // qualifier is left as authored rather than repointed at the wrong table.
+        let mut select = select_over(
+            table_ref("accounts", None, None),
+            vec![SelectItem::ColRef {
+                table: Some("accounts".to_string()),
+                name: "email".to_string(),
+                alias: None,
+            }],
+        );
+        select.joins.push(crate::model::ir::Join {
+            kind: crate::model::ir::JoinKind::Inner,
+            table: table_ref("orders", Some("accounts"), None),
+            on: Expr::Literal {
+                value: crate::model::ir::IrScalar::Bool(true),
+            },
+        });
+        let mut views: BTreeMap<String, ViewSnapshot> = BTreeMap::new();
+        views.insert(
+            "member_emails".to_string(),
+            ViewSnapshot {
+                materialized: false,
+                columns: None,
+                definition: None,
+                authored_query: Some(view_query(select)),
+                authored_schema: None,
+                comparable_body: None,
+                comment: None,
+            },
+        );
+        rewrite_view_bodies_for_table_rename(&mut views, SCHEMA, "accounts", "members");
+        let Some(ViewQuery::Structured { select }) = views["member_emails"].authored_query.clone()
+        else {
+            panic!("the authored body stays structured");
+        };
+        assert_eq!(
+            select.from.name, "members",
+            "the relation itself still follows the rename"
+        );
+        assert_eq!(
+            select.projection,
+            vec![SelectItem::ColRef {
+                table: Some("accounts".to_string()),
+                name: "email".to_string(),
+                alias: None,
+            }],
+            "a qualifier shadowed by another relation's alias is left as authored"
+        );
+    }
+
+    #[test]
+    fn a_table_rename_leaves_a_same_named_relation_in_another_schema_alone() {
+        // `other.accounts` is a different relation from the one this fold renamed, and
+        // the fold models exactly one schema. Following the rename into it would
+        // repoint the body at a table nothing renamed.
+        let mut select = select_over(table_ref("accounts", None, Some("other")), Vec::new());
+        select.r#where = None;
+        let mut views: BTreeMap<String, ViewSnapshot> = BTreeMap::new();
+        views.insert(
+            "member_emails".to_string(),
+            ViewSnapshot {
+                materialized: false,
+                columns: None,
+                definition: None,
+                authored_query: Some(view_query(select)),
+                authored_schema: None,
+                comparable_body: None,
+                comment: None,
+            },
+        );
+        rewrite_view_bodies_for_table_rename(&mut views, SCHEMA, "accounts", "members");
+        let Some(ViewQuery::Structured { select }) = views["member_emails"].authored_query.clone()
+        else {
+            panic!("the authored body stays structured");
+        };
+        assert_eq!(
+            select.from.name, "accounts",
+            "a relation in another schema is not the one being renamed"
+        );
+    }
+
+    /// A RAW view body is left exactly as authored, and this pins that as a KNOWN
+    /// LIMITATION rather than as correct behaviour.
+    ///
+    /// A raw body is author-supplied SQL text with no AST to re-render from, so the
+    /// only tool that could follow a rename into it is the naive substitution this
+    /// crate refuses everywhere else - it cannot tell a relation reference from
+    /// `WHERE note <> 'accounts'`. What that costs is real and is stated here so it
+    /// is not mistaken for coverage: after renaming a table a raw-bodied view reads,
+    /// a later `dropView` renders an inverse naming the OLD table, exactly the defect
+    /// the structured path no longer has.
+    #[test]
+    fn a_table_rename_leaves_a_raw_view_body_stale() {
+        let query = folded_view_query(
+            &[
+                create("accounts", vec![col("email", ColType::Text, false)]),
+                create_view(
+                    "member_emails",
+                    ViewQuery::Raw {
+                        sql: "SELECT email FROM accounts".to_string(),
+                    },
+                ),
+                rename_table("accounts", "members"),
+            ],
+            "member_emails",
+        );
+        assert_eq!(
+            query,
+            ViewQuery::Raw {
+                sql: "SELECT email FROM accounts".to_string(),
+            },
+            "a raw body is carried through untouched - a stale inverse the operator can \
+             still be handed, and the reason this arm is a limitation and not a feature"
         );
     }
 
