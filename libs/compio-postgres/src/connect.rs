@@ -20,9 +20,10 @@
 //   silently ignoring it.
 
 use crate::client::{Addr, Client, SocketConfig};
-use crate::config::{Host, LoadBalanceHosts, TargetSessionAttrs};
+use crate::config::{Host, LoadBalanceHosts, SslMode, TargetSessionAttrs};
 use crate::connect_raw::connect_raw;
 use crate::connect_socket::connect_socket;
+use crate::connect_tls::Encryption;
 use crate::connection::Connection;
 use crate::tls::MakeTlsConnect;
 use crate::{Config, Error, Socket};
@@ -37,6 +38,8 @@ pub async fn connect<T>(
 where
     T: MakeTlsConnect<Socket>,
 {
+    config.validate_tls_settings()?;
+
     if config.get_hosts().is_empty() && config.get_hostaddrs().is_empty() {
         return Err(Error::config("both host and hostaddr are missing".into()));
     }
@@ -151,6 +154,30 @@ where
     }
 }
 
+/// One address, with libpq's transport ordering and its reconnect.
+///
+/// Everything about `allow` and `prefer` that is not just "try TLS" lives here,
+/// because the fallback is not a branch inside an attempt - it is a *second
+/// attempt on a new socket*. A handshake that fails after the server answered
+/// `S` has consumed the stream: TLS records were exchanged on it and there is
+/// no way back to a clean startup packet. libpq's answer is
+/// `need_new_connection = true`, which drops the socket and re-enters address
+/// resolution; ours is calling [`connect_leg`] again, which opens a new one.
+///
+/// The two orderings, and what each retries:
+///
+/// * `prefer` - TLS, then plaintext, **retrying only a handshake failure**. A
+///   startup or authentication failure is final: retrying a rejected password
+///   in the clear would put it on the wire unencrypted, which is a worse
+///   outcome than the error.
+/// * `allow` - plaintext, then TLS, retrying any failure of the first leg.
+///   This is the `hostssl`-only server: the plaintext attempt is refused
+///   during startup and the TLS retry is the one that connects. Retrying in
+///   the *stronger* direction carries none of the hazard above.
+///
+/// A server that answers `N` to `SSLRequest` needs no reconnect at all and
+/// does not get one; that case is handled inside [`negotiate_tls`] on the
+/// original socket.
 async fn connect_once<T>(
     addr: Addr,
     hostname: Option<&str>,
@@ -161,6 +188,64 @@ async fn connect_once<T>(
 where
     T: MakeTlsConnect<Socket>,
 {
+    // libpq: "sslmode is ignored for Unix domain socket communication."
+    // A local socket has no network to eavesdrop on and no host name to put in
+    // a certificate, so every mode - including verify-full - is plaintext.
+    #[cfg(unix)]
+    if matches!(addr, Addr::Unix(_)) {
+        return connect_leg(&addr, hostname, port, tls, config, Encryption::Plaintext).await;
+    }
+
+    let first = Encryption::first_for(config.get_ssl_mode());
+    let err = match connect_leg(&addr, hostname, port, tls, config, first).await {
+        Ok(connected) => return Ok(connected),
+        Err(e) => e,
+    };
+
+    let retry = match (config.get_ssl_mode(), first) {
+        // TLS first, and the handshake is what failed: dial again, in the clear.
+        //
+        // KNOWN SHARP EDGE, and it is libpq's. "The handshake failed" includes
+        // "the certificate did not verify", because at this point the two are
+        // the same event - `pqsecure_open_client` reports one status for both,
+        // and so does rustls. So `sslmode=prefer sslrootcert=<ca>` against a
+        // server presenting a bad certificate does not fail: it silently
+        // downgrades to plaintext. That was raised on pgsql-hackers in 2016 and
+        // libpq still behaves this way.
+        //
+        // We reproduce it because this is a driver and `prefer` is libpq's
+        // word, not ours. The mode's own documentation says it "makes no sense
+        // from a security point of view"; a deployment that cares names a
+        // stronger mode, and `verify-ca`/`verify-full` cannot reach this arm at
+        // all. (Npgsql took the other road and made the unverified outcome an
+        // explicit opt-in. If that is wanted here it is a deliberate
+        // divergence, and it belongs in one place: this arm.)
+        (SslMode::Prefer, Encryption::Tls) if err.is_tls_handshake() => Encryption::Plaintext,
+        // Plaintext first, and it failed for any reason: dial again, with TLS.
+        (SslMode::Allow, Encryption::Plaintext) => Encryption::Tls,
+        // Every other mode has one transport in its allowed set, so there is
+        // nothing to fall back to. This is libpq's structural guarantee, not a
+        // check: `require`/`verify-ca`/`verify-full` never reach this arm with
+        // a second option.
+        _ => return Err(err),
+    };
+
+    connect_leg(&addr, hostname, port, tls, config, retry).await
+}
+
+/// One attempt: a fresh socket, one transport, one startup exchange.
+async fn connect_leg<T>(
+    addr: &Addr,
+    hostname: Option<&str>,
+    port: u16,
+    tls: &mut T,
+    config: &Config,
+    encryption: Encryption,
+) -> Result<(Client, Connection<Socket, T::Stream>), Error>
+where
+    T: MakeTlsConnect<Socket>,
+{
+    let addr = addr.clone();
     let socket = connect_socket(
         &addr,
         port,
@@ -178,7 +263,8 @@ where
         .make_tls_connect(hostname.unwrap_or(""))
         .map_err(|e| Error::tls(e.into()))?;
     let has_hostname = hostname.is_some();
-    let (mut client, connection) = connect_raw(socket, tls, has_hostname, config).await?;
+    let (mut client, connection) =
+        connect_raw(socket, tls, encryption, has_hostname, config).await?;
 
     // TargetSessionAttrs post-connect probe. The source interleaves a
     // `simple_query_raw("SHOW transaction_read_only")` with

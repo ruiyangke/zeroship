@@ -26,7 +26,19 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     T: TlsConnect<S>,
 {
-    let mut stream = connect_tls::connect_tls(stream, mode, negotiation, tls, has_hostname).await?;
+    // The stream belongs to the caller, so there is no second socket to dial:
+    // `allow` and `prefer` get the transport they attempt first, and no
+    // fallback. A cancel request carries no credentials and no data, so the
+    // only thing lost is the retry, not a security property.
+    let mut stream = connect_tls::negotiate_tls(
+        stream,
+        connect_tls::Encryption::first_for(mode),
+        mode,
+        negotiation,
+        tls,
+        has_hostname,
+    )
+    .await?;
 
     let mut buf = BytesMut::new();
     frontend::cancel_request(process_id, secret_key, &mut buf);
