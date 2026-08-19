@@ -876,7 +876,7 @@ impl LiveSchema {
         };
         // The accumulator's own introspected tables are the catalog evidence a
         // reference into an unmanaged target is proved against.
-        let catalog = crate::model::validate::CatalogFormatEvidence::new(&self.table_snapshots);
+        let catalog = crate::model::validate::CatalogColumnEvidence::new(&self.table_snapshots);
         crate::model::validate::validate_column_references_for_lower(
             ir,
             target,
@@ -2072,6 +2072,25 @@ pub enum IrLowerError {
     /// the boxed error's `Display`.
     #[error("IrAuthor::lower of a DML op: {0}")]
     DmlValidate(Box<crate::model::validate::AuthoringError>),
+    /// a key (index, primary key, or unique constraint) named a column the LIVE
+    /// MySQL catalog reports as `TEXT`/`BLOB`. MySQL answers that with error
+    /// 1170, and [`crate::model::ir::IndexElement::Column`] carries no
+    /// prefix-length field, so there is no spelling of this key MySQL will take.
+    ///
+    /// The OFFLINE gate (`validate_mysql_key_storage`) already refuses this when
+    /// the column is declared in the SAME migration as the key. This is the half
+    /// it cannot see: a column an EARLIER ordered migration created, or one of an
+    /// unmanaged table. Validation reads only the migration in front of it, so
+    /// the live catalog the apply path has already introspected is the only
+    /// witness — which is why the refusal lives here and not there.
+    ///
+    /// MEASURED on live MySQL 8.4.11 through the host `apply` path: before this
+    /// existed, `createTable(body TEXT)` then `createIndex(body)` in a later
+    /// migration cleared validate AND preview and failed mid-deploy with the
+    /// server's own `BLOB/TEXT column 'body' used in key specification without a
+    /// key length`. Boxed (the `AuthoringError` payload is large).
+    #[error("{0}")]
+    MysqlKeyStorage(Box<crate::model::validate::AuthoringError>),
     /// the creator-DML assembler ([`crate::render::dml`]) rejected a DML op: a
     /// malformed identifier, an empty/ragged insert, or a MySQL `onConflict`
     /// shape whose authored target cannot be retained safely.
@@ -3721,7 +3740,7 @@ impl IrAuthor {
         .map_err(|error| IrLowerError::DmlValidate(Box::new(error)))?;
         // A format-bearing reference into a target with no authored contract may
         // still be proved by the live catalog's own format evidence.
-        let catalog = crate::model::validate::CatalogFormatEvidence::new(&live.table_snapshots);
+        let catalog = crate::model::validate::CatalogColumnEvidence::new(&live.table_snapshots);
         crate::model::validate::validate_column_references_for_lower(
             ir,
             self.validation_dialect(),
@@ -3740,6 +3759,15 @@ impl IrAuthor {
             catalog,
         )
         .map_err(|error| IrLowerError::DmlValidate(Box::new(error)))?;
+        crate::model::validate::validate_mysql_key_storage_for_lower(
+            ir,
+            self.validation_dialect(),
+            &live.logical_columns,
+            &self.project_schema,
+            self.default_schema.as_deref(),
+            catalog,
+        )
+        .map_err(|error| IrLowerError::MysqlKeyStorage(Box::new(error)))?;
         self.validate_typed_reference_catalogs(ir, live, &logical_columns)?;
         self.refuse_repeat_sqlite_rename_target(ir)?;
         let mut out: Vec<PlanStep> = Vec::new();
@@ -7026,7 +7054,7 @@ impl IrAuthor {
         .map_err(|error| IrLowerError::DmlValidate(Box::new(error)))?;
         // A format-bearing reference into a target with no authored contract may
         // still be proved by the live catalog's own format evidence.
-        let catalog = crate::model::validate::CatalogFormatEvidence::new(&live.table_snapshots);
+        let catalog = crate::model::validate::CatalogColumnEvidence::new(&live.table_snapshots);
         crate::model::validate::validate_column_references_for_lower(
             ir,
             self.validation_dialect(),
@@ -7045,6 +7073,15 @@ impl IrAuthor {
             catalog,
         )
         .map_err(|error| IrLowerError::DmlValidate(Box::new(error)))?;
+        crate::model::validate::validate_mysql_key_storage_for_lower(
+            ir,
+            self.validation_dialect(),
+            &live.logical_columns,
+            &self.project_schema,
+            self.default_schema.as_deref(),
+            catalog,
+        )
+        .map_err(|error| IrLowerError::MysqlKeyStorage(Box::new(error)))?;
         self.validate_typed_reference_catalogs(ir, live, &logical_columns)?;
         let guard = guard_for(guard_cfg);
         let raw_island_guard = SqlGuard::new(guard_cfg.clone());
