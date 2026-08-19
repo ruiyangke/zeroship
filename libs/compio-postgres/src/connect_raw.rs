@@ -20,7 +20,7 @@ use crate::buf_stream::BufStream;
 use crate::client::Client;
 use crate::codec::{BackendMessage, BackendMessages, FrontendMessage, read_backend, write_frontend};
 use crate::config::{self, Config, ReplicationMode};
-use crate::connect_tls::connect_tls;
+use crate::connect_tls::{Encryption, negotiate_tls};
 use crate::connection::Connection;
 use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::tls::{TlsConnect, TlsStream};
@@ -120,9 +120,10 @@ where
 /// Negotiate TLS if configured, drive the startup + auth exchange,
 /// capture `ParameterStatus` + `BackendKeyData` up to `ReadyForQuery`,
 /// and return a wired-up `(Client, Connection)` pair.
-pub async fn connect_raw<S, T>(
+pub(crate) async fn connect_raw<S, T>(
     stream: S,
     tls: T,
+    encryption: Encryption,
     has_hostname: bool,
     config: &Config,
 ) -> Result<(Client, Connection<S, T::Stream>), Error>
@@ -130,8 +131,9 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     T: TlsConnect<S>,
 {
-    let stream = connect_tls(
+    let stream = negotiate_tls(
         stream,
+        encryption,
         config.get_ssl_mode(),
         config.get_ssl_negotiation(),
         tls,

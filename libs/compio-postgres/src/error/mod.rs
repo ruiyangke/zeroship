@@ -343,7 +343,17 @@ pub enum ErrorPosition {
 enum Kind {
     Io,
     UnexpectedMessage,
+    /// A TLS problem that is settled before any handshake bytes are exchanged:
+    /// an impossible `sslmode` combination, a server that refuses `SSLRequest`
+    /// under a mode that requires TLS, an unreadable `sslrootcert`.
     Tls,
+    /// The TLS handshake itself failed - certificate rejected, protocol
+    /// mismatch, connection reset mid-handshake.
+    ///
+    /// Separate from [`Kind::Tls`] because `sslmode=prefer` retries exactly
+    /// this failure in plaintext (libpq's `CONNECTION_FAILED()` after
+    /// `pqsecure_open_client`) and must retry nothing else.
+    TlsHandshake,
     ToSql(usize),
     FromSql(usize),
     Column(String),
@@ -383,7 +393,8 @@ impl fmt::Display for Error {
         match &self.0.kind {
             Kind::Io => fmt.write_str("error communicating with the server"),
             Kind::UnexpectedMessage => fmt.write_str("unexpected message from server"),
-            Kind::Tls => fmt.write_str("error performing TLS handshake"),
+            Kind::Tls => fmt.write_str("TLS could not be negotiated"),
+            Kind::TlsHandshake => fmt.write_str("error performing TLS handshake"),
             Kind::ToSql(idx) => write!(fmt, "error serializing parameter {idx}"),
             Kind::FromSql(idx) => write!(fmt, "error deserializing column {idx}"),
             Kind::Column(column) => write!(fmt, "invalid column `{column}`"),
@@ -427,6 +438,14 @@ impl Error {
     /// Determines if the error was associated with closed connection.
     pub fn is_closed(&self) -> bool {
         self.0.kind == Kind::Closed
+    }
+
+    /// Whether this is a failure of the TLS handshake itself.
+    ///
+    /// `sslmode=prefer` keys its plaintext retry on exactly this, and on
+    /// nothing else - see [`Kind::TlsHandshake`].
+    pub(crate) fn is_tls_handshake(&self) -> bool {
+        self.0.kind == Kind::TlsHandshake
     }
 
     /// Returns the SQLSTATE error code associated with the error.
@@ -487,6 +506,10 @@ impl Error {
 
     pub(crate) fn tls(e: Box<dyn error::Error + Sync + Send>) -> Error {
         Error::new(Kind::Tls, Some(e))
+    }
+
+    pub(crate) fn tls_handshake(e: Box<dyn error::Error + Sync + Send>) -> Error {
+        Error::new(Kind::TlsHandshake, Some(e))
     }
 
     pub(crate) fn io(e: io::Error) -> Error {

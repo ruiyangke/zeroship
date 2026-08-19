@@ -32,28 +32,33 @@
 //!
 //! Transport
 //! ---------
-//! What the pool opens depends on `sslmode` and on whether the crate was built
-//! with the `tls` feature:
+//! The pool has no transport policy of its own. It parses the URL, and every
+//! `sslmode` then means through the pool exactly what it means through
+//! [`Config::connect`] - see [`SslMode`] for the six, and [`crate::config::SslRootCert`]
+//! for what each verifies. The pool's only jobs here are to build the
+//! connector **once** rather than per connection, and to fail early.
 //!
-//! * `sslmode=require` (with `tls`) - a rustls connection, verified against the
-//!   trust anchors the URL names in `sslrootcert` (default: the OS store). See
-//!   [`crate::tls_rustls`].
-//! * `sslmode=require` (without `tls`) - rejected outright by
-//!   [`Pool::connect_with_config`], rather than surfacing as a
-//!   server-dependent handshake error several hundred milliseconds into a retry
-//!   loop.
-//! * `sslmode=prefer` (the default) and `sslmode=disable` - [`NoTls`],
-//!   i.e. plaintext.
+//! *This paragraph used to say the opposite.* Until the six modes landed, the
+//! pool hardcoded [`NoTls`] and read `prefer` - the default - as plaintext,
+//! while `Config::connect` with a real connector read the same word as
+//! "TLS, and hard-fail if it does not work". One spelling, two behaviours,
+//! chosen by which entry point you happened to use. The justification was
+//! honest as far as it went (the driver had no reconnect-in-plaintext
+//! fallback, so a verifying connector under `prefer` would have converted
+//! "works, in plaintext" into "fails"), but the fix was to build the fallback,
+//! which `connect.rs` now has.
 //!
-//! That last line is the surprising one, so: `prefer` does *not* opt into
-//! encryption here even when TLS is compiled in. This driver has no
-//! reconnect-in-plaintext fallback for a handshake that fails *after* the
-//! server accepted `SSLRequest` (`connect_tls.rs` returns the error), which
-//! libpq does have. Handing `prefer` a verifying connector would therefore
-//! convert every deployment whose server presents an untrusted certificate from
-//! "works, in plaintext" to "fails", silently and at the worst moment. `prefer`
-//! keeps its current, honest meaning - plaintext - and encryption is something
-//! a URL asks for with `require`.
+//! Building the connector once is not just a saving: it reads `sslrootcert`
+//! from disk, and `sslrootcert=system` walks the operating system's store. The
+//! pool opens connections at warm-up, on demand, and on every reconnect after
+//! an eviction, so resolving per attempt would put a filesystem scan on the
+//! reconnect path.
+//!
+//! Without the `tls` feature there is no connector to build, so
+//! `require`/`verify-ca`/`verify-full` are refused by
+//! [`Pool::connect_with_config`] before any socket is opened. libpq behaves the
+//! same way when compiled without SSL support: those three modes are an error,
+//! while `allow` and `prefer` are accepted and simply never attempt TLS.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -65,7 +70,8 @@ use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
-use crate::config::{SslMode, SslNegotiation};
+#[cfg(doc)]
+use crate::config::SslMode;
 use crate::tls::NoTls;
 use crate::{Client, Config, Connection, Error, Socket, TransactionStatus};
 
@@ -239,65 +245,32 @@ fn pool_error(msg: impl Into<String>) -> Error {
     Error::connect(io::Error::other(msg.into()))
 }
 
-/// Reject a connection string whose TLS settings this pool can never satisfy.
+/// Reject a mode that needs a TLS connector this build does not contain.
 ///
-/// What is unsatisfiable depends on the build, so this function has two
-/// versions. Both exist for the same reason: the driver already fails closed on
-/// an impossible TLS setting - `connect_tls` errors rather than falling back to
-/// plaintext, so nothing is silently downgraded - but the error it raises
-/// describes the server ("server does not support TLS" when the server answers
-/// `N`) rather than the real, permanent cause, and it arrives only after
-/// `connect_with_config`'s three-attempt backoff has spent about two seconds on
-/// a URL that could never have worked. Answering here names the cause and
-/// answers immediately.
+/// This is a build-capability check, not a policy: the contradictions between
+/// `sslmode`, `sslrootcert` and `sslnegotiation` are `Config`'s to catch (see
+/// `Config::validate_tls_settings`), and they are caught for every entry point,
+/// not just this one.
 ///
-/// `sslmode=prefer` (libpq's default, and therefore the default here) is never
-/// rejected: it permits plaintext, which is what it gets. See the `Transport`
-/// section of the module docs for why it does not get TLS.
+/// libpq draws the line in the same place. Compiled without SSL support,
+/// "using options `require`, `verify-ca`, or `verify-full` will cause an error,
+/// while options `allow` and `prefer` will be accepted but libpq will not
+/// actually attempt an SSL connection" - which, without the `tls` feature, is
+/// precisely what [`NoTls`] does.
+///
+/// Answering here rather than at the socket matters for a second reason: this
+/// pool retries a failed connection three times with backoff, so a URL that
+/// could never have worked would otherwise cost about two seconds before
+/// reporting an error that blames the server.
 #[cfg(not(feature = "tls"))]
-fn reject_unsatisfiable_tls(config: &Config) -> Result<(), Error> {
-    if config.get_ssl_mode() == SslMode::Require {
-        return Err(pool_error(
-            "sslmode=require cannot be satisfied: compio-postgres was built without the `tls` \
+fn reject_tls_without_a_connector(config: &Config) -> Result<(), Error> {
+    if !config.get_ssl_mode().permits_plaintext() {
+        return Err(pool_error(format!(
+            "sslmode={} cannot be satisfied: compio-postgres was built without the `tls` \
              feature, so no TLS connector exists. Rebuild with `--features tls`, or drop to \
              sslmode=prefer if plaintext is acceptable.",
-        ));
-    }
-
-    // `sslmode=disable` ignores `sslnegotiation` entirely, so only a mode that
-    // would have negotiated is worth rejecting here. With `require` already
-    // handled above, this leaves `prefer` - which `connect_tls` refuses to pair
-    // with direct negotiation anyway, on the grounds that a mode permitting
-    // plaintext must not drive a TLS-only handshake.
-    if config.get_ssl_negotiation() == SslNegotiation::Direct
-        && config.get_ssl_mode() != SslMode::Disable
-    {
-        return Err(pool_error(
-            "sslnegotiation=direct cannot be satisfied: compio-postgres was built without the \
-             `tls` feature, so no TLS connector exists.",
-        ));
-    }
-
-    Ok(())
-}
-
-/// See the `cfg(not(feature = "tls"))` twin above for why this exists.
-///
-/// With TLS compiled in, `sslmode=require` is satisfiable and no longer
-/// rejected. What remains is the one combination no build can serve:
-/// `sslnegotiation=direct` under a mode that permits plaintext. `connect_tls`
-/// refuses that pairing itself (`connect_tls.rs`: "weak sslmode \"prefer\" may
-/// not be used with sslnegotiation=direct"); rejecting it here just moves the
-/// same verdict ahead of the retry loop.
-#[cfg(feature = "tls")]
-fn reject_unsatisfiable_tls(config: &Config) -> Result<(), Error> {
-    if config.get_ssl_negotiation() == SslNegotiation::Direct
-        && config.get_ssl_mode() == SslMode::Prefer
-    {
-        return Err(pool_error(
-            "sslnegotiation=direct cannot be satisfied under sslmode=prefer: a mode that permits \
-             plaintext must not drive a TLS-only handshake. Use sslmode=require.",
-        ));
+            config.get_ssl_mode().as_str()
+        )));
     }
 
     Ok(())
@@ -309,19 +282,15 @@ fn reject_unsatisfiable_tls(config: &Config) -> Result<(), Error> {
 
 /// The pool's connection recipe, resolved from the URL exactly once.
 ///
-/// Both halves are here for the same reason. The parsed [`Config`] is cheap but
-/// pointless to redo; the TLS connector is *not* cheap - building it reads the
-/// certificate authority from disk (`sslrootcert=system` walks the operating
-/// system's store) - and the pool opens connections not just at warm-up but on
-/// demand and on every reconnect after an eviction. Resolving per attempt would
-/// put a filesystem scan on the reconnect path.
-///
-/// It also moves a broken `sslrootcert` to where it belongs: `Pool::connect`
-/// fails immediately naming the file, rather than after the retry loop.
+/// See the `Transport` section of the module docs for why the connector is
+/// built here rather than per attempt. Resolving early also moves a broken
+/// `sslrootcert` to where it belongs: `Pool::connect` fails immediately naming
+/// the file, rather than after the retry loop.
 struct Transport {
     config: Config,
-    /// Present only when the URL asks for encryption. See the `Transport`
-    /// section of the module docs for which modes those are.
+    /// Present whenever the URL's `sslmode` may use TLS - i.e. every mode but
+    /// `disable`. Which of them *verify* anything is the connector's business,
+    /// not the pool's.
     #[cfg(feature = "tls")]
     tls: Option<crate::tls_rustls::MakeRustlsConnect>,
 }
@@ -329,10 +298,12 @@ struct Transport {
 impl Transport {
     fn resolve(url: &str) -> Result<Transport, Error> {
         let config: Config = url.parse()?;
-        reject_unsatisfiable_tls(&config)?;
+        config.validate_tls_settings()?;
+        #[cfg(not(feature = "tls"))]
+        reject_tls_without_a_connector(&config)?;
 
         #[cfg(feature = "tls")]
-        let tls = if config.get_ssl_mode() == SslMode::Require {
+        let tls = if config.get_ssl_mode().permits_tls() {
             Some(crate::tls_rustls::MakeRustlsConnect::from_config(&config)?)
         } else {
             None
