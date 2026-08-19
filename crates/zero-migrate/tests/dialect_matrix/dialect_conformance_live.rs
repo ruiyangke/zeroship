@@ -57,7 +57,15 @@
 //!      happens to run in parallel - `drop_extension_rollback_pg.rs` says in its
 //!      own header that it cannot share `citext` with a second creator. Roles and
 //!      the `createSchema`/`dropSchema` name get a per-row unique suffix; the
-//!      extension becomes `pgcrypto`, which no live test in the tree claims.
+//!      extension becomes `pgcrypto` and is held under [`EXTENSION_CLAIM_KEY`]
+//!      while a row uses it, because a name cannot isolate this one - see that
+//!      constant. This paragraph used to end "which no live test in the tree
+//!      claims", and that was FALSE when it was written: `code.extension` in
+//!      `support::operator_charter` allowlists exactly `citext` and `pgcrypto`,
+//!      and `drop_extension_rollback_pg.rs` claims BOTH - `citext` as `EXT` and
+//!      `pgcrypto` as `EXT_GUARDED`, the latter in the live
+//!      `a_guarded_extension_drop_keeps_no_inverse`. There was no unclaimed name
+//!      to pick, so the sentence was describing a choice that had not been made.
 //!      `nextval`'s hard-coded `app` schema is retargeted at the probe schema,
 //!      because otherwise a cross-schema POLICY refusal would mask the capability
 //!      answer the row is asking about.
@@ -66,7 +74,11 @@
 //!      `LiveSchema::default()`.
 //!
 //! ISOLATION. Every PostgreSQL row runs in its own schema pair (project + meta),
-//! created and dropped per row, plus a per-row role and the one extension. The
+//! created and dropped per row, plus a per-row role. The one shared name is the
+//! extension, and it is isolated in TIME rather than in space: the two rows that
+//! claim it hold a cross-run advisory lock while they do, and ONLY those two rows
+//! drop it. Both halves are load-bearing and both are measured at
+//! [`EXTENSION_CLAIM_KEY`]. The
 //! PostgreSQL sweep counts `pg_namespace` before and after itself and fails if a
 //! `zmconf_%` schema it is answerable for survives - inside the sweep, not beside
 //! it, because a check whose subject is another test's in-flight state cannot be
@@ -98,6 +110,12 @@
 //!     every foreign pid reads as running, which keeps concurrent runs green and
 //!     gives up only the cross-run half of the check. This run's own leftovers are
 //!     still caught, because "is this pid mine" needs no `/proc`.
+//!
+//! The pid discipline does NOT extend to the extension, and cannot: it needs a name
+//! the test is free to choose, and an extension name is a lookup into the server's
+//! library rather than an identifier. That resource is held under a lock instead,
+//! and the leftover a killed holder leaves behind is cleared by the next claimant
+//! under the same lock - see [`EXTENSION_CLAIM_KEY`] and [`claim_the_extension`].
 //!
 //! SCOPE. PostgreSQL, SQLite and MySQL - all three dialects the engine emits for.
 //! The MySQL leg's isolation unit is a throwaway DATABASE rather than a schema,
@@ -910,6 +928,153 @@ fn probe_prefix_for(pid: u32) -> String {
     format!("{PROBE_PREFIX}{pid}_")
 }
 
+// ---------------------------------------------------------------------------
+// The one name this suite cannot make unique
+// ---------------------------------------------------------------------------
+
+/// The extension the `createExtension` and `dropExtension` rows claim.
+///
+/// The name is not free even before concurrency is considered. `support`'s operator
+/// charter allowlists `code.extension = ["citext", "pgcrypto"]`, so a row that named
+/// anything else would be refused by POLICY and would stop asking its question, and
+/// BOTH of those two are claimed by `rollback/drop_extension_rollback_pg.rs` - as
+/// `EXT` and as `EXT_GUARDED`. `pgcrypto` is the smaller of the two collisions, and
+/// that is MEASURED rather than assumed: across `crates/zero-migrate/tests`, the
+/// files that CREATE `citext` against a live server are that one and
+/// `pg_engine/pg_scenarios.rs`, while the only other file that creates `pgcrypto` is
+/// that one, in the single test `a_guarded_extension_drop_keeps_no_inverse`.
+///
+/// WHAT THIS FILE'S CLAIM DOES AND DOES NOT COVER. [`EXTENSION_CLAIM_KEY`] serializes
+/// the rows in THIS suite against each other, which is the collision that was
+/// measured. It does not reach `drop_extension_rollback_pg.rs`, which takes no
+/// claim: two gate runs whose `rollback` and `dialect_matrix` binaries overlap can
+/// still meet on `pgcrypto`. Closing that needs the same acquire in that file, or a
+/// third allowlisted extension in `support::operator_charter` - both outside this
+/// one, and neither is what went red.
+const PROBE_EXTENSION: &str = "pgcrypto";
+
+/// The advisory-lock key that makes claiming [`PROBE_EXTENSION`] safe across runs.
+///
+/// WHY A LOCK AND NOT A NAME. Every other non-schema-scoped name this suite touches
+/// is localized by [`nonce`], which puts this process's pid in it, so two runs never
+/// meet - the same discipline [`probe_owner`] adjudicates for schemas. An EXTENSION
+/// has no such freedom. Its name is not an identifier the test chooses, it is a
+/// lookup into the server's extension library, so `pgcrypto_<pid>` is not an
+/// isolated extension, it is `could not open extension control file`. Isolating in
+/// SPACE is unavailable, so these two rows isolate in TIME.
+///
+/// MEASURED at 0b77b1c2 - two runs of this suite's PostgreSQL leg started together
+/// against one server, BOTH red, each holding a different half of the collision:
+///
+/// ```text
+///   createExtension/base  ServerError  [23505] duplicate key value violates
+///                                      unique constraint "pg_extension_name_index"
+///   dropExtension/base    ServerError  [42704] extension "pgcrypto" does not exist
+/// ```
+///
+/// Both name a real row, so both read as a defect in the engine. Neither is one: the
+/// fixture claimed a database-global name twice. This is exactly the distinction the
+/// module doc insists a conformance layer keep - a suite that cannot tell a missing
+/// REFERENT from a wrong DECLARATION reports the fixture as a defect - and the sharp
+/// case is the second line, where the referent went missing because a SIBLING RUN
+/// removed it.
+///
+/// The key is hashed by the server the way `apply::executor` hashes a project id for
+/// its own lock, so a reader who knows one knows the other. Both live in one 64-bit
+/// advisory space, and a collision between this key and some project's could only
+/// make one of them WAIT, never mis-serialize: advisory locks are re-entrant per
+/// session, so the executor's own acquire inside a claimed row is satisfied at once.
+const EXTENSION_CLAIM_KEY: &str = "zero-migrate:dialect-conformance:extension:pgcrypto";
+
+/// How long a run waits for the claim before it REPORTS rather than hangs.
+///
+/// Spelled as a `lock_timeout`, which PostgreSQL applies to a `pg_advisory_lock`
+/// wait - VERIFIED on the 18.4 instance this suite runs against: a second session
+/// waiting on a held key aborts with `canceling statement due to lock timeout` at
+/// the bound rather than waiting forever. The whole PostgreSQL leg takes about
+/// thirty seconds and the claimed part of it is two rows, so this bound is reached
+/// by a wedged holder, not by a queue.
+const EXTENSION_CLAIM_WAIT: &str = "180s";
+
+/// Whether this row is one of the two that claims [`PROBE_EXTENSION`].
+fn claims_the_extension(kind: &str) -> bool {
+    matches!(kind, "createExtension" | "dropExtension")
+}
+
+/// Take the cross-run claim on [`PROBE_EXTENSION`], and start it from a known state.
+///
+/// The `DROP EXTENSION IF EXISTS` here is INSIDE the claim and is a fixture
+/// precondition, the same kind of thing [`prelude`] establishes: a run killed
+/// between its CREATE and its DROP leaves the extension installed, and the next
+/// claimant's `createExtension` - the SUBJECT of one of these two rows and the
+/// PRELUDE of the other - would then answer `already exists`. That answer is about
+/// the leftover, not about the declaration. The identical statement OUTSIDE the
+/// claim is the race itself, which is why it moved in here out of the unconditional
+/// cleanup at the foot of [`pg_verdict`].
+async fn claim_the_extension(session: &PgDevSession) -> Result<(), String> {
+    if let Err(error) = session
+        .batch(&format!("SET lock_timeout = '{EXTENSION_CLAIM_WAIT}'"))
+        .await
+    {
+        return Err(format!(
+            "could not bound the wait for the {PROBE_EXTENSION} claim: {error}"
+        ));
+    }
+    let taken = session
+        .exec(
+            "SELECT pg_advisory_lock(hashtext($1)::bigint)",
+            &[zero_migrate::driver::Bind::Text(
+                EXTENSION_CLAIM_KEY.to_string(),
+            )],
+        )
+        .await;
+    // RESET before the engine runs anything else on this PINNED connection. The
+    // bound belongs to the claim; left armed it would abort the executor's OWN
+    // `pg_advisory_lock` wait under load, and the row would be blamed for a
+    // ServerError that is this function's.
+    let _ = session.batch("RESET lock_timeout").await;
+    if let Err(error) = taken {
+        return Err(format!(
+            "waited {EXTENSION_CLAIM_WAIT} for the {PROBE_EXTENSION} claim \
+             ({EXTENSION_CLAIM_KEY}) and did not get it, so this row never asked its \
+             question: {error}"
+        ));
+    }
+    if let Err(error) = session
+        .batch(&format!("DROP EXTENSION IF EXISTS {PROBE_EXTENSION}"))
+        .await
+    {
+        return Err(format!(
+            "holds the {PROBE_EXTENSION} claim but could not clear a leftover \
+             installation before asking the row: {error}"
+        ));
+    }
+    Ok(())
+}
+
+/// Drop what the row installed under the claim, then release the claim.
+///
+/// Not a `Drop` guard, and it does not need to be. The claim is a SESSION-level
+/// advisory lock on [`PgDevSession`]'s ONE pinned connection, so the server releases
+/// it when that connection closes - which covers an early return, a panic AND a
+/// killed process, the third of which no `Drop` impl reaches. This explicit release
+/// is here so the claim ends at the ROW boundary rather than at the end of
+/// [`pg_verdict`]'s scope, and so the next claimant is not made to wait on the drop
+/// of a session that is already finished with it.
+async fn release_the_extension(session: &PgDevSession) {
+    let _ = session
+        .batch(&format!("DROP EXTENSION IF EXISTS {PROBE_EXTENSION}"))
+        .await;
+    let _ = session
+        .exec(
+            "SELECT pg_advisory_unlock(hashtext($1)::bigint)",
+            &[zero_migrate::driver::Bind::Text(
+                EXTENSION_CLAIM_KEY.to_string(),
+            )],
+        )
+        .await;
+}
+
 async fn pg_verdict(url: &str, kind: &str, variant: &str, op: &Op) -> Verdict {
     let session = PgDevSession::connect(url);
     let base = nonce(kind, variant);
@@ -917,8 +1082,16 @@ async fn pg_verdict(url: &str, kind: &str, variant: &str, op: &Op) -> Verdict {
         schema: base.clone(),
         aux_schema: format!("{base}_aux"),
         role: format!("{base}_role"),
-        extension: "pgcrypto",
+        extension: PROBE_EXTENSION,
     };
+    // The only name in `probe` that is not this run's alone. Taken before anything
+    // else, so a row that cannot get the claim has created nothing to reclaim.
+    let claimed = claims_the_extension(kind);
+    if claimed {
+        if let Err(why) = claim_the_extension(&session).await {
+            return Verdict::of(Outcome::NotExecutable, why);
+        }
+    }
     let policy = support::operator_charter(&probe.schema);
     let cfg = ExecutorConfig::new(format!("prj_{base}"), &probe.schema, policy.clone());
     let _guard = support::SchemaGuard::arm(
@@ -965,9 +1138,14 @@ async fn pg_verdict(url: &str, kind: &str, variant: &str, op: &Op) -> Verdict {
             role = probe.role
         ))
         .await;
-    let _ = session
-        .batch(&format!("DROP EXTENSION IF EXISTS {}", probe.extension))
-        .await;
+    // Only the two rows that CLAIMED the extension may drop it. This used to be
+    // unconditional, and that was the race's second channel: every one of the other
+    // fifty-odd rows ended by dropping a database-global object it had never
+    // created, so a sibling run reaching its `dropTable` row could remove the
+    // extension THIS run had just installed, three rows later.
+    if claimed {
+        release_the_extension(&session).await;
+    }
     verdict
 }
 
@@ -995,7 +1173,7 @@ async fn mysql_verdict(url: &str, kind: &str, variant: &str, op: &Op) -> Verdict
         schema: base.clone(),
         aux_schema: format!("{base}_aux"),
         role: format!("{base}_role"),
-        extension: "pgcrypto",
+        extension: PROBE_EXTENSION,
     };
     let policy = support::operator_charter(&probe.schema);
     let cfg = ExecutorConfig::new(format!("prj_{base}"), &probe.schema, policy.clone());
@@ -1097,7 +1275,7 @@ async fn sqlite_verdict(kind: &str, variant: &str, op: &Op) -> Verdict {
         schema: SQLITE_PROJECT.to_string(),
         aux_schema: format!("{base}_aux"),
         role: format!("{base}_role"),
-        extension: "pgcrypto",
+        extension: PROBE_EXTENSION,
     };
     let policy = support::operator_charter(SQLITE_PROJECT);
     let cfg = ExecutorConfig::new(SQLITE_PROJECT, SQLITE_PROJECT, policy.clone());
@@ -1872,6 +2050,85 @@ async fn a_probe_schema_is_judged_by_the_pid_in_its_name_not_by_its_prefix() {
         ProbeCensus::take(vec![sibling_schema], me).leaked(),
         "a census holding a finished run's leftover has to read as leaked"
     );
+}
+
+/// The extension claim EXCLUDES a second run, and only the two rows that need it
+/// take it.
+///
+/// The sibling of the pid test above, for the resource the pid discipline cannot
+/// reach. It asserts the two halves that the measured failure needed BOTH of:
+///
+///   1. exactly the rows whose op is an extension op claim the extension, so no
+///      other row's cleanup can drop a database-global object it never created;
+///   2. while one session holds the claim, a second session cannot take it, and once
+///      the first releases, the second can.
+///
+/// Part 2 uses a raw `pg_try_advisory_lock` for the contender rather than
+/// [`claim_the_extension`], because a WAIT and a REFUSAL are indistinguishable from
+/// a test that only ever waits: the try answers `false` immediately and that false
+/// is the observable. It then takes the claim the real way, which may wait for the
+/// sweep in this same binary, so the second half is stated as "the claim is
+/// obtainable once released" rather than "obtainable instantly" - the stronger
+/// version would be a check on another test's in-flight state, which the module doc
+/// says has to be sequenced with it, not asserted beside it.
+#[compio::test]
+async fn the_extension_claim_is_exclusive_and_only_the_extension_rows_take_it() {
+    // The table half needs no server, so it runs whether or not one is configured.
+    let claimants: BTreeSet<&str> = DIALECT_TABLE
+        .iter()
+        .map(|row| row.kind)
+        .filter(|kind| claims_the_extension(kind))
+        .collect();
+    assert_eq!(
+        claimants,
+        BTreeSet::from(["createExtension", "dropExtension"]),
+        "the claim - and the DROP EXTENSION at the foot of pg_verdict - must cover \
+         exactly the rows whose subject or prelude touches the extension. It used to \
+         cover every row, and a sibling run's `dropTable` row would then remove the \
+         extension this run had just installed."
+    );
+    assert!(
+        DIALECT_TABLE
+            .iter()
+            .any(|row| !claims_the_extension(row.kind)),
+        "if every row claimed the extension the assertion above would be vacuous"
+    );
+
+    let Some(url) = support::pg_url() else {
+        support::announce_live_db_skip(support::PG_URL_ENV);
+        return;
+    };
+    let holder = PgDevSession::connect(&url);
+    let contender = PgDevSession::connect(&url);
+
+    claim_the_extension(&holder)
+        .await
+        .expect("the holder takes the extension claim");
+
+    let held: bool = contender
+        .query_one(
+            "SELECT pg_try_advisory_lock(hashtext($1)::bigint) AS got",
+            &[zero_migrate::driver::Bind::Text(
+                EXTENSION_CLAIM_KEY.to_string(),
+            )],
+        )
+        .await
+        .expect("the contender asks for the claim")
+        .try_get::<_, bool>("got")
+        .expect("decode the try-lock answer");
+    assert!(
+        !held,
+        "a second run must NOT be able to take the {PROBE_EXTENSION} claim while a \
+         first holds it; without this exclusion both runs create the extension and \
+         one drops it under the other"
+    );
+
+    release_the_extension(&holder).await;
+
+    claim_the_extension(&contender)
+        .await
+        .expect("a released claim is obtainable by the next run");
+    release_the_extension(&contender).await;
 }
 
 #[compio::test]
