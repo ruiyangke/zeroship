@@ -629,7 +629,7 @@ echo "  deployed: $(tr '\n' '; ' < "$WORK/deployed.obs")"
 #
 # WHAT THE FLOOR DOES NOT CATCH: substitution. Swapping one assertion for an
 # easier one keeps the total at 44. Nothing here can see that; review can.
-WORKFLOWS_MIN_PASSED="${WORKFLOWS_MIN_PASSED:-44}"
+WORKFLOWS_MIN_PASSED=44
 
 echo ""
 echo "  dev vs deployed (workflows): $PASS passed, $FAIL failed  (mutation: $MUTATE)  (floor $WORKFLOWS_MIN_PASSED)"

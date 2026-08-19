@@ -1337,7 +1337,7 @@ echo "  $PASS passed, $FAIL failed, $((PASS+FAIL)) ran"
 # RE-MEASURED 2026-08-13 after the deploy-path, secret_files and snapshot
 # blocks: 108 unconditional; 112 with the shipped compose + dev.rs present;
 # 114 with target/debug/zeroship-control built as well.
-MIN_RAN="${DEPLOY_SCRIPTS_MIN_RAN:-108}"
+MIN_RAN=108
 RAN=$((PASS + FAIL))
 rc=0
 [ "$FAIL" -eq 0 ] || rc=1

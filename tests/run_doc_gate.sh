@@ -71,10 +71,11 @@
 # USAGE
 #   tests/run_doc_gate.sh
 #
-# ENV
-#   DOC_MAX_DEFAULT (1)   max unresolved links with default features
-#   DOC_MAX_ALL     (0)   max unresolved links with --all-features
-#   DOC_MIN_CRATES  (26)  workspace members that must actually be documented
+# THRESHOLDS (constants below, not environment - a bound its caller can move
+# is not a bound)
+#   DOC_MAX_DEFAULT 1   max unresolved links with default features
+#   DOC_MAX_ALL     0   max unresolved links with --all-features
+#   DOC_MIN_CRATES  26  workspace members that must actually be documented
 # ============================================================================
 set -uo pipefail
 
@@ -86,9 +87,9 @@ cd "$ROOT"
 # directions and is itself gated in CI.
 . "$ROOT/tests/lib/measurement_integrity.sh"
 
-DOC_MAX_DEFAULT="${DOC_MAX_DEFAULT:-1}"
-DOC_MAX_ALL="${DOC_MAX_ALL:-0}"
-DOC_MIN_CRATES="${DOC_MIN_CRATES:-26}"
+DOC_MAX_DEFAULT=1
+DOC_MAX_ALL=0
+DOC_MIN_CRATES=26
 
 LOG="$(mktemp)"
 trap 'rm -f "$LOG"' EXIT

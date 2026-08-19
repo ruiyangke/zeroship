@@ -565,7 +565,7 @@ echo "############ SUMMARY ############"
 # the dotless Host that bypasses the gate is not routable through Caddy.
 # Reaching the gap in the shipped topology needs BOTH the worker flag ON and
 # direct gateway access.
-AUTHZ_EXPECTED_FAILURES=${AUTHZ_EXPECTED_FAILURES:-"CONFIRMED AUTHZ GAP"}
+AUTHZ_EXPECTED_FAILURES="CONFIRMED AUTHZ GAP"
 IFS='|' read -r -a _apats <<< "$AUTHZ_EXPECTED_FAILURES"
 # FIXED-STRING matching, both directions. An earlier golden_path classifier used
 # an ERE and `sort({id:-1})` matched nothing because `{id:-1}` is an invalid

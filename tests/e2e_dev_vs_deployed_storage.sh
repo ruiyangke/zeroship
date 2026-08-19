@@ -561,7 +561,7 @@ cp "$WORK/deployed.txt" "$KEEP/deployed.txt" 2>/dev/null || true
 #
 # WHAT THE FLOOR DOES NOT CATCH: substitution. Swapping one assertion for an
 # easier one keeps the total unchanged. Nothing here can see that; review can.
-STORAGE_MIN_PASSED="${STORAGE_MIN_PASSED:-53}"
+STORAGE_MIN_PASSED=53
 
 echo ""
 echo "  results kept at $KEEP/{dev,deployed}.txt"
