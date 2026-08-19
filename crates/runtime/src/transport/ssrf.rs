@@ -127,10 +127,18 @@ pub fn is_blocked_ip(addr: IpAddr) -> bool {
 pub fn validate_url(url: &str) -> Result<(), String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("Invalid URL: {e}"))?;
 
-    // Allow http(s) and the WebSocket schemes ws/wss. The block list
-    // (private/loopback/etc.) below applies uniformly to all four.
+    // `fetch` is the only caller. `ws`/`wss` used to be accepted here because
+    // the WebSocket handshake shared this function; it now goes through
+    // `transport::egress::evaluate` instead, so leaving them accepted would
+    // only mean `fetch("ws://...")` getting past the scheme check to fail
+    // further down.
+    //
+    // Note this function has never checked PORTS, for any scheme. Ports are
+    // decided by the egress rule set, which carries one, and are not a thing
+    // the string-level fast path can usefully bound for `fetch` - which is the
+    // ungated egress by design.
     match parsed.scheme() {
-        "http" | "https" | "ws" | "wss" => {}
+        "http" | "https" => {}
         scheme => return Err(format!("Blocked URL scheme: {scheme}")),
     }
 
@@ -324,6 +332,10 @@ mod tests {
     fn validate_url_rejects_non_http() {
         assert!(validate_url("file:///etc/passwd").is_err());
         assert!(validate_url("gopher://x/").is_err());
+        // `fetch` is the only caller now. A WebSocket URL is decided by the
+        // egress rule set on the handshake path, not here, so accepting one
+        // here would be permissiveness with no consumer.
+        assert!(validate_url("wss://example.com/").is_err());
     }
 
     #[test]
