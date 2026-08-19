@@ -1,6 +1,6 @@
 //! P4 native login + consent front door for the platform OP `/authorize` flow.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 
