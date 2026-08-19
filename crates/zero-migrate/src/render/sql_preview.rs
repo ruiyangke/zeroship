@@ -508,8 +508,14 @@ fn render_ir_ops(
         // unresolved forward edge. Carry the authored logical contracts and table
         // presence forward without inventing catalog snapshots; truly live-state-
         // dependent operations still degrade to a labeled preview line.
+        //
+        // Table presence is the FOLD's rule, read rather than restated: this used to
+        // be a local two-arm walker that knew `createTable` and nothing else, so a
+        // dropped table stayed referenceable and a renamed one vanished. The preview
+        // is a surfacing layer, and the lower it surfaces reads the same rule from
+        // the same place (`render::lower::lower_one_op`), so the two cannot drift.
         let _ = working_live.advance_logical_columns(&one, dialect, project_schema, None);
-        advance_preview_table_presence(op, dialect, &mut working_live.tables);
+        crate::render::fold::advance_referenceable_tables(op, dialect, &mut working_live.tables);
         // The same reason, for the same envelope: a `createTable` here is what tells
         // a later `setColumnType` that the column it names is an identity or a
         // generated column, and those two facts decide whether the op is REFUSED and
@@ -520,37 +526,6 @@ fn render_ir_ops(
         working_live.advance_declared_column_generation(op, dialect);
     }
     Ok(out)
-}
-
-fn advance_preview_table_presence(
-    op: &Op,
-    dialect: SqlDialect,
-    tables: &mut std::collections::BTreeSet<String>,
-) {
-    match op {
-        Op::CreateTable { name, .. } => {
-            tables.insert(name.clone());
-        }
-        Op::Dialectal {
-            default,
-            pg,
-            sqlite,
-            mysql,
-        } => {
-            let selected = match dialect {
-                SqlDialect::Postgres => pg.as_deref(),
-                SqlDialect::Sqlite => sqlite.as_deref(),
-                SqlDialect::Mysql => mysql.as_deref(),
-            }
-            .or(default.as_deref());
-            if let Some(selected) = selected {
-                for nested in selected {
-                    advance_preview_table_presence(nested, dialect, tables);
-                }
-            }
-        }
-        _ => {}
-    }
 }
 
 /// Build a one-op `MigrationIr` carrying `op`, sharing the parent's identity so the

@@ -5005,9 +5005,22 @@ impl IrAuthor {
                 live_schema
                     .table_snapshots
                     .insert(name.clone(), snap.clone());
-                live_schema.tables.insert(name.clone());
-                // The just-created table is now live for any later intra-IR FK.
-                live.insert(name.clone());
+                // The just-created table is now live for any later intra-IR FK — said
+                // by the fold's rule rather than by a hand-written insert here, so
+                // this arm and the `dropTable`/`renameTable`/`detachPartition` arms
+                // that advance the same two sets at the tail of this function cannot
+                // come to different conclusions about what presence means. This one
+                // stays IN the arm (rather than moving to the tail with the others)
+                // because `createTable` returns early through `LoweredOp::CreateTable`,
+                // and because it must land AFTER `lower_create_table` has already
+                // decided this table's OWN self-referencing FK: advancing first would
+                // silently turn a deferred self-FK into an inline one.
+                crate::render::fold::advance_referenceable_tables(
+                    op,
+                    self.dialect,
+                    &mut live_schema.tables,
+                );
+                crate::render::fold::advance_referenceable_tables(op, self.dialect, live);
                 if let Some(spec) = partition_by {
                     partition_state.create_parent(name, spec.clone());
                 } else {
@@ -6300,6 +6313,26 @@ impl IrAuthor {
         for (mig, _statements) in &mut migs {
             mig.effect = Some(effect);
         }
+        // What this op does to the set of table names a LATER op in this same stream
+        // may reference — the fold's rule, applied to both name sets this function
+        // carries (`live_schema.tables`, which the INSTEAD OF trigger gate and the
+        // rename leg read, and the working `live_tables`, which decides whether a
+        // create-time foreign key inlines or defers).
+        //
+        // AFTER the arms, never before: an op must not be asked to answer a question
+        // using the change it is itself about to make. `createTable` advances inside
+        // its own arm for the same reason plus an ordering one (see there).
+        //
+        // Until this existed only `createTable` moved these sets, so a stream that
+        // dropped, renamed or detached a table went on referencing the old name.
+        // Both failure directions were real and are pinned in
+        // `tests/ir_contract/preview_fold_table_presence.rs`.
+        crate::render::fold::advance_referenceable_tables(
+            op,
+            self.dialect,
+            &mut live_schema.tables,
+        );
+        crate::render::fold::advance_referenceable_tables(op, self.dialect, live);
         Ok(LoweredOp::Ddl(migs))
     }
 

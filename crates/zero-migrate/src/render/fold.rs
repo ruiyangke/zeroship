@@ -598,6 +598,83 @@ pub(crate) fn selected_dialectal_leg<'a>(
     own.as_deref().or(default.as_deref())
 }
 
+/// **The ONE rule for what an op does to the set of table NAMES a later op in the
+/// same stream can reference.**
+///
+/// The fold answers this question for the full [`SchemaSnapshot`]. Two other places
+/// need the same answer over a bare name set and used to each carry their own
+/// version of it: `render::lower`'s working `live_tables` (which decides whether a
+/// create-time foreign key INLINES or defers) and the offline SQL preview's
+/// per-op presence carrier. Both handled `createTable` and nothing else, so both
+/// disagreed with the fold — and with PostgreSQL — the moment a stream dropped,
+/// renamed, or detached anything. Measured on PostgreSQL 18.4:
+///
+///   - `createTable alpha; dropTable alpha; createTable gamma REFERENCES alpha` —
+///     the stale-present `alpha` made the create-time FK INLINE, and the preview
+///     reported the whole envelope resolved. The server answers
+///     `ERROR: relation "alpha" does not exist`, mid-migration.
+///   - `createTable alpha; renameTable alpha -> beta; createTable gamma REFERENCES
+///     beta` — `beta` was never recorded, so the FK deferred with no target and the
+///     lower REFUSED the artifact ("non-live target … never created later"). The
+///     server accepts that sequence.
+///   - the same refusal for `detachPartition`, whose child becomes an ordinary
+///     table the server is equally happy to be referenced.
+///
+/// So the rule lives here, beside the fold that already had it right, and the two
+/// name-set carriers call it instead of restating it.
+///
+/// **`attachPartition` is deliberately NOT here, and that is a measured exclusion.**
+/// The fold's arm `tables.remove`s an attached child, but only because it re-homes
+/// the snapshot into its `partitions` map — the relation itself still exists.
+/// PostgreSQL 18.4 accepts `ALTER TABLE parent ATTACH PARTITION child; CREATE TABLE
+/// gamma … REFERENCES child(id)`, so mirroring that removal into a name set whose
+/// whole job is "may a foreign key name this" would manufacture a false refusal.
+/// This set means REFERENCEABLE RELATION, which is what its callers ask of it; it is
+/// not a mirror of the fold's `tables` key set.
+pub(crate) fn advance_referenceable_tables(
+    op: &Op,
+    dialect: SqlDialect,
+    tables: &mut std::collections::BTreeSet<String>,
+) {
+    match op {
+        // Descend through the fold's OWN leg selector rather than restating the
+        // own-then-default rule, so a dialectal envelope cannot drift from the
+        // catalog half about which leg it is even talking about.
+        Op::Dialectal {
+            default,
+            pg,
+            sqlite,
+            mysql,
+        } => {
+            if let Some(leg) = selected_dialectal_leg(dialect, default, pg, sqlite, mysql) {
+                for nested in leg {
+                    advance_referenceable_tables(nested, dialect, tables);
+                }
+            }
+        }
+        Op::CreateTable { name, .. } => {
+            tables.insert(name.clone());
+        }
+        Op::DropTable { table, .. } => {
+            tables.remove(table);
+        }
+        // A rename MOVES the relation: the old name stops resolving and the new one
+        // starts, which is exactly the pair of edits the fold's own arm makes to its
+        // snapshot map.
+        Op::RenameTable { table, to, .. } => {
+            tables.remove(table);
+            tables.insert(to.clone());
+        }
+        // A detached child is a standalone table from here on (the fold inserts it
+        // into its `tables` map for the same reason). It was never in this set while
+        // it was a partition, so this is an insert, not a move.
+        Op::DetachPartition { name, .. } => {
+            tables.insert(name.clone());
+        }
+        _ => {}
+    }
+}
+
 fn push_fold_op<'a>(
     out: &mut Vec<&'a Op>,
     op: &'a Op,

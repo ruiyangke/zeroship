@@ -17,4 +17,5 @@ mod ir_checksum;
 mod ir_envelope_schema;
 mod ir_wire_contract;
 mod op_fixture_goldens;
+mod preview_fold_table_presence;
 mod sql_preview;
