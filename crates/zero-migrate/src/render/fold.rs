@@ -5148,13 +5148,37 @@ impl std::error::Error for ProduceError {}
 ///
 /// Where a token is PARAMETERISED, the parameters ride in sibling facets and this
 /// inverse must read them or the round trip narrows the type: `char` needs
-/// `char_len`, `vector` needs `vector_dims`, and `number` needs `precision` - the one
-/// case where the facet decides WHICH `ColType` the token means (`Decimal` when it is
-/// present, `Double` when it is not) rather than merely parameterising a settled one.
+/// `char_len`, `vector` needs `vector_dims`, and TWO tokens go further still - the
+/// facet beside them decides WHICH `ColType` the token means rather than merely
+/// parameterising a settled one. `number` is `Decimal` when `precision` is present and
+/// `Double` when it is not; `string` is `String { length }` when `max_length` is
+/// present and `Text` when it is not.
 fn token_to_col_type(f: &crate::render::declarative::FieldDescriptor) -> Option<ColType> {
     let inner = |token: &str| -> Option<ColType> {
         Some(match token {
-            "string" => ColType::Text,
+            // `"string"` is a TWO-type token, exactly as `"number"` is below:
+            // `ColType::String { length }` and `ColType::Text` both spell it, because
+            // the shared `FieldDef` vocabulary has one string token and carries the
+            // width beside it as `maxLength` (the way `charLen` rides beside `char`).
+            // Collapsing every `string` to `Text` here dropped the bound on every
+            // descriptor→ops round trip, and the loss was not cosmetic: measured on
+            // live PostgreSQL in `tests/fold_live/pg_bounded_string_producer_live.rs`,
+            // a `t.string({ maxLength: 64 })` column reached the server as an
+            // unbounded `text` that STORED a 200-character value, and re-importing an
+            // exported schema authored `ALTER COLUMN … TYPE text` against a table
+            // nobody had changed - stripping the bound off a live column.
+            //
+            // A non-positive or unrepresentable width falls back to `Text` rather than
+            // refusing the descriptor. That is the same verdict `schema::query`'s
+            // `max_length` helper already reaches for such a facet (it filters
+            // `> 0` and lets the emitter answer the unbounded spelling), so the two
+            // carriers still agree on the column; refusing here would instead turn a
+            // descriptor set the boundary accepts today into a hard
+            // `ProduceError::UnknownType`.
+            "string" => match f.max_length.and_then(|len| u32::try_from(len).ok()) {
+                Some(length) if length > 0 => ColType::String { length },
+                _ => ColType::Text,
+            },
             "int" | "integer" => ColType::Int,
             "smallInt" => ColType::SmallInt,
             "bigInt" => ColType::BigInt,

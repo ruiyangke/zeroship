@@ -29,11 +29,12 @@
 //!   answer, so a facet the fold recovers WRONGLY round-trips just as happily. The
 //!   fold's own correctness is adjudicated elsewhere (`schema.runtime.json` goldens,
 //!   and the live-server suites).
-//! * NOT that re-importing the export reproduces the schema. It cannot: the
-//!   descriptor-to-ops producer is separately lossy, measured below by
-//!   `the_producer_not_the_wire_is_where_a_varchar_width_dies`. The wire carries the
-//!   width; `token_to_col_type` then maps every `"string"` to `ColType::Text` and
-//!   drops it. Fixing that is a producer change and is deliberately NOT in this one.
+//! * NOT that re-importing the export reproduces the schema. It cannot in general: the
+//!   descriptor-to-ops producer speaks its own vocabulary and drops what falls outside
+//!   it. One facet HAS been carried all the way through and is measured below by
+//!   [`a_varchar_width_survives_the_wire_and_the_producer`] — the `VARCHAR(n)` width,
+//!   which used to reach `token_to_col_type` and die there. That case is the whole
+//!   extent of the end-to-end claim; nothing here generalises it.
 //! * NOT anything about `env.db.ts`. That artifact is rendered from the richer
 //!   authoring IR, and no descriptor vocabulary can reconstruct it.
 //! * NOT that a JS caller sees the fields. This is the napi-free build; the `.node`
@@ -653,20 +654,24 @@ fn a_literal_field_is_unreachable_from_both_gen_artifacts_sources() {
     }
 }
 
-/// **Where a `VARCHAR(n)` width actually dies — and it is NOT this wire.**
+/// **A `VARCHAR(n)` width survives the wire AND the producer, end to end.**
 ///
-/// A reader who sees `maxLength` added to the DTO could reasonably conclude the export
-/// now round-trips a bounded string end to end. It does not, and the remaining loss is
-/// one layer down: `token_to_col_type` maps every `"string"` token to `ColType::Text`
-/// without consulting `max_length`, so re-importing an exported `VARCHAR(64)` produces
-/// an unbounded `TEXT`.
+/// This test used to be called `the_producer_not_the_wire_is_where_a_varchar_width_dies`
+/// and it asserted the opposite of its last line: `token_to_col_type` mapped every
+/// `"string"` token to `ColType::Text` without consulting `max_length`, so re-importing
+/// an exported `VARCHAR(64)` produced an unbounded `TEXT`. It was written as a sighted
+/// pin — "fixing the producer is announced by this test turning red" — and that is
+/// exactly how it went: the producer now reads the facet, and this file's failure was
+/// the notice.
 ///
-/// Pinned here so the boundary between "the export carries it" and "re-import restores
-/// it" is a measured fact rather than an inference, and so that fixing the producer —
-/// which is a separate change with its own artifact-drift blast radius — is announced
-/// by this test turning red.
+/// So the claim it makes is now the STRONG one its own message asked for, and it holds
+/// three links in a row: the fold recovers the width, the DTO carries it across, and
+/// re-folding the crossed descriptor gets it back. The consequence of the middle link
+/// having been broken was measured against a live PostgreSQL in
+/// `zero-migrate/tests/fold_live/pg_bounded_string_producer_live.rs` — the server
+/// stored a 200-character value in a column the author bounded at 64.
 #[test]
-fn the_producer_not_the_wire_is_where_a_varchar_width_dies() {
+fn a_varchar_width_survives_the_wire_and_the_producer() {
     let policy = support::no_inject(SCHEMA);
     let export = zero_migrate::render_schema_export(
         &width_and_generated_ops(),
@@ -692,8 +697,8 @@ fn the_producer_not_the_wire_is_where_a_varchar_width_dies() {
         "the export wire dropped a VARCHAR width"
     );
 
-    // The PRODUCER still drops it. Re-importing the crossed descriptor yields an
-    // unbounded TEXT column, not a VARCHAR(64).
+    // And the PRODUCER keeps it: re-importing the crossed descriptor yields a
+    // VARCHAR(64) again, not an unbounded TEXT.
     let refolded = zero_migrate::render_schema_export_from_descriptors(
         &[CollectionDescriptor {
             name: "refolded".to_string(),
@@ -708,8 +713,9 @@ fn the_producer_not_the_wire_is_where_a_varchar_width_dies() {
     )
     .expect("the round-tripped descriptor re-folds");
     assert_eq!(
-        refolded.collections["refolded"].fields[0].max_length, None,
-        "the producer now threads maxLength; this test's premise is stale and the \
-         end-to-end claim can be strengthened"
+        refolded.collections["refolded"].fields[0].max_length,
+        Some(64),
+        "the producer dropped the width again: an exported VARCHAR(64) re-imports as \
+         an unbounded TEXT, which on PostgreSQL is a column with no bound at all"
     );
 }

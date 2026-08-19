@@ -806,13 +806,14 @@ pub struct FieldDescriptorDto {
     pub char_len: Option<i64>,
     /// `t.string({ length })` — the BOUND on a `VARCHAR(N)` column.
     ///
-    /// A caveat worth stating on the field rather than in a commit message: this
-    /// crosses OUTBOUND intact, but re-importing it does NOT restore the width.
-    /// The producer's `token_to_col_type` maps every `"string"` token to the
-    /// unbounded `ColType::Text` without consulting this value, so a consumer that
-    /// exports a `VARCHAR(64)` and feeds it back as a manual source gets `TEXT`.
-    /// Pinned by `tests/collection_export_round_trip.rs`; the export is the half
-    /// that works.
+    /// Crosses in BOTH directions, and the inbound half is load-bearing rather than
+    /// decorative: `string` is a TWO-type token (`ColType::String { length }` and
+    /// `ColType::Text` both spell it), so `token_to_col_type` reads this value to pick
+    /// between them. It used to ignore it, and a consumer that exported a
+    /// `VARCHAR(64)` and fed it back as a manual source got an unbounded `TEXT` — a
+    /// column PostgreSQL then stored a 200-character value in
+    /// (`zero-migrate/tests/fold_live/pg_bounded_string_producer_live.rs`).
+    /// Pinned end to end by `tests/collection_export_round_trip.rs`.
     pub max_length: Option<i64>,
     /// `t.numeric({ precision, scale })` — total digits of a FIXED-PRECISION decimal,
     /// with [`Self::scale`] beside it.
@@ -822,8 +823,8 @@ pub struct FieldDescriptorDto {
     /// `ColType::Double` and `ColType::Decimal` are spelled as, so a wire that dropped
     /// these two would export a `t.numeric(20, 4)` column as a float, and a host
     /// feeding it back would get one. It crosses in BOTH directions for that reason
-    /// (`token_to_col_type` reads `precision` to pick the `ColType`), which is the
-    /// respect in which it is stronger than `max_length`'s outbound-only half.
+    /// (`token_to_col_type` reads `precision` to pick the `ColType`), exactly as
+    /// `max_length` does for the other two-type token, `string`.
     pub precision: Option<i64>,
     /// `t.numeric({ precision, scale })` — digits after the point. See
     /// [`Self::precision`].

@@ -28,10 +28,16 @@
 //! `tests/collection_export_round_trip.rs` pins `engine -> dto -> engine` as the
 //! IDENTITY over a folded corpus. That is a claim about the WIRE: every facet the fold
 //! recovered survives the crossing. It is NOT a claim that re-importing the export
-//! reproduces the original schema — the descriptor-to-ops producer is separately lossy
-//! (`token_to_col_type` maps every `"string"` to `ColType::Text`, so a `VARCHAR(n)`
-//! width crosses this wire intact and is then dropped by the producer), and it is NOT
-//! a claim that the exported values are CORRECT, only that they are preserved.
+//! reproduces the original schema — the descriptor-to-ops producer has its own
+//! vocabulary and every facet outside it is still dropped there — and it is NOT a
+//! claim that the exported values are CORRECT, only that they are preserved.
+//!
+//! The `VARCHAR(n)` width used to be the standing example of that gap:
+//! `token_to_col_type` mapped every `"string"` to `ColType::Text`, so a width crossed
+//! this wire intact and died one layer down. It no longer does — the producer reads
+//! `max_length` to choose between `ColType::String { length }` and `ColType::Text`,
+//! and `zero-migrate/tests/fold_live/pg_bounded_string_producer_live.rs` is the live
+//! PostgreSQL oracle for the difference that made.
 
 use zero_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor, IndexDescriptor};
 

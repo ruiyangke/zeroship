@@ -1991,6 +1991,22 @@ pub struct FieldDescriptor {
     /// `t.string({ length })` — bounded variable-length string. Mirrors
     /// `maxLength` on the intermediate SDK-shaped `FieldDef`; drives
     /// `VARCHAR(N)` on Postgres/MySQL (`TEXT` on SQLite).
+    ///
+    /// **Why a facet and not a token.** Like [`Self::precision`], and unlike
+    /// [`Self::char_len`], this does not merely PARAMETERISE its token — it decides
+    /// which type the token means. `render::lower::col_type_to_token` spells BOTH
+    /// `ColType::String { length }` and `ColType::Text` as `"string"`, because the
+    /// shared SDK `FieldDef` kernel has one string token, so the token alone cannot
+    /// tell a bounded column from an unbounded one. `render::fold::token_to_col_type`
+    /// therefore reads this value on the way back in. It used to ignore it, and the
+    /// cost was measured against a live PostgreSQL in
+    /// `tests/fold_live/pg_bounded_string_producer_live.rs`: a
+    /// `t.string({ maxLength: 64 })` column authored through the descriptor producer
+    /// reached the server as an unbounded `text` that STORED a 200-character value,
+    /// and re-importing an exported schema authored `ALTER COLUMN … TYPE text`
+    /// against a table nobody had changed.
+    ///
+    /// `None` ⇒ a genuine unbounded `t.text()` column.
     #[serde(rename = "maxLength", default)]
     pub max_length: Option<i64>,
     /// Render-only marker for a genuine unbounded `t.text()` column (`ColType::Text`

@@ -25,6 +25,8 @@ mod fold_role_extension_pg;
 mod fold_roundtrip_mysql;
 mod fold_roundtrip_pg;
 mod fold_roundtrip_sqlite;
+mod mysql_bounded_string_producer_live;
+mod pg_bounded_string_producer_live;
 mod schema_model_equivalence_mysql;
 mod schema_model_equivalence_pg;
 mod sqlite_decimal_rebuild_live;
