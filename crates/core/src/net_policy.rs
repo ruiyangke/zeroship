@@ -2,7 +2,7 @@
 //! validation, and the two PHASE-SCOPED queries the evaluator composes.
 //!
 //! Runtime owns enforcement, but the control plane needs the exact same
-//! grammar and validation at the AUTHORING boundary — which is a creator-facing
+//! grammar and validation at the AUTHORING boundary - which is a creator-facing
 //! API (`/api/apps/{id}/egress-rules`), not an operator's console. Keep this
 //! module V8-free so control can reject bad rules without depending on the
 //! runtime crate.
@@ -10,7 +10,7 @@
 //! Because the author is the creator, these checks are a SHAPE bound on creator
 //! input, not a guardrail on an operator's typing. A wrong rule breaks the
 //! creator's own app: an operational failure, not a security bypass. What keeps
-//! the resulting reach narrow is elsewhere — deny-by-default per app, the plan's
+//! the resulting reach narrow is elsewhere - deny-by-default per app, the plan's
 //! `max_grants`/`max_sockets`/`egress_ceiling_bytes` caps, and above all the
 //! platform's SSRF floor, which no rule in this module can widen
 //! (INVARIANT GRANTS-NARROW, enforced in `zeroship_runtime::transport::egress`).
@@ -35,7 +35,7 @@
 //!
 //! [`Destination`] therefore has no `matches(host, port)`. It has
 //! [`Destination::matches_name`] and [`Destination::matches_addr`], each of
-//! which can answer [`PhaseMatch::Undecidable`] — the case a single-pass matcher
+//! which can answer [`PhaseMatch::Undecidable`] - the case a single-pass matcher
 //! would have to silently fold into "no match", deleting all three properties.
 
 use std::net::IpAddr;
@@ -47,7 +47,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// A proxy for single-tenancy over ten measured destinations, NOT a tenancy
 /// bound: a single vendor holding a `/12` is refused and a reseller of a `/16`
-/// is admitted. Its guaranteed job is smaller and is the reason it exists —
+/// is admitted. Its guaranteed job is smaller and is the reason it exists -
 /// it stops one ACCEPT rule being `0.0.0.0/0`, which would turn the control off
 /// with a single row.
 pub const MIN_ACCEPT_PREFIX_V4: u8 = 16;
@@ -150,7 +150,7 @@ impl Destination {
 
     /// PHASE 1 query. Never resolves and never asks to.
     ///
-    /// Returns [`PhaseMatch::Undecidable`] for a [`Destination::Range`] — which
+    /// Returns [`PhaseMatch::Undecidable`] for a [`Destination::Range`] - which
     /// is the whole point: a range cannot be tested against a name, and folding
     /// that into "does not match" is what deletes the DNS gate.
     #[must_use]
@@ -245,7 +245,7 @@ impl EgressRule {
     }
 }
 
-/// What phase 1 decided, and — when it could not decide — what phase 3 needs.
+/// What phase 1 decided, and - when it could not decide - what phase 3 needs.
 ///
 /// The two refusal arms are the ONLY refusals reached without a lookup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -288,7 +288,7 @@ pub enum AddressPhase {
 /// Unordered is a property, not an accident. The verdict is a pure function of
 /// the SET: `platform floor > creator REJECT > creator ACCEPT > default(refuse)`,
 /// total and position-free. Nothing here stores or consults a position, and
-/// nothing may start to — an ordered walk must evaluate rule *k* before rule
+/// nothing may start to - an ordered walk must evaluate rule *k* before rule
 /// *k+1*, and a `Range` rule is undecidable without a resolved address, so an
 /// ordered evaluator has to resolve before the walk and the DNS gate ceases to
 /// exist.
@@ -325,7 +325,7 @@ impl EgressRules {
         self.rules.iter()
     }
 
-    /// PHASE 1 — steps 1 to 3. **Performs no lookup and requests none.**
+    /// PHASE 1 - steps 1 to 3. **Performs no lookup and requests none.**
     ///
     /// `target` is the NAME the app asked for. Callers must skip this phase
     /// entirely for an IP literal: phase 1 has nothing to say about one, and
@@ -334,7 +334,7 @@ impl EgressRules {
     pub fn name_phase(&self, target: &str, port: u16) -> NamePhase {
         let target = normalize_name(target);
 
-        // Step 1 — a Name REJECT is terminal, and terminal ahead of the gate.
+        // Step 1 - a Name REJECT is terminal, and terminal ahead of the gate.
         let mut name_accepted = false;
         for rule in &self.rules {
             if rule.port != port {
@@ -343,7 +343,7 @@ impl EgressRules {
             match rule.destination.matches_name(&target) {
                 PhaseMatch::Matches => match rule.verdict {
                     Verdict::Reject => return NamePhase::NameRejected,
-                    // Step 2 — record, do not return: a later REJECT in this
+                    // Step 2 - record, do not return: a later REJECT in this
                     // same unordered set still wins, which is what makes the
                     // answer independent of the order the rules arrived in.
                     Verdict::Accept => name_accepted = true,
@@ -358,7 +358,7 @@ impl EgressRules {
             };
         }
 
-        // Step 3 — the gate. ACCEPT-only and port-matched: a `Range` REJECT can
+        // Step 3 - the gate. ACCEPT-only and port-matched: a `Range` REJECT can
         // never turn a refusal into an admission, and a `Range` ACCEPT at 443
         // cannot admit a connect to 25, so resolving to test either is pure leak
         // for zero benefit.
@@ -383,7 +383,7 @@ impl EgressRules {
         })
     }
 
-    /// PHASE 3 — steps 5 and 6, for ONE address of the answer set.
+    /// PHASE 3 - steps 5 and 6, for ONE address of the answer set.
     ///
     /// Step 4 (the platform floor) is deliberately absent: it belongs to the
     /// platform, runs before this, and is not expressible in creator rules.
@@ -398,7 +398,7 @@ impl EgressRules {
                 continue;
             }
             match rule.verdict {
-                // Step 5 — REJECT wins over everything a creator can write, and
+                // Step 5 - REJECT wins over everything a creator can write, and
                 // is NOT conditioned on `name_accepted`.
                 Verdict::Reject => return AddressPhase::RangeRejected,
                 Verdict::Accept => range_accepted = true,
@@ -441,7 +441,7 @@ pub fn normalize_name(host: &str) -> String {
         .to_ascii_lowercase()
 }
 
-/// Validate a DNS-name destination. Shape only — a name the creator controls is
+/// Validate a DNS-name destination. Shape only - a name the creator controls is
 /// the creator's business, and what bounds where it lands is the SSRF floor.
 fn validate_name(raw: &str) -> Result<String, String> {
     let name = normalize_name(raw);
