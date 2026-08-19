@@ -938,8 +938,11 @@ fn probe_prefix_for(pid: u32) -> String {
 /// charter allowlists `code.extension = ["citext", "pgcrypto"]`, so a row that named
 /// anything else would be refused by POLICY and would stop asking its question, and
 /// BOTH of those two are claimed by `rollback/drop_extension_rollback_pg.rs` - as
-/// `EXT` and as `EXT_GUARDED`. `pgcrypto` because the `citext` arm there is the
-/// unguarded one and runs more often.
+/// `EXT` and as `EXT_GUARDED`. `pgcrypto` is the smaller of the two collisions, and
+/// that is MEASURED rather than assumed: across `crates/zero-migrate/tests`, the
+/// files that CREATE `citext` against a live server are that one and
+/// `pg_engine/pg_scenarios.rs`, while the only other file that creates `pgcrypto` is
+/// that one, in the single test `a_guarded_extension_drop_keeps_no_inverse`.
 ///
 /// WHAT THIS FILE'S CLAIM DOES AND DOES NOT COVER. [`EXTENSION_CLAIM_KEY`] serializes
 /// the rows in THIS suite against each other, which is the collision that was
