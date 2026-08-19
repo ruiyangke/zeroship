@@ -378,30 +378,33 @@ async fn fold_equals_introspect_mysql() {
         // fails this stage and the SQLite one and leaves
         // `fold_roundtrip_pg::named_type_lifecycle` green.
         //
-        // NO ENUM COLUMN HERE, and the reason is a defect this stage found rather than
-        // a gap in it. MySQL inlines an enum as the column type `enum('free','pro')`,
-        // which would make this the only oracle that compares the MEMBERSHIP in a
-        // compared field. But `mysql_type_takes_collation`
-        // (`render/declarative.rs`) lists VARCHAR/CHAR/TEXT and NOT ENUM, while MySQL
-        // treats ENUM as a character type. So every other character column is emitted
-        // with an explicit `COLLATE utf8mb4_0900_as_cs` and an enum column is emitted
-        // with none, inherits the `utf8mb4_0900_ai_ci` default, and introspects to
-        // `case_sensitive: false` against a fold that says nothing:
+        // THE ENUM COLUMN IS BACK, and it is the reason to read this stage twice.
+        //
+        // It was omitted here for a while, because MySQL inlines an enum as the column
+        // type `enum('free','pro')` and this is the only oracle that compares enum
+        // MEMBERSHIP in a compared field - and that made it the first thing to notice
+        // that `render/declarative.rs` pinned an explicit `COLLATE utf8mb4_0900_as_cs`
+        // on every character column EXCEPT this one. An uncollated enum inherited the
+        // `utf8mb4_0900_ai_ci` server default and introspected to
+        // `case_sensitive: false` against a fold that said nothing:
         //
         //     altered_objects: [ accounts / column tier / case_sensitive
         //                        expected "" actual "false" ]
         //
-        // That is permanent phantom drift on every MySQL enum column, and the drift is
-        // the SMALLER half - the column is genuinely case-INSENSITIVE on MySQL and
-        // case-sensitive on the other two backends, so `'FREE'` and `'free'` are one
-        // value there and two values everywhere else. Neither half is caused by the
-        // fold, and fixing it is a renderer change with its own live gate; recorded
-        // here so the next reader does not rediscover it by writing this same fixture.
+        // Permanent phantom drift on every MySQL enum column - and the drift was the
+        // SMALLER half, since the column was genuinely case-INSENSITIVE on MySQL and
+        // case-sensitive on the other two backends. Neither half was caused by the
+        // fold. Both are now fixed in the renderer
+        // (`declarative::mysql_pin_enum_collation`) with its own live gate in
+        // `mysql_engine::mysql_enum_collation`, so the column belongs in this fixture
+        // again: this stage is what makes a fold that loses enum membership visible,
+        // and it would go RED again if the collation pin were removed.
         let named_types = r#"{"ir_version":1,"name":"named_types","ops":[
             {"op":"createEnum","name":"plan_tier","values":["free","pro"]},
             {"op":"createDomain","name":"seat_quota","as":"bigInt"},
             {"op":"createTable","name":"accounts","columns":[
                 {"name":"id","type":"int","nullable":false},
+                {"name":"tier","type":{"enum":{"name":"plan_tier"}},"nullable":true},
                 {"name":"seats","type":{"domain":{"name":"seat_quota"}},"nullable":true}
             ],
             "primaryKey":["id"]}

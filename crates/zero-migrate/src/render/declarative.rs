@@ -1207,7 +1207,28 @@ pub(crate) fn pg_identity_type(data_type: &str) -> bool {
     )
 }
 
+/// The column type a snapshot renders as, for one dialect.
+///
+/// On MySQL the result is passed through [`mysql_pin_enum_collation`], because an
+/// `ENUM(...)` reaches this function by three routes that share no other code - a
+/// named-type `ddl_type_override` set by the lower and the fold, an `enum(...)`
+/// `data_type` read back from `information_schema.COLUMNS`, and (separately) a CHECK
+/// body folded into a native type inside
+/// [`DeclarativeEmitter::render_create_table_mysql_snapshot_statements`]. Pinning at
+/// each producer would be three copies of one decision; pinning here is one.
 pub(crate) fn column_type_for_render(
+    c: &ColumnSnapshot,
+    dialect: SqlDialect,
+    inline_pk: bool,
+) -> String {
+    let rendered = column_type_for_render_uncollated(c, dialect, inline_pk);
+    if matches!(dialect, SqlDialect::Mysql) {
+        return mysql_pin_enum_collation(&rendered, c.case_sensitive);
+    }
+    rendered
+}
+
+fn column_type_for_render_uncollated(
     c: &ColumnSnapshot,
     dialect: SqlDialect,
     inline_pk: bool,
@@ -1241,9 +1262,72 @@ fn inline_checks_clause(c: &ColumnSnapshot) -> String {
     }
 }
 
+/// The `CHARACTER SET` / `COLLATE` clause a MySQL character column pins, derived from
+/// the portable `caseSensitive` intent.
+///
+/// ONE spelling of the engine's collation choice, so the `VARCHAR`/`CHAR`/`TEXT`
+/// family ([`mysql_type_override_with_collation`]) and `ENUM`
+/// ([`mysql_pin_enum_collation`]) cannot drift apart. `None` is the canonical
+/// snapshot spelling for the default case-SENSITIVE intent - see
+/// `apply::backend::mysql::drift_sql::case_sensitive_from_collation`, which is the
+/// inverse of this function and never emits `Some(true)`.
+pub(crate) fn mysql_collation_clause(case_sensitive: Option<bool>) -> &'static str {
+    if matches!(case_sensitive, Some(false)) {
+        "CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci"
+    } else {
+        "CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs"
+    }
+}
+
+/// Pin an explicit collation onto a rendered MySQL `ENUM(...)` spelling.
+///
+/// **Why `ENUM` needs this and why it is not in [`mysql_type_takes_collation`].**
+/// MySQL treats `ENUM` as a CHARACTER type: member lookup, comparison and uniqueness
+/// all run under the column's collation. An `ENUM` emitted with no collation inherits
+/// the table default, which on a stock MySQL 8 server is `utf8mb4_0900_ai_ci` -
+/// case-INSENSITIVE - and that breaks the engine's stated promise three ways, all
+/// MEASURED against MySQL 8.4.11 with `@@collation_server = utf8mb4_0900_ai_ci`:
+///
+/// - `INSERT ... 'ACTIVE'` into `ENUM('active','archived')` SUCCEEDS and silently
+///   stores `'active'`, where PostgreSQL raises `22P02`.
+/// - `ENUM('active','Active')` is REFUSED outright (`ERROR 1291 ... has duplicated
+///   value 'active' in ENUM`) while PostgreSQL and SQLite accept the same authored
+///   members, so the schema cannot be deployed on MySQL at all.
+/// - Structural drift never converges: the catalog reports `_ai_ci`, which normalizes
+///   to `case_sensitive: Some(false)`, against a desired snapshot that says nothing.
+///
+/// [`mysql_type_takes_collation`] cannot host this. It is fed
+/// [`mysql_base_column_type`], whose input is always the PostgreSQL-mapped
+/// `field_data_type` - an enum column arrives there as `text`, never as `ENUM(...)`.
+/// The `ENUM(...)` spelling reaches rendering by three OTHER routes (a named-type
+/// `ddl_type_override` from the lower and the fold, an `enum(...)` `data_type` read
+/// back from `information_schema.COLUMNS`, and a CHECK body folded back into a native
+/// type by [`mysql_enum_type_from_check`]), and [`column_type_for_render`] is the one
+/// choke point all of them pass through.
+///
+/// Idempotent: a spelling that already carries a `COLLATE` is returned untouched, so
+/// re-rendering a column cannot stack two clauses.
+pub(crate) fn mysql_pin_enum_collation(rendered: &str, case_sensitive: Option<bool>) -> String {
+    let lower = rendered.trim().to_ascii_lowercase();
+    if !lower.starts_with("enum(") || lower.contains(" collate ") {
+        return rendered.to_string();
+    }
+    format!(
+        "{} {}",
+        rendered.trim(),
+        mysql_collation_clause(case_sensitive)
+    )
+}
+
 /// Whether a MySQL column type spelling is a character type that carries a
-/// collation (the `VARCHAR`/`CHAR`/`TEXT` family). Numeric, temporal, JSON, BLOB,
-/// and `ENUM` types do not take a general string collation here.
+/// collation (the `VARCHAR`/`CHAR`/`TEXT` family). Numeric, temporal, JSON and BLOB
+/// types do not take a general string collation here.
+///
+/// `ENUM` is a character type and DOES pin a collation, but it is not listed here and
+/// never can be: this predicate is fed [`mysql_base_column_type`], which only ever
+/// sees the PostgreSQL-mapped `field_data_type` spelling, and an enum column arrives
+/// there as `text`. `ENUM` is pinned at [`column_type_for_render`] instead - see
+/// [`mysql_pin_enum_collation`] for the routes and the measurement.
 fn mysql_type_takes_collation(base: &str) -> bool {
     let u = base.trim().to_ascii_uppercase();
     u.starts_with("VARCHAR")
@@ -1268,11 +1352,7 @@ fn mysql_type_override_with_collation(f: &FieldDescriptor, data_type: &str) -> O
     if !mysql_type_takes_collation(&base) {
         return None;
     }
-    let collation = if case_insensitive {
-        "CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci"
-    } else {
-        "CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs"
-    };
+    let collation = mysql_collation_clause(if case_insensitive { Some(false) } else { None });
     Some(format!("{base} {collation}"))
 }
 
@@ -8091,7 +8171,14 @@ impl DeclarativeAuthor {
             if enum_type.is_some() {
                 consumed_enum_checks.insert(enum_check_name);
             }
+            // This arm REPLACES the column's whole rendered type, so it also replaces
+            // the collation `column_type_for_render` would have pinned. Without the
+            // pin the enum inherits the table default (`utf8mb4_0900_ai_ci` on a stock
+            // MySQL 8), which is the defect `mysql_pin_enum_collation` documents - and
+            // for a descriptor that asked for `caseSensitive: false` it would silently
+            // drop the facet the author DID declare.
             let ty = enum_type
+                .map(|enum_type| mysql_pin_enum_collation(&enum_type, c.case_sensitive))
                 .unwrap_or_else(|| column_type_for_render(c, SqlDialect::Mysql, inline_pk));
             let pk = primary_key_clause(c, SqlDialect::Mysql, inline_pk);
             let null = null_clause(c, SqlDialect::Mysql, inline_pk);

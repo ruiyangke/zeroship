@@ -11,6 +11,7 @@
 mod support;
 
 mod mysql_alter_column_render;
+mod mysql_enum_collation;
 mod mysql_expression_default_render;
 mod mysql_storage_shapes;
 mod mysql_text_column_key_gate;
