@@ -640,6 +640,19 @@ the negotiation path and the dependency are all present.
 **NOT CHECKED** whether Redis is on a cross-host hop in the target topology; if
 it is core-local only, it may not be on S2's critical path at all.
 
+**2026-08-18: the Postgres half of P2 is DONE, so the four bullets above are a
+record of what was true at `ab93d1401`, not of the tree now.**
+`libs/compio-postgres/src/tls_rustls.rs` implements `MakeTlsConnect` over
+rustls, and the pool builds one for a `sslmode=require` URL under the `tls`
+feature; trust anchors come from `sslrootcert`, client certificates from
+`sslcert`/`sslkey`, and `tls-server-end-point` channel binding works. The pool
+still fails closed, but on a narrower set: without the `tls` feature
+`sslmode=require` is still rejected, and `sslnegotiation=direct` under
+`sslmode=prefer` is rejected in every build. `sslmode=prefer` remains plaintext
+- see the `Transport` section of the `pool` module docs for why. What remains of
+P2 is `compio-redis`, and enabling the `tls` feature plus moving deployment DSNs
+off `prefer` - no crate in the tree turns the feature on yet.
+
 ### 9.1 Build order
 
 ```
@@ -823,6 +836,9 @@ behalf*.
   pool also already fails CLOSED on `sslmode=require`. `compio-redis` has no
   `compio-tls` dependency and is the larger half; whether Redis is even on a
   cross-host hop is NOT CHECKED.
+- 2026-08-18: **the Postgres half of P2 is BUILT** - `tls_rustls.rs` plus the
+  pool's `sslmode=require` path. The bullet above is now history; see the end of
+  section 9 for what changed and what is left.
 
 ---
 

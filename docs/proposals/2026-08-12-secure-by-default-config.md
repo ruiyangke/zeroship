@@ -1,6 +1,8 @@
 # Secure by default, including local runs
 
-- **Status:** implemented
+- **Status:** implemented except Enforcement gate 2 (unknown-variable rejection
+  at startup), which is NOT built; gate 3 is partial. See the 2026-08-18
+  amendment on the Enforcement section.
 - **Date:** 2026-08-12
 - **Scope:** the five server binaries that carried a relaxation hatch (control,
   gateway, worker, auth, migrated) and the `zeroship` CLI
@@ -205,6 +207,91 @@ Three gates, none of which depend on anyone remembering the rule.
    active, and for each secret whether it was supplied or generated. A deploy
    can then assert its own posture instead of asserting it in prose.
 
+AMENDED 2026-08-18: the three gates above did not land equally, and the status
+line said "implemented" over all three. Re-verified against the tree today:
+
+**Gate 1 - landed.** `dev_insecure` / `insecure_dev` / `--dev-insecure` /
+`ZEROSHIP_DEV_INSECURE` have ZERO production occurrences. Counted 2026-08-18:
+0 hits under `sdks/`, `libs/`, `deploy/`, `db/`, `schema/` and `examples/`, and
+24 under `crates/` of which every one sits inside a `mod tests` block - they
+are the rejection tests themselves asserting the flag is refused. The remaining
+tree hits are historical prose in `ISSUES.md` and `docs/archive/`.
+
+All FIVE binaries carry their own parser-rejection test, not three:
+`crates/control/src/main.rs:1685`, `crates/gateway/src/main.rs:769` and `:782`,
+`crates/worker/src/main.rs:665`, `crates/auth/src/config.rs:1226` and `:1237`,
+`crates/migrated/src/config.rs:152`. `crates/cli/tests/dev_init_test.rs:662` is
+the cross-crate backstop that keys on the clap DECLARATION, so a re-added flag
+fails even in a crate whose own suite was not run; it guards its own input list
+(`dev_init_test.rs:668`, `sources.len() > 50`) so it cannot pass over nothing.
+`tests/compose_port_exposure_gate.sh:119` independently detects the flag
+reappearing in the control service's compose block.
+Its stated blind spot is a hand-rolled `std::env::var("ZEROSHIP_DEV_INSECURE")`
+that never reaches clap - which `crates/core/tests/config_env_access_gate.rs`
+closes from the other side, since `crates/core/src/config/env.rs` is the only
+path allowed to touch the process environment at all.
+
+**Gate 2 - NOT built.** There is no startup rejection of an unrecognised
+`ZEROSHIP_*` variable, and the reason is structural, not an oversight:
+rejecting unknown names requires enumerating the environment, and the sole
+whole-environment read in the workspace is
+`crates/core/src/config/declared.rs:515`, whose only caller is
+`crates/cli/src/main.rs:294` forwarding into a creator app's `process.env`. Its
+own documentation (`declared.rs:503-506`) says "the platform cannot enumerate
+them and must not try". No platform binary enumerates. `bootstrap` does not
+either. Migration step 6 below still carries this, correctly.
+
+What DOES exist covers the same failure shape over a narrower surface, at CI
+time rather than boot time - so the protection is real but it is not what this
+gate claimed:
+
+- `tests/config_name_alignment_gate.sh` check 6 fails when a Compose platform
+  service sets a variable the receiving binary does not declare, and check 6b
+  fails an alias whose two spellings differ. Both run in CI as named steps
+  (`.github/workflows/ci.yml:488` self-test, `:490` real run). Check 6 refuses
+  to report green on an empty input: under 5 services or under 20 checked
+  variables it fails instead (`config_name_alignment_gate.sh:270-275`,
+  `:299-302`).
+- The compiled contract (check 2) fails on a declared-but-unread source or an
+  undeclared reader (`crates/config-contract/src/contract.rs:41`, `:232`).
+
+The gap that remains is the one the gate script admits in its own header for
+check 6b (`config_name_alignment_gate.sh:36-38`) and which applies equally to
+check 6, since both read the checked-in Compose file: a variable that exists
+only in an operator's host shell or a generated `.env` is invisible. That
+is the `zeroship.co` shape this proposal was written about, so the substitution
+is partial and should be read as such.
+`docs/proposals/2026-08-11-config-name-alignment.md:776` (its Section 4.4) is
+the design for the startup half and is still unimplemented. Its Section 4.6
+(`:862-863`) requires `tests/config_check_e2e.sh` to assert "rejection of an unknown
+`ZEROSHIP_*` name"; that script asserts no such case today - its only
+unknown-input assertions are about `--check-config-format`
+(`config_check_e2e.sh:426`, `:622`).
+
+**Gate 3 - partial.** `--check-config` exists on all five servers with a shared
+structured emitter (`crates/core/src/config/bootstrap.rs:157`) rendering text or
+JSON, and it is exercised end to end against the real compiled binaries by
+`tests/config_check_e2e.sh`, a named CI step (`.github/workflows/ci.yml:499`)
+with a minimum-passed floor of 86 so a zero-assertion run cannot read as green
+(`config_check_e2e.sh:735`). Posture-shaped fields are reported
+(`trust_proxy`, `origin_scheme`, `blob_store_remote`).
+
+What is NOT reported is the second half of the sentence above: per-secret
+supplied-versus-generated. `CheckValue::Secret` is a bare bool and prints only
+`configured` / `(unset)` (`bootstrap.rs:187-188`). The internal machinery to say
+more exists - `SourceKind` and `Secret::supplied(...)`
+(`crates/core/src/config/names.rs:155` and `:659`) - but no binary emits it, and
+"generated" has no representation anywhere: `zeroship dev init` writes a file
+and the server sees an ordinary file source, so as written this half is not
+merely unbuilt, it is not expressible without a new signal from the generator to
+the server. Whoever finishes gate 3 should decide whether to report SOURCE
+(env / CLI file / overlay), which is available today, instead of
+supplied-vs-generated, which is not.
+
+Also unverified from inside the repository: migration step 1 asserts
+`STRIPE_WEBHOOK_SECRET` should be set on the `zeroship.co` host. That is host
+state, not tree state, and nothing here confirms or refutes it.
+
 ## Migration, ordered by risk
 
 1. **Set `STRIPE_WEBHOOK_SECRET` on `zeroship.co`.** One env var. The code
@@ -222,7 +309,9 @@ Three gates, none of which depend on anyone remembering the rule.
    safe once its input exists locally, so this step follows 3 and is done
    per-check rather than in one commit.
 5. **Delete the flag and the weak defaults.** Mechanical once 2 to 4 land.
-6. **Add the unknown-variable gate and posture reporting.**
+6. **Add the unknown-variable gate and posture reporting.** STILL OPEN as of
+   2026-08-18; steps 1 to 5 landed. See the amendment on the Enforcement
+   section for what stands in for it today and what it does not reach.
 
 Pre-launch, so each step is rename-and-update-callers with no deprecation
 window.
