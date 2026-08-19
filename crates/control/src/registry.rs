@@ -6,7 +6,6 @@ use compio_postgres::error::SqlState;
 use compio_postgres::{Client, NoTls};
 use uuid::Uuid;
 use zeroship_core::auth::hash_api_key;
-use zeroship_core::net_policy::Verdict;
 use zeroship_core::types::{
     AppNetPolicy, AppNetPolicyLimits, AppRecord, AppRuntimeLimits, AppVersionInfo,
     GatewayFamilyRevocation, GatewayPrincipalLifecycle, GatewaySnapshot, NetEgressEntry, RouteEntry,
@@ -542,21 +541,11 @@ impl Registry {
             // it as REJECT rather than dropping it: a rule the control plane
             // did not write must never be able to WIDEN what an app reaches,
             // and reject is the only reading with that property.
-            let verdict = match verdict_text.as_str() {
-                "accept" => Verdict::Accept,
-                other => {
-                    if other != "reject" {
-                        tracing::error!(
-                            app_id = %app_id,
-                            destination = %destination,
-                            verdict = %other,
-                            "registry: app_egress_rules row has an unknown verdict; \
-                             projecting it as reject"
-                        );
-                    }
-                    Verdict::Reject
-                }
-            };
+            //
+            // The SAME function the creator-facing endpoint reads with. Two
+            // copies of this arm could disagree about a row, and then a creator
+            // is shown one verdict while the runtime enforces the other.
+            let verdict = crate::egress_rules::parse_verdict(&verdict_text);
             rules.entry(app_id).or_default().push(NetEgressEntry {
                 verdict,
                 destination,
