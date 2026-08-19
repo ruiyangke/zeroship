@@ -141,6 +141,11 @@ fn verifier_for(
     provider: &CryptoProvider,
 ) -> Result<Arc<dyn ServerCertVerifier>, Error> {
     let algorithms = provider.signature_verification_algorithms;
+    // "Configured" is asked of the store, not of `SslRootCert`, and the two
+    // cannot disagree: `from_config` loads nothing for `Unset`, and errors
+    // rather than returning an empty store for `System` or `File`. Asking the
+    // store is the safer of the two identical questions, because a store with
+    // no anchors could not verify anything even if a path had been named.
     Ok(match VerifyPolicy::select(mode, !roots.is_empty())? {
         VerifyPolicy::AcceptAny => Arc::new(AcceptAnyServerCert { algorithms }),
         VerifyPolicy::Chain => Arc::new(ChainOnlyServerCert { roots, algorithms }),
