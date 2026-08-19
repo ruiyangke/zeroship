@@ -1,7 +1,7 @@
 //! SQLite SQL spelling. The future `zero-migrate-sqlite`.
 
-use crate::model::expr::CastTarget;
-use crate::model::ir::{Op, TableRef};
+use crate::model::expr::{CastTarget, ExtractField, ScalarFn};
+use crate::model::ir::{IrScalar, Op, TableRef};
 use crate::render::dml::{self, DmlError};
 use crate::render::lower::IrLowerError;
 use crate::render::renderer::{Capability, DialectSupports, DmlRenderer};
@@ -21,7 +21,7 @@ impl DmlRenderer for SqliteDmlRenderer {
     }
 
     fn qualify_table(&self, _project_schema: &str, table: &str) -> Result<String, DmlError> {
-        dml::quote_bare_ident("table", table)
+        dml::quote_bare_ident_for_dialect("table", table, DIALECT)
     }
 
     fn cast_target(&self, target: CastTarget) -> &'static str {
@@ -33,6 +33,98 @@ impl DmlRenderer for SqliteDmlRenderer {
             CastTarget::Bytes => "blob",
             CastTarget::Uuid => "text",
         }
+    }
+
+    fn placeholder(&self, n: usize) -> String {
+        dml::sqlite_placeholder(n)
+    }
+
+    fn inline_string_literal(&self, s: &str) -> String {
+        dml::sql_string_literal(s)
+    }
+
+    fn inline_decimal_literal(&self, d: &str) -> String {
+        // SQLite stores an exact decimal losslessly only as TEXT.
+        dml::sql_string_literal(d)
+    }
+
+    fn inline_bytes_literal(&self, bytes: &[u8]) -> String {
+        format!("X'{}'", hex::encode(bytes))
+    }
+
+    fn render_in_list(
+        &self,
+        expr: &str,
+        elems: &[IrScalar],
+        negated: bool,
+        joiner: &str,
+    ) -> Result<String, DmlError> {
+        let rendered = elems
+            .iter()
+            .map(|elem| dml::render_in_list_elem_portable(elem, DIALECT))
+            .collect::<Result<Vec<_>, _>>()?;
+        let op = if negated { "NOT IN" } else { "IN" };
+        Ok(format!("({expr} {op} ({}))", rendered.join(joiner)))
+    }
+
+    fn render_regex_match(&self, _expr: &str, _pattern: &str) -> Result<String, DmlError> {
+        Err(DmlError::UnrenderableExpr(
+            "regex is not supported on SQLite (no stock REGEXP); use dialect({...}) to port"
+                .to_string(),
+        ))
+    }
+
+    fn render_extract(&self, field: ExtractField, expr: &str) -> String {
+        let fmt = match field {
+            ExtractField::Year => "%Y",
+            ExtractField::Month => "%m",
+            ExtractField::Day => "%d",
+            ExtractField::Hour => "%H",
+            ExtractField::Minute => "%M",
+            ExtractField::Dow => "%w",
+        };
+        format!("CAST(strftime('{fmt}', {expr}) AS INTEGER)")
+    }
+
+    fn render_concat(&self, l: &str, r: &str) -> String {
+        format!("({l} || {r})")
+    }
+
+    fn render_distinct_from(&self, l: &str, r: &str) -> String {
+        format!("({l} IS DISTINCT FROM {r})")
+    }
+
+    fn render_scalar_fn_override(&self, f: ScalarFn, args: &[String]) -> Option<String> {
+        // SQLite exposes floor()/ceil() only when it was built with the optional
+        // math extension. Lower both operations to core SQL so the portable DSL
+        // behaves the same on every supported SQLite build. The builder enforces
+        // one argument; a malformed hand-authored arity falls back to the generic
+        // spelling, which validation rejects before render.
+        match f {
+            ScalarFn::Floor if args.len() == 1 => {
+                let arg = &args[0];
+                Some(format!(
+                    "(CASE WHEN {arg} >= 9223372036854775808.0 OR {arg} <= -9223372036854775808.0 THEN {arg} ELSE CAST({arg} AS INTEGER) - (CAST({arg} AS INTEGER) > {arg}) END)"
+                ))
+            }
+            ScalarFn::Ceil if args.len() == 1 => {
+                let arg = &args[0];
+                Some(format!(
+                    "(CASE WHEN {arg} >= 9223372036854775808.0 OR {arg} <= -9223372036854775808.0 THEN {arg} ELSE CAST({arg} AS INTEGER) + (CAST({arg} AS INTEGER) < {arg}) END)"
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    fn render_is_true(&self, operand: &str) -> String {
+        // SQLite has no native boolean type (values are 0/1) and rejects the
+        // `IS TRUE` / `IS FALSE` predicates at apply.
+        format!("({operand} = 1)")
+    }
+
+    fn render_is_false(&self, operand: &str) -> String {
+        format!("({operand} = 0)")
     }
 
     fn render_concat_ws(&self, rendered: &[String]) -> String {
@@ -146,7 +238,7 @@ impl DmlRenderer for SqliteDmlRenderer {
     }
 
     fn view_object_name(&self, name: &str, _eff_schema: &str) -> Result<String, IrLowerError> {
-        Ok(dml::quote_bare_ident("view", name)?)
+        Ok(dml::quote_bare_ident_for_dialect("view", name, DIALECT)?)
     }
 
     fn render_table_ref(&self, table: &TableRef, eff_schema: &str) -> Result<String, IrLowerError> {
@@ -156,11 +248,15 @@ impl DmlRenderer for SqliteDmlRenderer {
                     return Err(IrLowerError::LowerCrossSchema(schema.to_string()));
                 }
             }
-            dml::quote_bare_ident("table", &table.name)?
+            dml::quote_bare_ident_for_dialect("table", &table.name, DIALECT)?
         };
         if let Some(alias) = table.alias.as_deref() {
             sql.push_str(" AS ");
-            sql.push_str(&dml::quote_bare_ident("table alias", alias)?);
+            sql.push_str(&dml::quote_bare_ident_for_dialect(
+                "table alias",
+                alias,
+                DIALECT,
+            )?);
         }
         Ok(sql)
     }

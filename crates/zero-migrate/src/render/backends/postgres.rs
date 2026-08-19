@@ -1,8 +1,8 @@
 //! PostgreSQL SQL spelling. The future `zero-migrate-pg`.
 
-use crate::model::expr::CastTarget;
+use crate::model::expr::{CastTarget, ExtractField, ScalarFn};
 use crate::model::ir::TableRef;
-use crate::model::ir::{Op, TriggerAction};
+use crate::model::ir::{IrScalar, Op, TriggerAction};
 use crate::render::dml::{self, DmlError};
 use crate::render::lower::IrLowerError;
 use crate::render::renderer::{Capability, DialectSupports, DmlRenderer};
@@ -19,7 +19,7 @@ pub(super) struct PostgresDmlRenderer;
 pub(super) static RENDERER: PostgresDmlRenderer = PostgresDmlRenderer;
 
 fn quote_engine_ident_as_dml(what: &'static str, ident: &str) -> Result<String, IrLowerError> {
-    dml::quote_ident_checked(ident)
+    dml::quote_ident_checked_for_dialect(ident, DIALECT)
         .map_err(|e| DmlError::InvalidIdentifier {
             what,
             value: e.value,
@@ -33,12 +33,14 @@ impl DmlRenderer for PostgresDmlRenderer {
     }
 
     fn qualify_table(&self, project_schema: &str, table: &str) -> Result<String, DmlError> {
-        let t = dml::quote_bare_ident("table", table)?;
+        let t = dml::quote_bare_ident_for_dialect("table", table, DIALECT)?;
         Ok(format!(
             "{}.{}",
-            dml::quote_ident_checked(project_schema).map_err(|e| DmlError::InvalidIdentifier {
-                what: "schema",
-                value: e.value,
+            dml::quote_ident_checked_for_dialect(project_schema, DIALECT).map_err(|e| {
+                DmlError::InvalidIdentifier {
+                    what: "schema",
+                    value: e.value,
+                }
             })?,
             t
         ))
@@ -53,6 +55,72 @@ impl DmlRenderer for PostgresDmlRenderer {
             CastTarget::Bytes => "bytea",
             CastTarget::Uuid => "uuid",
         }
+    }
+
+    fn placeholder(&self, n: usize) -> String {
+        format!("${n}")
+    }
+
+    fn inline_string_literal(&self, s: &str) -> String {
+        dml::sql_string_literal(s)
+    }
+
+    fn inline_decimal_literal(&self, d: &str) -> String {
+        d.to_string()
+    }
+
+    fn inline_bytes_literal(&self, bytes: &[u8]) -> String {
+        use base64::Engine as _;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        format!("decode({}, 'base64')", dml::sql_string_literal(&encoded))
+    }
+
+    fn render_in_list(
+        &self,
+        expr: &str,
+        elems: &[IrScalar],
+        negated: bool,
+        joiner: &str,
+    ) -> Result<String, DmlError> {
+        let rendered: Result<Vec<_>, _> = elems.iter().map(dml::render_in_list_elem_pg).collect();
+        let (cmp, quantifier) = if negated { ("<>", "ALL") } else { ("=", "ANY") };
+        Ok(format!(
+            "({expr} {cmp} {quantifier} (ARRAY[{}]))",
+            rendered?.join(joiner)
+        ))
+    }
+
+    fn render_regex_match(&self, expr: &str, pattern: &str) -> Result<String, DmlError> {
+        Ok(format!(
+            "({expr} ~ {})",
+            dml::pg_text_literal(pattern, "PG regex pattern")?
+        ))
+    }
+
+    fn render_extract(&self, field: ExtractField, expr: &str) -> String {
+        format!("EXTRACT({} FROM {expr})", dml::extract_field_name(field))
+    }
+
+    fn render_concat(&self, l: &str, r: &str) -> String {
+        format!("({l} || {r})")
+    }
+
+    fn render_distinct_from(&self, l: &str, r: &str) -> String {
+        format!("({l} IS DISTINCT FROM {r})")
+    }
+
+    fn render_scalar_fn_override(&self, _f: ScalarFn, _args: &[String]) -> Option<String> {
+        // PostgreSQL spells every allow-listed scalar the way the shared table
+        // does; the portable INTENT and the native name coincide here.
+        None
+    }
+
+    fn render_is_true(&self, operand: &str) -> String {
+        format!("({operand} IS TRUE)")
+    }
+
+    fn render_is_false(&self, operand: &str) -> String {
+        format!("({operand} IS FALSE)")
     }
 
     fn render_concat_ws(&self, rendered: &[String]) -> String {
@@ -119,7 +187,7 @@ impl DmlRenderer for PostgresDmlRenderer {
         Ok(format!(
             "{}.{}",
             quote_engine_ident_as_dml("schema", eff_schema)?,
-            dml::quote_bare_ident("view", name)?
+            dml::quote_bare_ident_for_dialect("view", name, DIALECT)?
         ))
     }
 
@@ -129,12 +197,16 @@ impl DmlRenderer for PostgresDmlRenderer {
             format!(
                 "{}.{}",
                 quote_engine_ident_as_dml("schema", schema)?,
-                dml::quote_bare_ident("table", &table.name)?
+                dml::quote_bare_ident_for_dialect("table", &table.name, DIALECT)?
             )
         };
         if let Some(alias) = table.alias.as_deref() {
             sql.push_str(" AS ");
-            sql.push_str(&dml::quote_bare_ident("table alias", alias)?);
+            sql.push_str(&dml::quote_bare_ident_for_dialect(
+                "table alias",
+                alias,
+                DIALECT,
+            )?);
         }
         Ok(sql)
     }

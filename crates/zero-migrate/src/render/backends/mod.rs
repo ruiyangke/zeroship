@@ -37,23 +37,49 @@
 //!
 //! It is greppable on purpose — `SqlDialect::Sqlite` appearing inside
 //! `backends/mysql.rs` is a defect by construction, not a judgement call. The
-//! rule currently holds by inspection (1 literal per module, its own); no test
-//! enforces it yet, because adding one moves a pinned suite count.
+//! rule is ENFORCED, not merely inspected:
+//! `tests/dialect_matrix/backend_modules_name_one_dialect.rs` reads all three
+//! modules with `include_str!` and asserts both halves — own dialect exactly
+//! once, no other dialect at all, and that the single occurrence IS the
+//! `const DIALECT` line rather than just some single line.
 //!
-//! # The rule does NOT catch implicit coupling, and there is some
+//! # The rule does NOT catch implicit coupling, and there was some
 //!
 //! A backend can still reach another vendor's spelling THROUGH a core helper
 //! that hard-codes a dialect, and the grep above cannot see it because the
-//! literal lives in core. That is not hypothetical here: `dml::quote_ident` and
-//! `dml::quote_ident_checked` both pin `SqlDialect::Postgres`, so all four
-//! identifier emissions in `backends/sqlite.rs` are quoted by the POSTGRESQL
-//! renderer. It is correct today only because both vendors spell an identifier
-//! `"x"`.
+//! literal lives in core. That was not hypothetical here: `dml::quote_ident`,
+//! `dml::quote_bare_ident` and `dml::quote_ident_checked` all pin
+//! `SqlDialect::Postgres`, so all four identifier emissions in
+//! `backends/sqlite.rs` used to be quoted by the POSTGRESQL renderer. It was
+//! correct only because both vendors spell an identifier `"x"`.
 //!
-//! MEASURED, not reasoned: corrupting `PostgresDmlRenderer::quote_ident` alone
-//! fails 397 tests, 38 of which are SQLite-only — including
-//! `fold_roundtrip_sqlite`, `ir_apply_sqlite` and
-//! `dialect_conformance_live::every_sqlite_row_of_the_dialect_table_answers_to_a_live_database`.
+//! MEASURED, not reasoned, BEFORE the fix: corrupting
+//! `PostgresDmlRenderer::quote_ident` alone failed 7 of the 155 tests in the
+//! SQLite-ONLY `sqlite_engine` binary (`ir_apply_sqlite::*`, `hr_sqlite`,
+//! `existence_guard_sqlite`), all against a real SQLite database.
+//!
+//! RESOLVED: every identifier emission in `backends/sqlite.rs` and
+//! `backends/postgres.rs` now goes through the `*_for_dialect(.., DIALECT)`
+//! seam, the same one `backends/mysql.rs` already used. Re-running the identical
+//! neuter afterwards leaves `sqlite_engine` at 155 passed / 0 failed — the same
+//! 155 tests, so the SQLite backend stopped reading the PostgreSQL renderer
+//! without any emitted byte changing.
+//!
+//! # What is still coupled, and where
+//!
+//! Two SQLite render paths still reach the PG-pinned core wrappers, both OUTSIDE
+//! these modules and both belonging to `lower.rs`'s own step-3 pass:
+//! `render::lower::render_sqlite_trigger_op` and its helpers call the bare
+//! `dml::quote_bare_ident` at six sites. `backends/sqlite.rs` delegates its
+//! trigger rendering there, so the coupling survives one hop away.
+//!
+//! STALE DOC, KNOWN, NOT MINE TO EDIT: the enforcing test's own module comment
+//! (`backend_modules_name_one_dialect.rs`) still says the `quote_ident` coupling
+//! is "TRUE OF THIS TREE while this test passes", and points here for the
+//! measurement. That was true when it was written and is no longer. This module
+//! is the authority on that question; the test's prose needs the same edit and
+//! the change that resolved the coupling could not make it, because that file
+//! belongs to a concurrently-edited directory.
 //!
 //! So when moving a branch here, also grep the CORE helpers the moved code
 //! calls for hard-coded dialects. A directory move creates the APPEARANCE of

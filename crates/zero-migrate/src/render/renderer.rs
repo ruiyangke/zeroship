@@ -20,8 +20,8 @@
 //! though they read the dialect, and they stay parameterized in core. See
 //! `render::value_format` for the worked counter-example.
 
-use crate::model::expr::CastTarget;
-use crate::model::ir::{Op, TableRef};
+use crate::model::expr::{CastTarget, ExtractField, ScalarFn};
+use crate::model::ir::{IrScalar, Op, TableRef};
 use crate::render::dml::DmlError;
 use crate::render::lower::IrLowerError;
 use crate::schema::query::SqlDialect;
@@ -65,6 +65,55 @@ pub(crate) trait DmlRenderer {
     fn quote_ident(&self, ident: &str) -> String;
     fn qualify_table(&self, project_schema: &str, table: &str) -> Result<String, DmlError>;
     fn cast_target(&self, target: CastTarget) -> &'static str;
+
+    /// The positional placeholder for the `n`-th (1-based) bind — `$n` / `?n` / `?`.
+    fn placeholder(&self, n: usize) -> String;
+
+    /// An inline SQL string literal that does not depend on the server's
+    /// string-escape mode.
+    fn inline_string_literal(&self, s: &str) -> String;
+
+    /// An inline exact-decimal literal. A vendor that stores decimals as TEXT
+    /// wants it quoted; the others want the digits verbatim.
+    fn inline_decimal_literal(&self, d: &str) -> String;
+
+    /// An inline binary literal, native on every vendor so a backfill or column
+    /// default never coerces bytes through text.
+    fn inline_bytes_literal(&self, bytes: &[u8]) -> String;
+
+    /// The vendor's membership-test shape for an already-rendered `expr` against
+    /// a homogeneous literal list. `joiner` is the caller's canonical separator.
+    fn render_in_list(
+        &self,
+        expr: &str,
+        elems: &[IrScalar],
+        negated: bool,
+        joiner: &str,
+    ) -> Result<String, DmlError>;
+
+    /// The vendor's regular-expression match operator, or a refusal if it has none.
+    fn render_regex_match(&self, expr: &str, pattern: &str) -> Result<String, DmlError>;
+
+    /// The vendor's spelling of a portable date-part extraction.
+    fn render_extract(&self, field: ExtractField, expr: &str) -> String;
+
+    /// The vendor's string-concatenation spelling for two rendered operands.
+    fn render_concat(&self, l: &str, r: &str) -> String;
+
+    /// The vendor's NULL-safe inequality spelling for two rendered operands.
+    fn render_distinct_from(&self, l: &str, r: &str) -> String;
+
+    /// A vendor-specific spelling for an allow-listed scalar call, or `None` to
+    /// take the shared `<name>(<args>)` form. The override exists because the
+    /// portable INTENT of a few scalars is not the vendor's native spelling.
+    fn render_scalar_fn_override(&self, f: ScalarFn, args: &[String]) -> Option<String>;
+
+    /// The vendor's `IS TRUE` predicate for an already-rendered operand.
+    fn render_is_true(&self, operand: &str) -> String;
+
+    /// The vendor's `IS FALSE` predicate for an already-rendered operand.
+    fn render_is_false(&self, operand: &str) -> String;
+
     fn render_concat_ws(&self, rendered: &[String]) -> String;
     fn render_split_part(&self, col_sql: &str, delim: &str, n: i64) -> Result<String, DmlError>;
     fn synth_now(&self) -> String;
