@@ -204,41 +204,44 @@ A key decision (`Cargo.toml:43-52`): the model layer **adopts `zeroship-schema`*
 
 - **`apply/backend/postgres.rs`** (+ `postgres/{shadow,online,backfill}.rs`) — talks to PG over `compio-postgres` (native, zero-tokio). Adds shadow-DB dry-run (`PgShadow`), online expand-contract (`PgOnline`), bounded backfill.
 - **`apply/backend/sqlite/`** — `mod.rs`, `actor.rs` (single-writer flume queue), `authorizer.rs`, and the `*_sql.rs` renderers. In-process `rusqlite` on a dedicated hardened CDC-free connection.
-- **`apply/backend/mysql/`** — `mod.rs`, `snapshot.rs`, `transport.rs`. Live MySQL through a **Trusted JS driver isolate** loading the vendored, unmodified `mysql2/promise` bundle; SQL reaches the server via `connection.execute`. `transport.rs` imports `zeroship_runtime::{EnvSnapshot, HostPort, NetPolicy, Runtime}` — the concrete site where V8 + `node:net` replace a bespoke `compio-mysql`.
+- **`apply/backend/mysql/`** — `mod.rs`, `session.rs`, and the `*_sql.rs` renderers (`journal_sql`, `backfill_sql`, `drift_sql`, `identity_sql`, `primary_key_sql`). Live MySQL rides the dialect-neutral `driver::SqlSession` seam, exactly as Postgres does; the `SqlSession` impl is supplied by the host, which reaches the server through the real `mysql2` npm driver in the Node process. The engine itself opens no socket and embeds no V8.
 
 The `apply` error type deliberately avoids naming a driver: `BackendError` boxes any `Error + Send + Sync` and lets callers `downcast_ref::<compio_postgres::Error>()` for a SQLSTATE when needed; non-PG backends surface dialect-neutral text through `ApplyError::Backend(String)`.
 
-### 2.4 `src/frontend/` — the JS/TS authoring pipeline
+### 2.4 Authoring runs host-side, not in this crate
 
-`frontend/mod.rs` frames the design as Atlas-shaped: *many schema front-ends → one internal representation (`CollectionDescriptor` IR) → one diff/migrate engine.*
-
-| File | Responsibility |
-| --- | --- |
-| `frontend/mod.rs` | Overview + `eval_schema_to_ir`, `build_migrations`, `generate_migration`. |
-| `frontend/embedding.rs` | Shared V8 embedding: `zeroship_runtime::init::setup_globals` + `install_headers/install_native_streams/install_blob_native/install_dom`. |
-| `frontend/eval.rs` | Sandboxed V8 `schema.js` evaluation → descriptor IR. |
-| `frontend/record.rs` | V8-backed `op.*` recording into typed IR. Contains the `#[doc(hidden)]` in-process **unsandboxed** oracle (`record_migration_to_*_unsandboxed`) — test-only. |
-| `frontend/sandbox.rs` | The build-time **kernel sandbox**: OS-level isolation for untrusted `.ts` (`init_v8_single_threaded` so no background V8 threads in the seccomp jail). |
-| `frontend/recorder_service.rs` | The hosted recorder service: fresh kernel-sandboxed child per `record`, resource budget + wall-clock watchdog. |
-| `frontend/recorder_http.rs` | The hosted recorder HTTP contract (`POST /v1/recorder/record`) DTOs. |
-| `frontend/recorder_protocol.rs` | The stdin/stdout wire protocol parent↔sandboxed child. |
-| `frontend/build.rs` | Discover `migrations/*.ts` → record each via the sandboxed recorder → transient IR bytes. |
-| `frontend/generate.rs` | `generate --schema schema.js`: eval → IR → diff live DB → render a deployable `.sql`. |
-| `frontend/gen_types.rs` | Migration-first `gen-types`: emit the typed `env.db` surface FROM the migration set. |
-| `frontend/scaffold.rs` | `new` scaffold + generate-from-diff op.* `.ts`/IR synthesizer. |
-| `frontend/ir_adapter.js`, `frontend/op_recorder.js` | The embedded JS front-door scripts the recorder loads. |
-| `frontend/vendor/mysql2-3.14.1.bundle.mjs` | The vendored, unmodified mysql2 driver the MySQL isolate loads. |
+The design is Atlas-shaped: *many schema front-ends -> one internal
+representation (`CollectionDescriptor` IR) -> one diff/migrate engine.* What
+changed is where the front-end runs. `src/frontend/` no longer exists in the
+engine: there is no V8 embedding, no sandboxed recorder child and no vendored
+`mysql2` bundle in the Rust build graph. The host recorder evaluates the
+`t.*` / `op.*` DSL in the Node process and hands the engine an op-IR envelope,
+which is where this crate picks the pipeline up.
 
 Supporting modules complete the pipeline: `render/lower.rs` (`IrAuthor` — the DDL Lower phase, [§8.5](#8-one-ir-three-dialects-render--portability)), `render/declarative.rs` (desired-schema differ, [§5](#5-authoring-declarative-desired-state--the-fold)), `render/fold.rs` (the offline ops→snapshot fold), `render/sql_preview.rs` (offline `--sql` preview), `plan/loader.rs` (Flyway-style file loader), `plan/manifest.rs` (Atlas-`atlas.sum`-style integrity manifest, [§9.11](#9-the-apply-engine--durability)), `analysis/analyze.rs` (Atlas-style advisory lint, [§7.9](#7-the-validate-gate--error-taxonomy)), `analysis/classify.rs` (statement classification through the real PG parser), and `guard/mod.rs` (the parse-time deny-list — [§10](#10-security-first-design)).
 
-### 2.5 Why the crate depends on `zeroship-runtime` (V8)
+### 2.5 The engine does NOT depend on `zeroship-runtime`, and embeds no V8
 
-`zeroship-runtime` is an **unconditional** dependency (not feature-gated), pulled for two reasons (`Cargo.toml:53-56`):
+`third_party/zero-migrate/crates/zero-migrate/Cargo.toml` declares no zeroship
+dependency at all, and its own package description states the engine ships no
+embedded V8. Both of the jobs a V8 dependency used to do now run in the Node
+process instead:
 
-1. **The JS authoring front-end.** Creators author schema in the `@zeroship/db` `t.*` / `op.*` DSL as JavaScript. To turn that into IR the engine must *execute* the JS — the runtime supplies `init_v8`/`init_v8_single_threaded` + global installers (`embedding.rs:154-164`) + `modules::load_modules`.
-2. **The MySQL driver isolate.** Per the zero-tokio invariant, the crate ships no `compio-mysql`; the MySQL backend runs the real `mysql2` npm driver inside a Trusted V8 isolate over `node:net`, driven through `zeroship_runtime::{Runtime, NetPolicy, HostPort, EnvSnapshot}` (`apply/backend/mysql/transport.rs:6-7`), with `result_slot`/`ResultReceiver` bridging results out.
+1. **The JS authoring front-end.** Creators still author schema in the
+   `@zeroship/db` `t.*` / `op.*` DSL as JavaScript, but the host recorder
+   evaluates the DSL and hands the engine an op-IR envelope. The engine
+   consumes IR; it does not execute JS.
+2. **The MySQL and Postgres drivers.** The engine ships no network driver of
+   its own for either. Both go through the dialect-neutral
+   `driver::SqlSession` seam, whose production implementation is the
+   `zero-migrate-node` napi bridge over the host `pg` / `mysql2` npm drivers.
+   SQLite is the exception and runs in-process on a `rusqlite` actor.
 
-`Cargo.toml:97` also lists the raw `v8` crate directly, because the recorder child (`src/bin/recorder-child.rs`) does low-level V8 scope work.
+Because the engine opens no socket, it names no egress policy type. The
+zeroship-side raw-stream policy (`zeroship_runtime::NetPolicy`) is a rule set
+of verdict/destination/port rules with no `allowlist` constructor and no
+`HostPort`; the vendored `net_policy.rs` inside the engine is a separate,
+self-contained copy that nothing in this repo's crates reads.
 
 ### 2.6 The compio-postgres native fast path (zero tokio)
 
@@ -1116,7 +1119,7 @@ All three implement `trait MigrationBackend` (`apply/backend/mod.rs:166`). The d
 | `shadow()` dry-run | `Some(PgShadow)` | `None` (dev applies only trusted descriptor DDL) | (see impl) |
 | `online()` expand-contract | `Some(PgOnline)` | `None` (every existing-table change is a rebuild) | (see impl) |
 
-**The MySQL JS-driver transport in detail.** `JsDriverConn::open_mysql_dsn_json_with_policy` boots a `zeroship_runtime::Runtime` whose entry module is a fixed command-loop wrapping `mysql2/promise` (`mysql/transport.rs:18-58`); Rust marshals `{ kind, sql, binds }` in and gets `{ ok: rows } | { err: {...} }` back. The isolate is network-confined (`NetPolicy::allowlist([HostPort])`), capped at `TRUSTED_DRIVER_MAX_SOCKETS = 4` and `TRUSTED_DRIVER_EGRESS_CEILING = 64 MiB`; TLS is fail-closed (`validate_mysql_tls_pin` refuses `ssl` with an empty pinned `ssl.ca`); a per-command `command_timeout` (default 30s) poisons the connection and tears down the runtime. Bound values cross as native `?` placeholders — never string-interpolated.
+**The MySQL host driver in detail.** There is no in-engine transport module and no driver isolate. MySQL rides the same `driver::SqlSession` seam Postgres does; the host supplies the impl and reaches the server with the real `mysql2` npm driver in the Node process. Bound values cross as native `?` placeholders — never string-interpolated. The engine opens no socket, so it applies no network policy: whatever the Node host connects to is bounded by the host, not here.
 
 ### 8.3 The DIALECT TABLE — the single source of dialect truth
 
