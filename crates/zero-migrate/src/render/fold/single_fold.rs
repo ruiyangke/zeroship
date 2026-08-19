@@ -1,12 +1,17 @@
-//! **The single fold, and its four projections.** Step 3 of
+//! **The single fold, and its five projections.** Step 3 of
 //! `docs/proposals/single-fold-and-effects.md` section G, with step 4's first THREE
 //! consumers moved.
 //!
-//! ONE traversal decides what an op means; four typed projections read the value it
+//! ONE traversal decides what an op means; five typed projections read the value it
 //! produces. A projection here MAY NOT walk the op stream, and none of them takes
 //! `&[Op]` - that is the rule enforced by the signatures below rather than by review.
 //!
-//! # Three projections are LIVE; one is not
+//! The fifth, `FoldedSchema::project_collection_descriptors`, is the OUTBOUND export
+//! surface: the typed `CollectionDescriptor` set `project_field_defs` used to build
+//! privately and throw away. `project_field_defs` is now a map over it, so the two
+//! read one recovery rather than two.
+//!
+//! # Four projections are LIVE; one is not
 //!
 //! Step 3 shipped this module dead. Step 4 moves the consumers one at a time in
 //! blast-radius order, and the first three are done. ONE `fold` call inside
@@ -859,8 +864,30 @@ impl AuthoredState {
 }
 
 // ---------------------------------------------------------------------------
-// The four projections
+// The five projections
 // ---------------------------------------------------------------------------
+
+/// Flatten the typed collection set into the untyped wire `FieldDef` map.
+///
+/// The ONE place that knows `FieldDef` map = collections mapped through
+/// `descriptor_to_sdk_schema`. Both readers go through it — `project_field_defs` and
+/// `render_artifacts`, which needs the typed set as well as the flattened one and
+/// would otherwise spell the same mapping a second time. A second spelling is exactly
+/// what would let the exported structure and the serialized artifact drift apart,
+/// which is the divergence the fifth projection exists to make impossible.
+pub(crate) fn field_defs_from_collections(
+    collections: &BTreeMap<String, CollectionDescriptor>,
+) -> BTreeMap<String, serde_json::Value> {
+    collections
+        .iter()
+        .map(|(name, descriptor)| {
+            (
+                name.clone(),
+                crate::render::declarative::descriptor_to_sdk_schema(descriptor),
+            )
+        })
+        .collect()
+}
 
 impl FoldedSchema {
     /// **Projection 1: the catalog snapshot.** Today's `fold_ops` output.
@@ -896,6 +923,35 @@ impl FoldedSchema {
     /// fold carried forward rather than SQL text some other projection emitted.
     #[must_use]
     pub fn project_field_defs(&self) -> BTreeMap<String, serde_json::Value> {
+        field_defs_from_collections(&self.project_collection_descriptors())
+    }
+
+    /// **Projection 5: the TYPED per-collection descriptor set.** The same recovery
+    /// [`Self::project_field_defs`] runs, stopped one step earlier — before
+    /// `descriptor_to_sdk_schema` flattens the typed [`CollectionDescriptor`] into
+    /// untyped `FieldDef` JSON. This is the OUTBOUND export surface: a host that wants
+    /// to render its own artifacts reads structure here instead of re-parsing
+    /// `schema.runtime.json`.
+    ///
+    /// `project_field_defs` is now a MAP over this, so the two cannot disagree about
+    /// what the fold recovered. The flattening is the only difference between them,
+    /// and `descriptor_to_sdk_schema` reads `fields` alone — so populating `indexes`
+    /// and `runtime_options` here (which the discarded intermediate left empty) cannot
+    /// move a byte of `schema.runtime.json`.
+    ///
+    /// The indexes and options are READ from `project_runtime_metadata` rather
+    /// than re-derived, for the reason that projection's own doc gives: the implicit
+    /// unique index names are frozen at `createTable` and survive renames, so a second
+    /// derivation would rename an index on every `renameTable`.
+    ///
+    /// WHAT THIS IS NOT: the source `env.db.ts` is rendered from. That is
+    /// `project_authoring_tables`, which replays the richer IR precisely
+    /// because the `FieldDef` vocabulary collapses physical types, value formats and
+    /// keys. A consumer of this projection can rebuild the runtime descriptor; it
+    /// cannot rebuild the TypeScript.
+    #[must_use]
+    pub fn project_collection_descriptors(&self) -> BTreeMap<String, CollectionDescriptor> {
+        let mut metadata = self.project_runtime_metadata();
         let mut out = BTreeMap::new();
         for (name, table) in &self.authored {
             let mut fields: IndexMap<String, crate::render::declarative::FieldDescriptor> =
@@ -958,17 +1014,23 @@ impl FoldedSchema {
                     IrConstraintKind::Unique { .. } | IrConstraintKind::Exclusion { .. } => {}
                 }
             }
+            let meta = metadata.remove(name).unwrap_or_default();
             let descriptor = CollectionDescriptor {
                 name: name.clone(),
                 owner_app: FOLD_OWNER_APP.to_string(),
                 fields: fields.into_values().collect(),
-                indexes: Vec::new(),
-                runtime_options: TableRuntimeOptions::default(),
+                indexes: meta
+                    .indexes
+                    .into_iter()
+                    .map(|index| crate::render::declarative::IndexDescriptor {
+                        name: index.name,
+                        columns: index.fields,
+                        unique: index.unique,
+                    })
+                    .collect(),
+                runtime_options: meta.options,
             };
-            out.insert(
-                name.clone(),
-                crate::render::declarative::descriptor_to_sdk_schema(&descriptor),
-            );
+            out.insert(name.clone(), descriptor);
         }
         out
     }

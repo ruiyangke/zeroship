@@ -22,8 +22,8 @@ use zero_migrate::model::load::load_ir_document;
 use zero_migrate::model::validate::Dialect;
 use zero_migrate::render::declarative::CollectionDescriptor;
 use zero_migrate::{
-    effective_policy_from_charter_layers, render_artifacts, render_artifacts_from_descriptors,
-    EffectivePolicy, SchemaScope, DEFAULT_PROJECT_SCHEMA,
+    effective_policy_from_charter_layers, render_schema_export,
+    render_schema_export_from_descriptors, EffectivePolicy, SchemaScope, DEFAULT_PROJECT_SCHEMA,
 };
 
 use crate::wire::{BuildInfo, GenArtifactsReply, LoadVerifyReply};
@@ -140,7 +140,7 @@ fn schema_emit_policy(charter_layers: &[&str]) -> Result<EffectivePolicy, String
 /// # System-shape resolution (mirrors `lower.rs`)
 /// The pure-JS recorder emits RAW, author-only `createTable` ops — it drains ONLY
 /// the author-declared columns; every policy-managed column, primary key, and
-/// index is injected by the shared [`render_artifacts`] tail under the
+/// index is injected by the shared [`render_schema_export`] tail under the
 /// caller-supplied **confined policy charter**, not by the JS DSL (the same policy
 /// resolution the apply-side lower performs). The engine bakes in no confined
 /// preset: `charter_layers` carries the host's ordered layers. Both generated
@@ -183,8 +183,8 @@ pub fn gen_artifacts_from_envelopes(
     // consumes it: the fold's output no longer distinguishes an op that came from a
     // leg from one authored at the top level.
     let has_dialectal_ops = zero_migrate::history_carries_dialectal_ops(&ops);
-    match render_artifacts(&ops, dialect, schema, &effective) {
-        Ok(a) => gen_ok(a, has_dialectal_ops),
+    match render_schema_export(&ops, dialect, schema, &effective) {
+        Ok(export) => gen_ok(export, dialect, has_dialectal_ops),
         Err(e) => gen_err(e.to_string()),
     }
 }
@@ -222,25 +222,44 @@ pub fn gen_artifacts_from_descriptors(
         Ok(p) => p,
         Err(e) => return gen_err(format!("schema-emit policy charter failed to load: {e}")),
     };
-    match render_artifacts_from_descriptors(descriptors, dialect, schema, &effective) {
+    match render_schema_export_from_descriptors(descriptors, dialect, schema, &effective) {
         // A declared descriptor set has no op stream, so it cannot carry a
         // `dialect()` wrapper. `false` here is a property of the source shape, not a
         // default standing in for an unasked question.
-        Ok(a) => gen_ok(a, false),
+        Ok(export) => gen_ok(export, dialect, false),
         Err(e) => gen_err(e.to_string()),
     }
 }
 
 fn gen_ok(
-    artifacts: zero_migrate::GeneratedArtifacts,
+    export: zero_migrate::SchemaExport,
+    dialect: zero_migrate::SqlDialect,
     has_dialectal_ops: bool,
 ) -> GenArtifactsReply {
     GenArtifactsReply {
         ok: true,
-        env_db_ts: Some(artifacts.env_db_ts),
-        runtime_json: Some(artifacts.runtime_json),
+        env_db_ts: Some(export.artifacts.env_db_ts),
+        runtime_json: Some(export.artifacts.runtime_json),
         error: None,
         has_dialectal_ops: Some(has_dialectal_ops),
+        // `Some(vec![])` for an empty schema, never `None`: absent means "this addon
+        // does not report collections", and a caller must be able to tell that from
+        // "this schema declares none".
+        collections: Some(
+            export
+                .collections
+                .values()
+                .map(crate::descriptors::descriptor_to_dto)
+                .collect(),
+        ),
+        // The RESOLVED target, read back off the value the fold ran under rather than
+        // echoed from the caller's string: `preview_dialect` accepts more than one
+        // spelling per target, and the export is only interpretable against the one
+        // that was actually used. Named via `SqlDialect::id()` — the engine's OWN
+        // canonical name, and what a fourth backend would be registered under — rather
+        // than a local three-arm match, which would be a second naming authority that
+        // nothing keeps in step with the first.
+        dialect: Some(dialect.id().as_str().to_string()),
     }
 }
 
@@ -253,6 +272,11 @@ fn gen_err(msg: impl Into<String>) -> GenArtifactsReply {
         // A refusal folded nothing and has no answer. `None` rather than `false` so
         // a consumer's `=== false` assertion cannot pass on a call that never ran.
         has_dialectal_ops: None,
+        // Same rule, and it matters more here: an unknown dialect spelling is one of
+        // the ways to be refused, so echoing either field on a refusal would describe
+        // a fold that never happened.
+        collections: None,
+        dialect: None,
     }
 }
 

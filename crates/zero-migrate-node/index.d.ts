@@ -216,7 +216,14 @@ export interface BuildInfo {
   sourceDigest: string
 }
 
-/** One declared collection (table) — the MANUAL-source `CollectionDescriptor` mirror. */
+/**
+ * One collection (table) — the `CollectionDescriptor` mirror, in BOTH directions.
+ *
+ * INBOUND it is the manual `genArtifacts` source. OUTBOUND it is what
+ * [`GenArtifactsReply::collections`] carries, so a host can read the folded schema as
+ * structure and render its own files. The two directions use ONE type on purpose:
+ * anything the export emits is something the manual source accepts.
+ */
 export interface CollectionDescriptorDto {
   /** The collection (table) name. */
   name: string
@@ -234,12 +241,23 @@ export interface CollectionDescriptorDto {
 }
 
 /**
- * One declared field of a collection — the MANUAL-source `FieldDescriptor` mirror.
+ * One field of a collection — the `FieldDescriptor` mirror, in BOTH directions.
  *
  * Mirrors the `@zeroship/db` wire `FieldDef` shape the manual evaluator produces.
  * The common facets are typed scalars; the rich sub-object facets (`encrypted`,
  * `mask`, `generated`, `identity`) cross as REAL JS values ([`JsonValue`]) and
  * deserialize into the engine `FieldDescriptor` verbatim.
+ *
+ * It was the MANUAL SOURCE only, and the four fields added since say what that cost:
+ * while nothing ever CONSTRUCTED one, a slot the producer defaults or ignores is
+ * indistinguishable from a slot nothing needs. Carrying an export outward is what
+ * told `reference_column`, `reference_name`, `char_len` and `max_length` apart from
+ * the facets genuinely absent by design — see
+ * `tests/collection_export_round_trip.rs`, which was RED on all four.
+ *
+ * napi-NEUTRAL (`cfg_attr`), like the reply envelopes and for the same reason: it is
+ * no longer inbound-only. `crate::api` builds one on the OUTBOUND export path, and
+ * the napi-free `--no-default-features` build is what tests it.
  */
 export interface FieldDescriptorDto {
   /** The field (column) name. */
@@ -255,6 +273,23 @@ export interface FieldDescriptorDto {
   unique?: boolean
   /** For a `ref` field, the referenced collection (FK target table). */
   references?: string
+  /**
+   * The referenced target COLUMN. A legacy declarative `ref` omits it and keeps its
+   * historical `id` target; a typed migration reference always records it.
+   *
+   * Added when this type stopped being inbound-only. It was absent while the DTO
+   * only ever fed the producer — which defaults it to `id` — and that absence
+   * became an export loss the moment the fold, which recovers the REAL target
+   * column from the FK it holds, had to hand its answer outward.
+   */
+  referenceColumn?: string
+  /**
+   * An explicit foreign-key constraint name. Absent references use the shared
+   * `<table>_<field>_fkey` derivation. Present for the same reason as
+   * `reference_column`: the fold knows the real name, and dropping it here made an
+   * exported FK indistinguishable from a derived-name one.
+   */
+  referenceName?: string
   /** `ref` ON DELETE policy (`cascade`|`restrict`|`setNull`|`setDefault`|`noAction`). */
   onDelete?: string
   /** `ref` ON UPDATE policy. */
@@ -273,6 +308,20 @@ export interface FieldDescriptorDto {
   idPrefix?: string
   /** A `t.vector(dims, …)` dimensionality. */
   vectorDims?: number
+  /** `t.char(len)` — the FIXED width of a `CHAR(N)` column. */
+  charLen?: number
+  /**
+   * `t.string({ length })` — the BOUND on a `VARCHAR(N)` column.
+   *
+   * A caveat worth stating on the field rather than in a commit message: this
+   * crosses OUTBOUND intact, but re-importing it does NOT restore the width.
+   * The producer's `token_to_col_type` maps every `"string"` token to the
+   * unbounded `ColType::Text` without consulting this value, so a consumer that
+   * exports a `VARCHAR(64)` and feeds it back as a manual source gets `TEXT`.
+   * Pinned by `tests/collection_export_round_trip.rs`; the export is the half
+   * that works.
+   */
+  maxLength?: number
   /** A `t.vector(_, { metric })` distance metric (`cosine`|`l2`|`innerProduct`). */
   vectorMetric?: string
   /** `t.string({ caseSensitive: false })` — only `Some(false)` is meaningful. */
@@ -363,6 +412,43 @@ export interface GenArtifactsReply {
    * answers one narrow question and promises nothing wider.
    */
   hasDialectalOps?: boolean
+  /**
+   * **The structured export.** The folded schema as TYPED collections, in the same
+   * `CollectionDescriptorDto` vocabulary the manual source accepts — so a host can
+   * render its own artifacts instead of re-parsing `runtime_json` back out of the
+   * string this reply also carries.
+   *
+   * Collections are in name order (the engine returns a `BTreeMap`), which is the
+   * same order `runtime_json` serializes them in.
+   *
+   * ABSENT (`undefined` / `None`) when `ok == false`, for the reason
+   * `has_dialectal_ops` documents: a refused call folded nothing and has no answer.
+   * A consumer must therefore test for presence rather than for an empty array — a
+   * schema with no collections is a legitimate `[]`, and an older addon that
+   * predates this field is `undefined`, and those two must not read alike.
+   *
+   * WHAT IT DOES NOT CARRY: enough to rebuild `env_db_ts`. That file is rendered
+   * from the richer authoring IR precisely because the `FieldDef` vocabulary these
+   * descriptors speak collapses physical widths, value formats and keys. This is
+   * the runtime-descriptor half of the artifacts, not both halves.
+   */
+  collections?: Array<CollectionDescriptorDto>
+  /**
+   * The dialect the fold ACTUALLY ran under (`"postgres" | "mysql" | "sqlite"`),
+   * echoed into the payload rather than left to the caller's memory of what it
+   * sent.
+   *
+   * `Op::Dialectal` leg selection changes WHICH COLUMNS EXIST, so `collections`
+   * is meaningless without the dialect it was folded under, and a consumer that
+   * stores or forwards the export must carry the two together. The engine
+   * normalises dialect spellings (`preview_dialect` accepts more than one name per
+   * target), so this is the resolved target, not the string that was passed in.
+   *
+   * ABSENT when `ok == false` — a refusal never reached a fold, and an unknown
+   * dialect spelling is one of the ways to be refused, so echoing the input there
+   * would report a target that was rejected.
+   */
+  dialect?: string
 }
 
 /**

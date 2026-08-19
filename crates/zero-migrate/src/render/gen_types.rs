@@ -33,8 +33,18 @@
 //! portable: the fold selects `Op::Dialectal` legs, so one history legitimately
 //! yields different column sets on Postgres and MySQL.
 //!
-//! [`check_artifacts`] regenerates in memory and diffs against committed artifacts —
-//! the CI drift gate, no DB write.
+//! [`check_artifacts`] DIFFS already-generated artifacts against the committed ones —
+//! the CI drift gate, no DB write and no IO. It does NOT regenerate: it takes a
+//! `&GeneratedArtifacts` the CALLER produced and delegates to [`diff_artifacts`]. The
+//! distinction is not pedantry. This line used to say "regenerates", and a reviewer
+//! reasoning about what a change to the renderer could reach repeated it and had to be
+//! corrected by reading the signature — which is the cost of a doc that describes a
+//! function's job rather than its inputs.
+//!
+//! Alongside them, [`render_schema_export`] returns the same two artifacts PLUS the
+//! typed collection set they were rendered from, for a host that wants to render its
+//! own files rather than consume these. [`render_artifacts`] is that function with the
+//! collections dropped, so there is one fold behind both.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -256,6 +266,44 @@ pub fn render_artifacts(
     project_schema: &str,
     effective: &EffectivePolicy,
 ) -> Result<GeneratedArtifacts, GenTypesError> {
+    render_schema_export(ops, dialect, project_schema, effective).map(|export| export.artifacts)
+}
+
+/// The two rendered artifacts PLUS the typed collection set they were rendered from.
+///
+/// Deliberately a wrapper rather than two more fields on [`GeneratedArtifacts`], and
+/// the reason is a trap rather than taste: `GeneratedArtifacts` derives `Eq`, and
+/// `FieldDescriptor` is `PartialEq` but NOT `Eq` (`min`/`max` are `f64`). Widening
+/// that struct would have forced the `Eq` off it, and `Eq` is what the drift gate's
+/// callers compare with. The artifacts and the export therefore stay separable, and
+/// [`check_artifacts`] keeps taking exactly the value it takes today.
+#[derive(Debug, Clone)]
+pub struct SchemaExport {
+    /// The two artifact strings — byte-identical to what [`render_artifacts`] returns.
+    pub artifacts: GeneratedArtifacts,
+    /// The folded schema as TYPED descriptors, keyed by collection name.
+    ///
+    /// This is `FoldedSchema::project_collection_descriptors` — the same recovery
+    /// `runtime_json` is serialized from, stopped before the flattening. It is NOT
+    /// enough to reconstruct `env_db_ts`; that projection replays the richer authoring
+    /// IR for exactly the facets this vocabulary collapses.
+    pub collections: BTreeMap<String, crate::render::declarative::CollectionDescriptor>,
+}
+
+/// Render both artifacts AND return the typed collection set behind the runtime one.
+///
+/// [`render_artifacts`] is this function with the collections dropped, so there is one
+/// fold and one recovery: an export can never describe a different schema from the
+/// artifacts shipped beside it.
+///
+/// # Errors
+/// As [`render_artifacts`].
+pub fn render_schema_export(
+    ops: &[Op],
+    dialect: SqlDialect,
+    project_schema: &str,
+    effective: &EffectivePolicy,
+) -> Result<SchemaExport, GenTypesError> {
     let resolved = crate::resolve_create_table_policy(
         &MigrationIr {
             inverse_ops: None,
@@ -303,7 +351,10 @@ pub fn render_artifacts(
         .map_err(GenTypesError::Fold)?;
     let metadata = folded.project_runtime_metadata();
     let authoring_tables = folded.project_authoring_tables();
-    let field_defs = folded.project_field_defs();
+    // ONE recovery feeds both the serialized artifact and the structured export: the
+    // `FieldDef` map is a map over the typed collections, not a second traversal.
+    let collections = folded.project_collection_descriptors();
+    let field_defs = crate::render::fold::single_fold::field_defs_from_collections(&collections);
 
     // (a) RuntimeSchemaDescriptor v1 — fields plus runtime-visible collection
     // options and plain indexes.
@@ -315,9 +366,12 @@ pub fn render_artifacts(
     // (b) env.db.ts — reconstructed current-authoring-API schema.
     let env_db_ts = render_env_db_ts(&authoring_tables, &metadata);
 
-    Ok(GeneratedArtifacts {
-        runtime_json,
-        env_db_ts,
+    Ok(SchemaExport {
+        artifacts: GeneratedArtifacts {
+            runtime_json,
+            env_db_ts,
+        },
+        collections,
     })
 }
 
@@ -350,9 +404,29 @@ pub fn render_artifacts_from_descriptors(
     project_schema: &str,
     effective: &EffectivePolicy,
 ) -> Result<GeneratedArtifacts, GenTypesError> {
+    render_schema_export_from_descriptors(descriptors, dialect, project_schema, effective)
+        .map(|export| export.artifacts)
+}
+
+/// [`render_artifacts_from_descriptors`] keeping the typed collection set, exactly as
+/// [`render_schema_export`] is to [`render_artifacts`].
+///
+/// The collections that come back are the FOLDED ones, not the ones passed in. That is
+/// the point: the producer resolves each descriptor's table shape under `effective`,
+/// so the export names the columns the caller's charter actually injects rather than
+/// the ones it declared.
+///
+/// # Errors
+/// As [`render_artifacts_from_descriptors`].
+pub fn render_schema_export_from_descriptors(
+    descriptors: &[crate::render::declarative::CollectionDescriptor],
+    dialect: SqlDialect,
+    project_schema: &str,
+    effective: &EffectivePolicy,
+) -> Result<SchemaExport, GenTypesError> {
     let ops = crate::descriptors_to_create_ops(descriptors, project_schema, effective)
         .map_err(GenTypesError::Produce)?;
-    render_artifacts(&ops, dialect, project_schema, effective)
+    render_schema_export(&ops, dialect, project_schema, effective)
 }
 
 /// The IR carriers the runtime `FieldDef` projection intentionally cannot represent:

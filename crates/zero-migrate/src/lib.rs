@@ -225,7 +225,8 @@ pub use zero_migrate_policy::EffectivePolicy;
 // byte-identical for equivalent schemas.
 pub use render::gen_types::{
     check_artifacts, diff_artifacts, render_artifacts, render_artifacts_from_descriptors,
-    CheckDiff, GenTypesError, GeneratedArtifacts, DEFAULT_PROJECT_SCHEMA, ENV_DTS_FILE,
+    render_schema_export, render_schema_export_from_descriptors, CheckDiff, GenTypesError,
+    GeneratedArtifacts, SchemaExport, DEFAULT_PROJECT_SCHEMA, ENV_DTS_FILE,
     RUNTIME_DESCRIPTOR_FILE,
 };
 // The deploy-target dialect — re-exported so an embedding host's deploy

@@ -31,6 +31,12 @@
 /// (no hand-copied interfaces).
 pub mod wire;
 
+/// The boundary `CollectionDescriptor` mirror, in BOTH directions: the inbound manual
+/// `genArtifacts` source and the outbound structured export. No napi type appears in a
+/// signature, so this module and the round trip that measures it build with the `napi`
+/// feature off.
+pub mod descriptors;
+
 pub mod marshal;
 pub mod runtime;
 pub mod session;

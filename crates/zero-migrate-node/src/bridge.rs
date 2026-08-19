@@ -70,6 +70,7 @@ use zero_migrate::model::migration::{Migration, MigrationId};
 use zero_migrate::{MigrationEngine, MigrationIr, SqlDialect, SqliteBackend};
 
 use crate::api;
+use crate::descriptors::descriptor_dto_to_engine;
 use crate::marshal::{JsError, JsReply, JsRequest};
 use crate::runtime::run_engine_blocking;
 use crate::session::{NapiHostSession, VerbDispatch, VerbReply};
@@ -80,10 +81,9 @@ use crate::verbs::{
     status_ir_with_locked_backend, ApplyDialect,
 };
 use crate::wire::{
-    AdvisoryDto, ApplyIrSqliteRequest, ApplyReply, ApplyRequest, BuildInfo,
-    CollectionDescriptorDto, FieldDescriptorDto, GenArtifactsReply, GenArtifactsSource,
-    HistoryEventDto, HistoryReply, HistoryRequest, LoadVerifyReply, PreviewSqlSource,
-    ResolvePendingRequest, RollbackRequest, RuntimeOptionsDto, StatusIrRequest, StatusRequest,
+    AdvisoryDto, ApplyIrSqliteRequest, ApplyReply, ApplyRequest, BuildInfo, GenArtifactsReply,
+    GenArtifactsSource, HistoryEventDto, HistoryReply, HistoryRequest, LoadVerifyReply,
+    PreviewSqlSource, ResolvePendingRequest, RollbackRequest, StatusIrRequest, StatusRequest,
 };
 
 // ---------------------------------------------------------------------------
@@ -261,124 +261,9 @@ fn gen_artifacts_err(msg: impl Into<String>) -> GenArtifactsReply {
         error: Some(msg.into()),
         // Refused at the boundary before any fold ran, so there is no answer to give.
         has_dialectal_ops: None,
+        collections: None,
+        dialect: None,
     }
-}
-
-/// Convert a boundary [`CollectionDescriptorDto`] into the engine's declarative
-/// `CollectionDescriptor`. The rich sub-object facets crossed as `JsonValue`, so
-/// they `serde_json::from_value` into their closed engine types verbatim.
-fn descriptor_dto_to_engine(
-    dto: CollectionDescriptorDto,
-) -> std::result::Result<zero_migrate::render::declarative::CollectionDescriptor, String> {
-    use zero_migrate::render::declarative::{CollectionDescriptor, IndexDescriptor};
-
-    let fields = dto
-        .fields
-        .into_iter()
-        .map(field_dto_to_engine)
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-
-    let indexes = dto
-        .indexes
-        .unwrap_or_default()
-        .into_iter()
-        .map(|i| IndexDescriptor {
-            name: i.name,
-            columns: i.columns,
-            unique: i.unique.unwrap_or(false),
-        })
-        .collect();
-
-    let runtime_options = runtime_options_dto_to_engine(dto.runtime_options)?;
-
-    Ok(CollectionDescriptor {
-        name: dto.name,
-        owner_app: dto.owner_app,
-        fields,
-        indexes,
-        runtime_options,
-    })
-}
-
-fn field_dto_to_engine(
-    dto: FieldDescriptorDto,
-) -> std::result::Result<zero_migrate::render::declarative::FieldDescriptor, String> {
-    use zero_migrate::model::ir::{GeneratedCol, IdentityCol};
-    use zero_migrate::render::declarative::FieldDescriptor;
-
-    let generated: Option<GeneratedCol> = match dto.generated {
-        Some(v) => Some(
-            serde_json::from_value(v)
-                .map_err(|e| format!("field {:?}: invalid `generated` facet: {e}", dto.name))?,
-        ),
-        None => None,
-    };
-    let identity: Option<IdentityCol> = match dto.identity {
-        Some(v) => Some(
-            serde_json::from_value(v)
-                .map_err(|e| format!("field {:?}: invalid `identity` facet: {e}", dto.name))?,
-        ),
-        None => None,
-    };
-
-    Ok(FieldDescriptor {
-        name: dto.name,
-        ty: dto.ty,
-        required: dto.required.unwrap_or(false),
-        unique: dto.unique.unwrap_or(false),
-        references: dto.references,
-        reference_column: None,
-        reference_name: None,
-        on_delete: dto.on_delete,
-        on_update: dto.on_update,
-        deferrable: dto.deferrable,
-        literal_value: None,
-        default: dto.default,
-        min: dto.min,
-        max: dto.max,
-        enum_values: dto.enum_values,
-        id_prefix: dto.id_prefix,
-        vector_dims: dto.vector_dims,
-        // The width facets stay unset on this path. The descriptor source only ever
-        // reaches `gen_artifacts_from_descriptors`, which renders TypeScript types
-        // and runtime JSON; `gen_types` reads neither the bounded length nor the
-        // MySQL unbounded-TEXT spelling, both of which exist for DDL alone.
-        char_len: None,
-        max_length: None,
-        unbounded_text: false,
-        vector_metric: dto.vector_metric,
-        case_sensitive: dto.case_sensitive,
-        encrypted: dto.encrypted,
-        mask: dto.mask,
-        fts: dto.fts.unwrap_or(false),
-        fts_language: dto.fts_language,
-        generated,
-        identity,
-    })
-}
-
-fn runtime_options_dto_to_engine(
-    dto: Option<RuntimeOptionsDto>,
-) -> std::result::Result<zero_migrate::TableRuntimeOptions, String> {
-    use zero_migrate::{TableRuntimeOptions, TableStrictness};
-    let Some(dto) = dto else {
-        return Ok(TableRuntimeOptions::default());
-    };
-    let strictness = match dto.strictness.as_deref() {
-        None | Some("strict") => TableStrictness::Strict,
-        Some("lenient") => TableStrictness::Lenient,
-        Some("off") => TableStrictness::Off,
-        Some(other) => {
-            return Err(format!(
-                "invalid runtime option strictness {other:?} (expected strict|lenient|off)"
-            ))
-        }
-    };
-    Ok(TableRuntimeOptions {
-        soft_delete: dto.soft_delete.unwrap_or(false),
-        versioning: dto.versioning.unwrap_or(false),
-        strictness,
-    })
 }
 
 // ---------------------------------------------------------------------------

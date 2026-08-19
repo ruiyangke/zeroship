@@ -56,7 +56,10 @@ use napi_derive::napi;
 /// A `serde_json::Value` crossing the boundary as a REAL JS value (object/array/…),
 /// enabled by napi's `serde-json` feature — the IR `ops` AST and a lowered
 /// `Migration` ride this instead of a re-serialized JSON string.
-#[cfg(feature = "napi")]
+///
+/// The ALIAS is napi-neutral even though the crossing it names is not: it is
+/// `serde_json::Value` either way, and the napi-neutral descriptor DTOs below use it
+/// for their sub-object facets, so gating it would gate them back to napi-only.
 pub type JsonValue = serde_json::Value;
 
 /// Restore exact integers that napi's JS-number conversion widened to `f64`.
@@ -700,23 +703,66 @@ pub struct GenArtifactsReply {
     /// rules key on the dialect too (see the `render_artifacts` contract), so this
     /// answers one narrow question and promises nothing wider.
     pub has_dialectal_ops: Option<bool>,
+    /// **The structured export.** The folded schema as TYPED collections, in the same
+    /// `CollectionDescriptorDto` vocabulary the manual source accepts — so a host can
+    /// render its own artifacts instead of re-parsing `runtime_json` back out of the
+    /// string this reply also carries.
+    ///
+    /// Collections are in name order (the engine returns a `BTreeMap`), which is the
+    /// same order `runtime_json` serializes them in.
+    ///
+    /// ABSENT (`undefined` / `None`) when `ok == false`, for the reason
+    /// `has_dialectal_ops` documents: a refused call folded nothing and has no answer.
+    /// A consumer must therefore test for presence rather than for an empty array — a
+    /// schema with no collections is a legitimate `[]`, and an older addon that
+    /// predates this field is `undefined`, and those two must not read alike.
+    ///
+    /// WHAT IT DOES NOT CARRY: enough to rebuild `env_db_ts`. That file is rendered
+    /// from the richer authoring IR precisely because the `FieldDef` vocabulary these
+    /// descriptors speak collapses physical widths, value formats and keys. This is
+    /// the runtime-descriptor half of the artifacts, not both halves.
+    pub collections: Option<Vec<CollectionDescriptorDto>>,
+    /// The dialect the fold ACTUALLY ran under (`"postgres" | "mysql" | "sqlite"`),
+    /// echoed into the payload rather than left to the caller's memory of what it
+    /// sent.
+    ///
+    /// `Op::Dialectal` leg selection changes WHICH COLUMNS EXIST, so `collections`
+    /// is meaningless without the dialect it was folded under, and a consumer that
+    /// stores or forwards the export must carry the two together. The engine
+    /// normalises dialect spellings (`preview_dialect` accepts more than one name per
+    /// target), so this is the resolved target, not the string that was passed in.
+    ///
+    /// ABSENT when `ok == false` — a refusal never reached a fold, and an unknown
+    /// dialect spelling is one of the ways to be refused, so echoing the input there
+    /// would report a target that was rejected.
+    pub dialect: Option<String>,
 }
 
-/// One declared field of a collection — the MANUAL-source `FieldDescriptor` mirror.
+/// One field of a collection — the `FieldDescriptor` mirror, in BOTH directions.
 ///
 /// Mirrors the `@zeroship/db` wire `FieldDef` shape the manual evaluator produces.
 /// The common facets are typed scalars; the rich sub-object facets (`encrypted`,
 /// `mask`, `generated`, `identity`) cross as REAL JS values ([`JsonValue`]) and
 /// deserialize into the engine `FieldDescriptor` verbatim.
-#[cfg(feature = "napi")]
-#[napi(object)]
+///
+/// It was the MANUAL SOURCE only, and the four fields added since say what that cost:
+/// while nothing ever CONSTRUCTED one, a slot the producer defaults or ignores is
+/// indistinguishable from a slot nothing needs. Carrying an export outward is what
+/// told `reference_column`, `reference_name`, `char_len` and `max_length` apart from
+/// the facets genuinely absent by design — see
+/// `tests/collection_export_round_trip.rs`, which was RED on all four.
+///
+/// napi-NEUTRAL (`cfg_attr`), like the reply envelopes and for the same reason: it is
+/// no longer inbound-only. `crate::api` builds one on the OUTBOUND export path, and
+/// the napi-free `--no-default-features` build is what tests it.
+#[cfg_attr(feature = "napi", napi(object))]
 #[derive(Debug, Clone)]
 pub struct FieldDescriptorDto {
     /// The field (column) name.
     pub name: String,
     /// The DSL type token (`string` | `number` | `boolean` | `date` |
     /// `calendarDate` | `json` | `ref` | `bytes` | `id` | `vector` | …).
-    #[napi(js_name = "type")]
+    #[cfg_attr(feature = "napi", napi(js_name = "type"))]
     pub ty: String,
     /// `true` ⇒ `NOT NULL`.
     pub required: Option<bool>,
@@ -724,6 +770,19 @@ pub struct FieldDescriptorDto {
     pub unique: Option<bool>,
     /// For a `ref` field, the referenced collection (FK target table).
     pub references: Option<String>,
+    /// The referenced target COLUMN. A legacy declarative `ref` omits it and keeps its
+    /// historical `id` target; a typed migration reference always records it.
+    ///
+    /// Added when this type stopped being inbound-only. It was absent while the DTO
+    /// only ever fed the producer — which defaults it to `id` — and that absence
+    /// became an export loss the moment the fold, which recovers the REAL target
+    /// column from the FK it holds, had to hand its answer outward.
+    pub reference_column: Option<String>,
+    /// An explicit foreign-key constraint name. Absent references use the shared
+    /// `<table>_<field>_fkey` derivation. Present for the same reason as
+    /// `reference_column`: the fold knows the real name, and dropping it here made an
+    /// exported FK indistinguishable from a derived-name one.
+    pub reference_name: Option<String>,
     /// `ref` ON DELETE policy (`cascade`|`restrict`|`setNull`|`setDefault`|`noAction`).
     pub on_delete: Option<String>,
     /// `ref` ON UPDATE policy.
@@ -737,12 +796,24 @@ pub struct FieldDescriptorDto {
     /// Numeric `max` bound (lifts a CHECK).
     pub max: Option<f64>,
     /// Enum membership (string or numeric members).
-    #[napi(js_name = "enum")]
+    #[cfg_attr(feature = "napi", napi(js_name = "enum"))]
     pub enum_values: Option<Vec<JsonValue>>,
     /// A legacy internal `<prefix>_<22 base62 UUIDv7>` platform-ID prefix.
     pub id_prefix: Option<String>,
     /// A `t.vector(dims, …)` dimensionality.
     pub vector_dims: Option<i64>,
+    /// `t.char(len)` — the FIXED width of a `CHAR(N)` column.
+    pub char_len: Option<i64>,
+    /// `t.string({ length })` — the BOUND on a `VARCHAR(N)` column.
+    ///
+    /// A caveat worth stating on the field rather than in a commit message: this
+    /// crosses OUTBOUND intact, but re-importing it does NOT restore the width.
+    /// The producer's `token_to_col_type` maps every `"string"` token to the
+    /// unbounded `ColType::Text` without consulting this value, so a consumer that
+    /// exports a `VARCHAR(64)` and feeds it back as a manual source gets `TEXT`.
+    /// Pinned by `tests/collection_export_round_trip.rs`; the export is the half
+    /// that works.
+    pub max_length: Option<i64>,
     /// A `t.vector(_, { metric })` distance metric (`cosine`|`l2`|`innerProduct`).
     pub vector_metric: Option<String>,
     /// `t.string({ caseSensitive: false })` — only `Some(false)` is meaningful.
@@ -762,8 +833,7 @@ pub struct FieldDescriptorDto {
 }
 
 /// One declared named index of a collection (the `_indexes` array entry).
-#[cfg(feature = "napi")]
-#[napi(object)]
+#[cfg_attr(feature = "napi", napi(object))]
 #[derive(Debug, Clone)]
 pub struct IndexDescriptorDto {
     /// The index name (already collision-stable from the SDK).
@@ -775,8 +845,7 @@ pub struct IndexDescriptorDto {
 }
 
 /// Per-collection runtime options that do not round-trip through catalog state.
-#[cfg(feature = "napi")]
-#[napi(object)]
+#[cfg_attr(feature = "napi", napi(object))]
 #[derive(Debug, Clone)]
 pub struct RuntimeOptionsDto {
     /// `schema(...).softDelete()`.
@@ -788,9 +857,13 @@ pub struct RuntimeOptionsDto {
     pub strictness: Option<String>,
 }
 
-/// One declared collection (table) — the MANUAL-source `CollectionDescriptor` mirror.
-#[cfg(feature = "napi")]
-#[napi(object)]
+/// One collection (table) — the `CollectionDescriptor` mirror, in BOTH directions.
+///
+/// INBOUND it is the manual `genArtifacts` source. OUTBOUND it is what
+/// [`GenArtifactsReply::collections`] carries, so a host can read the folded schema as
+/// structure and render its own files. The two directions use ONE type on purpose:
+/// anything the export emits is something the manual source accepts.
+#[cfg_attr(feature = "napi", napi(object))]
 #[derive(Debug, Clone)]
 pub struct CollectionDescriptorDto {
     /// The collection (table) name.
