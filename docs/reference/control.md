@@ -56,28 +56,58 @@ await control.env.setSecret(appId, { key: "OPENAI_API_KEY", value: "sk-..." });
 await control.env.setExpose(appId, { keys: ["OPENAI_API_KEY"] });
 await control.env.listAudit(appId, { limit: 100 });
 
-await control.netGrants.grant(appId, { host: "db.example.com", port: 5432 });
-await control.netGrants.list(appId);
-await control.netGrants.revoke(appId, { host: "db.example.com", port: 5432 });
+await control.egressRules.set(appId, {
+  verdict: "accept",
+  destination: "db.example.com",
+  port: 5432,
+});
+await control.egressRules.list(appId);
+await control.egressRules.remove(appId, { destination: "db.example.com", port: 5432 });
 ```
 
-### `netGrants` is the raw-TCP allowlist
+### `egressRules` is the raw-TCP rule set
 
-An app cannot open a `node:net` socket to anywhere until it holds a grant, and
-these three calls are how you add one. They carry the same authority as `env`
-(`env:read` to list, `env:write` to change) because both change what a running
-app does without redeploying it.
+An app cannot open a `node:net` socket to anywhere until it holds an accept
+rule, and these three calls are how you write one. They carry the same authority
+as `env` (`env:read` to list, `env:write` to change) because both change what a
+running app does without redeploying it.
 
-`grant` names one `host:port`. The server refuses a bare `*`, a malformed
-wildcard, a registry-level suffix such as `*.co.uk`, and a wildcard over shared
-hosting (`*.workers.dev`) - an exact host under any of those is fine, because
-naming one destination is not the same as reaching every tenant on it. Your plan
-caps how many grants an app may hold; `list` returns that ceiling and the count
-in use alongside the grants themselves.
+A rule is three things: a **verdict**, a **destination** and a **port**.
 
-`fetch` is unaffected. It reaches any public host with no grant at all - the
-allowlist narrows raw TCP, which is a blast-radius control on your
-dependencies, not a boundary on your own code.
+`verdict` is `"accept"` or `"reject"` and is required - a body without one is
+refused rather than assumed to mean accept.
+
+`destination` is either an exact DNS name (`api.example.com`) or an address
+range in CIDR form (`198.51.100.0/24`, `2001:db8::/32`). The server works out
+which from the value itself. Wildcards are not a grammar this API accepts:
+`*.example.com` is refused, and the answer is either the exact hosts you meant
+or the range they sit in. An accept range cannot be broader than `/16` on IPv4
+or `/32` on IPv6; a reject range has no such floor, because `0.0.0.0/0` is the
+strictest thing you can write and refusing it would make no sense.
+
+**Rules are a set, not a list.** Order is not stored and has no effect. Any
+matching reject refuses; otherwise any matching accept admits; otherwise the
+connect is refused. So "everything in the vendor's `/20` except this `/24`" is
+two rules and reads the same whichever way round you write them. What you cannot
+express is a re-allow inside a reject - an accept range inside a reject range is
+dead, and `list` reports it with `effective_verdict: "reject"` so you can see it.
+
+Your plan caps how many **accept** rules an app may hold; `list` returns that
+ceiling and the count in use. Reject rules are not charged against it, because a
+reject can only ever narrow what the app can reach.
+
+**One thing to know before your first range rule.** A name rule is decided
+before the app looks anything up, so an app whose rules are all names never
+resolves a destination it is going to refuse. A range rule can only be decided
+against a resolved address, so once an app holds an accept range at a port, a
+connect to that port for a name no rule allows is resolved first and refused
+afterwards - and that lookup reaches the nameserver of whoever owns the name.
+The API says this in the response to your first such rule; this paragraph is the
+same statement made in advance.
+
+`fetch` is unaffected. It reaches any public host with no rule at all - these
+rules narrow raw TCP, which is a blast-radius control on your dependencies, not
+a boundary on your own code.
 
 ### Why `setExpose` follows `setSecret`
 

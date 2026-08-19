@@ -130,49 +130,95 @@ export interface SetExposeInput {
   keys: string[];
 }
 
-/** One allowed raw-TCP destination for an app. */
-export interface NetGrant {
+/**
+ * What a rule does when it matches. There is no default: a rule that does not
+ * say which one it is, is refused.
+ */
+export type EgressVerdict = "accept" | "reject";
+
+/**
+ * Which of the two things a destination is. The server infers it from the
+ * destination's own grammar rather than taking it from you: a value that parses
+ * as a CIDR range is `"cidr"`, anything else must parse as an exact DNS name
+ * and is `"name"`.
+ *
+ * The distinction is not cosmetic. A name is decided before the app resolves
+ * anything; a range can only be decided against a resolved address.
+ */
+export type EgressDestinationKind = "name" | "cidr";
+
+/** One egress rule for an app. */
+export interface EgressRule {
   app_id: string;
-  host: string;
+  verdict: EgressVerdict;
+  kind: EgressDestinationKind;
+  /** The exact DNS name, or the range in canonical CIDR form. */
+  destination: string;
   port: number;
-  granted_by: string;
-  granted_at: string;
+  created_by: string;
+  created_at: string;
   note: string | null;
+  /**
+   * The verdict that actually applies once the whole rule set is read.
+   * Rules are an unordered set and any matching reject wins, so an accept
+   * range wholly inside a reject range at the same port reports
+   * `"reject"` here while `verdict` still reads `"accept"`.
+   *
+   * Only statically decidable overlaps are reflected. Whether a name lands
+   * inside a rejected range depends on what that name resolves to at connect
+   * time, which this endpoint does not look up, so a name rule always reports
+   * its own verdict.
+   */
+  effective_verdict: EgressVerdict;
 }
 
-/** A `net.requests` hint from the app's manifest. Inert until granted. */
-export interface NetRequest {
+/** A `net.requests` hint from the app's manifest. Inert until a rule exists. */
+export interface EgressRequest {
   host: string;
   port: number;
   reason: string;
 }
 
 /** The plan ceiling on egress. A creator cannot raise any of these. */
-export interface NetGrantLimits {
-  max_grants: number;
-  used_grants: number;
+export interface EgressRuleLimits {
+  /** Bounds accept rules only. A reject rule can only narrow, so it is never charged here. */
+  max_accept_rules: number;
+  used_accept_rules: number;
   max_sockets: number;
   egress_ceiling_bytes: number;
 }
 
-export interface ListNetGrantsResult {
+export interface ListEgressRulesResult {
   app_id: string;
-  grants: NetGrant[];
-  requests: NetRequest[];
-  /** Manifest hints with no matching grant: what is still denied. */
-  pending_requests: NetRequest[];
-  limits: NetGrantLimits;
+  rules: EgressRule[];
+  requests: EgressRequest[];
+  /** Manifest hints with no matching accept rule: what is still refused. */
+  pending_requests: EgressRequest[];
+  limits: EgressRuleLimits;
 }
 
-export interface NetGrantInput {
-  host: string;
+export interface EgressRuleInput {
+  /** Required. Omitting it is a 400 rather than an implied `"accept"`. */
+  verdict: EgressVerdict;
+  /** An exact DNS name, or an address range in CIDR form. No wildcards. */
+  destination: string;
   port: number;
   note?: string;
 }
 
-export interface RevokeNetGrantInput {
-  host: string;
+export interface DeleteEgressRuleInput {
+  destination: string;
   port: number;
+}
+
+export interface SetEgressRuleResult {
+  rule: EgressRule;
+  /**
+   * A one-time explanation, non-null only on an app's FIRST accept rule for
+   * an address range. That rule changes how the app refuses destinations it
+   * does not allow, and this is the only place that is said. Show it.
+   */
+  notice: string | null;
 }
 
 export interface AuditEntry {
@@ -318,23 +364,28 @@ export class ControlClient {
   };
 
   /**
-   * The app's raw-TCP (`node:net`) egress allowlist. An app with no grants
-   * cannot open a socket at all; `grant` names one `host:port` within the
-   * plan's caps, and the server refuses bare `*`, malformed wildcards,
-   * registry-level suffixes and wildcards over shared hosting.
+   * The app's raw-TCP (`node:net`) egress rules. An app with no accept rule
+   * cannot open a socket at all.
+   *
+   * A rule is a verdict, a destination and a port. The destination is either an
+   * exact DNS name (`api.example.com`) or an address range in CIDR form
+   * (`198.51.100.0/24`); wildcards such as `*.example.com` are not a grammar
+   * this API accepts. Rules are an unordered set, not an ordered list: any
+   * matching reject wins, then any matching accept admits, and anything else is
+   * refused.
    *
    * Same authority as `env`: `env:read` to list, `env:write` to change.
    */
-  readonly netGrants = {
-    list: (appId: string): Promise<ListNetGrantsResult> =>
-      this.request(`/api/apps/${pathPart(appId)}/net-grants`),
-    grant: (appId: string, input: NetGrantInput): Promise<NetGrant> =>
-      this.request(`/api/apps/${pathPart(appId)}/net-grants`, {
+  readonly egressRules = {
+    list: (appId: string): Promise<ListEgressRulesResult> =>
+      this.request(`/api/apps/${pathPart(appId)}/egress-rules`),
+    set: (appId: string, input: EgressRuleInput): Promise<SetEgressRuleResult> =>
+      this.request(`/api/apps/${pathPart(appId)}/egress-rules`, {
         method: "POST",
         body: input,
       }),
-    revoke: (appId: string, input: RevokeNetGrantInput): Promise<void> =>
-      this.request(`/api/apps/${pathPart(appId)}/net-grants`, {
+    remove: (appId: string, input: DeleteEgressRuleInput): Promise<void> =>
+      this.request(`/api/apps/${pathPart(appId)}/egress-rules`, {
         method: "DELETE",
         body: input,
         parseAs: "void",
