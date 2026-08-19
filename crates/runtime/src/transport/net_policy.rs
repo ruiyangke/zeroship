@@ -2,27 +2,31 @@
 //!
 //! The policy is a trusted-Rust construction property: app JavaScript cannot
 //! request or widen it. `Denied` is the default and makes `node:net`
-//! unresolvable. `Allowlist` narrows connect targets to operator-reviewed
-//! host:port entries; `Trusted` skips host matching but still goes through
-//! SSRF, socket caps, and egress caps.
+//! unresolvable. `Rules` narrows connect targets to the creator's egress rule
+//! set; `Trusted` skips rule matching but still goes through the SSRF floor,
+//! socket caps, and egress caps.
 //!
-//! The allowlist is deliberately scoped as a compromised-dependency
-//! blast-radius control, not a malicious-creator exfiltration control. The
-//! malicious-creator controls are egress attribution, spend enforcement, and
-//! hard egress ceilings.
+//! The rule set is deliberately scoped as a compromised-dependency
+//! blast-radius control on RAW SOCKETS, not a malicious-creator exfiltration
+//! control and not an egress control in general: `fetch` is not gated and
+//! reaches any public host with no rule at all, which is the surface a
+//! compromised dependency would actually use. The malicious-creator controls
+//! are egress attribution, spend enforcement, and hard egress ceilings.
 //!
-//! The creator AUTHORS the entries, through the control plane's
-//! `/api/apps/{id}/net-grants` API, bounded by their plan's caps and the
-//! frontable-suffix catalog. What app JavaScript cannot do is widen its own
-//! policy: `NetPolicy` is built in trusted Rust from control-plane rows the
-//! isolate cannot reach, the manifest's `net.requests` entries are inert
-//! hints that never become grants by being deployed, and broad wildcards and
-//! wildcards fronting shared infrastructure are rejected at construction time.
+//! The creator AUTHORS the rules, through the control plane's
+//! `/api/apps/{id}/egress-rules` API, bounded by their plan's caps. What app
+//! JavaScript cannot do is widen its own policy: `NetPolicy` is built in
+//! trusted Rust from control-plane rows the isolate cannot reach, the
+//! manifest's `net.requests` entries are inert hints that never become grants
+//! by being deployed, and every rule is re-validated at construction time.
 //! In-band self-grant is impossible; out-of-band self-service is the design.
+//!
+//! Evaluation - three phases around exactly one resolution, and the platform
+//! SSRF floor above every creator rule - lives in [`super::egress`].
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
-pub use zeroship_core::net_policy::{HostPort, ReviewedAllowlist};
+pub use zeroship_core::net_policy::{Destination, EgressRule, EgressRules, Verdict};
 
 /// Process-wide fallback cap. Operators can lower it via
 /// `ZEROSHIP_NET_GLOBAL_MAX_SOCKETS`; tests use that hook to exercise
@@ -35,8 +39,8 @@ static GLOBAL_ACTIVE_SOCKETS: AtomicU32 = AtomicU32::new(0);
 pub enum NetPolicy {
     #[default]
     Denied,
-    Allowlist {
-        entries: ReviewedAllowlist,
+    Rules {
+        rules: EgressRules,
         max_sockets: u32,
         egress_ceiling_bytes: u64,
     },
@@ -54,13 +58,13 @@ impl NetPolicy {
     pub fn max_sockets(&self) -> u32 {
         match self {
             Self::Denied => 0,
-            Self::Allowlist { max_sockets, .. } | Self::Trusted { max_sockets, .. } => *max_sockets,
+            Self::Rules { max_sockets, .. } | Self::Trusted { max_sockets, .. } => *max_sockets,
         }
     }
 
     pub fn egress_ceiling_bytes(&self) -> Option<u64> {
         match self {
-            Self::Allowlist {
+            Self::Rules {
                 egress_ceiling_bytes,
                 ..
             }
@@ -72,21 +76,21 @@ impl NetPolicy {
         }
     }
 
-    pub fn allows_host_port(&self, host: &str, port: u16) -> bool {
-        match self {
-            Self::Denied => false,
-            Self::Trusted { .. } => true,
-            Self::Allowlist { entries, .. } => entries.iter().any(|e| e.matches(host, port)),
-        }
-    }
-
-    pub fn allowlist(
-        entries: Vec<HostPort>,
+    /// Build a rule-set policy, re-validating every rule.
+    ///
+    /// There is deliberately NO `allows_host_port(host, port) -> bool` on this
+    /// type. A single boolean over a name is exactly the shape that cannot
+    /// express a `Range` rule, and a caller reaching for one would have to
+    /// resolve first to answer it - which is the DNS gate deleted. Use
+    /// [`super::egress::pre_dns`] and [`super::egress::filter_answer`], or
+    /// [`super::egress::evaluate`], which keep the phases in order.
+    pub fn rules(
+        rules: Vec<EgressRule>,
         max_sockets: u32,
         egress_ceiling_bytes: u64,
     ) -> Result<Self, String> {
-        Ok(Self::Allowlist {
-            entries: ReviewedAllowlist::operator_reviewed(entries)?,
+        Ok(Self::Rules {
+            rules: EgressRules::validated(rules)?,
             max_sockets,
             egress_ceiling_bytes,
         })
@@ -151,20 +155,27 @@ fn configured_global_max_sockets() -> u32 {
 mod tests {
     use super::*;
 
+    fn accept(dest: &str, port: u16) -> EgressRule {
+        EgressRule::parse(Verdict::Accept, dest, port).expect("valid rule")
+    }
+
+    /// Construction re-validates, so a rule set assembled anywhere is bounded by
+    /// the same authoring rules the API applies.
     #[test]
-    fn hostport_exact_and_wildcard_match() {
-        assert!(HostPort::new("DB.Example.COM.", 5432).matches("db.example.com", 5432));
-        assert!(HostPort::new("*.db.example.com", 5432).matches("a.db.example.com", 5432));
-        assert!(!HostPort::new("*.db.example.com", 5432).matches("db.example.com", 5432));
-        assert!(!HostPort::new("*.db.example.com", 5432).matches("a.db.example.com", 5433));
+    fn rule_construction_refuses_wildcards_and_unbounded_accept_ranges() {
+        assert!(EgressRule::parse(Verdict::Accept, "*.workers.dev", 443).is_err());
+        assert!(NetPolicy::rules(vec![accept("db.neon.tech", 5432)], 4, 1024).is_ok());
+        assert!(EgressRule::parse(Verdict::Accept, "0.0.0.0/0", 443).is_err());
     }
 
     #[test]
-    fn allowlist_rejects_bare_and_fronting_wildcards() {
-        assert!(HostPort::try_new("*", 443).is_err());
-        assert!(HostPort::try_new("*.com", 443).is_err());
-        assert!(HostPort::try_new("*.workers.dev", 443).is_err());
-        assert!(HostPort::try_new("*.neon.tech", 5432).is_err());
-        assert!(HostPort::try_new("db.neon.tech", 5432).is_ok());
+    fn caps_are_readable_on_every_non_denied_variant() {
+        let rules = NetPolicy::rules(vec![accept("db.neon.tech", 5432)], 7, 99).unwrap();
+        assert_eq!(rules.max_sockets(), 7);
+        assert_eq!(rules.egress_ceiling_bytes(), Some(99));
+        assert_eq!(NetPolicy::trusted(3, 5).max_sockets(), 3);
+        assert_eq!(NetPolicy::Denied.max_sockets(), 0);
+        assert_eq!(NetPolicy::Denied.egress_ceiling_bytes(), None);
+        assert!(!NetPolicy::Denied.module_allowed());
     }
 }

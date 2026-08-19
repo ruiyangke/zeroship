@@ -57,7 +57,7 @@ pub struct AppNetPolicy {
 /// `destination` is TEXT and the kind is INFERRED from its grammar, exactly as
 /// the creator-facing API infers it: a value containing `/` must parse as a
 /// CIDR, anything else must parse as an exact DNS name. Carrying the parsed
-/// form here would let a hand-edited row skip validation on deserialization —
+/// form here would let a hand-edited row skip validation on deserialization -
 /// the worker re-runs `EgressRule::parse` on every entry it loads, which is the
 /// property this shape exists to keep.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
