@@ -40,25 +40,30 @@ pub const FREE_TIER_RUNTIME_LIMITS: AppRuntimeLimits = AppRuntimeLimits {
     heap_limit_mb: Some(64),
 };
 
-/// Worker-facing raw TCP policy for creator isolates.
+/// Worker-facing raw TCP egress policy for creator isolates.
 ///
-/// Empty `allow` means `Denied`. Non-empty means the worker may construct a
-/// reviewed allowlist using the supplied host:port entries and plan-level caps.
-/// `Trusted` is intentionally not representable on this wire type.
+/// Empty `egress` means `Denied`. Non-empty means the worker may build a rule
+/// set from the supplied entries and plan-level caps. `Trusted` is intentionally
+/// not representable on this wire type.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct AppNetPolicy {
-    pub allow: Vec<NetAllowEntry>,
+    pub egress: Vec<NetEgressEntry>,
     pub max_sockets: u32,
     pub egress_ceiling_bytes: u64,
-    #[serde(default)]
-    pub frontable_wildcard_suffixes: Vec<String>,
-    #[serde(default)]
-    pub frontable_wildcard_suffixes_available: bool,
 }
 
+/// One egress rule as it crosses the wire.
+///
+/// `destination` is TEXT and the kind is INFERRED from its grammar, exactly as
+/// the creator-facing API infers it: a value containing `/` must parse as a
+/// CIDR, anything else must parse as an exact DNS name. Carrying the parsed
+/// form here would let a hand-edited row skip validation on deserialization —
+/// the worker re-runs `EgressRule::parse` on every entry it loads, which is the
+/// property this shape exists to keep.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct NetAllowEntry {
-    pub host: String,
+pub struct NetEgressEntry {
+    pub verdict: crate::net_policy::Verdict,
+    pub destination: String,
     pub port: u16,
 }
 
