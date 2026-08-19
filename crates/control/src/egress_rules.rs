@@ -1,4 +1,8 @@
-//! Creator self-service for an app's raw-TCP egress rules.
+//! Creator self-service for an app's egress rules.
+//!
+//! They cover every RAW BYTE STREAM the app can open - `node:net`, `node:tls`
+//! and outbound `WebSocket` - through one rule set and one evaluator. `fetch`
+//! is the exception and reaches any public host with no rule at all.
 //!
 //! `zeroship.app_egress_rules` is the authoritative rule set the registry
 //! projects into every runtime (`Registry::get_versions`). This module is the
@@ -18,8 +22,9 @@
 //! Three things bound what a creator can write, and none of them is a human
 //! reviewer:
 //!
-//! 1. **Deny by default.** An app with no accept rule gets `NetPolicy::Denied`
-//!    and cannot resolve `node:net` at all. Nothing here changes that.
+//! 1. **Deny by default.** An app with no accept rule gets `NetPolicy::Denied`:
+//!    it cannot resolve `node:net` at all and every outbound `WebSocket` is
+//!    refused. Nothing here changes that.
 //! 2. **Shape.** Every rule goes through [`EgressRule::parse`], which refuses a
 //!    wildcard outright (they are no longer representable), refuses a bare IP
 //!    literal in favour of the `/32` or `/128` that says which check decides it,
@@ -34,7 +39,7 @@
 //!
 //! What this deliberately does NOT claim: it is not a boundary against a
 //! malicious creator. `fetch` reaches any public host with no rule at all, so
-//! raw-TCP narrowness is a compromised-dependency blast-radius control
+//! raw-stream narrowness is a compromised-dependency blast-radius control
 //! (`zeroship_core::net_policy`), and the malicious-creator controls are
 //! attribution, spend enforcement, and egress ceilings.
 
@@ -497,7 +502,9 @@ pub async fn upsert_rule(
     let record = rows_to_records(&all)
         .into_iter()
         .find(|r| (r.kind, r.destination.clone(), r.port) == written_key)
-        .unwrap_or_else(|| row_to_record(row, Verdict::Accept));
+        .unwrap_or_else(|| {
+            written_record(&rule, app_id, row.get("created_by"), row.get("created_at"), note.clone())
+        });
 
     Ok(SetEgressRuleResult {
         rule: record,
@@ -505,9 +512,17 @@ pub async fn upsert_rule(
     })
 }
 
-/// How many ACCEPT rules with a range destination the app holds. The input to
-/// the one-time notice, and the same predicate the runtime's DNS gate uses on
-/// the other side of the projection.
+/// How many ACCEPT rules with a range destination the app holds, at ANY port.
+///
+/// The input to the one-time notice, and NOT the runtime DNS gate predicate,
+/// which this comment used to claim it was. The gate asks whether a range
+/// ACCEPT exists AT THE PORT being connected to
+/// (`EgressRules::holds_range_accept_at`); this asks whether the app has ever
+/// written one. They cannot be one function: the notice is about the first time
+/// an app enters the leaking class at all, and a per-port count would announce
+/// it again on every new port. Keeping the two honestly separate is the point -
+/// a shared name over two different questions is how a test of one comes to
+/// read as coverage of the other.
 async fn count_range_accepts(pg: &Client, app_id: Uuid) -> Result<u32, EgressRuleError> {
     let rows = pg
         .query(
@@ -597,7 +612,8 @@ fn rows_to_records(rows: &[compio_postgres::Row]) -> Vec<EgressRuleRecord> {
     let parsed: Vec<(EgressRuleRecord, Option<Destination>)> = rows
         .iter()
         .map(|row| {
-            let verdict = parse_verdict(row.get("verdict"));
+            let raw: String = row.get("verdict");
+            let verdict = parse_verdict(&raw);
             let record = row_to_record(row, verdict);
             let destination = Destination::parse(&record.destination).ok();
             (record, destination)
@@ -634,12 +650,18 @@ fn rows_to_records(rows: &[compio_postgres::Row]) -> Vec<EgressRuleRecord> {
         .collect()
 }
 
-/// A verdict read back from the database. The column carries a CHECK
-/// constraint, so anything else is a hand-edited row; treating it as REJECT is
-/// the fail-closed reading, and the control plane is the only writer that is
-/// supposed to produce one.
-fn parse_verdict(raw: String) -> Verdict {
-    match raw.as_str() {
+/// A verdict read back from the database, for EVERY reader of the table.
+///
+/// The column carries a CHECK constraint, so anything else is a hand-edited
+/// row; treating it as REJECT is the fail-closed reading, and the control plane
+/// is the only writer that is supposed to produce one.
+///
+/// One function because the two readers - this endpoint and the registry
+/// projection the worker consumes - must not be able to disagree about a row.
+/// If they did, a creator would be shown one verdict and the runtime would
+/// enforce another, and only one of those two answers is visible to them.
+pub(crate) fn parse_verdict(raw: &str) -> Verdict {
+    match raw {
         "accept" => Verdict::Accept,
         other => {
             if other != "reject" {
@@ -650,6 +672,38 @@ fn parse_verdict(raw: String) -> Verdict {
             }
             Verdict::Reject
         }
+    }
+}
+
+/// The record for a rule this request just wrote, built from the rule itself.
+///
+/// Only reached if the re-read cannot see the row the write returned, which the
+/// primary key makes unreachable through the API - so it is exactly the kind of
+/// arm that rots unwatched. It used to hardcode `Verdict::Accept`, the
+/// fail-OPEN direction: a creator who wrote a REJECT would be told they had
+/// written an accept. It shapes what the creator is SHOWN and not what the
+/// runtime enforces - the worker reads the registry projection, not this
+/// response - so it was a display defect, and still the wrong default to leave
+/// in a file whose subject is verdicts.
+fn written_record(
+    rule: &EgressRule,
+    app_id: Uuid,
+    created_by: String,
+    created_at: DateTime<Utc>,
+    note: Option<String>,
+) -> EgressRuleRecord {
+    EgressRuleRecord {
+        app_id,
+        verdict: rule.verdict(),
+        kind: destination_kind(rule.destination()),
+        destination: rule.destination().to_text(),
+        port: rule.port(),
+        created_by,
+        created_at,
+        note,
+        // No other row was read, so no domination can be known. Reporting this
+        // rule's own verdict is the only answer this path has evidence for.
+        effective_verdict: rule.verdict(),
     }
 }
 
@@ -956,6 +1010,46 @@ mod tests {
         // asymmetry the floor is only meaningful because of.
         EgressRule::parse(Verdict::Reject, "0.0.0.0/0", 443)
             .expect("a reject range has no floor");
+    }
+
+    /// A row whose verdict is not one the CHECK constraint admits is a
+    /// hand-edited row, and must read as REJECT: a rule the control plane did
+    /// not write must never be able to WIDEN what an app reaches.
+    ///
+    /// Unreachable through the API, and unpinned until now - flipping the
+    /// fallback to `Accept` in BOTH readers left this crate green. It is
+    /// tested at the function rather than the endpoint because the endpoint
+    /// cannot produce the input.
+    #[test]
+    fn an_unknown_verdict_reads_as_reject_in_both_readers() {
+        assert_eq!(parse_verdict("reject"), Verdict::Reject);
+        assert_eq!(parse_verdict("REJECT"), Verdict::Reject);
+        assert_eq!(parse_verdict(""), Verdict::Reject);
+        assert_eq!(parse_verdict("allow"), Verdict::Reject);
+        // The control, differing in ONE thing - the exact stored token. Without
+        // it a reader that answered REJECT for everything would pass.
+        assert_eq!(parse_verdict("accept"), Verdict::Accept);
+    }
+
+    /// The record reported for a rule the re-read could not find must carry the
+    /// verdict that was WRITTEN. The old fallback hardcoded `Accept`, so a
+    /// creator writing a reject would have been shown an accept.
+    #[test]
+    fn the_written_record_reports_the_verdict_that_was_written() {
+        let app_id = Uuid::new_v4();
+        let now = Utc::now();
+        let reject = EgressRule::parse(Verdict::Reject, "93.184.216.7/32", 443).unwrap();
+        let record = written_record(&reject, app_id, "usr_x".to_string(), now, None);
+        assert_eq!(record.verdict, Verdict::Reject);
+        assert_eq!(record.effective_verdict, Verdict::Reject);
+        assert_eq!(record.kind, "cidr");
+        assert_eq!(record.destination, "93.184.216.7/32");
+
+        // The control, differing in ONE thing - the verdict written.
+        let accept = EgressRule::parse(Verdict::Accept, "93.184.216.7/32", 443).unwrap();
+        let record = written_record(&accept, app_id, "usr_x".to_string(), now, None);
+        assert_eq!(record.verdict, Verdict::Accept);
+        assert_eq!(record.effective_verdict, Verdict::Accept);
     }
 
     #[test]
