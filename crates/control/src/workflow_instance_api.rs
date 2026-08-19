@@ -293,7 +293,9 @@ impl From<RegistryError> for WorkflowApiError {
         match value {
             RegistryError::InvalidInput(msg) => Self::BadRequest(msg),
             RegistryError::NotFound(msg) => Self::NotFound(msg),
-            RegistryError::AlreadyExists(msg) | RegistryError::Conflict(msg) => Self::Conflict(msg),
+            RegistryError::AlreadyExists(msg)
+            | RegistryError::Conflict(msg)
+            | RegistryError::ReservedName(msg) => Self::Conflict(msg),
             RegistryError::Database(msg) => Self::Database(msg),
             RegistryError::FxUnresolved => Self::Database(value.to_string()),
         }
