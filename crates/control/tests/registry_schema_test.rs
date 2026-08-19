@@ -1,6 +1,8 @@
 //! Live-PG schema regression tests for control-plane registry tables.
 //!
-//! Set `CONTROL_TEST_DB` or `PG_TEST_URL` to run; tests skip otherwise.
+//! Configure a test database (`zeroship_core::config::test_database_url_opt`;
+//! run `tests/provision_test_backends.sh` to provision one) to run; tests
+//! skip otherwise.
 
 use compio_postgres::{connect, Client, NoTls};
 use zeroship_control::Registry;
@@ -8,8 +10,7 @@ use zeroship_control::Registry;
 mod common;
 
 fn db_url() -> String {
-    zeroship_core::test_env!("CONTROL_TEST_DB")
-        .or_else(|| zeroship_core::test_env!("PG_TEST_URL"))
+    zeroship_core::config::test_database_url_opt()
         .filter(|u| !u.trim().is_empty())
         .unwrap_or_else(|| {
             "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()

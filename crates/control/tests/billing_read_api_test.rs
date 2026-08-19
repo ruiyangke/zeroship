@@ -23,7 +23,9 @@
 //! asserts per-creator scope, so the default cargo runner can run them
 //! concurrently without cross-test interference.
 //!
-//! Set `CONTROL_TEST_DB` to run; silently skips otherwise.
+//! Configure a test database (`zeroship_core::config::test_database_url_opt`;
+//! run `tests/provision_test_backends.sh` to provision one) to run; silently
+//! skips otherwise.
 
 #![allow(clippy::future_not_send)]
 

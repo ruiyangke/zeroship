@@ -9,8 +9,9 @@
 //! the `Authorization: Bearer` + `Idempotency-Key` headers, the HTTP round-trip
 //! and the JSON parse are all exercised end to end.
 //!
-//! Real Postgres via `CONTROL_TEST_DB`; silent skip otherwise. The DB must have
-//! changeset 0040 applied.
+//! Real Postgres via a configured test database
+//! (`zeroship_core::config::test_database_url_opt`); silent skip otherwise.
+//! The DB must have changeset 0040 applied.
 
 mod common;
 

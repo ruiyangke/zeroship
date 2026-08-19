@@ -11,7 +11,7 @@
 //! effects on tmp dir / blob store) rather than re-cover the
 //! ingest logic itself.
 //!
-//! All cases gate on `CONTROL_TEST_DB` — Postgres is required to
+//! All cases gate on a test database — Postgres is required to
 //! construct `AppState` (registry/env_store/auth all dial the DB
 //! on startup), so the file is a silent skip in dev.
 //!
@@ -47,8 +47,7 @@ mod common;
 // ---------------------------------------------------------------------------
 
 fn db_url() -> String {
-    zeroship_core::test_env!("CONTROL_TEST_DB")
-        .or_else(|| zeroship_core::test_env!("PG_TEST_URL"))
+    zeroship_core::config::test_database_url_opt()
         .filter(|u| !u.trim().is_empty())
         .unwrap_or_else(|| {
             "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()

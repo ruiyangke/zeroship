@@ -401,14 +401,14 @@ mod tests {
 
     // ─── Live-PG tests for the decision tree ─────────────────────────────
     //
-    // Skipped unless `AUTH_DB_URL` is set. Each test seeds a fresh user
+    // Skipped unless a test database is available (`PG_TEST_URL` or the TOML overlay). Each test seeds a fresh user
     // (random email) and cleans up at the end.
 
     // `compio_postgres::Client` is `!Send` (Rc-backed). The future
     // therefore inherits the not-send trait — structural, not a defect.
     #[allow(dead_code, clippy::future_not_send)]
     async fn pg() -> Option<compio_postgres::Client> {
-        let dsn = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)?;
+        let dsn = zeroship_core::config::test_database_url_opt()?;
         let (client, connection) = compio_postgres::connect(&dsn, compio_postgres::NoTls)
             .await
             .expect("connect");
@@ -424,7 +424,7 @@ mod tests {
     #[compio::test]
     async fn needs_confirmation_when_local_user_has_password_hash() {
         let Some(client) = pg().await else {
-            eprintln!("skipping linker live-PG test (no AUTH_DB_URL)");
+            eprintln!("skipping linker live-PG test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
             return;
         };
 
@@ -492,7 +492,7 @@ mod tests {
     #[compio::test]
     async fn needs_confirmation_carries_native_return_to() {
         let Some(client) = pg().await else {
-            eprintln!("skipping linker live-PG test (no AUTH_DB_URL)");
+            eprintln!("skipping linker live-PG test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
             return;
         };
 
@@ -549,7 +549,7 @@ mod tests {
     #[compio::test]
     async fn auto_links_when_local_user_is_oauth_only() {
         let Some(client) = pg().await else {
-            eprintln!("skipping linker live-PG test (no AUTH_DB_URL)");
+            eprintln!("skipping linker live-PG test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
             return;
         };
 
@@ -603,7 +603,7 @@ mod tests {
     #[compio::test]
     async fn needs_confirmation_for_oauth_only_user_when_provider_untrusted_for_email() {
         let Some(client) = pg().await else {
-            eprintln!("skipping linker live-PG test (no AUTH_DB_URL)");
+            eprintln!("skipping linker live-PG test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
             return;
         };
 
@@ -669,7 +669,7 @@ mod tests {
     #[compio::test]
     async fn rejects_new_user_when_provider_untrusted_for_email_even_if_email_verified() {
         let Some(client) = pg().await else {
-            eprintln!("skipping linker live-PG test (no AUTH_DB_URL)");
+            eprintln!("skipping linker live-PG test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
             return;
         };
 

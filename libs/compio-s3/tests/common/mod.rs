@@ -26,6 +26,17 @@
 
 use std::io::Write;
 
+/// The skip token, declared here rather than taken from `crates/test-support`.
+///
+/// THIS DUPLICATION IS DELIBERATE AND MUST STAY, for the reason spelled out at
+/// `libs/compio-redis/tests/common/mod.rs`: `compio-s3` is a standalone,
+/// publishable driver with no zeroship dependency, and `cargo test` builds
+/// dev-dependencies, so sharing four lines from `zeroship-test-support` would
+/// put a zeroship crate in this one's build graph.
+///
+/// The copies stay honest because the CONSUMER is shared:
+/// `tests/lib/skip_census.sh` greps for this exact string, so a copy that
+/// drifted would stop being counted and the suite gates would notice.
 pub const SKIP_MARKER: &str = "ZEROSHIP-TEST-SKIPPED";
 
 pub fn skip(reason: &str) {

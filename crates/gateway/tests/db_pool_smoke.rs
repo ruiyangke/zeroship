@@ -1,8 +1,9 @@
 //! Live-PG smoke test for the gateway's per-worker connection pool
 //! (`zeroship_gateway::db`).
 //!
-//! Skipped silently unless `GATEWAY_POOL_SMOKE_URL` is set (same env-skip
-//! convention as the rest of the gateway PG tests). Needs no `auth`
+//! Skipped silently unless there is a test database (set `PG_TEST_URL` or run
+//! `tests/provision_test_backends.sh`; same env-skip convention as the rest
+//! of the gateway PG tests). Needs no `auth`
 //! schema — it runs a trivial `SELECT 1`, so any reachable Postgres works.
 //!
 //! Coverage:
@@ -20,8 +21,8 @@ use zeroship_gateway::db::DbConfig;
 
 #[compio::test]
 async fn pool_checkout_runs_concurrent_trivial_queries() {
-    let Some(dsn) = zeroship_core::test_env!("GATEWAY_POOL_SMOKE_URL") else {
-        zeroship_test_support::skip("skipping (no GATEWAY_POOL_SMOKE_URL)");
+    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
+        zeroship_test_support::skip("skipping (no test database; set PG_TEST_URL)");
         return;
     };
 

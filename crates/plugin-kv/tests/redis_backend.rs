@@ -1,31 +1,47 @@
 //! Integration tests for the Redis backend — exercises the Backend
 //! trait impl against a live Redis AND a live 3-node Dragonfly cluster.
 //!
-//! Single-node: set `REDIS_TEST_URL=redis://127.0.0.1:6379`
-//! Cluster:     set `DRAGONFLY_CLUSTER_SEEDS='redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002'`
+//! Single-node: REQUIRED. `tests/provision_test_backends.sh` starts it and
+//!              writes its address into the test overlay, so nothing needs
+//!              exporting. `REDIS_TEST_URL` overrides that.
+//!
+//!              This line used to read `set REDIS_TEST_URL=redis://127.0.0.1:6379`,
+//!              and 6379 was the wrong port as well as the wrong instruction -
+//!              deploy/compose publishes this workspace's Redis on 6390
+//!              precisely because 6379 is the port some OTHER project's
+//!              container is already holding on a shared development machine.
+//! Cluster:     OPTIONAL, and the only skip left in this file. Nothing in this
+//!              repository provisions a Dragonfly cluster; see the "WHAT IT
+//!              DOES NOT PROVISION" list in tests/provision_test_backends.sh.
+//!              set `DRAGONFLY_CLUSTER_SEEDS='redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002'`
 
 #![cfg(feature = "redis")]
 
 use zeroship_plugin_kv::backend::{Backend, Redis, TtlState};
 
-/// Single-node test URL. When `KV_REQUIRE_REDIS=1` is set but no
-/// `REDIS_TEST_URL` is configured, this PANICS instead of silently
-/// skipping — CI sets the require flag so a missing-URL misconfig fails
-/// loud rather than turning the whole suite into a no-op.
-fn redis_url() -> Option<String> {
-    let url = zeroship_core::test_env!("REDIS_TEST_URL").filter(|s| !s.is_empty());
-    if url.is_none() && require_redis() {
-        panic!(
-            "KV_REQUIRE_REDIS=1 but REDIS_TEST_URL is unset — refusing to skip the \
-             Redis backend tests silently"
-        );
-    }
-    url
-}
-
-/// `true` when the environment demands the Redis tests actually run.
-fn require_redis() -> bool {
-    matches!(zeroship_core::test_env!("KV_REQUIRE_REDIS").as_deref(), Some("1"))
+/// The single-node Redis these tests dial.
+///
+/// NO `KV_REQUIRE_REDIS` FLAG, and its deletion is the change. This used to
+/// return `Option`, announce a skip when `REDIS_TEST_URL` was unset, and panic
+/// only when `KV_REQUIRE_REDIS=1` turned the skip into a failure. The doc
+/// comment said "CI sets the require flag". Nothing set it: a repository-wide
+/// search for the name found this file, one line of `crates/worker`, and two
+/// archived documents - no workflow, no script, no Makefile. So the panic arm
+/// was unreachable and every one of these tests had been skipping-as-passing
+/// for as long as the flag existed, protected by a comment claiming otherwise.
+///
+/// That is the same shape `ZEROSHIP_REQUIRE_LIVE_BACKENDS` had, and it is
+/// resolved the same way it was: the flag is deleted and the requirement is
+/// stated unconditionally. Redis is not optional for a Redis backend's tests.
+/// `tests/provision_test_backends.sh` stands one up and writes its address into
+/// the test overlay, so the address resolves with nothing exported at all.
+///
+/// # Panics
+///
+/// When neither `REDIS_TEST_URL` nor the overlay names a Redis, with the
+/// command that provisions one.
+fn redis_url() -> String {
+    zeroship_core::config::test_kv_url()
 }
 
 fn cluster_url() -> Option<String> {
@@ -39,10 +55,7 @@ fn cluster_url() -> Option<String> {
 
 #[compio::test]
 async fn single_node_roundtrip() {
-    let Some(url) = redis_url() else {
-        zeroship_test_support::skip("skip: REDIS_TEST_URL not set");
-        return;
-    };
+    let url = redis_url();
     let b = Redis::new(url);
     let app = "kv-test-single";
 
@@ -135,17 +148,16 @@ async fn ttl_expires_in_cluster_mode() {
 // whichever backend is available.
 // -----------------------------------------------------------------
 
-/// Run `body` against every Redis backend the environment has
-/// configured. Produces one pass per configured backend; silently
-/// skips when nothing is set.
+/// Run `body` against the single-node Redis, plus the Dragonfly cluster when
+/// one is configured. The single node is REQUIRED - `redis_url` panics without
+/// it - so this can no longer run zero backends and report a pass, which is
+/// what "silently skips when nothing is set" used to describe.
 async fn for_each_backend<F, Fut>(f: F)
 where
     F: Fn(Redis, &'static str) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
-    if let Some(url) = redis_url() {
-        f(Redis::new(url), "single").await;
-    }
+    f(Redis::new(redis_url()), "single").await;
     if let Some(url) = cluster_url() {
         f(Redis::new(url), "cluster").await;
     }

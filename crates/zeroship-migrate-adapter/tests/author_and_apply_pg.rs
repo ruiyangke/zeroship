@@ -28,8 +28,8 @@
 //! zeroship-runtime's V8. Everything downstream of the envelope is the SAME native
 //! apply path as Stage 1.
 //!
-//! GATED behind `ZERO_MIGRATE_TEST_PG_URL` (a DSN on :5440): skips cleanly when
-//! unset, so DB-free CI stays green. The V8-authoring assertions run
+//! GATED behind a test database (a DSN on :5440; set `PG_TEST_URL`): skips
+//! cleanly when unset, so DB-free CI stays green. The V8-authoring assertions run
 //! UNCONDITIONALLY (they need no DB) so authoring itself is proven even without PG.
 
 use zero_migrate::driver::SqlSession;
@@ -238,7 +238,7 @@ fn cfg_for(tok: &str) -> (ExecutorConfig, EffectivePolicy) {
 }
 
 fn pg_url() -> Option<String> {
-    zeroship_core::test_env!("ZERO_MIGRATE_TEST_PG_URL").filter(|s| !s.trim().is_empty())
+    zeroship_core::config::test_database_url_opt()
 }
 
 async fn ensure_project_schema(session: &CompioPgSession, cfg: &ExecutorConfig) {
@@ -322,13 +322,13 @@ fn sample_ts_authors_ir_version_1_envelope_in_v8() {
 }
 
 /// The full native loop: author in V8 → v1 envelope → published-engine lower+apply
-/// over the compio seam → live PG. Gated on `ZERO_MIGRATE_TEST_PG_URL`.
+/// over the compio seam → live PG. Gated on a test database (see `PG_TEST_URL`).
 #[compio::test]
 async fn authored_v1_envelope_lowers_and_applies_over_native_compio_seam() {
     let Some(url) = pg_url() else {
         zeroship_test_support::skip(
-            "skipping Phase F Stage 2 apply: ZERO_MIGRATE_TEST_PG_URL unset \
-             (set it to a DSN on :5440 to run)"
+            "skipping Phase F Stage 2 apply: no test database (set PG_TEST_URL \
+             to a DSN on :5440 to run)"
         );
         return;
     };

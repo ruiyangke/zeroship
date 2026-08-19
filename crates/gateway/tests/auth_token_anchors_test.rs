@@ -11,8 +11,8 @@
 //! OP refresh") is exact. No stubs of the issuer or the single-flight.
 //!
 //! The DB-backed handler tests (token-exchange → anchor row →
-//! session?mint=1) are gated on `GATEWAY_ANCHORS_DB_URL` (the established
-//! env-skip convention — no live PG in CI by default). The mock-OP
+//! session?mint=1) are gated on a test database (set `PG_TEST_URL`; the
+//! established env-skip convention — no live PG in CI by default). The mock-OP
 //! single-flight test and the cookie/Origin tests run unconditionally.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -157,7 +157,7 @@ impl MockOP {
     /// made every DB-backed test in this file fail with
     /// `at_hash missing while access token binding was requested` (400
     /// `invalid_token`) once a database was provided - the tests could not run
-    /// without `GATEWAY_ANCHORS_DB_URL`, so nothing noticed.
+    /// without a test database, so nothing noticed.
     ///
     /// The hash comes from the REAL OP's own `oidc_at_hash` so this mock cannot
     /// drift from the issuer it stands in for. That is not circular: the code
@@ -1169,22 +1169,22 @@ async fn op_refresh(oidc: &OidcRp, op: &MockOP) -> Result<(), String> {
     Ok(())
 }
 
-// ─── PG-backed full-handler tests (gated on GATEWAY_ANCHORS_DB_URL) ──────
+// ─── PG-backed full-handler tests (gated on a test database) ──────
 
 /// Resolve the anchors test DB DSN.
 ///
 /// FAIL LOUDLY in CI: if `CI` is set (the harness expects full coverage) but
-/// `GATEWAY_ANCHORS_DB_URL` is absent, panic instead of silently skipping —
+/// there is no test database, panic instead of silently skipping —
 /// the repo's faithful-e2e mandate forbids a DB-gated test that quietly
 /// no-ops in CI. Locally (no `CI`), `None` ⇒ the test prints a skip line and
 /// returns, the established env-skip convention for a dev box without PG.
 fn db_url() -> Option<String> {
-    match zeroship_core::test_env!("GATEWAY_ANCHORS_DB_URL") {
+    match zeroship_core::config::test_database_url_opt() {
         Some(dsn) if !dsn.is_empty() => Some(dsn),
         _ => {
             if zeroship_core::declared_env!(external, "CI", zeroship_core::config::TestHarness).is_some() {
                 panic!(
-                    "GATEWAY_ANCHORS_DB_URL must be set in CI so the DB-backed anchor handler \
+                    "PG_TEST_URL must be set in CI so the DB-backed anchor handler \
                      tests run the real /token→anchor→/session?mint=1 path instead of silently \
                      skipping (faithful-e2e mandate)"
                 );
@@ -1330,7 +1330,7 @@ async fn token_exchange_is_identity_only_and_sets_both_cookies() {
     // gateway_sessions row is created. The global UUID never reaches the
     // browser.
     let Some(dsn) = db_url() else {
-        zeroship_test_support::skip("[anchors] skip token_exchange (no GATEWAY_ANCHORS_DB_URL)");
+        zeroship_test_support::skip("[anchors] skip token_exchange (no test database; set PG_TEST_URL)");
         return;
     };
     let op = Arc::new(MockOP::new(CLIENT_ID));
@@ -1470,7 +1470,7 @@ async fn token_exchange_is_identity_only_and_sets_both_cookies() {
 #[ntex::test]
 async fn token_exchange_swaps_email_for_relay_alias() {
     let Some(dsn) = db_url() else {
-        zeroship_test_support::skip("[anchors] skip token_email_swap (no GATEWAY_ANCHORS_DB_URL)");
+        zeroship_test_support::skip("[anchors] skip token_email_swap (no test database; set PG_TEST_URL)");
         return;
     };
     let op = Arc::new(MockOP::new(CLIENT_ID));
@@ -1525,7 +1525,7 @@ async fn token_exchange_swaps_email_for_relay_alias() {
 #[ntex::test]
 async fn token_exchange_fails_closed_when_no_alias() {
     let Some(dsn) = db_url() else {
-        zeroship_test_support::skip("[anchors] skip token_email_failclosed (no GATEWAY_ANCHORS_DB_URL)");
+        zeroship_test_support::skip("[anchors] skip token_email_failclosed (no test database; set PG_TEST_URL)");
         return;
     };
     let op = Arc::new(MockOP::new(CLIENT_ID));
@@ -1571,7 +1571,7 @@ async fn token_exchange_fails_closed_when_no_alias() {
 #[ntex::test]
 async fn anchor_abs_expiry_is_created_at_plus_30d_not_slid() {
     let Some(dsn) = db_url() else {
-        zeroship_test_support::skip("[anchors] skip abs_expiry (no GATEWAY_ANCHORS_DB_URL)");
+        zeroship_test_support::skip("[anchors] skip abs_expiry (no test database; set PG_TEST_URL)");
         return;
     };
     let op = Arc::new(MockOP::new(CLIENT_ID));
@@ -1624,7 +1624,7 @@ async fn session_mint_recovers_after_reload_one_refresh() {
     // and returns the identity projection — with NO JWT and NO real email in
     // the body, and the pws_ id (never the global UUID).
     let Some(dsn) = db_url() else {
-        zeroship_test_support::skip("[anchors] skip session_mint_recovers (no GATEWAY_ANCHORS_DB_URL)");
+        zeroship_test_support::skip("[anchors] skip session_mint_recovers (no test database; set PG_TEST_URL)");
         return;
     };
     let op = Arc::new(MockOP::new(CLIENT_ID));
@@ -1774,7 +1774,7 @@ async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
     // sid=NULL, so a logout_token carrying sid matched zero rows and left the
     // anchor alive; /session?mint=1 could re-mint the user after global logout.
     let Some(dsn) = db_url() else {
-        zeroship_test_support::skip("[anchors] skip bcl_refreshed_session (no GATEWAY_ANCHORS_DB_URL)");
+        zeroship_test_support::skip("[anchors] skip bcl_refreshed_session (no test database; set PG_TEST_URL)");
         return;
     };
     let op = Arc::new(MockOP::new(BCL_REFRESH_CLIENT_ID));
@@ -1975,7 +1975,7 @@ async fn session_mint_persists_rotated_refresh_token_for_next_rotation() {
     // `?mint=1`; otherwise the second mint would replay the stale token and the
     // OP's reuse detection would kill the family with `invalid_grant`.
     let Some(dsn) = db_url() else {
-        zeroship_test_support::skip("[anchors] skip session_mint_persists_rotated_refresh_token (no GATEWAY_ANCHORS_DB_URL)");
+        zeroship_test_support::skip("[anchors] skip session_mint_persists_rotated_refresh_token (no test database; set PG_TEST_URL)");
         return;
     };
     let op = Arc::new(MockOP::new(CLIENT_ID));
@@ -2075,7 +2075,7 @@ async fn session_mint_invalid_grant_deletes_anchor_and_requires_login() {
     // dead. The gateway must delete the server-held anchor, clear recovery
     // cookies, and surface `login_required` rather than treating it as retryable.
     let Some(dsn) = db_url() else {
-        zeroship_test_support::skip("[anchors] skip session_mint_invalid_grant_deletes_anchor (no GATEWAY_ANCHORS_DB_URL)");
+        zeroship_test_support::skip("[anchors] skip session_mint_invalid_grant_deletes_anchor (no test database; set PG_TEST_URL)");
         return;
     };
     let op = Arc::new(MockOP::new(CLIENT_ID));
@@ -2165,7 +2165,7 @@ async fn session_steady_state_reads_gateway_session_without_op() {
     // returns the relay-swapped identity projection — NO anchor read, NO OP
     // round-trip, NO JWT in the body.
     let Some(dsn) = db_url() else {
-        zeroship_test_support::skip("[anchors] skip session_steady_state (no GATEWAY_ANCHORS_DB_URL)");
+        zeroship_test_support::skip("[anchors] skip session_steady_state (no test database; set PG_TEST_URL)");
         return;
     };
     let op = Arc::new(MockOP::new(CLIENT_ID));
@@ -2239,7 +2239,7 @@ async fn session_minted_cookie_verifies_locally_bound_to_route_client() {
     // verify under CLIENT_ID; a DIFFERENT client_id MUST fail (the audience
     // binding that stops a cookie minted for app A from authenticating app B).
     let Some(dsn) = db_url() else {
-        zeroship_test_support::skip("[anchors] skip session_minted_cookie_verifies_locally (no GATEWAY_ANCHORS_DB_URL)");
+        zeroship_test_support::skip("[anchors] skip session_minted_cookie_verifies_locally (no test database; set PG_TEST_URL)");
         return;
     };
     let op = Arc::new(MockOP::new(CLIENT_ID));
@@ -2440,10 +2440,10 @@ async fn cleanup_f1(dsn: &str, user_id: Uuid) {
 #[allow(clippy::future_not_send)]
 async fn cookie_mint_writes_identity_so_reset_evicts_cookie_session() {
     let Some(dsn) = db_url() else {
-        zeroship_test_support::skip("[anchors] skip cookie_mint_writes_identity (no GATEWAY_ANCHORS_DB_URL)");
+        zeroship_test_support::skip("[anchors] skip cookie_mint_writes_identity (no test database; set PG_TEST_URL)");
         return;
     };
-    let auth_dsn = match zeroship_core::test_env!("AUTH_DB_URL") {
+    let auth_dsn = match zeroship_core::config::test_database_url_opt() {
         Some(d) if !d.is_empty() => d,
         _ => dsn.clone(),
     };
@@ -2573,10 +2573,10 @@ async fn cookie_mint_writes_identity_so_reset_evicts_cookie_session() {
 #[allow(clippy::future_not_send)]
 async fn interactive_cookie_mint_writes_identity_so_reset_evicts_session() {
     let Some(dsn) = db_url() else {
-        zeroship_test_support::skip("[anchors] skip interactive_cookie_mint_writes_identity (no GATEWAY_ANCHORS_DB_URL)");
+        zeroship_test_support::skip("[anchors] skip interactive_cookie_mint_writes_identity (no test database; set PG_TEST_URL)");
         return;
     };
-    let auth_dsn = match zeroship_core::test_env!("AUTH_DB_URL") {
+    let auth_dsn = match zeroship_core::config::test_database_url_opt() {
         Some(d) if !d.is_empty() => d,
         _ => dsn.clone(),
     };
@@ -2713,10 +2713,10 @@ async fn interactive_cookie_mint_writes_identity_so_reset_evicts_session() {
 #[allow(clippy::future_not_send)]
 async fn mint_racing_concurrent_reset_fails_closed_no_fresh_cookie() {
     let Some(dsn) = db_url() else {
-        zeroship_test_support::skip("[anchors] skip mint_racing_concurrent_reset (no GATEWAY_ANCHORS_DB_URL)");
+        zeroship_test_support::skip("[anchors] skip mint_racing_concurrent_reset (no test database; set PG_TEST_URL)");
         return;
     };
-    let auth_dsn = match zeroship_core::test_env!("AUTH_DB_URL") {
+    let auth_dsn = match zeroship_core::config::test_database_url_opt() {
         Some(d) if !d.is_empty() => d,
         _ => dsn.clone(),
     };

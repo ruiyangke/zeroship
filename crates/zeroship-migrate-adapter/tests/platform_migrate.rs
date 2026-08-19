@@ -12,7 +12,7 @@
 //! applies every migration to a FRESH scratch database on :5440 and
 //! INDEPENDENTLY asserts (via a second connection) that the expected platform
 //! schemas/tables/RLS-policy/function+trigger/grants landed. Gated on
-//! `ZERO_MIGRATE_TEST_PG_URL` (skips clean when unset).
+//! a test database (set `PG_TEST_URL`; skips clean when unset).
 
 #[cfg(feature = "platform-cli")]
 mod platform_cli {
@@ -118,7 +118,7 @@ mod platform_cli {
     }
 
     fn pg_url() -> Option<String> {
-        zeroship_core::test_env!("ZERO_MIGRATE_TEST_PG_URL").filter(|s| !s.trim().is_empty())
+        zeroship_core::config::test_database_url_opt()
     }
 
     /// DB-FREE proof: EVERY platform `.ts` migration authors (V8, v1 recorder) +
@@ -378,14 +378,14 @@ mod platform_cli {
     /// (zeroship-runtime V8 author → zero-migrate Platform lower+apply over the
     /// native compio seam), then INDEPENDENTLY assert (a SECOND connection) that the
     /// expected platform schema + tables + an RLS policy + a function/trigger + the
-    /// grants landed. Gated on `ZERO_MIGRATE_TEST_PG_URL` (skips clean when unset).
+    /// grants landed. Gated on a test database (set `PG_TEST_URL`; skips clean when unset).
     /// The scratch DB is created and dropped by this test.
     #[compio::test]
     async fn apply_all_platform_migrations_to_fresh_db() {
         let Some(url) = pg_url() else {
             zeroship_test_support::skip(
-                "skipping the full-apply proof: ZERO_MIGRATE_TEST_PG_URL unset \
-                 (set it to a DSN on :5440 to run)"
+                "skipping the full-apply proof: no test database (set PG_TEST_URL \
+                 to a DSN on :5440 to run)"
             );
             return;
         };
@@ -857,8 +857,8 @@ mod platform_cli {
     async fn ordered_runner_retains_authored_fk_formats_across_catalog_refresh() {
         let Some(url) = pg_url() else {
             zeroship_test_support::skip(
-                "skipping logical-column retention regression: ZERO_MIGRATE_TEST_PG_URL unset \
-                 (set it to a DSN on :5440 to run)"
+                "skipping logical-column retention regression: no test database (set PG_TEST_URL \
+                 to a DSN on :5440 to run)"
             );
             return;
         };
@@ -958,13 +958,13 @@ mod platform_cli {
     /// skips when re-lowering reproduces byte-identical, order-preserving versions.
     /// Before the fix, additive DDL got a fresh RANDOM `MigrationId::generate()` per
     /// lowering, so run 2 re-executed everything and failed (e.g. `type
-    /// "account_state" already exists`). Gated on `ZERO_MIGRATE_TEST_PG_URL`.
+    /// "account_state" already exists`). Gated on a test database (see `PG_TEST_URL`).
     #[compio::test]
     async fn platform_migrate_is_idempotent_on_rerun() {
         let Some(url) = pg_url() else {
             zeroship_test_support::skip(
-                "skipping idempotency proof: ZERO_MIGRATE_TEST_PG_URL unset \
-                 (set it to a DSN on :5440 to run)"
+                "skipping idempotency proof: no test database (set PG_TEST_URL \
+                 to a DSN on :5440 to run)"
             );
             return;
         };
@@ -1194,8 +1194,8 @@ export function down() {}
     async fn platform_migrate_applies_only_newly_appended_file() {
         let Some(url) = pg_url() else {
             zeroship_test_support::skip(
-                "skipping appended-file proof: ZERO_MIGRATE_TEST_PG_URL unset \
-                 (set it to a DSN on :5440 to run)"
+                "skipping appended-file proof: no test database (set PG_TEST_URL \
+                 to a DSN on :5440 to run)"
             );
             return;
         };
@@ -1325,8 +1325,8 @@ export function down() {}
     async fn platform_migrate_resumes_partially_applied_corpus() {
         let Some(url) = pg_url() else {
             zeroship_test_support::skip(
-                "skipping corpus-prefix resume proof: ZERO_MIGRATE_TEST_PG_URL unset \
-                 (set it to a DSN on :5440 to run)"
+                "skipping corpus-prefix resume proof: no test database (set PG_TEST_URL \
+                 to a DSN on :5440 to run)"
             );
             return;
         };
@@ -1441,8 +1441,8 @@ export function down() {}
     async fn platform_migrate_resumes_a_partially_applied_file() {
         let Some(url) = pg_url() else {
             zeroship_test_support::skip(
-                "skipping partial-file proof: ZERO_MIGRATE_TEST_PG_URL unset \
-                 (set it to a DSN on :5440 to run)"
+                "skipping partial-file proof: no test database (set PG_TEST_URL \
+                 to a DSN on :5440 to run)"
             );
             return;
         };
@@ -1546,8 +1546,8 @@ export function down() {}
     async fn platform_migrate_rejects_an_edited_applied_file() {
         let Some(url) = pg_url() else {
             zeroship_test_support::skip(
-                "skipping edited-file proof: ZERO_MIGRATE_TEST_PG_URL unset \
-                 (set it to a DSN on :5440 to run)"
+                "skipping edited-file proof: no test database (set PG_TEST_URL \
+                 to a DSN on :5440 to run)"
             );
             return;
         };

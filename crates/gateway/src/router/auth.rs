@@ -2302,21 +2302,21 @@ mod tests {
     // ─── Per-app family-marker revocation (§8.5, major regressions) ───────
     //
     // PG-gated: these need a live `auth` schema with `zeroship.token_revocations`
-    // (skip when AUTH_DB_URL is unset).
+    // (skip when there is no test database; set PG_TEST_URL).
     // They cover the MAJOR finding that revocation is PER-APP — revoking a
     // user on app A does NOT revoke the same sub on app B — keyed on the
     // TEXT `(client_id, pws_)` family marker (the old UUID-only denylist
     // could never match the `pws_…` subject).
 
     async fn connect_auth_db() -> Option<crate::db::DbConfig> {
-        let dsn = zeroship_core::test_env!("AUTH_DB_URL")?;
+        let dsn = zeroship_core::config::test_database_url_opt()?;
         Some(crate::db::DbConfig::new(dsn, 4))
     }
 
     #[ntex::test]
     async fn bearer_raw_op_revocation_is_per_app_not_global() {
         let Some(db) = connect_auth_db().await else {
-            eprintln!("skipping (no AUTH_DB_URL)");
+            eprintln!("skipping (no test database; set PG_TEST_URL)");
             return;
         };
         let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]);
@@ -2708,8 +2708,8 @@ mod tests {
     //     produce the SAME pws_ for the same (user, app));
     // (3) the global UUID is ABSENT from every outward `ZeroShip-User`;
     // (4) fail-closed 503 when the route has no sector yet.
-    // The DB upsert + cookie arm are PG-gated (skip when AUTH_DB_URL is
-    // unset, like the revocation tests); the in-memory arms run always.
+    // The DB upsert + cookie arm are PG-gated (skip when there is no test
+    // database, like the revocation tests); the in-memory arms run always.
 
     /// A fixed global UUID + two distinct app sectors. A `pws_` derived for
     /// the SAME user under DIFFERENT sectors MUST differ — no cross-app
@@ -3479,7 +3479,7 @@ mod tests {
     #[compio::test]
     async fn cookie_arm_rejects_revoked_family_statelessly() {
         let Some(db) = connect_auth_db().await else {
-            eprintln!("skipping (no AUTH_DB_URL)");
+            eprintln!("skipping (no test database; set PG_TEST_URL)");
             return;
         };
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
@@ -3588,7 +3588,7 @@ mod tests {
     #[compio::test]
     async fn revocation_cache_honors_revocation_after_ttl_expiry() {
         let Some(db) = connect_auth_db().await else {
-            eprintln!("skipping (no AUTH_DB_URL)");
+            eprintln!("skipping (no test database; set PG_TEST_URL)");
             return;
         };
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
@@ -3670,7 +3670,7 @@ mod tests {
     #[compio::test]
     async fn revocation_cache_negative_entry_serves_without_db_within_ttl() {
         let Some(db) = connect_auth_db().await else {
-            eprintln!("skipping (no AUTH_DB_URL)");
+            eprintln!("skipping (no test database; set PG_TEST_URL)");
             return;
         };
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
@@ -3773,7 +3773,7 @@ mod tests {
     #[compio::test]
     async fn revocation_cache_same_node_bust_takes_effect_immediately() {
         let Some(db) = connect_auth_db().await else {
-            eprintln!("skipping (no AUTH_DB_URL)");
+            eprintln!("skipping (no test database; set PG_TEST_URL)");
             return;
         };
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
@@ -3979,7 +3979,7 @@ mod tests {
     #[ntex::test]
     async fn revocation_keyed_on_pws_rejects_raw_op_bearer() {
         let Some(db) = connect_auth_db().await else {
-            eprintln!("skipping (no AUTH_DB_URL)");
+            eprintln!("skipping (no test database; set PG_TEST_URL)");
             return;
         };
 

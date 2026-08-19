@@ -4,8 +4,9 @@
 //! the advisory lock (#2), runs `SpendEngine::evaluate_all`, and on a transition
 //! writes the enriched `SpendStateChange` audit row (#8). No shims.
 //!
-//! Gated on `CONTROL_TEST_DB`; silent skip otherwise. The DB must have changeset
-//! 0039 applied.
+//! Gated on a configured test database
+//! (`zeroship_core::config::test_database_url_opt`); silent skip otherwise.
+//! The DB must have changeset 0039 applied.
 
 mod common;
 

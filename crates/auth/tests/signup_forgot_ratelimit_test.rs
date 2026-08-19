@@ -139,7 +139,7 @@ fn unique_loopback() -> IpAddr {
 #[allow(clippy::future_not_send)]
 async fn signup_native_return_to_redirects_to_login_return_to() {
     let Some((dsn, client)) = pg().await else {
-        zeroship_test_support::skip("skipping signup_forgot_ratelimit_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping signup_forgot_ratelimit_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -213,7 +213,7 @@ async fn signup_native_return_to_redirects_to_login_return_to() {
 #[allow(clippy::future_not_send)]
 async fn signup_replaces_open_redirect_return_to_at_intake() {
     let Some((dsn, client)) = pg().await else {
-        zeroship_test_support::skip("skipping signup_forgot_ratelimit_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping signup_forgot_ratelimit_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -267,7 +267,7 @@ async fn signup_replaces_open_redirect_return_to_at_intake() {
 
 #[allow(clippy::future_not_send)]
 async fn pg() -> Option<(String, compio_postgres::Client)> {
-    let dsn = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)?;
+    let dsn = zeroship_core::config::test_database_url_opt()?;
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
@@ -282,7 +282,7 @@ async fn pg() -> Option<(String, compio_postgres::Client)> {
 #[allow(clippy::future_not_send)]
 async fn signup_post_throttles_after_ip_bucket_capacity() {
     let Some((dsn, client)) = pg().await else {
-        zeroship_test_support::skip("skipping signup_forgot_ratelimit_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping signup_forgot_ratelimit_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -388,7 +388,7 @@ async fn signup_post_throttles_after_ip_bucket_capacity() {
 #[allow(clippy::future_not_send)]
 async fn signup_non_duplicate_create_error_renders_error_page() {
     let Some((dsn, client)) = pg().await else {
-        zeroship_test_support::skip("skipping signup_forgot_ratelimit_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping signup_forgot_ratelimit_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 
@@ -503,7 +503,7 @@ async fn signup_non_duplicate_create_error_renders_error_page() {
 #[allow(clippy::future_not_send)]
 async fn forgot_post_throttles_after_email_bucket_capacity() {
     let Some((dsn, client)) = pg().await else {
-        zeroship_test_support::skip("skipping signup_forgot_ratelimit_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping signup_forgot_ratelimit_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
 

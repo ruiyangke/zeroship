@@ -18,13 +18,12 @@ use zeroship_auth::store::sessions as session_store;
 const ISSUER: &str = "https://auth.zeroship.test/oauth2";
 
 fn db_url() -> Option<String> {
-    zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)
-        .or_else(|| zeroship_core::test_env!("CONTROL_TEST_DB"))
+    zeroship_core::config::test_database_url_opt()
 }
 
 async fn open_conn() -> Option<Client> {
     let Some(dsn) = db_url() else {
-        zeroship_test_support::skip("[oidc_backchannel_logout_test] skip (AUTH_DB_URL or CONTROL_TEST_DB unset)");
+        zeroship_test_support::skip("[oidc_backchannel_logout_test] skip (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return None;
     };
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect test DB");

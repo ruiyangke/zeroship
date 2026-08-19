@@ -17,7 +17,7 @@
 //! (2) returns `InvalidCredentials` (the correct password verifies against a
 //! never-locked row).
 //!
-//! Env-gated on `AUTH_DB_URL` (same gate as the sibling DB tests): the failure
+//! Env-gated on the test database (same gate as the sibling DB tests): the failure
 //! counter is durable PG state, so the live path needs a real database.
 
 use std::sync::Arc;
@@ -41,8 +41,8 @@ const BAD_PW: &str = "definitely the wrong password here";
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn consecutive_failures_lock_account_then_success_resets() {
-    let Some(db_url) = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) else {
-        zeroship_test_support::skip("skipping account_lockout_test (no AUTH_DB_URL)");
+    let Some(db_url) = zeroship_core::config::test_database_url_opt() else {
+        zeroship_test_support::skip("skipping account_lockout_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
     let (pg_client, pg_connection) = connect(&db_url, NoTls).await.expect("connect pg");
@@ -160,10 +160,10 @@ async fn consecutive_failures_lock_account_then_success_resets() {
 }
 
 /// Connect + spawn the PG driver, returning a shared client. Returns `None`
-/// (and prints a skip note) when `AUTH_DB_URL` is unset.
+/// (and prints a skip note) when no test database is configured.
 async fn connect_pg(label: &'static str) -> Option<Arc<compio_postgres::Client>> {
-    let Some(db_url) = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness) else {
-        zeroship_test_support::skip(&format!("skipping {label} (no AUTH_DB_URL)"));
+    let Some(db_url) = zeroship_core::config::test_database_url_opt() else {
+        zeroship_test_support::skip(&format!("skipping {label} (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))"));
         return None;
     };
     let (pg_client, pg_connection) = connect(&db_url, NoTls).await.expect("connect pg");

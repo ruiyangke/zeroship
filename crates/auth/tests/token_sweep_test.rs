@@ -1,4 +1,4 @@
-//! Token-sweep cron — live PG. Skip when `AUTH_DB_URL` unset.
+//! Token-sweep cron — live PG. Skip when no test database is configured.
 //!
 //! Drives [`token_sweep::tick`] directly so the sweep is observable inside
 //! a single test run (the real cron sleeps 1 h between ticks).
@@ -13,7 +13,7 @@ static TOKEN_SWEEP_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[allow(clippy::future_not_send)]
 async fn pg() -> Option<(compio_postgres::Client, String)> {
-    let dsn = zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)?;
+    let dsn = zeroship_core::config::test_database_url_opt()?;
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
@@ -32,7 +32,7 @@ async fn pg() -> Option<(compio_postgres::Client, String)> {
 #[compio::test]
 async fn token_sweep_deletes_expired_rows_after_grace_and_keeps_fresh_rows() {
     let Some((client, db_url)) = pg().await else {
-        zeroship_test_support::skip("skipping token_sweep_test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping token_sweep_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
     let _guard = TOKEN_SWEEP_TEST_LOCK.lock().expect("token sweep test lock");
@@ -225,13 +225,13 @@ async fn cleanup(
 /// SEC-3: the token sweep also reaps idle `zeroship.rate_limits` rows (and the
 /// relay dedup sentinels that share the table) so a forged-IP flood cannot
 /// leave permanent rows. A bucket idle past the 24h grace window is deleted; a
-/// freshly-touched one survives. Live PG — skip when `AUTH_DB_URL` unset.
+/// freshly-touched one survives. Live PG — skip when no test database is configured.
 // See the allow on `token_sweep_deletes_expired_rows_after_grace_and_keeps_fresh_rows` above.
 #[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn token_sweep_reaps_idle_rate_limit_buckets_and_keeps_fresh() {
     let Some((client, db_url)) = pg().await else {
-        zeroship_test_support::skip("skipping token_sweep rate_limits test (no AUTH_DB_URL)");
+        zeroship_test_support::skip("skipping token_sweep rate_limits test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
     let _guard = TOKEN_SWEEP_TEST_LOCK.lock().expect("token sweep test lock");

@@ -79,8 +79,8 @@ async fn pg_connect(dsn: &str) -> Client {
 }
 
 fn db_url() -> String {
-    zeroship_core::declared_env!(external, "AUTH_DB_URL", zeroship_core::config::TestHarness)
-        .expect("AUTH_DB_URL is required for reset_hash_gate_test")
+    zeroship_core::config::test_database_url_opt()
+        .expect("a test database is required for reset_hash_gate_test (set PG_TEST_URL or run tests/provision_test_backends.sh)")
 }
 
 /// Build the `/reset` service and harvest a CSRF pair from the GET render.

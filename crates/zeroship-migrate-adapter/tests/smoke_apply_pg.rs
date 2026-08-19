@@ -13,8 +13,9 @@
 //!   4. assert the table, the added column, AND the journal row all exist via an
 //!      INDEPENDENT query over the same seam.
 //!
-//! GATED behind `ZERO_MIGRATE_TEST_PG_URL` (a DSN on :5440): the test skips cleanly
-//! when unset, so DB-free CI stays green. It runs in its OWN meta + project schema
+//! GATED behind a test database (a DSN on :5440; set `PG_TEST_URL` or run
+//! `tests/provision_test_backends.sh`): the test skips cleanly when unset, so
+//! DB-free CI stays green. It runs in its OWN meta + project schema
 //! (suffixed by a unique token) so the shared DB stays clean and re-runs are
 //! independent.
 
@@ -108,7 +109,7 @@ fn cfg_for(tok: &str) -> (ExecutorConfig, EffectivePolicy) {
 
 /// The env var gating the live-PG smoke test. Mirrors the standalone's suite gate.
 fn pg_url() -> Option<String> {
-    zeroship_core::test_env!("ZERO_MIGRATE_TEST_PG_URL").filter(|s| !s.trim().is_empty())
+    zeroship_core::config::test_database_url_opt()
 }
 
 async fn ensure_project_schema(session: &CompioPgSession, cfg: &ExecutorConfig) {
@@ -175,8 +176,8 @@ async fn column_exists(session: &CompioPgSession, schema: &str, table: &str, col
 async fn ir_envelope_lowers_and_applies_over_native_compio_seam() {
     let Some(url) = pg_url() else {
         zeroship_test_support::skip(
-            "skipping Phase F smoke: ZERO_MIGRATE_TEST_PG_URL unset \
-             (set it to a DSN on :5440 to run)"
+            "skipping Phase F smoke: no test database (set PG_TEST_URL to a DSN \
+             on :5440, or run tests/provision_test_backends.sh)"
         );
         return;
     };

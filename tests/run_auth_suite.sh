@@ -4,8 +4,9 @@
 #
 # WHY THIS EXISTS
 # ---------------
-# The auth tests resolve their database from AUTH_DB_URL / PG_TEST_URL and
-# return early when neither is set. Cargo captures test output by default, so a
+# The auth tests resolve their database from the generated test overlay
+# (deploy/ops/zeroship.test.toml, or PG_TEST_URL overriding it) and return
+# early when neither supplies one. Cargo captures test output by default, so a
 # skipped test is indistinguishable from a passing one: `cargo test -p
 # zeroship-auth` reports success while test bodies do nothing at all. A suite
 # that passes because it never ran is worse than a red one, because it is
@@ -40,7 +41,10 @@
 #   instead of compose's `logical`. The address was right and the provenance was
 #   wrong, which is the worse of the two failures: it read as though something
 #   maintained that server.
-#   PG_HOST (localhost)  PG_PORT (5440)  PG_USER (postgres)  PG_PASS (zeroship)
+#   PG_HOST PG_PORT PG_USER PG_PASS - INPUTS to
+#     tests/provision_test_backends.sh, which writes the coordinates into
+#     deploy/ops/zeroship.test.toml; this script reads them back from there
+#     rather than carrying a second copy of the defaults.
 #   TEST_DB (per run: zeroship_auth_test_<pid>_<nanos>, dropped on exit)
 #   PSQL    (auto-detected; override with an explicit psql path)
 #   SKIP_DB_RECREATE (unset) - reuse a TEST_DB you named; needs one
@@ -62,10 +66,13 @@ cd "$ROOT"
 # `tests/lib_scratch_db_selftest.sh` covers both directions.
 . "$ROOT/tests/lib/scratch_db.sh"
 
-PG_HOST="${PG_HOST:-localhost}"
-PG_PORT="${PG_PORT:-5440}"
-PG_USER="${PG_USER:-postgres}"
-PG_PASS="${PG_PASS:-zeroship}"
+# The server's coordinates come from the generated overlay, not from four
+# `${PG_x:-...}` lines here and four more in run_billing_suite.sh. See that
+# file's header; `tests/provision_test_backends.sh` writes it, and the PG_*
+# names are its INPUTS, so setting one still points a run wherever you like.
+. "$ROOT/tests/lib/test_config.sh"
+zs_test_config_load "$ROOT" || exit 2
+
 TEST_THREADS="${TEST_THREADS:-1}"
 
 zs_scratch_db_resolve zeroship_auth_test || exit $?
@@ -82,8 +89,17 @@ if [ -z "$PSQL" ]; then
 fi
 [ -n "$PSQL" ] && [ -x "$PSQL" ] || { echo "FATAL: no psql found; set \$PSQL" >&2; exit 2; }
 
+# ONE name for the test database, and it is the one the overlay's override tier
+# already uses. This block exported AUTH_DB_URL and PG_TEST_URL, and further
+# down it exported GATEWAY_ANCHORS_DB_URL and GATEWAY_POOL_SMOKE_URL as well -
+# four names for one DSN, each read by one crate, so a crate whose name nobody
+# remembered to export ran against nothing and counted as passing. That is not
+# hypothetical: GATEWAY_ANCHORS_DB_URL was set NOWHERE in the repository, and
+# thirteen tests behind it announced skips for months.
+#
+# The scratch database name is per run and cannot live in the shared file, so
+# PG_TEST_URL is exactly the override tier the overlay is designed for.
 DSN="postgres://${PG_USER}:${PG_PASS}@${PG_HOST}:${PG_PORT}/${TEST_DB}"
-export AUTH_DB_URL="$DSN"
 export PG_TEST_URL="$DSN"
 
 run_psql() { PGPASSWORD="$PG_PASS" "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" "$@"; }
@@ -157,7 +173,7 @@ status=0
 cargo test -p zeroship-auth --no-fail-fast -- --test-threads "$TEST_THREADS" --nocapture 2>&1 | tee "$LOG" || status=1
 
 echo "------------------------------------------------------------------"
-# Every other AUTH_DB_URL-gated binary in the workspace. These self-skip exactly
+# Every other database-gated binary in the workspace. These self-skip exactly
 # like the auth crate's, and until they were listed here nothing ever ran them
 # with a database: `cargo test --workspace` provisions none, and no other gate
 # names them. Measured on zeroship-authz before adding it - "ok. 1 passed" in
@@ -166,15 +182,19 @@ echo "------------------------------------------------------------------"
 #
 # `oidc_rp_e2e` used to be excluded BY NAME here, on the stated ground that it
 # "also wants CONTROL_TEST_DB, which this script does not provision, so it would
-# skip". That reason was wrong, and the file says so: `db_url()` at
-# crates/gateway/tests/oidc_rp_e2e.rs:47 is
-# `test_env!("AUTH_DB_URL").or_else(|| test_env!("CONTROL_TEST_DB"))` - EITHER
-# variable satisfies it, and this script exports the first one. Measured
-# 2026-08-16 with CONTROL_TEST_DB explicitly unset and only AUTH_DB_URL set:
-# "3 passed in 6.73s", against the "3 passed in 0.00s" the same target reports
-# with neither. The exclusion cost real coverage for a provisioning gap that did
-# not exist, and this is the branch's strongest new assertion (the projected
-# identity check) - which no gate ran.
+# skip". That reason was wrong even then - its `db_url()` read
+# `test_env!("AUTH_DB_URL").or_else(|| test_env!("CONTROL_TEST_DB"))`, so EITHER
+# variable satisfied it and this script exported the first. Measured 2026-08-16
+# with CONTROL_TEST_DB explicitly unset and only AUTH_DB_URL set: "3 passed in
+# 6.73s", against the "3 passed in 0.00s" the same target reports with neither.
+# The exclusion cost real coverage for a provisioning gap that did not exist.
+#
+# The two-variable `or_else` is gone: `db_url()` at
+# crates/gateway/tests/oidc_rp_e2e.rs:46 is now
+# `zeroship_core::config::test_database_url_opt()`, one source for every target
+# in the workspace. The measurement above is why the collapse is safe here - the
+# target was already satisfied by whichever name happened to be exported, which
+# is another way of saying the two names never meant different things.
 #
 # It is in the list below now. It needs no allowlist entry and gets none: it
 # announces through `zeroship_test_support::skip`, so if it ever stops seeing a
@@ -200,21 +220,20 @@ echo "------------------------------------------------------------------"
 # at_hash on a ROTATED id_token while holding the access token; see
 # crates/gateway/src/auth_token.rs).
 #
-# So the variable is exported below and both binaries are in the list. This is
-# the SAME database the auth tests use: these tests seed their own users and
-# key off per-test UUIDs, and TEST_THREADS serializes the run.
-export GATEWAY_ANCHORS_DB_URL="$DSN"
+# So both binaries are in the list. This is the SAME database the auth tests
+# use: these tests seed their own users and key off per-test UUIDs, and
+# TEST_THREADS serializes the run.
+#
+# GATEWAY_ANCHORS_DB_URL and GATEWAY_POOL_SMOKE_URL were exported here, and
+# there is nothing left to export - both now read the single test DSN above.
+# Their history is the argument for that collapse rather than a footnote to it:
+# GATEWAY_POOL_SMOKE_URL was set NOWHERE in this repository outside its own
+# test file and one docs line, so `crates/gateway/tests/db_pool_smoke.rs`
+# announced a skip on every run of `cargo test --workspace` and its one test had
+# never executed. A private name for a value that already exists is a test that
+# does not run, and it looks exactly like a test that passes.
 
-# GATEWAY_POOL_SMOKE_URL was set NOWHERE in this repo - the only occurrence of
-# the name outside its own test file was docs/reference/env-vars.md:608, so
-# `crates/gateway/tests/db_pool_smoke.rs` announced a skip on every run of
-# `cargo test --workspace` and its one test had never executed. The target needs
-# no schema at all ("any reachable Postgres works", db_pool_smoke.rs:6 - it runs
-# `SELECT $1::int4`), so this script's database satisfies it as-is and there is
-# nothing to provision beyond naming the variable.
-export GATEWAY_POOL_SMOKE_URL="$DSN"
-
-echo "==> Other AUTH_DB_URL-gated binaries (authn, authz, mailer, gateway)"
+echo "==> Other database-gated binaries (authn, authz, mailer, gateway)"
 # `zeroship-authn` is here because it was in NO gate at all. Its one target,
 # crates/authn/tests/service_replay_pg_test.rs, gates all six of its tests on
 # AUTH_DB_URL and announces a skip for each; the string "zeroship-authn"

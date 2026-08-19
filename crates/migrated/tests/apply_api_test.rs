@@ -26,10 +26,7 @@ const DEFAULT_DSN: &str =
 const TEST_POLICY_SEAL_KEY: &[u8] = b"migrated integration policy seal key";
 
 fn dsn() -> String {
-    zeroship_core::test_env!("MIGRATED_TEST_DB")
-        .or_else(|| zeroship_core::test_env!("CONTROL_TEST_DB"))
-        .or_else(|| zeroship_core::test_env!("PG_TEST_URL"))
-        .unwrap_or_else(|| DEFAULT_DSN.to_string())
+    zeroship_core::config::test_database_url_opt().unwrap_or_else(|| DEFAULT_DSN.to_string())
 }
 
 fn tmpdir(label: &str) -> PathBuf {

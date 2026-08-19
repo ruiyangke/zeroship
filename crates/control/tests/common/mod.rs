@@ -57,7 +57,7 @@ pub async fn drain_pg() {
 }
 
 pub fn require_control_db() -> String {
-    zeroship_core::test_env!("CONTROL_TEST_DB")
+    zeroship_core::config::test_database_url_opt()
         .filter(|u| !u.trim().is_empty())
         .unwrap_or_else(|| {
             "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()

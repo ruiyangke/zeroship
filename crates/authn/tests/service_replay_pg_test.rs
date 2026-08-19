@@ -12,7 +12,7 @@
 //! "exactly one succeeded" is equally consistent with a harness that never
 //! interleaved, which would make the whole test vacuous.
 //!
-//! Announces a skip when `AUTH_DB_URL` is unset, and that skip is a FAILURE in
+//! Announces a skip when there is no test database, and that skip is a FAILURE in
 //! the gate that provisions the database: `tests/run_auth_suite.sh` exports the
 //! DSN and then fails on any announcement not named in its allowlist. This is
 //! not one of them. There is no environment variable that changes the verdict -
@@ -148,7 +148,7 @@ fn fixture_grant_sql() -> String {
 const FIXTURE_LOCK: i64 = 7_523_000_001;
 
 fn db_url() -> Option<String> {
-    zeroship_core::test_env!("AUTH_DB_URL")
+    zeroship_core::config::test_database_url_opt()
 }
 
 /// Establish the replay table exactly once, whoever gets there first.
@@ -317,7 +317,7 @@ async fn race(replicas: &TwoReplicas) -> usize {
 #[compio::test]
 async fn two_replicas_racing_one_assertion_admit_exactly_one() {
     let Some(url) = db_url() else {
-        zeroship_test_support::skip("AUTH_DB_URL unset (Postgres jti store)");
+        zeroship_test_support::skip("no test database (Postgres jti store; set PG_TEST_URL)");
         return;
     };
     let replicas = two_replicas(&url, |client| {
@@ -335,7 +335,7 @@ async fn two_replicas_racing_one_assertion_admit_exactly_one() {
 #[compio::test]
 async fn a_read_then_write_store_loses_the_same_race() {
     let Some(url) = db_url() else {
-        zeroship_test_support::skip("AUTH_DB_URL unset (Postgres jti store)");
+        zeroship_test_support::skip("no test database (Postgres jti store; set PG_TEST_URL)");
         return;
     };
     // The negative control. Same two connections, same one assertion, the only
@@ -357,7 +357,7 @@ async fn a_read_then_write_store_loses_the_same_race() {
 #[compio::test]
 async fn a_live_claim_blocks_a_replay_and_an_expired_one_does_not() {
     let Some(url) = db_url() else {
-        zeroship_test_support::skip("AUTH_DB_URL unset (Postgres jti store)");
+        zeroship_test_support::skip("no test database (Postgres jti store; set PG_TEST_URL)");
         return;
     };
     let client = connect(&url).await;
@@ -397,7 +397,7 @@ async fn a_live_claim_blocks_a_replay_and_an_expired_one_does_not() {
 #[compio::test]
 async fn a_verified_assertion_cannot_be_replayed_at_another_replica() {
     let Some(url) = db_url() else {
-        zeroship_test_support::skip("AUTH_DB_URL unset (Postgres jti store)");
+        zeroship_test_support::skip("no test database (Postgres jti store; set PG_TEST_URL)");
         return;
     };
     // Sequential, and across replicas: the second verifier has never seen this
@@ -419,7 +419,7 @@ async fn a_verified_assertion_cannot_be_replayed_at_another_replica() {
 #[compio::test]
 async fn every_granted_role_can_run_the_stores_own_statements() {
     let Some(url) = db_url() else {
-        zeroship_test_support::skip("AUTH_DB_URL unset (Postgres jti store)");
+        zeroship_test_support::skip("no test database (Postgres jti store; set PG_TEST_URL)");
         return;
     };
     // The rest of this file connects as the privileged test DSN, so it can
@@ -456,7 +456,7 @@ async fn every_granted_role_can_run_the_stores_own_statements() {
 #[compio::test]
 async fn a_role_without_the_grant_fails_closed_rather_than_admitting_the_assertion() {
     let Some(url) = db_url() else {
-        zeroship_test_support::skip("AUTH_DB_URL unset (Postgres jti store)");
+        zeroship_test_support::skip("no test database (Postgres jti store; set PG_TEST_URL)");
         return;
     };
     // The fail-closed arm was covered only in `zeroship-core`, against a store
