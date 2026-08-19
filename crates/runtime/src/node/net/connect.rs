@@ -8,7 +8,7 @@ use futures::channel::mpsc;
 
 use crate::state::{OpError, SharedState};
 use crate::transport::byte_pump::SocketStream;
-use crate::transport::egress::{EgressRefusal, EgressResolver, PreDns};
+use crate::transport::egress::EgressRefusal;
 
 use super::caps::release_socket_slot;
 #[cfg(feature = "runtime_tls")]
@@ -20,7 +20,6 @@ use super::registry::{
 };
 
 pub(super) const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy)]
 pub(super) enum ConnectKind {
@@ -76,15 +75,16 @@ impl ConnectKind {
     }
 }
 
-/// A connect that cleared PHASE 1 of the egress evaluator.
+/// A connect that cleared the checks a `connect()` call can answer
+/// synchronously: handler kind, port range, socket state, and whether the app
+/// holds `node:net` at all.
 ///
-/// `plan` carries phase 1's conclusion forward so phase 3 does not re-derive it.
-/// Re-deriving `name_accepted` from the resolved address would be a reverse
-/// lookup, which whoever owns the address controls.
+/// It carries NO policy conclusion. The egress verdict is
+/// `transport::egress::evaluate`'s to reach, in one place, once, on the connect
+/// task - see INVARIANT ONE-COMPOSITION.
 pub(super) struct AuthorizedConnect {
     host: String,
     port: u16,
-    plan: PreDns,
 }
 
 pub(super) fn authorize_connect(
@@ -110,7 +110,6 @@ pub(super) fn authorize_connect(
         validate_tls_policy(reject_unauthorized)?;
     }
 
-    let plan: PreDns;
     {
         let s = state.borrow();
         let socket = s
@@ -127,34 +126,18 @@ pub(super) fn authorize_connect(
         if !s.net_policy.module_allowed() {
             return Err(capability_violation(kind.capability_denied()));
         }
-        // PHASE 1 - synchronous, and it performs NO lookup. Running it here
-        // rather than inside the resolve task is the DNS gate: a name this
-        // refuses never reaches a nameserver.
-        plan = match crate::transport::egress::pre_dns(&s.net_policy, &host, port) {
-            Ok(plan) => plan,
-            Err(EgressRefusal::ModuleDenied) => {
-                return Err(capability_violation(kind.capability_denied()));
-            }
-            Err(refusal) => {
-                return Err(capability_violation(kind.connect_denied(
-                    &host,
-                    port,
-                    &refusal.to_string(),
-                )));
-            }
-        };
 
-        // PHASE 3 is deliberately NOT run here, not even for an IP literal
-        // whose answer set is already known. It has to stay in one place: the
-        // floor must run before any creator rule is consulted, and splitting
-        // the address phase across a sync and an async site is how that
-        // ordering gets quietly reversed later. The cost is that an IP literal
-        // refused by policy now reports through the socket's `error` event
-        // rather than throwing from `connect()`, which is also what Node does
-        // for an address it cannot reach.
+        // No phase of the egress evaluator runs here - not phase 1 either,
+        // even though it is synchronous and would let a name refusal throw
+        // straight out of `connect()`. Running it here as well as on the
+        // connect task would put the DNS gate in two places, and a gate with
+        // two implementations is a gate one of whose implementations is
+        // untested. The cost is that every policy refusal now reports through
+        // the socket's `error` event, which is also what Node does for an
+        // address it cannot reach.
     }
 
-    Ok(AuthorizedConnect { host, port, plan })
+    Ok(AuthorizedConnect { host, port })
 }
 
 #[cfg(feature = "runtime_tls")]
@@ -415,131 +398,57 @@ async fn connect_tcp(
     Some((addr, tcp))
 }
 
+/// The whole egress decision for this connect, in ONE call.
+///
+/// Phases 1, 2 and 3 are `transport::egress::evaluate`'s, including the DNS
+/// gate and the platform floor. Nothing here re-derives any of them; this
+/// function borrows the policy and the resolver, awaits the verdict, and turns
+/// a refusal into a socket `error` event.
 async fn resolve_authorized_target(
     state: &SharedState,
     socket_id: u32,
     target: &AuthorizedConnect,
 ) -> Option<SocketAddr> {
-    let port = target.port;
-
-    // PHASE 2. An IP literal is its own answer set and is NEVER resolved
-    // (INVARIANT ONE-RESOLUTION: zero queries for one), but it still goes
-    // through the address phase below - the floor and the creator's rules apply
-    // to an address the app named directly exactly as they do to a resolved one.
-    let (name_accepted, answer) = match target.plan {
-        PreDns::Literal(ip) => (false, vec![SocketAddr::new(ip, port)]),
-        PreDns::Resolve { name_accepted } => (
-            name_accepted,
-            match resolve_once(state, socket_id, &target.host, port).await {
-                Some(answer) => answer,
-                None => return None,
-            },
-        ),
-    };
-
-    filter_and_pick(state, socket_id, port, name_accepted, answer)
-}
-
-/// PHASE 2 proper: the single lookup, off the V8 thread and bounded.
-async fn resolve_once(
-    state: &SharedState,
-    socket_id: u32,
-    host: &str,
-    port: u16,
-) -> Option<Vec<SocketAddr>> {
-    let resolve_host = host.to_string();
-    // PHASE 2 - the single resolution. Everything downstream consumes THIS
-    // answer; an implementation that resolves again has taken a wrong turn.
-    let resolved = compio::time::timeout(
-        resolve_timeout(),
-        compio::runtime::spawn_blocking(move || {
-            #[cfg(debug_assertions)]
-            if zeroship_core::test_env!("ZEROSHIP_NET_TEST_DNS_HANG_HOST").as_deref()
-                == Some(resolve_host.as_str())
-            {
-                let ms = zeroship_core::test_env!("ZEROSHIP_NET_TEST_DNS_HANG_MS")
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(250);
-                std::thread::sleep(Duration::from_millis(ms));
-            }
-            crate::transport::egress::SystemResolver.resolve(&resolve_host, port)
-        }),
-    )
-    .await;
-    let answer = match resolved {
-        Ok(Ok(Ok(answer))) => answer,
-        Ok(Ok(Err(e))) => {
-            push_error_and_close(state, socket_id, format!("SSRF: {e}"), "ERR_NET_SSRF");
-            return None;
-        }
-        Ok(Err(_join)) => {
-            push_error_and_close(
-                state,
-                socket_id,
-                "DNS resolve task failed".to_string(),
-                "ERR_NET_DNS",
-            );
-            return None;
-        }
-        Err(_) => {
-            push_error_and_close(
-                state,
-                socket_id,
-                "DNS resolve timed out".to_string(),
-                "ERR_NET_DNS_TIMEOUT",
-            );
-            return None;
-        }
-    };
-    Some(answer)
-}
-
-/// PHASE 3 - the platform floor first, then the creator's rules, applied to
-/// EVERY member of the answer. The floor runs inside `filter_answer` and no
-/// verdict here can move it (INVARIANT GRANTS-NARROW).
-fn filter_and_pick(
-    state: &SharedState,
-    socket_id: u32,
-    port: u16,
-    name_accepted: bool,
-    answer: Vec<SocketAddr>,
-) -> Option<SocketAddr> {
-    let survivors = {
+    // The policy and the resolver are lifted out of the RefCell BEFORE the
+    // await: a `Ref` held across it would panic the next `borrow_mut` on this
+    // thread, and the whole point of one composition is that the await is
+    // inside it.
+    let (policy, resolver) = {
         let s = state.borrow();
-        crate::transport::egress::filter_answer(&s.net_policy, port, name_accepted, answer)
+        (s.net_policy.clone(), std::rc::Rc::clone(&s.egress_resolver))
     };
-    let addr = match survivors {
-        Ok(kept) => kept[0],
+
+    match crate::transport::egress::evaluate(&policy, &target.host, target.port, &*resolver).await {
+        // `evaluate` returns EVERY survivor in the resolver's order; taking the
+        // first is happy-eyeballs preference, not a filter.
+        Ok(kept) => kept.first().copied(),
         Err(refusal) => {
-            // The floor and the creator's own rules get DIFFERENT codes. They
-            // are different refusals: one the creator cannot change and one
-            // they wrote, and 5.7 asks for exactly this distinction because a
-            // v4-only range grant dropping every AAAA answer otherwise looks
-            // identical to a broken name.
-            let floor_emptied = matches!(
-                &refusal,
-                EgressRefusal::NoAddressSurvived { floor, .. } if !floor.is_empty()
-            );
-            let (code, prefix) = if floor_emptied {
-                ("ERR_NET_SSRF", "SSRF")
-            } else {
-                ("ERR_NET_EGRESS_DENIED", "egress")
-            };
-            push_error_and_close(state, socket_id, format!("{prefix}: {refusal}"), code);
-            return None;
+            report_refusal(state, socket_id, &refusal);
+            None
         }
-    };
-    Some(addr)
+    }
 }
 
-fn resolve_timeout() -> Duration {
-    zeroship_core::declared_env!(
-        platform,
-        "ZEROSHIP_NET_RESOLVE_TIMEOUT_MS",
-        crate::RuntimeConsumer
-    )
-    .and_then(|s| s.parse::<u64>().ok())
-    .filter(|ms| *ms > 0)
-    .map(Duration::from_millis)
-    .unwrap_or(RESOLVE_TIMEOUT)
+/// Render a refusal onto the socket.
+///
+/// The floor, the creator's own rules and a broken lookup get DIFFERENT codes.
+/// They are different refusals - one the creator cannot change, one they wrote,
+/// one that is not policy at all - and 5.7 asks for exactly this distinction
+/// because a v4-only range grant dropping every AAAA answer otherwise looks
+/// identical to a broken name.
+fn report_refusal(state: &SharedState, socket_id: u32, refusal: &EgressRefusal) {
+    if let EgressRefusal::ResolveFailed(failure) = refusal {
+        push_error_and_close(state, socket_id, failure.message.clone(), failure.code);
+        return;
+    }
+    let floor_emptied = matches!(
+        refusal,
+        EgressRefusal::NoAddressSurvived { floor, .. } if !floor.is_empty()
+    );
+    let (code, prefix) = if floor_emptied {
+        ("ERR_NET_SSRF", "SSRF")
+    } else {
+        ("ERR_NET_EGRESS_DENIED", "egress")
+    };
+    push_error_and_close(state, socket_id, format!("{prefix}: {refusal}"), code);
 }

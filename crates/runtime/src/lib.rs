@@ -111,7 +111,10 @@ zeroship_core::declare_env_consumer!(
 // Back-compat re-exports for the SSRF helper (was `crate::fetch`) and the
 // kernel HTTP bridge (was `crate::http`). Both moved under `transport/`.
 pub use transport::handler as http;
-pub use transport::egress::{EgressRefusal, EgressResolver, SystemResolver};
+pub use transport::egress::{
+    EgressRefusal, EgressResolver, ResolveFailure, ResolveFuture, SystemResolver,
+    gate_opened_resolutions,
+};
 pub use transport::net_policy::{Destination, EgressRule, EgressRules, NetPolicy, Verdict};
 pub use transport::ssrf as fetch;
 
