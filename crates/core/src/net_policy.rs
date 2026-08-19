@@ -312,7 +312,7 @@ impl EgressRules {
     }
 
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.rules.is_empty()
     }
 
