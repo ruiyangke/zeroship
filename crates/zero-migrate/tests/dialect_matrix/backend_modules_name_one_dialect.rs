@@ -36,11 +36,23 @@
 /// spelling THROUGH a core helper that hard-codes a dialect, because the offending
 /// literal then lives in core and no grep of the backend module can see it.
 ///
-/// That is not hypothetical, and it is TRUE OF THIS TREE while this test passes.
-/// `render::dml::quote_ident` and `render::dml::quote_ident_checked` both pin
-/// `SqlDialect::Postgres` (and `quote_bare_ident` delegates to the first), so the
-/// identifiers `backends/sqlite.rs` emits are quoted by the POSTGRESQL renderer. It
-/// is correct today only because both vendors spell an identifier `"x"`.
+/// That is not hypothetical. When this test was written it was TRUE OF THIS TREE
+/// while the test passed: `render::dml::quote_ident` and `quote_ident_checked` both
+/// pinned `SqlDialect::Postgres` (and `quote_bare_ident` delegated to the first), so
+/// every identifier `backends/sqlite.rs` emitted was quoted by the POSTGRESQL
+/// renderer - correct only because both vendors spell an identifier `"x"`.
+///
+/// That instance is FIXED. `backends/sqlite.rs` now routes through
+/// `SqliteDmlRenderer::quote_ident`, proven by neutering the PostgreSQL method: the
+/// SQLite-only `sqlite_engine` binary went from 148 passed / 7 failed to 155 / 0 over
+/// the same 155 tests, so the dependency is gone rather than merely re-covered.
+///
+/// AN EQUIVALENT INSTANCE SURVIVES ONE HOP AWAY, and this test is equally blind to
+/// it: `render::lower::render_sqlite_trigger_op` calls the PostgreSQL-pinned
+/// `dml::quote_bare_ident` six times, and `backends/sqlite.rs` delegates its trigger
+/// rendering there. So the example below is now a WORKED one rather than a live
+/// defect, and the class it illustrates is still present in the tree. Do not read the
+/// fix as evidence the class is gone.
 ///
 /// So a green run here means "no backend module NAMES another vendor". It does NOT
 /// mean the backend boundary is clean, and a reader who takes it for that has been
