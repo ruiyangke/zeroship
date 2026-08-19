@@ -32,10 +32,28 @@
 //!
 //! Transport
 //! ---------
-//! The pool opens its connections with [`NoTls`], so it cannot satisfy a
-//! connection string that requires encryption. Rather than let that surface
-//! as a server-dependent handshake error several hundred milliseconds into a
-//! retry loop, [`Pool::connect_with_config`] rejects such a URL outright.
+//! What the pool opens depends on `sslmode` and on whether the crate was built
+//! with the `tls` feature:
+//!
+//! * `sslmode=require` (with `tls`) - a rustls connection, verified against the
+//!   trust anchors the URL names in `sslrootcert` (default: the OS store). See
+//!   [`crate::tls_rustls`].
+//! * `sslmode=require` (without `tls`) - rejected outright by
+//!   [`Pool::connect_with_config`], rather than surfacing as a
+//!   server-dependent handshake error several hundred milliseconds into a retry
+//!   loop.
+//! * `sslmode=prefer` (the default) and `sslmode=disable` - [`NoTls`],
+//!   i.e. plaintext.
+//!
+//! That last line is the surprising one, so: `prefer` does *not* opt into
+//! encryption here even when TLS is compiled in. This driver has no
+//! reconnect-in-plaintext fallback for a handshake that fails *after* the
+//! server accepted `SSLRequest` (`connect_tls.rs` returns the error), which
+//! libpq does have. Handing `prefer` a verifying connector would therefore
+//! convert every deployment whose server presents an untrusted certificate from
+//! "works, in plaintext" to "fails", silently and at the worst moment. `prefer`
+//! keeps its current, honest meaning - plaintext - and encryption is something
+//! a URL asks for with `require`.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -223,27 +241,26 @@ fn pool_error(msg: impl Into<String>) -> Error {
 
 /// Reject a connection string whose TLS settings this pool can never satisfy.
 ///
-/// The pool builds its connections with [`NoTls`], so `sslmode=require` and
-/// `sslnegotiation=direct` have no way to succeed against any server. The
-/// driver already fails closed on both - `connect_tls` errors rather than
-/// falling back to plaintext, so nothing is silently downgraded - but the
-/// error it raises describes the server ("server does not support TLS" when
-/// the server answers `N`) rather than the real, permanent cause, and it
-/// arrives only after `connect_with_config`'s three-attempt backoff has spent
-/// about two seconds on a URL that could never have worked. Answering here
-/// names the cause and answers immediately.
+/// What is unsatisfiable depends on the build, so this function has two
+/// versions. Both exist for the same reason: the driver already fails closed on
+/// an impossible TLS setting - `connect_tls` errors rather than falling back to
+/// plaintext, so nothing is silently downgraded - but the error it raises
+/// describes the server ("server does not support TLS" when the server answers
+/// `N`) rather than the real, permanent cause, and it arrives only after
+/// `connect_with_config`'s three-attempt backoff has spent about two seconds on
+/// a URL that could never have worked. Answering here names the cause and
+/// answers immediately.
 ///
-/// `sslmode=prefer` (libpq's default, and therefore the default here) is not
-/// rejected: it asks for encryption where available and permits plaintext
-/// otherwise, which is exactly what it gets.
-fn reject_unsatisfiable_tls(url: &str) -> Result<(), Error> {
-    let config: Config = url.parse()?;
-
+/// `sslmode=prefer` (libpq's default, and therefore the default here) is never
+/// rejected: it permits plaintext, which is what it gets. See the `Transport`
+/// section of the module docs for why it does not get TLS.
+#[cfg(not(feature = "tls"))]
+fn reject_unsatisfiable_tls(config: &Config) -> Result<(), Error> {
     if config.get_ssl_mode() == SslMode::Require {
         return Err(pool_error(
-            "sslmode=require cannot be satisfied: the connection pool connects with NoTls \
-             and has no TLS connector. Use compio_postgres::connect with a TLS connector, \
-             or drop to sslmode=prefer if plaintext is acceptable.",
+            "sslmode=require cannot be satisfied: compio-postgres was built without the `tls` \
+             feature, so no TLS connector exists. Rebuild with `--features tls`, or drop to \
+             sslmode=prefer if plaintext is acceptable.",
         ));
     }
 
@@ -256,12 +273,114 @@ fn reject_unsatisfiable_tls(url: &str) -> Result<(), Error> {
         && config.get_ssl_mode() != SslMode::Disable
     {
         return Err(pool_error(
-            "sslnegotiation=direct cannot be satisfied: the connection pool connects with \
-             NoTls and has no TLS connector.",
+            "sslnegotiation=direct cannot be satisfied: compio-postgres was built without the \
+             `tls` feature, so no TLS connector exists.",
         ));
     }
 
     Ok(())
+}
+
+/// See the `cfg(not(feature = "tls"))` twin above for why this exists.
+///
+/// With TLS compiled in, `sslmode=require` is satisfiable and no longer
+/// rejected. What remains is the one combination no build can serve:
+/// `sslnegotiation=direct` under a mode that permits plaintext. `connect_tls`
+/// refuses that pairing itself (`connect_tls.rs`: "weak sslmode \"prefer\" may
+/// not be used with sslnegotiation=direct"); rejecting it here just moves the
+/// same verdict ahead of the retry loop.
+#[cfg(feature = "tls")]
+fn reject_unsatisfiable_tls(config: &Config) -> Result<(), Error> {
+    if config.get_ssl_negotiation() == SslNegotiation::Direct
+        && config.get_ssl_mode() == SslMode::Prefer
+    {
+        return Err(pool_error(
+            "sslnegotiation=direct cannot be satisfied under sslmode=prefer: a mode that permits \
+             plaintext must not drive a TLS-only handshake. Use sslmode=require.",
+        ));
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Transport - everything needed to open one connection, resolved once
+// ---------------------------------------------------------------------------
+
+/// The pool's connection recipe, resolved from the URL exactly once.
+///
+/// Both halves are here for the same reason. The parsed [`Config`] is cheap but
+/// pointless to redo; the TLS connector is *not* cheap - building it reads the
+/// certificate authority from disk (`sslrootcert=system` walks the operating
+/// system's store) - and the pool opens connections not just at warm-up but on
+/// demand and on every reconnect after an eviction. Resolving per attempt would
+/// put a filesystem scan on the reconnect path.
+///
+/// It also moves a broken `sslrootcert` to where it belongs: `Pool::connect`
+/// fails immediately naming the file, rather than after the retry loop.
+struct Transport {
+    config: Config,
+    /// Present only when the URL asks for encryption. See the `Transport`
+    /// section of the module docs for which modes those are.
+    #[cfg(feature = "tls")]
+    tls: Option<crate::tls_rustls::MakeRustlsConnect>,
+}
+
+impl Transport {
+    fn resolve(url: &str) -> Result<Transport, Error> {
+        let config: Config = url.parse()?;
+        reject_unsatisfiable_tls(&config)?;
+
+        #[cfg(feature = "tls")]
+        let tls = if config.get_ssl_mode() == SslMode::Require {
+            Some(crate::tls_rustls::MakeRustlsConnect::from_config(&config)?)
+        } else {
+            None
+        };
+
+        Ok(Transport {
+            config,
+            #[cfg(feature = "tls")]
+            tls,
+        })
+    }
+
+    /// Open a single client + spawn its Connection task. Returns the Client;
+    /// the task is detached and self-terminates when the Client's sender is
+    /// closed (i.e. when the Client is dropped).
+    async fn connect_one(&self) -> Result<Client, Error> {
+        #[cfg(feature = "tls")]
+        if let Some(tls) = &self.tls {
+            let (client, connection) = self.config.connect(tls.clone()).await?;
+            spawn_connection_task(connection);
+            return Ok(client);
+        }
+
+        let (client, connection) = self.config.connect(NoTls).await?;
+        spawn_connection_task(connection);
+        Ok(client)
+    }
+
+    /// Retry [`Transport::connect_one`] up to 3 times with 100ms, 400ms, 1.6s
+    /// backoff. Only used for pool warm-up - `get_inner`'s on-demand connect
+    /// stays single-shot to keep the latency budget tight.
+    async fn connect_with_retry(&self) -> Result<Client, Error> {
+        let mut delay = Duration::from_millis(100);
+        let mut last_err: Option<Error> = None;
+        for attempt in 0..3 {
+            match self.connect_one().await {
+                Ok(client) => return Ok(client),
+                Err(e) => {
+                    last_err = Some(e);
+                    if attempt < 2 {
+                        compio::time::sleep(delay).await;
+                        delay *= 4;
+                    }
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| pool_error("connect retries exhausted")))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -275,7 +394,7 @@ fn reject_unsatisfiable_tls(url: &str) -> Result<(), Error> {
 /// refill). Without the housekeeper, the pool still works but connections
 /// are never proactively evicted.
 pub struct Pool {
-    url: String,
+    transport: Transport,
     config: PoolConfig,
     /// Idle connections available for checkout.
     idle: RefCell<Vec<PoolEntry>>,
@@ -320,12 +439,12 @@ impl Pool {
     /// is retried with exponential backoff (3 attempts: 100ms, 400ms, 1.6s)
     /// to survive Docker ordering, DNS blips, and brief PG restarts.
     pub async fn connect_with_config(url: &str, config: PoolConfig) -> Result<Self, Error> {
-        reject_unsatisfiable_tls(url)?;
+        let transport = Transport::resolve(url)?;
 
         let warm = config.min_idle.max(1);
         let mut entries: Vec<PoolEntry> = Vec::with_capacity(warm);
         for i in 0..warm {
-            match Self::connect_with_retry(url).await {
+            match transport.connect_with_retry().await {
                 Ok(client) => entries.push(PoolEntry::new(client, config.max_lifetime)),
                 Err(e) => {
                     // Drop any already-opened clients (Client drop closes the
@@ -344,7 +463,7 @@ impl Pool {
 
         let total = entries.len();
         let pool = Self {
-            url: url.to_string(),
+            transport,
             config,
             idle: RefCell::new(entries),
             active: Cell::new(0),
@@ -357,36 +476,6 @@ impl Pool {
             pool.metrics.inc_created();
         }
         Ok(pool)
-    }
-
-    /// Retry [`Self::connect_one`] up to 3 times with 100ms, 400ms, 1.6s backoff.
-    /// Only used for pool warm-up — `get_inner`'s on-demand connect stays
-    /// single-shot to keep the latency budget tight.
-    async fn connect_with_retry(url: &str) -> Result<Client, Error> {
-        let mut delay = Duration::from_millis(100);
-        let mut last_err: Option<Error> = None;
-        for attempt in 0..3 {
-            match Self::connect_one(url).await {
-                Ok(client) => return Ok(client),
-                Err(e) => {
-                    last_err = Some(e);
-                    if attempt < 2 {
-                        compio::time::sleep(delay).await;
-                        delay *= 4;
-                    }
-                }
-            }
-        }
-        Err(last_err.unwrap_or_else(|| pool_error("connect retries exhausted")))
-    }
-
-    /// Open a single client + spawn its Connection task. Returns the Client;
-    /// the task is detached and self-terminates when the Client's sender is
-    /// closed (i.e. when the Client is dropped).
-    async fn connect_one(url: &str) -> Result<Client, Error> {
-        let (client, connection) = crate::connect(url, NoTls).await?;
-        spawn_connection_task(connection);
-        Ok(client)
     }
 
     /// Start the background housekeeper task. Runs every 30 seconds:
@@ -529,7 +618,7 @@ impl Pool {
             // forever (POOL-1). On Err the guard also releases it on return.
             if self.total.get() < self.config.max_size {
                 let permit = PermitGuard::reserve(self);
-                let client = match Self::connect_one(&self.url).await {
+                let client = match self.transport.connect_one().await {
                     Ok(c) => c,
                     Err(e) => {
                         // `permit` drops here -> total -= 1.
@@ -769,7 +858,7 @@ impl Pool {
             // bumped `total`, and let the guard release it on Err / cancellation
             // (the housekeeper runs as a detached task and can be dropped).
             let permit = PermitGuard::reserve(self);
-            match Self::connect_one(&self.url).await {
+            match self.transport.connect_one().await {
                 Ok(client) => {
                     self.metrics.inc_created();
                     created += 1;
@@ -951,7 +1040,10 @@ impl std::fmt::Debug for Pool {
 /// terminates when the Client is dropped (causing the sender to close, which
 /// causes the Connection's receiver to return `None`, which triggers the
 /// graceful Terminate+drain+exit path in `Connection::run`).
-fn spawn_connection_task(connection: Connection<Socket, crate::tls::NoTlsStream>) {
+fn spawn_connection_task<T>(connection: Connection<Socket, T>)
+where
+    T: compio::io::AsyncRead + compio::io::AsyncWrite + Unpin + 'static,
+{
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
             // Connection terminated with an error (I/O failure, protocol

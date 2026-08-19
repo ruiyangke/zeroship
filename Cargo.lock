@@ -1071,6 +1071,7 @@ dependencies = [
  "criterion",
  "fallible-iterator 0.2.0",
  "futures-channel",
+ "futures-rustls",
  "futures-util",
  "log",
  "parking_lot",
@@ -1080,8 +1081,12 @@ dependencies = [
  "postgres-protocol",
  "postgres-types",
  "rand 0.10.1",
+ "rustls",
+ "rustls-native-certs",
+ "sha2 0.10.9",
  "socket2 0.5.10",
  "whoami",
+ "x509-parser",
 ]
 
 [[package]]

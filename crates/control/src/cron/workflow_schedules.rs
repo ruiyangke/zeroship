@@ -462,6 +462,27 @@ async fn fire_claimed_schedule(
     Ok(fired)
 }
 
+/// Re-read a schedule this sweeper claimed, gated on OWNERSHIP - not on lease
+/// freshness.
+///
+/// `claim_due_schedules` stamps one `lease_expires` on the whole batch and
+/// `tick_with_config` then fires the claims one at a time, so a freshness
+/// predicate here would give every claim in the batch a shared wall-clock
+/// budget that per-schedule work (a fresh connection, the app journal's first
+/// `CREATE TABLE`, the run insert, the timer registration) spends. Exceeding it
+/// made the sweep return fewer fires than it claimed - so `tick_with_config`'s
+/// return value tracked how busy the machine was. Measured on this tree at load
+/// ~45: `retention_and_schedule_sweeps_visit_multiple_app_journals` got 1 of 2
+/// and `schedule_overlap_policy_skip_blocks_live_run_and_allow_fires_concurrent_run`
+/// got 0 of 1, both green alone.
+///
+/// Ownership is the correct gate and is exact: any takeover goes through
+/// `claim_due_schedules`, which rewrites `claimed_by`, and a completed fire
+/// nulls it. Together with the `FOR UPDATE` below and the caller's
+/// `pg_try_advisory_xact_lock`, a claim fires at most once however long the
+/// sweeper took to get here. `lease_expires` keeps its real job in
+/// `claim_due_schedules`: letting a LATER sweep re-claim a schedule whose
+/// sweeper died mid-fire.
 async fn load_claimed_schedule<C>(
     conn: &C,
     schedule_id: &str,
@@ -483,7 +504,6 @@ where
                 AND s.enabled \
                 AND s.next_fire_at <= now() \
                 AND s.claimed_by = $2 \
-                AND s.lease_expires > now() \
                 AND app.workflows_enabled \
                 AND plan.workflows_allowed \
                 AND NOT plan.archived \
