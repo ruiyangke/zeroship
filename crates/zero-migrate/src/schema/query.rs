@@ -142,7 +142,11 @@ impl SchemaRenderer for PostgresSchemaRenderer {
     }
 
     fn foreign_key_target(&self, app_id: &str, target: &str) -> String {
-        format!("{}.{}", quote_ident(app_id), quote_ident(target))
+        format!(
+            "{}.{}",
+            quote_ident_for_dialect(app_id, self.dialect()),
+            quote_ident_for_dialect(target, self.dialect())
+        )
     }
 
     fn column_type(&self, def: &serde_json::Value) -> String {
@@ -245,7 +249,7 @@ impl SchemaRenderer for SqliteSchemaRenderer {
     }
 
     fn foreign_key_target(&self, _app_id: &str, target: &str) -> String {
-        quote_ident(target)
+        quote_ident_for_dialect(target, self.dialect())
     }
 
     fn column_type(&self, def: &serde_json::Value) -> String {
@@ -850,23 +854,84 @@ fn validate_schema(name: &str) -> Result<(), QueryError> {
     Ok(())
 }
 
-/// Quote an identifier (table or column name) with double-quotes.
-/// Escapes any embedded double-quotes by doubling them.
-pub fn quote_ident(name: &str) -> String {
-    format!("\"{}\"", name.replace('"', "\"\""))
-}
-
 /// Quote a MySQL identifier with backticks.
 /// Escapes any embedded backticks by doubling them.
+///
+/// This is the ONE physical home of the backtick spelling, and
+/// `render::backends::mysql::MysqlDmlRenderer::quote_ident` delegates here rather
+/// than re-spelling it — so this function IS the MySQL backend's primitive, living
+/// one module away. (The ANSI double-quote spelling is arranged the other way
+/// round: its one home is `render::backends::ansi_double_quote_ident`, private to
+/// the backends, and this module reaches it through this file's private
+/// `quote_ident_for_dialect` — deliberately not linked, because a `pub` doc may not
+/// name a private item without tripping `rustdoc::private_intra_doc_links`.)
 pub fn mysql_quote_ident(name: &str) -> String {
     format!("`{}`", name.replace('`', "``"))
 }
 
+/// EMIT a schema-layer identifier in `dialect`'s own spelling.
+///
+/// THE schema kernel's only identifier-quoting door, and a thin forward to the
+/// crate's single dispatch ([`crate::render::dml::escape_quote_ident_for_dialect`],
+/// which resolves through `render::backends::renderer`). It used to hold its own
+/// three-arm `match` over `SqlDialect` and its own `pub fn quote_ident`, which made
+/// this module a SECOND physical home for the ANSI double-quote spelling that
+/// `render::backends` declares must have exactly one. Both are gone; the bytes are
+/// unchanged and the vendor is now decided by the vendor's own module.
+///
+/// There is deliberately no un-dialected sibling. `quote_ident(name)` existed here,
+/// was `pub`, and spelled `"x"` for a vendor it never named — correct bytes for two
+/// of the three shipping dialects and therefore invisible to every assertion about
+/// emitted SQL. Its call sites are now split between this function (where a
+/// `dialect` is in scope) and [`pg_quote_ident`] (where the surrounding statement is
+/// PostgreSQL-only syntax).
+///
+/// THE CENSUS, and it is worth stating how it was counted, because the obvious count
+/// is wrong. An anchored `quote_ident\(` scan of this file matched 52; a naive
+/// `grep -o 'quote_ident('` returns 63 because it also matches inside
+/// `mysql_quote_ident(`. Of the 52: one was the definition, one an internal call from
+/// the three-arm dispatch this function used to be, one a prose comment, and 49 were
+/// real call sites (45 emission, 4 in-src tests). `schema::diff` held 6 more through
+/// the `pub` name, and three integration probes imported it as their expected-value
+/// oracle. All 49 + 6 now name a dialect; the probes grew their own local spelling,
+/// which is what an oracle should have been in the first place.
+///
+/// MEASURED at `0b45ea46`, on the 1231-test `--lib` binary, by neutering
+/// `render::backends::ansi_double_quote_ident` — the one home — with a single
+/// appended token:
+///
+/// | tree | red | note |
+/// |------|-----|------|
+/// | before | 125 | exactly ONE of them under `schema::` |
+/// | before, neutering `schema::query::quote_ident` instead | 39 | DISJOINT from the 125 |
+/// | after this change | 164 | 125 + 39, the whole formerly-blind set |
+///
+/// The two before-sets being disjoint is the measurement that matters: those 39
+/// schema-kernel tests could not see the crate's single quoting home at all, which
+/// is what "second physical home" means operationally. No test was lost and no
+/// emitted byte changed — only who decided it.
 fn quote_ident_for_dialect(name: &str, dialect: SqlDialect) -> String {
-    match dialect {
-        SqlDialect::Postgres | SqlDialect::Sqlite => quote_ident(name),
-        SqlDialect::Mysql => mysql_quote_ident(name),
-    }
+    crate::render::dml::escape_quote_ident_for_dialect(name, dialect)
+}
+
+/// EMIT an identifier for a statement whose SYNTAX is PostgreSQL-only.
+///
+/// The schema kernel's PG-only builders (`CREATE INDEX CONCURRENTLY`,
+/// `COMMENT ON COLUMN`, `ALTER TABLE … DROP CONSTRAINT IF EXISTS`,
+/// `ADD COLUMN IF NOT EXISTS`, `CREATE SCHEMA`) have no `dialect` parameter because
+/// they have no other dialect to be. They still must not spell an identifier for a
+/// vendor they never named, so the vendor is in this function's NAME — the same
+/// technique as [`crate::render::dml::pg_canonical_ident`], and for the same reason:
+/// a red count cannot tell a deliberate PostgreSQL spelling apart from an unrouted
+/// one, so the door has to carry the intent.
+///
+/// This is EMISSION, not the `pg_get_constraintdef` normal form. Nothing in this
+/// module builds comparison text — `information_schema` appears here only in two doc
+/// comments, and `pg_get_constraintdef` not at all — so
+/// [`crate::render::dml::pg_canonical_ident`] is deliberately NOT the door used
+/// here, even though it would produce identical bytes.
+pub(crate) fn pg_quote_ident(name: &str) -> String {
+    quote_ident_for_dialect(name, SqlDialect::Postgres)
 }
 
 /// Render an author string in an expression/default/check position. MySQL gets
@@ -905,7 +970,7 @@ fn mysql_native_enum_values(def: &serde_json::Value) -> Option<Vec<String>> {
 
 /// Build CREATE SCHEMA IF NOT EXISTS for an app.
 pub fn build_create_schema(app_id: &str) -> String {
-    format!("CREATE SCHEMA IF NOT EXISTS {}", quote_ident(app_id))
+    format!("CREATE SCHEMA IF NOT EXISTS {}", pg_quote_ident(app_id))
 }
 
 // The production CREATE path passes the orchestrator's live table set through
@@ -1082,7 +1147,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
     let sqlite_table_unqualified =
         matches!(dialect, SqlDialect::Sqlite) && sqlite_scope == SqliteEmitScope::MainUnqualified;
     let table = if sqlite_table_unqualified {
-        quote_ident(collection)
+        quote_ident_for_dialect(collection, dialect)
     } else {
         format!(
             "{}.{}",
@@ -1324,9 +1389,9 @@ pub fn build_encryption_sentinel_comments(
         let escaped = body.replace('\'', "''");
         out.push(format!(
             "COMMENT ON COLUMN {}.{}.{} IS '{}'",
-            quote_ident(app_id),
-            quote_ident(collection),
-            quote_ident(field),
+            pg_quote_ident(app_id),
+            pg_quote_ident(collection),
+            pg_quote_ident(field),
             escaped,
         ));
     }
@@ -1526,20 +1591,20 @@ fn render_injected_index(
     Ok(match dialect {
         SqlDialect::Postgres => format!(
             "CREATE {unique_clause}INDEX IF NOT EXISTS {} ON {}.{} ({rendered_columns})",
-            quote_ident(&index_name),
-            quote_ident(app_id),
-            quote_ident(collection),
+            quote_ident_for_dialect(&index_name, dialect),
+            quote_ident_for_dialect(app_id, dialect),
+            quote_ident_for_dialect(collection, dialect),
         ),
         SqlDialect::Sqlite if sqlite_scope == SqliteEmitScope::MainUnqualified => format!(
             "CREATE {unique_clause}INDEX IF NOT EXISTS {} ON {} ({rendered_columns})",
-            quote_ident(&index_name),
-            quote_ident(collection),
+            quote_ident_for_dialect(&index_name, dialect),
+            quote_ident_for_dialect(collection, dialect),
         ),
         SqlDialect::Sqlite => format!(
             "CREATE {unique_clause}INDEX IF NOT EXISTS {}.{} ON {} ({rendered_columns})",
-            quote_ident(app_id),
-            quote_ident(&index_name),
-            quote_ident(collection),
+            quote_ident_for_dialect(app_id, dialect),
+            quote_ident_for_dialect(&index_name, dialect),
+            quote_ident_for_dialect(collection, dialect),
         ),
         SqlDialect::Mysql => format!(
             "CREATE {unique_clause}INDEX {} ON {}.{} ({rendered_columns})",
@@ -1570,7 +1635,7 @@ pub fn build_add_foreign_key(
         .and_then(|v| v.as_str())
         .ok_or_else(|| QueryError::InvalidFilter("ref field missing refTarget".to_string()))?;
 
-    let table = format!("{}.{}", quote_ident(app_id), quote_ident(collection));
+    let table = format!("{}.{}", pg_quote_ident(app_id), pg_quote_ident(collection));
     let fk_clause = build_fk_clause(app_id, collection, field, def, target, SqlDialect::Postgres)?;
     Ok(format!("ALTER TABLE {table} ADD {fk_clause}"))
 }
@@ -1584,11 +1649,11 @@ pub fn build_drop_foreign_key(
 ) -> Result<String, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
-    let table = format!("{}.{}", quote_ident(app_id), quote_ident(collection));
+    let table = format!("{}.{}", pg_quote_ident(app_id), pg_quote_ident(collection));
     Ok(format!(
         "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",
         table,
-        quote_ident(constraint_name)
+        pg_quote_ident(constraint_name)
     ))
 }
 
@@ -1712,14 +1777,14 @@ pub fn build_add_column(
     validate_collection(collection)?;
     validate_schema(app_id)?;
 
-    let table = format!("{}.{}", quote_ident(app_id), quote_ident(collection));
+    let table = format!("{}.{}", pg_quote_ident(app_id), pg_quote_ident(collection));
     let pg_type = def_to_pg_type(def);
     let constraints = def_to_constraints(field, def);
 
     let mut sql = format!(
         "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} {} {}",
         table,
-        quote_ident(field),
+        pg_quote_ident(field),
         pg_type,
         constraints
     )
@@ -1747,7 +1812,7 @@ pub fn build_add_column(
         sql.push_str(&format!(
             ";\nALTER TABLE {} ADD COLUMN IF NOT EXISTS {} TEXT NULL",
             table,
-            quote_ident(&sibling),
+            pg_quote_ident(&sibling),
         ));
         if let Some(comment) = build_mask_sentinel_comment_for_field(app_id, collection, field, def)
         {
@@ -1868,7 +1933,7 @@ pub fn build_create_indexes(
         return Ok(out);
     };
 
-    let table_qualified = format!("{}.{}", quote_ident(app_id), quote_ident(collection));
+    let table_qualified = format!("{}.{}", pg_quote_ident(app_id), pg_quote_ident(collection));
 
     for (field, def) in obj {
         // Skip top-level metadata keys (`_meta`,
@@ -1970,9 +2035,9 @@ pub fn build_create_indexes(
             let name = index_name(collection, &[field.as_str()], /* unique = */ false);
             let sql = format!(
                 "CREATE INDEX CONCURRENTLY IF NOT EXISTS {} ON {} ({})",
-                quote_ident(&name),
+                pg_quote_ident(&name),
                 table_qualified,
-                quote_ident(field),
+                pg_quote_ident(field),
             );
             out.push(IndexSpec {
                 name,
@@ -2005,10 +2070,10 @@ pub fn build_create_indexes(
         // both would be redundant and waste storage).
         if wants_unique {
             let name = index_name(collection, &[field.as_str()], /* unique = */ true);
-            let col_list = quote_ident(field);
+            let col_list = pg_quote_ident(field);
             let sql = format!(
                 "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS {} ON {} ({})",
-                quote_ident(&name),
+                pg_quote_ident(&name),
                 table_qualified,
                 col_list,
             );
@@ -2021,10 +2086,10 @@ pub fn build_create_indexes(
             });
         } else if wants_index {
             let name = index_name(collection, &[field.as_str()], /* unique = */ false);
-            let col_list = quote_ident(field);
+            let col_list = pg_quote_ident(field);
             let sql = format!(
                 "CREATE INDEX CONCURRENTLY IF NOT EXISTS {} ON {} ({})",
-                quote_ident(&name),
+                pg_quote_ident(&name),
                 table_qualified,
                 col_list,
             );
@@ -2052,9 +2117,9 @@ pub fn build_create_indexes(
                 let idx_name = format!("{collection}__{sibling_col}_idx");
                 let sql = format!(
                     "CREATE INDEX CONCURRENTLY IF NOT EXISTS {} ON {} ({})",
-                    quote_ident(&idx_name),
+                    pg_quote_ident(&idx_name),
                     table_qualified,
-                    quote_ident(&sibling_col),
+                    pg_quote_ident(&sibling_col),
                 );
                 out.push(IndexSpec {
                     name: idx_name,
@@ -2100,7 +2165,7 @@ pub fn build_named_indexes(
         return Ok(out);
     }
 
-    let table_qualified = format!("{}.{}", quote_ident(app_id), quote_ident(collection));
+    let table_qualified = format!("{}.{}", pg_quote_ident(app_id), pg_quote_ident(collection));
 
     for (i, entry) in arr.iter().enumerate() {
         let name = entry
@@ -2145,14 +2210,14 @@ pub fn build_named_indexes(
                 )));
             }
             columns.push(col.to_string());
-            quoted.push(quote_ident(col));
+            quoted.push(pg_quote_ident(col));
         }
 
         let pg_name = named_index_name(collection, name);
         let kind = if unique { "UNIQUE INDEX" } else { "INDEX" };
         let sql = format!(
             "CREATE {kind} CONCURRENTLY IF NOT EXISTS {} ON {} ({})",
-            quote_ident(&pg_name),
+            pg_quote_ident(&pg_name),
             table_qualified,
             quoted.join(", "),
         );
@@ -2347,9 +2412,9 @@ pub fn build_mask_sentinel_comments(
         let escaped = sentinel.replace('\'', "''");
         out.push(format!(
             "COMMENT ON COLUMN {}.{}.{} IS '{}'",
-            quote_ident(app_id),
-            quote_ident(collection),
-            quote_ident(&sibling),
+            pg_quote_ident(app_id),
+            pg_quote_ident(collection),
+            pg_quote_ident(&sibling),
             escaped,
         ));
     }
@@ -2376,9 +2441,9 @@ pub fn build_mask_sentinel_comment_for_field(
     let escaped = sentinel.replace('\'', "''");
     Some(format!(
         "COMMENT ON COLUMN {}.{}.{} IS '{}'",
-        quote_ident(app_id),
-        quote_ident(collection),
-        quote_ident(&sibling),
+        pg_quote_ident(app_id),
+        pg_quote_ident(collection),
+        pg_quote_ident(&sibling),
         escaped,
     ))
 }
@@ -5236,7 +5301,7 @@ columns = [
                 );
                 let rendered_columns = refs
                     .iter()
-                    .map(|column| quote_ident(column))
+                    .map(|column| quote_ident_for_dialect(column, dialect))
                     .collect::<Vec<_>>()
                     .join(", ");
                 assert!(sql.contains(&format!("({rendered_columns})")), "{sql}");
@@ -6063,21 +6128,33 @@ columns = [
 
 #[cfg(test)]
 mod hostile_identifier_quoting {
-    use super::{mysql_quote_ident, quote_ident};
+    use super::{mysql_quote_ident, quote_ident_for_dialect, SqlDialect};
 
-    /// The schema kernel carries its OWN quoting primitives, deliberately: the
-    /// render layer's structural single-home test
-    /// (`render::dml::tests::no_bare_escape_seam_outside_dml`) exempts this
-    /// subtree because it is a distinct module layer. That exemption is the
-    /// reason these need their own hostile-input coverage — nothing else in the
-    /// tree asserts anything about them, and "correct by inspection" is the
-    /// weakest claim available about an escape function.
+    /// Hostile-input coverage for the two identifier spellings this kernel can
+    /// reach. It USED to say the schema kernel carries its own quoting primitives
+    /// "deliberately", and pointed at an exemption in the render layer's structural
+    /// single-home test (`render::dml::tests::no_bare_escape_seam_outside_dml`) for
+    /// the `schema/` subtree.
+    ///
+    /// BOTH HALVES OF THAT ARE NOW FALSE. The exemption is deleted, and so is
+    /// `schema::query::quote_ident` — the ANSI double-quote spelling has exactly one
+    /// physical home (`render::backends::ansi_double_quote_ident`) and this module
+    /// reaches it, like everyone else, through a door that names a dialect. The
+    /// backtick spelling still lives here, in `mysql_quote_ident`, which
+    /// `render::backends::mysql` delegates to.
+    ///
+    /// These assertions are worth keeping regardless of where the bytes live: they
+    /// are the only hostile-input coverage of the backtick primitive, and they now
+    /// double as an end-to-end check that the PG door actually reaches the one home.
     ///
     /// The dangerous character is the one that closes THIS quoting: a `"` is
     /// inert inside backticks and a backtick is inert inside double quotes.
     #[test]
     fn a_quote_bearing_identifier_is_doubled_not_left_bare() {
-        assert_eq!(quote_ident(r#"a"b"#), r#""a""b""#);
+        assert_eq!(
+            quote_ident_for_dialect(r#"a"b"#, SqlDialect::Postgres),
+            r#""a""b""#
+        );
         assert_eq!(mysql_quote_ident("a`b"), "`a``b`");
     }
 
@@ -6085,7 +6162,7 @@ mod hostile_identifier_quoting {
     fn an_injecting_identifier_stays_inside_its_quoting() {
         // The payload's own quote is doubled, so the `);` and everything after it
         // remain part of the identifier rather than becoming syntax.
-        let pg = quote_ident(r#"x"); DROP TABLE victim; --"#);
+        let pg = quote_ident_for_dialect(r#"x"); DROP TABLE victim; --"#, SqlDialect::Postgres);
         assert_eq!(pg, r#""x""); DROP TABLE victim; --""#);
         assert_eq!(
             pg.matches('"').count() % 2,
@@ -6106,7 +6183,10 @@ mod hostile_identifier_quoting {
     fn the_other_dialects_quote_character_needs_no_escaping() {
         // Each primitive must leave the OTHER dialect's quote alone: doubling it
         // would corrupt the name for no safety gain.
-        assert_eq!(quote_ident("a`b"), r#""a`b""#);
+        assert_eq!(
+            quote_ident_for_dialect("a`b", SqlDialect::Postgres),
+            r#""a`b""#
+        );
         assert_eq!(mysql_quote_ident(r#"a"b"#), r#"`a"b`"#);
     }
 }

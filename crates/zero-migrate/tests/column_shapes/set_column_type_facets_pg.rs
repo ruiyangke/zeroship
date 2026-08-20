@@ -44,12 +44,23 @@ use std::collections::BTreeMap;
 use crate::support::PgDevSession;
 use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::driver::SqlSession;
-use zero_migrate::schema::query::quote_ident;
 use zero_migrate::{
     diff_snapshots, fold_ops, resolve_create_table_policy, snapshot_schema, Approval,
     EffectivePolicy, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine,
     MigrationIr, PostgresBackend, SqlDialect, StructuralDrift,
 };
+
+/// The test-side PostgreSQL identifier spelling, written out here rather than
+/// imported from the crate. It used to be
+/// `zero_migrate::schema::query::quote_ident`, which was `pub`, un-dialected, and a
+/// SECOND physical home for the spelling `render::backends::ansi_double_quote_ident`
+/// owns; it is gone. A probe that builds its expectation by calling the emitter it is
+/// checking is not an oracle anyway, so the replacement is deliberately independent —
+/// the same shape the sibling `fold_rename_column_constraint_definition_pg` and
+/// `fold_rename_column_check_body_pg` probes already use.
+fn quote_ident(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
 
 const OWNER: &str = "app_set_column_type_facets";
 const TABLE: &str = "retyped";

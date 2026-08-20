@@ -1277,9 +1277,9 @@ pub fn compute_diff(
                     let sibling = format!("{field}_masked");
                     let mut add_stmts = vec![format!(
                         "ALTER TABLE {}.{} ADD COLUMN IF NOT EXISTS {} TEXT NULL",
-                        crate::schema::query::quote_ident(app_id),
-                        crate::schema::query::quote_ident(collection),
-                        crate::schema::query::quote_ident(&sibling),
+                        crate::schema::query::pg_quote_ident(app_id),
+                        crate::schema::query::pg_quote_ident(collection),
+                        crate::schema::query::pg_quote_ident(&sibling),
                     )];
                     let sentinel = crate::schema::mask_codec::build_mask_sentinel(
                         new_meta.kind,
@@ -1288,9 +1288,9 @@ pub fn compute_diff(
                     let escaped = sentinel.replace('\'', "''");
                     add_stmts.push(format!(
                         "COMMENT ON COLUMN {}.{}.{} IS '{}'",
-                        crate::schema::query::quote_ident(app_id),
-                        crate::schema::query::quote_ident(collection),
-                        crate::schema::query::quote_ident(&sibling),
+                        crate::schema::query::pg_quote_ident(app_id),
+                        crate::schema::query::pg_quote_ident(collection),
+                        crate::schema::query::pg_quote_ident(&sibling),
                         escaped,
                     ));
                     let add_sql = Some(add_stmts.join(";\n"));
