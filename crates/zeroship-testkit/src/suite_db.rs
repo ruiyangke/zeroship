@@ -53,7 +53,10 @@ use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::time::Duration;
 
-/// How long [`provision`] waits for a peer before giving up.
+/// How long the `suite-db provision` subcommand waits for a peer before giving
+/// up. The provisioning itself lives in `main.rs`, because it is the one step
+/// that runs a caller's command: the decision half is here and testable, the
+/// process half is at the edge.
 pub const PROVISION_LOCK_TIMEOUT: Duration = Duration::from_secs(900);
 
 /// The resolved database name and who chose it.
@@ -170,6 +173,7 @@ pub enum Ensured {
 /// this created something. A run that dies between `CREATE` and the end of its
 /// migration leaves a partially journalled database, and the next run's migrate
 /// is what finishes it.
+///
 /// `say` receives each progress line AS IT IS DECIDED, not afterwards. The
 /// order matters on the failure path: `==> Creating <name>` is printed BEFORE
 /// the attempt, so a run that dies in `CREATE DATABASE` still shows which
