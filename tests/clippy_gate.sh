@@ -127,6 +127,18 @@
 #
 # WHAT THIS CANNOT SEE
 #
+# Read this before treating three green arms as completeness. They are checks on
+# the RUN, and the run's scope is set by the FEATURES constant below.
+#
+#   - NARROWING `FEATURES` IN THIS SCRIPT IS INVISIBLE TO ARM 3, BECAUSE ARM 3
+#     RESOLVES ITS EXPECTATION UNDER THAT SAME LIST. Delete a feature and the
+#     targets it gated leave the expected set and the observed set together; the
+#     comparison stays balanced, the count drops, and every arm reports green on
+#     a smaller workspace. This is the one place the expectation and the subject
+#     share a source, and it is the blind spot that matters most: it is the
+#     `--all-targets`/`required-features` coverage loss the old ci.yml comment
+#     warned about, reappearing one level up where the guard cannot look at it.
+#     Only review catches an edit to that constant. Widening it is always safe.
 #   - Code behind a `cfg` this build does not enable, or a target platform this
 #     machine is not. Clippy lints what it compiles.
 #   - A target deleted from Cargo.toml. It leaves both the expected and the
