@@ -2949,6 +2949,7 @@ fn rollback_inverse_step_kind(step: &PlanStep) -> &'static str {
         PlanStep::Dml { .. } => "DML",
         PlanStep::Backfill { .. } => "backfill",
         PlanStep::AlterPrimaryKey(_) => "alterPrimaryKey",
+        PlanStep::AlterColumnType(_) => "setColumnType",
         PlanStep::SynchronizeIdentity(_) => "synchronizeIdentity",
         PlanStep::OnlineRename(_) => "onlineRename",
     }

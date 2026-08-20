@@ -429,26 +429,63 @@ fn the_declarative_differ_refuses_an_identity_column_retype_the_same_way() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn mysql_and_sqlite_refuse_the_whole_op_before_either_verdict_applies() {
-    for (dialect, expected) in [
-        (SqlDialect::Mysql, "not supported on MySQL"),
-        (SqlDialect::Sqlite, "setColumnType"),
-    ] {
-        for create_col in [IDENTITY_COL, GENERATED_COL, ORDINARY_COL] {
-            let error = alter_statement(
-                dialect,
+fn sqlite_refuses_the_whole_op_before_either_verdict_applies() {
+    for create_col in [IDENTITY_COL, GENERATED_COL, ORDINARY_COL] {
+        let error = alter_statement(
+            SqlDialect::Sqlite,
+            &declared_in_envelope(create_col, r#""bigInt""#),
+            &LiveSchema::default(),
+        )
+        .expect_err(
+            "SQLite has no ALTER COLUMN at all, so the op is refused for EVERY column \
+             shape - the two verdicts above are PostgreSQL's alone",
+        );
+        assert!(
+            error.contains("setColumnType"),
+            "SQLite: expected the existing refusal naming the op, got {error}"
+        );
+    }
+}
+
+/// MySQL used to belong in the test above and no longer does, which is the finding
+/// rather than a relaxation of it.
+///
+/// It never lacked the CAPABILITY — `MODIFY COLUMN` restates the whole column
+/// definition — only the definition, which the op does not carry. It now lowers to a
+/// `PlanStep::AlterColumnType` that reads the definition from `SHOW CREATE TABLE` at
+/// apply. The two PostgreSQL verdicts above are still PostgreSQL's alone: a
+/// restate carries the live column's identity and generation facets across VERBATIM,
+/// so there is no cast for a generated column to reject and no type family for an
+/// identity column to leave.
+///
+/// The live schema here is EMPTY on purpose. Lowering needs nothing from it, which is
+/// what keeps the offline preview and the apply at the same verdict: preview lowers
+/// this same step and prints it as a `[runtime-resolved]` label instead of guessing
+/// at SQL. Before this, preview labeled the op and apply refused it.
+#[test]
+fn mysql_lowers_every_column_shape_to_a_restate_step_instead_of_refusing() {
+    for create_col in [IDENTITY_COL, GENERATED_COL, ORDINARY_COL] {
+        let effective = support::operator_charter(SCHEMA);
+        let author = IrAuthor::new(SCHEMA, "app", SqlDialect::Mysql, &effective);
+        let steps = author
+            .lower_steps(
                 &declared_in_envelope(create_col, r#""bigInt""#),
                 &LiveSchema::default(),
             )
-            .expect_err(&format!(
-                "{dialect:?} has no native ALTER COLUMN this lane can render, so the op \
-                 is refused for EVERY column shape - the two verdicts above are \
-                 PostgreSQL's alone"
-            ));
-            assert!(
-                error.contains(expected),
-                "{dialect:?}: expected the existing refusal naming {expected:?}, got {error}"
-            );
-        }
+            .expect("MySQL lowers a retype without any live schema");
+        let restates = steps
+            .iter()
+            .filter(|step| matches!(step, PlanStep::AlterColumnType(_)))
+            .count();
+        assert_eq!(
+            restates, 1,
+            "expected exactly one restate step for {create_col}, got {steps:?}"
+        );
+        assert!(
+            !steps
+                .iter()
+                .any(|step| matches!(step, PlanStep::Ddl(m) if m.up.contains("ALTER COLUMN"))),
+            "MySQL must render NO PostgreSQL ALTER COLUMN text for {create_col}"
+        );
     }
 }

@@ -1,5 +1,5 @@
-//! MySQL alter-column ops: two are refused, two are corrected. The split is the
-//! point of this file.
+//! MySQL alter-column ops: one is restated, one is refused, two are corrected. The
+//! split is the point of this file.
 //!
 //! Every one of these renderers used to emit PostgreSQL syntax with double-quoted
 //! identifiers on all three dialects, so nothing here executed on MySQL:
@@ -10,14 +10,24 @@
 //! Note the TABLE is double-quoted too: PostgreSQL end to end, not a mix of the
 //! two dialects.
 //!
-//! REFUSED - type and nullability. MySQL does these with `MODIFY COLUMN`, which
-//! requires the COMPLETE column specification restated and silently DISCARDS every
-//! facet left out. The op does not carry one: `Op::SetColumnType` builds its
+//! RESTATED - the type change (`setColumnType`). MySQL does it with `MODIFY COLUMN`,
+//! which requires the COMPLETE column specification restated and silently DISCARDS
+//! every facet left out. The op does not carry one: `Op::SetColumnType` builds its
 //! snapshot through `add_column_snapshot(.., None, None, None, None, None, None,
 //! None)`, called "a one-field descriptor" in its own comment. Rendering `MODIFY
-//! COLUMN` from that would take an authored `setColumnType` and quietly drop the
-//! column's default, its NOT NULL, its charset and its comment. Today's failure is
-//! loud and loses nothing; that would lose data definition silently.
+//! COLUMN` from that would quietly drop the column's default, its NOT NULL, its
+//! charset and its comment - measured against a live server in
+//! `mysql_setcolumntype_restate.rs`, which loses all four.
+//!
+//! So the definition is not rendered from the op; it is READ, at apply, from
+//! `SHOW CREATE TABLE`, and reproduced with only its type token replaced. That is
+//! what `PlanStep::AlterColumnType` is for, and it is the shape
+//! `apply/backend/mysql/primary_key_sql.rs` already used for `dropIdentityFrom`.
+//!
+//! REFUSED - the nullability change (`setColumnNotNull` / `dropColumnNotNull`). The
+//! same restate would serve it, and this file does NOT claim otherwise: the ops are
+//! still declared `unsupported` on MySQL because nobody has driven one end to end,
+//! not because the engine cannot.
 //!
 //! CORRECTED - `SET DEFAULT` and `DROP DEFAULT`. MySQL spells these exactly the
 //! way PostgreSQL does, so only the quoting was wrong. Refusing them would have
@@ -43,7 +53,7 @@ use zero_migrate::render::declarative::{
 };
 use zero_migrate::render::lower::IrAuthor;
 use zero_migrate::{
-    ColType, IrFlagsOverride, LiveSchema, MigrationIr, Op, SqlDialect, CURRENT_IR_VERSION,
+    ColType, IrFlagsOverride, LiveSchema, MigrationIr, Op, PlanStep, SqlDialect, CURRENT_IR_VERSION,
 };
 
 const PROJECT: &str = "app";
@@ -94,12 +104,15 @@ fn one_op_ir(op: Op) -> MigrationIr {
     }
 }
 
-fn lower_for(dialect: SqlDialect, op: Op) -> Result<(), String> {
+fn lower_steps_for(dialect: SqlDialect, op: Op) -> Result<Vec<zero_migrate::PlanStep>, String> {
     let author = IrAuthor::new(PROJECT, APP, dialect, &support::confined_charter());
     author
         .lower_steps(&one_op_ir(op), &LiveSchema::default())
-        .map(|_| ())
         .map_err(|e| e.to_string())
+}
+
+fn lower_for(dialect: SqlDialect, op: Op) -> Result<(), String> {
+    lower_steps_for(dialect, op).map(|_| ())
 }
 
 fn set_column_type_op() -> Op {
@@ -122,21 +135,38 @@ fn set_column_not_null_op() -> Op {
     }
 }
 
+/// A MySQL retype lowers to a RESTATE step and emits no PostgreSQL syntax.
+///
+/// This test used to assert the refusal, and the refusal is gone. What it protected
+/// is not: the property that matters here is that MySQL never receives
+/// `ALTER COLUMN … TYPE`, and that is still asserted - more strongly, because it now
+/// also has to hold for a lowering that SUCCEEDS. A refusal makes "emits no
+/// PostgreSQL syntax" vacuously true.
+///
+/// The definition `MODIFY COLUMN` needs is read from `SHOW CREATE TABLE` at apply;
+/// `tests/mysql_engine/mysql_setcolumntype_restate.rs` deploys one and reads every
+/// facet back from a live server.
 #[test]
-fn the_ir_lane_refuses_a_mysql_column_type_change_and_still_lowers_it_for_postgres() {
-    let refused = lower_for(SqlDialect::Mysql, set_column_type_op())
-        .expect_err("MySQL must refuse rather than emit PostgreSQL ALTER COLUMN syntax");
-    assert!(
-        refused.contains("setColumnType"),
-        "the refusal names the authored op so the author knows what to change: {refused}"
+fn the_ir_lane_restates_a_mysql_column_type_change_and_still_lowers_it_for_postgres() {
+    let steps = lower_steps_for(SqlDialect::Mysql, set_column_type_op())
+        .expect("MySQL lowers a retype to a restate step rather than refusing");
+    assert_eq!(
+        steps
+            .iter()
+            .filter(|step| matches!(step, PlanStep::AlterColumnType(_)))
+            .count(),
+        1,
+        "expected exactly one restate step: {steps:?}"
     );
     assert!(
-        refused.to_lowercase().contains("mysql"),
-        "and names the dialect it applies to: {refused}"
+        !steps
+            .iter()
+            .any(|step| matches!(step, PlanStep::Ddl(m) if m.up.contains("ALTER COLUMN"))),
+        "MySQL must never be handed PostgreSQL ALTER COLUMN syntax: {steps:?}"
     );
 
-    // The control. Refusing on every dialect would satisfy the assertions above
-    // while breaking PostgreSQL, so the fix is only correct if this still lowers.
+    // The control. A change that stopped PostgreSQL rendering its own retype would
+    // satisfy the assertions above while breaking the dialect that has the statement.
     lower_for(SqlDialect::Postgres, set_column_type_op())
         .expect("PostgreSQL still lowers a column type change");
 }

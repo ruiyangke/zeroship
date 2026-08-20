@@ -648,7 +648,12 @@ fn pk_error(step: &AlterPrimaryKeyStep, detail: impl std::fmt::Display) -> Apply
     ))
 }
 
-async fn show_create_table<D: SqlSession>(
+/// The `SHOW CREATE TABLE` body for one table.
+///
+/// `pub(super)` because the column-restate path reads the SAME text for the SAME
+/// reason: it is the only place a MySQL column definition exists in the server`s own
+/// spelling, facets included.
+pub(super) async fn show_create_table<D: SqlSession>(
     conn: &D,
     schema: &str,
     table: &str,
@@ -663,27 +668,30 @@ async fn show_create_table<D: SqlSession>(
     Ok(row.try_get(1usize)?)
 }
 
-fn column_definition_without_auto_increment(
-    show_create: &str,
-    column_name: &str,
-) -> Result<String, ApplyError> {
-    let clauses = create_table_clauses(show_create).ok_or_else(|| {
-        ApplyError::Backend(
-            "mysql primary key: could not parse SHOW CREATE TABLE output".to_string(),
-        )
-    })?;
-    let clause = clauses
+/// The `SHOW CREATE TABLE` clause that DEFINES one column, found by its name.
+///
+/// `pub(super)` for the same reason [`show_create_table`] is: the column-restate
+/// path needs the identical lookup, and a second implementation of the quote-aware
+/// clause split is exactly the kind of duplicate that drifts.
+pub(super) fn column_clause_for<'a>(show_create: &'a str, column_name: &str) -> Option<&'a str> {
+    create_table_clauses(show_create)?
         .into_iter()
         .find(|clause| {
             column_clause_name(clause)
                 .as_deref()
                 .is_some_and(|name| name.eq_ignore_ascii_case(column_name))
         })
-        .ok_or_else(|| {
-            ApplyError::Backend(format!(
-                "mysql primary key: SHOW CREATE TABLE omitted AUTO_INCREMENT column {column_name:?}"
-            ))
-        })?;
+}
+
+fn column_definition_without_auto_increment(
+    show_create: &str,
+    column_name: &str,
+) -> Result<String, ApplyError> {
+    let clause = column_clause_for(show_create, column_name).ok_or_else(|| {
+        ApplyError::Backend(format!(
+            "mysql primary key: SHOW CREATE TABLE omitted AUTO_INCREMENT column {column_name:?}"
+        ))
+    })?;
     let (definition, removed) = strip_top_level_auto_increment(clause);
     if !removed {
         return Err(ApplyError::Backend(format!(

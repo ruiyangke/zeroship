@@ -600,6 +600,7 @@ fn render_step(
             )));
         }
         PlanStep::AlterPrimaryKey(step) => render_alter_primary_key(step, out),
+        PlanStep::AlterColumnType(step) => render_alter_column_type(step, out),
         PlanStep::SynchronizeIdentity(step) => render_synchronize_identity(step, out),
         PlanStep::OnlineRename(rename) => render_online_rename(op, rename, out),
     }
@@ -651,6 +652,7 @@ fn render_step_no_op(step: &PlanStep, dialect: SqlDialect, out: &mut Vec<Rendere
             )));
         }
         PlanStep::AlterPrimaryKey(step) => render_alter_primary_key(step, out),
+        PlanStep::AlterColumnType(step) => render_alter_column_type(step, out),
         PlanStep::SynchronizeIdentity(step) => render_synchronize_identity(step, out),
         PlanStep::OnlineRename(rename) => render_online_rename_no_op(rename, out),
     }
@@ -698,6 +700,24 @@ fn render_alter_primary_key(
     out.push(Rendered::label(format!(
         "{RUNTIME_RESOLVED} primary-key {action} {:?}.{:?} ({authored}): exact current-key, candidate-unique, identity, and inbound-foreign-key prerequisites are catalog-validated under the apply lock; target-specific SQL is generated only after validation",
         step.schema, step.table,
+    )));
+}
+
+/// A restated column retype renders as a LABEL, never as SQL.
+///
+/// Preview is offline: it lowers against an EMPTY `LiveSchema` and cannot read
+/// `SHOW CREATE TABLE`. The statement apply will issue restates the live definition,
+/// so any SQL printed here would be a GUESS at facets the preview cannot see — and a
+/// guess is exactly the silent-drop failure the step exists to prevent. The label
+/// names what apply will read and what it will change, which is everything the
+/// operator can be told truthfully before the deploy.
+fn render_alter_column_type(
+    step: &crate::render::step::AlterColumnTypeStep,
+    out: &mut Vec<Rendered>,
+) {
+    out.push(Rendered::label(format!(
+        "{RUNTIME_RESOLVED} retype {:?}.{:?}.{:?} to {}: MySQL spells this MODIFY COLUMN, which restates the whole column definition; the live definition is read from SHOW CREATE TABLE under the apply lock and reproduced with only its type token replaced",
+        step.schema, step.table, step.column, step.ddl_type,
     )));
 }
 

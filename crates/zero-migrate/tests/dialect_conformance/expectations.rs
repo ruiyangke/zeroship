@@ -321,29 +321,24 @@ const ALLOWANCES: &[Allowance] = &[
                statement MySQL cannot host. It was a ServerError until the engine \
                learned to refuse it; it is not a wrong declaration.",
     },
-    // (B) DECLARATION ERROR, and the only one this column found. The sidecar declares
-    // `setColumnType` portable on MySQL, and `render/lower.rs`'s
-    // `refuse_mysql_alter_column` refuses it UNCONDITIONALLY - no payload reaches the
-    // renderer. Its four siblings on the same gate (`setColumnNotNull`,
-    // `dropColumnNotNull`, plus SQLite's whole alter-column family) are already
-    // declared unsupported, so this cell is simply out of step with them.
+    // WHAT USED TO BE HERE, and why its removal is the finding rather than a
+    // relaxation. `setColumnType/base [mysql]` was the ONE (B) DECLARATION ERROR this
+    // column found: the sidecar said `portable`, `refuse_mysql_alter_column` refused
+    // unconditionally, and the recommended repair was to flip the cell to
+    // `unsupported`.
     //
-    // Unconditional is the criterion this file's header sets for a SAFE flip, and
-    // `op_support.rs::alter_column_reason` ALREADY returns the MySQL arm, so the flip
-    // would not ship the internal placeholder either. It is recorded rather than
-    // performed only because flipping a cell means regenerating both the Rust and the
-    // TypeScript dialect tables and re-gating the host suite, which is a change to
-    // the engine's declared capability rather than to this instrument.
-    Allowance {
-        kind: "setColumnType",
-        variant: "base",
-        dialect: "mysql",
-        observed: Outcome::RefusedByCapability,
-        words: "MODIFY COLUMN needs the whole column definition restated",
-        why: "(B) the gate is UNCONDITIONAL, so the declaration is wrong rather than \
-               the representative narrow. Flip the mysql cell to `unsupported`; the \
-               reason arm already exists.",
-    },
+    // The declaration was right and the engine was wrong. MySQL's `MODIFY COLUMN`
+    // does restate the whole definition, but the definition is RECOVERABLE - the
+    // server reports it in `SHOW CREATE TABLE`, which this backend already reads for
+    // `dropIdentityFrom`. `setColumnType` now lowers on MySQL to a runtime-resolved
+    // step that restates the live clause with only its type token replaced, and
+    // `tests/mysql_engine/mysql_setcolumntype_restate.rs` deploys one against a live
+    // server and reads every facet back from `information_schema`.
+    //
+    // The lesson is the one `dropConstraint` taught two allowances above, in the
+    // other direction: an allowance recording a refusal is a claim about the ENGINE,
+    // and "the gate is unconditional" describes the gate rather than the database.
+    // This suite now reports the row as AGREEING, which is what removed the entry.
 ];
 
 /// Rows that hand the operator `op_support.rs`'s internal placeholder instead of a

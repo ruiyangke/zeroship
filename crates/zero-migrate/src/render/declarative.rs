@@ -1335,6 +1335,30 @@ pub(crate) fn mysql_collation_clause(case_sensitive: Option<bool>) -> &'static s
     }
 }
 
+/// The rendered MySQL type with any engine-chosen `CHARACTER SET … COLLATE …`
+/// suffix removed — the spelling a RETYPE restates.
+///
+/// The two are different questions and conflating them is a real bug. When the
+/// engine CREATES a column it also chooses that column's collation, so
+/// [`mysql_collation_clause`] belongs in the rendered type. When it RETYPES one, the
+/// op carries a type and nothing else: `setColumnType` says `string(128)`, it does
+/// not say `utf8mb4_0900_as_cs`. Restating the engine's collation there would
+/// silently re-collate a column the author never mentioned — measured, because a
+/// live `utf8mb4_bin` column retyped with the collated spelling emits two
+/// `CHARACTER SET` clauses and MySQL rejects the statement outright.
+///
+/// Derived from [`mysql_collation_clause`] rather than from its own copy of those
+/// strings, so a change to the engine's collation choice cannot leave this behind.
+pub(crate) fn mysql_type_without_collation(rendered: &str) -> &str {
+    for case_sensitive in [Some(false), None] {
+        let clause = mysql_collation_clause(case_sensitive);
+        if let Some(base) = rendered.strip_suffix(clause) {
+            return base.trim_end();
+        }
+    }
+    rendered
+}
+
 /// Pin an explicit collation onto a rendered MySQL `ENUM(...)` spelling.
 ///
 /// **Why `ENUM` needs this and why it is not in [`mysql_type_takes_collation`].**

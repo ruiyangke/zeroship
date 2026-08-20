@@ -1302,6 +1302,9 @@ fn step_has_journal_phase(
         zero_migrate::PlanStep::AlterPrimaryKey(step) => {
             has_version(step.migration.version.as_str())
         }
+        zero_migrate::PlanStep::AlterColumnType(step) => {
+            has_version(step.migration.version.as_str())
+        }
         zero_migrate::PlanStep::SynchronizeIdentity(step) => {
             has_version(step.migration.version.as_str())
         }
@@ -1674,6 +1677,7 @@ pub fn lower_envelope_to_migrations(
         matches!(
             step,
             zero_migrate::PlanStep::AlterPrimaryKey(_)
+                | zero_migrate::PlanStep::AlterColumnType(_)
                 | zero_migrate::PlanStep::SynchronizeIdentity(_)
         )
     }) {

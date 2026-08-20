@@ -492,6 +492,16 @@ mysql = "unsupported"
 # PG-native; on SQLite the imperative op lane refuses it unconditionally
 # (`require_capability_for(NativeAlterColumn)`) because a retype is reconciled ONLY
 # by the differ's 12-step rebuild. MEASURED against a live SQLite: refuses.
+#
+# The MySQL cell is `portable` and was for a long time a KNOWN-WRONG declaration:
+# the lowerer refused every alter-column op on MySQL, and the live conformance suite
+# recorded the disagreement as a declaration error recommending a flip to
+# `unsupported`. The cell was right and the engine was wrong. MySQL spells a retype
+# `MODIFY COLUMN`, which restates the whole column definition, and the definition is
+# recoverable from `SHOW CREATE TABLE` — so the op now lowers to a runtime-resolved
+# restate step. MEASURED against a live MySQL end to end, reading every facet back
+# from `information_schema`:
+# `tests/mysql_engine/mysql_setcolumntype_restate.rs`.
 [[row]]
 kind = "setColumnType"
 variant = "base"

@@ -90,6 +90,45 @@ pub struct AlterPrimaryKeyStep {
     pub action: AlterPrimaryKeyAction,
 }
 
+/// One column retype that the target dialect spells by RESTATING the column.
+///
+/// MySQL has no `ALTER COLUMN … TYPE`. It has `MODIFY COLUMN`, which takes the
+/// COMPLETE column definition and silently DISCARDS every facet the statement
+/// leaves out — measured in `tests/mysql_engine/mysql_setcolumntype_restate.rs`,
+/// where a bare `MODIFY COLUMN label varchar(128)` destroys the column's
+/// `NOT NULL`, its `DEFAULT`, its `COLLATE` and its `COMMENT` in one statement,
+/// with no warning.
+///
+/// So the statement cannot be written until the current definition is known, and
+/// the current definition is not in the op: `Op::SetColumnType` carries one field.
+/// This step stays STRUCTURED until apply for exactly the reason
+/// [`AlterPrimaryKeyStep`] does — the backend reads `SHOW CREATE TABLE` under the
+/// migration lock and restates the clause the server itself reports, so the answer
+/// cannot go stale between the read and the `ALTER`.
+///
+/// WHY NOT AT LOWER TIME, which would need no new step at all: the apply path DOES
+/// have the live column there ([`crate::LiveSchema::table_snapshots`] is populated
+/// from a real catalog read by `engine.rs` before it lowers). But
+/// `ColumnSnapshot` is a LOSSY projection of a MySQL column — the same test
+/// measures that `COLUMN_COMMENT` is never read, that `EXTRA` is read only for
+/// `auto_increment` / `DEFAULT_GENERATED` so `ON UPDATE CURRENT_TIMESTAMP` cannot
+/// be spelled, and that the generated-column facet is deliberately left `None`.
+/// Restating from it would drop those four facets SILENTLY, which is strictly
+/// worse than today's refusal.
+#[derive(Debug, Clone)]
+pub struct AlterColumnTypeStep {
+    /// Journal marker and approval metadata for this operation.
+    pub migration: Migration,
+    /// Effective target schema selected during lowering.
+    pub schema: String,
+    /// Bare target table name.
+    pub table: String,
+    /// Bare target column name.
+    pub column: String,
+    /// The dialect-rendered target type, exactly as the renderer spells it.
+    pub ddl_type: String,
+}
+
 /// One explicit import-time identity-generator reconciliation.
 ///
 /// This remains structured until apply so the backend validates the live
@@ -184,6 +223,8 @@ pub enum PlanStep {
     },
     /// A live-catalog-validated primary-key lifecycle mutation.
     AlterPrimaryKey(AlterPrimaryKeyStep),
+    /// A column retype the backend restates from the live column definition.
+    AlterColumnType(AlterColumnTypeStep),
     /// A live-catalog-validated, monotonic identity-generator reconciliation.
     SynchronizeIdentity(SynchronizeIdentityStep),
     /// A rename, lowered to ONE of two dialect-distinct executable shapes.
@@ -199,6 +240,7 @@ impl PlanStep {
             PlanStep::Dml { destructive, .. } => *destructive,
             PlanStep::Backfill { .. } => true,
             PlanStep::AlterPrimaryKey(step) => step.migration.flags.destructive,
+            PlanStep::AlterColumnType(step) => step.migration.flags.destructive,
             PlanStep::SynchronizeIdentity(step) => step.migration.flags.destructive,
             PlanStep::OnlineRename(RenameStep::SqliteRebuild(rb)) => rb.migration.flags.destructive,
             PlanStep::OnlineRename(RenameStep::PgExpandContract(_)) => false,
@@ -222,6 +264,11 @@ impl PlanStep {
             } if *destructive || *requires_approval => Some(version.as_str()),
             PlanStep::Backfill { version, .. } => Some(version.as_str()),
             PlanStep::AlterPrimaryKey(step)
+                if step.migration.flags.destructive || step.migration.flags.requires_approval =>
+            {
+                Some(step.migration.version.as_str())
+            }
+            PlanStep::AlterColumnType(step)
                 if step.migration.flags.destructive || step.migration.flags.requires_approval =>
             {
                 Some(step.migration.version.as_str())
@@ -276,6 +323,7 @@ impl PlanStep {
             PlanStep::Dml { .. }
             | PlanStep::Backfill { .. }
             | PlanStep::AlterPrimaryKey(_)
+            | PlanStep::AlterColumnType(_)
             | PlanStep::SynchronizeIdentity(_)
             | PlanStep::OnlineRename(_) => false,
         }
@@ -292,6 +340,7 @@ impl PlanStep {
             PlanStep::OnlineRename(RenameStep::SqliteRebuild(rb)) => Some(rb.spec.table.as_str()),
             PlanStep::Backfill { spec, .. } => Some(spec.table.as_str()),
             PlanStep::AlterPrimaryKey(step) => Some(step.table.as_str()),
+            PlanStep::AlterColumnType(step) => Some(step.table.as_str()),
             PlanStep::SynchronizeIdentity(step) => Some(step.table.as_str()),
             PlanStep::Dml { target_table, .. } => Some(target_table.as_str()),
             PlanStep::Ddl(_) => None,

@@ -14,5 +14,6 @@ mod mysql_alter_column_render;
 mod mysql_enum_collation;
 mod mysql_expression_default_render;
 mod mysql_query_renderer_collation;
+mod mysql_setcolumntype_restate;
 mod mysql_storage_shapes;
 mod mysql_text_column_key_gate;

@@ -117,10 +117,18 @@ const VALIDATE_CONSTRAINT_PG_ONLY: &str =
 /// ENTIRE column definition, and these ops carry a single field. See
 /// `render/lower.rs::refuse_mysql_alter_column`, which keeps this apart from the
 /// `NativeAlterColumn` capability claim (MySQL answers `true` there, correctly).
+///
+/// This now covers only `setColumnNotNull` / `dropColumnNotNull`. `setColumnType`
+/// left this reason behind: the definition the op does not carry is READ from
+/// `SHOW CREATE TABLE` at apply (`render::step::AlterColumnTypeStep`), and the same
+/// route is open to these two. The wording below therefore says what the engine has
+/// not done yet rather than what MySQL cannot do — the previous wording said the
+/// second thing, and it was wrong.
 const MYSQL_ALTER_COLUMN_RESTATE: &str =
     "MySQL restates the whole column definition in MODIFY COLUMN, which this op \
-     does not carry; the current engine renders PostgreSQL ALTER COLUMN syntax \
-     only — express it as a schema change rather than a stand-alone op";
+     does not carry, and this engine does not yet read the live definition back for \
+     a nullability change the way it does for a retype — express it as a schema \
+     change rather than a stand-alone op";
 const NEXTVAL_PG_ONLY: &str =
     "nextval sequence defaults are PostgreSQL-only; SQLite/MySQL have no standalone sequences";
 const IDENTITY_ALWAYS_PG_ONLY: &str =

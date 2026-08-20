@@ -74,7 +74,9 @@ use crate::conn::ExecutorConfig;
 use crate::model::migration::{Checksum, Migration, MigrationId};
 use crate::model::snapshot::SchemaSnapshot;
 use crate::render::plan::{DatabaseRequirements, SqliteRebuildSpec};
-use crate::render::step::{AlterPrimaryKeyStep, BindValue, SynchronizeIdentityStep};
+use crate::render::step::{
+    AlterColumnTypeStep, AlterPrimaryKeyStep, BindValue, SynchronizeIdentityStep,
+};
 use crate::schema::query::SqlDialect;
 
 /// The Postgres session GUCs the backend restores on exit so its per-apply
@@ -771,6 +773,28 @@ pub trait MigrationBackend {
     ) -> Result<bool, ApplyError> {
         Err(ApplyError::Backend(
             "this backend does not implement explicit primary-key lifecycle operations".to_string(),
+        ))
+    }
+
+    /// Retype one column on a dialect that spells the change by RESTATING the
+    /// whole column definition, reading that definition from the live server
+    /// under the project lock.
+    ///
+    /// Only MySQL needs this seam. PostgreSQL has `ALTER COLUMN … TYPE`, which
+    /// carries one facet and leaves the rest alone, so its retype is ordinary
+    /// rendered DDL; SQLite has no `ALTER COLUMN` at all and reconciles a retype
+    /// through the differ's table rebuild. Both therefore keep the default
+    /// refusal below rather than implementing this.
+    async fn alter_column_type(
+        &self,
+        _cfg: &ExecutorConfig,
+        _step: &AlterColumnTypeStep,
+        _approval: crate::approval::Approval,
+        _scope: &crate::approval::ApprovalScope,
+        _applied_by: &str,
+    ) -> Result<bool, ApplyError> {
+        Err(ApplyError::Backend(
+            "this backend does not restate column definitions to retype a column".to_string(),
         ))
     }
 
