@@ -23,6 +23,8 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; BIN="$ROOT/target/release"
 # shellcheck source=tests/lib/runtime_secrets.sh
 source "$ROOT/tests/lib/runtime_secrets.sh"
+# shellcheck source=tests/lib/usage_producer.sh
+source "$ROOT/tests/lib/usage_producer.sh"
 PASS=0; FAIL=0
 pass(){ PASS=$((PASS+1)); echo "  ✓ $1"; }
 fail(){ FAIL=$((FAIL+1)); echo "  ✗ $1"; }
@@ -101,7 +103,7 @@ SQL
 
 openssl genpkey -algorithm ed25519 -out "$WORK/sk.pem" 2>/dev/null; chmod 600 "$WORK/sk.pem"
 openssl rand -base64 48 > "$WORK/gate-broker-secret"; chmod 600 "$WORK/gate-broker-secret"
-CFG_TOML="$WORK/zeroship.toml"; printf '[metering]\nredpanda_brokers = "%s"\nusage_events_topic = "%s"\n' "$RP_BROKERS" "$USAGE_TOPIC" > "$CFG_TOML"
+CFG_TOML="$WORK/zeroship.toml"; printf '[metering]\nbrokers = "%s"\nevents_topic = "%s"\n' "$RP_BROKERS" "$USAGE_TOPIC" > "$CFG_TOML"
 ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$WORK/sk.pem"
 ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gate-broker-secret"
 # The issuer control verifies the admin bearer against, on the same key the
@@ -118,17 +120,22 @@ ZEROSHIP_CONTROL_STRIPE_SECRET_KEY="sk_test_unused" \
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 && pass "control healthy" || { fail "control"; tail -30 "$WORK/control.log"; exit 1; }
-USAGE_OUTBOX_WAL_PATH="$WORK/worker-outbox.redb" "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 \
-  --config "$CFG_TOML" --control-url "$CONTROL_URL" --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
+"$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 \
+  --metering-brokers "$RP_BROKERS" --metering-events-topic "$USAGE_TOPIC" \
+  --metering-outbox-wal-path "$WORK/worker-outbox.redb" \
+  --control-url "$CONTROL_URL" --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" >/dev/null 2>&1 && pass "worker healthy" || { fail "worker"; tail -30 "$WORK/worker.log"; exit 1; }
-USAGE_OUTBOX_WAL_PATH="$WORK/gate-outbox.redb" "$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "$CONTROL_URL" \
+e2e_assert_usage_producer "$WORK/worker.log" "worker"
+"$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "$CONTROL_URL" \
+  --metering-outbox-wal-path "$WORK/gate-outbox.redb" \
   --config "$CFG_TOML" --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/blobs" --blob-cache-disk-root "$WORK/blob-cache" \
  --poll-interval 2 --signing-key-file "$WORK/sk.pem" --broker-secret-file "$WORK/gate-broker-secret" > "$WORK/gate.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && pass "gateway healthy" || { fail "gateway"; tail -30 "$WORK/gate.log"; exit 1; }
+e2e_assert_usage_producer "$WORK/gate.log" "gateway"
 
 echo ""; echo "=== Stage 3: bearer + creator + app '$APP_HOST' + DEPLOY the real .zship ==="
 # The scope string is the action list the deleted permission_tokens policy

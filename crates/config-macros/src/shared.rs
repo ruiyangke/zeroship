@@ -205,6 +205,42 @@ pub(crate) const SHARED_IDENTITIES: &[SharedIdentity] = &[
         wrapper: "Operational",
         inner: "String",
     },
+    // Usage-metering stream identities. ONE deployment fact - which broker the
+    // billing events go to, and under which topic - seen by the two producers
+    // (worker and gateway). They sit under `metering.` rather than carrying a
+    // binary prefix for the same reason `blob_store` does not: an operator
+    // points a deployment at one stream, not at a per-service stream.
+    //
+    // Until 2026-08-20 they were not settings at all. Both producers read
+    // `REDPANDA_BROKERS` / `USAGE_EVENTS_TOPIC` directly through
+    // `UsageStreamSettings::from_env`, which is why the worker - whose TOML
+    // overlay source was removed as a credential boundary in 9b205f6ed - had
+    // NO interface for them and every metering harness had to set ambient
+    // variables on the command prefix.
+    SharedIdentity {
+        symbol: "METERING_BROKERS",
+        canonical: "metering.brokers",
+        wrapper: "Operational",
+        inner: "String",
+    },
+    SharedIdentity {
+        symbol: "METERING_EVENTS_TOPIC",
+        canonical: "metering.events_topic",
+        wrapper: "Operational",
+        inner: "String",
+    },
+    SharedIdentity {
+        symbol: "METERING_PRODUCER_GROUP_ID",
+        canonical: "metering.producer_group_id",
+        wrapper: "Operational",
+        inner: "String",
+    },
+    SharedIdentity {
+        symbol: "METERING_OUTBOX_WAL_PATH",
+        canonical: "metering.outbox_wal_path",
+        wrapper: "Operational",
+        inner: "String",
+    },
 ];
 
 /// Look up a shared identity by the symbol a declaration wrote.
