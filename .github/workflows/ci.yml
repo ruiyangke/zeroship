@@ -532,6 +532,18 @@ jobs:
       # is a human call for the commit that fixes it. Task #354. Text-only.
       - name: deploy does not arm the unsigned workflow-advance path
         run: tests/compose_workflow_advance_flag_gate.sh
+      # AGENTS.md's "zero tokio in the stack" invariant has never been checked by
+      # anything. It is two claims: no manifest we own declares tokio (true, and
+      # briefly false in b72fee096, caught by a human reading the diff), and the
+      # transitive edge through cyper -> hyper exists and is accepted. The gate
+      # bans the first and PINS the second, so it is green today and goes red on
+      # movement in either direction - including the edge being REMOVED, which is
+      # what investigate/cyper-tokio-removal is for and which must take the
+      # AGENTS.md paragraph with it. Runs cargo metadata and cargo tree only:
+      # both resolve from the manifests and the lockfile, so nothing is
+      # compiled. This step sits in the rust job for the toolchain, not a build.
+      - name: zero-tokio invariant
+        run: tests/zero_tokio_gate.sh
       # THE INSTRUMENTS' OWN SELF-TESTS. Every e2e harness in tests/ sources one
       # or more of tests/lib/*.sh for its run accounting: whether a binary is
       # stale against its sources, whether a Rust test skipped and still counted
