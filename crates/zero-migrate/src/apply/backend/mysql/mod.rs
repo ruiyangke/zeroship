@@ -1067,8 +1067,17 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
     }
 
     fn online(&self) -> Option<&dyn OnlineSchemaChange> {
-        // No online expand-contract harness on MySQL (the differ emits no
-        // renames for MySQL, so `renames` is empty — no online path is reached).
+        // No online expand-contract harness on MySQL.
+        //
+        // This used to justify itself with "the differ emits no renames for MySQL, so
+        // `renames` is empty — no online path is reached". That was FALSE, and
+        // measured false against a live server: the differ's rename author was
+        // dialect-blind, so a hinted MySQL rename planned a `PgExpandContract`, hit
+        // this `None` mid-apply, and left the deploy half-applied. The claim is true
+        // NOW because the differ refuses the rename at plan time
+        // (`DeclarativeError::MysqlRenameColumnUnsupported`) rather than because
+        // anything about this `None` changed. Keep the two in step: re-enabling MySQL
+        // renames means giving this seam a real harness, not relaxing the refusal.
         None
     }
 
