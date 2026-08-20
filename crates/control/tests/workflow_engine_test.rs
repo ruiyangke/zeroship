@@ -3409,6 +3409,127 @@ async fn workflow_blob_ref_gc_reclaims_zero_refs_but_not_referenced_hashes() {
     common::drain_pg().await;
 }
 
+/// One tick of the ref sweep over two apps that hold the SAME blob hash.
+///
+/// `second_app_holds_it` is the only variable. The object store is keyed by
+/// hash and shared by the whole fleet, so a second app's blob row is a live
+/// reference to the same bytes, and that is the case
+/// `workflow_blob_is_referenced` exists to answer.
+///
+/// Returns (deleted, first app's row survives, object survives).
+async fn ref_sweep_over_a_shared_hash(label: &str, second_app_holds_it: bool) -> Option<(usize, bool, bool)> {
+    let fx = isolated_fixture(label).await?;
+    let (first, _) = seed_app_and_deploy(&fx, &format!("{label}-first")).await;
+    let (second, _) = seed_app_and_deploy(&fx, &format!("{label}-second")).await;
+
+    let bytes = format!("s94-shared-hash-{label}").into_bytes();
+    let hash = sha256_hex(&bytes);
+    fx.state
+        .workflow_blob_store
+        .put_blob(&hash, &bytes)
+        .await
+        .expect("write the shared blob");
+    let aged = Utc::now() - ChronoDuration::seconds(workflow_blob_gc::REF_SWEEP_GRACE_SECS + 3_600);
+
+    // The first app is done with it: zero refcount, aged past the grace window.
+    fx.pg.set_default_app_id(first);
+    fx.pg
+        .execute(
+            "INSERT INTO zeroship.workflow_blobs \
+                (hash, size, content_type, refcount, last_referenced_at) \
+             VALUES ($1, $2, 'application/json', 0, $3)",
+            &[&hash, &(bytes.len() as i64), &aged],
+        )
+        .await
+        .expect("insert the collectible row");
+    if second_app_holds_it {
+        // The second app is NOT done with it. Refcount 1 and recent, so its own
+        // row could never be collected on its own account.
+        fx.pg.set_default_app_id(second);
+        fx.pg
+            .execute(
+                "INSERT INTO zeroship.workflow_blobs \
+                    (hash, size, content_type, refcount, last_referenced_at) \
+                 VALUES ($1, $2, 'application/json', 1, now())",
+                &[&hash, &(bytes.len() as i64)],
+            )
+            .await
+            .expect("insert the live row");
+    }
+
+    let swept = workflow_blob_gc::tick_ref_sweep(&fx.state)
+        .await
+        .expect("run the ref sweep");
+    fx.pg.set_default_app_id(first);
+    let row_survives = !fx
+        .pg
+        .query(
+            "SELECT 1 AS present FROM zeroship.workflow_blobs WHERE hash = $1",
+            &[&hash],
+        )
+        .await
+        .expect("read the first app's row back")
+        .is_empty();
+    let object_survives = fx.state.workflow_blob_store.get_blob(&hash).await.is_ok();
+
+    drop(fx);
+    common::drain_pg().await;
+    Some((swept.deleted, row_survives, object_survives))
+}
+
+/// A blob another app still holds must keep BOTH its row and its object.
+///
+/// This is the arm `fleet_sweeps_all_report_the_tenant_they_excluded` cannot
+/// reach: there the two apps are given different bytes on purpose, so the
+/// cross-app search is only ever asked about a hash no other app has. Here the
+/// hash is genuinely shared, and every privilege is intact - no revoke, no
+/// unreadable journal - so a failure is about the ORDER of the check and
+/// nothing else.
+///
+/// Until 2026-08-20 the row was deleted before the question was asked and
+/// `Ok(false)` did not undo it, so the first app's row vanished while the
+/// second app went on referencing the object. The delete COUNT was 0 either
+/// way, which is why the row assertion is the one that carries this.
+///
+/// WHAT THIS DOES NOT CATCH. Both rows are written directly rather than by
+/// running two workflows, so it does not prove the engine ever produces a
+/// shared hash across apps - only that the sweep is right when it does. It runs
+/// one tick on one thread, so the `FOR UPDATE SKIP LOCKED` path where a second
+/// sweep holds the row is never taken. And it says nothing about the second
+/// app's row, which no sweep should touch and which is not asserted here.
+#[compio::test]
+async fn ref_sweep_keeps_a_blob_a_second_app_still_references() {
+    let Some((deleted, row_survives, object_survives)) =
+        ref_sweep_over_a_shared_hash("blob-shared-held", true).await
+    else {
+        return;
+    };
+    assert_eq!(deleted, 0, "a blob another app holds must not be collected");
+    assert!(
+        row_survives,
+        "the retained blob must keep its ROW: without it the ref sweep can never \
+         look at this blob again, and the object outlives every reference to it"
+    );
+    assert!(object_survives, "and the bytes the second app still points at");
+}
+
+/// The control: identical, minus the second app's row.
+///
+/// This is what makes the assertions above measurements rather than a fixture
+/// no sweep ever reaches - the same seeded row moves from retained to collected
+/// on one variable.
+#[compio::test]
+async fn ref_sweep_collects_a_shared_hash_no_other_app_holds() {
+    let Some((deleted, row_survives, object_survives)) =
+        ref_sweep_over_a_shared_hash("blob-shared-free", false).await
+    else {
+        return;
+    };
+    assert_eq!(deleted, 1, "with no other holder the blob is collectible");
+    assert!(!row_survives, "and its row goes");
+    assert!(!object_survives, "and so do its bytes");
+}
+
 #[compio::test]
 async fn workflow_blob_orphan_gc_reclaims_only_unreferenced_old_files() {
     let Some(fx) = isolated_fixture("blob-orphan-gc").await else {
@@ -7277,6 +7398,14 @@ struct FleetSweeps {
     /// conservative arm - "deleted nothing" and "deleted it and did not count
     /// it" produce the same zero.
     readable_blob_present: bool,
+    /// Whether that blob's ROW is still in the readable app's journal.
+    ///
+    /// Paired with `readable_blob_present` because the two can disagree, and
+    /// the disagreement is the failure that neither field catches alone. A
+    /// sweep that removes the row and keeps the object leaves storage that
+    /// NEITHER sweep can reclaim: the ref sweep walks rows and there is no row,
+    /// and the orphan sweep refuses while the same journal is unreadable.
+    readable_blob_row_present: bool,
 }
 
 /// Run every journalled-fleet sweep once over TWO apps that both have work.
@@ -7292,7 +7421,7 @@ async fn sweeps_over_two_apps(label: &str, revoke_second: bool) -> Option<FleetS
     let fx = isolated_fixture(label).await?;
     let ctl = control_role_fixture(&fx, label).await;
 
-    let (_readable, readable_blob) =
+    let (readable, readable_blob) =
         seed_app_for_all_sweeps(&fx, &ctl, &format!("{label}-readable")).await;
     let (other, _other_blob) = seed_app_for_all_sweeps(&fx, &ctl, &format!("{label}-other")).await;
     if revoke_second {
@@ -7332,6 +7461,19 @@ async fn sweeps_over_two_apps(label: &str, revoke_second: bool) -> Option<FleetS
         .get_blob(&readable_blob)
         .await
         .is_ok();
+    // Read the row as the SUPERUSER (`fx`), not through `ctl`: the point is
+    // what the sweep left behind, and a revoked-privilege read would report an
+    // absent row for a reason that has nothing to do with the sweep.
+    fx.pg.set_default_app_id(readable);
+    let readable_blob_row_present = !fx
+        .pg
+        .query(
+            "SELECT 1 AS present FROM zeroship.workflow_blobs WHERE hash = $1",
+            &[&readable_blob],
+        )
+        .await
+        .expect("read the readable app's blob row back")
+        .is_empty();
 
     drop(ctl);
     drop(fx);
@@ -7343,6 +7485,7 @@ async fn sweeps_over_two_apps(label: &str, revoke_second: bool) -> Option<FleetS
         retention,
         blob_ref,
         readable_blob_present,
+        readable_blob_row_present,
     })
 }
 
@@ -7362,7 +7505,20 @@ async fn sweeps_over_two_apps(label: &str, revoke_second: bool) -> Option<FleetS
 /// blob it could not prove unreferenced. That conservative arm previously had
 /// no test at all.
 ///
-/// WHAT THIS DOES NOT CATCH. It exercises the CATALOG-level exclusion only -
+/// It is also the regression test for the ORDER that arm ran in. Until
+/// 2026-08-20 the ref sweep deleted the blob row and asked the question
+/// afterwards, and `Ok(false)` did not roll back, so this exact fixture left the
+/// row deleted and the object present - which `readable_blob_present` alone
+/// reports as a pass. `readable_blob_row_present` is the assertion that fails
+/// on it.
+///
+/// WHAT THIS DOES NOT CATCH. Nothing here exercises a hash shared by two apps:
+/// the two blobs are given different bytes on purpose, so the cross-app arm of
+/// `workflow_blob_is_referenced` - the reason the check exists at all - is only
+/// ever asked about a hash no other app has. That arm is covered by
+/// `ref_sweep_keeps_a_blob_a_second_app_still_references` and by nothing here.
+/// Nothing here runs two sweeps concurrently, so the row lock this
+/// relies on is never contended. It exercises the CATALOG-level exclusion only -
 /// the app is unreadable before the first per-app statement runs. The other
 /// path into `apps_skipped`, a journal that answers the catalog and then denies
 /// the statement, is covered by `fleet_sweeps_count_a_journal_denied_*` and by
@@ -7434,6 +7590,13 @@ async fn fleet_sweeps_all_report_the_tenant_they_excluded() {
         "the blob must still be IN the object store: a delete count of zero is \
          also what a sweep that deleted it and miscounted would report"
     );
+    assert!(
+        swept.readable_blob_row_present,
+        "the blob's ROW must survive too. A sweep that drops the row and keeps \
+         the object has made that storage unreclaimable by both sweeps: the ref \
+         sweep walks rows and finds none, and the orphan sweep refuses while \
+         the same journal is unreadable"
+    );
 }
 
 /// The control for the test above: identical setup, no revoke.
@@ -7477,6 +7640,12 @@ async fn fleet_sweeps_report_full_coverage_when_every_journal_is_readable() {
         !swept.readable_blob_present,
         "with nothing excluded the sweep must actually remove the object, which \
          is what makes the retained-blob assertion in the paired test a measurement"
+    );
+    assert!(
+        !swept.readable_blob_row_present,
+        "and it must remove the row, which is what makes the retained-ROW \
+         assertion in the paired test a measurement rather than a row this \
+         sweep never touches"
     );
 }
 
