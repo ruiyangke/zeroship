@@ -34,6 +34,14 @@
 //! this machine" rather than "the runtime regressed" - read the panic message
 //! before believing either.
 //!
+//! That container dependence already showed itself across the merge.
+//! `node_pg_tls_e2e` FAILED on the pre-merge run of 2026-08-20 ("Connection
+//! terminated unexpectedly", 500 not 200) and passed on both post-merge runs.
+//! Nothing in the merge fixed it and nothing here should be read as having
+//! fixed it - the TLS Postgres container was up the second time. It is the
+//! clearest example in this crate of a test whose verdict is about the machine
+//! rather than about the code.
+//!
 //! Second isolation loss, specific to this target: each of the six files held
 //! exactly ONE test, so cargo used to run them as six sequential processes.
 //! They are now six threads in one process and run CONCURRENTLY. `lock_env()`
