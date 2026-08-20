@@ -5,7 +5,7 @@
 //!   shapes. The native fetch client connects to it; promise reactions
 //!   drive the read loop.
 
-mod common;
+use crate::common;
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};

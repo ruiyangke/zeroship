@@ -1,4 +1,9 @@
 #![allow(dead_code)]
+// The six `node_*_e2e` modules that share this helper each carried a
+// crate-level `#![allow(unsafe_code)]` when they were their own binaries; that
+// is what covered the `std::env` blocks below. They are modules of
+// `tests/node_realworld.rs` now, so the allow has to sit on the helper itself.
+#![allow(unsafe_code)]
 
 use std::fs;
 use std::net::{TcpStream as StdTcpStream, ToSocketAddrs};

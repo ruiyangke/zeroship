@@ -4,7 +4,7 @@
 //! through `dispatch` so we exercise the full module-resolution path
 //! (eager import-graph walk + V8 synthetic-module instantiation).
 
-mod common;
+use crate::common;
 use common::{dispatch, m};
 
 #[test]

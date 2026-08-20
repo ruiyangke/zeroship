@@ -3,7 +3,7 @@
 //! in the actual kernel, complementing the lib-side `modules::tests`
 //! unit suite.
 
-mod common;
+use crate::common;
 use common::*;
 
 use zeroship_runtime::ModuleEntry;
