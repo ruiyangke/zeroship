@@ -31,6 +31,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CLI_MAIN="$ROOT/crates/cli/src/main.rs"
 
+# shellcheck source=tests/lib/gate_arms.sh
+. "$ROOT/tests/lib/gate_arms.sh"
+gate_arms_init deploy_instructions
+
 fail=0
 note() { printf '  %s\n' "$1"; }
 
@@ -61,11 +65,16 @@ fi
 # that routinely prints warnings teaches its readers to ignore its stderr.
 ALLOWED="$(printf '%s\n' "$HELP_LINES" | grep -oE '[-][-][a-z-]+' | sort -u)"
 ALLOWED_COUNT="$(printf '%s\n' "$ALLOWED" | grep -c . || true)"
-if [ "$ALLOWED_COUNT" -lt 2 ]; then
+# MEASURED 2026-08-20: 6 flags parsed from the deploy help lines. Floor 2 is
+# reused unchanged from the pre-library hand-rolled check this replaces -
+# below it there are too few flags to tell "the flag set shrank" from "the
+# help-line regex stopped matching".
+if ! gate_arm help_flags "$ALLOWED_COUNT" 2; then
   echo "FAIL: parsed only $ALLOWED_COUNT flag(s) from the deploy help lines." >&2
   echo "      Expected at least --app and one optional flag; a near-empty set" >&2
   echo "      would make every instruction look wrong. Lines were:" >&2
   printf '%s\n' "$HELP_LINES" >&2
+  gate_arms_finish || true
   exit 1
 fi
 
@@ -91,11 +100,16 @@ fi
 PARSER_FLAGS="$(sed -n '/^const DEPLOY_KNOWN_FLAGS/,/^];/p' "$CLI_MAIN" \
   | grep -oE '"[-][-][a-z-]+"' | tr -d '"' | sort -u || true)"
 PARSER_COUNT="$(printf '%s\n' "$PARSER_FLAGS" | grep -c . || true)"
-if [ "$PARSER_COUNT" -lt 2 ]; then
+# MEASURED 2026-08-20: 6 flags parsed from DEPLOY_KNOWN_FLAGS. Floor 2 is
+# reused unchanged from the pre-library hand-rolled check this replaces, for
+# the same reason as help_flags above: too few flags to tell "the const
+# shrank" from "the sed range stopped matching the const block".
+if ! gate_arm parser_flags "$PARSER_COUNT" 2; then
   echo "FAIL: parsed only $PARSER_COUNT flag(s) from DEPLOY_KNOWN_FLAGS in $CLI_MAIN." >&2
   echo "      That const is what the CLI actually enforces; if it cannot be read" >&2
   echo "      this gate has no authority to check the help text against, so it" >&2
   echo "      refuses rather than falling back to the prose alone." >&2
+  gate_arms_finish || true
   exit 1
 fi
 if [ "$ALLOWED" != "$PARSER_FLAGS" ]; then
@@ -176,10 +190,13 @@ done < <(grep -rn 'zeroship deploy [^`]' \
 # changes), it inspects nothing and exits 0 looking identical to a clean run.
 # The repo ships more than a handful of deploy instructions; a run that found
 # almost none has found a broken scanner, not a clean tree.
+# MEASURED 2026-08-20: 18 deploy instructions checked across examples/ and
+# docs/. Floor 5 is reused unchanged from the pre-library hand-rolled
+# MIN_INSTRUCTIONS check this replaces.
 MIN_INSTRUCTIONS=5
 echo
 echo "deploy instructions checked: $checked (floor $MIN_INSTRUCTIONS)"
-if [ "$checked" -lt "$MIN_INSTRUCTIONS" ]; then
+if ! gate_arm instructions_checked "$checked" "$MIN_INSTRUCTIONS"; then
   echo "FAIL: inspected only $checked deploy instruction(s), fewer than the" >&2
   echo "      $MIN_INSTRUCTIONS this gate expects. Instructions do not vanish by" >&2
   echo "      accident: either the scan path is wrong or the grep no longer" >&2
@@ -187,6 +204,7 @@ if [ "$checked" -lt "$MIN_INSTRUCTIONS" ]; then
   fail=1
 fi
 
+gate_arms_finish || fail=1
 if [ "$fail" -ne 0 ]; then
   echo "DEPLOY INSTRUCTIONS GATE: FAILED" >&2
   exit 1

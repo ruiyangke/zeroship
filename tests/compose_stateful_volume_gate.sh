@@ -37,6 +37,14 @@ PASS=0; FAIL=0
 pass() { PASS=$((PASS+1)); echo "  ok   $1"; }
 fail() { FAIL=$((FAIL+1)); echo "  FAIL $1"; }
 
+# Per-arm anti-vacuity accounting (tests/lib/gate_arms.sh). The STATEFUL loop
+# below is a hardcoded list and cannot itself collapse to zero; what CAN
+# collapse is the top-level `volumes:` parse each service's mount is matched
+# against, so that is the arm.
+# shellcheck source=tests/lib/gate_arms.sh
+. "$ROOT/tests/lib/gate_arms.sh"
+gate_arms_init compose_stateful_volume
+
 echo "============================================"
 echo "  stateful compose services keep data on a named volume"
 echo "============================================"
@@ -65,8 +73,13 @@ mapfile -t DECLARED < <(
        v && /^  [a-z][a-z0-9_-]*:/{ n=$1; sub(/:.*$/,"",n); print n; next }
        v && /^[a-z]/{v=0}' "$CF"
 )
-if [ "${#DECLARED[@]}" -eq 0 ]; then
-  echo "  x REFUSED: parsed ZERO declared named volumes out of $CF." >&2
+N_DECLARED=${#DECLARED[@]}
+# MEASURED 2026-08-20: 6 named volumes declared under the top-level `volumes:`
+# key. Floor well under that: adding or removing one volume for an unrelated
+# service should not trip this, while the failure it guards against - the
+# awk block losing its `volumes:` anchor - drops the count to zero, not to 3.
+if ! gate_arm declared_volumes "$N_DECLARED" 3; then
+  echo "  x REFUSED: parsed too few declared named volumes out of $CF." >&2
   echo "    A gate that checks nothing must not report success." >&2
   exit 1
 fi
@@ -107,4 +120,6 @@ if [ "$RAN" -ne "$EXPECT_RAN" ]; then
   echo "    added - re-measure and bump this line." >&2
   rc=1
 fi
+
+gate_arms_finish || rc=1
 exit $rc

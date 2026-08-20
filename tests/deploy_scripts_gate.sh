@@ -108,6 +108,23 @@ PASS=0; FAIL=0
 pass() { PASS=$((PASS+1)); echo "  ok   $1"; }
 fail() { FAIL=$((FAIL+1)); echo "  FAIL $1"; }
 
+# Per-arm anti-vacuity accounting.
+#
+# THIS GATE IS ONE OF THE FOUR THE LIBRARY EXISTS FOR. Its argv-secret scan
+# matched exactly ONE `--<name>-file` row in the shipped compose, on the single
+# service its own filter excludes, so it examined nothing and printed the same
+# clean line a compose file with no flags would - underneath a gate-level floor
+# on the ASSERTION count that was green throughout, because the assertion did
+# run. It just ran over an empty set. Everything the floor at the bottom of this
+# file counts is assertions; everything declared below is ITEMS.
+#
+# The arms are the seven places this file enumerates something DERIVED - from
+# the sourced deploy-remote.sh, from the shipped compose, from .gitmodules - as
+# opposed to the fixtures it writes itself, which cannot silently shrink.
+# shellcheck source=tests/lib/gate_arms.sh
+. "$ROOT/tests/lib/gate_arms.sh"
+gate_arms_init deploy_scripts
+
 if ! declare -F compose_vars >/dev/null || ! declare -F rename_suspects >/dev/null; then
   echo "  x REFUSED: sourcing $REMOTE did not define compose_vars/rename_suspects." >&2
   exit 1
@@ -292,13 +309,40 @@ if [ -f "$REAL_COMPOSE" ]; then
   # must be visible to it.
   SEEN_SERVICES="$(awk '/^  [a-z][a-z0-9_-]*:[[:space:]]*$/ { s=$1; sub(/:$/,"",s); print s }' "$REAL_COMPOSE" | sort -u)"
   MISSING_SEEN=""
+  N_DRY_RUN=0
   for s in $DRY_RUN_SERVICES; do
+    N_DRY_RUN=$((N_DRY_RUN + 1))
     echo "$SEEN_SERVICES" | grep -qx "$s" || MISSING_SEEN="$MISSING_SEEN $s"
   done
 
+  # BOTH ARMS ARE DECLARED BEFORE THE BRANCH, not inside it. Written as `elif`
+  # they would stop being declared the moment an earlier branch was taken, and a
+  # declaration that sits behind a condition that stopped matching is the same
+  # defect one level up - the meta-gate would see the source and be content.
+  #
+  # The services the pre-roll dry-runs, taken from CHECK_SERVICES in the sourced
+  # deploy-remote.sh. MEASURED 2026-08-20: 5 (control, migrated, gateway, worker,
+  # auth). Floor 3, well under that: the number moves when a platform service is
+  # added or retired, which is ordinary, but the failure this guards - the sourced
+  # script stops defining the list, or its shape changes - takes it to 0.
+  gate_arm dry_run_services "$N_DRY_RUN" 3 || true
+
+  # THE ARM THAT WAS VACUOUS, and the count it declares is deliberately the
+  # PRE-FILTER one. `FLAG_FILES` - the rows left after the dry-run filter - is
+  # the VIOLATION set, and its correct value is 0; flooring that would demand a
+  # credential in argv to pass. What may never collapse is the number of rows the
+  # matcher handed to the filter, because every one of those got a verdict.
+  # MEASURED 2026-08-20: 1, `migrate --database-url-file`, which is exactly the
+  # row the filter excludes. So this arm rules on one item and the floor is 1;
+  # that is as much as this enumeration can honestly claim, and it is the
+  # difference between "the filter excluded the only row" and "the matcher found
+  # no rows", which printed identically until now.
+  argv_rows_ok=0
+  gate_arm argv_flag_rows "$N_ALL_FLAGS" 1 || argv_rows_ok=1
+
   if [ -n "$MISSING_SEEN" ]; then
     fail "the service walk did not see$MISSING_SEEN, so a clean result below would mean nothing"
-  elif [ "$N_ALL_FLAGS" -eq 0 ]; then
+  elif [ "$argv_rows_ok" -ne 0 ]; then
     fail "the --<name>-file matcher found no row anywhere in $REAL_COMPOSE, not even on the services the pre-roll does not dry-run. It matched 1 on 2026-08-20; a matcher that matches nothing reports the same clean result as a compose file with no flags"
   elif [ -z "$FLAG_FILES" ]; then
     pass "no dry-run service passes a secret path as a command flag, so --check-config sees every one of them ($N_ALL_FLAGS flag row(s) in the file, $(printf '%s\n' "$ALL_FLAG_FILES" | tr '\t' ' ' | tr '\n' ';') -- all outside the dry-run set $(echo $DRY_RUN_SERVICES))"
@@ -345,8 +389,16 @@ fi
 DEV_RS="$ROOT/crates/cli/src/dev.rs"
 if [ -f "$REAL_COMPOSE" ] && [ -f "$DEV_RS" ]; then
   REAL_SECRETS="$(secret_files "$REAL_COMPOSE")"
-  if ! usable "$REAL_SECRETS"; then
-    fail "secret_files extracted NOTHING from the shipped compose file"
+  N_REAL_SECRETS=0
+  usable "$REAL_SECRETS" && N_REAL_SECRETS="$(printf '%s\n' $REAL_SECRETS | grep -c .)"
+  # One verdict per file: each must be named in dev.rs. MEASURED 2026-08-20: 7
+  # (auth-signing.pem, broker-secret, gateway-signing.pem, migrate-dsn,
+  # pairwise-salt, refresh-hash-key, refresh-idem-key). Floor 4, which a deploy
+  # that legitimately retires a key or two still clears, while the failure this
+  # guards - the extraction stops matching the compose file's shape - lands on 0.
+  # The `usable` test it replaces was a floor of 1.
+  if ! gate_arm real_secret_files "$N_REAL_SECRETS" 4; then
+    fail "secret_files extracted NOTHING (or almost nothing: $N_REAL_SECRETS) from the shipped compose file"
   else
     unprovisioned=""
     for n in $REAL_SECRETS; do
@@ -454,8 +506,14 @@ if [ -f "$ROOT/pnpm-lock.yaml" ] && [ -f "$ROOT/Cargo.toml" ] && [ -f "$ROOT/.gi
   REAL_MAN="$(for s in $REAL_SUB; do
     submodule_manifests "$s" "$ROOT/pnpm-lock.yaml" "$ROOT/Cargo.toml"
   done | sort -u)"
-  if ! usable "$REAL_MAN"; then
-    fail "no manifest was derived for any declared submodule of this repo; the preflight would inspect nothing"
+  N_REAL_MAN=0
+  usable "$REAL_MAN" && N_REAL_MAN="$(printf '%s\n' "$REAL_MAN" | grep -c .)"
+  # The manifests the deploy preflight would open, one verdict each. MEASURED
+  # 2026-08-20: 7, across the single declared submodule. Floor 3: the block below
+  # names TWO manifests by hand, so a floor of 2 could be met by an enumeration
+  # that had collapsed to exactly those two and nothing else.
+  if ! gate_arm submodule_manifests "$N_REAL_MAN" 3; then
+    fail "no manifest was derived for any declared submodule of this repo ($N_REAL_MAN); the preflight would inspect nothing"
   else
     miss=""
     for m in third_party/zero-migrate/crates/zero-migrate-node/package.json \
@@ -797,9 +855,32 @@ chmod +x "$STUB"/*
 # this file would never notice.
 ROLL_FILES="$(printf '%s\n' $SNAPSHOT_MEMBERS | grep -v '^secrets\.tar$' | tr '\n' ' ')"
 
+# Two arms, because these two derived lists drive the rest of this section and
+# every loop over them is a `for ... done` whose empty case is silent - the
+# restore-content loop, the secret-comparison loop and the snapshot-coverage
+# loop all report success on an empty list. They are declared here, where the
+# lists are built, rather than at each loop.
+#
+# MEASURED 2026-08-20 against the sourced deploy-remote.sh and the shipped
+# compose: SNAPSHOT_MEMBERS is 5 (compose/.env, compose/docker-compose.yml,
+# ops/Caddyfile, ops/zeroship.toml, secrets.tar) and ROLL_FILES is those minus
+# secrets.tar, so 4. Floor 3 each: a member being added or removed is a real
+# change to the deploy contract and moves the number by one, while the failure
+# guarded here - the sourced script renames the variable, or its shape stops
+# splitting on whitespace - takes it to 0 or 1.
+gate_arm snapshot_members "$(printf '%s\n' $SNAPSHOT_MEMBERS | grep -c .)" 3 || true
+gate_arm rollback_files "$(printf '%s\n' $ROLL_FILES | grep -c .)" 3 || true
+
 # The secret files the shipped compose references. Derived, for the same
 # reason: this gate must not carry its own copy of a list the script reads.
 SECRET_NAMES="$(secret_files "$REAL_COMPOSE" | tr '\n' ' ')"
+# The SAME extraction as `real_secret_files` above, declared again because it is
+# a second, independent read feeding different consumers: that arm guards the
+# dev.rs drift check, this one guards seed_sandbox and the two rollback loops
+# that compare restored key material. The dev.rs block is also conditional on
+# crates/cli/src/dev.rs existing, so its arm can be absent from a run this one
+# is present in. MEASURED 2026-08-20: 7. Floor 4, as above.
+gate_arm rollback_secret_files "$(printf '%s\n' $SECRET_NAMES | grep -c .)" 4 || true
 
 seed_secrets() { # $1 sandbox. Writes the referenced secret files, non-empty.
   local d="$1" n
@@ -1712,4 +1793,8 @@ if [ "$RAN" -lt "$MIN_RAN" ]; then
   echo "    Assertions went missing - a smaller green is not a pass." >&2
   rc=1
 fi
+# The floor above counts ASSERTIONS and the trailer below counts ITEMS, and the
+# 2026-08-20 failure is exactly the gap between them: 141 assertions ran, one of
+# them over an empty set, and the floor was green.
+gate_arms_finish || rc=1
 exit $rc

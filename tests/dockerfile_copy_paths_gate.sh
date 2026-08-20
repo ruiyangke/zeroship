@@ -41,6 +41,14 @@ PASS=0; FAIL=0
 pass() { PASS=$((PASS+1)); echo "  ok   $1"; }
 fail() { FAIL=$((FAIL+1)); echo "  FAIL $1"; }
 
+# Per-arm anti-vacuity accounting (tests/lib/gate_arms.sh). The two checks
+# below read two independent regions of the Dockerfile - every COPY line, and
+# just the `AS builder` stage body - so either can collapse to zero on its own
+# if the shape it depends on moves.
+# shellcheck source=tests/lib/gate_arms.sh
+. "$ROOT/tests/lib/gate_arms.sh"
+gate_arms_init dockerfile_copy_paths
+
 echo "============================================"
 echo "  deploy/Dockerfile COPY paths resolve in the repo"
 echo "============================================"
@@ -60,8 +68,13 @@ mapfile -t SRCS < <(
   ' "$DF"
 )
 
-if [ "${#SRCS[@]}" -eq 0 ]; then
-  echo "  x REFUSED: parsed ZERO context COPY sources out of $DF." >&2
+N_SRCS=${#SRCS[@]}
+# MEASURED 2026-08-20: 14 context COPY sources in deploy/Dockerfile. Floor well
+# under that: adding or dropping a COPY line for one workspace member should
+# not trip this, while the failure this guards against - the awk COPY-line
+# parser losing its match - drops it to zero, not to single digits.
+if ! gate_arm context_copy_sources "$N_SRCS" 5; then
+  echo "  x REFUSED: parsed too few context COPY sources out of $DF." >&2
   echo "    Either the Dockerfile changed shape or this parser is broken." >&2
   echo "    A gate that checks nothing must not report success." >&2
   exit 1
@@ -104,8 +117,14 @@ done
 # ---------------------------------------------------------------------------
 if [ -f "$ROOT/.cargo/config.toml" ] && grep -q "rustflags" "$ROOT/.cargo/config.toml"; then
   BUILDER_BODY="$(awk '/^FROM .* AS builder/{f=1;next} /^FROM /{f=0} f' "$DF")"
-  if [ -z "$BUILDER_BODY" ]; then
-    echo "  x REFUSED: no 'AS builder' stage body found - this check's premise is gone." >&2
+  N_BUILDER_LINES=$(printf '%s\n' "$BUILDER_BODY" | grep -c .)
+  # MEASURED 2026-08-20: 100 lines in the `AS builder` stage body. Floor well
+  # under that: ordinary edits to the builder stage move this by a handful of
+  # lines, while the failure this guards against - the awk stage-boundary
+  # match losing its anchor - drops it to zero, which "no builder body found"
+  # alone cannot be told apart from a builder stage that legitimately shrank.
+  if ! gate_arm builder_stage_body "$N_BUILDER_LINES" 20; then
+    echo "  x REFUSED: 'AS builder' stage body too small to trust - this check's premise is gone." >&2
     exit 1
   fi
   if printf '%s\n' "$BUILDER_BODY" | grep -qE '^COPY[[:space:]]+\.cargo/'; then
@@ -136,4 +155,6 @@ if [ "$RAN" -ne "$EXPECT_RAN" ]; then
   echo "    not a pass. More means a COPY was added; re-measure and bump this line." >&2
   rc=1
 fi
+
+gate_arms_finish || rc=1
 exit $rc

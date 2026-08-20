@@ -74,6 +74,12 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Per-arm anti-vacuity accounting: each arm below states how many items it
+# ruled on and the floor that number must clear. See tests/lib/gate_arms.sh.
+# shellcheck source=tests/lib/gate_arms.sh
+. "$ROOT/tests/lib/gate_arms.sh"
+gate_arms_init test_target_census
+
 # MEASURED 2026-08-20 on 4abf0f74a, by running the job's own
 # `cargo test --workspace --no-run --message-format=json` to completion:
 #
@@ -221,6 +227,28 @@ fi
 rc=0
 
 # --- arm 1: per-package existence, both directions ------------------------
+#
+# THE COUNT IS PACKAGES OBSERVED TO BUILD A TEST BINARY, which is the side that
+# can silently collapse: the census file is committed text and cannot go to
+# zero unnoticed (it is checked non-empty above), while OBSERVED_PKGS comes
+# from a jq filter over cargo's json and goes to zero the moment
+# `profile.test == true` stops matching a future cargo's output. If that
+# happened, the two comm(1) calls below would report every census row as
+# MISSING - loud - but a later edit that softened the MISSING arm would leave a
+# gate comparing two empty sets and printing nothing.
+#
+# FLOOR 15 against 30 census rows (counted 2026-08-20 in
+# tests/test_target_packages.txt). Half, because packages are added and removed
+# in ones and this must survive a real consolidation; a jq filter that stops
+# matching does not land on 14.
+#
+# NOT MEASURED BY RUNNING: this gate takes a cargo `--message-format json`
+# capture as argv, which means a full workspace `cargo test --no-run`. The 30
+# is counted from the census file, which is what the floor is expressed
+# against; the observed count on a healthy build equals it or exceeds it by the
+# EXTRA arm's definition.
+gate_arm package_census "$PKG_COUNT" 15 || rc=1
+
 MISSING="$(comm -23 <(printf '%s\n' "$EXPECTED_PKGS") <(printf '%s\n' "$OBSERVED_PKGS"))"
 EXTRA="$(comm -13 <(printf '%s\n' "$EXPECTED_PKGS") <(printf '%s\n' "$OBSERVED_PKGS"))"
 
@@ -266,10 +294,17 @@ echo "test binaries:  $TARGET_COUNT across $PKG_COUNT packages"
 echo "test names:     $names_total (floor $NAME_FLOOR)"
 echo "all executables: $ALL_EXES (not gated; the number the retired target floor counted)"
 
-if [ "$names_total" -lt "$NAME_FLOOR" ]; then
+# The test-name floor, now spelled as the shared contract so a collapse names
+# the arm rather than only the gate. Same number, same meaning: NAME_FLOOR is
+# the floor this file has always applied, and the bespoke diagnosis below is
+# kept because "a drop here is lost tests" is not something the generic message
+# can say.
+if ! gate_arm test_names "$names_total" "$NAME_FLOOR"; then
   rc=1
   echo "::error::test names ($names_total) fell below the floor ($NAME_FLOOR); tests stopped being built or run"
   echo "  Consolidating binaries does NOT move this number. A drop here is lost tests."
 fi
+
+gate_arms_finish || rc=1
 
 exit $rc

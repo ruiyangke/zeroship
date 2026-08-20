@@ -29,9 +29,22 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-exec cargo run \
+# THE SHIM STILL OWES AN ACCOUNT. It has no counts of its own - the binary has
+# them - so it delegates, and gate_arms_delegate refuses if the binary emits no
+# `zsgate-arm` line. That is not a formality: the rule set going to zero is
+# precisely the 2026-08-13 failure described above, and this is what makes it
+# the same refusal, in the same words, as an arm collapsing in any shell gate.
+# shellcheck source=tests/lib/gate_arms.sh
+. "$ROOT/tests/lib/gate_arms.sh"
+gate_arms_init compose_secret_strength
+
+gate_arms_delegate cargo run \
   --quiet \
   --manifest-path "$ROOT/Cargo.toml" \
   --package zeroship-gatekit \
   --bin compose-secret-strength \
   -- "$ROOT/deploy/compose/docker-compose.yml"
+status=$?
+
+gate_arms_finish || status=1
+exit "$status"
