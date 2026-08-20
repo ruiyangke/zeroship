@@ -7006,3 +7006,102 @@ async fn retention_tick_opens_the_same_connections_for_a_large_fleet_as_a_small_
         large.sessions_opened
     );
 }
+
+// ===========================================================================
+// Run lookup: "no such run" must not be manufactured from a permission gap
+// ===========================================================================
+
+/// Locating a run must not answer "no such run" while an app's journal is
+/// unreadable.
+///
+/// `find_run_tables` returning `None` is a DECISION, not a report: its callers
+/// ack the run's scheduler timer as terminal or conclude there are no children
+/// to cancel. Taking the app list from a helper that drops unreadable apps made
+/// a permission gap on ANY app look like "this run does not exist", and the
+/// live run behind it lost its timer.
+///
+/// The pair below is one variable apart. Both seed a run in app A and revoke
+/// app B; the first asks for a run that does exist, the second for one that
+/// does not. The first must still succeed - the fix must not couple a healthy
+/// tenant's lookup to another tenant's privilege gap - and the second must
+/// error rather than say `None`.
+///
+/// WHAT THIS DOES NOT CATCH. It exercises the lookup directly through a
+/// test-only accessor, so it does NOT prove the callers behave better: nothing
+/// here asserts that `sync_scheduler_for_run_on` stops acking terminal or that
+/// `cascade_cancel_children` stops reporting no children. It covers only the
+/// catalog-level unreadable case, not a journal that turns unreadable between
+/// the app-list query and the per-app SELECT, which still propagates as a raw
+/// error. And it says nothing about ordering cost: the fix searches every
+/// readable app before it looks at the exclusions, which is the same scan the
+/// old code did.
+#[compio::test]
+async fn run_lookup_finds_a_readable_apps_run_while_another_journal_is_unreadable() {
+    let Some(fx) = isolated_fixture("lookup-readable-wins").await else {
+        return;
+    };
+    let (good_app, good_deploy) = seed_app_and_deploy(&fx, "lookup-good").await;
+    let run_id = seed_run(&fx, good_app, &good_deploy, "sleeping", 60_000, None, None, None, None)
+        .await;
+    let (other_app, _other_deploy) = seed_app_and_deploy(&fx, "lookup-other").await;
+    revoke_journal_access(&fx, &other_app).await;
+
+    let control_url = dsn_as_role(&fx.db_url, "zeroship_control", "zeroship_control");
+    let found = {
+        let control_registry = Registry::new(&control_url)
+            .await
+            .expect("connect a registry as the zeroship_control role");
+        let found = workflow_engine::__find_run_app_for_test(&control_registry, &run_id).await;
+        drop(control_registry);
+        found
+    };
+    drop(fx);
+    common::drain_pg().await;
+
+    assert_eq!(
+        found.expect("a run in a READABLE journal must still be found"),
+        Some(good_app),
+        "the lookup must not be coupled to another tenant's privilege gap"
+    );
+}
+
+/// The control for the test above: same fleet, same revoke, a run id that
+/// exists nowhere.
+///
+/// This is the arm that discriminates. Before the fix it returned `Ok(None)`,
+/// which every caller reads as "this run is gone" - and it was the same
+/// `Ok(None)` a genuinely absent run produces, so the two were unrecoverably
+/// confused. It must now be an error.
+#[compio::test]
+async fn run_lookup_refuses_to_report_absent_while_a_journal_is_unreadable() {
+    let Some(fx) = isolated_fixture("lookup-unknown-errors").await else {
+        return;
+    };
+    let (good_app, good_deploy) = seed_app_and_deploy(&fx, "lookup-good").await;
+    let _present = seed_run(&fx, good_app, &good_deploy, "sleeping", 60_000, None, None, None, None)
+        .await;
+    let (other_app, _other_deploy) = seed_app_and_deploy(&fx, "lookup-other").await;
+    revoke_journal_access(&fx, &other_app).await;
+
+    let control_url = dsn_as_role(&fx.db_url, "zeroship_control", "zeroship_control");
+    let absent = {
+        let control_registry = Registry::new(&control_url)
+            .await
+            .expect("connect a registry as the zeroship_control role");
+        let absent =
+            workflow_engine::__find_run_app_for_test(&control_registry, "wfr_does_not_exist").await;
+        drop(control_registry);
+        absent
+    };
+    drop(fx);
+    common::drain_pg().await;
+
+    let err = absent.expect_err(
+        "with a journal it cannot read, the lookup must not claim the run is absent",
+    );
+    let message = err.to_string();
+    assert!(
+        message.contains("unreadable"),
+        "the error must name the reason it could not decide, got: {message}"
+    );
+}
