@@ -1698,7 +1698,14 @@ export function down() {}
             }
         }
 
-        let outcome = run_two_concurrently(&url, &db_a, &db_b).await;
+        let outcome = run_two_concurrently(
+            &url,
+            &db_a,
+            &db_b,
+            &migrations_dir(),
+            PLATFORM_MIGRATION_FILES,
+        )
+        .await;
 
         {
             let admin = admin_session(&url).await;
@@ -1716,19 +1723,133 @@ export function down() {}
         outcome.expect("two concurrent platform migrates on one cluster must both succeed");
     }
 
+    /// The SENSITIVE half of the concurrency proof: the same two-runs-one-cluster
+    /// shape, over a one-file corpus that creates roles nothing else has.
+    ///
+    /// WHY THIS EXISTS ALONGSIDE THE TEST ABOVE. The real-corpus version is
+    /// faithful but blunt, and MEASURED at only 1 failure in 3 runs with the
+    /// cluster lock disabled (2026-08-20, :5440). Two things blunt it. The two
+    /// runs must drift into phase across 28 unrelated files before they reach
+    /// the roles file, so whether their shared-catalog statements overlap is
+    /// luck; and every platform role already exists on any cluster a suite has
+    /// ever run against, so the engine's `ifNotExists` probe turns most of the
+    /// op into a no-op and there is less left to collide.
+    ///
+    /// This version removes both. The corpus is ONE file, so both runs reach the
+    /// role statements within milliseconds of each other, and the role names are
+    /// unique to this test run, so every `CREATE ROLE` and every unconditional
+    /// `ALTER ROLE … SET search_path` genuinely executes on both sides.
+    ///
+    /// It is not a weaker test for being synthetic: the lock is driven by the
+    /// LOWERED SQL, not by a filename, so this exercises the same classifier and
+    /// the same bracket the platform corpus does. What is synthetic is only the
+    /// precondition -- which is the one thing a shared cluster will not let the
+    /// real corpus establish, since dropping the live platform roles would break
+    /// every other suite using the server.
+    #[compio::test]
+    async fn concurrent_migrates_creating_the_same_roles_both_succeed() {
+        let Some(url) = pg_url() else {
+            zeroship_test_support::skip(
+                "skipping the concurrent-role proof: no test database (set PG_TEST_URL \
+                 to a DSN on :5440 to run)",
+            );
+            return;
+        };
+        let _serial = DB_APPLY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        // Short enough to stay inside PostgreSQL's 63-byte identifier limit.
+        let role_prefix = format!("zsrace{}", stamp % 1_000_000_000);
+        let roles: Vec<String> = (0..8).map(|i| format!("{role_prefix}_{i}")).collect();
+
+        let corpus = tempfile::tempdir().expect("create temporary race corpus");
+        std::fs::write(
+            corpus.path().join("20260101000000_race_probe.ts"),
+            race_corpus_source(&roles),
+        )
+        .expect("write the race corpus");
+
+        let db_a = format!("zs_rolerace_a_{stamp}");
+        let db_b = format!("zs_rolerace_b_{stamp}");
+        {
+            let admin = admin_session(&url).await;
+            for db in [&db_a, &db_b] {
+                let _ = admin.batch(&format!("DROP DATABASE IF EXISTS \"{db}\"")).await;
+                admin
+                    .batch(&format!("CREATE DATABASE \"{db}\""))
+                    .await
+                    .unwrap_or_else(|e| panic!("CREATE DATABASE {db} failed: {e}"));
+            }
+        }
+
+        let outcome = run_two_concurrently(&url, &db_a, &db_b, corpus.path(), 1).await;
+
+        // Teardown runs before the assertion so a red run still leaves the
+        // cluster clean. The roles are cluster-global: leaking one leaks it into
+        // every other suite on this server.
+        {
+            let admin = admin_session(&url).await;
+            for db in [&db_a, &db_b] {
+                let _ = admin
+                    .batch(&format!(
+                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+                         WHERE datname = '{db}' AND pid <> pg_backend_pid()"
+                    ))
+                    .await;
+                let _ = admin.batch(&format!("DROP DATABASE IF EXISTS \"{db}\"")).await;
+            }
+            for role in &roles {
+                let _ = admin.batch(&format!("DROP ROLE IF EXISTS \"{role}\"")).await;
+            }
+        }
+
+        outcome.expect("two concurrent migrates creating the same roles must both succeed");
+    }
+
+    /// A one-file corpus whose whole content is role creation.
+    ///
+    /// `setSearchPath` is the load-bearing option, not decoration: the renderer
+    /// emits it as a SEPARATE `ALTER ROLE … SET search_path` statement that
+    /// `ifNotExists` does NOT guard, so it writes the cluster-global
+    /// `pg_db_role_setting` unconditionally. That is the statement that produces
+    /// `tuple concurrently updated`, as opposed to the duplicate-key abort the
+    /// guarded `CREATE ROLE` produces.
+    fn race_corpus_source(roles: &[String]) -> String {
+        let mut out = String::from(
+            "import { role } from \"@zeroship/migrate\";\n\n\
+             export const name = \"race_probe\";\n\n\
+             export function up() {\n",
+        );
+        for role in roles {
+            out.push_str(&format!(
+                "  role(\"{role}\").create({{ login: false, setSearchPath: [\"public\"], \
+                 ifNotExists: true }});\n"
+            ));
+        }
+        out.push_str("}\n\nexport function down() {}\n");
+        out
+    }
+
     /// Drive both migrates so they are genuinely in flight together, and report
     /// what happened. Returns `Ok(())` only if BOTH runs completed the whole
     /// corpus AND their execution windows actually overlapped.
-    async fn run_two_concurrently(url: &str, db_a: &str, db_b: &str) -> Result<(), String> {
-        fn config_for(dsn: String) -> PlatformMigrateConfig {
-            PlatformMigrateConfig {
-                database_url: dsn,
-                migrations_dir: migrations_dir(),
-                project_schema: "zeroship".to_string(),
-                project_id: "zeroship".to_string(),
-                cluster_lock_database: DEFAULT_CLUSTER_LOCK_DATABASE.to_string(),
-            }
-        }
+    async fn run_two_concurrently(
+        url: &str,
+        db_a: &str,
+        db_b: &str,
+        corpus: &Path,
+        expected_files: usize,
+    ) -> Result<(), String> {
+        let config_for = |dsn: String| PlatformMigrateConfig {
+            database_url: dsn,
+            migrations_dir: corpus.to_path_buf(),
+            project_schema: "zeroship".to_string(),
+            project_id: "zeroship".to_string(),
+            cluster_lock_database: DEFAULT_CLUSTER_LOCK_DATABASE.to_string(),
+        };
         let cfg_a = config_for(dsn_with_db(url, db_a));
         let cfg_b = config_for(dsn_with_db(url, db_b));
 
@@ -1758,16 +1879,16 @@ export function down() {}
         // different ways depending on which one lost the race.
         let mut failures = Vec::new();
         match &result_a {
-            Ok(report) if report.files != PLATFORM_MIGRATION_FILES => failures.push(format!(
-                "run A applied {} files, expected {PLATFORM_MIGRATION_FILES}",
+            Ok(report) if report.files != expected_files => failures.push(format!(
+                "run A applied {} files, expected {expected_files}",
                 report.files
             )),
             Ok(_) => {}
             Err(e) => failures.push(format!("run A failed: {e}")),
         }
         match &result_b {
-            Ok(report) if report.files != PLATFORM_MIGRATION_FILES => failures.push(format!(
-                "run B applied {} files, expected {PLATFORM_MIGRATION_FILES}",
+            Ok(report) if report.files != expected_files => failures.push(format!(
+                "run B applied {} files, expected {expected_files}",
                 report.files
             )),
             Ok(_) => {}
