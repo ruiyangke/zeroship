@@ -113,6 +113,16 @@ Missing required URLs, meter ids, customer mapping fields, or secrets are boot
 errors. A provider whose advertised capability flags do not match its `as_*`
 methods also fails boot.
 
+A secret inside `--provider-config` is written the way every other zeroship
+secret is written: the material itself, or `urn:zeroship:file:<path>` naming the
+file that holds it (owner-only permissions are enforced on the file). A value
+starting with `urn:` or `arn:` that is not that file reference is refused, never
+taken as literal material.
+
+```json
+{"lago": {"api_url": "https://lago.example", "api_key": "urn:zeroship:file:/etc/zeroship/secrets/lago_api_key"}}
+```
+
 ## Event Forwarder
 
 `crates/control/src/cron/event_forwarder.rs` consumes the stream and forwards

@@ -38,7 +38,7 @@ use serde_json::json;
 use crate::metering::provider::{
     AggregateQuery, Backfiller, BillingPeriod, Capabilities, ClosedPeriodPolicy,
     CorrectionCapability, DedupContract, DedupKey, DedupTtl, HttpClientFactory, IngestAck,
-    InvoiceRef, Meter, MeteringProvider, ProviderCtx, ProviderError, SecretHandle, SubjectRef,
+    InvoiceRef, Meter, MeteringProvider, ProviderCtx, ProviderError, SecretInput, SubjectRef,
     UsageEvent,
 };
 
@@ -47,7 +47,7 @@ const LAGO_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10
 #[derive(Debug, serde::Deserialize)]
 struct LagoCfg {
     api_url: String,
-    api_key: SecretHandle,
+    api_key: SecretInput,
 }
 
 #[derive(Debug)]

@@ -12,7 +12,9 @@ pub mod registry;
 pub mod types;
 
 pub use control_store::ControlLiteStore;
-pub use ctx::{Clock, HttpClientFactory, ProviderCtx, SecretHandle, SecretResolver, StaticSecretResolver};
+pub use ctx::{
+    Clock, HttpClientFactory, PlatformSecretResolver, ProviderCtx, SecretInput, SecretResolver,
+};
 pub use registry::{ProviderFactory, ProviderRegistry};
 pub use types::{
     AdjustmentNote, AggregateQuery, BillingPeriod, ClosedPeriodPolicy, CorrectionCapability,
@@ -363,20 +365,6 @@ pub fn builtin_registry() -> Arc<ProviderRegistry> {
     Arc::new(registry)
 }
 
-pub fn build_registered_provider(
-    id: &str,
-    raw_config: serde_json::Value,
-    secrets: HashMap<String, String>,
-) -> Result<Arc<dyn MeteringProvider>, ProviderError> {
-    let registry = builtin_registry();
-    let ctx = ProviderCtx::new(
-        raw_config,
-        Arc::new(StaticSecretResolver::new(secrets)),
-        None,
-    );
-    registry.build(id, &ctx)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,7 +372,7 @@ mod tests {
     fn ctx() -> ProviderCtx {
         ProviderCtx::new(
             serde_json::json!({}),
-            Arc::new(StaticSecretResolver::default()),
+            Arc::new(PlatformSecretResolver),
             None,
         )
     }
@@ -743,7 +731,7 @@ mod tests {
     fn ctx_with_store() -> ProviderCtx {
         ProviderCtx::new(
             serde_json::json!({}),
-            Arc::new(StaticSecretResolver::default()),
+            Arc::new(PlatformSecretResolver),
             Some(Arc::new(DummyLiteStore)),
         )
     }

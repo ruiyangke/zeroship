@@ -747,14 +747,15 @@ fn main() -> std::io::Result<()> {
         stripe_base_url.clone(),
         Arc::clone(&tax_provider),
     ));
-    let mut secret_values = std::collections::HashMap::new();
-    secret_values.insert("stripe_secret_key".to_string(), stripe_secret_key.clone());
-    secret_values.insert("stripe_webhook_secret".to_string(), stripe_webhook_secret.clone());
+    // Provider secrets are read straight out of `--provider-config` through the
+    // platform secret grammar: the material, or `urn:zeroship:file:<path>`. This
+    // used to be a lookup into a two-entry map built here (stripe_secret_key,
+    // stripe_webhook_secret), which meant `lago` and `openmeter` -- whose keys
+    // are neither of those -- had no value an operator could write, and
+    // `--meter-provider lago` exited 1 below on every start.
     let provider_ctx = zeroship_control::metering::provider::ProviderCtx::new(
         provider_config_json,
-        Arc::new(zeroship_control::metering::provider::StaticSecretResolver::new(
-            secret_values,
-        )),
+        Arc::new(zeroship_control::metering::provider::PlatformSecretResolver),
         Some(lite_store),
     );
     let billing_stack = match zeroship_control::metering::provider::build_stack(
