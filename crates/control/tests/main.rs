@@ -94,19 +94,53 @@
 //!                        in `tests/common/`, not eleven private ones - which
 //!                        edits test bodies and was deliberately left undone
 //!                        here.
-//!   shared `common`      CHECKED, and also a behaviour change.
+//!   shared `common`      CHECKED, a behaviour change, and the one that found a
+//!                        REAL PRE-EXISTING BUG. Read this before "fixing" it.
+//!
 //!                        `common::isolated_closed_period_now()` memoises a
 //!                        random far-future month in a `OnceLock`. `common` is
 //!                        compiled once per TARGET, so its five callers
 //!                        (billing_credit / billing_proration /
 //!                        billing_reconcile / billing_refund_void / billing_tax)
-//!                        used to draw five different months and now share one.
-//!                        Sound only because each of those tests seeds its own
-//!                        app and asserts on rows keyed by that app id - the
-//!                        far-future month exists to stay clear of the REAL
-//!                        current period, not to keep the five apart. A caller
-//!                        that asserts on a period-wide aggregate NOT filtered
-//!                        by app needs its own draw.
+//!                        used to draw five months and now share one. Each of
+//!                        those tests asserts on rows keyed by its own app id,
+//!                        so they are fine.
+//!
+//!                        `billing_safety_net_test` is NOT fine, and was not
+//!                        before this merge either. It draws its OWN period
+//!                        (`unique_closed_period_now`, a fresh `Uuid` per call,
+//!                        2400 possible months) and then asserts
+//!                        `subjects_checked == 1`. But `reconcile_pass` counts
+//!                        EVERY subject in that period, summed over every meter
+//!                        the period contains
+//!                        (`cron/billing_reconcile.rs`, `add_safety_net_summary`
+//!                        + the per-meter loop). The test owns its app; it does
+//!                        NOT own its period. The assertion holds only while its
+//!                        random draw misses every month another test seeded.
+//!
+//!                        MEASURED 2026-08-20, same script, same 78 seeding
+//!                        tests, counting loaded periods (ones where a draw
+//!                        would make `subjects_checked != 1`):
+//!
+//!                          main        6 loaded periods, worst 96,  128 subjects
+//!                          this branch 2 loaded periods, worst 126, 128 subjects
+//!
+//!                        The 128 contaminating subjects are IDENTICAL. Merging
+//!                        did not create them, it concentrated them: fewer
+//!                        months to hit, more damage when hit. On the model of 4
+//!                        draws against 2400 months that is ~1.0 percent per run
+//!                        before and ~0.33 percent after - so a red run here is
+//!                        REAL and roughly three times RARER than it was, not a
+//!                        regression this merge introduced.
+//!
+//!                        The repair is per-test period ISOLATION, not a lock: a
+//!                        lock cannot help, because the rows outlive it and the
+//!                        collision is a later test DRAWING an earlier test's
+//!                        month. Hand every caller a distinct month from one
+//!                        process-global allocator in `tests/common/`, which
+//!                        makes the count 0 by construction - and which only
+//!                        BECOMES correct once these files share a process, as
+//!                        they now do.
 //!   ports, temp paths    CHECKED. No test binds a fixed port (the only literal
 //!                        ports in the directory are `:5440` inside DSN
 //!                        fallbacks), and every `std::env::temp_dir()` path is
