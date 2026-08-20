@@ -314,9 +314,15 @@ pub struct SweepCoverage {
     /// then denied by the per-app statement. Both are the availability trade
     /// [`skip_journal_scoped`] makes, and both leave this tenant uncovered.
     pub apps_skipped: usize,
-    /// Apps never reached because the tick hit its batch limit first. NOT an
-    /// error - the next tick picks them up - but the tick's work counts still
-    /// describe fewer tenants than exist, so it is not folded into `swept`.
+    /// Apps never reached because the tick hit its batch limit first.
+    ///
+    /// Not an exclusion, so not folded into `apps_skipped` - but not harmless
+    /// either, and this doc said "the next tick picks them up" until that claim
+    /// was checked. It is only true if the fleet ever drains. [`journalled_apps`]
+    /// orders by `a.id` and every sweep starts from the head with no cursor, so
+    /// a fleet that reliably exhausts its budget before the tail sweeps the SAME
+    /// prefix every tick and starves the rest indefinitely. A steady nonzero
+    /// value here is that condition, and it is the only place it is visible.
     pub apps_unvisited: usize,
 }
 
