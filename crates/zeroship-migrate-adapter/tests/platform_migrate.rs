@@ -2181,17 +2181,9 @@ export function down() {}
     /// agrees with itself; the snapshot is an EXTERNAL list of names and names
     /// the missing one.
     ///
-    /// SET CONTAINMENT, NOT PREFIX, and the difference is not cosmetic. The
-    /// released set used to be asserted as the oldest N files in filename
-    /// order, which is true of a journal because the runner applies in that
-    /// order. It stops being true the moment a migration lands with an earlier
-    /// timestamp than one already deployed -- `20260819000000_app_egress_rules`
-    /// landed on main after `20260820000000_control_workflow_journal_access`
-    /// was already applied -- and that is a legitimate thing to do: the runner
-    /// sorts, skips what the journal holds, and applies the rest. A prefix
-    /// assertion would have failed that merge for no defect, and a gate that
-    /// cries wolf gets deleted. What the bytes guard actually needs is that
-    /// each named file is present, which does not depend on order at all.
+    /// This is containment only. Ordering is a SEPARATE and equally hard
+    /// requirement, asserted by
+    /// `unreleased_migrations_sort_after_every_released_one` below.
     ///
     /// WHAT THIS DOES NOT CATCH: whether the snapshot is CURRENT. A repo cannot
     /// read production's journal, so nothing here can tell a snapshot of 34
@@ -2214,6 +2206,66 @@ export function down() {}
              migrate run expects them and refuses without them. Restore the files; if the \
              change they carry must go, land the removal as a NEW migration.",
             missing.len()
+        );
+    }
+
+    /// A migration that is not yet deployed must sort AFTER every one that is.
+    ///
+    /// WHY THIS IS NOT A STYLE RULE. `platform.rs` stamps every lowered step
+    /// with a version derived from the file's ORDINAL in sorted-filename order
+    /// (`restamp_stable_versions`, `file_ordinal * FILE_VERSION_STRIDE +
+    /// step_index`); the filename itself reaches the id only through an error
+    /// label. So a file inserted mid-corpus takes the version a LATER file
+    /// already owns, and every file after it shifts up one. The deployed
+    /// database's journal still holds the old mapping, so the next migrate run
+    /// compares a recorded checksum against a DIFFERENT file's body and aborts
+    /// with `ChecksumDrift` -- naming the new file, which is not the one that
+    /// changed, and saying nothing about ordering.
+    ///
+    /// MEASURED, and this is the whole reason the test exists. On 2026-08-20
+    /// `20260819000000_app_egress_rules.ts` landed on main while the deployed
+    /// journal ended at `20260820000000_control_workflow_journal_access.ts`.
+    /// That journal (`zeroship_migrations.schema_migrations`, 668 rows) records
+    ///
+    ///     mig_0000E9Uuwao9JYwWBWok52 -> 299299267e22b313e3036804b0a14014...
+    ///
+    /// as its highest version, which is ordinal 33 -- the last file's only
+    /// step. In the merged corpus ordinal 33 is `app_egress_rules`, whose body
+    /// hashes to 6ac171d3..., so the next deploy to that host would have
+    /// aborted. Nothing else in the tree could see it: the file is new, so no
+    /// ledger row covers its bytes, and its own content is perfectly fine.
+    ///
+    /// THE FIX IS ALWAYS TO RENAME the undeployed file so it sorts last. It is
+    /// not in any journal yet, so renaming it costs nothing -- which is exactly
+    /// why this must fail before the deploy rather than during it.
+    ///
+    /// WHAT THIS DOES NOT CATCH. Two applied files cannot swap order, so this
+    /// only ever polices the undeployed tail. It also says nothing about a file
+    /// that sorts last but is otherwise wrong, and -- like every check here --
+    /// it measures against ONE deployment's journal.
+    #[test]
+    fn unreleased_migrations_sort_after_every_released_one() {
+        let corpus = platform_migration_filenames();
+        let released = released_platform_migrations();
+        let Some(newest_released) = released.iter().map(|(f, _)| f.as_str()).max() else {
+            return;
+        };
+        let offenders: Vec<&String> = corpus
+            .iter()
+            .filter(|name| !released.iter().any(|(f, _)| f == *name))
+            .filter(|name| name.as_str() < newest_released)
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "these migrations are NOT yet applied anywhere but sort BEFORE \
+             {newest_released}, which is: {offenders:?}\n\
+             platform.rs derives each file's journal version from its ordinal in \
+             sorted-filename order, so inserting one mid-corpus takes a version the \
+             deployed journal already recorded for a different file. The next \
+             migrate run against that database aborts with ChecksumDrift naming \
+             the NEW file, which is not the one that changed.\n\
+             Rename the file(s) above so they sort after {newest_released}. They \
+             are in no journal yet, so a rename costs nothing."
         );
     }
 
