@@ -1,16 +1,17 @@
 //! PostgreSQL schema/DDL spelling. The future `zero-migrate-postgres`.
 
-use crate::schema::query::{
+use zero_migrate_backend::schema::{
     build_encryption_sentinel_comments, build_mask_sentinel_comments, char_len,
-    decimal_precision_scale, def_to_pg_type, max_length, quote_ident_for_dialect, SchemaRenderer,
-    SqlDialect,
+    decimal_precision_scale, def_to_pg_type, max_length, quote_ident_for_backend, SchemaRenderer,
 };
+use zero_migrate_ir::dialect::SqlDialect;
 
 /// This module's own vendor identity — the ONE dialect literal it is allowed to
 /// name. See `backends/mod.rs` for why. Deleting this const is the whole of the
 /// edit this module needs when it becomes its own crate.
 const DIALECT: SqlDialect = SqlDialect::Postgres;
 
+#[derive(Debug)]
 pub(super) struct PostgresSchemaRenderer;
 
 pub(super) static RENDERER: PostgresSchemaRenderer = PostgresSchemaRenderer;
@@ -23,8 +24,8 @@ impl SchemaRenderer for PostgresSchemaRenderer {
     fn foreign_key_target(&self, app_id: &str, target: &str) -> String {
         format!(
             "{}.{}",
-            quote_ident_for_dialect(app_id, self.dialect()),
-            quote_ident_for_dialect(target, self.dialect())
+            quote_ident_for_backend(app_id, &crate::dml::RENDERER),
+            quote_ident_for_backend(target, &crate::dml::RENDERER)
         )
     }
 
@@ -102,9 +103,13 @@ impl SchemaRenderer for PostgresSchemaRenderer {
         collection: &str,
         schema: &serde_json::Value,
     ) -> Vec<String> {
-        let mut statements = build_mask_sentinel_comments(app_id, collection, schema);
+        let mut statements =
+            build_mask_sentinel_comments(app_id, collection, schema, &crate::dml::RENDERER);
         statements.extend(build_encryption_sentinel_comments(
-            app_id, collection, schema,
+            app_id,
+            collection,
+            schema,
+            &crate::dml::RENDERER,
         ));
         statements
     }

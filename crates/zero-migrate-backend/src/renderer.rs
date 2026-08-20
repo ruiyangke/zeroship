@@ -46,12 +46,12 @@
 //! held before. The unit that blocks the crate split is the LOOKUP, not the call
 //! site, and the two counts are not the same number.
 
-use crate::model::expr::{CastTarget, ExtractField, ScalarFn};
-use crate::model::ir::{IrScalar, Op, TableRef};
-use crate::render::dml::DmlError;
-use crate::render::lower::IrLowerError;
-use crate::render::step::BindValue;
-use crate::schema::query::SqlDialect;
+use crate::dml::DmlError;
+use crate::error::IrLowerError;
+use crate::step::BindValue;
+use zero_migrate_ir::dialect::SqlDialect;
+use zero_migrate_ir::expr::{CastTarget, ExtractField, ScalarFn};
+use zero_migrate_ir::ir::{IrScalar, Op, TableRef};
 
 /// The dialect feature predicates the migration lowerer asks.
 ///
@@ -61,18 +61,13 @@ use crate::schema::query::SqlDialect;
 /// keep naming it through `render::renderer`.
 pub use zero_migrate_ir::backend::Capability;
 
-/// The exhaustive dispatch over the shipping backends, re-exported from
-/// [`crate::render::backends`] so existing `render::renderer::renderer(..)` call
-/// sites resolve unchanged.
-pub(crate) use crate::render::backends::renderer;
-
 /// Ask a dialect a capability QUESTION.
 ///
 /// The answer no longer lives in an exhaustive `match` on the vendor: it is read
 /// off the vendor's [`BackendDescriptor`](zero_migrate_ir::backend::BackendDescriptor),
 /// which is the whole point of promoting the matrix. A fourth backend answers by
 /// declaring a descriptor in its own crate, not by editing an arm here.
-pub(crate) trait DialectSupports {
+pub trait DialectSupports {
     fn supports(self, cap: Capability) -> bool;
 }
 
@@ -90,11 +85,27 @@ impl DialectSupports for SqlDialect {
 /// compile time until its renderer is implemented and wired.
 ///
 /// `Debug` is a SUPERTRAIT because the carriers that now hold a resolved
-/// `&'static dyn DmlRenderer` ([`crate::render::dml::BindCtx`],
+/// `&'static dyn DmlRenderer` ([`crate::dml::BindCtx`],
 /// [`crate::render::lower::IrAuthor`]) are `#[derive(Debug)]` types, and a
 /// carrier losing its `Debug` to gain a backend would be a worse trade than
 /// asking each unit-struct renderer for the one derive it costs.
-pub(crate) trait DmlRenderer: std::fmt::Debug {
+pub trait DmlRenderer: std::fmt::Debug + Sync {
+    /// Which vendor this is.
+    ///
+    /// ADDED BY THE CRATE SPLIT, and it is the hinge the whole extraction turns on.
+    /// The spelling helpers in [`crate::dml`] used to take a `dialect: SqlDialect`
+    /// and resolve a renderer from it through a registry in the engine — which is
+    /// exactly the edge that could not survive the split, because the registry has
+    /// to be ABOVE the vendors and `dml` has to be BELOW them. They take a
+    /// `&dyn DmlRenderer` now, and this method gives back the one thing the
+    /// dialect parameter was still carrying: the capability and leg-selection
+    /// questions the helpers ask of the dialect itself.
+    ///
+    /// It is NOT a second dialect literal in a vendor module. Each impl returns its
+    /// module's existing `DIALECT` const, so the one-dialect-literal rule (and the
+    /// test that enforces it) is unaffected.
+    fn dialect(&self) -> SqlDialect;
+
     fn quote_ident(&self, ident: &str) -> String;
     fn qualify_table(&self, project_schema: &str, table: &str) -> Result<String, DmlError>;
     fn cast_target(&self, target: CastTarget) -> &'static str;
@@ -177,7 +188,7 @@ pub(crate) trait DmlRenderer: std::fmt::Debug {
         &self,
         op: &Op,
         eff_schema: &str,
-    ) -> Result<Vec<crate::render::vendor::VendorStatement>, IrLowerError>;
+    ) -> Result<Vec<crate::vendor::VendorStatement>, IrLowerError>;
 }
 
 #[cfg(test)]

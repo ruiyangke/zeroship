@@ -338,225 +338,25 @@ impl Default for ColumnInfo {
     }
 }
 
-/// Encryption metadata attached to a [`ColumnInfo`] when
-/// the SDK declares the column with `t.encrypted({ mode, keyId, wraps })`.
+/// The mask / encryption column-metadata vocabulary.
 ///
-/// Populated by schema introspection:
-/// - **PG**: from `<meta>.encrypted_columns` rows written alongside the table
-///   create by whichever orchestrator drives this kernel. In appbase that is
-///   `plugin-db`'s `register_model`; this workspace has no such module, so the
-///   rows are the consumer's to write.
-/// - **SQLite**: from a sentinel CHECK comment
-///   `/* zero-migrate:enc:{mode}:{keyId}:{wraps} */` parsed out of
-///   `sqlite_master.sql` (same regex-on-DDL pattern used for
-///   vector dims; sidecar `__zero_migrate_schema_meta` is the upgrade path).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EncryptionMeta {
-    /// Encryption mode declared by the SDK.
-    /// `Randomised` (default, fail-safe) or `Deterministic` (enables
-    /// B-tree equality lookups; carries the standard deterministic
-    /// leak). See `crate::schema::descriptors::EncryptionMode`.
-    pub mode: crate::schema::descriptors::EncryptionMode,
-    /// Key id selecting the per-platform root from
-    /// a per-key env var (`COLUMN_KEY_<KEYID>`) / a `<admin>.column_keys` table.
-    /// Defaults to `"default"` when the SDK caller omits the field.
-    pub key_id: String,
-    /// Wrapped primitive type. The DDL emitter uses `BYTEA`/`BLOB`
-    /// regardless; `wraps` survives so validation walks the right
-    /// type-checker before the encrypt pass swaps bytes in.
-    pub wraps: WrappedType,
-}
-
-/// The inner type wrapped by a `t.encrypted(...)` builder.
+/// MOVED to `zero-migrate-backend` and re-exported here, so every
+/// `schema::diff::{EncryptionMeta, WrappedType, MaskMeta, MaskKind, Classification}`
+/// caller resolves unchanged.
 ///
-/// Only string / number / bytes are supported. Arbitrary JSON
-/// (object / array) wraps are deferred — they add a serialisation round-trip
-/// on every read/write that isn't needed for the v1 surface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WrappedType {
-    String,
-    Number,
-    Bytes,
-}
-
-/// Column-mask metadata attached to a [`ColumnInfo`]
-/// when the SDK declares the column with `.mask({ kind, classification })`
-/// or, for `t.encrypted()` columns, when the schema-normaliser
-/// auto-populates the default mask (`{ kind: "full", classification: "pii" }`).
+/// Two of the five are load-bearing across the crate boundary:
+/// `PostgresSchemaRenderer::column_comment_statements` spells `COMMENT ON COLUMN`
+/// from a sentinel body built by `MaskKind::from_sql` and
+/// `Classification::from_sql`. The other three came with them because they are the
+/// same vocabulary and `mask_codec` names all five.
 ///
-/// Path B: when present, the platform emits a sibling `<col>_masked`
-/// physical column alongside the parent at CREATE TABLE time,
-/// default reads pull the masked sibling and alias it back to the
-/// schema-declared name, and writes dual-bind both columns
-/// atomically. The sibling column is HIDDEN from the SDK
-/// surface — `Row<S>` only contains the parent column wrapped in
-/// `MaskedValue<T>`.
-///
-/// Population path:
-/// - **PG**: from `<meta>.mask_columns` rows the DDL
-///   emitter writes alongside the table create.
-/// - **SQLite**: from a sentinel CHECK comment
-///   `/* zero-migrate:mask:{kind}:{classification} */` parsed out of
-///   `sqlite_master.sql` (same regex-on-DDL pattern used elsewhere).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MaskMeta {
-    /// Mask transform applied at write time to compute the sibling
-    /// column's value from the plaintext. See [`MaskKind`].
-    pub kind: MaskKind,
-    /// Classification of the source field — drives unmask
-    /// authorization and audit-row tagging.
-    pub classification: Classification,
-    /// Name of the physical sibling column emitted alongside the
-    /// parent. Always `format!("{parent}_masked")`. Stored explicitly
-    /// so the read/write passes can quote the right identifier
-    /// without re-deriving from the parent name each call.
-    pub sibling_column: String,
-}
-
-/// Built-in mask transform applied at write time.
-///
-/// Mirrors the `MaskKind` union in the db SDK, which ships with the consuming
-/// product and is not vendored here.
-/// `None` is the explicit opt-out variant for encrypted columns
-/// where the creator genuinely wants plaintext-on-read; the write/read
-/// passes branch on `kind == None` to skip sibling emission and use the
-/// decrypt-on-read path. Every other variant produces a
-/// pre-computed masked string stored in the sibling column.
-///
-/// **No raw user-defined JS functions for masking.** Creator-supplied
-/// mask functions are a security risk (an AI-generated `mask: v => v`
-/// defeats the purpose). Only named built-in strategies — adding a
-/// new strategy is a platform change, not creator config.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MaskKind {
-    /// `"***"` — maximum redaction. Default for encrypted columns.
-    Full,
-    /// `"***-**-6789"` — last 4 visible. SSN, card numbers, phone.
-    Last4,
-    /// `"4111-****-****-****"` — first 4 visible. BIN/IIN preservation.
-    First4,
-    /// `"a****@example.com"` — preserve domain for sorting / analytics.
-    Email,
-    /// `"A. A***"` — initials. Name fields.
-    Name,
-    /// `"1985-**-**"` — preserve year. Age-bucket analytics.
-    DateYear,
-    /// `"198?-**-**"` — preserve decade. Coarser-grained analytics.
-    DateDecade,
-    /// Explicit opt-out: no sibling emission, no mask wrap on read.
-    /// Used by encrypted columns the creator wants plaintext-on-read
-    /// for (e.g. background-job-only read paths).
-    None,
-}
-
-impl MaskKind {
-    /// Canonical SDK-wire string for this kind. Mirrors
-    /// the discriminator the SDK emits in `def.mask.kind`, spelled by the db
-    /// SDK's `MaskKind` union. Used by the diff layer to round-trip
-    /// the live-introspection sentinel through `pg_description` (PG) /
-    /// `sqlite_master.sql` (SQLite) and back into a `MaskKind`.
-    #[must_use]
-    pub fn as_sql(self) -> &'static str {
-        match self {
-            Self::Full => "full",
-            Self::Last4 => "last4",
-            Self::First4 => "first4",
-            Self::Email => "email",
-            Self::Name => "name",
-            Self::DateYear => "dateYear",
-            Self::DateDecade => "dateDecade",
-            Self::None => "none",
-        }
-    }
-
-    /// Parse a kind string back into [`MaskKind`].
-    /// Returns `None` for any unrecognised input; the introspection
-    /// layer surfaces that as `mask_sentinel_malformed` so a future
-    /// SDK kind landing on an old worker (or a hand-edited sentinel)
-    /// produces a typed error rather than silently routing through the
-    /// default kind.
-    ///
-    /// Accepts both the canonical camelCase form the SDK emits and the
-    /// kebab-case form `crud::mask_pass::parse_mask_kind` historically
-    /// accepted (`date-year`/`date-decade`).
-    #[must_use]
-    pub fn from_sql(s: &str) -> Option<Self> {
-        Some(match s {
-            "full" => Self::Full,
-            "last4" => Self::Last4,
-            "first4" => Self::First4,
-            "email" => Self::Email,
-            "name" => Self::Name,
-            "dateYear" | "date-year" => Self::DateYear,
-            "dateDecade" | "date-decade" => Self::DateDecade,
-            "none" => Self::None,
-            _ => return None,
-        })
-    }
-}
-
-/// Taxonomy of sensitivity classes used to drive
-/// unmask authorization and audit-row tagging.
-///
-/// Mirrors the SDK's `Classification` union. The taxonomy is
-/// deliberately small — six classes covering the standard regulatory
-/// boundaries (PII / SPI / PHI / PCI) plus `Public` (nothing to
-/// protect) and `Internal` (platform metadata).
-///
-/// The six default-classification names (`public`, `pii`, `spi`,
-/// `phi`, `pci`, `internal`) are RESERVED as column names by
-/// `query::validate_field_name` so creators cannot accidentally
-/// collide with the classification taxonomy in their schemas.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Classification {
-    /// Usernames, display names, public profile data — visible to all.
-    Public,
-    /// PII — full name, email, address, phone, IP, date of birth.
-    /// Default classification for encrypted columns without explicit
-    /// `.mask(...)`.
-    Pii,
-    /// SPI — SSN, driver's license, biometric data (CPRA "sensitive PI").
-    Spi,
-    /// PHI — health records, medical IDs, diagnosis (HIPAA scope).
-    Phi,
-    /// PCI — card numbers, CVV, magnetic stripe data (PCI-DSS scope).
-    Pci,
-    /// Internal — platform-internal metadata, system field overrides.
-    Internal,
-}
-
-impl Classification {
-    /// Canonical SDK-wire string. Lower-snake to match
-    /// `VALID_CLASSIFICATIONS` in `crate::crud::mask_policy`.
-    #[must_use]
-    pub fn as_sql(self) -> &'static str {
-        match self {
-            Self::Public => "public",
-            Self::Pii => "pii",
-            Self::Spi => "spi",
-            Self::Phi => "phi",
-            Self::Pci => "pci",
-            Self::Internal => "internal",
-        }
-    }
-
-    /// Parse a classification string back into
-    /// [`Classification`]. Returns `None` for any unrecognised input
-    /// (surfaced as `mask_sentinel_malformed` by the introspection
-    /// layer).
-    #[must_use]
-    pub fn from_sql(s: &str) -> Option<Self> {
-        Some(match s {
-            "public" => Self::Public,
-            "pii" => Self::Pii,
-            "spi" => Self::Spi,
-            "phi" => Self::Phi,
-            "pci" => Self::Pci,
-            "internal" => Self::Internal,
-            _ => return None,
-        })
-    }
-}
+/// The CLASSIFIER stayed. Everything below this line — `compute_diff`,
+/// `LiveSchema`, `ChangeKind`, `IndexInfo` — decides something ABOUT a vendor
+/// rather than asking a vendor how to spell something, which is the boundary rule
+/// `render::backends` states at length.
+pub use zero_migrate_backend::mask_meta::{
+    Classification, EncryptionMeta, MaskKind, MaskMeta, WrappedType,
+};
 
 #[derive(Debug, Clone)]
 pub struct IndexInfo {

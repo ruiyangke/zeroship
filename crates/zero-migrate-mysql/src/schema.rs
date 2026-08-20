@@ -1,14 +1,15 @@
 //! MySQL schema/DDL spelling. The future `zero-migrate-mysql`.
 
-use crate::schema::query::{
-    def_case_sensitive, mysql_base_column_type_for_def, quote_ident_for_dialect, SchemaRenderer,
-    SqlDialect,
+use zero_migrate_backend::schema::{
+    def_case_sensitive, mysql_base_column_type_for_def, quote_ident_for_backend, SchemaRenderer,
 };
+use zero_migrate_ir::dialect::SqlDialect;
 
 /// This module's own vendor identity — the ONE dialect literal it is allowed to
 /// name. See `backends/mod.rs`.
 const DIALECT: SqlDialect = SqlDialect::Mysql;
 
+#[derive(Debug)]
 pub(super) struct MysqlSchemaRenderer;
 
 pub(super) static RENDERER: MysqlSchemaRenderer = MysqlSchemaRenderer;
@@ -21,8 +22,8 @@ impl SchemaRenderer for MysqlSchemaRenderer {
     fn foreign_key_target(&self, app_id: &str, target: &str) -> String {
         format!(
             "{}.{}",
-            quote_ident_for_dialect(app_id, self.dialect()),
-            quote_ident_for_dialect(target, self.dialect())
+            quote_ident_for_backend(app_id, &crate::dml::RENDERER),
+            quote_ident_for_backend(target, &crate::dml::RENDERER)
         )
     }
 
@@ -39,7 +40,7 @@ impl SchemaRenderer for MysqlSchemaRenderer {
     /// separate them. See [`mysql_base_column_type_for_def`] for which spellings are
     /// character types and which are deliberately left bare.
     fn column_type(&self, def: &serde_json::Value) -> String {
-        crate::render::declarative::mysql_pin_collation(
+        crate::collation::mysql_pin_collation(
             &mysql_base_column_type_for_def(def),
             def_case_sensitive(def),
         )

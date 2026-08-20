@@ -67,24 +67,14 @@ pub enum RenameStep {
 }
 
 /// A typed scalar bound into a parameterized [`PlanStep::Dml`] statement.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BindValue {
-    /// SQL `NULL`.
-    Null,
-    /// A boolean.
-    Bool(bool),
-    /// An exact 64-bit integer (the only integer domain the IR admits).
-    Int(i64),
-    /// A decimal/float carried as its canonical string form (numeric
-    /// domain: no `f64` in the IR identity).
-    Decimal(String),
-    /// A UTF-8 text value.
-    Text(String),
-    /// Exact binary bytes. SQLite binds this variant directly as a BLOB. The
-    /// PostgreSQL and MySQL renderers use a text bind wrapped in the dialect's
-    /// base64 decoder because their schema-blind host seams infer text values.
-    Bytes(Vec<u8>),
-}
+///
+/// MOVED to `zero-migrate-backend` and re-exported here. It is the currency of
+/// [`DmlRenderer::bind_bytes`](zero_migrate_backend::renderer::DmlRenderer::bind_bytes),
+/// so a vendor crate cannot implement the contract without naming it. It carries
+/// nothing but scalars, so it travelled alone; the rest of this module — which reaches
+/// `render::declarative`, `render::expand_contract` and `model::backfill` — stayed
+/// in the engine.
+pub use zero_migrate_backend::step::BindValue;
 
 /// One explicit primary-key lifecycle mutation.
 ///

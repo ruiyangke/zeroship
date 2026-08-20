@@ -245,6 +245,34 @@ pub use zero_migrate_ir::backend::{
     RegistryError, MYSQL_DESCRIPTOR, POSTGRES_DESCRIPTOR, SHIPPING_DESCRIPTORS, SQLITE_DESCRIPTOR,
 };
 pub use zero_migrate_ir::dialect::{DialectId, DialectSet, MYSQL, POSTGRES, SQLITE};
+
+/// The backends THIS BUILD ships, validated into a [`BackendRegistry`].
+///
+/// The vendors are separate crates now (`zero-migrate-postgres`,
+/// `zero-migrate-sqlite`, `zero-migrate-mysql`) and this engine names each of them
+/// exactly once, in `render::backends::VENDORS`. That list is what replaced the
+/// hard-coded three-arm `match` over `SqlDialect`; this function is how a host asks
+/// what it got, and it answers by running the leaf crate's own
+/// [`BackendRegistry::build`] over the shipping descriptors rather than by restating
+/// the id rule here.
+///
+/// It differs from [`SHIPPING_DESCRIPTORS`] in what it PROVES: that list is a
+/// constant in `zero-migrate-ir` and would still name three backends in a build that
+/// linked none of them. This one is derived from the vendors actually compiled in,
+/// so the two agreeing is a fact rather than a coincidence — `render::backends`'s
+/// `the_shipping_vendor_set_composes_into_a_registry` pins it.
+///
+/// # Panics
+///
+/// Never in a shipped build: the shipping ids are constants and the test above
+/// proves they satisfy the rule. The `expect` is here so a fourth backend added with
+/// a bad or colliding id fails loudly at first use rather than being dropped.
+#[must_use]
+pub fn shipping_backends() -> BackendRegistry {
+    render::backends::VENDORS
+        .descriptors()
+        .expect("the shipping backend crates must declare well-formed, distinct dialect ids")
+}
 // Dialect-neutral journal types (the SQLite path constructs/imports these too).
 pub use apply::journal::{
     AppliedEntry, HistoryEvent, HistoryKind, JournalError, JournaledKind, PendingContract,

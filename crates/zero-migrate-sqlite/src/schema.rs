@@ -1,13 +1,15 @@
 //! SQLite schema/DDL spelling. The future `zero-migrate-sqlite`.
 
-use crate::schema::query::{
-    decimal_precision_scale, quote_ident_for_dialect, SchemaRenderer, SqlDialect,
+use zero_migrate_backend::schema::{
+    decimal_precision_scale, quote_ident_for_backend, SchemaRenderer,
 };
+use zero_migrate_ir::dialect::SqlDialect;
 
 /// This module's own vendor identity — the ONE dialect literal it is allowed to
 /// name. See `backends/mod.rs`.
 const DIALECT: SqlDialect = SqlDialect::Sqlite;
 
+#[derive(Debug)]
 pub(super) struct SqliteSchemaRenderer;
 
 pub(super) static RENDERER: SqliteSchemaRenderer = SqliteSchemaRenderer;
@@ -18,7 +20,7 @@ impl SchemaRenderer for SqliteSchemaRenderer {
     }
 
     fn foreign_key_target(&self, _app_id: &str, target: &str) -> String {
-        quote_ident_for_dialect(target, self.dialect())
+        quote_ident_for_backend(target, &crate::dml::RENDERER)
     }
 
     fn column_type(&self, def: &serde_json::Value) -> String {

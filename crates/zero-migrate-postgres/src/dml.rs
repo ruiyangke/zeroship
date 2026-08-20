@@ -1,13 +1,13 @@
 //! PostgreSQL SQL spelling. The future `zero-migrate-postgres`.
 
-use crate::model::expr::{CastTarget, ExtractField, ScalarFn};
-use crate::model::ir::TableRef;
-use crate::model::ir::{IrScalar, Op, TriggerAction};
-use crate::render::dml::{self, DmlError};
-use crate::render::lower::IrLowerError;
-use crate::render::renderer::{Capability, DialectSupports, DmlRenderer};
-use crate::render::step::BindValue;
-use crate::schema::query::SqlDialect;
+use zero_migrate_backend::dml::{self, DmlError};
+use zero_migrate_backend::error::IrLowerError;
+use zero_migrate_backend::renderer::{Capability, DialectSupports, DmlRenderer};
+use zero_migrate_backend::step::BindValue;
+use zero_migrate_ir::dialect::SqlDialect;
+use zero_migrate_ir::expr::{CastTarget, ExtractField, ScalarFn};
+use zero_migrate_ir::ir::TableRef;
+use zero_migrate_ir::ir::{IrScalar, Op, TriggerAction};
 
 /// This module's own vendor identity — the ONE dialect literal it is allowed to
 /// name. See `backends/mod.rs` for why. Deleting this const (and the
@@ -21,7 +21,7 @@ pub(super) struct PostgresDmlRenderer;
 pub(super) static RENDERER: PostgresDmlRenderer = PostgresDmlRenderer;
 
 fn quote_engine_ident_as_dml(what: &'static str, ident: &str) -> Result<String, IrLowerError> {
-    dml::quote_ident_checked_for_dialect(ident, DIALECT)
+    dml::quote_ident_checked_for_backend(ident, &RENDERER)
         .map_err(|e| DmlError::InvalidIdentifier {
             what,
             value: e.value,
@@ -30,15 +30,19 @@ fn quote_engine_ident_as_dml(what: &'static str, ident: &str) -> Result<String, 
 }
 
 impl DmlRenderer for PostgresDmlRenderer {
+    fn dialect(&self) -> SqlDialect {
+        DIALECT
+    }
+
     fn quote_ident(&self, ident: &str) -> String {
-        super::ansi_double_quote_ident(ident)
+        zero_migrate_backend::spelling::ansi_double_quote_ident(ident)
     }
 
     fn qualify_table(&self, project_schema: &str, table: &str) -> Result<String, DmlError> {
-        let t = dml::quote_bare_ident_for_dialect("table", table, DIALECT)?;
+        let t = dml::quote_bare_ident_for_backend("table", table, &RENDERER)?;
         Ok(format!(
             "{}.{}",
-            dml::quote_ident_checked_for_dialect(project_schema, DIALECT).map_err(|e| {
+            dml::quote_ident_checked_for_backend(project_schema, &RENDERER).map_err(|e| {
                 DmlError::InvalidIdentifier {
                     what: "schema",
                     value: e.value,
@@ -72,7 +76,7 @@ impl DmlRenderer for PostgresDmlRenderer {
     }
 
     fn inline_bytes_literal(&self, bytes: &[u8]) -> String {
-        let encoded = super::base64_standard(bytes);
+        let encoded = zero_migrate_backend::spelling::base64_standard(bytes);
         format!("decode({}, 'base64')", dml::sql_string_literal(&encoded))
     }
 
@@ -80,7 +84,9 @@ impl DmlRenderer for PostgresDmlRenderer {
     /// bind and decodes it inside the statement, so the bound spelling is the
     /// inline one with a placeholder where the literal would be.
     fn bind_bytes(&self, bytes: &[u8], push: &mut dyn FnMut(BindValue) -> String) -> String {
-        let placeholder = push(BindValue::Text(super::base64_standard(bytes)));
+        let placeholder = push(BindValue::Text(
+            zero_migrate_backend::spelling::base64_standard(bytes),
+        ));
         format!("decode({placeholder}, 'base64')")
     }
 
@@ -186,7 +192,7 @@ impl DmlRenderer for PostgresDmlRenderer {
         Ok(format!(
             "{}.{}",
             quote_engine_ident_as_dml("schema", eff_schema)?,
-            dml::quote_bare_ident_for_dialect("view", name, DIALECT)?
+            dml::quote_bare_ident_for_backend("view", name, &RENDERER)?
         ))
     }
 
@@ -196,15 +202,15 @@ impl DmlRenderer for PostgresDmlRenderer {
             format!(
                 "{}.{}",
                 quote_engine_ident_as_dml("schema", schema)?,
-                dml::quote_bare_ident_for_dialect("table", &table.name, DIALECT)?
+                dml::quote_bare_ident_for_backend("table", &table.name, &RENDERER)?
             )
         };
         if let Some(alias) = table.alias.as_deref() {
             sql.push_str(" AS ");
-            sql.push_str(&dml::quote_bare_ident_for_dialect(
+            sql.push_str(&dml::quote_bare_ident_for_backend(
                 "table alias",
                 alias,
-                DIALECT,
+                &RENDERER,
             )?);
         }
         Ok(sql)
@@ -214,7 +220,7 @@ impl DmlRenderer for PostgresDmlRenderer {
         &self,
         op: &Op,
         eff_schema: &str,
-    ) -> Result<Vec<crate::render::vendor::VendorStatement>, IrLowerError> {
+    ) -> Result<Vec<zero_migrate_backend::vendor::VendorStatement>, IrLowerError> {
         if let Op::CreateTrigger {
             action: TriggerAction::Body { .. },
             ..
@@ -227,9 +233,9 @@ impl DmlRenderer for PostgresDmlRenderer {
                 });
             }
         }
-        let stmts = match crate::render::vendor::render_vendor_op(op, eff_schema) {
+        let stmts = match crate::vendor::render_vendor_op(op, eff_schema) {
             Ok(stmts) => stmts,
-            Err(crate::render::vendor::VendorError::UnsupportedTriggerAction { kind }) => {
+            Err(zero_migrate_backend::vendor::VendorError::UnsupportedTriggerAction { kind }) => {
                 return Err(IrLowerError::TriggerUnsupported {
                     kind,
                     dialect: DIALECT,

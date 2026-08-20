@@ -1,0 +1,2224 @@
+//! The creator-**DML assembler** + the closed-AST **expression renderer**.
+//!
+//! `IrAuthor::lower` compiles the DDL ops (`createTable`/`alter*`/…) into the
+//! same [`Migration`](crate::model::migration::Migration) shape the declarative differ
+//! emits. This module is the peer for the **DML** ops — `insert` / `update` /
+//! `del` / `backfill` — and for the closed expression AST ([`zero_migrate_ir::expr::Expr`])
+//! they carry in their `set` / `where` / `filter` positions.
+//!
+//! # Two rendering modes, one source of truth
+//!
+//! A migration value can reach the database two structurally-distinct ways, and
+//! this module owns both:
+//!
+//! 1. **Parameterized one-shot DML** ([`assemble_insert_for_backend`] / [`assemble_update_for_backend`] /
+//!    [`assemble_delete_for_backend`]). Every authored VALUE — an `insert` row scalar, an
+//!    `update SET` literal, a `where`-predicate literal — is emitted as a NATIVE
+//!    placeholder (`$n` on Postgres, `?n` on SQLite) carried on a
+//!    [`PlanStep::Dml`](crate::render::step::PlanStep::Dml) `binds` vector, NEVER
+//!    string-interpolated. So a value containing a quote / semicolon / comment
+//!    cannot change the *shape* of the statement on either backend (the
+//!    bind-safety property). The expression renderer (`render_expr_bound`) walks
+//!    the closed AST and appends a placeholder for each [`Expr::Literal`].
+//!
+//! 2. **Batched backfill** (`assemble_backfill`). The existing
+//!    [`BackfillSpec`](crate::model::backfill::BackfillSpec) executor (PG `backfill.rs`)
+//!    consumes a `set_clause` / `filter` SQL *string* (it assembles a windowed
+//!    `UPDATE … WHERE cursor > $last … AND (<filter>)` and guard-checks the WHOLE
+//!    statement). A backfill expression references the row's own columns and is
+//!    paged, so it cannot carry positional binds the way a one-shot statement can.
+//!    Here the renderer (`render_expr_inline_for_backend`) emits a SQL string in which a
+//!    `Literal` is an INLINE SQL literal (numeric verbatim; a string single-quoted
+//!    with `''` doubling — the canonical escape the guard's real-parser deny-list
+//!    then re-validates). The assembled `UPDATE` is guard-checked by the executor
+//!    before any batch runs, so the inline path inherits the same parse-time
+//!    confinement the rest of the engine relies on.
+//!
+//! # Identifier safety
+//!
+//! Every identifier (table, column) is validated as a bare
+//! `[A-Za-z_][A-Za-z0-9_]*` identifier and double-quoted with `"` doubling
+//! (`quote_ident`). A schema-qualified or otherwise malformed identifier is
+//! rejected at assemble time — an injection attempt through an identifier slot
+//! cannot reach the database. On **Postgres** the table is qualified to the project
+//! schema (`"schema"."table"`) so the resolved relation is always the project's
+//! own; on **SQLite** the table lives in the connection's `main` database (the app
+//! file) and is referenced UNqualified, matching the engine's SQLite DDL.
+//!
+//! # Conflict handling and backfills
+//!
+//! - `insert { onConflict }` renders exact `ON CONFLICT (columns)` semantics on
+//!   PostgreSQL and SQLite. MySQL uses `ON DUPLICATE KEY UPDATE`, which cannot name
+//!   one unique constraint. For `doUpdate`, the generated statement compares the
+//!   incoming target values with the conflicting row before applying assignments,
+//!   so a collision on another unique key cannot update the wrong row. A MySQL
+//!   `doUpdate` therefore requires every target column in the inserted column list
+//!   and does not permit assigning those target columns. A collision on another
+//!   unique key raises an error. MySQL `doNothing` is refused because its native
+//!   no-op update fires update triggers, while `INSERT IGNORE` suppresses unrelated
+//!   errors; neither is equivalent to a targeted `DO NOTHING`.
+//! - A **batched** `backfill` targets the `BackfillSpec` executor, PORTABLE on
+//!   BOTH backends: PG via the
+//!   writable-CTE windowed `UPDATE` (`backfill.rs`), SQLite via the batched
+//!   per-batch-txn executor (`apply::backend::sqlite::backfill_sql`). The inline
+//!   `set`/`filter` differ per dialect (the `c.fn.splitPart` lowering,
+//!   NULL-skipping `concatWs`); the `BackfillSpec` shape is uniform.
+//!
+//! # What is SPELLING here, and what deliberately is not
+//!
+//! Under `docs/proposals/pluggable-backends.md` step 3 the SQL SPELLING in this
+//! module has moved to `render::backends`, reached through the `DmlRenderer`
+//! trait: placeholders, inline string / decimal / bytes literals, `IN`-list
+//! shape, regex match, date extraction, concatenation, `IS DISTINCT FROM`, the
+//! `IS TRUE` / `IS FALSE` predicates, and the per-vendor scalar-call overrides.
+//! Each moved body is character-for-character what stood here; the three
+//! `Postgres | Sqlite` shared arms became one duplicated line in each of the two
+//! modules, which is the price of the arms being per-vendor impls rather than a
+//! match. (Plain text, not doc links: every name in this section is a private
+//! item, and a link from this module's public docs to one is a rustdoc warning.)
+//!
+//! Three kinds of dialect branch STAYED, on purpose:
+//!
+//! - **Semantics.** `validate_mysql_assignment_semantics` and
+//!   `mysql_expr_references_column` decide whether an authored program MEANS
+//!   the same thing under MySQL's left-to-right SET evaluation. They emit an
+//!   ERROR, never SQL bytes. Core deciding something about a vendor stays in
+//!   core, dialect-parameterized.
+//! - **IR leg selection.** `select_dialect_leg` reads the wire-pinned
+//!   `Expr::Dialectal { pg, sqlite, mysql }` shape. It cannot move; the shape is
+//!   a checksum input.
+//! - **Everything entangled with `BindCtx`.** `push_scalar`'s bytes transport,
+//!   `render_on_conflict_mysql`, and the limited-`DELETE` arms all interleave
+//!   spelling with the bind accumulator, which is not part of the backend
+//!   contract. `push_scalar` additionally asks "does this driver bind bytes
+//!   natively", which is a CAPABILITY the vocabulary does not have yet. Moving
+//!   these means promoting the bind accumulator first — a design decision, not a
+//!   directory move.
+//!
+//! # The shared SQLite-DML module seam
+//!
+//! The SQLite numbered `?n` placeholder spelling lives in [`sqlite_placeholder`],
+//! which the batched-backfill SQLite executor calls. The one-shot DML assembler
+//! does NOT reach it by that name: it emits through `BindCtx::push`, which asks its
+//! already-resolved backend (`self.backend.placeholder(n)`), and the SQLite backend's
+//! impl is the same spelling.
+//!
+//! **This paragraph used to claim the two paths met at a shared
+//! `placeholder(dialect, n)` function. They never did** — that function had zero
+//! callers and was deleted; see the tombstone above its old home below. The two
+//! paths agree because both end at `SqliteDmlRenderer`, not because a common
+//! function routes them, and the distinction matters: the old wording made a
+//! `renderer(dialect)` lookup nothing performed look like a dialect boundary, and it
+//! was counted as one.
+//!
+//! The transport-safe bind mirror
+//! ([`crate::apply::backend::sqlite::actor::SqliteBind`]) is the single
+//! value-binding path the SQLite executor uses.
+
+use std::collections::BTreeMap;
+
+use crate::renderer::{Capability, DialectSupports, DmlRenderer};
+use zero_migrate_ir::dialect::SqlDialect;
+
+use crate::step::BindValue;
+use zero_migrate_ir::expr::{
+    AggFunc, BinaryOp, Duration, Expr, ExtractField, PgExtractField, ScalarFn, SynthFn, UnaryOp,
+};
+use zero_migrate_ir::ir::{IrScalar, IrValue};
+
+/// A failure assembling a DML op into a statement (template + binds, or a backfill
+/// spec). Distinct from the structural [`zero_migrate_ir::validate::AuthoringError`]
+/// (which gates the expression AST *before* assembly): this carries the
+/// assembler-level rejections: a malformed identifier, an empty insert, an
+/// expression node the renderer cannot lower, or a MySQL conflict shape whose
+/// target intent cannot be retained safely.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DmlError {
+    /// An identifier (table / column) is not a bare `[A-Za-z_][A-Za-z0-9_]*`
+    /// identifier — empty, schema-qualified, or containing characters outside the
+    /// safe set. Rejected before any SQL is assembled.
+    #[error(
+        "invalid identifier for {what}: {value:?} (must be a bare [A-Za-z_][A-Za-z0-9_]* identifier)"
+    )]
+    InvalidIdentifier {
+        /// Which slot was invalid (`"table"` / `"column"`).
+        what: &'static str,
+        /// The offending value.
+        value: String,
+    },
+    /// An `insert` carried no columns, or a row whose arity does not match the
+    /// column list. A zero-column / ragged insert is malformed on both dialects.
+    #[error("malformed insert into {table:?}: {reason}")]
+    MalformedInsert {
+        /// The target table.
+        table: String,
+        /// What was wrong.
+        reason: String,
+    },
+    /// An `update` / `backfill` whose `set` map is empty — nothing to assign.
+    #[error(
+        "malformed {op} into {table:?}: empty `set` (a transform must assign at least one column)"
+    )]
+    EmptySet {
+        /// The op kind (`"update"` / `"backfill"`).
+        op: &'static str,
+        /// The target table.
+        table: String,
+    },
+    /// SQLite has no portable native `DELETE ... LIMIT` form. The subquery
+    /// lowering therefore needs a live-catalog key that identifies one row
+    /// exactly. Hidden `rowid` is not sufficient: a declared `rowid` column can
+    /// shadow it, and `WITHOUT ROWID` tables do not have it at all.
+    #[error(
+        "SQLite limited delete from {table:?} requires a catalog-proven non-null PRIMARY KEY or full UNIQUE key"
+    )]
+    SqliteLimitedDeleteNeedsUniqueIdentity {
+        /// The target table whose catalog snapshot had no safe identity.
+        table: String,
+    },
+    /// The closed-AST expression renderer cannot lower a node (an unsupported /
+    /// out-of-policy shape that the structural validator should have rejected
+    /// first — this is the assembler's fail-closed backstop, never a silent
+    /// emission). Carries a description of the offending node.
+    #[error(
+        "cannot render expression node ({0}); the structural validator must reject it before assembly"
+    )]
+    UnrenderableExpr(String),
+    /// A MySQL `doUpdate` target column is absent from the inserted column list.
+    /// MySQL cannot name a conflict target, so the renderer needs the incoming
+    /// value of each target column to guard the update.
+    #[error(
+        "MySQL insert into {table:?} cannot safely apply `onConflict.doUpdate`: \
+         target column {column:?} is not present in the inserted columns"
+    )]
+    MySqlConflictTargetNotInserted {
+        /// The target table.
+        table: String,
+        /// The target column without an incoming value.
+        column: String,
+    },
+    /// A MySQL `doUpdate` attempts to assign one of its target columns. MySQL
+    /// evaluates duplicate-key assignments from left to right, so changing a
+    /// target value would invalidate the target-match guard for later assignments.
+    #[error(
+        "MySQL insert into {table:?} cannot safely apply `onConflict.doUpdate`: \
+         assignment to target column {column:?} is not supported; update a \
+         non-target column or split the migration into explicit steps"
+    )]
+    MySqlConflictTargetUpdated {
+        /// The target table.
+        table: String,
+        /// The conflict target column also present in `doUpdate`.
+        column: String,
+    },
+    /// A MySQL multi-column assignment reads another column that the same SET
+    /// list also writes. PostgreSQL and SQLite evaluate every RHS from the
+    /// original row, while MySQL exposes earlier assignments to later ones.
+    #[error(
+        "MySQL {op} on {table:?} cannot preserve simultaneous SET semantics: \
+         assignment to {column:?} reads assigned column {referenced_column:?}; \
+         split the operation or compute the value without another assigned column"
+    )]
+    MySqlCrossAssignmentDependency {
+        /// The authored operation (`update`, `backfill`, or `onConflict.doUpdate`).
+        op: &'static str,
+        /// The target table.
+        table: String,
+        /// The assignment whose RHS has the dependency.
+        column: String,
+        /// The other assigned column read by that RHS.
+        referenced_column: String,
+    },
+    /// MySQL has no exact native equivalent for targeted `DO NOTHING`.
+    #[error(
+        "MySQL cannot safely apply `onConflict` without a non-empty `doUpdate`: \
+         `ON DUPLICATE KEY UPDATE` fires update triggers and `INSERT IGNORE` \
+         suppresses unrelated data errors"
+    )]
+    MySqlConflictDoNothingNotExact,
+    /// A single `insert` assembled more bind parameters than the wire protocol
+    /// admits (PostgreSQL caps a statement at 65535 positional parameters; the
+    /// `Bind` message length is a `u16`). Reject at assemble time with a bounded
+    /// error rather than emitting a statement the driver fails mid-flight. Splitting
+    /// the insert into chunks touches the executor / atomicity boundary and is
+    /// deliberately out of scope here.
+    #[error(
+        "insert into {table:?} assembles {count} bind parameters, over the {max} \
+         protocol limit; split the rows into smaller batches"
+    )]
+    TooManyBinds {
+        /// The target table.
+        table: String,
+        /// The assembled bind count.
+        count: usize,
+        /// The protocol ceiling.
+        max: usize,
+    },
+}
+
+/// The maximum number of positional bind parameters a single statement may carry
+/// (PostgreSQL `Bind` parameter count is a `u16`).
+pub const MAX_BIND_PARAMS: usize = 65535;
+
+/// Validate a bare SQL identifier and double-quote it for `dialect` (`"` → `""` on
+/// both shipping spellings). The ONLY identifier-emission path the assembler uses —
+/// a schema-qualified / malformed name is rejected, so an injection through an
+/// identifier slot cannot reach the DB. Bare-identifier validation mirrors
+/// [`crate::model::backfill::BackfillSpec`].
+///
+/// # There is no longer a PostgreSQL-pinned spelling of this, and that is the point
+///
+/// This function used to have two dialect-free wrappers, `quote_ident` and its
+/// public-in-crate sibling `quote_bare_ident`, both of which passed
+/// `SqlDialect::Postgres`. They were safe only for callers that were THEMSELVES
+/// PostgreSQL-specific, and twice they were not: `render::backends::sqlite` quoted
+/// all four of its identifier emissions with them, and after that was fixed
+/// `render_sqlite_trigger_op` — then still in `render::lower`, since moved into
+/// `render::backends::sqlite` by step 3 — quoted all six of its trigger
+/// identifiers with them. Both were correct SQL only because the two vendors spell
+/// an identifier `"x"`, and both were hard blockers on extracting a
+/// `zero-migrate-sqlite` crate that does not need `zero-migrate-postgres` AT
+/// RUNTIME — a crate-extraction spike demonstrated the second one by rendering a
+/// `createTrigger` from inside the extracted crate and getting PostgreSQL's marker
+/// back.
+///
+/// With the trigger path routed through [`quote_bare_ident_for_backend`], rustc
+/// reported both wrappers `never used`, so they are GONE rather than merely
+/// unused: a dialect-free spelling that exists is a trap a future caller falls
+/// into, and its absence is what makes "core hard-codes a dialect behind a
+/// backend's back" unrepresentable here instead of merely absent today.
+///
+/// The other PG-pinned wrapper, [`quote_ident_checked`], is untouched and stays
+/// pinned. Its callers — `apply::backend::postgres`, `apply::role`,
+/// `apply::journal`, `render::vendor`, `conn`, `plan::author`, and the vendor-op
+/// arms of `render::lower` — really are PostgreSQL-specific and travel to the PG
+/// crate with the pin intact. (An earlier version of this note said those callers
+/// used the wrapper deleted above. They never did; they have always used
+/// `quote_ident_checked`, which is a different function with a different
+/// fail-closed contract.)
+///
+/// Pinned by `tests/dialect_matrix/sqlite_trigger_quoting_reaches_postgres.rs`.
+pub fn quote_ident_for_backend(
+    what: &'static str,
+    ident: &str,
+    backend: &dyn DmlRenderer,
+) -> Result<String, DmlError> {
+    let ok = !ident.is_empty()
+        && ident.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && ident.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !ok {
+        return Err(DmlError::InvalidIdentifier {
+            what,
+            value: ident.to_string(),
+        });
+    }
+    Ok(escape_quote_ident_for_backend(ident, backend))
+}
+
+/// Public-in-crate wrapper for author-supplied bare identifiers. Trigger-body
+/// rendering needs the same strict table/column/name gate as the DML assembler, and
+/// must name the dialect it is rendering for — see [`quote_ident_for_backend`] for
+/// why the dialect-free spelling of this was deleted rather than left unused.
+pub fn quote_bare_ident_for_backend(
+    what: &'static str,
+    ident: &str,
+    backend: &dyn DmlRenderer,
+) -> Result<String, DmlError> {
+    quote_ident_for_backend(what, ident, backend)
+}
+
+/// A render-seam rejection of an **engine-supplied identifier** (project schema,
+/// migrator role, meta schema, …) — the single fail-closed gate every engine
+/// quoting seam routes through (`quote_ident_checked`). Distinct from
+/// [`DmlError::InvalidIdentifier`], which gates *author-supplied* bare
+/// identifiers with the strict `[A-Za-z_][A-Za-z0-9_]*` rule; this gate is for
+/// names the engine itself produces (a UUIDv7 schema carries `-`, so the strict
+/// rule cannot apply), and only refuses the two bytes that double-quote escaping
+/// cannot neutralise: an empty string and a NUL byte. Each module maps it to its
+/// own local error variant so the fail-closed message stays honest per surface.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("engine-supplied identifier is not quotable ({reason}): {value:?}")]
+pub struct IdentQuoteError {
+    /// Why the identifier could not be quoted (`"empty"` / `"contains NUL"`).
+    pub reason: &'static str,
+    /// The offending value.
+    pub value: String,
+}
+
+/// The ONE canonical render seam for an **engine-supplied identifier** — the
+/// project schema, the migrator role, the meta schema, a derived trigger name,
+/// etc. Every engine quoting helper (`author` / `backfill` / `role` / `journal`
+/// / `dml`) routes through this so all seams are **byte-identical** AND
+/// **uniformly self-defending**.
+///
+/// Unlike a bare authored identifier ([`quote_ident_for_backend`]), an engine-supplied name
+/// is NOT a bare `[A-Za-z_][A-Za-z0-9_]*` ident — under the Confined posture the
+/// project schema is the app id (a `UUIDv7` carrying `-`). So it is emitted
+/// escape-and-quote: double an embedded `"`, wrap in `"`.
+///
+/// The name is never author-supplied, but this seam still fails closed rather
+/// than trust the caller: it refuses an empty string and any value carrying a
+/// NUL byte — the one byte that `"`-doubling cannot neutralise (PG rejects NUL
+/// inside an identifier outright). Everything else (including `"`) is rendered
+/// safely by escaping, **byte-identically** to a bare
+/// `format!("\"{}\"", x.replace('"', "\"\""))`.
+/// THE PIN MOVED, IT DID NOT GO. `quote_ident_checked(ident)` used to be this
+/// function with `SqlDialect::Postgres` written into its body — a PostgreSQL-pinned
+/// seam with thirty engine callers. The pin cannot live here any more: this crate is
+/// BELOW the vendors and has no PostgreSQL renderer to resolve. It is now
+/// `zero_migrate::render::dml::quote_ident_checked`, one line in the engine, which
+/// resolves PostgreSQL from the engine's registry and calls this. The engine's
+/// thirty call sites are unchanged and the pin is still exactly one line.
+pub fn quote_ident_checked_for_backend(
+    ident: &str,
+    backend: &dyn DmlRenderer,
+) -> Result<String, IdentQuoteError> {
+    if ident.is_empty() {
+        return Err(IdentQuoteError {
+            reason: "empty",
+            value: ident.to_string(),
+        });
+    }
+    if ident.contains('\0') {
+        return Err(IdentQuoteError {
+            reason: "contains NUL",
+            value: ident.to_string(),
+        });
+    }
+    Ok(escape_quote_ident_for_backend(ident, backend))
+}
+
+/* THE RAW SPELLING PRIMITIVE IS GONE FROM CORE.
+ *
+ * It used to live here as `escape_quote_ident`, `pub(crate)`, and any module in
+ * the crate could call it to spell `"x"` without ever naming a vendor. Two of the
+ * three shipping dialects agree on that spelling, so such a call is BYTE-CORRECT
+ * AND SILENT: no assertion about emitted SQL can distinguish "SQLite quoted this"
+ * from "nobody quoted this and it happened to look right". That is the whole
+ * defect class — an emission that reaches NO renderer at all.
+ *
+ * The bytes now live in `render::backends::ansi_double_quote_ident`, which is
+ * `pub(in crate::render::backends)`. Core cannot name it, so core must pick a
+ * DOOR, and the door records the vendor:
+ *
+ *   - EMIT for a named dialect  -> `escape_quote_ident_for_backend(x, d)`
+ *   - the PG-shaped NORMAL FORM -> `pg_canonical_ident(x)`
+ *
+ * The visibility IS the census. Deleting the old name turned "which sites in this
+ * crate spell an identifier without routing" from a grep that cannot see through
+ * a helper into compiler output that enumerates every one of them, at the
+ * DEFINITION rather than at each call site.
+ */
+
+/// EMIT an identifier in `dialect`'s own spelling, decided by that dialect's
+/// backend rather than by a `format!` in core.
+///
+/// This is the door for anything that will be sent to a database. The other door,
+/// [`pg_canonical_ident`], is for the normal form that is COMPARED rather than
+/// executed; picking between them is the point of there being two.
+pub fn escape_quote_ident_for_backend(ident: &str, backend: &dyn DmlRenderer) -> String {
+    backend.quote_ident(ident)
+}
+
+/// The PG-SHAPED NORMAL FORM, which is NOT an emission — and re-dialecting it
+/// would be a REGRESSION, not a fix.
+///
+/// Constraint-definition bodies and stored-DDL fragments are built once in
+/// PostgreSQL spelling ON PURPOSE, so that a desired snapshot round-trips
+/// byte-for-byte against `pg_get_constraintdef`. That normal form is then consumed
+/// by the SQLite and MySQL drift comparators too — `constraintdef_cols` and
+/// `quote_ident_if_needed` in `render::declarative` are called from
+/// `apply::backend::mysql::drift_sql` and `apply::backend::sqlite::drift_sql` —
+/// and is translated to MySQL's backtick spelling at the ONE emission point,
+/// `declarative::mysql_requote_sql`.
+///
+/// So a SQLite drift comparison that reads PostgreSQL-spelled bytes is CORRECT
+/// here, and pointing these callers at the SQLite renderer would break the
+/// round-trip. It gets its own named door precisely so that the next person
+/// auditing this seam can tell the deliberate PG spelling apart from an
+/// unrouted one: a neuter reddens both identically, so the red count is not a
+/// diagnosis and the door name has to carry the intent.
+///
+/// PostgreSQL EMISSION also lands here, and legitimately: for PostgreSQL the
+/// canonical form and the emitted form are the same function.
+/// THE PIN MOVED, IT DID NOT GO — same as `quote_ident_checked` above. The
+/// PostgreSQL-shaped normal form is still one named door with one production
+/// caller (`render::declarative::quote_ident_if_needed`); the `SqlDialect::Postgres`
+/// that used to be written here is now written once in
+/// `zero_migrate::render::dml::pg_canonical_ident`, where a PostgreSQL renderer can
+/// actually be resolved.
+pub fn pg_canonical_ident_for_backend(ident: &str, backend: &dyn DmlRenderer) -> String {
+    escape_quote_ident_for_backend(ident, backend)
+}
+
+/// Qualify a validated bare table name for the target dialect.
+///
+/// - **Postgres**: `"schema"."table"` — the project schema is engine-supplied
+///   (never author-supplied) and the migrator's `search_path` is pinned to it, but
+///   we qualify explicitly so the resolved relation is unambiguously the project's.
+/// - **SQLite**: the table lives in the connection's `main` database (the app
+///   file is `main`) — there is NO schema namespace, and a
+///   `"schema"."table"` reference would resolve to a non-existent attached DB. So
+///   the SQLite form is the BARE quoted table, matching the engine's UNqualified
+///   SQLite DDL emission (the same property the createTable lowering relies on).
+fn qualify_table(
+    project_schema: &str,
+    backend: &dyn DmlRenderer,
+    table: &str,
+) -> Result<String, DmlError> {
+    backend.qualify_table(project_schema, table)
+}
+
+/// Map an [`IrScalar`] to a [`BindValue`] for native parameter binding — the
+/// one-shot DML path. Safe `Int` and tagged `Int64` values become exact i64
+/// binds; decimal strings carry through verbatim. Binary values stay binary on
+/// SQLite; PostgreSQL and MySQL wrap a base64 text bind in a dialect decoder at
+/// the placeholder site. Values are never inlined.
+fn scalar_to_bind(s: &IrScalar) -> BindValue {
+    match s {
+        IrScalar::Null => BindValue::Null,
+        IrScalar::Bool(b) => BindValue::Bool(*b),
+        IrScalar::Int(i) | IrScalar::Int64(i) => BindValue::Int(*i),
+        IrScalar::Decimal(d) => BindValue::Decimal(d.clone()),
+        IrScalar::Str(s) => BindValue::Text(s.clone()),
+        IrScalar::Bytes(bytes) => BindValue::Bytes(bytes.clone()),
+    }
+}
+
+/* `pub fn placeholder(dialect, n)` USED TO LIVE HERE, and its doc claimed to be
+ * "the SINGLE placeholder-emission point the one-shot assembler and the batched-
+ * backfill SQLite executor both call". It was not: it had ZERO callers in
+ * `crates/`, `sdks/` or `packages/`, and had had none for as long as the two
+ * places it named have existed. The one-shot assembler emits through
+ * `BindCtx::push`, which asks its RESOLVED backend (`self.backend.placeholder(n)`);
+ * the SQLite executor uses `sqlite_placeholder` below.
+ *
+ * It was `pub`, so the compiler could not report it unused, and it was counted as
+ * one of the crate's dialect boundaries on the strength of that doc comment. It was
+ * neither a boundary nor reachable — just a `renderer(dialect)` lookup that nothing
+ * performed. 0.1.0 was never published and nothing outside this repo consumes the
+ * crate, so deleting it costs nothing and stops the miscount recurring.
+ */
+
+/// The SQLite numbered placeholder (`?n`) — factored out as the shared-module
+/// entry the batched-backfill SQLite executor reuses for per-batch statement
+/// assembly, so the two paths bind values through ONE path.
+#[must_use]
+pub fn sqlite_placeholder(n: usize) -> String {
+    format!("?{n}")
+}
+
+/// Render a single inline SQL literal for the **backfill** string path
+/// ([`render_expr_inline_for_backend`]). Numeric/bool literals print verbatim, except that an
+/// exact decimal is quoted on SQLite to match its lossless TEXT storage. A string
+/// is single-quoted with `''` doubling (the canonical SQL escape). The assembled
+/// statement is then guard-checked by the real Postgres parser before any batch
+/// runs, so a hostile literal cannot alter the statement shape past the parser.
+/// NULL renders as the keyword. Bytes use native binary expressions on every
+/// dialect so a backfill or column default never coerces them through text.
+/// Render a SQL string literal using the canonical single-quote escape.
+#[must_use]
+pub fn sql_string_literal(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+/// Render a MySQL string in a grammar position that accepts only a quoted
+/// string token (not a hex expression), such as an `ENUM(...)` member or the
+/// five-character `SIGNAL SQLSTATE` code. Every MySQL author-SQL execution path
+/// pins `NO_BACKSLASH_ESCAPES` before executing these literals, so standard
+/// quote doubling has one stable interpretation regardless of the connection's
+/// inherited `sql_mode`.
+#[must_use]
+pub fn mysql_grammar_string_literal(s: &str) -> String {
+    sql_string_literal(s)
+}
+
+/// Render an inline string without depending on a server's string-escape mode.
+/// PostgreSQL and SQLite use standard quote doubling. MySQL uses a UTF-8 hex
+/// literal so `NO_BACKSLASH_ESCAPES` (present or absent) cannot change either the
+/// value or the statement shape.
+pub fn inline_string_literal_for_backend(s: &str, backend: &dyn DmlRenderer) -> String {
+    backend.inline_string_literal(s)
+}
+
+pub fn inline_literal_for_backend(
+    s: &IrScalar,
+    backend: &dyn DmlRenderer,
+) -> Result<String, DmlError> {
+    Ok(match s {
+        IrScalar::Null => "NULL".to_string(),
+        IrScalar::Bool(b) => {
+            if *b {
+                "TRUE".to_string()
+            } else {
+                "FALSE".to_string()
+            }
+        }
+        IrScalar::Int(i) | IrScalar::Int64(i) => i.to_string(),
+        IrScalar::Decimal(d) => backend.inline_decimal_literal(d),
+        IrScalar::Str(s) => backend.inline_string_literal(s),
+        IrScalar::Bytes(bytes) => backend.inline_bytes_literal(bytes),
+    })
+}
+
+pub fn pg_text_literal(s: &str, what: &'static str) -> Result<String, DmlError> {
+    if s.is_empty() {
+        return Err(DmlError::UnrenderableExpr(format!(
+            "{what} must be non-empty"
+        )));
+    }
+    if s.contains('\0') {
+        return Err(DmlError::UnrenderableExpr(format!(
+            "{what} contains a NUL byte"
+        )));
+    }
+    Ok(format!("{}::text", sql_string_literal(s)))
+}
+
+/// Validate an in-list / regex text operand, then let the CALLER'S OWN backend
+/// spell it.
+///
+/// It takes the backend rather than a [`SqlDialect`] because every caller is a
+/// backend rendering for itself: `backends/mysql.rs::render_regex_match` and
+/// [`render_in_list_elem_portable`] below. Taking a dialect here meant core
+/// resolving the registry to reach the vendor that had just called in — see
+/// [`render_in_list_elem_portable`] for the whole shape. Core owns whether the
+/// operand is LEGAL (non-empty, no NUL); the vendor owns how it is WRITTEN.
+pub fn in_list_text_literal(
+    s: &str,
+    what: &'static str,
+    backend: &dyn DmlRenderer,
+) -> Result<String, DmlError> {
+    if s.is_empty() {
+        return Err(DmlError::UnrenderableExpr(format!(
+            "{what} must be non-empty"
+        )));
+    }
+    if s.contains('\0') {
+        return Err(DmlError::UnrenderableExpr(format!(
+            "{what} contains a NUL byte"
+        )));
+    }
+    Ok(backend.inline_string_literal(s))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InListScalarKind {
+    Text,
+    Number,
+    Bool,
+    Null,
+}
+
+fn in_list_scalar_kind(elem: &IrScalar) -> Result<InListScalarKind, DmlError> {
+    Ok(match elem {
+        IrScalar::Str(_) => InListScalarKind::Text,
+        IrScalar::Int(_) | IrScalar::Int64(_) | IrScalar::Decimal(_) => InListScalarKind::Number,
+        IrScalar::Bool(_) => InListScalarKind::Bool,
+        IrScalar::Null => InListScalarKind::Null,
+        IrScalar::Bytes(_) => {
+            return Err(DmlError::UnrenderableExpr(
+                "inList elements must be string, number, boolean, or null; bytes are not allowed"
+                    .to_string(),
+            ));
+        }
+    })
+}
+
+fn homogeneous_in_list_kind(elems: &[IrScalar]) -> Result<Option<InListScalarKind>, DmlError> {
+    let mut kind = None;
+    for elem in elems {
+        let elem_kind = in_list_scalar_kind(elem)?;
+        if let Some(first) = kind {
+            if elem_kind != first {
+                return Err(DmlError::UnrenderableExpr(
+                    "inList elements must be homogeneous".to_string(),
+                ));
+            }
+        } else {
+            kind = Some(elem_kind);
+        }
+    }
+    Ok(kind)
+}
+
+pub fn render_in_list_elem_pg(elem: &IrScalar) -> Result<String, DmlError> {
+    Ok(match elem {
+        IrScalar::Str(s) => pg_text_literal(s, "inList element")?,
+        IrScalar::Int(i) | IrScalar::Int64(i) => i.to_string(),
+        IrScalar::Decimal(d) => d.clone(),
+        IrScalar::Bool(b) => {
+            if *b {
+                "TRUE".to_string()
+            } else {
+                "FALSE".to_string()
+            }
+        }
+        IrScalar::Null => "NULL".to_string(),
+        IrScalar::Bytes(_) => {
+            return Err(DmlError::UnrenderableExpr(
+                "inList elements must be string, number, boolean, or null; bytes are not allowed"
+                    .to_string(),
+            ));
+        }
+    })
+}
+
+/// One in-list element in the spelling of the backend that asked, for the two
+/// vendors whose in-list is a plain `IN (...)` over inline literals.
+///
+/// # It takes a BACKEND, and that is the whole point
+///
+/// This used to take `dialect: SqlDialect`, and its only two callers —
+/// `backends/sqlite.rs::render_in_list` and `backends/mysql.rs::render_in_list` —
+/// handed it their own `DIALECT` const. Core then resolved that dialect back
+/// through [`crate::render::backends::renderer`] to reach the very backend that had
+/// called in. Under `docs/proposals/pluggable-backends.md` step 4 that reads
+/// `zero-migrate-sqlite` -> core -> `zero-migrate-sqlite`: a dependency cycle in the
+/// exact shape the crate split exists to remove, and one that emits byte-identical
+/// SQL either way, so no behaviour test can see it. The backends now pass `self`,
+/// and the round trip is gone.
+///
+/// # Why PostgreSQL has a separate, lookup-free helper
+///
+/// Not because PostgreSQL is exempt from the rule. [`render_in_list_elem_pg`] can be
+/// lookup-free because every PG in-list spelling is FIXED — `'x'::text` for a
+/// string, the decimal verbatim — so it needs no vendor at all. SQLite quotes
+/// decimals to match its lossless TEXT storage and MySQL emits strings as a UTF-8
+/// hex literal, so this helper genuinely needs a vendor. It just needs the CALLER's,
+/// which the caller already is.
+///
+/// Pinned by `tests/dialect_matrix/dml_emitters_do_not_relookup_a_backend.rs`.
+pub fn render_in_list_elem_portable(
+    elem: &IrScalar,
+    backend: &dyn DmlRenderer,
+) -> Result<String, DmlError> {
+    Ok(match elem {
+        IrScalar::Str(s) => in_list_text_literal(s, "inList element", backend)?,
+        IrScalar::Int(i) | IrScalar::Int64(i) => i.to_string(),
+        IrScalar::Decimal(d) => backend.inline_decimal_literal(d),
+        IrScalar::Bool(b) => {
+            if *b {
+                "TRUE".to_string()
+            } else {
+                "FALSE".to_string()
+            }
+        }
+        IrScalar::Null => "NULL".to_string(),
+        IrScalar::Bytes(_) => {
+            return Err(DmlError::UnrenderableExpr(
+                "inList elements must be string, number, boolean, or null; bytes are not allowed"
+                    .to_string(),
+            ));
+        }
+    })
+}
+
+fn render_in_list(
+    expr: &str,
+    elems: &[IrScalar],
+    negated: bool,
+    backend: &dyn DmlRenderer,
+) -> Result<String, DmlError> {
+    if elems.is_empty() {
+        return Ok(if negated { "TRUE" } else { "FALSE" }.to_string());
+    }
+    let kind = homogeneous_in_list_kind(elems)?.expect("non-empty list has kind");
+    let joiner = if matches!(kind, InListScalarKind::Text) {
+        ", "
+    } else {
+        ","
+    };
+    backend.render_in_list(expr, elems, negated, joiner)
+}
+
+fn render_pg_regex_match(
+    expr: &str,
+    pattern: &str,
+    backend: &dyn DmlRenderer,
+) -> Result<String, DmlError> {
+    backend.render_regex_match(expr, pattern)
+}
+
+pub fn extract_field_name(field: ExtractField) -> &'static str {
+    match field {
+        ExtractField::Year => "year",
+        ExtractField::Month => "month",
+        ExtractField::Day => "day",
+        ExtractField::Hour => "hour",
+        ExtractField::Minute => "minute",
+        ExtractField::Dow => "dow",
+    }
+}
+
+fn render_extract(
+    field: ExtractField,
+    expr: &str,
+    backend: &dyn DmlRenderer,
+) -> Result<String, DmlError> {
+    Ok(backend.render_extract(field, expr))
+}
+
+fn render_pg_extract_field(field: PgExtractField) -> &'static str {
+    match field {
+        PgExtractField::Second => "second",
+        PgExtractField::Doy => "doy",
+        PgExtractField::Epoch => "epoch",
+        PgExtractField::Quarter => "quarter",
+        PgExtractField::Week => "week",
+        PgExtractField::Isodow => "isodow",
+        PgExtractField::Isoyear => "isoyear",
+        PgExtractField::Century => "century",
+        PgExtractField::Decade => "decade",
+        PgExtractField::Millennium => "millennium",
+        PgExtractField::Microseconds => "microseconds",
+        PgExtractField::Milliseconds => "milliseconds",
+        PgExtractField::Timezone => "timezone",
+        PgExtractField::TimezoneHour => "timezone_hour",
+        PgExtractField::TimezoneMinute => "timezone_minute",
+    }
+}
+
+fn render_pg_extract(
+    field: PgExtractField,
+    expr: &str,
+    backend: &dyn DmlRenderer,
+) -> Result<String, DmlError> {
+    let dialect = backend.dialect();
+    if !dialect.supports(Capability::PostgresVendorPrimitives) {
+        return Err(DmlError::UnrenderableExpr(
+            "PG EXTRACT is PostgreSQL-only".to_string(),
+        ));
+    }
+    Ok(format!(
+        "EXTRACT({} FROM {expr})",
+        render_pg_extract_field(field)
+    ))
+}
+
+fn render_pg_interval_literal(
+    duration: &Duration,
+    backend: &dyn DmlRenderer,
+) -> Result<String, DmlError> {
+    let dialect = backend.dialect();
+    if !dialect.supports(Capability::PostgresVendorPrimitives) {
+        return Err(DmlError::UnrenderableExpr(
+            "PG interval literal is PostgreSQL-only".to_string(),
+        ));
+    }
+
+    let mut parts = Vec::new();
+    for (value, singular, plural) in [
+        (duration.years, "year", "years"),
+        (duration.months, "month", "months"),
+        (duration.days, "day", "days"),
+        (duration.hours, "hour", "hours"),
+        (duration.minutes, "minute", "minutes"),
+        (duration.seconds, "second", "seconds"),
+    ] {
+        if let Some(value) = value {
+            let unit = if value == 1 || value == -1 {
+                singular
+            } else {
+                plural
+            };
+            parts.push(format!("{value} {unit}"));
+        }
+    }
+    if parts.is_empty() {
+        return Err(DmlError::UnrenderableExpr(
+            "PG interval duration must include at least one field".to_string(),
+        ));
+    }
+    Ok(format!("INTERVAL {}", sql_string_literal(&parts.join(" "))))
+}
+
+/// The SQL spelling of a binary operator (the method↔node table). `Concat` is
+/// `||` — the one place PG/SQLite NULL semantics agree.
+fn binary_op_sql(op: BinaryOp) -> &'static str {
+    match op {
+        BinaryOp::Eq => "=",
+        BinaryOp::Ne => "<>",
+        BinaryOp::Lt => "<",
+        BinaryOp::Le => "<=",
+        BinaryOp::Gt => ">",
+        BinaryOp::Ge => ">=",
+        BinaryOp::And => "AND",
+        BinaryOp::Or => "OR",
+        BinaryOp::Add => "+",
+        BinaryOp::Sub => "-",
+        BinaryOp::Mul => "*",
+        BinaryOp::Div => "/",
+        BinaryOp::Concat => "||",
+    }
+}
+
+/// Render a binary operation to SQL, **dialect-aware**. Every operator is a
+/// portable infix EXCEPT string concatenation on MySQL: MySQL's `||` is *logical
+/// OR* (not concat, absent the non-default `PIPES_AS_CONCAT` sql_mode), so a
+/// `Concat` rendered as `a || b` there would silently corrupt to a boolean. MySQL
+/// concatenation is the `CONCAT(a, b)` function. PG and SQLite use the `||`
+/// operator, where it is genuinely concatenation.
+fn render_binop(op: BinaryOp, l: &str, r: &str, backend: &dyn DmlRenderer) -> String {
+    if matches!(op, BinaryOp::Concat) {
+        backend.render_concat(l, r)
+    } else {
+        format!("({} {} {})", l, binary_op_sql(op), r)
+    }
+}
+
+/// Render the portable `distinctFrom` NULL-safe inequality node, **dialect-aware**.
+/// PG and SQLite both support the standard `IS DISTINCT FROM` operator directly.
+/// MySQL has NO `IS DISTINCT FROM`, so the engine owns the lowering to
+/// `NOT (<l> <=> <r>)` — `<=>` is MySQL's NULL-safe equality operator, so its
+/// negation is exactly the "distinct from" (NULL-aware inequality) predicate.
+fn render_distinct_from(l: &str, r: &str, backend: &dyn DmlRenderer) -> String {
+    backend.render_distinct_from(l, r)
+}
+
+/// The SQL spelling of an allow-listed named scalar function. These
+/// are the provably-identical cross-dialect scalars (same name + semantics on PG
+/// and SQLite), so the spelling is dialect-neutral.
+fn scalar_fn_sql(f: ScalarFn) -> &'static str {
+    match f {
+        ScalarFn::Coalesce => "coalesce",
+        ScalarFn::Nullif => "nullif",
+        ScalarFn::Lower => "lower",
+        ScalarFn::Upper => "upper",
+        ScalarFn::Trim => "trim",
+        ScalarFn::Length => "length",
+        ScalarFn::Abs => "abs",
+        // Portable scalar fns — identical spelling on PG/SQLite/MySQL.
+        // `Mod` renders as the `%` OPERATOR, special-cased in `render_scalar_fn_call`
+        // (SQLite has no `mod()` fn); this fallback name is never reached for it.
+        ScalarFn::Mod => "mod",
+        ScalarFn::Round => "round",
+        ScalarFn::Floor => "floor",
+        ScalarFn::Ceil => "ceil",
+        ScalarFn::Substr => "substr",
+        ScalarFn::Replace => "replace",
+        // VENDOR scalars. `current_user` is a reserved keyword
+        // rendered WITHOUT parens — the FnCall render arms special-case it; this
+        // spelling is the fallback name.
+        ScalarFn::CurrentSetting => "current_setting",
+        ScalarFn::CurrentUser => "current_user",
+    }
+}
+
+/// Render an allow-listed [`ScalarFn`] call from its already-rendered argument
+/// fragments. Most are `<name>(<args>)`; the VENDOR `CurrentUser` is a bare
+/// reserved keyword with NO parens (PG rejects `current_user()`).
+fn render_scalar_fn_call(f: ScalarFn, args: &[String], backend: &dyn DmlRenderer) -> String {
+    match f {
+        ScalarFn::CurrentUser => "current_user".to_string(),
+        // `mod` renders as the `%` OPERATOR — NOT a `mod(...)` call — because
+        // SQLite has no `mod()` SQL function (`%` is universal on PG/SQLite/MySQL).
+        // `args.join(" % ")` wrapped in parens is byte-identical to `(<a> % <b>)`
+        // for the 2-arg case the builder produces, and never index-panics on a
+        // malformed hand-crafted arity.
+        ScalarFn::Mod => format!("({})", args.join(" % ")),
+        // Every other spelling is the vendor's to answer. A backend returning
+        // `None` takes the shared `<name>(<args>)` table below.
+        _ => backend
+            .render_scalar_fn_override(f, args)
+            .unwrap_or_else(|| format!("{}({})", scalar_fn_sql(f), args.join(", "))),
+    }
+}
+
+/// The lower-cased SQL name of an [`AggFunc`].
+fn agg_fn_sql(f: AggFunc) -> &'static str {
+    match f {
+        AggFunc::Count => "count",
+        AggFunc::Sum => "sum",
+        AggFunc::Avg => "avg",
+        AggFunc::Min => "min",
+        AggFunc::Max => "max",
+        AggFunc::StringAgg => "string_agg",
+        AggFunc::ArrayAgg => "array_agg",
+        AggFunc::BoolAnd => "bool_and",
+        AggFunc::BoolOr => "bool_or",
+    }
+}
+
+/// Render an aggregate application from already-rendered argument fragments.
+/// `arg = None` (only `Count`) → `count(*)`; `StringAgg` renders its
+/// required delimiter as the second argument.
+fn render_agg(
+    f: AggFunc,
+    arg_sql: Option<&str>,
+    delimiter_sql: Option<&str>,
+    distinct: bool,
+) -> Result<String, DmlError> {
+    let name = agg_fn_sql(f);
+    if matches!(f, AggFunc::StringAgg) {
+        let (Some(a), Some(d)) = (arg_sql, delimiter_sql) else {
+            return Err(DmlError::UnrenderableExpr(
+                "string_agg requires an argument and delimiter".to_string(),
+            ));
+        };
+        let prefix = if distinct { "DISTINCT " } else { "" };
+        return Ok(format!("{name}({prefix}{a}, {d})"));
+    }
+    if delimiter_sql.is_some() {
+        return Err(DmlError::UnrenderableExpr(
+            "aggregate delimiter is only valid for string_agg".to_string(),
+        ));
+    }
+    match arg_sql {
+        None if matches!(f, AggFunc::ArrayAgg | AggFunc::BoolAnd | AggFunc::BoolOr) => Err(
+            DmlError::UnrenderableExpr(format!("{} requires an argument", agg_fn_sql(f))),
+        ),
+        None => Ok(format!("{name}(*)")),
+        Some(a) if distinct => Ok(format!("{name}(DISTINCT {a})")),
+        Some(a) => Ok(format!("{name}({a})")),
+    }
+}
+
+/// The portable cast-target SQL type per dialect. `bytes` is `BYTEA` on
+/// PG / `BLOB` on SQLite; the rest share spelling.
+fn cast_target_sql(
+    target: zero_migrate_ir::expr::CastTarget,
+    backend: &dyn DmlRenderer,
+) -> &'static str {
+    backend.cast_target(target)
+}
+
+/// Render a `c.fn.concatWs(delim, a, b, …)` per dialect: PG `concat_ws`;
+/// SQLite has no `concat_ws`, so it lowers to a NULL-skipping fold over `||` using
+/// the pinned, portable shape. The args are already rendered fragments.
+fn render_concat_ws(rendered: &[String], backend: &dyn DmlRenderer) -> String {
+    backend.render_concat_ws(rendered)
+}
+
+/// The MAX literal part index `c.fn.splitPart` admits — the O(2ⁿ) inline-unroll
+/// bound (`~17 KB` at `n=8`). MUST equal
+/// [`zero_migrate_ir::validate::SPLIT_PART_MAX_N`] — the validator gates the envelope and
+/// this renderer assumes it; a fixture pins their equality.
+pub const SPLIT_PART_MAX_N: i64 = zero_migrate_ir::validate::SPLIT_PART_MAX_N;
+
+/// Render the PINNED `c.fn.splitPart(col, d, n)` per dialect, given the
+/// already-rendered `col_sql` fragment and the raw delimiter + `n` IR args. The
+/// renderer is **dialect-aware** because the portability ENVELOPE is dialect-gated
+/// (mirroring `validate::check_split_part`, which returns early on a Postgres
+/// target): PG's native `split_part` is multi-char-delimiter-capable and takes any
+/// positive `n`, so on a Postgres target a `dialect_scope=PgOnly` out-of-envelope
+/// splitPart is a first-class, renderable node — NOT a hard error.
+///
+/// On BOTH dialects the GRAMMAR is enforced (the renderer's fail-closed backstop):
+/// the delimiter must be a non-empty string literal and `n` a positive integer
+/// literal — a non-literal delim/n, a non-string delim, an empty delim, or `n ≤ 0`
+/// is unrenderable everywhere. The widening on PG is of the envelope (multi-char /
+/// non-ASCII delim, `n > SPLIT_PART_MAX_N`), never the grammar.
+///
+/// - **Postgres:** `split_part(<col>, '<d>', n)` — verbatim for ANY literal
+///   delimiter (single-quotes `''`-escaped) and any positive literal `n`. Returns
+///   `''` past the token count.
+/// - **SQLite:** restricted to the proven envelope — a SINGLE-ASCII-byte delimiter
+///   and `1 ≤ n ≤ SPLIT_PART_MAX_N` — then the engine-owned `instr`/`substr`
+///   unroll, byte-identical to PG `split_part` against SQLite 3.51.2. The delimiter
+///   is required to be a single ASCII byte precisely because UTF-8 never embeds an
+///   ASCII byte inside a multibyte sequence, so the byte-wise `instr` scan finds
+///   exactly the boundaries PG's character-wise `split_part` does (the byte-identity
+///   proof). Append a sentinel delimiter (`cur₀ = col || 'd'`) so every token is
+///   delimiter-terminated, then walk the boundary to literal depth `n`:
+///   `curᵢ = substr(curᵢ₋₁, instr(curᵢ₋₁, 'd') + 1)` for `i = 1 … n−1`, and the
+///   result is `substr(cur_{n-1}, 1, instr(cur_{n-1}, 'd') − 1)`. The unroll
+///   references `curᵢ₋₁` twice per level, so it grows O(2ⁿ) (~17 KB at `n=8`) — the
+///   reason `n` is capped at 8. The delimiter is emitted as a single-quoted SQL
+///   literal (`''`-escaped), NOT a bind: it is an engine-pinned constant of the
+///   pinned expression, and the authorizer (with `instr` allow-listed) vets the
+///   whole statement.
+fn render_split_part(
+    col_sql: &str,
+    delim_arg: &Expr,
+    n_arg: &Expr,
+    backend: &dyn DmlRenderer,
+) -> Result<String, DmlError> {
+    // GRAMMAR (both dialects): a string-literal delimiter, a positive integer
+    // literal n. These are unrenderable on EITHER backend.
+    let delim = match delim_arg {
+        Expr::Literal {
+            value: IrScalar::Str(s),
+        } if !s.is_empty() => s.as_str(),
+        Expr::Literal {
+            value: IrScalar::Str(_),
+        } => {
+            return Err(DmlError::UnrenderableExpr(
+                "c.fn.splitPart delimiter must be a non-empty string literal".to_string(),
+            ));
+        }
+        other => {
+            return Err(DmlError::UnrenderableExpr(format!(
+                "c.fn.splitPart delimiter must be a string literal \
+                 (a runtime/computed delimiter is not renderable); got {other:?}"
+            )));
+        }
+    };
+    let n = match n_arg {
+        Expr::Literal {
+            value: IrScalar::Int(n),
+        } if *n >= 1 => *n,
+        Expr::Literal {
+            value: IrScalar::Int(n),
+        } => {
+            return Err(DmlError::UnrenderableExpr(format!(
+                "c.fn.splitPart part index n must be a positive integer literal; got {n}"
+            )));
+        }
+        other => {
+            return Err(DmlError::UnrenderableExpr(format!(
+                "c.fn.splitPart part index n must be a positive integer literal; got {other:?}"
+            )));
+        }
+    };
+
+    backend.render_split_part(col_sql, delim, n)
+}
+
+/// Select the [`Expr::Dialectal`] leg to render for `dialect`: the
+/// target dialect's OWN leg if present, else the `default` leg. Returns a borrow
+/// of the chosen leg. This is the one leg-selection rule shared by both the bound
+/// and inline render paths.
+///
+/// A `Dialectal` with neither an own leg nor a `default` for the target is
+/// UNREACHABLE here because [`crate::model::validate`] refuses it per-target
+/// (`EXPR_NOT_PORTABLE`) before assembly — but the seam is fail-closed
+/// defensively: it returns [`DmlError::UnrenderableExpr`] rather than silently
+/// dropping the value.
+fn select_dialect_leg<'a>(
+    dialect: SqlDialect,
+    default: &'a Option<Box<Expr>>,
+    pg: &'a Option<Box<Expr>>,
+    sqlite: &'a Option<Box<Expr>>,
+    mysql: &'a Option<Box<Expr>>,
+) -> Result<&'a Expr, DmlError> {
+    let own = match dialect {
+        SqlDialect::Postgres => pg,
+        SqlDialect::Sqlite => sqlite,
+        SqlDialect::Mysql => mysql,
+    };
+    own.as_deref().or(default.as_deref()).ok_or_else(|| {
+        DmlError::UnrenderableExpr(format!(
+            "dialect() has no leg for the {dialect:?} target and no default — the \
+             structural validator must refuse this before assembly"
+        ))
+    })
+}
+
+/// Collect every column an expression reads AS RENDERED FOR `dialect`, in sorted
+/// order.
+///
+/// The offline half of the `DropColumn` CHECK cascade: PostgreSQL drops a CHECK
+/// whenever any column its expression references is dropped, so the fold has to
+/// know that column set exactly. Reading it back out of the rendered SQL text is
+/// not an option - `CHECK ((status <> 'qty'::text))` must NOT cascade on a `qty`
+/// column, and `CHECK (((a)::text <> ''::text))` carries a bare `text` token that
+/// is a cast type rather than a column. Walking the closed AST answers both
+/// exactly.
+///
+/// [`Expr::Dialectal`] descends ONLY into the leg [`select_dialect_leg`] picks,
+/// matching what [`render_expr_inline_for_backend`] actually emits. Unioning all legs would
+/// attribute a PostgreSQL CHECK to a column that appears only in the SQLite or
+/// MySQL leg and cascade away a constraint PostgreSQL kept.
+///
+/// Deliberately NOT shared with the `collect_col_refs` inside
+/// [`crate::render::lower::derived_check_constraint_name`], which unions every leg
+/// because a derived constraint NAME has to stay stable across dialects. Same walk,
+/// opposite requirement.
+///
+/// The match has no catch-all arm so a new [`Expr`] variant is a compile error here
+/// rather than a silently missed column reference.
+pub fn expr_column_refs_for_backend(
+    expr: &Expr,
+    backend: &dyn DmlRenderer,
+) -> Result<Vec<String>, DmlError> {
+    fn walk(
+        expr: &Expr,
+        backend: &dyn DmlRenderer,
+        out: &mut std::collections::BTreeSet<String>,
+    ) -> Result<(), DmlError> {
+        match expr {
+            Expr::ColRef { name, .. } => {
+                out.insert(name.clone());
+            }
+            Expr::Literal { .. } | Expr::UuidV4 | Expr::UuidV7 | Expr::PgInterval { .. } => {}
+            Expr::BinOp { lhs, rhs, .. } => {
+                walk(lhs, backend, out)?;
+                walk(rhs, backend, out)?;
+            }
+            Expr::UnaryOp { operand, .. }
+            | Expr::Cast { operand, .. }
+            | Expr::PgColumnSize { expr: operand }
+            | Expr::Extract { from: operand, .. }
+            | Expr::PgExtract { from: operand, .. }
+            | Expr::PgRegexMatch { expr: operand, .. }
+            | Expr::InList { expr: operand, .. } => walk(operand, backend, out)?,
+            Expr::Case { branches, r#else } => {
+                for branch in branches {
+                    walk(&branch.when, backend, out)?;
+                    walk(&branch.then, backend, out)?;
+                }
+                if let Some(r#else) = r#else {
+                    walk(r#else, backend, out)?;
+                }
+            }
+            Expr::FnCall { args, .. } | Expr::FnSynth { args, .. } => {
+                for arg in args {
+                    walk(arg, backend, out)?;
+                }
+            }
+            Expr::Between { operand, low, high } => {
+                walk(operand, backend, out)?;
+                walk(low, backend, out)?;
+                walk(high, backend, out)?;
+            }
+            Expr::Like { operand, pattern } => {
+                walk(operand, backend, out)?;
+                walk(pattern, backend, out)?;
+            }
+            Expr::DistinctFrom { left, right } => {
+                walk(left, backend, out)?;
+                walk(right, backend, out)?;
+            }
+            Expr::Agg { arg, delimiter, .. } => {
+                if let Some(arg) = arg {
+                    walk(arg, backend, out)?;
+                }
+                if let Some(delimiter) = delimiter {
+                    walk(delimiter, backend, out)?;
+                }
+            }
+            Expr::Dialectal {
+                default,
+                pg,
+                sqlite,
+                mysql,
+            } => walk(
+                select_dialect_leg(backend.dialect(), default, pg, sqlite, mysql)?,
+                backend,
+                out,
+            )?,
+        }
+        Ok(())
+    }
+
+    let mut out = std::collections::BTreeSet::new();
+    walk(expr, backend, &mut out)?;
+    Ok(out.into_iter().collect())
+}
+
+/// Return whether the MySQL-selected leg of an expression reads `column`.
+/// This mirrors the renderer's recursive closed-AST walk so an unsafe dependency
+/// cannot hide inside CASE, a helper, or a dialect branch.
+fn mysql_expr_references_column(expr: &Expr, column: &str) -> Result<bool, DmlError> {
+    Ok(match expr {
+        Expr::ColRef { name, .. } => name == column,
+        Expr::Literal { .. } | Expr::UuidV4 | Expr::UuidV7 | Expr::PgInterval { .. } => false,
+        Expr::BinOp { lhs, rhs, .. } => {
+            mysql_expr_references_column(lhs, column)? || mysql_expr_references_column(rhs, column)?
+        }
+        Expr::UnaryOp { operand, .. }
+        | Expr::Cast { operand, .. }
+        | Expr::PgColumnSize { expr: operand }
+        | Expr::Extract { from: operand, .. }
+        | Expr::PgExtract { from: operand, .. }
+        | Expr::PgRegexMatch { expr: operand, .. }
+        | Expr::InList { expr: operand, .. } => mysql_expr_references_column(operand, column)?,
+        Expr::Case { branches, r#else } => {
+            let mut found = false;
+            for branch in branches {
+                if mysql_expr_references_column(&branch.when, column)?
+                    || mysql_expr_references_column(&branch.then, column)?
+                {
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                if let Some(r#else) = r#else {
+                    found = mysql_expr_references_column(r#else, column)?;
+                }
+            }
+            found
+        }
+        Expr::FnCall { args, .. } | Expr::FnSynth { args, .. } => {
+            let mut found = false;
+            for arg in args {
+                if mysql_expr_references_column(arg, column)? {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        }
+        Expr::Between { operand, low, high } => {
+            mysql_expr_references_column(operand, column)?
+                || mysql_expr_references_column(low, column)?
+                || mysql_expr_references_column(high, column)?
+        }
+        Expr::Like { operand, pattern } => {
+            mysql_expr_references_column(operand, column)?
+                || mysql_expr_references_column(pattern, column)?
+        }
+        Expr::DistinctFrom { left, right } => {
+            mysql_expr_references_column(left, column)?
+                || mysql_expr_references_column(right, column)?
+        }
+        Expr::Agg { arg, delimiter, .. } => {
+            if let Some(arg) = arg {
+                if mysql_expr_references_column(arg, column)? {
+                    return Ok(true);
+                }
+            }
+            if let Some(delimiter) = delimiter {
+                mysql_expr_references_column(delimiter, column)?
+            } else {
+                false
+            }
+        }
+        Expr::Dialectal {
+            default,
+            pg,
+            sqlite,
+            mysql,
+        } => mysql_expr_references_column(
+            select_dialect_leg(SqlDialect::Mysql, default, pg, sqlite, mysql)?,
+            column,
+        )?,
+    })
+}
+
+/// MySQL evaluates a SET list from left to right. Refuse cross-assignment reads
+/// rather than silently changing the simultaneous RHS semantics authors get on
+/// PostgreSQL and SQLite. A self-reference remains safe because its RHS is read
+/// before that column's sole assignment.
+fn validate_mysql_assignment_semantics(
+    op: &'static str,
+    table: &str,
+    set: &BTreeMap<String, IrValue>,
+) -> Result<(), DmlError> {
+    for (column, value) in set {
+        let IrValue::Expr(expr) = value else {
+            continue;
+        };
+        for referenced_column in set.keys() {
+            if referenced_column != column && mysql_expr_references_column(expr, referenced_column)?
+            {
+                return Err(DmlError::MySqlCrossAssignmentDependency {
+                    op,
+                    table: table.to_string(),
+                    column: column.clone(),
+                    referenced_column: referenced_column.clone(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A bind accumulator carried through the parameterized render walk: it owns the
+/// running placeholder counter (1-based, dialect-specific) and the ordered
+/// [`BindValue`] list.
+#[derive(Debug)]
+pub struct BindCtx<'a> {
+    /// The vendor this walk is rendering for.
+    ///
+    /// It used to carry a `dialect: SqlDialect` ALONGSIDE the backend, with a note
+    /// saying `dialect` survived only because the sibling doors
+    /// (`quote_ident_for_backend`, `inline_literal_for_backend`, …) still took one and had
+    /// callers outside `render::`. The crate split is the "later step" that note
+    /// anticipated: those doors take a `&dyn DmlRenderer` now, so the second field
+    /// had nothing left to answer and is gone. Where the walk genuinely needs the
+    /// dialect — a capability question, a dialectal-leg selection — it reads
+    /// [`DmlRenderer::dialect`].
+    pub backend: &'a dyn DmlRenderer,
+    /// The ordered binds accumulated by the walk.
+    pub binds: Vec<BindValue>,
+}
+
+impl<'a> BindCtx<'a> {
+    pub fn new(backend: &'a dyn DmlRenderer) -> Self {
+        Self {
+            backend,
+            binds: Vec::new(),
+        }
+    }
+
+    /// Append a bound scalar and return its dialect placeholder.
+    fn push_bind(&mut self, b: BindValue) -> String {
+        self.binds.push(b);
+        self.backend.placeholder(self.binds.len())
+    }
+
+    /// Bind one typed IR scalar without losing binary values.
+    ///
+    /// The binary case is the VENDOR's to answer — which carrier the value
+    /// travels in, and what (if anything) wraps the placeholder — so it goes
+    /// through [`DmlRenderer::bind_bytes`]. This method used to make that choice
+    /// itself, with a three-way `match` on `self.backend.dialect()` spelling
+    /// `decode(.., 'base64')` / `FROM_BASE64(..)` / raw bytes in core.
+    fn push_scalar(&mut self, value: &IrScalar) -> String {
+        if let IrScalar::Bytes(bytes) = value {
+            let backend = self.backend;
+            return backend.bind_bytes(bytes, &mut |b| self.push_bind(b));
+        }
+        self.push_bind(scalar_to_bind(value))
+    }
+}
+
+/// Render a closed-AST [`Expr`] to a parameterized SQL fragment, appending a
+/// native bind for every [`Expr::Literal`] (the one-shot DML path). A `ColRef`
+/// renders to its quoted identifier; a `Literal` to a placeholder; operators /
+/// functions / casts to their SQL spelling. The bind safety property:
+/// statement structure is fixed by the AST shape, never by a literal's content.
+pub fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError> {
+    Ok(match expr {
+        Expr::ColRef { name, table } => match table {
+            // Qualified ref (`c("orders", "id")`): `<quoted table>.<quoted col>`,
+            // both halves through the same per-dialect identifier quoting.
+            Some(t) => format!(
+                "{}.{}",
+                quote_ident_for_backend("table", t, ctx.backend)?,
+                quote_ident_for_backend("column", name, ctx.backend)?
+            ),
+            None => quote_ident_for_backend("column", name, ctx.backend)?,
+        },
+        Expr::Literal { value } => ctx.push_scalar(value),
+        Expr::BinOp { op, lhs, rhs } => {
+            let l = render_expr_bound(lhs, ctx)?;
+            let r = render_expr_bound(rhs, ctx)?;
+            render_binop(*op, &l, &r, ctx.backend)
+        }
+        Expr::UnaryOp { op, operand } => {
+            let o = render_expr_bound(operand, ctx)?;
+            render_unary(*op, &o, ctx.backend)
+        }
+        Expr::Case { branches, r#else } => {
+            let mut s = String::from("CASE");
+            for b in branches {
+                let c = render_expr_bound(&b.when, ctx)?;
+                let r = render_expr_bound(&b.then, ctx)?;
+                s.push_str(&format!(" WHEN {c} THEN {r}"));
+            }
+            if let Some(e) = r#else {
+                let e = render_expr_bound(e, ctx)?;
+                s.push_str(&format!(" ELSE {e}"));
+            }
+            s.push_str(" END");
+            s
+        }
+        Expr::FnCall { r#fn, args } => {
+            let mut rs = Vec::with_capacity(args.len());
+            for a in args {
+                rs.push(render_expr_bound(a, ctx)?);
+            }
+            render_scalar_fn_call(*r#fn, &rs, ctx.backend)
+        }
+        Expr::FnSynth { r#fn, args } => render_synth_bound(*r#fn, args, ctx)?,
+        Expr::UuidV4 => ctx.backend.uuid_v4(),
+        Expr::UuidV7 => ctx.backend.uuid_v7()?,
+        Expr::Cast { operand, target } => {
+            let o = render_expr_bound(operand, ctx)?;
+            format!("CAST({o} AS {})", cast_target_sql(*target, ctx.backend))
+        }
+        Expr::Between { operand, low, high } => {
+            let o = render_expr_bound(operand, ctx)?;
+            let lo = render_expr_bound(low, ctx)?;
+            let hi = render_expr_bound(high, ctx)?;
+            format!("({o} BETWEEN {lo} AND {hi})")
+        }
+        Expr::Like { operand, pattern } => {
+            let o = render_expr_bound(operand, ctx)?;
+            let p = render_expr_bound(pattern, ctx)?;
+            format!("({o} LIKE {p})")
+        }
+        Expr::DistinctFrom { left, right } => {
+            let l = render_expr_bound(left, ctx)?;
+            let r = render_expr_bound(right, ctx)?;
+            render_distinct_from(&l, &r, ctx.backend)
+        }
+        Expr::Agg {
+            func,
+            arg,
+            delimiter,
+            distinct,
+        } => {
+            let a = match arg {
+                Some(e) => Some(render_expr_bound(e, ctx)?),
+                None => None,
+            };
+            let d = match delimiter {
+                Some(e) => Some(render_expr_bound(e, ctx)?),
+                None => None,
+            };
+            render_agg(*func, a.as_deref(), d.as_deref(), *distinct)?
+        }
+        Expr::InList {
+            expr,
+            elems,
+            negated,
+        } => {
+            let e = render_expr_bound(expr, ctx)?;
+            render_in_list(&e, elems, *negated, ctx.backend)?
+        }
+        Expr::PgRegexMatch { expr, pattern } => {
+            let e = render_expr_bound(expr, ctx)?;
+            render_pg_regex_match(&e, pattern, ctx.backend)?
+        }
+        Expr::PgColumnSize { expr } => {
+            if !ctx
+                .backend
+                .dialect()
+                .supports(Capability::PostgresVendorPrimitives)
+            {
+                return Err(DmlError::UnrenderableExpr(
+                    "pg_column_size is PostgreSQL-only".to_string(),
+                ));
+            }
+            let e = render_expr_bound(expr, ctx)?;
+            format!("pg_column_size({e})")
+        }
+        Expr::Extract { field, from } => {
+            let e = render_expr_bound(from, ctx)?;
+            render_extract(*field, &e, ctx.backend)?
+        }
+        Expr::PgExtract { field, from } => {
+            let e = render_expr_bound(from, ctx)?;
+            render_pg_extract(*field, &e, ctx.backend)?
+        }
+        Expr::PgInterval { duration } => render_pg_interval_literal(duration, ctx.backend)?,
+        Expr::Dialectal {
+            default,
+            pg,
+            sqlite,
+            mysql,
+        } => {
+            let leg = select_dialect_leg(ctx.backend.dialect(), default, pg, sqlite, mysql)?;
+            render_expr_bound(leg, ctx)?
+        }
+    })
+}
+
+/// Render a `FnSynth` in the parameterized path. `concatWs` and `splitPart` lower
+/// per dialect via the portable-helper renderers; `now` renders to the apply-time
+/// DB scalar. Exact UUID generators are direct expression variants rather than
+/// synthesized-function tokens.
+fn render_synth_bound(f: SynthFn, args: &[Expr], ctx: &mut BindCtx) -> Result<String, DmlError> {
+    match f {
+        SynthFn::ConcatWs => {
+            let mut rs = Vec::with_capacity(args.len());
+            for a in args {
+                rs.push(render_expr_bound(a, ctx)?);
+            }
+            Ok(render_concat_ws(&rs, ctx.backend))
+        }
+        SynthFn::Now => Ok(ctx.backend.synth_now()),
+        SynthFn::SplitPart => {
+            // splitPart(col, delim, n): the column arg may itself be a ColRef or an
+            // in-AST sub-expression — render it (binding any nested Literals), then
+            // extract the pinned single-ASCII delim + literal n envelope. The
+            // delim/n are engine-pinned constants of the lowering, NOT binds.
+            if args.len() != 3 {
+                return Err(DmlError::UnrenderableExpr(format!(
+                    "c.fn.splitPart takes exactly (column, delim, n); got {} args",
+                    args.len()
+                )));
+            }
+            let col_sql = render_expr_bound(&args[0], ctx)?;
+            render_split_part(&col_sql, &args[1], &args[2], ctx.backend)
+        }
+    }
+}
+
+fn render_value_bound(value: &IrValue, ctx: &mut BindCtx) -> Result<String, DmlError> {
+    match value {
+        IrValue::Scalar(s) => Ok(ctx.push_scalar(s)),
+        IrValue::Expr(e) => render_expr_bound(e, ctx),
+    }
+}
+
+/// Render a unary op around an already-rendered operand, dialect-aware.
+fn render_unary(op: UnaryOp, operand: &str, backend: &dyn DmlRenderer) -> String {
+    match op {
+        UnaryOp::Not => format!("(NOT {operand})"),
+        UnaryOp::IsNull => format!("({operand} IS NULL)"),
+        UnaryOp::IsNotNull => format!("({operand} IS NOT NULL)"),
+        // The boolean predicates are the vendor's to spell: SQLite has no native
+        // boolean type (values are 0/1) and rejects `IS TRUE` / `IS FALSE` at apply.
+        UnaryOp::IsTrue => backend.render_is_true(operand),
+        UnaryOp::IsFalse => backend.render_is_false(operand),
+    }
+}
+
+/// Render a closed-AST [`Expr`] to an INLINE SQL string (the backfill path). A
+/// `ColRef` is its quoted identifier; a `Literal` is an inline SQL literal
+/// ([`inline_literal_for_backend`], guard-revalidated downstream); operators / functions /
+/// casts render the same SQL spelling as the bound path. NO binds — the backfill
+/// executor pages the statement and cannot carry positional binds.
+pub fn render_expr_inline_for_backend(
+    expr: &Expr,
+    backend: &dyn DmlRenderer,
+) -> Result<String, DmlError> {
+    render_expr_inline_with_col_for_backend(expr, backend, &|name| {
+        quote_ident_for_backend("column", name, backend)
+    })
+}
+
+pub fn render_value_inline_for_backend(
+    value: &IrValue,
+    backend: &dyn DmlRenderer,
+) -> Result<String, DmlError> {
+    match value {
+        IrValue::Scalar(s) => inline_literal_for_backend(s, backend),
+        IrValue::Expr(e) => render_expr_inline_for_backend(e, backend),
+    }
+}
+
+/// The DOOR into the inline walk: it RESOLVES the backend once and hands it to
+/// the recursive worker.
+///
+/// The door still takes a [`SqlDialect`] because its callers — in
+/// `render::lower`, `render::declarative`, `model::` and `apply::` — hold one,
+/// and the walk itself still needs it for the sibling core doors
+/// (`quote_ident_for_backend`, `inline_literal_for_backend`) that have not moved yet. What
+/// the split buys is that the RECURSION carries a resolved backend instead of
+/// re-deriving it from the dialect at each node, which is the same arrangement
+/// [`BindCtx`] gives the bound walk.
+pub fn render_expr_inline_with_col_for_backend<F>(
+    expr: &Expr,
+    backend: &dyn DmlRenderer,
+    col_ref: &F,
+) -> Result<String, DmlError>
+where
+    F: Fn(&str) -> Result<String, DmlError>,
+{
+    render_expr_inline_walk_for_backend(expr, backend, col_ref)
+}
+
+fn render_expr_inline_walk_for_backend<F>(
+    expr: &Expr,
+    backend: &dyn DmlRenderer,
+    col_ref: &F,
+) -> Result<String, DmlError>
+where
+    F: Fn(&str) -> Result<String, DmlError>,
+{
+    let dialect = backend.dialect();
+    Ok(match expr {
+        Expr::ColRef { name, table } => match table {
+            // Qualified ref: quote the table via the per-dialect identifier
+            // quoter; delegate the column to the caller-supplied `col_ref` closure.
+            Some(t) => format!(
+                "{}.{}",
+                quote_ident_for_backend("table", t, backend)?,
+                col_ref(name)?
+            ),
+            None => col_ref(name)?,
+        },
+        Expr::Literal { value } => inline_literal_for_backend(value, backend)?,
+        Expr::BinOp { op, lhs, rhs } => {
+            let l = render_expr_inline_walk_for_backend(lhs, backend, col_ref)?;
+            let r = render_expr_inline_walk_for_backend(rhs, backend, col_ref)?;
+            render_binop(*op, &l, &r, backend)
+        }
+        Expr::UnaryOp { op, operand } => render_unary(
+            *op,
+            &render_expr_inline_walk_for_backend(operand, backend, col_ref)?,
+            backend,
+        ),
+        Expr::Case { branches, r#else } => {
+            let mut s = String::from("CASE");
+            for b in branches {
+                let c = render_expr_inline_walk_for_backend(&b.when, backend, col_ref)?;
+                let r = render_expr_inline_walk_for_backend(&b.then, backend, col_ref)?;
+                s.push_str(&format!(" WHEN {c} THEN {r}"));
+            }
+            if let Some(e) = r#else {
+                s.push_str(&format!(
+                    " ELSE {}",
+                    render_expr_inline_walk_for_backend(e, backend, col_ref)?
+                ));
+            }
+            s.push_str(" END");
+            s
+        }
+        Expr::FnCall { r#fn, args } => {
+            let rs: Result<Vec<_>, _> = args
+                .iter()
+                .map(|a| render_expr_inline_walk_for_backend(a, backend, col_ref))
+                .collect();
+            render_scalar_fn_call(*r#fn, &rs?, backend)
+        }
+        Expr::FnSynth { r#fn, args } => match r#fn {
+            SynthFn::SplitPart => {
+                // The column arg renders inline; the delim/n are engine-pinned
+                // constants of the lowering, extracted raw (NOT inline-rendered
+                // as generic literals). The backfill (inline) path is exactly where
+                // the hero split lands.
+                if args.len() != 3 {
+                    return Err(DmlError::UnrenderableExpr(format!(
+                        "c.fn.splitPart takes exactly (column, delim, n); got {} args",
+                        args.len()
+                    )));
+                }
+                let col_sql = render_expr_inline_walk_for_backend(&args[0], backend, col_ref)?;
+                render_split_part(&col_sql, &args[1], &args[2], backend)?
+            }
+            SynthFn::ConcatWs => {
+                let rs: Result<Vec<_>, _> = args
+                    .iter()
+                    .map(|a| render_expr_inline_walk_for_backend(a, backend, col_ref))
+                    .collect();
+                render_concat_ws(&rs?, backend)
+            }
+            SynthFn::Now => backend.synth_now(),
+        },
+        Expr::UuidV4 => backend.uuid_v4(),
+        Expr::UuidV7 => backend.uuid_v7()?,
+        Expr::Cast { operand, target } => {
+            format!(
+                "CAST({} AS {})",
+                render_expr_inline_walk_for_backend(operand, backend, col_ref)?,
+                cast_target_sql(*target, backend)
+            )
+        }
+        Expr::Between { operand, low, high } => {
+            let o = render_expr_inline_walk_for_backend(operand, backend, col_ref)?;
+            let lo = render_expr_inline_walk_for_backend(low, backend, col_ref)?;
+            let hi = render_expr_inline_walk_for_backend(high, backend, col_ref)?;
+            format!("({o} BETWEEN {lo} AND {hi})")
+        }
+        Expr::Like { operand, pattern } => {
+            let o = render_expr_inline_walk_for_backend(operand, backend, col_ref)?;
+            let p = render_expr_inline_walk_for_backend(pattern, backend, col_ref)?;
+            format!("({o} LIKE {p})")
+        }
+        Expr::DistinctFrom { left, right } => {
+            let l = render_expr_inline_walk_for_backend(left, backend, col_ref)?;
+            let r = render_expr_inline_walk_for_backend(right, backend, col_ref)?;
+            render_distinct_from(&l, &r, backend)
+        }
+        Expr::Agg {
+            func,
+            arg,
+            delimiter,
+            distinct,
+        } => {
+            let a = match arg {
+                Some(e) => Some(render_expr_inline_walk_for_backend(e, backend, col_ref)?),
+                None => None,
+            };
+            let d = match delimiter {
+                Some(e) => Some(render_expr_inline_walk_for_backend(e, backend, col_ref)?),
+                None => None,
+            };
+            render_agg(*func, a.as_deref(), d.as_deref(), *distinct)?
+        }
+        Expr::InList {
+            expr,
+            elems,
+            negated,
+        } => {
+            let e = render_expr_inline_walk_for_backend(expr, backend, col_ref)?;
+            render_in_list(&e, elems, *negated, backend)?
+        }
+        Expr::PgRegexMatch { expr, pattern } => {
+            let e = render_expr_inline_walk_for_backend(expr, backend, col_ref)?;
+            render_pg_regex_match(&e, pattern, backend)?
+        }
+        Expr::PgColumnSize { expr } => {
+            if !dialect.supports(Capability::PostgresVendorPrimitives) {
+                return Err(DmlError::UnrenderableExpr(
+                    "pg_column_size is PostgreSQL-only".to_string(),
+                ));
+            }
+            format!(
+                "pg_column_size({})",
+                render_expr_inline_walk_for_backend(expr, backend, col_ref)?
+            )
+        }
+        Expr::Extract { field, from } => {
+            let e = render_expr_inline_walk_for_backend(from, backend, col_ref)?;
+            render_extract(*field, &e, backend)?
+        }
+        Expr::PgExtract { field, from } => {
+            let e = render_expr_inline_walk_for_backend(from, backend, col_ref)?;
+            render_pg_extract(*field, &e, backend)?
+        }
+        Expr::PgInterval { duration } => render_pg_interval_literal(duration, backend)?,
+        Expr::Dialectal {
+            default,
+            pg,
+            sqlite,
+            mysql,
+        } => {
+            let leg = select_dialect_leg(backend.dialect(), default, pg, sqlite, mysql)?;
+            render_expr_inline_walk_for_backend(leg, backend, col_ref)?
+        }
+    })
+}
+
+/// **VENDOR** — render a CLOSED [`Expr`] predicate to an inline Postgres SQL
+/// fragment for the vendor `CREATE POLICY` `USING`/`WITH CHECK` and `CREATE
+/// TRIGGER` `WHEN` clauses. These DDL positions carry NO binds
+/// (a policy/trigger predicate is part of the catalog definition, not a
+/// parameterized statement), so the inline renderer is the right seam — a
+/// `ColRef` is its quoted identifier, a `Literal` an inline SQL literal, and the
+/// VENDOR `c.fn.currentSetting`/`currentUser` scalars render their PG form. The
+/// whole rendered statement is then `pg_query`-parsed by the guard, so the inline
+/// literals are re-validated by the real parser before any apply. PG dialect only
+/// (vendor predicates are `PgOnly`).
+///
+/// # Errors
+/// [`DmlError::UnrenderableExpr`] for an expression node that has no inline form
+/// (e.g. a `bytes` literal).
+/// THE TWO PINNED SPELLINGS COLLAPSED INTO ONE PARAMETERIZED DOOR, and that is a
+/// simplification the split forced rather than a loss. `render_predicate_pg` and
+/// `render_predicate_sqlite` had identical bodies apart from the dialect literal, so
+/// each was a vendor writing its own name into a helper it then called on itself.
+/// A vendor now passes `self`: `zero-migrate-postgres` for the vendor
+/// `CREATE POLICY` / `CREATE TRIGGER` clauses, `zero-migrate-sqlite` for its trigger
+/// bodies. Neither can reach the other's spelling any more, which is the property
+/// `sqlite_trigger_quoting_reaches_postgres.rs` exists to protect.
+pub fn render_predicate(expr: &Expr, backend: &dyn DmlRenderer) -> Result<String, DmlError> {
+    render_expr_inline_for_backend(expr, backend)
+}
+
+/// The structured `onConflict` facet of an `insert`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OnConflict {
+    /// The conflict-target columns (`ON CONFLICT (cols)`).
+    pub columns: Vec<String>,
+    /// `Some` SET assignments ⇒ `DO UPDATE SET …`; `None` ⇒ `DO NOTHING`.
+    pub do_update: Option<BTreeMap<String, IrValue>>,
+}
+
+/// The assembled one-shot DML statement: the placeholder template + ordered binds.
+/// Fed straight into [`PlanStep::Dml`](crate::render::step::PlanStep::Dml).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssembledDml {
+    /// The placeholder SQL (`$n`/`?n` — never an inlined value).
+    pub template: String,
+    /// The ordered native binds.
+    pub binds: Vec<BindValue>,
+}
+
+/// Assemble an `insert` op into a parameterized one-shot statement. Every
+/// value is a native bind. PostgreSQL and SQLite render an exact conflict target;
+/// MySQL renders its safe native duplicate-key form.
+///
+/// # Errors
+/// [`DmlError`] on a malformed identifier, an empty-or-ragged insert, or a MySQL
+/// conflict shape that cannot retain target intent safely.
+pub fn assemble_insert_for_backend(
+    project_schema: &str,
+    backend: &dyn DmlRenderer,
+    table: &str,
+    columns: &[String],
+    rows: &[Vec<IrValue>],
+    on_conflict: Option<&OnConflict>,
+) -> Result<AssembledDml, DmlError> {
+    let dialect = backend.dialect();
+    if columns.is_empty() {
+        return Err(DmlError::MalformedInsert {
+            table: table.to_string(),
+            reason: "no columns".to_string(),
+        });
+    }
+    if rows.is_empty() {
+        return Err(DmlError::MalformedInsert {
+            table: table.to_string(),
+            reason: "no rows".to_string(),
+        });
+    }
+    let mut ctx = BindCtx::new(backend);
+    let qtable = qualify_table(project_schema, ctx.backend, table)?;
+    let qcols: Result<Vec<_>, _> = columns
+        .iter()
+        .map(|c| quote_ident_for_backend("column", c, backend))
+        .collect();
+    let qcols = qcols?;
+
+    let mut value_groups: Vec<String> = Vec::with_capacity(rows.len());
+    for (ri, row) in rows.iter().enumerate() {
+        if row.len() != columns.len() {
+            return Err(DmlError::MalformedInsert {
+                table: table.to_string(),
+                reason: format!(
+                    "row {ri} has {} value(s) but {} column(s) were named",
+                    row.len(),
+                    columns.len()
+                ),
+            });
+        }
+        let placeholders: Result<Vec<String>, DmlError> = row
+            .iter()
+            .map(|v| render_value_bound(v, &mut ctx))
+            .collect();
+        let placeholders = placeholders?;
+        value_groups.push(format!("({})", placeholders.join(", ")));
+    }
+
+    let mut template = format!(
+        "INSERT INTO {qtable} ({}) VALUES {}",
+        qcols.join(", "),
+        value_groups.join(", ")
+    );
+
+    if let Some(oc) = on_conflict {
+        if !dialect.supports(Capability::InsertOnConflictClause) {
+            return Err(DmlError::UnrenderableExpr(format!(
+                "structured onConflict is unavailable for the {dialect:?} target"
+            )));
+        }
+        template.push_str(&render_on_conflict(table, &qtable, columns, oc, &mut ctx)?);
+    }
+
+    if ctx.binds.len() > MAX_BIND_PARAMS {
+        return Err(DmlError::TooManyBinds {
+            table: table.to_string(),
+            count: ctx.binds.len(),
+            max: MAX_BIND_PARAMS,
+        });
+    }
+
+    Ok(AssembledDml {
+        template,
+        binds: ctx.binds,
+    })
+}
+
+/// Render a dialect-native conflict tail. PostgreSQL and SQLite share the exact
+/// `ON CONFLICT (cols)` grammar. MySQL uses its duplicate-key grammar and guards
+/// every requested update with an incoming-target comparison.
+fn render_on_conflict(
+    table: &str,
+    qtable: &str,
+    insert_columns: &[String],
+    oc: &OnConflict,
+    ctx: &mut BindCtx,
+) -> Result<String, DmlError> {
+    if oc.columns.is_empty() {
+        return Err(DmlError::MalformedInsert {
+            table: "<onConflict>".to_string(),
+            reason: "onConflict carries no target columns".to_string(),
+        });
+    }
+    let qcols: Result<Vec<_>, _> = oc
+        .columns
+        .iter()
+        .map(|c| quote_ident_for_backend("column", c, ctx.backend))
+        .collect();
+    let qcols = qcols?;
+    if matches!(ctx.backend.dialect(), SqlDialect::Mysql) {
+        return render_on_conflict_mysql(table, qtable, insert_columns, oc, &qcols, ctx);
+    }
+
+    let target = format!("ON CONFLICT ({})", qcols.join(", "));
+    match &oc.do_update {
+        None => Ok(format!(" {target} DO NOTHING")),
+        Some(set) => {
+            if set.is_empty() {
+                return Ok(format!(" {target} DO NOTHING"));
+            }
+            // BTreeMap ⇒ deterministic column order (canonical).
+            let mut assigns = Vec::with_capacity(set.len());
+            for (col, val) in set {
+                let qc = quote_ident_for_backend("column", col, ctx.backend)?;
+                let ph = render_value_bound(val, ctx)?;
+                assigns.push(format!("{qc} = {ph}"));
+            }
+            Ok(format!(" {target} DO UPDATE SET {}", assigns.join(", ")))
+        }
+    }
+}
+
+/// Render MySQL 8's closest safe native equivalent to a named conflict target.
+/// MySQL has no syntax for choosing one unique key. `DO NOTHING` is refused
+/// because neither a no-op update nor `INSERT IGNORE` has the same behavior. For
+/// `doUpdate`, generated row aliases expose the incoming target values and each
+/// assignment is conditional on all authored target columns matching the existing
+/// row. A non-target collision evaluates a guarded invalid-JSON expression, which
+/// is a hard MySQL error even when the caller uses a permissive `sql_mode`. The
+/// generated alias names contain hyphens, which cannot collide with the DSL's bare
+/// authored identifiers.
+fn render_on_conflict_mysql(
+    table: &str,
+    qtable: &str,
+    insert_columns: &[String],
+    oc: &OnConflict,
+    qtarget_columns: &[String],
+    ctx: &mut BindCtx,
+) -> Result<String, DmlError> {
+    let Some(set) = oc.do_update.as_ref().filter(|set| !set.is_empty()) else {
+        return Err(DmlError::MySqlConflictDoNothingNotExact);
+    };
+
+    for target in &oc.columns {
+        if set.contains_key(target) {
+            return Err(DmlError::MySqlConflictTargetUpdated {
+                table: table.to_string(),
+                column: target.clone(),
+            });
+        }
+    }
+    validate_mysql_assignment_semantics("onConflict.doUpdate", table, set)?;
+
+    let row_alias = escape_quote_ident_for_backend("zero-migrate-incoming", ctx.backend);
+    let value_aliases = insert_columns
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            escape_quote_ident_for_backend(&format!("zero-migrate-value-{index}"), ctx.backend)
+        })
+        .collect::<Vec<_>>();
+
+    let mut target_match = Vec::with_capacity(oc.columns.len());
+    for (target, qtarget) in oc.columns.iter().zip(qtarget_columns) {
+        let Some(index) = insert_columns.iter().position(|column| column == target) else {
+            return Err(DmlError::MySqlConflictTargetNotInserted {
+                table: table.to_string(),
+                column: target.clone(),
+            });
+        };
+        target_match.push(format!(
+            "({qtable}.{qtarget} = {row_alias}.{})",
+            value_aliases[index]
+        ));
+    }
+    let target_match = target_match.join(" AND ");
+    // Ordinary equality is intentional: MySQL UNIQUE indexes do not conflict on
+    // NULL, so NULL/NULL must never establish an authored-target match. The false
+    // branch is selected for both FALSE and NULL. Invalid JSON text is specified
+    // by MySQL as a statement error independently of `sql_mode`; division by zero
+    // is not, and under a permissive mode silently yields NULL. CONCAT keeps IF's
+    // false branch string-compatible with legitimate text, decimal, or binary
+    // assignment values. IF evaluates only the selected branch, so a genuine
+    // authored-target collision never touches the invalid document.
+    let non_target_conflict_error =
+        "CONCAT('', JSON_EXTRACT('zero-migrate conflict target mismatch', '$'))";
+
+    let mut assigns = Vec::with_capacity(set.len());
+    for (column, value) in set {
+        let qcolumn = quote_ident_for_backend("column", column, ctx.backend)?;
+        let desired = render_value_bound(value, ctx)?;
+        assigns.push(format!(
+            "{qcolumn} = IF({target_match}, {desired}, {non_target_conflict_error})"
+        ));
+    }
+
+    Ok(format!(
+        " AS {row_alias}({}) ON DUPLICATE KEY UPDATE {}",
+        value_aliases.join(", "),
+        assigns.join(", ")
+    ))
+}
+
+/// Assemble a one-shot `update` op (no `batch`) into a parameterized statement.
+/// `set` RHS values render through `render_value_bound` and the optional `where`
+/// renders through `render_expr_bound`, so scalar set values and expression
+/// literals are native binds. Portable on both backends.
+///
+/// # Errors
+/// [`DmlError`] on a malformed identifier / empty `set` / an unrenderable node.
+pub fn assemble_update_for_backend(
+    project_schema: &str,
+    backend: &dyn DmlRenderer,
+    table: &str,
+    set: &BTreeMap<String, IrValue>,
+    r#where: Option<&Expr>,
+) -> Result<AssembledDml, DmlError> {
+    let dialect = backend.dialect();
+    if set.is_empty() {
+        return Err(DmlError::EmptySet {
+            op: "update",
+            table: table.to_string(),
+        });
+    }
+    let mut ctx = BindCtx::new(backend);
+    let qtable = qualify_table(project_schema, ctx.backend, table)?;
+    if matches!(dialect, SqlDialect::Mysql) {
+        validate_mysql_assignment_semantics("update", table, set)?;
+    }
+    // BTreeMap ⇒ deterministic, canonical assignment order.
+    let mut assigns = Vec::with_capacity(set.len());
+    for (col, rhs) in set {
+        let qc = quote_ident_for_backend("column", col, backend)?;
+        let r = render_value_bound(rhs, &mut ctx)?;
+        assigns.push(format!("{qc} = {r}"));
+    }
+    let mut template = format!("UPDATE {qtable} SET {}", assigns.join(", "));
+    if let Some(pred) = r#where {
+        let w = render_expr_bound(pred, &mut ctx)?;
+        template.push_str(&format!(" WHERE {w}"));
+    }
+    Ok(AssembledDml {
+        template,
+        binds: ctx.binds,
+    })
+}
+
+/// Assemble a `del` op into a parameterized `DELETE`. PostgreSQL limited deletes
+/// identify a physical row with `(tableoid, ctid)`, including when the target is
+/// a partitioned parent. MySQL uses its native limit clause. A SQLite limited
+/// delete is rejected here because this schema-blind entry cannot prove a safe
+/// row identity; the catalog-aware IR lower uses the internal identity-bearing
+/// entry after introspection. The limit-free form is a plain delete everywhere.
+///
+/// # Errors
+/// [`DmlError`] on a malformed identifier, an unrenderable predicate, or a
+/// SQLite limit without catalog identity facts.
+pub fn assemble_delete_for_backend(
+    project_schema: &str,
+    backend: &dyn DmlRenderer,
+    table: &str,
+    r#where: &Expr,
+    limit: Option<u64>,
+) -> Result<AssembledDml, DmlError> {
+    assemble_delete_with_sqlite_identity_for_backend(
+        project_schema,
+        backend,
+        table,
+        r#where,
+        limit,
+        None,
+    )
+}
+
+/// Catalog-aware delete assembly used by the guarded IR lower. The SQLite
+/// identity columns must be a non-null PRIMARY KEY or complete non-partial UNIQUE
+/// key recovered from the live table snapshot.
+pub fn assemble_delete_with_sqlite_identity_for_backend(
+    project_schema: &str,
+    backend: &dyn DmlRenderer,
+    table: &str,
+    r#where: &Expr,
+    limit: Option<u64>,
+    sqlite_identity_columns: Option<&[String]>,
+) -> Result<AssembledDml, DmlError> {
+    let dialect = backend.dialect();
+    let mut ctx = BindCtx::new(backend);
+    let qtable = qualify_table(project_schema, ctx.backend, table)?;
+    let w = render_expr_bound(r#where, &mut ctx)?;
+    let template = match (dialect, limit) {
+        (_, None) => format!("DELETE FROM {qtable} WHERE {w}"),
+        // PostgreSQL and SQLite cannot take a bare limited DELETE portably. The
+        // limit binds natively while a subquery selects exact row identities.
+        (SqlDialect::Sqlite, Some(n)) => {
+            let identity_columns = sqlite_identity_columns
+                .filter(|columns| !columns.is_empty())
+                .ok_or_else(|| DmlError::SqliteLimitedDeleteNeedsUniqueIdentity {
+                    table: table.to_string(),
+                })?;
+            let quoted_identity: Result<Vec<_>, _> = identity_columns
+                .iter()
+                .map(|column| {
+                    quote_ident_checked_for_backend(column, backend).map_err(|_| {
+                        DmlError::InvalidIdentifier {
+                            what: "catalog identity column",
+                            value: column.clone(),
+                        }
+                    })
+                })
+                .collect();
+            let quoted_identity = quoted_identity?;
+            let selected_identity = quoted_identity.join(", ");
+            let compared_identity = if quoted_identity.len() == 1 {
+                selected_identity.clone()
+            } else {
+                format!("({selected_identity})")
+            };
+            let ph = ctx.push_bind(BindValue::Int(i64::try_from(n).unwrap_or(i64::MAX)));
+            format!(
+                "DELETE FROM {qtable} WHERE {compared_identity} IN \
+                 (SELECT {selected_identity} FROM {qtable} WHERE {w} LIMIT {ph})"
+            )
+        }
+        (SqlDialect::Postgres, Some(n)) => {
+            let ph = ctx.push_bind(BindValue::Int(i64::try_from(n).unwrap_or(i64::MAX)));
+            format!(
+                "DELETE FROM {qtable} WHERE (tableoid, ctid) IN \
+                 (SELECT tableoid, ctid FROM {qtable} WHERE {w} LIMIT {ph})"
+            )
+        }
+        (SqlDialect::Mysql, Some(n)) => {
+            let ph = ctx.push_bind(BindValue::Int(i64::try_from(n).unwrap_or(i64::MAX)));
+            format!("DELETE FROM {qtable} WHERE {w} LIMIT {ph}")
+        }
+    };
+    Ok(AssembledDml {
+        template,
+        binds: ctx.binds,
+    })
+}
+
+/// The rendered backfill clauses (the SQL strings the
+/// [`BackfillSpec`](crate::model::backfill::BackfillSpec) carries).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackfillClauses {
+    /// The `SET` body (e.g. `"normalized" = lower("raw")`).
+    pub set_clause: String,
+    /// The optional extra `WHERE` conjunct.
+    pub filter: Option<String>,
+}
+
+/// Assemble a `backfill` op's `set` / `filter` into the inline SQL strings the
+/// [`BackfillSpec`](crate::model::backfill::BackfillSpec) executor consumes. Renders for
+/// EITHER dialect: the inline transform is dialect-rendered (the
+/// `c.fn.splitPart` lowering, NULL-skipping `concatWs`), and the PG (`backfill.rs`)
+/// or SQLite (`apply::backend::sqlite::backfill_sql`) executor consumes the result.
+///
+/// # Errors
+/// [`DmlError`] on a malformed identifier / empty `set` / an unrenderable node.
+pub fn assemble_backfill_clauses_for_backend(
+    backend: &dyn DmlRenderer,
+    table: &str,
+    set: &BTreeMap<String, IrValue>,
+    filter: Option<&Expr>,
+) -> Result<BackfillClauses, DmlError> {
+    assemble_backfill_clauses_inner_for_backend(backend, table, set, filter, false)
+}
+
+/// Assemble the ordinary portion of a backfill that also carries apply-engine
+/// per-row assignments. The ordinary map may be empty because the executor will
+/// append the separately carried generator assignments at batch time.
+pub fn assemble_backfill_clauses_allow_empty_for_backend(
+    backend: &dyn DmlRenderer,
+    table: &str,
+    set: &BTreeMap<String, IrValue>,
+    filter: Option<&Expr>,
+) -> Result<BackfillClauses, DmlError> {
+    assemble_backfill_clauses_inner_for_backend(backend, table, set, filter, true)
+}
+
+fn assemble_backfill_clauses_inner_for_backend(
+    backend: &dyn DmlRenderer,
+    table: &str,
+    set: &BTreeMap<String, IrValue>,
+    filter: Option<&Expr>,
+    allow_empty: bool,
+) -> Result<BackfillClauses, DmlError> {
+    let dialect = backend.dialect();
+    if set.is_empty() && !allow_empty {
+        return Err(DmlError::EmptySet {
+            op: "backfill",
+            table: table.to_string(),
+        });
+    }
+    if matches!(dialect, SqlDialect::Mysql) {
+        validate_mysql_assignment_semantics("backfill", table, set)?;
+    }
+    // BTreeMap ⇒ canonical order.
+    let mut assigns = Vec::with_capacity(set.len());
+    for (col, rhs) in set {
+        let qc = quote_ident_for_backend("column", col, backend)?;
+        let r = render_value_inline_for_backend(rhs, backend)?;
+        assigns.push(format!("{qc} = {r}"));
+    }
+    let set_clause = assigns.join(", ");
+    let filter = match filter {
+        Some(f) => Some(render_expr_inline_for_backend(f, backend)?),
+        None => None,
+    };
+    Ok(BackfillClauses { set_clause, filter })
+}

@@ -72,6 +72,22 @@ indexmap = { workspace = true }
 # (`pub use zero_migrate_ir as ir;` + flattened root re-exports) so downstream
 # `zero_migrate::{MigrationIr, Op, …}` names are unchanged.
 zero-migrate-ir = { workspace = true }
+# The backend CONTRACT: the `DmlRenderer` / `SchemaRenderer` traits, the render
+# errors their signatures name (`IrLowerError`, `DeclarativeError`, `DmlError`,
+# `VendorError`), the identifier/expression spelling seam, and the vendor-registry
+# shape. The engine re-exports the whole surface under its historical paths
+# (`render::{renderer, dml, vendor}`, `render::lower::IrLowerError`,
+# `render::declarative::DeclarativeError`, `render::step::BindValue`,
+# `schema::query::SchemaRenderer`, `schema::{descriptors, mask_codec, error}`), so
+# no downstream name moved.
+zero-migrate-backend = { workspace = true }
+# The three SHIPPING BACKENDS. The engine names them exactly once each, in
+# `render::backends::VENDORS`, which is the registry composition that replaced the
+# hard-coded `match` over `SqlDialect`. The arrow only points this way: no vendor
+# crate depends on the engine, which is what let them be extracted at all.
+zero-migrate-postgres = { workspace = true }
+zero-migrate-sqlite = { workspace = true }
+zero-migrate-mysql = { workspace = true }
 # The SQL security layer: the `pg_query`-backed parse-time
 # deny-list, cross-schema confinement, statement classification, and operational
 # advisories (`SqlGuard`, `GuardConfig`, `analyze`, `classify`, `Advisory`,

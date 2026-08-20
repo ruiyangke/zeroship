@@ -14,9 +14,9 @@
 //! `crate::crud::mask_backfill::{build,parse}_mask_sentinel` references
 //! keep resolving unchanged.
 
-use crate::schema::descriptors::EncryptionMode;
-use crate::schema::diff::{Classification, EncryptionMeta, MaskKind, WrappedType};
-use crate::schema::error::MaskSentinelError;
+use crate::descriptors::EncryptionMode;
+use crate::mask_meta::{Classification, EncryptionMeta, MaskKind, WrappedType};
+use crate::schema_error::MaskSentinelError;
 
 /// The standalone-default encryption-sentinel prefix. The persisted sentinel is
 /// a wire contract co-written by any other engine writing into the same schema,
