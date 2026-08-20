@@ -2241,3 +2241,115 @@ async fn sslnegotiation_direct_under_prefer_is_rejected_by_the_pool() {
         "the refusal should name the unsatisfiable setting, got: {cause}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Connection lifetime
+//
+// The invariant these two tests hold is a LIFETIME, not a ceiling: a
+// connection opened inside a `compio` runtime is gone from the server when
+// that runtime ends, not when the process ends. A bounded-but-nonzero series
+// satisfies "stays under max_connections" and still breaks every caller that
+// needs the session released - `CREATE DATABASE ... TEMPLATE x` refuses while
+// ONE other session is on `x`.
+//
+// They are plain `#[test]`, not `#[compio::test]`: the runtime is the subject,
+// so the test has to build and drop it itself and then look at the server from
+// outside it.
+// ---------------------------------------------------------------------------
+
+/// How many backends on `url` carry `application_name = tag`.
+///
+/// Runs in a runtime of its own, which it also drops - so if the leak this
+/// guards against ever came back, the observer would be leaking too. That is
+/// deliberate: the observer's own connections are untagged and therefore never
+/// counted, so a broken observer inflates nothing.
+fn tagged_backends(url: &str, tag: &str) -> i64 {
+    let rt = compio::runtime::Runtime::new().expect("cannot create runtime");
+    rt.block_on(async {
+        let client = connect(url).await.unwrap();
+        let rows = client
+            .query(
+                "SELECT count(*)::int8 AS n FROM pg_stat_activity WHERE application_name = $1",
+                &[&tag],
+            )
+            .await
+            .unwrap();
+        rows[0].get::<_, i64>("n")
+    })
+}
+
+/// Descriptors this process holds open. A socket that outlives its runtime
+/// shows up here as well as in `pg_stat_activity`, so the pair separates "the
+/// server dropped the session" from "we still own the fd".
+fn open_fds() -> usize {
+    std::fs::read_dir("/proc/self/fd")
+        .expect("/proc/self/fd")
+        .count()
+}
+
+#[test]
+fn a_connection_does_not_outlive_the_runtime_that_opened_it() {
+    let url = test_url();
+    let tag = "cpg_runtime_lifetime";
+    let sep = if url.contains('?') { '&' } else { '?' };
+    let tagged = format!("{url}{sep}application_name={tag}");
+
+    let mut backends = Vec::new();
+    let mut fds = Vec::new();
+    for _ in 0..6 {
+        let rt = compio::runtime::Runtime::new().expect("cannot create runtime");
+        rt.block_on(async {
+            let client = match connect(&tagged).await {
+                Ok(client) => client,
+                Err(e) => common::postgres_unreachable(&tagged, &e),
+            };
+            let rows = client.query("SELECT 1::int4 AS one", &[]).await.unwrap();
+            assert_eq!(rows[0].get::<_, i32>("one"), 1);
+        });
+        drop(rt);
+        backends.push(tagged_backends(&url, tag));
+        fds.push(open_fds());
+    }
+
+    println!("tagged backends after each runtime drop: {backends:?}");
+    println!("open fds after each runtime drop:        {fds:?}");
+
+    assert_eq!(
+        backends,
+        vec![0; 6],
+        "every runtime opened one connection and dropped it; the server should \
+         hold none between iterations, got {backends:?}"
+    );
+}
+
+/// The one-variable partner. The test above would also pass if the connection
+/// were never opened - `postgres_unreachable` guards the total failure, but a
+/// connection that closes too EARLY reads identically to one that closes on
+/// time. This asserts the count is 1 while the runtime is still running, so
+/// the 0s above mean "released", not "never taken".
+#[test]
+fn a_connection_is_visible_to_the_server_while_its_runtime_runs() {
+    let url = test_url();
+    let tag = "cpg_runtime_lifetime_live";
+    let sep = if url.contains('?') { '&' } else { '?' };
+    let tagged = format!("{url}{sep}application_name={tag}");
+
+    let rt = compio::runtime::Runtime::new().expect("cannot create runtime");
+    let seen = rt.block_on(async {
+        let client = match connect(&tagged).await {
+            Ok(client) => client,
+            Err(e) => common::postgres_unreachable(&tagged, &e),
+        };
+        let rows = client
+            .query(
+                "SELECT count(*)::int8 AS n FROM pg_stat_activity WHERE application_name = $1",
+                &[&tag],
+            )
+            .await
+            .unwrap();
+        rows[0].get::<_, i64>("n")
+    });
+    drop(rt);
+
+    assert_eq!(seen, 1, "the live connection should see itself");
+}
