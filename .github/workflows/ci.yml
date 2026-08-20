@@ -90,6 +90,48 @@ jobs:
       - name: Project config contract
         run: bash tests/project_config_gate.sh
       - run: cargo check --workspace
+      # WPT BEFORE `cargo test`, for exactly the reason the SDK dist files are
+      # built before any cargo command above, and discovered the same way.
+      #
+      # crates/runtime declares a `wpt` test target whose 23 modules
+      # `include_str!` crates/runtime/tests/wpt/. That directory is fetched on
+      # demand by setup-wpt.sh, is in .gitignore, and `git ls-files` reports it
+      # in no ref - so a fresh checkout does not have it, and nothing here made
+      # one. rust-cache restores ~/.cargo and target/, not source trees.
+      #
+      # MEASURED 2026-08-20 on 4abf0f74a: with the directory absent,
+      # `cargo test --workspace --no-run` fails with 207 `couldn't read
+      # crates/runtime/tests/wpt/...` errors and builds no test binary at all
+      # for the crate; with it present the same command exits 0 and builds 122.
+      # `cargo check --workspace` above does NOT catch this, because without
+      # --all-targets it never looks at a test target.
+      #
+      # So every cargo test step in this job, and the census gate below, could
+      # not run. This is not new - the wpt_*.rs files date to 2026-05-01 and
+      # were 23 separate auto-discovered targets before 2ee8bba08 consolidated
+      # them, each equally uncompilable.
+      #
+      # Cached on the pin, so the ~1.1 GB working tree is fetched when the pin
+      # moves and not once per run. setup-wpt.sh is idempotent: given an
+      # existing clone it fetches the pin and resets, which is what makes a
+      # restored cache safe rather than merely fast.
+      - name: Pin the WPT commit for the cache key
+        id: wpt-pin
+        run: |
+          set -o pipefail
+          pin=$(grep -oP 'WPT_COMMIT="\$\{WPT_COMMIT:-\K[0-9a-f]{40}' \
+            crates/runtime/tests/setup-wpt.sh)
+          if [ -z "$pin" ]; then
+            echo "::error::could not read the WPT pin out of setup-wpt.sh; the cache key would be a constant and would serve a stale tree forever"
+            exit 1
+          fi
+          echo "pin=$pin" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: crates/runtime/tests/wpt
+          key: wpt-${{ steps.wpt-pin.outputs.pin }}
+      - name: Fetch the WPT tree the runtime test target include_str!s
+        run: ./crates/runtime/tests/setup-wpt.sh
       # PROVISION BEFORE TESTING, and this step is what makes the deletion of
       # `ZEROSHIP_REQUIRE_LIVE_BACKENDS` safe here rather than merely correct.
       #
