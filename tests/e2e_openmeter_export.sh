@@ -121,20 +121,35 @@ ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gate-broker-secret"
 e2e_platform_op_up "$WORK/sk.pem" "$WORK" || exit 1
 e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DBURL"
-OPENMETER_TOKEN="$(openssl rand -hex 32)" \
+# The token is a shell variable, NOT an exported one: the provider config
+# carries the material itself. It used to say `env:OPENMETER_TOKEN`, an arm the
+# resolver stopped having in 94c7ba7dd, so control refused to start and every
+# assertion below it was unreachable. The local OpenMeter this drives has no
+# account to have issued a key, so the token is a literal by nature.
+OM_TOKEN="$(openssl rand -hex 32)"
 ZEROSHIP_CONTROL_STRIPE_SECRET_KEY="sk_test_unused" \
 "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --config "$CFG_TOML" \
   --blob-store "$WORK/blobs" \
   --stripe-base-url "http://127.0.0.1:1" \
   --meter-provider openmeter --invoicer-provider lite --allow-unsupported-billing \
-  --provider-config "{\"openmeter\":{\"base_url\":\"$OM_URL\",\"token\":\"env:OPENMETER_TOKEN\"}}" \
+  --provider-config "{\"openmeter\":{\"base_url\":\"$OM_URL\",\"token\":\"$OM_TOKEN\"}}" \
   --spend-recompute-interval 2 > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 && pass "control healthy (meter=openmeter, invoicer=lite, stream=redpanda)" || { fail "control"; tail -30 "$WORK/control.log"; exit 1; }
 
+# The worker takes NO `--config`. 9b205f6ed (2026-08-16) removed its TOML
+# overlay source on purpose - "the worker deliberately has no TOML overlay
+# source", a credential boundary - so `--config` here is an unknown argument and
+# clap exited before the worker did anything, making every assertion below it
+# unreachable. The stream producer settings that used to arrive in the file's
+# [metering] table now have exactly one channel left, the four
+# UsageStreamSettings::from_env names; USAGE_OUTBOX_WAL_PATH was already one of
+# them. Without the brokers the worker still boots but drains and DROPS every
+# usage event, so the forwarder rail below would assert against silence.
+REDPANDA_BROKERS="$RP_BROKERS" USAGE_EVENTS_TOPIC="$USAGE_TOPIC" \
 USAGE_OUTBOX_WAL_PATH="$WORK/worker-outbox.redb" "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 \
-  --config "$CFG_TOML" --control-url "$CONTROL_URL" --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
+  --control-url "$CONTROL_URL" --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" >/dev/null 2>&1 && pass "worker healthy (outbox → redpanda)" || { fail "worker"; tail -30 "$WORK/worker.log"; exit 1; }
