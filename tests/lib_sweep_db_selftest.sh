@@ -47,29 +47,58 @@ ok()  { pass=$((pass + 1)); echo "ok   - $1"; }
 bad() { fail=$((fail + 1)); echo "FAIL - $1" >&2; }
 check() { if [ "$2" = "$3" ]; then ok "$1 ($3)"; else bad "$1: expected '$2', got '$3'"; fi }
 
-echo "=== the two fingerprint computations agree on THIS repository ==="
+echo "=== the fingerprint: both computations agree, and it discriminates ==="
 # Pinned against the real tree, not a fixture. A fixture would pin the two
 # implementations to each other and prove nothing about the 34 files the
 # sweeper actually reasons over - and it is those files, at their real sizes
 # and real names, that either agree or delete everything.
 from_dir="$(zs_schema_fingerprint "$ROOT")"
-from_ref="$(zs_fingerprint_of_ref HEAD)"
+from_ref="$(zs_fingerprint_of_ref "$ROOT" HEAD)"
 check "working tree and HEAD agree" "$from_dir" "$from_ref"
 if [ -n "$from_dir" ]; then ok "and the value is non-empty ($from_dir)"; else bad "empty fingerprint"; fi
 
-# One variable changed: a different tree. If the two computations agreed
-# because BOTH return a constant, this passes anyway - so the case above needs
-# this one beside it.
-older="$(git rev-list --max-count=1 --skip=40 HEAD 2>/dev/null)"
-if [ -n "$older" ]; then
-  from_older="$(zs_fingerprint_of_ref "$older")"
-  if [ -n "$from_older" ] && [ "$from_older" != "$from_ref" ]; then
-    ok "control: a 40-commit-older tree fingerprints differently ($from_older)"
-  else
-    bad "control: an older tree gave '$from_older' against HEAD's '$from_ref'"
-  fi
+# One variable changed: a migration set that differs by exactly one file. If the
+# two computations above agreed because BOTH return a constant, that case passes
+# anyway - so it needs this one beside it, and this one has to be the thing that
+# would notice.
+#
+# CONSTRUCTED, NOT SAMPLED. This used to take a commit 40 back on the branch and
+# assume its migrations differed. That bound the control to the repository's
+# recent ACTIVITY rather than to the variable under test: no migration had
+# changed in the last 108 commits, both sides hashed to the same value, and the
+# case could not pass however well the fingerprint worked. The two trees below
+# differ by one edited migration whatever the log looks like.
+#
+# TREES RATHER THAN COMMITS: `git write-tree` needs no user identity, runs no
+# hooks and signs nothing, so this cannot go red for a reason unrelated to the
+# fingerprint. `zs_fingerprint_of_ref` takes any tree-ish - the no-migrations
+# case below already hands it a bare tree sha.
+CTRL="$TMP/control-repo"
+mkdir -p "$CTRL/db/migrations-ts"
+printf 'one' > "$CTRL/db/migrations-ts/20260101_one.ts"
+printf 'two' > "$CTRL/db/migrations-ts/20260202_two.ts"
+#
+# `add -A -f`: the force is against a GLOBAL excludes file. Nothing in this
+# throwaway tree is ignorable, and a `*.ts` line in somebody's ~/.gitignore
+# would otherwise stage an empty set and take the case down with it.
+git -C "$CTRL" init -q . >/dev/null 2>&1
+git -C "$CTRL" add -A -f
+ctrl_before="$(git -C "$CTRL" write-tree 2>/dev/null)"
+printf 'one, but different' > "$CTRL/db/migrations-ts/20260101_one.ts"
+git -C "$CTRL" add -A -f
+ctrl_after="$(git -C "$CTRL" write-tree 2>/dev/null)"
+fp_before="$(zs_fingerprint_of_ref "$CTRL" "$ctrl_before")"
+fp_after="$(zs_fingerprint_of_ref "$CTRL" "$ctrl_after")"
+if [ -z "$ctrl_before" ] || [ -z "$ctrl_after" ]; then
+  bad "control: could not build the throwaway repository at $CTRL"
+elif [ "$ctrl_before" = "$ctrl_after" ]; then
+  bad "control: the two constructed trees are the same object ($ctrl_before)"
+elif [ -z "$fp_before" ] || [ -z "$fp_after" ]; then
+  bad "control: a constructed tree produced no fingerprint ('$fp_before' / '$fp_after')"
+elif [ "$fp_before" = "$fp_after" ]; then
+  bad "control: editing one migration did not move the fingerprint ($fp_before)"
 else
-  bad "control: could not find an older commit to compare against"
+  ok "control: editing one migration moves the fingerprint ($fp_before then $fp_after)"
 fi
 
 echo
@@ -79,7 +108,7 @@ echo "=== a ref with no migrations directory FAILS rather than returning a value
 # would look reachable - or, worse, the empty digest would be shared by every
 # such ref.
 empty_tree="$(git hash-object -t tree /dev/null)"
-( zs_fingerprint_of_ref "$empty_tree" ) >"$TMP/empty.out" 2>/dev/null
+( zs_fingerprint_of_ref "$ROOT" "$empty_tree" ) >"$TMP/empty.out" 2>/dev/null
 check "an empty tree is refused" "1" "$?"
 if [ ! -s "$TMP/empty.out" ]; then ok "and prints nothing"; else bad "printed '$(cat "$TMP/empty.out")'"; fi
 
