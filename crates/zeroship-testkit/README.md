@@ -71,9 +71,17 @@ one.
 ```bash
 cargo test -p zeroship-testkit          # 32 unit + 4 live (needs the overlay)
 tests/lib_test_config_selftest.sh       # 16, hermetic
-tests/lib_suite_db_selftest.sh          # 36, hermetic
-tests/lib_sweep_db_selftest.sh          # 29, reads /proc and git
+tests/lib_suite_db_selftest.sh          # 36, hermetic (was 43 with the psql seam)
+tests/lib_sweep_db_selftest.sh          # 29 cases, reads /proc and git
 ```
+
+`lib_sweep_db_selftest.sh` reports 28 passed / 1 failed, and did so on `main`
+before this crate existed. The failing case is a negative control that picks its
+"different migration set" by commit distance (`rev-list --skip=40`) rather than
+by constructing one, so it goes red during any quiet period on migrations. It is
+bound to repository history rather than to the variable it means to vary. Left
+alone here deliberately: matching `main` exactly, failure and all, is what shows
+the port changed no behaviour.
 
 The live tests need `deploy/ops/zeroship.test.toml`; without it they announce a
 skip that `tests/lib/skip_census.sh` counts, rather than passing silently.
