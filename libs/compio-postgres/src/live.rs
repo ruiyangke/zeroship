@@ -8,10 +8,19 @@
 //!
 //! If the runtime is torn down first, the socket is orphaned: an io_uring
 //! submission co-owns the descriptor and is never reclaimed, so the descriptor
-//! stays open - and the server-side backend stays live - for the rest of the
-//! process. Callers that tear a runtime down deliberately (a test, a graceful
-//! shutdown path) therefore need a way to wait for the shutdown to land rather
-//! than guessing at a sleep.
+//! stays open for the rest of the process. THE SERVER-SIDE BACKEND NO LONGER
+//! GOES WITH IT - this said "and the server-side backend stays live" until
+//! `crate::release` landed, which is exactly the half that was worth fixing
+//! automatically. Dropping the `Client` now shuts the socket down with a
+//! synchronous syscall, so the session ends whether or not the task is ever
+//! polled again; what leaks is a descriptor in this process.
+//!
+//! So this is no longer the way to keep a server from running out of
+//! connections. It remains the way to know that a connection has actually
+//! finished - its task returned, its buffers are gone, its descriptor is
+//! closed - which a caller tearing a runtime down deliberately (a test, a
+//! graceful shutdown path) may still want to wait for rather than guess at with
+//! a sleep.
 //!
 //! [`live_connections`] is that observation point and [`drain_connections`] is
 //! the wait. The counter is per-thread because a `Connection` never leaves the

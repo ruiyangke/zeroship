@@ -218,8 +218,8 @@ where
             // Step B — clean shutdown once the client has gone away and
             // all pending work is done.
             if terminating && self.responses.is_empty() {
-                // NOT `?`: same reasoning as the Terminate write above - the
-                // client is gone and the socket may already be released.
+                // NOT `?`: same reasoning as the Terminate write in Step E -
+                // the client is gone and the socket may already be released.
                 if let Err(e) = self.stream.flush().await {
                     trace!("final flush failed, client already gone: {e}");
                 }

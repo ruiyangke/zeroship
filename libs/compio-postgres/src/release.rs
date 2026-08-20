@@ -2,8 +2,8 @@
 //!
 //! # Why a synchronous shutdown, and not the connection task's own teardown
 //!
-//! The connection task already shuts the socket down cleanly: dropping the
-//! [`Client`](crate::Client) closes the request channel, the task writes
+//! The connection task has its own clean teardown: dropping the
+//! [`Client`](crate::Client) closes the request channel, and the task writes
 //! `Terminate`, emits a FIN and returns (`connection.rs`, the
 //! `client_gone && !terminate_sent` branch). That teardown is *asynchronous* -
 //! it only happens if something polls the task afterwards.
@@ -25,12 +25,14 @@
 //! # Why a dup(2) and not the connection's own descriptor
 //!
 //! Holding the raw descriptor number and shutting *that* down races descriptor
-//! reuse: if the connection task has already closed the socket - the ordinary
-//! outcome when a client is dropped inside a live runtime - the number may
-//! since have been handed to an unrelated socket, and this would tear down a
-//! stranger's connection. Owning a `dup` removes the race by construction: the
-//! descriptor stays valid because we hold it, and `shutdown` on a dup acts on
-//! the same underlying socket, so the server still sees the FIN.
+//! reuse. The client half can outlive its connection - a server-initiated close
+//! or a fatal I/O error ends the task and closes the socket while the `Client`
+//! is still in the caller's hand - and once the number is free the kernel will
+//! reissue it, so a shutdown on it would tear down a stranger's connection.
+//! Nothing here can observe that from the client side, so it cannot be checked;
+//! owning a `dup` removes the race by construction instead. The descriptor
+//! stays valid because we hold it, and `shutdown` on a dup acts on the same
+//! underlying socket, so the server still sees the FIN.
 //!
 //! Not a `compio::driver::SharedFd` clone, which would also pin the descriptor
 //! and cost nothing: `SharedFd` is refcounted with `Rc` unless compio's `sync`
