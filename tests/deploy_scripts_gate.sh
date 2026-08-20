@@ -72,7 +72,14 @@ REMOTE="$ROOT/deploy/scripts/deploy-remote.sh"
 APPDEP="$ROOT/deploy/scripts/deploy-app.sh"
 REAL_COMPOSE="$ROOT/deploy/compose/docker-compose.yml"
 REAL_OVERLAY="$ROOT/deploy/ops/zeroship.toml"
-GRANTS_MIGRATION="$ROOT/db/migrations-ts/20260702000900_grants.ts"
+# The whole committed migration corpus, NOT one named file. These two
+# assertions are about the END STATE the corpus produces, and pinning them to
+# 20260702000900_grants.ts made them assertions about WHICH FILE spells the
+# statement. That is a real difference: once a file has been applied to a
+# deployed database its bytes are frozen by the runner's checksum guard, so a
+# statement can only ever MOVE to a later file, and a gate that reads one
+# filename then reports the invariant as broken when it is intact.
+MIGRATIONS_DIR="$ROOT/db/migrations-ts"
 
 echo "============================================"
 echo "  deploy scripts: extraction, pairing, arguments"
@@ -288,11 +295,11 @@ if [ -f "$REAL_COMPOSE" ]; then
   fi
 fi
 
-if [ -f "$GRANTS_MIGRATION" ]; then
-  grep -qF 'REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA zeroship FROM zeroship_worker' "$GRANTS_MIGRATION" \
-    && pass "the platform grants revoke worker authority from every current zeroship table" \
-    || fail "the platform grants do not revoke worker authority from every current zeroship table"
-  grep -qF 'ALTER DEFAULT PRIVILEGES IN SCHEMA zeroship REVOKE ALL PRIVILEGES ON TABLES FROM zeroship_worker' "$GRANTS_MIGRATION" \
+if [ -d "$MIGRATIONS_DIR" ]; then
+  grep -rqF 'REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA zeroship FROM zeroship_worker' "$MIGRATIONS_DIR" \
+    && pass "the platform migrations revoke worker authority from every current zeroship table" \
+    || fail "the platform migrations do not revoke worker authority from every current zeroship table"
+  grep -rqF 'ALTER DEFAULT PRIVILEGES IN SCHEMA zeroship REVOKE ALL PRIVILEGES ON TABLES FROM zeroship_worker' "$MIGRATIONS_DIR" \
     && pass "future zeroship tables remain denied to the worker by default" \
     || fail "future zeroship tables are not denied to the worker by default"
 else
