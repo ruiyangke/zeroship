@@ -867,6 +867,205 @@ async fn transaction_rollback_explicit() {
 }
 
 // ---------------------------------------------------------------------------
+// Savepoint scope: what a rolled-back nested transaction leaves behind
+// ---------------------------------------------------------------------------
+
+/// Rolling a savepoint back must end its scope on the server too.
+///
+/// `ROLLBACK TO SAVEPOINT x` undoes the work but LEAVES `x` defined - the
+/// documented behaviour, and the reason "roll back to it again later" is a
+/// thing you can do. `Transaction::rollback` issued only that, so a savepoint
+/// whose Rust value had been consumed stayed on the server's savepoint stack.
+///
+/// PostgreSQL resolves a savepoint name to the most recently established one,
+/// so the leftover shadows an enclosing savepoint of the same name and the
+/// enclosing `rollback` rolls back to the INNER scope: the outer statements it
+/// was supposed to discard survive, and then commit. Two nesting levels
+/// naming one savepoint is what this test builds, because that is where the
+/// leftover changes an outcome rather than merely accumulating.
+#[compio::test]
+async fn a_rolled_back_savepoint_does_not_shadow_an_enclosing_one() {
+    let Some(url) = require_pg().await else { return };
+    let mut client = connect(&url).await.unwrap();
+
+    client
+        .batch_execute("CREATE TABLE savepoint_scope (n int)")
+        .await
+        .unwrap();
+
+    {
+        let mut tx = client.transaction().await.unwrap();
+        {
+            let mut outer = tx.savepoint("s").await.unwrap();
+            outer
+                .execute("INSERT INTO savepoint_scope VALUES (1)", &[])
+                .await
+                .unwrap();
+            {
+                let inner = outer.savepoint("s").await.unwrap();
+                inner
+                    .execute("INSERT INTO savepoint_scope VALUES (2)", &[])
+                    .await
+                    .unwrap();
+                inner.rollback().await.unwrap();
+            }
+            outer.rollback().await.unwrap();
+        }
+        tx.commit().await.unwrap();
+    }
+
+    let rows = client
+        .query("SELECT n FROM savepoint_scope ORDER BY n", &[])
+        .await
+        .unwrap();
+    let kept: Vec<i32> = rows.iter().map(|r| r.get::<_, i32>(0)).collect();
+    assert!(
+        kept.is_empty(),
+        "the outer rollback rolled back to the inner savepoint and kept {kept:?}"
+    );
+
+    client
+        .batch_execute("DROP TABLE savepoint_scope")
+        .await
+        .unwrap();
+}
+
+/// The same leftover, asserted directly: after `rollback`, the savepoint the
+/// transaction owned is gone from the server.
+///
+/// Without this the scope test above could be satisfied by anything that
+/// happens to reorder the names. `3B001 invalid_savepoint_specification` is
+/// the server saying the name is no longer defined.
+#[compio::test]
+async fn a_rolled_back_savepoint_is_no_longer_defined() {
+    let Some(url) = require_pg().await else { return };
+    let mut client = connect(&url).await.unwrap();
+
+    let mut tx = client.transaction().await.unwrap();
+    {
+        let sp = tx.savepoint("s").await.unwrap();
+        sp.rollback().await.unwrap();
+    }
+
+    let err = tx
+        .batch_execute("ROLLBACK TO SAVEPOINT s")
+        .await
+        .expect_err("the savepoint must not still be defined");
+    assert_eq!(
+        err.code(),
+        Some(&SqlState::S_E_INVALID_SPECIFICATION),
+        "expected the server to report an undefined savepoint, got: {err}"
+    );
+}
+
+/// The control for both: a savepoint rollback still recovers a transaction
+/// whose statement failed, the enclosing transaction stays usable, and a
+/// plain (savepoint-free) rollback still discards its work.
+///
+/// Recovering from a failed statement is what savepoints are FOR, and it is
+/// the case a too-strict fix breaks: the subtransaction is in an aborted
+/// state when `rollback` runs, so anything issued before `ROLLBACK TO` - a
+/// `RELEASE`, say - is refused by the server and the recovery fails. The
+/// plain-rollback half fails if the same treatment is applied to a
+/// transaction that owns no savepoint.
+#[compio::test]
+async fn a_savepoint_rollback_recovers_a_failed_statement() {
+    let Some(url) = require_pg().await else { return };
+    let mut client = connect(&url).await.unwrap();
+
+    client
+        .batch_execute("CREATE TABLE savepoint_recovery (n int)")
+        .await
+        .unwrap();
+
+    {
+        let mut tx = client.transaction().await.unwrap();
+        tx.execute("INSERT INTO savepoint_recovery VALUES (1)", &[])
+            .await
+            .unwrap();
+        {
+            let sp = tx.savepoint("attempt").await.unwrap();
+            sp.execute("INSERT INTO savepoint_recovery VALUES ('not an int')", &[])
+                .await
+                .expect_err("the statement must fail and abort the subtransaction");
+            sp.rollback()
+                .await
+                .expect("rolling back an aborted subtransaction must recover it");
+        }
+        tx.execute("INSERT INTO savepoint_recovery VALUES (3)", &[])
+            .await
+            .expect("the enclosing transaction must be usable again");
+        tx.commit().await.unwrap();
+    }
+
+    let rows = client
+        .query("SELECT n FROM savepoint_recovery ORDER BY n", &[])
+        .await
+        .unwrap();
+    let kept: Vec<i32> = rows.iter().map(|r| r.get::<_, i32>(0)).collect();
+    assert_eq!(kept, vec![1, 3]);
+
+    // A transaction that owns no savepoint still rolls back as one unit.
+    {
+        let tx = client.transaction().await.unwrap();
+        tx.execute("INSERT INTO savepoint_recovery VALUES (4)", &[])
+            .await
+            .unwrap();
+        tx.rollback()
+            .await
+            .expect("a savepoint-free transaction still rolls back");
+    }
+
+    let rows = client
+        .query("SELECT n FROM savepoint_recovery ORDER BY n", &[])
+        .await
+        .unwrap();
+    let kept: Vec<i32> = rows.iter().map(|r| r.get::<_, i32>(0)).collect();
+    assert_eq!(kept, vec![1, 3]);
+
+    client
+        .batch_execute("DROP TABLE savepoint_recovery")
+        .await
+        .unwrap();
+}
+
+/// The control for `commit`, which the same pairing rules govern: releasing a
+/// savepoint keeps its work and hands it to the enclosing transaction.
+#[compio::test]
+async fn a_committed_savepoint_keeps_its_work() {
+    let Some(url) = require_pg().await else { return };
+    let mut client = connect(&url).await.unwrap();
+
+    client
+        .batch_execute("CREATE TABLE savepoint_commit (n int)")
+        .await
+        .unwrap();
+
+    {
+        let mut tx = client.transaction().await.unwrap();
+        {
+            let sp = tx.savepoint("keep").await.unwrap();
+            sp.execute("INSERT INTO savepoint_commit VALUES (1)", &[])
+                .await
+                .unwrap();
+            sp.commit().await.unwrap();
+        }
+        tx.commit().await.unwrap();
+    }
+
+    let rows = client
+        .query("SELECT n FROM savepoint_commit", &[])
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+
+    client
+        .batch_execute("DROP TABLE savepoint_commit")
+        .await
+        .unwrap();
+}
+
+// ---------------------------------------------------------------------------
 // 19. error_recovery_in_transaction
 // ---------------------------------------------------------------------------
 
