@@ -1650,11 +1650,13 @@ export function down() {}
     /// This is the configuration every agent brief in this repo hands out — "you
     /// get a private TEST_DB on the shared :5440 cluster" — and for the two
     /// migrations that write shared catalogs, a private database is not
-    /// isolation. `db/migrations-ts/20260702000100_schema_roles_extensions.ts`
-    /// and `.../20260702000900_grants.ts` write `pg_authid`,
+    /// isolation. The migrations that create roles write `pg_authid`,
     /// `pg_db_role_setting` and `pg_auth_members`, which are cluster-global, so
     /// the per-database advisory lock `run_platform_migrations` already holds
-    /// does not exclude the peer at all.
+    /// does not exclude the peer at all. This test deliberately names no
+    /// migration file: which files carry that DDL has already changed once
+    /// (see the header of `platform::cluster_lock`), and the whole corpus is
+    /// what it runs.
     ///
     /// Before the cluster lock this aborted one of the two runs with an
     /// infrastructure error carrying no test name — `tuple concurrently
@@ -1964,6 +1966,9 @@ export function down() {}
                 ended_b.duration_since(started_b),
             ));
         }
+
+        Ok(())
+    }
 
     // ===================================================================
     // RELEASED-BYTES GUARD
