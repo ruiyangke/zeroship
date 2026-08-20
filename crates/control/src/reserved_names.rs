@@ -50,6 +50,29 @@
 //! Unreserving `auth` without changing the edge just re-creates the shadowed
 //! app. A deployment that wants the name free changes its edge routing, and
 //! the gate below is then what tells it the two agree.
+//!
+//! # What the drift gate does NOT catch
+//!
+//! It compares SITE-BLOCK LABELS, so three edge changes leave it green while
+//! weakening or invalidating what it protects:
+//!
+//! - **A host claimed by a MATCHER rather than a site block.** Putting
+//!   `@status host status.{$ZEROSHIP_DOMAIN}` + `handle @status { ... }` inside
+//!   the wildcard block routes `status.<domain>` away from creator apps without
+//!   adding a site block. MEASURED 2026-08-20: [`caddy_site_labels`] answers the
+//!   unchanged `["auth", "control", "console", "api"]` for exactly that
+//!   mutation, so the edge claims a fifth host and nothing here notices.
+//!   Closing it means parsing Caddy's matcher grammar, which this does not do.
+//! - **A site block that keeps its label and changes where it POINTS.** Flipping
+//!   `console` from `gateway:8000` to a service of its own moves it from the
+//!   Reachable class to the Shadowed one. The name stays reserved, so the
+//!   refusal is still right, but the per-name reasoning above goes stale with
+//!   nothing to fail.
+//! - **The DEPLOYED copy of the Caddyfile.** `include_str!` binds the REPO's
+//!   file at compile time; production routes by whatever is on the host
+//!   (`/opt/zeroship-deploy/ops/Caddyfile`). Verified byte-identical on
+//!   2026-08-20, and nothing in this tree re-checks it, so a hand-edit there
+//!   leaves this gate asserting about a file the edge is not reading.
 
 /// Hostname labels under the app domain that the platform edge claims, so a
 /// creator app may not take them.
