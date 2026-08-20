@@ -253,10 +253,20 @@ impl AuthConfig {
 ///
 /// These entries never become enforcement policy by themselves: deploying a
 /// bundle grants nothing. Control surfaces them as pending until the
-/// corresponding `zeroship.app_net_grants` row exists, which the creator
-/// writes out of band through `/api/apps/{id}/net-grants` — an authenticated
-/// call subject to their plan's caps and the frontable-suffix catalog, not a
-/// self-declaration the running app can make.
+/// corresponding egress rule row exists, which the creator writes out of band
+/// through `/api/apps/{id}/egress-rules` — an authenticated call subject to
+/// their plan's caps, not a self-declaration the running app can make.
+///
+/// A hint can only ever express an ACCEPT: a bundle cannot know what its
+/// operator wants refused, so the REJECT half of the rule set has no
+/// deploy-time affordance and is control-plane authoring only.
+///
+/// **The full destination grammar is NOT validated here.** It lives in
+/// `zeroship_core::net_policy::Destination`, and `zeroship-core` depends on
+/// this crate, so reaching for it would be a dependency cycle. Duplicating it
+/// would give the tree two grammars that drift, which is worse than checking
+/// less. What this validates is the shape that must hold for any hint at all;
+/// control parses the destination properly when it matches hints against rules.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct NetConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -286,16 +296,14 @@ impl NetRequest {
         if self.port == 0 {
             return Err("net.requests port must be between 1 and 65535".to_string());
         }
-        let star_count = host.bytes().filter(|b| *b == b'*').count();
-        if host == "*" {
-            return Err("net.requests host cannot be bare '*'".to_string());
-        }
-        let valid_wildcard = host
-            .strip_prefix("*.")
-            .is_some_and(|suffix| !suffix.is_empty());
-        if star_count > 0 && (star_count != 1 || !valid_wildcard) {
+        // Wildcards are not representable anywhere in the egress surface, so a
+        // hint must not be able to ask for one either. This is a REFUSAL of the
+        // form, not a check on which suffixes may be fronted: the curated
+        // frontable-suffix list is gone, and `*.` is simply not a grammar.
+        if host.contains('*') {
             return Err(format!(
-                "net.requests host {host:?} must use the '*.example.com' wildcard form"
+                "net.requests host {host:?} must not contain '*'; wildcards are not \
+                 representable, name each host exactly or request an address range"
             ));
         }
         if self.reason.trim().is_empty() {
@@ -877,26 +885,26 @@ mod net_request_validation_tests {
         }
     }
 
+    /// A hint may name an exact host or an address range. The range form is
+    /// passed through unparsed on purpose - see the type's doc comment for why
+    /// the grammar cannot live in this crate.
     #[test]
-    fn net_request_host_validation_accepts_literal_and_single_wildcard() {
+    fn net_request_host_validation_accepts_exact_hosts_and_ranges() {
         assert!(request("example.com").validate().is_ok());
-        assert!(request("*.example.com").validate().is_ok());
+        assert!(request("93.184.216.0/24").validate().is_ok());
     }
 
+    /// Every wildcard spelling is refused, not just the malformed ones. The old
+    /// validator accepted `*.example.com` and policed WHICH suffix it fronted;
+    /// there is no such thing as a valid wildcard hint any more.
     #[test]
-    fn net_request_host_validation_rejects_bare_wildcard_suffix() {
-        assert!(
-            request("*.").validate().is_err(),
-            "bare wildcard suffix must be rejected"
-        );
-    }
-
-    #[test]
-    fn net_request_host_validation_rejects_additional_wildcards() {
-        assert!(
-            request("*.*.example.com").validate().is_err(),
-            "additional wildcards must be rejected"
-        );
+    fn net_request_host_validation_rejects_every_wildcard_form() {
+        for host in ["*", "*.", "*.example.com", "*.*.example.com", "a.*.example.com"] {
+            assert!(
+                request(host).validate().is_err(),
+                "{host} must not be representable as a hint"
+            );
+        }
     }
 }
 
