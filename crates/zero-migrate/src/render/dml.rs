@@ -2204,6 +2204,31 @@ mod tests {
     /// `dml.rs` keeps its exemption only because this test's own needle strings and
     /// the prose above spell the pattern; no `dml.rs` code performs the escape.
     ///
+    /// THE `schema/` EXEMPTION IS GONE, AND IT WAS LOAD-BEARING WHILE IT LASTED. The
+    /// scan used to skip the whole `schema/` subtree on the grounds that the
+    /// schema-authority DDL layer "carries its OWN identifier-quoting primitive
+    /// (`schema::query::quote_ident`)" and was a distinct module layer from the render
+    /// seam. That reasoning is exactly the shape of the defect this test exists to
+    /// catch: `schema::query::quote_ident` was `pub`, took no dialect, and both
+    /// `PostgresSchemaRenderer::foreign_key_target` AND
+    /// `SqliteSchemaRenderer::foreign_key_target` spelled identifiers through it — so
+    /// SQLite's schema renderer emitted through a `format!` in core that named no
+    /// vendor, and was byte-correct only because two of the three shipping dialects
+    /// agree on `"x"`.
+    ///
+    /// MEASURED, on the `--lib` binary, by neutering
+    /// `render::backends::ansi_double_quote_ident` with one appended token: 125 red,
+    /// of which exactly ONE was under `schema::`. Neutering
+    /// `schema::query::quote_ident` instead reddened 39, and those 39 were DISJOINT
+    /// from the 125 — a whole test population that could not observe the crate's
+    /// single quoting home. After routing, the same one-token neuter reddens 164.
+    ///
+    /// The exemption is deleted rather than retargeted, so `schema/` is now scanned
+    /// like every other subtree. `schema::query::mysql_quote_ident` survives the scan
+    /// legitimately: it spells backticks, not `"`, and is the MySQL backend's own
+    /// primitive (`backends::mysql` delegates to it) rather than a second home for
+    /// anything.
+    ///
     /// The `"` → `""` escape logic must NOT recur inline across sites such as
     /// `executor` / `precondition` / `baseline` / `expand_contract` / `shadow` /
     /// `declarative` / `db` / `render::lower` / `apply::backend::sqlite`.
@@ -2242,16 +2267,6 @@ mod tests {
                 // own needle strings and the prose that names the seam.
                 let rel = path.strip_prefix(&src_root).unwrap().display().to_string();
                 if rel == "render/backends/mod.rs" || rel == "render/dml.rs" {
-                    continue;
-                }
-                // The `schema/` module tree is the
-                // schema-authority DDL layer with its OWN identifier-quoting
-                // primitive (`schema::query::quote_ident`). That escape is a
-                // distinct module layer from this engine's render seam — the
-                // structural invariant this test enforces is about the RENDER
-                // layer (`render::*` / `apply::*` / `command::*`), not the
-                // schema kernel — so the `schema/` subtree is exempt.
-                if path.components().any(|c| c.as_os_str() == "schema") {
                     continue;
                 }
                 let body = std::fs::read_to_string(&path).expect("read src file");

@@ -41,12 +41,23 @@ use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::model::ir::IrFlagsOverride;
 use zero_migrate::render::fold::single_fold;
-use zero_migrate::schema::query::quote_ident;
 use zero_migrate::{
     fold_ops, resolve_create_table_policy, Approval, BinaryOp, ColType, EffectivePolicy,
     ExecutorConfig, Expr, GeneratedCol, GuardConfig, IrAuthor, IrColumn, IrScalar, LiveSchema,
     LockMode, MigrationEngine, MigrationIr, Op, PostgresBackend, SqlDialect,
 };
+
+/// The test-side PostgreSQL identifier spelling, written out here rather than
+/// imported from the crate. It used to be
+/// `zero_migrate::schema::query::quote_ident`, which was `pub`, un-dialected, and a
+/// SECOND physical home for the spelling `render::backends::ansi_double_quote_ident`
+/// owns; it is gone. A probe that builds its expectation by calling the emitter it is
+/// checking is not an oracle anyway, so the replacement is deliberately independent —
+/// the same shape the sibling `fold_rename_column_constraint_definition_pg` and
+/// `fold_rename_column_check_body_pg` probes already use.
+fn quote_ident(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
 
 const OWNER: &str = "app_fold_generated_expr_pg";
 const TABLE: &str = "generated_body_rename";
