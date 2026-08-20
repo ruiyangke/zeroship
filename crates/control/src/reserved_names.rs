@@ -58,6 +58,17 @@
 //!
 //! # How the gate knows what the edge claims: Caddy answers, not a parser
 //!
+//! CADDY IS THE LOCAL STACK'S EDGE AND THE CURRENT SINGLE-HOST DEPLOY'S EDGE.
+//! It is NOT the final production edge — that is undecided, and may be k8s
+//! (operator, 2026-08-20). So the durable part of what follows is the
+//! INVARIANT: the reserved set is derived from the edge, in both directions,
+//! from an artifact the edge itself produces. `caddy adapt` is today's
+//! instance of that, not the point of it. When the edge changes, re-derive
+//! from the new edge's own lowered config — an Ingress or Gateway API object
+//! is the same shape of answer. Do NOT port the reasoning below into a parser
+//! for the next config language, and do not add further couplings to
+//! Caddyfile syntax elsewhere in the tree.
+//!
 //! This module used to read `deploy/ops/Caddyfile` directly and pick site
 //! addresses out of the text. That is parsing a language we do not own, and it
 //! was silently wrong for every spelling it had not been taught. MEASURED
