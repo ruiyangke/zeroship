@@ -464,10 +464,16 @@ pub(crate) fn catalog_id_default_for_expected(
 }
 
 fn default_matches_uuid(default: &str, dialect: SqlDialect, v7: bool) -> bool {
+    // CORE-ASKS-VENDOR, and it stays that way. This module is the worked
+    // counter-example named in `render::renderer`: fingerprinting a catalog
+    // default is NORMALIZATION, which is core's decision even though it reads the
+    // dialect. The one question the vendor owns here is what its own uuid default
+    // LOOKS like, so the backend is resolved once and asked once.
+    let backend = crate::render::backends::renderer(dialect);
     let rendered = if v7 {
-        crate::render::renderer::renderer(dialect).uuid_v7().ok()
+        backend.uuid_v7().ok()
     } else {
-        Some(crate::render::renderer::renderer(dialect).uuid_v4())
+        Some(backend.uuid_v4())
     };
     rendered.is_some_and(|rendered| {
         let actual = catalog_expression_fingerprint_in_dialect(default, dialect);

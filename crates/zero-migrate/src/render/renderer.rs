@@ -50,6 +50,7 @@ use crate::model::expr::{CastTarget, ExtractField, ScalarFn};
 use crate::model::ir::{IrScalar, Op, TableRef};
 use crate::render::dml::DmlError;
 use crate::render::lower::IrLowerError;
+use crate::render::step::BindValue;
 use crate::schema::query::SqlDialect;
 
 /// The dialect feature predicates the migration lowerer asks.
@@ -87,7 +88,13 @@ impl DialectSupports for SqlDialect {
 /// every render decision. The single exhaustive dispatch match lives in
 /// [`crate::render::backends`], so a third [`SqlDialect`] variant breaks there at
 /// compile time until its renderer is implemented and wired.
-pub(crate) trait DmlRenderer {
+///
+/// `Debug` is a SUPERTRAIT because the carriers that now hold a resolved
+/// `&'static dyn DmlRenderer` ([`crate::render::dml::BindCtx`],
+/// [`crate::render::lower::IrAuthor`]) are `#[derive(Debug)]` types, and a
+/// carrier losing its `Debug` to gain a backend would be a worse trade than
+/// asking each unit-struct renderer for the one derive it costs.
+pub(crate) trait DmlRenderer: std::fmt::Debug {
     fn quote_ident(&self, ident: &str) -> String;
     fn qualify_table(&self, project_schema: &str, table: &str) -> Result<String, DmlError>;
     fn cast_target(&self, target: CastTarget) -> &'static str;
@@ -106,6 +113,22 @@ pub(crate) trait DmlRenderer {
     /// An inline binary literal, native on every vendor so a backfill or column
     /// default never coerces bytes through text.
     fn inline_bytes_literal(&self, bytes: &[u8]) -> String;
+
+    /// BIND a binary value, and return the SQL fragment that reconstitutes it at
+    /// the placeholder site. `push` appends ONE bind and hands back its
+    /// placeholder.
+    ///
+    /// The bound counterpart of [`inline_bytes_literal`](Self::inline_bytes_literal),
+    /// and the vendor's to answer for the same reason: the vendors disagree about
+    /// the CARRIER, not about the value. SQLite's driver takes the byte vector
+    /// straight through, so the fragment is the bare placeholder; PostgreSQL's
+    /// schema-blind DML seam and mysql2 both take canonical base64 as TEXT and
+    /// decode it inside the statement, in each vendor's own spelling.
+    ///
+    /// This was a three-way `match` on `SqlDialect` inside `BindCtx::push_scalar`
+    /// — a spelling decision made in core, which is the shape this module exists
+    /// to hold instead.
+    fn bind_bytes(&self, bytes: &[u8], push: &mut dyn FnMut(BindValue) -> String) -> String;
 
     /// The vendor's membership-test shape for an already-rendered `expr` against
     /// a homogeneous literal list. `joiner` is the caller's canonical separator.
