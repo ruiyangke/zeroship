@@ -6,7 +6,7 @@
 //! `isDeepStrictEqual`, `parseArgs` (long-form `--flag value`), and
 //! `TextEncoder` / `TextDecoder` re-exports.
 
-mod common;
+use crate::common;
 use common::{dispatch, m};
 
 #[test]

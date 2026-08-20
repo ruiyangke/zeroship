@@ -4,7 +4,7 @@
 //! indexOf / read*/write* numerics / toJSON), and the
 //! `globalThis.Buffer` install. Migrated from unenv polyfill in #204.
 
-mod common;
+use crate::common;
 use common::{dispatch, m};
 
 // ---------------------------------------------------------------------------
