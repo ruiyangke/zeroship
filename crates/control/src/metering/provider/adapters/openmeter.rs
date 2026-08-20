@@ -2,14 +2,14 @@ use std::sync::Arc;
 
 use crate::metering::provider::{
     AggregateQuery, Capabilities, DedupContract, DedupKey, DedupTtl, IngestAck, Meter,
-    MeteringProvider, ProviderCtx, ProviderError, SecretHandle, UsageEvent,
+    MeteringProvider, ProviderCtx, ProviderError, SecretInput, UsageEvent,
 };
 use crate::openmeter_client::{CloudEvent, OpenMeterApi, OpenMeterClient};
 
 #[derive(Debug, serde::Deserialize)]
 struct OpenMeterCfg {
     base_url: String,
-    token: SecretHandle,
+    token: SecretInput,
 }
 
 pub struct OpenMeterProvider {
