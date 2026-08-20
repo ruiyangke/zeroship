@@ -4206,7 +4206,7 @@ async fn durable_workflows_m1_keystone_real_spine() {
         .await
         .expect("run guarded ref sweep");
     assert_eq!(
-        guarded_deleted, 0,
+        guarded_deleted.deleted, 0,
         "ref sweep must not delete a blob still referenced by a step row"
     );
     assert!(fx
@@ -4282,7 +4282,7 @@ async fn durable_workflows_m1_keystone_real_spine() {
     let reclaimed = workflow_blob_gc::tick_ref_sweep(&fx.state)
         .await
         .expect("run reclaim ref sweep");
-    assert_eq!(reclaimed, 1);
+    assert_eq!(reclaimed.deleted, 1);
     assert!(fx
         .state
         .workflow_blob_store

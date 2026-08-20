@@ -12,6 +12,7 @@ use chrono::Utc;
 use compio_postgres::{Client, GenericClient};
 use zeroship_plugin_workflow::store::pg::WorkflowTables;
 
+use crate::cron::workflow_engine::SweepCoverage;
 use crate::registry::RegistryError;
 use crate::AppState;
 
@@ -28,10 +29,16 @@ const REF_SWEEP_LOCK: &str = "zeroship.workflow_blob_ref_gc";
 const ORPHAN_SWEEP_LOCK: &str = "zeroship.workflow_blob_orphan_gc";
 const MAX_REF_DELETES_PER_TICK: i64 = 256;
 
+/// What one [`tick_ref_sweep`] did, and over how much of the fleet.
+///
+/// An app excluded from this sweep keeps its zero-refcount blobs, so the cost
+/// of a silent exclusion is unbounded storage growth on that tenant - which no
+/// delete count can report, because the healthy answer is also a small number.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct BlobGcStats {
-    pub deleted_refs: usize,
-    pub deleted_orphans: usize,
+pub struct RefSweepStats {
+    /// Blobs deleted from the object store and their app's blob table.
+    pub deleted: usize,
+    pub coverage: SweepCoverage,
 }
 
 #[allow(clippy::future_not_send)]
@@ -39,7 +46,13 @@ pub async fn run_ref_sweep(state: Arc<AppState>, tick_secs: u64) {
     tracing::info!(tick_secs, "control workflow_blob_ref_gc cron starting");
     loop {
         match tick_ref_sweep(&state).await {
-            Ok(n) if n > 0 => tracing::info!(deleted = n, "workflow_blob_ref_gc tick deleted blobs"),
+            Ok(stats) if stats.deleted > 0 || stats.coverage.apps_skipped > 0 => tracing::info!(
+                deleted = stats.deleted,
+                apps_swept = stats.coverage.apps_swept,
+                apps_skipped = stats.coverage.apps_skipped,
+                apps_unvisited = stats.coverage.apps_unvisited,
+                "workflow_blob_ref_gc tick deleted blobs"
+            ),
             Ok(_) => {}
             Err(e) => tracing::error!(error = %e, "workflow_blob_ref_gc tick failed"),
         }
@@ -60,22 +73,44 @@ pub async fn run_orphan_sweep(state: Arc<AppState>, tick_secs: u64) {
     }
 }
 
+/// Delete each app's own zero-refcount workflow blobs.
+///
+/// ONE transaction for the whole tick, which decides what an exclusion can be
+/// here. A journal that the catalog reported readable and that then DENIES the
+/// per-app statement cannot be skipped: the failed statement has already
+/// aborted this transaction, so there is nothing to carry on with and the error
+/// propagates. Only the catalog-level exclusion lands in `apps_skipped`. That
+/// is the trade this sweep's transaction scope buys, and it is why
+/// `apps_skipped` here is not the same population as in the per-app-transaction
+/// sweeps.
 #[allow(clippy::future_not_send)]
-pub async fn tick_ref_sweep(state: &AppState) -> Result<usize, RegistryError> {
+pub async fn tick_ref_sweep(state: &AppState) -> Result<RefSweepStats, RegistryError> {
     let mut conn = state.registry.conn().await?;
     let tx = conn.transaction().await?;
     if !try_xact_lock(&tx, REF_SWEEP_LOCK).await? {
         tx.commit().await?;
-        return Ok(0);
+        // Another node holds the sweep lock. Zero coverage, not complete
+        // coverage: this tick swept nothing and must not claim it did.
+        return Ok(RefSweepStats::default());
     }
 
     let cutoff = Utc::now() - chrono::Duration::seconds(REF_SWEEP_GRACE_SECS);
-    let mut deleted = 0usize;
+    let mut stats = RefSweepStats::default();
     let mut remaining = MAX_REF_DELETES_PER_TICK;
-    for app_id in super::workflow_engine::journalled_fleet(&tx).await?.readable {
+    let fleet = super::workflow_engine::journalled_fleet(&tx).await?;
+    stats.coverage = SweepCoverage::opened_over(&fleet);
+    let mut apps = fleet.readable.into_iter();
+    // Walked by `next()` rather than by `for`, and the budget is checked BEFORE
+    // the pull, so that a `break` leaves every untouched app IN the iterator
+    // for `len()` below. A `for` loop - or a check after the pull - would have
+    // already moved the breaking app out and undercounted by one.
+    loop {
         if remaining <= 0 {
             break;
         }
+        let Some(app_id) = apps.next() else {
+            break;
+        };
         // Deletes only this app's own zero-refcount blobs, so an app excluded
         // for being unreadable costs that app its GC and nothing else. The
         // ORPHAN sweep below is the opposite case and must not skip.
@@ -103,11 +138,12 @@ pub async fn tick_ref_sweep(state: &AppState) -> Result<usize, RegistryError> {
                 &[&cutoff, &remaining],
             )
             .await?;
+        stats.coverage.swept_one();
 
         for row in rows {
             let hash: String = row.get("hash");
             if delete_zero_ref_blob_locked_for_app(state, &tx, &tables, &hash).await? {
-                deleted += 1;
+                stats.deleted += 1;
                 remaining -= 1;
                 if remaining <= 0 {
                     break;
@@ -115,9 +151,10 @@ pub async fn tick_ref_sweep(state: &AppState) -> Result<usize, RegistryError> {
             }
         }
     }
+    stats.coverage.apps_unvisited = apps.len();
 
     tx.commit().await?;
-    Ok(deleted)
+    Ok(stats)
 }
 
 /// Delete one app's now-unreferenced blobs, in a transaction of its own on the
