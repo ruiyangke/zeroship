@@ -67,7 +67,7 @@ use compio::io::{AsyncRead, AsyncWrite};
 use fallible_iterator::FallibleIterator;
 use futures_channel::mpsc;
 use futures_util::{SinkExt, StreamExt};
-use log::trace;
+use log::{debug, trace};
 use postgres_protocol::message::backend::Message;
 use postgres_protocol::message::frontend;
 use std::collections::{HashMap, VecDeque};
@@ -79,6 +79,16 @@ use std::task::Poll;
 pub struct Request {
     pub messages: RequestMessages,
     pub sender: mpsc::Sender<BackendMessages>,
+    pub(crate) disposition: RequestDisposition,
+}
+
+/// Whether a caller awaits the request outcome.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RequestDisposition {
+    /// A caller holds the response stream and expects delivery.
+    Awaited,
+    /// Drop-time cleanup whose response stream is discarded at creation.
+    Housekeeping,
 }
 
 /// The payload of a [`Request`]: either a pre-encoded batch of frontend
@@ -96,6 +106,48 @@ pub enum RequestMessages {
 /// response batches back on. Matches the shape of the tokio version.
 struct Response {
     sender: mpsc::Sender<BackendMessages>,
+    disposition: RequestDisposition,
+}
+
+struct PendingResponse {
+    sender: mpsc::Sender<BackendMessages>,
+    messages: BackendMessages,
+    disposition: RequestDisposition,
+}
+
+enum RequestOutcome {
+    Continue,
+    HousekeepingUndeliverable(Error),
+}
+
+fn has_awaited_response(
+    responses: &VecDeque<Response>,
+    pending_responses: &VecDeque<PendingResponse>,
+) -> bool {
+    responses
+        .iter()
+        .any(|response| response.disposition == RequestDisposition::Awaited)
+        || pending_responses
+            .iter()
+            .any(|response| response.disposition == RequestDisposition::Awaited)
+}
+
+fn finish_request_write(
+    result: Result<(), Error>,
+    disposition: RequestDisposition,
+    responses: &VecDeque<Response>,
+    pending_responses: &VecDeque<PendingResponse>,
+) -> Result<RequestOutcome, Error> {
+    match result {
+        Ok(()) => Ok(RequestOutcome::Continue),
+        Err(error)
+            if disposition == RequestDisposition::Housekeeping
+                && !has_awaited_response(responses, pending_responses) =>
+        {
+            Ok(RequestOutcome::HousekeepingUndeliverable(error))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// A connection to a PostgreSQL database.
@@ -105,7 +157,7 @@ struct Response {
 /// drive I/O with the server. `run` resolves only when the connection
 /// is closed, either because a fatal error occurred or because the
 /// associated [`Client`](crate::Client) has dropped and all outstanding
-/// work has completed.
+/// awaited work has completed.
 #[must_use = "connection does nothing unless run"]
 pub struct Connection<S, T> {
     stream: BufStream<MaybeTlsStream<S, T>>,
@@ -127,7 +179,7 @@ pub struct Connection<S, T> {
     /// before the consumer has drained the first would be silently
     /// dropped by `try_send`; if that batch carries `ReadyForQuery`, the
     /// consumer would block forever on `Responses::poll_next`.
-    pending_responses: VecDeque<(mpsc::Sender<BackendMessages>, BackendMessages)>,
+    pending_responses: VecDeque<PendingResponse>,
     /// Channel for async server->client messages (notices, notifications,
     /// parameter status). `None` until someone calls
     /// `Connection::notifications()`.
@@ -197,7 +249,12 @@ where
             // drains. Doing this BEFORE any read keeps batch ordering
             // correct (a second batch for the same request can never
             // overtake the first).
-            while let Some((mut sender, messages)) = self.pending_responses.pop_front() {
+            while let Some(PendingResponse {
+                mut sender,
+                messages,
+                ..
+            }) = self.pending_responses.pop_front()
+            {
                 // Wait until the downstream channel has capacity.
                 let ready = poll_fn(|cx| sender.poll_ready(cx)).await;
                 match ready {
@@ -216,8 +273,11 @@ where
             }
 
             // Step B — clean shutdown once the client has gone away and
-            // all pending work is done.
-            if terminating && self.responses.is_empty() {
+            // all awaited work is done. Drop-time housekeeping has no
+            // receiver waiting for its response and must not delay shutdown.
+            if terminating
+                && !has_awaited_response(&self.responses, &self.pending_responses)
+            {
                 // NOT `?`: same reasoning as the Terminate write in Step E -
                 // the client is gone and the socket may already be released.
                 if let Err(e) = self.stream.flush().await {
@@ -240,12 +300,14 @@ where
 
             // Step C — terminating branch: Terminate has been sent; we
             // only drain any remaining inbound bytes until we see EOF or
-            // finish the in-flight response queue. No new requests.
+            // finish the awaited responses. No new requests.
             if terminating {
                 match read_backend(&mut self.stream).await {
                     Ok(msg) => self.handle_message(msg)?,
                     Err(e) => {
-                        if is_eof(&e) && self.responses.is_empty() {
+                        if is_eof(&e)
+                            && !has_awaited_response(&self.responses, &self.pending_responses)
+                        {
                             return Ok(());
                         }
                         return Err(e);
@@ -267,7 +329,9 @@ where
                 let msg = match read_backend(&mut self.stream).await {
                     Ok(msg) => msg,
                     Err(e) => {
-                        if is_eof(&e) && self.responses.is_empty() {
+                        if is_eof(&e)
+                            && !has_awaited_response(&self.responses, &self.pending_responses)
+                        {
                             return Ok(());
                         }
                         return Err(e);
@@ -276,7 +340,14 @@ where
                 self.handle_message(msg)?;
                 // Drain any requests that arrived while we were reading.
                 while let Ok(request) = self.receiver.try_recv() {
-                    self.handle_request(request).await?;
+                    if let RequestOutcome::HousekeepingUndeliverable(error) =
+                        self.handle_request(request).await?
+                    {
+                        debug!(
+                            "housekeeping request was not delivered; closing connection: {error}"
+                        );
+                        return Ok(());
+                    }
                 }
                 continue;
             }
@@ -290,7 +361,16 @@ where
             // arrival of the next client request, in exchange for
             // cancel-safety of the read side.
             match self.receiver.next().await {
-                Some(request) => self.handle_request(request).await?,
+                Some(request) => {
+                    if let RequestOutcome::HousekeepingUndeliverable(error) =
+                        self.handle_request(request).await?
+                    {
+                        debug!(
+                            "housekeeping request was not delivered; closing connection: {error}"
+                        );
+                        return Ok(());
+                    }
+                }
                 None => {
                     // Client side dropped. Send Terminate and begin
                     // graceful shutdown.
@@ -330,17 +410,32 @@ where
     /// Handle a request received from the client (serialized path).
     /// Pushes the response channel onto `responses` and writes the
     /// frontend messages onto the unsplit stream.
-    async fn handle_request(&mut self, request: Request) -> Result<(), Error> {
+    async fn handle_request(&mut self, request: Request) -> Result<RequestOutcome, Error> {
+        let Request {
+            messages,
+            sender,
+            disposition,
+        } = request;
         self.responses.push_back(Response {
-            sender: request.sender,
+            sender,
+            disposition,
         });
 
-        match request.messages {
+        match messages {
             RequestMessages::Single(msg) => {
-                write_frontend(&mut self.stream, msg)?;
-                self.stream.flush().await?;
+                let mut result = write_frontend(&mut self.stream, msg);
+                if result.is_ok() {
+                    result = self.stream.flush().await;
+                }
+                finish_request_write(
+                    result,
+                    disposition,
+                    &self.responses,
+                    &self.pending_responses,
+                )
             }
             RequestMessages::CopyIn(mut receiver) => {
+                debug_assert_eq!(disposition, RequestDisposition::Awaited);
                 // COPY FROM STDIN: stream user-supplied frames to the
                 // server until the receiver signals end-of-stream. The
                 // serialized loop CANNOT read while writing (see the
@@ -357,9 +452,9 @@ where
                         None => break,
                     }
                 }
+                Ok(RequestOutcome::Continue)
             }
         }
-        Ok(())
     }
 }
 
@@ -375,7 +470,7 @@ where
 struct Dispatch<'a> {
     parameters: &'a mut HashMap<String, String>,
     responses: &'a mut VecDeque<Response>,
-    pending_responses: &'a mut VecDeque<(mpsc::Sender<BackendMessages>, BackendMessages)>,
+    pending_responses: &'a mut VecDeque<PendingResponse>,
     async_sender: Option<&'a mpsc::UnboundedSender<AsyncMessage>>,
 }
 
@@ -425,8 +520,11 @@ impl Dispatch<'_> {
                 // queued and the whole loop re-enters `poll_read` on
                 // the next wake.
                 let messages = e.into_inner();
-                self.pending_responses
-                    .push_back((response.sender.clone(), messages));
+                self.pending_responses.push_back(PendingResponse {
+                    sender: response.sender.clone(),
+                    messages,
+                    disposition: response.disposition,
+                });
                 if !request_complete {
                     self.responses.push_front(response);
                 }
@@ -529,20 +627,21 @@ impl Error {
 /// ([`flush_with_read_draining`]) so both classify EOF / error / close
 /// identically.
 ///
-/// `Some(Err(e))` -> clean close (`Ok(())`) iff EOF with the response queue
-/// drained, else propagate `e`. `None` (channel closed without a terminal
-/// error) -> clean iff nothing is in flight, else `Error::closed()`. A
+/// `Some(Err(e))` -> clean close (`Ok(())`) iff EOF with no awaited response,
+/// else propagate `e`. `None` (channel closed without a terminal error) ->
+/// clean iff no awaited response is in flight, else `Error::closed()`. A
 /// `Some(Ok(_))` never reaches here (those frames are dispatched inline).
 fn classify_read_terminal(
     terminal: Option<Result<BackendMessage, Error>>,
     responses: &VecDeque<Response>,
+    pending_responses: &VecDeque<PendingResponse>,
 ) -> Result<(), Error> {
     match terminal {
         Some(Err(e)) => {
-            // EOF with the response queue drained is a clean close; otherwise
-            // it is a genuine error (IO-4: EOF mid-response is always an error
-            // on the multiplexed path).
-            if is_eof(&e) && responses.is_empty() {
+            // EOF with no awaited response is a clean close; otherwise it is
+            // a genuine error (IO-4: EOF mid-awaited-response is always an
+            // error on the multiplexed path).
+            if is_eof(&e) && !has_awaited_response(responses, pending_responses) {
                 Ok(())
             } else {
                 Err(e)
@@ -550,13 +649,28 @@ fn classify_read_terminal(
         }
         Some(Ok(_)) | None => {
             // The read task ended (channel closed) without a terminal error.
-            // Clean only if nothing is in flight.
-            if responses.is_empty() {
-                Ok(())
-            } else {
+            // Clean only if nobody awaits an in-flight outcome.
+            if has_awaited_response(responses, pending_responses) {
                 Err(Error::closed())
+            } else {
+                Ok(())
             }
         }
+    }
+}
+
+fn check_captured_terminal_after_housekeeping_write_failure(
+    terminal: Option<Option<Result<BackendMessage, Error>>>,
+) -> Result<(), Error> {
+    match terminal {
+        // A parse, protocol, or non-EOF I/O error is independent of the
+        // undeliverable cleanup write and must remain observable from run().
+        Some(Some(Err(error))) if !is_eof(&error) => Err(error),
+        // ConnectionRelease shuts down both halves. Its expected EOF can be
+        // captured while the matching housekeeping flush reports EPIPE. With
+        // no awaited response left, those are two views of the same clean
+        // shutdown; the pre-existing write-first ordering reported the write.
+        _ => Ok(()),
     }
 }
 
@@ -613,7 +727,7 @@ async fn flush_with_read_draining<W>(
     read_rx: &mut mpsc::Receiver<Result<BackendMessage, Error>>,
     parameters: &mut HashMap<String, String>,
     responses: &mut VecDeque<Response>,
-    pending_responses: &mut VecDeque<(mpsc::Sender<BackendMessages>, BackendMessages)>,
+    pending_responses: &mut VecDeque<PendingResponse>,
     async_sender: Option<&mpsc::UnboundedSender<AsyncMessage>>,
 ) -> (
     Result<(), Error>,
@@ -646,12 +760,17 @@ where
             // (2) Deliver a stashed batch whose sender now has room. Honour
             // the FIFO gate: while a batch is stashed, no new inbound frame
             // may be dispatched ahead of it.
-            if let Some((sender, _)) = pending_responses.front_mut() {
-                match sender.poll_ready(cx) {
+            if let Some(response) = pending_responses.front_mut() {
+                match response.sender.poll_ready(cx) {
                     Poll::Ready(_) => {
                         // Err (consumer hung up) still counts as "ready":
                         // start_send below is a no-op drop in that case.
-                        if let Some((mut sender, messages)) = pending_responses.pop_front() {
+                        if let Some(PendingResponse {
+                            mut sender,
+                            messages,
+                            ..
+                        }) = pending_responses.pop_front()
+                        {
                             let _ = sender.start_send(messages);
                         }
                         continue;
@@ -706,8 +825,8 @@ where
     // (`OwnedReadHalf<TcpStream>` / `OwnedReadHalf<UnixStream>`).
     <S as SplitStream>::ReadHalf: 'static,
 {
-    /// Drive the connection until the client is dropped and all
-    /// outstanding requests have completed, or a fatal I/O error occurs.
+    /// Drive the connection until the client is dropped and all awaited
+    /// requests have completed, or a fatal I/O error occurs.
     ///
     /// Splits the socket into owned read/write halves and runs the
     /// [multiplexed loop](Self::run_multiplexed) when possible (always,
@@ -809,7 +928,7 @@ where
     /// ## FIFO framing
     ///
     /// The read task forwards frames in wire order over a FIFO channel.
-    /// `responses` is the in-order queue of awaited requests; a batch is
+    /// `responses` is the in-order queue of in-flight requests; a batch is
     /// always delivered to its front entry. When a downstream sender is
     /// full, the batch is stashed in `pending_responses` and **the main
     /// loop stops consuming the read channel** until it drains (gate: the
@@ -862,13 +981,13 @@ where
         });
 
         let mut responses: VecDeque<Response> = VecDeque::new();
-        let mut pending_responses: VecDeque<(mpsc::Sender<BackendMessages>, BackendMessages)> =
-            VecDeque::new();
+        let mut pending_responses: VecDeque<PendingResponse> = VecDeque::new();
         // COPY-IN frame source, set while streaming a `COPY ... FROM STDIN`.
         let mut copy_in: Option<CopyInReceiver> = None;
         // The `Client` handle dropped (`receiver` closed). We do NOT send
-        // `Terminate` until the response queue has drained (mirrors
-        // tokio-postgres `poll_write`), then send it exactly once.
+        // `Terminate` until no awaited response remains (mirrors
+        // tokio-postgres `poll_write`), then send it exactly once. A discarded
+        // housekeeping response does not hold shutdown open.
         let mut client_gone = false;
         let mut terminate_sent = false;
 
@@ -879,12 +998,17 @@ where
         let run_result: Result<(), Error> = async {
             loop {
                 // ---- Shutdown sequencing. Once the client is gone and no
-                // response/COPY work remains, send Terminate once, then emit a
-                // FIN via the write half's `shutdown` (mirrors the serialized
-                // path; MUX-4). The server then closes; the read task forwards
-                // EOF; the Read arm returns Ok.
-                if client_gone && !terminate_sent && responses.is_empty() && copy_in.is_none() {
-                    trace!("client gone + queue drained, sending Terminate (multiplexed)");
+                // awaited response/COPY work remains, send Terminate once,
+                // then emit a FIN via the write half's `shutdown` (mirrors the
+                // serialized path; MUX-4). Housekeeping responses do not hold
+                // shutdown open. The server then closes; the read task
+                // forwards EOF; the Read arm returns Ok.
+                if client_gone
+                    && !terminate_sent
+                    && !has_awaited_response(&responses, &pending_responses)
+                    && copy_in.is_none()
+                {
+                    trace!("client gone + no awaited responses, sending Terminate (multiplexed)");
                     let buf = inner_encode_terminate();
                     // NOT `?`. `Terminate` is a courtesy to the server and the
                     // client half that would have received an error is, by
@@ -944,8 +1068,8 @@ where
 
                 // (2) Back-pressure: the front stashed batch's sender has room.
                 if has_pending
-                    && let Some((sender, _)) = pending_responses.front_mut()
-                    && let Poll::Ready(ready) = sender.poll_ready(cx)
+                    && let Some(response) = pending_responses.front_mut()
+                    && let Poll::Ready(ready) = response.sender.poll_ready(cx)
                 {
                     // Err (consumer hung up) still counts as "ready"; the
                     // SenderReady arm discards the batch in that case.
@@ -986,12 +1110,17 @@ where
                 MuxEvent::Read(terminal @ (Some(Err(_)) | None)) => {
                     // EOF / error / channel-close classification, shared with
                     // the in-flush read-draining path.
-                    return classify_read_terminal(terminal, &responses);
+                    return classify_read_terminal(terminal, &responses, &pending_responses);
                 }
 
                 // ---------- Stashed batch deliverable ----------
                 MuxEvent::SenderReady => {
-                    if let Some((mut sender, messages)) = pending_responses.pop_front() {
+                    if let Some(PendingResponse {
+                        mut sender,
+                        messages,
+                        ..
+                    }) = pending_responses.pop_front()
+                    {
                         // The poll above observed Ready; start_send may still
                         // fail if the consumer hung up between poll and now.
                         let _ = sender.start_send(messages);
@@ -1000,41 +1129,69 @@ where
 
                 // ---------- New request ----------
                 MuxEvent::Request(Some(request)) => {
+                    let Request {
+                        messages,
+                        sender,
+                        disposition,
+                    } = request;
                     responses.push_back(Response {
-                        sender: request.sender,
+                        sender,
+                        disposition,
                     });
-                    match request.messages {
+                    match messages {
                         RequestMessages::Single(msg) => {
-                            write_frontend(&mut write_half, msg)?;
+                            let write_result = write_frontend(&mut write_half, msg);
                             // Flush to completion while concurrently draining
-                            // the read channel (cancel-safe: the flush future
-                            // is never dropped). Interleaving read+write in the
-                            // same poll is what prevents a large bidirectional
-                            // exchange from wedging the cap-1 channel
-                            // (MUX-DEADLOCK-1).
-                            let (res, terminal) = flush_with_read_draining(
-                                &mut write_half,
-                                &mut read_rx,
-                                &mut parameters,
-                                &mut responses,
-                                &mut pending_responses,
-                                async_sender.as_ref(),
-                            )
-                            .await;
-                            res?;
+                            // the read channel, then attribute a write failure
+                            // to the request that caused that flush.
+                            let (write_result, terminal) = if write_result.is_ok() {
+                                flush_with_read_draining(
+                                    &mut write_half,
+                                    &mut read_rx,
+                                    &mut parameters,
+                                    &mut responses,
+                                    &mut pending_responses,
+                                    async_sender.as_ref(),
+                                )
+                                .await
+                            } else {
+                                (write_result, None)
+                            };
+                            match finish_request_write(
+                                write_result,
+                                disposition,
+                                &responses,
+                                &pending_responses,
+                            )? {
+                                RequestOutcome::Continue => {}
+                                RequestOutcome::HousekeepingUndeliverable(error) => {
+                                    check_captured_terminal_after_housekeeping_write_failure(
+                                        terminal,
+                                    )?;
+                                    debug!(
+                                        "housekeeping request was not delivered; closing connection: {error}"
+                                    );
+                                    return Ok(());
+                                }
+                            }
                             if let Some(terminal) = terminal {
-                                return classify_read_terminal(terminal, &responses);
+                                return classify_read_terminal(
+                                    terminal,
+                                    &responses,
+                                    &pending_responses,
+                                );
                             }
                         }
                         RequestMessages::CopyIn(rx) => {
+                            debug_assert_eq!(disposition, RequestDisposition::Awaited);
                             // Enter COPY mode; frames stream via branch (4).
                             copy_in = Some(rx);
                         }
                     }
                 }
                 MuxEvent::Request(None) => {
-                    // The Client handle dropped. Defer Terminate until the
-                    // response queue drains (top of the loop). Stop accepting
+                    // The Client handle dropped. Defer Terminate until awaited
+                    // responses drain (top of the loop). Stop accepting
                     // further requests.
                     trace!("receiver closed (multiplexed)");
                     client_gone = true;
@@ -1058,7 +1215,11 @@ where
                     .await;
                     res?;
                     if let Some(terminal) = terminal {
-                        return classify_read_terminal(terminal, &responses);
+                        return classify_read_terminal(
+                            terminal,
+                            &responses,
+                            &pending_responses,
+                        );
                     }
                 }
                 MuxEvent::CopyFrame(None) => {
@@ -1087,5 +1248,383 @@ where
         let _ = read_handle.cancel().await;
 
         run_result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Socket;
+    use crate::connect_raw::connect_raw;
+    use crate::connect_tls::Encryption;
+    use crate::socket::{SocketReadHalf, SocketWriteHalf};
+    use crate::{Config, NoTls};
+    use compio::buf::{BufResult, IoBuf, IoBufMut};
+    use futures_channel::oneshot;
+    use std::io::{Read, Write};
+    use std::net::{Shutdown, SocketAddr, TcpListener};
+    use std::sync::mpsc as std_mpsc;
+    use std::time::Duration;
+
+    struct ObservedSocket {
+        inner: Socket,
+        read_ended: Option<oneshot::Sender<()>>,
+    }
+
+    struct ObservedReadHalf {
+        inner: SocketReadHalf,
+        read_ended: Option<oneshot::Sender<()>>,
+    }
+
+    impl AsyncRead for ObservedSocket {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            self.inner.read(buf).await
+        }
+    }
+
+    impl AsyncWrite for ObservedSocket {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            self.inner.write(buf).await
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            self.inner.flush().await
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            self.inner.shutdown().await
+        }
+    }
+
+    impl AsyncRead for ObservedReadHalf {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            let result = self.inner.read(buf).await;
+            if (result.0.is_err() || matches!(result.0.as_ref(), Ok(&0)))
+                && let Some(sender) = self.read_ended.take()
+            {
+                let _ = sender.send(());
+            }
+            result
+        }
+    }
+
+    impl SplitStream for ObservedSocket {
+        type ReadHalf = ObservedReadHalf;
+        type WriteHalf = SocketWriteHalf;
+
+        fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+            let Self { inner, read_ended } = self;
+            match inner.try_into_split() {
+                Ok((read, write)) => Ok((
+                    ObservedReadHalf {
+                        inner: read,
+                        read_ended,
+                    },
+                    write,
+                )),
+                Err(inner) => Err(Self { inner, read_ended }),
+            }
+        }
+    }
+
+    fn scripted_peer() -> (SocketAddr, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind scripted peer");
+        let address = listener.local_addr().expect("read scripted peer address");
+        let handle = std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().expect("accept driver connection");
+            peer.set_nodelay(true).expect("disable Nagle on scripted peer");
+
+            let mut length = [0; 4];
+            peer.read_exact(&mut length).expect("read startup length");
+            let length = u32::from_be_bytes(length) as usize;
+            assert!(length >= 4, "startup packet length includes its header");
+            let mut startup = vec![0; length - 4];
+            peer.read_exact(&mut startup).expect("read startup body");
+
+            peer.write_all(b"R\0\0\0\x08\0\0\0\0")
+                .expect("write AuthenticationOk");
+            peer.write_all(b"K\0\0\0\x0c\0\0\0\0\0\0\0\0")
+                .expect("write BackendKeyData");
+            peer.write_all(b"Z\0\0\0\x05I")
+                .expect("write startup ReadyForQuery");
+            peer.flush().expect("flush startup response");
+
+            let mut tag = [0; 1];
+            peer.read_exact(&mut tag).expect("read query tag");
+            assert_eq!(tag[0], b'Q', "expected a simple-query request");
+            let mut query_length = [0; 4];
+            peer.read_exact(&mut query_length).expect("read query length");
+            let query_length = u32::from_be_bytes(query_length) as usize;
+            assert!(
+                query_length >= 4,
+                "query packet length includes its header"
+            );
+            let mut query = vec![0; query_length - 4];
+            peer.read_exact(&mut query).expect("read query body");
+        });
+
+        (address, handle)
+    }
+
+    fn read_frontend_message(peer: &mut std::net::TcpStream) -> (u8, Vec<u8>) {
+        let mut tag = [0; 1];
+        peer.read_exact(&mut tag).expect("read frontend tag");
+
+        let mut length = [0; 4];
+        peer.read_exact(&mut length)
+            .expect("read frontend message length");
+        let length = u32::from_be_bytes(length) as usize;
+        assert!(length >= 4, "frontend length includes its header");
+
+        let mut body = vec![0; length - 4];
+        peer.read_exact(&mut body)
+            .expect("read frontend message body");
+        (tag[0], body)
+    }
+
+    fn frontend_cstring(body: &[u8]) -> &[u8] {
+        let end = body
+            .iter()
+            .position(|byte| *byte == 0)
+            .expect("frontend cstring has a terminator");
+        &body[..end]
+    }
+
+    fn housekeeping_read_eof_peer() -> (
+        SocketAddr,
+        oneshot::Receiver<()>,
+        std_mpsc::Sender<()>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind scripted peer");
+        let address = listener.local_addr().expect("read scripted peer address");
+        let (close_written_tx, close_written_rx) = oneshot::channel();
+        let (close_peer_tx, close_peer_rx) = std_mpsc::channel();
+
+        let handle = std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().expect("accept driver connection");
+            peer.set_nodelay(true).expect("disable Nagle on scripted peer");
+
+            let mut length = [0; 4];
+            peer.read_exact(&mut length).expect("read startup length");
+            let length = u32::from_be_bytes(length) as usize;
+            assert!(length >= 4, "startup packet length includes its header");
+            let mut startup = vec![0; length - 4];
+            peer.read_exact(&mut startup).expect("read startup body");
+
+            peer.write_all(b"R\0\0\0\x08\0\0\0\0")
+                .expect("write AuthenticationOk");
+            peer.write_all(b"K\0\0\0\x0c\0\0\0\0\0\0\0\0")
+                .expect("write BackendKeyData");
+            peer.write_all(b"Z\0\0\0\x05I")
+                .expect("write startup ReadyForQuery");
+            peer.flush().expect("flush startup response");
+
+            let (tag, body) = read_frontend_message(&mut peer);
+            assert_eq!(tag, b'P', "expected Parse for statement preparation");
+            let statement_name = frontend_cstring(&body).to_vec();
+            assert!(!statement_name.is_empty(), "prepared statement is named");
+            let (tag, body) = read_frontend_message(&mut peer);
+            assert_eq!(tag, b'D', "expected Describe for statement preparation");
+            assert_eq!(body.first(), Some(&b'S'), "Describe targets a statement");
+            assert_eq!(
+                frontend_cstring(&body[1..]),
+                statement_name.as_slice(),
+                "Describe targets the parsed statement"
+            );
+            let (tag, body) = read_frontend_message(&mut peer);
+            assert_eq!(tag, b'S', "expected Sync after statement preparation");
+            assert!(body.is_empty(), "Sync must have an empty body");
+
+            peer.write_all(b"1\0\0\0\x04")
+                .expect("write ParseComplete");
+            peer.write_all(b"t\0\0\0\x06\0\0")
+                .expect("write ParameterDescription");
+            peer.write_all(b"n\0\0\0\x04").expect("write NoData");
+            peer.write_all(b"Z\0\0\0\x05I")
+                .expect("write prepare ReadyForQuery");
+            peer.flush().expect("flush prepare response");
+
+            let (tag, body) = read_frontend_message(&mut peer);
+            assert_eq!(tag, b'C', "expected Close for dropped statement");
+            assert_eq!(
+                body.first(),
+                Some(&b'S'),
+                "expected Close to target a statement"
+            );
+            assert_eq!(
+                frontend_cstring(&body[1..]),
+                statement_name.as_slice(),
+                "Close targets the prepared statement"
+            );
+            let (tag, body) = read_frontend_message(&mut peer);
+            assert_eq!(tag, b'S', "expected Sync after Close");
+            assert!(body.is_empty(), "Sync must have an empty body");
+
+            close_written_tx
+                .send(())
+                .expect("the test stopped waiting for the Close write");
+            close_peer_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the last Client was not dropped within 5 seconds");
+
+            // Send a FIN without discarding a possible client-side Terminate.
+            // Draining that half before the socket drops prevents unread data
+            // from turning this deliberately scripted EOF into a TCP reset.
+            peer.shutdown(Shutdown::Write)
+                .expect("close the scripted peer write half without ReadyForQuery");
+            peer.set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("bound the scripted peer drain");
+            let mut drain = [0; 64];
+            loop {
+                let read = peer
+                    .read(&mut drain)
+                    .expect("the connection driver did not close within 5 seconds");
+                if read == 0 {
+                    break;
+                }
+            }
+        });
+
+        (address, close_written_rx, close_peer_tx, handle)
+    }
+
+    #[test]
+    fn housekeeping_write_failure_does_not_hide_a_backpressured_awaited_response() {
+        let (sender, _receiver) = mpsc::channel(1);
+        let responses = VecDeque::new();
+        let pending_responses = VecDeque::from([PendingResponse {
+            sender,
+            messages: BackendMessages::empty(),
+            disposition: RequestDisposition::Awaited,
+        }]);
+        let write_error = Error::io(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "scripted write failure",
+        ));
+
+        assert!(
+            finish_request_write(
+                Err(write_error),
+                RequestDisposition::Housekeeping,
+                &responses,
+                &pending_responses,
+            )
+            .is_err(),
+            "a housekeeping write hid a backpressured awaited response"
+        );
+    }
+
+    #[test]
+    fn housekeeping_write_failure_does_not_hide_a_captured_non_eof_read_error() {
+        let read_error = Error::io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "scripted read failure",
+        ));
+
+        assert!(
+            check_captured_terminal_after_housekeeping_write_failure(Some(Some(Err(read_error))))
+                .is_err(),
+            "a housekeeping write hid a captured non-EOF read error"
+        );
+    }
+
+    #[compio::test]
+    async fn backend_error_determined_before_the_last_client_drops_is_still_reported() {
+        let (address, peer) = scripted_peer();
+        let tcp = compio::net::TcpStream::connect(address)
+            .await
+            .expect("connect to scripted peer");
+        let socket = Socket::new_tcp(tcp);
+        let release = socket
+            .release_handle()
+            .expect("duplicate the client release handle");
+        let (read_ended_tx, read_ended_rx) = oneshot::channel();
+        let stream = ObservedSocket {
+            inner: socket,
+            read_ended: Some(read_ended_tx),
+        };
+        let config: Config = "user=test dbname=test sslmode=disable"
+            .parse()
+            .expect("parse test config");
+        let (client, connection) = connect_raw(
+            stream,
+            NoTls,
+            Encryption::Plaintext,
+            true,
+            &config,
+            Some(release),
+        )
+        .await
+        .expect("complete scripted startup");
+        let observer = client
+            .simple_query_raw("SELECT 1")
+            .await
+            .expect("queue the observed request");
+        let mut driver = Box::pin(connection.run());
+        assert!(
+            futures_util::poll!(driver.as_mut()).is_pending(),
+            "the connection ended before the peer could close it"
+        );
+
+        compio::time::timeout(Duration::from_secs(5), read_ended_rx)
+            .await
+            .expect("the peer did not close within 5 seconds")
+            .expect("the EOF observer was dropped");
+
+        drop(client);
+        let outcome = compio::time::timeout(Duration::from_secs(5), driver)
+            .await
+            .expect("the connection driver did not finish within 5 seconds");
+        assert!(
+            outcome.is_err(),
+            "an EOF determined before the last Client dropped was reported as a clean close"
+        );
+
+        drop(observer);
+        peer.join().expect("the scripted peer panicked");
+    }
+
+    #[compio::test]
+    async fn dropping_the_client_after_a_statement_close_write_is_a_clean_read_eof() {
+        let (address, close_written, close_peer, peer) = housekeeping_read_eof_peer();
+        let tcp = compio::net::TcpStream::connect(address)
+            .await
+            .expect("connect to scripted peer");
+        let socket = Socket::new_tcp(tcp);
+        let config: Config = "user=test dbname=test sslmode=disable"
+            .parse()
+            .expect("parse test config");
+        let (client, connection) = config
+            .connect_raw(socket, NoTls)
+            .await
+            .expect("complete scripted startup");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        let statement = client
+            .prepare("SET application_name TO 'scripted-peer'")
+            .await
+            .expect("prepare the statement");
+        drop(statement);
+
+        compio::time::timeout(Duration::from_secs(5), close_written)
+            .await
+            .expect("the statement Close was not written within 5 seconds")
+            .expect("the Close-write observer was dropped");
+        drop(client);
+        close_peer
+            .send(())
+            .expect("the scripted peer stopped before client drop");
+
+        let outcome = compio::time::timeout(Duration::from_secs(5), driver)
+            .await
+            .expect("the connection driver did not finish within 5 seconds")
+            .expect("the connection task panicked");
+        peer.join().expect("the scripted peer panicked");
+
+        assert!(
+            outcome.is_ok(),
+            "read EOF with only statement-close housekeeping outstanding failed run(): {outcome:?}"
+        );
     }
 }
