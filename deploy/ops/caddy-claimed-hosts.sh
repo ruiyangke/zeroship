@@ -140,11 +140,15 @@ adapt() {
   fi
 }
 
+# Provenance only - recorded in the artifact, never compared (see the "next
+# hole" note in crates/control/src/reserved_names.rs). `|| true` because
+# `head -1` can SIGPIPE the producer, and under `set -o pipefail` that would
+# abort the whole run over a field nothing decides anything on.
 caddy_version() {
   if [ "$CADDY_HOW" = docker ]; then
-    docker run --rm "$CADDY_IMAGE" caddy version 2>/dev/null | head -1
+    { docker run --rm "$CADDY_IMAGE" caddy version 2>/dev/null | head -1; } || true
   else
-    caddy version 2>/dev/null | head -1
+    { caddy version 2>/dev/null | head -1; } || true
   fi
 }
 
