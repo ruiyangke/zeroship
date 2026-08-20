@@ -693,7 +693,7 @@ mod tests {
     /// This checks only that the selection *discriminates*: a SHA-256-signed
     /// certificate hashes to 32 bytes with SHA-256, a SHA-384-signed one to 48
     /// with SHA-384. It does NOT check the value against a PostgreSQL server -
-    /// that is what the live SCRAM-PLUS handshake in `tests/tls_rustls.rs`
+    /// that is what the live SCRAM-PLUS handshake in `tests/tls_live.rs`
     /// does.
     #[test]
     fn end_point_hash_follows_the_signature_algorithm() {

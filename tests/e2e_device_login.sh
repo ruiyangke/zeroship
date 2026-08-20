@@ -303,7 +303,7 @@ USER_ID="$(psql_q "SELECT id FROM zeroship.users WHERE email = '$EMAIL'::citext"
 
 # Account-enumeration defense, on the live server: re-signing up the SAME
 # email must be indistinguishable from a fresh one. `crates/auth` owns the
-# byte-level assertion (tests/signup_continuation_test.rs); this checks the
+# byte-level assertion (crates/auth/tests/signup_continuation_test.rs); this checks the
 # shipped binary agrees, since a divergence here is a live email oracle.
 dup_signup() {
   local email="$1" out="$2" hdrs="$3" page="$WORK/dup-get.html" csrf

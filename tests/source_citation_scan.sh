@@ -28,7 +28,7 @@
 #      4 of the 17 above. `tsx` precedes `ts`, and a trailing `(?![A-Za-z0-9])`
 #      closes the rest.
 #
-# Two categories are deliberately NOT defects, and a gate that flags them is
+# Four categories are deliberately NOT defects, and a gate that flags them is
 # wrong rather than strict:
 #
 #   * NEGATIVE citations, where the comment names a file precisely to say it
@@ -37,8 +37,20 @@
 #     repository, and it CANNOT". The citation is the point of the sentence.
 #   * UPSTREAM paths that belong to another project — `plugin-db` citing the
 #     `sqlite-vec` crate's own `examples/simple-rust/demo.rs`.
+#   * Paths that are DATA rather than pointers. `config-contract`'s inventory
+#     scanner is fed in-memory sources keyed by an invented crate name, and its
+#     raw-env half carries the sealed-module suffix it MATCHES paths against.
+#     Both are values the code reads, not places a reader is being sent. The
+#     tell: renaming the invented crate would satisfy the scan and change
+#     nothing real.
+#   * GENERATED build outputs, which resolve only after `pnpm build` and are
+#     never tracked. The scan reports these itself, as a warning at the end of
+#     a built run, and the warning is the reason they are here: a local green
+#     that came from a built tree is not the CI answer. Naming one is correct
+#     — it is where the artifact really lands — so the alternative would be to
+#     stop naming build outputs in comments, which is worse.
 #
-# Both are listed in ALLOW below, by "file:citation" pair rather than by
+# All four are listed in ALLOW below, by "file:citation" pair rather than by
 # citation alone, so the same path cited wrongly somewhere else is still caught.
 #
 # This file and its self-test are excluded from the scan. Both spell out paths
@@ -137,6 +149,22 @@ crates/migrated/tests/typed_id_parity.rs:tests/core_id_parity.rs
 crates/runtime/src/core/init.rs:crates/runtime/src/embed/websocket.js
 crates/plugin-db/src/backend/sqlite/session.rs:examples/simple-rust/demo.rs
 tests/golden_path.sh:tests/m0_gate.sh
+libs/compio-s3/tests/common/mod.rs:tests/common/env.rs
+crates/config-contract/src/raw_env.rs:tests/common/env.rs
+crates/config-contract/tests/raw_env_contract.rs:tests/common/env.rs
+crates/config-contract/src/inventory.rs:crates/alpha/src/config.rs
+crates/config-contract/src/inventory.rs:crates/demo/src/config.rs
+crates/config-contract/src/inventory.rs:crates/demo/src/main.rs
+crates/config-contract/src/inventory.rs:crates/x/src/lib.rs
+tests/bench_platform.sh:examples/bench/dist/server/index.js
+tests/e2e-browser/src/dev-server.ts:sdks/vite-plugin/dist/cli/migrate-dev.js
+tests/e2e_dev_vs_deployed_stream.sh:sdks/vite-plugin/dist/dev-bootstrap.js
+tests/golden_path.sh:sdks/vite-plugin/dist/index.js
+tests/lib/binary_freshness.sh:sdks/vite-plugin/dist/index.js
+AGENTS.md:sdks/db/dist/internal.js
+CONTRIBUTING.md:sdks/db/dist/internal.js
+ISSUES.md:sdks/bootstrap/dist/runtime-entry.js
+docs/build-and-deploy-golden-path.md:examples/workflows-order/dist/index.js
 "
 
 # A corpus check the count cannot do: a renamed root silently stops being
@@ -292,10 +320,13 @@ done < <( { grep -roP "$DOC_PAT" --include='*.md' \
   } | sort -u )
 
 echo "doc citations checked: $doc_found across docs/ + root *.md, excluding $DOC_EXCLUDED and dated records (allowed: $doc_allowed, unresolvable: $((missing - src_missing)))"
-# The build-state report. Deliberately a WARNING and not a failure: whether a
-# citation to a build output should count as a source citation is a contract
-# question, and this check's job is to stop a local green being mistaken for a
-# CI green, not to answer it.
+# The build-state report. Still a WARNING and not a failure, but the contract
+# question it used to leave open is now ANSWERED: a citation to a build output
+# is correct as written and belongs in ALLOW (fourth category above), so the
+# named pairs no longer fail in either tree. The warning survives because it
+# reports something ALLOW cannot - that this run resolved a target CI would
+# not, so a green here is not evidence of a green there. Any target it lists
+# that is NOT in ALLOW is on its way to failing in CI.
 if [ -s "$RESOLVED_LIST" ] && git rev-parse --git-dir >/dev/null 2>&1; then
   sort -u "$RESOLVED_LIST" > "$RESOLVED_LIST.s"
   git ls-files | sort -u > "$RESOLVED_LIST.t"
