@@ -80,6 +80,17 @@ impl std::fmt::Debug for PostgresBackend {
 
 impl PostgresBackend {
     /// Build a backend handle around an already-initialised pool.
+    ///
+    /// Column keys resolve through the admin table first, then through
+    /// whatever local source this isolate carries - the roots a host
+    /// installed, else `ZEROSHIP_COLUMN_KEY_<KEYID>`. A caller that wants
+    /// to pin the source regardless of the isolate goes through
+    /// [`Self::new_with_key_source`].
+    ///
+    /// Do not call this from inside a `context::with` / `with_mut`
+    /// closure - it takes a context borrow of its own.
+    /// `IsolateDbContext::set_pool` uses `new_with_key_source` for
+    /// exactly that reason.
     pub fn new(pool: Rc<compio_postgres::Pool>, url: String) -> Self {
         // Wire the column-key store. We clone the `Rc<Pool>`
         // into `KeySource::PgAdminTable` so the `KeyStore`'s
@@ -87,15 +98,26 @@ impl PostgresBackend {
         // without re-reaching into `PostgresBackend`. The pool clone is
         // cheap (Rc inc), and the cache is invalidated naturally on
         // backend drop.
-        let key_store = crate::encryption::KeyStore::new(
-            crate::encryption::KeySource::PgAdminTable(pool.clone()),
-        );
+        let key_source = crate::context::pg_key_source(pool.clone());
+        Self::new_with_key_source(pool, url, key_source)
+    }
+
+    /// Build a backend handle with an explicit column-key source.
+    ///
+    /// The isolate context uses this to hand a backend the root keys the
+    /// host installed (`IsolateDbContext::local_key_source`) instead of
+    /// the process environment.
+    pub fn new_with_key_source(
+        pool: Rc<compio_postgres::Pool>,
+        url: String,
+        key_source: crate::encryption::KeySource,
+    ) -> Self {
         Self {
             pool,
             url,
             pgvector_available: RefCell::new(None),
             postgis_available: RefCell::new(None),
-            key_store,
+            key_store: crate::encryption::KeyStore::new(key_source),
         }
     }
 
