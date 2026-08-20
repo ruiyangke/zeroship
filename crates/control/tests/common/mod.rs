@@ -495,7 +495,7 @@ pub fn lite_billing_stack(
     tax_provider: Arc<dyn zeroship_control::tax::TaxProvider>,
 ) -> Arc<zeroship_control::metering::provider::BillingStack> {
     use zeroship_control::metering::provider::{
-        BillingStack, ControlLiteStore, LiteStore, ProviderCtx, StaticSecretResolver,
+        BillingStack, ControlLiteStore, LiteStore, PlatformSecretResolver, ProviderCtx,
     };
     use zeroship_control::{SecretString, StripeStore};
 
@@ -508,7 +508,7 @@ pub fn lite_billing_stack(
     ));
     let ctx = ProviderCtx::new(
         serde_json::json!({}),
-        Arc::new(StaticSecretResolver::default()),
+        Arc::new(PlatformSecretResolver),
         Some(store),
     );
     let provider = zeroship_control::metering::provider::builtin_registry()

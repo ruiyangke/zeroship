@@ -16,7 +16,7 @@ use uuid::Uuid;
 use zeroship_control::metering::provider::{
     assert_capability_consistency, AggregateQuery, BillingPeriod, Capabilities, DedupKey,
     DedupTtl, CorrectionCapability, IngestAck, InvoiceRef, LiteStore, MeteringProvider,
-    ProviderCtx, ProviderError, StaticSecretResolver, SubjectRef, UsageEvent, UsageSubject,
+    PlatformSecretResolver, ProviderCtx, ProviderError, SubjectRef, UsageEvent, UsageSubject,
 };
 
 const METER: &str = "compute_units";
@@ -29,6 +29,7 @@ const PERIOD: BillingPeriod = BillingPeriod {
 };
 const LAGO_API_KEY: &str = "lago_hmac_conformance";
 const STRIPE_SECRET: &str = "sk_test_conformance";
+const OPENMETER_TOKEN: &str = "om_test_conformance";
 
 #[compio::test]
 async fn provider_conformance_lago() {
@@ -154,10 +155,9 @@ async fn build_fixture(adapter: Adapter) -> Fixture {
                 serde_json::json!({
                     "lago": {
                         "api_url": mock.base_url.clone(),
-                        "api_key": "lago_api_key",
+                        "api_key": LAGO_API_KEY,
                     }
                 }),
-                HashMap::from([("lago_api_key".to_string(), LAGO_API_KEY.to_string())]),
                 None,
             )
             .expect("lago provider builds");
@@ -172,7 +172,6 @@ async fn build_fixture(adapter: Adapter) -> Fixture {
             let provider = build_provider(
                 adapter.id(),
                 serde_json::json!({}),
-                HashMap::new(),
                 Some(store.clone()),
             )
             .expect("lite provider builds");
@@ -189,13 +188,9 @@ async fn build_fixture(adapter: Adapter) -> Fixture {
                 serde_json::json!({
                     "openmeter": {
                         "base_url": mock.base_url.clone(),
-                        "token": "openmeter_token",
+                        "token": OPENMETER_TOKEN,
                     }
                 }),
-                HashMap::from([(
-                    "openmeter_token".to_string(),
-                    "om_test_conformance".to_string(),
-                )]),
                 None,
             )
             .expect("openmeter provider builds");
@@ -211,7 +206,7 @@ async fn build_fixture(adapter: Adapter) -> Fixture {
                 adapter.id(),
                 serde_json::json!({
                     "stripe_meters": {
-                        "secret_key": "stripe_secret_key",
+                        "secret_key": STRIPE_SECRET,
                         "base_url": mock.base_url.clone(),
                         "meters": {
                             METER: STRIPE_METER_ID,
@@ -219,7 +214,6 @@ async fn build_fixture(adapter: Adapter) -> Fixture {
                         },
                     }
                 }),
-                HashMap::from([("stripe_secret_key".to_string(), STRIPE_SECRET.to_string())]),
                 Some(Arc::new(FakeLiteStore::default())),
             )
             .expect("stripe_meters provider builds");
@@ -235,10 +229,9 @@ async fn build_fixture(adapter: Adapter) -> Fixture {
                 adapter.id(),
                 serde_json::json!({
                     "stripe_invoice": {
-                        "secret_key": "stripe_secret_key",
+                        "secret_key": STRIPE_SECRET,
                     }
                 }),
-                HashMap::from([("stripe_secret_key".to_string(), STRIPE_SECRET.to_string())]),
                 Some(store.clone()),
             )
             .expect("stripe_invoice provider builds");
@@ -254,14 +247,13 @@ async fn build_fixture(adapter: Adapter) -> Fixture {
 fn build_provider(
     id: &str,
     raw_config: serde_json::Value,
-    secrets: HashMap<String, String>,
     store: Option<Arc<FakeLiteStore>>,
 ) -> Result<Arc<dyn MeteringProvider>, ProviderError> {
     let registry = zeroship_control::metering::provider::builtin_registry();
     let store: Option<Arc<dyn LiteStore>> = store.map(|s| s as Arc<dyn LiteStore>);
     let ctx = ProviderCtx::new(
         raw_config,
-        Arc::new(StaticSecretResolver::new(secrets)),
+        Arc::new(PlatformSecretResolver),
         store,
     );
     registry.build(id, &ctx)
@@ -571,16 +563,31 @@ async fn assert_invoice_close_idempotent(fx: &Fixture) {
 async fn assert_fail_closed_config(adapter: Adapter) {
     match adapter {
         Adapter::Lago => {
-            assert_provider_config_fails("lago", serde_json::json!({}), HashMap::new(), None);
+            assert_provider_config_fails("lago", serde_json::json!({}), None);
+            // An empty key, an empty url, and a `urn:` value that is not the
+            // file scheme. The third is the one worth naming: a reserved prefix
+            // must refuse, not become the provider's key by being taken as
+            // literal material.
+            assert_provider_config_fails(
+                "lago",
+                serde_json::json!({
+                    "lago": { "api_url": "http://127.0.0.1:1", "api_key": "" }
+                }),
+                None,
+            );
+            assert_provider_config_fails(
+                "lago",
+                serde_json::json!({ "lago": { "api_url": "", "api_key": LAGO_API_KEY } }),
+                None,
+            );
             assert_provider_config_fails(
                 "lago",
                 serde_json::json!({
                     "lago": {
                         "api_url": "http://127.0.0.1:1",
-                        "api_key": "lago_api_key",
+                        "api_key": "urn:zeroship:vault:billing/lago",
                     }
                 }),
-                HashMap::new(),
                 None,
             );
         }
@@ -588,22 +595,32 @@ async fn assert_fail_closed_config(adapter: Adapter) {
             let err = expect_provider_error(build_provider(
                 "lite",
                 serde_json::json!({}),
-                HashMap::new(),
                 None,
             ));
             assert!(err.to_string().contains("LiteStore is required"));
         }
         Adapter::OpenMeter => {
-            assert_provider_config_fails("openmeter", serde_json::json!({}), HashMap::new(), None);
+            assert_provider_config_fails("openmeter", serde_json::json!({}), None);
+            assert_provider_config_fails(
+                "openmeter",
+                serde_json::json!({
+                    "openmeter": { "base_url": "http://127.0.0.1:1", "token": "" }
+                }),
+                None,
+            );
+            assert_provider_config_fails(
+                "openmeter",
+                serde_json::json!({ "openmeter": { "base_url": "", "token": OPENMETER_TOKEN } }),
+                None,
+            );
             assert_provider_config_fails(
                 "openmeter",
                 serde_json::json!({
                     "openmeter": {
                         "base_url": "http://127.0.0.1:1",
-                        "token": "openmeter_token",
+                        "token": "urn:zeroship:vault:billing/openmeter",
                     }
                 }),
-                HashMap::new(),
                 None,
             );
         }
@@ -611,30 +628,27 @@ async fn assert_fail_closed_config(adapter: Adapter) {
             assert_provider_config_fails(
                 "stripe_meters",
                 serde_json::json!({}),
-                HashMap::new(),
                 None,
             );
             assert_provider_config_fails(
                 "stripe_meters",
                 serde_json::json!({
                     "stripe_meters": {
-                        "secret_key": "stripe_secret_key",
+                        "secret_key": STRIPE_SECRET,
                     }
                 }),
-                HashMap::from([("stripe_secret_key".to_string(), STRIPE_SECRET.to_string())]),
                 None,
             );
             assert_provider_config_fails(
                 "stripe_meters",
                 serde_json::json!({
                     "stripe_meters": {
-                        "secret_key": "stripe_secret_key",
+                        "secret_key": STRIPE_SECRET,
                         "meters": {
                             METER: "",
                         },
                     }
                 }),
-                HashMap::from([("stripe_secret_key".to_string(), STRIPE_SECRET.to_string())]),
                 Some(Arc::new(FakeLiteStore::default())),
             );
         }
@@ -642,17 +656,15 @@ async fn assert_fail_closed_config(adapter: Adapter) {
             assert_provider_config_fails(
                 "stripe_invoice",
                 serde_json::json!({}),
-                HashMap::new(),
                 None,
             );
             assert_provider_config_fails(
                 "stripe_invoice",
                 serde_json::json!({
                     "stripe_invoice": {
-                        "secret_key": "stripe_secret_key",
+                        "secret_key": STRIPE_SECRET,
                     }
                 }),
-                HashMap::from([("stripe_secret_key".to_string(), STRIPE_SECRET.to_string())]),
                 None,
             );
         }
@@ -662,10 +674,9 @@ async fn assert_fail_closed_config(adapter: Adapter) {
 fn assert_provider_config_fails(
     id: &str,
     raw_config: serde_json::Value,
-    secrets: HashMap<String, String>,
     store: Option<Arc<FakeLiteStore>>,
 ) {
-    let err = expect_provider_error(build_provider(id, raw_config, secrets, store));
+    let err = expect_provider_error(build_provider(id, raw_config, store));
     assert!(
         matches!(err, ProviderError::Config(_) | ProviderError::Store(_)),
         "{id} invalid config failed with unexpected error: {err}"

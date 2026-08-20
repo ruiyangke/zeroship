@@ -7,13 +7,13 @@ use uuid::Uuid;
 use crate::metering::provider::{
     AggregateQuery, BillingPeriod, Capabilities, CorrectionCapability, DedupContract, DedupKey,
     DedupTtl, IngestAck, InvoiceRef, Meter, MeteringProvider, ProviderCtx, ProviderError,
-    SecretHandle, SubjectRef, UsageEvent,
+    SecretInput, SubjectRef, UsageEvent,
 };
 use crate::stripe_client::{StripeApi, StripeClient};
 
 #[derive(Debug, serde::Deserialize)]
 struct StripeMetersCfg {
-    secret_key: SecretHandle,
+    secret_key: SecretInput,
     meters: HashMap<String, String>,
     #[serde(default = "default_stripe_base_url")]
     base_url: String,

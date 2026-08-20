@@ -4,12 +4,12 @@ use uuid::Uuid;
 
 use crate::metering::provider::{
     BillingPeriod, Capabilities, CorrectionCapability, InvoiceRef, MeteringProvider, ProviderCtx,
-    ProviderError, SecretHandle, SubjectRef,
+    ProviderError, SecretInput, SubjectRef,
 };
 
 #[derive(Debug, serde::Deserialize)]
 struct StripeInvoiceCfg {
-    secret_key: SecretHandle,
+    secret_key: SecretInput,
 }
 
 pub struct StripeInvoiceProvider {
