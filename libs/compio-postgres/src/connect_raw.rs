@@ -37,6 +37,12 @@ use postgres_protocol::message::frontend;
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 
+/// A normal PostgreSQL startup emits no notices, and a new session cannot
+/// ordinarily receive notifications before it has issued `LISTEN`. Leave room
+/// for hundreds of extension or hook warnings, but reject a pathological peer
+/// before handshake-time asynchronous messages can grow without bound.
+const MAX_DELAYED_HANDSHAKE_MESSAGES: usize = 256;
+
 /// Carries the handshake-time state: the wrapped stream, a cursor through
 /// the currently-in-flight `BackendMessages` batch, and a deferred queue of
 /// async messages (NoticeResponse / NotificationResponse) that arrive
@@ -75,7 +81,7 @@ where
     ///
     /// - `NoticeResponse` / `NotificationResponse` are deferred into
     ///   `delayed` so the connection task can replay them on its first
-    ///   iteration. This matches tokio-postgres's behavior.
+    ///   iteration.
     /// - `ParameterStatus` is returned inline so `read_info` can fold
     ///   it into the parameter map that becomes `Connection.parameters`.
     ///   If we deferred it instead, a caller of `Connection::parameter`
@@ -98,7 +104,7 @@ where
                         // Preserve ordering — the connection task
                         // will replay these in front of its first
                         // real read.
-                        self.delayed.push_back(msg);
+                        self.delay(msg)?;
                     }
                     // ParameterStatus must be surfaced to the handshake
                     // caller so `read_info` updates the parameter map
@@ -114,6 +120,21 @@ where
                 }
             }
         }
+    }
+
+    fn delay(&mut self, msg: Message) -> Result<(), Error> {
+        if self.delayed.len() >= MAX_DELAYED_HANDSHAKE_MESSAGES {
+            return Err(Error::io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "too many asynchronous messages during connection handshake (max \
+                     {MAX_DELAYED_HANDSHAKE_MESSAGES})"
+                ),
+            )));
+        }
+
+        self.delayed.push_back(msg);
+        Ok(())
     }
 }
 
@@ -498,14 +519,193 @@ where
                 // Preserve ordering by pushing back into the handshake
                 // delayed queue; the connection task will replay these
                 // on startup.
-                handshake
-                    .delayed
-                    .push_back(Message::NoticeResponse(body));
+                handshake.delay(Message::NoticeResponse(body))?;
             }
             Some(Message::ReadyForQuery(_)) => return Ok((process_id, secret_key, parameters)),
             Some(Message::ErrorResponse(body)) => return Err(Error::db(body)),
             Some(_) => return Err(Error::unexpected_message()),
             None => return Err(Error::closed()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::AsyncMessage;
+    use crate::config::SslMode;
+    use crate::tls::NoTls;
+    use compio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+    use compio::net::{TcpListener, TcpStream};
+    use futures_channel::oneshot;
+    use futures_util::StreamExt;
+    use std::time::Duration;
+
+    const EXPECTED_DELAYED_MESSAGE_LIMIT: usize = 256;
+
+    fn frame(tag: u8, body: &[u8]) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(5 + body.len());
+        frame.push(tag);
+        frame.extend_from_slice(&u32::try_from(body.len() + 4).unwrap().to_be_bytes());
+        frame.extend_from_slice(body);
+        frame
+    }
+
+    fn notice(message: &str) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(b"SNOTICE\0");
+        body.extend_from_slice(b"VNOTICE\0");
+        body.extend_from_slice(b"C00000\0");
+        body.push(b'M');
+        body.extend_from_slice(message.as_bytes());
+        body.extend_from_slice(b"\0\0");
+        frame(b'N', &body)
+    }
+
+    fn successful_handshake(notices: impl IntoIterator<Item = Vec<u8>>) -> Vec<u8> {
+        let mut script = frame(b'R', &0u32.to_be_bytes());
+        for notice in notices {
+            script.extend_from_slice(&notice);
+        }
+        script.extend_from_slice(&frame(b'K', &[0; 8]));
+        script.extend_from_slice(&frame(b'Z', b"I"));
+        script
+    }
+
+    async fn scripted_server_after_startup(
+        server_says: Option<Vec<u8>>,
+    ) -> (crate::Socket, oneshot::Receiver<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (startup_seen, startup_observed) = oneshot::channel();
+
+        compio::runtime::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+
+            let compio::BufResult(result, length) = socket.read_exact(vec![0u8; 4]).await;
+            result.unwrap();
+            let length = u32::from_be_bytes(length.try_into().unwrap()) as usize;
+            assert!(length >= 4, "startup packet length must include its header");
+
+            let compio::BufResult(result, _) =
+                socket.read_exact(vec![0u8; length - 4]).await;
+            result.unwrap();
+            let _ = startup_seen.send(());
+
+            if let Some(server_says) = server_says {
+                let compio::BufResult(result, _) = socket.write_all(server_says).await;
+                result.unwrap();
+                socket.flush().await.unwrap();
+            } else {
+                // Startup is on the wire and the client is waiting for
+                // authentication. Stay silent until it drops the stream.
+                let compio::BufResult(_, _) = socket.read(vec![0u8; 1]).await;
+            }
+        })
+        .detach();
+
+        (
+            crate::Socket::new_tcp(TcpStream::connect(addr).await.unwrap()),
+            startup_observed,
+        )
+    }
+
+    fn plaintext_config() -> Config {
+        let mut config = Config::new();
+        config
+            .user("scripted-user")
+            .ssl_mode(SslMode::Disable)
+            .connect_timeout(Duration::from_secs(5));
+        config
+    }
+
+    #[compio::test]
+    async fn handshake_rejects_excess_delayed_messages() {
+        let notices = (0..=EXPECTED_DELAYED_MESSAGE_LIMIT)
+            .map(|index| notice(&format!("notice {index}")));
+        let (stream, _) =
+            scripted_server_after_startup(Some(successful_handshake(notices))).await;
+
+        let error = match plaintext_config().connect_raw(stream, NoTls).await {
+            Ok(_) => panic!(
+                "handshake retained more than {EXPECTED_DELAYED_MESSAGE_LIMIT} delayed messages"
+            ),
+            Err(error) => error,
+        };
+        let cause = error
+            .into_source()
+            .expect("the delayed-message error must explain the limit");
+        let io = cause
+            .downcast_ref::<std::io::Error>()
+            .expect("the delayed-message limit is a protocol I/O error");
+        assert_eq!(io.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            io.to_string()
+                .contains(&EXPECTED_DELAYED_MESSAGE_LIMIT.to_string()),
+            "the error must name the delayed-message limit: {io}"
+        );
+    }
+
+    #[compio::test]
+    async fn handshake_replays_a_few_delayed_notices() {
+        const NOTICE_TEXTS: [&str; 3] = ["first warning", "second warning", "third warning"];
+        let notices = NOTICE_TEXTS.into_iter().map(notice);
+        let (stream, _) =
+            scripted_server_after_startup(Some(successful_handshake(notices))).await;
+
+        let (client, mut connection) = plaintext_config()
+            .connect_raw(stream, NoTls)
+            .await
+            .expect("a normal handshake with a few notices must succeed");
+        let mut messages = connection.notifications();
+        let run = compio::runtime::spawn(async move { connection.run().await });
+
+        for expected in NOTICE_TEXTS {
+            let message = compio::time::timeout(Duration::from_secs(5), messages.next())
+                .await
+                .expect("connection task did not replay the delayed notice")
+                .expect("the asynchronous message stream ended before replay");
+            match message {
+                AsyncMessage::Notice(notice) => assert_eq!(notice.message(), expected),
+                other => panic!("expected a delayed notice, got {other:?}"),
+            }
+        }
+
+        drop(client);
+        let _ = compio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("scripted connection task did not stop after its peer closed");
+    }
+
+    #[compio::test]
+    async fn connect_raw_timeout_covers_a_stalled_handshake() {
+        let (stream, startup_observed) = scripted_server_after_startup(None).await;
+        let mut config = plaintext_config();
+        config.connect_timeout(Duration::from_secs(1));
+        let connect =
+            compio::runtime::spawn(async move { config.connect_raw(stream, NoTls).await });
+
+        compio::time::timeout(Duration::from_secs(5), startup_observed)
+            .await
+            .expect("client did not send startup before the test watchdog")
+            .expect("server closed before observing the complete startup packet");
+
+        let result = compio::time::timeout(Duration::from_secs(5), connect)
+            .await
+            .expect("outer watchdog expired because connect_raw ignored connect_timeout")
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        let error = match result {
+            Ok(_) => panic!("a silent server completed the PostgreSQL handshake"),
+            Err(error) => error,
+        };
+
+        let cause = error
+            .into_source()
+            .expect("connection timeout must retain its I/O cause");
+        let io = cause
+            .downcast_ref::<std::io::Error>()
+            .expect("connection timeout cause must be an I/O error");
+        assert_eq!(io.kind(), std::io::ErrorKind::TimedOut);
+        assert_eq!(io.to_string(), "connection timed out");
     }
 }
