@@ -642,6 +642,51 @@ show_last_output
 expect_status 2 "worker REJECTS --config rather than silently ignoring it"
 echo ""
 
+echo "=== Case 13c: no harness under tests/ launches the worker with --config ==="
+# REGRESSION, and case 13b is not it. 13b proves the BINARY rejects the flag;
+# what actually broke is that nine harnesses kept passing it. Between
+# 9b205f6ed (2026-08-16) and 2026-08-20 each of those died on
+#
+#     error: unexpected argument '--config' found
+#
+# before its first assertion, and three were CI-gated under `set -o pipefail`,
+# so nothing masked it and nothing reported it either: a `run:` step whose
+# script exits 2 at line 140 looks identical to one whose script was never
+# meant to get further. Two of those CI steps carried a pass/fail count in a
+# comment that had been false for four days.
+#
+# Static, because the alternative - running nine docker-backed harnesses - is
+# not a gate anybody runs before pushing. It is scoped to the COMMAND, not the
+# file: `--config` is correct in every one of these harnesses for control, the
+# gateway, migrated and auth, so a file-level grep would be all false positives.
+#
+# Backslash continuations are joined first. The naive line-level grep found
+# three of the four real cases and missed e2e_metering_billing.sh, whose
+# `--config "$CFG_TOML" \` sat on its own continuation line with the binary two
+# lines above - which is the same one-line-at-a-time blindness that let the
+# whole class survive four days of green CI.
+worker_config_launches="$(
+    for f in "$ROOT"/tests/*.sh; do
+        case "$f" in *config_check_e2e.sh) continue ;; esac
+        awk -v file="$f" '
+            { line = line $0 }
+            /\\$/ { sub(/\\$/, " ", line); next }
+            {
+              if (line ~ /zeroship-worker/ && line ~ /--config([ =]|$)/)
+                  printf "%s:%d: %s\n", file, NR, line
+              line = ""
+            }
+        ' "$f"
+    done
+)"
+if [ -n "$worker_config_launches" ]; then
+    fail "a harness passes --config to the worker, which exits 2 before asserting anything"
+    printf '%s\n' "$worker_config_launches" | sed 's/^/    /'
+else
+    pass "no tests/ harness passes --config on a zeroship-worker launch line"
+fi
+echo ""
+
 echo "=== Case 14: --check-config-format json is machine-readable everywhere ==="
 # Also the negative half of the ValueEnum conversion: an unknown format is now
 # rejected by clap rather than silently falling back to text.
@@ -763,15 +808,22 @@ fi
 # the deleted-source set, the canonical-path overlay tiers, the inverted literal
 # rule and the presence-only sentinel.
 #
-# Case 18 (the platform mint destination, split from the issuer) added eight:
-# four on the reported issuer/mint pair, one on the refusal when only the
-# issuer is set, three on the rejected spellings. MEASURED after it landed: 84.
-# Case 18b adds two process-level refusals for mint-key equality with each key a
-# worker process holds, bringing the assertion floor to 86.
+# Case 18 (the platform mint destination, split from the issuer) added eight
+# and case 18b two, taking the floor to 86. BOTH CASES ARE GONE: 479f1b979
+# (2026-08-17) dropped `auth.platform_mint_key` and `auth.platform_mint_url`
+# and deleted the cases that asserted on them, which is correct - they test a
+# setting that no longer exists - but the floor stayed at 86. From that commit
+# this harness has printed "76 passed, 0 failed" and then exited 1, in a CI
+# step that runs it by bare path, for three days.
+#
+# It is the failure the floor is FOR, aimed at itself: nothing failed, ten
+# assertions were missing, and the only thing wrong was that nobody re-measured.
+# Lowered deliberately to the measured value on 2026-08-20, which is 77: the 76
+# that survived 479f1b979, plus case 13c.
 #
 # Raise it when you add cases. If it trips after you deleted a case on purpose,
 # lower it deliberately and say so in the commit -- do not delete the check.
-CONFIG_CHECK_MIN_PASSED=86
+CONFIG_CHECK_MIN_PASSED=77
 if [ "$PASS" -lt "$CONFIG_CHECK_MIN_PASSED" ]; then
     echo "" >&2
     echo "FLOOR: only $PASS assertions passed, expected at least $CONFIG_CHECK_MIN_PASSED." >&2
