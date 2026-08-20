@@ -101,7 +101,7 @@ pub const PENDING_LINK_TTL_SECS: u64 = 600;
 /// Stash-equivalent payload carried between the federation callback and
 /// `/link`. Signed + base64url-encoded; opaque to the browser.
 ///
-/// Reuses [`crate::config::AuthConfig::stash_signing_key`] for the HMAC
+/// Reuses [`crate::config::AuthSettings::stash_signing_key`] for the HMAC
 /// key. The wire format is shape-distinct from
 /// [`crate::ui::oauth_stash::OAuthStash`] (different field set, includes
 /// `exp_unix`) so the two are not confusable.
@@ -185,7 +185,8 @@ fn has_return_to(return_to: Option<&str>) -> bool {
 ///
 /// `pending_signing_key` is the HMAC key used to sign the
 /// `NeedsConfirmation` token. In production this is
-/// `cfg.stash_signing_key.as_bytes()` (shared with the OAuth stash cookie).
+/// `cfg.settings.stash_signing_key.expose_str().as_bytes()` (shared with the
+/// OAuth stash cookie).
 ///
 /// # Errors
 ///
