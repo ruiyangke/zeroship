@@ -84,6 +84,32 @@
 # become per-run AND the triggers need a WHEN clause scoping them to their own
 # run's rows, because a trigger on a shared table fires for the peer too.
 #
+# AND THE PART THAT IS WORSE THAN "CONCURRENT RUNS GO RED": one of those tests
+# can POISON THE SHARED DATABASE FOR EVERY LATER RUN, INCLUDING SINGLE ONES.
+# `signup_forgot_ratelimit_test` inserts a user named `M3_FAIL` and adds
+# `CHECK (name <> 'M3_FAIL')` to zeroship.users. Lose the race, panic between
+# the insert and the cleanup, and the row stays - and because nothing ever
+# drops this database, it stays forever.
+#
+# MEASURED 2026-08-20, and it is why the numbers above have to be read with a
+# date on them: a SINGLE run of `cargo test -p zeroship-auth` on a clean
+# database was 254/0, and the same command after the concurrent runs was
+# 253 passed / 1 failed -
+#     add test constraint: ... check constraint
+#     "auth_users_signup_m3_name_check" of relation "users" is violated by
+#     some row      (SqlState 23514)
+# on ONE row, left at 13:29:13Z by a concurrent run that died mid-test. No
+# concurrency was involved in the failure; the residue was.
+#
+# RECOVERY IS ONE COMMAND, and it is the thing to reach for whenever this gate
+# fails in a way that looks like state rather than code:
+#
+#     psql -c 'DROP DATABASE zeroship_auth_test_<hash>'
+#
+# The next run recreates and re-migrates it in about a minute. That is the
+# whole point of deriving the name - the database is reproducible, so throwing
+# it away costs nothing and no one has to decide whether it was still wanted.
+#
 # PROVISION FIRST. This script creates and migrates a DATABASE; it does not
 # create a SERVER, and it fails at line ~110 if none is listening. Stand one up
 # with `tests/provision_test_backends.sh`, which brings up deploy/compose's
