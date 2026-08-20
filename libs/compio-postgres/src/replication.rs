@@ -72,7 +72,8 @@ use crate::client::Addr;
 use crate::config::Host;
 use bytes::{BufMut, BytesMut};
 use compio::io::{AsyncRead, AsyncWrite};
-use postgres_protocol::message::backend::Message;
+use fallible_iterator::FallibleIterator;
+use postgres_protocol::message::backend::{DataRowBody, Message};
 use postgres_protocol::message::frontend;
 use std::collections::HashMap;
 
@@ -291,7 +292,7 @@ where
             match msg {
                 Message::RowDescription(_) => {}
                 Message::DataRow(row) => {
-                    let parsed = parse_identify_system_row(row.buffer())?;
+                    let parsed = parse_identify_system_row(&row)?;
                     systemid = parsed.systemid;
                     timeline = parsed.timeline;
                     xlogpos = parsed.xlogpos;
@@ -817,36 +818,42 @@ fn error_from_error_response_body(mut body: BytesMut) -> Error {
     }
 }
 
-/// Parse the body of the `IDENTIFY_SYSTEM` `DataRow` into an
-/// [`IdentifySystem`].
+/// Parse an `IDENTIFY_SYSTEM` `DataRow` into an [`IdentifySystem`].
 ///
-/// `buf` is the raw `DataRow` body: a `u16` field count followed by that
-/// many length-prefixed fields (`i32` length, then `length` bytes; a
-/// negative length is SQL NULL). The four fields, in order, are
-/// `systemid`, `timeline`, `xlogpos`, `dbname` (`dbname` is NULL when
-/// the connection isn't bound to a database).
+/// The four fields, in order, are `systemid`, `timeline`, `xlogpos` and
+/// `dbname`; `dbname` is SQL NULL when the connection is not bound to a
+/// database, and maps to `None`.
 ///
-/// Every read is bounds-checked: a truncated or malformed row yields an
-/// `Err` (mirroring the pgoutput decoder's `read_u8/u16/u32` posture)
-/// instead of indexing out of bounds and panicking the replication
-/// task.
-fn parse_identify_system_row(buf: &[u8]) -> Result<IdentifySystem, Error> {
-    // 4 fields per the spec, encoded as length-prefixed strings. Parse
-    // positionally, bounds-checking each read.
-    let mut idx = 0usize;
-    let n = read_u16_be(buf, &mut idx)? as usize;
-    let mut fields: Vec<Option<&str>> = Vec::with_capacity(n);
-    for _ in 0..n {
-        let len = read_i32_be(buf, &mut idx)?;
-        if len < 0 {
-            fields.push(None);
-        } else {
-            let end = idx.checked_add(len as usize).ok_or_else(eof_identify_row)?;
-            let slice = buf.get(idx..end).ok_or_else(eof_identify_row)?;
-            fields.push(Some(
-                std::str::from_utf8(slice).map_err(|e| Error::parse(std::io::Error::other(e)))?,
-            ));
-            idx = end;
+/// THE FIELD COUNT IS NOT IN THE BUFFER, which is the whole reason this takes
+/// a [`DataRowBody`] rather than a byte slice. `Message::parse` consumes the
+/// `DataRow`'s `u16` count into `DataRowBody::len` and keeps only the
+/// length-prefixed fields in `storage` - and `storage` is exactly what
+/// `buffer()` returns. This function used to take `row.buffer()` and read a
+/// `u16` count off the front of it, which landed on the top two bytes of the
+/// FIRST FIELD'S `i32` length. Any length below 65536 encodes as
+/// `00 00 hi lo`, so the count read as zero for every real server: the field
+/// loop never ran and `identify_system` returned an empty systemid, a zero
+/// timeline and an empty xlogpos while reporting success.
+///
+/// [`DataRowBody::ranges`] is the accessor for this, and it carries the count
+/// `parse` already took off the wire, so the framing here cannot drift from
+/// the framing that produced the row. It is also bounds-checked, so a
+/// truncated or malformed row yields an `Err` rather than panicking the
+/// replication task.
+fn parse_identify_system_row(row: &DataRowBody) -> Result<IdentifySystem, Error> {
+    let mut fields: Vec<Option<&str>> = Vec::new();
+    let mut ranges = row.ranges();
+    let buf = row.buffer();
+    while let Some(range) = ranges.next().map_err(Error::parse)? {
+        match range {
+            None => fields.push(None),
+            Some(range) => {
+                let slice = buf.get(range).ok_or_else(eof_identify_row)?;
+                fields.push(Some(
+                    std::str::from_utf8(slice)
+                        .map_err(|e| Error::parse(std::io::Error::other(e)))?,
+                ));
+            }
         }
     }
 
@@ -860,24 +867,6 @@ fn parse_identify_system_row(buf: &[u8]) -> Result<IdentifySystem, Error> {
         xlogpos: fields.get(2).and_then(|f| *f).unwrap_or("").to_string(),
         dbname: fields.get(3).and_then(|f| *f).map(|s| s.to_string()),
     })
-}
-
-/// Read a big-endian `u16` at `*idx`, advancing `*idx` by 2. Returns an
-/// `UnexpectedEof` parse error if fewer than 2 bytes remain.
-fn read_u16_be(buf: &[u8], idx: &mut usize) -> Result<u16, Error> {
-    let end = idx.checked_add(2).ok_or_else(eof_identify_row)?;
-    let slice = buf.get(*idx..end).ok_or_else(eof_identify_row)?;
-    *idx = end;
-    Ok(u16::from_be_bytes([slice[0], slice[1]]))
-}
-
-/// Read a big-endian `i32` at `*idx`, advancing `*idx` by 4. Returns an
-/// `UnexpectedEof` parse error if fewer than 4 bytes remain.
-fn read_i32_be(buf: &[u8], idx: &mut usize) -> Result<i32, Error> {
-    let end = idx.checked_add(4).ok_or_else(eof_identify_row)?;
-    let slice = buf.get(*idx..end).ok_or_else(eof_identify_row)?;
-    *idx = end;
-    Ok(i32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]))
 }
 
 /// The `UnexpectedEof` error returned when the `IDENTIFY_SYSTEM`
@@ -1459,81 +1448,143 @@ mod tests {
     use super::*;
     use pgoutput::{PgOutputMessage, TupleColumn};
 
-    /// Build the body of an `IDENTIFY_SYSTEM` `DataRow`: a `u16` field
-    /// count followed by length-prefixed fields (`None` = SQL NULL,
-    /// encoded as length -1).
-    fn identify_row_body(fields: &[Option<&str>]) -> Vec<u8> {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&u16::try_from(fields.len()).unwrap().to_be_bytes());
+    /// Build a whole `DataRow` WIRE MESSAGE and hand it to
+    /// `Message::parse`, so the fixture is the shape production actually
+    /// receives.
+    ///
+    /// The previous helper returned a bare body with the `u16` field count
+    /// still on the front and passed that straight to the parser. No
+    /// `DataRowBody` ever looks like that: `Message::parse` consumes the count
+    /// into `DataRowBody::len` and leaves only the fields in the buffer. So
+    /// the fixture and the parser agreed on a layout the server never sends,
+    /// every case below passed, and `identify_system` returned empty values
+    /// against a real server. Going through `Message::parse` is what makes
+    /// these tests able to fail.
+    fn identify_row(fields: &[Option<&str>]) -> DataRowBody {
+        let mut body = Vec::new();
+        body.extend_from_slice(&u16::try_from(fields.len()).unwrap().to_be_bytes());
         for f in fields {
             match f {
-                None => buf.extend_from_slice(&(-1i32).to_be_bytes()),
+                None => body.extend_from_slice(&(-1i32).to_be_bytes()),
                 Some(s) => {
-                    buf.extend_from_slice(&i32::try_from(s.len()).unwrap().to_be_bytes());
-                    buf.extend_from_slice(s.as_bytes());
+                    body.extend_from_slice(&i32::try_from(s.len()).unwrap().to_be_bytes());
+                    body.extend_from_slice(s.as_bytes());
                 }
             }
         }
-        buf
+
+        let mut wire = vec![b'D'];
+        wire.extend_from_slice(&i32::try_from(body.len() + 4).unwrap().to_be_bytes());
+        wire.extend_from_slice(&body);
+
+        let mut buf = BytesMut::from(&wire[..]);
+        match Message::parse(&mut buf) {
+            Ok(Some(Message::DataRow(row))) => row,
+            other => panic!("fixture did not parse as a DataRow: {:?}", other.is_ok()),
+        }
     }
 
     #[test]
     fn identify_row_parses_well_formed() {
         // 4 fields: systemid, timeline, xlogpos, dbname.
-        let buf = identify_row_body(&[
+        let row = identify_row(&[
             Some("7012345678901234567"),
             Some("3"),
             Some("0/16B3750"),
             Some("zeroship"),
         ]);
-        let got = parse_identify_system_row(&buf).expect("well-formed row must parse");
+        let got = parse_identify_system_row(&row).expect("well-formed row must parse");
         assert_eq!(got.systemid, "7012345678901234567");
         assert_eq!(got.timeline, 3);
         assert_eq!(got.xlogpos, "0/16B3750");
         assert_eq!(got.dbname.as_deref(), Some("zeroship"));
 
         // dbname NULL (physical replication connection) must parse to None.
-        let buf = identify_row_body(&[Some("701"), Some("1"), Some("0/0"), None]);
-        let got = parse_identify_system_row(&buf).expect("row with NULL dbname must parse");
+        let row = identify_row(&[Some("701"), Some("1"), Some("0/0"), None]);
+        let got = parse_identify_system_row(&row).expect("row with NULL dbname must parse");
         assert_eq!(got.dbname, None);
+        assert_eq!(got.timeline, 1);
+    }
+
+    /// A systemid whose length happens to start with zero bytes is the exact
+    /// shape that made the old parser return nothing.
+    ///
+    /// Any length below 65536 encodes as `00 00 hi lo`, so reading a `u16`
+    /// off the front of the first field's `i32` length always yielded 0. That
+    /// is every real system identifier, which is why this failed against every
+    /// server rather than some unusual one.
+    #[test]
+    fn identify_row_field_count_is_not_re_read_from_the_body() {
+        let row = identify_row(&[
+            Some("7676199916444573733"),
+            Some("1"),
+            Some("0/1A2B3C8"),
+            Some("zeroship"),
+        ]);
+        let got = parse_identify_system_row(&row).expect("well-formed row must parse");
+        assert_eq!(
+            got.systemid, "7676199916444573733",
+            "the field count was re-read from the body and swallowed every field"
+        );
         assert_eq!(got.timeline, 1);
     }
 
     #[test]
     fn identify_row_truncated_is_error_not_panic() {
-        // Field count claims 4, but the buffer ends immediately. The
-        // raw-indexing parser indexes buf[2..] out of bounds and panics;
-        // the bounds-checked parser must return Err.
-        let claims_four_no_body = [0x00u8, 0x04];
+        // A DataRow whose header claims more fields than its body carries.
+        // `Message::parse` accepts it (it only splits tag and length), so the
+        // short read surfaces from `ranges()` and must be an Err, not a panic
+        // and not a silently short result.
+        let mut wire = vec![b'D'];
+        let body = [0x00u8, 0x04]; // count 4, no fields
+        wire.extend_from_slice(&i32::try_from(body.len() + 4).unwrap().to_be_bytes());
+        wire.extend_from_slice(&body);
+        let mut buf = BytesMut::from(&wire[..]);
+        let Ok(Some(Message::DataRow(row))) = Message::parse(&mut buf) else {
+            panic!("fixture did not parse as a DataRow");
+        };
         assert!(
-            parse_identify_system_row(&claims_four_no_body).is_err(),
-            "truncated row (count only) must be Err, not panic"
+            parse_identify_system_row(&row).is_err(),
+            "a row claiming 4 fields with no body must be Err, not panic"
         );
 
-        // Field count 1, then a length prefix that runs off the end
-        // (only 2 of the 4 length bytes present).
-        let truncated_len = [0x00u8, 0x01, 0x00, 0x00];
+        // Count 1, then a length prefix that runs off the end.
+        let mut wire = vec![b'D'];
+        let body = [0x00u8, 0x01, 0x00, 0x00];
+        wire.extend_from_slice(&i32::try_from(body.len() + 4).unwrap().to_be_bytes());
+        wire.extend_from_slice(&body);
+        let mut buf = BytesMut::from(&wire[..]);
+        let Ok(Some(Message::DataRow(row))) = Message::parse(&mut buf) else {
+            panic!("fixture did not parse as a DataRow");
+        };
         assert!(
-            parse_identify_system_row(&truncated_len).is_err(),
-            "truncated length prefix must be Err, not panic"
+            parse_identify_system_row(&row).is_err(),
+            "a truncated length prefix must be Err, not panic"
         );
 
-        // Field count 1, length 10, but only 3 payload bytes follow.
-        let mut truncated_payload = Vec::new();
-        truncated_payload.extend_from_slice(&1u16.to_be_bytes());
-        truncated_payload.extend_from_slice(&10i32.to_be_bytes());
-        truncated_payload.extend_from_slice(b"abc");
+        // Count 1, declared length 10, only 3 payload bytes present.
+        let mut wire = vec![b'D'];
+        let mut body = Vec::new();
+        body.extend_from_slice(&1u16.to_be_bytes());
+        body.extend_from_slice(&10i32.to_be_bytes());
+        body.extend_from_slice(b"abc");
+        wire.extend_from_slice(&i32::try_from(body.len() + 4).unwrap().to_be_bytes());
+        wire.extend_from_slice(&body);
+        let mut buf = BytesMut::from(&wire[..]);
+        let Ok(Some(Message::DataRow(row))) = Message::parse(&mut buf) else {
+            panic!("fixture did not parse as a DataRow");
+        };
         assert!(
-            parse_identify_system_row(&truncated_payload).is_err(),
-            "field length exceeding remaining bytes must be Err, not panic"
+            parse_identify_system_row(&row).is_err(),
+            "a field length exceeding the remaining bytes must be Err, not panic"
         );
 
-        // Completely empty buffer: even the u16 field count can't be read.
-        let empty: [u8; 0] = [];
-        assert!(
-            parse_identify_system_row(&empty).is_err(),
-            "empty row body must be Err, not panic"
-        );
+        // A row with no fields at all yields the empty identity rather than an
+        // error: there is nothing malformed about it, and `identify_system`
+        // reports the absence through its own values.
+        let row = identify_row(&[]);
+        let got = parse_identify_system_row(&row).expect("an empty row is not malformed");
+        assert_eq!(got.systemid, "");
     }
 
     /// Build a full `ErrorResponse` wire message: `E` tag + 4-byte
