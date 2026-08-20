@@ -176,7 +176,10 @@ fn no_sqlite_render_path_is_quoted_by_the_postgres_pinned_wrapper() {
 /// # What it is for now that the census is at zero
 ///
 /// It is the reason the fix is PROVABLY byte-neutral. Both `quote_ident`
-/// implementations are the same `dml::escape_quote_ident(ident)`, so re-pointing six
+/// implementations are the same `super::ansi_double_quote_ident(ident)` (they were
+/// `dml::escape_quote_ident(ident)` until that primitive moved into
+/// `render::backends` and became private to it; the move changed the name and the
+/// visibility, not the bytes), so re-pointing six
 /// calls from one to the other cannot move a byte of emitted SQL - which is the
 /// claim the gate's identical pass counts corroborate but cannot, on their own,
 /// distinguish from "the changed path is untested".

@@ -89,6 +89,25 @@
 //! `zero-migrate` binaries pass with byte-identical counts before and after — the
 //! seam changed no emitted byte, only who decided it.
 //!
+//! AND THE CONTROL, WITHOUT WHICH THAT GREEN IS WORTHLESS. Identical pass counts
+//! are evidence only if the suites can SEE these bytes at all; a suite blind to the
+//! changed path reports the same green either way. So the same nine binaries were
+//! re-run with [`ansi_double_quote_ident`] itself corrupted by one token:
+//!
+//! | binary | red |  | binary | red |
+//! |--------|-----|--|--------|-----|
+//! | `--lib` | 123 | | `column_shapes` | 74 |
+//! | `sqlite_engine` | 118 | | `rename` | 26 |
+//! | `pg_engine` | 78 | | `ir_contract` | 18 |
+//! | `pg_drift` | 19 | | `dialect_matrix` | 7 |
+//! | `mysql_engine` | 1 | | **total** | **464** |
+//!
+//! Every binary reddens, so every binary's green is load-bearing. `mysql_engine`
+//! reddening only ONCE is not a blind spot but a confirmation: MySQL spells
+//! identifiers with backticks and never calls this function, and its single red is
+//! the PG-shaped constraintdef normal form described below, arriving exactly where
+//! that section says it does.
+//!
 //! # What is still coupled, and where
 //!
 //! Two SQLite render paths still reach the PG-pinned core wrappers, both OUTSIDE
