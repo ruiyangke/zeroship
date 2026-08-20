@@ -68,6 +68,32 @@
 # which says so). Nothing here needs a compiler-checked rule table, which is the
 # reason the compose secret gate is Rust.
 #
+# MEASURED DISCRIMINATION, 2026-08-20, each mutation confirmed present with
+# `git diff` before the red run and absent after, and each followed by a green
+# re-run on the restored tree:
+#
+#   tokio = { version = "1", ... } in crates/config-contract  -> red, arm
+#       `declared`, naming zeroship-config-contract
+#   rt = { package = "tokio", version = "1" } in the same file -> red, arm
+#       `declared`, naming tokio; a text grep for `tokio =` sees nothing here
+#   tokio in the root [workspace.dependencies], and the renamed form there
+#       -> red, arm `declared`, naming Cargo.toml; cargo metadata carries no
+#       virtual-manifest table, so this is the arm's second, hand-rolled half
+#   "tokio1" added to lettre's feature list in crates/mailer -> red, arm
+#       `carriers`, naming lettre. NO manifest declares tokio and NO package
+#       enters the lockfile; one feature word moves the edge. This is why the
+#       carrier arm reads `cargo tree`, which resolves features, and not
+#       `cargo metadata`, whose graph already lists lettre's optional tokio
+#       dependency and so cannot tell the two states apart.
+#   cyper = { workspace = true } in crates/config-contract -> red, arm
+#       `entrypoints`, naming zeroship-config-contract
+#   a name added to PINNED_CARRIERS that nothing reaches -> red, "pinned but
+#       no longer reaching tokio", which is the removal direction
+#
+# THE ONE-VARIABLE CONTROL: `url = { version = "2", features = ["serde"] }`,
+# added to the same file, in the same table, in the same edit shape -> GREEN.
+# The gate reacts to tokio, not to a Cargo.toml having been touched.
+#
 # WHAT THIS DOES NOT CHECK. It does not read source: a crate could use tokio
 # types re-exported by something else and this would not know. It does not rule
 # on `third_party/zero-migrate`, which is its own cargo workspace and is
@@ -117,7 +143,10 @@ if ! (cd "$ROOT" && cargo metadata --format-version 1) > "$TMP/meta.json" 2> "$T
 fi
 
 # `sort -u` over a whitespace-separated list, so pins may be written in any
-# order and compared as sets.
+# order and compared as sets. The unquoted expansion is the point: the pins are
+# written as one whitespace-separated string and word splitting is what turns
+# them into elements.
+# shellcheck disable=SC2086
 as_set() { printf '%s\n' $1 | sed '/^$/d' | LC_ALL=C sort -u; }
 
 # ---------------------------------------------------------------------------
@@ -144,8 +173,10 @@ members_checked=$(jq -r '(.workspace_members) as $ws
 
 # The virtual root manifest is not a package, so cargo metadata does not carry
 # its `[workspace.dependencies]` table. Read the keys, and the renamed form.
+# A section header is `[` followed by a letter, so a value that happens to start
+# a line with `[` does not silently end the table scan.
 awk '
-  /^[[:space:]]*\[/ { in_ws = ($0 ~ /^[[:space:]]*\[workspace\.dependencies\][[:space:]]*$/); next }
+  /^[[:space:]]*\[[A-Za-z]/ { in_ws = ($0 ~ /^[[:space:]]*\[workspace\.dependencies\][[:space:]]*$/); next }
   !in_ws { next }
   /^[[:space:]]*#/ { next }
   /^[[:space:]]*[A-Za-z0-9_-]+[[:space:]]*=/ {
