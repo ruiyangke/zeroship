@@ -72,11 +72,28 @@
 //!                        kept apart by anything. The process boundary used to
 //!                        do it for free: cargo runs test binaries one at a
 //!                        time, never two at once. It cannot do it now.
+//!
+//!                        The gates do not even cover their own sweep. TEN
+//!                        modules drive `billing_reconcile` (billing_credit,
+//!                        billing_notify, billing_proration, billing_reconcile,
+//!                        billing_redesign_regression, billing_refund_void,
+//!                        billing_safety_net, billing_tax, spend,
+//!                        stripe_reconcile - counted 2026-08-20 by grepping the
+//!                        directory for the module path, not by reading the lock
+//!                        names) and only six of them hold a `RECONCILE_LOCK`.
+//!                        FIVE drive `SpendEngine`, of which two hold a
+//!                        `SWEEP_LOCK`. So the ceiling on safety here is the
+//!                        thread count, not the locks.
+//!
 //!                        `tests/run_billing_suite.sh` passes `--test-threads 1`
 //!                        and always has, which is what makes the gated target
 //!                        safe; a bare `cargo test -p zeroship-control
 //!                        --features live-db-tests` does NOT pass it, and that
-//!                        is the run where these gates are exposed.
+//!                        is the run where these gates are exposed. If that run
+//!                        is to be made reliable, the fix is ONE gate per sweep
+//!                        in `tests/common/`, not eleven private ones - which
+//!                        edits test bodies and was deliberately left undone
+//!                        here.
 //!   shared `common`      CHECKED, and also a behaviour change.
 //!                        `common::isolated_closed_period_now()` memoises a
 //!                        random far-future month in a `OnceLock`. `common` is
