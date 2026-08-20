@@ -1,48 +1,8 @@
-import { grant, raw, revoke } from "@zeroship/migrate";
+import { grant, revoke } from "@zeroship/migrate";
 
 export const name = "grants";
 
 export function up() {
-  // The worker streams creator-table WAL and owns only per-app workflow
-  // journals. REPLICATION is required for the former; membership in the
-  // NOLOGIN workflow owner is required for the latter. Neither capability
-  // grants a write path into the platform schema.
-  raw({
-    sql: "ALTER ROLE zeroship_worker WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT REPLICATION BYPASSRLS",
-    reason: "the role DSL does not expose PostgreSQL's REPLICATION attribute",
-  });
-  raw({
-    sql: "ALTER ROLE zeroship_workflow_owner WITH NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS",
-    reason: "reassert the exact narrow attributes of the workflow journal owner",
-  });
-  raw({
-    sql: "GRANT zeroship_workflow_owner TO zeroship_worker",
-    reason: "reassert membership when platform roles predate a fresh migration run",
-  });
-
-  // Start from zero effective authority over every current and future platform
-  // relation. Later grants give the worker only the columns its workflow
-  // dispatcher reads. This schema-wide deny is the class boundary: it includes
-  // device_grants and every other authorization-decision table without relying
-  // on a hand-maintained sensitive-table list.
-  raw({
-    sql: "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA zeroship FROM zeroship_worker",
-    reason: "the grant DSL has no ALL TABLES IN SCHEMA target",
-  });
-  raw({
-    sql: "REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA zeroship FROM zeroship_worker",
-    reason: "the worker must not advance platform-owned sequences",
-  });
-  raw({
-    sql: "ALTER DEFAULT PRIVILEGES IN SCHEMA zeroship REVOKE ALL PRIVILEGES ON TABLES FROM zeroship_worker",
-    reason: "future platform tables must inherit the same deny-by-default boundary",
-  });
-  raw({
-    sql: "ALTER DEFAULT PRIVILEGES IN SCHEMA zeroship REVOKE ALL PRIVILEGES ON SEQUENCES FROM zeroship_worker",
-    reason: "future platform sequences must inherit the same deny-by-default boundary",
-  });
-  revoke({ privileges: ["create"], on: { kind: "schema", names: ["zeroship"] }, from: ["zeroship_worker", "zeroship_workflow_owner"] });
-
   grant({ privileges: ["usage"], on: { kind: "schema", names: ["zeroship"] }, to: ["zeroship_auth", "zeroship_control", "zeroship_gateway", "zeroship_worker", "zeroship_app"] });
   grant({ privileges: ["create", "usage"], on: { kind: "schema", names: ["zeroship"] }, to: ["sandbox_admin"] });
   grant({ privileges: ["usage"], on: { kind: "schema", names: ["zeroship"] }, to: ["sandbox_app"] });
@@ -52,10 +12,9 @@ export function up() {
   grant({ privileges: ["select", "insert", "update", "delete"], on: { kind: "table", schema: "zeroship", names: ["users", "idp_sessions", "magic_links", "magic_completions", "email_verifications", "totp_credentials", "totp_backup_codes", "oauth_refresh_tokens", "oauth_authorization_codes", "device_grants", "signing_keys", "oidc_session_clients"] }, to: ["zeroship_auth"] });
   grant({ privileges: ["select", "insert", "delete"], on: { kind: "table", schema: "zeroship", names: ["federated_identities", "jwk_key_state", "rate_limits", "audit_events"] }, to: ["zeroship_auth"] });
   grant({ privileges: ["select", "insert", "update"], on: { kind: "table", schema: "zeroship", names: ["oauth_grants", "oauth_clients", "token_revocations"] }, to: ["zeroship_auth"] });
-  grant({ privileges: ["select"], on: { kind: "table", schema: "zeroship", names: ["app_scope_defs", "principal_grants"] }, to: ["zeroship_auth"] });
+  grant({ privileges: ["select"], on: { kind: "table", schema: "zeroship", names: ["app_scope_defs"] }, to: ["zeroship_auth"] });
   grant({ privileges: ["select", "insert"], on: { kind: "table", schema: "zeroship", names: ["email_suppressions", "cron_state"] }, to: ["zeroship_auth"] });
-  grant({ privileges: ["select", "insert", "update"], on: { kind: "table", schema: "zeroship", names: ["app_user_identities"] }, to: ["zeroship_auth"] });
-  grant({ privileges: ["select", "update"], on: { kind: "table", schema: "zeroship", names: ["app_session_anchors"] }, to: ["zeroship_auth"] });
+  grant({ privileges: ["select", "update"], on: { kind: "table", schema: "zeroship", names: ["app_user_identities", "app_session_anchors"] }, to: ["zeroship_auth"] });
   grant({ privileges: ["select", "delete"], on: { kind: "table", schema: "zeroship", names: ["gateway_sessions"] }, to: ["zeroship_auth"] });
   grant({ privileges: ["select", "insert", "update"], on: { kind: "table", schema: "zeroship", names: ["gateway_sessions", "app_user_identities"] }, to: ["zeroship_gateway"] });
   grant({ privileges: ["select", "insert", "update", "delete"], on: { kind: "table", schema: "zeroship", names: ["app_session_anchors"] }, to: ["zeroship_gateway"] });
@@ -70,14 +29,6 @@ export function up() {
   grant({ privileges: ["select", "delete"], on: { kind: "table", schema: "zeroship", names: ["rate_limits"] }, to: ["zeroship_control"] });
   grant({ privileges: ["insert"], on: { kind: "table", schema: "zeroship", names: ["app_audit"] }, to: ["zeroship_control"] });
   grant({ privileges: ["select", "update"], on: { kind: "table", schema: "zeroship", names: ["app_user_identities"] }, to: ["zeroship_control"] });
-  raw({
-    sql: "GRANT SELECT (id, plan_id, workflows_enabled) ON zeroship.apps TO zeroship_worker",
-    reason: "workflow claims need only the app's plan and workflow enablement fields",
-  });
-  raw({
-    sql: "GRANT SELECT (id, name, runtime_limits_json, workflows_allowed, archived) ON zeroship.plans TO zeroship_worker",
-    reason: "workflow claims need only the plan fields that set execution limits and eligibility",
-  });
   grant({ privileges: ["select", "insert", "update", "delete"], on: { kind: "table", schema: "zeroship", names: ["sandboxes", "shares", "hosts", "deleted_sandboxes", "wake_jobs"] }, to: ["sandbox_app"] });
   grant({ privileges: ["select", "insert"], on: { kind: "table", schema: "zeroship", names: ["sandbox_events"] }, to: ["sandbox_app"] });
   grant({ privileges: ["insert"], on: { kind: "table", schema: "zeroship", names: ["sandbox_events"] }, to: ["sandbox_audit"] });
