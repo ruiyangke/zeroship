@@ -64,6 +64,23 @@
 # missing migration. It reads that way on a PRIVATE database too, for exactly
 # the same reason, so this is a property the change neither creates nor cures.
 #
+# AND THE ONE IT DOES CREATE, WHICH NO HASH CAN SEE: a SINGLETON ROW. The
+# migration set describes the schema; it says nothing about whether two runs can
+# both hold a row the schema allows only one of. The auth suite had exactly one
+# - `zeroship.signing_keys` permits a single `active` OP key per database, and
+# `publish_active_key` retires every other active row and refuses to reactivate
+# a retired one - so two runs sharing a database spent the whole run retiring
+# each other. MEASURED before the fixture fix: 168/97 and 168/103, of which 96
+# failures were that one message. See `crates/auth/tests/common/mod.rs`.
+#
+# It is recorded here because it is the class of hazard this design has, not an
+# anecdote about one table: a shared database shares DATABASE-SCOPED SINGLETONS
+# - advisory-lock keys, single-active-row registries, fleet-wide sweep locks -
+# and the fingerprint cannot warn about any of them. The only instrument that
+# finds them is running two suites at once and reading what breaks. Do that
+# before pointing a new suite at a shared database; a serial pass proves
+# nothing, because serial already worked.
+#
 # CONCURRENT RUNS ON ONE SHARED DATABASE, and the one place they were NOT safe:
 #
 #   - CREATE: two runs can both find the database absent and both issue
