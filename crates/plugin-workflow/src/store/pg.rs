@@ -113,6 +113,24 @@ pub fn app_schema_for(app_id: &Uuid) -> String {
     format!("app_{}", app_id.as_hyphenated())
 }
 
+/// The five journal table names, unqualified, in [`JOURNAL_TABLE_SUFFIXES`]
+/// order.
+///
+/// For a caller that asks the CATALOG about a journal rather than querying it:
+/// `pg_class.relname` is a bare name, so a schema-qualified [`WorkflowTables`]
+/// field cannot be compared against it. Control's fleet census is the only such
+/// caller today, and it needs the whole set - deciding "this app has a journal"
+/// from one table name is what it used to do, and an app holding four of the
+/// five was then invisible to it rather than reported incomplete.
+///
+/// `journal_table_names_match_the_provisioned_tables` binds this to
+/// [`WorkflowTables::all`], so a sixth table added to [`provision_sql`] cannot
+/// leave the census enumerating five.
+#[must_use]
+pub fn journal_table_names() -> [String; 5] {
+    JOURNAL_TABLE_SUFFIXES.map(|suffix| format!("__zeroship_workflow_{suffix}"))
+}
+
 #[must_use]
 pub fn quote_ident(ident: &str) -> String {
     let escaped = ident.replace('"', "\"\"");
@@ -1965,5 +1983,47 @@ mod tests {
             owner_sql.contains("\"zeroship_workflow_owner\""),
             "workflow tables must use the dedicated narrow owner: {owner_sql}"
         );
+    }
+
+    /// The bare names control's catalog census asks for are exactly the tables
+    /// provisioning creates.
+    ///
+    /// Two enumerations of the same five tables exist - `JOURNAL_TABLE_SUFFIXES`
+    /// and the named fields `WorkflowTables::all` returns - and nothing joined
+    /// them until this. The census is keyed to the first and provisioning to the
+    /// second, so drift between them is the census silently asking about a table
+    /// that is not there (every app reported incomplete) or not asking about one
+    /// that is (an app missing it reported complete).
+    ///
+    /// WHAT THIS DOES NOT CATCH: a table `provision_sql` creates and neither
+    /// list names. The loop below runs over `all()`, so it proves every LISTED
+    /// table is created and nothing about an unlisted `CREATE TABLE` added to
+    /// that string. It also says nothing about the tables existing in any
+    /// database - it reads generated SQL, not a catalog.
+    #[test]
+    fn journal_table_names_match_the_provisioned_tables() {
+        let tables = WorkflowTables::for_app_id(&Uuid::nil());
+        let qualified: Vec<String> = journal_table_names()
+            .iter()
+            .map(|name| {
+                format!(
+                    "{}.{}",
+                    quote_ident(&tables.app_schema),
+                    quote_ident(name)
+                )
+            })
+            .collect();
+        assert_eq!(
+            qualified,
+            tables.all().map(str::to_string).to_vec(),
+            "the catalog census's table list must be the tables provisioning creates"
+        );
+        let table_sql = provision_sql(&tables);
+        for table in tables.all() {
+            assert!(
+                table_sql.contains(&format!("CREATE TABLE IF NOT EXISTS {table}")),
+                "provisioning must create {table}: {table_sql}"
+            );
+        }
     }
 }
