@@ -16,10 +16,39 @@
 # Both halves matter equally and only the pair distinguishes a real fingerprint
 # from a constant: a function returning "abc" forever passes the first check.
 #
-# The create/ensure cases run against a FAKE run_psql that records its SQL and
-# is scripted to answer, so they assert what the library ISSUES rather than that
-# some database exists. That is the only way to exercise the lost-create-race
-# arm at all - it needs two runs interleaved at a point no test can schedule.
+# WHERE THE CREATE/ENSURE CASES WENT, and why they are not here any more.
+#
+# They used to inject a FAKE `run_psql` shell function that recorded the SQL it
+# was handed and was scripted to answer - the only way to reach the
+# lost-create-race arm, which needs two runs interleaved at a point no test can
+# schedule. That worked because the library was shell, running in THIS process.
+# The logic is a separate binary now (crates/zeroship-testkit), so:
+#
+#   - a shell function defined here is unreachable from it, and exporting the
+#     function would not help: the fake closed over this script's non-exported
+#     $TMP, which no child inherits;
+#   - worse, run unchanged the cases would reach the REAL server the overlay
+#     names. MEASURED 2026-08-20 during the port: the unmodified selftest
+#     created `zeroship_auth_test_abc` on the shared cluster at :5440 and then
+#     reported 36/43 - with several of the 36 passing only because a real
+#     database happened to answer the way the fake was meant to. A vacuous green
+#     is worse than a red.
+#
+# So they moved, and split by what they can prove:
+#
+#   the DECISIONS (reuse / create-once / lost race / genuine failure /
+#   could-not-tell) -> `cargo test -p zeroship-testkit`, suite_db::tests, over a
+#   scripted DbAdmin - the same technique, expressed as data instead of as a
+#   shell function;
+#
+#   the DRIVER AND THE SERVER (create really works outside a transaction, a
+#   duplicate create really returns 42P04, the provisioning lock really
+#   serializes two PROCESSES) -> crates/zeroship-testkit/tests/live_suite_db.rs,
+#   against a real PostgreSQL, with the race FORCED by a decorator rather than
+#   waited for.
+#
+# What is left here is what only a shell test can answer: that the shim wires
+# its arguments through and hands back the exit codes the suites switch on.
 #
 # Run directly: tests/lib_suite_db_selftest.sh
 set -uo pipefail
@@ -30,7 +59,6 @@ LIB="$ROOT/tests/lib/suite_db.sh"
 . "$LIB"
 
 TMP="$(mktemp -d)"
-S_PROV="$TMP/provision_probe.sh"
 trap 'rm -rf "$TMP"' EXIT
 
 fail=0
@@ -153,191 +181,94 @@ long="$(printf 'a%.0s' $(seq 1 64))"
 check "refused: a 64-byte name Postgres would truncate" "2" "$?"
 
 echo
-echo "=== ensure: an existing database is REUSED, never dropped ==="
-# The whole point. A drop here would destroy a peer's run mid-suite, and would
-# destroy the failed-run data a caller kept deliberately.
-: > "$TMP/psql.log"
-run_psql() {
-  printf '%s\n' "$*" >> "$TMP/psql.log"
-  case "$*" in *"FROM pg_database"*) printf '1\n' ;; esac
-}
-( TEST_DB=zeroship_auth_test_abc zs_suite_db_ensure ) >/dev/null 2>&1
-check "ensure succeeds against an existing database" "0" "$?"
-if grep -qi 'DROP DATABASE' "$TMP/psql.log"; then
-  bad "ensure issued a DROP: $(grep -i 'DROP DATABASE' "$TMP/psql.log")"
+echo "=== nothing in the suite-database path can issue a DROP ==="
+# The whole point of the schema-keyed name. A drop here would destroy a peer's
+# run mid-suite and would destroy the failed-run data a caller kept
+# deliberately, so the property is STRUCTURAL rather than conditional: the
+# DbAdmin trait has exactly `exists` and `create`, and there is no arm to reach.
+#
+# Two instruments, because they answer different questions. First, the SHAPE:
+# a trait with a third method is a drop waiting for a caller.
+methods="$(awk '/^pub trait DbAdmin/,/^\}/' \
+  "$ROOT/crates/zeroship-testkit/src/admin.rs" \
+  | sed -n 's/^ *fn \([a-z_]*\).*/\1/p' | tr '\n' ' ')"
+check "the server trait offers exactly these operations" "exists create " "$methods"
+
+# Second, the STATEMENT. The pattern is anchored on the opening quote of a Rust
+# string literal, so it matches SQL this code would send and not the same words
+# in a comment or in a test's hostile-input fixture - both of which exist in
+# these files and are meant to.
+if grep -rn '"DROP DATABASE' "$ROOT/crates/zeroship-testkit/src/" >"$TMP/drops" 2>&1; then
+  bad "the suite-database path can issue a DROP: $(cat "$TMP/drops")"
 else
-  ok "ensure issued no DROP"
+  ok "no DROP statement anywhere under crates/zeroship-testkit/src"
 fi
-if grep -qi 'CREATE DATABASE' "$TMP/psql.log"; then
-  bad "ensure re-created an existing database"
+# THE POSITIVE CONTROL, one variable changed: a file that DOES issue one. Without
+# it, a grep that matched nothing and a grep whose pattern was broken read the
+# same - and this pattern is deliberately narrow, which is exactly the way a
+# pattern goes silently blind. `live_suite_db.rs` drops its own scratch database
+# WITH (FORCE), correct there and wrong in the sweeper: see that file and
+# tests/lib/sweep_db.sh for whose connections FORCE terminates.
+if grep -q '"DROP DATABASE IF EXISTS {name} WITH (FORCE)"' \
+     "$ROOT/crates/zeroship-testkit/tests/live_suite_db.rs"; then
+  ok "control: the same pattern finds the scratch drop it is meant to find"
 else
-  ok "ensure re-created nothing"
+  bad "control: the pattern found nothing even where a DROP exists"
 fi
 
 echo
-echo "=== ensure: an absent database is created exactly once ==="
-: > "$TMP/psql.log"
-run_psql() {
-  printf '%s\n' "$*" >> "$TMP/psql.log"
-  case "$*" in *"FROM pg_database"*) : ;; esac   # prints nothing: absent
-}
-( TEST_DB=zeroship_auth_test_abc zs_suite_db_ensure ) >/dev/null 2>&1
-check "ensure succeeds when it has to create" "0" "$?"
-if grep -qF 'CREATE DATABASE zeroship_auth_test_abc;' "$TMP/psql.log"; then
-  ok "ensure issued the CREATE"
-else
-  bad "no CREATE issued: $(cat "$TMP/psql.log")"
-fi
-if grep -qi 'DROP DATABASE' "$TMP/psql.log"; then bad "ensure issued a DROP"; else ok "and still no DROP"; fi
+echo "=== check_identifier accepts what the resolver produces ==="
+# The control for the refusal loop above: a checker that refused everything
+# would pass every case there and take the suites down on their real name.
+zs_suite_db_check_identifier zeroship_auth_test_a1eec1e1c30f >/dev/null 2>&1
+check "a derived name is accepted" "0" "$?"
+sixtythree="$(printf 'a%.0s' $(seq 1 63))"
+zs_suite_db_check_identifier "$sixtythree" >/dev/null 2>&1
+check "63 bytes is accepted, and 64 was refused above" "0" "$?"
 
 echo
-echo "=== ensure: LOSING the create race is success, not failure ==="
-# Two agents starting together both find the database absent and both issue
-# CREATE. The loser must proceed. This is scripted because no test can schedule
-# the interleaving, and it is asserted through a second pg_database probe rather
-# than by matching the error text - "it exists now" is the condition that
-# actually makes it safe to continue.
-: > "$TMP/psql.log"
-: > "$TMP/probes"
-run_psql() {
-  printf '%s\n' "$*" >> "$TMP/psql.log"
-  case "$*" in
-    *"FROM pg_database"*)
-      # The counter lives in a FILE, not a variable: the library reads this
-      # function's stdout through `$(...)`, so every probe runs in its own
-      # subshell and a shell variable would be back at its old value each time.
-      printf 'x' >> "$TMP/probes"
-      # First probe: absent. Second (after the failed CREATE): a peer made it.
-      [ "$(wc -c < "$TMP/probes")" -ge 2 ] && printf '1\n'
-      return 0 ;;
-    *"CREATE DATABASE"*)
-      echo 'ERROR:  database "zeroship_auth_test_abc" already exists' >&2
-      return 1 ;;
-  esac
-}
-( TEST_DB=zeroship_auth_test_abc zs_suite_db_ensure ) >"$TMP/race.out" 2>&1
-check "a lost create race exits 0" "0" "$?"
-if grep -q 'appeared concurrently' "$TMP/race.out"; then
-  ok "and says the peer won rather than reporting an error"
+echo "=== a helper called before resolve refuses instead of guessing ==="
+# `zs_suite_db_ensure` with no TEST_DB has no database to reason about. Guessing
+# one would create something nobody asked for, on a shared cluster.
+( unset TEST_DB; zs_suite_db_ensure ) >/dev/null 2>"$TMP/noname.err"
+check "ensure before resolve fails" "1" "$?"
+if grep -q 'zs_suite_db_ensure before zs_suite_db_resolve' "$TMP/noname.err"; then
+  ok "and says which call was missing"
 else
-  bad "output did not explain the race: $(cat "$TMP/race.out")"
+  bad "unexpected message: $(cat "$TMP/noname.err")"
 fi
-
-echo
-echo "=== ensure: a create that fails for ANY OTHER reason still fails ==="
-# One variable changed from the case above: the database is still absent on the
-# second probe. Without this the arm above would swallow every create failure.
-: > "$TMP/psql.log"
-run_psql() {
-  printf '%s\n' "$*" >> "$TMP/psql.log"
-  case "$*" in
-    *"FROM pg_database"*) return 0 ;;                       # absent, both times
-    *"CREATE DATABASE"*) echo 'ERROR:  permission denied to create database' >&2; return 1 ;;
-  esac
-}
-( TEST_DB=zeroship_auth_test_abc zs_suite_db_ensure ) >"$TMP/denied.out" 2>&1
-check "a genuine create failure exits 2" "2" "$?"
-if grep -q 'permission denied to create database' "$TMP/denied.out"; then
-  ok "and re-emits the server's own reason"
-else
-  bad "the server's error was swallowed: $(cat "$TMP/denied.out")"
-fi
-
-echo
-echo "=== ensure: 'cannot tell' is not 'absent' ==="
-# psql exiting non-zero prints nothing, exactly like an empty result set. Read
-# as absent, an unreachable server becomes a CREATE DATABASE failing for reasons
-# nobody can name.
-run_psql() { return 2; }
-( TEST_DB=zeroship_auth_test_abc zs_suite_db_ensure ) >"$TMP/unreach.out" 2>&1
-check "an unreachable server exits 2" "2" "$?"
-if grep -q 'could not ask the server' "$TMP/unreach.out"; then
-  ok "and says it could not tell, rather than 'absent'"
-else
-  bad "output: $(cat "$TMP/unreach.out")"
-fi
+( unset TEST_DB; zs_suite_db_provision true ) >/dev/null 2>&1
+check "provision before resolve fails" "1" "$?"
 
 echo
 echo "=== every function survives 'set -e', which is how both suites run it ==="
 # The case this file did NOT have, and the bug it did not catch. Both suite
-# scripts open with `set -euo pipefail`. `zs_suite_db_exists` returns 1 to mean
-# ABSENT - a perfectly ordinary answer - so a bare call to it on its own line
-# takes the whole harness down under `set -e` before the next statement runs.
+# scripts open with `set -euo pipefail`, and a helper that returns non-zero as
+# an ORDINARY answer takes the whole harness down on the line that calls it
+# unless the helper itself is written for it.
 #
-# MEASURED before the fix, on a real 5444 database that did not exist yet: the
-# harness printed the resolved name and then stopped. No error, no output, exit
-# 1. It reads exactly like a psql that hung, which is why the selftest passing
-# 39/39 at the time was not evidence of anything - it runs under `set -uo
-# pipefail` with no `-e`, so it exercised the one mode the suites never use.
+# MEASURED before the original fix, on a real 5444 database that did not exist
+# yet: the harness printed the resolved name and then stopped. No error, no
+# output, exit 1. It reads exactly like a database call that hung, which is why
+# the selftest passing at the time was not evidence of anything - it runs under
+# `set -uo pipefail` with no `-e`, so it exercised the one mode the suites never
+# use.
 cat > "$TMP/under_set_e.sh" <<EOF
 set -euo pipefail
 . "$LIB"
-run_psql() {
-  case "\$*" in
-    *"FROM pg_database"*) return 0 ;;          # absent: the 1-returning path
-    *"CREATE DATABASE"*)  return 0 ;;
-  esac
-}
 zs_suite_db_resolve zeroship_auth_test "" "$TMP/a"
-zs_suite_db_ensure
-echo "REACHED THE END"
+zs_suite_db_check_identifier "\$TEST_DB"
+if zs_sweep_never_defined 2>/dev/null; then :; fi
+echo "REACHED THE END with \$TEST_DB"
 EOF
 out="$(bash "$TMP/under_set_e.sh" 2>&1)"
 rc=$?
-check "a create-path run under set -e finishes" "0" "$rc"
-if printf '%s' "$out" | grep -q 'REACHED THE END'; then
-  ok "and reaches the line after zs_suite_db_ensure"
+check "a resolve-and-check run under set -e finishes" "0" "$rc"
+if printf '%s' "$out" | grep -q "REACHED THE END with zeroship_auth_test_${fa}"; then
+  ok "and reaches the line after, with TEST_DB set"
 else
   bad "it died inside the library: $out"
 fi
-
-echo
-echo "=== provision serializes create+migrate against a concurrent run ==="
-# The step the migrate binary's own advisory lock does NOT cover. MEASURED on
-# 5444 before this lock existed, two first-ever migrates of one database
-# started together:
-#     migrate A exit=0   migrate B exit=1
-#     FAILED: provision schema: duplicate key value violates unique
-#             constraint "pg_namespace_nspname_index"
-# The project lock is taken around the APPLY; `CREATE SCHEMA` happens before
-# it. After the lock, the same experiment gives 0 and 0 with one CREATE and one
-# reuse.
-#
-# Asserted by OVERLAP, not by exit codes: two migrates that both succeed prove
-# nothing on their own, since they might simply not have collided. The fake
-# migrate below records the interval it ran for, and the check is that the two
-# intervals do not intersect.
-cat > "$S_PROV" <<EOF
-set -euo pipefail
-. "$LIB"
-PG_HOST=h; PG_PORT=1; TEST_DB=zeroship_selftest_lockprobe
-run_psql() { case "\$*" in *"FROM pg_database"*) printf '1\n' ;; esac; }
-TMPDIR="$TMP" zs_suite_db_provision bash -c '
-  printf "start %s\n" "\$(date +%s%N)" >> "$TMP/interval.log"
-  sleep 1
-  printf "end   %s\n" "\$(date +%s%N)" >> "$TMP/interval.log"
-'
-EOF
-: > "$TMP/interval.log"
-bash "$S_PROV" >/dev/null 2>&1 & pa=$!
-bash "$S_PROV" >/dev/null 2>&1 & pb=$!
-wait "$pa"; ra=$?
-wait "$pb"; rb=$?
-check "both provisions succeed" "0" "$((ra + rb))"
-# start end start end  = serialized.  start start end end = overlapped.
-order="$(awk '{print $1}' "$TMP/interval.log" | tr -d ' ' | tr '\n' ' ')"
-if [ "$order" = "start end start end " ]; then
-  ok "the two migrate commands did not overlap ($order)"
-else
-  bad "the migrate commands overlapped or did not both run: '$order'"
-fi
-
-echo
-echo "=== ensure without run_psql refuses instead of silently doing nothing ==="
-( unset -f run_psql
-  TEST_DB=zeroship_auth_test_abc zs_suite_db_ensure ) >/dev/null 2>&1
-check "missing run_psql exits 2" "2" "$?"
-
 echo
 echo "=================================================================="
 echo "suite db selftest: ${pass} passed, ${fail} failed"
