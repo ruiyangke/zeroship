@@ -360,6 +360,16 @@ enum Kind {
     ColumnCount,
     Parameters(usize, usize),
     Closed,
+    /// An earlier operation on this connection was dropped before it
+    /// completed, so the connection is out of step with the server.
+    ///
+    /// Distinct from [`Kind::Closed`]: the socket is open and the server is
+    /// fine. What is broken is the agreement about where in the byte stream
+    /// each side is - a cancelled read discards bytes it took off the socket,
+    /// and a cancelled write can leave a fraction of a message on the wire.
+    /// Neither is repairable by anything the driver can send, so the only
+    /// correct answer to a later call is to refuse it.
+    Cancelled,
     Db,
     Parse,
     Encode,
@@ -403,6 +413,10 @@ impl fmt::Display for Error {
                 write!(fmt, "expected {expected} parameters but got {real}")
             }
             Kind::Closed => fmt.write_str("connection closed"),
+            Kind::Cancelled => fmt.write_str(
+                "an operation was dropped before it completed, leaving this connection out of \
+                 step with the server",
+            ),
             Kind::Db => fmt.write_str("db error"),
             Kind::Parse => fmt.write_str("error parsing response from server"),
             Kind::Encode => fmt.write_str("error encoding message to server"),
@@ -440,6 +454,15 @@ impl Error {
         self.0.kind == Kind::Closed
     }
 
+    /// Whether the connection was refused because an earlier operation on it
+    /// was dropped before completing.
+    ///
+    /// A connection reporting this cannot be recovered or retried on - see
+    /// [`Kind::Cancelled`]. Discard it and open another.
+    pub fn is_cancelled(&self) -> bool {
+        self.0.kind == Kind::Cancelled
+    }
+
     /// Whether this is a failure of the TLS handshake itself.
     ///
     /// `sslmode=prefer` keys its plaintext retry on exactly this, and on
@@ -461,6 +484,10 @@ impl Error {
 
     pub(crate) fn closed() -> Error {
         Error::new(Kind::Closed, None)
+    }
+
+    pub(crate) fn cancelled() -> Error {
+        Error::new(Kind::Cancelled, None)
     }
 
     pub(crate) fn unexpected_message() -> Error {
