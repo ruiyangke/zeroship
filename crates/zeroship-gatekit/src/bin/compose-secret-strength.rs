@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use zeroship_core::config::PLATFORM_SECRETS;
+use zeroship_gatekit::arm_census::Arm;
 use zeroship_gatekit::compose::ComposeFile;
 use zeroship_gatekit::secret_strength::{enforced_rules, run};
 
@@ -37,12 +38,38 @@ fn main() -> ExitCode {
     // Print the rule count BEFORE the verdict. A gate's most important number
     // is how much it enumerated: a smaller green is not a pass, and the only
     // way to see that is to print the count on every run.
+    //
+    // It goes out in the SAME wire format the shell gates use, because
+    // tests/compose_secret_strength_gate.sh is a shim and gate_arms_delegate
+    // refuses unless this binary emits one. The rule set going to zero is the
+    // 2026-08-13 failure this whole crate was written for; it is now the same
+    // refusal, spelled the same way, as an arm collapsing in any other gate.
+    //
+    // FLOOR 4 against 6 rules today - MEASURED 2026-08-20 by running this
+    // binary: "6 of 8 platform secrets carry a strength floor". Under today's
+    // count so that deliberately unrestricting a secret does not fail the gate,
+    // well above the zero that de-enumeration produces.
+    let enforced = enforced_rules(PLATFORM_SECRETS).len();
+    let arm = Arm {
+        gate: "compose_secret_strength",
+        arm: "secret_rules",
+        examined: enforced,
+        floor: 4,
+    };
+    println!("{}", arm.line());
     println!(
-        "  rules: {} of {} platform secrets carry a strength floor \
+        "  rules: {enforced} of {} platform secrets carry a strength floor \
          (zeroship_core::config::PLATFORM_SECRETS)",
-        enforced_rules(PLATFORM_SECRETS).len(),
         PLATFORM_SECRETS.len()
     );
+    if !arm.cleared() {
+        eprintln!(
+            "  x REFUSED: only {enforced} strength rule(s) enumerated, floor {}. The rule table \
+             stopped enumerating; a clean compose file and an empty rule set print the same thing.",
+            arm.floor
+        );
+        return ExitCode::FAILURE;
+    }
 
     let report = run(&compose, PLATFORM_SECRETS);
     let verdict = report.verdict();
