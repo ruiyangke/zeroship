@@ -380,22 +380,42 @@ pub struct ReplicationConnection<S, T> {
 /// driving `next()` inside a `futures::select!` drops the losing branch's
 /// future on every iteration.
 #[derive(Debug, Default)]
-struct InFlight(bool);
+struct InFlight {
+    /// A call has claimed the stream and not yet given it back.
+    busy: bool,
+    /// The stream can never be used again, whatever happens next.
+    ///
+    /// Separate from `busy` because the two recover differently: a call that
+    /// returns clears `busy`, and nothing clears this. A framer that has lost
+    /// sync does not know where the next real frame begins, so there is no
+    /// state to recover TO.
+    poisoned: bool,
+}
 
 impl InFlight {
     /// Claim the stream for one I/O call, or refuse because a previous call
-    /// never gave it back.
+    /// never gave it back, or because the stream is unusable.
     fn enter(&mut self) -> Result<(), Error> {
-        if self.0 {
+        if self.busy || self.poisoned {
             return Err(Error::cancelled());
         }
-        self.0 = true;
+        self.busy = true;
         Ok(())
     }
 
     /// Give the stream back after a call returned under its own power.
     fn leave(&mut self) {
-        self.0 = false;
+        self.busy = false;
+    }
+
+    /// Retire the stream permanently.
+    ///
+    /// For failures that leave the wire in a state no later call can make
+    /// sense of - a frame header the protocol cannot express, so the framer
+    /// has no idea where the next one starts. Returning the same error
+    /// forever would look transient to a caller that retries.
+    fn poison(&mut self) {
+        self.poisoned = true;
     }
 }
 
@@ -695,7 +715,26 @@ where
 
     async fn next_inner(&mut self) -> Result<Option<ReplicationMessage>, Error> {
         loop {
-            let header = read_header(&mut self.stream).await?;
+            // A header this call could not read is a lost frame boundary, so
+            // the stream is retired rather than left re-readable.
+            //
+            // POISON HERE, not on every error out of this function. A
+            // server-sent `ErrorResponse` below is a complete, well-framed
+            // message that leaves the wire exactly where it should be, and a
+            // caller may reasonably carry on after one. A header we could not
+            // make sense of is different in kind: the framer does not know
+            // where the next message starts, so there is nothing to
+            // resynchronise to. Without this, `read_header`'s floor check
+            // returns before it consumes the five header bytes, and the next
+            // call re-reads them for the identical error forever - which a
+            // caller that retries cannot tell from something transient.
+            let header = match read_header(&mut self.stream).await {
+                Ok(header) => header,
+                Err(e) => {
+                    self.in_flight.poison();
+                    return Err(e);
+                }
+            };
             match header.tag {
                 COPY_DATA_TAG => {
                     let body = self.stream.buf().split_to(header.body_len()).freeze();
@@ -2205,6 +2244,44 @@ mod tests {
                 .expect("CopyDone is a valid empty-bodied frame")
                 .is_none(),
             "CopyDone ends the stream"
+        );
+    }
+
+    /// A frame the framer cannot resynchronise from must poison the stream,
+    /// not repeat forever.
+    ///
+    /// `read_header` returns the floor error BEFORE consuming the five header
+    /// bytes, and `next` gives the stream back unconditionally, so the same
+    /// bad header is re-read on the next call: identical error, no forward
+    /// progress, no way for a caller to tell it apart from something
+    /// transient. A consumer whose policy is "log and retry" spins on it.
+    ///
+    /// This is the same rule the cancellation guard already applies. A framer
+    /// that has lost sync does not know where the next real frame starts, so
+    /// there is nothing to resynchronise TO - refusing is the only honest
+    /// answer.
+    #[compio::test]
+    async fn a_frame_the_framer_cannot_resynchronise_from_poisons_the_stream() {
+        let mut wire = vec![COPY_DATA_TAG];
+        wire.extend_from_slice(&0u32.to_be_bytes());
+
+        let mut stream = stream_over(wire);
+        let first = stream
+            .next()
+            .await
+            .expect_err("a length below the protocol minimum is not decodable");
+        assert!(
+            !first.is_cancelled(),
+            "the first failure is the framing error itself, not a refusal"
+        );
+
+        let second = stream
+            .next()
+            .await
+            .expect_err("a stream that lost framing must not be reusable");
+        assert!(
+            second.is_cancelled(),
+            "the stream re-read the same bad header instead of refusing: {second}"
         );
     }
 
