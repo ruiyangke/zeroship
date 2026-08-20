@@ -21,7 +21,7 @@
 //! the native fetch cutover; `globalThis.fetch` is now the native
 //! callback installed by `fetch_native::install_fetch_global`.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use cyper::resolve::Resolve;
 use futures::Stream;
@@ -127,10 +127,18 @@ pub fn is_blocked_ip(addr: IpAddr) -> bool {
 pub fn validate_url(url: &str) -> Result<(), String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("Invalid URL: {e}"))?;
 
-    // Allow http(s) and the WebSocket schemes ws/wss. The block list
-    // (private/loopback/etc.) below applies uniformly to all four.
+    // `fetch` is the only caller. `ws`/`wss` used to be accepted here because
+    // the WebSocket handshake shared this function; it now goes through
+    // `transport::egress::evaluate` instead, so leaving them accepted would
+    // only mean `fetch("ws://...")` getting past the scheme check to fail
+    // further down.
+    //
+    // Note this function has never checked PORTS, for any scheme. Ports are
+    // decided by the egress rule set, which carries one, and are not a thing
+    // the string-level fast path can usefully bound for `fetch` - which is the
+    // ungated egress by design.
     match parsed.scheme() {
-        "http" | "https" | "ws" | "wss" => {}
+        "http" | "https" => {}
         scheme => return Err(format!("Blocked URL scheme: {scheme}")),
     }
 
@@ -163,65 +171,6 @@ pub fn validate_url(url: &str) -> Result<(), String> {
     }
 
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// resolve_and_check_ssrf — DNS resolution + SSRF revalidation
-// ---------------------------------------------------------------------------
-
-/// Resolve `host:port` to a `SocketAddr` and verify the result is NOT
-/// in any blocked range. Returns the FIRST non-blocked address.
-///
-/// This is the WebSocket-handshake counterpart to `SsrfResolver` (which
-/// hooks into cyper's resolver pipeline). Unlike fetch — where
-/// `cyper::Client` performs the connect after receiving the filtered
-/// stream of IPs — the WebSocket handshake calls
-/// `compio::net::TcpStream::connect(addr)` directly, so we MUST hand it
-/// a SocketAddr that has already been validated. Otherwise an attacker
-/// can pin a public hostname's resolution to `127.0.0.1` between the
-/// URL-string check and `connect`.
-///
-/// In dev mode (`ZEROSHIP_DEV=1`) localhost is permitted (matches
-/// `validate_url`), so the WebSocket handshake also reaches the Vite
-/// dev server.
-///
-/// This is the explicit DNS-rebinding guard described in
-/// `docs/archive/websocket-native.md` §VIII.1.
-pub fn resolve_and_check_ssrf(host: &str, port: u16) -> Result<SocketAddr, String> {
-    use std::io::{Error, ErrorKind};
-
-    let dev_mode = dev_mode_enabled();
-
-    // Strip IPv6 literal brackets before to_socket_addrs.
-    let host_clean = host.trim_start_matches('[').trim_end_matches(']');
-    let target = format!("{host_clean}:{port}");
-
-    // std DNS resolution. The handshake spawns this on a compio task
-    // (off the V8 thread); a brief sync DNS call there is acceptable.
-    let mut iter = std::net::ToSocketAddrs::to_socket_addrs(&target)
-        .map_err(|e: Error| format!("DNS resolve failed: {e}"))?;
-
-    // Pick the first non-blocked address. We intentionally don't try
-    // every candidate: the SSRF guard is best served by failing fast
-    // when ANY blocked candidate is returned. The fallback for happy-
-    // eyeballs / multi-AAAA hosts is "try the first allowed one".
-    let mut last_blocked: Option<IpAddr> = None;
-    for addr in &mut iter {
-        let ip = addr.ip();
-        if dev_mode || !is_blocked_ip(ip) {
-            return Ok(addr);
-        }
-        last_blocked = Some(ip);
-    }
-    Err(match last_blocked {
-        Some(ip) => format!(
-            "Blocked: all resolved addresses are in blocked ranges (e.g. {ip}) (SSRF guard)"
-        ),
-        None => format!("DNS resolve produced no addresses for {host}:{port}"),
-    })
-    .inspect_err(|e| {
-        let _ = Error::new(ErrorKind::PermissionDenied, e.clone());
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -383,6 +332,10 @@ mod tests {
     fn validate_url_rejects_non_http() {
         assert!(validate_url("file:///etc/passwd").is_err());
         assert!(validate_url("gopher://x/").is_err());
+        // `fetch` is the only caller now. A WebSocket URL is decided by the
+        // egress rule set on the handshake path, not here, so accepting one
+        // here would be permissiveness with no consumer.
+        assert!(validate_url("wss://example.com/").is_err());
     }
 
     #[test]

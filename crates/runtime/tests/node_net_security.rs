@@ -1,6 +1,8 @@
 #![allow(unsafe_code)]
 
+use std::cell::RefCell;
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
+use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
@@ -13,8 +15,9 @@ use rustls::sign::CertifiedKey;
 use uuid::Uuid;
 use zeroship_core::usage_event::UsageEvent;
 use zeroship_runtime::channel::CancelFlag;
-use zeroship_runtime::{
-    EnvSnapshot, FetchOutcome, HostPort, ModuleEntry, NetPolicy, RequestCtx, Runtime, SettledFetch,
+use zeroship_runtime::{EgressResolver, EgressRule, ResolveFuture, Verdict,
+
+    EnvSnapshot, FetchOutcome, ModuleEntry, NetPolicy, RequestCtx, Runtime, SettledFetch,
 };
 
 struct EnvGuard {
@@ -260,6 +263,81 @@ async fn run_net_js(body: &str, policy: NetPolicy, max_wait: Duration) -> JsResu
     .await
 }
 
+/// PHASE 2 of the SHIPPED connect path, recorded.
+///
+/// Everything below the seam - the off-thread lookup and its timeout - is
+/// replaced, and every call is logged. Whether the production path resolved a
+/// name is not otherwise observable: a refusal that arrives quickly cannot be
+/// told from a lookup that was fast, so without this the DNS gate can only be
+/// asserted about `evaluate` and never about what `connect()` does.
+struct RecordingResolver {
+    answers: Vec<SocketAddr>,
+    calls: RefCell<Vec<(String, u16)>>,
+}
+
+impl RecordingResolver {
+    fn new(answers: &[SocketAddr]) -> Self {
+        Self {
+            answers: answers.to_vec(),
+            calls: RefCell::new(Vec::new()),
+        }
+    }
+    fn lookups(&self) -> usize {
+        self.calls.borrow().len()
+    }
+}
+
+impl EgressResolver for RecordingResolver {
+    fn resolve<'a>(&'a self, host: &'a str, port: u16) -> ResolveFuture<'a> {
+        self.calls.borrow_mut().push((host.to_string(), port));
+        let answers = self.answers.clone();
+        Box::pin(async move { Ok(answers) })
+    }
+}
+
+async fn run_net_js_with_resolver(
+    body: &str,
+    policy: NetPolicy,
+    resolver: Rc<RecordingResolver>,
+    max_wait: Duration,
+) -> JsResult {
+    let modules = vec![ModuleEntry {
+        specifier: "index.js".to_string(),
+        source: wrap_module(r#"import net from "node:net";"#, body),
+    }];
+    let runtime = Runtime::builder()
+        .modules(modules)
+        .net_policy(policy)
+        .egress_resolver(resolver)
+        .build();
+    runtime.start_pump();
+
+    let env = EnvSnapshot::empty();
+    let ctx = RequestCtx::new(CancelFlag::new());
+    let outcome = runtime.call_fetch_handler("GET", "http://localhost/", &[], "", &env, ctx);
+    drive_fetch_outcome(outcome, max_wait).await
+}
+
+/// A connect to a DNS NAME, reporting either the socket error or the echoed
+/// bytes. Every other rule-policy row in these suites targets an IP literal,
+/// which skips the name phase entirely and so says nothing about the gate.
+fn connect_to_name(host: &str, port: u16) -> String {
+    format!(
+        r#"
+return await new Promise((resolve) => {{
+  const s = new net.Socket();
+  let data = "";
+  s.on("connect", () => s.write("ok"));
+  s.on("data", (chunk) => {{ data += chunk.toString(); s.end(); }});
+  s.on("error", (err) => resolve(`error:${{err.code}}:${{err.message}}`));
+  s.on("close", () => resolve(`closed:data=${{data}}`));
+  s.connect({port}, "{host}");
+  setTimeout(() => resolve("timeout"), 2000);
+}});
+"#
+    )
+}
+
 async fn dispatch_rpc_js(
     module_src: String,
     rpc_id: &str,
@@ -352,12 +430,196 @@ fn trusted(max_sockets: u32, egress_ceiling_bytes: u64) -> NetPolicy {
 }
 
 fn allowlist(host: &str, port: u16, max_sockets: u32, egress_ceiling_bytes: u64) -> NetPolicy {
-    NetPolicy::allowlist(
-        vec![HostPort::new(host, port)],
+    NetPolicy::rules(
+        vec![accept_target(host, port)],
         max_sockets,
         egress_ceiling_bytes,
     )
     .unwrap()
+}
+
+/// The DNS gate, asserted about the code that SHIPS rather than about the
+/// evaluator in isolation.
+///
+/// Every other rule-policy row in these suites connects to `127.0.0.1` or
+/// `169.254.169.254`, both IP literals, which skip the name phase; and until
+/// the connect path was given a resolver seam, no test could see whether it
+/// resolved at all. Both gaps are why deleting the gate from the shipped path
+/// used to leave every suite green.
+///
+/// The three arms differ from each other in ONE thing each, so a green result
+/// says which rule decided it rather than only that something refused.
+#[test]
+fn the_shipped_connect_path_holds_the_dns_gate() {
+    let _lock = lock_env();
+    let _env = EnvGuard::set(&[("ZEROSHIP_DEV", Some("1".to_string()))]);
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        let addr = spawn_tcp_server(ServerMode::Echo).await;
+        let port = addr.port();
+        let names_only = NetPolicy::rules(
+            vec![EgressRule::parse(Verdict::Accept, "granted.example.test", port).unwrap()],
+            4,
+            1024 * 1024,
+        )
+        .unwrap();
+
+        // ARM 1 - an ungranted name under a names-only policy. No lookup.
+        let gated = Rc::new(RecordingResolver::new(&[addr]));
+        let before = zeroship_runtime::gate_opened_resolutions();
+        let refused = run_net_js_with_resolver(
+            &connect_to_name("ungranted.example.test", port),
+            names_only.clone(),
+            gated.clone(),
+            Duration::from_secs(3),
+        )
+        .await;
+        // The lookup count is asserted FIRST because it is the property; the
+        // refusal is the consequence. A path that resolved and then refused
+        // would satisfy only the second.
+        assert_eq!(
+            gated.lookups(),
+            0,
+            "the shipped path resolved an ungranted name: the attacker-chosen \
+             label reached a nameserver. body={}",
+            refused.body
+        );
+        assert!(
+            refused.body.contains("ERR_NET_EGRESS_DENIED"),
+            "expected a creator-rule refusal, got: {}",
+            refused.body
+        );
+        assert_eq!(
+            zeroship_runtime::gate_opened_resolutions(),
+            before,
+            "the gate held, so no gate-opened resolution may be counted"
+        );
+
+        // ARM 2 - the control, differing in ONE thing: the name asked for. The
+        // same policy resolves and connects for the name it grants, so arm 1 is
+        // about the gate and not about a policy that refuses everything.
+        let granted = Rc::new(RecordingResolver::new(&[addr]));
+        let ok = run_net_js_with_resolver(
+            &connect_to_name("granted.example.test", port),
+            names_only,
+            granted.clone(),
+            Duration::from_secs(3),
+        )
+        .await;
+        assert_eq!(granted.lookups(), 1, "unexpected body: {}", ok.body);
+        assert!(
+            ok.body.contains("closed:data=ok"),
+            "a granted name must connect, got: {}",
+            ok.body
+        );
+        assert_eq!(
+            zeroship_runtime::gate_opened_resolutions(),
+            before,
+            "a lookup for a name a Name ACCEPT admits is not a gate-opened one"
+        );
+
+        // ARM 3 - the residual, differing from arm 1 in ONE rule: a Range
+        // ACCEPT at the same port. The gate opens, the ungranted name IS
+        // resolved, and the platform counts it.
+        let with_range = NetPolicy::rules(
+            vec![
+                EgressRule::parse(Verdict::Accept, "granted.example.test", port).unwrap(),
+                EgressRule::parse(Verdict::Accept, "127.0.0.0/24", port).unwrap(),
+            ],
+            4,
+            1024 * 1024,
+        )
+        .unwrap();
+        let opened = Rc::new(RecordingResolver::new(&[addr]));
+        let leaked = run_net_js_with_resolver(
+            &connect_to_name("ungranted.example.test", port),
+            with_range,
+            opened.clone(),
+            Duration::from_secs(3),
+        )
+        .await;
+        assert_eq!(
+            opened.lookups(),
+            1,
+            "holding a Range ACCEPT at this port opens the gate. body={}",
+            leaked.body
+        );
+        assert!(
+            leaked.body.contains("closed:data=ok"),
+            "the range must admit the resolved address, got: {}",
+            leaked.body
+        );
+        assert_eq!(
+            zeroship_runtime::gate_opened_resolutions(),
+            before + 1,
+            "GATE_OPENED_RESOLUTIONS must count the shipped path's leak, not \
+             only the evaluator's; it is the one piece of observability the \
+             design leaves for this channel"
+        );
+    });
+}
+
+/// 5.7, with the platform floor LIVE.
+///
+/// Every other `node:net` row sets `ZEROSHIP_DEV=1`, which bypasses
+/// `is_blocked_ip` - so the floor arm of the refusal split is never taken and
+/// collapsing the two codes into one leaves them all green. These two arms
+/// differ in ONE thing, the address the name resolved to, and must report
+/// DIFFERENT codes: an app cannot act on "your own rules refused this" if it is
+/// spelled the same as "the platform refused this".
+#[test]
+fn the_floor_and_the_creators_rules_refuse_with_different_codes() {
+    let _lock = lock_env();
+    // Deliberately NOT ZEROSHIP_DEV=1: the floor has to be running.
+    let _env = EnvGuard::set(&[]);
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        // A public range the floor permits, so the creator's own rules are what
+        // decide anything outside it.
+        let policy = NetPolicy::rules(
+            vec![EgressRule::parse(Verdict::Accept, "93.184.216.0/24", 443).unwrap()],
+            4,
+            1024 * 1024,
+        )
+        .unwrap();
+
+        let private: SocketAddr = "10.0.0.5:443".parse().unwrap();
+        let floored = Rc::new(RecordingResolver::new(&[private]));
+        let by_floor = run_net_js_with_resolver(
+            &connect_to_name("internal.example.test", 443),
+            policy.clone(),
+            floored,
+            Duration::from_secs(3),
+        )
+        .await;
+        assert!(
+            by_floor.body.contains("ERR_NET_SSRF"),
+            "an answer set the floor empties must report the floor, got: {}",
+            by_floor.body
+        );
+
+        // The control: same policy, same port, same everything but the address
+        // the name resolved to. Public, so it clears the floor and is refused
+        // by the creator's own rule set instead.
+        let public: SocketAddr = "203.0.114.9:443".parse().unwrap();
+        let unmatched = Rc::new(RecordingResolver::new(&[public]));
+        let by_rules = run_net_js_with_resolver(
+            &connect_to_name("outside.example.test", 443),
+            policy,
+            unmatched,
+            Duration::from_secs(3),
+        )
+        .await;
+        assert!(
+            by_rules.body.contains("ERR_NET_EGRESS_DENIED"),
+            "an address that clears the floor and matches no ACCEPT is the \
+             creator's refusal, got: {}",
+            by_rules.body
+        );
+        assert!(
+            !by_rules.body.contains("ERR_NET_SSRF"),
+            "the floor did not refuse this one: {}",
+            by_rules.body
+        );
+    });
 }
 
 #[test]
@@ -560,9 +822,18 @@ return `${{capFailure}}|${{reclaimed}}|${{cycle}}`;
 fn allowlist_denies_miss_and_rejects_broad_entries_at_config_time() {
     let _lock = lock_env();
     let _env = EnvGuard::set(&[("ZEROSHIP_DEV", Some("1".to_string()))]);
-    assert!(HostPort::try_new("*", 443).is_err());
-    assert!(HostPort::try_new("*.workers.dev", 443).is_err());
-    assert!(HostPort::try_new("*.neon.tech", 5432).is_err());
+    // Wildcards are not refused by a curated suffix list any more - they are
+    // not REPRESENTABLE. The `*.` form is no longer a grammar the rule parser
+    // accepts, so `*.workers.dev` cannot be written at all rather than being
+    // written and caught.
+    assert!(EgressRule::parse(Verdict::Accept, "*", 443).is_err());
+    assert!(EgressRule::parse(Verdict::Accept, "*.workers.dev", 443).is_err());
+    assert!(EgressRule::parse(Verdict::Accept, "*.neon.tech", 5432).is_err());
+    // An exact host under the same suffix stays grantable: the deleted list was
+    // enforcing taste, and reckless is the creator's problem now.
+    assert!(EgressRule::parse(Verdict::Accept, "db.neon.tech", 5432).is_ok());
+    // And one ACCEPT rule can no longer be the whole internet.
+    assert!(EgressRule::parse(Verdict::Accept, "0.0.0.0/0", 443).is_err());
 
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         let allowed = spawn_tcp_server(ServerMode::Idle).await;
@@ -570,13 +841,13 @@ fn allowlist_denies_miss_and_rejects_broad_entries_at_config_time() {
         run_net_js(
             &format!(
                 r#"
-try {{
+return new Promise((resolve) => {{
   const s = new net.Socket();
+  s.on("error", (err) => resolve(`${{err.code}}:${{err.message}}`));
+  s.on("close", () => resolve("closed-without-error"));
   s.connect({}, "127.0.0.1");
-  return "allowed";
-}} catch (err) {{
-  return `${{err.code}}:${{err.message}}`;
-}}
+  setTimeout(() => resolve("timeout"), 2000);
+}});
 "#,
                 blocked_port
             ),
@@ -586,9 +857,14 @@ try {{
         .await
     });
     assert_eq!(result.status, 200, "unexpected status/body: {}", result.body);
+    // An IP literal at a port no rule names is refused in the ADDRESS phase,
+    // so the refusal arrives on the `error` event. It used to throw from
+    // `connect()` because the old check was a boolean over the host string;
+    // an address is now decided by the same ordered phase that decides a
+    // resolved one.
     assert!(
-        result.body.contains("capability_violation"),
-        "expected allowlist miss denial, got: {}",
+        result.body.contains("ERR_NET_EGRESS_DENIED"),
+        "expected an egress-rule denial, got: {}",
         result.body
     );
 }
@@ -841,10 +1117,10 @@ return `writes=${{refused}}|flushed=${{flushed}}`;
                 idle.port(),
                 echo.port()
             ),
-            NetPolicy::allowlist(
+            NetPolicy::rules(
                 vec![
-                    HostPort::new("127.0.0.1", idle.port()),
-                    HostPort::new("127.0.0.1", echo.port()),
+                    accept_target("127.0.0.1", idle.port()),
+                    accept_target("127.0.0.1", echo.port()),
                 ],
                 4,
                 8 * 1024 * 1024,
@@ -1297,4 +1573,20 @@ try {
         "rejectUnauthorized:false should be denied even for Trusted outside dev, got: {}",
         trusted_denied.body
     );
+}
+
+/// Build an ACCEPT rule for a `node:net` test target.
+///
+/// These tests target literal addresses, and an IP literal is NOT a
+/// representable `Name` - it must be written as a range, so a reader of a rule
+/// always knows which check decides it. `is_blocked_ip` would refuse loopback
+/// outright; these tests run with `ZEROSHIP_DEV=1`, which bypasses the floor
+/// and nothing else.
+fn accept_target(host: &str, port: u16) -> EgressRule {
+    let destination = match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => format!("{v4}/32"),
+        Ok(std::net::IpAddr::V6(v6)) => format!("{v6}/128"),
+        Err(_) => host.to_string(),
+    };
+    EgressRule::parse(Verdict::Accept, &destination, port).expect("valid test egress rule")
 }
