@@ -62,8 +62,7 @@ impl Fixture {
         .detach();
         let db = Arc::new(pg_client);
         let issuer = Arc::new(test_issuer());
-        issuer
-            .publish_active_key(&db)
+        common::publish_op_key_once(&issuer, &db)
             .await
             .expect("publish active OP key");
 

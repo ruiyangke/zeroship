@@ -64,8 +64,7 @@ async fn boot_native() -> Option<(
 
     let cfg = Arc::new(test_auth_config(&db_url));
     let issuer = Arc::new(test_issuer());
-    issuer
-        .publish_active_key(&pg)
+    common::publish_op_key_once(&issuer, &pg)
         .await
         .expect("publish active OP key");
 
