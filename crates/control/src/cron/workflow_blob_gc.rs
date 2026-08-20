@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use chrono::Utc;
-use compio_postgres::GenericClient;
+use compio_postgres::{Client, GenericClient};
 use zeroship_plugin_workflow::store::pg::WorkflowTables;
 
 use crate::registry::RegistryError;
@@ -120,8 +120,15 @@ pub async fn tick_ref_sweep(state: &AppState) -> Result<usize, RegistryError> {
     Ok(deleted)
 }
 
+/// Delete one app's now-unreferenced blobs, in a transaction of its own on the
+/// CALLER's connection.
+///
+/// The connection is borrowed rather than opened here so that a fleet sweep
+/// pays one connect for the whole tick instead of one per app; the transaction
+/// is still per call, so the caller's own per-app boundary is preserved.
 pub(crate) async fn delete_zero_ref_hashes_for_app(
     state: &AppState,
+    conn: &mut Client,
     tables: &WorkflowTables,
     hashes: impl IntoIterator<Item = String>,
 ) -> Result<usize, RegistryError> {
@@ -130,7 +137,6 @@ pub(crate) async fn delete_zero_ref_hashes_for_app(
         return Ok(0);
     }
 
-    let mut conn = state.registry.conn().await?;
     let tx = conn.transaction().await?;
     let mut deleted = 0usize;
     for hash in hashes {
