@@ -157,7 +157,7 @@ done < <(git worktree list --porcelain)
 # Then every local branch and every remote-tracking head, which covers a branch
 # nobody has checked out anywhere.
 while IFS= read -r ref; do
-  fp="$(zs_fingerprint_of_ref "$ref")" || continue
+  fp="$(zs_fingerprint_of_ref "$ROOT" "$ref")" || continue
   add_reachable "$fp" "$ref"
 done < <(git for-each-ref --format='%(refname)' refs/heads refs/remotes)
 

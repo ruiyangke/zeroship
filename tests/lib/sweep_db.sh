@@ -55,11 +55,18 @@ zs_sweep_family_of() {
 
 # Recompute zs_schema_fingerprint from a git tree instead of a directory.
 #
+# Usage: zs_fingerprint_of_ref <repo> <ref>
+#
 # Byte-for-byte the same construction as the working-tree one - `<basename> `
 # then the sha256 of the file's bytes, sorted, hashed, truncated to 12. Read the
 # header above before changing either one.
+#
+# The repository is an ARGUMENT, mirroring `zs_schema_fingerprint <root>`. It
+# used to be whatever directory the caller happened to be in, which agreed with
+# the `git for-each-ref` that produced the ref only by coincidence - and left
+# the selftest no way to ask about a tree it built itself.
 zs_fingerprint_of_ref() {
-  zs_testkit fingerprint ref --ref "$1"
+  zs_testkit fingerprint ref --repo "$1" --ref "$2"
 }
 
 # Is `pid` this shell or one of its descendants?
