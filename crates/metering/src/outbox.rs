@@ -70,7 +70,7 @@ pub const DEFAULT_USAGE_EVENTS_TOPIC: &str = "usage-events";
 pub const DEFAULT_MAX_RETAINED_EVENTS: usize = 100_000;
 
 /// Resolved usage-stream producer settings. The source of these values is the
-/// caller's concern — this crate only consumes the resolved struct.
+/// caller's concern - this crate only consumes the resolved struct.
 ///
 /// Both producers now build it from their own generated `metering.*`
 /// declarations, so one operator-visible identity carries the flag, the
