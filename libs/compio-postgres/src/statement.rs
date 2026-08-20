@@ -36,7 +36,8 @@ pub(crate) fn close_statement(client: &InnerClient, name: &str) {
         Some(buf.split().freeze())
     });
     if let Some(buf) = buf {
-        let _ = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)));
+        let _ = client
+            .send_transaction_neutral(RequestMessages::Single(FrontendMessage::Raw(buf)));
     }
 }
 

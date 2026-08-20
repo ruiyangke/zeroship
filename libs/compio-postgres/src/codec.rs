@@ -64,6 +64,18 @@ impl BackendMessages {
     pub fn empty() -> BackendMessages {
         BackendMessages(BytesMut::new())
     }
+
+    /// Return the status byte from a trailing `ReadyForQuery` frame without
+    /// consuming the messages that still belong to the response stream.
+    pub(crate) fn ready_for_query_status(&self) -> Option<u8> {
+        const FRAME_LEN: usize = 6;
+        let frame = self.0.get(self.0.len().checked_sub(FRAME_LEN)?..)?;
+        if frame[0] == backend::READY_FOR_QUERY_TAG && frame[1..5] == [0, 0, 0, 5] {
+            Some(frame[5])
+        } else {
+            None
+        }
+    }
 }
 
 impl FallibleIterator for BackendMessages {
