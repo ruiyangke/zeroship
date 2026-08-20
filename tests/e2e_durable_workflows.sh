@@ -150,7 +150,12 @@ done
 pass "release binaries built"
 
 echo "=== DW-07 test warmup ==="
-cargo test -p zeroship-control --test durable_workflows_keystone_e2e --no-run
+# `durable_workflows_keystone_e2e` is a MODULE of the `main` test target, not a
+# target of its own: control's 48 integration files collapsed into four
+# executables on 2026-08-20, so `--test durable_workflows_keystone_e2e` no longer
+# resolves. Every selection below names the target and filters on the module
+# path, which is a prefix of every test name in it.
+cargo test -p zeroship-control --test main --no-run
 # workflow_engine_test needs a live PostgreSQL and therefore carries
 # `required-features = ["live-db-tests"]`; without the feature cargo reports "no
 # test target named workflow_engine_test" rather than building it.
@@ -690,7 +695,7 @@ if [ "$BENCH_ONLY" = "1" ]; then
   ZEROSHIP_DW_E2E_PG_CONTAINER="$PG_ADMIN_CONTAINER" \
   ZEROSHIP_DW_E2E_PG_USER="$PG_USER" \
   ZEROSHIP_DW_E2E_PG_DB="$PG_DB" \
-    cargo test -p zeroship-control --test durable_workflows_keystone_e2e dw23_workflow_engine_load_bench -- --ignored --nocapture --test-threads=1 || {
+    cargo test -p zeroship-control --test main durable_workflows_keystone_e2e::dw23_workflow_engine_load_bench -- --ignored --nocapture --test-threads=1 || {
       fail "DW-23 workflow engine load bench failed"
       echo "--- control.log ---"
       tail -120 "$WORK/control.log" || true
@@ -716,7 +721,7 @@ ZEROSHIP_DW_E2E_SIDE_PORT="$SIDE_PORT" \
 ZEROSHIP_DW_E2E_PG_CONTAINER="$PG_ADMIN_CONTAINER" \
 ZEROSHIP_DW_E2E_PG_USER="$PG_USER" \
 ZEROSHIP_DW_E2E_PG_DB="$PG_DB" \
-  cargo test -p zeroship-control --test durable_workflows_keystone_e2e durable_workflows_m1_keystone_real_spine -- --nocapture --test-threads=1 || {
+  cargo test -p zeroship-control --test main durable_workflows_keystone_e2e::durable_workflows_m1_keystone_real_spine -- --nocapture --test-threads=1 || {
     fail "DW-07 keystone assertions failed"
     echo "--- control.log ---"
     tail -120 "$WORK/control.log" || true
@@ -737,7 +742,7 @@ ZEROSHIP_DW_E2E_SIDE_PORT="$SIDE_PORT" \
 ZEROSHIP_DW_E2E_PG_CONTAINER="$PG_ADMIN_CONTAINER" \
 ZEROSHIP_DW_E2E_PG_USER="$PG_USER" \
 ZEROSHIP_DW_E2E_PG_DB="$PG_DB" \
-  cargo test -p zeroship-control --test durable_workflows_keystone_e2e -- --nocapture --test-threads=1 --skip durable_workflows_m1_keystone_real_spine || {
+  cargo test -p zeroship-control --test main durable_workflows_keystone_e2e:: -- --nocapture --test-threads=1 --skip durable_workflows_m1_keystone_real_spine || {
     fail "DW-07 keystone assertions failed"
     echo "--- control.log ---"
     tail -120 "$WORK/control.log" || true

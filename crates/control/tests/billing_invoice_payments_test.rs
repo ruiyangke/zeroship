@@ -22,7 +22,7 @@
 
 #![allow(clippy::future_not_send)]
 
-mod common;
+use crate::common;
 
 use compio_postgres::{connect, NoTls};
 use uuid::Uuid;

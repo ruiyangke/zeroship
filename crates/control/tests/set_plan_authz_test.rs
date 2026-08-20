@@ -32,7 +32,7 @@ use zeroship_control::{
 };
 use zeroship_core::types::{AppNetPolicyLimits, AppRuntimeLimits};
 
-mod common;
+use crate::common;
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 

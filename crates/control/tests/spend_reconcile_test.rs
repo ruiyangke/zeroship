@@ -8,7 +8,7 @@
 //! (`zeroship_core::config::test_database_url_opt`); silent skip otherwise.
 //! The DB must have changeset 0039 applied.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::sync::Arc;

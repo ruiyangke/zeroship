@@ -3,7 +3,7 @@
 //! real spend recompute snapshot writer. The provider is recording-only because
 //! this test asserts the boundary call, not an external service.
 
-mod common;
+use crate::common;
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

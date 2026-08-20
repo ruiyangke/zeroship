@@ -17,7 +17,7 @@
 //! configured test database (`zeroship_core::config::test_database_url_opt`);
 //! silent skip otherwise.
 
-mod common;
+use crate::common;
 
 use std::collections::HashMap;
 
