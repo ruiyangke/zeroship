@@ -150,6 +150,40 @@ released_ledger_drift() {
   done < "$journal"
 }
 
+# released_ledger_misordered <journal_tsv> <migrations_dir>
+#
+# Print one line per migration that is NOT in the journal but sorts BEFORE the
+# newest migration that is. Empty output means the undeployed files are all a
+# suffix, which is the only arrangement the version stamping survives.
+#
+# WHY A SECOND CHECK, when released_ledger_drift already compares bytes. They
+# catch disjoint failures and this one is invisible to the other: the file at
+# fault is NEW, so no journal row covers its bytes and its own content is fine.
+# `platform.rs` (restamp_stable_versions) derives every lowered step's journal
+# version from the file's ORDINAL in sorted-filename order, so inserting a file
+# mid-corpus takes a version the journal already recorded for a LATER file and
+# shifts everything after it. The runner then compares a recorded checksum
+# against a different file's body and aborts with `ChecksumDrift` -- naming the
+# new file, which is not the one that changed, and never mentioning order.
+#
+# Measured 2026-08-20: `20260819000000_app_egress_rules.ts` landed while this
+# host's journal ended at `20260820000000_control_workflow_journal_access.ts`,
+# whose only step it records as mig_0000E9Uuwao9JYwWBWok52. The next roll would
+# have aborted. The fix is always to rename the undeployed file so it sorts
+# last; it is in no journal, so that costs nothing.
+released_ledger_misordered() {
+  local journal="$1" dir="$2" newest="" name
+  newest="$(cut -f1 "$journal" | sort | tail -1)"
+  [ -n "$newest" ] || return 0
+  for path in "$dir"/*.ts; do
+    [ -e "$path" ] || continue
+    name="${path##*/}"
+    [ "$name" \< "$newest" ] || continue
+    cut -f1 "$journal" | grep -qxF "$name" && continue
+    printf '%s sorts before %s but this host has never applied it\n' "$name" "$newest"
+  done
+}
+
 # released_ledger_render <journal_tsv> <ledger_file>
 #
 # Print the ledger file's leading comment header verbatim, then the journal rows.
@@ -753,6 +787,17 @@ $LEDGER_DRIFT
   bytes (git show <the commit before the edit>) and re-land the change as a NEW
   migration file. \`git log -p -- db/migrations-ts/<file>\` finds the edit."
       echo "ok  all $(wc -l < "$JOURNAL_FILE") applied migrations still have their released bytes"
+
+      LEDGER_ORDER="$(released_ledger_misordered "$JOURNAL_FILE" db/migrations-ts)"
+      [ -z "$LEDGER_ORDER" ] || fail "these migrations sort before one $HOST has already applied:
+$LEDGER_ORDER
+  NOTHING WAS RESTARTED. A file's journal version comes from its ordinal in
+  sorted-filename order, so one inserted mid-corpus claims the version this
+  host already recorded for a later file. The roll would abort at \`migrate\`
+  with ChecksumDrift naming the file above -- which is not the one that
+  changed. RENAME the file(s) above so they sort last. They are in no journal
+  yet, so the rename costs nothing and needs no new migration."
+      echo "ok  every migration this host has not applied sorts after the ones it has"
       ;;
   esac
 
