@@ -7,7 +7,10 @@
 // The decoder semantics are preserved exactly:
 //   - A single call to `read_backend` returns either one *async* message
 //     (NoticeResponse / NotificationResponse / ParameterStatus) or a
-//     batch of *normal* messages terminated by ReadyForQuery.
+//     batch of *normal* messages. The batch ends at ReadyForQuery, at an
+//     async message, or at the last COMPLETE message in the buffer -
+//     whichever comes first. Only ReadyForQuery sets `request_complete`,
+//     so a batch is NOT a whole response and callers must not assume it is.
 //   - Inside a `Normal` batch, callers iterate via `BackendMessages::next`.
 //
 // The length-cap + peek helpers from the earlier BufStream hardening pass
@@ -95,8 +98,13 @@ where
 ///
 /// Mirrors `PostgresCodec::decode` from tokio-postgres: the loop walks
 /// the buffer one header at a time, peeling off an Async message when
-/// it's first and returning a Normal batch terminated by ReadyForQuery
-/// otherwise.
+/// it's first and returning a Normal batch otherwise.
+///
+/// A Normal batch ends at whichever comes first: `ReadyForQuery` (which
+/// also sets `request_complete`), an async message at a non-zero offset, or
+/// the last COMPLETE message in the buffer. That third terminator is what
+/// keeps the read buffer bounded - the decoder returns what it has rather
+/// than reading until the run happens to end on a message boundary.
 ///
 /// On a Normal batch, the returned `BackendMessages` owns the underlying
 /// `BytesMut` slice — the stream's read buffer is drained exactly that
@@ -121,13 +129,12 @@ where
         // tokio-postgres's codec.rs decode().
         let mut idx = 0usize;
         let mut request_complete = false;
-        let mut need_more = false;
 
         while let Some(header) = backend::Header::parse(&stream.buf()[idx..]).map_err(Error::io)? {
             let msg_len = header.len() as usize + 1;
             if stream.buf()[idx..].len() < msg_len {
-                // Partial message at the tail — fill more and retry.
-                need_more = true;
+                // Partial message at the tail. Everything before it is
+                // complete, so stop walking and hand that prefix back.
                 break;
             }
 
@@ -158,18 +165,21 @@ where
             }
         }
 
-        if need_more {
-            // Need at least one more byte than we already have to make
-            // progress; fill() will read a full chunk in one syscall.
-            let have = stream.buf().len();
-            stream.fill(have + 1).await?;
-            continue;
-        }
-
         if idx == 0 {
-            // Buffered bytes parsed into zero complete messages
-            // (`Header::parse` returned None even though fill(5) ran).
-            // Fill more and retry.
+            // The message at the head is still partial - the only way `idx`
+            // stays 0, since the `fill(5)` above already guaranteed a parseable
+            // header. Reading is the only way forward. Asking for one more byte
+            // than we hold is what makes this terminate: `fill` must either read
+            // at least one byte, fail, or reject the size, so it cannot return
+            // successfully without progress.
+            //
+            // Refilling ONLY here is what bounds the read buffer. Refilling
+            // whenever any message at the tail was partial - which is what
+            // this did until it was measured - lets a dense run of small
+            // messages accumulate untouched until `fill` refuses the request
+            // above `MAX_MESSAGE_SIZE`, failing a query whose largest single
+            // message was kilobytes. It also re-walked every buffered header
+            // on each chunk, which is quadratic in the size of the run.
             let have = stream.buf().len();
             stream.fill(have + 1).await?;
             continue;
@@ -180,5 +190,134 @@ where
             messages,
             request_complete,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::buf_stream::ReadFramer;
+    use std::collections::VecDeque;
+
+    /// A [`ReadFramer`] that hands out exactly the byte chunks it was scripted
+    /// with, and fails once they run out.
+    ///
+    /// The live suite cannot pin this behaviour on its own. `READ_CHUNK` is a
+    /// MAXIMUM, not a promise: `AsyncRead::read` may return any positive count,
+    /// so the phase of the partial tail against the read boundary is a property
+    /// of the transport on the day, not of the decoder. A run that happens to
+    /// leave fewer than 5 bytes at the tail drains even on the pre-fix decoder.
+    /// Scripting the chunks removes the schedule from the experiment.
+    struct ScriptedFramer {
+        chunks: VecDeque<Vec<u8>>,
+        buf: BytesMut,
+    }
+
+    impl ScriptedFramer {
+        fn new(chunks: Vec<Vec<u8>>) -> Self {
+            Self {
+                chunks: chunks.into(),
+                buf: BytesMut::new(),
+            }
+        }
+    }
+
+    impl ReadFramer for ScriptedFramer {
+        async fn fill(&mut self, min_bytes: usize) -> Result<(), Error> {
+            while self.buf.len() < min_bytes {
+                match self.chunks.pop_front() {
+                    Some(chunk) => self.buf.extend_from_slice(&chunk),
+                    // The decoder asked for bytes the script does not have.
+                    // That request is itself the failure under test.
+                    None => {
+                        return Err(Error::io(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "decoder asked for more bytes than the script holds",
+                        )));
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        fn buf(&mut self) -> &mut BytesMut {
+            &mut self.buf
+        }
+
+        fn peek_u32_be(&self, offset: usize) -> Option<u32> {
+            let end = offset.checked_add(4)?;
+            let slice = self.buf.get(offset..end)?;
+            Some(u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]))
+        }
+
+        fn validate_length(&self, _length: u32) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    /// One single-column, non-NULL `DataRow` on the wire: tag, i32 length
+    /// (counting itself but not the tag), i16 column count, i32 field length,
+    /// payload.
+    fn data_row(payload: &[u8]) -> Vec<u8> {
+        let field_len = i32::try_from(payload.len()).expect("test payload exceeds a wire field");
+        let body_len = 4 + 2 + 4 + field_len;
+        let mut out = vec![b'D'];
+        out.extend_from_slice(&body_len.to_be_bytes());
+        out.extend_from_slice(&1i16.to_be_bytes());
+        out.extend_from_slice(&field_len.to_be_bytes());
+        out.extend_from_slice(payload);
+        out
+    }
+
+    /// A partial message at the tail must not make the decoder go back to the
+    /// socket: the complete messages ahead of it are already deliverable.
+    ///
+    /// This is the whole of the bug that failed a 125 MiB result set. Refilling
+    /// on a partial tail let a dense run of small `DataRow`s pile up in the read
+    /// buffer until `BufStream::fill` refused a request above `MAX_MESSAGE_SIZE`
+    /// - a query killed by an accumulation whose largest single message was
+    /// 16 KiB. Here the script simply runs out, so a decoder that refills gets
+    /// `UnexpectedEof` and one that returns its prefix gets both rows.
+    #[compio::test]
+    async fn a_partial_tail_does_not_hold_back_the_complete_messages_before_it() {
+        let mut framer = ScriptedFramer::new(vec![
+            [
+                data_row(b"first"),
+                data_row(b"second"),
+                // Enough of a third row to parse a header, never enough to
+                // complete it.
+                data_row(&[b'x'; 64])[..10].to_vec(),
+            ]
+            .concat(),
+        ]);
+
+        let message = read_backend(&mut framer)
+            .await
+            .expect("the decoder refilled instead of returning its complete prefix");
+
+        let BackendMessage::Normal {
+            mut messages,
+            request_complete,
+        } = message
+        else {
+            panic!("expected a Normal batch");
+        };
+
+        assert!(
+            !request_complete,
+            "a batch that never reached ReadyForQuery must not claim to be complete"
+        );
+
+        let mut payloads = Vec::new();
+        while let Some(msg) = messages.next().unwrap() {
+            match msg {
+                backend::Message::DataRow(body) => {
+                    let ranges: Vec<_> = body.ranges().collect().unwrap();
+                    payloads.push(ranges.len());
+                }
+                _ => panic!("a message other than DataRow appeared in the batch"),
+            }
+        }
+        assert_eq!(payloads.len(), 2, "the complete prefix was not returned whole");
     }
 }

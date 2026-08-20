@@ -73,11 +73,17 @@ impl TransactionStatus {
 
 /// A stream of backend messages for a single in-flight request.
 ///
-/// Yields messages one at a time via `next().await`. Internally the
-/// connection task sends one `BackendMessages` batch per `RowDescription +
+/// Yields messages one at a time via `next().await`. The connection task
+/// sends one or MORE `BackendMessages` batches per `RowDescription +
 /// DataRow* + CommandComplete + ReadyForQuery` group, and `Responses`
-/// flattens the inner `FallibleIterator` so the caller sees a linear
-/// message stream. Matches tokio-postgres's `Responses` type.
+/// flattens the inner `FallibleIterator` so the caller sees a linear message
+/// stream. Matches tokio-postgres's `Responses` type.
+///
+/// One batch per group would be wrong to rely on: the decoder cuts a batch at
+/// the last COMPLETE message in the read buffer, so a response larger than the
+/// socket hands over at once arrives as several batches, only the last of
+/// which carries `ReadyForQuery`. Bounding the read buffer requires that; see
+/// `codec::read_backend`.
 pub struct Responses {
     receiver: mpsc::Receiver<BackendMessages>,
     cur: BackendMessages,
