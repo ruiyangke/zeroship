@@ -72,6 +72,8 @@ use postgres_protocol::message::backend::Message;
 use postgres_protocol::message::frontend;
 use std::collections::{HashMap, VecDeque};
 use std::future::poll_fn;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::task::Poll;
 
 /// A request from a `Client` to be forwarded to the server by the
@@ -80,6 +82,7 @@ pub struct Request {
     pub messages: RequestMessages,
     pub sender: mpsc::Sender<BackendMessages>,
     pub(crate) disposition: RequestDisposition,
+    pub(crate) transaction_effect: TransactionEffect,
 }
 
 /// Whether a caller awaits the request outcome.
@@ -89,6 +92,15 @@ pub(crate) enum RequestDisposition {
     Awaited,
     /// Drop-time cleanup whose response stream is discarded at creation.
     Housekeeping,
+}
+
+/// Whether a request can authoritatively change the session's transaction status.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TransactionEffect {
+    /// The request's `ReadyForQuery` status belongs to the session state.
+    MayChange,
+    /// Protocol maintenance whose `ReadyForQuery` must not replace session state.
+    Neutral,
 }
 
 /// The payload of a [`Request`]: either a pre-encoded batch of frontend
@@ -107,6 +119,7 @@ pub enum RequestMessages {
 struct Response {
     sender: mpsc::Sender<BackendMessages>,
     disposition: RequestDisposition,
+    transaction_effect: TransactionEffect,
 }
 
 struct PendingResponse {
@@ -184,6 +197,11 @@ pub struct Connection<S, T> {
     /// parameter status). `None` until someone calls
     /// `Connection::notifications()`.
     async_sender: Option<mpsc::UnboundedSender<AsyncMessage>>,
+    /// Transaction status and transaction-capable request count shared with
+    /// the client. This task is the sole writer of status because it observes
+    /// every server response exactly once and in wire order.
+    tx_status: Arc<AtomicU8>,
+    in_flight_requests: Arc<AtomicUsize>,
     /// Keeps this connection counted in `live_connections()` for exactly as
     /// long as it owns its socket, so `drain_connections` can wait for the
     /// socket to be released instead of guessing at a sleep.
@@ -200,6 +218,8 @@ where
         delayed_notices: VecDeque<Message>,
         parameters: HashMap<String, String>,
         receiver: mpsc::UnboundedReceiver<Request>,
+        tx_status: Arc<AtomicU8>,
+        in_flight_requests: Arc<AtomicUsize>,
     ) -> Connection<S, T> {
         Connection {
             stream,
@@ -209,6 +229,8 @@ where
             responses: VecDeque::new(),
             pending_responses: VecDeque::new(),
             async_sender: None,
+            tx_status,
+            in_flight_requests,
             _live: crate::live::LiveConnectionGuard::new(),
         }
     }
@@ -403,6 +425,8 @@ where
             responses: &mut self.responses,
             pending_responses: &mut self.pending_responses,
             async_sender: self.async_sender.as_ref(),
+            tx_status: &self.tx_status,
+            in_flight_requests: &self.in_flight_requests,
         }
         .handle_message(message)
     }
@@ -415,10 +439,12 @@ where
             messages,
             sender,
             disposition,
+            transaction_effect,
         } = request;
         self.responses.push_back(Response {
             sender,
             disposition,
+            transaction_effect,
         });
 
         match messages {
@@ -436,6 +462,7 @@ where
             }
             RequestMessages::CopyIn(mut receiver) => {
                 debug_assert_eq!(disposition, RequestDisposition::Awaited);
+                debug_assert_eq!(transaction_effect, TransactionEffect::MayChange);
                 // COPY FROM STDIN: stream user-supplied frames to the
                 // server until the receiver signals end-of-stream. The
                 // serialized loop CANNOT read while writing (see the
@@ -472,6 +499,8 @@ struct Dispatch<'a> {
     responses: &'a mut VecDeque<Response>,
     pending_responses: &'a mut VecDeque<PendingResponse>,
     async_sender: Option<&'a mpsc::UnboundedSender<AsyncMessage>>,
+    tx_status: &'a AtomicU8,
+    in_flight_requests: &'a AtomicUsize,
 }
 
 impl Dispatch<'_> {
@@ -482,7 +511,18 @@ impl Dispatch<'_> {
             BackendMessage::Normal {
                 messages,
                 request_complete,
-            } => self.deliver_batch(messages, request_complete),
+            } => {
+                let ready_status = if request_complete {
+                    Some(
+                        messages
+                            .ready_for_query_status()
+                            .ok_or_else(Error::unexpected_message)?,
+                    )
+                } else {
+                    None
+                };
+                self.deliver_batch(messages, ready_status)
+            }
         }
     }
 
@@ -493,8 +533,9 @@ impl Dispatch<'_> {
     fn deliver_batch(
         &mut self,
         mut messages: BackendMessages,
-        request_complete: bool,
+        ready_status: Option<u8>,
     ) -> Result<(), Error> {
+        let request_complete = ready_status.is_some();
         // If there's no in-flight request but the server sent us backend
         // data, surface it as an error (matches tokio version).
         let mut response = match self.responses.pop_front() {
@@ -504,6 +545,21 @@ impl Dispatch<'_> {
                 _ => return Err(Error::unexpected_message()),
             },
         };
+
+        if let Some(status) = ready_status
+            && response.transaction_effect == TransactionEffect::MayChange
+        {
+            self.tx_status.store(status, Ordering::Relaxed);
+            if self
+                .in_flight_requests
+                .fetch_update(Ordering::Release, Ordering::Relaxed, |count| {
+                    count.checked_sub(1)
+                })
+                .is_err()
+            {
+                return Err(Error::unexpected_message());
+            }
+        }
 
         match response.sender.try_send(messages) {
             Ok(()) => {
@@ -729,6 +785,8 @@ async fn flush_with_read_draining<W>(
     responses: &mut VecDeque<Response>,
     pending_responses: &mut VecDeque<PendingResponse>,
     async_sender: Option<&mpsc::UnboundedSender<AsyncMessage>>,
+    tx_status: &AtomicU8,
+    in_flight_requests: &AtomicUsize,
 ) -> (
     Result<(), Error>,
     Option<Option<Result<BackendMessage, Error>>>,
@@ -789,6 +847,8 @@ where
                             responses,
                             pending_responses,
                             async_sender,
+                            tx_status,
+                            in_flight_requests,
                         })
                         .handle_message(msg)
                         {
@@ -851,6 +911,8 @@ where
             responses,
             pending_responses,
             async_sender,
+            tx_status,
+            in_flight_requests,
             _live,
         } = self;
 
@@ -859,8 +921,16 @@ where
                 // `_live` must outlive the loop: the split halves still own the
                 // socket, so the connection is not released until they are.
                 let _live = _live;
-                Self::run_multiplexed(read_half, write_half, parameters, receiver, async_sender)
-                    .await
+                Self::run_multiplexed(
+                    read_half,
+                    write_half,
+                    parameters,
+                    receiver,
+                    async_sender,
+                    tx_status,
+                    in_flight_requests,
+                )
+                .await
             }
             Err(stream) => {
                 let conn = Connection {
@@ -871,6 +941,8 @@ where
                     responses,
                     pending_responses,
                     async_sender,
+                    tx_status,
+                    in_flight_requests,
                     _live,
                 };
                 conn.run_serialized().await
@@ -944,6 +1016,8 @@ where
         mut parameters: HashMap<String, String>,
         mut receiver: mpsc::UnboundedReceiver<Request>,
         async_sender: Option<mpsc::UnboundedSender<AsyncMessage>>,
+        tx_status: Arc<AtomicU8>,
+        in_flight_requests: Arc<AtomicUsize>,
     ) -> Result<(), Error> {
         // ---- Spawn the dedicated read task. It OWNS `read_half` and loops
         // `read_backend` forever, forwarding each frame over a bounded
@@ -1104,6 +1178,8 @@ where
                         responses: &mut responses,
                         pending_responses: &mut pending_responses,
                         async_sender: async_sender.as_ref(),
+                        tx_status: &tx_status,
+                        in_flight_requests: &in_flight_requests,
                     }
                     .handle_message(msg)?;
                 }
@@ -1133,10 +1209,12 @@ where
                         messages,
                         sender,
                         disposition,
+                        transaction_effect,
                     } = request;
                     responses.push_back(Response {
                         sender,
                         disposition,
+                        transaction_effect,
                     });
                     match messages {
                         RequestMessages::Single(msg) => {
@@ -1152,6 +1230,8 @@ where
                                     &mut responses,
                                     &mut pending_responses,
                                     async_sender.as_ref(),
+                                    &tx_status,
+                                    &in_flight_requests,
                                 )
                                 .await
                             } else {
@@ -1184,6 +1264,7 @@ where
                         }
                         RequestMessages::CopyIn(rx) => {
                             debug_assert_eq!(disposition, RequestDisposition::Awaited);
+                            debug_assert_eq!(transaction_effect, TransactionEffect::MayChange);
                             // Enter COPY mode; frames stream via branch (4).
                             copy_in = Some(rx);
                         }
@@ -1211,6 +1292,8 @@ where
                         &mut responses,
                         &mut pending_responses,
                         async_sender.as_ref(),
+                        &tx_status,
+                        &in_flight_requests,
                     )
                     .await;
                     res?;
@@ -1513,6 +1596,34 @@ mod tests {
             .is_err(),
             "a housekeeping write hid a backpressured awaited response"
         );
+    }
+
+    #[test]
+    fn transaction_neutral_ready_for_query_does_not_replace_session_status() {
+        let (sender, _receiver) = mpsc::channel(1);
+        let mut parameters = HashMap::new();
+        let mut responses = VecDeque::from([Response {
+            sender,
+            disposition: RequestDisposition::Housekeeping,
+            transaction_effect: TransactionEffect::Neutral,
+        }]);
+        let mut pending_responses = VecDeque::new();
+        let tx_status = AtomicU8::new(b'T');
+        let in_flight_requests = AtomicUsize::new(1);
+
+        Dispatch {
+            parameters: &mut parameters,
+            responses: &mut responses,
+            pending_responses: &mut pending_responses,
+            async_sender: None,
+            tx_status: &tx_status,
+            in_flight_requests: &in_flight_requests,
+        }
+        .deliver_batch(BackendMessages::empty(), Some(b'I'))
+        .expect("deliver transaction-neutral ReadyForQuery");
+
+        assert_eq!(tx_status.load(Ordering::Relaxed), b'T');
+        assert_eq!(in_flight_requests.load(Ordering::Relaxed), 1);
     }
 
     #[test]

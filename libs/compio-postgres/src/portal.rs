@@ -3,6 +3,7 @@
 use crate::Statement;
 use crate::client::InnerClient;
 use crate::codec::FrontendMessage;
+use crate::connection::{RequestDisposition, RequestMessages, TransactionEffect};
 use postgres_protocol::message::frontend;
 use std::sync::{Arc, Weak};
 
@@ -24,7 +25,11 @@ impl Drop for Inner {
                 Some(buf.split().freeze())
             });
             if let Some(buf) = buf {
-                let _ = client.send_housekeeping(FrontendMessage::Raw(buf));
+                let _ = client.send_with(
+                    RequestMessages::Single(FrontendMessage::Raw(buf)),
+                    RequestDisposition::Housekeeping,
+                    TransactionEffect::Neutral,
+                );
             }
         }
     }

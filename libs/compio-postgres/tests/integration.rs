@@ -13,7 +13,9 @@
 //!       cargo test -p compio-postgres --test integration
 
 use compio_postgres::error::SqlState;
-use compio_postgres::{Client, Error, NoTls, Pool, PoolConfig, TransactionStatus};
+use compio_postgres::{
+    Client, Error, NoTls, Pool, PoolConfig, SimpleQueryMessage, TransactionStatus,
+};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -417,6 +419,28 @@ async fn error_handling() {
     // Connection should still be usable after error
     let rows = client.query("SELECT 1 as ok", &[]).await.unwrap();
     assert_eq!(rows[0].get::<_, i32>("ok"), 1);
+}
+
+#[compio::test]
+async fn simple_query_stream_ends_after_reporting_a_database_error() {
+    use futures_util::StreamExt;
+
+    let Some(url) = require_pg().await else { return };
+    let client = connect(&url).await.unwrap();
+    let stream = client.simple_query_raw("SELECT 1 / 0").await.unwrap();
+    let mut stream = std::pin::pin!(stream);
+
+    let error = stream
+        .next()
+        .await
+        .expect("the stream ended before reporting the database error")
+        .unwrap_err();
+    assert_eq!(error.code(), Some(&SqlState::DIVISION_BY_ZERO));
+    assert!(
+        stream.next().await.is_none(),
+        "the stream produced another item after its database error"
+    );
+    assert_eq!(client.transaction_status(), TransactionStatus::Idle);
 }
 
 // ---------------------------------------------------------------------------
@@ -2022,6 +2046,7 @@ async fn single_connection_pool(url: &str) -> Pool {
         PoolConfig {
             max_size: 1,
             min_idle: 1,
+            validation_bypass: std::time::Duration::from_secs(60),
             ..PoolConfig::default()
         },
     )
@@ -2044,13 +2069,12 @@ async fn released_open_transaction_is_not_inherited_by_the_next_borrower() {
             .unwrap();
     }
 
-    // Open a transaction with raw SQL and write inside it, then release the
-    // connection without committing or rolling back.
+    // Open a transaction and write inside it in one simple-Query message,
+    // then release the connection without committing or rolling back.
     {
         let client = pool.get().await.unwrap();
-        client.batch_execute("BEGIN").await.unwrap();
         client
-            .execute("INSERT INTO tx_leak VALUES (1)", &[])
+            .batch_execute("BEGIN; INSERT INTO tx_leak VALUES (1); SELECT 1")
             .await
             .unwrap();
         assert_eq!(
@@ -2077,7 +2101,7 @@ async fn released_open_transaction_is_not_inherited_by_the_next_borrower() {
 }
 
 #[compio::test]
-async fn released_aborted_transaction_is_not_inherited_by_the_next_borrower() {
+async fn released_transaction_aborted_by_a_later_batch_is_not_inherited_by_the_next_borrower() {
     let Some(url) = require_pg().await else {
         return;
     };
@@ -2094,6 +2118,9 @@ async fn released_aborted_transaction_is_not_inherited_by_the_next_borrower() {
             .batch_execute("SELECT * FROM no_such_table_here")
             .await
             .unwrap_err();
+        // ErrorResponse is delivered immediately; wait separately for the
+        // trailing ReadyForQuery that makes the failed status authoritative.
+        client.simple_query("").await.unwrap();
         assert_eq!(
             client.transaction_status(),
             TransactionStatus::Failed,
@@ -2105,6 +2132,285 @@ async fn released_aborted_transaction_is_not_inherited_by_the_next_borrower() {
     let one: i32 = client.query_one_scalar("SELECT 1", &[]).await.unwrap();
     assert_eq!(one, 1, "the next borrower inherited an aborted transaction");
     assert_eq!(client.transaction_status(), TransactionStatus::Idle);
+}
+
+#[compio::test]
+async fn released_transaction_aborted_in_one_batch_is_not_inherited_by_the_next_borrower() {
+    let Some(url) = require_pg().await else {
+        return;
+    };
+    let pool = single_connection_pool(&url).await;
+
+    {
+        let client = pool.get().await.unwrap();
+        let error = client
+            .batch_execute("BEGIN; SELECT 1 / 0")
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), Some(&SqlState::DIVISION_BY_ZERO));
+    }
+
+    let client = pool.get().await.unwrap();
+    let one: i32 = match client.query_one_scalar("SELECT 1::int4", &[]).await {
+        Ok(one) => one,
+        Err(error) => panic!(
+            "the next borrower inherited the aborted transaction: SQLSTATE {} ({error})",
+            error.code().map_or("<none>", SqlState::code)
+        ),
+    };
+    assert_eq!(one, 1);
+    assert_eq!(client.transaction_status(), TransactionStatus::Idle);
+}
+
+#[compio::test]
+async fn older_response_stream_does_not_hide_a_later_failed_transaction() {
+    use futures_util::StreamExt;
+
+    let Some(url) = require_pg().await else {
+        return;
+    };
+    let pool = single_connection_pool(&url).await;
+
+    {
+        let client = pool.get().await.unwrap();
+        let older = client.simple_query_raw("").await.unwrap();
+        let mut older = Box::pin(older);
+
+        let first = older
+            .next()
+            .await
+            .expect("the empty query response was not delivered")
+            .unwrap();
+        assert!(matches!(first, SimpleQueryMessage::CommandComplete(0)));
+
+        let error = client
+            .batch_execute("BEGIN; SELECT 1 / 0")
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), Some(&SqlState::DIVISION_BY_ZERO));
+
+        assert!(
+            older.next().await.is_none(),
+            "the older empty-query stream did not end at ReadyForQuery"
+        );
+    }
+
+    let client = pool.get().await.unwrap();
+    let one: i32 = match client.query_one_scalar("SELECT 1::int4", &[]).await {
+        Ok(one) => one,
+        Err(error) => panic!(
+            "the older stream hid the failed transaction: SQLSTATE {} ({error})",
+            error.code().map_or("<none>", SqlState::code)
+        ),
+    };
+    assert_eq!(one, 1);
+    assert_eq!(client.transaction_status(), TransactionStatus::Idle);
+}
+
+#[compio::test]
+async fn dropped_unpolled_begin_stream_is_not_inherited_by_the_next_borrower() {
+    let Some(url) = require_pg().await else {
+        return;
+    };
+    let pool = single_connection_pool(&url).await;
+
+    {
+        let client = pool.get().await.unwrap();
+        let stream = client.simple_query_raw("BEGIN").await.unwrap();
+        drop(stream);
+    }
+
+    let client = pool.get().await.unwrap();
+    let one: i32 = client
+        .query_one_scalar("SELECT 1::int4", &[])
+        .await
+        .unwrap();
+    assert_eq!(one, 1);
+    assert_eq!(
+        client.transaction_status(),
+        TransactionStatus::Idle,
+        "the next borrower inherited the unpolled stream's transaction"
+    );
+}
+
+#[compio::test]
+async fn errored_batch_in_an_implicit_transaction_rolls_back_session_changes_and_reports_idle() {
+    let Some(url) = require_pg().await else {
+        return;
+    };
+    let pool = single_connection_pool(&url).await;
+    let channel = test_schema();
+    let backend_pid;
+
+    {
+        let client = pool.get().await.unwrap();
+        backend_pid = client.process_id();
+        client
+            .batch_execute("SET application_name = 'cpg_before_error'")
+            .await
+            .unwrap();
+
+        let error = client
+            .batch_execute(&format!(
+                "SET application_name = 'cpg_during_error'; \
+                 LISTEN {channel}; \
+                 CREATE TEMP TABLE batch_error_temp (id int); \
+                 INSERT INTO batch_error_temp VALUES (0); \
+                 SELECT 1 / id FROM batch_error_temp"
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), Some(&SqlState::DIVISION_BY_ZERO));
+        // The SQLSTATE is returned at ErrorResponse, before PostgreSQL's
+        // trailing ReadyForQuery necessarily reaches the connection task.
+        // This empty query is a FIFO barrier and changes no transaction state.
+        client.simple_query("").await.unwrap();
+        assert_eq!(
+            client.transaction_status(),
+            TransactionStatus::Idle,
+            "an errored implicit transaction must end idle"
+        );
+    }
+
+    let client = pool.get().await.unwrap();
+    assert_eq!(
+        client.process_id(),
+        backend_pid,
+        "the pool recycled a connection that PostgreSQL reported idle"
+    );
+    let application_name: String = client
+        .query_one_scalar("SELECT current_setting('application_name')", &[])
+        .await
+        .unwrap();
+    assert_eq!(application_name, "cpg_before_error");
+
+    let listeners: i64 = client
+        .query_one_scalar(
+            "SELECT count(*)::int8 \
+             FROM pg_listening_channels() AS channels(channel) \
+             WHERE channel = $1",
+            &[&channel],
+        )
+        .await
+        .unwrap();
+    assert_eq!(listeners, 0, "LISTEN survived the implicit rollback");
+
+    let temp_table: Option<String> = client
+        .query_one_scalar("SELECT to_regclass('batch_error_temp')::text", &[])
+        .await
+        .unwrap();
+    assert!(
+        temp_table.is_none(),
+        "the temporary table survived the implicit rollback"
+    );
+}
+
+#[compio::test]
+async fn released_session_changes_in_an_aborted_transaction_are_rolled_back() {
+    let Some(url) = require_pg().await else {
+        return;
+    };
+    let pool = single_connection_pool(&url).await;
+    let channel = test_schema();
+
+    {
+        let client = pool.get().await.unwrap();
+        client
+            .batch_execute("SET application_name = 'cpg_before_aborted_batch'")
+            .await
+            .unwrap();
+        let error = client
+            .batch_execute(&format!(
+                "BEGIN; \
+                 SET application_name = 'cpg_in_aborted_batch'; \
+                 LISTEN {channel}; \
+                 CREATE TEMP TABLE aborted_batch_temp (id int); \
+                 INSERT INTO aborted_batch_temp VALUES (0); \
+                 SELECT 1 / id FROM aborted_batch_temp"
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), Some(&SqlState::DIVISION_BY_ZERO));
+        // Preserve immediate error delivery while making the status assertion
+        // wait for the failed batch's trailing ReadyForQuery.
+        client.simple_query("").await.unwrap();
+        assert_eq!(client.transaction_status(), TransactionStatus::Failed);
+    }
+
+    let client = pool.get().await.unwrap();
+    let one: i32 = client.query_one_scalar("SELECT 1::int4", &[]).await.unwrap();
+    assert_eq!(one, 1);
+    assert_eq!(client.transaction_status(), TransactionStatus::Idle);
+
+    let application_name: String = client
+        .query_one_scalar("SELECT current_setting('application_name')", &[])
+        .await
+        .unwrap();
+    assert_eq!(application_name, "cpg_before_aborted_batch");
+
+    let listeners: i64 = client
+        .query_one_scalar(
+            "SELECT count(*)::int8 \
+             FROM pg_listening_channels() AS channels(channel) \
+             WHERE channel = $1",
+            &[&channel],
+        )
+        .await
+        .unwrap();
+    assert_eq!(listeners, 0, "LISTEN survived the release rollback");
+
+    let temp_table: Option<String> = client
+        .query_one_scalar("SELECT to_regclass('aborted_batch_temp')::text", &[])
+        .await
+        .unwrap();
+    assert!(
+        temp_table.is_none(),
+        "the temporary table survived the release rollback"
+    );
+}
+
+#[compio::test]
+async fn clean_release_hands_off_same_connection_without_queuing_rollback() {
+    use std::rc::Rc;
+
+    let Some(url) = require_pg().await else {
+        return;
+    };
+    let pool = Rc::new(single_connection_pool(&url).await);
+    let client = pool.get().await.unwrap();
+    let backend_pid = client.process_id();
+    let one: i32 = client
+        .query_one_scalar("SELECT 1::int4", &[])
+        .await
+        .unwrap();
+    assert_eq!(one, 1);
+    assert_eq!(client.transaction_status(), TransactionStatus::Idle);
+    assert!(!client.is_dirty());
+
+    let waiter = {
+        let pool = Rc::clone(&pool);
+        compio::runtime::spawn(async move {
+            let client = pool.get().await.expect("the waiting borrower acquires");
+            (client.process_id(), client.is_dirty())
+        })
+    };
+
+    let mut spins = 0;
+    while pool.pending_count() == 0 {
+        yield_n(1).await;
+        spins += 1;
+        assert!(spins < 1000, "the waiting borrower never parked");
+    }
+
+    drop(client);
+    let (next_pid, dirty) = waiter
+        .await
+        .unwrap_or_else(|error| std::panic::resume_unwind(error));
+    assert_eq!(
+        next_pid, backend_pid,
+        "a clean connection was recycled instead of handed off"
+    );
+    assert!(!dirty, "a clean release needlessly queued ROLLBACK");
 }
 
 #[compio::test]
