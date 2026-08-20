@@ -418,8 +418,17 @@ impl Fixture {
         )
         .await
         .expect("insert user");
+        // SCHEMA-QUALIFIED, like every other statement in this fixture. These
+        // two were the only unqualified table references in the auth suite, and
+        // they resolved only because the shared dev cluster carries a
+        // hand-applied `ALTER ROLE postgres SET search_path = zeroship, public`
+        // - a CLUSTER-GLOBAL row in pg_db_role_setting that no migration and no
+        // provisioning script creates. MEASURED 2026-08-20 against a fresh
+        // PostgreSQL 16.15: `insert app: relation "apps" does not exist`
+        // (SqlState 42P01), two tests red, on a cluster whose only difference
+        // was that nobody had ever run that ALTER by hand.
         pg.execute(
-            "INSERT INTO apps (id, name, api_key, api_key_hash) VALUES ($1, $2, $3, $4)",
+            "INSERT INTO zeroship.apps (id, name, api_key, api_key_hash) VALUES ($1, $2, $3, $4)",
             &[
                 &app_db_id,
                 &app_name,
@@ -494,7 +503,7 @@ impl Fixture {
             .await;
         if let Some(app_db_id) = self.app_db_id {
             let _ = pg
-                .execute("DELETE FROM apps WHERE id = $1", &[&app_db_id])
+                .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_db_id])
                 .await;
         }
         let _ = pg
