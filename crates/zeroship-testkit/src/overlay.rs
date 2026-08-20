@@ -13,14 +13,20 @@
 //! WHY A HAND-ROLLED READER AND NOT THE REAL PARSER, still. The shell version's
 //! answer was "a harness cannot afford a cargo build to learn a hostname"; that
 //! argument is spent now that the harness runs a compiled binary either way.
-//! The surviving reason is dependency shape: pulling `zeroship-core` in for
-//! this would drag the whole config/topology/secrets tree, plus `serde` and
-//! `toml`, into a crate whose job is to be quick to build and impossible to
-//! break. The VALIDATION still lives in Rust service code -- `test_overlay.rs`
-//! fails on an unknown key, so a typo cannot survive `cargo test -p
-//! zeroship-core`, and this reader would only ever return `None` for one.
-//! The subset parsed here (a `[section]` header and `key = "value"`) is the
-//! whole of what the generator writes.
+//! The reason that replaced it is a hard one rather than a preference:
+//! `zeroship_core::config::test_overlay` means depending on `zeroship-core`,
+//! and `zeroship-core` depends on `cyper`, which depends on `hyper`, which
+//! depends on TOKIO. Measured 2026-08-20 with
+//! `cargo tree -i tokio -e normal -p zeroship-control`: that is the ONLY edge
+//! by which tokio enters this workspace at all. Reusing the parser would put
+//! the test harness on the wrong side of the zero-tokio invariant to save
+//! forty lines.
+//!
+//! The VALIDATION still lives in Rust service code -- `test_overlay.rs` fails
+//! on an unknown key under `deny_unknown_fields`, so a typo cannot survive
+//! `cargo test -p zeroship-core`, and this reader would only ever return `None`
+//! for one. The subset parsed here (a `[section]` header and `key = "value"`)
+//! is the whole of what the generator writes.
 //!
 //! WHAT IT DOES NOT DO. It does not invent a DSN when the file is missing. A
 //! suite that silently falls back to a compiled default when its configuration
