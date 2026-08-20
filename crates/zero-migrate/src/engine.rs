@@ -1049,7 +1049,7 @@ impl MigrationEngine {
         // use native ALTER), and `renames` is non-empty only on PostgreSQL — SQLite
         // routes a rename through its rebuild, and MySQL is refused at PLAN time by
         // `DeclarativeError::MysqlRenameColumnUnsupported` because the
-        // `PgExpandContract` step this loop builds needs an `OnlineSchemaChange`
+        // `ExpandContract` step this loop builds needs an `OnlineSchemaChange`
         // capability the MySQL backend does not have. So each dialect produces
         // exactly the steps its old code path drove, and the `renames` loop below is
         // reachable on PostgreSQL alone.

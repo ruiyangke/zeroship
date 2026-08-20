@@ -1072,7 +1072,8 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         // This used to justify itself with "the differ emits no renames for MySQL, so
         // `renames` is empty — no online path is reached". That was FALSE, and
         // measured false against a live server: the differ's rename author was
-        // dialect-blind, so a hinted MySQL rename planned a `PgExpandContract`, hit
+        // dialect-blind, so a hinted MySQL rename planned an `ExpandContract` (then
+        // spelled `PgExpandContract`, a name the same investigation disproved), hit
         // this `None` mid-apply, and left the deploy half-applied. The claim is true
         // NOW because the differ refuses the rename at plan time
         // (`DeclarativeError::MysqlRenameColumnUnsupported`) rather than because

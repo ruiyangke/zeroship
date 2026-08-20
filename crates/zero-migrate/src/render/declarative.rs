@@ -5438,7 +5438,7 @@ pub enum DeclarativeError {
     /// The rename author is dialect-blind: only SQLite `continue`s past it (its
     /// renames route through the 12-step rebuild), so PostgreSQL AND MySQL both
     /// pushed an `ExpandContractPlan` into the plan's `renames`. The engine then maps
-    /// every one of them to `RenameStep::PgExpandContract` unconditionally, and the
+    /// every one of them to `RenameStep::ExpandContract` unconditionally, and the
     /// MySQL backend exposes no `OnlineSchemaChange` capability to run it - so the
     /// deploy died mid-apply on an internal "routing bug" message, AFTER the plain
     /// DDL ahead of it had already committed, leaving a schema that was neither the
@@ -6641,7 +6641,7 @@ impl DeclarativeAuthor {
             // double-handled.
             // MySQL reaches the expand-contract author below, whose plan it cannot
             // execute: the engine lowers every authored rename to
-            // `RenameStep::PgExpandContract`, and the MySQL backend's `online()` is
+            // `RenameStep::ExpandContract`, and the MySQL backend's `online()` is
             // `None`, so the deploy died mid-apply on an internal routing-bug message
             // with the plain DDL ahead of it already committed. Refuse before
             // authoring, naming the columns, for the reason on the error variant.
