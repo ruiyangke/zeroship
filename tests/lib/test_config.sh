@@ -66,6 +66,12 @@ zs_test_config_get() {
 # still honoured as INPUTS by the provisioner, which is the override tier: set
 # one there and the overlay this reads is written to match. Setting one HERE
 # without regenerating the overlay is refused - see below.
+#
+# ON A REFUSAL NOTHING IS SET, which the shell version did not manage: it
+# exported PG_* and then ran the agreement check, so a refused load left the
+# caller's own PG_PORT overwritten by the overlay's. No consumer read them
+# afterwards - all four do `|| exit 2` - so this is a difference nobody can
+# observe today, recorded because it is a difference.
 zs_test_config_load() {
   local root assignments status
 
