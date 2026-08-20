@@ -142,7 +142,7 @@ pub async fn tick_with_config(
     // catalog-level exclusion only.
     let fleet = super::workflow_engine::journalled_fleet(&tx).await?;
     stats.coverage = SweepCoverage::opened_over(&fleet);
-    let mut apps = fleet.readable.into_iter();
+    let mut apps = fleet.usable.into_iter();
     // Budget checked BEFORE the pull so an app the break never reached stays in
     // the iterator and is counted as unvisited rather than as swept.
     loop {

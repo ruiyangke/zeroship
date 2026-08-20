@@ -20,7 +20,7 @@ use zeroship_plugin_workflow::advance::{
 use zeroship_plugin_workflow::apply;
 use zeroship_plugin_workflow::engine;
 use zeroship_plugin_workflow::errors::WorkflowError;
-use zeroship_plugin_workflow::store::pg::{PgStore, WorkflowTables};
+use zeroship_plugin_workflow::store::pg::{self, PgStore, WorkflowTables};
 use zeroship_workflow_scheduler::{
     self as workflow_scheduler, SchedulerConfig, TimerWheel, WakeHandle,
     WorkflowSchedulerStore, WorkflowSchedulerStoreError, WORKFLOW_ADVANCE_PATH,
@@ -41,6 +41,10 @@ pub use engine::{
 /// knob, not a correctness bound; DW-23 will measure and tune it.
 pub const DEFAULT_TICK_SECS: u64 = 1;
 const GATEWAY_DISPATCH_TIMEOUT: Duration = Duration::from_secs(35);
+/// How many tables a COMPLETE workflow journal has. Read from the provisioning
+/// crate's own list so a table added there cannot leave this census counting the
+/// old number and calling every app incomplete.
+const JOURNAL_TABLE_COUNT: usize = pg::JOURNAL_TABLE_SUFFIXES.len();
 static INFLIGHT_DISPATCHES: AtomicUsize = AtomicUsize::new(0);
 static PROVISIONED_WORKFLOW_JOURNALS: OnceLock<Mutex<HashSet<Uuid>>> = OnceLock::new();
 
@@ -96,11 +100,12 @@ where
 pub(crate) enum AppJournal {
     /// The journal exists and is readable on this connection.
     Ready(WorkflowTables),
-    /// This app has no journal tables at all.
+    /// This app has NONE of the journal tables. Some of them is not this arm.
     NotProvisioned,
-    /// The journal exists but this connection could not reach it - no USAGE on
-    /// `app_<uuid>`, a half-provisioned schema, or an app dropped mid-sweep.
-    /// Carries the database's own message so the skip log names a cause.
+    /// The journal exists but this connection could not use it - no USAGE on
+    /// `app_<uuid>`, an app dropped mid-sweep, or a journal holding some of its
+    /// tables and not the rest. Carries the database's own message, or the
+    /// count that was short, so the skip log names a cause.
     Unreachable(String),
 }
 
@@ -167,20 +172,42 @@ pub(crate) fn skip_journal_scoped<T>(
 /// can report the condition and must then roll back; it cannot carry on. That
 /// is why fleet sweeps take their app list from [`journalled_apps`], which
 /// answers the same question out of the catalog without raising.
+///
+/// EVERY journal table is probed, not just `runs`. `Ready` is what makes a
+/// caller run journal statements, and those statements read `subscriptions`,
+/// `signals`, `steps` and `blobs` too, so answering it from one table is
+/// answering a different question than the one the caller asked. A journal
+/// holding SOME of its tables is `Unreachable` and not `NotProvisioned`,
+/// deliberately: `NotProvisioned` means "this app holds nothing", and the
+/// fan-out completes a broadcast on the strength of it - which would drop the
+/// live subscribers of an app whose `subscriptions` table is right there.
 pub(crate) async fn probe_journal<C>(conn: &C, app_id: &Uuid) -> Result<AppJournal, RegistryError>
 where
     C: GenericClient + Sync,
 {
     let tables = WorkflowTables::for_app_id(app_id);
+    let names: Vec<String> = tables.all().map(str::to_string).to_vec();
     let result = conn
-        .query("SELECT to_regclass($1) IS NOT NULL AS exists", &[&tables.runs])
+        .query(
+            "SELECT count(*) FILTER (WHERE to_regclass(t.name) IS NOT NULL) AS present \
+               FROM unnest($1::text[]) AS t(name)",
+            &[&names],
+        )
         .await;
     match result {
         Ok(rows) => {
-            if rows.first().is_some_and(|row| row.get("exists")) {
+            let present = rows
+                .first()
+                .map_or(0, |row| usize::try_from(row.get::<_, i64>("present")).unwrap_or(0));
+            if present == names.len() {
                 Ok(AppJournal::Ready(tables))
-            } else {
+            } else if present == 0 {
                 Ok(AppJournal::NotProvisioned)
+            } else {
+                Ok(AppJournal::Unreachable(format!(
+                    "app {app_id}'s workflow journal is incomplete: {present} of {} tables exist",
+                    names.len()
+                )))
             }
         }
         Err(err) if is_journal_scoped_error(&err) => Ok(AppJournal::Unreachable(err.to_string())),
@@ -208,12 +235,17 @@ where
     }
 }
 
-/// One app that has a workflow journal, and whether this connection can read it.
+/// One app that has a workflow journal, and whether a sweep may use it.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct JournalledApp {
     pub app_id: Uuid,
-    /// False when this connection holds no USAGE on `app_<uuid>` or no SELECT on
-    /// the journal's runs table.
+    /// How many of the journal's tables the catalog lists in `app_<uuid>`.
+    ///
+    /// Anything other than all of them is a journal no sweep may touch - see
+    /// [`Self::exclusion`].
+    pub tables_present: usize,
+    /// False when this connection holds no USAGE on `app_<uuid>`, or no SELECT
+    /// on one of the journal tables that ARE there.
     ///
     /// Answered by `has_*_privilege`, which counts a privilege the role could
     /// reach through role MEMBERSHIP - control reaches the journals by being a
@@ -223,12 +255,70 @@ pub(crate) struct JournalledApp {
     /// to `SET ROLE` first. `zeroship_control` is created without NOINHERIT
     /// (db/migrations-ts/20260702000100_schema_roles_extensions.ts), so this
     /// holds; if that ever changes, this column starts lying.
+    ///
+    /// SELECT is the only privilege probed, and every sweep that DELETES from a
+    /// journal needs more. That is not a gap this column can close: control
+    /// reaches a journal by owning it through `zeroship_workflow_owner`, so its
+    /// privileges are all-or-nothing per schema, and the failure that actually
+    /// happened in production was schema USAGE (20260820000000). A DELETE denied
+    /// on a SELECTable table stays a statement-time skip.
     pub readable: bool,
 }
 
-/// Every app that HAS a workflow journal, with its readability, in id order.
+impl JournalledApp {
+    /// Why a sweep must not run its statements against this journal, or `None`.
+    ///
+    /// Both arms mean the same thing to a caller - this tenant is EXCLUDED, and
+    /// nothing may be concluded about what its journal holds - so they share a
+    /// return type and differ only in the cause the WARN names.
+    pub(crate) fn exclusion(self) -> Option<&'static str> {
+        if !self.readable {
+            Some("its journal schema is unreadable on this connection")
+        } else if self.tables_present != JOURNAL_TABLE_COUNT {
+            Some("its journal is incomplete: some journal tables are missing")
+        } else {
+            None
+        }
+    }
+}
+
+/// Every app that HAS any part of a workflow journal, in id order.
 ///
-/// Two decisions live in this one query.
+/// Three decisions live in this one query.
+///
+/// WHY EVERY JOURNAL TABLE AND NOT JUST `runs`. The join was pinned to
+/// `__zeroship_workflow_runs` alone, and that one table then answered two
+/// different questions: "does this app have a journal" and "can this connection
+/// read it". Both answers were keyed to the wrong thing. An app whose runs table
+/// was readable while another journal table was not was reported READABLE, and
+/// the sweep that then touched that other table failed - or, in a sweep that
+/// treats an unreadable tenant conservatively, silently did nothing - INSIDE an
+/// app the census had already counted as covered. And because the join was
+/// INNER, an app holding journal tables but NOT that one was absent from the
+/// result entirely: neither swept nor skipped, in no coverage number, no WARN.
+/// So the census now asks for the whole table set and reports an app that has
+/// SOME of it as excluded rather than dropping it.
+///
+/// Both of those are defence in depth, not a bug being reproduced: no code path
+/// in this tree produces a partial journal. `PgStore::provision` sends all five
+/// `CREATE TABLE`s as one simple-query batch - one implicit transaction, so a
+/// failure leaves none of them - and it creates `runs` FIRST, so even a
+/// hypothetical non-atomic partial could only lack the LATER tables, never that
+/// one. Nothing drops a journal table: `delete_app` deletes `zeroship` rows and
+/// `plugin-db`'s `drop_namespace` drops the app's DATA schema, the bare
+/// `<uuid>`, which is not this one. Creator migrations cannot reach `app_<uuid>`
+/// at all; it is owned by `zeroship_workflow_owner`
+/// (`migrated::provisioning::workflow_journal_schema_name`). The state this
+/// guards against is therefore an operator acting out of band, or a future
+/// change - and the cost of guarding is that the census reports it instead of
+/// being blind to it.
+///
+/// WHAT COMPLETENESS COSTS. A sixth journal table added to `provision_sql`
+/// makes every already-provisioned app incomplete until its next dispatch
+/// re-runs `CREATE TABLE IF NOT EXISTS`, and this reports all of them EXCLUDED
+/// until then. That is loud and countable - `apps_skipped` equal to the fleet
+/// size, `is_complete()` false - which is the point: the alternative is sweeps
+/// running statements against a table half the fleet does not have.
 ///
 /// WHY NOT `workflows_enabled`. Selecting every app and probing each with
 /// `to_regclass` was O(apps) round trips per tick, and the obvious fix -
@@ -255,19 +345,23 @@ pub(crate) async fn journalled_apps<C>(conn: &C) -> Result<Vec<JournalledApp>, R
 where
     C: GenericClient + Sync,
 {
+    let journal_tables: Vec<String> = pg::journal_table_names().to_vec();
     let rows = conn
         .query(
             "SELECT a.id AS app_id, \
-                    (has_schema_privilege(n.oid, 'USAGE') \
-                     AND has_table_privilege(c.oid, 'SELECT')) AS readable \
+                    count(*) AS tables_present, \
+                    bool_and(has_schema_privilege(n.oid, 'USAGE') \
+                             AND has_table_privilege(c.oid, 'SELECT')) AS readable \
                FROM zeroship.apps a \
                JOIN pg_catalog.pg_namespace n \
                  ON n.nspname = 'app_' || a.id::text \
                JOIN pg_catalog.pg_class c \
                  ON c.relnamespace = n.oid \
-                AND c.relname = '__zeroship_workflow_runs' \
+                AND c.relkind = 'r' \
+                AND c.relname = ANY($1::text[]) \
+              GROUP BY a.id \
               ORDER BY a.id",
-            &[],
+            &[&journal_tables],
         )
         .await
         .map_err(RegistryError::from)?;
@@ -275,6 +369,7 @@ where
         .into_iter()
         .map(|row| JournalledApp {
             app_id: row.get("app_id"),
+            tables_present: usize::try_from(row.get::<_, i64>("tables_present")).unwrap_or(0),
             readable: row.get("readable"),
         })
         .collect())
@@ -302,10 +397,18 @@ where
 /// never at app creation. Counting those apps here would make `apps_total`
 /// scale with the platform rather than with the workflow fleet, and would put a
 /// permanent nonzero "not covered" number in front of an operator for tenants
-/// that have nothing for any of these sweeps to do. There is also no partial
-/// arm to catch: `PgStore::provision` installs all five journal tables in one
-/// `batch_execute`, which Postgres runs as a single implicit transaction, so
-/// "schema present, runs table missing" is not a reachable state.
+/// that have nothing for any of these sweeps to do. An app with a journal
+/// SCHEMA and no tables in it is that same normal state - the schema is created
+/// at deploy time by the migration apply, the tables lazily - and is likewise
+/// not counted.
+///
+/// An app with SOME of the journal tables is a different case and IS counted,
+/// as an exclusion. `PgStore::provision` installs them all in one
+/// `batch_execute` - a single implicit transaction - and creates `runs` first,
+/// and nothing in the tree drops one, so no code path reaches that state; the
+/// census reports it rather than dropping the app so that reaching it out of
+/// band is visible in a number instead of being indistinguishable from an app
+/// that never ran a workflow. See [`journalled_apps`].
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct SweepCoverage {
     /// Apps the tick actually ran its per-app statement against.
@@ -337,7 +440,7 @@ impl SweepCoverage {
     pub(crate) fn opened_over(fleet: &JournalledFleet) -> Self {
         Self {
             apps_swept: 0,
-            apps_skipped: fleet.unreadable.len(),
+            apps_skipped: fleet.excluded.len(),
             apps_unvisited: 0,
         }
     }
@@ -374,20 +477,21 @@ impl SweepCoverage {
 
 /// The apps a fleet sweep may walk, and the ones it must exclude.
 ///
-/// Returns both halves rather than the readable ids alone so that a caller
-/// cannot consume the list without the exclusions being in front of it. An app
-/// with a journal it cannot read is EXCLUDED and WARNED about, once per tick,
-/// naming the app - and now also COUNTED, so the tick's return value carries
-/// the exclusion instead of leaving it to log archaeology.
+/// Returns both halves rather than the usable ids alone so that a caller cannot
+/// consume the list without the exclusions being in front of it. An app with a
+/// journal this connection cannot read, or one whose journal is missing tables,
+/// is EXCLUDED and WARNED about, once per tick, naming the app and the cause -
+/// and COUNTED, so the tick's return value carries the exclusion instead of
+/// leaving it to log archaeology.
 ///
 /// Before this existed the sweeps selected every app and propagated the per-app
 /// probe with `?`, so one app whose schema control could not read aborted the
 /// tick for every other tenant.
 pub(crate) struct JournalledFleet {
     /// In id order.
-    pub(crate) readable: Vec<Uuid>,
+    pub(crate) usable: Vec<Uuid>,
     /// In id order. Already WARNed about by the time this returns.
-    pub(crate) unreadable: Vec<Uuid>,
+    pub(crate) excluded: Vec<Uuid>,
 }
 
 pub(crate) async fn journalled_fleet<C>(conn: &C) -> Result<JournalledFleet, RegistryError>
@@ -395,18 +499,19 @@ where
     C: GenericClient + Sync,
 {
     let mut fleet = JournalledFleet {
-        readable: Vec::new(),
-        unreadable: Vec::new(),
+        usable: Vec::new(),
+        excluded: Vec::new(),
     };
     for app in journalled_apps(conn).await? {
-        if app.readable {
-            fleet.readable.push(app.app_id);
-        } else {
+        if let Some(reason) = app.exclusion() {
             tracing::warn!(
                 app_id = %app.app_id,
-                "skipping app in workflow sweep: its journal schema is unreadable on this connection"
+                tables_present = app.tables_present,
+                "skipping app in workflow sweep: {reason}"
             );
-            fleet.unreadable.push(app.app_id);
+            fleet.excluded.push(app.app_id);
+        } else {
+            fleet.usable.push(app.app_id);
         }
     }
     Ok(fleet)
@@ -437,7 +542,7 @@ where
     C: GenericClient + Sync,
 {
     let fleet = journalled_fleet(conn).await?;
-    for app_id in fleet.readable {
+    for app_id in fleet.usable {
         let Some(tables) = existing_tables(conn, &app_id).await? else {
             continue;
         };
@@ -450,7 +555,7 @@ where
             return Ok(Some(tables));
         }
     }
-    if let Some(app_id) = fleet.unreadable.first() {
+    if let Some(app_id) = fleet.excluded.first() {
         return Err(RegistryError::Database(format!(
             "cannot decide whether workflow run {run_id} exists: \
              app {app_id}'s journal is unreadable on this connection"
@@ -749,7 +854,7 @@ async fn reconcile_scheduler_from_journal_with_store(
         registered: 0,
         coverage: SweepCoverage::opened_over(&fleet),
     };
-    for app_id in fleet.readable {
+    for app_id in fleet.usable {
         let tables = WorkflowTables::for_app_id(&app_id);
         let sql = format!(
             "SELECT id, app_id, wake_at, cancel_requested \
@@ -831,7 +936,7 @@ pub async fn reap_parked_cancel_requested_batch(
     // the batch limit leaves the untouched apps IN the iterator and `len()`
     // below reports them. A `for` loop would have already moved the app that
     // triggered the break out of it and undercounted by one.
-    let mut apps = fleet.readable.into_iter();
+    let mut apps = fleet.usable.into_iter();
     loop {
         if reap.registered >= usize::try_from(limit).unwrap_or(usize::MAX) {
             break;

@@ -100,7 +100,7 @@ pub async fn tick_ref_sweep(state: &AppState) -> Result<RefSweepStats, RegistryE
     let mut remaining = MAX_REF_DELETES_PER_TICK;
     let fleet = super::workflow_engine::journalled_fleet(&tx).await?;
     stats.coverage = SweepCoverage::opened_over(&fleet);
-    let mut apps = fleet.readable.into_iter();
+    let mut apps = fleet.usable.into_iter();
     // Walked by `next()` rather than by `for`, and the budget is checked BEFORE
     // the pull, so that a `break` leaves every untouched app IN the iterator
     // for `len()` below. A `for` loop - or a check after the pull - would have
@@ -272,10 +272,17 @@ const BLOB_REFERENCED_BY_OUTPUT_SQL: &str = "SELECT \
 /// Is `hash` referenced by ANY app's journal?
 ///
 /// The caller DELETES the blob when this says false, so an app whose journal
-/// cannot be read must answer TRUE, not be skipped. Skipping it would let a
+/// cannot be SEARCHED must answer TRUE, not be skipped. Skipping it would let a
 /// permission gap on one tenant delete another tenant's live workflow output -
 /// a fleet-wide sweep that reads "I could not check" as "nothing there" turns a
 /// visible outage into silent data loss.
+///
+/// "Cannot be searched" covers an incomplete journal as well as an unreadable
+/// one, and the incomplete case is why the census reports it at all: the
+/// reference query reads `blobs`, `steps` AND `runs`, so a journal missing one
+/// of them cannot answer the question - and an app the census DROPPED would
+/// have been passed over silently, letting a hash its blobs table still
+/// references be deleted.
 ///
 /// `owner` names the app whose own blob row is the row the caller is about to
 /// delete, and excludes THAT ROW ONLY from the search - the same app's steps and
@@ -292,12 +299,11 @@ where
 {
     for app in super::workflow_engine::journalled_apps(conn).await? {
         let app_id = app.app_id;
-        if !app.readable {
+        if let Some(reason) = app.exclusion() {
             tracing::warn!(
                 app_id = %app_id,
                 hash = %hash,
-                "retaining workflow blob: this app's journal is unreadable, so it cannot be \
-                 proven unreferenced"
+                "retaining workflow blob: {reason}, so it cannot be proven unreferenced"
             );
             return Ok(true);
         }
