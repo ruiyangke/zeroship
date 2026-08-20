@@ -2324,6 +2324,32 @@ fn a_connection_does_not_outlive_the_runtime_that_opened_it() {
         "every runtime opened one connection and dropped it; the server should \
          hold none between iterations, got {backends:?}"
     );
+
+    // The descriptor half, which `crate::release` does NOT fix and is not
+    // trying to. Measured 2026-08-20 by running this test against the same
+    // binary with `Socket::release_handle` forced to `None`: the backend series
+    // went [1,2,3,4,5,6] and the fd series stayed [10,16,22,28,34,40] - byte
+    // for byte what it is with the release in place. The release ends the
+    // SESSION; the descriptor is co-owned by an io_uring submission that
+    // `Runtime::drop` never reclaims (`crate::live` has the mechanism), so it
+    // stays for the life of the process either way.
+    //
+    // Six per runtime is therefore a known, accepted cost, and this bound is
+    // what makes it an accepted one rather than an unmeasured one. It matters
+    // because it multiplies: `crates/auth` runs 254 tests in ONE process now
+    // (`crates/auth/tests/main.rs`), so at this rate that binary ends holding
+    // ~1,500 descriptors. That is over the 1024 soft `RLIMIT_NOFILE` that many
+    // CI images still ship, and the failure it would produce - EMFILE, from a
+    // test unrelated to whatever raised the cost - names nothing useful. If a
+    // change makes a runtime cost more descriptors, this should say so here.
+    let per_runtime: Vec<usize> = fds.windows(2).map(|w| w[1] - w[0]).collect();
+    println!("descriptors leaked per runtime:          {per_runtime:?}");
+    const BUDGET: usize = 6;
+    assert!(
+        per_runtime.iter().all(|&d| d <= BUDGET),
+        "a torn-down runtime leaks at most {BUDGET} descriptors; got {per_runtime:?} \
+         from {fds:?}. See the comment above before raising this."
+    );
 }
 
 /// The one-variable partner. The test above would also pass if the connection
@@ -2356,6 +2382,76 @@ fn a_connection_is_visible_to_the_server_while_its_runtime_runs() {
     drop(rt);
 
     assert_eq!(seen, 1, "the live connection should see itself");
+}
+
+/// A server-sent refusal must reach the reader with the SQLSTATE it carried.
+///
+/// `compio_postgres::Error`'s own `Display` renders EVERY `Kind::Db` as the
+/// literal string `"db error"`, and `postgres_unreachable` used to format only
+/// that. Measured 2026-08-20 with `crate::release` disabled against a live,
+/// healthy server at its `max_connections` ceiling: nine tests in this file
+/// failed reporting `error: db error` and told the reader to provision a
+/// database that was already up. `53300` never appeared in the output.
+///
+/// The error here is a real one off the wire rather than a synthesised chain,
+/// because the property under test is that the `DbError` at the bottom of a
+/// real `Error` is found and read.
+#[compio::test]
+async fn a_server_refusal_reaches_the_reader_with_its_sqlstate() {
+    let Some(url) = require_pg().await else { return };
+    let client = connect(&url).await.unwrap();
+
+    let err = client
+        .query("SELECT * FROM a_table_that_does_not_exist", &[])
+        .await
+        .expect_err("querying a missing table must fail");
+
+    // What the old formatting produced, and all it produced.
+    assert_eq!(err.to_string(), "db error");
+
+    let chain = common::error_chain(&err);
+    assert!(
+        chain.contains("42P01"),
+        "the chain must carry the SQLSTATE the server sent, got {chain:?}"
+    );
+    assert!(
+        chain.contains("a_table_that_does_not_exist"),
+        "the chain must carry the server's message, got {chain:?}"
+    );
+    assert!(
+        common::server_answered(&err),
+        "a DbError means PostgreSQL composed and sent this, so it answered"
+    );
+}
+
+/// The one-variable partner. The test above proves the chain walk RUNS; only
+/// this proves it DISCRIMINATES. A `server_answered` that returned `true`
+/// unconditionally would pass the test above and would put "the server
+/// ANSWERED, so it is running" on top of a connection refused - the same class
+/// of wrong claim, pointed the other way.
+///
+/// Port 1 is dialled rather than a closed high port: the low ports are
+/// reserved, so nothing can be listening there by accident and make this pass
+/// for the wrong reason.
+#[compio::test]
+async fn nothing_listening_is_not_reported_as_a_server_answer() {
+    let err = compio_postgres::connect(
+        "postgres://postgres:zeroship@127.0.0.1:1/zeroship",
+        NoTls,
+    )
+    .await
+    .err()
+    .expect("nothing listens on port 1");
+
+    assert!(
+        !common::server_answered(&err),
+        "no server replied, so the provisioning advice is the correct one"
+    );
+    let chain = common::error_chain(&err);
+    assert!(
+        !chain.contains("SQLSTATE"),
+        "a transport failure carries no SQLSTATE to print, got {chain:?}"
+    );
 }
 
 /// The consequence that motivated this, stated as the thing a caller actually
