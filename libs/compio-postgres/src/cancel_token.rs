@@ -54,6 +54,27 @@ impl CancelToken {
             self.ssl_mode,
             self.ssl_negotiation,
             tls,
+            // `true`, deliberately, and NOT derived from `self.socket_config`.
+            //
+            // Here `has_hostname` asks whether the CONNECTOR the caller just
+            // handed us has a name to validate against. Only the caller knows:
+            // this method takes their stream and their `TlsConnect`, and
+            // nothing says either has to match the address the original
+            // session used. `true` means "attempt validation", which fails
+            // closed - a connector with no name refuses the handshake.
+            //
+            // Deriving it from the token was tried and reverted. It reads as
+            // more precise and is a downgrade: `Config::connect_raw` leaves
+            // `socket_config` as `None` forever (`config.rs`), so every
+            // caller-owned-stream client got `false`, and under the default
+            // `sslmode=prefer` that skips TLS and puts the cancel key - a
+            // bearer credential, see `cancel_query_raw` - on the wire in
+            // cleartext. It did not even fix the Unix case it was written for:
+            // `cancel_query_raw` still picks `Encryption::first_for(mode)`, so
+            // Unix plus `require` fails either way, just with a different
+            // message.
+            //
+            // Upstream tokio-postgres passes `true` here too.
             true,
             self.process_id,
             self.secret_key,
