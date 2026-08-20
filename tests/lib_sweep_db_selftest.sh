@@ -48,10 +48,11 @@ bad() { fail=$((fail + 1)); echo "FAIL - $1" >&2; }
 check() { if [ "$2" = "$3" ]; then ok "$1 ($3)"; else bad "$1: expected '$2', got '$3'"; fi }
 
 echo "=== the fingerprint: both computations agree, and it discriminates ==="
-# Pinned against the real tree, not a fixture. A fixture would pin the two
-# implementations to each other and prove nothing about the 34 files the
-# sweeper actually reasons over - and it is those files, at their real sizes
-# and real names, that either agree or delete everything.
+# THE AGREEMENT is pinned against the real tree, not a fixture. A fixture would
+# pin the two implementations to each other and prove nothing about the 34 files
+# the sweeper actually reasons over - and it is those files, at their real sizes
+# and real names, that either agree or delete everything. The control after it
+# is the opposite case and is built rather than found; see there for why.
 from_dir="$(zs_schema_fingerprint "$ROOT")"
 from_ref="$(zs_fingerprint_of_ref "$ROOT" HEAD)"
 check "working tree and HEAD agree" "$from_dir" "$from_ref"
@@ -73,14 +74,14 @@ if [ -n "$from_dir" ]; then ok "and the value is non-empty ($from_dir)"; else ba
 # hooks and signs nothing, so this cannot go red for a reason unrelated to the
 # fingerprint. `zs_fingerprint_of_ref` takes any tree-ish - the no-migrations
 # case below already hands it a bare tree sha.
-CTRL="$TMP/control-repo"
-mkdir -p "$CTRL/db/migrations-ts"
-printf 'one' > "$CTRL/db/migrations-ts/20260101_one.ts"
-printf 'two' > "$CTRL/db/migrations-ts/20260202_two.ts"
 #
 # `add -A -f`: the force is against a GLOBAL excludes file. Nothing in this
 # throwaway tree is ignorable, and a `*.ts` line in somebody's ~/.gitignore
 # would otherwise stage an empty set and take the case down with it.
+CTRL="$TMP/control-repo"
+mkdir -p "$CTRL/db/migrations-ts"
+printf 'one' > "$CTRL/db/migrations-ts/20260101_one.ts"
+printf 'two' > "$CTRL/db/migrations-ts/20260202_two.ts"
 git -C "$CTRL" init -q . >/dev/null 2>&1
 git -C "$CTRL" add -A -f
 ctrl_before="$(git -C "$CTRL" write-tree 2>/dev/null)"

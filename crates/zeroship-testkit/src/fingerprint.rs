@@ -12,6 +12,14 @@
 //! implementations to each other and prove nothing about the files the sweeper
 //! actually reasons over.
 //!
+//! THAT ARGUMENT IS ABOUT THE AGREEMENT, and the fixtures below are not trying
+//! to take it over. They cover what the real repository cannot be asked to
+//! demonstrate on command: that the hash MOVES when the migration set does and
+//! HOLDS when anything else does. That pair used to be sampled from history --
+//! "a commit 40 back must differ" -- which made the harness's verdict a
+//! function of how recently somebody touched `db/migrations-ts`, and it read as
+//! a broken fingerprint during every quiet spell.
+//!
 //! WHY THE BASENAME GOES INTO THE HASH BESIDE THE BYTES. The platform runner
 //! orders by filename and journals under it, so `20260101_a.ts` and
 //! `20260301_a.ts` with identical bytes are two different schemas and must not
