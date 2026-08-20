@@ -832,9 +832,15 @@ jobs:
   # test. An overlay naming a Redis that does not exist is a false statement in
   # the one document the whole workspace reads for its test coordinates.
   #
-  # POSTGRES_DB: zeroship for the same reason: compose sets it, so the overlay's
-  # DSN names `zeroship`, and any target that falls back to
-  # `test_database_url_opt()` instead of the suite's own PG_TEST_URL dials it.
+  # POSTGRES_DB: zeroship for the same reason, and it is the same kind of
+  # claim - truth in the overlay, not a test that needs it. compose sets it, so
+  # the overlay's DSN names `zeroship`; without it the DSN names a database that
+  # does not exist on the service container. Nothing in either gate dials that
+  # DSN today, because both scripts export PG_TEST_URL for their whole cargo run
+  # and `database_url_opt` prefers it (crates/core/src/config/test_overlay.rs:131)
+  # - so the overlay's own database is the unreachable fallback arm. Make it
+  # real anyway; a generated topology that is only accidentally unread is not a
+  # correct one.
   billing-gate:
     runs-on: ubuntu-latest
     services:
