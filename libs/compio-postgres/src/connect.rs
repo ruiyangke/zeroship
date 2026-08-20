@@ -29,7 +29,28 @@ use crate::tls::MakeTlsConnect;
 use crate::{Config, Error, Socket};
 use compio::net::ToSocketAddrsAsync;
 use rand::seq::SliceRandom;
+use std::future::Future;
+use std::time::Duration;
 use std::{cmp, io};
+
+pub(crate) async fn with_connect_timeout<T, F>(
+    timeout: Option<Duration>,
+    connect: F,
+) -> Result<T, Error>
+where
+    F: Future<Output = Result<T, Error>>,
+{
+    match timeout {
+        Some(timeout) => match compio::time::timeout(timeout, connect).await {
+            Ok(result) => result,
+            Err(_) => Err(Error::connect(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "connection timed out",
+            ))),
+        },
+        None => connect.await,
+    }
+}
 
 pub async fn connect<T>(
     mut tls: T,
@@ -188,6 +209,26 @@ async fn connect_once<T>(
 where
     T: MakeTlsConnect<Socket>,
 {
+    with_connect_timeout(
+        config.get_connect_timeout().copied(),
+        connect_once_inner(addr, hostname, port, tls, config),
+    )
+    .await
+}
+
+/// One address-level connection sequence. The caller's deadline spans this
+/// whole operation, including a permitted TLS/plaintext retry on a fresh
+/// socket, rather than restarting for each transport leg.
+async fn connect_once_inner<T>(
+    addr: Addr,
+    hostname: Option<&str>,
+    port: u16,
+    tls: &mut T,
+    config: &Config,
+) -> Result<(Client, Connection<Socket, T::Stream>), Error>
+where
+    T: MakeTlsConnect<Socket>,
+{
     // libpq: "sslmode is ignored for Unix domain socket communication."
     // A local socket has no network to eavesdrop on and no host name to put in
     // a certificate, so every mode - including verify-full - is plaintext.
@@ -301,4 +342,122 @@ where
     });
 
     Ok((client, connection))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::NoTls;
+    use crate::config::SslMode;
+    use compio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+    use compio::net::TcpListener;
+    use futures_channel::oneshot;
+    use std::error::Error as _;
+    use std::net::SocketAddr;
+    use std::time::Duration;
+
+    fn frame(tag: u8, body: &[u8]) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(5 + body.len());
+        frame.push(tag);
+        frame.extend_from_slice(&u32::try_from(body.len() + 4).unwrap().to_be_bytes());
+        frame.extend_from_slice(body);
+        frame
+    }
+
+    fn successful_handshake() -> Vec<u8> {
+        let mut script = frame(b'R', &0u32.to_be_bytes());
+        script.extend_from_slice(&frame(b'K', &[0; 8]));
+        script.extend_from_slice(&frame(b'Z', b"I"));
+        script
+    }
+
+    async fn scripted_server_after_startup(
+        server_says: Option<Vec<u8>>,
+    ) -> (SocketAddr, oneshot::Receiver<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (startup_seen, startup_observed) = oneshot::channel();
+
+        compio::runtime::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+
+            let compio::BufResult(result, length) = socket.read_exact(vec![0u8; 4]).await;
+            result.unwrap();
+            let length = u32::from_be_bytes(length.try_into().unwrap()) as usize;
+            assert!(length >= 4, "startup packet length must include its header");
+
+            let compio::BufResult(result, _) =
+                socket.read_exact(vec![0u8; length - 4]).await;
+            result.unwrap();
+            let _ = startup_seen.send(());
+
+            if let Some(server_says) = server_says {
+                let compio::BufResult(result, _) = socket.write_all(server_says).await;
+                result.unwrap();
+                socket.flush().await.unwrap();
+            } else {
+                // The client is now past TCP connect and startup write. Wait for
+                // it to close the timed-out attempt without sending a byte.
+                let compio::BufResult(_, _) = socket.read(vec![0u8; 1]).await;
+            }
+        })
+        .detach();
+
+        (addr, startup_observed)
+    }
+
+    fn config_for(addr: SocketAddr, connect_timeout: Duration) -> Config {
+        let mut config = Config::new();
+        config
+            .user("scripted-user")
+            .hostaddr(addr.ip())
+            .port(addr.port())
+            .ssl_mode(SslMode::Disable)
+            .connect_timeout(connect_timeout);
+        config
+    }
+
+    #[compio::test]
+    async fn connect_timeout_covers_a_server_stalled_during_handshake() {
+        let (addr, startup_observed) = scripted_server_after_startup(None).await;
+        let config = config_for(addr, Duration::from_secs(1));
+        let connect = compio::runtime::spawn(async move { config.connect(NoTls).await });
+
+        compio::time::timeout(Duration::from_secs(5), startup_observed)
+            .await
+            .expect("client did not send startup before the test watchdog")
+            .expect("server closed before observing the complete startup packet");
+
+        let result = compio::time::timeout(Duration::from_secs(5), connect)
+            .await
+            .expect("outer watchdog expired because connect_timeout covered only TCP")
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        let error = match result {
+            Ok(_) => panic!("a silent server completed the PostgreSQL handshake"),
+            Err(error) => error,
+        };
+
+        let io = error
+            .source()
+            .and_then(|cause| cause.downcast_ref::<std::io::Error>())
+            .expect("connection timeout must retain its I/O cause");
+        assert_eq!(io.kind(), std::io::ErrorKind::TimedOut);
+        assert_eq!(io.to_string(), "connection timed out");
+    }
+
+    #[compio::test]
+    async fn connect_timeout_allows_a_handshake_inside_the_deadline() {
+        let (addr, startup_observed) =
+            scripted_server_after_startup(Some(successful_handshake())).await;
+        let config = config_for(addr, Duration::from_secs(5));
+
+        let connected = compio::time::timeout(Duration::from_secs(10), config.connect(NoTls))
+            .await
+            .expect("outer watchdog expired during a scripted local handshake")
+            .expect("a handshake inside connect_timeout must succeed");
+        startup_observed
+            .await
+            .expect("server did not observe the complete startup packet");
+        drop(connected);
+    }
 }
