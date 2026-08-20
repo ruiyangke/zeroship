@@ -40,66 +40,63 @@
 # it in; an ambient variable that silently redirects a gate is how gates get
 # silently disabled.
 #
-# TWO RUNS AT ONCE ARE NOT YET FULLY GREEN, AND HERE IS EXACTLY WHAT IS LEFT.
+# TWO RUNS AT ONCE ARE GREEN, AND HERE IS WHAT IT TOOK.
 # A shared database shares DATABASE-SCOPED SINGLETONS, which no migration hash
 # can see (tests/lib/suite_db.sh says why). Running two suites together is the
-# only instrument that finds them, and it found these. Fixed already:
+# only instrument that finds them, and it found these:
 #
 #   the active OP signing key   3 fixtures published a constant-seed key per
 #                               test; a peer run retired it and the republish
-#                               died. 96 failures -> 0. Two runs of the auth
-#                               integration binary together: 254/0 and 254/0.
-#   4 rate-limit bucket keys    a shared client ip, or none at all, so a peer
+#                               died. 96 failures -> 0.
+#   5 rate-limit bucket keys    a shared client ip, or none at all, so a peer
 #                               drained the bucket and a 429 arrived where the
-#                               test asserts 401 / 303 / 200.
+#                               test asserts 401 / 303 / 200 / 302. The last of
+#                               them was `reset_ip:0.0.0.0`, shared by the three
+#                               /reset POSTs in password_reset_test.
+#   4 globally-named DDL        triggers and a CHECK constraint installed on
+#     objects on shared tables  zeroship.{users,magic_links,magic_completions,
+#                               email_verifications}. Per-run NAMES and a WHEN
+#                               clause (or predicate) naming the run's own row;
+#                               the model is signing_key_retention_test.rs:643,
+#                               which has done both since it was written.
 #
-# Where that leaves two concurrent runs, MEASURED 2026-08-20 on one shared
-# database, the pair started together and confirmed overlapping (both runs'
-# client processes holding a backend in 13 of 15 samples):
+# MEASURED 2026-08-20 on this cluster, THREE pairs run one after another, each
+# pair two whole gates started together on the ONE shared database:
 #
-#   whole gate, before the last fixture fixes   636 passed / 5 failed
-#                                               638 passed / 3 failed
-#   the auth integration binary, after them     252 passed / 2 failed
-#                                               253 passed / 1 failed
+#   pair 1   641/0 and 641/0    277s of 279s overlapping
+#   pair 2   641/0 and 641/0    286s of 303s
+#   pair 3   641/0 and 641/0    304s of 316s
 #
-# and every remaining failure is in the list below. For comparison, ONE run
-# alone on the same database reports 632 for the whole gate and 254/0 for that
-# binary, so the concurrency cost is now those few tests and nothing else.
+# and the one-variable control, the same two runs against a database EACH:
 #
-# STILL OPEN, and each is a globally-named DDL object a test installs on a
-# SHARED table. Two runs then fight over one object, and a sleeping trigger
-# meant to slow THIS run's insert also slows the peer's. `:410` below is the
-# one that failed in BOTH runs of the last measurement, `magic_link_test` in
-# one of them:
+#   641/0 and 641/0             265s of 281s
 #
-#   crates/auth/tests/signup_forgot_ratelimit_test.rs:397,405,499
-#       CHECK constraint `auth_users_signup_m3_name_check` on zeroship.users
-#   crates/auth/tests/magic_link_test.rs:38,58,80,104
-#       two functions + two triggers, fixed names
-#   crates/auth/tests/password_reset_test.rs:92,112
-#   crates/auth/tests/verification_test.rs:42,63
+# so the concurrency cost on a shared database is now zero tests, not "a few".
 #
-# The fix shape is in the tree already: signing_key_retention_test.rs:643
-# interpolates `{trigger_name}` per run and needs nothing. The names have to
-# become per-run AND the triggers need a WHEN clause scoping them to their own
-# run's rows, because a trigger on a shared table fires for the peer too.
+# WHAT THE INSTRUMENT LOOKS LIKE WHEN IT IS WORKING, because a green whole-gate
+# pair is a weak signal: 641 tests dilute a handful of colliding ones, and a
+# pre-fix pair of whole gates ALSO reported 641/0 twice on this cluster. Run
+# only the four colliding modules in both processes instead -
 #
-# AND THE PART THAT IS WORSE THAN "CONCURRENT RUNS GO RED": one of those tests
-# can POISON THE SHARED DATABASE FOR EVERY LATER RUN, INCLUDING SINGLE ONES.
-# `signup_forgot_ratelimit_test` inserts a user named `M3_FAIL` and adds
-# `CHECK (name <> 'M3_FAIL')` to zeroship.users. Lose the race, panic between
-# the insert and the cleanup, and the row stays - and because nothing ever
-# drops this database, it stays forever.
+#   cargo test -p zeroship-auth --test main --no-fail-fast -- --test-threads 1 \
+#     magic_link_test:: password_reset_test:: verification_test:: \
+#     signup_forgot_ratelimit_test::
 #
-# MEASURED 2026-08-20, and it is why the numbers above have to be read with a
-# date on them: a SINGLE run of `cargo test -p zeroship-auth` on a clean
-# database was 254/0, and the same command after the concurrent runs was
-# 253 passed / 1 failed -
+# - twice at once, and the collisions concentrate. Five such pairs before the
+# fixes: 9 of 10 runs red. Five after: 0 of 10.
+#
+# AND THE PART THAT WAS WORSE THAN "CONCURRENT RUNS GO RED": one of those tests
+# POISONED THE SHARED DATABASE FOR EVERY LATER RUN, INCLUDING SINGLE ONES.
+# `signup_forgot_ratelimit_test` inserts a user named `M3_FAIL` and used to add
+# `CHECK (name <> 'M3_FAIL')` to zeroship.users under a fixed name. Lose the
+# race, panic between the insert and the cleanup, and the row stays - and
+# because nothing ever drops this database, it stayed forever:
 #     add test constraint: ... check constraint
 #     "auth_users_signup_m3_name_check" of relation "users" is violated by
 #     some row      (SqlState 23514)
-# on ONE row, left at 13:29:13Z by a concurrent run that died mid-test. No
-# concurrency was involved in the failure; the residue was.
+# on ONE row left by a concurrent run that died mid-test. No concurrency was
+# involved in that failure; the residue was. The constraint now names one
+# email, so a leaked one can never match another row.
 #
 # RECOVERY IS ONE COMMAND, and it is the thing to reach for whenever this gate
 # fails in a way that looks like state rather than code:
