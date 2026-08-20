@@ -1,7 +1,7 @@
 //! The creator-**DML assembler** + the closed-AST **expression renderer**.
 //!
 //! `IrAuthor::lower` compiles the DDL ops (`createTable`/`alter*`/…) into the
-//! same [`Migration`](crate::model::migration::Migration) shape the declarative differ
+//! same `Migration` shape the declarative differ
 //! emits. This module is the peer for the **DML** ops — `insert` / `update` /
 //! `del` / `backfill` — and for the closed expression AST ([`zero_migrate_ir::expr::Expr`])
 //! they carry in their `set` / `where` / `filter` positions.
@@ -15,14 +15,14 @@
 //!    [`assemble_delete_for_backend`]). Every authored VALUE — an `insert` row scalar, an
 //!    `update SET` literal, a `where`-predicate literal — is emitted as a NATIVE
 //!    placeholder (`$n` on Postgres, `?n` on SQLite) carried on a
-//!    [`PlanStep::Dml`](crate::render::step::PlanStep::Dml) `binds` vector, NEVER
+//!    `PlanStep::Dml` `binds` vector, NEVER
 //!    string-interpolated. So a value containing a quote / semicolon / comment
 //!    cannot change the *shape* of the statement on either backend (the
 //!    bind-safety property). The expression renderer (`render_expr_bound`) walks
 //!    the closed AST and appends a placeholder for each [`Expr::Literal`].
 //!
 //! 2. **Batched backfill** (`assemble_backfill`). The existing
-//!    [`BackfillSpec`](crate::model::backfill::BackfillSpec) executor (PG `backfill.rs`)
+//!    `BackfillSpec` executor (PG `backfill.rs`)
 //!    consumes a `set_clause` / `filter` SQL *string* (it assembles a windowed
 //!    `UPDATE … WHERE cursor > $last … AND (<filter>)` and guard-checks the WHOLE
 //!    statement). A backfill expression references the row's own columns and is
@@ -112,7 +112,7 @@
 //! was counted as one.
 //!
 //! The transport-safe bind mirror
-//! ([`crate::apply::backend::sqlite::actor::SqliteBind`]) is the single
+//! (`crate::apply::backend::sqlite::actor::SqliteBind`) is the single
 //! value-binding path the SQLite executor uses.
 
 use std::collections::BTreeMap;
@@ -264,7 +264,7 @@ pub const MAX_BIND_PARAMS: usize = 65535;
 /// both shipping spellings). The ONLY identifier-emission path the assembler uses —
 /// a schema-qualified / malformed name is rejected, so an injection through an
 /// identifier slot cannot reach the DB. Bare-identifier validation mirrors
-/// [`crate::model::backfill::BackfillSpec`].
+/// `crate::model::backfill::BackfillSpec`.
 ///
 /// # There is no longer a PostgreSQL-pinned spelling of this, and that is the point
 ///
@@ -288,7 +288,7 @@ pub const MAX_BIND_PARAMS: usize = 65535;
 /// into, and its absence is what makes "core hard-codes a dialect behind a
 /// backend's back" unrepresentable here instead of merely absent today.
 ///
-/// The other PG-pinned wrapper, [`quote_ident_checked`], is untouched and stays
+/// The other PG-pinned wrapper, `quote_ident_checked`, is untouched and stays
 /// pinned. Its callers — `apply::backend::postgres`, `apply::role`,
 /// `apply::journal`, `render::vendor`, `conn`, `plan::author`, and the vendor-op
 /// arms of `render::lower` — really are PostgreSQL-specific and travel to the PG
@@ -414,7 +414,7 @@ pub fn quote_ident_checked_for_backend(
 /// backend rather than by a `format!` in core.
 ///
 /// This is the door for anything that will be sent to a database. The other door,
-/// [`pg_canonical_ident`], is for the normal form that is COMPARED rather than
+/// `pg_canonical_ident`, is for the normal form that is COMPARED rather than
 /// executed; picking between them is the point of there being two.
 pub fn escape_quote_ident_for_backend(ident: &str, backend: &dyn DmlRenderer) -> String {
     backend.quote_ident(ident)
@@ -672,7 +672,7 @@ pub fn render_in_list_elem_pg(elem: &IrScalar) -> Result<String, DmlError> {
 /// This used to take `dialect: SqlDialect`, and its only two callers —
 /// `backends/sqlite.rs::render_in_list` and `backends/mysql.rs::render_in_list` —
 /// handed it their own `DIALECT` const. Core then resolved that dialect back
-/// through [`crate::render::backends::renderer`] to reach the very backend that had
+/// through `crate::render::backends::renderer` to reach the very backend that had
 /// called in. Under `docs/proposals/pluggable-backends.md` step 4 that reads
 /// `zero-migrate-sqlite` -> core -> `zero-migrate-sqlite`: a dependency cycle in the
 /// exact shape the crate split exists to remove, and one that emits byte-identical
@@ -1116,13 +1116,13 @@ fn select_dialect_leg<'a>(
 /// is a cast type rather than a column. Walking the closed AST answers both
 /// exactly.
 ///
-/// [`Expr::Dialectal`] descends ONLY into the leg [`select_dialect_leg`] picks,
+/// `Expr::Dialectal` descends ONLY into the leg `select_dialect_leg` picks,
 /// matching what [`render_expr_inline_for_backend`] actually emits. Unioning all legs would
 /// attribute a PostgreSQL CHECK to a column that appears only in the SQLite or
 /// MySQL leg and cascade away a constraint PostgreSQL kept.
 ///
 /// Deliberately NOT shared with the `collect_col_refs` inside
-/// [`crate::render::lower::derived_check_constraint_name`], which unions every leg
+/// `crate::render::lower::derived_check_constraint_name`, which unions every leg
 /// because a derived constraint NAME has to stay stable across dialects. Same walk,
 /// opposite requirement.
 ///
@@ -1794,7 +1794,7 @@ pub struct OnConflict {
 }
 
 /// The assembled one-shot DML statement: the placeholder template + ordered binds.
-/// Fed straight into [`PlanStep::Dml`](crate::render::step::PlanStep::Dml).
+/// Fed straight into `PlanStep::Dml`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssembledDml {
     /// The placeholder SQL (`$n`/`?n` — never an inlined value).
@@ -2153,7 +2153,7 @@ pub fn assemble_delete_with_sqlite_identity_for_backend(
 }
 
 /// The rendered backfill clauses (the SQL strings the
-/// [`BackfillSpec`](crate::model::backfill::BackfillSpec) carries).
+/// `BackfillSpec` carries).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackfillClauses {
     /// The `SET` body (e.g. `"normalized" = lower("raw")`).
@@ -2163,7 +2163,7 @@ pub struct BackfillClauses {
 }
 
 /// Assemble a `backfill` op's `set` / `filter` into the inline SQL strings the
-/// [`BackfillSpec`](crate::model::backfill::BackfillSpec) executor consumes. Renders for
+/// `BackfillSpec` executor consumes. Renders for
 /// EITHER dialect: the inline transform is dialect-rendered (the
 /// `c.fn.splitPart` lowering, NULL-skipping `concatWs`), and the PG (`backfill.rs`)
 /// or SQLite (`apply::backend::sqlite::backfill_sql`) executor consumes the result.

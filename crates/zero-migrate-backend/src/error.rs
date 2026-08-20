@@ -47,7 +47,7 @@ pub enum ExpandContractError {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DeclarativeError {
     /// A descriptor name/type was not a safe bare identifier / type at the
-    /// author boundary (mirrors [`crate::render::expand_contract`]'s `validate_ident` /
+    /// author boundary (mirrors `crate::render::expand_contract`'s `validate_ident` /
     /// `validate_type`). Nothing is generated.
     #[error("invalid descriptor: {0}")]
     Invalid(String),
@@ -129,7 +129,7 @@ pub enum DeclarativeError {
     /// an identity column have.
     ///
     /// The differ's half of
-    /// [`IrLowerError::IdentityColumnTypeUnsupported`](crate::render::lower::IrLowerError),
+    /// `IrLowerError::IdentityColumnTypeUnsupported`,
     /// refused for the same measured reason: the server answers `identity column
     /// type must be smallint, integer, or bigint` and rejects the `ALTER` outright,
     /// so a plan carrying it dies partway through applying. Widening and narrowing
@@ -288,7 +288,7 @@ pub enum DeclarativeError {
         /// The FK target table that is absent from the union.
         target: String,
     },
-    /// A [`RenameHint`] did not match an actual drop+add pair: the `from`
+    /// A `RenameHint` did not match an actual drop+add pair: the `from`
     /// column is not present in live as a dropped column, OR the `to` column is
     /// not present in desired as an added column, on the named table. The hint is
     /// the creator's signed statement of intent, so an un-matchable hint is a hard
@@ -306,7 +306,7 @@ pub enum DeclarativeError {
         /// The `to` column the hint named (expected: desired-only).
         to: String,
     },
-    /// A [`RenameHint`] matched a drop+add pair whose **types differ**: the
+    /// A `RenameHint` matched a drop+add pair whose **types differ**: the
     /// live `from` column and the desired `to` column do not share a `data_type`.
     /// A pure online rename (expand-contract dual-write) requires type identity —
     /// a simultaneous rename + type change is two distinct intents and is refused
@@ -362,7 +362,7 @@ pub enum DeclarativeError {
         /// (`encrypted` / `mask` / `default` / `enum` / `check`).
         facet: &'static str,
     },
-    /// Two [`RenameHint`]s on the same table shared a `from` (e.g. `[a→c, a→d]`)
+    /// Two `RenameHint`s on the same table shared a `from` (e.g. `[a→c, a→d]`)
     /// or a `to` (e.g. `[a→c, b→c]`) column. Each hint resolves INDEPENDENTLY, so
     /// a shared endpoint produces two colliding expand-contract sequences: a
     /// duplicated `ADD COLUMN <to>` (the second fails `already exists`), divergent
@@ -382,7 +382,7 @@ pub enum DeclarativeError {
         /// Which endpoint collided: `"from"` or `"to"`.
         side: &'static str,
     },
-    /// A [`RenameHint`]'s `to` equals another hint's `from` on the same table
+    /// A `RenameHint`'s `to` equals another hint's `from` on the same table
     /// (e.g. `[a→b, b→c]`) — a rename CHAIN. Chains are not supported: the engine
     /// resolves each hint against the single live/desired snapshot pair, where the
     /// intermediate name (`b`) cannot be simultaneously a live-only drop and a
@@ -399,7 +399,7 @@ pub enum DeclarativeError {
         /// The intermediate column that is both a `to` and a `from`.
         column: String,
     },
-    /// A [`RenameHint`] had `from == to` — a no-op rename of a column to its own
+    /// A `RenameHint` had `from == to` — a no-op rename of a column to its own
     /// name. This is rejected with a PRECISE error rather than the misleading
     /// [`DeclarativeError::RenameHintUnmatched`] it would otherwise produce (the
     /// identical name is neither live-only nor desired-only).
@@ -413,7 +413,7 @@ pub enum DeclarativeError {
         /// The identical `from`/`to` column name.
         column: String,
     },
-    /// Authoring the expand-contract rename sequence for a matched [`RenameHint`]
+    /// Authoring the expand-contract rename sequence for a matched `RenameHint`
     /// failed (e.g. an identifier that passed the declarative author boundary was
     /// rejected by the stricter expand-contract author boundary). Surfaced rather
     /// than swallowed.
@@ -463,7 +463,7 @@ pub enum DeclarativeError {
     /// DOES handle the previously-deferred ops — a column TYPE change, a nullability
     /// change (either direction), a column RENAME, an ADD/DROP CONSTRAINT, and an
     /// in-place FK redefinition — so those now flow through
-    /// [`DeclarativePlan::rebuilds`] instead of surfacing here. This variant remains
+    /// `DeclarativePlan::rebuilds` instead of surfacing here. This variant remains
     /// as the fail-closed boundary for any future existing-table op the rebuild
     /// author cannot yet emit: the engine refuses to emit dangling Postgres DDL on
     /// the SQLite path, surfacing a clear typed error rather than a silent pass.
@@ -484,7 +484,7 @@ pub enum DeclarativeError {
     /// leaves present must end RLS-enabled. The IR path can discharge it, because an
     /// author can write a `setRls` op next to the create. The declarative path
     /// cannot: the desired model is a
-    /// [`SchemaSnapshot`], which records RLS
+    /// `SchemaSnapshot`, which records RLS
     /// only as `RoleSnapshot.bypass_rls` and carries nothing per table, so no diff of
     /// it can author the `ENABLE ROW LEVEL SECURITY` the obligation asks for.
     ///
@@ -730,7 +730,7 @@ pub enum IrLowerError {
     )]
     SqliteRebuildOnly(&'static str),
     /// a guarded op whose shape cannot produce a verifiable
-    /// [`GuardProbe`](crate::model::probe::GuardProbe). Lowering REFUSES fail-closed
+    /// `GuardProbe`. Lowering REFUSES fail-closed
     /// rather than stamping a probe that could not verify the declared shape.
     /// Carries the op tag.
     #[error(
@@ -755,17 +755,17 @@ pub enum IrLowerError {
          arrange. Refusing to silently render into `main` (a wrong-target drop)."
     )]
     SqliteSchemaUnsupported(String),
-    /// the connection [`default_schema`](IrAuthor::with_default_schema)
+    /// the connection `default_schema`
     /// resolved an op's EFFECTIVE schema to a schema the author's
     /// confinement `scope` does NOT permit. The friendly op-level
     /// cross-schema VALIDATE gate inspects ONLY the op's own qualifier, never this
     /// connection default; so a foreign `default_schema` would otherwise render every
     /// guard-less op (one that omits its own qualifier) into the foreign schema while
     /// the validate gate stays silent. Lowering FAILS CLOSED here: a `default_schema`
-    /// outside the active scope is refused, not rendered. A bare [`IrAuthor::lower`]
+    /// outside the active scope is refused, not rendered. A bare `IrAuthor::lower`
     /// confines against the Confined `Single(project_schema)`, so a creator-path author
     /// refuses a foreign default even without the upstream load gate;
-    /// [`IrAuthor::lower_guarded`] confines against the charter's `schema.cross_schema`
+    /// `IrAuthor::lower_guarded` confines against the charter's `schema.cross_schema`
     /// grant. Carries the offending schema.
     #[error(
         "IrAuthor::lower resolved a connection default_schema to {0:?}, which the \
@@ -778,10 +778,10 @@ pub enum IrLowerError {
     /// an op carrying an
     /// EXPLICIT `schema()` qualifier that the active confinement
     /// scope does NOT permit. The friendly op-level cross-schema
-    /// VALIDATE gate ([`zero_migrate_ir::validate::validate_ir_scoped`]) already refuses this
+    /// VALIDATE gate (`zero_migrate_ir::validate::validate_ir_scoped`) already refuses this
     /// fail-closed on every PRODUCTION path (`load_and_lower[_guarded]` →
     /// `load_ir_document` → `validate_ir_scoped` gates the explicit qualifier before
-    /// lower). But the public [`lower`](IrAuthor::lower)/[`lower_steps`](IrAuthor::lower_steps)
+    /// lower). But the public `lower`/`lower_steps`
     /// entries do NOT re-run validation — they assume the IR was pre-validated by the
     /// load gate. A future INTERNAL caller invoking bare `lower()` with an op carrying
     /// an explicit FOREIGN `schema()` would otherwise render into that foreign schema,
@@ -801,7 +801,7 @@ pub enum IrLowerError {
     )]
     LowerCrossSchema(String),
     /// a SQLite `renameColumn` whose table's full live structure is not
-    /// in [`LiveSchema::table_snapshots`] / [`LiveSchema::sqlite_schemas`]. SQLite
+    /// in `LiveSchema::table_snapshots` / `LiveSchema::sqlite_schemas`. SQLite
     /// has no native online rename, so the rename is reconciled by the 12-step
     /// table REBUILD, which needs the WHOLE live table shape (every column + the
     /// live SDK schema `Value`) to author the post-rename CREATE + value-copy. The
@@ -903,7 +903,7 @@ pub enum IrLowerError {
         /// Optional precise reason.
         reason: Option<&'static str>,
     },
-    /// a `renameColumn` whose IR-carried [`ColType`] does not match the
+    /// a `renameColumn` whose IR-carried `ColType` does not match the
     /// LIVE `from` column's actual `data_type`. A pure online rename mirrors values
     /// across the two columns (PG dual-write `NEW.<to> := NEW.<from>`; the SQLite
     /// rebuild copies the column across) and CANNOT also change the type — a
@@ -913,7 +913,7 @@ pub enum IrLowerError {
     /// `Int` over a live `text` column) would otherwise author a mismatched
     /// `ADD COLUMN` + a cross-type dual-write copy with no rejection. This is the
     /// IR-path mirror of the declarative differ's
-    /// [`crate::render::declarative::DeclarativeError::RenameHintTypeMismatch`] — enforced
+    /// `crate::render::declarative::DeclarativeError::RenameHintTypeMismatch` — enforced
     /// IDENTICALLY on BOTH dialects (the single authoritative type source is the
     /// LIVE column, reconciled against the IR `ty`; neither leg silently uses one
     /// over the other). Carries the table, the column, and the two `data_type`s.
@@ -936,7 +936,7 @@ pub enum IrLowerError {
         live_type: String,
     },
     /// a `renameColumn` whose LIVE `from` column structure is absent from
-    /// [`LiveSchema::table_snapshots`], so the authoritative IR-vs-live type
+    /// `LiveSchema::table_snapshots`, so the authoritative IR-vs-live type
     /// reconciliation (see [`Self::RenameTypeMismatch`]) cannot run. A rename must
     /// NEVER lower from an IR-carried type alone — the live column type is the
     /// authority on BOTH dialects — so an absent live `from` column fails closed
@@ -948,7 +948,7 @@ pub enum IrLowerError {
          alone"
     )]
     RenameNeedsLiveColumn(String, String),
-    /// the structural expression validator ([`crate::model::validate`])
+    /// the structural expression validator (`crate::model::validate`)
     /// rejected an embedded closed-AST node of a DML op (`update`/`del`/`backfill`
     /// `set`/`where`/`filter`) BEFORE assembly: an out-of-policy node, an
     /// out-of-envelope synth, a non-portable cast. Boxed (the `AuthoringError`
@@ -975,7 +975,7 @@ pub enum IrLowerError {
     /// key length`. Boxed (the `AuthoringError` payload is large).
     #[error("{0}")]
     MysqlKeyStorage(Box<zero_migrate_ir::validate::AuthoringError>),
-    /// the creator-DML assembler ([`crate::render::dml`]) rejected a DML op: a
+    /// the creator-DML assembler (`crate::render::dml`) rejected a DML op: a
     /// malformed identifier, an empty/ragged insert, or a MySQL `onConflict`
     /// shape whose authored target cannot be retained safely.
     /// All are hard errors. A DML op is never silently dropped or misapplied.

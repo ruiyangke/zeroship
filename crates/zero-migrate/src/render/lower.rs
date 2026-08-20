@@ -1651,7 +1651,7 @@ pub struct IrAuthor {
 /// `render::lower::IrLowerError` caller and every `match` arm resolves unchanged.
 ///
 /// It had to move: it is the `Err` half of
-/// [`DmlRenderer::render_trigger_op`](zero_migrate_backend::renderer::DmlRenderer::render_trigger_op)
+/// `DmlRenderer::render_trigger_op`
 /// and of the two view/table-ref methods beside it, so a vendor crate cannot
 /// implement the contract without naming it, and this module drags effectively all
 /// of the engine behind it. See `zero_migrate_backend::error` for the measurement.

@@ -87,16 +87,46 @@ pub(crate) fn quote_ident_checked(ident: &str) -> Result<String, IdentQuoteError
     seam::quote_ident_checked_for_backend(ident, renderer(SqlDialect::Postgres))
 }
 
-/// The PG-SHAPED NORMAL FORM, which is NOT an emission.
+/// The PG-SHAPED NORMAL FORM — which this doc used to call "NOT an emission", and
+/// that claim is MEASURED FALSE.
 ///
-/// Constraint-definition bodies and stored-DDL fragments are built once in
-/// PostgreSQL spelling ON PURPOSE, so a desired snapshot round-trips byte-for-byte
-/// against `pg_get_constraintdef`, and that normal form is then READ by the SQLite
-/// and MySQL drift comparators. Re-dialecting it would be a regression, not a fix.
+/// The intent is real and unchanged: constraint-definition bodies and stored-DDL
+/// fragments are built once in PostgreSQL spelling ON PURPOSE, so a desired snapshot
+/// round-trips byte-for-byte against `pg_get_constraintdef`, and that normal form is
+/// then READ by the SQLite and MySQL drift comparators. Re-dialecting THOSE callers
+/// would be a regression, not a fix, and the door keeps its name for exactly the
+/// reason it always did: a neuter reddens a deliberate PostgreSQL spelling and an
+/// unrouted one identically, so the red count is not a diagnosis and the name has to
+/// carry the intent.
 ///
-/// It keeps its own named door for exactly the reason it always did: a neuter reddens
-/// this and an unrouted emission identically, so the red count is not a diagnosis and
-/// the door name has to carry the intent.
+/// WHAT IS FALSE IS "NOT AN EMISSION". At least one caller EXECUTES this form against
+/// a non-PostgreSQL server. MEASURED by replacing `PostgresDmlRenderer::quote_ident`
+/// with a marker string and running the SQLite-only `sqlite_engine` binary against a
+/// real SQLite database: 154 passed / 2 failed, with the marker coming back inside
+/// SQLite DDL —
+///
+/// ```text
+///   CREATE TABLE "accounts" (…, CONSTRAINT "accounts_legacy_range_chk"
+///                                CHECK (ZMPOISONPOSTGRES >= 0))
+/// ```
+///
+/// The path is `render::declarative::field_check_constraints` → that module's
+/// `quote_ident` → here. The constraint NAME is spelled by SQLite; the column
+/// reference inside the CHECK body is spelled by PostgreSQL, and the whole
+/// `definition` string is emitted verbatim into SQLite's `CREATE TABLE`.
+///
+/// It is correct TODAY only because PostgreSQL and SQLite spell an identifier
+/// identically, which is the precise invisibility this whole apparatus exists to
+/// fight — no assertion about emitted SQL can see it.
+///
+/// IT IS NOT A CRATE CYCLE AND IT IS NOT NEW. The caller is the ENGINE, not
+/// `zero-migrate-sqlite`, so it does not re-create the vendor-to-vendor dependency
+/// the crate split removed. And the identical neuter at `16a7a569` — the commit
+/// BEFORE the split, with the vendors still in-crate modules — gives the identical
+/// result: 154 passed / 2 failed, the same two tests, the same marker count. The
+/// extraction neither caused it nor fixed it; it is recorded here because the
+/// extraction is what made it visible, and because the sentence it replaces asserted
+/// the opposite.
 pub(crate) fn pg_canonical_ident(ident: &str) -> String {
     seam::pg_canonical_ident_for_backend(ident, renderer(SqlDialect::Postgres))
 }

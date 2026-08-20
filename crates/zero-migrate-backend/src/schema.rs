@@ -11,7 +11,7 @@
 //! spelling. What moved is exactly the transitive closure of what the three
 //! `SchemaRenderer` impls CALL:
 //!
-//! * the trait itself, and [`quote_ident_for_dialect`] / [`pg_quote_ident`] — the
+//! * the trait itself, and `quote_ident_for_dialect` / `pg_quote_ident` — the
 //!   ONE forwarder from this stack into [`crate::dml`], described below;
 //! * the JSON field-shape readers ([`char_len`], [`max_length`],
 //!   [`decimal_precision_scale`], [`def_case_sensitive`],
@@ -31,7 +31,7 @@
 //!
 //! # The cross-stack edge, unchanged and still ONE forwarder
 //!
-//! These vendors spell identifiers through [`quote_ident_for_dialect`], which
+//! These vendors spell identifiers through `quote_ident_for_dialect`, which
 //! forwards to [`crate::dml::escape_quote_ident_for_backend`], which resolves
 //! through the DML registry. That was already true inside the engine and the
 //! crate split did NOT change it: it is one forwarder, and it must stay one. The
@@ -45,7 +45,7 @@ use zero_migrate_ir::dialect::SqlDialect;
 ///
 /// This trait deliberately has no default methods: adding a third dialect must
 /// provide every spelling explicitly. The single exhaustive dispatch match lives
-/// in [`renderer`], so a new [`SqlDialect`] variant breaks there at compile time
+/// in `renderer`, so a new `SqlDialect` variant breaks there at compile time
 /// and forces the missing renderer to be wired before the crate can build.
 ///
 /// IT LOST TWO METHODS, AND THE MEASUREMENT IS WHY. `encrypted_column_bind_placeholder`
@@ -68,7 +68,7 @@ use zero_migrate_ir::dialect::SqlDialect;
 /// `render::backends`'s header) comparison and normalization stay in core,
 /// dialect-PARAMETERIZED, even when the answer depends on the vendor; only
 /// spelling is core ASKING a vendor something. It is now the free function
-/// [`canonical_type_for_dialect`], sitting beside the two core folds its arms
+/// `canonical_type_for_dialect`, sitting beside the two core folds its arms
 /// already delegated to, and that is what let `render::existence_probe` — the only
 /// caller of this trait outside this module — stop resolving a renderer at all.
 /// 8 methods to 7.
@@ -91,7 +91,7 @@ pub trait SchemaRenderer: std::fmt::Debug + Sync {
 /// metadata rather than a field declaration (e.g. `"_meta"`,
 /// `"_indexes"`). These keys are produced by the SDK normaliser
 /// or appear in test schemas; they MUST be skipped before the
-/// schema-iteration loop reaches [`validate_field_name`] (otherwise
+/// schema-iteration loop reaches `validate_field_name` (otherwise
 /// the leading `_` would trip the reserved-prefix rule).
 ///
 /// The list is intentionally narrow — only keys the runtime
@@ -115,7 +115,7 @@ pub fn is_schema_metadata_key(key: &str) -> bool {
 /// was `pub`, and spelled `"x"` for a vendor it never named — correct bytes for two
 /// of the three shipping dialects and therefore invisible to every assertion about
 /// emitted SQL. Its call sites are now split between this function (where a
-/// `dialect` is in scope) and [`pg_quote_ident`] (where the surrounding statement is
+/// `dialect` is in scope) and `pg_quote_ident` (where the surrounding statement is
 /// PostgreSQL-only syntax).
 ///
 /// THE CENSUS, and it is worth stating how it was counted, because the obvious count
@@ -153,14 +153,14 @@ pub fn quote_ident_for_backend(name: &str, backend: &dyn crate::renderer::DmlRen
 /// `ADD COLUMN IF NOT EXISTS`, `CREATE SCHEMA`) have no `dialect` parameter because
 /// they have no other dialect to be. They still must not spell an identifier for a
 /// vendor they never named, so the vendor is in this function's NAME — the same
-/// technique as [`crate::dml::pg_canonical_ident`], and for the same reason:
+/// technique as `crate::dml::pg_canonical_ident`, and for the same reason:
 /// a red count cannot tell a deliberate PostgreSQL spelling apart from an unrouted
 /// one, so the door has to carry the intent.
 ///
 /// This is EMISSION, not the `pg_get_constraintdef` normal form. Nothing in this
 /// module builds comparison text — `information_schema` appears here only in two doc
 /// comments, and `pg_get_constraintdef` not at all — so
-/// [`crate::dml::pg_canonical_ident`] is deliberately NOT the door used
+/// `crate::dml::pg_canonical_ident` is deliberately NOT the door used
 /// here, even though it would produce identical bytes.
 /// THE PIN MOVED, IT DID NOT GO. This used to write `SqlDialect::Postgres` into its
 /// own body and resolve a renderer from it; this crate is below the vendors and has
@@ -333,7 +333,7 @@ pub fn build_mask_sentinel_comments(
 /// The bare `zero-migrate:enc:<mode>:<keyId>:<wraps>` sentinel BODY for a field's
 /// `t.encrypted({...})` declaration (no `/* */` wrapper, no comment statement),
 /// or `None` for a plain column. The SINGLE source of truth for the `zero-migrate:enc` wire
-/// grammar: [`encryption_sentinel_for_field`] wraps it in `/* */` for the inline
+/// grammar: `encryption_sentinel_for_field` wraps it in `/* */` for the inline
 /// DDL form, and [`build_encryption_sentinel_comments`] wraps it in a
 /// `COMMENT ON COLUMN … '…'` statement for the PG-recoverable form. The runtime
 /// parser is [`crate::mask_codec::parse_encryption_sentinel`].
@@ -379,7 +379,7 @@ pub fn encryption_sentinel_body_for_field(def: &serde_json::Value) -> Option<Str
 ///   `union`/`textArray`), and every numeric and temporal spelling. `JSON COLLATE
 ///   ...` is not redundant but a parse error, so the predicate matters.
 ///
-/// The classification is [`zero_migrate::render::declarative::mysql_spelling_takes_collation`]
+/// The classification is `zero_migrate::render::declarative::mysql_spelling_takes_collation`
 /// reading this function's OUTPUT; nothing here decides it a second time.
 pub fn mysql_base_column_type_for_def(def: &serde_json::Value) -> String {
     if def.get("encrypted").is_some() {
@@ -453,7 +453,7 @@ pub fn mysql_base_column_type_for_def(def: &serde_json::Value) -> String {
 }
 
 /// The portable `caseSensitive` intent a field def carries, in the shape
-/// [`zero_migrate::render::declarative::mysql_collation_clause`] reads.
+/// `zero_migrate::render::declarative::mysql_collation_clause` reads.
 ///
 /// The SDK def only ever carries the key when it is FALSE (see
 /// `render::declarative::field_to_sdk_def`), so an absent key is the default

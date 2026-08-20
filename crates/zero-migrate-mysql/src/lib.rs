@@ -1,7 +1,7 @@
 //! # `zero-migrate-mysql` — the MySQL backend
 //!
 //! One vendor, two spellings, no engine. This crate holds MySQL's
-//! `DmlRenderer` impl ([`dml`]) and its `SchemaRenderer` impl ([`schema`]), and it
+//! `DmlRenderer` impl (`dml`) and its `SchemaRenderer` impl (`schema`), and it
 //! depends on `zero-migrate-backend` and `zero-migrate-ir` — never on the engine.
 //! That is the whole point of the split: the engine names this crate for its
 //! registry, so this crate must not name the engine back.

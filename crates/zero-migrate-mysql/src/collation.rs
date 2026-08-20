@@ -23,8 +23,8 @@
 /// the portable `caseSensitive` intent.
 ///
 /// ONE spelling of the engine's collation choice, so the `VARCHAR`/`CHAR`/`TEXT`
-/// family ([`mysql_type_override_with_collation`]) and `ENUM`
-/// ([`mysql_pin_enum_collation`]) cannot drift apart. `None` is the canonical
+/// family (`mysql_type_override_with_collation`) and `ENUM`
+/// (`mysql_pin_enum_collation`) cannot drift apart. `None` is the canonical
 /// snapshot spelling for the default case-SENSITIVE intent - see
 /// `apply::backend::mysql::drift_sql::case_sensitive_from_collation`, which is the
 /// inverse of this function and never emits `Some(true)`.
@@ -39,10 +39,10 @@ pub fn mysql_collation_clause(case_sensitive: Option<bool>) -> &'static str {
 /// Pin an explicit collation onto ANY rendered MySQL character-type spelling.
 ///
 /// The spelling-level half of the engine's collation promise, and the piece
-/// [`mysql_type_override_with_collation`] cannot serve: that one keys on a
-/// [`FieldDescriptor`] and a PostgreSQL-spelled `data_type`, so it is reachable only
+/// `mysql_type_override_with_collation` cannot serve: that one keys on a
+/// `FieldDescriptor` and a PostgreSQL-spelled `data_type`, so it is reachable only
 /// from the snapshot carrier. A second renderer -
-/// [`crate::schema::query::renderer`]'s MySQL arm - answers the same question from a
+/// `crate::schema::query::renderer`'s MySQL arm - answers the same question from a
 /// raw SDK field def and has only a rendered STRING to decide from. Both now route
 /// their character spellings through this one function, so the two cannot pin
 /// different collations, and neither can drift from
@@ -72,7 +72,7 @@ pub fn mysql_pin_collation(rendered: &str, case_sensitive: Option<bool>) -> Stri
 /// family that one does not: `ENUM(...)`. MySQL stores an enum as an index into its
 /// member list but compares and LOOKS UP members as strings, so an uncollated `ENUM`
 /// silently accepts `'ACTIVE'` for a declared `'active'` - see
-/// [`mysql_pin_enum_collation`], which measured it. `SET(...)` is the same shape and
+/// `mysql_pin_enum_collation`, which measured it. `SET(...)` is the same shape and
 /// is named here for the same reason, though nothing in the engine emits one today.
 ///
 /// Deliberately NOT here: `JSON` (MySQL refuses a collation on it outright), the BLOB
@@ -87,10 +87,10 @@ pub fn mysql_spelling_takes_collation(rendered: &str) -> bool {
 /// types do not take a general string collation here.
 ///
 /// `ENUM` is a character type and DOES pin a collation, but it is not listed here and
-/// never can be: this predicate is fed [`mysql_base_column_type`], which only ever
+/// never can be: this predicate is fed `mysql_base_column_type`, which only ever
 /// sees the PostgreSQL-mapped `field_data_type` spelling, and an enum column arrives
-/// there as `text`. `ENUM` is pinned at [`column_type_for_render`] instead - see
-/// [`mysql_pin_enum_collation`] for the routes and the measurement.
+/// there as `text`. `ENUM` is pinned at `column_type_for_render` instead - see
+/// `mysql_pin_enum_collation` for the routes and the measurement.
 pub fn mysql_type_takes_collation(base: &str) -> bool {
     let u = base.trim().to_ascii_uppercase();
     u.starts_with("VARCHAR")

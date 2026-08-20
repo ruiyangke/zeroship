@@ -128,7 +128,7 @@ pub(crate) fn quote_ident_for_dialect(name: &str, dialect: SqlDialect) -> String
 /// `ADD COLUMN IF NOT EXISTS`, `CREATE SCHEMA`) have no `dialect` parameter because
 /// they have no other dialect to be. They still must not spell an identifier for a
 /// vendor they never named, so the vendor is in this function's NAME — the same
-/// technique as [`crate::render::dml::pg_canonical_ident`], and for the same reason:
+/// technique as `crate::render::dml::pg_canonical_ident`, and for the same reason:
 /// a red count cannot tell a deliberate PostgreSQL spelling apart from an unrouted
 /// one, so the door has to carry the intent.
 #[must_use]

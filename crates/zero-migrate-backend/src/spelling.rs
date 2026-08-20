@@ -30,8 +30,8 @@
 /// these bytes itself is spelling them FOR A VENDOR IT NEVER NAMED, and no assertion
 /// about emitted SQL can see the mistake while the two vendors agree — the bytes are
 /// right, the routing is absent. The engine's doors are
-/// [`crate::dml::escape_quote_ident_for_dialect`] (to EMIT for a named dialect) and
-/// [`crate::dml::pg_canonical_ident`] (for the PG-shaped normal form); both resolve
+/// `crate::dml::escape_quote_ident_for_dialect` (to EMIT for a named dialect) and
+/// `crate::dml::pg_canonical_ident` (for the PG-shaped normal form); both resolve
 /// back here through the registry, so the bytes are unchanged and the vendor is on
 /// the record.
 ///

@@ -2,7 +2,7 @@
 //!
 //! This module holds the vocabulary and the traits, and it deliberately holds no
 //! SQL. Nothing here names a vendor, spells a keyword, or quotes an identifier;
-//! the three shipping implementations live in [`crate::render::backends`], one
+//! the three shipping implementations live in `crate::render::backends`, one
 //! module per dialect, and the dispatch table lives there too.
 //!
 //! `renderer()` is re-exported from here so the crate's existing
@@ -81,12 +81,12 @@ impl DialectSupports for SqlDialect {
 ///
 /// No method has a default body: adding a dialect requires an explicit impl for
 /// every render decision. The single exhaustive dispatch match lives in
-/// [`crate::render::backends`], so a third [`SqlDialect`] variant breaks there at
+/// `crate::render::backends`, so a third `SqlDialect` variant breaks there at
 /// compile time until its renderer is implemented and wired.
 ///
 /// `Debug` is a SUPERTRAIT because the carriers that now hold a resolved
 /// `&'static dyn DmlRenderer` ([`crate::dml::BindCtx`],
-/// [`crate::render::lower::IrAuthor`]) are `#[derive(Debug)]` types, and a
+/// `crate::render::lower::IrAuthor`) are `#[derive(Debug)]` types, and a
 /// carrier losing its `Debug` to gain a backend would be a worse trade than
 /// asking each unit-struct renderer for the one derive it costs.
 pub trait DmlRenderer: std::fmt::Debug + Sync {
