@@ -955,6 +955,26 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # A SECOND defect, found only once the overlay fix above let this job get
+      # far enough to hit it. run_auth_suite.sh:239 provisions its database with
+      # deploy/ops/db-migrate.sh, which `cargo run`s zeroship-platform-migrate
+      # out of zeroship-migrate-adapter, which pulls in zeroship-runtime - and
+      # that crate `include_str!`s three gitignored SDK dist files. Reproduced
+      # 2026-08-20 in a worktree that had never run pnpm:
+      #   error: couldn't read .../sdks/bootstrap/dist/install-schema.js
+      #   error: couldn't read .../sdks/db/dist/internal.js
+      #   error: couldn't read .../sdks/bootstrap/dist/runtime-entry.js
+      #   error: could not compile `zeroship-runtime` (lib) due to 3 previous errors
+      # billing-gate and plugin-db-live-gate already carry this block for the
+      # same reason; auth-gate reaches the same crate by a different route (the
+      # migrate binary rather than the crate under test) and was missed.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter zero-migrate build
+      - run: pnpm build
       - name: Install psql client
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
       - name: Write the test overlay naming this job's service containers
