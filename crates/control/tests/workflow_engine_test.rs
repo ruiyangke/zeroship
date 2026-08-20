@@ -6653,6 +6653,10 @@ async fn revoke_journal_access(fx: &Fixture, app_id: &Uuid) {
 
 struct TwoAppReap {
     registered: usize,
+    /// The tick's OWN account of how much of the fleet it covered. Kept
+    /// alongside `registered` because the pair is the whole point: a tick that
+    /// dropped a tenant and a clean tick can produce the same `registered`.
+    coverage: workflow_engine::SweepCoverage,
     /// `wake_at` of the READABLE app's parked run once the reaper has run. The
     /// reaper's whole job is to pull this forward to now.
     good_wake_at: DateTime<Utc>,
@@ -6674,11 +6678,11 @@ async fn reap_over_two_apps(label: &str, revoke_second: bool) -> Option<TwoAppRe
     }
 
     let control_url = dsn_as_role(&fx.db_url, "zeroship_control", "zeroship_control");
-    let registered = {
+    let reap = {
         let control_registry = Registry::new(&control_url)
             .await
             .expect("connect a registry as the zeroship_control role");
-        let registered = workflow_engine::reap_parked_cancel_requested_batch(
+        let reap = workflow_engine::reap_parked_cancel_requested_batch(
             &fx.scheduler_store,
             &control_registry,
             64,
@@ -6686,7 +6690,7 @@ async fn reap_over_two_apps(label: &str, revoke_second: bool) -> Option<TwoAppRe
         .await
         .expect("the reaper tick must survive an app whose journal it cannot read");
         drop(control_registry);
-        registered
+        reap
     };
 
     fx.pg.set_default_app_id(good_app);
@@ -6703,7 +6707,8 @@ async fn reap_over_two_apps(label: &str, revoke_second: bool) -> Option<TwoAppRe
     drop(fx);
     common::drain_pg().await;
     Some(TwoAppReap {
-        registered,
+        registered: reap.registered,
+        coverage: reap.coverage,
         good_wake_at,
     })
 }
@@ -6724,16 +6729,21 @@ async fn reap_over_two_apps(label: &str, revoke_second: bool) -> Option<TwoAppRe
 /// on 2026-08-20.
 ///
 /// WHAT THIS DOES NOT CATCH. Exactly one arm: the PARKED-CANCEL reaper skipping
-/// one unreadable app while reaping another. It does not cover the other sweeps
-/// that share `journalled_app_ids` (scheduler reconcile, signal-fanout
-/// subscription GC, workflow/deploy retention, blob GC) - those are asserted by
-/// nothing here. It does not cover the CONSERVATIVE arms: nothing here proves
-/// blob GC retains a blob, or deploy retention keeps a manifest, when an app is
-/// unreadable. It says nothing about a journal that becomes unreadable BETWEEN
-/// the app-list query and the per-app statement, nor about a connection-level
-/// failure, which is deliberately still fatal. And it does not prove the
-/// production database has the grant: it proves the migration corpus this test
-/// DB was built from does.
+/// one unreadable app while reaping another, and reporting that skip in its
+/// return value. It does not cover the other sweeps that share
+/// `journalled_fleet` (scheduler reconcile, signal-fanout subscription GC,
+/// workflow/deploy retention, blob GC) - those still return a work count with no
+/// coverage beside it, and nothing here asserts otherwise. It does not cover the
+/// CONSERVATIVE arms: nothing here proves blob GC retains a blob, or deploy
+/// retention keeps a manifest, when an app is unreadable. It does not exercise
+/// the `apps_skipped` increment on the OTHER path - a journal that turns
+/// unreadable BETWEEN the catalog query and the per-app statement, which is the
+/// `skip_journal_scoped` arm inside the loop; both paths add to the same field
+/// and only the catalog one is asserted here. It does not exercise
+/// `apps_unvisited` at all, because 64 is far above a two-app fleet. It says
+/// nothing about a connection-level failure, which is deliberately still fatal.
+/// And it does not prove the production database has the grant: it proves the
+/// migration corpus this test DB was built from does.
 #[compio::test]
 async fn parked_cancel_reaper_skips_an_app_whose_journal_is_unreadable() {
     let Some(result) = reap_over_two_apps("skip-unreadable-journal", true).await else {
@@ -6742,6 +6752,37 @@ async fn parked_cancel_reaper_skips_an_app_whose_journal_is_unreadable() {
     assert_eq!(
         result.registered, 1,
         "the reaper must reap the readable app's parked cancel and skip the unreadable one"
+    );
+    // The discrimination this pair exists for. `registered` is a work count and
+    // a work count of 1 is also what a healthy one-app fleet produces; only
+    // `apps_skipped` says a tenant was dropped, and it says it in the RETURN
+    // VALUE, not in a WARN nobody greps.
+    //
+    // `apps_skipped` is asserted absolutely and `apps_swept` only as a floor:
+    // the CONTROL_TEST_DB template may already hold journalled apps (a shared
+    // billing test DB does), which moves `apps_swept` and `apps_total` but not
+    // the skip count, since nothing in a migrated template is unreadable.
+    assert_eq!(
+        result.coverage.apps_skipped, 1,
+        "the excluded tenant must be counted, not left to log archaeology"
+    );
+    assert!(
+        result.coverage.apps_swept >= 1,
+        "the readable app must have been swept, got {}",
+        result.coverage.apps_swept
+    );
+    assert_eq!(
+        result.coverage.apps_unvisited, 0,
+        "a limit of 64 must not leave any app unvisited at this fleet size"
+    );
+    assert_eq!(
+        result.coverage.apps_total(),
+        result.coverage.apps_swept + 1,
+        "coverage must account for every journalled app: swept plus the one skipped"
+    );
+    assert!(
+        !result.coverage.is_complete(),
+        "a tick that dropped a tenant must not report complete coverage"
     );
     assert!(
         result.good_wake_at <= Utc::now() + ChronoDuration::seconds(5),
@@ -6756,6 +6797,11 @@ async fn parked_cancel_reaper_skips_an_app_whose_journal_is_unreadable() {
 /// This is what makes the `1` above mean "skipped one app". Without it a `1`
 /// would be equally consistent with a reaper that only ever handles one app per
 /// tick.
+///
+/// It is also the control for the COVERAGE assertions: `apps_skipped == 0` here
+/// against `== 1` there, one variable apart, is what shows the field
+/// discriminates rather than being a constant. An `apps_skipped` hardcoded to 1
+/// would pass the test above and fail this one.
 #[compio::test]
 async fn parked_cancel_reaper_reaps_both_apps_when_both_journals_are_readable() {
     let Some(result) = reap_over_two_apps("reap-both-journals", false).await else {
@@ -6764,5 +6810,18 @@ async fn parked_cancel_reaper_reaps_both_apps_when_both_journals_are_readable() 
     assert_eq!(
         result.registered, 2,
         "with both journals readable the reaper must reap both apps' parked cancels"
+    );
+    assert!(
+        result.coverage.apps_swept >= 2,
+        "both seeded journals were readable, so both apps must be swept, got {}",
+        result.coverage.apps_swept
+    );
+    assert_eq!(
+        result.coverage.apps_skipped, 0,
+        "nothing was excluded, so the skip count must be zero"
+    );
+    assert!(
+        result.coverage.is_complete(),
+        "a tick that covered every tenant must report complete coverage"
     );
 }

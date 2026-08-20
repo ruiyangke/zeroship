@@ -122,7 +122,7 @@ pub async fn tick_with_config(
     // from the journal, so an unreadable journal means the refcount is unknown
     // and reclaiming would delete a manifest a running workflow still replays
     // from.
-    for app_id in super::workflow_engine::journalled_app_ids(&tx).await? {
+    for app_id in super::workflow_engine::journalled_fleet(&tx).await?.readable {
         if remaining <= 0 {
             break;
         }
