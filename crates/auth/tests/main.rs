@@ -1,8 +1,5 @@
 //! The one integration-test target for `zeroship-auth`.
 //!
-//! THIS TARGET DOES NOT PASS YET. Read the connection-leak section below
-//! before running it or before copying this layout to another crate.
-//!
 //! WHY THIS FILE EXISTS
 //! --------------------
 //! Cargo links one executable per `tests/*.rs` file, and every one of those
@@ -18,47 +15,62 @@
 //! The 254 integration test names are unchanged: the merged binary's
 //! `--list` output is byte-for-byte the union of the 52 old binaries'.
 //!
-//! WHAT BLOCKS IT: THE PROCESS IS A CONNECTION-RECLAMATION BOUNDARY
-//! ---------------------------------------------------------------
-//! `tests/run_auth_suite.sh` goes from 641 passed to 387 passed and 146
-//! failed. 145 of those 146 are one error:
+//! WHAT THE MERGE EXPOSED: THE PROCESS USED TO BE THE RECLAMATION BOUNDARY
+//! ----------------------------------------------------------------------
+//! This section is history, not a warning: the target passes. It is here
+//! because the merge did not CAUSE the failure below, it removed the thing
+//! that had been hiding it, and anyone merging test binaries in another
+//! crate will meet the same wall if the driver ever regresses.
+//!
+//! On the day it was written this target reported 387 passed and 146
+//! failed against `tests/run_auth_suite.sh`'s 641. 145 of the 146 were one
+//! error:
 //!
 //!   FATAL 53300 "sorry, too many clients already"
 //!
-//! Nothing about the merge causes it. Every live-PG test here opens a
-//! connection and drives it with
+//! Every live-PG test here opens a connection and drives it with
 //! `compio::runtime::spawn(connection.run()).detach()`. `#[compio::test]`
-//! builds a fresh `Runtime` per test and drops it at the end of the test,
-//! and that drop does NOT close a socket owned by a detached task. The
-//! connection survives until the PROCESS EXITS.
+//! builds a fresh `Runtime` per test and drops it at the end - and that
+//! drop reclaimed nothing, because a task parked on an io_uring submission
+//! holds a clone of the runtime's `Rc` (compio-runtime `runtime/future.rs`,
+//! `Submit`) and `Runtime::drop` skips reclamation entirely while that `Rc`
+//! is shared (`runtime/mod.rs`). Detaching was not the cause - a retained
+//! `JoinHandle` leaks the same - the pending submission was. So the
+//! connection lived until the PROCESS EXITED, and cargo's 52 processes were
+//! the only thing reclaiming connections.
 //!
 //! Measured 2026-08-19 against `zs-auth-pg-5440` (`max_connections` = 100)
 //! by sampling `pg_stat_activity` every 2 s while running the OLD,
 //! PRE-MERGE binaries under `--test-threads 1`.
 //!
-//! `totp_store_test` isolates the mechanism: 8 tests, one `connect()` each,
+//! `totp_store_test` isolated the mechanism: 8 tests, one `connect()` each,
 //! and NO `ntex::web::test::server` anywhere in the file.
 //!
 //!   1 1 1 1 1 2 2 2 2 3 3 3 3 3 4 4 4 4 6 6 6 6 7 8 8 8 8
 //!
 //! Eight tests, eight connections, one per test, none reclaimed, and 0 the
-//! moment the process exited. The HTTP fixtures are not involved.
+//! moment the process exited. The HTTP fixtures were not involved.
 //!
-//! `oidc_refresh_token_test` shows the same shape at the scale that
-//! matters - 30 tests, 1.9 connections each because it also boots a server:
+//! `oidc_refresh_token_test` showed the same shape at the scale that
+//! mattered - 30 tests, 1.9 connections each because it also boots a
+//! server:
 //!
 //!   0 -> 9 -> 17 -> 26 -> 35 -> 45 -> 56, then 0 once the process exited
 //!
-//! So ONE of the 52 old binaries already sat at 56% of the server ceiling,
-//! and the only reason the suite ever passed is that cargo ran the 52
-//! targets as 52 processes. Between those two rates, 254 tests in one
-//! process want 230 to 480 connections against a ceiling of 100.
+//! FIXED IN THE DRIVER, NOT HERE, AND NOT BY RAISING `max_connections`.
+//! `libs/compio-postgres/src/release.rs`: the client half owns a dup of the
+//! socket and shuts it down from its `Drop`, a syscall that needs no
+//! executor, so a session ends with the client that opened it instead of
+//! with the process.
+//! `libs/compio-postgres/tests/integration.rs`'s
+//! `a_connection_does_not_outlive_the_runtime_that_opened_it` holds that
+//! invariant, and holds it as a LIFETIME rather than a ceiling - it asserts
+//! the server-side count returns to zero after each runtime, which a merely
+//! bounded count would not.
 //!
-//! That makes the fix a prerequisite, not a detail of this refactor, and it
-//! is not in this crate: the leak is in how the driver task is spawned and
-//! dropped (`libs/compio-postgres` + compio's runtime). Raising
-//! `max_connections` hides it and does not scale - the tree has 313 test
-//! files, and the same pattern is in every crate with live-PG tests.
+//! Sampled the same way over this whole 254-test target, 2026-08-19:
+//! 197 samples, peak 6, and 80 of them read 0. Not "under the limit" -
+//! back to baseline between tests.
 //!
 //! HOW TO ADD A TEST FILE
 //! ----------------------
