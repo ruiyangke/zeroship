@@ -61,8 +61,12 @@
 //! connection string (`sslrootcert`, plus `sslcert`/`sslkey` for client-certificate auth) and implements
 //! `tls-server-end-point` channel binding. With that feature on, [`Pool`] builds one automatically for a
 //! `sslmode=require` URL; see the `tls_rustls` module (`src/tls_rustls.rs`) and the `Transport` section of the
-//! `pool` module docs (`src/pool.rs`). Both names are code spans, not links, because the module carrying them is
-//! `#[cfg(feature = "tls")]` and so does not exist to link to in a default-feature doc build.
+//! `pool` module docs (`src/pool.rs`).
+
+// `MakeRustlsConnect` and `tls_rustls` above are code spans, not intra-doc links, and must stay that way. The
+// module carrying them is `#[cfg(feature = "tls")]`, so in a default-feature `cargo doc` there is no item for a
+// link to resolve against and rustdoc emits `unresolved link`. tests/run_doc_gate.sh builds both feature
+// configurations and allows zero unresolved links under `--all-features`.
 
 #![warn(rust_2018_idioms, clippy::all)]
 #![allow(clippy::needless_lifetimes)]
