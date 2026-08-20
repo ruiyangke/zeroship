@@ -24,6 +24,10 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/lib/gate_arms.sh
+. "$ROOT/tests/lib/gate_arms.sh"
+gate_arms_init cli_command_index
+
 MAIN="$ROOT/crates/cli/src/main.rs"
 AGENTS="$ROOT/AGENTS.md"
 
@@ -49,12 +53,18 @@ indexed=$(grep -E '^[^|]*cli/ +CLI:' "$AGENTS" \
 # billing and JS gates that passed over zero tests.
 n_actual=$(printf '%s\n' "$actual" | grep -c . || true)
 n_indexed=$(printf '%s\n' "$indexed" | grep -c . || true)
-if [ "$n_actual" -lt 2 ]; then
+# MEASURED 2026-08-20: 10 commands on each side. Floor 2 is reused unchanged
+# from the pre-library hand-rolled check this replaces - below it there are
+# too few commands for "missing" vs "phantom" to mean anything (need --app
+# plus at least one more to prove the parser found real arms, not a false hit).
+if ! gate_arm cli_dispatch "$n_actual" 2; then
   echo "FAIL: extracted $n_actual commands from main.rs - the parser is broken, not the docs."
+  gate_arms_finish || true
   exit 1
 fi
-if [ "$n_indexed" -lt 2 ]; then
+if ! gate_arm agents_index "$n_indexed" 2; then
   echo "FAIL: extracted $n_indexed commands from the AGENTS.md crate index - the parser is broken, not the docs."
+  gate_arms_finish || true
   exit 1
 fi
 
@@ -78,4 +88,5 @@ fi
 if [ "$fail" -eq 0 ]; then
   echo "  ok: crate index and dispatch table agree on all $n_actual commands"
 fi
+gate_arms_finish || fail=1
 exit "$fail"

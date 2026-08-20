@@ -61,6 +61,16 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
 
+# Per-arm anti-vacuity accounting. Most of this gate compares two readers on a
+# FIXTURE, which cannot silently shrink; the arms declared below are the three
+# places where it instead enumerates something derived from the tree - the
+# binary's dependency record, the schema's defaults, and the runtime crate list -
+# and each of those can collapse to nothing while printing what a clean tree
+# prints.
+# shellcheck source=tests/lib/gate_arms.sh
+. "$ROOT/tests/lib/gate_arms.sh"
+gate_arms_init project_config
+
 BIN="${ZEROSHIP_BIN:-$ROOT/target/debug/zeroship}"
 FIXTURE="$ROOT/tests/fixtures/project-config/zeroship.jsonc"
 MINIMAL_FIXTURE="$ROOT/tests/fixtures/project-config/zeroship-minimal.jsonc"
@@ -141,6 +151,25 @@ then
   echo "      Run: cargo build -p zeroship --bin zeroship"
   exit 1
 fi
+
+# THE FRESHNESS CHECK BELOW RULES ON THIS SET, one input at a time, and it is
+# the one enumeration here that fails SILENTLY: a dependency record this parser
+# no longer understands yields no inputs, both loops below find nothing to
+# complain about, and the gate proceeds to compare a binary of any age against
+# today's sources. That reads exactly like a freshly built tree.
+#
+# THE FLOOR IS 20, AND IT CANNOT BE 3. The node program above seeds the set with
+# three unconditional paths (Cargo.toml, Cargo.lock, schema/project-v1.json), so
+# any floor at or below 3 is cleared by an empty dependency record and can never
+# fire - a declared vacuity wearing the uniform of a floor.
+#
+# NOT MEASURED ON THE REAL BINARY: target/debug/zeroship is not built in this
+# worktree, which is why the run refuses above. 20 is set from a PROXY - the two
+# binaries that ARE built here, target/debug/{gate-arm-census,compose-secret-
+# strength}.d, both resolve to 74 inputs through this same program, and they are
+# gatekit binaries with a fraction of the CLI's dependency surface. Re-measure
+# and raise it the first time this gate runs on a built tree.
+gate_arm binary_freshness_inputs "$(grep -c . "$WORK/binary-inputs" || true)" 20 || true
 
 STALE_INPUT=""
 MISSING_INPUT=""
@@ -224,7 +253,13 @@ walk(s, "");
 process.stdout.write(out.join("\n") + "\n");
 ' "$SCHEMA")"
 N_DEFAULTS=$(printf '%s\n' "$DEFAULT_PATHS" | grep -c . || true)
-if [ "$N_DEFAULTS" -lt 3 ]; then
+# Every extracted default is then ruled on twice below - once against each
+# reader - so this is the count and there is no filter between the two.
+# MEASURED 2026-08-20 against schema/project-v1.json: 6. The floor is the 3 the
+# hand-rolled test enforced, kept rather than raised because the schema is small
+# and a legitimate consolidation could plausibly remove two defaults; what it
+# separates is a walker that stopped descending, which lands on 0 or 1.
+if ! gate_arm schema_defaults "$N_DEFAULTS" 3; then
   fail "extracted $N_DEFAULTS defaults from the schema - the extractor is broken, not the code"
 else
   ts_missing=""; rs_missing=""
@@ -723,14 +758,25 @@ echo "== 5. no runtime-side parser =="
 RUNTIME_DIRS=(crates/runtime crates/worker crates/gateway)
 for d in crates/plugin-*; do RUNTIME_DIRS+=("$d"); done
 hits=""
+n_named=0
 for d in "${RUNTIME_DIRS[@]}"; do
   [ -d "$d" ] || continue
+  n_named=$((n_named + 1))
   # `zeroship.jsonc` (the filename) or `project_config` (the module).
   h="$(grep -rnE 'zeroship\.jsonc|project_config' "$d" --include='*.rs' --include='*.toml' 2>/dev/null || true)"
   [ -n "$h" ] && hits="$hits$h"$'\n'
 done
+# THE COUNT IS POST-FILTER - directories that exist and were therefore grepped -
+# and `${#RUNTIME_DIRS[@]}` is not, which is why the pass line below now prints
+# this number instead. Three entries in that array are literal paths and four
+# come from the `crates/plugin-*` glob; with no match, bash leaves the pattern
+# itself in the array, so the pre-filter length stays 4 while nothing is read.
+# MEASURED 2026-08-20: 7 directories (runtime, worker, gateway, plugin-db,
+# plugin-kv, plugin-storage, plugin-workflow). The floor is 4: it clears the
+# three literal paths, so a glob that stopped matching cannot pass it.
+gate_arm runtime_dirs_named "$n_named" 4 || true
 if [ -z "$hits" ]; then
-  pass "no runtime-side crate (${#RUNTIME_DIRS[@]} scanned) names the config file or its module"
+  pass "no runtime-side crate ($n_named scanned) names the config file or its module"
 else
   fail "a runtime-side crate references the creator project config:"
   printf '%s' "$hits" | sed 's/^/       /' | head -10
@@ -740,13 +786,22 @@ echo
 echo "== 6. no runtime-side JSONC parser dependency or API use =="
 RUNTIME_JSONC_DEPS=""
 RUNTIME_JSONC_APIS=""
+n_jsonc=0
 for d in "${RUNTIME_DIRS[@]}"; do
   [ -d "$d" ] || continue
+  n_jsonc=$((n_jsonc + 1))
   h="$(grep -nE 'jsonc[-_]parser|json5|json[_-]spanned' "$d/Cargo.toml" 2>/dev/null || true)"
   [ -n "$h" ] && RUNTIME_JSONC_DEPS="$RUNTIME_JSONC_DEPS$d/Cargo.toml:$h"$'\n'
   h="$(grep -rnE 'jsonc_parser|json5::|json_spanned' "$d" --include='*.rs' 2>/dev/null || true)"
   [ -n "$h" ] && RUNTIME_JSONC_APIS="$RUNTIME_JSONC_APIS$h"$'\n'
 done
+# Declared separately from the arm above even though the two loops walk the same
+# array, because they are separate walks with separate skip conditions: this one
+# also depends on each directory having a Cargo.toml to read, and a checkout
+# where those went missing would leave check 5 ruling on 7 crates while check 6
+# ruled on none. Same measurement, same floor, same reasoning as
+# runtime_dirs_named above.
+gate_arm runtime_dirs_jsonc "$n_jsonc" 4 || true
 if [ -z "$RUNTIME_JSONC_DEPS" ]; then
   pass "no runtime-side crate declares a JSONC parsing dependency"
 else
@@ -763,4 +818,13 @@ fi
 echo
 echo "----------------------------------------------------------------------"
 echo "  passed: $PASS   failed: $FAIL"
+
+# The arm trailer is printed after the tally rather than folded into it: an arm
+# that ruled on too little is not one of the assertions above going red, it is a
+# statement that one of them was answering about nothing. It gets its own line
+# and its own exit path.
+arms_rc=0
+gate_arms_finish || arms_rc=1
+
 [ "$FAIL" -eq 0 ] || exit 1
+[ "$arms_rc" -eq 0 ] || exit 1

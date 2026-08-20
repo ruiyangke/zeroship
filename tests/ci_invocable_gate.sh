@@ -34,6 +34,10 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/lib/gate_arms.sh
+. "$ROOT/tests/lib/gate_arms.sh"
+gate_arms_init ci_invocable
+
 WF="$ROOT/.github/workflows"
 fail=0
 checked=0
@@ -80,14 +84,17 @@ done < <(
 # Anti-hollow floor. If the extraction stops matching - the workflow moves, the
 # indentation changes, `run:` gains a block scalar this sed does not strip -
 # this gate inspects nothing and exits 0 looking exactly like a clean run.
-MIN=10
-echo "bare CI script invocations checked: $checked (floor $MIN)"
-if [ "$checked" -lt "$MIN" ]; then
-  echo "FAIL: found only $checked bare invocation(s), fewer than the $MIN expected." >&2
+# MEASURED 2026-08-20: 62 bare invocations across .github/workflows/*.yml.
+# Floor 10 is reused unchanged from the hand-rolled MIN check this replaces -
+# well under 62, far above the single-digit count a broken extractor produces.
+echo "bare CI script invocations checked: $checked (floor 10)"
+if ! gate_arm bare_invocations "$checked" 10; then
+  echo "FAIL: found only $checked bare invocation(s), fewer than the floor expected." >&2
   echo "      CI does not stop invoking scripts by accident: the extractor is" >&2
   echo "      broken. Fix the extractor, do not lower the floor." >&2
   fail=1
 fi
 
+gate_arms_finish || fail=1
 [ "$fail" -eq 0 ] || { echo "CI INVOCABLE GATE: FAILED" >&2; exit 1; }
 echo "CI INVOCABLE GATE: passed"

@@ -59,6 +59,15 @@ echo "============================================"
 declare -F _dev_secrets_missing >/dev/null || {
   echo "  x REFUSED: sourcing $LIB did not define _dev_secrets_missing." >&2; exit 1; }
 
+# Per-arm anti-vacuity accounting (tests/lib/gate_arms.sh). The file half and
+# the variable half of the demanded set are two independent enumerations
+# inside _dev_secrets_missing (one reads compose `/etc/zeroship/secrets/...`
+# mounts, the other walks a fixed name list) - either can collapse to zero on
+# its own without the other noticing.
+# shellcheck source=tests/lib/gate_arms.sh
+. "$ROOT/tests/lib/gate_arms.sh"
+gate_arms_init dev_secrets
+
 FIX="$(mktemp -d)"
 trap 'rm -rf "$FIX"' EXIT
 SEC="$FIX/secrets"
@@ -84,7 +93,15 @@ esac
 # An .env holding every variable the function asks for. Derived by asking the
 # function itself, so a variable added to it is covered without an edit here.
 : >"$ENVF"
-for v in $(_dev_secrets_missing "$ENVF" "$SEC" | sed -n 's/ (variable)$//p'); do
+VARS_DEMANDED="$(_dev_secrets_missing "$ENVF" "$SEC" | sed -n 's/ (variable)$//p')"
+N_VARS_DEMANDED=$(printf '%s\n' "$VARS_DEMANDED" | grep -c .)
+# MEASURED 2026-08-20: 8 platform-secret variable names in the fixed list
+# inside _dev_secrets_missing. Floor well under that: this list moves by ones
+# as secrets are added or retired, while the failure this guards against - the
+# fixed `for name in ...` list emptied out, or _dev_secrets_missing stopped
+# being sourced correctly - drops it to zero.
+gate_arm required_env_vars "$N_VARS_DEMANDED" 3 || true
+for v in $VARS_DEMANDED; do
   printf '%s=x\n' "$v" >>"$ENVF"
 done
 VARS_LEFT="$(_dev_secrets_missing "$ENVF" "$SEC" | grep -c '(variable)$')"
@@ -98,6 +115,13 @@ if [ -z "${REQUIRED//[[:space:]]/}" ]; then
 else
   pass "the shipped compose yields a non-empty demanded file set ($(echo $REQUIRED))"
 fi
+N_REQUIRED=$(printf '%s\n' "$REQUIRED" | grep -c .)
+# MEASURED 2026-08-20: 7 secret files named in the shipped compose's
+# `/etc/zeroship/secrets/...` mounts. Floor well under that: this is the SAME
+# set the two loops below (dev.rs pairing, discrimination) iterate over, so
+# one arm covers all three call sites - if the compose scan loses its anchor
+# they all silently iterate zero times together.
+gate_arm required_secret_files "$N_REQUIRED" 3 || true
 
 # ------------------------------------------------------------- THE REGRESSION
 #
@@ -210,4 +234,6 @@ if [ "$RAN" -lt "$MIN_RAN" ]; then
   echo "    Assertions went missing - a smaller green is not a pass." >&2
   rc=1
 fi
+
+gate_arms_finish || rc=1
 exit $rc

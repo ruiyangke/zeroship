@@ -419,6 +419,27 @@ jobs:
         run: tests/ws_subscription_stub_gate.sh --self-test
       - name: websocket subscription stub agrees with what describes it
         run: tests/ws_subscription_stub_gate.sh
+      # THE META-GATE. The step above is one of four gates found vacuous on
+      # 2026-08-20 - an arm watching a single identifier the fix had deleted,
+      # examining 0 names and printing green. The other three were skip_marker
+      # (8 hits, 8 excused, 0 ruled on), deploy_scripts' argv scan (1 pre-filter
+      # row, on the one service the filter excludes) and compose_secret_strength
+      # (rule set regexed out of another file's message; the message improved).
+      # Every one of them printed what a clean tree prints.
+      #
+      # So each gate now declares, per arm, how many items that arm ruled on
+      # and a floor that number must clear. The floors live in the gates, beside
+      # the code that produces the number; this step checks the PROPERTY - that
+      # every gate participates - and holds no table of expected counts, because
+      # such a table is the census that goes stale, which is the failure mode
+      # four OTHER gates hit the same week when two new crates landed.
+      #
+      # STATIC by design. The per-arm floors are enforced at the point of
+      # measurement by tests/lib/gate_arms.sh, in each gate's own CI step above
+      # and below, which is where the diagnosis is. This is milliseconds and
+      # needs no docker, no database and no built workspace beyond cargo.
+      - name: Every gate declares how much each of its arms examined
+        run: cargo run -q -p zeroship-gatekit --bin gate-arm-census -- tests
       # NOTHING IN THIS REPO BUILDS THE PLATFORM IMAGE. Measured 2026-08-11:
       # grep over .github/workflows/*.yml for `deploy/Dockerfile`, `docker build`
       # and `docker compose` returns ZERO hits, so the deploy path AGENTS.md
@@ -571,6 +592,7 @@ jobs:
           tests/lib_test_config_selftest.sh
           tests/lib/e2e_stack_selftest.sh
           tests/lib/known_catchall_selftest.sh
+          tests/lib_gate_arms_selftest.sh
       # e2d0cba4c changed three harnesses from 100755 to 100644 in a commit about
       # sharing a helper. The next day two of them were wired into CI by bare
       # path, where a non-executable file is exit 126 - so those steps could not

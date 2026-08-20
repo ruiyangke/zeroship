@@ -57,6 +57,30 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
 
+# Per-arm anti-vacuity accounting. This gate already had an anti-hollow floor on
+# nearly every extraction below, plus a gate-level one on the total pass count;
+# they are all expressed through the shared contract now, which changes two
+# things. A refusal NAMES the extraction that collapsed rather than only the
+# gate, and each count is emitted in a fixed format so the meta-gate can rule on
+# it - the compose-secret failure of 2026-08-20 was one program regexing
+# another's prose, and this is the same relationship one level up.
+#
+# EACH CHECK FUNCTION TAKES ITS ARM ID AS ITS FIRST ARGUMENT, because every one
+# of them is called more than once: --self-test runs each against a planted
+# violation AND against the real input, and check_ops_toml runs over two files.
+# Two arms sharing an id would let one vouch for the other's count, which the
+# library refuses outright.
+#
+# EACH FUNCTION NAMES THAT PARAMETER DIFFERENTLY - compose_arm, alias_arm,
+# argv_arm, ops_arm, secret_arm - and that is not style. `gate-arm-census` reads
+# this file as TEXT and cannot evaluate a variable, so five functions all
+# spelling `gate_arm "$arm"` are five occurrences of one token to it, and it
+# fails the file for declaring the same arm five times. Distinct spellings are
+# what let the static half of the contract see five distinct arms.
+# shellcheck source=tests/lib/gate_arms.sh
+. "$ROOT/tests/lib/gate_arms.sh"
+gate_arms_init config_name_alignment
+
 COMPOSE="deploy/compose/docker-compose.yml"
 PLATFORM_IMAGE="zeroship-platform:dev"
 
@@ -264,7 +288,7 @@ toml_leaves() {
 # ---------------------------------------------------------------------------
 
 check_compose() {
-    local compose="$1" label="$2" contract="$3"
+    local compose_arm="$1" compose="$2" label="$3" contract="$4"
     local rows services=0 bad=0 checked=0
     rows="$(compose_service_env "$compose")"
     if [ -z "$rows" ]; then
@@ -272,7 +296,14 @@ check_compose() {
         return 1
     fi
     services="$(echo "$rows" | cut -f1 | sort -u | wc -l)"
-    if [ "$services" -lt 5 ]; then
+    # The services this walk attributed rows to. MEASURED 2026-08-20 on
+    # deploy/compose/docker-compose.yml: 5 - control, migrated, gateway, worker,
+    # auth. The floor stays the 5 the hand-rolled test enforced, which is equal
+    # to today's count and so will fail the day a platform service is legitimately
+    # removed; that is deliberate here and was already the behaviour, because the
+    # set is enumerated from `image: $PLATFORM_IMAGE` and losing one silently is
+    # the failure this is for.
+    if ! gate_arm "${compose_arm}_services" "$services" 5; then
         fail "$label: only $services platform services found (expected at least 5);"
         echo "      the extraction stopped matching, so a clean result would mean nothing."
         return 1
@@ -303,7 +334,12 @@ check_compose() {
             bad=$((bad + 1))
         fi
     done <<<"$rows"
-    if [ "$checked" -lt 20 ]; then
+    # THE POST-FILTER COUNT, and the distinction is the whole point: `rows` is 42
+    # on the shipped compose and `checked` is 39, the three ambient keys having
+    # been excused by AMBIENT_COMPOSE_KEYS above (measured 2026-08-20). A gate
+    # that declared its pre-filter total is how skip_marker_gate.sh came to rule
+    # on nothing while reporting 8 hits. Floor 20, as the hand-rolled test had.
+    if ! gate_arm "$compose_arm" "$checked" 20; then
         fail "$label: only $checked zeroship variables checked across $services services"
         return 1
     fi
@@ -343,7 +379,7 @@ check_compose() {
 # carries a `:-default`, so a host that still sets only the old name renders
 # green and silently takes the built-in default.
 check_compose_alias_equality() {
-    local compose="$1" label="$2"
+    local alias_arm="$1" compose="$2" label="$3"
     local rows bad=0 checked=0
     rows="$(compose_service_env "$compose")"
     if [ -z "$rows" ]; then
@@ -361,7 +397,13 @@ check_compose_alias_equality() {
     done <<<"$rows"
     # Anti-hollow: the rule is vacuous if the value half of the extractor stops
     # matching, and that failure looks exactly like compliance.
-    if [ "$checked" -lt 20 ]; then
+    #
+    # POST-FILTER, and here the filter is the rule itself: a composite value (a
+    # URL built from scheme plus domain) is not an alias and is recorded with an
+    # empty alias field, so it is skipped rather than ruled on. MEASURED
+    # 2026-08-20: 26 one-to-one aliases out of 42 environment rows. Floor 20, as
+    # the hand-rolled test had.
+    if ! gate_arm "$alias_arm" "$checked" 20; then
         fail "$label: only $checked one-to-one aliases found; the value extraction stopped matching"
         return 1
     fi
@@ -413,7 +455,7 @@ check_compose_alias_equality() {
 #     reads a mounted file and re-exports it, say). This is a text check on the
 #     deploy file, and the mount surface is deploy/scripts/deploy-remote.sh's.
 check_compose_command_secrets() {
-    local compose="$1" label="$2" contract="$3"
+    local argv_arm="$1" compose="$2" label="$3" contract="$4"
     local rows secret_flags bad=0 checked=0
 
     rows="$(compose_command_items "$compose")"
@@ -453,8 +495,13 @@ check_compose_command_secrets() {
     # Anti-hollow: every arm above passes at zero if the extractor stops
     # matching, and that failure is indistinguishable from compliance.
     # MEASURED on deploy/compose/docker-compose.yml 2026-08-16: 84 items.
+    # RE-MEASURED 2026-08-20: 84.
+    #
+    # Every extracted item is ruled on by both detectors, so this is already the
+    # post-filter number - the `secret_flags` join narrows detector B's evidence,
+    # not the set of items examined.
     local min_items=60
-    if [ "$checked" -lt "$min_items" ]; then
+    if ! gate_arm "$argv_arm" "$checked" "$min_items"; then
         fail "$label: only $checked command items scanned, expected at least $min_items"
         echo "      The command extraction stopped matching, so a clean result would mean nothing."
         return 1
@@ -468,20 +515,32 @@ check_compose_command_secrets() {
 }
 
 check_ops_toml() {
-    local file="$1" label="$2" contract="$3"
+    local ops_arm="$1" file="$2" label="$3" contract="$4"
     local bad=0 checked=0 leaf
     while read -r leaf; do
         [ -n "$leaf" ] || continue
-        checked=$((checked + 1))
         if echo "$FILE_ONLY_OVERLAY_LEAVES" | grep -q "^$leaf "; then
             continue
         fi
+        # Counted AFTER the exclusion, so this is the number of leaves whose
+        # verdict the contract join actually decided. It used to be counted
+        # before, which made it the raw leaf total: deploy/ops/zeroship.toml has
+        # four leaves and ONE of them, auth.trusted_oauth_clients, is excused, so
+        # the old number said 4 where 3 were ruled on. That gap is small here and
+        # is the entire skip_marker_gate.sh failure at scale - 8 hits, 8 excused,
+        # 0 ruled on, green.
+        checked=$((checked + 1))
         if ! awk -F'\t' -v t="$leaf" '$6==t {found=1} END{exit !found}' "$contract"; then
             echo "  $file carries $leaf, which is not a generated overlay path"
             bad=$((bad + 1))
         fi
     done < <(toml_leaves "$file")
-    if [ "$checked" -eq 0 ]; then
+    # MEASURED 2026-08-20, post-exclusion: deploy/ops/zeroship.toml rules on 3 of
+    # its 4 leaves, deploy/ops/zeroship.example.toml on 21 of its 22. The floor
+    # stays the 1 the hand-rolled test enforced and cannot be raised towards
+    # either number: the smaller file rules on 3, and --self-test drives this
+    # same function over a two-line planted fixture holding exactly one leaf.
+    if ! gate_arm "$ops_arm" "$checked" 1; then
         fail "$label: extracted zero leaves from $file"
         return 1
     fi
@@ -549,8 +608,8 @@ check_ops_toml() {
 #     2026-08-17), so an arm for them would scan zero files and pass on
 #     nothing. It is left unwritten rather than written and hollow.
 check_tracked_secret_literals() {
-    local label="$1" contract="$2"
-    shift 2
+    local secret_arm="$1" label="$2" contract="$3"
+    shift 3
     local secret_paths bad=0 resolved=0 file line leaf value
 
     secret_paths="$(awk -F'\t' 'NR > 1 && $3 == "secret" && $6 != "" { print $6 }' \
@@ -559,7 +618,12 @@ check_tracked_secret_literals() {
         fail "$label: the contract declares no secret-classed overlay path; nothing could be checked"
         return 1
     fi
-    if [ "$#" -eq 0 ]; then
+    # The file enumeration, which is `git ls-files '*.toml'` at the call site and
+    # so can go to zero without anything else changing. MEASURED 2026-08-20: 44
+    # tracked TOML files. The floor is the 1 the hand-rolled test enforced and
+    # cannot be raised towards 44, because --self-test calls this same function
+    # with a SINGLE planted file to prove it still rejects a literal.
+    if ! gate_arm "${secret_arm}_files" "$#" 1; then
         fail "$label: no tracked TOML files were passed; the file enumeration stopped matching"
         return 1
     fi
@@ -587,8 +651,14 @@ check_tracked_secret_literals() {
     # the file enumeration stops matching, and that failure is indistinguishable
     # from a tree with no secrets in it.
     # MEASURED on a clean tree 2026-08-17: 17, all in deploy/ops/zeroship.example.toml.
+    #
+    # `resolved` is the POST-JOIN count and the right one to declare: 44 files go
+    # in and several hundred assignments are read, but only the leaves that match
+    # a secret-classed contract row get a verdict. Declaring the assignment total
+    # would stay comfortably above any floor while the join itself matched
+    # nothing.
     local min_resolved=12
-    if [ "$resolved" -lt "$min_resolved" ]; then
+    if ! gate_arm "$secret_arm" "$resolved" "$min_resolved"; then
         fail "$label: only $resolved secret-classed leaves resolved, expected at least $min_resolved"
         echo "      The extraction or the contract join stopped matching, so a clean result would mean nothing."
         return 1
@@ -621,7 +691,14 @@ if ! "$BIN" contract >"$TMP/contract.tsv" 2>"$TMP/contract.err"; then
     exit 1
 fi
 CONTRACT_ROWS=$(($(wc -l <"$TMP/contract.tsv") - 1))
-if [ "$CONTRACT_ROWS" -lt 150 ]; then
+# THE JOIN KEY EVERY CHECK BELOW USES, so it is declared as an arm of its own:
+# checks 6, 6c, 7 and 8 all resolve their verdict against these rows, and a short
+# dump makes every one of them pass on nothing at once. The floor of 150 is
+# carried over verbatim from the hand-rolled test this replaces; the real count
+# could not be re-measured on 2026-08-20 because zeroship-config-contract does
+# not build in this worktree (crates/runtime needs `pnpm build` first), which is
+# also why this gate is red here.
+if ! gate_arm contract_projections "$CONTRACT_ROWS" 150; then
     fail "the compiled contract has only $CONTRACT_ROWS projections; every check below joins"
     echo "      against it, so a short dump would make all of them pass on nothing."
     exit 1
@@ -643,7 +720,7 @@ if [ "${1:-}" = "--self-test" ]; then
         exit 1
     fi
     before=$FAIL
-    check_compose "$TMP/self/compose.yml" "compose self-test" "$TMP/contract.tsv" >/dev/null 2>&1
+    check_compose compose_mutation "$TMP/self/compose.yml" "compose self-test" "$TMP/contract.tsv" >/dev/null 2>&1
     if [ "$FAIL" -gt "$before" ]; then
         FAIL=$before
         pass "self-test: an undeclared ZEROSHIP_* compose variable is rejected"
@@ -660,7 +737,7 @@ if [ "${1:-}" = "--self-test" ]; then
         exit 1
     fi
     before=$FAIL
-    check_compose_alias_equality "$TMP/self/alias.yml" "alias self-test" >/dev/null 2>&1
+    check_compose_alias_equality alias_mutation "$TMP/self/alias.yml" "alias self-test" >/dev/null 2>&1
     if [ "$FAIL" -gt "$before" ]; then
         FAIL=$before
         pass "self-test: a container variable fed by a differently-named .env variable is rejected"
@@ -678,7 +755,7 @@ if [ "${1:-}" = "--self-test" ]; then
         exit 1
     fi
     before=$FAIL
-    check_compose_command_secrets "$TMP/self/cmd_url.yml" "command-url self-test" "$TMP/contract.tsv" >/dev/null 2>&1
+    check_compose_command_secrets argv_url_mutation "$TMP/self/cmd_url.yml" "command-url self-test" "$TMP/contract.tsv" >/dev/null 2>&1
     if [ "$FAIL" -gt "$before" ]; then
         FAIL=$before
         pass "self-test: a userinfo-bearing URL in a command block is rejected"
@@ -696,7 +773,7 @@ if [ "${1:-}" = "--self-test" ]; then
         exit 1
     fi
     before=$FAIL
-    check_compose_command_secrets "$TMP/self/cmd_flag.yml" "command-flag self-test" "$TMP/contract.tsv" >/dev/null 2>&1
+    check_compose_command_secrets argv_flag_mutation "$TMP/self/cmd_flag.yml" "command-flag self-test" "$TMP/contract.tsv" >/dev/null 2>&1
     if [ "$FAIL" -gt "$before" ]; then
         FAIL=$before
         pass "self-test: a secret's value flag in a command block is rejected"
@@ -706,7 +783,7 @@ if [ "${1:-}" = "--self-test" ]; then
 
     printf '[control]\nnot_a_real_setting = 1\n' >"$TMP/self/ops.toml"
     before=$FAIL
-    check_ops_toml "$TMP/self/ops.toml" "ops-toml self-test" "$TMP/contract.tsv" >/dev/null 2>&1
+    check_ops_toml ops_mutation "$TMP/self/ops.toml" "ops-toml self-test" "$TMP/contract.tsv" >/dev/null 2>&1
     if [ "$FAIL" -gt "$before" ]; then
         FAIL=$before
         pass "self-test: an overlay leaf outside the contract is rejected"
@@ -726,7 +803,7 @@ if [ "${1:-}" = "--self-test" ]; then
         exit 1
     fi
     before=$FAIL
-    check_tracked_secret_literals "secret-literal self-test" "$TMP/contract.tsv" \
+    check_tracked_secret_literals secret_mutation "secret-literal self-test" "$TMP/contract.tsv" \
         "$TMP/self/secret_literal.toml" >/dev/null 2>&1
     if [ "$FAIL" -gt "$before" ]; then
         FAIL=$before
@@ -737,15 +814,22 @@ if [ "${1:-}" = "--self-test" ]; then
 
     # And the one-variable partner: the SAME checks on the real inputs must pass,
     # or the mutations above proved only that the checks reject everything.
-    check_compose "$COMPOSE" "compose control" "$TMP/contract.tsv"
-    check_compose_alias_equality "$COMPOSE" "alias control"
-    check_compose_command_secrets "$COMPOSE" "command control" "$TMP/contract.tsv"
-    check_ops_toml "deploy/ops/zeroship.toml" "ops-toml control" "$TMP/contract.tsv"
-    check_tracked_secret_literals "tracked-secret control" "$TMP/contract.tsv" "${TRACKED_TOML[@]}"
+    check_compose compose_control "$COMPOSE" "compose control" "$TMP/contract.tsv"
+    check_compose_alias_equality alias_control "$COMPOSE" "alias control"
+    check_compose_command_secrets argv_control "$COMPOSE" "command control" "$TMP/contract.tsv"
+    check_ops_toml ops_control "deploy/ops/zeroship.toml" "ops-toml control" "$TMP/contract.tsv"
+    check_tracked_secret_literals secret_control "tracked-secret control" "$TMP/contract.tsv" "${TRACKED_TOML[@]}"
 
     echo ""
     echo "Self-test summary: $PASS passed, $FAIL failed"
+    # --self-test is a completed run and owes the same trailer. Its arms are the
+    # ten above: the five mutated inputs and the five real ones, each with its own
+    # id, so a mutation whose fixture stopped resembling the real file shows up
+    # here as a count that no longer matches its control.
+    arms_rc=0
+    gate_arms_finish || arms_rc=1
     [ "$FAIL" -eq 0 ] || exit 1
+    [ "$arms_rc" -eq 0 ] || exit 1
     exit 0
 fi
 
@@ -787,31 +871,41 @@ fi
 
 echo ""
 echo "=== 6. Compose sets only variables the receiving binary declares ==="
-check_compose "$COMPOSE" "compose" "$TMP/contract.tsv"
+check_compose compose "$COMPOSE" "compose" "$TMP/contract.tsv"
 
 echo ""
 echo "=== 6b. Compose one-to-one aliases satisfy LEFT == RIGHT ==="
-check_compose_alias_equality "$COMPOSE" "compose alias equality"
+check_compose_alias_equality compose_alias "$COMPOSE" "compose alias equality"
 
 echo ""
 echo "=== 6c. No compose command/entrypoint item carries a credential ==="
-check_compose_command_secrets "$COMPOSE" "compose command argv" "$TMP/contract.tsv"
+check_compose_command_secrets compose_argv "$COMPOSE" "compose command argv" "$TMP/contract.tsv"
 
 echo ""
 echo "=== 7. Every ops-TOML leaf is a generated overlay path ==="
 for file in deploy/ops/zeroship.toml deploy/ops/zeroship.example.toml; do
     [ -f "$file" ] || { fail "expected $file to exist"; continue; }
-    check_ops_toml "$file" "ops-toml" "$TMP/contract.tsv"
+    # The arm id is DERIVED from the file, not written out beside it, so a third
+    # overlay added to this loop gets its own arm without anyone remembering to
+    # name one - and two files can never end up sharing an id and vouching for
+    # each other's count. `zeroship.example.toml` yields ops_zeroship_example.
+    check_ops_toml "ops_$(basename "$file" .toml | tr . _)" "$file" "ops-toml" "$TMP/contract.tsv"
 done
 
 echo ""
 echo "=== 8. No tracked file carries a plaintext secret ==="
-check_tracked_secret_literals "tracked secret literals" "$TMP/contract.tsv" "${TRACKED_TOML[@]}"
+check_tracked_secret_literals tracked_secrets "tracked secret literals" "$TMP/contract.tsv" "${TRACKED_TOML[@]}"
 
 echo ""
 echo "============================================"
 echo "Summary: $PASS passed, $FAIL failed"
 echo "============================================"
+
+# Printed before the exits below so every completed run carries the trailer, and
+# folded in last so it cannot mask the two verdicts that are about the TREE. An
+# arm refusal is a statement about the instrument, and it gets its own exit.
+arms_rc=0
+gate_arms_finish || arms_rc=1
 
 [ "$FAIL" -eq 0 ] || exit 1
 
@@ -826,3 +920,5 @@ if [ "$PASS" -lt "$CONFIG_GATE_MIN_PASSED" ]; then
     echo "  Nothing FAILED, so this is not a broken check - it is MISSING ones." >&2
     exit 1
 fi
+
+[ "$arms_rc" -eq 0 ] || exit 1

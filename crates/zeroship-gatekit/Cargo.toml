@@ -9,6 +9,11 @@ target = "compose-secret-strength"
 class = "test-dev-tool"
 reason = "A repository gate. It READS the deployment's compose file and is not in it; it has no configuration overlay of its own."
 
+[[package.metadata.zeroship-config.targets]]
+target = "gate-arm-census"
+class = "test-dev-tool"
+reason = "The meta-gate. It reads the repository's own gate scripts; it is not a deployed service and has no configuration overlay."
+
 [dependencies]
 serde = { workspace = true }
 # The compose model needs a real YAML parser. `serde_norway` is the maintained

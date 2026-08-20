@@ -47,6 +47,14 @@ PASS=0; FAIL=0
 pass() { PASS=$((PASS+1)); echo "  ok   $1"; }
 fail() { FAIL=$((FAIL+1)); echo "  FAIL $1"; }
 
+# Per-arm anti-vacuity accounting (tests/lib/gate_arms.sh). This gate has two
+# independent enumerations - the published-port census and the control-route
+# posture read - and each can collapse to zero on its own if its parser loses
+# the anchor it depends on, independently of whether the other one still works.
+# shellcheck source=tests/lib/gate_arms.sh
+. "$ROOT/tests/lib/gate_arms.sh"
+gate_arms_init compose_port_exposure
+
 echo "============================================"
 echo "  deploy/compose publishes only the edge on 0.0.0.0"
 echo "============================================"
@@ -77,8 +85,13 @@ mapfile -t ENTRIES < <(
   ' "$CF"
 )
 
-if [ "${#ENTRIES[@]}" -eq 0 ]; then
-  echo "  x REFUSED: parsed ZERO published ports out of $CF." >&2
+N_ENTRIES=${#ENTRIES[@]}
+# MEASURED 2026-08-20: 9 published-port entries in the tracked compose file.
+# Floor well under that: ordinary edits move this by one or two ports, while
+# the failure this guards against - the block-aware awk parser losing its
+# `ports:` anchor - drops it to zero, not to single digits.
+if ! gate_arm published_ports "$N_ENTRIES" 5; then
+  echo "  x REFUSED: parsed too few published ports out of $CF." >&2
   echo "    Either the file changed shape or this parser is broken; a gate that" >&2
   echo "    checks nothing must not report success." >&2
   exit 1
@@ -105,6 +118,14 @@ CONTROL_BLOCK=$(awk '
   in_control && /^  [a-z][a-z0-9_-]*:[[:space:]]*$/ { exit }
   in_control && !/^[[:space:]]*#/ { print }
 ' "$CF")
+# MEASURED 2026-08-20: 43 non-comment lines in compose's `control:` service
+# body. If the awk block-parser above loses its anchor (the service renamed or
+# reindented), CONTROL_BLOCK goes empty and CONTROL_POSTURE_RELAXED silently
+# defaults to "not relaxed" regardless of what the file actually says - the
+# checks below would still print a verdict, just not one grounded in anything.
+# Floor well under 43 so an environment-block edit does not trip it.
+N_CONTROL_LINES=$(printf '%s\n' "$CONTROL_BLOCK" | grep -c .)
+gate_arm control_route_posture "$N_CONTROL_LINES" 10 || true
 CONTROL_ROUTE_ACTIVE=0
 CONTROL_POSTURE_RELAXED=0
 CONTROL_ROUTE_STAGED=0
@@ -158,4 +179,6 @@ if [ "$PORT_RAN" -ne "$EXPECT_RAN" ]; then
   echo "    a pass. More means a port was added; re-measure and bump this line." >&2
   rc=1
 fi
+
+gate_arms_finish || rc=1
 exit $rc

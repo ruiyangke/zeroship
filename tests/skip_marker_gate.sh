@@ -77,6 +77,13 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
+# Per-arm anti-vacuity accounting. This gate is the WORST measured instance the
+# library exists for: 8 raw hits, 8 excused by ALLOW, 0 ruled on - and it printed
+# the same "ok" a tree with no skip-shaped prints at all would print.
+# shellcheck source=tests/lib/gate_arms.sh
+. "$(dirname "$0")/lib/gate_arms.sh"
+gate_arms_init skip_marker
+
 MARKER='ZEROSHIP-TEST-SKIPPED'
 
 # Print, as `path:line:text`, every skip-shaped print macro in $1.. that does
@@ -206,7 +213,10 @@ MARKER_TOKENS="$(grep -rnoE "${MARKER_FAMILY}[A-Z0-9_-]*" crates libs tests)"
 N_MARKER=0
 [ -n "$MARKER_TOKENS" ] && N_MARKER="$(printf '%s\n' "$MARKER_TOKENS" | wc -l | tr -d ' ')"
 
-if [ "$N_MARKER" -lt "$MARKER_SITE_FLOOR" ]; then
+# MEASURED 2026-08-20: 27 tokens. Floor kept at the value this check already
+# used before the arm contract existed - it is well under 27, and the comment
+# above already explains why the count can only shrink one edit at a time.
+if ! gate_arm marker_identical "$N_MARKER" "$MARKER_SITE_FLOOR"; then
   echo "GATE CANNOT ANSWER: only $N_MARKER marker token(s) found, below the floor"
   echo "  of $MARKER_SITE_FLOOR. 27 were measured 2026-08-20. The search stopped"
   echo "  matching, so 'no drift' would mean nothing."
@@ -239,7 +249,7 @@ N_RAW="$(n_lines "$RAW")"
 # is the difference between those two. 8 rows on 2026-08-20; the floor is 1
 # because ANY row proves the detector ran, and because the honest end state of
 # this gate is a small number, not a large one.
-if [ "$N_RAW" -eq 0 ]; then
+if ! gate_arm raw_detection "$N_RAW" 1; then
   echo "GATE CANNOT ANSWER: the skip-shaped-print pattern matched nothing in"
   echo "  crates/ or libs/. Every skip announcement in this workspace would have"
   echo "  to have been deleted for that to be real; the likelier reading is that"
@@ -271,10 +281,12 @@ COUNT="$(n_lines "${OFFENDERS%$'\n'}")"
 # must FAIL, or the ALLOW list silently becomes the whole world. It doubles as
 # this gate's positive control - both entries match today, so if the detector
 # breaks they stop matching and say so here as well as at the floor above.
+N_STILL_MATCHING=0
 for entry in "${ALLOW[@]}"; do
   pattern="${entry%%|*}"
   reason="${entry#*|}"
   if printf '%s\n' "$RAW" | grep -qE "$pattern"; then
+    N_STILL_MATCHING=$((N_STILL_MATCHING + 1))
     printf '  exempt %s\n         %s\n' \
       "$(printf '%s\n' "$RAW" | grep -cE "$pattern") row(s) matching ${pattern%%:*}" "$reason"
   else
@@ -287,7 +299,33 @@ for entry in "${ALLOW[@]}"; do
   fi
 done
 
+# THE ARM THIS GATE ACTUALLY NEEDS, and the reason it exists at all: the
+# FORWARD count (COUNT below, "unruled") is 8 raw hits, 8 excused, 0 unruled -
+# genuinely zero today, because every current offender is legitimately excused.
+# Declaring an arm on THAT number would be exactly the defect this file was
+# rewritten to stop being: a floor >=1 on a count that is honestly 0 would fail
+# every clean run, and a floor of 0 is refused by the library on purpose. So
+# this arm counts the REVERSE direction instead - how many ALLOW entries still
+# match something in $RAW, which is what direction 2 above rules on line by
+# line. 2 entries, both matching, measured 2026-08-20. Floor 1: a legitimate
+# cleanup can retire one exemption, but not both while $RAW is still nonempty
+# above, and this is the number that goes to 0 the same way arm 1 of
+# ws_subscription_stub_gate.sh did - a pattern that stops matching anything.
+if ! gate_arm allow_entries_live "$N_STILL_MATCHING" 1; then
+  echo "GATE CANNOT ANSWER: no ALLOW entry in this file still matches a raw"
+  echo "  skip-shaped print. Either both were legitimately retired (the forward"
+  echo "  count above should then be nonzero for the same edit) or the allowlist"
+  echo "  itself stopped matching, in which case direction 2's clean report means"
+  echo "  nothing."
+  STATUS=1
+fi
+
 echo "  ${N_RAW} skip-shaped print(s) found, ${N_EXCUSED} excused, ${COUNT} unruled"
+
+# Folded into STATUS, not exit()'d directly, because the COUNT==0 branch right
+# below is this gate's normal PASS path and still has to carry an arm refusal
+# out through the same variable everything else here uses.
+gate_arms_finish || STATUS=1
 
 if [ "$COUNT" -eq 0 ]; then
   [ "$STATUS" -eq 0 ] && echo "  ok   no test announces a skip the census cannot see"
