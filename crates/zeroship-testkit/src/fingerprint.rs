@@ -335,6 +335,32 @@ mod tests {
     }
 
     #[test]
+    fn a_git_tree_fingerprint_ignores_everything_outside_the_migration_set() {
+        // THE OTHER HALF of the control above, and the case that makes its
+        // verdict attributable. Two trees that differ by one migration also
+        // differ as OBJECTS, so "the hashes differ" is equally consistent with
+        // a fingerprint keyed on the tree sha -- which would discriminate
+        // beautifully and put every commit in its own database. Only a pair
+        // where the tree moves and the migration set does not can tell those
+        // apart, so this is that pair's second half.
+        let repo = scratch();
+        tree(repo.path(), &[("20260101_one.ts", "one")]);
+        std::fs::write(repo.path().join("README.md"), "before").unwrap();
+        init_repo(repo.path());
+        let before = write_tree(repo.path());
+
+        std::fs::write(repo.path().join("README.md"), "after").unwrap();
+        let after = write_tree(repo.path());
+        assert_ne!(before, after, "the trees must differ as objects");
+
+        assert_eq!(
+            of_ref(repo.path(), &before),
+            of_ref(repo.path(), &after),
+            "a file outside db/migrations-ts moved the fingerprint"
+        );
+    }
+
+    #[test]
     fn a_git_tree_with_no_migrations_yields_no_value() {
         // Not a hash of nothing: that would be a legitimate-looking value no
         // working tree can produce, so every database keyed to it would look
