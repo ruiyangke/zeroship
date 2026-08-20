@@ -1073,7 +1073,19 @@ impl Config {
         T: TlsConnect<S>,
     {
         self.validate_tls_settings()?;
-        connect_raw(stream, tls, Encryption::first_for(self.ssl_mode), true, self).await
+        // No release handle: the stream is the caller's, `S` is unconstrained,
+        // and a stream that is not a socket has no descriptor to shut down.
+        // Such a connection keeps the pre-existing behaviour - it is released
+        // when its connection task is next polled.
+        connect_raw(
+            stream,
+            tls,
+            Encryption::first_for(self.ssl_mode),
+            true,
+            self,
+            None,
+        )
+        .await
     }
 }
 

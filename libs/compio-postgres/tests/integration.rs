@@ -1792,8 +1792,9 @@ async fn concurrent_large_bidirectional_queries_do_not_deadlock() {
 //
 // We RETAIN the connection task's JoinHandle (instead of the detaching
 // `connect` helper) so we can observe the task actually finishing. Dropping
-// the client closes the request channel; the driver drains, terminates,
-// FINs, cancels the read task in its teardown block, and returns Ok. A 5 s
+// the client closes the request channel and releases the socket; the driver
+// drains, attempts its goodbye, cancels the read task in its teardown block,
+// and returns Ok whether or not that goodbye landed. A 5 s
 // timeout turns any teardown hang (e.g. a read task left parked forever, or a
 // shutdown that wedges) into a fast, loud failure.
 //
@@ -1817,8 +1818,11 @@ async fn multiplexed_clean_shutdown_completes_without_hang() {
     let rows = client.query("SELECT 42::int4 AS v", &[]).await.unwrap();
     assert_eq!(rows[0].get::<_, i32>("v"), 42);
 
-    // Drop the client: request channel closes -> driver sends Terminate, FINs,
-    // stops the read task, and `run` returns Ok(()).
+    // Drop the client: the request channel closes AND `ConnectionRelease`
+    // shuts the socket down on the spot, so the driver's Terminate normally
+    // does NOT reach the server - `run` still has to stop the read task and
+    // return Ok(()). Before that release existed this returned
+    // `Err(BrokenPipe)`, because the driver propagated the failed goodbye.
     drop(client);
 
     // The driver must finish on its own, promptly, with a clean Ok. A hang

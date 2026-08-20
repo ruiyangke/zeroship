@@ -218,7 +218,11 @@ where
             // Step B — clean shutdown once the client has gone away and
             // all pending work is done.
             if terminating && self.responses.is_empty() {
-                self.stream.flush().await?;
+                // NOT `?`: same reasoning as the Terminate write above - the
+                // client is gone and the socket may already be released.
+                if let Err(e) = self.stream.flush().await {
+                    trace!("final flush failed, client already gone: {e}");
+                }
                 // Best-effort clean socket shutdown: closes the TLS
                 // session gracefully (rustls treats silent drop as a
                 // truncation attack) and emits a proper TCP FIN/ACK.
@@ -292,8 +296,17 @@ where
                     // graceful shutdown.
                     trace!("receiver closed, sending Terminate");
                     let buf = inner_encode_terminate();
-                    write_frontend(&mut self.stream, FrontendMessage::Raw(buf))?;
-                    self.stream.flush().await?;
+                    // NOT `?`, for the reason given on the multiplexed loop's
+                    // Terminate: the client half is gone, so there is nobody
+                    // left to report to, and the socket has usually been
+                    // released already (`crate::release`).
+                    let mut goodbye = write_frontend(&mut self.stream, FrontendMessage::Raw(buf));
+                    if goodbye.is_ok() {
+                        goodbye = self.stream.flush().await;
+                    }
+                    if let Err(e) = goodbye {
+                        trace!("Terminate not delivered, client already gone: {e}");
+                    }
                     terminating = true;
                 }
             }
@@ -873,8 +886,21 @@ where
                 if client_gone && !terminate_sent && responses.is_empty() && copy_in.is_none() {
                     trace!("client gone + queue drained, sending Terminate (multiplexed)");
                     let buf = inner_encode_terminate();
-                    write_frontend(&mut write_half, FrontendMessage::Raw(buf))?;
-                    write_half.flush().await?;
+                    // NOT `?`. `Terminate` is a courtesy to the server and the
+                    // client half that would have received an error is, by
+                    // definition of this branch, already gone. It is also
+                    // routinely undeliverable now: dropping the client releases
+                    // the socket synchronously (`crate::release`), so by the
+                    // time this task next runs the descriptor is usually shut
+                    // down. Propagating that turns every ordinary close into a
+                    // connection error in the caller's log.
+                    let mut goodbye = write_frontend(&mut write_half, FrontendMessage::Raw(buf));
+                    if goodbye.is_ok() {
+                        goodbye = write_half.flush().await;
+                    }
+                    if let Err(e) = goodbye {
+                        trace!("Terminate not delivered, client already gone: {e}");
+                    }
                     // Emit a clean TCP FIN on the write side, matching the
                     // serialized loop's `stream.shutdown()`. Swallow the
                     // expected BrokenPipe / NotConnected if the server already
