@@ -18,21 +18,42 @@ use std::fs::{OpenOptions, TryLockError};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-/// Take an exclusive lock on `path`, run `body`, release.
+/// Why a lock was not taken.
 ///
-/// `Err(())` means the wait ran out; the caller decides what to say about it.
+/// The two arms are separated because the CALLER SAYS DIFFERENT THINGS about
+/// them: "waited 900s for another run" is the right message for one and an
+/// actively misleading one for the other -- a lock directory that does not
+/// exist would otherwise be reported as a peer holding the lock for fifteen
+/// minutes.
+#[derive(Debug)]
+pub enum LockError {
+    /// The wait ran out with a peer still holding it.
+    TimedOut,
+    /// The lock file could not be opened or locked at all.
+    Unusable(std::io::Error),
+}
+
+/// Take an exclusive lock on `path`, run `body`, release.
 ///
 /// The lock is released by the file being closed when this function returns,
 /// on every path out including a panic -- which is the same property the
 /// shell's subshell-plus-`9>` construction was buying, arrived at without
 /// needing a comment to explain which file descriptor was which.
-pub fn with_file_lock<T>(path: &Path, timeout: Duration, body: impl FnOnce() -> T) -> Result<T, ()> {
+///
+/// # Errors
+/// [`LockError::TimedOut`] when a peer still holds it after `timeout`, or
+/// [`LockError::Unusable`] when the file could not be opened or locked.
+pub fn with_file_lock<T>(
+    path: &Path,
+    timeout: Duration,
+    body: impl FnOnce() -> T,
+) -> Result<T, LockError> {
     let file = OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
         .open(path)
-        .map_err(|_| ())?;
+        .map_err(LockError::Unusable)?;
 
     // POLL RATHER THAN BLOCK, so the timeout is ours rather than a signal's.
     // `flock(2)` has no timeout of its own, and `flock(1)` implements
@@ -46,10 +67,10 @@ pub fn with_file_lock<T>(path: &Path, timeout: Duration, body: impl FnOnce() -> 
         match file.try_lock() {
             Ok(()) => break,
             Err(TryLockError::WouldBlock) => {}
-            Err(TryLockError::Error(_)) => return Err(()),
+            Err(TryLockError::Error(why)) => return Err(LockError::Unusable(why)),
         }
         if Instant::now() >= deadline {
-            return Err(());
+            return Err(LockError::TimedOut);
         }
         std::thread::sleep(Duration::from_millis(50));
     }

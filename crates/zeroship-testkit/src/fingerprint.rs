@@ -85,23 +85,26 @@ pub fn of_dir(root: &Path) -> Result<String, String> {
 
 /// Hash the migration set a git tree carries.
 ///
-/// `Err(())` rather than a message: the shell's `zs_fingerprint_of_ref` printed
-/// nothing and returned 1, and the sweeper treats "this ref has no migrations"
-/// as an ordinary answer about a ref, not as a failure worth narrating. A
-/// fingerprint for a tree with no migrations would be a legitimate-looking hash
-/// no working tree can ever produce, so every database keyed to it would look
-/// reachable forever.
-pub fn of_ref(reference: &str) -> Result<String, ()> {
+/// `None` rather than an error message, and that is the shell's contract
+/// preserved rather than an omission: `zs_fingerprint_of_ref` printed nothing
+/// and returned 1, and the sweeper's loop is `fp="$(...)" || continue`. "This
+/// ref carries no migrations" is an ordinary answer about a ref -- most tags
+/// and many old branches -- not a failure worth narrating 21 times.
+///
+/// What it must never do is return a VALUE for such a tree. A fingerprint of
+/// nothing is a legitimate-looking hash no working tree can ever produce, so
+/// every database keyed to it would look reachable forever.
+pub fn of_ref(reference: &str) -> Option<String> {
     let listing = Command::new("git")
         .args(["ls-tree", reference, "--", &format!("{MIGRATIONS_DIR}/")])
         .output()
-        .map_err(|_| ())?;
+        .ok()?;
     if !listing.status.success() {
-        return Err(());
+        return None;
     }
     let listing = String::from_utf8_lossy(&listing.stdout);
     if listing.trim().is_empty() {
-        return Err(());
+        return None;
     }
 
     let mut lines: Vec<String> = Vec::new();
@@ -115,9 +118,9 @@ pub fn of_ref(reference: &str) -> Result<String, ()> {
             continue;
         };
         let mut fields = meta.split_whitespace();
-        let (_mode, kind, sha) = match (fields.next(), fields.next(), fields.next()) {
-            (Some(a), Some(b), Some(c)) => (a, b, c),
-            _ => continue,
+        let (Some(_mode), Some(kind), Some(sha)) = (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
         };
         if kind != "blob" || !path.ends_with(".ts") {
             continue;
@@ -125,18 +128,18 @@ pub fn of_ref(reference: &str) -> Result<String, ()> {
         let blob = Command::new("git")
             .args(["cat-file", "blob", sha])
             .output()
-            .map_err(|_| ())?;
+            .ok()?;
         if !blob.status.success() {
-            return Err(());
+            return None;
         }
         let basename = path.rsplit('/').next().unwrap_or(path);
         lines.push(sha256sum_line(basename, &blob.stdout));
     }
 
     if lines.is_empty() {
-        return Err(());
+        return None;
     }
-    Ok(digest_of(lines))
+    Some(digest_of(lines))
 }
 
 /// One line of what `printf '%s ' <name>; sha256sum < file` emits.

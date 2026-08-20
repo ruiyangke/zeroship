@@ -234,11 +234,11 @@ fn run_fingerprint(cmd: FingerprintCmd) -> i32 {
             Err(refusal) => refuse(&refusal, exit::FATAL),
         },
         FingerprintCmd::Ref { reference } => match fingerprint::of_ref(&reference) {
-            Ok(value) => {
+            Some(value) => {
                 println!("{value}");
                 exit::OK
             }
-            Err(()) => exit::NO,
+            None => exit::NO,
         },
     }
 }
@@ -342,8 +342,18 @@ fn run_provision(root: &Path, name: &str, lock_dir: &Path, argv: &[String]) -> i
 
     match held {
         Ok(code) => code,
-        Err(()) => refuse(
+        Err(lock::LockError::TimedOut) => refuse(
             &suite_db::provision_lock_timeout_message(name, &lock_file),
+            exit::FATAL,
+        ),
+        // NOT the timeout message. A lock directory that does not exist would
+        // otherwise be reported as a peer holding the lock for fifteen minutes,
+        // and the caller would go looking for a run that was never there.
+        Err(lock::LockError::Unusable(why)) => refuse(
+            &format!(
+                "FATAL: could not take the provisioning lock at {}: {why}\n",
+                lock_file.display()
+            ),
             exit::FATAL,
         ),
     }

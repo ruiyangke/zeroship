@@ -43,8 +43,7 @@ pub fn get(document: &str, want_section: &str, want_key: &str) -> Option<String>
         if trimmed_start.starts_with('#') {
             continue;
         }
-        if trimmed_start.starts_with('[') {
-            let rest = &trimmed_start[1..];
+        if let Some(rest) = trimmed_start.strip_prefix('[') {
             section = match rest.find(']') {
                 Some(end) => rest[..end].to_string(),
                 None => rest.to_string(),
