@@ -149,7 +149,7 @@ OUTSIDE these two markers is hand-maintained and is never rewritten
 by the generator.
 -->
 
-**153 canonical settings**: 114 operational, 32 secret, 5 bootstrap controls, 2 command controls. Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is the canonical name itself, because both are computed from the one declaration rather than spelled twice.
+**149 canonical settings**: 111 operational, 31 secret, 5 bootstrap controls, 2 command controls. Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is the canonical name itself, because both are computed from the one declaration rather than spelled twice.
 
 ### shared (no scope prefix: read by more than one binary)
 
