@@ -15,8 +15,10 @@
 # fallback, it would just set a variable nothing reads, and the harness would
 # fail at the startup guard several hundred lines later.
 #
-# Every name below is exported, because every name below is read by at least
-# one child service.
+# Every name below is exported. Nothing here is withheld from a child any
+# more: the one name that was, the platform mint key, authenticated control to
+# an auth endpoint that no longer exists, so the pair of launcher wrappers that
+# handed it to two services and scrubbed it from the rest went with it.
 
 # Repo root + the vendored `jose` build, derived from THIS file's location so a
 # harness that sources only this file still gets both. `tests/lib/e2e_stack.sh`
