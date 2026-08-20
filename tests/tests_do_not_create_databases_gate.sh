@@ -86,6 +86,23 @@ ALLOW=(
   # decides whether a rendered migration statement writes a shared catalog; the
   # string never reaches a server, and this file opens no connection.
   "crates/zeroship-migrate-adapter/src/platform/cluster_lock.rs|a string CLASSIFIED, never executed - the marker table for the cluster-lock router"
+
+  # THIS GATE'S OWN PREMISE, in code. "The harness creates the database and
+  # passes the DSN in" - zeroship-testkit IS that harness, and `admin.rs` holds
+  # the one statement that does it, behind a trait whose whole point is that
+  # every suite goes through it instead of writing its own. It is caught only
+  # because the candidate filter counts a `src` file with an inline
+  # `#[cfg(test)]` module as test code, which is the right rule meeting the one
+  # file it should not apply to. Landed 2026-08-20 and made this gate RED on
+  # main until ruled on here.
+  "crates/zeroship-testkit/src/admin.rs|the harness's own CREATE DATABASE - the statement every other file is told to use instead of its own"
+
+  # A MATCHER LIMIT, not an exemption on the merits. This file issues no such
+  # statement; it asserts on the server's ERROR TEXT, "permission denied to
+  # create database", which the case-insensitive match above reads as a
+  # statement. Ruled on rather than fixed by dropping `-i`, because a lowercase
+  # `create database` in test code is a thing this gate should still catch.
+  "crates/zeroship-testkit/src/suite_db.rs|an error MESSAGE asserted on in a unit test, matched only because the search is case-insensitive"
 )
 
 echo "==> Scanning Rust test code for CREATE DATABASE"
@@ -93,10 +110,15 @@ echo "==> Scanning Rust test code for CREATE DATABASE"
 # Candidates: everything under a `tests/` directory, plus any `src` file
 # carrying a `#[cfg(test)]` module. The second half matters - `cluster_lock.rs`
 # is a src file, and an inline test module is still test code.
+#
+# No `-not -path './target/*'`: it was here and could not match. The roots are
+# `crates` and `libs`, so every path `find` emits starts `crates/` or `libs/`
+# and none can start `./`, and build output does not live under either root
+# anyway. Measured 2026-08-20: 1081 candidates with the clause, 1081 without.
+# A prune that prunes nothing makes the scan read as broader than it is.
 candidates() {
   find crates libs -type f -name '*.rs' \
-    \( -path '*/tests/*' -o -path '*/src/*' \) \
-    -not -path './target/*' 2>/dev/null | LC_ALL=C sort
+    \( -path '*/tests/*' -o -path '*/src/*' \) 2>/dev/null | LC_ALL=C sort
 }
 
 offenders=""
