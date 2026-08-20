@@ -68,13 +68,19 @@ fail() { FAIL=$((FAIL + 1)); echo "FAIL: $1"; }
 # Non-zeroship variables a platform service is allowed to carry. Each is an
 # EXTERNAL or ambient input with no ConfigSpec by construction, so the registry
 # cannot produce it and a reason has to be written down instead.
+#
+# SCOPED TO THE PLATFORM IMAGE, which is why there are three entries and not
+# six. `compose_service_env` emits rows only for services whose `image` is
+# $PLATFORM_IMAGE, so the postgres container's own POSTGRES_DB / POSTGRES_USER /
+# POSTGRES_PASSWORD never reach this check at all. They were listed here anyway
+# and matched nothing - measured 2026-08-20, the complete set of non-ZEROSHIP
+# keys reaching this arm is the three below, all on `control`. A list half of
+# which cannot fire reads as a wider allowance than the code grants, and the
+# reverse-direction check below now fails an entry that stops firing.
 AMBIENT_COMPOSE_KEYS="
 SANDBOX_URL      control reaches the extracted zeroship-sandbox project over HTTP
 SANDBOX_TOKEN    the same, its bearer
 OPENAI_API_KEY   forwarded to creator apps; the platform itself does not read it
-POSTGRES_DB      the postgres image's own variable
-POSTGRES_PASSWORD the postgres image's own variable
-POSTGRES_USER    the postgres image's own variable
 "
 
 # Overlay leaves that are file-and-default ONLY by design, so they have no
@@ -271,12 +277,14 @@ check_compose() {
         echo "      the extraction stopped matching, so a clean result would mean nothing."
         return 1
     fi
+    local ambient_hit=""
     while IFS=$'\t' read -r svc bin key _alias; do
         [ -n "$key" ] || continue
         case "$key" in
             ZEROSHIP_*) ;;
             *)
                 if echo "$AMBIENT_COMPOSE_KEYS" | grep -q "^$key "; then
+                    ambient_hit="$ambient_hit $key"
                     continue
                 fi
                 echo "  $svc sets $key, which is neither a zeroship name nor a listed ambient input"
@@ -303,7 +311,23 @@ check_compose() {
         fail "$label: $bad undeclared variable(s) across $services platform services"
         return 1
     fi
-    pass "$label: $checked zeroship variables on $services platform services are all declared by the binary that reads them"
+    # REVERSE DIRECTION on the ambient allowance. An entry that no longer
+    # matches anything is a wider allowance than the code grants, and it reads
+    # to the next person as a decision somebody is still making. Three of the
+    # six entries here matched nothing on 2026-08-20 - they named the postgres
+    # container's own variables, and this walk only ever sees services on the
+    # platform image - so the list said "six exceptions" while granting three.
+    local unused=""
+    while read -r k _rest; do
+        [ -n "$k" ] || continue
+        case " $ambient_hit " in *" $k "*) ;; *) unused="$unused $k" ;; esac
+    done <<<"$AMBIENT_COMPOSE_KEYS"
+    if [ -n "$unused" ]; then
+        fail "$label: AMBIENT_COMPOSE_KEYS allows$unused, which no platform service sets."
+        echo "      Remove the entry, or find out why the extraction stopped seeing it."
+        return 1
+    fi
+    pass "$label: $checked zeroship variables on $services platform services are all declared by the binary that reads them ($(echo $ambient_hit | wc -w) ambient key(s) allowed, all still present)"
     return 0
 }
 

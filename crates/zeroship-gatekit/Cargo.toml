@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 description = "Repository gates as Rust binaries: shared compose model, verdict reporting, and the gates themselves"
 
+[[package.metadata.zeroship-config.targets]]
+target = "compose-secret-strength"
+class = "test-dev-tool"
+reason = "A repository gate. It READS the deployment's compose file and is not in it; it has no configuration overlay of its own."
+
 [dependencies]
 serde = { workspace = true }
 # The compose model needs a real YAML parser. `serde_norway` is the maintained
