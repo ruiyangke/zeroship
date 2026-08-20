@@ -24,10 +24,21 @@
 #
 # USAGE
 # -----
-#   tests/run_auth_suite.sh                    # per-run DB + migrate + run all
-#   TEST_DB=mine tests/run_auth_suite.sh       # name it, and keep it afterwards
-#   TEST_DB=mine SKIP_DB_RECREATE=1 tests/run_auth_suite.sh   # reuse that one
-#   PG_PORT=5440 tests/run_auth_suite.sh
+#   tests/run_auth_suite.sh                    # shared schema-keyed DB, run all
+#   tests/run_auth_suite.sh --database mine    # a private one you name and own
+#
+# THE DATABASE IS SHARED, AND ITS NAME IS DERIVED. It is
+# `zeroship_auth_test_<hash of db/migrations-ts/*.ts>`, so every run that needs
+# the same schema lands in the same database and two agents on one commit
+# neither collide nor multiply. It is created if absent, migrated, and NEVER
+# dropped - by this script or any other. Why that is the right axis, why
+# concurrent runs are safe on it, and what it does not cover: the header of
+# tests/lib/suite_db.sh. Reclaiming space is tests/sweep_test_databases.sh.
+#
+# `TEST_DB=...` in the environment is REFUSED, not honoured. The override is a
+# flag so that it cannot be inherited from a shell nobody remembers exporting
+# it in; an ambient variable that silently redirects a gate is how gates get
+# silently disabled.
 #
 # PROVISION FIRST. This script creates and migrates a DATABASE; it does not
 # create a SERVER, and it fails at line ~110 if none is listening. Stand one up
@@ -45,10 +56,11 @@
 #     tests/provision_test_backends.sh, which writes the coordinates into
 #     deploy/ops/zeroship.test.toml; this script reads them back from there
 #     rather than carrying a second copy of the defaults.
-#   TEST_DB (per run: zeroship_auth_test_<pid>_<nanos>, dropped on exit)
 #   PSQL    (auto-detected; override with an explicit psql path)
-#   SKIP_DB_RECREATE (unset) - reuse a TEST_DB you named; needs one
 #   TEST_THREADS (1)         - live-database tests share rows, so serialize
+#
+# TEST_DB and SKIP_DB_RECREATE are no longer read here, and a run that finds
+# either set in its environment stops rather than quietly going elsewhere.
 # ============================================================================
 set -euo pipefail
 
@@ -61,10 +73,11 @@ cd "$ROOT"
 # Counts the tests that announced they did nothing, so a green tally cannot hide
 # them; `tests/lib_skip_census_selftest.sh` covers both directions.
 . "$ROOT/tests/lib/skip_census.sh"
-# Names the database per run, so a second run of this script cannot drop this
-# one's out from under it. See that file's header for the measured collision;
-# `tests/lib_scratch_db_selftest.sh` covers both directions.
-. "$ROOT/tests/lib/scratch_db.sh"
+# Names the database after the MIGRATION SET, so every run needing this schema
+# shares one and a branch that changes the schema gets its own without being
+# told to. See that file's header; `tests/lib_suite_db_selftest.sh` covers both
+# directions.
+. "$ROOT/tests/lib/suite_db.sh"
 
 # The server's coordinates come from the generated overlay, not from four
 # `${PG_x:-...}` lines here and four more in run_billing_suite.sh. See that
@@ -75,7 +88,28 @@ zs_test_config_load "$ROOT" || exit 2
 
 TEST_THREADS="${TEST_THREADS:-1}"
 
-zs_scratch_db_resolve zeroship_auth_test || exit $?
+# The override is an ARGUMENT. Nothing here reads a database name out of the
+# environment; see the header.
+DB_OVERRIDE=""
+usage() {
+  echo "usage: tests/run_auth_suite.sh [--database <name>]" >&2
+  echo "  --database <name>  run against a database you name and own. It is" >&2
+  echo "                     created if absent and never dropped. Omit it to" >&2
+  echo "                     use the shared database named after this tree's" >&2
+  echo "                     migration set." >&2
+}
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --database)
+      [ "$#" -ge 2 ] || { echo "FATAL: --database needs a name" >&2; usage; exit 2; }
+      DB_OVERRIDE="$2"; shift 2 ;;
+    --database=*) DB_OVERRIDE="${1#--database=}"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "FATAL: unknown argument '$1'" >&2; usage; exit 2 ;;
+  esac
+done
+
+zs_suite_db_resolve zeroship_auth_test "$DB_OVERRIDE" "$ROOT" || exit $?
 
 PSQL="${PSQL:-}"
 if [ -z "$PSQL" ]; then
@@ -97,40 +131,43 @@ fi
 # hypothetical: GATEWAY_ANCHORS_DB_URL was set NOWHERE in the repository, and
 # thirteen tests behind it announced skips for months.
 #
-# The scratch database name is per run and cannot live in the shared file, so
-# PG_TEST_URL is exactly the override tier the overlay is designed for.
+# The suite database name is derived from this tree's migration set and cannot
+# live in the shared file, so PG_TEST_URL is exactly the override tier the
+# overlay is designed for.
 DSN="postgres://${PG_USER}:${PG_PASS}@${PG_HOST}:${PG_PORT}/${TEST_DB}"
 export PG_TEST_URL="$DSN"
 
 run_psql() { PGPASSWORD="$PG_PASS" "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" "$@"; }
 
-# Armed BEFORE the database is created, not after the tests start: a migration
-# that fails leaves a database behind exactly like a failing test does, and the
-# per-run name means nothing would ever reuse it. INT and TERM are routed
-# through `exit` so they reach this trap too - bash runs an EXIT trap on a
-# signal only if the handler exits, and a suite this long is cancelled by hand
-# often enough for that to be the common case rather than the exotic one.
+# The trap disposes of this run's LOG and nothing else. The database is not
+# this run's to drop: it is shared with every concurrent run on the same schema,
+# and on a red run it is the primary debugging artifact - the tables a failing
+# test left behind are usually the only way to tell a product defect from a
+# fixture one. INT and TERM route through `exit` so a cancelled run still
+# removes its log; bash runs an EXIT trap on a signal only if the handler exits.
 LOG=""
 cleanup() {
   if [ -n "$LOG" ]; then rm -f "$LOG"; fi
-  zs_scratch_db_cleanup
   return 0
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-if [ -z "${SKIP_DB_RECREATE:-}" ]; then
-  echo "==> Recreating ${TEST_DB} on ${PG_HOST}:${PG_PORT}"
-  run_psql -d postgres -v ON_ERROR_STOP=1 \
-    -c "DROP DATABASE IF EXISTS ${TEST_DB} WITH (FORCE);" \
-    -c "CREATE DATABASE ${TEST_DB};"
-  echo "==> Migrating ${TEST_DB}"
-  ZEROSHIP_MIGRATE_DSN="$DSN" deploy/ops/db-migrate.sh >/dev/null
-  echo "==> Migration complete"
-else
-  echo "==> SKIP_DB_RECREATE set; reusing ${TEST_DB}"
-fi
+zs_suite_db_ensure || exit $?
+
+# Migrate UNCONDITIONALLY, whether this run created the database or found it.
+#
+# Not an optimisation left on the table. A run that dies between CREATE and the
+# end of its migration leaves a partially journalled database, and the next
+# run's migrate is what finishes it - skipping the migrate on "it already
+# existed" would hand that run a half-built schema and blame the tests. The
+# apply is idempotent (it re-derives the journal and skips applied files) and
+# `run_platform_migrations` brackets itself in an advisory lock taken IN THIS
+# DATABASE, so a concurrent peer blocks here rather than racing.
+echo "==> Migrating ${TEST_DB} (idempotent; skips what is already applied)"
+ZEROSHIP_MIGRATE_DSN="$DSN" deploy/ops/db-migrate.sh >/dev/null
+echo "==> Migration complete"
 
 # Prove the database is actually reachable before trusting any result below.
 run_psql -d "$TEST_DB" -v ON_ERROR_STOP=1 -tAc "select 1" >/dev/null \
