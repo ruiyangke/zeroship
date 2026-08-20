@@ -19,6 +19,10 @@
 //!
 //! ## Layout
 //!
+//! - [`arm_census`] - the META-gate. Rules on the gates themselves: each must
+//!   declare, per arm, how many items that arm ruled on and the floor that
+//!   number must clear. It checks the PROPERTY and never the values, because a
+//!   central table of expected counts would be the census it is fixing.
 //! - [`compose`] - the shared docker-compose model. Reusable: four shell gates
 //!   and one deploy script currently hand-roll six separate approximations of
 //!   it, and this is what they collapse onto.
@@ -37,6 +41,7 @@
 //! - Return a [`report::Report`]; let the binary do the printing and the
 //!   exiting.
 
+pub mod arm_census;
 pub mod compose;
 pub mod report;
 pub mod secret_strength;
