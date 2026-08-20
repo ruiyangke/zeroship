@@ -14,6 +14,7 @@ use uuid::Uuid;
 use zeroship_core::config::DeclaredEnvKey;
 
 use crate::config::ControlSettingsConsumer;
+use crate::cron::workflow_engine::SweepCoverage;
 use crate::registry::RegistryError;
 use crate::AppState;
 
@@ -55,6 +56,15 @@ pub struct DeployRetentionStats {
     pub candidates: usize,
     pub retained_live_pins: usize,
     pub manifests_deleted: usize,
+    /// How much of the journalled fleet this tick covered.
+    ///
+    /// `candidates == 0` is the answer both for a fleet with nothing superseded
+    /// and for a fleet whose one app with superseded deploys was excluded. The
+    /// exclusion is the SAFE direction here - an unreadable journal means the
+    /// deploy refcount is unknown and the manifest is kept - but "safe" is not
+    /// "fine": that tenant's bundles accumulate every tick and no count above
+    /// changes while they do.
+    pub coverage: SweepCoverage,
 }
 
 impl DeployRetentionStats {
@@ -81,10 +91,13 @@ pub async fn run(state: Arc<AppState>, tick_secs: u64) {
     );
     loop {
         match tick_with_config(&state, config).await {
-            Ok(stats) if !stats.is_empty() => tracing::info!(
+            Ok(stats) if !stats.is_empty() || stats.coverage.apps_skipped > 0 => tracing::info!(
                 candidates = stats.candidates,
                 retained_live_pins = stats.retained_live_pins,
                 manifests_deleted = stats.manifests_deleted,
+                apps_swept = stats.coverage.apps_swept,
+                apps_skipped = stats.coverage.apps_skipped,
+                apps_unvisited = stats.coverage.apps_unvisited,
                 "deploy_retention tick processed deploy manifests"
             ),
             Ok(_) => {}
@@ -122,11 +135,25 @@ pub async fn tick_with_config(
     // from the journal, so an unreadable journal means the refcount is unknown
     // and reclaiming would delete a manifest a running workflow still replays
     // from.
-    for app_id in super::workflow_engine::journalled_fleet(&tx).await?.readable {
+    //
+    // ONE transaction for the whole tick, so - as in the blob ref sweep - a
+    // journal denied at STATEMENT time after the catalog called it readable
+    // cannot be skipped and propagates. `apps_skipped` here is the
+    // catalog-level exclusion only.
+    let fleet = super::workflow_engine::journalled_fleet(&tx).await?;
+    stats.coverage = SweepCoverage::opened_over(&fleet);
+    let mut apps = fleet.readable.into_iter();
+    // Budget checked BEFORE the pull so an app the break never reached stays in
+    // the iterator and is counted as unvisited rather than as swept.
+    loop {
         if remaining <= 0 {
             break;
         }
+        let Some(app_id) = apps.next() else {
+            break;
+        };
         let candidates = superseded_deploys(&tx, &app_id, &cutoff, remaining).await?;
+        stats.coverage.swept_one();
         for candidate in candidates {
             stats.candidates += 1;
             let pinned = deploy_pinned_run_count(&tx, &candidate.app_id, &candidate.deploy_id).await?;
@@ -143,6 +170,7 @@ pub async fn tick_with_config(
             }
         }
     }
+    stats.coverage.apps_unvisited = apps.len();
 
     tx.commit().await?;
     Ok(stats)
