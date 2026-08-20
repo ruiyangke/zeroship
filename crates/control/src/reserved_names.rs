@@ -101,8 +101,9 @@
 //!   `/opt/zeroship-deploy/ops/Caddyfile`, which `deploy/scripts/deploy-remote.sh`
 //!   overwrites from this repo on every roll (its `scp` of `deploy/ops/Caddyfile`)
 //!   — so the two can only diverge by a hand-edit ON the host, between rolls,
-//!   which the next roll silently reverts. Verified byte-identical 2026-08-20.
-//!   Nothing in this tree re-checks it.
+//!   which the next roll silently reverts. Reported byte-identical on
+//!   2026-08-20; that was a check against the live host, not reproduced when
+//!   this was written, and nothing in this tree re-checks it.
 //! - **Any edge that is not this Caddyfile.** A deployment fronted by
 //!   Cloudflare Workers, an ALB or an nginx of its own claims hosts this gate
 //!   never sees. `RESERVED_APP_NAMES` is then a floor, not a description.
