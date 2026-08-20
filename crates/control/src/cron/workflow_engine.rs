@@ -160,6 +160,13 @@ pub(crate) fn skip_journal_scoped<T>(
 /// `to_regclass` RAISES rather than returning NULL when the caller holds no
 /// USAGE on the schema, so "does it exist" and "can I read it" are answered by
 /// the same statement and have to be separated here.
+///
+/// The `Unreachable` arm returns `Ok`, but the statement that produced it has
+/// already ABORTED any open transaction - Postgres does not un-fail a
+/// transaction because the client caught the error. So an in-transaction caller
+/// can report the condition and must then roll back; it cannot carry on. That
+/// is why fleet sweeps take their app list from [`journalled_apps`], which
+/// answers the same question out of the catalog without raising.
 pub(crate) async fn probe_journal<C>(conn: &C, app_id: &Uuid) -> Result<AppJournal, RegistryError>
 where
     C: GenericClient + Sync,
