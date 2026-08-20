@@ -43,7 +43,7 @@ _dev_secrets_complete() {
   done
   for file in \
     auth-signing.pem gateway-signing.pem control-signing.pem broker-secret \
-    refresh-hash-key refresh-idem-key pairwise-salt platform-mint-key; do
+    refresh-hash-key refresh-idem-key pairwise-salt; do
     [ -s "$secrets_dir/$file" ] || return 1
   done
 }
