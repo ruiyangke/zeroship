@@ -72,7 +72,7 @@ pub async fn tick_ref_sweep(state: &AppState) -> Result<usize, RegistryError> {
     let cutoff = Utc::now() - chrono::Duration::seconds(REF_SWEEP_GRACE_SECS);
     let mut deleted = 0usize;
     let mut remaining = MAX_REF_DELETES_PER_TICK;
-    for app_id in super::workflow_engine::journalled_app_ids(&tx).await? {
+    for app_id in super::workflow_engine::journalled_fleet(&tx).await?.readable {
         if remaining <= 0 {
             break;
         }

@@ -193,7 +193,7 @@ where
 /// An unreachable journal is an error here, because the caller has no other
 /// tenant to get on with: reporting `None` would tell it the app holds no runs,
 /// which is exactly the confusion [`AppJournal`] exists to prevent. Fleet-wide
-/// sweeps take their app list from [`journalled_app_ids`] instead.
+/// sweeps take their app list from [`journalled_fleet`] instead.
 pub(crate) async fn existing_tables<C>(
     conn: &C,
     app_id: &Uuid,
@@ -280,32 +280,87 @@ where
         .collect())
 }
 
-/// Apps whose workflow journal this connection can read, in id order.
+/// How much of the fleet one sweep tick actually covered.
 ///
-/// The app ids a fleet-wide sweep should walk. An app with a journal it cannot
-/// read is EXCLUDED and WARNED about, once per tick, naming the app - it is not
-/// dropped silently, because a sweep that quietly covers fewer tenants every
-/// tick is the same outage with the alarm removed.
+/// The three fields ACCOUNT for the fleet: `apps_swept + apps_skipped +
+/// apps_unvisited` is the number of apps that had a journal when the tick
+/// started. That is the whole point of the type. A sweep that returns only a
+/// work count cannot distinguish "nothing to do" from "one tenant excluded
+/// because we could not read it", and the only signal for the second is a WARN
+/// string in a log nobody greps - a count that means two different things is
+/// the same defect species as a grep that returns empty for two different
+/// reasons.
+///
+/// A caller therefore decides on [`Self::is_complete`], not on a log line.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SweepCoverage {
+    /// Apps the tick actually ran its per-app statement against.
+    pub apps_swept: usize,
+    /// Apps EXCLUDED: unreadable in the catalog probe, or readable there and
+    /// then denied by the per-app statement. Both are the availability trade
+    /// [`skip_journal_scoped`] makes, and both leave this tenant uncovered.
+    pub apps_skipped: usize,
+    /// Apps never reached because the tick hit its batch limit first. NOT an
+    /// error - the next tick picks them up - but the tick's work counts still
+    /// describe fewer tenants than exist, so it is not folded into `swept`.
+    pub apps_unvisited: usize,
+}
+
+impl SweepCoverage {
+    /// Apps that had a journal when the tick started.
+    #[must_use]
+    pub fn apps_total(self) -> usize {
+        self.apps_swept
+            .saturating_add(self.apps_skipped)
+            .saturating_add(self.apps_unvisited)
+    }
+
+    /// True when every journalled app was swept. False means this tick's other
+    /// counts are a partial view of the fleet.
+    #[must_use]
+    pub fn is_complete(self) -> bool {
+        self.apps_skipped == 0 && self.apps_unvisited == 0
+    }
+}
+
+/// The apps a fleet sweep may walk, and the ones it must exclude.
+///
+/// Returns both halves rather than the readable ids alone so that a caller
+/// cannot consume the list without the exclusions being in front of it. An app
+/// with a journal it cannot read is EXCLUDED and WARNED about, once per tick,
+/// naming the app - and now also COUNTED, so the tick's return value carries
+/// the exclusion instead of leaving it to log archaeology.
 ///
 /// Before this existed the sweeps selected every app and propagated the per-app
 /// probe with `?`, so one app whose schema control could not read aborted the
 /// tick for every other tenant.
-pub(crate) async fn journalled_app_ids<C>(conn: &C) -> Result<Vec<Uuid>, RegistryError>
+pub(crate) struct JournalledFleet {
+    /// In id order.
+    pub(crate) readable: Vec<Uuid>,
+    /// In id order. Already WARNed about by the time this returns.
+    pub(crate) unreadable: Vec<Uuid>,
+}
+
+pub(crate) async fn journalled_fleet<C>(conn: &C) -> Result<JournalledFleet, RegistryError>
 where
     C: GenericClient + Sync,
 {
-    let mut ids = Vec::new();
+    let mut fleet = JournalledFleet {
+        readable: Vec::new(),
+        unreadable: Vec::new(),
+    };
     for app in journalled_apps(conn).await? {
         if app.readable {
-            ids.push(app.app_id);
+            fleet.readable.push(app.app_id);
         } else {
             tracing::warn!(
                 app_id = %app.app_id,
                 "skipping app in workflow sweep: its journal schema is unreadable on this connection"
             );
+            fleet.unreadable.push(app.app_id);
         }
     }
-    Ok(ids)
+    Ok(fleet)
 }
 
 /// Locate the journal holding `run_id` by searching every app's journal.
@@ -319,7 +374,7 @@ async fn find_run_tables<C>(conn: &C, run_id: &str) -> Result<Option<WorkflowTab
 where
     C: GenericClient + Sync,
 {
-    for app_id in journalled_app_ids(conn).await? {
+    for app_id in journalled_fleet(conn).await?.readable {
         let Some(tables) = existing_tables(conn, &app_id).await? else {
             continue;
         };
@@ -521,9 +576,17 @@ pub async fn run_inflight_reaper(state: Arc<AppState>, tick_secs: u64) {
     }
     loop {
         match reap_parked_cancel_requested_batch(&store, &state.registry, 64).await {
-            Ok(n) if n > 0 => {
-                tracing::info!(registered = n, "workflow parked-cancel reaper registered due timers")
-            }
+            // `apps_skipped` is logged even when it is the ONLY thing that
+            // happened. A tick that reaped nothing because the one tenant with
+            // parked cancels was unreadable used to be indistinguishable from
+            // an idle tick here.
+            Ok(reap) if reap.registered > 0 || reap.coverage.apps_skipped > 0 => tracing::info!(
+                registered = reap.registered,
+                apps_swept = reap.coverage.apps_swept,
+                apps_skipped = reap.coverage.apps_skipped,
+                apps_unvisited = reap.coverage.apps_unvisited,
+                "workflow parked-cancel reaper tick"
+            ),
             Ok(_) => {}
             Err(e) => tracing::error!(error = %e, "workflow parked-cancel reaper tick failed"),
         }
@@ -574,7 +637,7 @@ async fn reconcile_scheduler_from_journal_with_store(
 ) -> Result<usize, RegistryError> {
     let conn = registry.conn().await?;
     let mut registered = 0usize;
-    for app_id in journalled_app_ids(&conn).await? {
+    for app_id in journalled_fleet(&conn).await?.readable {
         let tables = WorkflowTables::for_app_id(&app_id);
         let sql = format!(
             "SELECT id, app_id, wake_at, cancel_requested \
@@ -609,32 +672,65 @@ async fn reconcile_scheduler_from_journal_with_store(
     Ok(registered)
 }
 
+/// What one [`reap_parked_cancel_requested_batch`] tick did, and over how much
+/// of the fleet.
+///
+/// `registered` alone cannot tell "no parked cancels anywhere" from "the one
+/// tenant that had them was excluded because we could not read its journal".
+/// `coverage` is what separates them, from the return value alone.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ParkedCancelReap {
+    /// Timers registered with the scheduler store.
+    pub registered: usize,
+    pub coverage: SweepCoverage,
+}
+
 /// Pull parked cancel requests into the scheduler store as due-now timers.
 ///
 /// Cascade cancellation updates the per-app journal first. The scheduler store
 /// remains the timer authority, so a sleeping/waiting child with an old future
 /// store row must be repaired before the normal due-timer scan can dispatch it.
+///
+/// An app whose journal this connection cannot read is SKIPPED, not fatal - one
+/// tenant must not stop the fleet - and the skip is reported in the returned
+/// [`SweepCoverage`] as well as WARNed.
 #[allow(clippy::future_not_send)]
 pub async fn reap_parked_cancel_requested_batch(
     scheduler_store: &WorkflowSchedulerStore,
     registry: &Registry,
     limit: i64,
-) -> Result<usize, RegistryError> {
+) -> Result<ParkedCancelReap, RegistryError> {
     if limit <= 0 {
-        return Ok(0);
+        return Ok(ParkedCancelReap::default());
     }
 
     let conn = registry.conn().await?;
-    let mut registered = 0usize;
-    for app_id in journalled_app_ids(&conn).await? {
-        if registered >= usize::try_from(limit).unwrap_or(usize::MAX) {
+    let fleet = journalled_fleet(&conn).await?;
+    let mut reap = ParkedCancelReap {
+        registered: 0,
+        coverage: SweepCoverage {
+            apps_swept: 0,
+            apps_skipped: fleet.unreadable.len(),
+            apps_unvisited: 0,
+        },
+    };
+    // `apps` is walked by `next()` rather than by `for`, so that a `break` on
+    // the batch limit leaves the untouched apps IN the iterator and `len()`
+    // below reports them. A `for` loop would have already moved the app that
+    // triggered the break out of it and undercounted by one.
+    let mut apps = fleet.readable.into_iter();
+    loop {
+        if reap.registered >= usize::try_from(limit).unwrap_or(usize::MAX) {
             break;
         }
-        let tables = WorkflowTables::for_app_id(&app_id);
-        let remaining = limit.saturating_sub(i64::try_from(registered).unwrap_or(i64::MAX));
+        let remaining = limit.saturating_sub(i64::try_from(reap.registered).unwrap_or(i64::MAX));
         if remaining <= 0 {
             break;
         }
+        let Some(app_id) = apps.next() else {
+            break;
+        };
+        let tables = WorkflowTables::for_app_id(&app_id);
         let sql = format!(
             "WITH candidates AS ( \
                  SELECT id \
@@ -655,8 +751,13 @@ pub async fn reap_parked_cancel_requested_batch(
         let Some(rows) =
             skip_journal_scoped(&app_id, "parked-cancel scan", conn.query(&sql, &[&remaining]).await)?
         else {
+            // Readable in the catalog, denied by the statement: a different
+            // exclusion from the one counted above, but the same consequence
+            // for this tenant, so it lands in the same field.
+            reap.coverage.apps_skipped = reap.coverage.apps_skipped.saturating_add(1);
             continue;
         };
+        reap.coverage.apps_swept = reap.coverage.apps_swept.saturating_add(1);
         for row in rows {
             let run_id: String = row.get("id");
             let app_id: Uuid = row.get("app_id");
@@ -665,10 +766,11 @@ pub async fn reap_parked_cancel_requested_batch(
                 .ack_register_next(&run_id, app_id, wake_at)
                 .await
                 .map_err(scheduler_store_error_to_registry)?;
-            registered = registered.saturating_add(1);
+            reap.registered = reap.registered.saturating_add(1);
         }
     }
-    Ok(registered)
+    reap.coverage.apps_unvisited = apps.len();
+    Ok(reap)
 }
 
 /// Control-hosted timer-authority tick.
@@ -733,7 +835,15 @@ where
         .max(1);
     let per_app_fair_limit = config.per_app_fair_limit.max(1);
     let per_app_fair_limit_usize = usize::try_from(per_app_fair_limit).unwrap_or(usize::MAX);
-    reap_parked_cancel_requested_batch(scheduler_store, &state.registry, per_app_fair_limit).await?;
+    // Coverage is DROPPED here on purpose: `fire_once` returns a fired-timer
+    // count, and threading a second sweep's coverage through it would say
+    // nothing about the timer loop below, which is what this function is. The
+    // reaper's own caller (`run_inflight_reaper`) is where the coverage of this
+    // sweep is reported. That does mean a `zeroship-control` running only the
+    // engine cron still learns about a skipped tenant from the WARN alone.
+    let _reap =
+        reap_parked_cancel_requested_batch(scheduler_store, &state.registry, per_app_fair_limit)
+            .await?;
     let mut scheduler_config = SchedulerConfig {
         max_due_per_tick: per_app_fair_limit_usize,
         max_loaded_timers: fair_limit,

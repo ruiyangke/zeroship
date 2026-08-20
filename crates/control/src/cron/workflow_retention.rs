@@ -125,7 +125,7 @@ pub async fn tick_with_config(
 
     let app_ids = {
         let conn = state.registry.conn().await?;
-        super::workflow_engine::journalled_app_ids(&conn).await?
+        super::workflow_engine::journalled_fleet(&conn).await?.readable
     };
     let mut stats = RetentionStats::default();
     for app_id in app_ids {
@@ -134,7 +134,7 @@ pub async fn tick_with_config(
         }
         let mut conn = state.registry.conn().await?;
         let tx = conn.transaction().await.map_err(RegistryError::from)?;
-        // No per-app existence probe: `journalled_app_ids` already returned only
+        // No per-app existence probe: `journalled_fleet` already returned only
         // apps whose journal exists AND is readable on this connection, so the
         // `to_regclass` round trip that used to run here per app is redundant.
         let tables = WorkflowTables::for_app_id(&app_id);
