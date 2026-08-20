@@ -1363,6 +1363,55 @@ run_deploy "$SB_FRESH" ZS_GATE_JOURNAL_EXISTS='f'
   && pass "CONTROL: a host with NO migration journal yet still deploys (nothing is frozen there)" \
   || fail "CONTROL: a fresh host with no journal was refused (rc=$DEP_RC), so the two refusals above prove nothing: $DEP_OUT"
 
+# --- D4: a deploy from a tree with a STALE ledger rewrites it and says so ---
+#
+# This is the arm that decides whether the fix rebuilt the defect with more
+# steps. The old guard was a hand-maintained list that covered 21 files while
+# the deployed journal held 34; if a deploy from a tree that never updated the
+# list could still finish quietly, the list would go stale exactly as before,
+# just with a different file extension.
+#
+# THE FIRST VERSION OF THIS ARM TRUNCATED THE SNAPSHOT IN THE WORKING TREE AND
+# PROVED NOTHING, which is worth recording because it looked right. The script
+# asks `git diff --quiet`, so it compares the rewritten file against what is
+# COMMITTED -- and rewriting a truncated worktree file restores it to exactly
+# the committed content, no diff, exit 0. That is the correct answer to the
+# question the script asks (nothing needs committing) and the wrong scenario:
+# real staleness lives in the COMMIT, not in the worktree.
+#
+# So the disagreement is introduced on the JOURNAL side instead: the stub host
+# reports one row fewer than the committed snapshot holds. The direction is the
+# opposite of real drift, but the property under test is the mechanism -- when
+# the journal and the committed snapshot disagree, the deploy must rewrite the
+# file and refuse to finish quietly -- and that is direction-agnostic.
+#
+# The pre-roll check still passes, because every file the journal DOES name is
+# intact in the tree, so the run reaches the roll and the post-roll refresh is
+# what has to fire.
+LEDGER_SAVE="$FIX/ledger.tsv"
+cp "$LEDGER_FILE" "$LEDGER_SAVE"
+LEDGER_ROWS_BEFORE="$(grep -c '\.ts	' "$LEDGER_FILE")"
+STALE_JOURNAL="$FIX/journal.short.tsv"
+head -n -1 "$GATE_JOURNAL" >"$STALE_JOURNAL"
+SB_STALE="$FIX/sb_stale"; seed_deploy "$SB_STALE"
+run_deploy "$SB_STALE" ZS_GATE_JOURNAL="$STALE_JOURNAL"
+LEDGER_ROWS_AFTER="$(grep -c '\.ts	' "$LEDGER_FILE")"
+cp "$LEDGER_SAVE" "$LEDGER_FILE"
+
+[ "$LEDGER_ROWS_AFTER" = "$((LEDGER_ROWS_BEFORE - 1))" ] \
+  && pass "a deploy REWRITES db/released_migrations.tsv from the journal ($LEDGER_ROWS_BEFORE rows became $LEDGER_ROWS_AFTER), so coverage tracks deploys instead of whoever remembered" \
+  || fail "the ledger still holds $LEDGER_ROWS_AFTER rows after a deploy whose journal held $((LEDGER_ROWS_BEFORE - 1)); it drifts away from the deployment exactly as the hand-maintained list did"
+[ "$DEP_RC" != 0 ] \
+  && pass "the same run exits non-zero, so a stale ledger cannot be deployed past in silence" \
+  || fail "the deploy exited 0 with a ledger it had just rewritten; nothing makes anyone commit it"
+case "$DEP_OUT" in
+  *"THE DEPLOY SUCCEEDED"*) pass "the non-zero exit says the deploy succeeded, so it is not read as a failed roll" ;;
+  *) fail "the non-zero exit does not distinguish itself from a failed deploy; an operator will --rollback a healthy stack: $DEP_OUT" ;;
+esac
+seen "$CAP" '### docker compose up -d --remove-orphans' \
+  && pass "CONTROL: the stale-ledger run DID roll the stack, so the non-zero exit above is the to-do and not an early refusal" \
+  || fail "CONTROL: the stale-ledger run never reached the roll, so it proves nothing about the post-roll refresh: $DEP_OUT"
+
 CAP="$CAP_HAPPY"
 
 # --- D2: provisioning uses the IMAGE'S OWN dev init ------------------------
