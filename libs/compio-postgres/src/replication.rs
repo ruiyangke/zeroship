@@ -718,16 +718,21 @@ where
             // A header this call could not read is a lost frame boundary, so
             // the stream is retired rather than left re-readable.
             //
-            // POISON HERE, not on every error out of this function. A
-            // server-sent `ErrorResponse` below is a complete, well-framed
-            // message that leaves the wire exactly where it should be, and a
-            // caller may reasonably carry on after one. A header we could not
-            // make sense of is different in kind: the framer does not know
-            // where the next message starts, so there is nothing to
-            // resynchronise to. Without this, `read_header`'s floor check
-            // returns before it consumes the five header bytes, and the next
-            // call re-reads them for the identical error forever - which a
-            // caller that retries cannot tell from something transient.
+            // The test is ALIGNMENT, not where the error came from.
+            //
+            // Poison whenever the wire is left somewhere the next call cannot
+            // read a header from. That is true here - `read_header`'s floor and
+            // ceiling checks return before consuming the five bytes, so the
+            // next call re-reads them for the identical error forever, which a
+            // caller that retries cannot tell from something transient. It is
+            // ALSO true of the unhandled-tag arm below, which returns with a
+            // body it did not consume; an earlier version of this comment said
+            // everything below this point was well-framed, and that arm is the
+            // counterexample sitting in the same `match`.
+            //
+            // A server-sent `ErrorResponse` is the case that does NOT poison: it
+            // is a complete message, its arm consumes the body, and the wire is
+            // exactly where it should be, so a caller may reasonably carry on.
             let header = match read_header(&mut self.stream).await {
                 Ok(header) => header,
                 Err(e) => {
@@ -833,9 +838,20 @@ where
                     let _ = self.stream.buf().split_to(header.body_len()).freeze();
                 }
                 other => {
+                    // POISON. `read_header` has taken the five header bytes,
+                    // and an unknown tag means the length that came with them
+                    // was never validated against a shape we understand - so
+                    // the body cannot be skipped on trust either. Every arm
+                    // above consumes `header.body_len()` because it knows what
+                    // the frame is; here we do not.
+                    //
+                    // Without this the next call reads its length field out of
+                    // this frame's unconsumed body, and a framer reading
+                    // payload as a header can synthesise an XLogData whose
+                    // `wal_end` becomes a flush position the server acts on.
+                    self.in_flight.poison();
                     return Err(Error::io(std::io::Error::other(format!(
-                        "unexpected tag in replication stream: 0x{:02x}",
-                        other
+                        "unexpected tag in replication stream: 0x{other:02x}"
                     ))));
                 }
             }
@@ -2244,6 +2260,59 @@ mod tests {
                 .expect("CopyDone is a valid empty-bodied frame")
                 .is_none(),
             "CopyDone ends the stream"
+        );
+    }
+
+    /// An unhandled tag must retire the stream too, because its body was
+    /// never consumed.
+    ///
+    /// `read_header` has already taken the five header bytes by the time the
+    /// tag is matched. Every other arm splits `header.body_len()` off before
+    /// returning; this one did not, and did not poison either, so the next
+    /// call read its length field out of the SKIPPED BODY. The framer then
+    /// resynchronises onto payload, and if those bytes happen to decode as an
+    /// XLogData its `wal_end` becomes `observe_received` and, through the next
+    /// standby status update, a `flush_lsn` - a durability promise the server
+    /// acts on by recycling WAL. Repeating one error forever was safe by
+    /// comparison.
+    #[compio::test]
+    async fn an_unhandled_tag_retires_the_stream_rather_than_resynchronising() {
+        // A ReadyForQuery, which has no meaning inside CopyBoth, followed by a
+        // well-formed keepalive. If the framer resyncs it will read the second
+        // frame from the wrong offset.
+        let mut wire = vec![b'Z'];
+        wire.extend_from_slice(&5u32.to_be_bytes());
+        wire.push(b'I');
+        let mut keepalive = vec![PRIMARY_KEEPALIVE_TAG];
+        keepalive.extend_from_slice(&0x0000_0000_dead_beefu64.to_be_bytes());
+        keepalive.extend_from_slice(&0i64.to_be_bytes());
+        keepalive.push(0);
+        wire.push(COPY_DATA_TAG);
+        wire.extend_from_slice(&(u32::try_from(keepalive.len() + 4).unwrap()).to_be_bytes());
+        wire.extend_from_slice(&keepalive);
+
+        let mut stream = stream_over(wire);
+        let first = stream
+            .next()
+            .await
+            .expect_err("an unhandled tag is not decodable");
+        assert!(
+            !first.is_cancelled(),
+            "the first failure is the unhandled tag itself, not a refusal"
+        );
+
+        let second = stream
+            .next()
+            .await
+            .expect_err("a stream whose framer skipped a body must not be reusable");
+        assert!(
+            second.is_cancelled(),
+            "the framer resynchronised onto the skipped body instead of refusing: {second}"
+        );
+        assert_eq!(
+            stream.last_received_lsn(),
+            0,
+            "a resynchronised read advanced the received LSN from payload bytes"
         );
     }
 
