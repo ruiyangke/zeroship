@@ -47,8 +47,16 @@
 )]
 
 pub(crate) mod backends;
-pub mod descriptors;
 pub mod diff;
-pub mod error;
-pub mod mask_codec;
 pub mod query;
+
+// ── Three leaf modules moved into `zero-migrate-backend` and re-exported under
+// their historical `crate::schema::*` paths.
+//
+// `mask_codec` is the sentinel CODEC PostgreSQL's `SchemaRenderer::
+// column_comment_statements` spells through, so a backend crate has to be able to
+// name it; `descriptors` and `error` are the vocabulary `mask_codec` itself names.
+// All three are pure data with no engine dependency, which is why they could go.
+pub use zero_migrate_backend::descriptors;
+pub use zero_migrate_backend::mask_codec;
+pub use zero_migrate_backend::schema_error as error;

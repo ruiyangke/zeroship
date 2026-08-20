@@ -4,16 +4,16 @@
 //! it is therefore the worked example step 3 followed: SQLite's now sits in
 //! `backends/sqlite.rs` in the same shape. PostgreSQL's is still in `render::vendor`.
 
-use crate::model::expr::{CastTarget, ExtractField, ScalarFn};
-use crate::model::ir::{
+use zero_migrate_backend::dml::{self, DmlError};
+use zero_migrate_backend::error::IrLowerError;
+use zero_migrate_backend::renderer::{Capability, DialectSupports, DmlRenderer};
+use zero_migrate_backend::step::BindValue;
+use zero_migrate_ir::dialect::SqlDialect;
+use zero_migrate_ir::expr::{CastTarget, ExtractField, ScalarFn};
+use zero_migrate_ir::ir::{
     ForEach, IrScalar, Op, RaiseLevel, TableRef, TriggerAction, TriggerEvent, TriggerStmt,
     TriggerTiming,
 };
-use crate::render::dml::{self, DmlError};
-use crate::render::lower::IrLowerError;
-use crate::render::renderer::{Capability, DialectSupports, DmlRenderer};
-use crate::render::step::BindValue;
-use crate::schema::query::SqlDialect;
 
 /// This module's own vendor identity — the ONE dialect literal it is allowed to
 /// name. See `backends/mod.rs`.
@@ -31,6 +31,10 @@ pub(super) struct MysqlDmlRenderer;
 pub(super) static RENDERER: MysqlDmlRenderer = MysqlDmlRenderer;
 
 impl DmlRenderer for MysqlDmlRenderer {
+    fn dialect(&self) -> SqlDialect {
+        DIALECT
+    }
+
     /// THE single physical home of MySQL's backtick identifier spelling: double
     /// every embedded backtick, then wrap the result in backticks.
     ///
@@ -90,10 +94,10 @@ impl DmlRenderer for MysqlDmlRenderer {
     }
 
     fn qualify_table(&self, project_schema: &str, table: &str) -> Result<String, DmlError> {
-        let t = dml::quote_bare_ident_for_dialect("table", table, DIALECT)?;
+        let t = dml::quote_bare_ident_for_backend("table", table, &RENDERER)?;
         Ok(format!(
             "{}.{}",
-            dml::quote_ident_checked_for_dialect(project_schema, DIALECT).map_err(|e| {
+            dml::quote_ident_checked_for_backend(project_schema, &RENDERER).map_err(|e| {
                 DmlError::InvalidIdentifier {
                     what: "schema",
                     value: e.value,
@@ -139,7 +143,9 @@ impl DmlRenderer for MysqlDmlRenderer {
     /// backend enforces the other half of this contract: a raw binary bind that
     /// reaches the MySQL session without a `FROM_BASE64` wrapper is refused.
     fn bind_bytes(&self, bytes: &[u8], push: &mut dyn FnMut(BindValue) -> String) -> String {
-        let placeholder = push(BindValue::Text(super::base64_standard(bytes)));
+        let placeholder = push(BindValue::Text(
+            zero_migrate_backend::spelling::base64_standard(bytes),
+        ));
         format!("FROM_BASE64({placeholder})")
     }
 
@@ -272,13 +278,13 @@ impl DmlRenderer for MysqlDmlRenderer {
     fn view_object_name(&self, name: &str, eff_schema: &str) -> Result<String, IrLowerError> {
         Ok(format!(
             "{}.{}",
-            dml::quote_ident_checked_for_dialect(eff_schema, DIALECT).map_err(|e| {
+            dml::quote_ident_checked_for_backend(eff_schema, &RENDERER).map_err(|e| {
                 DmlError::InvalidIdentifier {
                     what: "schema",
                     value: e.value,
                 }
             })?,
-            dml::quote_bare_ident_for_dialect("view", name, DIALECT)?
+            dml::quote_bare_ident_for_backend("view", name, &RENDERER)?
         ))
     }
 
@@ -287,21 +293,21 @@ impl DmlRenderer for MysqlDmlRenderer {
             let schema = table.schema.as_deref().unwrap_or(eff_schema);
             format!(
                 "{}.{}",
-                dml::quote_ident_checked_for_dialect(schema, DIALECT).map_err(|e| {
+                dml::quote_ident_checked_for_backend(schema, &RENDERER).map_err(|e| {
                     DmlError::InvalidIdentifier {
                         what: "schema",
                         value: e.value,
                     }
                 },)?,
-                dml::quote_bare_ident_for_dialect("table", &table.name, DIALECT)?
+                dml::quote_bare_ident_for_backend("table", &table.name, &RENDERER)?
             )
         };
         if let Some(alias) = table.alias.as_deref() {
             sql.push_str(" AS ");
-            sql.push_str(&dml::quote_bare_ident_for_dialect(
+            sql.push_str(&dml::quote_bare_ident_for_backend(
                 "table alias",
                 alias,
-                DIALECT,
+                &RENDERER,
             )?);
         }
         Ok(sql)
@@ -311,7 +317,7 @@ impl DmlRenderer for MysqlDmlRenderer {
         &self,
         op: &Op,
         eff_schema: &str,
-    ) -> Result<Vec<crate::render::vendor::VendorStatement>, IrLowerError> {
+    ) -> Result<Vec<zero_migrate_backend::vendor::VendorStatement>, IrLowerError> {
         match op {
             Op::CreateTrigger {
                 name,
@@ -344,7 +350,7 @@ impl DmlRenderer for MysqlDmlRenderer {
                     up.push_str("IF EXISTS ");
                 }
                 up.push_str(&qname);
-                Ok(vec![crate::render::vendor::VendorStatement {
+                Ok(vec![zero_migrate_backend::vendor::VendorStatement {
                     name: format!("drop_trigger_{name}_{table}"),
                     up,
                     down: None,
@@ -360,13 +366,13 @@ impl DmlRenderer for MysqlDmlRenderer {
 fn mysql_trigger_name(name: &str, eff_schema: &str) -> Result<String, IrLowerError> {
     Ok(format!(
         "{}.{}",
-        dml::quote_ident_checked_for_dialect(eff_schema, DIALECT).map_err(|e| {
+        dml::quote_ident_checked_for_backend(eff_schema, &RENDERER).map_err(|e| {
             DmlError::InvalidIdentifier {
                 what: "schema",
                 value: e.value,
             }
         },)?,
-        dml::quote_bare_ident_for_dialect("trigger", name, DIALECT)?
+        dml::quote_bare_ident_for_backend("trigger", name, &RENDERER)?
     ))
 }
 
@@ -378,13 +384,13 @@ fn mysql_trigger_table_ref(
     let schema = schema.unwrap_or(eff_schema);
     Ok(format!(
         "{}.{}",
-        dml::quote_ident_checked_for_dialect(schema, DIALECT).map_err(|e| {
+        dml::quote_ident_checked_for_backend(schema, &RENDERER).map_err(|e| {
             DmlError::InvalidIdentifier {
                 what: "schema",
                 value: e.value,
             }
         },)?,
-        dml::quote_bare_ident_for_dialect("table", table, DIALECT)?
+        dml::quote_bare_ident_for_backend("table", table, &RENDERER)?
     ))
 }
 
@@ -395,13 +401,13 @@ fn render_mysql_trigger_create(
     timing: TriggerTiming,
     events: &[TriggerEvent],
     for_each: ForEach,
-    when: Option<&crate::model::expr::Expr>,
+    when: Option<&zero_migrate_ir::expr::Expr>,
     action: &TriggerAction,
     eff_schema: &str,
-) -> Result<crate::render::vendor::VendorStatement, IrLowerError> {
+) -> Result<zero_migrate_backend::vendor::VendorStatement, IrLowerError> {
     if events.is_empty() {
         return Err(IrLowerError::Vendor(
-            crate::render::vendor::VendorError::EmptyList {
+            zero_migrate_backend::vendor::VendorError::EmptyList {
                 what: "trigger events",
             },
         ));
@@ -444,7 +450,7 @@ fn render_mysql_trigger_create(
     };
     if statements.is_empty() {
         return Err(IrLowerError::Vendor(
-            crate::render::vendor::VendorError::EmptyList {
+            zero_migrate_backend::vendor::VendorError::EmptyList {
                 what: "trigger body statements",
             },
         ));
@@ -469,7 +475,7 @@ fn render_mysql_trigger_create(
             .join(" "),
     );
     up.push_str(" END");
-    Ok(crate::render::vendor::VendorStatement {
+    Ok(zero_migrate_backend::vendor::VendorStatement {
         name: format!("create_trigger_{name}_{table}"),
         up,
         down: Some(format!("DROP TRIGGER IF EXISTS {qname}")),
@@ -486,7 +492,7 @@ fn render_mysql_trigger_stmt(stmt: &TriggerStmt, eff_schema: &str) -> Result<Str
         } => {
             if columns.is_empty() {
                 return Err(IrLowerError::DmlAssemble(
-                    crate::render::dml::DmlError::MalformedInsert {
+                    zero_migrate_backend::dml::DmlError::MalformedInsert {
                         table: table.clone(),
                         reason: "no columns".to_string(),
                     },
@@ -494,7 +500,7 @@ fn render_mysql_trigger_stmt(stmt: &TriggerStmt, eff_schema: &str) -> Result<Str
             }
             if rows.is_empty() {
                 return Err(IrLowerError::DmlAssemble(
-                    crate::render::dml::DmlError::MalformedInsert {
+                    zero_migrate_backend::dml::DmlError::MalformedInsert {
                         table: table.clone(),
                         reason: "no rows".to_string(),
                     },
@@ -503,13 +509,13 @@ fn render_mysql_trigger_stmt(stmt: &TriggerStmt, eff_schema: &str) -> Result<Str
             let qtable = mysql_trigger_table_ref(table, schema.as_deref(), eff_schema)?;
             let qcols: Result<Vec<_>, _> = columns
                 .iter()
-                .map(|c| dml::quote_bare_ident_for_dialect("column", c, DIALECT))
+                .map(|c| dml::quote_bare_ident_for_backend("column", c, &RENDERER))
                 .collect();
             let mut groups = Vec::with_capacity(rows.len());
             for (ri, row) in rows.iter().enumerate() {
                 if row.len() != columns.len() {
                     return Err(IrLowerError::DmlAssemble(
-                        crate::render::dml::DmlError::MalformedInsert {
+                        zero_migrate_backend::dml::DmlError::MalformedInsert {
                             table: table.clone(),
                             reason: format!(
                                 "row {ri} has {} value(s) but {} column(s) were named",
@@ -521,7 +527,9 @@ fn render_mysql_trigger_stmt(stmt: &TriggerStmt, eff_schema: &str) -> Result<Str
                 }
                 let vals: Result<Vec<_>, _> = row
                     .iter()
-                    .map(|value| crate::render::dml::render_value_inline(value, DIALECT))
+                    .map(|value| {
+                        zero_migrate_backend::dml::render_value_inline_for_backend(value, &RENDERER)
+                    })
                     .collect();
                 groups.push(format!("({})", vals?.join(", ")));
             }
@@ -539,7 +547,7 @@ fn render_mysql_trigger_stmt(stmt: &TriggerStmt, eff_schema: &str) -> Result<Str
         } => {
             if set.is_empty() {
                 return Err(IrLowerError::DmlAssemble(
-                    crate::render::dml::DmlError::EmptySet {
+                    zero_migrate_backend::dml::DmlError::EmptySet {
                         op: "update",
                         table: table.clone(),
                     },
@@ -550,15 +558,15 @@ fn render_mysql_trigger_stmt(stmt: &TriggerStmt, eff_schema: &str) -> Result<Str
             for (col, rhs) in set {
                 assigns.push(format!(
                     "{} = {}",
-                    dml::quote_bare_ident_for_dialect("column", col, DIALECT)?,
-                    crate::render::dml::render_value_inline(rhs, DIALECT)?
+                    dml::quote_bare_ident_for_backend("column", col, &RENDERER)?,
+                    zero_migrate_backend::dml::render_value_inline_for_backend(rhs, &RENDERER)?
                 ));
             }
             let mut sql = format!("UPDATE {qtable} SET {}", assigns.join(", "));
             if let Some(pred) = r#where {
                 sql.push_str(&format!(
                     " WHERE {}",
-                    crate::render::dml::render_expr_inline(pred, DIALECT)?
+                    zero_migrate_backend::dml::render_expr_inline_for_backend(pred, &RENDERER)?
                 ));
             }
             Ok(sql)
@@ -570,7 +578,8 @@ fn render_mysql_trigger_stmt(stmt: &TriggerStmt, eff_schema: &str) -> Result<Str
             schema,
         } => {
             let qtable = mysql_trigger_table_ref(table, schema.as_deref(), eff_schema)?;
-            let pred = crate::render::dml::render_expr_inline(r#where, DIALECT)?;
+            let pred =
+                zero_migrate_backend::dml::render_expr_inline_for_backend(r#where, &RENDERER)?;
             Ok(match limit {
                 None => format!("DELETE FROM {qtable} WHERE {pred}"),
                 Some(n) => format!("DELETE FROM {qtable} WHERE {pred} LIMIT {}", n.get()),
@@ -610,7 +619,7 @@ fn render_mysql_trigger_stmt(stmt: &TriggerStmt, eff_schema: &str) -> Result<Str
             let errcode = errcode.as_deref().unwrap_or("45000");
             Ok(format!(
                 "SIGNAL SQLSTATE {} SET MESSAGE_TEXT = {}",
-                crate::render::dml::mysql_grammar_string_literal(errcode),
+                zero_migrate_backend::dml::mysql_grammar_string_literal(errcode),
                 RENDERER.inline_string_literal(message)
             ))
         }

@@ -1,0 +1,28 @@
+[package]
+name = "zero-migrate-backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The zero-migrate backend CONTRACT: the DmlRenderer and SchemaRenderer traits, the render errors their signatures name (IrLowerError, DeclarativeError, DmlError, VendorError), the identifier/expression spelling seam, and the vendor-registry shape a backend crate hands back. Sits between zero-migrate-ir and the per-vendor crates; names no dialect and ships no vendor."
+
+[dependencies]
+# The wire contract: the closed `Op` enum, the closed `Expr` AST, `IrScalar`,
+# `SqlDialect`, `DialectId`, `Capability`, `BackendDescriptor` and the
+# `BackendRegistry` this crate's `VendorSet::descriptors` composes into. Every type
+# the two renderer traits name that is not declared here comes from this crate.
+zero-migrate-ir = { workspace = true }
+# `serde_json::Value` IS the schema-field shape `SchemaRenderer` reads: the DDL
+# surface takes the SDK's field definitions as JSON, not as a Rust type.
+serde_json = { workspace = true }
+# Canonical (padded) base64 — the wire form PostgreSQL and MySQL both decode for a
+# binary value carried through TEXT. `spelling::base64_standard` is its one home.
+base64 = { workspace = true }
+# MySQL spells a string literal in an expression position as `_utf8mb4 X'<hex>'` so
+# an inherited `NO_BACKSLASH_ESCAPES` mode cannot reinterpret it.
+hex = { workspace = true }
+# The render error enums are `thiserror` derives, with `#[error(transparent)]`
+# carrying the nested render errors' Display through byte-identically.
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

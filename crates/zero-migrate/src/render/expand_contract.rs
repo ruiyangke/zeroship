@@ -85,13 +85,12 @@ pub enum OnlineIntent {
 }
 
 /// A failure to author an online expand-contract sequence.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum ExpandContractError {
-    /// A request field was empty or invalid (empty table/column name, `from`
-    /// equal to `to`, empty type).
-    #[error("invalid online intent: {0}")]
-    Invalid(String),
-}
+///
+/// MOVED to `zero-migrate-backend` and re-exported here. It is a one-variant
+/// `Invalid(String)` and it travelled for one reason: `DeclarativeError::Rename` is
+/// `#[from] ExpandContractError`, and `DeclarativeError` had to go with
+/// `IrLowerError`. It brought nothing with it.
+pub use zero_migrate_backend::error::ExpandContractError;
 
 /// The full ordered output of [`ExpandContractAuthor::author`] — the expand and
 /// contract migrations for one online intent, with the `depends_on` chain wired.

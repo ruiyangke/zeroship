@@ -1,0 +1,23 @@
+[package]
+name = "zero-migrate-mysql"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The MySQL backend for zero-migrate: this vendor's DML/view/trigger spelling and its column/DDL spelling, and nothing else. Implements the zero-migrate-backend contract; does NOT depend on the engine."
+
+[dependencies]
+# The CONTRACT: the two renderer traits, the render errors their signatures name,
+# the identifier/expression spelling seam this vendor calls, and the VendorSet shape
+# `VENDOR` below is registered through. This is the ONLY zero-migrate crate a
+# backend may depend on - depending on the engine is the cycle the split removed.
+zero-migrate-backend = { workspace = true }
+# The closed `Op` / `Expr` / `IrScalar` vocabulary the trait methods are handed, plus
+# `SqlDialect` and this vendor's `BackendDescriptor`.
+zero-migrate-ir = { workspace = true }
+# The schema-field shape `SchemaRenderer` reads is the SDK's field JSON.
+serde_json = { workspace = true }
+# MySQL and SQLite both spell a binary/string literal as a hex form.
+hex = { workspace = true }
+
+[lints]
+workspace = true

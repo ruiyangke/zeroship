@@ -9,14 +9,14 @@
 //! backfills) stays in the data plane.
 //!
 //! The `(MaskKind, Classification)` types this codec round-trips live in
-//! [`crate::schema::diff`] (the schema metadata types). plugin-db re-exports both
+//! `crate::schema::diff` (the schema metadata types). plugin-db re-exports both
 //! the codec and the types from their original module paths so existing
 //! `crate::crud::mask_backfill::{build,parse}_mask_sentinel` references
 //! keep resolving unchanged.
 
-use crate::schema::descriptors::EncryptionMode;
-use crate::schema::diff::{Classification, EncryptionMeta, MaskKind, WrappedType};
-use crate::schema::error::MaskSentinelError;
+use crate::descriptors::EncryptionMode;
+use crate::mask_meta::{Classification, EncryptionMeta, MaskKind, WrappedType};
+use crate::schema_error::MaskSentinelError;
 
 /// The standalone-default encryption-sentinel prefix. The persisted sentinel is
 /// a wire contract co-written by any other engine writing into the same schema,

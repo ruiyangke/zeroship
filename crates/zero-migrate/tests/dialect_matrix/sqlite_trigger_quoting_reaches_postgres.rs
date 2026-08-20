@@ -84,8 +84,8 @@ const PINNED_CALLS_IN_THE_TRIGGER_PATH: usize = 0;
 ///
 /// Both are named because the anchor is two-sided: "it is here" alone would pass on a
 /// copy, and "it is not there" alone would pass on a deletion.
-const SUBJECT_FILE: &str = "render/backends/sqlite.rs";
-const FORMER_SUBJECT_FILE: &str = "render/lower.rs";
+const SUBJECT_FILE: &str = "zero-migrate-sqlite/src/dml.rs";
+const FORMER_SUBJECT_FILE: &str = "zero-migrate/src/render/lower.rs";
 
 /// The census floor for the crate-wide half below.
 ///
@@ -98,7 +98,7 @@ const FORMER_SUBJECT_FILE: &str = "render/lower.rs";
 /// So the walk covers every crate, and this floor asserts the walk FOUND them. Raise
 /// it when a crate is added. If one is genuinely removed, lower it deliberately and
 /// say so — never to get green.
-const WORKSPACE_CRATE_FLOOR: usize = 5;
+const WORKSPACE_CRATE_FLOOR: usize = 9;
 
 /// The subject itself. `render_sqlite_trigger_op` is the entry point
 /// `SqliteDmlRenderer::render_trigger_op` calls, and the two helpers under it are
@@ -142,7 +142,7 @@ fn no_sqlite_render_path_is_quoted_by_the_postgres_pinned_wrapper() {
     // `include_str!` is a compile-time dependency: editing either file rebuilds this
     // binary, so neither the count nor the anchor can silently drift out from under
     // the pin.
-    let subject = include_str!("../../src/render/backends/sqlite.rs");
+    let subject = include_str!("../../../zero-migrate-sqlite/src/dml.rs");
     let former = include_str!("../../src/render/lower.rs");
     assert_subject_is_where_this_file_says_it_is(subject, former);
 
@@ -150,7 +150,7 @@ fn no_sqlite_render_path_is_quoted_by_the_postgres_pinned_wrapper() {
 
     assert_eq!(
         in_subject, PINNED_CALLS_IN_THE_TRIGGER_PATH,
-        "src/{SUBJECT_FILE} makes {in_subject} call(s) to the PostgreSQL-pinned \
+        "{SUBJECT_FILE} makes {in_subject} call(s) to the PostgreSQL-pinned \
          `dml::quote_bare_ident`; the pin says {PINNED_CALLS_IN_THE_TRIGGER_PATH}.\n\
          \n\
          The pin is at 0 and 0 is the stop: the SQLite trigger path was routed \
@@ -187,12 +187,7 @@ fn no_sqlite_render_path_is_quoted_by_the_postgres_pinned_wrapper() {
         .parent()
         .expect("this crate lives at <workspace>/crates/<name>")
         .to_path_buf();
-    let this_crate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .file_name()
-        .expect("crate directory has a name")
-        .to_string_lossy()
-        .into_owned();
-    let subject_rel = format!("{this_crate}/src/{SUBJECT_FILE}");
+    let subject_rel = SUBJECT_FILE.to_string();
 
     let mut roots: Vec<PathBuf> = std::fs::read_dir(&crates_root)
         .unwrap_or_else(|e| panic!("reading {}: {e}", crates_root.display()))
@@ -280,7 +275,7 @@ fn no_sqlite_render_path_is_quoted_by_the_postgres_pinned_wrapper() {
 fn assert_subject_is_where_this_file_says_it_is(subject: &str, former: &str) {
     assert!(
         subject.contains(SUBJECT_FN),
-        "src/{SUBJECT_FILE} does not contain `{SUBJECT_FN}`, so the census below is \
+        "{SUBJECT_FILE} does not contain `{SUBJECT_FN}`, so the census below is \
          counting a file that does not hold the SQLite trigger spelling and its zero \
          means nothing.\n\
          \n\
@@ -292,8 +287,8 @@ fn assert_subject_is_where_this_file_says_it_is(subject: &str, former: &str) {
     );
     assert!(
         !former.contains(SUBJECT_FN),
-        "src/{FORMER_SUBJECT_FILE} still contains `{SUBJECT_FN}`. The SQLite trigger \
-         spelling was moved OUT of the core lowerer into src/{SUBJECT_FILE}; a copy \
+        "{FORMER_SUBJECT_FILE} still contains `{SUBJECT_FN}`. The SQLite trigger \
+         spelling was moved OUT of the core lowerer into {SUBJECT_FILE}; a copy \
          left behind there is a second implementation the census does not scan, and \
          the one it does scan will happily report zero for it."
     );
@@ -328,8 +323,8 @@ fn assert_subject_is_where_this_file_says_it_is(subject: &str, former: &str) {
 /// red is the escalation.
 #[test]
 fn postgres_and_sqlite_still_spell_an_identifier_identically() {
-    let pg = quote_ident_body(include_str!("../../src/render/backends/postgres.rs"));
-    let sqlite = quote_ident_body(include_str!("../../src/render/backends/sqlite.rs"));
+    let pg = quote_ident_body(include_str!("../../../zero-migrate-postgres/src/dml.rs"));
+    let sqlite = quote_ident_body(include_str!("../../../zero-migrate-sqlite/src/dml.rs"));
 
     assert_eq!(
         pg, sqlite,

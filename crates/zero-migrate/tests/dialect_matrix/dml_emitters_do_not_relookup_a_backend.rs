@@ -174,7 +174,14 @@
 /// whole point of the floor. Lower it, in the same commit, with the reason.
 #[test]
 fn a_dml_emitter_holding_a_backend_never_resolves_another() {
-    const DML: &str = include_str!("../../src/render/dml.rs");
+    // THE SUBJECT MOVED. Fourteen of the nineteen carriers below were in
+    // `zero-migrate/src/render/dml.rs`; the crate extraction took that module into
+    // `zero-migrate-backend`, leaving a thin engine-side shim at the old path whose
+    // functions take a `dialect` and resolve ONE backend at the door. This census
+    // scans all three, so it still sees every carrier AND it now watches the shim
+    // for a carrier that starts re-resolving.
+    const BACKEND_DML: &str = include_str!("../../../zero-migrate-backend/src/dml.rs");
+    const ENGINE_DML: &str = include_str!("../../src/render/dml.rs");
     const LOWER: &str = include_str!("../../src/render/lower.rs");
     const CARRIER_NAME: &str = "backend:";
     // Deliberately NOT `"dyn DmlRenderer"`. Writing this test found two carriers in
@@ -193,32 +200,36 @@ fn a_dml_emitter_holding_a_backend_never_resolves_another() {
     // can be diffed against what the conversion produced rather than guessed at.
     const KNOWN: &[&str] = &[
         // `render/dml.rs`, threading a backend down the bound and inline walks.
-        "render/dml.rs::qualify_table",
-        "render/dml.rs::in_list_text_literal",
-        "render/dml.rs::render_in_list_elem_portable",
-        "render/dml.rs::render_in_list",
-        "render/dml.rs::render_pg_regex_match",
-        "render/dml.rs::render_extract",
-        "render/dml.rs::render_binop",
-        "render/dml.rs::render_distinct_from",
-        "render/dml.rs::render_scalar_fn_call",
-        "render/dml.rs::cast_target_sql",
-        "render/dml.rs::render_concat_ws",
-        "render/dml.rs::render_split_part",
-        "render/dml.rs::render_unary",
-        "render/dml.rs::render_expr_inline_walk",
+        "zero-migrate-backend/src/dml.rs::qualify_table",
+        "zero-migrate-backend/src/dml.rs::in_list_text_literal",
+        "zero-migrate-backend/src/dml.rs::render_in_list_elem_portable",
+        "zero-migrate-backend/src/dml.rs::render_in_list",
+        "zero-migrate-backend/src/dml.rs::render_pg_regex_match",
+        "zero-migrate-backend/src/dml.rs::render_extract",
+        "zero-migrate-backend/src/dml.rs::render_binop",
+        "zero-migrate-backend/src/dml.rs::render_distinct_from",
+        "zero-migrate-backend/src/dml.rs::render_scalar_fn_call",
+        "zero-migrate-backend/src/dml.rs::cast_target_sql",
+        "zero-migrate-backend/src/dml.rs::render_concat_ws",
+        "zero-migrate-backend/src/dml.rs::render_split_part",
+        "zero-migrate-backend/src/dml.rs::render_unary",
+        "zero-migrate-backend/src/dml.rs::render_expr_inline_walk_for_backend",
         // `render/lower.rs`: the two that already carried, plus the view-query
         // subtree below its `render_view_query` door.
-        "render/lower.rs::trigger_inverse_from_history",
-        "render/lower.rs::render_view_op",
-        "render/lower.rs::render_select_ast",
-        "render/lower.rs::render_join",
-        "render/lower.rs::render_table_ref",
+        "zero-migrate/src/render/lower.rs::trigger_inverse_from_history",
+        "zero-migrate/src/render/lower.rs::render_view_op",
+        "zero-migrate/src/render/lower.rs::render_select_ast",
+        "zero-migrate/src/render/lower.rs::render_join",
+        "zero-migrate/src/render/lower.rs::render_table_ref",
     ];
 
     let mut carriers: Vec<(&str, &str, Vec<&str>)> = Vec::new();
 
-    for (file, src) in [("render/dml.rs", DML), ("render/lower.rs", LOWER)] {
+    for (file, src) in [
+        ("zero-migrate-backend/src/dml.rs", BACKEND_DML),
+        ("zero-migrate/src/render/dml.rs", ENGINE_DML),
+        ("zero-migrate/src/render/lower.rs", LOWER),
+    ] {
         let lines: Vec<&str> = src.lines().collect();
 
         for (start, line) in lines.iter().enumerate() {
@@ -278,12 +289,15 @@ fn a_dml_emitter_holding_a_backend_never_resolves_another() {
              exists to remove. It also emits byte-identical SQL, so no behaviour \
              test can see it — this is the only check that can.\n\
              \n\
-             Use the `backend` this function was given. Note that, unlike \
-             `SchemaRenderer`, `DmlRenderer` exposes NO `dialect()` accessor — so if \
-             a DIALECT is genuinely what is needed here (drift comparison, \
-             capability folding, normalization keyed by dialect: core decisions, not \
-             vendor spelling), it has to be threaded in ALONGSIDE the backend, the \
-             way `render_expr_inline_walk` and `render_select_ast` both do. If a \
+             Use the `backend` this function was given. `DmlRenderer` NOW has a \
+             `dialect()` accessor — the crate split added it, because the spelling \
+             helpers had to stop taking a `SqlDialect` and the capability and \
+             leg-selection questions they ask still need one. So a genuine DIALECT \
+             need (drift comparison, capability folding, normalization keyed by \
+             dialect: core decisions, not vendor spelling) is `backend.dialect()`, \
+             not a second registry lookup. This message used to say the accessor did \
+             not exist and that the dialect had to be threaded alongside; that is \
+             past tense. If a \
              genuinely DIFFERENT vendor is needed, that is a boundary and it belongs \
              at the door, not in this body. See `render/backends/mod.rs` for who is \
              allowed to call the registry.",

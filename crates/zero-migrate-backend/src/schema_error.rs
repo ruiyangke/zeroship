@@ -62,7 +62,7 @@ impl std::error::Error for SchemaError {
 }
 
 /// Error from parsing a `zero-migrate:mask:` sentinel string
-/// ([`crate::schema::mask_codec::parse_mask_sentinel`]).
+/// (`crate::schema::mask_codec::parse_mask_sentinel`).
 ///
 /// Carries the human-readable rejection message. plugin-db's
 /// `From<MaskSentinelError> for DbError` re-creates the exact
