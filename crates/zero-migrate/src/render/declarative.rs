@@ -1270,7 +1270,7 @@ pub(crate) fn pg_identity_type(data_type: &str) -> bool {
 /// named-type `ddl_type_override` set by the lower and the fold, an `enum(...)`
 /// `data_type` read back from `information_schema.COLUMNS`, and (separately) a CHECK
 /// body folded into a native type inside
-/// [`DeclarativeEmitter::render_create_table_mysql_snapshot_statements`]. Pinning at
+/// [`MysqlEmitter::create_table`]. Pinning at
 /// each producer would be three copies of one decision; pinning here is one.
 pub(crate) fn column_type_for_render(
     c: &ColumnSnapshot,
@@ -6136,8 +6136,9 @@ impl DeclarativeAuthor {
     /// callers, not about the type, and three `SqlDialect::Sqlite` legs would land
     /// here if it were not for a capability gate several frames up:
     ///
-    /// - [`Self::lower_add_constraint`] and [`Self::lower_drop_constraint`] spell
-    ///   their table reference `self.qualified(table)` on the SQLite arm;
+    /// - [`Self::constraint_refs`] — which is what [`Self::lower_add_constraint`]
+    ///   and [`Self::lower_drop_constraint`] now share — spells its table reference
+    ///   `self.qualified(table)` on the SQLite arm;
     /// - [`Self::render_add_fk`] spells the table with `sqlite_ident` on its SQLite
     ///   arm but then calls [`Self::fk_clause`], which qualifies the FK's REFERENCES
     ///   target through here regardless of dialect.
@@ -6443,7 +6444,13 @@ impl DeclarativeAuthor {
             let up = match self.dialect {
                 SqlDialect::Sqlite => self.render_create_table_sqlite(table, desired_full)?,
                 SqlDialect::Mysql => self
-                    .render_create_table_mysql_snapshot_statements(table, t, &inline_fks)
+                    .mysql_emitter()
+                    .create_table(&CreateTableRequest {
+                        table,
+                        snapshot: t,
+                        inline_fks: &inline_fks,
+                        inject: None,
+                    })
                     .join(";\n"),
                 SqlDialect::Postgres => self.render_create_table(table, t, &inline_fks),
             };
@@ -7195,8 +7202,13 @@ impl DeclarativeAuthor {
                 "internal: no resolved inject for SQLite table '{table}'"
             ))
         })?;
-        Ok(self
-            .render_create_table_sqlite_snapshot_statements(table, snapshot, inject)
+        Ok(SqliteEmitter
+            .create_table(&CreateTableRequest {
+                table,
+                snapshot,
+                inline_fks: &[],
+                inject: Some(inject),
+            })
             .join(";\n"))
     }
 
@@ -7280,8 +7292,13 @@ impl DeclarativeAuthor {
                     })?;
                 }
             }
-            return self
-                .render_create_table_sqlite_snapshot_statements(table, snapshot, inject)
+            return SqliteEmitter
+                .create_table(&CreateTableRequest {
+                    table,
+                    snapshot,
+                    inline_fks: &[],
+                    inject: Some(inject),
+                })
                 .into_iter()
                 .next()
                 .ok_or_else(|| {
@@ -7568,7 +7585,13 @@ impl DeclarativeAuthor {
         let create_real = if let Some(stored) = live.stored_create_sql.as_deref() {
             rewrite_sqlite_stored_foreign_keys(table, stored, live, desired)?
         } else {
-            self.render_create_table_sqlite_snapshot_statements(table, desired, inject)
+            SqliteEmitter
+                .create_table(&CreateTableRequest {
+                    table,
+                    snapshot: desired,
+                    inline_fks: &[],
+                    inject: Some(inject),
+                })
                 .into_iter()
                 .next()
                 .ok_or_else(|| {
@@ -8190,62 +8213,14 @@ impl DeclarativeAuthor {
         // multi-statement `up` byte-for-byte. The `diff` path takes this joined
         // form; the IR lower path takes the structural list directly (so a
         // string-literal DEFAULT carrying an interior `;\n` is never re-split).
-        self.render_create_table_statements(table, t, inline_fks)
+        self.pg_emitter()
+            .create_table(&CreateTableRequest {
+                table,
+                snapshot: t,
+                inline_fks,
+                inject: None,
+            })
             .join(";\n")
-    }
-
-    /// **Structural** form of [`Self::render_create_table`]: the CREATE statement plus
-    /// every follow-on `COMMENT ON COLUMN` sentinel, as a per-statement `Vec`.
-    /// `join(";\n")` is byte-identical to [`Self::render_create_table`].
-    /// Three thin ADAPTERS, one per dialect, over the single
-    /// [`DdlEmitter::create_table`] contract method.
-    ///
-    /// They exist because their eight call sites each hold a DIFFERENT subset of a
-    /// [`CreateTableRequest`] — the differ has `inline_fks`, the SQLite rebuild
-    /// builders have an `inject`, the in-module goldens have neither — and
-    /// converting those call sites is separable from proving the contract. Each
-    /// adapter fills in what its caller lacks and asks the emitter for the rest.
-    /// When the call sites build the request themselves, these three go away.
-    fn render_create_table_statements(
-        &self,
-        table: &str,
-        t: &TableSnapshot,
-        inline_fks: &[&ConstraintSnapshot],
-    ) -> Vec<String> {
-        self.pg_emitter().create_table(&CreateTableRequest {
-            table,
-            snapshot: t,
-            inline_fks,
-            inject: None,
-        })
-    }
-
-    fn render_create_table_sqlite_snapshot_statements(
-        &self,
-        table: &str,
-        t: &TableSnapshot,
-        inject: &ResolvedInject,
-    ) -> Vec<String> {
-        SqliteEmitter.create_table(&CreateTableRequest {
-            table,
-            snapshot: t,
-            inline_fks: &[],
-            inject: Some(inject),
-        })
-    }
-
-    fn render_create_table_mysql_snapshot_statements(
-        &self,
-        table: &str,
-        t: &TableSnapshot,
-        inline_fks: &[&ConstraintSnapshot],
-    ) -> Vec<String> {
-        self.mysql_emitter().create_table(&CreateTableRequest {
-            table,
-            snapshot: t,
-            inline_fks,
-            inject: None,
-        })
     }
 
     /// The FK clause for THIS author's dialect, spelled by the backend that owns
@@ -8447,8 +8422,8 @@ impl DeclarativeAuthor {
         )
     }
 
-    /// The `(table, column)` references an `ALTER COLUMN {SET|DROP} DEFAULT`
-    /// statement uses, quoted for the target dialect.
+    /// The ONE spelling of `ALTER TABLE … ALTER COLUMN … {SET|DROP} DEFAULT`, for
+    /// every dialect and both directions.
     ///
     /// These two statements are spelled the same way on all three dialects -
     /// MEASURED on MySQL 8.4.11, which accepts `ALTER TABLE t ALTER COLUMN `c` SET
@@ -8458,26 +8433,66 @@ impl DeclarativeAuthor {
     /// type and nullability changes: MySQL has no `ALTER COLUMN ... TYPE`, but it
     /// does have this.
     ///
-    /// Follows the shape `render_add_fk` already uses, which is the convention in
-    /// this file for a renderer that has to care about the dialect.
-    fn alter_column_refs(&self, table: &str, col: &str) -> (String, String) {
-        match self.dialect {
+    /// NOT a [`DdlEmitter`] method, and that is the whole point of it being one
+    /// function rather than three. The three sites that spell this statement
+    /// (`SET DEFAULT`'s `up`, its inverse `down`, and the stand-alone `DROP
+    /// DEFAULT`) each used to write the `format!` out again; a per-dialect
+    /// contract method would instead have written the SAME `format!` out three
+    /// times, once per impl, because the STATEMENT does not vary — only the two
+    /// identifiers do, and they vary through the `match` below, which is the one
+    /// place in this file that has to know.
+    ///
+    /// `default_sql` is `Some(literal)` for `SET DEFAULT <literal>` and `None`
+    /// for `DROP DEFAULT`. The two are the same statement with two tails, which
+    /// is why the `down` of a set and the `up` of a drop are byte-identical.
+    ///
+    /// HOW THINLY COVERED THIS IS, MEASURED. Collapsing the `Some` arm into the
+    /// `None` arm — so every caller emits `DROP DEFAULT` and the literal is never
+    /// spelled — took the workspace from `37 / 3373 / 0 / 11` to
+    /// `37 / 3370 / 3 / 11`. THREE tests out of 3373 can tell `SET DEFAULT` from
+    /// `DROP DEFAULT`, one per binary that sees the path at all:
+    ///
+    /// | binary | test |
+    /// |---|---|
+    /// | `--lib` | `render::lower::tests::set_column_default_literal_and_synth_expr_render` |
+    /// | `fold_live` | `fold_roundtrip_pg::add_and_alter_columns` |
+    /// | `mysql_engine` | `mysql_alter_column_render::a_mysql_default_change_is_rendered_with_backticks_rather_than_refused` |
+    ///
+    /// `sqlite_engine` did NOT redden, and neither did `pg_drift`. The SQLite
+    /// silence is NOT a coverage hole — I asserted it was one and was wrong. Both
+    /// `Op::SetColumnDefault` and `Op::DropColumnDefault` call
+    /// `require_capability_for(Capability::NativeAlterColumn, …)`, and that
+    /// capability is FALSE for SQLite, so the `SqlDialect::Sqlite` arm of the
+    /// `match` below is dead for the same reason the stand-alone constraint
+    /// renderers' SQLite arms are dead: a gate several frames up, not the render.
+    /// `pg_drift`'s silence is the real reportable one — that suite contains the
+    /// string `SET DEFAULT`, which is exactly why it looked like coverage.
+    fn alter_column_default_stmt(
+        &self,
+        table: &str,
+        col: &str,
+        default_sql: Option<&str>,
+    ) -> String {
+        let (table_ref, col_ref) = match self.dialect {
             SqlDialect::Mysql => (
                 mysql_qualified(&self.project_schema, table),
                 mysql_quote_ident(col),
             ),
             SqlDialect::Postgres => (self.qualified(table), quote_ident(col)),
             SqlDialect::Sqlite => (sqlite_ident(table), sqlite_ident(col)),
-        }
+        };
+        let action = match default_sql {
+            Some(default_sql) => format!("SET DEFAULT {default_sql}"),
+            None => "DROP DEFAULT".to_string(),
+        };
+        format!("ALTER TABLE {table_ref} ALTER COLUMN {col_ref} {action}")
     }
 
     /// Render an `ALTER TABLE … ALTER COLUMN … SET DEFAULT …` from a pre-rendered
     /// literal default expression. Synth defaults are rejected before this seam.
     fn render_set_column_default(&self, table: &str, col: &str, default_sql: &str) -> Migration {
-        let (table_ref, col_ref) = self.alter_column_refs(table, col);
-        let up =
-            format!("ALTER TABLE {table_ref} ALTER COLUMN {col_ref} SET DEFAULT {default_sql}");
-        let down = format!("ALTER TABLE {table_ref} ALTER COLUMN {col_ref} DROP DEFAULT");
+        let up = self.alter_column_default_stmt(table, col, Some(default_sql));
+        let down = self.alter_column_default_stmt(table, col, None);
         self.make(
             &format!("set_column_default_{table}_{col}"),
             up,
@@ -8491,8 +8506,7 @@ impl DeclarativeAuthor {
     /// is not present in the op payload, so the down migration is intentionally
     /// absent.
     fn render_drop_column_default(&self, table: &str, col: &str) -> Migration {
-        let (table_ref, col_ref) = self.alter_column_refs(table, col);
-        let up = format!("ALTER TABLE {table_ref} ALTER COLUMN {col_ref} DROP DEFAULT");
+        let up = self.alter_column_default_stmt(table, col, None);
         self.make(
             &format!("drop_column_default_{table}_{col}"),
             up,
@@ -8791,16 +8805,16 @@ impl DeclarativeAuthor {
         // [`DdlEmitter::drop_table_up`], not a fourth place that knows how three
         // vendors qualify a table.
         let down = self.emitter().drop_table_up(table);
+        let req = CreateTableRequest {
+            table,
+            snapshot,
+            inline_fks: &inline_fks,
+            inject: Some(inject),
+        };
         let statements = match self.dialect {
-            SqlDialect::Sqlite => {
-                self.render_create_table_sqlite_snapshot_statements(table, snapshot, inject)
-            }
-            SqlDialect::Mysql => {
-                self.render_create_table_mysql_snapshot_statements(table, snapshot, &inline_fks)
-            }
-            SqlDialect::Postgres => {
-                self.render_create_table_statements(table, snapshot, &inline_fks)
-            }
+            SqlDialect::Sqlite => SqliteEmitter.create_table(&req),
+            SqlDialect::Mysql => self.mysql_emitter().create_table(&req),
+            SqlDialect::Postgres => self.pg_emitter().create_table(&req),
         };
         let up = statements.join(";\n");
         let mut mig = self.make(
@@ -9020,6 +9034,57 @@ impl DeclarativeAuthor {
         single_stmt(self.render_add_fk(table, fk, Vec::new()))
     }
 
+    /// The `(table, constraint)` references every stand-alone
+    /// `ALTER TABLE … {ADD|DROP} CONSTRAINT` statement needs, quoted for the target
+    /// dialect.
+    ///
+    /// Identifier syntax follows the TARGET dialect, exactly as `render_add_fk`
+    /// does a few hundred lines up. Without this the MySQL leg emitted
+    /// PostgreSQL double quotes — `ALTER TABLE "db"."t" ADD CONSTRAINT "t_uq"
+    /// UNIQUE (val)` — which MySQL rejects as a syntax error PARTWAY THROUGH a
+    /// deploy, even though it declares `Capability::AlterTableAddConstraint` and
+    /// supports the statement perfectly well in its own spelling.
+    ///
+    /// Only the MySQL arm was introduced: PostgreSQL and SQLite keep the exact
+    /// bytes they emitted before, because this seam is shared with the differ and
+    /// the FK rendering is deliberately byte-identical between the imperative and
+    /// declarative paths.
+    ///
+    /// NOT a [`DdlEmitter`] method, and this was RE-MEASURED rather than assumed:
+    /// the pluggable-backends census sorted these sites into "genuine three-way
+    /// statement, wants the contract", and the STATEMENTS are nothing of the kind.
+    /// `ADD CONSTRAINT <name> <body>` and `DROP CONSTRAINT <name>` are spelled with
+    /// the identical keywords on all three dialects — only these two identifiers
+    /// vary — so three contract impls would have been three copies of one
+    /// `format!`. That is the Class C shape ([`Self::alter_column_default_stmt`]),
+    /// not the Class B shape, and the two functions that used to spell this `match`
+    /// held it VERBATIM, comments included.
+    fn constraint_refs(&self, table: &str, name: &str) -> (String, String) {
+        match self.dialect {
+            SqlDialect::Mysql => (
+                mysql_qualified(&self.project_schema, table),
+                mysql_quote_ident(name),
+            ),
+            // The SQLite leg is split out so its identifier is spelled by the
+            // SQLite backend. Byte-identical to the PG leg today; that is the
+            // point — agreement is not routing.
+            SqlDialect::Sqlite => (self.qualified(table), sqlite_ident(name)),
+            SqlDialect::Postgres => (self.qualified(table), quote_ident(name)),
+        }
+    }
+
+    /// The ONE spelling of `ALTER TABLE … DROP CONSTRAINT <name>`.
+    ///
+    /// The `down` of [`Self::lower_add_constraint`] and the `up` of
+    /// [`Self::lower_drop_constraint`] are the SAME statement, which is why they
+    /// are one function. Note what this is NOT: the FK drop, which MySQL spells
+    /// `DROP FOREIGN KEY` — see [`Self::lower_drop_fk`], which stays separate for
+    /// exactly that reason.
+    fn drop_constraint_stmt(&self, table: &str, name: &str) -> String {
+        let (table_ref, constraint_ident) = self.constraint_refs(table, name);
+        format!("ALTER TABLE {table_ref} DROP CONSTRAINT {constraint_ident}")
+    }
+
     /// render a stand-alone `ALTER TABLE … ADD CONSTRAINT <name> <body>`
     /// for a column-list constraint (`UNIQUE (…)` / `PRIMARY KEY (…)`). `body` is
     /// the constraint body the caller built from the IR (no embedded `Expr`, so
@@ -9039,33 +9104,12 @@ impl DeclarativeAuthor {
         body: &str,
         gated: bool,
     ) -> LoweredUnit {
-        // Identifier syntax follows the TARGET dialect, exactly as `render_add_fk`
-        // does a few hundred lines up. Without this the MySQL leg emitted
-        // PostgreSQL double quotes — `ALTER TABLE "db"."t" ADD CONSTRAINT "t_uq"
-        // UNIQUE (val)` — which MySQL rejects as a syntax error PARTWAY THROUGH a
-        // deploy, even though it declares `Capability::AlterTableAddConstraint` and
-        // supports the statement perfectly well in its own spelling.
-        //
-        // Only the MySQL arm is introduced: PostgreSQL and SQLite keep the exact
-        // bytes they emitted before, because this seam is shared with the differ and
-        // the FK rendering is deliberately byte-identical between the imperative and
-        // declarative paths.
-        let (table_ref, constraint_ident) = match self.dialect {
-            SqlDialect::Mysql => (
-                mysql_qualified(&self.project_schema, table),
-                mysql_quote_ident(name),
-            ),
-            // The SQLite leg is split out so its identifier is spelled by the
-            // SQLite backend. Byte-identical to the PG leg today; that is the
-            // point — agreement is not routing.
-            SqlDialect::Sqlite => (self.qualified(table), sqlite_ident(name)),
-            SqlDialect::Postgres => (self.qualified(table), quote_ident(name)),
-        };
+        let (table_ref, constraint_ident) = self.constraint_refs(table, name);
         let up = format!("ALTER TABLE {table_ref} ADD CONSTRAINT {constraint_ident} {body}");
         // MySQL has supported `DROP CONSTRAINT` since 8.0.19. FKs still need
         // `DROP FOREIGN KEY` there, which is why `render_add_fk` spells its own
         // down separately rather than routing through here.
-        let down = format!("ALTER TABLE {table_ref} DROP CONSTRAINT {constraint_ident}");
+        let down = self.drop_constraint_stmt(table, name);
         let flags = if gated {
             MigrationFlags {
                 requires_approval: true,
@@ -9092,21 +9136,7 @@ impl DeclarativeAuthor {
     /// constraint's body from a bare name (the IR carries no body on a drop), so
     /// there is no structural reverse; a re-declaration re-adds it.
     pub(crate) fn lower_drop_constraint(&self, table: &str, name: &str) -> LoweredUnit {
-        // Same dialect-matched identifiers as the add path above, for the same
-        // reason: the PostgreSQL spelling reached MySQL and died as a syntax error
-        // mid-deploy. PostgreSQL and SQLite keep their existing bytes.
-        let (table_ref, constraint_ident) = match self.dialect {
-            SqlDialect::Mysql => (
-                mysql_qualified(&self.project_schema, table),
-                mysql_quote_ident(name),
-            ),
-            // The SQLite leg is split out so its identifier is spelled by the
-            // SQLite backend. Byte-identical to the PG leg today; that is the
-            // point — agreement is not routing.
-            SqlDialect::Sqlite => (self.qualified(table), sqlite_ident(name)),
-            SqlDialect::Postgres => (self.qualified(table), quote_ident(name)),
-        };
-        let up = format!("ALTER TABLE {table_ref} DROP CONSTRAINT {constraint_ident}");
+        let up = self.drop_constraint_stmt(table, name);
         single_stmt(self.make(
             &format!("drop_constraint_{table}_{name}"),
             up,
@@ -9266,6 +9296,13 @@ impl DeclarativeAuthor {
 // BODIES and says nothing about the seam. What actually blocked it was that the
 // three renderers took three DIFFERENT parameter lists; see
 // [`CreateTableRequest`] for why that divergence was apparent rather than real.
+//
+// The three per-dialect ADAPTERS that briefly stood between the call sites and
+// that method are gone: every caller now builds its own [`CreateTableRequest`]
+// and asks an emitter directly. The adapters had been the last place where a
+// caller's dialect was inferred from WHICH function it called rather than stated,
+// and the `lower_create_table` site shows what that bought — one request, built
+// once, handed to whichever emitter the dialect selects.
 
 /// Everything a backend needs to spell ONE `CREATE TABLE`, and nothing about which
 /// backend is spelling it.
@@ -10573,7 +10610,8 @@ mod snapshot_builder_refactor_safety_tests {
     }
     use super::{
         build_resolved_table_snapshot, build_table_snapshot, CollectionDescriptor,
-        DeclarativeAuthor, FieldDescriptor, IndexDescriptor, ResolvedInject,
+        CreateTableRequest, DdlEmitter, DeclarativeAuthor, FieldDescriptor, IndexDescriptor,
+        ResolvedInject, SqliteEmitter,
     };
     use crate::schema::query::SqlDialect;
 
@@ -10869,8 +10907,13 @@ mod snapshot_builder_refactor_safety_tests {
         let sqlite_snap =
             build_resolved_table_snapshot("app", &d, SqlDialect::Sqlite, &sqlite_inject)
                 .expect("SQLite snapshot builds");
-        let sqlite_sql = DeclarativeAuthor::new("app", "app_test")
-            .render_create_table_sqlite_snapshot_statements(&d.name, &sqlite_snap, &sqlite_inject)
+        let sqlite_sql = SqliteEmitter
+            .create_table(&CreateTableRequest {
+                table: &d.name,
+                snapshot: &sqlite_snap,
+                inline_fks: &[],
+                inject: Some(&sqlite_inject),
+            })
             .join(";\n");
         assert!(
             sqlite_sql.contains("\"email\" text COLLATE NOCASE"),
