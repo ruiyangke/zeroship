@@ -185,7 +185,7 @@ fn validate(registration: &OauthClientRegistration) -> Result<Vec<String>, Strin
             if registration
                 .client_secret
                 .as_deref()
-                .map_or(true, |secret| secret.trim().is_empty())
+                .is_none_or(|secret| secret.trim().is_empty())
             {
                 return Err(format!(
                     "oauth client {id:?} uses client_secret_basic and must supply a client_secret"
