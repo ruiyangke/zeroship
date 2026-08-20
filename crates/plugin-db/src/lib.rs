@@ -22,6 +22,22 @@
 //! isolation. The pool is created lazily on first use (one per worker
 //! thread).
 
+// The `env.db` surface nests async blocks deeply - a v8_class method awaiting a
+// pooled `compio-postgres` request awaiting the connection task's own
+// request/response future - and rustc walks that whole chain when it computes a
+// block's layout. Two driver changes each added per-request state (a request
+// now carries both a disposition and a transaction effect), and together they
+// pushed one block in `v8_classes::masked_value` past the default depth of 128.
+//
+// NEITHER driver change crosses it alone; only a build carrying both does. It
+// is therefore invisible when each is checked on its own branch, which is how
+// it reached a merge before anything noticed.
+//
+// `crates/gateway/src/main.rs` carries this attribute for the same reason. It
+// is a compiler resource limit, not a correctness guard - raising it costs
+// compile time and nothing else.
+#![recursion_limit = "256"]
+
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
