@@ -791,10 +791,11 @@ mod tests {
 
     #[ntex::test]
     async fn suppressed_recipient_returns_200_and_does_not_transport() {
-        let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
-            eprintln!("skip suppressed_recipient_returns_200_and_does_not_transport (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-            return;
-        };
+        // This test cannot verify the suppression path without a real
+        // Postgres to read it back from; a skipped run used to report
+        // green while proving nothing about suppression. Panic instead,
+        // naming the provisioning command.
+        let dsn = zeroship_core::config::test_database_url();
         let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
         compio::runtime::spawn(async move {
             if let Err(e) = connection.run().await {

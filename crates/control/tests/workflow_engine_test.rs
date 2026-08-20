@@ -195,9 +195,7 @@ impl Drop for TestDatabase {
         let admin_url = self.admin_url.clone();
         let name = self.name.clone();
         let _ = std::thread::spawn(move || {
-            let Ok(rt) = compio::runtime::Runtime::new() else {
-                return;
-            };
+            let rt = compio::runtime::Runtime::new().expect("compio runtime");
             rt.block_on(async move {
                 let Ok(admin) = try_pg(&admin_url).await else {
                     return;

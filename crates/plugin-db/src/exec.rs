@@ -1426,12 +1426,12 @@ mod tests {
     // cancelled query.
     // -------------------------------------------------------------------
     //
-    // PG-REQUIRED. Gated like the crate's other live-Postgres tests:
-    // connects to `PG_TEST_URL` (default `postgres://postgres:test@
-    // localhost:5434/postgres`) and SKIPS (prints + returns) when no
-    // Postgres is reachable. No zeroship test PG is configured in the
-    // fix-authoring environment, so this is verified by compile + code
-    // reasoning here, not observed red/green.
+    // PG-REQUIRED. Connects to `PG_TEST_URL` (default `postgres://postgres:
+    // test@localhost:5434/postgres`) and PANICS, naming the address it
+    // dialled, when no Postgres is reachable there. The leak window this
+    // test guards can only be observed against a real backend, so a run
+    // that quietly returned on a connect failure would let the leak go
+    // unchecked while the suite still reported green.
     //
     // Real path: drives `query_postgres_pool_with_autocommit_role` (the
     // single funnel every autocommit CRUD op flows through) against a
@@ -1458,8 +1458,6 @@ mod tests {
         reset_world();
         run(async {
             let url = pg_test_url();
-            // Skip when no Postgres is reachable — same convention as
-            // tests/integration.rs `require_pg`.
             match compio_postgres::connect(&url, NoTls).await {
                 Ok((client, connection)) => {
                     compio::runtime::spawn(async move {
@@ -1469,8 +1467,12 @@ mod tests {
                     drop(client);
                 }
                 Err(e) => {
-                    eprintln!("Skipping autocommit-leak test — Postgres not reachable: {e}");
-                    return;
+                    // A Postgres this test cannot dial is a FAILURE, not a
+                    // skip: the role/timeout leak this test guards against
+                    // only reproduces against a real backend, and a return
+                    // here used to let that leak go unchecked while the
+                    // suite still reported green.
+                    panic!("autocommit-leak test could not connect to {url}: {e}");
                 }
             }
 
