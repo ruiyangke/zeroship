@@ -118,16 +118,22 @@ fi
 echo ""
 echo "  $PASS passed, $FAIL failed, $((PASS+FAIL)) ran"
 
-# Floor counts assertions that RAN, not that PASSED: a mutation moves an outcome
+# Counts assertions that RAN, not that PASSED: a mutation moves an outcome
 # BETWEEN those columns, so only a LOST assertion drops the sum.
-# MEASURED 2026-08-11: 13 context COPY sources + the .cargo/ builder-stage check.
-MIN_RAN="${DOCKERFILE_COPY_MIN_RAN:-14}"
+#
+# EXACT, not a floor, and not overridable. MEASURED 2026-08-19: 15 - 14 context
+# COPY sources plus the .cargo/ builder-stage check. The minimum of 14 measured
+# on 2026-08-11 had gone slack by one, so a tree that lost a COPY source still
+# cleared it. Pure parse of a tracked Dockerfile, so deterministic; when a COPY
+# is added or removed, re-measure and change this line in the same commit.
+EXPECT_RAN=15
 RAN=$((PASS + FAIL))
 rc=0
 [ "$FAIL" -eq 0 ] || rc=1
-if [ "$RAN" -lt "$MIN_RAN" ]; then
-  echo "  x FLOOR: only $RAN COPY sources checked, expected at least $MIN_RAN." >&2
-  echo "    Sources went missing from the parse - a smaller green is not a pass." >&2
+if [ "$RAN" -ne "$EXPECT_RAN" ]; then
+  echo "  x COUNT: $RAN COPY sources checked, expected exactly $EXPECT_RAN." >&2
+  echo "    Fewer means sources went missing from the parse - a smaller green is" >&2
+  echo "    not a pass. More means a COPY was added; re-measure and bump this line." >&2
   rc=1
 fi
 exit $rc

@@ -164,7 +164,7 @@ fi
 #
 # The number is MEASURED from a full run, not chosen. Raise it when you add
 # checks; if you remove one deliberately, lower it deliberately and say so.
-VERDACCIO_GUARD_MIN_PASSED="${VERDACCIO_GUARD_MIN_PASSED:-8}"
+VERDACCIO_GUARD_MIN_PASSED=8
 if [ "$PASS" -lt "$VERDACCIO_GUARD_MIN_PASSED" ]; then
     echo "" >&2
     echo "FLOOR: only $PASS assertions passed, expected at least $VERDACCIO_GUARD_MIN_PASSED." >&2

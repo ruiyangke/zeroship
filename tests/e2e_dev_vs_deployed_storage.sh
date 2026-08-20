@@ -343,7 +343,7 @@ docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "CREATE DATABASE $PG_DB" >/dev
 ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
 e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DB_URL"
-e2e_with_platform_mint_key "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --blob-store "$WORK/bundles" \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --blob-store "$WORK/bundles" \
  > "$WORK/control.log" 2>&1 & PIDS+=($!)
 sleep 4
 # Without --storage-url the env.storage namespace is absent BY DESIGN
@@ -561,7 +561,7 @@ cp "$WORK/deployed.txt" "$KEEP/deployed.txt" 2>/dev/null || true
 #
 # WHAT THE FLOOR DOES NOT CATCH: substitution. Swapping one assertion for an
 # easier one keeps the total unchanged. Nothing here can see that; review can.
-STORAGE_MIN_PASSED="${STORAGE_MIN_PASSED:-53}"
+STORAGE_MIN_PASSED=53
 
 echo ""
 echo "  results kept at $KEEP/{dev,deployed}.txt"

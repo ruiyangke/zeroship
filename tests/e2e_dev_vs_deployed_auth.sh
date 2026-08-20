@@ -41,7 +41,7 @@
 # the 40 diff lines byte-identical between the first two after normalising the
 # app UUID - stable, not flake.
 #
-# THE 20 IS NOT PROSE. It is the default of `AUTH_EXPECTED_DIVERGENT` in the
+# THE 20 IS NOT PROSE. It is the constant `AUTH_EXPECTED_DIVERGENT` in the
 # classifier at the foot of this file, which exits 0 ONLY on exactly that count
 # and exits 1 in BOTH directions - on a new divergence AND on a count that has
 # SHRUNK without this header being updated.
@@ -688,10 +688,10 @@ fi
 # 22). The floor is deliberately NOT bumped: it is a `-lt` guard, the extra row
 # keeps satisfying it, and raising it to a number nobody has re-measured would
 # put an unverified count in the gate. Re-measure and bump together.
-if [ "${MUTATE:-none}" = "none" ]; then
-  AUTH_MIN_PASSED="${AUTH_MIN_PASSED:-22}"
+if [ "$MUTATE" = "none" ]; then
+  AUTH_MIN_PASSED=22
 else
-  AUTH_MIN_PASSED="${AUTH_MIN_PASSED:-21}"
+  AUTH_MIN_PASSED=21
 fi
 if [ "$PASS" -lt "$AUTH_MIN_PASSED" ]; then
   echo "FAIL: only $PASS assertions passed, fewer than the $AUTH_MIN_PASSED this" >&2
@@ -738,12 +738,14 @@ fi
 # and are carved out as TOLERATED with the runs that justified it. If an auth
 # row starts flapping, move it to a tolerated list WITH the measurement; do not
 # loosen this back to a bare count.
-AUTH_EXPECTED_DIVERGENT="${AUTH_EXPECTED_DIVERGENT:-20}"
-AUTH_REQUIRED_DIVERGENT="${AUTH_REQUIRED_DIVERGENT:-alpha.GET./auth/session anon.GET./auth/session anon.probe.defaulted anon.probe.requireGated anon.probe.userDeclared forged.GET./auth/session forged.probe.defaulted forged.probe.requireGated forged.probe.userDeclared garbage.probe.defaulted garbage.probe.requireGated garbage.probe.userDeclared replay.GET./auth/session stale.probe.appGate stale.probe.defaulted stale.probe.public stale.probe.requireAnon stale.probe.requireGated stale.probe.userDeclared stale.probe.userShape}"
-if [ "${MUTATE:-none}" != "none" ]; then
+AUTH_EXPECTED_DIVERGENT=20
+AUTH_REQUIRED_DIVERGENT="alpha.GET./auth/session anon.GET./auth/session anon.probe.defaulted anon.probe.requireGated anon.probe.userDeclared forged.GET./auth/session forged.probe.defaulted forged.probe.requireGated forged.probe.userDeclared garbage.probe.defaulted garbage.probe.requireGated garbage.probe.userDeclared replay.GET./auth/session stale.probe.appGate stale.probe.defaulted stale.probe.public stale.probe.requireAnon stale.probe.requireGated stale.probe.userDeclared stale.probe.userShape"
+if [ "$MUTATE" != "none" ]; then
   # The documented control moves the count to 17; see the header. Do not
-  # classify a mutated run against the unmutated expectation.
-  AUTH_EXPECTED_DIVERGENT="${AUTH_EXPECTED_DIVERGENT_MUTATED:-17}"
+  # classify a mutated run against the unmutated expectation. 17 is a LITERAL,
+  # not an override: MUTATE is the harness control and it selects which
+  # constant applies, while the counts themselves stay in the file.
+  AUTH_EXPECTED_DIVERGENT=17
   # And the identity set the mutation must leave: RUN 2026-08-12, the delta is
   # exactly the three rows named for it - anon/forged/garbage probe.defaulted -
   # and it adds NONE. That is strictly more than `20 -> 17` could ever say: a
@@ -754,7 +756,7 @@ if [ "${MUTATE:-none}" != "none" ]; then
   # probe.defaulted row that diverges for a different reason, and the header
   # already says so; a mutation control that also closed it would mean the
   # posture change was reaching further than its name claims.
-  AUTH_REQUIRED_DIVERGENT="${AUTH_REQUIRED_DIVERGENT_MUTATED:-alpha.GET./auth/session anon.GET./auth/session anon.probe.requireGated anon.probe.userDeclared forged.GET./auth/session forged.probe.requireGated forged.probe.userDeclared garbage.probe.requireGated garbage.probe.userDeclared replay.GET./auth/session stale.probe.appGate stale.probe.defaulted stale.probe.public stale.probe.requireAnon stale.probe.requireGated stale.probe.userDeclared stale.probe.userShape}"
+  AUTH_REQUIRED_DIVERGENT="alpha.GET./auth/session anon.GET./auth/session anon.probe.requireGated anon.probe.userDeclared forged.GET./auth/session forged.probe.requireGated forged.probe.userDeclared garbage.probe.requireGated garbage.probe.userDeclared replay.GET./auth/session stale.probe.appGate stale.probe.defaulted stale.probe.public stale.probe.requireAnon stale.probe.requireGated stale.probe.userDeclared stale.probe.userShape"
 fi
 DIVERGENT_ROWS="${DIVERGENT_ROWS:-0}"
 if [ "$FAIL" -eq 0 ] && [ "$DIVERGENT_ROWS" -eq 0 ] && [ "$AUTH_EXPECTED_DIVERGENT" -eq 0 ]; then

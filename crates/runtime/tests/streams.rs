@@ -1,6 +1,6 @@
 #![allow(unsafe_code)]
 
-mod common;
+use crate::common;
 use common::*;
 
 #[test]

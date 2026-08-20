@@ -7,6 +7,14 @@
 //! Then:
 //!   DRAGONFLY_CLUSTER_SEEDS='redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002' \
 //!     cargo test -p compio-redis --test cluster -- --nocapture
+//!
+//! EVERY seed-gated test announces through `common::skip`, naming itself.
+//! Fifteen of the sixteen used to be a bare `let Some(s) = seeds() else {
+//! return; };`, which prints `ok` and lands inside "N passed". Measured
+//! 2026-08-19 with the variable unset: 21 tests passed in 0.01s and
+//! `tests/lib/skip_census.sh` saw ONE skip for sixteen tests that did nothing.
+//! The census can only count what announces, so a silent return is not a
+//! cheaper skip - it is an invisible one.
 
 use compio_redis::ClusterClient;
 
@@ -24,7 +32,7 @@ fn seeds_refs(v: &[String]) -> Vec<&str> {
 #[compio::test]
 async fn connect_and_roundtrip() {
     let Some(s) = seeds() else {
-        common::skip("skip: DRAGONFLY_CLUSTER_SEEDS not set");
+        common::skip("connect_and_roundtrip: DRAGONFLY_CLUSTER_SEEDS not set");
         return;
     };
     let seeds = seeds_refs(&s);
@@ -40,7 +48,10 @@ async fn connect_and_roundtrip() {
 
 #[compio::test]
 async fn hash_tag_isolation_enables_mget() {
-    let Some(s) = seeds() else { return; };
+    let Some(s) = seeds() else {
+        common::skip("hash_tag_isolation_enables_mget: DRAGONFLY_CLUSTER_SEEDS not set");
+        return;
+    };
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
 
@@ -60,7 +71,10 @@ async fn hash_tag_isolation_enables_mget() {
 
 #[compio::test]
 async fn cross_slot_mget_errors_without_network_call() {
-    let Some(s) = seeds() else { return; };
+    let Some(s) = seeds() else {
+        common::skip("cross_slot_mget_errors_without_network_call: DRAGONFLY_CLUSTER_SEEDS not set");
+        return;
+    };
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
 
@@ -72,7 +86,10 @@ async fn cross_slot_mget_errors_without_network_call() {
 
 #[compio::test]
 async fn atomic_incr_survives_routing() {
-    let Some(s) = seeds() else { return; };
+    let Some(s) = seeds() else {
+        common::skip("atomic_incr_survives_routing: DRAGONFLY_CLUSTER_SEEDS not set");
+        return;
+    };
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
 
@@ -86,7 +103,10 @@ async fn atomic_incr_survives_routing() {
 
 #[compio::test]
 async fn scan_on_routing_key_returns_matching() {
-    let Some(s) = seeds() else { return; };
+    let Some(s) = seeds() else {
+        common::skip("scan_on_routing_key_returns_matching: DRAGONFLY_CLUSTER_SEEDS not set");
+        return;
+    };
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
 
@@ -114,7 +134,10 @@ async fn scan_on_routing_key_returns_matching() {
 
 #[compio::test]
 async fn ttl_lifecycle_on_cluster() {
-    let Some(s) = seeds() else { return; };
+    let Some(s) = seeds() else {
+        common::skip("ttl_lifecycle_on_cluster: DRAGONFLY_CLUSTER_SEEDS not set");
+        return;
+    };
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
 
@@ -189,7 +212,10 @@ async fn non_cluster_redis_behavior_is_bounded() {
 
 #[compio::test]
 async fn set_nx_is_idempotent() {
-    let Some(s) = seeds() else { return; };
+    let Some(s) = seeds() else {
+        common::skip("set_nx_is_idempotent: DRAGONFLY_CLUSTER_SEEDS not set");
+        return;
+    };
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
 
@@ -211,7 +237,10 @@ async fn set_nx_is_idempotent() {
 
 #[compio::test]
 async fn pexpire_and_pttl_semantics() {
-    let Some(s) = seeds() else { return; };
+    let Some(s) = seeds() else {
+        common::skip("pexpire_and_pttl_semantics: DRAGONFLY_CLUSTER_SEEDS not set");
+        return;
+    };
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
 
@@ -236,7 +265,10 @@ async fn pexpire_and_pttl_semantics() {
 
 #[compio::test]
 async fn binary_safe_values_roundtrip_through_cluster() {
-    let Some(s) = seeds() else { return; };
+    let Some(s) = seeds() else {
+        common::skip("binary_safe_values_roundtrip_through_cluster: DRAGONFLY_CLUSTER_SEEDS not set");
+        return;
+    };
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
 
@@ -255,7 +287,10 @@ async fn binary_safe_values_roundtrip_through_cluster() {
 
 #[compio::test]
 async fn cloned_handle_shares_topology_and_pools() {
-    let Some(s) = seeds() else { return; };
+    let Some(s) = seeds() else {
+        common::skip("cloned_handle_shares_topology_and_pools: DRAGONFLY_CLUSTER_SEEDS not set");
+        return;
+    };
     let seeds = seeds_refs(&s);
     let cc1 = ClusterClient::connect(&seeds, 4).await.expect("connect");
     let cc2 = cc1.clone();
@@ -271,7 +306,10 @@ async fn cloned_handle_shares_topology_and_pools() {
 
 #[compio::test]
 async fn cross_slot_mset_rejected_before_network() {
-    let Some(s) = seeds() else { return; };
+    let Some(s) = seeds() else {
+        common::skip("cross_slot_mset_rejected_before_network: DRAGONFLY_CLUSTER_SEEDS not set");
+        return;
+    };
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
 
@@ -284,7 +322,10 @@ async fn cross_slot_mset_rejected_before_network() {
 
 #[compio::test]
 async fn empty_batch_ops_are_noops() {
-    let Some(s) = seeds() else { return; };
+    let Some(s) = seeds() else {
+        common::skip("empty_batch_ops_are_noops: DRAGONFLY_CLUSTER_SEEDS not set");
+        return;
+    };
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
 
@@ -294,7 +335,10 @@ async fn empty_batch_ops_are_noops() {
 
 #[compio::test]
 async fn mget_preserves_order_and_holes() {
-    let Some(s) = seeds() else { return; };
+    let Some(s) = seeds() else {
+        common::skip("mget_preserves_order_and_holes: DRAGONFLY_CLUSTER_SEEDS not set");
+        return;
+    };
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
 
@@ -321,7 +365,10 @@ async fn mget_preserves_order_and_holes() {
 
 #[compio::test]
 async fn decr_by_can_go_negative() {
-    let Some(s) = seeds() else { return; };
+    let Some(s) = seeds() else {
+        common::skip("decr_by_can_go_negative: DRAGONFLY_CLUSTER_SEEDS not set");
+        return;
+    };
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
 
@@ -338,7 +385,10 @@ async fn decr_by_can_go_negative() {
 
 #[compio::test]
 async fn incr_on_non_numeric_errors_with_server() {
-    let Some(s) = seeds() else { return; };
+    let Some(s) = seeds() else {
+        common::skip("incr_on_non_numeric_errors_with_server: DRAGONFLY_CLUSTER_SEEDS not set");
+        return;
+    };
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
 
@@ -358,7 +408,10 @@ async fn incr_on_non_numeric_errors_with_server() {
 
 #[compio::test]
 async fn large_value_roundtrip() {
-    let Some(s) = seeds() else { return; };
+    let Some(s) = seeds() else {
+        common::skip("large_value_roundtrip: DRAGONFLY_CLUSTER_SEEDS not set");
+        return;
+    };
     let seeds = seeds_refs(&s);
     let cc = ClusterClient::connect(&seeds, 4).await.expect("connect");
 

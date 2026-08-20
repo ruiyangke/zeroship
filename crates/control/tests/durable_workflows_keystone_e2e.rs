@@ -965,13 +965,6 @@ async fn register_existing_run_timer(fx: &Fixture, run_id: &str) {
     }
 }
 
-fn bench_env_usize(value: Option<String>, default: usize) -> usize {
-    value
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(default)
-}
-
 fn bench_percentile_ms(values: &[Duration], percentile: f64) -> f64 {
     if values.is_empty() {
         return 0.0;
@@ -1040,13 +1033,13 @@ async fn bench_counts(fx: &Fixture, run_ids: &[String]) -> (i64, i64) {
 }
 
 #[test]
-#[ignore = "DW-23 load bench: requires tests/e2e_durable_workflows.sh with ZEROSHIP_DW23_BENCH_ONLY=1"]
+#[ignore = "DW-23 load bench: requires tests/e2e_durable_workflows.sh --bench"]
 fn dw23_workflow_engine_load_bench() {
     let rt = compio::runtime::Runtime::new().expect("compio runtime");
     rt.block_on(async {
         if !enabled() {
             zeroship_test_support::skip(
-                "skip: run via tests/e2e_durable_workflows.sh with ZEROSHIP_DW23_BENCH_ONLY=1"
+                "skip: run via tests/e2e_durable_workflows.sh --bench"
             );
             return;
         }
@@ -1060,9 +1053,15 @@ fn dw23_workflow_engine_load_bench() {
         let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id).await;
         set_dispatch_paused(&fx, false).await;
 
-        let run_count = bench_env_usize(zeroship_core::test_env!("ZEROSHIP_DW23_BENCH_RUNS"), 128);
-        let concurrency = bench_env_usize(zeroship_core::test_env!("ZEROSHIP_DW23_BENCH_CONCURRENCY"), 32);
-        let max_secs = bench_env_usize(zeroship_core::test_env!("ZEROSHIP_DW23_BENCH_MAX_SECS"), 60);
+        // The parameters of the ONE recorded run, as literals:
+        // docs/archive/benchmarks/2026-07-07-durable-workflows-load.md:9.
+        // They used to be ZEROSHIP_DW23_BENCH_{RUNS,CONCURRENCY,MAX_SECS}, which
+        // nothing set, and whose max_secs DEFAULT was 60 while the archived run
+        // passed 90 - so the archived numbers were not reproducible from the
+        // defaults. Change a parameter by editing this line and re-archiving.
+        let run_count = 128usize;
+        let concurrency = 32usize;
+        let max_secs = 90usize;
         let mut run_ids = Vec::with_capacity(run_count);
         for idx in 0..run_count {
             run_ids

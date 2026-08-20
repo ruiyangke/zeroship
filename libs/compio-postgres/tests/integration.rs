@@ -948,15 +948,34 @@ async fn null_in_params() {
 #[compio::test]
 async fn pool_exhaustion() {
     let Some(url) = require_pg().await else { return };
-    // Custom config: max_size=2, very short connection_timeout so the test
-    // doesn't wait 30 s for the exhaustion error.
+    // max_size=2 with a very short connection_timeout, so the test does not
+    // wait 30 s to observe the exhaustion error.
+    //
+    // `min_idle: 2`, NOT 0, and that is load-bearing. `connection_timeout`
+    // bounds the WHOLE of `get()` - opening a connection as well as waiting for
+    // one - so with an empty pool the first two acquisitions had to complete a
+    // TCP connect, a startup exchange and SCRAM-SHA-256 (4096 PBKDF2 rounds, in
+    // a debug build) inside the same 200 ms budget meant for the exhaustion
+    // wait. That made a test about CAPACITY fail on a busy machine because of
+    // LATENCY: observed once at 74 s of suite time under load, and passing 3/3
+    // in isolation on the same commit.
+    //
+    // Warming both connections up front removes the unrelated variable. The two
+    // acquisitions below now come from `idle` and open no sockets, so the only
+    // thing the 200 ms budget times is the third `get()`, which is what the
+    // test is named after.
     let config = compio_postgres::PoolConfig {
         max_size: 2,
-        min_idle: 0,
+        min_idle: 2,
         connection_timeout: std::time::Duration::from_millis(200),
         ..compio_postgres::PoolConfig::default()
     };
     let pool = Pool::connect_with_config(&url, config).await.unwrap();
+    assert_eq!(
+        pool.idle_count(),
+        2,
+        "warm-up must fill the pool, or the acquisitions below are timing a connect"
+    );
 
     // Acquire 2 connections without returning them
     let _c1 = pool.get().await.unwrap();
@@ -1773,8 +1792,9 @@ async fn concurrent_large_bidirectional_queries_do_not_deadlock() {
 //
 // We RETAIN the connection task's JoinHandle (instead of the detaching
 // `connect` helper) so we can observe the task actually finishing. Dropping
-// the client closes the request channel; the driver drains, terminates,
-// FINs, cancels the read task in its teardown block, and returns Ok. A 5 s
+// the client closes the request channel and releases the socket; the driver
+// drains, attempts its goodbye, cancels the read task in its teardown block,
+// and returns Ok whether or not that goodbye landed. A 5 s
 // timeout turns any teardown hang (e.g. a read task left parked forever, or a
 // shutdown that wedges) into a fast, loud failure.
 //
@@ -1798,8 +1818,11 @@ async fn multiplexed_clean_shutdown_completes_without_hang() {
     let rows = client.query("SELECT 42::int4 AS v", &[]).await.unwrap();
     assert_eq!(rows[0].get::<_, i32>("v"), 42);
 
-    // Drop the client: request channel closes -> driver sends Terminate, FINs,
-    // stops the read task, and `run` returns Ok(()).
+    // Drop the client: the request channel closes AND `ConnectionRelease`
+    // shuts the socket down on the spot, so the driver's Terminate normally
+    // does NOT reach the server - `run` still has to stop the read task and
+    // return Ok(()). Before that release existed this returned
+    // `Err(BrokenPipe)`, because the driver propagated the failed goodbye.
     drop(client);
 
     // The driver must finish on its own, promptly, with a clean Ok. A hang
@@ -2165,7 +2188,13 @@ async fn sslmode_require_fails_closed_over_a_plaintext_server() {
         .await
         .err()
         .expect("sslmode=require must not succeed over a plaintext connection");
-    assert_eq!(err.to_string(), "error performing TLS handshake");
+    // "could not be negotiated", NOT "handshake failed". The two are separate
+    // error kinds because `sslmode=prefer` retries a failed HANDSHAKE in
+    // plaintext and must retry nothing else; nothing was handshaken here, so
+    // this is the negotiation kind. Getting the pair backwards would give
+    // `prefer` a plaintext retry after a refusal it should have accepted on
+    // the same socket.
+    assert_eq!(err.to_string(), "TLS could not be negotiated");
 
     let err = Pool::connect(&require, 2)
         .await
@@ -2185,14 +2214,18 @@ async fn sslmode_require_fails_closed_over_a_plaintext_server() {
     );
     #[cfg(feature = "tls")]
     assert!(
-        cause.contains("server does not support TLS"),
+        cause.contains("does not support SSL"),
         "the failure should be the server's refusal, got: {cause}"
     );
 }
 
 /// `sslnegotiation=direct` under `sslmode=prefer` is the one TLS combination no
 /// build can serve: a mode that permits plaintext must not drive a TLS-only
-/// handshake. The pool rejects it before spending its retry budget.
+/// handshake, because a direct handshake sends no `SSLRequest` and so has no
+/// negotiation to fall back from. libpq rejects the pairing in
+/// `connectOptions2`; this driver rejects it in `Config::validate_tls_settings`,
+/// which every entry point calls - so the pool answers before spending its
+/// retry budget, and `Config::connect` answers before opening a socket.
 #[compio::test]
 async fn sslnegotiation_direct_under_prefer_is_rejected_by_the_pool() {
     let Some(url) = require_pg().await else {
@@ -2211,4 +2244,218 @@ async fn sslnegotiation_direct_under_prefer_is_rejected_by_the_pool() {
         cause.contains("sslnegotiation=direct"),
         "the refusal should name the unsatisfiable setting, got: {cause}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Connection lifetime
+//
+// The invariant these two tests hold is a LIFETIME, not a ceiling: a
+// connection opened inside a `compio` runtime is gone from the server when
+// that runtime ends, not when the process ends. A bounded-but-nonzero series
+// satisfies "stays under max_connections" and still breaks every caller that
+// needs the session released - `CREATE DATABASE ... TEMPLATE x` refuses while
+// ONE other session is on `x`.
+//
+// They are plain `#[test]`, not `#[compio::test]`: the runtime is the subject,
+// so the test has to build and drop it itself and then look at the server from
+// outside it.
+// ---------------------------------------------------------------------------
+
+/// How many backends on `url` carry `application_name = tag`.
+///
+/// Runs in a runtime of its own, which it also drops - so if the leak this
+/// guards against ever came back, the observer would be leaking too. That is
+/// deliberate: the observer's own connections are untagged and therefore never
+/// counted, so a broken observer inflates nothing.
+fn tagged_backends(url: &str, tag: &str) -> i64 {
+    let rt = compio::runtime::Runtime::new().expect("cannot create runtime");
+    rt.block_on(async {
+        let client = connect(url).await.unwrap();
+        let rows = client
+            .query(
+                "SELECT count(*)::int8 AS n FROM pg_stat_activity WHERE application_name = $1",
+                &[&tag],
+            )
+            .await
+            .unwrap();
+        rows[0].get::<_, i64>("n")
+    })
+}
+
+/// Descriptors this process holds open. A socket that outlives its runtime
+/// shows up here as well as in `pg_stat_activity`, so the pair separates "the
+/// server dropped the session" from "we still own the fd".
+fn open_fds() -> usize {
+    std::fs::read_dir("/proc/self/fd")
+        .expect("/proc/self/fd")
+        .count()
+}
+
+#[test]
+fn a_connection_does_not_outlive_the_runtime_that_opened_it() {
+    let url = test_url();
+    let tag = "cpg_runtime_lifetime";
+    let sep = if url.contains('?') { '&' } else { '?' };
+    let tagged = format!("{url}{sep}application_name={tag}");
+
+    let mut backends = Vec::new();
+    let mut fds = Vec::new();
+    for _ in 0..6 {
+        let rt = compio::runtime::Runtime::new().expect("cannot create runtime");
+        rt.block_on(async {
+            let client = match connect(&tagged).await {
+                Ok(client) => client,
+                Err(e) => common::postgres_unreachable(&tagged, &e),
+            };
+            let rows = client.query("SELECT 1::int4 AS one", &[]).await.unwrap();
+            assert_eq!(rows[0].get::<_, i32>("one"), 1);
+        });
+        drop(rt);
+        backends.push(tagged_backends(&url, tag));
+        fds.push(open_fds());
+    }
+
+    println!("tagged backends after each runtime drop: {backends:?}");
+    println!("open fds after each runtime drop:        {fds:?}");
+
+    assert_eq!(
+        backends,
+        vec![0; 6],
+        "every runtime opened one connection and dropped it; the server should \
+         hold none between iterations, got {backends:?}"
+    );
+}
+
+/// The one-variable partner. The test above would also pass if the connection
+/// were never opened - `postgres_unreachable` guards the total failure, but a
+/// connection that closes too EARLY reads identically to one that closes on
+/// time. This asserts the count is 1 while the runtime is still running, so
+/// the 0s above mean "released", not "never taken".
+#[test]
+fn a_connection_is_visible_to_the_server_while_its_runtime_runs() {
+    let url = test_url();
+    let tag = "cpg_runtime_lifetime_live";
+    let sep = if url.contains('?') { '&' } else { '?' };
+    let tagged = format!("{url}{sep}application_name={tag}");
+
+    let rt = compio::runtime::Runtime::new().expect("cannot create runtime");
+    let seen = rt.block_on(async {
+        let client = match connect(&tagged).await {
+            Ok(client) => client,
+            Err(e) => common::postgres_unreachable(&tagged, &e),
+        };
+        let rows = client
+            .query(
+                "SELECT count(*)::int8 AS n FROM pg_stat_activity WHERE application_name = $1",
+                &[&tag],
+            )
+            .await
+            .unwrap();
+        rows[0].get::<_, i64>("n")
+    });
+    drop(rt);
+
+    assert_eq!(seen, 1, "the live connection should see itself");
+}
+
+/// The consequence that motivated this, stated as the thing a caller actually
+/// wants to do.
+///
+/// `CREATE DATABASE <new> WITH TEMPLATE <src>` is refused - SQLSTATE 55006,
+/// "source database is being accessed by other users" - while ANY other session
+/// is on `src`. ONE is enough. So a suite that clones a template between tests
+/// needs the previous test's connection to be GONE, and a count that merely
+/// stays under `max_connections` does not give it that. This is the
+/// discriminating consequence of a lifetime over a ceiling, and the reason the
+/// invariant above is written the way it is.
+///
+/// It does NOT generalise to "a per-test template clone is now safe". It shows
+/// only that a connection whose CLIENT has been dropped stops blocking one. A
+/// fixture that keeps a `Client` or a `Pool` alive across tests still holds a
+/// session on the template and still blocks the clone - the release is tied to
+/// the client's lifetime, which is the point, not to the test's.
+///
+/// Uses a template of its own rather than the suite's database: every other
+/// test here is on that one, and at full parallelism one of them would be the
+/// "1 other session", which would make this fail for a reason that has nothing
+/// to do with what it asserts.
+#[test]
+fn a_template_clone_is_not_blocked_by_the_previous_runtime() {
+    let url = test_url();
+    let (base, _) = url.rsplit_once('/').expect("a database in the DSN");
+    let template = "cpg_template_lifetime_src";
+    let clone = "cpg_template_lifetime_clone";
+    // The session issuing the clone must not itself be ON the template, or it
+    // would be the one other session and this would fail on its own connection.
+    let admin_url = format!("{base}/postgres");
+    let template_url = format!("{base}/{template}");
+
+    let admin_sql = |stmts: Vec<String>| {
+        let admin_url = admin_url.clone();
+        let rt = compio::runtime::Runtime::new().expect("cannot create runtime");
+        rt.block_on(async move {
+            let admin = match connect(&admin_url).await {
+                Ok(admin) => admin,
+                Err(e) => common::postgres_unreachable(&admin_url, &e),
+            };
+            let mut last = Ok(0);
+            for stmt in stmts {
+                last = admin.execute(&stmt, &[]).await;
+                if last.is_err() {
+                    break;
+                }
+            }
+            last
+        })
+    };
+
+    // Fresh both ways: a leftover clone from an earlier run would make the
+    // CREATE fail, and a leftover template would make it pass without this
+    // test's own connection ever having been on it.
+    admin_sql(vec![
+        format!("DROP DATABASE IF EXISTS {clone} WITH (FORCE)"),
+        format!("DROP DATABASE IF EXISTS {template} WITH (FORCE)"),
+        format!("CREATE DATABASE {template}"),
+    ])
+    .expect("provisioning the template");
+
+    // One test's shape: open a connection on the template, use it, end the
+    // runtime.
+    let rt = compio::runtime::Runtime::new().expect("cannot create runtime");
+    rt.block_on(async {
+        let client = connect(&template_url).await.expect("connect to the template");
+        client.execute("SELECT 1", &[]).await.unwrap();
+    });
+    drop(rt);
+
+    // The next test's fixture.
+    let result = admin_sql(vec![format!(
+        "CREATE DATABASE {clone} WITH TEMPLATE {template}"
+    )]);
+
+    // Clean up before asserting, so a failure does not also leave two databases.
+    let _ = admin_sql(vec![
+        format!("DROP DATABASE IF EXISTS {clone} WITH (FORCE)"),
+        format!("DROP DATABASE IF EXISTS {template} WITH (FORCE)"),
+    ]);
+
+    if let Err(e) = result {
+        // The crate's `Display` for a server error is the bare "db error"; the
+        // SQLSTATE and the server's sentence are in the source. Without it this
+        // failure cannot be told apart from a permissions problem or a typo in
+        // the database name, which is the whole difference between a regression
+        // test and a red light.
+        let cause = std::error::Error::source(&e)
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        assert_eq!(
+            e.code(),
+            Some(&SqlState::OBJECT_IN_USE),
+            "expected 55006 from the template clone, got: {e}: {cause}"
+        );
+        panic!(
+            "the previous runtime's connection still holds the template open, \
+             so a per-test clone cannot run: {cause}"
+        );
+    }
 }

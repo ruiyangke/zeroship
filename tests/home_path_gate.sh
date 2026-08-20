@@ -93,7 +93,7 @@ done < <(git ls-files -- "${EXTS[@]}" 2>/dev/null)
 # actually applied. It said "below the 400 floor" while comparing against 9000
 # during its own mutation test - a message describing a different check than
 # the one that ran, which is the exact defect class this repo keeps finding.
-ENUM_FLOOR="${ENUM_FLOOR:-400}"
+ENUM_FLOOR=400
 if [ "$enumerated" -lt "$ENUM_FLOOR" ]; then
   echo "FAIL: only $enumerated files enumerated, below the $ENUM_FLOOR floor." >&2
   echo "      The listing is truncated or the globs stopped matching, so a" >&2

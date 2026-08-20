@@ -1,6 +1,6 @@
 //! P1a platform OP token-issuance foundation tests.
 
-mod common;
+use crate::common;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use compio_postgres::{connect, Client, NoTls};

@@ -131,7 +131,7 @@ e2e_platform_op_up "$WORK/sk.pem" "$WORK" || exit 1
 e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DBURL"
 ZEROSHIP_CONTROL_STRIPE_SECRET_KEY="sk_test_unused" \
-e2e_with_platform_mint_key "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --config "$CFG_TOML" \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --config "$CFG_TOML" \
   --blob-store "$WORK/blobs" \
   --stripe-base-url "http://127.0.0.1:1" \
   --meter-provider lite --invoicer-provider lite --allow-unsupported-billing \
@@ -217,7 +217,7 @@ echo "============================================"
 # disabling check_account in the gateway gave 14 passed / 2 failed = 16 RAN, so the
 # denominator held while two verdicts flipped, which is exactly what a floor on
 # PASS alone would have mistaken for a smaller run.
-ACCT_MIN_RAN="${ACCT_MIN_RAN:-16}"
+ACCT_MIN_RAN=16
 RAN=$((PASS + FAIL))
 rc=0
 [ "$FAIL" -eq 0 ] || rc=1
