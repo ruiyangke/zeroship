@@ -4,6 +4,7 @@
 //! random email so concurrent runs don't collide; the cleanup at the end
 //! removes every row the test inserted.
 
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
 use compio_postgres::{connect, Client, NoTls};
@@ -28,6 +29,36 @@ fn test_cfg(db_url: &str) -> AuthConfig {
         Some("test-stash-key-not-for-prod-32bytes!".to_owned()),
     );
     cfg
+}
+
+/// A per-call loopback address for the `x-forwarded-for` header every `/reset`
+/// POST below carries.
+///
+/// `reset::post` keys its rate limit on `reset_ip:{client_ip}`, and
+/// `headers::client_ip` reads THAT HEADER ALONE - `TestRequest::peer_addr` does
+/// not reach `req.peer_addr()`, so a request without the header resolves to
+/// `0.0.0.0` and lands in one bucket shared by every request, every test and
+/// every concurrent run. `Bucket::RESET_IP` is 30 tokens refilling at 30/hour,
+/// so that bucket does not recover inside a test session: once two runs have
+/// drained it, every later run on the same database keeps taking 429 where
+/// these tests assert 302, for an hour, whether or not anything is running
+/// concurrently.
+///
+/// MEASURED 2026-08-20, five concurrent pairs of the four DDL-installing auth
+/// modules on one shared database: of this file's three `reset_post_*` tests,
+/// two failed in 10 of 10 runs and the third in 9, every one of them
+/// `left: 429, right: 302` with a `password_reset_throttled` audit row naming
+/// bucket `reset_per_ip`.
+///
+/// `signup_forgot_ratelimit_test` carries the same helper for the same reason.
+fn unique_loopback() -> IpAddr {
+    let bytes = *Uuid::new_v4().as_bytes();
+    IpAddr::V4(Ipv4Addr::new(
+        127,
+        bytes[0].max(1),
+        bytes[1].max(1),
+        bytes[2].max(1),
+    ))
 }
 
 fn read_set_cookie(headers: &ntex::http::HeaderMap, name: &str) -> Option<String> {
@@ -248,6 +279,10 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
         .finish();
     let post_req = test::TestRequest::post()
         .uri("/reset")
+        // Not `peer_addr`: the handler keys its rate limit on the FORWARDED ip
+        // alone, and without this header every run shares `reset_ip:0.0.0.0`.
+        // See `unique_loopback` for the measurement.
+        .header("x-forwarded-for", unique_loopback().to_string())
         .header("content-type", "application/x-www-form-urlencoded")
         .header("cookie", format!("__Host-zsidp_csrf={csrf}"))
         .set_payload(body)
@@ -381,6 +416,10 @@ async fn reset_post_consumes_magic_login_state_for_same_email() {
         .finish();
     let post_req = test::TestRequest::post()
         .uri("/reset")
+        // Not `peer_addr`: the handler keys its rate limit on the FORWARDED ip
+        // alone, and without this header every run shares `reset_ip:0.0.0.0`.
+        // See `unique_loopback` for the measurement.
+        .header("x-forwarded-for", unique_loopback().to_string())
         .header("content-type", "application/x-www-form-urlencoded")
         .header("cookie", format!("__Host-zsidp_csrf={csrf}"))
         .set_payload(body)
@@ -775,6 +814,10 @@ async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
         .finish();
     let post_req = test::TestRequest::post()
         .uri("/reset")
+        // Not `peer_addr`: the handler keys its rate limit on the FORWARDED ip
+        // alone, and without this header every run shares `reset_ip:0.0.0.0`.
+        // See `unique_loopback` for the measurement.
+        .header("x-forwarded-for", unique_loopback().to_string())
         .header("content-type", "application/x-www-form-urlencoded")
         .header("cookie", format!("__Host-zsidp_csrf={csrf}"))
         .set_payload(body)
