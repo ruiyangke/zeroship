@@ -7413,6 +7413,18 @@ name = "zeroship-test-support"
 version = "0.1.0"
 
 [[package]]
+name = "zeroship-testkit"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "compio",
+ "compio-postgres",
+ "sha2 0.10.9",
+ "tempfile",
+ "zeroship-test-support",
+]
+
+[[package]]
 name = "zeroship-worker"
 version = "0.1.0"
 dependencies = [
