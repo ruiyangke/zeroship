@@ -3,8 +3,8 @@
 //! WHAT THIS REPLACES. Test code named the one test PostgreSQL under eight
 //! different environment variables - `AUTH_DB_URL`, `CONTROL_TEST_DB`,
 //! `GATEWAY_ANCHORS_DB_URL`, `GATEWAY_POOL_SMOKE_URL`, `LIVE_DB_TEST_URL`,
-//! `MIGRATED_TEST_DB`, `ZERO_MIGRATE_TEST_PG_URL`, `ZEROSHIP_SCHEDULER_TEST_DB`
-//! - each read by one crate's tests and exported by whichever suite happened to
+//! `MIGRATED_TEST_DB`, `ZERO_MIGRATE_TEST_PG_URL`, `ZEROSHIP_SCHEDULER_TEST_DB` -
+//! each read by one crate's tests and exported by whichever suite happened to
 //! remember it. Nothing related them, so a name that was never exported meant
 //! the tests behind it did not run, and a name pointed at the wrong server meant
 //! they ran against it silently. Both happened.
