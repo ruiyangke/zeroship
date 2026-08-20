@@ -106,9 +106,25 @@
 //! - **Any edge that is not this Caddyfile.** A deployment fronted by
 //!   Cloudflare Workers, an ALB or an nginx of its own claims hosts this gate
 //!   never sees. `RESERVED_APP_NAMES` is then a floor, not a description.
-//! - **Hosts claimed somewhere other than an HTTP matcher** — a `listen`
-//!   address, a TLS connection policy, or a Caddy app other than `http`. The
-//!   walk below reads `match` entries and nothing else.
+//! - **Hosts claimed somewhere other than a `match`.** The walk reads `match`
+//!   entries and nothing else, so a `listen` address naming a host would be
+//!   invisible. A `match` whose shape it does not understand — a TLS connection
+//!   policy's, which is an object rather than an array and whose `sni` claims
+//!   hostnames — is an `Err`, so that one fails loudly rather than silently.
+//!
+//! # The next hole in THIS mechanism
+//!
+//! Every mechanism has one; naming it is cheaper than discovering it. Here it
+//! is the gap between the artifact and the running edge, and it has two halves.
+//! The artifact is generated with the Caddy image the compose file pins for the
+//! `caddy` service, which is why the generator reads that image out of compose
+//! instead of naming one — but nothing checks that the HOST is running the
+//! image compose pins, or that Caddy was started with this config file at all.
+//! Adapt-time behaviour is also version-dependent: a future Caddy that lowers
+//! some directive into a shape this walk reads differently would move the
+//! answer without moving the Caddyfile. The version is recorded in the artifact
+//! and deliberately NOT compared, because comparing it would fail every image
+//! bump for no reason; that trade is what leaves the hole open.
 
 use std::collections::{BTreeMap, BTreeSet};
 
