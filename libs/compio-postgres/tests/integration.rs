@@ -2357,3 +2357,105 @@ fn a_connection_is_visible_to_the_server_while_its_runtime_runs() {
 
     assert_eq!(seen, 1, "the live connection should see itself");
 }
+
+/// The consequence that motivated this, stated as the thing a caller actually
+/// wants to do.
+///
+/// `CREATE DATABASE <new> WITH TEMPLATE <src>` is refused - SQLSTATE 55006,
+/// "source database is being accessed by other users" - while ANY other session
+/// is on `src`. ONE is enough. So a suite that clones a template between tests
+/// needs the previous test's connection to be GONE, and a count that merely
+/// stays under `max_connections` does not give it that. This is the
+/// discriminating consequence of a lifetime over a ceiling, and the reason the
+/// invariant above is written the way it is.
+///
+/// It does NOT generalise to "a per-test template clone is now safe". It shows
+/// only that a connection whose CLIENT has been dropped stops blocking one. A
+/// fixture that keeps a `Client` or a `Pool` alive across tests still holds a
+/// session on the template and still blocks the clone - the release is tied to
+/// the client's lifetime, which is the point, not to the test's.
+///
+/// Uses a template of its own rather than the suite's database: every other
+/// test here is on that one, and at full parallelism one of them would be the
+/// "1 other session", which would make this fail for a reason that has nothing
+/// to do with what it asserts.
+#[test]
+fn a_template_clone_is_not_blocked_by_the_previous_runtime() {
+    let url = test_url();
+    let (base, _) = url.rsplit_once('/').expect("a database in the DSN");
+    let template = "cpg_template_lifetime_src";
+    let clone = "cpg_template_lifetime_clone";
+    // The session issuing the clone must not itself be ON the template, or it
+    // would be the one other session and this would fail on its own connection.
+    let admin_url = format!("{base}/postgres");
+    let template_url = format!("{base}/{template}");
+
+    let admin_sql = |stmts: Vec<String>| {
+        let admin_url = admin_url.clone();
+        let rt = compio::runtime::Runtime::new().expect("cannot create runtime");
+        rt.block_on(async move {
+            let admin = match connect(&admin_url).await {
+                Ok(admin) => admin,
+                Err(e) => common::postgres_unreachable(&admin_url, &e),
+            };
+            let mut last = Ok(0);
+            for stmt in stmts {
+                last = admin.execute(&stmt, &[]).await;
+                if last.is_err() {
+                    break;
+                }
+            }
+            last
+        })
+    };
+
+    // Fresh both ways: a leftover clone from an earlier run would make the
+    // CREATE fail, and a leftover template would make it pass without this
+    // test's own connection ever having been on it.
+    admin_sql(vec![
+        format!("DROP DATABASE IF EXISTS {clone} WITH (FORCE)"),
+        format!("DROP DATABASE IF EXISTS {template} WITH (FORCE)"),
+        format!("CREATE DATABASE {template}"),
+    ])
+    .expect("provisioning the template");
+
+    // One test's shape: open a connection on the template, use it, end the
+    // runtime.
+    let rt = compio::runtime::Runtime::new().expect("cannot create runtime");
+    rt.block_on(async {
+        let client = connect(&template_url).await.expect("connect to the template");
+        client.execute("SELECT 1", &[]).await.unwrap();
+    });
+    drop(rt);
+
+    // The next test's fixture.
+    let result = admin_sql(vec![format!(
+        "CREATE DATABASE {clone} WITH TEMPLATE {template}"
+    )]);
+
+    // Clean up before asserting, so a failure does not also leave two databases.
+    let _ = admin_sql(vec![
+        format!("DROP DATABASE IF EXISTS {clone} WITH (FORCE)"),
+        format!("DROP DATABASE IF EXISTS {template} WITH (FORCE)"),
+    ]);
+
+    if let Err(e) = result {
+        // The crate's `Display` for a server error is the bare "db error"; the
+        // SQLSTATE and the server's sentence are in the source. Without it this
+        // failure cannot be told apart from a permissions problem or a typo in
+        // the database name, which is the whole difference between a regression
+        // test and a red light.
+        let cause = std::error::Error::source(&e)
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        assert_eq!(
+            e.code(),
+            Some(&SqlState::OBJECT_IN_USE),
+            "expected 55006 from the template clone, got: {e}: {cause}"
+        );
+        panic!(
+            "the previous runtime's connection still holds the template open, \
+             so a per-test clone cannot run: {cause}"
+        );
+    }
+}
