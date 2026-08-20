@@ -102,6 +102,19 @@
 //!     loopback, say - will pass or fail depending on which of its neighbours
 //!     ran first. That is a real hazard and it is why they are listed.
 //!
+//!   * Wall-clock budgets now compete with 1368 neighbours instead of the
+//!     handful in their own file. `url_native::
+//!     search_params_iter_is_linear_not_quadratic` asserts a 2000-entry
+//!     `for-of` finishes inside 1000 ms. On the FIRST full run of this target
+//!     (2026-08-20, `/proc/loadavg` 16-19 on a shared box) it read 1291 ms and
+//!     failed. It then passed 10/10 filtered to itself out of this binary,
+//!     10/10 out of the old `url_native` binary, 5/5 in a full run of this
+//!     binary and 5/5 in a full run of the old one, so it is not
+//!     deterministic. Those clean runs also sat at a LOWER load than the
+//!     failing one, so they do not establish that the merge left its flake
+//!     rate where it was. Read a timing assertion in here as measuring a
+//!     busier machine than it used to.
+//!
 //!   * One process means one abort. A module that aborts (not panics) takes
 //!     the other 101 down with it and the run reports no result for any of
 //!     them, where before it reported 136 clean targets and one crash.
