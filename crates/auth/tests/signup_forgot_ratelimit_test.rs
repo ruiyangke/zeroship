@@ -409,7 +409,7 @@ async fn signup_non_duplicate_create_error_renders_error_page() {
     // database nothing drops, and every later run - including single ones -
     // fails the same way on the residue.
     //
-    // MEASURED 2026-08-20, this file's four sibling modules run in two
+    // MEASURED 2026-08-20, the four DDL-installing auth test modules run in two
     // concurrent processes against one database, five pairs: this test failed
     // in 9 of the 10 runs, in both shapes - `left: 302, right: 200` and
     // `check constraint "auth_users_signup_m3_name_check" of relation "users"
