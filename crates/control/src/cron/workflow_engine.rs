@@ -107,12 +107,17 @@ pub(crate) enum AppJournal {
 /// True when a database error is scoped to ONE app's journal rather than to the
 /// sweep as a whole.
 ///
-/// The four codes are the ways a per-app journal can fail while the connection
-/// itself is healthy: no USAGE on the schema, the schema gone, a table gone, a
-/// column gone (a journal provisioned by an older runtime). Every other failure
-/// - a lost connection above all, which surfaces with NO SQLSTATE at all - is
-/// deliberately excluded: a sweep that skipped past a dead connection would walk
-/// the remaining apps against it and then report a clean tick.
+/// The three codes are the ways ONE tenant's journal can fail while the
+/// connection is healthy: no USAGE on `app_<uuid>`, the schema gone, a table
+/// gone. Every other failure propagates. Two exclusions are deliberate:
+///
+/// - A lost connection carries NO SQLSTATE at all, so it can never match. A
+///   sweep that skipped past one would walk the remaining apps against a dead
+///   connection and then report a clean tick.
+/// - `undefined_column` is NOT here. Every journal has the same shape, so a
+///   missing column is our own SQL or a schema drift affecting the whole fleet,
+///   not a property of one tenant, and it must fail rather than degrade into a
+///   per-app warning repeated for every app.
 pub(crate) fn is_journal_scoped_error(err: &compio_postgres::Error) -> bool {
     matches!(
         err.code(),
@@ -120,7 +125,6 @@ pub(crate) fn is_journal_scoped_error(err: &compio_postgres::Error) -> bool {
             if *code == SqlState::INSUFFICIENT_PRIVILEGE
                 || *code == SqlState::INVALID_SCHEMA_NAME
                 || *code == SqlState::UNDEFINED_TABLE
-                || *code == SqlState::UNDEFINED_COLUMN
     )
 }
 
