@@ -2334,7 +2334,13 @@ fn a_connection_does_not_outlive_the_runtime_that_opened_it() {
 const FD_PROBE_TEST: &str = "a_torn_down_runtime_leaks_a_bounded_number_of_descriptors";
 
 /// Set in the re-executed child. Its presence selects the measuring arm.
-const FD_PROBE_CHILD: &str = "CPG_FD_PROBE_CHILD";
+///
+/// The spelling lives in the sealed key enum, not here. `clippy.toml` denies
+/// `std::env::var_os`, and the one place in this crate permitted to read the
+/// environment is `common::env::get`, which takes the key rather than a name -
+/// so the read below cannot use a local `&str` constant, and keeping one for
+/// the WRITE side alone would be the same literal in two files.
+const FD_PROBE_CHILD: common::env::TestEnvKey = common::env::TestEnvKey::FdProbeChild;
 
 /// Marks the child's machine-readable result line.
 const FD_PROBE_MARKER: &str = "FD-PROBE-SERIES ";
@@ -2389,7 +2395,7 @@ const FD_PROBE_MARKER: &str = "FD-PROBE-SERIES ";
 /// the next runner has to know.
 #[test]
 fn a_torn_down_runtime_leaks_a_bounded_number_of_descriptors() {
-    if std::env::var_os(FD_PROBE_CHILD).is_some() {
+    if common::env::get(FD_PROBE_CHILD).is_some() {
         measure_and_report_fd_series();
         return;
     }
@@ -2397,7 +2403,7 @@ fn a_torn_down_runtime_leaks_a_bounded_number_of_descriptors() {
     let exe = std::env::current_exe().expect("current_exe");
     let output = std::process::Command::new(&exe)
         .args(["--exact", FD_PROBE_TEST, "--nocapture", "--test-threads=1"])
-        .env(FD_PROBE_CHILD, "1")
+        .env(FD_PROBE_CHILD.name(), "1")
         .output()
         .expect("re-exec the test binary");
 

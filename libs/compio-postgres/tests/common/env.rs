@@ -28,13 +28,26 @@ pub enum TestEnvKey {
     /// Connection string for the PostgreSQL integration suites. Absent means
     /// the default DSN in each target, never "do not run".
     PgTestUrl,
+    /// Set on the child in the descriptor-budget probe, which re-executes its
+    /// own test binary so the `/proc/self/fd` count is taken in a process that
+    /// ran nothing else. Present means "you are the child".
+    ///
+    /// Prefixed because, unlike `PG_TEST_URL`, it names no shared service and
+    /// exists only inside one test's re-exec.
+    FdProbeChild,
 }
 
 impl TestEnvKey {
     /// The literal environment spelling. Literal arms only, by rule.
-    const fn name(self) -> &'static str {
+    ///
+    /// Public because a key can be WRITTEN as well as read: the probe above
+    /// passes this to `Command::env` when it spawns its child. Handing out the
+    /// name opens no bypass - `std::env::var` is denied at every call site in
+    /// the workspace, so the only way to read one back is [`get`] below.
+    pub const fn name(self) -> &'static str {
         match self {
             Self::PgTestUrl => "PG_TEST_URL",
+            Self::FdProbeChild => "CPG_FD_PROBE_CHILD",
         }
     }
 }

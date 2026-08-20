@@ -36,9 +36,9 @@ use zeroship_core::config::{Secret, SourceKind};
 /// (`crates/auth/src/oidc/issuer.rs:388-408`), and the kid is a pure
 /// thumbprint of the public key (`issuer.rs:273`). So two issuers built from
 /// the same seed publish the SAME kid, and whichever publishes second dies on
-/// a key something between them retired. That is production behaving correctly
-/// - a retiring signer must not come back - against fixtures wrong to share one
-/// OP identity.
+/// a key something between them retired. That is production behaving
+/// correctly - a retiring signer must not come back - against fixtures wrong
+/// to share one OP identity.
 ///
 /// THE SEED WAS `CARGO_CRATE_NAME` ALONE, WHICH SCOPES IT TO THE BINARY AND
 /// NOT TO THE RUN. That was enough while every run had a private database. It
