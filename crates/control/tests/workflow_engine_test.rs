@@ -7277,6 +7277,14 @@ struct FleetSweeps {
     /// conservative arm - "deleted nothing" and "deleted it and did not count
     /// it" produce the same zero.
     readable_blob_present: bool,
+    /// Whether that blob's ROW is still in the readable app's journal.
+    ///
+    /// Paired with `readable_blob_present` because the two can disagree, and
+    /// the disagreement is the failure that neither field catches alone. A
+    /// sweep that removes the row and keeps the object leaves storage that
+    /// NEITHER sweep can reclaim: the ref sweep walks rows and there is no row,
+    /// and the orphan sweep refuses while the same journal is unreadable.
+    readable_blob_row_present: bool,
 }
 
 /// Run every journalled-fleet sweep once over TWO apps that both have work.
@@ -7292,7 +7300,7 @@ async fn sweeps_over_two_apps(label: &str, revoke_second: bool) -> Option<FleetS
     let fx = isolated_fixture(label).await?;
     let ctl = control_role_fixture(&fx, label).await;
 
-    let (_readable, readable_blob) =
+    let (readable, readable_blob) =
         seed_app_for_all_sweeps(&fx, &ctl, &format!("{label}-readable")).await;
     let (other, _other_blob) = seed_app_for_all_sweeps(&fx, &ctl, &format!("{label}-other")).await;
     if revoke_second {
@@ -7332,6 +7340,19 @@ async fn sweeps_over_two_apps(label: &str, revoke_second: bool) -> Option<FleetS
         .get_blob(&readable_blob)
         .await
         .is_ok();
+    // Read the row as the SUPERUSER (`fx`), not through `ctl`: the point is
+    // what the sweep left behind, and a revoked-privilege read would report an
+    // absent row for a reason that has nothing to do with the sweep.
+    fx.pg.set_default_app_id(readable);
+    let readable_blob_row_present = !fx
+        .pg
+        .query(
+            "SELECT 1 AS present FROM zeroship.workflow_blobs WHERE hash = $1",
+            &[&readable_blob],
+        )
+        .await
+        .expect("read the readable app's blob row back")
+        .is_empty();
 
     drop(ctl);
     drop(fx);
@@ -7343,6 +7364,7 @@ async fn sweeps_over_two_apps(label: &str, revoke_second: bool) -> Option<FleetS
         retention,
         blob_ref,
         readable_blob_present,
+        readable_blob_row_present,
     })
 }
 
@@ -7434,6 +7456,13 @@ async fn fleet_sweeps_all_report_the_tenant_they_excluded() {
         "the blob must still be IN the object store: a delete count of zero is \
          also what a sweep that deleted it and miscounted would report"
     );
+    assert!(
+        swept.readable_blob_row_present,
+        "the blob's ROW must survive too. A sweep that drops the row and keeps \
+         the object has made that storage unreclaimable by both sweeps: the ref \
+         sweep walks rows and finds none, and the orphan sweep refuses while \
+         the same journal is unreadable"
+    );
 }
 
 /// The control for the test above: identical setup, no revoke.
@@ -7477,6 +7506,12 @@ async fn fleet_sweeps_report_full_coverage_when_every_journal_is_readable() {
         !swept.readable_blob_present,
         "with nothing excluded the sweep must actually remove the object, which \
          is what makes the retained-blob assertion in the paired test a measurement"
+    );
+    assert!(
+        !swept.readable_blob_row_present,
+        "and it must remove the row, which is what makes the retained-ROW \
+         assertion in the paired test a measurement rather than a row this \
+         sweep never touches"
     );
 }
 
