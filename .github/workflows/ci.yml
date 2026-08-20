@@ -404,6 +404,15 @@ jobs:
       # neither is in a suite anyone watches. Text-only: no binary, no docker.
       - name: dev secret provisioning check can actually pass
         run: tests/dev_secrets_gate.sh
+      # The harness creates the database and passes the DSN in; a test that
+      # makes its own decides its own isolation invisibly and cannot run
+      # against a database anybody else is connected to. Four files issue
+      # CREATE DATABASE and each is ruled on in the script, with the reason;
+      # a ruling that no longer matches anything fails this too, because an
+      # exemption nobody removed is how the next one gets waved through.
+      # Text-only: no build, no database.
+      - name: test code does not create its own databases
+        run: tests/tests_do_not_create_databases_gate.sh
       # A COUPLING TRIPWIRE, not a style rule. Measured 2026-08-12 by running
       # tests/e2e_gateway_workflow_advance_authz.sh: the worker's 403 without
       # --workflow-advance-unsigned is BOTH why durable workflows cannot run in
@@ -438,6 +447,17 @@ jobs:
       #   scratch_db.sh:69     fixed name, no token  ->  20/0 becomes 17 passed, 3 failed
       #   scratch_db.sh:85     drop regardless of owner -> 20/0 becomes 19 passed, 1 failed
       #
+      # Two more since, on the same terms. `suite_db.sh` names the SHARED
+      # suite database after the migration set and `sweep_db.sh` decides which
+      # databases a sweep destroys, so both are wired here and both were
+      # mutation-checked against the shipping library, not a copy:
+      #   suite_db.sh  pre-`set -e` form restored  ->  41/0 becomes 39 passed, 2 failed
+      #   sweep_db.sh  root-pid test moved back after the self test
+      #                                            ->  29/0 becomes 28 passed, 1 failed
+      # The second is worth a sentence: with the order swapped, a self-pid of 0
+      # or 1 marks the WHOLE process table "ours", every candidate reads as
+      # live, and the sweeper reclaims nothing while reporting success.
+      #
       # THE FOURTH IS DIFFERENT AND THE DIFFERENCE MATTERS. known_catchall_selftest
       # RE-IMPLEMENTS the counters and exit rule of tests/e2e_app_primitives.sh
       # rather than sourcing them, deliberately - that harness stands up a whole
@@ -459,6 +479,8 @@ jobs:
           tests/lib_binary_freshness_selftest.sh
           tests/lib_skip_census_selftest.sh
           tests/lib_scratch_db_selftest.sh
+          tests/lib_suite_db_selftest.sh
+          tests/lib_sweep_db_selftest.sh
           tests/lib/e2e_stack_selftest.sh
           tests/lib/known_catchall_selftest.sh
       # e2d0cba4c changed three harnesses from 100755 to 100644 in a commit about
