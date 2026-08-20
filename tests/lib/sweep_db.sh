@@ -73,14 +73,9 @@ zs_fingerprint_of_ref() {
 # variable, not an exported one, and the binary reads no environment at all -
 # so the caller sets it in the shell they are testing and the answer follows
 # the argument rather than an ambient value the callee happened to inherit.
-zs_sweep_pid_is_ours() {
+zs_pid_is_ours() {
   zs_testkit sweep pid-is-ours --self-pid "${ZS_SWEEP_SELF_PID:-$$}" --pid "$1"
 }
-
-# Backwards-compatible spelling used by tests/sweep_test_databases.sh and the
-# selftest. One name would have been better; both are here because renaming the
-# caller is a separate change from moving the implementation.
-zs_pid_is_ours() { zs_sweep_pid_is_ours "$@"; }
 
 # Scan /proc ONCE for every name in the file `$1`, filling `ZS_SWEEP_HELD_BY`
 # with `<name> <pid>` lines for the names something on this box is holding, and
