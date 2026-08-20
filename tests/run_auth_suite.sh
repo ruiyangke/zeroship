@@ -40,6 +40,35 @@
 # it in; an ambient variable that silently redirects a gate is how gates get
 # silently disabled.
 #
+# TWO RUNS AT ONCE ARE NOT YET FULLY GREEN, AND HERE IS EXACTLY WHAT IS LEFT.
+# A shared database shares DATABASE-SCOPED SINGLETONS, which no migration hash
+# can see (tests/lib/suite_db.sh says why). Running two suites together is the
+# only instrument that finds them, and it found these. Fixed already:
+#
+#   the active OP signing key   3 fixtures published a constant-seed key per
+#                               test; a peer run retired it and the republish
+#                               died. 96 failures -> 0. Two runs of the auth
+#                               integration binary together: 254/0 and 254/0.
+#   4 rate-limit bucket keys    a shared client ip, or none at all, so a peer
+#                               drained the bucket and a 429 arrived where the
+#                               test asserts 401 / 303 / 200.
+#
+# STILL OPEN, and each is a globally-named DDL object a test installs on a
+# SHARED table. Two runs then fight over one object, and a sleeping trigger
+# meant to slow THIS run's insert also slows the peer's:
+#
+#   crates/auth/tests/signup_forgot_ratelimit_test.rs:397,405,499
+#       CHECK constraint `auth_users_signup_m3_name_check` on zeroship.users
+#   crates/auth/tests/magic_link_test.rs:38,58,80,104
+#       two functions + two triggers, fixed names
+#   crates/auth/tests/password_reset_test.rs:92,112
+#   crates/auth/tests/verification_test.rs:42,63
+#
+# The fix shape is in the tree already: signing_key_retention_test.rs:643
+# interpolates `{trigger_name}` per run and needs nothing. The names have to
+# become per-run AND the triggers need a WHEN clause scoping them to their own
+# run's rows, because a trigger on a shared table fires for the peer too.
+#
 # PROVISION FIRST. This script creates and migrates a DATABASE; it does not
 # create a SERVER, and it fails at line ~110 if none is listening. Stand one up
 # with `tests/provision_test_backends.sh`, which brings up deploy/compose's
