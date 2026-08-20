@@ -88,6 +88,7 @@ pub async fn run(state: Arc<AppState>, tick_secs: u64) {
                 tracing::info!(
                     broadcasts = stats.broadcasts,
                     deliveries = stats.deliveries,
+                    subscriptions_expired = stats.subscriptions_expired,
                     apps_swept = stats.coverage.apps_swept,
                     apps_skipped = stats.coverage.apps_skipped,
                     "workflow_signal_fanout tick delivered broadcasts"
@@ -128,6 +129,11 @@ pub async fn tick_with_config(
     Ok(stats)
 }
 
+struct SubscriptionGc {
+    deleted: usize,
+    coverage: SweepCoverage,
+}
+
 /// Drop every app's lapsed subscriptions, and report how much of the fleet that
 /// covered.
 ///
@@ -135,11 +141,6 @@ pub async fn tick_with_config(
 /// outlives its expiry keeps receiving broadcasts, so an app excluded from this
 /// sweep every tick delivers signals to runs that stopped listening. Nothing in
 /// the delete count would ever say so.
-struct SubscriptionGc {
-    deleted: usize,
-    coverage: SweepCoverage,
-}
-
 async fn gc_expired_subscriptions(state: &AppState) -> Result<SubscriptionGc, RegistryError> {
     let conn = state.registry.conn().await?;
     let fleet = super::workflow_engine::journalled_fleet(&conn).await?;
@@ -541,15 +542,21 @@ mod tests {
             broadcasts: 1,
             deliveries: 2,
             coverage: one_tick_of_coverage,
+            subscriptions_expired: 4,
         };
         stats.add(FanoutStats {
             broadcasts: 1,
             deliveries: 1,
             coverage: one_tick_of_coverage,
+            subscriptions_expired: 4,
         });
         assert_eq!(
             stats.coverage, one_tick_of_coverage,
             "coverage is per tick; draining a second broadcast must not double it"
+        );
+        assert_eq!(
+            stats.subscriptions_expired, 4,
+            "the GC's own delete count is per tick too, for the same reason"
         );
         assert_eq!(stats.broadcasts, 2, "the work counts still accumulate");
     }
