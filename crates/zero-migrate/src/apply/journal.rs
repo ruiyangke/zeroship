@@ -158,7 +158,7 @@ impl EventKind {
 }
 
 /// The lifecycle state of a cross-deploy online-rename pending-contract
-/// obligation. An obligation is born `pending` when a `PgExpandContract`
+/// obligation. An obligation is born `pending` when an `ExpandContract`
 /// EXPAND completes (its C1/C2 contract is deferred to a later deploy); it is
 /// discharged by appending a `resolved` row (history is append-only — a discharge
 /// is NEVER a DELETE, exactly like the journal of record). The NET state of an
@@ -254,7 +254,7 @@ pub struct PendingContract {
     /// the `resolve-pending` lookup key on this. It is a deep sub-step id that the
     /// plan-level supplied set never exposes — so orphan/blocked do NOT key on it.
     pub pending_version: String,
-    /// The rename's PLAN-GROUP version (the `PgExpandContract` plan's E1-anchored
+    /// The rename's PLAN-GROUP version (the `ExpandContract` plan's E1-anchored
     /// id, `render::lower::plan_step_version`). This is the STABLE identity the SUPPLIED
     /// migration set carries (a re-lowered IR's `lower_plan.version`) and an
     /// author's `depends_on` references, so `status`'s orphan and
@@ -558,7 +558,7 @@ pub async fn ensure_journal<D: SqlSession>(
     .await?;
 
     // 2a-ter. The append-only CROSS-DEPLOY PENDING-CONTRACT obligation log
-    // A `PgExpandContract` online rename applies its EXPAND
+    // A `ExpandContract` online rename applies its EXPAND
     // (E1..E3 + backfill) in deploy N and DEFERS its contract (C1 drop trigger
     // + C2 drop old column) to a later deploy. The deferred contract
     // is a DURABLE OBLIGATION — not a transient return value — so a later deploy
@@ -586,7 +586,7 @@ pub async fn ensure_journal<D: SqlSession>(
     // `pending_version` is the APPLY-TIME obligation key (the E2 trigger id) —
     // deterministic per rename, used by the engine interlock's
     // idempotent-skip + self-EXPAND exemption + the `resolve-pending` lookup;
-    // `plan_version` is the rename's PLAN-GROUP version (the PgExpandContract
+    // `plan_version` is the rename's PLAN-GROUP version (the ExpandContract
     // plan's E1-anchored id, `render::lower::plan_step_version`) — the STABLE
     // identity the SUPPLIED migration set carries (a re-lowered IR's
     // `lower_plan.version`) and an author's `depends_on` references, so
@@ -1520,7 +1520,7 @@ fn canonical_pending_contract_type(ty: &str) -> String {
 }
 
 /// Open a cross-deploy pending-contract obligation: INSERT a `state='pending'`
-/// row. Called once per `PgExpandContract` whose EXPAND completed.
+/// row. Called once per `ExpandContract` whose EXPAND completed.
 ///
 /// The caller avoids duplicate pending rows under the project lock. The insert
 /// also refuses to reopen a version that has any resolved row. Resolution is

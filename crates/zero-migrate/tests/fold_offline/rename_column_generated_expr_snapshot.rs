@@ -242,7 +242,7 @@ async fn a_sqlite_rename_rebuild_emits_a_generated_body_over_the_new_column_name
     // table, which has not been renamed yet), so a whole-step text search would pass
     // for the wrong reason and fail for a right one.
     let spec = match &steps[..] {
-        [zero_migrate::PlanStep::OnlineRename(zero_migrate::RenameStep::SqliteRebuild(rebuild))] => {
+        [zero_migrate::PlanStep::OnlineRename(zero_migrate::RenameStep::TableRebuild(rebuild))] => {
             &rebuild.spec
         }
         other => panic!("a SQLite rename lowers to exactly one rebuild step, got {other:?}"),

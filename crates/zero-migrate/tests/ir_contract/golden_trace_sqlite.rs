@@ -368,7 +368,7 @@ async fn golden_g_sqlite_pg_rename_fails_closed() {
             ty: "text".into(),
         })
         .expect("author rename");
-    let steps = vec![PlanStep::OnlineRename(RenameStep::PgExpandContract(rename))];
+    let steps = vec![PlanStep::OnlineRename(RenameStep::ExpandContract(rename))];
     let res = engine
         .apply_plan(
             &steps,

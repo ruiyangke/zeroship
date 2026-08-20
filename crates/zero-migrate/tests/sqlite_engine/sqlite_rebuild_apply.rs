@@ -29,7 +29,7 @@ use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
     CollectionDescriptor, DeclarativeAuthor, FieldDescriptor, IndexDescriptor, IrAuthor,
     LiveSchema, Migration, MigrationIr, PlanStep, RebuildError, RenameStep, SchemaSnapshot,
-    SqliteBackend, SqliteRebuild, SqliteRebuildSpec, SqliteSequencePolicy,
+    SqliteBackend, SqliteSequencePolicy, TableRebuild, TableRebuildSpec,
 };
 
 const PROJECT: &str = "prj_demo";
@@ -110,7 +110,7 @@ async fn apply_first_deploy(be: &SqliteBackend, desc: &[CollectionDescriptor]) {
 }
 
 /// The single rebuild the second-deploy diff produces (asserts exactly one).
-fn one_rebuild(v1: &[CollectionDescriptor], v2: &[CollectionDescriptor]) -> SqliteRebuild {
+fn one_rebuild(v1: &[CollectionDescriptor], v2: &[CollectionDescriptor]) -> TableRebuild {
     let (live, ownership) = live_from(v1);
     let desired2 = desired_snapshot(PROJECT, v2, &effective_policy()).expect("v2 desired");
     let plan = sqlite_author()
@@ -191,13 +191,13 @@ fn drop_composite_fk_ir() -> MigrationIr {
     .expect("composite FK drop fixture deserializes")
 }
 
-fn lower_sqlite_rebuild(ir: &MigrationIr, live: &LiveSchema) -> SqliteRebuild {
+fn lower_sqlite_rebuild(ir: &MigrationIr, live: &LiveSchema) -> TableRebuild {
     let steps = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite, &support::no_inject("app"))
         .lower_steps(ir, live)
         .expect("SQLite composite FK lifecycle lowers");
     assert_eq!(steps.len(), 1, "one FK change is one atomic rebuild");
     match steps.into_iter().next().expect("one step") {
-        PlanStep::OnlineRename(RenameStep::SqliteRebuild(rebuild)) => rebuild,
+        PlanStep::OnlineRename(RenameStep::TableRebuild(rebuild)) => rebuild,
         other => panic!("expected SQLite rebuild, got {other:?}"),
     }
 }
@@ -303,9 +303,9 @@ async fn sequence_remove_policy_turns_identity_into_ordinary_integer() {
         .expect("read old sequence");
     assert_eq!(before[0][0].as_deref(), Some("100"));
 
-    let spec = SqliteRebuildSpec {
+    let spec = TableRebuildSpec {
         table: "t".into(),
-        tmp_table: SqliteRebuildSpec::tmp_name("t"),
+        tmp_table: TableRebuildSpec::tmp_name("t"),
         new_table_create: "CREATE TABLE \"t__zero_migrate_rebuild\" (\
             \"id\" INTEGER NOT NULL, \"value\" TEXT)"
             .into(),
@@ -397,9 +397,9 @@ async fn sequence_remove_policy_rollback_restores_old_high_water() {
         .await
         .expect("fk on");
 
-    let spec = SqliteRebuildSpec {
+    let spec = TableRebuildSpec {
         table: "child".into(),
-        tmp_table: SqliteRebuildSpec::tmp_name("child"),
+        tmp_table: TableRebuildSpec::tmp_name("child"),
         new_table_create: "CREATE TABLE \"child__zero_migrate_rebuild\" (\
             \"id\" INTEGER NOT NULL, \
             \"parent_id\" INTEGER REFERENCES \"parent\" (\"id\"))"
@@ -1230,9 +1230,9 @@ async fn fk_violation_aborts_rebuild_intact_and_fk_back_on() {
     // A rebuild of `child` (same shape) that carries the orphaned row → the
     // foreign_key_check after the swap finds the dangling 'ghost' reference and
     // aborts. Construct the spec directly to keep the FK in the new table.
-    let spec = SqliteRebuildSpec {
+    let spec = TableRebuildSpec {
         table: "child".into(),
-        tmp_table: SqliteRebuildSpec::tmp_name("child"),
+        tmp_table: TableRebuildSpec::tmp_name("child"),
         new_table_create: "CREATE TABLE \"child__zero_migrate_rebuild\" (\
             \"id\" TEXT PRIMARY KEY, \
             \"parent_id\" TEXT REFERENCES \"parent\" (\"id\"))"
@@ -1410,9 +1410,9 @@ async fn aborting_rebuild_leaves_no_wedge_and_fk_on() {
 
     // A rebuild whose recreate step is a hard error (a CREATE INDEX over a
     // non-existent column) → the whole rebuild aborts mid-transaction.
-    let spec = SqliteRebuildSpec {
+    let spec = TableRebuildSpec {
         table: "t".into(),
-        tmp_table: SqliteRebuildSpec::tmp_name("t"),
+        tmp_table: TableRebuildSpec::tmp_name("t"),
         new_table_create:
             "CREATE TABLE \"t__zero_migrate_rebuild\" (\"id\" TEXT PRIMARY KEY, \"v\" TEXT)".into(),
         copy_columns: vec![("id".into(), "id".into()), ("v".into(), "v".into())],
@@ -1630,9 +1630,9 @@ async fn dependent_referencing_dropped_column_fails_closed() {
 
     // A rebuild whose new shape DROPS `drop_me` (only `id` survives). The captured
     // index is over `drop_me`, which the new table lacks → verbatim replay must fail.
-    let spec = SqliteRebuildSpec {
+    let spec = TableRebuildSpec {
         table: "t".into(),
-        tmp_table: SqliteRebuildSpec::tmp_name("t"),
+        tmp_table: TableRebuildSpec::tmp_name("t"),
         new_table_create: "CREATE TABLE \"t__zero_migrate_rebuild\" (\"id\" TEXT PRIMARY KEY)"
             .into(),
         copy_columns: vec![("id".into(), "id".into())],
@@ -1742,9 +1742,9 @@ async fn cross_table_fk_orphan_caught_by_unscoped_check() {
     // This orphans child.c1, whose parent_id='pa' no longer resolves. A
     // foreign_key_check scoped to `parent` sees no orphan IN parent and passes; only
     // the UNSCOPED check (which also visits `child`) catches the orphan.
-    let spec = SqliteRebuildSpec {
+    let spec = TableRebuildSpec {
         table: "parent".into(),
-        tmp_table: SqliteRebuildSpec::tmp_name("parent"),
+        tmp_table: TableRebuildSpec::tmp_name("parent"),
         new_table_create: "CREATE TABLE \"parent__zero_migrate_rebuild\" (\
             \"id\" TEXT PRIMARY KEY, \"label\" TEXT)"
             .into(),
@@ -1860,7 +1860,7 @@ async fn pre_created_temp_table_does_not_pollute_rebuild() {
 
     // A creator pre-creates the engine's temp name with JUNK shape + a JUNK row, as a
     // prior CreatorUp migration would. (One txn flipping to CreatorUp for the DDL.)
-    let tmp_name = SqliteRebuildSpec::tmp_name("gadgets");
+    let tmp_name = TableRebuildSpec::tmp_name("gadgets");
     assert_eq!(tmp_name, "gadgets__zero_migrate_rebuild");
     be.actor().exec("BEGIN IMMEDIATE").await.expect("begin");
     be.actor().set_mode(Mode::CreatorUp).await.expect("creator");
@@ -2570,7 +2570,7 @@ async fn rebuild_one_seam_refuses_destructive_rebuild_outside_version_scope() {
 }
 
 /// A destructive journal migration for a directly-constructed rebuild spec.
-fn rebuild_migration(table: &str, spec: &SqliteRebuildSpec) -> Migration {
+fn rebuild_migration(table: &str, spec: &TableRebuildSpec) -> Migration {
     use zero_migrate::model::migration::{Checksum, ChecksumInput, MigrationFlags, MigrationId};
     let flags = MigrationFlags {
         destructive: true,

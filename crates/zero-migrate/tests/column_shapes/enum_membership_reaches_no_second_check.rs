@@ -173,7 +173,7 @@ fn a_sqlite_rebuild_carries_the_membership_exactly_once() {
     let steps = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite, &effective)
         .lower_steps(&rename, &live)
         .expect("the rename lowers to a rebuild");
-    let [PlanStep::OnlineRename(RenameStep::SqliteRebuild(rebuild))] = steps.as_slice() else {
+    let [PlanStep::OnlineRename(RenameStep::TableRebuild(rebuild))] = steps.as_slice() else {
         panic!("a SQLite renameColumn lowers to one rebuild step: {steps:#?}");
     };
     let create = &rebuild.spec.new_table_create;

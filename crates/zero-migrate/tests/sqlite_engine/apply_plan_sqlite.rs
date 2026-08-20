@@ -2,7 +2,7 @@
 //! dual-EXECUTION rename dispatch (`op.*` DSL), against REAL temp-file
 //! `SQLite`.
 //!
-//! A `PlanStep::OnlineRename(RenameStep::SqliteRebuild(_))` driven
+//! A `PlanStep::OnlineRename(RenameStep::TableRebuild(_))` driven
 //! THROUGH `apply_plan` executes via `MigrationBackend::rebuild_one` (the 12-step
 //! offline rebuild), NOT `run_online` (`SQLite` has no online capability). A seeded
 //! row survives the rename, the old column is gone, and the journal records the
@@ -137,7 +137,7 @@ async fn sqlite_online_rename_executes_via_rebuild_one_through_apply_plan() {
         .await
         .expect("seed rows");
 
-    // Produce the SqliteRebuild via the differ + a rename hint (one rebuild, no
+    // Produce the TableRebuild via the differ + a rename hint (one rebuild, no
     // PG expand-contract on SQLite).
     let (live, ownership) = live_from(&v1);
     let desired2 = desired_snapshot(PROJECT, &v2, &effective_policy()).expect("v2 desired");
@@ -164,11 +164,11 @@ async fn sqlite_online_rename_executes_via_rebuild_one_through_apply_plan() {
     let rebuild = plan.rebuilds.into_iter().next().unwrap();
     let rebuild_version = rebuild.migration.version.as_str().to_string();
 
-    // Drive it THROUGH the single shared apply_plan as a RenameStep::SqliteRebuild.
+    // Drive it THROUGH the single shared apply_plan as a RenameStep::TableRebuild.
     // (Clone so the same rebuild — same version — can be replayed for the
     // idempotency check; the SQLite rebuild version is a freshly-minted UUIDv7, so
     // a re-diff would mint a different one; net-applied-skip keys on the SAME id.)
-    let steps = vec![PlanStep::OnlineRename(RenameStep::SqliteRebuild(
+    let steps = vec![PlanStep::OnlineRename(RenameStep::TableRebuild(
         rebuild.clone(),
     ))];
     let engine = MigrationEngine::new();
@@ -226,7 +226,7 @@ async fn sqlite_online_rename_executes_via_rebuild_one_through_apply_plan() {
 
     // Idempotent re-run: replay the SAME rebuild (same version) → net-applied-skip,
     // no double rebuild.
-    let steps2 = vec![PlanStep::OnlineRename(RenameStep::SqliteRebuild(rebuild))];
+    let steps2 = vec![PlanStep::OnlineRename(RenameStep::TableRebuild(rebuild))];
     let out2 = engine
         .apply_plan(
             &steps2,
@@ -248,7 +248,7 @@ async fn sqlite_online_rename_executes_via_rebuild_one_through_apply_plan() {
 // ---------------------------------------------------------------------------
 // REGRESSION: apply_plan bootstraps the journal up front.
 //
-// A standalone plan whose FIRST step is `OnlineRename(SqliteRebuild)`, applied
+// A standalone plan whose FIRST step is `OnlineRename(TableRebuild)`, applied
 // against a FRESH SQLite file with NO `_mig` journal, made its first journal
 // touch a READ (`journal_sql::applied` SELECT on a non-existent
 // `_mig.schema_migrations`, via the rebuild arm's net-applied-skip lookup) →
@@ -301,7 +301,7 @@ async fn rebuild_first_plan_against_fresh_journal_bootstraps_it() {
             .expect("seed row");
     }
 
-    // 2) Build the SqliteRebuild via the differ (pure — no DB write).
+    // 2) Build the TableRebuild via the differ (pure — no DB write).
     let (live, ownership) = live_from(&v1);
     let desired2 = desired_snapshot(PROJECT, &v2, &effective_policy()).expect("v2 desired");
     let hint = RenameHint {
@@ -331,9 +331,9 @@ async fn rebuild_first_plan_against_fresh_journal_bootstraps_it() {
     let journal_b = dir.path().join("zs-app.migrations-b.sqlite");
     let be = SqliteBackend::open(&app, &journal_b).expect("open backend B (fresh journal)");
 
-    // The FIRST (and only) step is the SqliteRebuild; the `_mig` journal does not
+    // The FIRST (and only) step is the TableRebuild; the `_mig` journal does not
     // exist yet — the rebuild arm's net-applied-skip lookup reads it first.
-    let steps = vec![PlanStep::OnlineRename(RenameStep::SqliteRebuild(rebuild))];
+    let steps = vec![PlanStep::OnlineRename(RenameStep::TableRebuild(rebuild))];
     let engine = MigrationEngine::new();
     let out = engine
         .apply_plan(
@@ -413,7 +413,7 @@ async fn sqlite_rename_opens_no_obligation_and_never_gates_a_follow_on_deploy() 
     let engine = MigrationEngine::new();
     engine
         .apply_plan(
-            &[PlanStep::OnlineRename(RenameStep::SqliteRebuild(rebuild))],
+            &[PlanStep::OnlineRename(RenameStep::TableRebuild(rebuild))],
             Approval::Approved,
             &be,
             &exec_cfg(),

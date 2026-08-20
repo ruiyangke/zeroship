@@ -100,7 +100,7 @@ enum LoweredOp {
     /// ordered plan is known. Not guarded per-fragment: the expand-contract author / the differ are
     /// the trusted, descriptor-/intent-driven producers (no untrusted raw SQL),
     /// exactly like the declarative path that produces the same shapes. Boxed: a
-    /// `RenameStep::PgExpandContract` is large (the full E1..C2 plan), so boxing it
+    /// `RenameStep::ExpandContract` is large (the full E1..C2 plan), so boxing it
     /// keeps the common `Ddl` arm cheap (`clippy::large_enum_variant`).
     Rename(Box<RenameStep>),
     /// An explicit primary-key lifecycle mutation. It remains structured until
@@ -2697,11 +2697,11 @@ impl LoweredArtifact {
         for s in &self.plan.steps {
             match s {
                 PlanStep::Ddl(m) => out.push(m.clone()),
-                PlanStep::OnlineRename(RenameStep::PgExpandContract(ec)) => {
+                PlanStep::OnlineRename(RenameStep::ExpandContract(ec)) => {
                     out.extend(ec.expand.iter().cloned());
                     out.extend(ec.contract.iter().cloned());
                 }
-                PlanStep::OnlineRename(RenameStep::SqliteRebuild(rb)) => {
+                PlanStep::OnlineRename(RenameStep::TableRebuild(rb)) => {
                     out.push(rb.migration.clone());
                 }
                 PlanStep::AlterPrimaryKey(step) => out.push(step.migration.clone()),
@@ -6108,7 +6108,7 @@ impl IrAuthor {
                         live_schema,
                     )?;
                     live_schema.table_snapshots.insert(table.clone(), desired);
-                    return Ok(LoweredOp::Rename(Box::new(RenameStep::SqliteRebuild(
+                    return Ok(LoweredOp::Rename(Box::new(RenameStep::TableRebuild(
                         rebuild,
                     ))));
                 }
@@ -6218,7 +6218,7 @@ impl IrAuthor {
                         &self.resolved_inject(&eff_schema, table)?,
                     )?;
                     live_schema.table_snapshots.insert(table.clone(), desired);
-                    return Ok(LoweredOp::Rename(Box::new(RenameStep::SqliteRebuild(
+                    return Ok(LoweredOp::Rename(Box::new(RenameStep::TableRebuild(
                         rebuild,
                     ))));
                 }
@@ -8576,7 +8576,7 @@ impl IrAuthor {
         table: &str,
         constraint: &IrConstraint,
         live_schema: &LiveSchema,
-    ) -> Result<(crate::render::declarative::SqliteRebuild, TableSnapshot), IrLowerError> {
+    ) -> Result<(crate::render::declarative::TableRebuild, TableSnapshot), IrLowerError> {
         let IrConstraintKind::Fk {
             columns,
             references_table,
@@ -10181,13 +10181,13 @@ fn stamp_ir_plan_steps(ir: &MigrationIr, steps: &mut [PlanStep]) -> (MigrationId
                     ir_step_version(&plan_version, ordinal),
                 );
             }
-            PlanStep::OnlineRename(RenameStep::SqliteRebuild(rb)) => {
+            PlanStep::OnlineRename(RenameStep::TableRebuild(rb)) => {
                 replacements.insert(
                     rb.migration.version.as_str().to_string(),
                     ir_step_version(&plan_version, ordinal),
                 );
             }
-            PlanStep::OnlineRename(RenameStep::PgExpandContract(ec)) => {
+            PlanStep::OnlineRename(RenameStep::ExpandContract(ec)) => {
                 let step_version = ir_step_version(&plan_version, ordinal);
                 for (sub_ordinal, migration) in ec.expand.iter().enumerate() {
                     let next = if sub_ordinal == 0 {
@@ -10251,11 +10251,11 @@ fn stamp_ir_plan_steps(ir: &MigrationIr, steps: &mut [PlanStep]) -> (MigrationId
                 let next = ir_step_version(&plan_version, ordinal);
                 restamp_ir_migration(&mut step.migration, next, &anchor, &replacements, &ir.flags);
             }
-            PlanStep::OnlineRename(RenameStep::SqliteRebuild(rb)) => {
+            PlanStep::OnlineRename(RenameStep::TableRebuild(rb)) => {
                 let next = ir_step_version(&plan_version, ordinal);
                 restamp_ir_migration(&mut rb.migration, next, &anchor, &replacements, &ir.flags);
             }
-            PlanStep::OnlineRename(RenameStep::PgExpandContract(ec)) => {
+            PlanStep::OnlineRename(RenameStep::ExpandContract(ec)) => {
                 ec.plan_version = Some(plan_version.clone());
                 let step_version = ir_step_version(&plan_version, ordinal);
                 for (sub_ordinal, migration) in ec.expand.iter_mut().enumerate() {
@@ -16910,7 +16910,7 @@ columns = [
             .lower_plan(&ir, &live)
             .expect("rename lowers");
 
-        let [PlanStep::OnlineRename(RenameStep::PgExpandContract(rename))] = plan.steps.as_slice()
+        let [PlanStep::OnlineRename(RenameStep::ExpandContract(rename))] = plan.steps.as_slice()
         else {
             panic!("expected one PostgreSQL online rename step")
         };

@@ -27,7 +27,7 @@ use crate::apply::journal::{self, AppliedEntry, JournalError};
 use crate::conn::ExecutorConfig;
 use crate::model::migration::{Migration, MigrationId};
 use crate::model::snapshot::SchemaSnapshot;
-use crate::render::plan::{DatabaseRequirements, SqliteRebuildSpec};
+use crate::render::plan::{DatabaseRequirements, TableRebuildSpec};
 use crate::render::step::BindValue;
 use crate::render::step::{AlterPrimaryKeyStep, SynchronizeIdentityStep};
 use crate::schema::query::SqlDialect;
@@ -524,7 +524,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
 
     async fn rebuild_one(
         &self,
-        spec: &SqliteRebuildSpec,
+        spec: &TableRebuildSpec,
         _m: &Migration,
         _scope: &crate::approval::ApprovalScope,
         _applied_by: &str,

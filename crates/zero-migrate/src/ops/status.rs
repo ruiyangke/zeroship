@@ -197,7 +197,7 @@ impl PlanStatusManifest {
                     status.writes_quiesced = Some(step.writes_quiesced.clone());
                     steps.push(status);
                 }
-                PlanStep::OnlineRename(RenameStep::PgExpandContract(rename)) => {
+                PlanStep::OnlineRename(RenameStep::ExpandContract(rename)) => {
                     steps.extend(
                         rename
                             .expand
@@ -211,7 +211,7 @@ impl PlanStatusManifest {
                             .map(|m| migration_step(m, PlanStatusStepKind::OnlineContract)),
                     );
                 }
-                PlanStep::OnlineRename(RenameStep::SqliteRebuild(rebuild)) => {
+                PlanStep::OnlineRename(RenameStep::TableRebuild(rebuild)) => {
                     steps.push(migration_step(
                         &rebuild.migration,
                         PlanStatusStepKind::SqliteRebuild,
