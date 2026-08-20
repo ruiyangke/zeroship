@@ -88,6 +88,11 @@ enum FingerprintCmd {
     /// From a git tree. Prints nothing and exits 1 when the ref has no
     /// migrations, which is an ordinary answer about a ref.
     Ref {
+        /// The repository the ref is resolved in. Stated rather than taken
+        /// from the working directory, so the caller that enumerated the refs
+        /// is the one that says where they live.
+        #[arg(long)]
+        repo: PathBuf,
         #[arg(long = "ref")]
         reference: String,
     },
@@ -233,7 +238,7 @@ fn run_fingerprint(cmd: FingerprintCmd) -> i32 {
             }
             Err(refusal) => refuse(&refusal, exit::FATAL),
         },
-        FingerprintCmd::Ref { reference } => match fingerprint::of_ref(&reference) {
+        FingerprintCmd::Ref { repo, reference } => match fingerprint::of_ref(&repo, &reference) {
             Some(value) => {
                 println!("{value}");
                 exit::OK

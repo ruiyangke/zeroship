@@ -94,8 +94,17 @@ pub fn of_dir(root: &Path) -> Result<String, String> {
 /// What it must never do is return a VALUE for such a tree. A fingerprint of
 /// nothing is a legitimate-looking hash no working tree can ever produce, so
 /// every database keyed to it would look reachable forever.
-pub fn of_ref(reference: &str) -> Option<String> {
+///
+/// WHY `repo` IS AN ARGUMENT. It used to be the process's working directory,
+/// which made this the one function here with an ambient input -- and the
+/// sweeper's ref list comes from a `git for-each-ref` run somewhere else, so
+/// "which repository" was agreed by coincidence rather than stated. Naming it
+/// also makes the discrimination control constructible: a test can build two
+/// trees that differ by exactly one migration and ask about THEM, instead of
+/// sampling this repository's history and hoping a migration changed recently.
+pub fn of_ref(repo: &Path, reference: &str) -> Option<String> {
     let listing = Command::new("git")
+        .current_dir(repo)
         .args(["ls-tree", reference, "--", &format!("{MIGRATIONS_DIR}/")])
         .output()
         .ok()?;
@@ -126,6 +135,7 @@ pub fn of_ref(reference: &str) -> Option<String> {
             continue;
         }
         let blob = Command::new("git")
+            .current_dir(repo)
             .args(["cat-file", "blob", sha])
             .output()
             .ok()?;
@@ -240,6 +250,99 @@ mod tests {
         let nodir = scratch();
         let err = of_dir(nodir.path()).unwrap_err();
         assert!(err.contains("no platform migrations directory"), "{err}");
+    }
+
+    /// `git add -A` then `git write-tree`, and hand back the tree's sha.
+    ///
+    /// A TREE rather than a commit on a branch, deliberately: `write-tree`
+    /// needs no `user.email`, runs no hooks and signs nothing, so a case built
+    /// on it cannot fail for a reason that has nothing to do with the
+    /// fingerprint. [`of_ref`] takes any tree-ish, and the selftest's
+    /// no-migrations case already passes it a bare tree sha.
+    ///
+    /// `add -A -f`: the force is against a GLOBAL excludes file. Nothing in a
+    /// throwaway tree is ignorable, and a `*.ts` line in somebody's
+    /// `~/.gitignore` would otherwise stage an empty set.
+    fn write_tree(repo: &Path) -> String {
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .current_dir(repo)
+                .args(args)
+                .output()
+                .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+            String::from_utf8(out.stdout).unwrap()
+        };
+        git(&["add", "-A", "-f"]);
+        git(&["write-tree"]).trim().to_string()
+    }
+
+    fn init_repo(repo: &Path) {
+        let out = Command::new("git")
+            .current_dir(repo)
+            .args(["init", "-q", "."])
+            .output()
+            .expect("git init");
+        assert!(out.status.success(), "git init: {out:?}");
+    }
+
+    #[test]
+    fn the_git_tree_fingerprint_moves_when_one_migration_changes() {
+        // THE NEGATIVE CONTROL for `of_ref`, and it is CONSTRUCTED rather than
+        // sampled. The selftest used to take a commit 40 back on this branch
+        // and assume its migrations differed; that binds the control to the
+        // repository's recent activity, so it goes red during any quiet period
+        // on migrations and its verdict says nothing about the function.
+        //
+        // Without a case of this shape, "the two computations agree on the real
+        // repository" is satisfied by an `of_ref` that returns a constant --
+        // and a constant fingerprint means every branch shares one database
+        // with no symptom until two schemas collide in it.
+        let repo = scratch();
+        tree(repo.path(), &[("20260101_one.ts", "one"), ("20260202_two.ts", "two")]);
+        init_repo(repo.path());
+        let before = write_tree(repo.path());
+
+        std::fs::write(
+            repo.path().join(MIGRATIONS_DIR).join("20260101_one.ts"),
+            "one, but different",
+        )
+        .unwrap();
+        let after = write_tree(repo.path());
+        assert_ne!(before, after, "the two trees must actually differ");
+
+        let fp_before = of_ref(repo.path(), &before).expect("a tree with migrations");
+        let fp_after = of_ref(repo.path(), &after).expect("a tree with migrations");
+        assert_ne!(fp_before, fp_after, "one edited migration must move the hash");
+    }
+
+    #[test]
+    fn the_two_computations_agree_on_a_constructed_tree() {
+        // The real-repository pin in tests/lib_sweep_db_selftest.sh stays the
+        // authority for this property -- a fixture cannot vouch for the files
+        // the sweeper reasons over. What a fixture CAN do is put a name in the
+        // set that the real repository does not have. The space matters: the
+        // git side splits its listing on the TAB rather than on whitespace
+        // precisely so a path with a space survives, and nothing tested it.
+        let repo = scratch();
+        tree(
+            repo.path(),
+            &[("20260101_one.ts", "one"), ("20260202 two.ts", "two")],
+        );
+        init_repo(repo.path());
+        let from_ref = of_ref(repo.path(), &write_tree(repo.path())).expect("a tree");
+        assert_eq!(of_dir(repo.path()).unwrap(), from_ref);
+    }
+
+    #[test]
+    fn a_git_tree_with_no_migrations_yields_no_value() {
+        // Not a hash of nothing: that would be a legitimate-looking value no
+        // working tree can produce, so every database keyed to it would look
+        // reachable forever and the sweeper would never reclaim one.
+        let repo = scratch();
+        std::fs::write(repo.path().join("README.md"), "hello").unwrap();
+        init_repo(repo.path());
+        assert_eq!(of_ref(repo.path(), &write_tree(repo.path())), None);
     }
 
     #[test]
