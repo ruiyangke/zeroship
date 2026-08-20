@@ -6653,6 +6653,10 @@ async fn revoke_journal_access(fx: &Fixture, app_id: &Uuid) {
 
 struct TwoAppReap {
     registered: usize,
+    /// The tick's OWN account of how much of the fleet it covered. Kept
+    /// alongside `registered` because the pair is the whole point: a tick that
+    /// dropped a tenant and a clean tick can produce the same `registered`.
+    coverage: workflow_engine::SweepCoverage,
     /// `wake_at` of the READABLE app's parked run once the reaper has run. The
     /// reaper's whole job is to pull this forward to now.
     good_wake_at: DateTime<Utc>,
@@ -6674,11 +6678,11 @@ async fn reap_over_two_apps(label: &str, revoke_second: bool) -> Option<TwoAppRe
     }
 
     let control_url = dsn_as_role(&fx.db_url, "zeroship_control", "zeroship_control");
-    let registered = {
+    let reap = {
         let control_registry = Registry::new(&control_url)
             .await
             .expect("connect a registry as the zeroship_control role");
-        let registered = workflow_engine::reap_parked_cancel_requested_batch(
+        let reap = workflow_engine::reap_parked_cancel_requested_batch(
             &fx.scheduler_store,
             &control_registry,
             64,
@@ -6686,7 +6690,7 @@ async fn reap_over_two_apps(label: &str, revoke_second: bool) -> Option<TwoAppRe
         .await
         .expect("the reaper tick must survive an app whose journal it cannot read");
         drop(control_registry);
-        registered
+        reap
     };
 
     fx.pg.set_default_app_id(good_app);
@@ -6703,7 +6707,8 @@ async fn reap_over_two_apps(label: &str, revoke_second: bool) -> Option<TwoAppRe
     drop(fx);
     common::drain_pg().await;
     Some(TwoAppReap {
-        registered,
+        registered: reap.registered,
+        coverage: reap.coverage,
         good_wake_at,
     })
 }
@@ -6724,16 +6729,21 @@ async fn reap_over_two_apps(label: &str, revoke_second: bool) -> Option<TwoAppRe
 /// on 2026-08-20.
 ///
 /// WHAT THIS DOES NOT CATCH. Exactly one arm: the PARKED-CANCEL reaper skipping
-/// one unreadable app while reaping another. It does not cover the other sweeps
-/// that share `journalled_app_ids` (scheduler reconcile, signal-fanout
-/// subscription GC, workflow/deploy retention, blob GC) - those are asserted by
-/// nothing here. It does not cover the CONSERVATIVE arms: nothing here proves
-/// blob GC retains a blob, or deploy retention keeps a manifest, when an app is
-/// unreadable. It says nothing about a journal that becomes unreadable BETWEEN
-/// the app-list query and the per-app statement, nor about a connection-level
-/// failure, which is deliberately still fatal. And it does not prove the
-/// production database has the grant: it proves the migration corpus this test
-/// DB was built from does.
+/// one unreadable app while reaping another, and reporting that skip in its
+/// return value. It does not cover the other sweeps that share
+/// `journalled_fleet` (scheduler reconcile, signal-fanout subscription GC,
+/// workflow/deploy retention, blob GC) - those still return a work count with no
+/// coverage beside it, and nothing here asserts otherwise. It does not cover the
+/// CONSERVATIVE arms: nothing here proves blob GC retains a blob, or deploy
+/// retention keeps a manifest, when an app is unreadable. It does not exercise
+/// the `apps_skipped` increment on the OTHER path - a journal that turns
+/// unreadable BETWEEN the catalog query and the per-app statement, which is the
+/// `skip_journal_scoped` arm inside the loop; both paths add to the same field
+/// and only the catalog one is asserted here. It does not exercise
+/// `apps_unvisited` at all, because 64 is far above a two-app fleet. It says
+/// nothing about a connection-level failure, which is deliberately still fatal.
+/// And it does not prove the production database has the grant: it proves the
+/// migration corpus this test DB was built from does.
 #[compio::test]
 async fn parked_cancel_reaper_skips_an_app_whose_journal_is_unreadable() {
     let Some(result) = reap_over_two_apps("skip-unreadable-journal", true).await else {
@@ -6742,6 +6752,37 @@ async fn parked_cancel_reaper_skips_an_app_whose_journal_is_unreadable() {
     assert_eq!(
         result.registered, 1,
         "the reaper must reap the readable app's parked cancel and skip the unreadable one"
+    );
+    // The discrimination this pair exists for. `registered` is a work count and
+    // a work count of 1 is also what a healthy one-app fleet produces; only
+    // `apps_skipped` says a tenant was dropped, and it says it in the RETURN
+    // VALUE, not in a WARN nobody greps.
+    //
+    // `apps_skipped` is asserted absolutely and `apps_swept` only as a floor:
+    // the CONTROL_TEST_DB template may already hold journalled apps (a shared
+    // billing test DB does), which moves `apps_swept` and `apps_total` but not
+    // the skip count, since nothing in a migrated template is unreadable.
+    assert_eq!(
+        result.coverage.apps_skipped, 1,
+        "the excluded tenant must be counted, not left to log archaeology"
+    );
+    assert!(
+        result.coverage.apps_swept >= 1,
+        "the readable app must have been swept, got {}",
+        result.coverage.apps_swept
+    );
+    assert_eq!(
+        result.coverage.apps_unvisited, 0,
+        "a limit of 64 must not leave any app unvisited at this fleet size"
+    );
+    assert_eq!(
+        result.coverage.apps_total(),
+        result.coverage.apps_swept + 1,
+        "coverage must account for every journalled app: swept plus the one skipped"
+    );
+    assert!(
+        !result.coverage.is_complete(),
+        "a tick that dropped a tenant must not report complete coverage"
     );
     assert!(
         result.good_wake_at <= Utc::now() + ChronoDuration::seconds(5),
@@ -6756,6 +6797,11 @@ async fn parked_cancel_reaper_skips_an_app_whose_journal_is_unreadable() {
 /// This is what makes the `1` above mean "skipped one app". Without it a `1`
 /// would be equally consistent with a reaper that only ever handles one app per
 /// tick.
+///
+/// It is also the control for the COVERAGE assertions: `apps_skipped == 0` here
+/// against `== 1` there, one variable apart, is what shows the field
+/// discriminates rather than being a constant. An `apps_skipped` hardcoded to 1
+/// would pass the test above and fail this one.
 #[compio::test]
 async fn parked_cancel_reaper_reaps_both_apps_when_both_journals_are_readable() {
     let Some(result) = reap_over_two_apps("reap-both-journals", false).await else {
@@ -6764,5 +6810,298 @@ async fn parked_cancel_reaper_reaps_both_apps_when_both_journals_are_readable() 
     assert_eq!(
         result.registered, 2,
         "with both journals readable the reaper must reap both apps' parked cancels"
+    );
+    assert!(
+        result.coverage.apps_swept >= 2,
+        "both seeded journals were readable, so both apps must be swept, got {}",
+        result.coverage.apps_swept
+    );
+    assert_eq!(
+        result.coverage.apps_skipped, 0,
+        "nothing was excluded, so the skip count must be zero"
+    );
+    assert!(
+        result.coverage.is_complete(),
+        "a tick that covered every tenant must report complete coverage"
+    );
+}
+
+// ===========================================================================
+// Retention sweep: connections held must not scale with the fleet
+// ===========================================================================
+
+/// Sessions this database has ever accepted, from the server's own counter.
+///
+/// `pg_stat_activity` cannot answer the question this test asks. The retention
+/// sweep is entirely serial - one app's transaction commits before the next one
+/// opens - so its peak CONCURRENT backend count was about 2 whether it opened
+/// one connection or one per app, and a sampler would have printed the same
+/// number before and after the fix. What scaled with the fleet was the number
+/// of connections OPENED, because `Registry::conn` runs a fresh
+/// `compio_postgres::connect` every call, and `pg_stat_database.sessions` is
+/// where Postgres records that.
+///
+/// Read on the fixture's OWN connection, which is already open and so is
+/// counted identically in both snapshots.
+async fn sessions_opened(fx: &Fixture) -> i64 {
+    fx.pg
+        .inner
+        .batch_execute("SELECT pg_stat_clear_snapshot()")
+        .await
+        .expect("clear the per-transaction stats snapshot");
+    let row = fx
+        .pg
+        .inner
+        .query_one(
+            "SELECT sessions FROM pg_stat_database WHERE datname = current_database()",
+            &[],
+        )
+        .await
+        .expect("read pg_stat_database.sessions");
+    row.get::<_, i64>("sessions")
+}
+
+/// Seed one app whose journal holds one expired terminal run with a blob
+/// output, so a retention tick has real work on every app in the fleet.
+///
+/// The blob matters: without one the tick's blob-GC call short-circuits on an
+/// empty hash set and never reaches its own connection, and that was the SECOND
+/// per-app `Registry::conn` site.
+async fn seed_expired_run_with_blob(fx: &Fixture, label: &str, terminal_at: DateTime<Utc>) {
+    let (app_id, deploy_id) = seed_app_and_deploy(fx, label).await;
+    let run_id = seed_run(fx, app_id, &deploy_id, "completed", -1_000, None, None, None, None).await;
+    fx.pg.set_default_app_id(app_id);
+    fx.pg
+        .execute(
+            "UPDATE zeroship.workflow_runs SET wake_at = NULL, terminal_at = $2 WHERE id = $1",
+            &[&run_id, &terminal_at],
+        )
+        .await
+        .expect("age the terminal run past the retention window");
+
+    let bytes = format!("fleet-blob-{label}").into_bytes();
+    let hash = sha256_hex(&bytes);
+    fx.state
+        .workflow_blob_store
+        .put_blob(&hash, &bytes)
+        .await
+        .expect("write workflow blob");
+    fx.pg
+        .execute(
+            "INSERT INTO zeroship.workflow_blobs \
+                (hash, size, content_type, refcount, last_referenced_at) \
+             VALUES ($1, $2, 'application/json', 1, $3)",
+            &[&hash, &(bytes.len() as i64), &terminal_at],
+        )
+        .await
+        .expect("insert workflow blob ref");
+    fx.pg
+        .execute(
+            "INSERT INTO zeroship.workflow_steps \
+                (run_id, ordinal, name, name_occurrence, kind, state, output_kind, \
+                 output_hash, output_size, output_content_type, batch_id, batch_width, finished_at) \
+             VALUES ($1, 0, 'blob-out', 0, 'run', 'completed', 'blob', \
+                     $2, $3, 'application/json', 'wfd_fleet', 1, $4)",
+            &[&run_id, &hash, &(bytes.len() as i64), &terminal_at],
+        )
+        .await
+        .expect("insert blob step");
+}
+
+struct FleetSweep {
+    apps: usize,
+    sessions_opened: i64,
+    runs_reaped: usize,
+}
+
+/// Run ONE retention tick over a fleet of `apps` apps and report how many
+/// database sessions it opened.
+async fn retention_over_fleet(label: &str, apps: usize) -> Option<FleetSweep> {
+    let fx = isolated_fixture(label).await?;
+    let window_ms = 2 * 24 * 60 * 60 * 1_000;
+    let terminal_at = Utc::now() - ChronoDuration::milliseconds(window_ms + 60_000);
+    for i in 0..apps {
+        seed_expired_run_with_blob(&fx, &format!("{label}-{i}"), terminal_at).await;
+    }
+
+    let before = sessions_opened(&fx).await;
+    let stats = workflow_retention::tick_with_config(
+        &fx.state,
+        workflow_retention::WorkflowRetentionConfig {
+            retention_window_ms: window_ms,
+            batch_size: 256,
+        },
+    )
+    .await
+    .expect("run retention sweep over the fleet");
+    let after = sessions_opened(&fx).await;
+
+    drop(fx);
+    common::drain_pg().await;
+    Some(FleetSweep {
+        apps,
+        sessions_opened: after - before,
+        runs_reaped: stats.runs,
+    })
+}
+
+/// A retention tick over a 12-app fleet must open the SAME number of database
+/// connections as one over a 2-app fleet.
+///
+/// The two sweeps are one variable apart - fleet size - and both do real
+/// per-app work, which `runs_reaped` asserts so that an equal session count
+/// cannot come from a sweep that skipped the loop entirely.
+///
+/// MEASURED, by reverting the fix and re-running this test: the old shape took
+/// `state.registry.conn()` inside the per-app loop AND again inside the blob GC
+/// it calls, and opened `2N + 1` sessions - 5 for 2 apps, 25 for 12. The fixed
+/// shape opens 1, for both fleet sizes.
+///
+/// WHAT THIS DOES NOT CATCH. It measures CONNECTIONS OPENED, and says nothing
+/// about connections held CONCURRENTLY - that was about 2 before the change and
+/// is 1 after, and no assertion here would notice a future change that opened
+/// them in parallel instead of in sequence. It does not check transaction
+/// SCOPE: a rewrite that collapsed the per-app transactions into one
+/// fleet-spanning transaction would open exactly one session and pass this test
+/// while holding every tenant's row locks for the whole sweep. It does not
+/// check lock DURATION at all. It does not cover the other fleet sweeps
+/// (scheduler reconcile, signal fanout, deploy retention, blob GC) - deploy
+/// retention and the blob ref sweep already hoist their connection, but nothing
+/// here would notice if that regressed. And 12 apps is not 10k: it shows the
+/// count is flat between two sizes, not that it is flat at scale.
+#[compio::test]
+async fn retention_tick_opens_the_same_connections_for_a_large_fleet_as_a_small_one() {
+    let Some(small) = retention_over_fleet("fleet-conn-small", 2).await else {
+        return;
+    };
+    let Some(large) = retention_over_fleet("fleet-conn-large", 12).await else {
+        return;
+    };
+
+    // A floor, not an equality: the CONTROL_TEST_DB template may already hold
+    // journalled apps of its own with expired runs. The point of asserting it
+    // at all is that both sweeps did real per-app work, so an equal session
+    // count cannot come from a loop that never ran.
+    assert!(
+        small.runs_reaped >= small.apps,
+        "the small sweep must prune at least one run per seeded app, got {} for {} apps",
+        small.runs_reaped,
+        small.apps
+    );
+    assert!(
+        large.runs_reaped >= large.apps,
+        "the large sweep must prune at least one run per seeded app, got {} for {} apps",
+        large.runs_reaped,
+        large.apps
+    );
+    assert_eq!(
+        large.sessions_opened, small.sessions_opened,
+        "connections opened must not scale with the fleet: {} apps opened {} \
+         sessions, {} apps opened {}",
+        small.apps, small.sessions_opened, large.apps, large.sessions_opened
+    );
+    assert!(
+        large.sessions_opened <= 2,
+        "a retention tick should open one connection, got {}",
+        large.sessions_opened
+    );
+}
+
+// ===========================================================================
+// Run lookup: "no such run" must not be manufactured from a permission gap
+// ===========================================================================
+
+/// Locating a run must not answer "no such run" while an app's journal is
+/// unreadable.
+///
+/// `find_run_tables` returning `None` is a DECISION, not a report: its callers
+/// ack the run's scheduler timer as terminal or conclude there are no children
+/// to cancel. Taking the app list from a helper that drops unreadable apps made
+/// a permission gap on ANY app look like "this run does not exist", and the
+/// live run behind it lost its timer.
+///
+/// The pair below is one variable apart. Both seed a run in app A and revoke
+/// app B; the first asks for a run that does exist, the second for one that
+/// does not. The first must still succeed - the fix must not couple a healthy
+/// tenant's lookup to another tenant's privilege gap - and the second must
+/// error rather than say `None`.
+///
+/// WHAT THIS DOES NOT CATCH. It exercises the lookup directly through a
+/// test-only accessor, so it does NOT prove the callers behave better: nothing
+/// here asserts that `sync_scheduler_for_run_on` stops acking terminal or that
+/// `cascade_cancel_children` stops reporting no children. It covers only the
+/// catalog-level unreadable case, not a journal that turns unreadable between
+/// the app-list query and the per-app SELECT, which still propagates as a raw
+/// error. And it says nothing about ordering cost: the fix searches every
+/// readable app before it looks at the exclusions, which is the same scan the
+/// old code did.
+#[compio::test]
+async fn run_lookup_finds_a_readable_apps_run_while_another_journal_is_unreadable() {
+    let Some(fx) = isolated_fixture("lookup-readable-wins").await else {
+        return;
+    };
+    let (good_app, good_deploy) = seed_app_and_deploy(&fx, "lookup-good").await;
+    let run_id = seed_run(&fx, good_app, &good_deploy, "sleeping", 60_000, None, None, None, None)
+        .await;
+    let (other_app, _other_deploy) = seed_app_and_deploy(&fx, "lookup-other").await;
+    revoke_journal_access(&fx, &other_app).await;
+
+    let control_url = dsn_as_role(&fx.db_url, "zeroship_control", "zeroship_control");
+    let found = {
+        let control_registry = Registry::new(&control_url)
+            .await
+            .expect("connect a registry as the zeroship_control role");
+        let found = workflow_engine::__find_run_app_for_test(&control_registry, &run_id).await;
+        drop(control_registry);
+        found
+    };
+    drop(fx);
+    common::drain_pg().await;
+
+    assert_eq!(
+        found.expect("a run in a READABLE journal must still be found"),
+        Some(good_app),
+        "the lookup must not be coupled to another tenant's privilege gap"
+    );
+}
+
+/// The control for the test above: same fleet, same revoke, a run id that
+/// exists nowhere.
+///
+/// This is the arm that discriminates. Before the fix it returned `Ok(None)`,
+/// which every caller reads as "this run is gone" - and it was the same
+/// `Ok(None)` a genuinely absent run produces, so the two were unrecoverably
+/// confused. It must now be an error.
+#[compio::test]
+async fn run_lookup_refuses_to_report_absent_while_a_journal_is_unreadable() {
+    let Some(fx) = isolated_fixture("lookup-unknown-errors").await else {
+        return;
+    };
+    let (good_app, good_deploy) = seed_app_and_deploy(&fx, "lookup-good").await;
+    let _present = seed_run(&fx, good_app, &good_deploy, "sleeping", 60_000, None, None, None, None)
+        .await;
+    let (other_app, _other_deploy) = seed_app_and_deploy(&fx, "lookup-other").await;
+    revoke_journal_access(&fx, &other_app).await;
+
+    let control_url = dsn_as_role(&fx.db_url, "zeroship_control", "zeroship_control");
+    let absent = {
+        let control_registry = Registry::new(&control_url)
+            .await
+            .expect("connect a registry as the zeroship_control role");
+        let absent =
+            workflow_engine::__find_run_app_for_test(&control_registry, "wfr_does_not_exist").await;
+        drop(control_registry);
+        absent
+    };
+    drop(fx);
+    common::drain_pg().await;
+
+    let err = absent.expect_err(
+        "with a journal it cannot read, the lookup must not claim the run is absent",
+    );
+    let message = err.to_string();
+    assert!(
+        message.contains("unreadable"),
+        "the error must name the reason it could not decide, got: {message}"
     );
 }
