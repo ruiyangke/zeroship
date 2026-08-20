@@ -2734,3 +2734,112 @@ async fn a_result_set_larger_than_the_single_frame_cap_still_streams() {
         "last row truncated"
     );
 }
+
+/// `max_size` is a ceiling, so a pool must never open or hand out more
+/// connections than it.
+///
+/// `Pool::connect(url, n)` sets `max_size` and leaves every other knob at its
+/// default, including `min_idle: 2`. Warmup opened `min_idle.max(1)`
+/// connections with no reference to `max_size`, so `Pool::connect(url, 1)`
+/// came back holding two and handed out both. Measured before the fix:
+/// `total=2 idle=2`, and a second checkout succeeded while the first was
+/// still held. A per-tenant connection budget that the pool silently doubles
+/// is not a budget.
+///
+/// The convenience constructor is the only one that can produce this, because
+/// it is the only one that lets a caller set `max_size` without also seeing
+/// `min_idle`.
+#[compio::test]
+async fn a_pool_never_opens_more_connections_than_its_max_size() {
+    let Some(url) = require_pg().await else { return };
+
+    let pool = Pool::connect(&url, 1).await.unwrap();
+    assert_eq!(
+        pool.total_count(),
+        1,
+        "warmup opened more connections than max_size"
+    );
+
+    let held = pool.get().await.unwrap();
+    let second = compio::time::timeout(std::time::Duration::from_secs(2), pool.get()).await;
+    assert!(
+        second.is_err(),
+        "a second connection was handed out while max_size=1 was already checked out"
+    );
+    drop(held);
+}
+
+/// The control for the test above: a pool whose `max_size` leaves room for the
+/// default `min_idle` must still warm up to `min_idle`, not be clamped down to
+/// one connection. Without this, "never exceed max_size" could be satisfied by
+/// warming a single connection always, which would cost every pool its warm
+/// start.
+#[compio::test]
+async fn a_pool_with_room_still_warms_up_to_min_idle() {
+    let Some(url) = require_pg().await else { return };
+
+    let expected = PoolConfig::default().min_idle;
+    let pool = Pool::connect(&url, 8).await.unwrap();
+    assert_eq!(
+        pool.total_count(),
+        expected,
+        "warmup did not reach the default min_idle when max_size allowed it"
+    );
+}
+
+/// The two configurations the pool refuses must actually be refused, and must
+/// say so at construction rather than at the first checkout.
+///
+/// Both were added with the warm-set fix and neither had coverage. The
+/// `max_size = 0` arm matters most: without it the pool constructs `Ok`,
+/// never opens a connection, and then parks every `get()` on a waiter nothing
+/// can wake, so the caller pays the full `connection_timeout` - 30s by
+/// default - to learn what the constructor already knew.
+///
+/// `min_idle > max_size` is reachable without ever typing `min_idle`, because
+/// `PoolConfig` has public fields and `..Default::default()` fills it in.
+#[compio::test]
+async fn a_pool_refuses_a_configuration_it_cannot_honour() {
+    let Some(url) = require_pg().await else { return };
+
+    let zero = Pool::connect_with_config(
+        &url,
+        PoolConfig {
+            max_size: 0,
+            min_idle: 0,
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(
+        zero.is_err(),
+        "a pool with max_size 0 was constructed; every checkout on it would time out"
+    );
+
+    let inverted = Pool::connect_with_config(
+        &url,
+        PoolConfig {
+            max_size: 1,
+            min_idle: 4,
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(
+        inverted.is_err(),
+        "a pool was constructed with min_idle above max_size"
+    );
+
+    // The control: the shape that reaches the refusal by accident must still
+    // work once the two numbers agree.
+    let ok = Pool::connect_with_config(
+        &url,
+        PoolConfig {
+            max_size: 1,
+            min_idle: 1,
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(ok.is_ok(), "a coherent single-connection pool was refused");
+}

@@ -395,10 +395,19 @@ pub struct Pool {
 impl Pool {
     /// Create a new pool. Eagerly opens `min_idle` connections to verify
     /// the URL and warm the pool.
+    ///
+    /// `min_idle` is lowered to `max_size` when the default would exceed it.
+    /// This is the only constructor that can produce that combination, because
+    /// it is the only one that sets `max_size` without the caller also seeing
+    /// `min_idle`: `Pool::connect(url, 1)` against the default `min_idle` of 2
+    /// used to warm up to two connections and hand out both, so the argument
+    /// named `max_size` did not bound anything.
     pub async fn connect(url: &str, max_size: usize) -> Result<Self, Error> {
+        let defaults = PoolConfig::default();
         let config = PoolConfig {
             max_size,
-            ..PoolConfig::default()
+            min_idle: defaults.min_idle.min(max_size),
+            ..defaults
         };
         Self::connect_with_config(url, config).await
     }
@@ -409,9 +418,53 @@ impl Pool {
     /// of traffic does not pay full connect latency. Each connection attempt
     /// is retried with exponential backoff (3 attempts: 100ms, 400ms, 1.6s)
     /// to survive Docker ordering, DNS blips, and brief PG restarts.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a `max_size` of 0, and a `min_idle` greater than `max_size`.
+    /// Both are configurations the pool cannot honour rather than preferences
+    /// it can approximate, and both are cheaper to hear about here than as a
+    /// checkout that blocks for `connection_timeout`.
     pub async fn connect_with_config(url: &str, config: PoolConfig) -> Result<Self, Error> {
+        // A pool that can hold nothing is not a pool. Refused here rather than
+        // constructed, because the alternative is worse than it looks: with
+        // `max_size` 0 there is no idle entry to pop and no capacity to create
+        // one, so `get()` parks on a waiter nothing can ever wake and every
+        // caller pays the full `connection_timeout` before hearing about it.
+        if config.max_size == 0 {
+            return Err(Error::config("pool max_size must be at least 1".into()));
+        }
+
+        // `min_idle` above `max_size` is not a preference the pool can honour,
+        // it is two contradictory instructions, and the pool cannot tell which
+        // number the caller meant. Refused rather than clamped, so the answer
+        // comes from whoever wrote them.
+        //
+        // NOT only reachable from a config spelled out in full, which is what
+        // this comment used to claim. `PoolConfig` has public fields and no
+        // `#[non_exhaustive]`, so `PoolConfig { max_size: 1, ..Default::default() }`
+        // is the ordinary idiom and `Default` supplies `min_idle` behind the
+        // caller's back - see `crates/plugin-db/tests/missing_role.rs`, which
+        // is written exactly that way. A caller who never typed `min_idle` can
+        // therefore land here.
+        if config.min_idle > config.max_size {
+            return Err(Error::config(
+                format!(
+                    "pool min_idle ({}) exceeds max_size ({}); set min_idle explicitly",
+                    config.min_idle, config.max_size
+                )
+                .into(),
+            ));
+        }
+
         let transport = Transport::resolve(url)?;
 
+        // `max(1)` keeps a `min_idle` of 0 from making the constructor prove
+        // nothing about the URL - one connection is what verifies it. No
+        // `min(max_size)`: with both guards above in place, `min_idle` is never
+        // greater than `max_size` and `max_size` is never 0, so clamping here
+        // could only ever change the `max_size == 0` case - which is now
+        // refused rather than turned into a pool that deadlocks.
         let warm = config.min_idle.max(1);
         let mut entries: Vec<PoolEntry> = Vec::with_capacity(warm);
         for i in 0..warm {
@@ -824,6 +877,18 @@ impl Pool {
 
         let mut created = 0usize;
         for _ in 0..to_create {
+            // RE-CHECK, do not trust `to_create`. That budget was computed
+            // before the first `connect_one().await` below, and it stops being
+            // true at that await: `get_inner` reserves slots while this task is
+            // parked, so a later iteration can reserve one the pool no longer
+            // has. Measured shape on the defaults - max_size 8, four checked
+            // out, housekeeper picks to_create 2, reserves one and parks; four
+            // acquisitions take total to 8; the second iteration then reserved
+            // a ninth. The on-demand path never had this because it checks and
+            // reserves with no await between the two.
+            if self.total.get() >= self.config.max_size {
+                break;
+            }
             // Same RAII discipline as the on-demand connect path: reserve the
             // slot before the await so concurrent get_inner calls see the
             // bumped `total`, and let the guard release it on Err / cancellation
