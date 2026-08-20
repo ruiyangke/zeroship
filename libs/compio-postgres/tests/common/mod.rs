@@ -51,7 +51,47 @@ pub fn redact_dsn(dsn: &str) -> String {
     )
 }
 
-/// Fail the calling test because PostgreSQL could not be reached.
+/// Renders an error and every `source()` beneath it, joined with `": "`.
+///
+/// `compio_postgres::Error`'s own `Display` is a one-word kind - `Kind::Db`
+/// prints the literal string `"db error"` (`src/error/mod.rs`, the `Display`
+/// impl) - and everything that identifies the failure lives in the `DbError`
+/// hanging off `source()`. Formatting the outer error alone therefore renders
+/// every server-sent refusal, whatever it was, as `db error`.
+///
+/// The `SQLSTATE` is appended rather than taken from `DbError`'s `Display`,
+/// which prints only `severity: message` and drops the code.
+pub fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut rendered = String::new();
+    let mut link = Some(error);
+    while let Some(current) = link {
+        if !rendered.is_empty() {
+            rendered.push_str(": ");
+        }
+        rendered.push_str(&current.to_string());
+        if let Some(db) = current.downcast_ref::<compio_postgres::error::DbError>() {
+            rendered.push_str(&format!(" (SQLSTATE {})", db.code().code()));
+        }
+        link = current.source();
+    }
+    rendered
+}
+
+/// Whether the server answered. A `DbError` anywhere in the chain is a message
+/// PostgreSQL composed and sent, so something was listening, authenticated the
+/// startup packet far enough to reply, and refused on purpose.
+pub fn server_answered(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut link = Some(error);
+    while let Some(current) = link {
+        if current.is::<compio_postgres::error::DbError>() {
+            return true;
+        }
+        link = current.source();
+    }
+    false
+}
+
+/// Fail the calling test because the connection this test needs was not made.
 ///
 /// This is what a missing database does now. It used to announce a skip, which
 /// cargo counts as a pass, and the only way to make it fatal was to remember to
@@ -61,16 +101,53 @@ pub fn redact_dsn(dsn: &str) -> String {
 /// The message has to answer three questions or it is no better than the
 /// `connection refused` it replaces: WHICH backend, WHERE it was dialled (with
 /// the password removed - see [`redact_dsn`]), and WHAT COMMAND provisions one.
+///
+/// The third answer is only correct when nothing answered, and this printed it
+/// unconditionally. Measured 2026-08-20: with `crate::release` disabled, nine
+/// tests in `integration.rs` failed against a running, healthy server that had
+/// hit its `max_connections` ceiling, and every one of them reported
+///
+/// ```text
+///   error:   db error
+/// Provision it, then re-run: ...
+/// ```
+///
+/// - the wrong cause and a remedy for a server that was already up. So the
+/// branch below asks whether PostgreSQL replied before it prescribes anything,
+/// and [`error_chain`] prints what it said.
 #[track_caller]
-pub fn postgres_unreachable(dsn: &str, error: &dyn std::fmt::Display) -> ! {
+pub fn postgres_unreachable(dsn: &str, error: &(dyn std::error::Error + 'static)) -> ! {
+    let dialled = redact_dsn(dsn);
+    let cause = error_chain(error);
+
+    if server_answered(error) {
+        panic!(
+            "PostgreSQL refused the connection this test requires.\n\
+             \n\
+             \x20 backend: PostgreSQL\n\
+             \x20 dialled: {dialled}\n\
+             \x20 server:  {cause}\n\
+             \n\
+             The server ANSWERED, so it is running and reachable and this is\n\
+             not a provisioning problem. The SQLSTATE above says what it\n\
+             objected to. `53300` is the `max_connections` ceiling: something\n\
+             in this process is holding connections open across tests - see\n\
+             `libs/compio-postgres/src/release.rs` - and raising the ceiling\n\
+             would hide that rather than fix it.\n\
+             \n\
+             There is no environment variable that makes this a skip. A\n\
+             database this suite cannot use is a failed run, not a green one."
+        )
+    }
+
     panic!(
         "PostgreSQL is unreachable, and this test requires it.\n\
          \n\
          \x20 backend: PostgreSQL\n\
-         \x20 dialled: {}\n\
-         \x20 error:   {error}\n\
+         \x20 dialled: {dialled}\n\
+         \x20 error:   {cause}\n\
          \n\
-         Provision it, then re-run:\n\
+         Nothing answered, so provision it and re-run:\n\
          \x20 tests/provision_test_backends.sh\n\
          \n\
          That brings up the `postgres` and `redis` services from\n\
@@ -78,8 +155,7 @@ pub fn postgres_unreachable(dsn: &str, error: &dyn std::fmt::Display) -> ! {
          Point the tests somewhere else with PG_TEST_URL.\n\
          \n\
          There is no environment variable that makes this a skip. A database\n\
-         this suite cannot reach is a failed run, not a green one.",
-        redact_dsn(dsn)
+         this suite cannot reach is a failed run, not a green one."
     )
 }
 
