@@ -2324,6 +2324,150 @@ fn a_connection_does_not_outlive_the_runtime_that_opened_it() {
         "every runtime opened one connection and dropped it; the server should \
          hold none between iterations, got {backends:?}"
     );
+
+    // The fd series is printed, not asserted, and the test below is why: in
+    // THIS process the number moves for reasons that have nothing to do with
+    // the runtime being dropped.
+}
+
+/// Name of the test below, needed as a literal because it re-executes itself.
+const FD_PROBE_TEST: &str = "a_torn_down_runtime_leaks_a_bounded_number_of_descriptors";
+
+/// Set in the re-executed child. Its presence selects the measuring arm.
+const FD_PROBE_CHILD: &str = "CPG_FD_PROBE_CHILD";
+
+/// Marks the child's machine-readable result line.
+const FD_PROBE_MARKER: &str = "FD-PROBE-SERIES ";
+
+/// The descriptor half of the invariant above, which `crate::release` does NOT
+/// fix and is not trying to.
+///
+/// Measured 2026-08-20 against the same binary with `Socket::release_handle`
+/// forced to `None`: the backend series went `[1,2,3,4,5,6]` and the fd series
+/// stayed `[10,16,22,28,34,40]` - byte for byte what it is with the release in
+/// place. The release ends the SESSION; the descriptor is co-owned by an
+/// io_uring submission that `Runtime::drop` never reclaims (`crate::live` has
+/// the mechanism), so it stays for the life of the process either way.
+///
+/// Three per runtime is a known, accepted cost, and this bound is what makes it
+/// accepted rather than unmeasured. It multiplies: `crates/auth` runs 254 tests
+/// in ONE process (`crates/auth/tests/main.rs`), so at this rate that binary
+/// ends holding ~760 descriptors. That is under the 1024 soft `RLIMIT_NOFILE`
+/// many CI images still ship - with no room for a second connection per test,
+/// which several of them open. What it would surface as is EMFILE in a test
+/// unrelated to whatever raised the cost.
+///
+/// The bound is three and not six because the test above measures TWO runtime
+/// teardowns per iteration: `tagged_backends` builds a `Runtime` and a
+/// connection of its own to ask the server its question. Its series therefore
+/// reads `[6,6,6,6,6]` for the same underlying cost, which is why the number
+/// this asserts is measured here rather than taken from what that one prints.
+///
+/// # Why this re-executes itself
+///
+/// `/proc/self/fd` is per-PROCESS, and libtest runs this file's tests on
+/// several threads of one process by default. Sibling tests opening and
+/// closing their own connections move the count underneath the loop, so the
+/// per-drop delta measures them too. Measured 2026-08-20, same binary, same
+/// database, same box, `--test-threads` the only variable:
+///
+///   default:            fds [78,122,165,170,171,176]  deltas [44,43,5,1,5]
+///   --test-threads=1:   fds [10, 16, 22, 28, 34, 40]  deltas [6,6,6,6,6]
+///
+/// An earlier version of this asserted the budget inline and passed only
+/// because it had been run serially - and it did not merely mis-measure, it
+/// PANICKED with "attempt to subtract with overflow" when a sibling closed
+/// more descriptors than the runtime leaked and the count went DOWN.
+///
+/// Tagging the descriptors the way the backend count is tagged does not rescue
+/// it: the siblings connect to the same database on the same port, so nothing
+/// observable on the socket separates their descriptors from this test's.
+/// Machine load is not the contaminant either - other PROCESSES cannot appear
+/// in `/proc/self/fd` - so the fix is not to tolerate the churn but to remove
+/// it, by doing the measuring in a child process that runs this test and
+/// nothing else. That is isolated by construction rather than by a convention
+/// the next runner has to know.
+#[test]
+fn a_torn_down_runtime_leaks_a_bounded_number_of_descriptors() {
+    if std::env::var_os(FD_PROBE_CHILD).is_some() {
+        measure_and_report_fd_series();
+        return;
+    }
+
+    let exe = std::env::current_exe().expect("current_exe");
+    let output = std::process::Command::new(&exe)
+        .args(["--exact", FD_PROBE_TEST, "--nocapture", "--test-threads=1"])
+        .env(FD_PROBE_CHILD, "1")
+        .output()
+        .expect("re-exec the test binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "the isolated child failed.\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
+    );
+
+    // Searched for anywhere in the line, not as a prefix: libtest writes
+    // `test <name> ... ` without a newline and the child's first `println!`
+    // lands on the end of it, so the marker is mid-line on the run that
+    // matters.
+    let series = stdout
+        .lines()
+        .find_map(|line| line.split_once(FD_PROBE_MARKER))
+        .map(|(_, rest)| rest)
+        .unwrap_or_else(|| {
+            panic!("child printed no {FD_PROBE_MARKER} line.\n--- stdout ---\n{stdout}")
+        });
+    let fds: Vec<i64> = series
+        .split(',')
+        .map(|n| n.trim().parse().expect("fd count"))
+        .collect();
+    assert!(fds.len() >= 2, "need at least two samples, got {fds:?}");
+
+    // Signed, so a count that goes DOWN is a number this reports rather than a
+    // panic inside the assertion that was supposed to describe it.
+    let per_runtime: Vec<i64> = fds.windows(2).map(|w| w[1] - w[0]).collect();
+    println!("open fds in the isolated child: {fds:?}");
+    println!("descriptors leaked per runtime: {per_runtime:?}");
+
+    const BUDGET: i64 = 3;
+    assert!(
+        per_runtime.iter().all(|&d| d <= BUDGET),
+        "a torn-down runtime leaks at most {BUDGET} descriptors; got {per_runtime:?} \
+         from {fds:?}. Read the doc comment before raising this."
+    );
+}
+
+/// The child arm of [`a_torn_down_runtime_leaks_a_bounded_number_of_descriptors`].
+///
+/// Opens and drops one runtime per iteration and prints the descriptor count
+/// after each, on a line the parent parses. Sampling `/proc/self/fd` is only
+/// meaningful here because the parent invoked this process with `--exact` and
+/// `--test-threads=1`, so no other test shares it.
+fn measure_and_report_fd_series() {
+    let url = test_url();
+    let tag = "cpg_fd_probe";
+    let sep = if url.contains('?') { '&' } else { '?' };
+    let tagged = format!("{url}{sep}application_name={tag}");
+
+    let mut fds = Vec::new();
+    for _ in 0..6 {
+        let rt = compio::runtime::Runtime::new().expect("cannot create runtime");
+        rt.block_on(async {
+            let client = match connect(&tagged).await {
+                Ok(client) => client,
+                Err(e) => common::postgres_unreachable(&tagged, &e),
+            };
+            let rows = client.query("SELECT 1::int4 AS one", &[]).await.unwrap();
+            assert_eq!(rows[0].get::<_, i32>("one"), 1);
+        });
+        drop(rt);
+        fds.push(open_fds());
+    }
+
+    let series: Vec<String> = fds.iter().map(ToString::to_string).collect();
+    println!("{FD_PROBE_MARKER}{}", series.join(","));
 }
 
 /// The one-variable partner. The test above would also pass if the connection
@@ -2356,6 +2500,76 @@ fn a_connection_is_visible_to_the_server_while_its_runtime_runs() {
     drop(rt);
 
     assert_eq!(seen, 1, "the live connection should see itself");
+}
+
+/// A server-sent refusal must reach the reader with the SQLSTATE it carried.
+///
+/// `compio_postgres::Error`'s own `Display` renders EVERY `Kind::Db` as the
+/// literal string `"db error"`, and `postgres_unreachable` used to format only
+/// that. Measured 2026-08-20 with `crate::release` disabled against a live,
+/// healthy server at its `max_connections` ceiling: nine tests in this file
+/// failed reporting `error: db error` and told the reader to provision a
+/// database that was already up. `53300` never appeared in the output.
+///
+/// The error here is a real one off the wire rather than a synthesised chain,
+/// because the property under test is that the `DbError` at the bottom of a
+/// real `Error` is found and read.
+#[compio::test]
+async fn a_server_refusal_reaches_the_reader_with_its_sqlstate() {
+    let Some(url) = require_pg().await else { return };
+    let client = connect(&url).await.unwrap();
+
+    let err = client
+        .query("SELECT * FROM a_table_that_does_not_exist", &[])
+        .await
+        .expect_err("querying a missing table must fail");
+
+    // What the old formatting produced, and all it produced.
+    assert_eq!(err.to_string(), "db error");
+
+    let chain = common::error_chain(&err);
+    assert!(
+        chain.contains("42P01"),
+        "the chain must carry the SQLSTATE the server sent, got {chain:?}"
+    );
+    assert!(
+        chain.contains("a_table_that_does_not_exist"),
+        "the chain must carry the server's message, got {chain:?}"
+    );
+    assert!(
+        common::server_answered(&err),
+        "a DbError means PostgreSQL composed and sent this, so it answered"
+    );
+}
+
+/// The one-variable partner. The test above proves the chain walk RUNS; only
+/// this proves it DISCRIMINATES. A `server_answered` that returned `true`
+/// unconditionally would pass the test above and would put "the server
+/// ANSWERED, so it is running" on top of a connection refused - the same class
+/// of wrong claim, pointed the other way.
+///
+/// Port 1 is dialled rather than a closed high port: the low ports are
+/// reserved, so nothing can be listening there by accident and make this pass
+/// for the wrong reason.
+#[compio::test]
+async fn nothing_listening_is_not_reported_as_a_server_answer() {
+    let err = compio_postgres::connect(
+        "postgres://postgres:zeroship@127.0.0.1:1/zeroship",
+        NoTls,
+    )
+    .await
+    .err()
+    .expect("nothing listens on port 1");
+
+    assert!(
+        !common::server_answered(&err),
+        "no server replied, so the provisioning advice is the correct one"
+    );
+    let chain = common::error_chain(&err);
+    assert!(
+        !chain.contains("SQLSTATE"),
+        "a transport failure carries no SQLSTATE to print, got {chain:?}"
+    );
 }
 
 /// The consequence that motivated this, stated as the thing a caller actually
