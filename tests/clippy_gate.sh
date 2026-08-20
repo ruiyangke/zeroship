@@ -436,11 +436,12 @@ awk -F'\t' '
 EXTERNAL_ERRS="$(tr -d '[:space:]' < "$TMP/errors_external.txt")"
 EXTERNAL_ERRS="${EXTERNAL_ERRS:-0}"
 
-# Projected to (package, code, message) and deduped AGAIN: the same source line
-# is re-linted once per target that compiles it, so one doc comment in a shared
-# `tests/common/mod.rs` reports once per test binary in the crate. Deduping on
-# the full row including the target would print it three times and make the
-# count read as three separate faults.
+# Projected to (package, code, message) and deduped AGAIN. The same source line
+# is re-linted once per target that compiles it, so a doc comment in a module
+# that several test binaries in a crate share reports once per binary. Deduping
+# on the full row, target included, printed one such comment three times and
+# made the count read as three separate faults - which is what this projection
+# was added to stop.
 LINT_ERRS="$(awk -F'\t' '$2 ~ /^clippy::/ {printf "%s\t%s\t%s\n", $1, $2, $3}' "$TMP/errors_named.tsv" | sort -u)"
 HARD_ERRS="$(awk -F'\t' '$2 !~ /^clippy::/ {printf "%s\t%s\t%s\n", $1, $2, $3}' "$TMP/errors_named.tsv" | sort -u)"
 
