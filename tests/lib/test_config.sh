@@ -81,6 +81,8 @@ zs_test_config_get() {
 # one there and the overlay this reads is written to match.
 zs_test_config_load() {
   local root dsn authority userinfo hostport
+  local want_host="${PG_HOST:-}" want_port="${PG_PORT:-}"
+  local want_user="${PG_USER:-}" want_pass="${PG_PASS:-}"
 
   root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
   ZS_TEST_OVERLAY="$root/deploy/ops/zeroship.test.toml"
@@ -128,4 +130,65 @@ zs_test_config_load() {
 
   ZS_TEST_PG_DSN="$dsn"
   export PG_HOST PG_PORT PG_USER PG_PASS PG_DB ZS_TEST_PG_DSN ZS_TEST_REDIS_URL
+
+  zs_test_config_assert_agrees "$want_host" "$want_port" "$want_user" "$want_pass" || return 1
+}
+
+# Refuse when the caller asked for one server and the overlay names another.
+#
+# WHY A REFUSAL AND NOT A WARNING. A harness reads PG_HOST/PG_PORT for its OWN
+# psql calls; every SERVICE it spawns reads the overlay through
+# `zeroship_core::config::test_overlay`. Point a suite at a second cluster with
+# `PG_PORT=5444` and the two halves connect to two different servers - the
+# provisioning and the probes on one, the code under test on the other. Nothing
+# announces that. The run completes and reports a plausible number computed
+# against two databases, which is the worst available outcome: not a failure, a
+# WRONG MEASUREMENT that reads like a result.
+#
+# The values are also what `tests/provision_test_backends.sh` takes as INPUTS,
+# so the fix a caller wants is always the same - regenerate the overlay for the
+# server they meant - and the message says so.
+#
+# `localhost` and `127.0.0.1` are the same host and are treated as such. They
+# differ as strings and CI writes one while the generator writes the other, so
+# comparing them literally would refuse every CI run for no reason - a gate that
+# cries wolf is a gate somebody deletes.
+zs_test_config_assert_agrees() {
+  local want_host="$1" want_port="$2" want_user="$3" want_pass="$4"
+  local mismatch=""
+
+  _zs_same_host() {
+    local a="$1" b="$2"
+    [ "$a" = "$b" ] && return 0
+    case "$a" in localhost|127.0.0.1|::1) ;; *) return 1 ;; esac
+    case "$b" in localhost|127.0.0.1|::1) return 0 ;; *) return 1 ;; esac
+  }
+
+  [ -n "$want_host" ] && ! _zs_same_host "$want_host" "$PG_HOST" \
+    && mismatch="${mismatch}  PG_HOST: you asked for '${want_host}', the overlay says '${PG_HOST}'
+"
+  [ -n "$want_port" ] && [ "$want_port" != "$PG_PORT" ] \
+    && mismatch="${mismatch}  PG_PORT: you asked for '${want_port}', the overlay says '${PG_PORT}'
+"
+  [ -n "$want_user" ] && [ "$want_user" != "$PG_USER" ] \
+    && mismatch="${mismatch}  PG_USER: you asked for '${want_user}', the overlay says '${PG_USER}'
+"
+  # The password is compared but never printed.
+  [ -n "$want_pass" ] && [ "$want_pass" != "$PG_PASS" ] \
+    && mismatch="${mismatch}  PG_PASS: differs from the overlay's (values not shown)
+"
+
+  [ -z "$mismatch" ] && return 0
+
+  echo "FATAL: the server you asked for is not the server the overlay names." >&2
+  printf '%s' "$mismatch" >&2
+  echo "       $ZS_TEST_OVERLAY" >&2
+  echo "       This is not a preference the harness can honour halfway. Its own" >&2
+  echo "       psql calls would go to your server while every service it starts" >&2
+  echo "       read the overlay and went to the other one, and the run would" >&2
+  echo "       report a number computed against two different databases." >&2
+  echo "       Regenerate the overlay for the server you mean:" >&2
+  echo "         PG_HOST=${want_host:-$PG_HOST} PG_PORT=${want_port:-$PG_PORT} \\" >&2
+  echo "           tests/provision_test_backends.sh" >&2
+  return 1
 }

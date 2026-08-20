@@ -481,6 +481,7 @@ jobs:
           tests/lib_scratch_db_selftest.sh
           tests/lib_suite_db_selftest.sh
           tests/lib_sweep_db_selftest.sh
+          tests/lib_test_config_selftest.sh
           tests/lib/e2e_stack_selftest.sh
           tests/lib/known_catchall_selftest.sh
       # e2d0cba4c changed three harnesses from 100755 to 100644 in a commit about
