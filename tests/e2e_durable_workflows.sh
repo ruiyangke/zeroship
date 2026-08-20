@@ -659,9 +659,9 @@ ON CONFLICT (id) DO UPDATE SET
   ingress_disabled = false,
   updated_at = now(),
   updated_by = EXCLUDED.updated_by;
-INSERT INTO zeroship.app_net_grants (app_id, host, port, granted_by, note)
-VALUES ('$APP_ID', '127.0.0.1', $SIDE_PORT, 'dw07-e2e', 'DW-07 side-effect counter')
-ON CONFLICT (app_id, host, port) DO UPDATE SET granted_at = now(), note = EXCLUDED.note;
+INSERT INTO zeroship.app_egress_rules (app_id, verdict, kind, destination, port, created_by, note)
+VALUES ('$APP_ID', 'accept', 'cidr', '127.0.0.1/32', $SIDE_PORT, 'dw07-e2e', 'DW-07 side-effect counter')
+ON CONFLICT (app_id, kind, destination, port) DO UPDATE SET created_at = now(), note = EXCLUDED.note;
 SQL
 DEPLOY_ID="$(docker exec "$PG_ADMIN_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -At -v ON_ERROR_STOP=1 \
   -c "SELECT id FROM zeroship.app_deploys WHERE app_id = '$APP_ID' ORDER BY activated_at DESC, created_at DESC, id DESC LIMIT 1;")"

@@ -295,6 +295,84 @@ pub fn drain_events(state: &SharedState, ws_id: u32) -> Vec<WsEvent> {
 // Connect task
 // ---------------------------------------------------------------------------
 
+/// Put a `ws://` / `wss://` destination through the egress evaluator and return
+/// the address to connect to, or report the refusal and return `None`.
+///
+/// The refusal is classified by `transport::egress::refusal_report`, the same
+/// function `node:net` uses, so an app sees the SAME vocabulary from both
+/// transports: `ERR_NET_SSRF` when the platform floor emptied the answer,
+/// `ERR_NET_EGRESS_DENIED` when the creator's own rules did. WebSocket's
+/// `error` event carries no code field, so the code is written into the reason
+/// rather than dropped.
+async fn authorize_ws_target(
+    state: &SharedState,
+    ws_id: u32,
+    url: &url::Url,
+) -> Option<std::net::SocketAddr> {
+    let Some(host) = url.host_str().map(ToString::to_string) else {
+        push_event(
+            state,
+            ws_id,
+            WsEvent::Error {
+                reason: "WebSocket URL has no host".to_string(),
+            },
+        );
+        push_event(
+            state,
+            ws_id,
+            WsEvent::Close {
+                code: 1006,
+                reason: String::new(),
+                was_clean: false,
+            },
+        );
+        return None;
+    };
+    let port = url
+        .port_or_known_default()
+        .unwrap_or_else(|| if url.scheme() == "wss" { 443 } else { 80 });
+
+    // Lifted out of the RefCell before the await, as on the `node:net` path.
+    let (policy, resolver) = {
+        let s = state.borrow();
+        (s.net_policy.clone(), Rc::clone(&s.egress_resolver))
+    };
+
+    match crate::transport::egress::evaluate(&policy, &host, port, &*resolver).await {
+        // Survivors come back in the resolver's own order; taking the first is
+        // happy-eyeballs preference, not a filter.
+        Ok(kept) => kept.first().copied(),
+        Err(refusal) => {
+            // The `error` event is a plain Event by spec and carries no
+            // message, so the close reason is the ONLY channel an app has for
+            // this. Leaving it empty would mean a creator whose v4-only range
+            // grant dropped every AAAA answer sees something indistinguishable
+            // from a broken name - the exact confusion the three-way split
+            // exists to prevent. The abort path already carries a reason on a
+            // 1006 close, so this is the established shape here.
+            let (code, message) = crate::transport::egress::refusal_report(&refusal);
+            let reason = format!("{code}: {message}");
+            push_event(
+                state,
+                ws_id,
+                WsEvent::Error {
+                    reason: reason.clone(),
+                },
+            );
+            push_event(
+                state,
+                ws_id,
+                WsEvent::Close {
+                    code: 1006,
+                    reason,
+                    was_clean: false,
+                },
+            );
+            None
+        }
+    }
+}
+
 pub fn spawn_connect_task(
     state: SharedState,
     ws_id: u32,
@@ -329,7 +407,23 @@ pub fn spawn_connect_task(
         let max_frame_size = opts.max_frame_size;
         let max_message_size = opts.max_message_size;
 
-        let result = super::handshake::run_handshake(url, opts).await;
+        // THE EGRESS GATE, and the same one `node:net` goes through.
+        //
+        // A WebSocket is a raw bidirectional byte stream the moment the
+        // upgrade completes, so it is gated by the creator's `NetPolicy`
+        // exactly as a socket is, under ONE rule set: a creator who granted
+        // `api.example.test:443` reaches it by either transport, and a
+        // creator who granted nothing reaches nothing by either. `fetch` is
+        // the only ungated egress on this platform.
+        //
+        // Running it HERE rather than inside the handshake is INVARIANT
+        // ONE-COMPOSITION: `run_handshake` receives an address that is
+        // already authorized and makes no egress decision of its own.
+        let Some(addr) = authorize_ws_target(&state_for_task, ws_id, &url).await else {
+            return;
+        };
+
+        let result = super::handshake::run_handshake(url, addr, opts).await;
 
         match result {
             Ok(Established {

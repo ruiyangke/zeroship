@@ -92,7 +92,7 @@ impl Scope {
     ///
     /// `env:*` covers everything that configures an app without redeploying
     /// it, which since creator self-service egress
-    /// (`/api/apps/{id}/net-grants`) includes the raw-TCP host allowlist. The
+    /// (`/api/apps/{id}/egress-rules`) includes the raw-TCP host allowlist. The
     /// label names both, because a screen that says only "environment
     /// variables" while the token can widen an app's network reach is a lie
     /// told at the exact moment consent is given. No `net:*` scope was added:
@@ -225,7 +225,7 @@ mod tests {
         );
     }
 
-    /// `env:*` authorizes `/api/apps/{id}/net-grants` as well as vars, so the
+    /// `env:*` authorizes `/api/apps/{id}/egress-rules` as well as vars, so the
     /// consent copy has to name the network capability. This pins the wording
     /// against a future edit that trims it back to "environment variables"
     /// and silently understates what the user is approving.

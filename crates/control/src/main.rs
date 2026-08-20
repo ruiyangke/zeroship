@@ -275,20 +275,7 @@ fn main() -> std::io::Result<()> {
         trusted_oauth_clients = trusted_oauth_clients.len(),
         "control: trusted OAuth client set resolved"
     );
-    // The one operator lever left over creator egress. It is file-and-default
-    // only, so an absent key resolves UNAVAILABLE and every creator wildcard
-    // grant is refused - the same fail-closed state the missing catalog row
-    // used to produce, now decided at boot instead of per request.
     let configured_oauth_clients = file.auth.oauth_clients.clone();
-    let frontable_suffixes = zeroship_core::net_policy::FrontableSuffixCatalog::from_config(
-        file.control.frontable_wildcard_suffixes.as_deref(),
-    );
-    tracing::info!(
-        available = frontable_suffixes.available,
-        suffixes = frontable_suffixes.suffixes.len(),
-        "control: frontable wildcard suffix catalog resolved"
-    );
-
     let port = *settings.port.get();
     let bind_host = settings.bind.get().clone();
     // Every secret is already resolved by the generated declaration, in one
@@ -580,8 +567,7 @@ fn main() -> std::io::Result<()> {
         .block_on(async move {
     let registry = Registry::new(&db_url)
         .await
-        .expect("failed to connect to database")
-        .with_frontable_suffixes(frontable_suffixes);
+        .expect("failed to connect to database");
 
     // The content-addressed `BlobStore` is the ONLY deploy-artifact store.
     // `.zship` deploys land in `{prefix}/blobs/` + `{prefix}/manifests/`;
@@ -1111,11 +1097,11 @@ fn main() -> std::io::Result<()> {
                 web::resource("/api/apps/{id}/audit")
                     .route(web::get().to(env_handlers::list_audit)),
             )
-            // Creator self-service for the app's raw-TCP egress hosts. The
-            // creator names hosts; the plan's caps and the operator's
-            // frontable-suffix catalog bound what they may name, and an app
-            // with no rows stays default-deny.
-            .configure(zeroship_control::net_grants::configure)
+            // Creator self-service for the app's raw-TCP egress rules. The
+            // creator names destinations and verdicts; the plan's caps and the
+            // rule grammar bound what they may write, and an app with no
+            // accept rule stays default-deny.
+            .configure(zeroship_control::egress_rules::configure)
             // --- Auth (resource server) ---
             // No console OIDC RP and no console back-channel-logout endpoint:
             // the console is now a gateway-fronted regular app authenticated
