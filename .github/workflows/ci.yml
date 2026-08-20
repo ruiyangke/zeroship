@@ -785,6 +785,74 @@ jobs:
   # is exactly how fifteen non-billing control suites went unrun before.
   #
   # The job name is kept because branch protection references it.
+  #
+  # THIS JOB AND auth-gate BELOW EXITED 2 HAVING RUN ZERO TESTS on every fresh
+  # checkout until 2026-08-20, and the reason was configuration, not a database.
+  # Both scripts call `zs_test_config_load` (run_billing_suite.sh:133,
+  # run_auth_suite.sh:157), which reads `deploy/ops/zeroship.test.toml` and
+  # RETURNS 1 when it is absent. That file is gitignored (.gitignore:62) and is
+  # written by tests/provision_test_backends.sh, which until this change had
+  # exactly ONE call site in this workflow - the `rust` job at line 150. So the
+  # service container below was healthy and reachable and the suite never got as
+  # far as dialling it.
+  #
+  # MEASURED 2026-08-20 on a worktree with no overlay, against a real
+  # postgres:16 with no POSTGRES_DB and no postgres-init.sql (so the `postgres`
+  # role has no search_path either) - the same shape as a `services:` container.
+  # Same command, same server, one variable apart:
+  #   no overlay    exit 2,  0 `test result:` lines, 0 tests
+  #   overlay       exit 0, 26 `test result:` lines,
+  #                 "AUTH SUITE: 641 tests passed, 0 unexpected skips,
+  #                  1 allowlisted (floor 604)"
+  # THE NUMBERS ARE auth-gate's. billing-gate was NOT run: it additionally needs
+  # a Redpanda this machine had no free port for, and its 748-test suite plus a
+  # cold zeroship-control build did not fit the session. Its overlay hurdle is
+  # the same `zs_test_config_load` call and the same fix; what is unverified is
+  # everything AFTER that line.
+  #
+  # A separate control, so the fix cannot be read as having quietened the
+  # refusal: with the overlay naming :5444 and the caller asking for :5432, the
+  # same command still exits 2 with 0 tests and prints "the server you asked for
+  # is not the server the overlay names". tests/lib_test_config_selftest.sh
+  # covers all 16 arms and is green.
+  #
+  # `--check` is the arm that ADOPTS a server rather than starting one: it skips
+  # the `docker compose up` entirely and only probes the addresses it is given,
+  # then writes the overlay naming them. That is exactly the relationship a
+  # `services:` container needs - the runner owns the server's lifecycle, this
+  # step owns the file that names it. Without `--check` the script would try to
+  # bind compose's postgres to 5440, which the service container already holds.
+  #
+  # The PG_* values moved from the test step to job level so BOTH steps see
+  # them. They are the provisioner's documented INPUTS, and the step below has
+  # to have them or it would write the provisioner's own defaults instead.
+  #
+  # DO NOT READ `zs_test_config_assert_agrees` AS A GUARD IN THIS JOB. It
+  # compares the caller's PG_* against the overlay, and here one job-level `env`
+  # feeds both the step that writes the overlay and the step that checks it, so
+  # the two cannot disagree and the comparison is vacuous. What actually catches
+  # a `ports:` line drifting from PG_PORT is the provisioner's own probe: it
+  # waits 60s for a server on the address it was handed and then fails with
+  # "PostgreSQL never came up on localhost:<port>". Loud, but from a different
+  # mechanism than the one the harness advertises.
+  #
+  # `redis:` is a real service and not a stub because the overlay names Redis
+  # too (`worker.kv_url`), and the provisioner probes it. Neither of these two
+  # suites reads `ZS_TEST_REDIS_URL` or `test_kv_url()` today - the sole call
+  # site is crates/worker/src/handler.rs:3497, in a crate neither gate builds -
+  # so this is here to keep the generated topology TRUE rather than to serve a
+  # test. An overlay naming a Redis that does not exist is a false statement in
+  # the one document the whole workspace reads for its test coordinates.
+  #
+  # POSTGRES_DB: zeroship for the same reason, and it is the same kind of
+  # claim - truth in the overlay, not a test that needs it. compose sets it, so
+  # the overlay's DSN names `zeroship`; without it the DSN names a database that
+  # does not exist on the service container. Nothing in either gate dials that
+  # DSN today, because both scripts export PG_TEST_URL for their whole cargo run
+  # and `database_url_opt` prefers it (crates/core/src/config/test_overlay.rs:131)
+  # - so the overlay's own database is the unreachable fallback arm. Make it
+  # real anyway; a generated topology that is only accidentally unread is not a
+  # correct one.
   billing-gate:
     runs-on: ubuntu-latest
     services:
@@ -793,6 +861,7 @@ jobs:
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: zeroship
+          POSTGRES_DB: zeroship
         ports:
           - 5440:5432
         options: >-
@@ -800,6 +869,21 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6390:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      PG_HOST: localhost
+      PG_PORT: 5440
+      PG_USER: postgres
+      PG_PASS: zeroship
+      PG_DB: zeroship
     steps:
       - uses: actions/checkout@v4
         with:
@@ -837,13 +921,16 @@ jobs:
             sleep 3
           done
           echo "redpanda failed to become healthy" >&2; docker logs redpanda; exit 1
+      # Write deploy/ops/zeroship.test.toml for the service containers above.
+      # Without this the next step exits 2 before it runs a single test; see the
+      # comment on this job. `--check` provisions nothing - the runner already
+      # started both servers - it probes them and writes the file that names
+      # them.
+      - name: Write the test overlay naming this job's service containers
+        run: bash tests/provision_test_backends.sh --check
       - name: Run the live-database gate
         run: tests/run_billing_suite.sh
         env:
-          PG_HOST: localhost
-          PG_PORT: 5440
-          PG_USER: postgres
-          PG_PASS: zeroship
           REDPANDA_BROKERS: 127.0.0.1:19092
 
   # The auth tests resolve their database from AUTH_DB_URL and return early when
@@ -851,6 +938,10 @@ jobs:
   # therefore proves nothing about them. tests/run_auth_suite.sh provisions an
   # isolated database, runs the suite against it, and fails if any test reports
   # that it skipped, so a missing database cannot masquerade as a pass.
+  #
+  # It could not masquerade as anything, because it did not run: see the long
+  # comment on billing-gate for the absent-overlay defect both jobs had and for
+  # why every line below is shaped the way it is.
   auth-gate:
     runs-on: ubuntu-latest
     services:
@@ -859,6 +950,7 @@ jobs:
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: zeroship
+          POSTGRES_DB: zeroship
         ports:
           - 5440:5432
         options: >-
@@ -866,21 +958,53 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6390:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      PG_HOST: localhost
+      PG_PORT: 5440
+      PG_USER: postgres
+      PG_PASS: zeroship
+      PG_DB: zeroship
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # A SECOND defect, found only once the overlay fix above let this job get
+      # far enough to hit it. run_auth_suite.sh:239 provisions its database with
+      # deploy/ops/db-migrate.sh, which `cargo run`s zeroship-platform-migrate
+      # out of zeroship-migrate-adapter, which pulls in zeroship-runtime - and
+      # that crate `include_str!`s three gitignored SDK dist files. Reproduced
+      # 2026-08-20 in a worktree that had never run pnpm:
+      #   error: couldn't read .../sdks/bootstrap/dist/install-schema.js
+      #   error: couldn't read .../sdks/db/dist/internal.js
+      #   error: couldn't read .../sdks/bootstrap/dist/runtime-entry.js
+      #   error: could not compile `zeroship-runtime` (lib) due to 3 previous errors
+      # billing-gate and plugin-db-live-gate already carry this block for the
+      # same reason; auth-gate reaches the same crate by a different route (the
+      # migrate binary rather than the crate under test) and was missed.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter zero-migrate build
+      - run: pnpm build
       - name: Install psql client
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Write the test overlay naming this job's service containers
+        run: bash tests/provision_test_backends.sh --check
       - name: Run the auth live-database gate
         run: tests/run_auth_suite.sh
-        env:
-          PG_HOST: localhost
-          PG_PORT: 5440
-          PG_USER: postgres
-          PG_PASS: zeroship
 
   # The live-Postgres gate for zeroship-plugin-db: 111 tests that ran in NO job
   # at all until 2026-08-12. The `rust` job skips the target for want of
