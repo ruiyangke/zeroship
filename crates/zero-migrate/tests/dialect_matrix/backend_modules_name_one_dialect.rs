@@ -47,18 +47,34 @@
 /// SQLite-only `sqlite_engine` binary went from 148 passed / 7 failed to 155 / 0 over
 /// the same 155 tests, so the dependency is gone rather than merely re-covered.
 ///
-/// AN EQUIVALENT INSTANCE SURVIVES ONE HOP AWAY, and this test is equally blind to
-/// it: `render::lower::render_sqlite_trigger_op` calls the PostgreSQL-pinned
+/// AN EQUIVALENT INSTANCE SURVIVED ONE HOP AWAY, and this test was equally blind to
+/// it: `render::lower::render_sqlite_trigger_op` called the PostgreSQL-pinned
 /// `dml::quote_bare_ident` six times, and `backends/sqlite.rs` delegates its trigger
-/// rendering there. So the example below is now a WORKED one rather than a live
-/// defect, and the class it illustrates is still present in the tree. Do not read the
-/// fix as evidence the class is gone.
+/// rendering there. That one is now fixed too — those six say
+/// `quote_bare_ident_for_dialect(.., SQLITE_TRIGGER_DIALECT)`, and the pinned wrapper
+/// they used no longer exists.
+///
+/// HOW it was proven is the part worth keeping, because the obvious proof LIED. The
+/// neuter above works by watching a suite go red; run against the trigger path it did
+/// not. `sqlite_engine` stayed at 156 passed / 0 failed with `PostgresDmlRenderer::
+/// quote_ident` neutered AT THE COMMIT WHERE THE REACH WAS STILL LIVE — that binary
+/// never renders a trigger, so its green meant nothing, and only running the
+/// before-case as a control exposed it. `sqlite_trigger_render_bytes.rs` was written
+/// to be an instrument that can see the path, and with it the same neuter fails
+/// before the fix and passes after.
+///
+/// So both examples are WORKED ones now. The CLASS is not gone: it is invisible to
+/// this test by construction, and both instances were found only because someone went
+/// looking. Do not read either fix as evidence the class is gone — and do not trust a
+/// neuter that stays green without first checking it can go red.
 ///
 /// So a green run here means "no backend module NAMES another vendor". It does NOT
 /// mean the backend boundary is clean, and a reader who takes it for that has been
 /// given a proof of the wrong proposition. `backends/mod.rs` carries the same
 /// warning at more length, with the measurement behind it; the second grep it asks
-/// for - over the CORE helpers a moved branch calls - has no test, here or anywhere.
+/// for - over the CORE helpers a moved branch calls - now HAS a test, next door in
+/// `sqlite_trigger_quoting_reaches_postgres.rs`, which walks every `.rs` under `src/`
+/// and pins the pinned-wrapper call count at ZERO.
 ///
 /// # Two ways this goes red that are not defects
 ///
