@@ -62,7 +62,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 # third_party/ is a vendored submodule owned by another project; its contents
-# are not ours to gate.
+# are not ours to gate. THE EXCLUSION IS THE SUBMODULE BOUNDARY, not a filter:
+# `git ls-files` reports a submodule as one gitlink entry and never descends
+# into it, so nothing under third_party/ can reach the loop below. There WAS a
+# `case "$f" in third_party/*) continue ;;` here and it could not fire -- 0 of
+# 2211 enumerated paths were under third_party/ when measured 2026-08-20 --
+# which made this gate read as covering a case it never met. It is now asserted
+# instead of filtered, so if third_party/ is ever vendored in-tree the gate says
+# so rather than quietly starting to scan somebody else's repository.
 EXTS=('*.rs' '*.ts' '*.tsx' '*.mjs' '*.cjs' '*.js' '*.toml' '*.yml' '*.yaml' '*.nix' '*.json')
 
 # `/home/<user>/` and `/Users/<user>/`. The trailing slash matters: it is what
@@ -71,10 +78,11 @@ EXTS=('*.rs' '*.ts' '*.tsx' '*.mjs' '*.cjs' '*.js' '*.toml' '*.yml' '*.yaml' '*.
 # leak does NOT happen and must not trip this gate.
 PAT='/(home|Users)/[A-Za-z0-9._-]+/'
 
+vendored=0
 enumerated=0
 hits=""
 while IFS= read -r f; do
-  case "$f" in third_party/*) continue ;; esac
+  case "$f" in third_party/*) vendored=$((vendored + 1)) ;; esac
   enumerated=$((enumerated + 1))
   # Strip URLs, then match. Order matters: matching first and filtering after
   # would drop a line that contains BOTH a URL and a real home path.
@@ -101,6 +109,15 @@ if [ "$enumerated" -lt "$ENUM_FLOOR" ]; then
   exit 2
 fi
 
+if [ "$vendored" -gt 0 ]; then
+  echo "FAIL: $vendored enumerated path(s) are under third_party/, which the" >&2
+  echo "      submodule boundary is supposed to keep out. Either it stopped" >&2
+  echo "      being a submodule or a second vendored tree arrived; add the" >&2
+  echo "      skip back, because those files belong to another project and" >&2
+  echo "      their home paths are not this gate's to rule on." >&2
+  exit 2
+fi
+
 if [ -n "$hits" ]; then
   echo "FAIL: tracked source/config hardcodes a home directory, which resolves" >&2
   echo "      on exactly one machine:" >&2
@@ -109,4 +126,4 @@ if [ -n "$hits" ]; then
   exit 1
 fi
 
-echo "home-path gate: $enumerated source/config files, 0 hardcoded home paths"
+echo "home-path gate: $enumerated source/config files ($vendored under third_party/), 0 hardcoded home paths"
