@@ -1308,7 +1308,27 @@ impl<'a> Parser<'a> {
         self.skip_ws();
         let keyword = match self.keyword() {
             Some(keyword) => keyword,
-            None => return Ok(None),
+            // An empty keyword means one of two very different things, and the
+            // parse loop above reads `Ok(None)` as "input exhausted" for both.
+            // Conflating them makes the parser stop at the first malformed
+            // token and report SUCCESS, silently discarding every setting
+            // after it - so `host=h =typo sslmode=require` yields a config that
+            // no longer asks for TLS. Only a genuinely exhausted input is a
+            // clean stop; anything else left in the string is a parse error.
+            //
+            // tokio-postgres 0.7.18 conflates them too (`parameter()` at its
+            // config.rs:963 is otherwise identical), so this is a libpq
+            // divergence inherited from upstream rather than one introduced
+            // here. libpq rejects the empty option name.
+            None => {
+                return match self.it.peek() {
+                    None => Ok(None),
+                    Some(&(i, c)) => Err(Error::config_parse(
+                        format!("unexpected character at byte {i}: expected a keyword but got `{c}`")
+                            .into(),
+                    )),
+                };
+            }
         };
         self.skip_ws();
         self.eat('=')?;
@@ -1733,5 +1753,55 @@ mod tests {
                 .err()
                 .unwrap_or_else(|| panic!("{s} parsed, so an empty path reads as absent"));
         }
+    }
+}
+
+#[cfg(test)]
+mod dsn_parse_tests {
+    use super::*;
+
+    /// A keyword/value string that cannot be parsed must be REFUSED, not
+    /// truncated at the bad token.
+    ///
+    /// `parameter()` returns `Ok(None)` both when the input is exhausted and
+    /// when what remains does not start with a keyword, and the parse loop
+    /// reads `None` as end-of-input either way. So everything after the first
+    /// malformed token is silently dropped - including a later `sslmode`.
+    /// Here the caller asked for `require` and, before the fix, got the
+    /// `Prefer` default, which will fall back to an unencrypted connection
+    /// against a server that refuses TLS. A connection string that asked for
+    /// encryption must never quietly stop asking for it.
+    ///
+    /// libpq rejects the empty option name rather than treating it as the end
+    /// of the string. tokio-postgres 0.7.18 has this same hole (its
+    /// `parameter()` at config.rs:963 is identical), so this is a divergence
+    /// from libpq that the port inherited rather than one it introduced.
+    #[test]
+    fn a_malformed_keyword_does_not_silently_drop_the_settings_after_it() {
+        let parsed = "host=127.0.0.1 =typo sslmode=require".parse::<Config>();
+
+        // Asserted as "not Ok(sslmode=Prefer)" rather than merely "is Err", so
+        // the test names the consequence: the string asked for `require` and
+        // the silent-truncation bug answers with the default.
+        match parsed {
+            Ok(config) => panic!(
+                "a malformed keyword parsed as valid, and sslmode silently became {:?} \
+                 instead of the requested Require",
+                config.get_ssl_mode()
+            ),
+            Err(_) => {}
+        }
+    }
+
+    /// The control for the test above: trailing whitespace is genuinely the
+    /// end of the input and must still parse. Without this, "reject when the
+    /// keyword is empty" could be satisfied by rejecting every string whose
+    /// parse loop ends, which would break every well-formed DSN.
+    #[test]
+    fn trailing_whitespace_is_still_a_complete_connection_string() {
+        let config = "host=127.0.0.1 sslmode=require   "
+            .parse::<Config>()
+            .expect("trailing whitespace made a valid connection string fail");
+        assert_eq!(config.get_ssl_mode(), SslMode::Require);
     }
 }
