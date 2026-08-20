@@ -15,7 +15,7 @@
 //!
 //! Run with `--test-threads=1` (the auth suite shares rows).
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 

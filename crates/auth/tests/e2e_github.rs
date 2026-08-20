@@ -28,7 +28,7 @@ use zeroship_auth::server;
 use zeroship_core::config::{Secret, SourceKind};
 use zeroship_auth::store::users;
 
-mod common;
+use crate::common;
 use common::mock_provider::{MockProvider, MockUser, ProviderMode};
 use common::{location, read_set_cookie, test_auth_config_with, CookieJar};
 
