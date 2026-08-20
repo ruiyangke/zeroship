@@ -57,10 +57,16 @@
 //! `Client::connect` and `Config::connect` take a TLS implementation as an argument. The `NoTls` type in this crate can
 //! be used when TLS is not required.
 //!
-//! The `tls` Cargo feature adds [`MakeRustlsConnect`], a rustls backend that reads its trust anchors from the
+//! The `tls` Cargo feature adds `MakeRustlsConnect`, a rustls backend that reads its trust anchors from the
 //! connection string (`sslrootcert`, plus `sslcert`/`sslkey` for client-certificate auth) and implements
 //! `tls-server-end-point` channel binding. With that feature on, [`Pool`] builds one automatically for a
-//! `sslmode=require` URL; see [`tls_rustls`] and the `Transport` section of the `pool` module docs (`src/pool.rs`).
+//! `sslmode=require` URL; see the `tls_rustls` module (`src/tls_rustls.rs`) and the `Transport` section of the
+//! `pool` module docs (`src/pool.rs`).
+
+// `MakeRustlsConnect` and `tls_rustls` above are code spans, not intra-doc links, and must stay that way. The
+// module carrying them is `#[cfg(feature = "tls")]`, so in a default-feature `cargo doc` there is no item for a
+// link to resolve against and rustdoc emits `unresolved link`. tests/run_doc_gate.sh builds both feature
+// configurations and allows zero unresolved links under `--all-features`.
 
 #![warn(rust_2018_idioms, clippy::all)]
 #![allow(clippy::needless_lifetimes)]

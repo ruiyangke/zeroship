@@ -4,7 +4,7 @@
 //! `github.com/login/oauth/...`), so the random material we need to verify
 //! the callback — `state`, PKCE `verifier`, OIDC `nonce`, and the pending
 //! native continuation target — has to ride with the browser. We stash it in a
-//! short-lived signed cookie, MAC'd against `AuthConfig::stash_signing_key`.
+//! short-lived signed cookie, MAC'd against `AuthSettings::stash_signing_key`.
 //!
 //! Cookie layout: `base64url(json).base64url(hmac-sha256)`. The HMAC
 //! covers the base64url of the JSON (i.e. we sign the wire bytes, not the

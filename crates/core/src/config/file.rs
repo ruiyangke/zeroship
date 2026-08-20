@@ -545,7 +545,8 @@ pub struct AuthSection {
 /// uses come from the generated `observability.log_filter` /
 /// `observability.log_format` declarations, which walk the same overlay by
 /// canonical path; the key spellings here and there are therefore the same by
-/// construction, and both parse `log_format` into a [`LogFormat`].
+/// construction, and both parse `log_format` into a
+/// [`LogFormat`](crate::observability::LogFormat).
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ObsSection {
