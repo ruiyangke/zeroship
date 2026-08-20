@@ -76,8 +76,40 @@ use crate::schema::query::{SchemaRenderer, SqlDialect};
 /// keeping — the alternative is a default arm that silently spells the new vendor
 /// like PostgreSQL.
 ///
-/// Re-exported as `crate::schema::query::renderer`, the path all eight of its
-/// callers already use, so this move changed no call site.
+/// Re-exported as `crate::schema::query::renderer`, the path every caller uses.
+///
+/// # Who is allowed to call this
+///
+/// It had eight callers and every one of them was a POINT-OF-USE lookup: a core
+/// emitter deep in a call chain, holding a `dialect: SqlDialect` parameter, asking
+/// the registry for a vendor at the moment it needed one spelling. One
+/// `CREATE TABLE` emit went through the registry five separate times for the same
+/// dialect.
+///
+/// That is now zero. `schema::query`'s private emitters take
+/// `backend: &'static dyn SchemaRenderer` instead of `dialect: SqlDialect`, and the
+/// resolution happens ONCE per entry point. What remains here is only:
+///
+/// * **Boundaries** — `build_create_table_with_fks_for_dialect_scoped_statements`
+///   and `def_to_column_type_for_dialect`, the `pub` surfaces whose callers hand in
+///   a dialect. The dialect becomes a backend exactly where it crosses in.
+/// * **Caller-fixed targets** — `build_add_foreign_key` and `def_to_constraints`
+///   name PostgreSQL because they ARE PostgreSQL (`pg_quote_ident` throughout), and
+///   the tests that name the vendor under test. Naming a fixed target is not a
+///   decision, so it is not a lookup.
+///
+/// The distinction is what step 4 turns on: a boundary resolution survives the move
+/// to per-vendor crates by becoming the facade's `register(..)` table, while a
+/// point-of-use lookup cannot — it is core reaching for a vendor list core will no
+/// longer have. Adding one back inside an emitter re-creates the blocker.
+///
+/// Note that the emitters still hold a `SqlDialect`; they derive it with
+/// [`SchemaRenderer::dialect`] rather than receive it. That is deliberate and it is
+/// NOT a lookup in disguise: identifier quoting, FK-action folding and the SQLite
+/// scope test are core NORMALIZATION keyed by dialect, which the boundary rule keeps
+/// in core, parameterized. Five such derivations exist; each one marks a place where
+/// core needs to know which vendor it is talking to for a reason that is not
+/// spelling, and shrinking that number is a different piece of work from this one.
 pub fn renderer(dialect: SqlDialect) -> &'static dyn SchemaRenderer {
     match dialect {
         SqlDialect::Postgres => &postgres::RENDERER,

@@ -852,6 +852,13 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
 ) -> Result<Vec<String>, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
+
+    // The ONE dialect->backend resolution for this whole emit. Everything below
+    // that needs a vendor spelling receives THIS value; nothing under here asks
+    // the registry again. `dialect` stays in scope because core still needs it as
+    // a normalization key (identifier quoting, FK-action folding, the SQLite
+    // scope test) — parameterized semantics, not a vendor lookup.
+    let backend = renderer(dialect);
     let inject = ResolvedInject::for_table(effective, app_id, collection).map_err(|error| {
         QueryError::InvalidFilter(format!(
             "active table injection for {app_id}.{collection} is not renderable: {error}"
@@ -873,7 +880,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
         )
     };
 
-    let mut columns = build_injected_columns(collection, &inject, dialect)?;
+    let mut columns = build_injected_columns(collection, &inject, backend)?;
 
     let mut deferred_fks: Vec<String> = Vec::new();
     let mut union_checks: Vec<String> = Vec::new();
@@ -910,7 +917,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
             {
                 continue;
             }
-            let col_def = field_to_column_for_dialect(field, def, dialect, &inject)?;
+            let col_def = field_to_column_for_dialect(field, def, backend, &inject)?;
             columns.push(col_def);
 
             // Path B sibling-column emission. When the
@@ -973,7 +980,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
                     };
                     if should_inline {
                         if let Ok(fk_clause) =
-                            build_fk_clause(app_id, collection, field, def, target, dialect)
+                            build_fk_clause(app_id, collection, field, def, target, backend)
                         {
                             deferred_fks.push(fk_clause);
                         }
@@ -1073,7 +1080,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
     let mut statements: Vec<String> = vec![create_table];
     statements.extend(system_index_stmts);
 
-    statements.extend(renderer(dialect).column_comment_statements(app_id, collection, schema));
+    statements.extend(backend.column_comment_statements(app_id, collection, schema));
 
     Ok(statements)
 }
@@ -1121,13 +1128,14 @@ pub fn build_encryption_sentinel_comments(
 fn build_injected_columns(
     table: &str,
     inject: &ResolvedInject,
-    dialect: SqlDialect,
+    backend: &'static dyn SchemaRenderer,
 ) -> Result<Vec<String>, QueryError> {
+    let dialect = backend.dialect();
     let primary_key = inject.primary_key();
     let mut columns =
         Vec::with_capacity(inject.columns().len() + usize::from(primary_key.is_some()));
     for column in inject.columns() {
-        let data_type = injected_column_type(column, dialect)?;
+        let data_type = injected_column_type(column, backend)?;
         let inline_primary_key = primary_key
             .is_some_and(|pk| pk.len() == 1 && pk.first().is_some_and(|name| name == &column.name));
         let primary_key_clause = if inline_primary_key {
@@ -1146,7 +1154,7 @@ fn build_injected_columns(
             .default
             .as_ref()
             .map(|default| {
-                render_injected_default(default, &column.ty, dialect)
+                render_injected_default(default, &column.ty, backend)
                     .map(|rendered| format!(" DEFAULT {rendered}"))
                     .map_err(|error| {
                         QueryError::InvalidFilter(format!(
@@ -1203,7 +1211,7 @@ fn injected_column_ident(name: &str, dialect: SqlDialect) -> String {
 fn render_injected_default(
     default: &IrDefault,
     ty: &ColType,
-    dialect: SqlDialect,
+    backend: &'static dyn SchemaRenderer,
 ) -> Result<String, crate::render::lower::IrLowerError> {
     if matches!(
         default,
@@ -1214,12 +1222,15 @@ fn render_injected_default(
             },
         } if args.is_empty()
     ) {
-        return Ok(renderer(dialect).current_timestamp_expr().to_string());
+        return Ok(backend.current_timestamp_expr().to_string());
     }
-    crate::render::lower::render_ir_default_for_type(default, ty, dialect)
+    crate::render::lower::render_ir_default_for_type(default, ty, backend.dialect())
 }
 
-fn injected_column_type(column: &IrColumn, dialect: SqlDialect) -> Result<String, QueryError> {
+fn injected_column_type(
+    column: &IrColumn,
+    backend: &'static dyn SchemaRenderer,
+) -> Result<String, QueryError> {
     let def = match &column.ty {
         ColType::Text => serde_json::json!({ "type": "string" }),
         // Bounded system string (`id`, actor stamps): `character varying(N)` on
@@ -1236,7 +1247,7 @@ fn injected_column_type(column: &IrColumn, dialect: SqlDialect) -> Result<String
             )))
         }
     };
-    Ok(def_to_column_type_for_dialect(&def, dialect))
+    Ok(backend.column_type(&def))
 }
 
 /// Render the active policy's canonical injected indexes. Physical names are
@@ -1353,7 +1364,17 @@ pub fn build_add_foreign_key(
         .ok_or_else(|| QueryError::InvalidFilter("ref field missing refTarget".to_string()))?;
 
     let table = format!("{}.{}", pg_quote_ident(app_id), pg_quote_ident(collection));
-    let fk_clause = build_fk_clause(app_id, collection, field, def, target, SqlDialect::Postgres)?;
+    // A CALLER-FIXED TARGET, not a dialect decision: this entry point spells its
+    // table and constraint through `pg_quote_ident` and is PostgreSQL by contract,
+    // so it names the backend it means rather than being handed one.
+    let fk_clause = build_fk_clause(
+        app_id,
+        collection,
+        field,
+        def,
+        target,
+        renderer(SqlDialect::Postgres),
+    )?;
     Ok(format!("ALTER TABLE {table} ADD {fk_clause}"))
 }
 
@@ -1398,8 +1419,9 @@ fn build_fk_clause(
     field: &str,
     def: &serde_json::Value,
     target: &str,
-    dialect: SqlDialect,
+    backend: &'static dyn SchemaRenderer,
 ) -> Result<String, QueryError> {
+    let dialect = backend.dialect();
     validate_collection(target)?;
     let constraint_name = fk_constraint_name(
         collection,
@@ -1416,7 +1438,7 @@ fn build_fk_clause(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    let target_qualified = renderer(dialect).foreign_key_target(app_id, target);
+    let target_qualified = backend.foreign_key_target(app_id, target);
     let target_column = def
         .get("refColumn")
         .and_then(|value| value.as_str())
@@ -2283,9 +2305,10 @@ pub fn encryption_sentinel_body_for_field(def: &serde_json::Value) -> Option<Str
 fn field_to_column_for_dialect(
     field: &str,
     def: &serde_json::Value,
-    dialect: SqlDialect,
+    backend: &'static dyn SchemaRenderer,
     inject: &ResolvedInject,
 ) -> Result<String, QueryError> {
+    let dialect = backend.dialect();
     validate_field_name_for_declaration(field, inject)?;
     validate_encryption_sentinel_for_field(def)?;
     // `t.encrypted(...)`-declared columns always store the
@@ -2312,8 +2335,8 @@ fn field_to_column_for_dialect(
     } else {
         ""
     };
-    let sql_type = def_to_column_type_for_dialect(def, dialect);
-    let constraints = def_to_constraints_for_dialect(field, def, dialect);
+    let sql_type = backend.column_type(def);
+    let constraints = def_to_constraints_for_dialect(field, def, backend);
     // The sentinel comment (when present) sits between the type and the
     // constraints so the parsed shape is `"<col>" BYTEA /* zero-migrate:enc:... */
     // <constraints>`. PG ignores the comment; SQLite preserves it in
@@ -2892,14 +2915,18 @@ fn strip_mysql_int_display_width(input: &str) -> String {
 
 /// Generate column constraints from field definition.
 fn def_to_constraints(field: &str, def: &serde_json::Value) -> String {
-    def_to_constraints_for_dialect(field, def, SqlDialect::Postgres)
+    // CALLER-FIXED TARGET: the sole caller is `build_add_column`, whose whole
+    // statement is `pg_quote_ident`-spelled. It names PostgreSQL because it means
+    // PostgreSQL, not because it is choosing.
+    def_to_constraints_for_dialect(field, def, renderer(SqlDialect::Postgres))
 }
 
 fn def_to_constraints_for_dialect(
     field: &str,
     def: &serde_json::Value,
-    dialect: SqlDialect,
+    backend: &'static dyn SchemaRenderer,
 ) -> String {
+    let dialect = backend.dialect();
     let mut parts = Vec::new();
 
     if def.get("required").and_then(|v| v.as_bool()) == Some(true) {
@@ -2958,15 +2985,15 @@ fn def_to_constraints_for_dialect(
                     parts.push(format!("DEFAULT {b}"));
                 }
             }
-            Some("json") | Some("object") => parts.push(renderer(dialect).json_object_default()),
-            Some("array") => parts.push(renderer(dialect).json_array_default()),
+            Some("json") | Some("object") => parts.push(backend.json_object_default()),
+            Some("array") => parts.push(backend.json_array_default()),
             _ => {}
         }
     } else {
         // Default defaults for json/object/array
         match def.get("type").and_then(|t| t.as_str()) {
-            Some("json") | Some("object") => parts.push(renderer(dialect).json_object_default()),
-            Some("array") => parts.push(renderer(dialect).json_array_default()),
+            Some("json") | Some("object") => parts.push(backend.json_object_default()),
+            Some("array") => parts.push(backend.json_array_default()),
             _ => {}
         }
     }
@@ -3201,7 +3228,9 @@ columns = [
         def: &serde_json::Value,
         dialect: SqlDialect,
     ) -> Result<String, QueryError> {
-        super::field_to_column_for_dialect(field, def, dialect, &confined_inject("posts"))
+        // A test names the dialect it is testing; the wrapper resolves it so the
+        // cases below stay written in the dialect they mean.
+        super::field_to_column_for_dialect(field, def, renderer(dialect), &confined_inject("posts"))
     }
 
     // -----------------------------------------------------------------------
