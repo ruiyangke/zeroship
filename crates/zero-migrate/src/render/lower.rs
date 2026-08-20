@@ -9209,6 +9209,39 @@ fn render_sequence_owned_by(
     ))
 }
 
+/// Refuse a materialized view on a dialect whose descriptor does not grant it.
+///
+/// THIS IS NOT A SPELLING, so it does not live on [`DmlRenderer`]. It emits no
+/// SQL: it reads a capability bit and constructs a CORE error type
+/// ([`IrLowerError::ViewUnsupported`]). It used to be a `DmlRenderer` method, and
+/// all three impls were byte-identical modulo their own `DIALECT` const —
+/// `if materialized && !DIALECT.supports(Capability::MaterializedView)`. That is a
+/// vendor being asked a question about ITSELF whose answer core already holds, so
+/// resolving a renderer to ask it was a tautology: core has the `SqlDialect`, and
+/// [`DialectSupports`] reads the same
+/// [`BackendDescriptor`](zero_migrate_ir::backend::BackendDescriptor) the vendor
+/// would have read. The vendor added nothing between the question and the answer.
+///
+/// It is a cycle edge deleted rather than inverted, which matters for
+/// `docs/proposals/pluggable-backends.md` step 4: a backend crate does not have to
+/// export this at all, and core does not have to reach a registry to run it.
+///
+/// The `dialect` in the error is PROVENANCE and travels with the decision — core
+/// now supplies it from the same value it used to look the renderer up with, so
+/// the rendered message is unchanged.
+fn validate_view_materialized(
+    dialect: SqlDialect,
+    materialized: bool,
+) -> Result<(), IrLowerError> {
+    if materialized && !dialect.supports(Capability::MaterializedView) {
+        return Err(IrLowerError::ViewUnsupported {
+            kind: "materializedView",
+            dialect,
+        });
+    }
+    Ok(())
+}
+
 fn render_view_op(
     op: &Op,
     eff_schema: &str,
@@ -9226,8 +9259,8 @@ fn render_view_op(
             ..
         } => {
             let materialized = materialized.unwrap_or(false);
+            validate_view_materialized(dialect, materialized)?;
             let renderer = crate::render::renderer::renderer(dialect);
-            renderer.validate_view_materialized(materialized)?;
             let qname = renderer.view_object_name(name, eff_schema)?;
             let cols = render_view_columns(columns.as_deref(), dialect)?;
             let query_sql = render_view_query(query, eff_schema, dialect, scope)?;
@@ -9280,8 +9313,8 @@ fn render_view_op(
             ..
         } => {
             let materialized = materialized.unwrap_or(false);
+            validate_view_materialized(dialect, materialized)?;
             let renderer = crate::render::renderer::renderer(dialect);
-            renderer.validate_view_materialized(materialized)?;
             let qname = renderer.view_object_name(name, eff_schema)?;
             let mut up = if materialized {
                 String::from("DROP MATERIALIZED VIEW ")

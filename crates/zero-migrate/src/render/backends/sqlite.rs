@@ -209,16 +209,6 @@ impl DmlRenderer for SqliteDmlRenderer {
         ))
     }
 
-    fn validate_view_materialized(&self, materialized: bool) -> Result<(), IrLowerError> {
-        if materialized && !DIALECT.supports(Capability::MaterializedView) {
-            return Err(IrLowerError::ViewUnsupported {
-                kind: "materializedView",
-                dialect: DIALECT,
-            });
-        }
-        Ok(())
-    }
-
     fn view_create_prefix(
         &self,
         _materialized: bool,
