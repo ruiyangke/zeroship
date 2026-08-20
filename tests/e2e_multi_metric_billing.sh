@@ -1,25 +1,27 @@
 #!/usr/bin/env bash
 # ============================================================================
-# e2e_spend_state_transitions.sh — NEW-COVERAGE E2E for the spend-enforcement
-# STATE MACHINE end to end: Allow → Warn → Degrade → Block.
+# e2e_multi_metric_billing.sh — NEW-COVERAGE E2E for the charge being a SUM over
+# weighted metrics, not the requests count wearing a price.
 #
-# The other billing e2es only exercise the Block (402) leg. This walks ALL four
-# spend states and asserts both the control-derived state AND the gateway's
-# per-state behavior:
+# Every other billing e2e drives one priced metric, so a pricing bug that ignored
+# the metric weights entirely would still show the right number. This drives a
+# padded body so `requests` AND `egress_bytes` both land in usage_aggregates with
+# different weights, then asserts the projected charge is the SUM:
 #
-#   spend engine (crates/control/src/spend.rs derive_state):
-#     pct = spend*100/limit ; Warn>=80, Degrade>=95, Block>=100
-#   gateway enforcement (crates/gateway/src/enforce.rs + router/dispatch.rs):
-#     Allow   -> pass, no header
-#     Warn    -> pass + `x-zs-spend-warn: 1` response header
-#     Degrade -> pass (throttled 1/DEGRADE_FACTOR, NOT blocked)
-#     Block   -> 402 SPEND_LIMIT
+#   pricing (crates/control/src/pricing.rs):
+#     CU(metric) = floor(total * units_per_op / per_units)
+#     requests     weight 1 CU / 1 op    -> CU = R
+#     egress_bytes weight 1 CU / 100 b   -> CU = floor(EGR/100)
+#   FX 1e12 pico-cents/unit = 1 cent per CU, so charge = R + floor(EGR/100)
 #
-# DETERMINISTIC design: drive a fixed usage ONCE, read its projected charge C
-# (cents), then move through the bands by changing ONLY the spend_limit and
-# re-reconciling (a limit change re-derives the state immediately, bypassing the
-# anti-flap deadband). Enforcement is provider-independent, so this uses the
-# `lite` provider (no external billing account).
+# The second metric must be strictly non-zero, and the charge strictly greater
+# than the requests-only charge: without both, a summation that dropped every
+# metric after the first would still pass. Pricing is provider-independent, so
+# this uses the `lite` provider (no external billing account).
+#
+# UNTIL 2026-08-20 THIS HEADER DESCRIBED e2e_spend_state_transitions.sh, which is
+# a DIFFERENT harness that still exists - this file was branched from it and the
+# comment block came along. Three of its helpers came along too and are deleted.
 #
 # REFUSES (exit 1) when docker is unavailable - a run that asserted nothing
 # is not a passing run. KEEP_WORK=1 preserves logs.
@@ -59,10 +61,6 @@ RP_BROKERS="127.0.0.1:$RP_PORT"; USAGE_TOPIC="zeroship-usage-mm-e2e"
 WORK="$(mktemp -d -t zs-e2e-mm-XXXXXX)"; mkdir -p "$WORK/blobs" "$WORK/blob-cache"; PIDFILE="$WORK/pids"; : > "$PIDFILE"
 jget(){ node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const o=JSON.parse(s);process.stdout.write(String(o$1??'')+'\n')}catch(e){console.log('')}})"; }
 psql_exec(){ docker exec -i "$PGC" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 "$@"; }
-spend_state(){ psql_exec -tA -c "SELECT state::text FROM zeroship.app_spend_state WHERE app_id='$1'" 2>/dev/null | tr -d '[:space:]'; }
-set_limit(){ curl -s -o /dev/null -X PUT "$CONTROL_URL/api/apps/$1/spend-limit" -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" -d "{\"cents\":$2}"; curl -s -o /dev/null -X POST -H "Authorization: Bearer $ZEROSHIP_CONTROL_KEY" "$CONTROL_URL/internal/spend/reconcile"; }
-# GET one probe request; echo "<status> <warnheader:0|1>"
-probe_req(){ local out; out="$(curl -s -D - -o /dev/null -H 'Host: mm-probe.localhost' "http://localhost:$ZEROSHIP_GATEWAY_PORT/probe/$1" 2>/dev/null)"; local code warn; code="$(printf '%s' "$out" | awk 'NR==1{print $2}')"; warn=0; printf '%s' "$out" | grep -qiE '^x-zs-spend-warn:' && warn=1; echo "${code:-000} $warn"; }
 
 cleanup(){
   echo ""; echo "=== Cleanup ==="
@@ -98,7 +96,7 @@ PLAN_ID="pln_mm_e2e"
 # FX 1e12 pico-cents/unit = 1 cent per CU; requests weight 1 CU/op → 1 cent/request.
 psql_exec >/dev/null 2>&1 <<SQL && pass "seeded plan + pricing (1 cent/request) + weights" || { fail "plan seed"; exit 1; }
 INSERT INTO zeroship.plans (id,name,base_fee_cents,included_units,fx_pico_cents_per_unit,runtime_limits_json,spend_limit_default_cents)
-VALUES ('$PLAN_ID','spend-e2e',0,0,1000000000000,'{"cpu_limit_ms":5000,"wall_timeout_ms":30000,"heap_limit_mb":256}',100000000) ON CONFLICT (id) DO NOTHING;
+VALUES ('$PLAN_ID','mm-e2e',0,0,1000000000000,'{"cpu_limit_ms":5000,"wall_timeout_ms":30000,"heap_limit_mb":256}',100000000) ON CONFLICT (id) DO NOTHING;
 INSERT INTO zeroship.pricing_config (id,fx_pico_cents_per_unit) VALUES ('global',1000000000000) ON CONFLICT (id) DO UPDATE SET fx_pico_cents_per_unit=EXCLUDED.fx_pico_cents_per_unit;
 INSERT INTO zeroship.billing_metrics (metric,kind,unit) VALUES ('requests','platform','op') ON CONFLICT (metric) DO UPDATE SET kind='platform';
 INSERT INTO zeroship.metric_weights (metric,units_per_op,per_units) VALUES ('requests',1,1) ON CONFLICT (metric) DO UPDATE SET units_per_op=1,per_units=1;
