@@ -10,6 +10,7 @@ use std::time::{Duration, SystemTime};
 
 use chrono::Utc;
 use compio_postgres::{Client, GenericClient};
+use uuid::Uuid;
 use zeroship_plugin_workflow::store::pg::WorkflowTables;
 
 use crate::cron::workflow_engine::SweepCoverage;
@@ -208,7 +209,10 @@ pub async fn tick_orphan_sweep(state: &AppState) -> Result<usize, RegistryError>
         if entry.last_modified > cutoff {
             continue;
         }
-        if workflow_blob_is_referenced(&tx, &entry.hash).await? {
+        // No `owner`: this sweep deletes an OBJECT and no row, so every blob
+        // row in the fleet - including one in the app that wrote this object -
+        // is a live reference that must retain it.
+        if workflow_blob_is_referenced(&tx, &entry.hash, None).await? {
             continue;
         }
         match state.workflow_blob_store.delete_blob(&entry.hash).await {
@@ -241,6 +245,26 @@ where
     Ok(rows.first().is_some_and(|row| row.get("locked")))
 }
 
+/// Every way a hash can still be in use: a blob row, a step output, a run
+/// output.
+const BLOB_REFERENCED_SQL: &str = "SELECT \
+        EXISTS (SELECT 1 FROM zeroship.workflow_blobs WHERE hash = $1) \
+     OR EXISTS (SELECT 1 FROM zeroship.workflow_steps \
+                 WHERE output_kind = 'blob' AND output_hash = $1) \
+     OR EXISTS (SELECT 1 FROM zeroship.workflow_runs \
+                 WHERE output_kind = 'blob' AND output_hash = $1) AS referenced";
+
+/// The same question, minus the blob row itself.
+///
+/// Used for the ONE app whose own blob row is the row about to be deleted: that
+/// row is what the caller is collecting, so counting it would make the answer
+/// "referenced" every time. Its steps and runs are still searched.
+const BLOB_REFERENCED_BY_OUTPUT_SQL: &str = "SELECT \
+        EXISTS (SELECT 1 FROM zeroship.workflow_steps \
+                 WHERE output_kind = 'blob' AND output_hash = $1) \
+     OR EXISTS (SELECT 1 FROM zeroship.workflow_runs \
+                 WHERE output_kind = 'blob' AND output_hash = $1) AS referenced";
+
 /// Is `hash` referenced by ANY app's journal?
 ///
 /// The caller DELETES the blob when this says false, so an app whose journal
@@ -248,7 +272,17 @@ where
 /// permission gap on one tenant delete another tenant's live workflow output -
 /// a fleet-wide sweep that reads "I could not check" as "nothing there" turns a
 /// visible outage into silent data loss.
-async fn workflow_blob_is_referenced<C>(conn: &C, hash: &str) -> Result<bool, RegistryError>
+///
+/// `owner` names the app whose own blob row is the row the caller is about to
+/// delete, and excludes THAT ROW ONLY from the search - the same app's steps and
+/// runs are still searched, and every other app is searched in full. Passing
+/// `None` searches everything, which is what the orphan sweep wants: it deletes
+/// no row, so no row is its own.
+async fn workflow_blob_is_referenced<C>(
+    conn: &C,
+    hash: &str,
+    owner: Option<&Uuid>,
+) -> Result<bool, RegistryError>
 where
     C: GenericClient + Sync,
 {
@@ -264,19 +298,13 @@ where
             return Ok(true);
         }
         let tables = WorkflowTables::for_app_id(&app_id);
+        let sql = if owner == Some(&app_id) {
+            BLOB_REFERENCED_BY_OUTPUT_SQL
+        } else {
+            BLOB_REFERENCED_SQL
+        };
         let rows = conn
-            .query(
-                &super::workflow_engine::journal_sql(
-                    &tables,
-                    "SELECT \
-                        EXISTS (SELECT 1 FROM zeroship.workflow_blobs WHERE hash = $1) \
-                     OR EXISTS (SELECT 1 FROM zeroship.workflow_steps \
-                                 WHERE output_kind = 'blob' AND output_hash = $1) \
-                     OR EXISTS (SELECT 1 FROM zeroship.workflow_runs \
-                                 WHERE output_kind = 'blob' AND output_hash = $1) AS referenced",
-                ),
-                &[&hash],
-            )
+            .query(&super::workflow_engine::journal_sql(&tables, sql), &[&hash])
             .await?;
         if rows.first().is_some_and(|row| row.get("referenced")) {
             return Ok(true);
@@ -319,12 +347,40 @@ where
         return Ok(false);
     }
 
+    // Prove it unreferenced BEFORE removing the row, not after.
+    //
+    // This check ran after the DELETE until 2026-08-20, and the ordering was
+    // buying one thing: `workflow_blob_is_referenced` counts a blob ROW as a
+    // reference, so with this app's own row still present it answered
+    // "referenced" every time and nothing would ever have been collected.
+    // Deleting first made the row invisible to the check. `owner` buys the same
+    // exclusion without the destructive step, and buys it more narrowly - only
+    // that one row is excluded, where a DELETE excluded it by making it gone.
+    //
+    // What the old ordering COST is why this moved. A `false` verdict arrived
+    // with the row already deleted, and `Ok(false)` does not roll back: the
+    // enclosing transaction in `tick_ref_sweep` and in
+    // `delete_zero_ref_hashes_for_app` commits either way. One unreadable
+    // tenant makes the check say "referenced" for EVERY hash in the fleet, so
+    // the row went and the object stayed - storage neither sweep can reclaim,
+    // because the ref sweep walks rows and finds none while the orphan sweep
+    // refuses on the same unreadable journal.
+    if workflow_blob_is_referenced(conn, hash, Some(&tables.app_id)).await? {
+        return Ok(false);
+    }
+
     let delete_sql = format!(
         "DELETE FROM {} WHERE hash = $1 AND refcount = 0",
         tables.blobs
     );
+    // `changed == 0` is still honoured as "someone else got there first", but
+    // it is not what makes this safe against a concurrent reference: the
+    // `FOR UPDATE SKIP LOCKED` above is. We hold that row's lock for the rest of
+    // the transaction, and taking a new reference to a blob bumps its refcount
+    // on this same row, so a racing referencer blocks rather than slipping
+    // between the check and the delete.
     let changed = conn.execute(&delete_sql, &[&hash]).await?;
-    if changed == 0 || workflow_blob_is_referenced(conn, hash).await? {
+    if changed == 0 {
         return Ok(false);
     }
 
