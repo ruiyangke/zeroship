@@ -28,7 +28,7 @@
 #      4 of the 17 above. `tsx` precedes `ts`, and a trailing `(?![A-Za-z0-9])`
 #      closes the rest.
 #
-# Two categories are deliberately NOT defects, and a gate that flags them is
+# Four categories are deliberately NOT defects, and a gate that flags them is
 # wrong rather than strict:
 #
 #   * NEGATIVE citations, where the comment names a file precisely to say it
@@ -37,8 +37,20 @@
 #     repository, and it CANNOT". The citation is the point of the sentence.
 #   * UPSTREAM paths that belong to another project — `plugin-db` citing the
 #     `sqlite-vec` crate's own `examples/simple-rust/demo.rs`.
+#   * Paths that are DATA rather than pointers. `config-contract`'s inventory
+#     scanner is fed in-memory sources keyed by an invented crate name, and its
+#     raw-env half carries the sealed-module suffix it MATCHES paths against.
+#     Both are values the code reads, not places a reader is being sent. The
+#     tell: renaming the invented crate would satisfy the scan and change
+#     nothing real.
+#   * GENERATED build outputs, which resolve only after `pnpm build` and are
+#     never tracked. The scan reports these itself, as a warning at the end of
+#     a built run, and the warning is the reason they are here: a local green
+#     that came from a built tree is not the CI answer. Naming one is correct
+#     — it is where the artifact really lands — so the alternative would be to
+#     stop naming build outputs in comments, which is worse.
 #
-# Both are listed in ALLOW below, by "file:citation" pair rather than by
+# All four are listed in ALLOW below, by "file:citation" pair rather than by
 # citation alone, so the same path cited wrongly somewhere else is still caught.
 #
 # This file and its self-test are excluded from the scan. Both spell out paths
@@ -137,6 +149,18 @@ crates/migrated/tests/typed_id_parity.rs:tests/core_id_parity.rs
 crates/runtime/src/core/init.rs:crates/runtime/src/embed/websocket.js
 crates/plugin-db/src/backend/sqlite/session.rs:examples/simple-rust/demo.rs
 tests/golden_path.sh:tests/m0_gate.sh
+libs/compio-s3/tests/common/mod.rs:tests/common/env.rs
+crates/config-contract/src/raw_env.rs:tests/common/env.rs
+crates/config-contract/tests/raw_env_contract.rs:tests/common/env.rs
+crates/config-contract/src/inventory.rs:crates/alpha/src/config.rs
+crates/config-contract/src/inventory.rs:crates/demo/src/config.rs
+crates/config-contract/src/inventory.rs:crates/demo/src/main.rs
+crates/config-contract/src/inventory.rs:crates/x/src/lib.rs
+tests/bench_platform.sh:examples/bench/dist/server/index.js
+tests/e2e-browser/src/dev-server.ts:sdks/vite-plugin/dist/cli/migrate-dev.js
+tests/e2e_dev_vs_deployed_stream.sh:sdks/vite-plugin/dist/dev-bootstrap.js
+tests/golden_path.sh:sdks/vite-plugin/dist/index.js
+tests/lib/binary_freshness.sh:sdks/vite-plugin/dist/index.js
 "
 
 # A corpus check the count cannot do: a renamed root silently stops being
