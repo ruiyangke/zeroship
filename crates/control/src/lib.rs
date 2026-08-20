@@ -40,6 +40,7 @@ pub mod proration;
 pub mod rate_limit;
 pub mod refund;
 pub mod registry;
+pub mod reserved_names;
 pub mod spend;
 pub mod stripe_client;
 pub mod stripe_handlers;
