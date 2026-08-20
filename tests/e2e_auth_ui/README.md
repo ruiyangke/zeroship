@@ -29,6 +29,7 @@ the day this was written are both invisible to a response-body assertion:
 | --- | --- |
 | `csp.spec.ts` | `/login` enforces `style-src 'self'` with neither `unsafe-inline` nor `unsafe-hashes`; ZERO style violations via both `page.on("console")` and the document `securitypolicyviolation` event; the forgot-link row computes `text-align: right` (so the fix is a real layout, not a silenced console). |
 | `a11y.spec.ts` | A real failed login (HTTP 401) exposes `role="alert"` on the error and `aria-invalid` + `aria-describedby` on both fields, with the description target present; every visible control on `/login`, `/signup`, `/forgot` has an accessible name; exactly one `h1` per page; every keyboard target matches `:focus-visible` with a non-transparent outline. |
+| `flows.spec.ts` | A verified user enrolls RFC 6238 TOTP through the authenticated endpoints, proves the clean challenge has no error semantics, proves a rejected code exposes an addressable alert, and completes login with a current code. A separate verified user reaches real OIDC consent for a registered per-app client, sees the app scope label and block-level description, sees visibly distinct Allow/Deny actions, and Deny returns `access_denied` to the RP. |
 | `journey.spec.ts` | One browser context signs up, reads and redeems the verification link from the live auth log, signs in, checks `/me`, signs out, proves `/me` is gated again, compares wrong-password and missing-email failures byte-for-byte, and rejects verification-link replay. |
 
 ## How to run
