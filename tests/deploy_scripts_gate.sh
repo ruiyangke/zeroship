@@ -1318,10 +1318,11 @@ echo "  $PASS passed, $FAIL failed, $((PASS+FAIL)) ran"
 # RE-MEASURED 2026-08-13 after the deploy-path, secret_files and snapshot
 # blocks: 108 unconditional; 112 with the shipped compose + dev.rs present;
 # 114 with target/debug/zeroship-control built as well.
-# RE-MEASURED 2026-08-19 after deleting the overlay check for the platform
-# mint credential: 107 unconditional. That credential is no longer a declared
-# setting, so an overlay naming it is an unknown field, which is the defect the
-# --check-config case at the bottom of this file already covers.
+# 2026-08-19: the overlay check for the platform mint credential is deleted, so
+# every count above drops by one. MEASURED both sides on one host with
+# target/debug/zeroship-control absent: 118 ran before, 117 after. That
+# credential is no longer a declared setting, so an overlay naming it is an
+# unknown field, which the --check-config case at the bottom already covers.
 MIN_RAN=107
 RAN=$((PASS + FAIL))
 rc=0
