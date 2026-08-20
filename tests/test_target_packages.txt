@@ -7,9 +7,12 @@
 # binaries while absent from this list - an unlisted package is one whose
 # disappearance tomorrow nothing would notice.
 #
-# MEASURED 2026-08-20: all 29 workspace members build test binaries, so this
-# list is every member and there are no exclusions to justify. It read 28 on
-# 4abf0f74a; zeroship-gatekit is the 29th.
+# MEASURED 2026-08-20 by the command below: all 30 workspace members build test
+# binaries, so this list is every member and there are no exclusions to justify.
+# It read 28 on 4abf0f74a, then 29 when zeroship-gatekit landed. zeroship-testkit
+# is the 30th and was missing, which had this gate reporting
+# "these packages build test binaries but are not in the census". Both crates
+# landed the same day, and only one of them was added here.
 #
 # To regenerate after a deliberate change:
 #   cargo test --workspace --no-run --message-format=json > /tmp/t.json
@@ -43,5 +46,6 @@ zeroship-runtime-macros
 zeroship-schema
 zeroship-stream
 zeroship-test-support
+zeroship-testkit
 zeroship-worker
 zeroship-workflow-scheduler

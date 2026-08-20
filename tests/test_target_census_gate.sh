@@ -92,14 +92,17 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # present on a runner, the `wpt` target DOES compile there, and its 31 names ARE
 # in the count this floor is compared against.
 #
-# The NUMBER survives that correction - 5444 against a floor of 5413 is still a
-# pass, by more than it was designed to need. What does not survive is calling
-# the 31 a measured component: it is now plain slack. It is deliberately not
-# tightened to 5444 here, because this file already records that no CI run of
-# this job has ever printed its own number, so nobody knows whether a runner
-# resolves features the way the machine that measured 5444 did. Tighten it in
-# the change that first reads a real runner's count, not before. No other
-# allowance is made.
+# The NUMBER survives that correction, with room to spare. RE-MEASURED
+# 2026-08-20 on this branch with the WPT tree present, by the same command:
+#
+#   5504 test names across 125 test binaries in 30 packages
+#
+# against the floor of 5413. So the 31 is not a measured component any more, it
+# is 91 points of ordinary slack. It is deliberately NOT tightened here, because
+# this file already records that no CI run of this job has ever printed its own
+# number, so nobody knows whether a runner resolves features the way the two
+# machines that produced 5444 and 5504 did. Tighten it in the change that first
+# reads a real runner's count, not before. No other allowance is made.
 #
 # What makes this go stale: someone adds tests (floor gets loose - harmless, and
 # the step prints the real number every run so the next reader can tighten it),
