@@ -2186,6 +2186,106 @@ mod tests {
         assert!(crate::apply::journal::quote_ident_for_test("a\0b").is_err());
     }
 
+    /// The BACKTICK half of the same invariant, and it is a separate test rather
+    /// than a second needle in the one below because the two spellings have
+    /// different homes on purpose.
+    ///
+    /// MySQL's backtick-doubling escape must live in EXACTLY one physical home,
+    /// `render/backends/mysql.rs`, and nowhere else in the crate source. That home
+    /// is inside the backend module, so — like
+    /// [`crate::render::backends::ansi_double_quote_ident`] — core cannot name it
+    /// and must pick a door in this module that records the vendor.
+    ///
+    /// WHY THIS TEST EXISTS AT ALL, given that nothing was mis-emitted before it.
+    /// The backtick spelling used to live in `schema::query::mysql_quote_ident`,
+    /// which was `pub` and in CORE, with `backends::mysql` reaching INTO core to
+    /// get its own spelling — the exact mirror image of the ANSI arrangement. No
+    /// emitted byte was wrong, because every call site named MySQL in the callee's
+    /// name, and the one-dialect-literal test passed because the reach was by
+    /// function name rather than a `SqlDialect::` literal. The defect was
+    /// STRUCTURAL and it was a step-4 blocker: the future `zero-migrate-mysql`
+    /// would have needed core at runtime to spell its own identifier, which is the
+    /// core-to-backend cycle the whole backend split exists to break.
+    ///
+    /// A second home also existed where nobody was looking for one:
+    /// `apply::backend::mysql::journal_sql::quote_ident_mysql` carried its own copy
+    /// of the same escape. The ANSI needle has zero offenders crate-wide, so the
+    /// backtick needle having two was the asymmetry, not a difference of kind.
+    ///
+    /// TWO NEEDLES, AND THE SECOND ONE HAS AN EXEMPTION THAT IS ITSELF THE POINT.
+    /// Needle 1 is the escape CALL. Needle 2 is the doubled-backtick string literal
+    /// that a hand-rolled re-quoter emits without ever calling `replace`, and it has
+    /// exactly one sanctioned occurrence: `declarative::mysql_requote_sql`, the
+    /// documented single translation point from the `pg_get_constraintdef` normal
+    /// form into MySQL spelling. That function is a character-stream TRANSLATOR, not
+    /// a spelling primitive — the MySQL counterpart of `pg_canonical_ident`'s
+    /// normal-form role rather than of `ansi_double_quote_ident`'s spelling role —
+    /// and it is reached from core, never from a backend, so it creates no
+    /// core-to-backend cycle. It is exempted BY NAME rather than left unscanned, so
+    /// a second hand-rolled re-quoter appearing anywhere else goes red.
+    ///
+    /// WHAT NEITHER NEEDLE CATCHES, and the limitation is the same shape as the ANSI
+    /// scan's. Both are byte-patterns, so a bare wrap with no doubling at all —
+    /// ``format!("`{ident}`")`` after a strict bare-identifier gate, which is what
+    /// `apply::backend::mysql::backfill_sql::quote_bare` used to be — passes both
+    /// while being an unrouted spelling. That site was routed by hand; only the
+    /// compile-time half (the primitive being unnameable outside its backend module)
+    /// generalises. The in-crate test expectations that build a backtick literal to
+    /// CHECK an emitter are deliberately left alone: a probe that derives its
+    /// expectation from the emitter it checks is not an oracle.
+    #[test]
+    fn no_bare_backtick_escape_seam_outside_the_mysql_backend() {
+        use std::path::Path;
+        // Both byte-patterns, assembled so this file does not itself contain
+        // needle 1. `render/dml.rs` is exempt anyway, for these fragments and the
+        // prose above; no `dml.rs` code performs the escape.
+        let escape_call = ['r', 'e', 'p', 'l', 'a', 'c', 'e']
+            .iter()
+            .collect::<String>()
+            + "('`', \"``\")";
+        let doubled_literal = "\"``\"";
+        let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders: Vec<String> = Vec::new();
+        let mut stack = vec![src_root.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read_dir src") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let rel = path.strip_prefix(&src_root).unwrap().display().to_string();
+                if rel == "render/dml.rs" {
+                    continue;
+                }
+                let body = std::fs::read_to_string(&path).expect("read src file");
+                // The single sanctioned home of the escape CALL is the MySQL
+                // backend module itself.
+                if rel != "render/backends/mysql.rs" && body.contains(&escape_call) {
+                    offenders.push(format!("{rel} (escape call)"));
+                }
+                // The single sanctioned emitter of the doubled literal is the
+                // normal-form translator; see this test's header.
+                if rel != "render/backends/mysql.rs"
+                    && rel != "render/declarative.rs"
+                    && body.contains(doubled_literal)
+                {
+                    offenders.push(format!("{rel} (doubled literal)"));
+                }
+            }
+        }
+        offenders.sort();
+        assert!(
+            offenders.is_empty(),
+            "bare backtick spelling found outside render/backends/mysql.rs — route \
+             these through dml::escape_quote_ident_for_dialect(.., SqlDialect::Mysql) \
+             so the MySQL backend decides its own spelling: {offenders:?}"
+        );
+    }
+
     /// STRUCTURAL enforcement of the "no remaining bare
     /// `format!`/`replace` escape seam" claim. The raw `"` → `""` escape logic
     /// (`replace('"', "\"\"")`) must live in EXACTLY one physical home — and
@@ -2224,10 +2324,15 @@ mod tests {
     /// single quoting home. After routing, the same one-token neuter reddens 164.
     ///
     /// The exemption is deleted rather than retargeted, so `schema/` is now scanned
-    /// like every other subtree. `schema::query::mysql_quote_ident` survives the scan
-    /// legitimately: it spells backticks, not `"`, and is the MySQL backend's own
-    /// primitive (`backends::mysql` delegates to it) rather than a second home for
-    /// anything.
+    /// like every other subtree. `schema::query::mysql_quote_ident` used to survive
+    /// this scan legitimately — it spells backticks, not `"` — and an earlier version
+    /// of this note added that it was "the MySQL backend's own primitive
+    /// (`backends::mysql` delegates to it) rather than a second home for anything".
+    /// The delegation was real and the conclusion did not follow: a backend
+    /// delegating INTO core is the mirror image of the arrangement this test
+    /// enforces, not an instance of it. That function is now gone and the backtick
+    /// spelling has its own scan, `no_bare_backtick_escape_seam_outside_the_mysql_backend`
+    /// above.
     ///
     /// The `"` → `""` escape logic must NOT recur inline across sites such as
     /// `executor` / `precondition` / `baseline` / `expand_contract` / `shadow` /

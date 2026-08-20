@@ -28,8 +28,62 @@ pub(super) struct MysqlDmlRenderer;
 pub(super) static RENDERER: MysqlDmlRenderer = MysqlDmlRenderer;
 
 impl DmlRenderer for MysqlDmlRenderer {
+    /// THE single physical home of MySQL's backtick identifier spelling: double
+    /// every embedded backtick, then wrap the result in backticks.
+    ///
+    /// It lives HERE, in the vendor's own module, and no longer in core. It used
+    /// to be `schema::query::mysql_quote_ident` — `pub`, in the schema kernel —
+    /// with this method reaching INTO core to get its own spelling: the exact
+    /// mirror image of the ANSI arrangement, where `ansi_double_quote_ident` is
+    /// `pub(in crate::render::backends)` so that core CANNOT reach it un-named.
+    ///
+    /// NOTHING WAS EMITTED WRONGLY BEFORE THE MOVE, and that is the point. Every
+    /// call site named MySQL in the callee's name, so no vendor was unnamed, and
+    /// `backend_modules_name_one_dialect` passed because the reach was by function
+    /// name rather than by a dialect-enum literal. What it blocked was step 4: the
+    /// future `zero-migrate-mysql` would have needed core at RUNTIME to spell its
+    /// own identifier — the core-to-backend cycle the backend split exists to
+    /// break, and the same shape as the extraction spike's finding that `-sqlite`
+    /// needed `-postgres` to quote a trigger name.
+    ///
+    /// (This doc may not spell the dialect-enum literal, even in prose.
+    /// `backend_modules_name_one_dialect`'s second half collects EVERY line in this
+    /// file mentioning that path and demands the list be exactly the `DIALECT`
+    /// const, so a comment is a carrier like any other line. An earlier draft of
+    /// this paragraph named it and turned that test red, which is the rule working
+    /// as intended.)
+    ///
+    /// MEASURED on the 1231-test `--lib` binary by neutering each candidate with a
+    /// single appended token:
+    ///
+    /// | tree | neutered | red |
+    /// |------|----------|-----|
+    /// | before | this method | 21 |
+    /// | before | `schema::query::mysql_quote_ident` | 30 |
+    /// | after | this method | 54 |
+    ///
+    /// The two before-sets NEST rather than being disjoint — the inverse of the
+    /// ANSI case, and exactly what "the backend delegates into core" means
+    /// operationally: NOTHING reddened by neutering this method was missed by
+    /// neutering core. The 9 in the difference (`render::lower::tests` ×5,
+    /// `schema::query::hostile_identifier_quoting` ×3, and
+    /// `policy_keyword_and_quoted_identifiers_are_quoted_in_injected_sql`) are the
+    /// tests whose MySQL identifier bytes this backend had NO say in.
+    ///
+    /// AND THE 54 IS NOT A TYPO FOR THE 30 THAT WAS PREDICTED. Routing the two
+    /// SECOND homes found during the change — `apply::backend::mysql::journal_sql`
+    /// and `::backfill_sql`, each of which carried its own copy of the spelling and
+    /// so could not be reached by the core neuter at all — added 24
+    /// `apply::backend::mysql` tests on top of the 30. Nothing was lost at any
+    /// step: the 54 is a strict superset of the 30, and the binary held at 1232
+    /// tests throughout. The prediction was wrong because it was formed from the
+    /// two sets measured FIRST, before those homes were known to exist.
+    ///
+    /// Like the two ANSI impls, this spells the bytes DIRECTLY rather than through
+    /// the `*_for_dialect` seam its sibling methods use: it IS this dialect's
+    /// `quote_ident`, so routing through the dispatch would recurse.
     fn quote_ident(&self, ident: &str) -> String {
-        crate::schema::query::mysql_quote_ident(ident)
+        format!("`{}`", ident.replace('`', "``"))
     }
 
     fn qualify_table(&self, project_schema: &str, table: &str) -> Result<String, DmlError> {

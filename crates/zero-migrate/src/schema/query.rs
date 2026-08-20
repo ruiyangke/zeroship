@@ -89,10 +89,19 @@ pub use zero_migrate_ir::dialect::SqlDialect;
 /// provide every spelling explicitly. The single exhaustive dispatch match lives
 /// in [`renderer`], so a new [`SqlDialect`] variant breaks there at compile time
 /// and forces the missing renderer to be wired before the crate can build.
+///
+/// IT LOST TWO METHODS, AND THE MEASUREMENT IS WHY. `encrypted_column_bind_placeholder`
+/// and `wrap_encrypted_param` had ZERO call sites anywhere in the workspace — four
+/// and five mentions respectively, every one of them the declaration, an impl, or a
+/// doc line. `wrap_encrypted_param`'s SQLite arm was the sole reader of a `pub const
+/// SQLITE_ENC_BLOB_PREFIX` whose own doc claimed "the SQLite session strips the
+/// prefix and base64-decodes the remainder"; the sentinel string appeared exactly
+/// once in the whole repository, in its own definition, so nothing stripped it and
+/// nothing ever had. A dead encryption seam that DOCUMENTS a decode step it does not
+/// perform is worse than no seam, because the next reader budgets for it. All three
+/// are deleted rather than kept warm: 10 methods to 8.
 pub trait SchemaRenderer {
     fn dialect(&self) -> SqlDialect;
-    fn encrypted_column_bind_placeholder(&self, n: usize) -> String;
-    fn wrap_encrypted_param(&self, b64_value: String) -> String;
     fn foreign_key_target(&self, app_id: &str, target: &str) -> String;
     fn column_type(&self, def: &serde_json::Value) -> String;
     fn json_object_default(&self) -> String;
@@ -131,14 +140,6 @@ pub fn renderer(dialect: SqlDialect) -> &'static dyn SchemaRenderer {
 impl SchemaRenderer for PostgresSchemaRenderer {
     fn dialect(&self) -> SqlDialect {
         SqlDialect::Postgres
-    }
-
-    fn encrypted_column_bind_placeholder(&self, n: usize) -> String {
-        format!("decode(${n}, 'base64')::bytea")
-    }
-
-    fn wrap_encrypted_param(&self, b64_value: String) -> String {
-        b64_value
     }
 
     fn foreign_key_target(&self, app_id: &str, target: &str) -> String {
@@ -238,14 +239,6 @@ impl SchemaRenderer for PostgresSchemaRenderer {
 impl SchemaRenderer for SqliteSchemaRenderer {
     fn dialect(&self) -> SqlDialect {
         SqlDialect::Sqlite
-    }
-
-    fn encrypted_column_bind_placeholder(&self, n: usize) -> String {
-        format!("${n}")
-    }
-
-    fn wrap_encrypted_param(&self, b64_value: String) -> String {
-        format!("{SQLITE_ENC_BLOB_PREFIX}{b64_value}")
     }
 
     fn foreign_key_target(&self, _app_id: &str, target: &str) -> String {
@@ -368,19 +361,11 @@ impl SchemaRenderer for MysqlSchemaRenderer {
         SqlDialect::Mysql
     }
 
-    fn encrypted_column_bind_placeholder(&self, _n: usize) -> String {
-        "FROM_BASE64(?)".to_string()
-    }
-
-    fn wrap_encrypted_param(&self, b64_value: String) -> String {
-        b64_value
-    }
-
     fn foreign_key_target(&self, app_id: &str, target: &str) -> String {
         format!(
             "{}.{}",
-            mysql_quote_ident(app_id),
-            mysql_quote_ident(target)
+            quote_ident_for_dialect(app_id, self.dialect()),
+            quote_ident_for_dialect(target, self.dialect())
         )
     }
 
@@ -536,16 +521,19 @@ mod schema_renderer_tests {
     }
 }
 
-/// Sentinel prefix the SQLite session uses to recognise an encrypted-
-/// column param that must be base64-decoded and bound as BLOB. The
-/// prefix is deliberately long + improbable: a base64 payload contains
-/// only `[A-Za-z0-9+/=]`, never `_` or `:`, so this prefix can never
-/// collide with a real base64 value the encryption pass writes.
-///
-/// The SQLite session strips the prefix and base64-decodes the
-/// remainder; PG never sees a value with this prefix because the PG
-/// renderer's `wrap_encrypted_param` is a no-op on the PG arm.
-pub const SQLITE_ENC_BLOB_PREFIX: &str = "__zero_migrate_enc_blob__:";
+/* THE ENCRYPTED-BLOB SENTINEL IS DELETED, AND ITS DOC WAS FALSE.
+ *
+ * `pub const SQLITE_ENC_BLOB_PREFIX` claimed that "the SQLite session strips the
+ * prefix and base64-decodes the remainder". The literal it defined appeared EXACTLY
+ * ONCE in the entire repository — in that definition — so no session stripped it,
+ * and none ever had. Its only reader in code was `SchemaRenderer::wrap_encrypted_param`,
+ * itself dead (see the trait's header), so the constant, its one reader, and the
+ * decode step it promised are all gone together.
+ *
+ * Recorded rather than silently removed because the doc is the interesting part: a
+ * comment describing a decode that does not exist reads as a designed seam, and the
+ * next person to add encrypted-column support would have built on top of it.
+ */
 
 /// Validate a collection name: alphanumeric + underscores only.
 ///
@@ -854,20 +842,23 @@ fn validate_schema(name: &str) -> Result<(), QueryError> {
     Ok(())
 }
 
-/// Quote a MySQL identifier with backticks.
-/// Escapes any embedded backticks by doubling them.
-///
-/// This is the ONE physical home of the backtick spelling, and
-/// `render::backends::mysql::MysqlDmlRenderer::quote_ident` delegates here rather
-/// than re-spelling it — so this function IS the MySQL backend's primitive, living
-/// one module away. (The ANSI double-quote spelling is arranged the other way
-/// round: its one home is `render::backends::ansi_double_quote_ident`, private to
-/// the backends, and this module reaches it through this file's private
-/// `quote_ident_for_dialect` — deliberately not linked, because a `pub` doc may not
-/// name a private item without tripping `rustdoc::private_intra_doc_links`.)
-pub fn mysql_quote_ident(name: &str) -> String {
-    format!("`{}`", name.replace('`', "``"))
-}
+/* THE BACKTICK SPELLING IS GONE FROM CORE TOO.
+ *
+ * It used to live here as `pub fn mysql_quote_ident`, and it was the exact MIRROR
+ * IMAGE of the ANSI arrangement described below: instead of core reaching a
+ * backend-private primitive through a named door, the MySQL BACKEND reached into
+ * core — `render::backends::mysql` called this function to get its own spelling.
+ *
+ * Nothing here was mis-emitted. Every call site named MySQL in the callee's name,
+ * so unlike the `quote_ident` case there was no unnamed vendor, and the
+ * one-dialect-literal test passed because the reach was by function name rather
+ * than a `SqlDialect::` literal. What it blocked was the crate split: the future
+ * `zero-migrate-mysql` would have needed core AT RUNTIME to spell an identifier.
+ *
+ * The bytes now live in `render::backends::mysql`'s own `quote_ident`, which core
+ * cannot name, so this module reaches them the same way it reaches the ANSI ones —
+ * through `quote_ident_for_dialect(name, SqlDialect::Mysql)`.
+ */
 
 /// EMIT a schema-layer identifier in `dialect`'s own spelling.
 ///
@@ -968,10 +959,12 @@ fn mysql_native_enum_values(def: &serde_json::Value) -> Option<Vec<String>> {
 // DDL builders for registerModel
 // ---------------------------------------------------------------------------
 
-/// Build CREATE SCHEMA IF NOT EXISTS for an app.
-pub fn build_create_schema(app_id: &str) -> String {
-    format!("CREATE SCHEMA IF NOT EXISTS {}", pg_quote_ident(app_id))
-}
+/* `pub fn build_create_schema` IS DELETED. It had ZERO callers: one mention in the
+ * whole repository across every `.rs` and `.ts` file, and that mention was its own
+ * definition. A previous pass routed its identifier through the PostgreSQL door
+ * rather than delete it, because removing public API was outside that brief; the
+ * routing was correct and the function was still dead. `CREATE SCHEMA` is emitted
+ * by the apply layer, not from here. */
 
 // The production CREATE path passes the orchestrator's live table set through
 // `FkEmission::Deferred` so an FK to a not-yet-created target becomes a separate
@@ -1476,7 +1469,7 @@ fn build_injected_columns(
 /// author-controlled identifiers continue through the regular quoting path.
 fn injected_column_ident(name: &str, dialect: SqlDialect) -> String {
     match dialect {
-        SqlDialect::Mysql => mysql_quote_ident(name),
+        SqlDialect::Mysql => quote_ident_for_dialect(name, dialect),
         SqlDialect::Postgres | SqlDialect::Sqlite => {
             crate::render::declarative::quote_ident_if_needed(name)
         }
@@ -1608,9 +1601,9 @@ fn render_injected_index(
         ),
         SqlDialect::Mysql => format!(
             "CREATE {unique_clause}INDEX {} ON {}.{} ({rendered_columns})",
-            mysql_quote_ident(&index_name),
-            mysql_quote_ident(app_id),
-            mysql_quote_ident(collection),
+            quote_ident_for_dialect(&index_name, dialect),
+            quote_ident_for_dialect(app_id, dialect),
+            quote_ident_for_dialect(collection, dialect),
         ),
     })
 }
@@ -6128,7 +6121,7 @@ columns = [
 
 #[cfg(test)]
 mod hostile_identifier_quoting {
-    use super::{mysql_quote_ident, quote_ident_for_dialect, SqlDialect};
+    use super::{quote_ident_for_dialect, SqlDialect};
 
     /// Hostile-input coverage for the two identifier spellings this kernel can
     /// reach. It USED to say the schema kernel carries its own quoting primitives
@@ -6139,13 +6132,19 @@ mod hostile_identifier_quoting {
     /// BOTH HALVES OF THAT ARE NOW FALSE. The exemption is deleted, and so is
     /// `schema::query::quote_ident` — the ANSI double-quote spelling has exactly one
     /// physical home (`render::backends::ansi_double_quote_ident`) and this module
-    /// reaches it, like everyone else, through a door that names a dialect. The
-    /// backtick spelling still lives here, in `mysql_quote_ident`, which
-    /// `render::backends::mysql` delegates to.
+    /// reaches it, like everyone else, through a door that names a dialect.
     ///
-    /// These assertions are worth keeping regardless of where the bytes live: they
-    /// are the only hostile-input coverage of the backtick primitive, and they now
-    /// double as an end-to-end check that the PG door actually reaches the one home.
+    /// AND SO IS THE BACKTICK SPELLING. This note used to end "the backtick spelling
+    /// still lives here, in `mysql_quote_ident`, which `render::backends::mysql`
+    /// delegates to" — a true statement about an arrangement that was the MIRROR
+    /// IMAGE of the one above, with the BACKEND reaching into CORE for its own
+    /// spelling. Those bytes are now `render::backends::mysql`'s own `quote_ident`
+    /// and this module reaches them through the same dialect-naming door.
+    ///
+    /// So BOTH halves below are now end-to-end: each asserts that the door for its
+    /// dialect actually arrives at that dialect's one home. They remain the only
+    /// hostile-input coverage of either primitive, which is why they assert bytes
+    /// rather than delegate to the emitter they are checking.
     ///
     /// The dangerous character is the one that closes THIS quoting: a `"` is
     /// inert inside backticks and a backtick is inert inside double quotes.
@@ -6155,7 +6154,7 @@ mod hostile_identifier_quoting {
             quote_ident_for_dialect(r#"a"b"#, SqlDialect::Postgres),
             r#""a""b""#
         );
-        assert_eq!(mysql_quote_ident("a`b"), "`a``b`");
+        assert_eq!(quote_ident_for_dialect("a`b", SqlDialect::Mysql), "`a``b`");
     }
 
     #[test]
@@ -6170,7 +6169,7 @@ mod hostile_identifier_quoting {
             "an odd number of quotes means one of them closes the identifier: {pg}"
         );
 
-        let my = mysql_quote_ident("x`); DROP TABLE victim; -- ");
+        let my = quote_ident_for_dialect("x`); DROP TABLE victim; -- ", SqlDialect::Mysql);
         assert_eq!(my, "`x``); DROP TABLE victim; -- `");
         assert_eq!(
             my.matches('`').count() % 2,
@@ -6187,6 +6186,9 @@ mod hostile_identifier_quoting {
             quote_ident_for_dialect("a`b", SqlDialect::Postgres),
             r#""a`b""#
         );
-        assert_eq!(mysql_quote_ident(r#"a"b"#), r#"`a"b`"#);
+        assert_eq!(
+            quote_ident_for_dialect(r#"a"b"#, SqlDialect::Mysql),
+            r#"`a"b`"#
+        );
     }
 }
