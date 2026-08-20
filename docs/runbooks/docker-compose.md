@@ -108,7 +108,10 @@ point; non-edge publications are loopback-only debugging paths):
 - `postgres` -> `localhost:5440`
 - `gateway` (`zeroship-gate`) -> `localhost:8000`
 - `auth` (`zeroship-auth`) -> `localhost:9092`
-- `redpanda` (Kafka-wire billing stream) -> `REDPANDA_BROKERS=127.0.0.1:19092`
+- `redpanda` (Kafka-wire billing stream) -> `127.0.0.1:19092`. The producers
+  take it as `--metering-brokers` / `ZEROSHIP_METERING_BROKERS`;
+  `REDPANDA_BROKERS` is now only the name the host-side `zeroship-stream` and
+  `zeroship-control` integration tests gate themselves on.
 - `redis` (`env.kv` store) has no host port
 - `worker` (`zeroship-worker`) has no host port; scale it with `--scale worker=N`
 

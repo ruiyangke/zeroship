@@ -652,10 +652,12 @@ services:
       - redis-data:/data
 
   # redpanda - Kafka-wire durable stream for the billing-provider platform.
-  # Host-side integration tests use:
+  # Host-side integration tests use the test-only name:
   #   REDPANDA_BROKERS=127.0.0.1:19092 cargo test -p zeroship-stream --test redpanda_roundtrip
-  # In-compose services should use REDPANDA_BROKERS=redpanda:9092 when S4/S5 wire
-  # the forwarder and worker producer.
+  # The SERVICES do not: the worker and gateway producers take
+  # `--metering-brokers` / `ZEROSHIP_METERING_BROKERS` (canonical
+  # `metering.brokers`, also settable as `[metering] brokers` in the overlay for
+  # the binaries that load one). In compose that value is `redpanda:9092`.
   redpanda:
     image: docker.redpanda.com/redpandadata/redpanda:latest
     command:
