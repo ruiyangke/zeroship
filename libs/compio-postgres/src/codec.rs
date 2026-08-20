@@ -49,7 +49,17 @@ pub enum BackendMessage {
     /// An out-of-band async notification / notice / parameter status
     /// update — must be routed to the dedicated async channel, not the
     /// in-flight request.
-    Async(backend::Message),
+    ///
+    /// `frame_len` is the whole frame the message OWNS: `Message::parse`
+    /// splits `tag + length + body` off the read buffer and the resulting
+    /// body keeps all of it. Nothing derived from the parsed view can stand
+    /// in for it - a `NotificationResponse` whose two strings are followed by
+    /// megabytes of padding parses fine and its fields sum to a handful of
+    /// bytes. Anything that retains one of these must charge this number.
+    Async {
+        message: backend::Message,
+        frame_len: usize,
+    },
 }
 
 /// A lazily-parsed iterator of backend messages sharing a single
@@ -156,10 +166,13 @@ where
                 | backend::PARAMETER_STATUS_TAG => {
                     if idx == 0 {
                         // Async message sits at the head — return it alone.
+                        // Measured BEFORE the parse consumes it: `header.len()` counts
+                        // itself but not the tag, so the frame is one more.
+                        let frame_len = header.len() as usize + 1;
                         let message = backend::Message::parse(stream.buf())
                             .map_err(Error::io)?
                             .expect("async header implies full message is buffered");
-                        return Ok(BackendMessage::Async(message));
+                        return Ok(BackendMessage::Async { message, frame_len });
                     } else {
                         // Normal batch terminates at this async boundary;
                         // caller will see the async message on the next call.
