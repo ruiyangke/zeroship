@@ -25,9 +25,18 @@
 # `tests/lib_skip_census_selftest.sh` covers both directions.
 
 # The token every announcement carries. Kept byte-identical to
-# `crates/test-support/src/lib.rs` and to the three verbatim copies in
-# `libs/*/tests/common/mod.rs`; one search over a run log has to find every skip
-# in the workspace, whichever side of that line it came from.
+# `crates/test-support/src/lib.rs` and to the verbatim `SKIP_MARKER` consts in
+# `libs/compio-s3` and `libs/compio-redis`; one search over a run log has to
+# find every skip in the workspace, whichever side of that line it came from.
+# `libs/compio-postgres` deliberately has neither -- it replaced its announcer
+# with a panic, and its `tests/common/mod.rs` header says so. This said "the
+# three verbatim copies in libs/*/tests/common/mod.rs", which was one too many
+# and named a file that asserts the opposite.
+#
+# "Kept byte-identical" was an instruction, not a check, until 2026-08-20:
+# `tests/skip_marker_gate.sh` now compares every token in the marker's family
+# against this one, because a single wrong character removes every skip
+# announced through that copy from this census without any number moving.
 #
 # It is deliberately not a word. Searching for "skip" cannot do this job and
 # that is measured: of the 98 lines containing it in one full auth run, 13 were

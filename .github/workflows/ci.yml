@@ -386,6 +386,14 @@ jobs:
       # ten files were in that state on 2026-08-19; the self-test runs first
       # because a gate that reports zero offenders and a gate whose detector
       # matches nothing print the same thing.
+      #
+      # AND ON THE REAL TREE IT WAS THE SECOND ONE. Measured 2026-08-20: 8 rows
+      # found, 0 removed by the marker filter, all 8 removed by an ALLOW list of
+      # bare path prefixes, so the run examined nothing and printed the clean
+      # line anyway. The gate now prints found/excused/unruled, refuses a zero
+      # pre-filter, fails an ALLOW entry that matches nothing, and matches the
+      # excused SHAPE rather than the whole file - a marker-less skip injected
+      # into a WPT runner was excused before that change and is named after it.
       - name: Skip-marker gate self-test
         run: tests/skip_marker_gate.sh --self-test
       - name: No test skips in a string the census cannot see
