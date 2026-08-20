@@ -82,8 +82,7 @@ impl Fixture {
             BrokerSecrets::new(BROKER_CURRENT.to_vec(), previous.map(|bytes| bytes.to_vec()))
                 .expect("broker secrets");
         let issuer = Arc::new(test_issuer().with_broker_secrets(broker_secrets));
-        issuer
-            .publish_active_key(&db)
+        common::publish_op_key_once(&issuer, &db)
             .await
             .expect("publish active OP key");
 

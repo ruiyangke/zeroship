@@ -62,8 +62,7 @@ impl Fixture {
         .detach();
         let db = Arc::new(pg_client);
         let issuer = Arc::new(test_issuer());
-        issuer
-            .publish_active_key(&db)
+        common::publish_op_key_once(&issuer, &db)
             .await
             .expect("publish active OP key");
 
@@ -1064,6 +1063,16 @@ async fn get(fx: &Fixture, path: &str, cookie: Option<&str>) -> cyper::Response 
 }
 
 #[allow(clippy::future_not_send)]
+/// A client IP unique to this RUN, stable within it. See `post_form`.
+fn run_client_ip() -> String {
+    static IP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    IP.get_or_init(|| {
+        let b = *Uuid::new_v4().as_bytes();
+        format!("127.{}.{}.{}", b[0].max(1), b[1].max(1), b[2].max(1))
+    })
+    .clone()
+}
+
 async fn post_form(fx: &Fixture, path: &str, body: &str, cookie: Option<&str>) -> cyper::Response {
     let mut req = fx
         .http
@@ -1071,6 +1080,14 @@ async fn post_form(fx: &Fixture, path: &str, body: &str, cookie: Option<&str>) -
         .expect("build POST")
         .header("content-type", "application/x-www-form-urlencoded")
         .expect("content-type");
+    // A client IP unique to this RUN. `/login` rate-limits per client ip, and
+    // with no header every POST in every run shares ONE bucket in
+    // `zeroship.rate_limits`. Invisible while each run had a private database.
+    // MEASURED 2026-08-20 with two runs sharing one: 429 where this file
+    // asserts 303, at three separate call sites.
+    req = req
+        .header("x-forwarded-for", run_client_ip())
+        .expect("x-forwarded-for");
     if let Some(cookie) = cookie {
         req = req.header("cookie", cookie).expect("cookie");
     }

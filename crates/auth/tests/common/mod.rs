@@ -28,26 +28,59 @@ use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::server;
 use zeroship_core::config::{Secret, SourceKind};
 
-/// The OP signing key belonging to the calling test binary, and to no other.
+/// The OP signing key belonging to this test PROCESS, and to no other.
 ///
 /// Every integration test binary in this crate shares ONE suite database.
 /// `Issuer::publish_active_key` retires every other active row in
 /// `zeroship.signing_keys` and then refuses to reactivate a `retiring` row
 /// (`crates/auth/src/oidc/issuer.rs:388-408`), and the kid is a pure
-/// thumbprint of the public key (`issuer.rs:273`). So two binaries that build
-/// their issuer from the same seed publish the SAME kid, and the one that runs
-/// second dies on a key some binary between them retired. That is production
-/// behaving correctly - a retiring signer must not come back - against
-/// fixtures wrong to share one OP identity.
+/// thumbprint of the public key (`issuer.rs:273`). So two issuers built from
+/// the same seed publish the SAME kid, and whichever publishes second dies on
+/// a key something between them retired. That is production behaving correctly
+/// - a retiring signer must not come back - against fixtures wrong to share one
+/// OP identity.
 ///
-/// `mod common` is compiled into each test binary separately, so
-/// `CARGO_CRATE_NAME` here expands to that binary's own target name. The
-/// distinctness therefore holds by construction; nobody has to track which
-/// seed literals are already spoken for.
+/// THE SEED WAS `CARGO_CRATE_NAME` ALONE, WHICH SCOPES IT TO THE BINARY AND
+/// NOT TO THE RUN. That was enough while every run had a private database. It
+/// is not enough now that runs on one migration set share one, because the
+/// crate name is identical in both: run A's `oidc_userinfo_test` and run B's
+/// build the same kid, and each retires the other's.
+///
+/// MEASURED 2026-08-20, two auth suites started together against one shared
+/// database: 168 passed / 97 failed and 168 passed / 103 failed, of which 96
+/// were one message -
+///     publish active OP key: Config("signing key rrH3djpczx84e4EPasp7tvEcuv8a2ifSc4p0VT5Q5Go
+///                                   has non-activatable status \"retiring\"")
+/// - the same kid in both logs, which is the collision stated as a fact.
+///
+/// So the seed carries a per-PROCESS token as well. Distinctness then holds by
+/// construction in both directions: two binaries of one run differ (different
+/// processes), and two runs of one binary differ (different processes again).
+/// Memoized, because the key must be stable for the life of the process - an
+/// issuer that re-derived it would publish a second kid and retire its own.
+///
+/// A key this process published and something else has since retired stays
+/// usable here, which is what makes per-process seeds sufficient rather than
+/// merely different: `publish_active_key`'s own doc says an already-running
+/// retiring signer remains safe, because every token it returns advances the
+/// row's maximum issued expiry. Only REPUBLISHING a retired kid fails, and
+/// nothing republishes a kid no other process can derive.
 pub fn op_signing_key() -> ed25519_dalek::SigningKey {
-    ed25519_dalek::SigningKey::from_bytes(&zeroship_core::crypto::derive_key(env!(
-        "CARGO_CRATE_NAME"
-    )))
+    static SEED: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+    let seed = SEED.get_or_init(|| {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        // The pid separates two live processes; the clock separates a reused
+        // pid from the process that held it before. The crate name is kept so
+        // a kid in a log still names the binary that minted it.
+        zeroship_core::crypto::derive_key(&format!(
+            "{}-{}-{nanos}",
+            env!("CARGO_CRATE_NAME"),
+            std::process::id(),
+        ))
+    });
+    ed25519_dalek::SigningKey::from_bytes(seed)
 }
 
 // ─── AuthConfig test fixture ─────────────────────────────────────────────
@@ -388,4 +421,59 @@ impl Fixture {
     pub async fn fresh_challenge(&self) -> String {
         native_authorize_return_to(&self.test_client_id, self.test_redirect)
     }
+}
+
+/// Publish this process's OP signing key, once, however many fixtures ask.
+///
+/// WHY ONCE. `zeroship.signing_keys` holds at most one `active` row per
+/// DATABASE: `publish_active_key` retires every other active row
+/// (`crates/auth/src/oidc/issuer.rs:396-403`) and refuses to reactivate a
+/// `retiring` one (`:380-392`). That is production behaving correctly - a
+/// retired signer must not come back - and it makes "the active OP key" a
+/// database-level singleton, which two concurrent suite runs on one shared
+/// database both need to be.
+///
+/// Per-process KEYS are not enough on their own, and the measurement says so.
+/// Two auth binaries run together on one database, after `op_signing_key`
+/// became per-process:
+///     A: 161 passed; 93 failed        B: 254 passed; 0 failed
+/// and 93 of A's 93 were `publish active OP key: ... has non-activatable
+/// status "retiring"`, naming A's OWN kid. Distinct keys stopped the two runs
+/// from colliding on one identity; what remained is that each REPUBLISHED its
+/// key per fixture boot, and B's publish had retired A's row in between.
+///
+/// Publishing once removes the republish, which is the only operation that can
+/// fail. A key another run has since retired stays usable here: `retiring` rows
+/// remain in the JWKS (`crates/auth/src/oidc/metadata.rs:71-84` selects
+/// `status IN ('active','next','retiring')`), and every JWKS assertion in this
+/// crate looks its key up BY KID rather than asserting how many there are, so a
+/// peer's key sitting beside this one changes nothing.
+///
+/// NOT for `signing_key_retention_test`, which is the lifecycle's own test and
+/// must drive the real `publish_active_key` directly.
+///
+/// LOAD-THEN-STORE, NOT `swap`: the flag records that a publish SUCCEEDED, not
+/// that one was attempted. With `swap` the flag is already set when the publish
+/// returns an error, so the first caller reports the real failure and every
+/// later caller in the process gets `Ok(())` with nothing published and fails
+/// somewhere downstream on a key that was never registered - one real failure
+/// wearing fifty unrelated faces.
+///
+/// The race `swap` was buying is not worth having. This suite runs
+/// `--test-threads 1`, and even threaded the worst case is republishing our own
+/// still-ACTIVE kid, which succeeds: `publish_active_key` refuses only
+/// `retiring` and `retired` rows. Skipping the publish is the outcome nothing
+/// downstream can recover from.
+pub async fn publish_op_key_once(
+    issuer: &zeroship_auth::oidc::Issuer,
+    db: &compio_postgres::Client,
+) -> zeroship_auth::error::Result<()> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static PUBLISHED: AtomicBool = AtomicBool::new(false);
+    if PUBLISHED.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    issuer.publish_active_key(db).await?;
+    PUBLISHED.store(true, Ordering::SeqCst);
+    Ok(())
 }

@@ -95,9 +95,17 @@ DB-gated and end-to-end suites (bring up the dev Postgres via
 own server):
 
 ```
+tests/run_auth_suite.sh         # the auth live-database gate. Uses a SHARED
+                                # database named after this tree's migration
+                                # set, so two agents on one commit can run it
+                                # at the same time; --database <name> for a
+                                # private one. TEST_DB in the environment is
+                                # refused. docs/runbooks/local-dev.md says why.
 tests/run_billing_suite.sh      # provisions the DB + runs every live-database suite
                                 # (everything behind the `live-db-tests` feature
                                 #  in zeroship-control / zeroship-migrated)
+tests/sweep_test_databases.sh   # reclaim the test databases no branch can ask
+                                # for. Dry run unless --apply; never FORCE.
 ./tests/golden_path.sh          # build a creator app locally and deploy it
 ./tests/e2e_platform.sh         # multi-service platform smoke
 ./tests/e2e_docker.sh           # the full stack under Docker Compose

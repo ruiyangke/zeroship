@@ -1554,17 +1554,77 @@ mod access_identity_tests {
             backchannel_logout_uri: None,
             brokered: false,
         };
+        // PER-PROCESS, not the fixed `[61u8; 32]` this used to be.
+        //
+        // `zeroship.signing_keys` allows one `active` OP key per DATABASE:
+        // `publish_active_key` retires every other active row and refuses to
+        // reactivate a retired one. A constant seed gives every run the same
+        // kid, so two runs sharing a suite database retire each other and the
+        // second dies on its own key. MEASURED 2026-08-20, two auth suites on
+        // one database: 3 failures in each run, both
+        //   publish mint-race signing key: Config("signing key
+        //     L0N3gfnVojR3MCyMbPF6lMf6P9ywvEtOlQe2mLgT18c is terminally
+        //     retired and cannot be reactivated")
+        // naming the same kid in both logs. Same reasoning as
+        // `crates/auth/tests/common/mod.rs::op_signing_key`, which cannot be
+        // reached from here because this is a lib test.
         let issuer = Issuer::from_signing_key(
-            &ed25519_dalek::SigningKey::from_bytes(&[61_u8; 32]),
+            &ed25519_dalek::SigningKey::from_bytes(&mint_race_signing_seed()),
             [62_u8; 32],
             "https://auth.mint-race.test".to_string(),
         )
         .expect("issuer");
-        issuer
-            .publish_active_key(&setup)
-            .await
-            .expect("publish mint-race signing key");
+        // ONCE per process. A fresh kid is not enough on its own: this fixture
+        // builds one per test, and a peer run retires our row between calls, so
+        // the second REPUBLISH of our own kid fails. Publishing once removes
+        // the only operation that can fail; a retired row stays usable, since
+        // the JWKS keeps `retiring` keys and lookups here are by kid.
+        //
+        // LOAD-THEN-STORE, NOT `swap`. The flag must record that a publish
+        // SUCCEEDED, not that one was attempted. Written as
+        // `if !PUBLISHED.swap(true, ..)` the flag is already set when the
+        // `expect` below panics, so the first test reports the true error and
+        // every later test in the process silently skips the publish and fails
+        // somewhere downstream on a key that was never registered - one real
+        // failure wearing three unrelated faces, which is the diagnosis trap
+        // this whole file's fixtures exist to avoid.
+        //
+        // The race the swap was buying is not one worth having: this suite runs
+        // `--test-threads 1`, and even threaded the worst case is publishing
+        // our own still-ACTIVE kid twice, which succeeds - `publish_active_key`
+        // refuses only `retiring` and `retired` rows. Skipping the publish
+        // entirely is the outcome that cannot be recovered from.
+        {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static PUBLISHED: AtomicBool = AtomicBool::new(false);
+            if !PUBLISHED.load(Ordering::SeqCst) {
+                issuer
+                    .publish_active_key(&setup)
+                    .await
+                    .expect("publish mint-race signing key");
+                PUBLISHED.store(true, Ordering::SeqCst);
+            }
+        }
         (dsn, setup, mint, deletion, user_id, client, issuer)
+    }
+
+    /// A signing seed unique to this test process, stable within it.
+    ///
+    /// The pid separates two live runs; the clock separates a reused pid from
+    /// the process that held it before. Stable within the process because an
+    /// issuer that re-derived its key would publish a second kid and retire its
+    /// own.
+    fn mint_race_signing_seed() -> [u8; 32] {
+        static SEED: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+        *SEED.get_or_init(|| {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos());
+            zeroship_core::crypto::derive_key(&format!(
+                "mint-race-{}-{nanos}",
+                std::process::id()
+            ))
+        })
     }
 
     fn token_iat(token: &str) -> i64 {

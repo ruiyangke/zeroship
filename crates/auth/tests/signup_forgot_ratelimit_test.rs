@@ -446,11 +446,24 @@ async fn signup_non_duplicate_create_error_renders_error_page() {
         .append_pair("email", &email)
         .append_pair("password", "correct horse battery staple")
         .finish();
+    let peer_ip = unique_loopback();
     let resp = test::call_service(
         &app,
         test::TestRequest::post()
             .uri("/signup")
-            .peer_addr(SocketAddr::new(unique_loopback(), 49154))
+            .peer_addr(SocketAddr::new(peer_ip, 49154))
+            // The header, not just `peer_addr`. Its sibling ~100 lines up
+            // explains why and this site did not do it: ntex's
+            // `TestRequest::peer_addr` does not reach `req.peer_addr()`, so the
+            // handler keys on the FORWARDED ip and a request without this
+            // header lands in the single shared `signup_ip:0.0.0.0` bucket.
+            //
+            // Harmless while every run had a private database. MEASURED
+            // 2026-08-20 with two runs sharing one: this test got 302 where it
+            // asserts 200 - "non-23505 create failure must render an error
+            // page, not redirect" - because the peer run had already drained
+            // the bucket this request silently shared with it.
+            .header("x-forwarded-for", peer_ip.to_string())
             .header("content-type", "application/x-www-form-urlencoded")
             .header("cookie", format!("__Host-zsidp_csrf={csrf}"))
             .set_payload(body)

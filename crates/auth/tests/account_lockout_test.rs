@@ -31,6 +31,22 @@ use zeroship_auth::identity::eligibility::{self, LoginIneligible};
 use zeroship_auth::identity::{password, password_reset};
 use zeroship_auth::store::users;
 
+/// A client IP unique to this RUN, and distinct per `probe` within it.
+///
+/// The three probes below passed the literals `192.0.2.10/.11/.12`. The rate
+/// limiter buckets on the client IP, so each of those is a SHARED row in
+/// `zeroship.rate_limits` - harmless while every run had a private database,
+/// and a bucket two concurrent runs drain together once they share one. The
+/// emails in this test were already per-run; the IP was the one identity that
+/// was not.
+///
+/// Any distinct string serves: the value is only ever a bucket key here, never
+/// asserted on.
+fn probe_ip(probe: u8) -> String {
+    let b = *Uuid::new_v4().as_bytes();
+    format!("127.{}.{}.{}", b[0].max(1), b[1].max(1), probe.max(1))
+}
+
 /// Lockout engages on the 5th consecutive failure (see
 /// `credentials::LOCKOUT_THRESHOLD`). Keep this in sync with the impl.
 const LOCKOUT_THRESHOLD: usize = 5;
@@ -399,7 +415,7 @@ async fn locked_absent_and_wrongpw_are_status_indistinguishable() {
         &pg,
         &req,
         "test-client",
-        "192.0.2.10",
+        &probe_ip(1),
         &locked_email,
         GOOD_PW,
     )
@@ -412,7 +428,7 @@ async fn locked_absent_and_wrongpw_are_status_indistinguishable() {
         &pg,
         &req,
         "test-client",
-        "192.0.2.11",
+        &probe_ip(2),
         &ghost_email,
         BAD_PW,
     )
@@ -430,7 +446,7 @@ async fn locked_absent_and_wrongpw_are_status_indistinguishable() {
         &pg,
         &req,
         "test-client",
-        "192.0.2.12",
+        &probe_ip(3),
         &real_email,
         BAD_PW,
     )
