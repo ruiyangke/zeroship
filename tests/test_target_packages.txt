@@ -1,0 +1,46 @@
+# Workspace packages that MUST build at least one test binary under
+# `cargo test --workspace` in the Rust tests job.
+#
+# Read by tests/test_target_census_gate.sh. Existence, not a count: a package
+# may collapse 53 test binaries into 1 and stay green, and may add ten more
+# without an edit here. Only reaching ZERO is red, and so is building test
+# binaries while absent from this list - an unlisted package is one whose
+# disappearance tomorrow nothing would notice.
+#
+# MEASURED 2026-08-20 on 4abf0f74a: all 28 workspace members build test
+# binaries, so this list is every member and there are no exclusions to justify.
+# `cargo metadata --no-deps` reported 28 packages on the same tree.
+#
+# To regenerate after a deliberate change:
+#   cargo test --workspace --no-run --message-format=json > /tmp/t.json
+#   tests/test_target_census_gate.sh /tmp/t.json --print-census
+# Read the diff before pasting it. Regenerating on red is how a gate stops
+# being one.
+compio-postgres
+compio-redis
+compio-s3
+zeroship
+zeroship-auth
+zeroship-authn
+zeroship-authz
+zeroship-bundle
+zeroship-config-contract
+zeroship-config-macros
+zeroship-control
+zeroship-core
+zeroship-gateway
+zeroship-mailer
+zeroship-metering
+zeroship-migrate-adapter
+zeroship-migrated
+zeroship-plugin-db
+zeroship-plugin-kv
+zeroship-plugin-storage
+zeroship-plugin-workflow
+zeroship-runtime
+zeroship-runtime-macros
+zeroship-schema
+zeroship-stream
+zeroship-test-support
+zeroship-worker
+zeroship-workflow-scheduler
