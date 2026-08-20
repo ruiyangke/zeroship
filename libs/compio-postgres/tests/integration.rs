@@ -2679,3 +2679,58 @@ fn a_template_clone_is_not_blocked_by_the_previous_runtime() {
         );
     }
 }
+
+/// A result set far larger than the driver's single-frame cap must still
+/// stream, because that cap bounds ONE message and not the run of messages a
+/// query answers with.
+///
+/// `read_backend` used to refill the socket whenever a partial message sat at
+/// the tail of the read buffer, instead of returning the complete prefix the
+/// way tokio-postgres's `decode` does. A dense run of small `DataRow`s
+/// therefore accumulated untouched until `BufStream::fill` refused a request
+/// above `MAX_MESSAGE_SIZE`, and the query died with `message too large`
+/// though its biggest single message was 16 KB. Measured before the fix: the
+/// buffer reached exactly 67108864 bytes and the next refill was refused.
+///
+/// THE ROW WIDTH IS LOAD-BEARING, NOT A ROUND NUMBER. 16373 payload bytes
+/// makes each `DataRow` exactly 16384 bytes on the wire (1 tag + 4 length + 2
+/// field count + 4 field length + payload), which is `READ_CHUNK`. Rows and
+/// reads then advance in lockstep, so the leftover at the tail does not land in
+/// the under-5-bytes window that let the old code drain by luck. At an
+/// unaligned width it does: 4000-byte payloads drained every ~800 chunks and an
+/// earlier draft of this test PASSED against the bug, peaking at 13 MB. Change
+/// the width and this stops exercising anything.
+///
+/// THIS IS NOT A SCHEDULE-INDEPENDENT GUARD, and must not be read as one.
+/// `READ_CHUNK` is a MAXIMUM: `AsyncRead::read` may return any positive count,
+/// so a short read can still walk the tail into the escape window and let even
+/// the old decoder drain. The guarantee lives in
+/// `codec::tests::a_partial_tail_does_not_hold_back_the_complete_messages_before_it`,
+/// which scripts the chunks and so removes the transport from the experiment.
+/// What this test adds is the end-to-end fact that a real PostgreSQL streaming
+/// a real result set past the cap is served.
+///
+/// 8000 rows of 16384 bytes is 131072000 bytes, about 125 MiB against a 64 MiB
+/// cap, and PostgreSQL sends it with no async message to break the run.
+/// `query` materialises every row, so this is a framing test that costs real
+/// memory rather than a bounded-memory streaming test.
+#[compio::test]
+async fn a_result_set_larger_than_the_single_frame_cap_still_streams() {
+    let Some(url) = require_pg().await else { return };
+    let client = connect(&url).await.unwrap();
+
+    let rows = client
+        .query(
+            "SELECT repeat('x', 16373) AS payload FROM generate_series(1, 8000)",
+            &[],
+        )
+        .await
+        .unwrap_or_else(|e| panic!("125 MiB result set refused: {}", common::error_chain(&e)));
+
+    assert_eq!(rows.len(), 8000, "wrong row count for the large result set");
+    assert_eq!(
+        rows[7999].get::<_, &str>("payload").len(),
+        16373,
+        "last row truncated"
+    );
+}
