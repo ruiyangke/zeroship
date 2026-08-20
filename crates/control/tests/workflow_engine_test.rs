@@ -7173,7 +7173,7 @@ async fn control_role_fixture(fx: &Fixture, label: &str) -> Fixture {
 /// cron fleet has something to count on every tenant. Rows go in through `fx`
 /// (the superuser: the journal DDL and the platform inserts need it); the blob
 /// goes into `ctl`'s object store, because `ctl` is what runs the sweeps.
-async fn seed_app_for_all_sweeps(fx: &Fixture, ctl: &Fixture, label: &str) -> Uuid {
+async fn seed_app_for_all_sweeps(fx: &Fixture, ctl: &Fixture, label: &str) -> (Uuid, String) {
     let (app_id, deploy_id) = seed_app_and_deploy(fx, label).await;
 
     // Scheduler reconcile: one live run with a wake row to re-register.
@@ -7242,7 +7242,7 @@ async fn seed_app_for_all_sweeps(fx: &Fixture, ctl: &Fixture, label: &str) -> Uu
         .await
         .expect("insert the zero-refcount blob row");
 
-    app_id
+    (app_id, hash)
 }
 
 /// One tick of each fleet sweep, with what it did and what it covered.
@@ -7252,6 +7252,13 @@ struct FleetSweeps {
     deploy: deploy_retention::DeployRetentionStats,
     retention: workflow_retention::RetentionStats,
     blob_ref: workflow_blob_gc::RefSweepStats,
+    /// Whether the READABLE app's unreferenced blob is still in the object
+    /// store once the ref sweep has run.
+    ///
+    /// Carried because `deleted == 0` is not the claim worth making about the
+    /// conservative arm - "deleted nothing" and "deleted it and did not count
+    /// it" produce the same zero.
+    readable_blob_present: bool,
 }
 
 /// Run every journalled-fleet sweep once over TWO apps that both have work.
@@ -7267,8 +7274,9 @@ async fn sweeps_over_two_apps(label: &str, revoke_second: bool) -> Option<FleetS
     let fx = isolated_fixture(label).await?;
     let ctl = control_role_fixture(&fx, label).await;
 
-    let _readable = seed_app_for_all_sweeps(&fx, &ctl, &format!("{label}-readable")).await;
-    let other = seed_app_for_all_sweeps(&fx, &ctl, &format!("{label}-other")).await;
+    let (_readable, readable_blob) =
+        seed_app_for_all_sweeps(&fx, &ctl, &format!("{label}-readable")).await;
+    let (other, _other_blob) = seed_app_for_all_sweeps(&fx, &ctl, &format!("{label}-other")).await;
     if revoke_second {
         revoke_journal_access(&fx, &other).await;
     }
@@ -7300,6 +7308,12 @@ async fn sweeps_over_two_apps(label: &str, revoke_second: bool) -> Option<FleetS
     let blob_ref = workflow_blob_gc::tick_ref_sweep(&ctl.state)
         .await
         .expect("blob ref gc must survive an unreadable journal");
+    let readable_blob_present = ctl
+        .state
+        .workflow_blob_store
+        .get_blob(&readable_blob)
+        .await
+        .is_ok();
 
     drop(ctl);
     drop(fx);
@@ -7310,6 +7324,7 @@ async fn sweeps_over_two_apps(label: &str, revoke_second: bool) -> Option<FleetS
         deploy,
         retention,
         blob_ref,
+        readable_blob_present,
     })
 }
 
@@ -7396,6 +7411,11 @@ async fn fleet_sweeps_all_report_the_tenant_they_excluded() {
         swept.blob_ref.coverage.apps_skipped, 1,
         "the blob ref sweep must report the tenant it could not read"
     );
+    assert!(
+        swept.readable_blob_present,
+        "the blob must still be IN the object store: a delete count of zero is \
+         also what a sweep that deleted it and miscounted would report"
+    );
 }
 
 /// The control for the test above: identical setup, no revoke.
@@ -7435,6 +7455,11 @@ async fn fleet_sweeps_report_full_coverage_when_every_journal_is_readable() {
     );
     assert_eq!(swept.blob_ref.coverage.apps_skipped, 0);
     assert!(swept.blob_ref.coverage.apps_unvisited == 0);
+    assert!(
+        !swept.readable_blob_present,
+        "with nothing excluded the sweep must actually remove the object, which \
+         is what makes the retained-blob assertion in the paired test a measurement"
+    );
 }
 
 /// A batch limit that stops the sweep mid-fleet must SAY how many apps it never
@@ -7541,7 +7566,7 @@ async fn in_loop_denial_over_two_apps(
     let ctl = control_role_fixture(&fx, label).await;
 
     let _readable = seed_app_for_all_sweeps(&fx, &ctl, &format!("{label}-readable")).await;
-    let other = seed_app_for_all_sweeps(&fx, &ctl, &format!("{label}-other")).await;
+    let (other, _other_blob) = seed_app_for_all_sweeps(&fx, &ctl, &format!("{label}-other")).await;
     if deny_second {
         let tables = WorkflowTables::for_app_id(&other);
         fx.pg
