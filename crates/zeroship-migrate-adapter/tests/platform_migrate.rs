@@ -25,6 +25,7 @@ mod platform_cli {
         author_and_lower_all, run_platform_migrations, PlatformMigrateConfig, PlatformMigrateError,
         PLATFORM_MIGRATION_LEDGER_TABLE,
     };
+    use zeroship_migrate_adapter::platform::cluster_lock::DEFAULT_CLUSTER_LOCK_DATABASE;
     use zeroship_migrate_adapter::CompioPgSession;
 
     /// Serialize the live-PG apply tests. Some provision a scratch DB and create
@@ -445,6 +446,7 @@ mod platform_cli {
             migrations_dir: migrations_dir(),
             project_schema: "zeroship".to_string(),
             project_id: "zeroship".to_string(),
+            cluster_lock_database: DEFAULT_CLUSTER_LOCK_DATABASE.to_string(),
         };
         let report = run_platform_migrations(&cfg)
             .await
@@ -909,6 +911,7 @@ mod platform_cli {
             migrations_dir: migrations_dir(),
             project_schema: "zeroship".to_string(),
             project_id: "zeroship".to_string(),
+            cluster_lock_database: DEFAULT_CLUSTER_LOCK_DATABASE.to_string(),
         };
         let report = run_platform_migrations(&cfg)
             .await
@@ -1018,6 +1021,7 @@ mod platform_cli {
             migrations_dir: migrations_dir(),
             project_schema: "zeroship".to_string(),
             project_id: "zeroship".to_string(),
+            cluster_lock_database: DEFAULT_CLUSTER_LOCK_DATABASE.to_string(),
         };
 
         // ── RUN 1: fresh DB — everything applies, nothing skips ──
@@ -1187,6 +1191,7 @@ export function down() {}
             migrations_dir: migrations_dir.to_path_buf(),
             project_schema: "zeroship".to_string(),
             project_id: "zeroship".to_string(),
+            cluster_lock_database: DEFAULT_CLUSTER_LOCK_DATABASE.to_string(),
         }
     }
 
