@@ -56,24 +56,86 @@ pub const PART_SIZE: usize = 8 * 1024 * 1024;
 type InflightPart<'a> =
     futures::future::LocalBoxFuture<'a, Result<PartETag, String>>;
 
+/// The two upload knobs `put_stream` runs under, resolved ONCE when the
+/// backend is built rather than re-read on every op.
+///
+/// Both used to be read from the process environment inside the upload loop,
+/// which meant the only way to drive a non-default value was to plant a
+/// process-global variable. That is racy (`set_var` mutates the environment
+/// every other thread is reading) and non-hermetic, so the value a caller
+/// wants is now an argument: [`S3::with_tuning`] takes it, and [`S3::new`]
+/// supplies [`S3UploadTuning::resolved`] so the production path is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct S3UploadTuning {
+    /// In-flight `UploadPart` PUTs. See [`crate::limits::upload_concurrency`].
+    pub concurrency: usize,
+    /// Ceiling on one streamed object. See
+    /// [`crate::limits::max_stream_object_bytes`].
+    pub max_stream_bytes: u64,
+}
+
+impl S3UploadTuning {
+    /// The compiled-in defaults, with NO environment read. This is the honest
+    /// base for a caller that wants to override one knob and leave the other
+    /// alone (`S3UploadTuning { concurrency: 4, ..S3UploadTuning::DEFAULTS }`)
+    /// without dragging in whatever the ambient environment happens to say.
+    pub const DEFAULTS: Self = Self {
+        concurrency: crate::limits::DEFAULT_UPLOAD_CONCURRENCY,
+        max_stream_bytes: crate::limits::DEFAULT_MAX_STREAM_OBJECT_BYTES,
+    };
+
+    /// Production resolution: each knob's declared environment read, falling
+    /// back to its compiled default. Not `Default`, deliberately - a `Default`
+    /// that reads the process environment looks pure and is not.
+    #[must_use]
+    pub fn resolved() -> Self {
+        Self {
+            concurrency: crate::limits::upload_concurrency(),
+            max_stream_bytes: crate::limits::max_stream_object_bytes(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct S3 {
     client: S3Client,
+    /// Resolved at construction; see [`S3UploadTuning`].
+    tuning: S3UploadTuning,
 }
 
 impl S3 {
-    /// Build from a parsed config + resolved credentials.
+    /// Build from a parsed config + resolved credentials, with the upload
+    /// knobs taken from their declared environment reads.
     #[must_use]
     pub fn new(config: S3Config, credentials: S3Credentials) -> Self {
+        Self::with_tuning(config, credentials, S3UploadTuning::resolved())
+    }
+
+    /// Build with the upload knobs supplied explicitly instead of resolved
+    /// from the environment.
+    #[must_use]
+    pub fn with_tuning(
+        config: S3Config,
+        credentials: S3Credentials,
+        tuning: S3UploadTuning,
+    ) -> Self {
         Self {
             client: S3Client::new(config, credentials),
+            tuning,
         }
     }
 
-    /// Build directly from an existing client (shares its config/creds Arcs).
+    /// Build directly from an existing client (shares its config/creds Arcs),
+    /// with the upload knobs taken from their declared environment reads.
     #[must_use]
     pub fn from_client(client: S3Client) -> Self {
-        Self { client }
+        Self::from_client_with_tuning(client, S3UploadTuning::resolved())
+    }
+
+    /// [`Self::from_client`] with the upload knobs supplied explicitly.
+    #[must_use]
+    pub const fn from_client_with_tuning(client: S3Client, tuning: S3UploadTuning) -> Self {
+        Self { client, tuning }
     }
 
     /// The logical key (pre-`config.prefix`) for an object.
@@ -103,7 +165,7 @@ impl S3 {
     /// slow producer no longer starves the in-flight uploads (the prior
     /// gate-only-drain loop parked on the producer between dispatches, leaving
     /// in-flight PUTs unpolled while their deadlines ticked). At most
-    /// [`crate::limits::upload_concurrency`] PUTs run at once: at capacity the
+    /// [`S3UploadTuning::concurrency`] PUTs run at once: at capacity the
     /// loop drains one before reading more, so live part memory is bounded by
     /// `~(N+1) × PART_SIZE` (the in-flight set plus a transiently-buffered
     /// part). Uploads finish out of order, so `(part_number, ETag)` results are
@@ -131,8 +193,8 @@ impl S3 {
         use futures::stream::FuturesUnordered;
         use futures::{FutureExt, StreamExt};
 
-        let max_total = crate::limits::max_stream_object_bytes();
-        let concurrency = crate::limits::upload_concurrency();
+        let max_total = self.tuning.max_stream_bytes;
+        let concurrency = self.tuning.concurrency;
 
         let mut total: u64 = 0;
         let mut parts: Vec<PartETag> = Vec::new();

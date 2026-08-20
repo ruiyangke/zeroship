@@ -663,12 +663,26 @@ fn start_minio() -> bool {
 
 #[cfg(feature = "s3")]
 fn make_s3() -> zeroship_plugin_storage::S3 {
+    make_s3_tuned(zeroship_plugin_storage::S3UploadTuning::DEFAULTS)
+}
+
+/// The same MinIO-backed backend with the upload knobs stated at the call
+/// site. Tests that need a non-default concurrency or stream ceiling pass one
+/// here; nothing plants a process-global environment variable to do it.
+#[cfg(feature = "s3")]
+fn make_s3_tuned(
+    tuning: zeroship_plugin_storage::S3UploadTuning,
+) -> zeroship_plugin_storage::S3 {
     use compio_s3::{S3Config, S3Credentials};
     let url = format!(
         "s3://{MINIO_BUCKET}/it?provider=minio&endpoint=http://127.0.0.1:{MINIO_PORT}&region=us-east-1&style=path&dev_http=true&checksum=none"
     );
     let cfg = S3Config::parse_url(&url).expect("parse minio url");
-    zeroship_plugin_storage::S3::new(cfg, S3Credentials::new(MINIO_ACCESS, MINIO_SECRET, None))
+    zeroship_plugin_storage::S3::with_tuning(
+        cfg,
+        S3Credentials::new(MINIO_ACCESS, MINIO_SECRET, None),
+        tuning,
+    )
 }
 
 #[cfg(feature = "s3")]
@@ -804,12 +818,14 @@ impl ChunkSource for SlowChunks {
 /// in-flight PUTs concurrently so a slow-but-progressing source finishes.
 #[cfg(feature = "s3")]
 async fn run_s3_slow_producer_overlap() {
-    use zeroship_plugin_storage::limits::UPLOAD_CONCURRENCY_ENV;
+    use zeroship_plugin_storage::S3UploadTuning;
     const PART_SIZE: usize = 8 * 1024 * 1024;
 
     // Concurrency 4 so multiple PUTs are in flight while the producer stalls.
-    std::env::set_var(UPLOAD_CONCURRENCY_ENV, "4");
-    let backend = make_s3();
+    let backend = make_s3_tuned(S3UploadTuning {
+        concurrency: 4,
+        ..S3UploadTuning::DEFAULTS
+    });
 
     let key = "slow-producer.bin";
     // ~3.1 parts total, fed as ~1 MiB chunks with a ~1.2s inter-chunk delay —
@@ -836,7 +852,6 @@ async fn run_s3_slow_producer_overlap() {
         .put_stream(APP, BUCKET, key, Box::new(src), None)
         .await
         .unwrap_or_else(|e| panic!("HIGH-2 slow-producer put_stream: {e}"));
-    std::env::remove_var(UPLOAD_CONCURRENCY_ENV);
     assert_eq!(written, total as u64, "HIGH-2: written size");
 
     let (meta, stream) = backend
@@ -896,13 +911,16 @@ async fn run_s3_mid_upload_abort(backend: &zeroship_plugin_storage::S3) {
 /// fails fast (and the C1-style abort leaves no orphaned upload).
 #[cfg(feature = "s3")]
 async fn run_s3_part_limit_fast_fail() {
-    use zeroship_plugin_storage::limits::MAX_STREAM_OBJECT_BYTES_ENV;
+    use zeroship_plugin_storage::S3UploadTuning;
     // Cap at 12 MiB so the first full 8 MiB part is flushed (creating a real
-    // multipart upload) before the running total trips the cap — exercising the
-    // fast-fail AND the C1 abort of an already-started upload.
-    // SAFETY: single-threaded test; restored immediately after the call.
-    std::env::set_var(MAX_STREAM_OBJECT_BYTES_ENV, (12 * 1024 * 1024).to_string());
-    let backend = make_s3();
+    // multipart upload) before the running total trips the cap - exercising the
+    // fast-fail AND the C1 abort of an already-started upload. The ceiling is
+    // an argument to this backend, so it binds THIS upload and nothing else in
+    // the process.
+    let backend = make_s3_tuned(S3UploadTuning {
+        max_stream_bytes: 12 * 1024 * 1024,
+        ..S3UploadTuning::DEFAULTS
+    });
 
     // 16 MiB of data through a 12 MiB cap → trips after the first 8 MiB part.
     let obj_key = "h2-toobig.bin";
@@ -910,7 +928,6 @@ async fn run_s3_part_limit_fast_fail() {
     let res = backend
         .put_stream(APP, BUCKET, obj_key, Box::new(VecChunks::new(chunks)), None)
         .await;
-    std::env::remove_var(MAX_STREAM_OBJECT_BYTES_ENV);
     let err = res.expect_err("H2: oversized stream must fail fast");
     assert!(
         err.contains("max stream size") || err.contains("part limit"),
@@ -937,13 +954,15 @@ async fn run_s3_part_limit_fast_fail() {
 /// (Pre-change this path was strictly sequential, so the sort line is new.)
 #[cfg(feature = "s3")]
 async fn run_s3_parallel_many_parts() {
-    use zeroship_plugin_storage::limits::UPLOAD_CONCURRENCY_ENV;
+    use zeroship_plugin_storage::S3UploadTuning;
     const PART_SIZE: usize = 8 * 1024 * 1024;
 
     // Force 4-way concurrency explicitly so the test does not depend on the
-    // default. SAFETY: single-threaded test; restored after the call.
-    std::env::set_var(UPLOAD_CONCURRENCY_ENV, "4");
-    let backend = make_s3();
+    // default.
+    let backend = make_s3_tuned(S3UploadTuning {
+        concurrency: 4,
+        ..S3UploadTuning::DEFAULTS
+    });
 
     let key = "parallel-many.bin";
     // 6 full parts + a short last part = 7 parts, well past the concurrency of
@@ -970,7 +989,6 @@ async fn run_s3_parallel_many_parts() {
         .put_stream(APP, BUCKET, key, Box::new(VecChunks::new(chunks)), None)
         .await
         .unwrap_or_else(|e| panic!("parallel many-part put_stream: {e}"));
-    std::env::remove_var(UPLOAD_CONCURRENCY_ENV);
     assert_eq!(written, total as u64, "parallel: written size");
 
     let (meta, stream) = backend
@@ -992,11 +1010,13 @@ async fn run_s3_parallel_many_parts() {
 /// multipart upload remains listable.
 #[cfg(feature = "s3")]
 async fn run_s3_parallel_mid_upload_abort() {
-    use zeroship_plugin_storage::limits::UPLOAD_CONCURRENCY_ENV;
+    use zeroship_plugin_storage::S3UploadTuning;
     const PART_SIZE: usize = 8 * 1024 * 1024;
 
-    std::env::set_var(UPLOAD_CONCURRENCY_ENV, "4");
-    let backend = make_s3();
+    let backend = make_s3_tuned(S3UploadTuning {
+        concurrency: 4,
+        ..S3UploadTuning::DEFAULTS
+    });
 
     let obj_key = "c1-parallel-aborted.bin";
     let key_prefix = format!("{APP}/{BUCKET}/{obj_key}");
@@ -1022,7 +1042,6 @@ async fn run_s3_parallel_mid_upload_abort() {
     let res = backend
         .put_stream(APP, BUCKET, obj_key, Box::new(src), None)
         .await;
-    std::env::remove_var(UPLOAD_CONCURRENCY_ENV);
     assert!(res.is_err(), "C1/parallel: mid-upload error must propagate");
 
     let uploads = raw
