@@ -41,7 +41,21 @@
 # USAGE
 # -----
 #   tests/provision_test_backends.sh            # up + wait for healthy
-#   tests/provision_test_backends.sh --check    # only verify; provision nothing
+#   tests/provision_test_backends.sh --check    # adopt servers already running
+#
+# BOTH FORMS WRITE THE OVERLAY. That is not a side effect, it is the deliverable:
+# the servers are useless to the suites without a file naming them, and
+# `zs_test_config_load` fails hard rather than guessing when there is none. What
+# `--check` skips is the `docker compose up`, and nothing else.
+#
+# `--check` is therefore the arm for a caller who already HAS the servers and
+# only needs them described - a GitHub Actions job whose `services:` containers
+# the runner started and owns, which is what .github/workflows/ci.yml's
+# auth-gate and billing-gate do. Pointing the full form at those would try to
+# bind compose's postgres to a port the service container already holds. Name
+# the servers through the PG_*/REDIS_* inputs above; the overlay is written to
+# match, and the `wal_level` probe below degrades to a WARN because there is no
+# compose-managed container to ask.
 # ============================================================================
 set -euo pipefail
 
