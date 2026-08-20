@@ -81,12 +81,16 @@ EOF
 artifact() {
   printf '{"reason":"compiler-artifact","package_id":"%s","target":{"name":"%s","kind":["%s"]},"fresh":false}\n' "$1" "$2" "$3"
 }
-# diag <pkg_id> <level> <code|-> <text>
+# diag <pkg_id> <level> <code|-> <text> <target> <kind>
+#
+# The target is not decoration. A target that errors emits no artifact, so the
+# gate has to know WHICH target an error belongs to before it can tell a failing
+# target apart from one that was never scheduled.
 diag() {
   local code
   if [ "$3" = "-" ]; then code='null'; else code="{\"code\":\"$3\"}"; fi
-  printf '{"reason":"compiler-message","package_id":"%s","message":{"level":"%s","code":%s,"message":"%s","rendered":"%s\\n"}}\n' \
-    "$1" "$2" "$code" "$4" "$4"
+  printf '{"reason":"compiler-message","package_id":"%s","target":{"name":"%s","kind":["%s"]},"message":{"level":"%s","code":%s,"message":"%s","rendered":"%s\\n"}}\n' \
+    "$1" "$5" "$6" "$2" "$code" "$4" "$4"
 }
 
 # The complete, everything-linted stream.
@@ -136,17 +140,27 @@ check "clean workspace passes" 0 "linted:   6 targets in 3 packages (expected 6 
 
 # ------------------------------------------------------------------- case 2
 # A deny-level clippy lint in the MIDDLE package is red, and is reported as a
-# lint rather than as a compile failure. Everything still got linted, so the
-# coverage arms must stay quiet - a gate that shouted "not reached" here would
-# bury the one line that matters.
-{ full_stream; diag "$ID_M" error "clippy::disallowed_methods" "use of a disallowed method"; } > "$TMP/lint.json"
+# lint and NOTHING ELSE.
+#
+# The failing target emits no artifact - that is what failing means - so a naive
+# coverage arm reports it a second time as "unlinted". Two headings for one
+# fault, and the second is supposed to mean "we could not see this crate". A
+# heading that fires for two different things stops being read as either, which
+# is precisely the confusion this gate exists to remove.
+{
+  full_stream | grep -v 'mike_it'
+  diag "$ID_M" error "clippy::disallowed_methods" "use of a disallowed method" mike_it test
+} > "$TMP/lint.json"
 run "$TMP/lint.json"
 check "deny-level lint in a middle package is red" 1 \
   "deny-level clippy lint" "pkg-mike" "clippy::disallowed_methods"
-if printf '%s\n' "$OUT" | grep -q "NOT REACHED"; then
-  echo "FAIL: a lint failure must not be reported as a coverage failure"
-  fail=$((fail + 1)); pass=$((pass - 1))
-fi
+for wrong in "NOT REACHED" "went unlinted"; do
+  if printf '%s\n' "$OUT" | grep -q "$wrong"; then
+    echo "FAIL: a failing target must not ALSO be reported as '$wrong'"
+    printf '%s\n' "$OUT" | sed 's/^/       /'
+    fail=$((fail + 1)); pass=$((pass - 1))
+  fi
+done
 
 # ------------------------------------------------------------------- case 3
 # THE FAILURE THIS GATE EXISTS FOR. `pkg-alpha` fails, cargo aborts, and the two
@@ -155,7 +169,7 @@ fi
 # and call the other two clean.
 {
   artifact "$ID_A" pkg-alpha lib
-  diag "$ID_A" error "clippy::needless_borrow" "this expression borrows a value"
+  diag "$ID_A" error "clippy::needless_borrow" "this expression borrows a value" alpha_it test
 } > "$TMP/aborted.json"
 run "$TMP/aborted.json"
 check "packages never scheduled are named, not counted clean" 1 \
@@ -167,7 +181,7 @@ check "packages never scheduled are named, not counted clean" 1 \
 # under its own heading, because the fix is a different fix.
 {
   full_stream
-  diag "$ID_Z" error "-" "cannot find type \`Foo\` in this scope"
+  diag "$ID_Z" error "-" "cannot find type \`Foo\` in this scope" pkg-zulu lib
 } > "$TMP/hard.json"
 run "$TMP/hard.json"
 check "a compile error is reported as could-not-lint, not as a lint" 1 \
@@ -185,7 +199,7 @@ fi
 full_stream | grep -v 'mike_it' > "$TMP/lost_target.json"
 run "$TMP/lost_target.json"
 check "a single lost target inside a present package is red" 1 \
-  "went unlinted" "mike_it"
+  "went unlinted" "mike_it" "stops being linted, silently"
 if printf '%s\n' "$OUT" | grep -q "NOT REACHED"; then
   echo "FAIL: pkg-mike still built targets; it is not an unreached package"
   fail=$((fail + 1)); pass=$((pass - 1))
@@ -212,7 +226,7 @@ check "an empty stream is refused, not passed" 2 "nothing was measured"
 # Diagnostics from crates.io dependencies are not this workspace's problem and
 # must not turn a clean tree red. (`--cap-lints` normally makes this moot; the
 # filter is here so that a day it does not, the gate still points at us.)
-{ full_stream; diag "$ID_EXT" error "clippy::needless_borrow" "in a vendored crate"; } > "$TMP/external.json"
+{ full_stream; diag "$ID_EXT" error "clippy::needless_borrow" "in a vendored crate" serde lib; } > "$TMP/external.json"
 run "$TMP/external.json"
 check "an error attributed to a non-workspace crate does not fail us" 0 \
   "linted:   6 targets in 3 packages (expected 6 in 3)"
