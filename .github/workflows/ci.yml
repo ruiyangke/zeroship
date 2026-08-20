@@ -458,9 +458,11 @@ jobs:
       # exists for, then failed on a healthy host. Both were caught by hand.
       # Drives the pure functions against fixture compose files and the deploy
       # path through a stub ssh; runs no real ssh, no docker, no network.
-      # MEASURED 2026-08-20: 129 assertions, floor 118. (This line said "64
-      # assertions, floor 63" while the script's floor was already 107 - it was
-      # written once and never re-run against the thing it describes.)
+      # MEASURED 2026-08-20 on a host with no target/debug/zeroship-control:
+      # 141 assertions, floor 118. One further case runs only when that binary
+      # is built. (This line said "64 assertions, floor 63" while the script's
+      # floor was already 107, then "129" once the count had moved again - it
+      # gets written and not re-run against the thing it describes.)
       - name: deploy scripts extraction, rename pairing and arguments
         run: tests/deploy_scripts_gate.sh
       # tests/lib/dev_secrets.sh gates whether e2e_docker.sh and
