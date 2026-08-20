@@ -57,7 +57,7 @@ mod platform_cli {
     ///     enumerations disagreeing names the file; two counts agreeing proves
     ///     nothing.
     ///   - "a file that a deployed database applied went missing" is asserted
-    ///     by `released_platform_migrations_are_a_prefix_of_the_corpus`, whose
+    ///     by `released_platform_migrations_all_exist_in_the_corpus`, whose
     ///     authority is production's journal rather than a number somebody
     ///     typed. That is what catches the delete-one-add-one above, and it
     ///     names the file.
@@ -119,6 +119,23 @@ mod platform_cli {
                 .file_name()
                 .ok_or_else(|| format!("migration path has no filename: {}", source.display()))?;
             std::fs::copy(&source, destination.join(filename))
+                .map_err(|e| format!("copy {}: {e}", source.display()))?;
+        }
+        Ok(())
+    }
+
+    /// Copy exactly the NAMED migration files into `destination`.
+    ///
+    /// By name rather than by position, so a corpus whose filename order is not
+    /// the deploy order cannot make the caller seed the wrong set. A name that
+    /// is not in the corpus is an error rather than a silently smaller copy --
+    /// the caller is reconstructing a deployed database's state and a missing
+    /// file changes what it is reconstructing.
+    fn copy_migration_files(destination: &Path, names: &[&str]) -> Result<(), String> {
+        let dir = migrations_dir();
+        for name in names {
+            let source = dir.join(name);
+            std::fs::copy(&source, destination.join(name))
                 .map_err(|e| format!("copy {}: {e}", source.display()))?;
         }
         Ok(())
@@ -2151,49 +2168,53 @@ export function down() {}
         );
     }
 
-    /// The snapshot must be a PREFIX of `db/migrations-ts` in filename order.
+    /// Every file the snapshot names must still be in `db/migrations-ts`.
     ///
-    /// This is what makes "released" and "the oldest N files" the same set, and
-    /// it is the whole reason the guard above can be a simple list. The runner
-    /// applies in filename order, so a deployed database's journal is always a
-    /// prefix of the corpus; a file inserted with an EARLIER timestamp than an
-    /// already-released one breaks that and would silently shift every later
-    /// entry against the wrong file.
+    /// Deleting an applied migration is the same defect as editing one: the
+    /// runner's next pass over that database still expects it and refuses.
+    /// Without this the bytes guard above would panic on the failed read with
+    /// no explanation of why the file mattered.
     ///
-    /// Also refuses a snapshot naming a file that no longer exists. Deleting an
-    /// applied migration is the same defect as editing one -- the runner's next
-    /// pass over that database still expects it -- and without this check the
-    /// bytes guard above would simply panic on the read with no explanation.
+    /// This is also what catches the corpus change the deleted
+    /// `PLATFORM_MIGRATION_FILES` constant could not see. Delete one applied
+    /// migration and add another and the file count is unchanged, so a count
+    /// agrees with itself; the snapshot is an EXTERNAL list of names and names
+    /// the missing one.
+    ///
+    /// SET CONTAINMENT, NOT PREFIX, and the difference is not cosmetic. The
+    /// released set used to be asserted as the oldest N files in filename
+    /// order, which is true of a journal because the runner applies in that
+    /// order. It stops being true the moment a migration lands with an earlier
+    /// timestamp than one already deployed -- `20260819000000_app_egress_rules`
+    /// landed on main after `20260820000000_control_workflow_journal_access`
+    /// was already applied -- and that is a legitimate thing to do: the runner
+    /// sorts, skips what the journal holds, and applies the rest. A prefix
+    /// assertion would have failed that merge for no defect, and a gate that
+    /// cries wolf gets deleted. What the bytes guard actually needs is that
+    /// each named file is present, which does not depend on order at all.
     ///
     /// WHAT THIS DOES NOT CATCH: whether the snapshot is CURRENT. A repo cannot
     /// read production's journal, so nothing here can tell a snapshot of 34
-    /// applied files from one of 21 while twelve more are live. That is
-    /// `released_platform_migrations_cover_every_deployed_file`'s job, and it
-    /// runs in the deploy, not here.
+    /// applied files from one of 21 while thirteen more are live. That is the
+    /// deploy's job -- see
+    /// `released_platform_migrations_cover_every_deployed_file`.
     #[test]
-    fn released_platform_migrations_are_a_prefix_of_the_corpus() {
+    fn released_platform_migrations_all_exist_in_the_corpus() {
         let corpus = platform_migration_filenames();
         let released = released_platform_migrations();
+        let missing: Vec<&str> = released
+            .iter()
+            .map(|(filename, _)| filename.as_str())
+            .filter(|filename| !corpus.iter().any(|have| have == filename))
+            .collect();
         assert!(
-            released.len() <= corpus.len(),
-            "{RELEASED_LEDGER_PATH} holds {} rows but db/migrations-ts holds {} files; \
-             a deployed database has journalled a migration this tree no longer carries, \
-             which its next migrate run will refuse",
-            released.len(),
-            corpus.len()
+            missing.is_empty(),
+            "{RELEASED_LEDGER_PATH} names {} migration(s) that db/migrations-ts no longer \
+             carries: {missing:?}. A deployed database has journalled them, so its next \
+             migrate run expects them and refuses without them. Restore the files; if the \
+             change they carry must go, land the removal as a NEW migration.",
+            missing.len()
         );
-        for (index, (filename, _)) in released.iter().enumerate() {
-            assert_eq!(
-                corpus.get(index).map(String::as_str),
-                Some(filename.as_str()),
-                "{RELEASED_LEDGER_PATH} row {index} names {filename}, but the corpus has \
-                 {:?} at that position. The released set must stay a prefix of the corpus \
-                 in filename order -- a migration added with an earlier timestamp than an \
-                 applied one breaks that, and every later row would then be checked \
-                 against the wrong file",
-                corpus.get(index)
-            );
-        }
     }
 
     /// The DEPLOY is what keeps the snapshot honest; this test only says so.
@@ -2298,27 +2319,21 @@ export function down() {}
         scratch_dsn: &str,
         corpus: &Path,
     ) -> Result<(), String> {
-        // The released files are the oldest N by filename order, which is the
-        // order the runner applies in. Assert it rather than assume it: if a file
-        // is ever inserted with an earlier timestamp than a released one, the
-        // prefix stops being the released set and this test would seed the ledger
-        // against the wrong files. (The DB-free
-        // `released_platform_migrations_are_a_prefix_of_the_corpus` says the same
-        // thing without a database; this arm keeps the DB test from proceeding on
-        // a corpus it would mis-seed even when run alone.)
-        let all = platform_migration_filenames();
+        // Seed the corpus with EXACTLY the files the snapshot names, by name.
+        //
+        // This used to copy the oldest N files and assert the snapshot was that
+        // prefix. Both halves were wrong for the same reason: a migration can
+        // land with an earlier timestamp than one already deployed
+        // (`20260819000000_app_egress_rules` did, after `20260820000000_...`
+        // was applied), and then "the oldest N" and "what the journal holds"
+        // are different sets. Copying by name cannot drift that way, and it
+        // removes an ordering assumption the runner never made.
         let released = released_platform_migrations();
-        for (index, (filename, _)) in released.iter().enumerate() {
-            if all.get(index) != Some(filename) {
-                return Err(format!(
-                    "released file {index} is {:?} in filename order but the released list \
-                     says {filename}; the released set is no longer a prefix of the corpus",
-                    all.get(index)
-                ));
-            }
-        }
-
-        copy_migration_prefix(corpus, released.len())?;
+        let names: Vec<&str> = released
+            .iter()
+            .map(|(filename, _)| filename.as_str())
+            .collect();
+        copy_migration_files(corpus, &names)?;
         let cfg = test_config(scratch_dsn, corpus);
         run_platform_migrations(&cfg)
             .await
