@@ -72,7 +72,14 @@ REMOTE="$ROOT/deploy/scripts/deploy-remote.sh"
 APPDEP="$ROOT/deploy/scripts/deploy-app.sh"
 REAL_COMPOSE="$ROOT/deploy/compose/docker-compose.yml"
 REAL_OVERLAY="$ROOT/deploy/ops/zeroship.toml"
-GRANTS_MIGRATION="$ROOT/db/migrations-ts/20260702000900_grants.ts"
+# The whole committed migration corpus, NOT one named file. These two
+# assertions are about the END STATE the corpus produces, and pinning them to
+# 20260702000900_grants.ts made them assertions about WHICH FILE spells the
+# statement. That is a real difference: once a file has been applied to a
+# deployed database its bytes are frozen by the runner's checksum guard, so a
+# statement can only ever MOVE to a later file, and a gate that reads one
+# filename then reports the invariant as broken when it is intact.
+MIGRATIONS_DIR="$ROOT/db/migrations-ts"
 
 echo "============================================"
 echo "  deploy scripts: extraction, pairing, arguments"
@@ -269,20 +276,6 @@ if [ -f "$REAL_COMPOSE" ]; then
   fi
 fi
 
-# The operator overlay is shared with services that must never possess the
-# platform mint credential. A file reference here leaks the raw key through
-# their shared config or secret-directory mounts even if the binary ignores
-# the setting.
-if [ -f "$REAL_OVERLAY" ]; then
-  if grep -Eq '^[[:space:]]*platform_mint_key[[:space:]]*=' "$REAL_OVERLAY"; then
-    fail "the shared operator overlay contains auth.platform_mint_key"
-  else
-    pass "the shared operator overlay contains no platform mint credential"
-  fi
-else
-  fail "the shipped operator overlay is missing: $REAL_OVERLAY"
-fi
-
 # The worker handles attacker-controlled app code. Its default DSN must name
 # the constrained worker role, never the provisioning principal that owns the
 # platform schema. Scope the extraction to the worker service so a safe DSN on
@@ -302,11 +295,11 @@ if [ -f "$REAL_COMPOSE" ]; then
   fi
 fi
 
-if [ -f "$GRANTS_MIGRATION" ]; then
-  grep -qF 'REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA zeroship FROM zeroship_worker' "$GRANTS_MIGRATION" \
-    && pass "the platform grants revoke worker authority from every current zeroship table" \
-    || fail "the platform grants do not revoke worker authority from every current zeroship table"
-  grep -qF 'ALTER DEFAULT PRIVILEGES IN SCHEMA zeroship REVOKE ALL PRIVILEGES ON TABLES FROM zeroship_worker' "$GRANTS_MIGRATION" \
+if [ -d "$MIGRATIONS_DIR" ]; then
+  grep -rqF 'REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA zeroship FROM zeroship_worker' "$MIGRATIONS_DIR" \
+    && pass "the platform migrations revoke worker authority from every current zeroship table" \
+    || fail "the platform migrations do not revoke worker authority from every current zeroship table"
+  grep -rqF 'ALTER DEFAULT PRIVILEGES IN SCHEMA zeroship REVOKE ALL PRIVILEGES ON TABLES FROM zeroship_worker' "$MIGRATIONS_DIR" \
     && pass "future zeroship tables remain denied to the worker by default" \
     || fail "future zeroship tables are not denied to the worker by default"
 else
@@ -1289,17 +1282,12 @@ if [ ! -x "$CTL_BIN" ]; then
   echo "  note $CTL_BIN is not built; skipping (cargo build --bin zeroship-control)"
 else
   ovl_env=(
-    ZEROSHIP_AUTH_PLATFORM_MINT_KEY=3333333333333333333333333333333333333333333333333333333333333333
     ZEROSHIP_CONTROL_DATABASE_URL=postgres://u:p@postgres:5432/z
     ZEROSHIP_CONTROL_KEY=1111111111111111111111111111111111111111111111111111111111111111
     ZEROSHIP_WORKER_KEY=2222222222222222222222222222222222222222222222222222222222222222
     ZEROSHIP_PAIRWISE_SALT=4444444444444444444444444444444444444444444444444444444444444444
     ZEROSHIP_CONTROL_MASTER_KEY=5555555555555555555555555555555555555555555555555555555555555555
     ZEROSHIP_AUTH_PLATFORM_ISSUER=https://auth.example.com/oauth2
-    # The issuer above is the PUBLIC name a token's `iss` carries; this is the
-    # address control dials to mint one. Two settings on purpose, and control
-    # refuses to start with only the first.
-    ZEROSHIP_AUTH_PLATFORM_MINT_URL=http://auth:9092
   )
   # The GOOD overlay is the one this repo ships, so the control below is not a
   # hand-written minimum that happens to parse.
@@ -1337,7 +1325,12 @@ echo "  $PASS passed, $FAIL failed, $((PASS+FAIL)) ran"
 # RE-MEASURED 2026-08-13 after the deploy-path, secret_files and snapshot
 # blocks: 108 unconditional; 112 with the shipped compose + dev.rs present;
 # 114 with target/debug/zeroship-control built as well.
-MIN_RAN="${DEPLOY_SCRIPTS_MIN_RAN:-108}"
+# 2026-08-19: the overlay check for the platform mint credential is deleted, so
+# every count above drops by one. MEASURED both sides on one host with
+# target/debug/zeroship-control absent: 118 ran before, 117 after. That
+# credential is no longer a declared setting, so an overlay naming it is an
+# unknown field, which the --check-config case at the bottom already covers.
+MIN_RAN=107
 RAN=$((PASS + FAIL))
 rc=0
 [ "$FAIL" -eq 0 ] || rc=1

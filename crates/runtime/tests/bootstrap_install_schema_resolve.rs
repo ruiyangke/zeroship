@@ -22,7 +22,7 @@
 //! injection included). The user source below mirrors the runtime-entry's
 //! import so the assertion exercises the same resolution path.
 
-mod common;
+use crate::common;
 use common::{dispatch, m};
 
 #[test]

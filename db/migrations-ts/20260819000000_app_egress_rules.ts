@@ -8,6 +8,16 @@ export const name = "app_egress_rules";
 // there are no rows to carry across, so the old table is dropped rather than
 // backfilled.
 //
+// CORRECTING AN APPLIED FILE'S COMMENT, WHICH IS WHY THE NOTE IS HERE.
+// `20260817000500_drop_net_policy_catalog.ts` says the frontable-wildcard-suffix
+// catalog "moves to the config overlay (`[control] frontable_wildcard_suffixes`)".
+// That was true when written and is false as of this file: the key is deleted
+// along with the rest of the wildcard mechanism, because a wildcard destination
+// is not representable in the egress grammar at all (`*.example.com` does not
+// parse), so there is nothing left for the catalog to answer. That file has been
+// applied to a deployed database and its source bytes are hashed in the journal,
+// so it cannot be edited to say so - see the frozen-migration rule in AGENTS.md.
+//
 // `destination` is TEXT, not `inet`/`cidr`. The native types would need
 // compio-postgres's `with-cidr-0_3` feature, which no workspace crate enables,
 // and all they buy is SQL containment operators - no query here does

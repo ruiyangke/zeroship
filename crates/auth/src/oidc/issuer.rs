@@ -942,11 +942,16 @@ mod ttl_tests {
     /// command into a rotation.
     const MIN_ACCESS_TOKEN_LIFETIME_SECS: i64 = 120;
 
-    // Asserting on constants is the POINT here, not an oversight: the three
-    // values are compile-time constants and this test exists so that changing
-    // one of them fails loudly with the reason, which is what the message
-    // carries. Clippy's objection is that the assertion can only say what the
-    // compiler already knows, which is true and is why the allow names it.
+    // Both assertions below compare two constants, which is exactly what
+    // `clippy::assertions_on_constants` exists to flag: an assertion the
+    // compiler can fold is normally either dead or a build error waiting to
+    // happen. That premise does not hold for a guard test. This one is
+    // deliberately true today and exists to fail the moment someone edits
+    // `ACCESS_TOKEN_TTL_SECS`, and the whole value of it is the message it
+    // prints when that happens - which interpolates the offending value.
+    // Clippy's suggested `const { assert!(..) }` cannot format, so taking the
+    // suggestion would trade the diagnostic this test exists to deliver for
+    // silence from the lint.
     #[allow(clippy::assertions_on_constants)]
     #[test]
     fn the_access_token_lifetime_stays_short_enough_to_expire_as_a_backstop() {

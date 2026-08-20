@@ -5,6 +5,7 @@
 // signatures we implement below.
 
 use crate::buf_stream::SplitStream;
+use crate::release::ConnectionRelease;
 use compio::buf::{BufResult, IoBuf, IoBufMut};
 use compio::io::{AsyncRead, AsyncWrite};
 use compio::net::{OwnedReadHalf, OwnedWriteHalf, TcpStream};
@@ -34,6 +35,20 @@ impl Socket {
     #[cfg(unix)]
     pub(crate) fn new_unix(stream: UnixStream) -> Socket {
         Socket(Inner::Unix(stream))
+    }
+
+    /// A handle that shuts this socket down when it is dropped.
+    ///
+    /// Taken before the socket is handed to the connection task and stored on
+    /// the client half, so the session ends when the client does rather than
+    /// when the process does. See [`crate::release`] for why that cannot be
+    /// left to the connection task's own teardown.
+    pub(crate) fn release_handle(&self) -> Option<ConnectionRelease> {
+        match &self.0 {
+            Inner::Tcp(s) => ConnectionRelease::dup_of(s),
+            #[cfg(unix)]
+            Inner::Unix(s) => ConnectionRelease::dup_of(s),
+        }
     }
 }
 

@@ -345,7 +345,7 @@ docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "CREATE DATABASE $PG_DB" >/dev
 ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
 e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DB_URL"
-e2e_with_platform_mint_key "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --blob-store "$WORK/bundles" \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --blob-store "$WORK/bundles" \
  > "$WORK/control.log" 2>&1 & PIDS+=($!)
 sleep 4
 # Without ZEROSHIP_WORKER_KV_URL the env.kv namespace is absent BY DESIGN and every handler
@@ -549,7 +549,7 @@ fi
 #
 # WHAT THE FLOOR DOES NOT CATCH: substitution. Swapping one assertion for an
 # easier one keeps the total at 44. Nothing here can see that; review can.
-KV_MIN_PASSED="${KV_MIN_PASSED:-44}"
+KV_MIN_PASSED=44
 
 echo ""
 echo "  dev vs deployed: $PASS passed, $FAIL failed  (mutation: $MUTATE)  (floor $KV_MIN_PASSED)"

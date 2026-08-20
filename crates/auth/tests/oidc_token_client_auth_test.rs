@@ -12,7 +12,7 @@
 //!   - public (`none`, no hash) - PKCE is the only credential, by design
 //!   - brokered (per-app broker secret, derived not stored)
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 

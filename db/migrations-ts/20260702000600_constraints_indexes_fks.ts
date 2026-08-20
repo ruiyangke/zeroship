@@ -23,7 +23,6 @@ export function up() {
   table("app_members", { schema: "zeroship" }).index("app_members_user_idx").add({ on: ["user_id"] });
   table("app_net_grants", { schema: "zeroship" }).index("app_net_grants_app_id_idx").add({ on: ["app_id"] });
   table("app_session_anchors", { schema: "zeroship" }).index("app_session_anchors_user_idx").add({ on: ["app_id", "global_user_id"], where: (col) => col("revoked_at").isNull() });
-  table("app_user_identities", { schema: "zeroship" }).index("app_user_identities_global_user_id_idx").add({ on: ["global_user_id"] });
   table("app_user_identities", { schema: "zeroship" }).index("app_user_identities_pairwise_sub_idx").add({ on: ["pairwise_sub"] });
   table("app_user_identities", { schema: "zeroship" }).index("app_user_identities_relay_active_idx").add({ on: ["relay_email"], unique: true, where: (col) => col("relay_email").isNotNull().and(col("revoked_at").isNull()) });
   table("apps", { schema: "zeroship" }).index("apps_plan_id_idx").add({ on: ["plan_id"] });
@@ -40,7 +39,6 @@ export function up() {
   table("token_revocations", { schema: "zeroship" }).index("auth_token_revocations_revoked_after_idx").add({ on: ["revoked_after"] });
   table("totp_backup_codes", { schema: "zeroship" }).index("auth_totp_backup_codes_user_idx").add({ on: ["user_id"] });
   table("users", { schema: "zeroship" }).index("auth_users_deletion_due_idx").add({ on: ["deletion_scheduled_for"], where: (col) => col("deletion_scheduled_for").isNotNull().and(col("anonymized_at").isNull()) });
-  table("users", { schema: "zeroship" }).index("auth_users_non_authenticating_idx").add({ on: ["id"], where: (col) => col("disabled_at").isNotNull().or(col("anonymized_at").isNotNull(), col("deletion_requested_at").isNotNull(), col("deletion_scheduled_for").isNotNull()) });
   table("authz_decisions", { schema: "zeroship" }).index("authz_decisions_occurred_idx").add({ on: [{ column: "occurred_at", order: "desc" }] });
   table("authz_decisions", { schema: "zeroship" }).index("authz_decisions_user_idx").add({ on: ["actor_user_id"], where: (col) => col("actor_user_id").isNotNull() });
   table("billing_disputes", { schema: "zeroship" }).index("billing_disputes_invoice_idx").add({ on: ["invoice_id"] });

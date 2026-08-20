@@ -80,7 +80,7 @@ done < <(
 # Anti-hollow floor. If the extraction stops matching - the workflow moves, the
 # indentation changes, `run:` gains a block scalar this sed does not strip -
 # this gate inspects nothing and exits 0 looking exactly like a clean run.
-MIN="${CI_INVOCABLE_MIN:-10}"
+MIN=10
 echo "bare CI script invocations checked: $checked (floor $MIN)"
 if [ "$checked" -lt "$MIN" ]; then
   echo "FAIL: found only $checked bare invocation(s), fewer than the $MIN expected." >&2

@@ -16,7 +16,7 @@ use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::oidc::Issuer;
 use zeroship_auth::server;
 
-mod common;
+use crate::common;
 use common::test_auth_config;
 
 const ISSUER: &str = "https://auth.zeroship.test/oauth2";

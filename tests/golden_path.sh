@@ -864,7 +864,7 @@ e2e_export_database_urls "$DB_URL"
 # and got `502 {"error":"internal error"}` with
 # `worker log fetch failed ... "error":"parse logs JSON: EOF"` in its log,
 # because it was reading an empty body from a port nothing listens on.
-e2e_with_platform_mint_key "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --blob-store /tmp/gp-bundles \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --blob-store /tmp/gp-bundles \
   --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" \
   --audit-retention-check-secs 1 >/tmp/gp-control.log 2>&1 & PIDS+=($!)
 "$BIN/zeroship-migrated" --port "$ZEROSHIP_MIGRATED_PORT" \
@@ -1012,7 +1012,7 @@ chmod 600 "$GP_DEAD_DSN_FILE"
 # `env -u ZEROSHIP_CONTROL_DATABASE_URL` is load-bearing: `e2e_export_database_urls`
 # exported it at the top of step 2, and with it set the env tier legitimately
 # wins and assertion A would measure nothing.
-e2e_with_platform_mint_key env -u ZEROSHIP_CONTROL_DATABASE_URL \
+env -u ZEROSHIP_CONTROL_DATABASE_URL \
   "$BIN/zeroship-control" --port "$CFG_PORT" --config "$GP_OVERLAY" \
   --blob-store /tmp/gp-bundles >/tmp/gp-control-overlay.log 2>&1 & PIDS+=($!)
 for _ in $(seq 1 20); do curl -sf "http://localhost:$CFG_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
@@ -1030,7 +1030,7 @@ grep -q "loaded overlay" /tmp/gp-control-overlay.log \
 # DSN, while the overlay still names a working one. Env must win, so this must
 # NOT come up.
 ZEROSHIP_CONTROL_DATABASE_URL="$GP_DEAD_DSN" \
-  e2e_with_platform_mint_key "$BIN/zeroship-control" --port "$CFG_PORT_B" --config "$GP_OVERLAY" \
+  "$BIN/zeroship-control" --port "$CFG_PORT_B" --config "$GP_OVERLAY" \
   --blob-store /tmp/gp-bundles >/tmp/gp-control-envwins.log 2>&1 & PIDS+=($!)
 sleep 6
 if curl -sf "http://localhost:$CFG_PORT_B/readyz" >/dev/null 2>&1; then
@@ -1050,7 +1050,7 @@ grep -q "failed to connect to database" /tmp/gp-control-envwins.log \
 # D. Same again one tier up: the generated `--database-url-file` path flag. This
 # is the ONLY CLI form the DSN has, because a secret must never appear in argv
 # where `ps` shows it to every user on the host.
-e2e_with_platform_mint_key env -u ZEROSHIP_CONTROL_DATABASE_URL \
+env -u ZEROSHIP_CONTROL_DATABASE_URL \
   "$BIN/zeroship-control" --port "$CFG_PORT_C" --config "$GP_OVERLAY" \
   --blob-store /tmp/gp-bundles --database-url-file "$GP_DEAD_DSN_FILE" \
   >/tmp/gp-control-cliwins.log 2>&1 & PIDS+=($!)
@@ -1106,7 +1106,7 @@ else
     # The DSN is the ONE variable between the two runs, and it is secret-classed,
     # so it arrives as a per-process assignment rather than on the command line.
     ZEROSHIP_CONTROL_DATABASE_URL="$_dsn" \
-    e2e_with_platform_mint_key "$BIN/zeroship-control" --port "$_port" --blob-store /tmp/gp-bundles \
+    "$BIN/zeroship-control" --port "$_port" --blob-store /tmp/gp-bundles \
       > "/tmp/gp-$_tag.log" 2>&1 &
     # `disown`, and deliberately NOT PIDS+=. These two are killed a few lines
     # below, inside this step. Registering them for the EXIT trap as well made
@@ -4408,7 +4408,7 @@ gp_close_step
 #   failures: 15 total, 15 expected, 0 unexpected, 0 stale expectation(s)
 # The delta and the run agree to the assertion, and the 15 reds are the same
 # ticketed set (#260 x6, #236 x2, #332/#333 x3, #331 x4).
-GOLDEN_MIN_PASSED="${GOLDEN_MIN_PASSED:-121}"
+GOLDEN_MIN_PASSED=121
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.
@@ -4511,7 +4511,7 @@ rc=0
 # that table carries a BEFORE DELETE append-only trigger, so the cascade aborts
 # the whole transaction. They are listed here for the same reason as the others
 # -- so a NEW failure is still visible -- and not because anyone chose them.
-GOLDEN_EXPECTED_FAILURES=${GOLDEN_EXPECTED_FAILURES:-"scaffold notes.list|scaffold notes.add|scaffold notes.delete|scaffold files.upload|scaffold files.list|scaffold visits.bump|sort({id:-1}) is NOT creation order|DIVERGE on id ordering|DELETE /api/apps/<id> did not succeed|zeroship.apps row SURVIVED the delete|gateway is STILL serving the deleted app|per-app Postgres schema SURVIVED the delete|dev: step 6 drove getMessages on the dev tier|dev and deployed DIVERGE on log visibility|left the creator no log line"}
+GOLDEN_EXPECTED_FAILURES="scaffold notes.list|scaffold notes.add|scaffold notes.delete|scaffold files.upload|scaffold files.list|scaffold visits.bump|sort({id:-1}) is NOT creation order|DIVERGE on id ordering|DELETE /api/apps/<id> did not succeed|zeroship.apps row SURVIVED the delete|gateway is STILL serving the deleted app|per-app Postgres schema SURVIVED the delete|dev: step 6 drove getMessages on the dev tier|dev and deployed DIVERGE on log visibility|left the creator no log line"
 IFS='|' read -r -a _pats <<< "$GOLDEN_EXPECTED_FAILURES"
 # FIXED-STRING matching, both directions, and this is not stylistic. The first
 # draft joined the patterns into one ERE, and one of them - `sort({id:-1}) is

@@ -653,6 +653,27 @@ still fails closed, but on a narrower set: without the `tls` feature
 P2 is `compio-redis`, and enabling the `tls` feature plus moving deployment DSNs
 off `prefer` - no crate in the tree turns the feature on yet.
 
+**2026-08-19: the paragraph above is itself now history on two points.** The
+driver has all six libpq `sslmode` values, so:
+
+- **`sslmode=prefer` is no longer plaintext-by-definition.** The pool builds a
+  connector for every mode but `disable` and `prefer` attempts TLS, falling
+  back by reconnecting in the clear. The reason it did not - no
+  reconnect-after-handshake-failure path - was removed rather than worked
+  around, so `prefer` now means one thing through the pool and through
+  `Config::connect`.
+- **`sslmode=require` no longer implies verification.** It is libpq's `require`:
+  encrypted, and authenticated only if `sslrootcert` names trust anchors. A DSN
+  that wants the server authenticated must say `verify-full` (or `verify-ca`).
+  This matters for anything in this proposal that leaned on `require` as the
+  strong setting - it never was one in libpq, and it is not one here.
+
+"Moving deployment DSNs off `prefer`" therefore now means moving them to
+`verify-full` with an explicit `sslrootcert`, not to `require`. Whether the
+platform should *refuse* a weak `sslmode` at all is a zeroship policy question
+and deliberately does not live in the driver, which is publishable and knows
+nothing about zeroship.
+
 ### 9.1 Build order
 
 ```

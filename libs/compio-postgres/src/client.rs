@@ -12,6 +12,7 @@ use crate::copy_in::CopyInSink;
 use crate::copy_out::CopyOutStream;
 use crate::keepalive::KeepaliveConfig;
 use crate::query::RowStream;
+use crate::release::ConnectionRelease;
 use crate::simple_query::SimpleQueryStream;
 use crate::tls::{MakeTlsConnect, TlsConnect};
 use crate::types::{Oid, ToSql, Type};
@@ -178,6 +179,21 @@ pub struct InnerClient {
     /// finished startup is idle. Written by every [`Responses`] stream this
     /// client hands out; read by the pool on release.
     tx_status: Arc<AtomicU8>,
+
+    /// Shuts the connection's socket down when this `InnerClient` drops - that
+    /// is, when the last handle that could still issue a query on this
+    /// connection goes away.
+    ///
+    /// Dropping the client already ASKS the connection task to terminate (the
+    /// `sender` above closes), but that request is only honoured if something
+    /// polls the task afterwards, and nothing guarantees that: a compio runtime
+    /// torn down with the task parked leaves the socket - and with it the
+    /// server-side backend - alive for the rest of the process. See
+    /// [`crate::release`] for the mechanism and the measurement.
+    ///
+    /// `None` for [`Config::connect_raw`](crate::Config::connect_raw), whose
+    /// stream belongs to the caller and need not be a socket at all.
+    _release: Option<ConnectionRelease>,
 }
 
 impl InnerClient {
@@ -321,6 +337,7 @@ impl Client {
         ssl_negotiation: SslNegotiation,
         process_id: i32,
         secret_key: i32,
+        release: Option<ConnectionRelease>,
     ) -> Client {
         Client {
             inner: Arc::new(InnerClient {
@@ -329,6 +346,7 @@ impl Client {
                 buffer: Default::default(),
                 dirty: AtomicBool::new(false),
                 tx_status: Arc::new(AtomicU8::new(b'I')),
+                _release: release,
             }),
             socket_config: None,
             ssl_mode,

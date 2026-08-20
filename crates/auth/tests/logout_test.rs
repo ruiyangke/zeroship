@@ -19,7 +19,7 @@ use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::store::{sessions, users};
 use zeroship_mailer::{Mailer, StdoutMailer};
 
-mod common;
+use crate::common;
 use common::test_auth_config;
 
 #[ntex::test]

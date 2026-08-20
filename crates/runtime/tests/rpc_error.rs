@@ -6,7 +6,7 @@
 //!
 //! See `docs/proposals/rpc.md` §RpcError surface for the contract.
 
-mod common;
+use crate::common;
 use common::{dispatch, m};
 
 #[test]

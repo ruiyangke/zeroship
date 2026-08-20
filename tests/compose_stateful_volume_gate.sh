@@ -91,13 +91,20 @@ done
 echo ""
 echo "  $PASS passed, $FAIL failed, $((PASS+FAIL)) ran"
 
-# Floor counts assertions that RAN, not that PASSED.
-MIN_RAN="${COMPOSE_VOLUMES_MIN_RAN:-3}"
+# Counts assertions that RAN, not that PASSED.
+#
+# EXACT, not a floor, and not overridable. MEASURED 2026-08-19: 3 stateful
+# services in the tracked compose files. The count is a pure parse of tracked
+# files, so it is deterministic; when a stateful service is added or removed,
+# re-measure and change this line in the same commit.
+EXPECT_RAN=3
 RAN=$((PASS + FAIL))
 rc=0
 [ "$FAIL" -eq 0 ] || rc=1
-if [ "$RAN" -lt "$MIN_RAN" ]; then
-  echo "  x FLOOR: only $RAN stateful services checked, expected at least $MIN_RAN." >&2
+if [ "$RAN" -ne "$EXPECT_RAN" ]; then
+  echo "  x COUNT: $RAN stateful services checked, expected exactly $EXPECT_RAN." >&2
+  echo "    Fewer means services went missing from the parse; more means one was" >&2
+  echo "    added - re-measure and bump this line." >&2
   rc=1
 fi
 exit $rc
