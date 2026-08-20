@@ -10,7 +10,7 @@
 #   5. gateway -> worker -> env.db insert/find succeeds on the deployed app
 #   6. db_reads/db_writes reach usage_aggregates and are included in charge
 #
-# Skips cleanly when docker is unavailable. KEEP_WORK=1 preserves logs/containers.
+# REFUSES (exit 1) when docker is unavailable. KEEP_WORK=1 preserves logs/containers.
 # ============================================================================
 set -uo pipefail
 
@@ -27,9 +27,16 @@ echo "============================================"
 echo "  zeroship E2E — deployed migration-first env.db app"
 echo "============================================"
 
+# Docker unavailable is a REFUSAL, not a skip. Everything below runs against an
+# ephemeral PG and redpanda this harness starts itself, so without docker NOTHING
+# here runs - and until 2026-08-20 that printed a warning and exited 0, which any
+# caller reads as "the deployed env.db path passed". The eleven harnesses
+# 7ff94acb0 converted on 2026-08-11 did not include this one.
 if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
-  echo "  ⚠ SKIP: docker unavailable."
-  exit 0
+  echo "  x REFUSED: docker unavailable, so NOTHING in this harness ran." >&2
+  echo "    Exiting non-zero: a run that asserted nothing is not a passing run." >&2
+  echo "    Start docker and re-run." >&2
+  exit 1
 fi
 
 for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-platform-migrate zeroship-migrated; do
