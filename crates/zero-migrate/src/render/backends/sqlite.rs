@@ -17,7 +17,7 @@ pub(super) static RENDERER: SqliteDmlRenderer = SqliteDmlRenderer;
 
 impl DmlRenderer for SqliteDmlRenderer {
     fn quote_ident(&self, ident: &str) -> String {
-        dml::escape_quote_ident(ident)
+        super::ansi_double_quote_ident(ident)
     }
 
     fn qualify_table(&self, _project_schema: &str, table: &str) -> Result<String, DmlError> {

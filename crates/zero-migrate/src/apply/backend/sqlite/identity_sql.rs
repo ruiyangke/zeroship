@@ -49,7 +49,7 @@ fn lit(value: &str) -> String {
 }
 
 fn ident(value: &str) -> String {
-    crate::render::dml::escape_quote_ident(value)
+    crate::render::dml::escape_quote_ident_for_dialect(value, super::SQLITE_DIALECT)
 }
 
 fn integer_cell(row: &[Option<String>], index: usize) -> i64 {

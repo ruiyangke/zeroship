@@ -139,8 +139,17 @@ impl ExpandContractPlan {
 
 /// Quote a Postgres identifier (double embedded quotes, wrap in `"`). Mirrors
 /// [`crate::plan::author`]'s quoting so output is injection-safe.
+///
+/// PostgreSQL, named rather than assumed. Expand/contract is a PG-only shape (its
+/// callers in `engine` emit `ADD CONSTRAINT … NOT VALID` / `VALIDATE CONSTRAINT`,
+/// which neither other backend has), so the dialect is not in doubt — but it now
+/// has to be written down, because the raw primitive this used to call spelled the
+/// bytes for nobody.
 pub(crate) fn quote_ident(ident: &str) -> String {
-    crate::render::dml::escape_quote_ident(ident)
+    crate::render::dml::escape_quote_ident_for_dialect(
+        ident,
+        crate::schema::query::SqlDialect::Postgres,
+    )
 }
 
 /// Validate a bare SQL identifier: non-empty, starts with a letter/underscore,

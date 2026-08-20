@@ -819,6 +819,19 @@ async fn resolve_view_bodies_in_transaction<D: SqlSession>(
 ///     established is present in the introspected snapshot. A missing row is an
 ///     error rather than an absent body, because silently reading it as "no body"
 ///     is how a comparison stops running without anyone noticing.
+/// Spell the `<schema>.<view>` argument of the `pg_get_viewdef` probe below.
+///
+/// PostgreSQL, named rather than assumed: `pg_get_viewdef` is a PG catalog
+/// function and this whole probe is `#[cfg(pg_seam)]`. It used to call the crate's
+/// raw escape primitive, which produced correct bytes for no stated dialect.
+#[cfg(pg_seam)]
+fn pg_view_ident(ident: &str) -> String {
+    crate::render::dml::escape_quote_ident_for_dialect(
+        ident,
+        crate::schema::query::SqlDialect::Postgres,
+    )
+}
+
 #[cfg(pg_seam)]
 async fn probe_one_view_body<D: SqlSession>(
     conn: &D,
@@ -849,12 +862,7 @@ async fn probe_one_view_body<D: SqlSession>(
                         AS expected_body, \
                         pg_get_viewdef($1::text::regclass, true) AS actual_body"
             ),
-            &[format!(
-                "{}.{}",
-                crate::render::dml::escape_quote_ident(view_schema),
-                crate::render::dml::escape_quote_ident(name)
-            )
-            .into()],
+            &[format!("{}.{}", pg_view_ident(view_schema), pg_view_ident(name)).into()],
         )
         .await?;
 

@@ -65,6 +65,30 @@
 //! 155 tests, so the SQLite backend stopped reading the PostgreSQL renderer
 //! without any emitted byte changing.
 //!
+//! # The OTHER half of the class: emission that reaches no renderer at all
+//!
+//! The paragraph above is about a backend reaching ANOTHER vendor's renderer. The
+//! larger instance was core reaching NO renderer: `dml::escape_quote_ident` was a
+//! `pub(crate)` raw `format!` that any module could call to spell `"x"` without
+//! naming a dialect. Correct bytes, absent routing, and invisible to every
+//! behaviour test for the same reason as above — two vendors agree on the spelling.
+//!
+//! RESOLVED, and the fix is the visibility of [`ansi_double_quote_ident`] below.
+//! Core cannot name it, so every former caller had to choose a door in
+//! `render::dml` and record its vendor. MEASURED at `8710fe39`, on the SQLite-only
+//! `sqlite_engine` binary (156 tests), by neutering `SqliteDmlRenderer::quote_ident`
+//! and counting what notices:
+//!
+//! | tree | red | note |
+//! |------|-----|------|
+//! | before the seam | 51 | the SQLite backend's actual reach |
+//! | after, `declarative` routed | 90 | +39, the whole previously-blind set |
+//! | after, `apply::backend::sqlite` routed too | 118 | +28 more |
+//!
+//! ZERO tests were lost at any step, and all 1960 tests across the nine
+//! `zero-migrate` binaries pass with byte-identical counts before and after — the
+//! seam changed no emitted byte, only who decided it.
+//!
 //! # What is still coupled, and where
 //!
 //! Two SQLite render paths still reach the PG-pinned core wrappers, both OUTSIDE
@@ -72,6 +96,13 @@
 //! `render::lower::render_sqlite_trigger_op` and its helpers call the bare
 //! `dml::quote_bare_ident` at six sites. `backends/sqlite.rs` delegates its
 //! trigger rendering there, so the coupling survives one hop away.
+//!
+//! And a DELIBERATE non-defect that looks identical to a neuter: the
+//! `pg_get_constraintdef` normal form (`declarative::quote_ident_if_needed` /
+//! `constraintdef_cols`) is PostgreSQL-spelled ON PURPOSE and is read by the SQLite
+//! and MySQL drift comparators. It has its own door,
+//! `dml::pg_canonical_ident`, precisely because a red count cannot tell it apart
+//! from an unrouted emission. Re-dialecting it would be a regression.
 //!
 //! STALE DOC, KNOWN, NOT MINE TO EDIT: the enforcing test's own module comment
 //! (`backend_modules_name_one_dialect.rs`) still says the `quote_ident` coupling
@@ -91,6 +122,28 @@ mod sqlite;
 
 use crate::render::renderer::DmlRenderer;
 use crate::schema::query::SqlDialect;
+
+/// The ANSI double-quote identifier spelling: double every embedded `"`, wrap the
+/// result in `"`. THE single physical home of that byte-logic, and PRIVATE TO THE
+/// BACKENDS.
+///
+/// Two of the three shipping vendors happen to agree on this spelling, which is
+/// exactly why core must not be able to reach it un-named. A core caller that
+/// spells these bytes itself is spelling them FOR A VENDOR IT NEVER NAMED, and no
+/// assertion about emitted SQL can see the mistake while the two vendors agree —
+/// the bytes are right, the routing is absent. Visibility is the detector: core
+/// cannot name this function, so it must pick a door in [`crate::render::dml`]
+/// instead ([`crate::render::dml::escape_quote_ident_for_dialect`] to EMIT for a
+/// named dialect, [`crate::render::dml::pg_canonical_ident`] for the PG-shaped
+/// normal form). Both doors resolve back here through [`renderer`], so the bytes
+/// are unchanged and the vendor is now on the record.
+///
+/// This is also why the two `quote_ident` impls below call it DIRECTLY rather than
+/// through the `*_for_dialect` seam their sibling methods use: they ARE the
+/// dialect's `quote_ident`, so routing through the dispatch would recurse.
+pub(in crate::render::backends) fn ansi_double_quote_ident(ident: &str) -> String {
+    format!("\"{}\"", ident.replace('"', "\"\""))
+}
 
 /// The ONE exhaustive dispatch match over the shipping backends.
 ///

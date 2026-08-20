@@ -77,6 +77,20 @@ pub use authorizer::Mode;
 pub use journal_sql::LoadedVersion;
 pub use rebuild_sql::RebuildError;
 
+/// This backend's vendor identity, named ONCE for the whole `sqlite/` subtree.
+///
+/// The four apply-time SQL builders under this module (`backfill_sql`,
+/// `identity_sql`, `primary_key_sql`, `rebuild_sql`) each spell identifiers into
+/// SQL they send to a real SQLite database. They used to do it through the raw
+/// crate-wide escape primitive, which reached no renderer at all — and because
+/// they contained NO `SqlDialect::` literal, the one-dialect-literal grep read
+/// them as clean: it looks for a FOREIGN literal, and "no literal" passes.
+///
+/// One const, read by all four, is the shape that makes their vendor greppable
+/// without putting four literals in the tree. It mirrors
+/// `render::backends::sqlite`'s own `DIALECT`.
+const SQLITE_DIALECT: SqlDialect = SqlDialect::Sqlite;
+
 /// The SQLite [`MigrationBackend`]. Holds the dedicated hardened migration actor
 /// for ONE tenant. Construct via [`SqliteBackend::open`].
 #[derive(Debug)]

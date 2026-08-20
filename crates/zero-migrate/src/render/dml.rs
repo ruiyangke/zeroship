@@ -374,38 +374,61 @@ pub(crate) fn quote_ident_checked_for_dialect(
     Ok(escape_quote_ident_for_dialect(ident, dialect))
 }
 
-/// The ONE raw double-quote escape primitive for the whole crate: double every
-/// embedded `"`, wrap in `"`. This is the *single physical home* of the
-/// `replace('"', "\"\"")` byte-logic — every identifier-quoting seam in
-/// `zero-migrate` routes through it, either DIRECTLY (the author-boundary
-/// helpers, whose input is already gated by an upstream `validate_ident`:
-/// `declarative` / `shadow` / `expand_contract` / `precondition`'s structured-check
-/// `quote_ident` / `render::lower` / `apply::backend::sqlite`) or via the fail-closed engine
-/// wrapper [`quote_ident_checked`] (every **engine-supplied** identifier render
-/// seam — project schema, migrator role, meta schema, recovery index name — in
-/// `conn` / `executor` / `precondition` / `baseline` /
-/// `author` / `backfill` / `role` / `journal`). Centralising it keeps every render
-/// seam byte-identical and makes the "no remaining bare escape seam" claim
-/// *structurally* true - enforced by `no_bare_escape_seam_outside_dml` below.
-/// (Plain text, not a doc link: that enforcer is a `#[cfg(test)]` test fn, and
-/// rustdoc never compiles `cfg(test)`, so no flag combination can resolve a link
-/// to it.)
-///
-/// It is infallible by construction: double-quote escaping neutralises every byte
-/// EXCEPT the empty string and a NUL (which PG rejects in an identifier outright).
-/// Callers that handle **engine-supplied** identifiers (project schema, migrator
-/// role, meta schema) MUST therefore route through [`quote_ident_checked`], which
-/// adds the empty/NUL fail-closed gate on top of this primitive — so EVERY
-/// engine-identifier render seam in the crate is uniformly self-defending, not
-/// just the five (`dml`/`role`/`author`/`backfill`/`journal`) that originally
-/// adopted the wrapper. Callers quoting author identifiers already gated upstream
-/// (`validate_ident`) may call this directly.
-pub(crate) fn escape_quote_ident(ident: &str) -> String {
-    format!("\"{}\"", ident.replace('"', "\"\""))
-}
+/* THE RAW SPELLING PRIMITIVE IS GONE FROM CORE.
+ *
+ * It used to live here as `escape_quote_ident`, `pub(crate)`, and any module in
+ * the crate could call it to spell `"x"` without ever naming a vendor. Two of the
+ * three shipping dialects agree on that spelling, so such a call is BYTE-CORRECT
+ * AND SILENT: no assertion about emitted SQL can distinguish "SQLite quoted this"
+ * from "nobody quoted this and it happened to look right". That is the whole
+ * defect class — an emission that reaches NO renderer at all.
+ *
+ * The bytes now live in `render::backends::ansi_double_quote_ident`, which is
+ * `pub(in crate::render::backends)`. Core cannot name it, so core must pick a
+ * DOOR, and the door records the vendor:
+ *
+ *   - EMIT for a named dialect  -> `escape_quote_ident_for_dialect(x, d)`
+ *   - the PG-shaped NORMAL FORM -> `pg_canonical_ident(x)`
+ *
+ * The visibility IS the census. Deleting the old name turned "which sites in this
+ * crate spell an identifier without routing" from a grep that cannot see through
+ * a helper into compiler output that enumerates every one of them, at the
+ * DEFINITION rather than at each call site.
+ */
 
+/// EMIT an identifier in `dialect`'s own spelling, decided by that dialect's
+/// backend rather than by a `format!` in core.
+///
+/// This is the door for anything that will be sent to a database. The other door,
+/// [`pg_canonical_ident`], is for the normal form that is COMPARED rather than
+/// executed; picking between them is the point of there being two.
 pub(crate) fn escape_quote_ident_for_dialect(ident: &str, dialect: SqlDialect) -> String {
     crate::render::renderer::renderer(dialect).quote_ident(ident)
+}
+
+/// The PG-SHAPED NORMAL FORM, which is NOT an emission — and re-dialecting it
+/// would be a REGRESSION, not a fix.
+///
+/// Constraint-definition bodies and stored-DDL fragments are built once in
+/// PostgreSQL spelling ON PURPOSE, so that a desired snapshot round-trips
+/// byte-for-byte against `pg_get_constraintdef`. That normal form is then consumed
+/// by the SQLite and MySQL drift comparators too — `constraintdef_cols` and
+/// `quote_ident_if_needed` in `render::declarative` are called from
+/// `apply::backend::mysql::drift_sql` and `apply::backend::sqlite::drift_sql` —
+/// and is translated to MySQL's backtick spelling at the ONE emission point,
+/// `declarative::mysql_requote_sql`.
+///
+/// So a SQLite drift comparison that reads PostgreSQL-spelled bytes is CORRECT
+/// here, and pointing these callers at the SQLite renderer would break the
+/// round-trip. It gets its own named door precisely so that the next person
+/// auditing this seam can tell the deliberate PG spelling apart from an
+/// unrouted one: a neuter reddens both identically, so the red count is not a
+/// diagnosis and the door name has to carry the intent.
+///
+/// PostgreSQL EMISSION also lands here, and legitimately: for PostgreSQL the
+/// canonical form and the emitted form are the same function.
+pub(crate) fn pg_canonical_ident(ident: &str) -> String {
+    escape_quote_ident_for_dialect(ident, SqlDialect::Postgres)
 }
 
 /// Qualify a validated bare table name for the target dialect.
@@ -2165,17 +2188,33 @@ mod tests {
 
     /// STRUCTURAL enforcement of the "no remaining bare
     /// `format!`/`replace` escape seam" claim. The raw `"` → `""` escape logic
-    /// (`replace('"', "\"\"")`) must live in EXACTLY one physical home —
-    /// [`escape_quote_ident`] in this module — and nowhere else in the crate
-    /// source. Every other quoting seam routes through it (directly for infallible
-    /// author-validated helpers, or via [`quote_ident_checked`] for the fail-closed
-    /// engine-identifier surfaces).
+    /// (`replace('"', "\"\"")`) must live in EXACTLY one physical home — and
+    /// nowhere else in the crate source. Every other quoting seam routes through
+    /// it (via one of the two `dml` doors for author-validated helpers, or via
+    /// [`quote_ident_checked`] for the fail-closed engine-identifier surfaces).
+    ///
+    /// THE HOME MOVED, AND THE INVARIANT DID NOT WEAKEN. It used to be `dml.rs`.
+    /// It is now `render/backends/mod.rs::ansi_double_quote_ident`, which is
+    /// `pub(in crate::render::backends)` — so the new home is strictly STRONGER
+    /// than the old one: "exactly one file contains these bytes" is now backed by
+    /// "and no module outside `render::backends` can even name the function". This
+    /// test going red on the move was expected and the fix was to retarget the
+    /// exemption, not to relax the scan.
+    ///
+    /// `dml.rs` keeps its exemption only because this test's own needle strings and
+    /// the prose above spell the pattern; no `dml.rs` code performs the escape.
     ///
     /// The `"` → `""` escape logic must NOT recur inline across sites such as
     /// `executor` / `precondition` / `baseline` / `expand_contract` / `shadow` /
-    /// `declarative` / `db` / `render::lower` / `apply::backend::sqlite` — only
-    /// `dml.rs` (the helper + this test's own needle strings) may contain the
-    /// pattern.
+    /// `declarative` / `db` / `render::lower` / `apply::backend::sqlite`.
+    ///
+    /// WHAT IT DOES NOT CATCH, MEASURED: the scan is a byte-pattern, so a
+    /// re-implementation that spells the quote differently — `char::from(34)`,
+    /// `'\u{22}'`, a `&str` const — passes it while being the identical defect.
+    /// That is not hypothetical: the spike behind this seam wrote `char::from(34)`
+    /// in a probe and evaded this guard by accident. The compile-time half (the
+    /// primitive being unnameable outside `render::backends`) is what closes that
+    /// gap, because it never looks at bytes at all.
     #[test]
     fn no_bare_escape_seam_outside_dml() {
         use std::path::Path;
@@ -2198,8 +2237,11 @@ mod tests {
                 if path.extension().and_then(|e| e.to_str()) != Some("rs") {
                     continue;
                 }
-                // dml.rs is the single sanctioned home (helper + this test).
-                if path.file_name().and_then(|n| n.to_str()) == Some("dml.rs") {
+                // The single sanctioned home is `render/backends/mod.rs` (the
+                // primitive itself). `render/dml.rs` stays exempt for this test's
+                // own needle strings and the prose that names the seam.
+                let rel = path.strip_prefix(&src_root).unwrap().display().to_string();
+                if rel == "render/backends/mod.rs" || rel == "render/dml.rs" {
                     continue;
                 }
                 // The `schema/` module tree is the
@@ -2220,56 +2262,78 @@ mod tests {
         }
         assert!(
             offenders.is_empty(),
-            "bare `\"`-escape seam found outside dml.rs — route these through \
-             dml::escape_quote_ident / quote_ident_checked: {offenders:?}"
+            "bare `\"`-escape seam found outside render/backends/mod.rs — route \
+             these through dml::escape_quote_ident_for_dialect (to emit) / \
+             dml::pg_canonical_ident (the PG normal form) / \
+             dml::quote_ident_checked (engine identifiers): {offenders:?}"
         );
     }
 
     /// STRUCTURAL proof that the "every engine-supplied
     /// identifier render seam fail-closes" contract is TRUE, not just true for the
     /// five seams (`dml`/`role`/`author`/`backfill`/`journal`) that first adopted
-    /// the wrapper. The infallible primitive [`escape_quote_ident`] must NEVER be
-    /// handed an **engine-supplied** identifier (project schema / migrator role /
-    /// meta schema) — those must route through [`quote_ident_checked`] so they
-    /// fail closed on empty / NUL. We scan the crate source for the give-away
-    /// byte-patterns (`escape_quote_ident(&cfg.pg.meta_schema)`,
-    /// `escape_quote_ident(&cfg.project_schema)`, `escape_quote_ident(role)`,
-    /// `escape_quote_ident(&exec_cfg.pg.meta_schema)`) — every such site is an
-    /// engine-identifier seam that must NOT use the infallible escaper.
+    /// the wrapper. The infallible doors must NEVER be handed an
+    /// **engine-supplied** identifier (project schema / migrator role / meta
+    /// schema) — those must route through [`quote_ident_checked`] so they fail
+    /// closed on empty / NUL. We scan the crate source for the give-away
+    /// byte-patterns (`…(&cfg.pg.meta_schema)`, `…(&cfg.project_schema)`,
+    /// `…(role)`, `…(&exec_cfg.pg.meta_schema)`) — every such site is an
+    /// engine-identifier seam that must NOT use an infallible escaper.
+    ///
+    /// RETARGETED WITH THE SEAM. The infallible primitive used to be
+    /// `dml::escape_quote_ident`, and these needles named it. That symbol no
+    /// longer exists — the raw spelling moved into `render::backends` and became
+    /// private to it — so needles built on the old name would have matched nothing
+    /// forever after and this pin would have gone quietly dead while still passing.
+    /// The needles now name the two doors that replaced it,
+    /// [`escape_quote_ident_for_dialect`] and [`pg_canonical_ident`], which is
+    /// where an engine identifier could actually land today.
     ///
     /// Engine-identifier sites such as `precondition.rs` (project_schema + role),
     /// `executor.rs` (role + meta_schema ×4 + project_schema + recovery index),
     /// `baseline.rs` (meta_schema), and
     /// `db.rs::search_path_clause` (project/platform/extension schemas) must NOT
-    /// feed an engine identifier to `escape_quote_ident`.
+    /// feed an engine identifier to either door.
     ///
     /// **SCOPE — this is a PER-SITE regression pin, NOT a general invariant.** It
-    /// only catches the exact call-site *spellings* in `needles` above (the give-away
-    /// `escape_quote_ident(&cfg.…)` / `(role)` byte-patterns). A future engine-identifier
+    /// only catches the exact call-site *spellings* in `needles` below (the give-away
+    /// `(&cfg.…)` / `(role)` argument byte-patterns). A future engine-identifier
     /// seam bound to a *differently-named* variable — e.g.
-    /// `let s = &cfg.pg.meta_schema; escape_quote_ident(s)` — would slip past this scan
+    /// `let s = &cfg.pg.meta_schema; pg_canonical_ident(s)` — would slip past this scan
     /// undetected. The broader, spelling-independent guarantee that NO bare `"`-escape
-    /// seam exists outside `dml.rs` is held by `no_bare_escape_seam` (above); this test
-    /// complements it by naming the specific engine-identifier sites and proving they
-    /// route through the fail-closed wrapper. When adding a new engine-identifier render
-    /// seam, add its spelling to `needles` here.
+    /// seam exists outside `render/backends/mod.rs` is held by
+    /// `no_bare_escape_seam_outside_dml` (above); this test complements it by naming
+    /// the specific engine-identifier sites and proving they route through the
+    /// fail-closed wrapper. When adding a new engine-identifier render seam, add its
+    /// spelling to `needles` here.
     #[test]
     fn no_engine_identifier_uses_the_infallible_escaper() {
         use std::path::Path;
         // The engine-supplied identifier argument patterns. `quote_ident_checked`
-        // takes the SAME args; the infallible `escape_quote_ident` must not.
+        // takes the SAME args; the infallible doors must not.
         let esc = [
             'e', 's', 'c', 'a', 'p', 'e', '_', 'q', 'u', 'o', 't', 'e', '_', 'i', 'd', 'e', 'n',
+            't', '_', 'f', 'o', 'r', '_', 'd', 'i', 'a', 'l', 'e', 'c', 't',
+        ]
+        .iter()
+        .collect::<String>();
+        let canon = [
+            'p', 'g', '_', 'c', 'a', 'n', 'o', 'n', 'i', 'c', 'a', 'l', '_', 'i', 'd', 'e', 'n',
             't',
         ]
         .iter()
         .collect::<String>();
         let needles = [
-            format!("{esc}(&cfg.pg.meta_schema)"),
-            format!("{esc}(&cfg.project_schema)"),
-            format!("{esc}(&exec_cfg.pg.meta_schema)"),
-            format!("{esc}(&exec_cfg.project_schema)"),
-            format!("{esc}(role)"),
+            format!("{esc}(&cfg.pg.meta_schema"),
+            format!("{esc}(&cfg.project_schema"),
+            format!("{esc}(&exec_cfg.pg.meta_schema"),
+            format!("{esc}(&exec_cfg.project_schema"),
+            format!("{esc}(role"),
+            format!("{canon}(&cfg.pg.meta_schema)"),
+            format!("{canon}(&cfg.project_schema)"),
+            format!("{canon}(&exec_cfg.pg.meta_schema)"),
+            format!("{canon}(&exec_cfg.project_schema)"),
+            format!("{canon}(role)"),
         ];
         let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut offenders: Vec<String> = Vec::new();

@@ -29,7 +29,7 @@ fn quote_engine_ident_as_dml(what: &'static str, ident: &str) -> Result<String, 
 
 impl DmlRenderer for PostgresDmlRenderer {
     fn quote_ident(&self, ident: &str) -> String {
-        dml::escape_quote_ident(ident)
+        super::ansi_double_quote_ident(ident)
     }
 
     fn qualify_table(&self, project_schema: &str, table: &str) -> Result<String, DmlError> {

@@ -70,11 +70,45 @@ fn mysql_qualified(schema: &str, object: &str) -> String {
     )
 }
 
-/// Quote a Postgres identifier (double embedded quotes, wrap in `"`). Mirrors
-/// [`crate::plan::author`]'s quoting so emitted SQL is injection-safe even past the
-/// author-boundary `validate_ident` (defense in depth — the guard is line two).
+/// The ONE dialect identity of every SQLite-owned render path in this module.
+///
+/// It is a const rather than a literal at each site so that the ~35 call sites of
+/// [`sqlite_ident`] below name no vendor themselves. When `SqliteEmitter` and its
+/// helpers eventually move into `render::backends::sqlite`, this const IS that
+/// module's `DIALECT` and the migration is one line — the same one-dialect-literal
+/// shape `backends/mod.rs` already requires of a backend module.
+const SQLITE_DIALECT: SqlDialect = SqlDialect::Sqlite;
+
+/// EMIT an identifier in SQLite's OWN spelling, decided by the SQLite backend.
+///
+/// Every SQLite-owned emission in this module goes through here. Before the seam
+/// they went through [`quote_ident`] into a raw `format!` that reached NO renderer
+/// at all: the bytes were right because PostgreSQL and SQLite happen to agree on
+/// `"x"`, and nothing in the suite could tell the agreement apart from a routing.
+/// MEASURED at `8710fe39`: neutering `SqliteDmlRenderer::quote_ident` reddened 51
+/// of the 156 `sqlite_engine` tests while neutering this module's `quote_ident`
+/// reddened 72 — 39 live-SQLite tests whose emitted identifier bytes the SQLite
+/// backend could not influence at all.
+fn sqlite_ident(ident: &str) -> String {
+    crate::render::dml::escape_quote_ident_for_dialect(ident, SQLITE_DIALECT)
+}
+
+/// Quote an identifier in PostgreSQL spelling — for this module that is BOTH the
+/// PG emission form and the PG-shaped normal form, which coincide by construction.
+///
+/// Mirrors [`crate::plan::author`]'s quoting so emitted SQL is injection-safe even
+/// past the author-boundary `validate_ident` (defense in depth — the guard is line
+/// two).
+///
+/// NOT A DEFECT WHEN A SQLITE PATH READS IT. [`quote_ident_if_needed`] and
+/// [`constraintdef_cols`] build the `pg_get_constraintdef` normal form on purpose,
+/// and `apply::backend::sqlite::drift_sql` / `apply::backend::mysql::drift_sql`
+/// compare against that form deliberately; MySQL's spelling is derived from it at
+/// the single translation point, [`mysql_requote_sql`]. Re-dialecting those callers
+/// to their own backend would break the round-trip. See
+/// [`crate::render::dml::pg_canonical_ident`] for why that needs its own door.
 fn quote_ident(ident: &str) -> String {
-    crate::render::dml::escape_quote_ident(ident)
+    crate::render::dml::pg_canonical_ident(ident)
 }
 
 /// The PG keywords whose category is NOT `UNRESERVED` (i.e. reserved,
@@ -823,7 +857,7 @@ pub(crate) fn rewrite_sqlite_stored_primary_key(
     if let Some(columns) = target_columns {
         let columns = columns
             .iter()
-            .map(|column| quote_ident(column))
+            .map(|column| sqlite_ident(column))
             .collect::<Vec<_>>()
             .join(", ");
         rewritten.push(format!("PRIMARY KEY ({columns})"));
@@ -1067,7 +1101,7 @@ fn rewrite_sqlite_stored_foreign_keys(
         if let Some(constraint) = sqlite_constraint_by_name(&desired.constraints, &name) {
             rewritten.push(format!(
                 "CONSTRAINT {} {}",
-                quote_ident(&constraint.name),
+                sqlite_ident(&constraint.name),
                 constraint.definition
             ));
         } else if sqlite_constraint_by_name(&live.constraints, &name).is_none() {
@@ -1101,7 +1135,7 @@ fn rewrite_sqlite_stored_foreign_keys(
             }
             None => rewritten.push(format!(
                 "CONSTRAINT {} {}",
-                quote_ident(&desired_fk.name),
+                sqlite_ident(&desired_fk.name),
                 desired_fk.definition
             )),
         }
@@ -1758,7 +1792,11 @@ fn render_index_elements_sqlite(idx: &IndexSnapshot) -> String {
             // opclass/collation are PG-only (refused at validate before lower), so
             // the SQLite element render intentionally ignores them.
             IndexElementSnapshot::Column { name, order, .. } => {
-                format!("{}{}", quote_ident(name), render_index_order_suffix(*order))
+                format!(
+                    "{}{}",
+                    sqlite_ident(name),
+                    render_index_order_suffix(*order)
+                )
             }
             IndexElementSnapshot::Expr(expr) => format!("({expr})"),
         })
@@ -4556,7 +4594,7 @@ fn retarget_sqlite_fk_definition(definition: &str, target: &str) -> Option<Strin
             .find(|ch: char| ch == '(' || ch.is_whitespace())
             .unwrap_or(definition.len() - target_start);
     let mut rewritten = definition.to_string();
-    rewritten.replace_range(target_start..target_end, &quote_ident(target));
+    rewritten.replace_range(target_start..target_end, &sqlite_ident(target));
     Some(rewritten)
 }
 
@@ -4623,7 +4661,7 @@ fn sqlite_stored_create_for_pure_rename(
     })?;
     Ok(format!(
         "CREATE TABLE {}{}",
-        quote_ident(table),
+        sqlite_ident(table),
         &stored[open..]
     ))
 }
@@ -4656,7 +4694,7 @@ fn sqlite_authored_primary_key_clause(
     }
     Ok(Some(format!(
         "CONSTRAINT {} {}",
-        quote_ident(&primary_key.name),
+        sqlite_ident(&primary_key.name),
         primary_key.definition
     )))
 }
@@ -6323,7 +6361,7 @@ impl DeclarativeAuthor {
                 SqlDialect::Sqlite => (
                     self.render_create_table_sqlite(table, desired_full)?,
                     // SQLite DROP TABLE is unqualified (main IS the app file).
-                    format!("DROP TABLE {}", quote_ident(table)),
+                    format!("DROP TABLE {}", sqlite_ident(table)),
                 ),
                 SqlDialect::Mysql => (
                     self.render_create_table_mysql_snapshot_statements(table, t, &inline_fks)
@@ -7483,7 +7521,7 @@ impl DeclarativeAuthor {
         // rewritten stored text.
         let new_table_create = format!(
             "CREATE TABLE {} {}",
-            quote_ident(&tmp),
+            sqlite_ident(&tmp),
             &create_real[open..]
         );
 
@@ -7583,8 +7621,8 @@ impl DeclarativeAuthor {
             preserve_stored_shape,
             table_renames,
         )?;
-        let real_q = quote_ident(table);
-        let tmp_q = quote_ident(&tmp);
+        let real_q = sqlite_ident(table);
+        let tmp_q = sqlite_ident(&tmp);
         // The first occurrence of the quoted real table name is the CREATE target.
         let new_table_create = match create_real.find(&real_q) {
             Some(pos) => {
@@ -7711,9 +7749,9 @@ impl DeclarativeAuthor {
             .chain(spec.column_renames.iter().map(|(from, to)| {
                 format!(
                     "ALTER TABLE {} RENAME COLUMN {} TO {}",
-                    quote_ident(table),
-                    quote_ident(from),
-                    quote_ident(to)
+                    sqlite_ident(table),
+                    sqlite_ident(from),
+                    sqlite_ident(to)
                 )
             }))
             .chain(spec.recreate_objects.iter().cloned())
@@ -8213,7 +8251,7 @@ impl DeclarativeAuthor {
             };
             parts.push(format!(
                 "{} {}{}{}{}{}{}{}{}",
-                quote_ident(&c.name),
+                sqlite_ident(&c.name),
                 ty,
                 enc,
                 sqlite_inline_sentinel,
@@ -8232,14 +8270,14 @@ impl DeclarativeAuthor {
             {
                 parts.push(format!(
                     "CONSTRAINT {} {}",
-                    quote_ident(&c.name),
+                    sqlite_ident(&c.name),
                     c.definition
                 ));
             }
         }
         let mut statements = vec![format!(
             "CREATE TABLE {} ({})",
-            quote_ident(table),
+            sqlite_ident(table),
             parts.join(", ")
         )];
         let emitter = SqliteEmitter;
@@ -8411,7 +8449,7 @@ impl DeclarativeAuthor {
     ) -> Migration {
         let table_ref = match self.dialect {
             SqlDialect::Postgres => self.qualified(table),
-            SqlDialect::Sqlite => quote_ident(table),
+            SqlDialect::Sqlite => sqlite_ident(table),
             SqlDialect::Mysql => mysql_qualified(&self.project_schema, table),
         };
         let up = format!("ALTER TABLE {} ADD {}", table_ref, self.fk_clause(fk));
@@ -8421,7 +8459,14 @@ impl DeclarativeAuthor {
                 table_ref,
                 mysql_quote_ident(&fk.name)
             ),
-            SqlDialect::Postgres | SqlDialect::Sqlite => format!(
+            // Split from the PG arm not because the bytes differ — they do not —
+            // but so the SQLite leg's identifier is spelled by the SQLite backend.
+            SqlDialect::Sqlite => format!(
+                "ALTER TABLE {} DROP CONSTRAINT {}",
+                table_ref,
+                sqlite_ident(&fk.name)
+            ),
+            SqlDialect::Postgres => format!(
                 "ALTER TABLE {} DROP CONSTRAINT {}",
                 table_ref,
                 quote_ident(&fk.name)
@@ -8597,7 +8642,7 @@ impl DeclarativeAuthor {
                 mysql_quote_ident(col),
             ),
             SqlDialect::Postgres => (self.qualified(table), quote_ident(col)),
-            SqlDialect::Sqlite => (quote_ident(table), quote_ident(col)),
+            SqlDialect::Sqlite => (sqlite_ident(table), sqlite_ident(col)),
         }
     }
 
@@ -8920,7 +8965,7 @@ impl DeclarativeAuthor {
         let (statements, down) = match self.dialect {
             SqlDialect::Sqlite => (
                 self.render_create_table_sqlite_snapshot_statements(table, snapshot, inject),
-                format!("DROP TABLE {}", quote_ident(table)),
+                format!("DROP TABLE {}", sqlite_ident(table)),
             ),
             SqlDialect::Mysql => (
                 self.render_create_table_mysql_snapshot_statements(table, snapshot, &inline_fks),
@@ -9187,7 +9232,11 @@ impl DeclarativeAuthor {
                 mysql_qualified(&self.project_schema, table),
                 mysql_quote_ident(name),
             ),
-            SqlDialect::Postgres | SqlDialect::Sqlite => (self.qualified(table), quote_ident(name)),
+            // The SQLite leg is split out so its identifier is spelled by the
+            // SQLite backend. Byte-identical to the PG leg today; that is the
+            // point — agreement is not routing.
+            SqlDialect::Sqlite => (self.qualified(table), sqlite_ident(name)),
+            SqlDialect::Postgres => (self.qualified(table), quote_ident(name)),
         };
         let up = format!("ALTER TABLE {table_ref} ADD CONSTRAINT {constraint_ident} {body}");
         // MySQL has supported `DROP CONSTRAINT` since 8.0.19. FKs still need
@@ -9228,7 +9277,11 @@ impl DeclarativeAuthor {
                 mysql_qualified(&self.project_schema, table),
                 mysql_quote_ident(name),
             ),
-            SqlDialect::Postgres | SqlDialect::Sqlite => (self.qualified(table), quote_ident(name)),
+            // The SQLite leg is split out so its identifier is spelled by the
+            // SQLite backend. Byte-identical to the PG leg today; that is the
+            // point — agreement is not routing.
+            SqlDialect::Sqlite => (self.qualified(table), sqlite_ident(name)),
+            SqlDialect::Postgres => (self.qualified(table), quote_ident(name)),
         };
         let up = format!("ALTER TABLE {table_ref} DROP CONSTRAINT {constraint_ident}");
         single_stmt(self.make(
@@ -9692,7 +9745,7 @@ impl DdlEmitter for SqliteEmitter {
         // on SQLite the table is `main` (the app file): emit an UNqualified
         // `ALTER TABLE <t> ADD COLUMN …`. A schema-qualified `"schema"."t"` would
         // resolve to no table ("no such table").
-        let table_ref = quote_ident(table);
+        let table_ref = sqlite_ident(table);
         // on SQLite the mask sentinel rides INLINE in the column clause
         // (there is NO `COMMENT ON COLUMN` in SQLite — it is a syntax error). SQLite
         // preserves the inline `/* … */` comment through `ADD COLUMN` in
@@ -9725,7 +9778,7 @@ impl DdlEmitter for SqliteEmitter {
         let up = format!(
             "ALTER TABLE {} ADD COLUMN {} {}{}{}{}{}{}{}",
             table_ref,
-            quote_ident(&c.name),
+            sqlite_ident(&c.name),
             ty,
             enc,
             sqlite_inline_sentinel,
@@ -9737,7 +9790,7 @@ impl DdlEmitter for SqliteEmitter {
         let down = format!(
             "ALTER TABLE {} DROP COLUMN {}",
             table_ref,
-            quote_ident(&c.name)
+            sqlite_ident(&c.name)
         );
         // SQLite ADD COLUMN is a SINGLE statement (the sentinel rides inline); the
         // structural list therefore has exactly one element.
@@ -9755,19 +9808,19 @@ impl DdlEmitter for SqliteEmitter {
         (
             format!(
                 "CREATE {unique}INDEX IF NOT EXISTS {} ON {} ({col_list}){}",
-                quote_ident(&idx.name),
-                quote_ident(table),
+                sqlite_ident(&idx.name),
+                sqlite_ident(table),
                 idx.predicate
                     .as_deref()
                     .map(|p| format!(" WHERE {p}"))
                     .unwrap_or_default(),
             ),
-            format!("DROP INDEX IF EXISTS {}", quote_ident(&idx.name)),
+            format!("DROP INDEX IF EXISTS {}", sqlite_ident(&idx.name)),
         )
     }
 
     fn drop_table_up(&self, table: &str) -> String {
-        format!("DROP TABLE {}", quote_ident(table))
+        format!("DROP TABLE {}", sqlite_ident(table))
     }
 
     fn rename_table(&self, table: &str, to: &str) -> (String, String) {
@@ -9777,13 +9830,13 @@ impl DdlEmitter for SqliteEmitter {
         (
             format!(
                 "ALTER TABLE {} RENAME TO {}",
-                quote_ident(table),
-                quote_ident(to)
+                sqlite_ident(table),
+                sqlite_ident(to)
             ),
             format!(
                 "ALTER TABLE {} RENAME TO {}",
-                quote_ident(to),
-                quote_ident(table)
+                sqlite_ident(to),
+                sqlite_ident(table)
             ),
         )
     }
@@ -9794,8 +9847,8 @@ impl DdlEmitter for SqliteEmitter {
         // resolve to no table.
         format!(
             "ALTER TABLE {} DROP COLUMN {}",
-            quote_ident(table),
-            quote_ident(col)
+            sqlite_ident(table),
+            sqlite_ident(col)
         )
     }
 
@@ -9805,7 +9858,7 @@ impl DdlEmitter for SqliteEmitter {
         // SILENTLY no-ops (the qualified name never resolves), reporting success while
         // the index survives: silent drift, the dangerous failure mode. Emit the
         // unqualified `DROP INDEX <name>` so the index is ACTUALLY dropped.
-        format!("DROP INDEX {}", quote_ident(idx_name))
+        format!("DROP INDEX {}", sqlite_ident(idx_name))
     }
 }
 

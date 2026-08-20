@@ -44,8 +44,10 @@
 //! # Why this test is TEXTUAL and not a render assertion
 //!
 //! Because no render assertion can exist. `PostgresDmlRenderer::quote_ident` and
-//! `SqliteDmlRenderer::quote_ident` are both `dml::escape_quote_ident(ident)` -
-//! byte-identical, for every input. Nothing an SQL-output test can feed them tells
+//! `SqliteDmlRenderer::quote_ident` are both `super::ansi_double_quote_ident(ident)`
+//! (they were `dml::escape_quote_ident(ident)` until that primitive moved into
+//! `render::backends` and became private to it) - byte-identical, for every input,
+//! by either spelling. Nothing an SQL-output test can feed them tells
 //! the two apart, which is exactly why this coupling survived long enough to need a
 //! source-editing spike to see. The second test below pins that fact, so the day the
 //! two spellings diverge is the day this stops being latent and starts being a
