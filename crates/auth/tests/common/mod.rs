@@ -422,3 +422,43 @@ impl Fixture {
         native_authorize_return_to(&self.test_client_id, self.test_redirect)
     }
 }
+
+/// Publish this process's OP signing key, once, however many fixtures ask.
+///
+/// WHY ONCE. `zeroship.signing_keys` holds at most one `active` row per
+/// DATABASE: `publish_active_key` retires every other active row
+/// (`crates/auth/src/oidc/issuer.rs:396-403`) and refuses to reactivate a
+/// `retiring` one (`:380-392`). That is production behaving correctly - a
+/// retired signer must not come back - and it makes "the active OP key" a
+/// database-level singleton, which two concurrent suite runs on one shared
+/// database both need to be.
+///
+/// Per-process KEYS are not enough on their own, and the measurement says so.
+/// Two auth binaries run together on one database, after `op_signing_key`
+/// became per-process:
+///     A: 161 passed; 93 failed        B: 254 passed; 0 failed
+/// and 93 of A's 93 were `publish active OP key: ... has non-activatable
+/// status "retiring"`, naming A's OWN kid. Distinct keys stopped the two runs
+/// from colliding on one identity; what remained is that each REPUBLISHED its
+/// key per fixture boot, and B's publish had retired A's row in between.
+///
+/// Publishing once removes the republish, which is the only operation that can
+/// fail. A key another run has since retired stays usable here: `retiring` rows
+/// remain in the JWKS (`crates/auth/src/oidc/metadata.rs:71-84` selects
+/// `status IN ('active','next','retiring')`), and every JWKS assertion in this
+/// crate looks its key up BY KID rather than asserting how many there are, so a
+/// peer's key sitting beside this one changes nothing.
+///
+/// NOT for `signing_key_retention_test`, which is the lifecycle's own test and
+/// must drive the real `publish_active_key` directly.
+pub async fn publish_op_key_once(
+    issuer: &zeroship_auth::oidc::Issuer,
+    db: &compio_postgres::Client,
+) -> zeroship_auth::error::Result<()> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static PUBLISHED: AtomicBool = AtomicBool::new(false);
+    if PUBLISHED.swap(true, Ordering::SeqCst) {
+        return Ok(());
+    }
+    issuer.publish_active_key(db).await
+}
