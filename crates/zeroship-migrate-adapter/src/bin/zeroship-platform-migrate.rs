@@ -23,7 +23,16 @@
 //! Usage:
 //!   zeroship-platform-migrate --database-url-file /path/to/dsn \
 //!       [--migrations-dir db/migrations-ts] [--project-schema zeroship] \
-//!       [--project-id zeroship]
+//!       [--project-id zeroship] [--cluster-lock-database postgres]
+//!
+//! `--cluster-lock-database` names the database on the SAME cluster that
+//! concurrent migrate runs coordinate through while applying cluster-global
+//! objects (roles, databases, tablespaces). It defaults to `postgres` and only
+//! needs setting on a cluster where that maintenance database was dropped. It
+//! is a separate database from the one being migrated on purpose: a PostgreSQL
+//! advisory lock is database-scoped, so two runs migrating two different
+//! databases have nowhere else to exclude each other. See
+//! `zeroship_migrate_adapter::platform::cluster_lock`.
 //!
 //! IN A DEPLOY FILE THE DSN ARRIVES AS A PATH, NEVER AS A VALUE. A process
 //! argument list is public: `docker inspect`, `docker ps --no-trunc`, `ps` and
@@ -47,6 +56,7 @@
 
 use std::path::{Path, PathBuf};
 
+use zeroship_migrate_adapter::platform::cluster_lock::DEFAULT_CLUSTER_LOCK_DATABASE;
 use zeroship_migrate_adapter::platform::{run_platform_migrations, PlatformMigrateConfig};
 
 fn main() {
@@ -56,7 +66,8 @@ fn main() {
             eprintln!("zeroship-platform-migrate: {msg}");
             eprintln!(
                 "\nusage: zeroship-platform-migrate --database-url-file <PATH> \
-                 [--migrations-dir <dir>] [--project-schema <schema>] [--project-id <id>]"
+                 [--migrations-dir <dir>] [--project-schema <schema>] [--project-id <id>] \\
+                 [--cluster-lock-database <db>]"
             );
             std::process::exit(2);
         }
@@ -104,6 +115,7 @@ where
     let mut migrations_dir: Option<PathBuf> = None;
     let mut project_schema = String::from("zeroship");
     let mut project_id = String::from("zeroship");
+    let mut cluster_lock_database = String::from(DEFAULT_CLUSTER_LOCK_DATABASE);
 
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -124,6 +136,11 @@ where
             }
             "--project-id" => {
                 project_id = args.next().ok_or("--project-id needs a value")?;
+            }
+            "--cluster-lock-database" => {
+                cluster_lock_database = args
+                    .next()
+                    .ok_or("--cluster-lock-database needs a value")?;
             }
             "-h" | "--help" => return Err("help".to_string()),
             other => return Err(format!("unknown argument '{other}'")),
@@ -178,6 +195,7 @@ where
         migrations_dir,
         project_schema,
         project_id,
+        cluster_lock_database,
     })
 }
 
