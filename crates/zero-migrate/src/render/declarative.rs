@@ -6422,24 +6422,18 @@ impl DeclarativeAuthor {
             // SQLite and the IR migration path both render this already-resolved
             // snapshot. Keeping one resolved-shape emitter preserves the confined
             // byte format while making declarative and migration CREATEs identical.
-            let (up, down) = match self.dialect {
-                SqlDialect::Sqlite => (
-                    self.render_create_table_sqlite(table, desired_full)?,
-                    // SQLite DROP TABLE is unqualified (main IS the app file).
-                    format!("DROP TABLE {}", sqlite_ident(table)),
-                ),
-                SqlDialect::Mysql => (
-                    self.render_create_table_mysql_snapshot_statements(table, t, &inline_fks)
-                        .join(";\n"),
-                    format!(
-                        "DROP TABLE {}",
-                        mysql_qualified(&self.project_schema, table)
-                    ),
-                ),
-                SqlDialect::Postgres => (
-                    self.render_create_table(table, t, &inline_fks),
-                    format!("DROP TABLE {}", self.qualified(table)),
-                ),
+            // The `down` is NOT a routing decision, and spelling it in the match made
+            // it look like one. [`DdlEmitter::drop_table_up`] already IS the
+            // per-dialect `DROP TABLE <ref>` — unqualified on SQLite, `schema`.`t` on
+            // MySQL, "schema"."t" on PostgreSQL — so all three arms were re-deriving a
+            // contract method byte-for-byte. Ask the contract instead of re-spelling it.
+            let down = self.emitter().drop_table_up(table);
+            let up = match self.dialect {
+                SqlDialect::Sqlite => self.render_create_table_sqlite(table, desired_full)?,
+                SqlDialect::Mysql => self
+                    .render_create_table_mysql_snapshot_statements(table, t, &inline_fks)
+                    .join(";\n"),
+                SqlDialect::Postgres => self.render_create_table(table, t, &inline_fks),
             };
             let mig = self.make(
                 &format!("create_table_{table}"),
@@ -9027,22 +9021,20 @@ impl DeclarativeAuthor {
         // The STRUCTURAL statement list for the create (CREATE + follow-on COMMENT
         // sentinels on PG; CREATE + policy-injected indexes on SQLite). The
         // `up` is `join(";\n")` over it — byte-identical to the differ's render.
-        let (statements, down) = match self.dialect {
-            SqlDialect::Sqlite => (
-                self.render_create_table_sqlite_snapshot_statements(table, snapshot, inject),
-                format!("DROP TABLE {}", sqlite_ident(table)),
-            ),
-            SqlDialect::Mysql => (
-                self.render_create_table_mysql_snapshot_statements(table, snapshot, &inline_fks),
-                format!(
-                    "DROP TABLE {}",
-                    mysql_qualified(&self.project_schema, table)
-                ),
-            ),
-            SqlDialect::Postgres => (
-                self.render_create_table_statements(table, snapshot, &inline_fks),
-                format!("DROP TABLE {}", self.qualified(table)),
-            ),
+        // Same `down` as the differ's create, and for the same reason: it is
+        // [`DdlEmitter::drop_table_up`], not a fourth place that knows how three
+        // vendors qualify a table.
+        let down = self.emitter().drop_table_up(table);
+        let statements = match self.dialect {
+            SqlDialect::Sqlite => {
+                self.render_create_table_sqlite_snapshot_statements(table, snapshot, inject)
+            }
+            SqlDialect::Mysql => {
+                self.render_create_table_mysql_snapshot_statements(table, snapshot, &inline_fks)
+            }
+            SqlDialect::Postgres => {
+                self.render_create_table_statements(table, snapshot, &inline_fks)
+            }
         };
         let up = statements.join(";\n");
         let mut mig = self.make(
