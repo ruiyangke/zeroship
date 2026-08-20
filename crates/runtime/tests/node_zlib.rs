@@ -1,7 +1,7 @@
 //! `node:zlib` — gzip / deflate / deflateRaw / brotli round-trips,
 //! sync + async (callback) shapes, error handling. Wave #192.
 
-mod common;
+use crate::common;
 use common::{dispatch, m};
 
 // ---------------------------------------------------------------------------

@@ -51,6 +51,9 @@
 #       cargo test -p zeroship-runtime --test bootstrap_install_schema_resolve
 #       4 passed; 0 failed  (resolves_and_is_callable, resolves_during_module
 #       _evaluation, shares_instance_across_imports, transitive_db_internal)
+#     That target name stopped resolving on 2026-08-20: the file is a module of
+#     tests/main.rs now. Rerun it with
+#       cargo test -p zeroship-runtime --test main -- bootstrap_install_schema_resolve::
 #
 # So db-todos DOES run on the worker. It is the DEPLOYED vehicle of
 # tests/e2e_dev_vs_deployed_db.sh, and `tests/golden_path.sh` step 10 deploys

@@ -12,7 +12,6 @@ use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::runtime::{Runtime, DEFAULT_IDLE_GC_AFTER};
 use zeroship_runtime::{init_v8, EnvSnapshot, ModuleEntry, RequestCtx};
 
-mod common;
 
 /// Minimal `default.fetch` so `call_fetch_handler` is non-pending.
 fn trivial_module() -> Vec<ModuleEntry> {

@@ -11,7 +11,7 @@
 // `/__zeroship/v1/<id>` wire (HTTP POST). Async generators returned by
 // procedures are piped through the shim's `_zsRpcAndRespond` helper.
 
-mod common;
+use crate::common;
 use common::*;
 
 use std::time::Duration;

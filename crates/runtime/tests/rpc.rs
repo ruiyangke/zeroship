@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 use common::*;
 
 // These tests exercise the synthetic-entry RPC contract: every HTTP

@@ -1,7 +1,6 @@
 #![allow(unsafe_code)]
 
-#[path = "support/node_realworld.rs"]
-mod node_realworld;
+use crate::node_realworld;
 
 use std::net::SocketAddr;
 use std::time::Duration;

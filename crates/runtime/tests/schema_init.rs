@@ -11,7 +11,7 @@
 //!     `installSchema(descriptorFields, env)` with the live `env.db` handle.
 //!   - The bootstrap doesn't publish the legacy `__zsSchemaInit` global.
 
-mod common;
+use crate::common;
 use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx};
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::runtime::Runtime;
