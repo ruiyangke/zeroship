@@ -93,7 +93,7 @@ pub async fn tick_with_config(
 
 async fn gc_expired_subscriptions(state: &AppState) -> Result<(), RegistryError> {
     let conn = state.registry.conn().await?;
-    for app_id in super::workflow_engine::journalled_app_ids(&conn).await? {
+    for app_id in super::workflow_engine::journalled_fleet(&conn).await?.readable {
         let tables = WorkflowTables::for_app_id(&app_id);
         let sql = format!(
             "DELETE FROM {} \
@@ -123,7 +123,7 @@ async fn gc_expired_subscriptions(state: &AppState) -> Result<(), RegistryError>
 /// An app with NO journal schema at all is a different case and is deliberately
 /// still picked: there are no subscribers to deliver to, and the arm below
 /// completes the broadcast rather than leaving it forever pending. The skipped
-/// app is named in the WARN that `journalled_app_ids` emits from
+/// app is named in the WARN that `journalled_fleet` emits from
 /// `gc_expired_subscriptions` on the same tick, so the stall is not silent.
 async fn drain_one_broadcast(
     state: &AppState,
