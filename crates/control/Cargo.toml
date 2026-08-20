@@ -326,6 +326,11 @@ path = "tests/registry_schema_test.rs"
 required-features = ["live-db-tests"]
 
 [[test]]
+name = "reserved_app_names_test"
+path = "tests/reserved_app_names_test.rs"
+required-features = ["live-db-tests"]
+
+[[test]]
 name = "set_plan_authz_test"
 path = "tests/set_plan_authz_test.rs"
 required-features = ["live-db-tests"]

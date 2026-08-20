@@ -119,6 +119,12 @@ fn error_response(e: RegistryError) -> web::HttpResponse {
         RegistryError::Conflict(msg) => {
             web::HttpResponse::Conflict().json(&serde_json::json!({ "error": msg }))
         }
+        // 409, not 400: the name is well-formed and simply unavailable, which
+        // is the same thing a creator does about it as a duplicate name. A 400
+        // would file it with the charset rejection and read as "malformed".
+        RegistryError::ReservedName(msg) => {
+            web::HttpResponse::Conflict().json(&serde_json::json!({ "error": msg }))
+        }
         RegistryError::InvalidInput(msg) => {
             web::HttpResponse::BadRequest().json(&serde_json::json!({ "error": msg }))
         }
