@@ -3865,7 +3865,25 @@ async fn workflow_retention_reaps_only_expired_terminal_runs() {
         )
         .await
         .expect("run retention sweep again");
-        assert_eq!(again, workflow_retention::RetentionStats::default());
+        // The ROW counts must be zero, and the coverage must NOT be: a second
+        // tick over a fleet with nothing left to prune still visits the app.
+        // Comparing the whole struct against `default()` used to assert both at
+        // once, which stopped being right the moment the tick started reporting
+        // what it covered - a zero-coverage tick is one that swept nobody.
+        assert_eq!(
+            again,
+            workflow_retention::RetentionStats {
+                coverage: again.coverage,
+                ..workflow_retention::RetentionStats::default()
+            },
+            "a second sweep must find nothing left to prune"
+        );
+        assert!(
+            again.coverage.apps_swept >= 1,
+            "and must still have VISITED the app, got {}",
+            again.coverage.apps_swept
+        );
+        assert_eq!(again.coverage.apps_skipped, 0);
     })
     .await
     .expect("test timeout");

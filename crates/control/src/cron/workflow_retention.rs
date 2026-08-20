@@ -161,8 +161,10 @@ pub async fn tick_with_config(
     // costs nothing here because the loop never ran two apps at once.
     let mut conn = state.registry.conn().await?;
     let fleet = super::workflow_engine::journalled_fleet(&conn).await?;
-    let mut stats = RetentionStats::default();
-    stats.coverage = super::workflow_engine::SweepCoverage::opened_over(&fleet);
+    let mut stats = RetentionStats {
+        coverage: super::workflow_engine::SweepCoverage::opened_over(&fleet),
+        ..RetentionStats::default()
+    };
     let mut apps = fleet.readable.into_iter();
     // Budget checked BEFORE the pull, so an app the break never reached stays
     // in the iterator for the `len()` at the bottom instead of being counted as
