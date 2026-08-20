@@ -335,12 +335,11 @@ export function up() {
       activated_at: t.timestamp(),
       retiring_at: t.timestamp(),
       retired_at: t.timestamp(),
-      max_issued_expires_at: t.timestamp(),
     },
     primaryKey: ["kid"],
   });
   table("signing_keys", { schema: "zeroship" }).check("signing_keys_alg_check").add({ expr: (col) => col("alg").eq("EdDSA") });
-  table("signing_keys", { schema: "zeroship" }).check("signing_keys_status_check").add({ expr: (col) => col("status").in(["active", "next", "retiring", "retired"]) });
+  table("signing_keys", { schema: "zeroship" }).check("signing_keys_status_check").add({ expr: (col) => col("status").in(["active", "next", "retiring"]) });
   table("token_revocations", { schema: "zeroship" }).create({
     columns: {
       client_id: t.text().notNull(),

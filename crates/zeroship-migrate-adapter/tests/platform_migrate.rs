@@ -40,7 +40,7 @@ mod platform_cli {
     /// How many files `db/migrations-ts` holds. Asserted rather than derived so
     /// that a discovery bug which silently drops a file fails loudly instead of
     /// agreeing with itself. Adding a migration updates this one constant.
-    const PLATFORM_MIGRATION_FILES: usize = 29;
+    const PLATFORM_MIGRATION_FILES: usize = 33;
 
     const DURABLE_WORKFLOW_JOURNAL_TABLES: [&str; 10] = [
         "app_deploys",
@@ -1965,6 +1965,210 @@ export function down() {}
             ));
         }
 
+    // ===================================================================
+    // RELEASED-BYTES GUARD
+    // ===================================================================
+
+    /// The checksums a DEPLOYED database has already recorded for the migration
+    /// files it applied, copied from that database's
+    /// `zeroship_migrations.platform_migration_files` on 2026-08-19.
+    ///
+    /// WHY THIS TABLE EXISTS. The runner hashes each file's source bytes and
+    /// refuses any file whose hash no longer matches what the journal recorded
+    /// (`platform.rs`, `PlatformMigrateError::ChecksumMismatch`). The guard is
+    /// correct and it cannot self-heal: once a deployed database has journalled a
+    /// file, EDITING that file bricks every future migrate run against it, and
+    /// the only repair is to restore the released bytes and re-land the change as
+    /// a new file.
+    ///
+    /// Nothing detected that. Four commits on 2026-08-16 edited five
+    /// already-applied files in place; every test passed, because every test
+    /// applies the corpus to an EMPTY database, where the journal is written from
+    /// the same bytes it is later checked against and so always agrees. The
+    /// failure needs a journal written from DIFFERENT bytes, which only a
+    /// deployed database had. These constants are that database's half of the
+    /// comparison, brought into the repo so the check can run without one.
+    ///
+    /// APPENDING TO THIS LIST IS PART OF SHIPPING A DEPLOY, and nothing enforces
+    /// that: a file released to production but missing here is simply not covered
+    /// by the two tests below. That is the known limit of this guard.
+    const RELEASED_PLATFORM_MIGRATIONS: [(&str, &str); 21] = [
+        ("20260702000100_schema_roles_extensions.ts", "e90eccffe56726f1485b8530876b06715d0a823397eda4237fae1992e8a29ad4"),
+        ("20260702000200_control_tables.ts", "02519586a0cd0e5e45ef736e6ca450050eb2601fee7821f28e690c7878dce634"),
+        ("20260702000300_auth_oauth_tables.ts", "7919452776a5df8ecfeed330d0f082af3827db242dbad06e59f6dbd876cd733e"),
+        ("20260702000400_billing_metering_invoice_tables.ts", "6caebcc2484bde0d8c6330c16c23c7b0ff44bf0ed0baadbb9458a2e9c35ea8ff"),
+        ("20260702000500_sandbox_tables.ts", "bfcf9709dd925d700c15a0cca36bb08a817b8fa7a4d91538b2383502283149b7"),
+        ("20260702000600_constraints_indexes_fks.ts", "8d143ec43e97fde62bff35778764c908bd90934b6f6185c713d5f2e45b92b6a6"),
+        ("20260702000700_functions_triggers_comments.ts", "0b399fe02e40f151e12185588a4a18ae88aab841e804c62c68e2df5c61931961"),
+        ("20260702000800_policies_rls.ts", "06fdfd789367eb5d08023a76983eb98f6df1fbc386647825ce0a5137f12cc7a3"),
+        ("20260702000900_grants.ts", "7d5ea9d9827b9b013934db079173297e3c3b41f90b1478fec8038b9321c8eac6"),
+        ("20260705000000_durable_workflows_journal.ts", "8056efb60fbf1c614f08bf724fe6372605b13f836ff382d40f4d6c4022390148"),
+        ("20260708000100_billing_provider_corrections.ts", "f9ca0b178aad1ebe9c225742ad5307aeacd4ca4ba0584b2771989652a297eb2b"),
+        ("20260709000100_drop_metering_exports.ts", "ff056c9e5d975b8989297a04d058c7f9741e784291599e96233a5f057126e566"),
+        ("20260811000000_auth_token_revocations_delete.ts", "00d812ae407349dcf4b02c079d2b1f7a2bebbe6b858db7c02ccc37d360892e22"),
+        ("20260811000100_workflow_scheduler_store.ts", "bf6db45369a10c41226ededbb868a868c0d39f5da2291e25e4cb7c09855856db"),
+        ("20260811000200_control_audit_grants.ts", "5fe39ae98e9c89a292ac30903a62cc66a3124a749d1c2205d767ba85b06aa9e6"),
+        ("20260811000300_control_connect_failures_grant.ts", "71378d8236f02963ddcbaf1e6503d99ffbab12d52171453fbcb2294f2b4a4808"),
+        ("20260811000400_rate_limits_write_grants.ts", "7bcac0ce93a4adbd4f0b1b7bdf183041da085ca8c84720ab43e7a6d61e0b40b5"),
+        ("20260812000000_gateway_token_revocations_update.ts", "4e785973a01c73d6c583538f928718f7e01af7d1a7df4796690ff67d5259b6ee"),
+        ("20260812000100_control_app_oauth_clients_update.ts", "307d0712f5c382adf529994f5faab3804ec4008b830511993aaefb6fba86cab3"),
+        ("20260812000200_control_upsert_update_grants.ts", "dc3ba3fe73443a97159c64d95c31d3871ad57495c3beed20e98135c3fb2e6965"),
+        ("20260812000300_auth_email_suppressions_update.ts", "1c24834981f19cd21119972a08e83f2348bd73fd3c9bc9a6e78def6e4b077e6c"),
+    ];
+
+    /// A released migration file's bytes must never change.
+    ///
+    /// DB-FREE and therefore always runs. This is the check that would have
+    /// failed on 2026-08-16 the moment the first of the five edits was made,
+    /// naming the file, instead of surfacing three months later as
+    /// `service "migrate" didn't complete successfully` on a production roll.
+    ///
+    /// WHAT THIS DOES NOT CATCH. Exactly one thing is asserted: that the files
+    /// listed above still hash to the listed values. It does NOT check that the
+    /// deltas removed from those files were re-landed anywhere, that the corpus
+    /// still produces the intended schema, or that any file absent from the list
+    /// is unedited. A commit that reverted the five files and dropped their
+    /// changes on the floor passes this test; the end-state equivalence that
+    /// rules that out is asserted by the other tests in this module, not here.
+    #[test]
+    fn released_platform_migrations_keep_their_released_bytes() {
+        let dir = migrations_dir();
+        let mut drifted = Vec::new();
+        for (filename, released) in RELEASED_PLATFORM_MIGRATIONS {
+            let path = dir.join(filename);
+            let source = std::fs::read(&path)
+                .unwrap_or_else(|e| panic!("read released migration {}: {e}", path.display()));
+            let current = zero_migrate::manifest_entry::sha256_hex(&source);
+            if current != released {
+                drifted.push(format!(
+                    "  {filename}\n    released {released}\n    current  {current}"
+                ));
+            }
+        }
+        assert!(
+            drifted.is_empty(),
+            "{} released migration file(s) were edited after they were applied to a \
+             deployed database. That database's journal still holds the released \
+             checksum, so its next migrate run refuses with ChecksumMismatch and \
+             cannot recover. Restore the released bytes and re-land the change as a \
+             NEW file:\n{}",
+            drifted.len(),
+            drifted.join("\n")
+        );
+    }
+
+    /// The same guard, driven through the real runner against a real database
+    /// whose ledger carries the RELEASED checksums rather than the corpus's own.
+    ///
+    /// The precondition a fresh-database run can never reproduce is seeded
+    /// explicitly: apply the released prefix, then overwrite the completion
+    /// ledger with the checksums the deployed database actually recorded, then
+    /// run the WHOLE corpus the way a deploy does. On the corpus as it stood on
+    /// 2026-08-19 this stops on the first drifted file with
+    /// `migration file 20260702000100_schema_roles_extensions.ts was edited after
+    /// it was applied`.
+    ///
+    /// WHAT THIS DOES NOT CATCH. It proves the checksum GATE is passed and the
+    /// remaining files apply on top of a released-prefix database. It says
+    /// nothing about whether that database ends up shaped like a fresh one -- it
+    /// asserts no schema, no grant and no row. It also seeds only the ledger, so
+    /// a deployed database that additionally carries objects no migration created
+    /// is outside what this covers.
+    #[compio::test]
+    async fn platform_migrate_accepts_a_ledger_of_released_checksums() {
+        let Some(url) = pg_url() else {
+            zeroship_test_support::skip(
+                "skipping released-ledger proof: no test database (set PG_TEST_URL \
+                 to a DSN to run)"
+            );
+            return;
+        };
+        let _serial = DB_APPLY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let corpus = tempfile::tempdir().expect("create temporary migration corpus");
+        let scratch = create_scratch_database(&url, "zs_released_ledger")
+            .await
+            .expect("create released-ledger scratch database");
+
+        let result = run_released_ledger_assertions(&scratch.dsn, corpus.path()).await;
+        drop_scratch_database(&url, &scratch)
+            .await
+            .expect("drop released-ledger scratch database");
+        result.expect("the corpus must apply over a ledger of released checksums");
+    }
+
+    async fn run_released_ledger_assertions(
+        scratch_dsn: &str,
+        corpus: &Path,
+    ) -> Result<(), String> {
+        // The released files are the oldest N by filename order, which is the
+        // order the runner applies in. Assert it rather than assume it: if a file
+        // is ever inserted with an earlier timestamp than a released one, the
+        // prefix stops being the released set and this test would seed the ledger
+        // against the wrong files.
+        let mut all: Vec<String> = std::fs::read_dir(migrations_dir())
+            .map_err(|e| format!("read platform migration corpus: {e}"))?
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".ts"))
+            .collect();
+        all.sort();
+        for (index, (filename, _)) in RELEASED_PLATFORM_MIGRATIONS.iter().enumerate() {
+            if all.get(index).map(String::as_str) != Some(*filename) {
+                return Err(format!(
+                    "released file {index} is {:?} in filename order but the released list \
+                     says {filename}; the released set is no longer a prefix of the corpus",
+                    all.get(index)
+                ));
+            }
+        }
+
+        copy_migration_prefix(corpus, RELEASED_PLATFORM_MIGRATIONS.len())?;
+        let cfg = test_config(scratch_dsn, corpus);
+        run_platform_migrations(&cfg)
+            .await
+            .map_err(|e| format!("released prefix apply failed: {e}"))?;
+
+        // SEED THE PRODUCTION FACT. Up to here the ledger holds the corpus's own
+        // checksums, which trivially agree with it -- that agreement is exactly
+        // why a fresh-database test cannot see this bug. Replacing them with the
+        // checksums a deployed database recorded is the whole experiment.
+        let probe = CompioPgSession::connect(scratch_dsn)
+            .await
+            .map_err(|e| format!("connect released-ledger probe: {e}"))?;
+        for (filename, released) in RELEASED_PLATFORM_MIGRATIONS {
+            probe
+                .batch(&format!(
+                    "UPDATE zeroship_migrations.{PLATFORM_MIGRATION_LEDGER_TABLE} \
+                     SET checksum = '{released}' WHERE filename = '{filename}'"
+                ))
+                .await
+                .map_err(|e| format!("seed released checksum for {filename}: {e}"))?;
+        }
+        let seeded = ledger_row_count(&probe).await;
+        if seeded != RELEASED_PLATFORM_MIGRATIONS.len() as i64 {
+            return Err(format!(
+                "seeded ledger holds {seeded} rows, expected {}",
+                RELEASED_PLATFORM_MIGRATIONS.len()
+            ));
+        }
+
+        copy_migration_corpus(corpus)?;
+        let run = run_platform_migrations(&cfg)
+            .await
+            .map_err(|e| format!("full corpus over a released ledger failed: {e}"))?;
+        if run.files != PLATFORM_MIGRATION_FILES {
+            return Err(format!(
+                "full corpus reported {} files, expected {PLATFORM_MIGRATION_FILES}",
+                run.files
+            ));
+        }
+        if run.applied.is_empty() {
+            return Err(
+                "full corpus applied nothing over a released ledger; the unreleased files \
+                 should have applied"
+                    .to_string(),
+            );
+        }
         Ok(())
     }
 }
