@@ -514,7 +514,7 @@ fn main() -> std::io::Result<()> {
     // operator-visible identity: the four `metering.*` declarations, whose
     // resolver has already applied flag > `ZEROSHIP_METERING_*` > `[metering]`
     // overlay > default. Disabled (drain-and-drop) when no brokers resolve.
-    // Detached — never on the proxy hot path.
+    // Detached - never on the proxy hot path.
     let gate_stream_settings = zeroship_gateway::config::usage_stream_settings(&settings);
     match zeroship_metering::build_usage_outbox(
         &gate_meter_source,

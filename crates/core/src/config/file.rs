@@ -323,7 +323,7 @@ pub struct SchedulerSection {
 #[serde(deny_unknown_fields)]
 pub struct MeteringSection {
     /// Kafka-wire broker list for the usage-event stream, e.g.
-    /// `"redpanda:9092"`. Unset ⇒ the usage producer is disabled
+    /// `"redpanda:9092"`. Unset means the usage producer is disabled
     /// (drain-and-drop).
     pub brokers: Option<String>,
     /// Usage-event topic (default `"usage-events"`).

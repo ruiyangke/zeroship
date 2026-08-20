@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # ============================================================================
-# tests/lib/usage_producer.sh — assert a producer's usage outbox is LIVE.
+# tests/lib/usage_producer.sh - assert a producer's usage outbox is LIVE.
 #
 # WHY THIS EXISTS. A worker or gateway with no brokers configured boots
 # normally, serves normally, and drains its meter into nothing. On a billing
