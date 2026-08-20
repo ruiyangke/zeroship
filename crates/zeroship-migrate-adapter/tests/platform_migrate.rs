@@ -1642,4 +1642,150 @@ export function down() {}
         }
         Ok(())
     }
+
+    // ── the cluster-global concurrency regression ───────────────────────────
+
+    /// TWO migrate runs, TWO fresh databases, ONE cluster, at the same time.
+    ///
+    /// This is the configuration every agent brief in this repo hands out — "you
+    /// get a private TEST_DB on the shared :5440 cluster" — and for the two
+    /// migrations that write shared catalogs, a private database is not
+    /// isolation. `db/migrations-ts/20260702000100_schema_roles_extensions.ts`
+    /// and `.../20260702000900_grants.ts` write `pg_authid`,
+    /// `pg_db_role_setting` and `pg_auth_members`, which are cluster-global, so
+    /// the per-database advisory lock `run_platform_migrations` already holds
+    /// does not exclude the peer at all.
+    ///
+    /// Before the cluster lock this aborted one of the two runs with an
+    /// infrastructure error carrying no test name — `tuple concurrently
+    /// updated`, or a duplicate key on `pg_authid_rolname_index` /
+    /// `pg_db_role_setting_databaseid_rol_index` — which is the shape most
+    /// easily misread as flakiness or as the reader's own change.
+    ///
+    /// A SERIAL RUN OF THIS TEST PROVES NOTHING: serial is the configuration
+    /// that already worked. The overlap assertion below is therefore part of the
+    /// test, not decoration — it fails if a future change quietly makes the two
+    /// runs sequential, which would leave every other assertion here passing
+    /// vacuously.
+    #[compio::test]
+    async fn concurrent_migrates_of_two_databases_on_one_cluster_both_succeed() {
+        let Some(url) = pg_url() else {
+            zeroship_test_support::skip(
+                "skipping the concurrent-migrate proof: no test database (set PG_TEST_URL \
+                 to a DSN on :5440 to run)",
+            );
+            return;
+        };
+        // Exclude the SIBLING tests in this binary; the two runs *inside* this
+        // test are concurrent on purpose.
+        let _serial = DB_APPLY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let db_a = format!("zs_concurrent_a_{stamp}");
+        let db_b = format!("zs_concurrent_b_{stamp}");
+
+        {
+            let admin = admin_session(&url).await;
+            for db in [&db_a, &db_b] {
+                let _ = admin.batch(&format!("DROP DATABASE IF EXISTS \"{db}\"")).await;
+                admin
+                    .batch(&format!("CREATE DATABASE \"{db}\""))
+                    .await
+                    .unwrap_or_else(|e| panic!("CREATE DATABASE {db} failed: {e}"));
+            }
+        }
+
+        let outcome = run_two_concurrently(&url, &db_a, &db_b).await;
+
+        {
+            let admin = admin_session(&url).await;
+            for db in [&db_a, &db_b] {
+                let _ = admin
+                    .batch(&format!(
+                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+                         WHERE datname = '{db}' AND pid <> pg_backend_pid()"
+                    ))
+                    .await;
+                let _ = admin.batch(&format!("DROP DATABASE IF EXISTS \"{db}\"")).await;
+            }
+        }
+
+        outcome.expect("two concurrent platform migrates on one cluster must both succeed");
+    }
+
+    /// Drive both migrates so they are genuinely in flight together, and report
+    /// what happened. Returns `Ok(())` only if BOTH runs completed the whole
+    /// corpus AND their execution windows actually overlapped.
+    async fn run_two_concurrently(url: &str, db_a: &str, db_b: &str) -> Result<(), String> {
+        fn config_for(dsn: String) -> PlatformMigrateConfig {
+            PlatformMigrateConfig {
+                database_url: dsn,
+                migrations_dir: migrations_dir(),
+                project_schema: "zeroship".to_string(),
+                project_id: "zeroship".to_string(),
+                cluster_lock_database: DEFAULT_CLUSTER_LOCK_DATABASE.to_string(),
+            }
+        }
+        let cfg_a = config_for(dsn_with_db(url, db_a));
+        let cfg_b = config_for(dsn_with_db(url, db_b));
+
+        // Run A on a spawned task and B inline on the same compio thread. Both
+        // sessions are therefore in flight across each other's awaits, which is
+        // what puts two statements on the server at once -- the condition the
+        // shared catalogs are unprotected against.
+        let started_a = std::time::Instant::now();
+        let task_a = compio::runtime::spawn(async move {
+            let started = std::time::Instant::now();
+            let result = run_platform_migrations(&cfg_a).await;
+            (started, std::time::Instant::now(), result)
+        });
+
+        let started_b = std::time::Instant::now();
+        let result_b = run_platform_migrations(&cfg_b).await;
+        let ended_b = std::time::Instant::now();
+
+        let (spawned_start_a, ended_a, result_a) = task_a.await;
+        let _ = started_a;
+
+        // Report BOTH outcomes. Reporting only the first failure would hide the
+        // case where the peer failed differently, and the two runs fail in
+        // different ways depending on which one lost the race.
+        let mut failures = Vec::new();
+        match &result_a {
+            Ok(report) if report.files != PLATFORM_MIGRATION_FILES => failures.push(format!(
+                "run A applied {} files, expected {PLATFORM_MIGRATION_FILES}",
+                report.files
+            )),
+            Ok(_) => {}
+            Err(e) => failures.push(format!("run A failed: {e}")),
+        }
+        match &result_b {
+            Ok(report) if report.files != PLATFORM_MIGRATION_FILES => failures.push(format!(
+                "run B applied {} files, expected {PLATFORM_MIGRATION_FILES}",
+                report.files
+            )),
+            Ok(_) => {}
+            Err(e) => failures.push(format!("run B failed: {e}")),
+        }
+        if !failures.is_empty() {
+            return Err(failures.join(" | "));
+        }
+
+        // The anti-vacuity check. If A finished before B started (or vice
+        // versa), the runs were serial and every assertion above passed for a
+        // reason that has nothing to do with the lock under test.
+        if ended_a <= started_b || ended_b <= spawned_start_a {
+            return Err(format!(
+                "the two runs did NOT overlap, so this test proved nothing about \
+                 concurrency: A ran for {:?}, B ran for {:?}",
+                ended_a.duration_since(spawned_start_a),
+                ended_b.duration_since(started_b),
+            ));
+        }
+
+        Ok(())
+    }
 }
