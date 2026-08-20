@@ -7,7 +7,7 @@
 
 use crate::codec::{BackendMessages, FrontendMessage};
 use crate::config::{SslMode, SslNegotiation};
-use crate::connection::{Request, RequestMessages};
+use crate::connection::{Request, RequestDisposition, RequestMessages};
 use crate::copy_in::CopyInSink;
 use crate::copy_out::CopyOutStream;
 use crate::keepalive::KeepaliveConfig;
@@ -210,8 +210,29 @@ impl InnerClient {
     /// into the unbounded `UnboundedSender<Request>` channel. Failure
     /// means the connection task has terminated (socket closed).
     pub fn send(&self, messages: RequestMessages) -> Result<Responses, Error> {
+        self.send_with_disposition(messages, RequestDisposition::Awaited)
+    }
+
+    /// Queue drop-time cleanup whose delivery and response are not promised.
+    pub(crate) fn send_housekeeping(&self, message: FrontendMessage) -> Result<(), Error> {
+        self.send_with_disposition(
+            RequestMessages::Single(message),
+            RequestDisposition::Housekeeping,
+        )?;
+        Ok(())
+    }
+
+    fn send_with_disposition(
+        &self,
+        messages: RequestMessages,
+        disposition: RequestDisposition,
+    ) -> Result<Responses, Error> {
         let (sender, receiver) = mpsc::channel(1);
-        let request = Request { messages, sender };
+        let request = Request {
+            messages,
+            sender,
+            disposition,
+        };
         self.sender
             .unbounded_send(request)
             .map_err(|_| Error::closed())?;
@@ -848,7 +869,7 @@ impl Client {
 
         let _ = self
             .inner()
-            .send(RequestMessages::Single(FrontendMessage::Raw(buf)));
+            .send_housekeeping(FrontendMessage::Raw(buf));
     }
 
     #[doc(hidden)]

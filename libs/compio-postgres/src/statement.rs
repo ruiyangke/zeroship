@@ -2,7 +2,6 @@
 
 use crate::client::InnerClient;
 use crate::codec::FrontendMessage;
-use crate::connection::RequestMessages;
 use crate::types::Type;
 use postgres_protocol::message::frontend;
 use std::sync::{Arc, Weak};
@@ -36,7 +35,7 @@ pub(crate) fn close_statement(client: &InnerClient, name: &str) {
         Some(buf.split().freeze())
     });
     if let Some(buf) = buf {
-        let _ = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)));
+        let _ = client.send_housekeeping(FrontendMessage::Raw(buf));
     }
 }
 
