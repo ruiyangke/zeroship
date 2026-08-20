@@ -80,13 +80,26 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 #   5444 test names across 122 test binaries in 28 packages
 #   (131 executables by the retired count's reckoning, against its floor of 250)
 #
-# The floor is 5444 minus 31, and the 31 is a measured component rather than
-# slack: it is the whole of crates/runtime's `wpt` target. That target
-# `include_str!`s crates/runtime/tests/wpt/, which is gitignored, has never been
-# tracked in any ref, and which no step of this job fetches - so on a runner it
-# does not compile. Today that makes the BUILD fail before this gate is reached;
-# if it is ever excluded with required-features instead, its 31 names go with it
-# and the floor already expects that. No other allowance is made.
+# The floor is 5444 minus 31, and the 31 was written down as a measured
+# component rather than slack: it is the whole of crates/runtime's `wpt` target,
+# which `include_str!`s crates/runtime/tests/wpt/, gitignored and never tracked
+# in any ref.
+#
+# THAT JUSTIFICATION SAID "no step of this job fetches" it, AND IT IS FALSE.
+# The same job runs `./crates/runtime/tests/setup-wpt.sh` (.github/workflows/
+# ci.yml, "Fetch the WPT tree the runtime test target include_str!s"), behind an
+# actions/cache keyed on the pin, several steps before this gate. So the tree IS
+# present on a runner, the `wpt` target DOES compile there, and its 31 names ARE
+# in the count this floor is compared against.
+#
+# The NUMBER survives that correction - 5444 against a floor of 5413 is still a
+# pass, by more than it was designed to need. What does not survive is calling
+# the 31 a measured component: it is now plain slack. It is deliberately not
+# tightened to 5444 here, because this file already records that no CI run of
+# this job has ever printed its own number, so nobody knows whether a runner
+# resolves features the way the machine that measured 5444 did. Tighten it in
+# the change that first reads a real runner's count, not before. No other
+# allowance is made.
 #
 # What makes this go stale: someone adds tests (floor gets loose - harmless, and
 # the step prints the real number every run so the next reader can tighten it),
