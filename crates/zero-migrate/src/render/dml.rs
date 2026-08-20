@@ -273,7 +273,8 @@ pub(crate) const MAX_BIND_PARAMS: usize = 65535;
 /// `SqlDialect::Postgres`. They were safe only for callers that were THEMSELVES
 /// PostgreSQL-specific, and twice they were not: `render::backends::sqlite` quoted
 /// all four of its identifier emissions with them, and after that was fixed
-/// `render::lower::render_sqlite_trigger_op` still quoted all six of its trigger
+/// `render_sqlite_trigger_op` — then still in `render::lower`, since moved into
+/// `render::backends::sqlite` by step 3 — quoted all six of its trigger
 /// identifiers with them. Both were correct SQL only because the two vendors spell
 /// an identifier `"x"`, and both were hard blockers on extracting a
 /// `zero-migrate-sqlite` crate that does not need `zero-migrate-postgres` AT
