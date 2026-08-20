@@ -88,6 +88,15 @@ cd "$ROOT"
 # directions and is itself gated in CI.
 . "$ROOT/tests/lib/measurement_integrity.sh"
 
+# Per-arm anti-vacuity accounting. This gate already HAD the right instinct -
+# note 3 above is exactly "a check that examines nothing prints the same as a
+# clean tree" - it just enforced it ad hoc per run_config() call instead of
+# through the shared contract. Wiring it through names the arm (default vs.
+# all-features) in the refusal instead of just the gate.
+# shellcheck source=tests/lib/gate_arms.sh
+. "$ROOT/tests/lib/gate_arms.sh"
+gate_arms_init run_doc
+
 DOC_MAX_DEFAULT=1
 DOC_MAX_ALL=0
 
@@ -119,10 +128,10 @@ trap 'rm -f "$LOG"' EXIT
 
 status=0
 
-# $1 = human label, $2 = max allowed unresolved, $3.. = extra cargo flags
+# $1 = arm id, $2 = human label, $3 = max allowed unresolved, $4.. = extra cargo flags
 run_config() {
-  local label="$1" max="$2"
-  shift 2
+  local arm="$1" label="$2" max="$3"
+  shift 3
 
   # Cold, every time. See note 1.
   cargo clean --doc >/dev/null 2>&1
@@ -140,7 +149,16 @@ run_config() {
 
   # Checked BEFORE the unresolved count, because a build that did not run
   # produces the most reassuring number in this whole script. See note 3.
-  if [ "$crates" -lt "$DOC_MIN_CRATES" ]; then
+  #
+  # This IS the arm: `crates` is the number of crates this config's build
+  # actually documented, i.e. ruled on for unresolved links, and DOC_MIN_CRATES
+  # (derived above from the workspace's own membership) is the floor a real run
+  # clears. Reusing that existing floor here rather than picking a fresh
+  # "well under" number, because DOC_MIN_CRATES is already exact - it is not a
+  # slack bound, it is what a live build produces - and the whole point of note
+  # 3 was that a build which did not run must not pass as if it examined
+  # everything.
+  if ! gate_arm "$arm" "$crates" "$DOC_MIN_CRATES"; then
     # Name the cause when it is knowable. The crate-count control already turns a
     # dead build into a FAIL rather than a false green, so the verdict was never
     # wrong - but "documented only 3 crates" sends the reader looking for a doc
@@ -179,8 +197,10 @@ run_config() {
   fi
 }
 
-run_config "default features " "$DOC_MAX_DEFAULT"
-run_config "--all-features   " "$DOC_MAX_ALL" --all-features
+run_config doc_default_features "default features " "$DOC_MAX_DEFAULT"
+run_config doc_all_features     "--all-features   " "$DOC_MAX_ALL" --all-features
+
+gate_arms_finish || status=1
 
 echo "=================================================================="
 if [ "$status" -ne 0 ]; then

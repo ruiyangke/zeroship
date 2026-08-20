@@ -28,6 +28,14 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
+# Per-arm anti-vacuity accounting. THIS GATE IS WHY THE LIBRARY EXISTS: arm 1
+# below examined 0 names and printed green for eight days, underneath a
+# gate-level `RAN -lt 3` guard that was correct and green the whole time,
+# because three arms did run - one of them over an empty set.
+# shellcheck source=tests/lib/gate_arms.sh
+. "$(dirname "$0")/lib/gate_arms.sh"
+gate_arms_init ws_subscription_stub
+
 PASS=0
 FAIL=0
 RAN=0
@@ -165,19 +173,6 @@ CITED="$(cited_ids "$DISPATCH")"
 N_CITED=0
 [ -n "$CITED" ] && N_CITED=$(printf '%s\n' "$CITED" | wc -l | tr -d ' ')
 
-# THE CANNOT-ANSWER BRANCH, which is the whole reason this arm was rewritten.
-# An extraction that matched nothing reports zero phantoms, and so does a clean
-# file. Refuse, do not pass. MEASURED 2026-08-20: 88 identifiers cited before
-# the three fixes above, 85 after them. The floor sits well under that because
-# ordinary comment edits move the number by ones, while the failure it guards
-# -- the regex stops matching, or the file moves -- takes it to zero, not to 39.
-if [ "$N_CITED" -lt "$DISPATCH_COMMENT_FLOOR" ]; then
-  echo "GATE CANNOT ANSWER: only $N_CITED backticked identifier(s) extracted from"
-  echo "  $DISPATCH comments, below the floor of $DISPATCH_COMMENT_FLOOR. The"
-  echo "  extraction stopped matching, so 'no phantoms' would mean nothing."
-  exit 1
-fi
-
 CODE="$(mktemp)"
 trap 'rm -f "$CODE"' EXIT
 code_corpus crates > "$CODE"
@@ -190,7 +185,23 @@ for id in $CITED; do
   grep -qw -- "$id" "$CODE" || phantoms="$phantoms $id"
 done
 
-if [ -z "$phantoms" ]; then
+# THE CANNOT-ANSWER BRANCH, which is the whole reason this arm was rewritten,
+# now spelled as the shared contract so the refusal NAMES the arm rather than
+# just the gate. An extraction that matched nothing reports zero phantoms, and
+# so does a clean file. MEASURED 2026-08-20: 88 identifiers cited before the
+# three fixes above, 85 after them. The floor sits well under that because
+# ordinary comment edits move the number by ones, while the failure it guards
+# -- the regex stops matching, or the file moves -- takes it to zero, not to 39.
+#
+# The count declared is `n_checked`, the identifiers this arm actually RULED
+# ON, not `N_CITED` before NOT_RUST_SYMBOLS is subtracted. skip_marker_gate.sh
+# was green on 8 raw hits and 8 exclusions; a gate that declares its pre-filter
+# total cannot see that happen to itself.
+if ! gate_arm comment_citations "$n_checked" "$DISPATCH_COMMENT_FLOOR"; then
+  fail "the citation extraction over $DISPATCH ruled on $n_checked identifier(s),
+       under its floor of $DISPATCH_COMMENT_FLOOR. Whatever it reports about
+       phantoms is meaningless: fix the extraction, do not lower the floor."
+elif [ -z "$phantoms" ]; then
   pass "all $n_checked identifier(s) cited in $DISPATCH comments resolve to code"
 else
   fail "these names appear in a $DISPATCH comment and NOWHERE in crates/ outside
@@ -208,9 +219,16 @@ fi
 # today -- their absence is also how a broken extraction announces itself
 # before the floor above would.
 stale=""
+n_excused=0
 for id in $NOT_RUST_SYMBOLS; do
+  n_excused=$((n_excused + 1))
   printf '%s\n' "$CITED" | grep -qx -- "$id" || stale="$stale $id"
 done
+# An empty NOT_RUST_SYMBOLS would make this arm vacuously clean while removing
+# every exclusion from the arm above. Two entries today; the floor is 1 because
+# a legitimate cleanup can take it to one, but not to none while the list is
+# still being consulted.
+gate_arm excuse_liveness "$n_excused" 1 || stale="$stale (the excuse list is empty)"
 if [ -z "$stale" ]; then
   pass "both NOT_RUST_SYMBOLS entries are still cited, so the extraction ran"
 else
@@ -226,6 +244,15 @@ fi
 # the doc stop saying it -- which is the point: the doc cannot drift either way.
 stub=$(grep -c "StatusCode::NOT_IMPLEMENTED" "$DISPATCH")
 doc501=$(grep -c "501" "$WSDOC")
+# THE COUNT HERE IS SOURCES COMPARED, NOT MENTIONS FOUND, and the distinction
+# is not a dodge: `stub == 0 && doc501 == 0` is a LEGITIMATE green for this arm
+# -- it is what a landed proxy looks like -- so a floor on the mention totals
+# would fail the very state the arm is designed to accept. What must never
+# collapse is the number of sources the comparison has in hand; both files are
+# checked for existence above, so this is 2 or the gate never got here.
+n_sources=0
+for f in "$DISPATCH" "$WSDOC"; do [ -r "$f" ] && n_sources=$((n_sources + 1)); done
+gate_arm doc_agreement "$n_sources" 2 || true
 if [ "$stub" -ge 1 ] && [ "$doc501" -ge 1 ]; then
   pass "stub present ($stub site) and $WSDOC states the 501"
 elif [ "$stub" -eq 0 ] && [ "$doc501" -eq 0 ]; then
@@ -245,6 +272,8 @@ if [ "$RAN" -lt 3 ]; then
   echo "GATE DID NOT RUN: expected 3 arms, ran $RAN"
   exit 1
 fi
+
+gate_arms_finish || FAIL=$((FAIL + 1))
 
 echo "  ws subscription stub gate: $PASS passed, $FAIL failed ($RAN arms ran,"
 echo "  $N_CITED identifier(s) cited in $DISPATCH comments, $n_checked checked)"

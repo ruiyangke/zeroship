@@ -141,10 +141,24 @@ crates/
 +-- cli/              CLI: serve, deploy, migrate, config, login, logout, whoami, secret, var, dev
                       (no `build` — builds go through @zeroship/vite-plugin)
 +-- zeroship-gatekit/ Repository GATES as Rust: shared docker-compose model, the
-                      green/red/REFUSED verdict type, and the gates themselves.
+                      green/red/REFUSED verdict type, the META-gate
+                      (`gate-arm-census`, which checks that every gate declares
+                      per arm how much it examined), and the gates themselves.
                       Not zeroship-test-support - that crate is the test-DATABASE
                       substrate; these read files and link no driver.
 ```
+
+**Writing or changing a gate.** Every arm of every gate declares the number of
+items THAT ARM RULED ON and a floor that number must clear
+(`tests/lib/gate_arms.sh`; worked example `tests/ws_subscription_stub_gate.sh`).
+This is not ceremony: on 2026-08-20 four gates were found to be examining
+nothing and printing exactly what a clean tree prints, and a gate-level "3 arms
+ran" guard was green throughout one of them because three arms did run, one over
+an empty set. The floor lives beside the code that produces the number, never in
+a central table - a table of expected counts is a census, and stale censuses are
+how four OTHER gates went red the same week when two new crates landed.
+`cargo run -p zeroship-gatekit --bin gate-arm-census -- tests` checks that every
+gate participates; `--run <gate.sh>` also rules on the counts they emit.
 
 Standalone, zeroship-independent driver libraries (own top-level `libs/`, publishable):
 
