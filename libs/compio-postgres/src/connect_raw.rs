@@ -170,7 +170,14 @@ where
         secret_key,
         release,
     );
-    let connection = Connection::new(handshake.stream, handshake.delayed, parameters, receiver);
+    let connection = Connection::new(
+        handshake.stream,
+        handshake.delayed,
+        parameters,
+        receiver,
+        client.tx_status_handle(),
+        client.in_flight_requests_handle(),
+    );
 
     Ok((client, connection))
 }
