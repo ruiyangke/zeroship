@@ -1342,6 +1342,40 @@ seen "$CAP" '### docker compose up -d --remove-orphans' \
   && fail "the stack was ROLLED anyway; the check has to precede the roll or 'migrate' has already refused" \
   || pass "NOTHING IS RESTARTED when an applied migration was edited"
 
+# --- D4: a migration that sorts before an applied one refuses the roll ------
+#
+# Disjoint from the arm above and invisible to it: the file at fault is NEW, so
+# no journal row covers its bytes and its own content is fine. The version comes
+# from the file's ordinal in sorted-filename order, so inserting one mid-corpus
+# claims a version the journal already holds for a later file, and the roll
+# aborts at `migrate` with a ChecksumDrift naming the wrong file. Measured on
+# 2026-08-20 with 20260819000000_app_egress_rules.ts against a journal ending at
+# 20260820000000_control_workflow_journal_access.ts.
+#
+# The stub journal is the real ledger, so "sorts before the newest journalled
+# file" is produced by planting a file with an early date -- the same shape the
+# egress merge had.
+LEDGER_EARLY="$ROOT/db/migrations-ts/20260101000000_gate_misordered.ts"
+printf 'export const name = "gate_misordered";\nexport function up() {}\nexport function down() {}\n' >"$LEDGER_EARLY"
+SB_ORDER="$FIX/sb_order"; seed_deploy "$SB_ORDER"
+run_deploy "$SB_ORDER"
+rm -f "$LEDGER_EARLY"
+
+[ "$DEP_RC" != 0 ] \
+  && pass "a migration sorting before one the host has applied makes the deploy exit non-zero" \
+  || fail "a mid-corpus migration deployed cleanly (rc=$DEP_RC); the roll aborts at 'migrate' with ChecksumDrift naming the wrong file"
+case "$DEP_OUT" in
+  *20260101000000_gate_misordered.ts*) pass "the refusal names the misordered file, which the engine's own ChecksumDrift never does" ;;
+  *) fail "the refusal does not name the misordered file: $DEP_OUT" ;;
+esac
+seen "$CAP" '### docker compose up -d --remove-orphans' \
+  && fail "the stack was ROLLED anyway; this has to precede the roll or 'migrate' has already aborted" \
+  || pass "NOTHING IS RESTARTED when a migration sorts before an applied one"
+
+# CONTROL: the happy path above ran the same check against the same journal with
+# no planted file and DID reach the roll, so the three arms are about the file
+# and not about the check refusing everything.
+
 # --- D4: a journal probe that answers neither t nor f is refused ------------
 #
 # A down database, a wrong role and an empty deployment all produce no output
