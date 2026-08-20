@@ -90,8 +90,8 @@ async fn install_magic_links_insert_delay(client: &Client, email: &str) -> Strin
         )
         .await
         .expect("create insert delay function");
-    // `email` is this test's own `format!(\"...{uuid}@example.test\")`, so it
-    // carries no quote to escape; no caller-supplied string reaches this SQL.
+    // `email` is this test's own uuid-derived address, so it carries no quote
+    // to escape; no caller-supplied string ever reaches this SQL.
     client
         .execute(
             &format!(
