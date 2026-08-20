@@ -7,9 +7,9 @@
 # binaries while absent from this list - an unlisted package is one whose
 # disappearance tomorrow nothing would notice.
 #
-# MEASURED 2026-08-20 on 4abf0f74a: all 28 workspace members build test
-# binaries, so this list is every member and there are no exclusions to justify.
-# `cargo metadata --no-deps` reported 28 packages on the same tree.
+# MEASURED 2026-08-20: all 29 workspace members build test binaries, so this
+# list is every member and there are no exclusions to justify. It read 28 on
+# 4abf0f74a; zeroship-gatekit is the 29th.
 #
 # To regenerate after a deliberate change:
 #   cargo test --workspace --no-run --message-format=json > /tmp/t.json
@@ -29,6 +29,7 @@ zeroship-config-macros
 zeroship-control
 zeroship-core
 zeroship-gateway
+zeroship-gatekit
 zeroship-mailer
 zeroship-metering
 zeroship-migrate-adapter
