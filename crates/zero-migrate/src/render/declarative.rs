@@ -6086,13 +6086,25 @@ impl DeclarativeAuthor {
     /// compile until it has an emitter).
     fn emitter(&self) -> Box<dyn DdlEmitter> {
         match self.dialect {
-            SqlDialect::Postgres => Box::new(PgEmitter {
-                project_schema: self.project_schema.clone(),
-            }),
+            SqlDialect::Postgres => Box::new(self.pg_emitter()),
             SqlDialect::Sqlite => Box::new(SqliteEmitter),
-            SqlDialect::Mysql => Box::new(MysqlEmitter {
-                project_schema: self.project_schema.clone(),
-            }),
+            SqlDialect::Mysql => Box::new(self.mysql_emitter()),
+        }
+    }
+
+    /// A named emitter, for the few core paths that must reach a SPECIFIC vendor's
+    /// spelling rather than this author's — the `SqlDialect::…` arms that were
+    /// already choosing one, now saying which through a constructor instead of by
+    /// inlining the vendor's bytes.
+    fn pg_emitter(&self) -> PgEmitter {
+        PgEmitter {
+            project_schema: self.project_schema.clone(),
+        }
+    }
+
+    fn mysql_emitter(&self) -> MysqlEmitter {
+        MysqlEmitter {
+            project_schema: self.project_schema.clone(),
         }
     }
 
@@ -8185,99 +8197,27 @@ impl DeclarativeAuthor {
     /// **Structural** form of [`Self::render_create_table`]: the CREATE statement plus
     /// every follow-on `COMMENT ON COLUMN` sentinel, as a per-statement `Vec`.
     /// `join(";\n")` is byte-identical to [`Self::render_create_table`].
+    /// Three thin ADAPTERS, one per dialect, over the single
+    /// [`DdlEmitter::create_table`] contract method.
+    ///
+    /// They exist because their eight call sites each hold a DIFFERENT subset of a
+    /// [`CreateTableRequest`] — the differ has `inline_fks`, the SQLite rebuild
+    /// builders have an `inject`, the in-module goldens have neither — and
+    /// converting those call sites is separable from proving the contract. Each
+    /// adapter fills in what its caller lacks and asks the emitter for the rest.
+    /// When the call sites build the request themselves, these three go away.
     fn render_create_table_statements(
         &self,
         table: &str,
         t: &TableSnapshot,
         inline_fks: &[&ConstraintSnapshot],
     ) -> Vec<String> {
-        let mut parts: Vec<String> = Vec::new();
-        for c in &t.columns {
-            let inline_pk = inline_pk_for_column(table, t, &c.name);
-            let ty = column_type_for_render(c, SqlDialect::Postgres, inline_pk);
-            let pk = primary_key_clause(c, SqlDialect::Postgres, inline_pk);
-            let null = null_clause(c, SqlDialect::Postgres, inline_pk);
-            let identity = pg_identity_clause(c);
-            let generated = generated_clause(c.generated.as_ref());
-            // emit the DEFAULT clause (emission-only metadata), including the
-            // legacy `__fts` generated-column sentinel path.
-            let default = default_clause(c.default.as_deref());
-            let checks = inline_checks_clause(c);
-            // the inline `/* zero-migrate:enc:… */` sentinel rides between
-            // the type and the constraints, exactly as the shared kernel's
-            // `field_to_column_for_dialect` bakes it, so a `generate`d encrypted
-            // column is byte-identical to a `registerModel`-created one.
-            let enc = c
-                .encryption_sentinel
-                .as_deref()
-                .map(|s| format!(" {s}"))
-                .unwrap_or_default();
-            parts.push(format!(
-                "{} {}{}{}{}{}{}{}{}",
-                quote_ident(&c.name),
-                ty,
-                enc,
-                identity,
-                generated,
-                pk,
-                null,
-                default,
-                checks,
-            ));
-        }
-        for fk in inline_fks {
-            parts.push(self.fk_clause(fk));
-        }
-        // inline CHECK constraints (literal-pin, min/max, enum) as
-        // table-level `CONSTRAINT <name> CHECK (...)` clauses. The definition is
-        // the emitted DDL clause built by `field_check_constraints`.
-        //
-        // a `createTable({ uniques })` table-level UNIQUE
-        // (folded into the snapshot as a `UNIQUE` `ConstraintSnapshot` by
-        // `render::lower::create_table_descriptor`'s spec-fold) is inlined here as a
-        // `CONSTRAINT <name> <definition>` clause, the SAME shape a stand-alone
-        // `addConstraint(unique)` renders (`UNIQUE (cols)`), so a table built with
-        // a named unique round-trips against the live catalog. CHECK is inlined the
-        // same way; both are emission-only bodies the differ does not re-diff.
-        for c in &t.constraints {
-            if should_render_table_pk(table, t, c)
-                || c.kind == "CHECK"
-                || c.kind == "UNIQUE"
-                || c.kind == "EXCLUDE"
-            {
-                parts.push(format!(
-                    "CONSTRAINT {} {}",
-                    quote_ident(&c.name),
-                    c.definition
-                ));
-            }
-        }
-        let partition = t
-            .partition_by
-            .as_ref()
-            .map(render_partition_spec_pg)
-            .unwrap_or_default();
-        let create = format!(
-            "CREATE TABLE {} ({}){}",
-            self.qualified(table),
-            parts.join(", "),
-            partition,
-        );
-        let mut statements: Vec<String> = vec![create];
-        // append `COMMENT ON COLUMN … '<sentinel>'` for every
-        // column carrying a comment sentinel (`zero-migrate:mask:…` on a masked sibling,
-        // `zero-migrate:enc:…` on an encrypted column), so the runtime sentinel is part of
-        // the same migration as the table create (an interrupted apply never
-        // leaves a column without its sentinel). The comment body is built by
-        // the shared codecs; we only quote it into the statement here. Each
-        // COMMENT is its OWN structural statement (a guard-per-statement unit),
-        // not a textual `;\n` split of the joined `up`.
-        for c in &t.columns {
-            if let Some(stmt) = self.comment_stmt(table, c) {
-                statements.push(stmt);
-            }
-        }
-        statements
+        self.pg_emitter().create_table(&CreateTableRequest {
+            table,
+            snapshot: t,
+            inline_fks,
+            inject: None,
+        })
     }
 
     fn render_create_table_sqlite_snapshot_statements(
@@ -8286,69 +8226,12 @@ impl DeclarativeAuthor {
         t: &TableSnapshot,
         inject: &ResolvedInject,
     ) -> Vec<String> {
-        let mut parts: Vec<String> = Vec::new();
-        for c in &t.columns {
-            let inline_pk = inline_pk_for_column(table, t, &c.name);
-            let ty = column_type_for_render(c, SqlDialect::Sqlite, inline_pk);
-            let pk = primary_key_clause(c, SqlDialect::Sqlite, inline_pk);
-            let null = null_clause(c, SqlDialect::Sqlite, inline_pk);
-            let generated = generated_clause(c.generated.as_ref());
-            let default = default_clause(c.default.as_deref());
-            let checks = inline_checks_clause(c);
-            let enc = c
-                .encryption_sentinel
-                .as_deref()
-                .map(|s| format!(" {s}"))
-                .unwrap_or_default();
-            let sqlite_inline_sentinel = if c.encryption_sentinel.is_none() {
-                c.comment_sentinel
-                    .as_deref()
-                    .map(|s| format!(" /* {s} */"))
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            };
-            parts.push(format!(
-                "{} {}{}{}{}{}{}{}{}",
-                sqlite_ident(&c.name),
-                ty,
-                enc,
-                sqlite_inline_sentinel,
-                generated,
-                pk,
-                null,
-                default,
-                checks,
-            ));
-        }
-        for c in &t.constraints {
-            if should_render_table_pk(table, t, c)
-                || c.kind == "CHECK"
-                || c.kind == "UNIQUE"
-                || c.kind == "FOREIGN KEY"
-            {
-                parts.push(format!(
-                    "CONSTRAINT {} {}",
-                    sqlite_ident(&c.name),
-                    c.definition
-                ));
-            }
-        }
-        let mut statements = vec![format!(
-            "CREATE TABLE {} ({})",
-            sqlite_ident(table),
-            parts.join(", ")
-        )];
-        let emitter = SqliteEmitter;
-        for idx in t
-            .indexes
-            .iter()
-            .filter(|idx| is_injected_index(table, &idx.name, inject))
-        {
-            let (up, _) = emitter.create_index(table, idx);
-            statements.push(up);
-        }
-        statements
+        SqliteEmitter.create_table(&CreateTableRequest {
+            table,
+            snapshot: t,
+            inline_fks: &[],
+            inject: Some(inject),
+        })
     }
 
     fn render_create_table_mysql_snapshot_statements(
@@ -8357,146 +8240,29 @@ impl DeclarativeAuthor {
         t: &TableSnapshot,
         inline_fks: &[&ConstraintSnapshot],
     ) -> Vec<String> {
-        let mut parts: Vec<String> = Vec::new();
-        let mut consumed_enum_checks = BTreeSet::new();
-        for c in &t.columns {
-            let inline_pk = inline_pk_for_column(table, t, &c.name);
-            let enum_check_name = check_constraint_name(table, &c.name, "enum");
-            let enum_type = t
-                .constraints
-                .iter()
-                .find(|chk| chk.kind == "CHECK" && chk.name == enum_check_name)
-                .and_then(|chk| mysql_enum_type_from_check(&chk.definition, &c.name));
-            if enum_type.is_some() {
-                consumed_enum_checks.insert(enum_check_name);
-            }
-            // This arm REPLACES the column's whole rendered type, so it also replaces
-            // the collation `column_type_for_render` would have pinned. Without the
-            // pin the enum inherits the table default (`utf8mb4_0900_ai_ci` on a stock
-            // MySQL 8), which is the defect `mysql_pin_enum_collation` documents - and
-            // for a descriptor that asked for `caseSensitive: false` it would silently
-            // drop the facet the author DID declare.
-            let ty = enum_type
-                .map(|enum_type| mysql_pin_enum_collation(&enum_type, c.case_sensitive))
-                .unwrap_or_else(|| column_type_for_render(c, SqlDialect::Mysql, inline_pk));
-            let pk = primary_key_clause(c, SqlDialect::Mysql, inline_pk);
-            let null = null_clause(c, SqlDialect::Mysql, inline_pk);
-            let identity = mysql_identity_clause(c);
-            let generated = mysql_generated_clause(c.generated.as_ref());
-            let default = mysql_default_clause(c.default.as_deref());
-            let checks = inline_checks_clause(c);
-            parts.push(format!(
-                "{} {}{}{}{}{}{}{}",
-                mysql_quote_ident(&c.name),
-                ty,
-                identity,
-                generated,
-                pk,
-                null,
-                default,
-                checks,
-            ));
-        }
-        // InnoDB creates an implicit child index when an inline FK has no index
-        // in the same CREATE TABLE statement. The planned index must therefore be
-        // inline too; emitting it only as a later CREATE INDEX would conceal the
-        // implicit object from the preview and can leave a redundant index. These
-        // exact snapshots are skipped from the follow-on index-unit loop below.
-        for idx in mysql_inline_fk_supporting_indexes(t, inline_fks) {
-            let unique = if idx.unique { "UNIQUE " } else { "" };
-            parts.push(format!(
-                "{unique}KEY {} ({})",
-                mysql_quote_ident(&idx.name),
-                render_index_elements_mysql(idx)
-            ));
-        }
-        for fk in inline_fks {
-            parts.push(self.mysql_fk_clause(fk));
-        }
-        for c in &t.constraints {
-            if consumed_enum_checks.contains(&c.name) {
-                continue;
-            }
-            if should_render_table_pk(table, t, c) || c.kind == "CHECK" || c.kind == "UNIQUE" {
-                parts.push(format!(
-                    "CONSTRAINT {} {}",
-                    mysql_quote_ident(&c.name),
-                    mysql_requote_sql(&c.definition)
-                ));
-            }
-        }
-        vec![format!(
-            "CREATE TABLE {} ({})",
-            mysql_qualified(&self.project_schema, table),
-            parts.join(", ")
-        )]
+        self.mysql_emitter().create_table(&CreateTableRequest {
+            table,
+            snapshot: t,
+            inline_fks,
+            inject: None,
+        })
     }
 
-    /// render the `COMMENT ON COLUMN <schema>.<table>.<col> IS
-    /// '<sentinel>'` statement for a column carrying a `comment_sentinel`
-    /// (`zero-migrate:mask:…` for a masked sibling or `zero-migrate:enc:…` for an encrypted column),
-    /// or `None` for a column without one. The sentinel BODY is built by the
-    /// shared codecs (threaded onto the snapshot in `desired_snapshot`) — never
-    /// re-spelled here; this only wraps it in the schema-qualified
-    /// `COMMENT ON COLUMN` statement with the SQL-literal single-quote escape,
-    /// matching the shared kernel's `build_mask_sentinel_comment_for_field`
-    /// spelling so a `generate`d sentinel is byte-identical to a
-    /// `registerModel`-written one.
-    fn comment_stmt(&self, table: &str, c: &ColumnSnapshot) -> Option<String> {
-        let sentinel = c.comment_sentinel.as_deref()?;
-        let escaped = sentinel.replace('\'', "''");
-        Some(format!(
-            "COMMENT ON COLUMN {}.{} IS '{}'",
-            self.qualified(table),
-            quote_ident(&c.name),
-            escaped,
-        ))
-    }
-
-    /// Render a `CONSTRAINT … FOREIGN KEY (…) REFERENCES <schema>.<tgt> (id)
-    /// [<policy>]` clause for inline CREATE TABLE / ALTER ADD CONSTRAINT use.
+    /// The FK clause for THIS author's dialect, spelled by the backend that owns
+    /// the spelling.
     ///
-    /// The ON UPDATE / ON DELETE / DEFERRABLE policy tail is carried in the
-    /// constraint `definition` (built by [`fk_definition_for_dialect`] in the
-    /// dialect canonical spelling). The tail is appended verbatim — the applied
-    /// constraint then introspects back to the identical definition, and the FK
-    /// round-trips clean. A bare FK (no policy tail) emits nothing extra.
+    /// The SQLite arm resolving to the PostgreSQL clause is PRESERVED, not
+    /// introduced: it is what the `if matches!(.., Mysql)` this replaces already
+    /// did, and it is unreachable for the reason
+    /// [`Self::qualified`] records at length — `Capability::AlterTableAddConstraint`
+    /// is false for SQLite, so no SQLite FK reaches a stand-alone `ADD CONSTRAINT`.
+    /// Naming it here rather than letting it fall out of an `if` makes it a
+    /// question a reader can ask.
     fn fk_clause(&self, fk: &ConstraintSnapshot) -> String {
-        if matches!(self.dialect, SqlDialect::Mysql) {
-            return self.mysql_fk_clause(fk);
+        match self.dialect {
+            SqlDialect::Mysql => self.mysql_emitter().fk_clause(fk),
+            SqlDialect::Postgres | SqlDialect::Sqlite => self.pg_emitter().fk_clause(fk),
         }
-        let cols = fk_local_columns(&fk.definition);
-        let target = fk_target_table(&fk.definition).unwrap_or_default();
-        let ref_cols = fk_referenced_columns(&fk.definition);
-        let policy = fk_policy_tail(&fk.definition);
-        format!(
-            "CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({}){}",
-            quote_ident(&fk.name),
-            fk_ddl_local_cols(&cols),
-            self.qualified(&target),
-            fk_ddl_referenced_cols(&ref_cols),
-            policy,
-        )
-    }
-
-    fn mysql_fk_clause(&self, fk: &ConstraintSnapshot) -> String {
-        let columns = fk_local_columns(&fk.definition)
-            .iter()
-            .map(|column| mysql_quote_ident(column))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let target = fk_target_table(&fk.definition).unwrap_or_default();
-        let referenced_columns = fk_referenced_columns(&fk.definition)
-            .iter()
-            .map(|column| mysql_quote_ident(column))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let policy = mysql_fk_policy_tail(&fk.definition);
-        format!(
-            "CONSTRAINT {} FOREIGN KEY ({columns}) REFERENCES {} ({referenced_columns}){policy}",
-            mysql_quote_ident(&fk.name),
-            mysql_qualified(&self.project_schema, &target),
-        )
     }
 
     /// Render a deferred `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY …`.
@@ -9494,9 +9260,61 @@ impl DeclarativeAuthor {
 // it). The ROUTING branches (FK inline-vs-defer, rebuild-vs-ALTER, policy-injected
 // index skip, the unreachable guard) stay in `diff()` — they are diff-logic.
 //
-// NOT extracted: the CREATE TABLE renderers. They share a resolved snapshot input,
-// but column/constraint spelling is large enough to remain dialect-specific.
+// The CREATE TABLE renderers ARE extracted, as of [`DdlEmitter::create_table`].
+// The header used to say they were not, on the grounds that "column/constraint
+// spelling is large enough to remain dialect-specific" — which is true of the
+// BODIES and says nothing about the seam. What actually blocked it was that the
+// three renderers took three DIFFERENT parameter lists; see
+// [`CreateTableRequest`] for why that divergence was apparent rather than real.
+
+/// Everything a backend needs to spell ONE `CREATE TABLE`, and nothing about which
+/// backend is spelling it.
+///
+/// The three renderers this unifies did not differ in what they NEEDED — they
+/// differed in what each had been handed. PostgreSQL and MySQL took an
+/// `inline_fks` slice; SQLite took a `&ResolvedInject` and no FK slice at all.
+/// That reads like three incompatible contracts and is not: BOTH are decisions
+/// CORE already made before any vendor is consulted (which foreign keys inline
+/// rather than defer to an `ALTER TABLE ADD CONSTRAINT`; which indexes the active
+/// policy injected). Carrying both and letting each backend read the fields its
+/// dialect uses costs one `Option` and removes the divergence.
+struct CreateTableRequest<'a> {
+    /// The UNQUALIFIED table name. Each backend qualifies it its own way — with a
+    /// project schema on PostgreSQL and MySQL, not at all on SQLite, where the
+    /// app file IS `main`.
+    table: &'a str,
+    /// The resolved desired shape: columns, constraints, indexes, partitioning.
+    snapshot: &'a TableSnapshot,
+    /// The foreign keys CORE decided to INLINE in the create rather than defer.
+    ///
+    /// SQLite ignores this and inlines every `FOREIGN KEY` straight off
+    /// `snapshot.constraints`, because it has no late `ADD CONSTRAINT` to defer
+    /// TO — the routing decision that produces this slice is made in
+    /// [`DeclarativeAuthor::lower_create_table`], gated on
+    /// `Capability::AlterTableAddConstraint`.
+    inline_fks: &'a [&'a ConstraintSnapshot],
+    /// The active policy's resolved injection, when the caller has one.
+    ///
+    /// Only SQLite reads it: it emits the injected indexes INSIDE the create
+    /// payload instead of as follow-on `CREATE INDEX` units, which is why the
+    /// differ skips re-emitting them on that dialect. `None` means "the caller
+    /// had no inject to give", which today is only ever a PostgreSQL or MySQL
+    /// caller — neither of which looks at this field.
+    inject: Option<&'a ResolvedInject>,
+}
+
 trait DdlEmitter {
+    /// Render a `CREATE TABLE` as its STRUCTURAL statement list — the create
+    /// itself plus whatever the dialect attaches to it. `join(";\n")` over the
+    /// list is the canonical `up`, and the list (not the joined string) is what
+    /// the guard-per-statement lower consumes, so a string-literal DEFAULT
+    /// carrying an interior `;\n` is never re-split mid-statement.
+    ///
+    /// What "attaches to it" differs, and that IS the vendor's business: PostgreSQL
+    /// appends one `COMMENT ON COLUMN` per sentinel-carrying column, SQLite appends
+    /// the policy-injected `CREATE INDEX`es, MySQL appends nothing.
+    fn create_table(&self, req: &CreateTableRequest<'_>) -> Vec<String>;
+
     /// Render an `ALTER TABLE … ADD COLUMN …` as `(up_statements, down)`. The mask
     /// / encrypted sentinel spelling differs by dialect: PG appends a trailing
     /// `COMMENT ON COLUMN` as a SEPARATE structural statement; `SQLite` rides the
@@ -9548,6 +9366,29 @@ impl PgEmitter {
         )
     }
 
+    /// Render a `CONSTRAINT … FOREIGN KEY (…) REFERENCES <schema>.<tgt> (…)
+    /// [<policy>]` clause for inline `CREATE TABLE` / `ALTER … ADD CONSTRAINT` use.
+    /// (Was the non-MySQL branch of `DeclarativeAuthor::fk_clause`, moved VERBATIM.)
+    ///
+    /// The `ON UPDATE` / `ON DELETE` / `DEFERRABLE` policy tail is carried in the
+    /// constraint `definition` (built by `fk_definition_for_dialect` in the dialect
+    /// canonical spelling) and appended verbatim, so the applied constraint
+    /// introspects back to the identical definition and the FK round-trips clean.
+    fn fk_clause(&self, fk: &ConstraintSnapshot) -> String {
+        let cols = fk_local_columns(&fk.definition);
+        let target = fk_target_table(&fk.definition).unwrap_or_default();
+        let ref_cols = fk_referenced_columns(&fk.definition);
+        let policy = fk_policy_tail(&fk.definition);
+        format!(
+            "CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({}){}",
+            quote_ident(&fk.name),
+            fk_ddl_local_cols(&cols),
+            self.qualified(&target),
+            fk_ddl_referenced_cols(&ref_cols),
+            policy,
+        )
+    }
+
     /// The PG `COMMENT ON COLUMN` sentinel statement, or `None`. (Was
     /// `DeclarativeAuthor::comment_stmt`, moved VERBATIM.)
     fn comment_stmt(&self, table: &str, c: &ColumnSnapshot) -> Option<String> {
@@ -9563,6 +9404,97 @@ impl PgEmitter {
 }
 
 impl DdlEmitter for PgEmitter {
+    fn create_table(&self, req: &CreateTableRequest<'_>) -> Vec<String> {
+        let (table, t) = (req.table, req.snapshot);
+        let mut parts: Vec<String> = Vec::new();
+        for c in &t.columns {
+            let inline_pk = inline_pk_for_column(table, t, &c.name);
+            let ty = column_type_for_render(c, SqlDialect::Postgres, inline_pk);
+            let pk = primary_key_clause(c, SqlDialect::Postgres, inline_pk);
+            let null = null_clause(c, SqlDialect::Postgres, inline_pk);
+            let identity = pg_identity_clause(c);
+            let generated = generated_clause(c.generated.as_ref());
+            // emit the DEFAULT clause (emission-only metadata), including the
+            // legacy `__fts` generated-column sentinel path.
+            let default = default_clause(c.default.as_deref());
+            let checks = inline_checks_clause(c);
+            // the inline `/* zero-migrate:enc:… */` sentinel rides between
+            // the type and the constraints, exactly as the shared kernel's
+            // `field_to_column_for_dialect` bakes it, so a `generate`d encrypted
+            // column is byte-identical to a `registerModel`-created one.
+            let enc = c
+                .encryption_sentinel
+                .as_deref()
+                .map(|s| format!(" {s}"))
+                .unwrap_or_default();
+            parts.push(format!(
+                "{} {}{}{}{}{}{}{}{}",
+                quote_ident(&c.name),
+                ty,
+                enc,
+                identity,
+                generated,
+                pk,
+                null,
+                default,
+                checks,
+            ));
+        }
+        for fk in req.inline_fks {
+            parts.push(self.fk_clause(fk));
+        }
+        // inline CHECK constraints (literal-pin, min/max, enum) as
+        // table-level `CONSTRAINT <name> CHECK (...)` clauses. The definition is
+        // the emitted DDL clause built by `field_check_constraints`.
+        //
+        // a `createTable({ uniques })` table-level UNIQUE
+        // (folded into the snapshot as a `UNIQUE` `ConstraintSnapshot` by
+        // `render::lower::create_table_descriptor`'s spec-fold) is inlined here as a
+        // `CONSTRAINT <name> <definition>` clause, the SAME shape a stand-alone
+        // `addConstraint(unique)` renders (`UNIQUE (cols)`), so a table built with
+        // a named unique round-trips against the live catalog. CHECK is inlined the
+        // same way; both are emission-only bodies the differ does not re-diff.
+        for c in &t.constraints {
+            if should_render_table_pk(table, t, c)
+                || c.kind == "CHECK"
+                || c.kind == "UNIQUE"
+                || c.kind == "EXCLUDE"
+            {
+                parts.push(format!(
+                    "CONSTRAINT {} {}",
+                    quote_ident(&c.name),
+                    c.definition
+                ));
+            }
+        }
+        let partition = t
+            .partition_by
+            .as_ref()
+            .map(render_partition_spec_pg)
+            .unwrap_or_default();
+        let create = format!(
+            "CREATE TABLE {} ({}){}",
+            self.qualified(table),
+            parts.join(", "),
+            partition,
+        );
+        let mut statements: Vec<String> = vec![create];
+        // append `COMMENT ON COLUMN … '<sentinel>'` for every
+        // column carrying a comment sentinel (`zero-migrate:mask:…` on a masked sibling,
+        // `zero-migrate:enc:…` on an encrypted column), so the runtime sentinel is part of
+        // the same migration as the table create (an interrupted apply never
+        // leaves a column without its sentinel). The comment body is built by
+        // the shared codecs; we only quote it into the statement here. Each
+        // COMMENT is its OWN structural statement (a guard-per-statement unit),
+        // not a textual `;\n` split of the joined `up`.
+        for c in &t.columns {
+            if let Some(stmt) = self.comment_stmt(table, c) {
+                statements.push(stmt);
+            }
+        }
+        statements
+    }
+
     fn add_column(&self, table: &str, c: &ColumnSnapshot) -> (Vec<String>, Option<String>) {
         let inline_pk = false;
         let null = null_clause(c, SqlDialect::Postgres, inline_pk);
@@ -9786,6 +9718,78 @@ fn mysql_requote_sql(sql: &str) -> String {
 struct SqliteEmitter;
 
 impl DdlEmitter for SqliteEmitter {
+    fn create_table(&self, req: &CreateTableRequest<'_>) -> Vec<String> {
+        let (table, t) = (req.table, req.snapshot);
+        let mut parts: Vec<String> = Vec::new();
+        for c in &t.columns {
+            let inline_pk = inline_pk_for_column(table, t, &c.name);
+            let ty = column_type_for_render(c, SqlDialect::Sqlite, inline_pk);
+            let pk = primary_key_clause(c, SqlDialect::Sqlite, inline_pk);
+            let null = null_clause(c, SqlDialect::Sqlite, inline_pk);
+            let generated = generated_clause(c.generated.as_ref());
+            let default = default_clause(c.default.as_deref());
+            let checks = inline_checks_clause(c);
+            let enc = c
+                .encryption_sentinel
+                .as_deref()
+                .map(|s| format!(" {s}"))
+                .unwrap_or_default();
+            let sqlite_inline_sentinel = if c.encryption_sentinel.is_none() {
+                c.comment_sentinel
+                    .as_deref()
+                    .map(|s| format!(" /* {s} */"))
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            parts.push(format!(
+                "{} {}{}{}{}{}{}{}{}",
+                sqlite_ident(&c.name),
+                ty,
+                enc,
+                sqlite_inline_sentinel,
+                generated,
+                pk,
+                null,
+                default,
+                checks,
+            ));
+        }
+        // Note the missing `req.inline_fks` loop, which is not an omission: SQLite
+        // inlines every FK off the snapshot below, because it has no late
+        // `ADD CONSTRAINT` to defer one to.
+        for c in &t.constraints {
+            if should_render_table_pk(table, t, c)
+                || c.kind == "CHECK"
+                || c.kind == "UNIQUE"
+                || c.kind == "FOREIGN KEY"
+            {
+                parts.push(format!(
+                    "CONSTRAINT {} {}",
+                    sqlite_ident(&c.name),
+                    c.definition
+                ));
+            }
+        }
+        let mut statements = vec![format!(
+            "CREATE TABLE {} ({})",
+            sqlite_ident(table),
+            parts.join(", ")
+        )];
+        // The policy-injected indexes ride INSIDE the create payload here, which is
+        // why the differ's follow-on index loop skips them on this dialect. A caller
+        // with no inject to give (PostgreSQL's or MySQL's, neither of which reaches
+        // this impl) contributes none.
+        for idx in t.indexes.iter().filter(|idx| {
+            req.inject
+                .is_some_and(|inj| is_injected_index(table, &idx.name, inj))
+        }) {
+            let (up, _) = self.create_index(table, idx);
+            statements.push(up);
+        }
+        statements
+    }
+
     fn add_column(&self, table: &str, c: &ColumnSnapshot) -> (Vec<String>, Option<String>) {
         let inline_pk = false;
         let null = null_clause(c, SqlDialect::Sqlite, inline_pk);
@@ -9927,9 +9931,110 @@ impl MysqlEmitter {
     fn qualified(&self, object: &str) -> String {
         mysql_qualified(&self.project_schema, object)
     }
+
+    /// MySQL's inline / stand-alone FK clause. (Was
+    /// `DeclarativeAuthor::mysql_fk_clause`, moved VERBATIM.) The policy tail drops
+    /// `DEFERRABLE INITIALLY DEFERRED`, which MySQL does not accept, via
+    /// [`mysql_fk_policy_tail`].
+    fn fk_clause(&self, fk: &ConstraintSnapshot) -> String {
+        let columns = fk_local_columns(&fk.definition)
+            .iter()
+            .map(|column| mysql_quote_ident(column))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let target = fk_target_table(&fk.definition).unwrap_or_default();
+        let referenced_columns = fk_referenced_columns(&fk.definition)
+            .iter()
+            .map(|column| mysql_quote_ident(column))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let policy = mysql_fk_policy_tail(&fk.definition);
+        format!(
+            "CONSTRAINT {} FOREIGN KEY ({columns}) REFERENCES {} ({referenced_columns}){policy}",
+            mysql_quote_ident(&fk.name),
+            self.qualified(&target),
+        )
+    }
 }
 
 impl DdlEmitter for MysqlEmitter {
+    fn create_table(&self, req: &CreateTableRequest<'_>) -> Vec<String> {
+        let (table, t, inline_fks) = (req.table, req.snapshot, req.inline_fks);
+        let mut parts: Vec<String> = Vec::new();
+        let mut consumed_enum_checks = BTreeSet::new();
+        for c in &t.columns {
+            let inline_pk = inline_pk_for_column(table, t, &c.name);
+            let enum_check_name = check_constraint_name(table, &c.name, "enum");
+            let enum_type = t
+                .constraints
+                .iter()
+                .find(|chk| chk.kind == "CHECK" && chk.name == enum_check_name)
+                .and_then(|chk| mysql_enum_type_from_check(&chk.definition, &c.name));
+            if enum_type.is_some() {
+                consumed_enum_checks.insert(enum_check_name);
+            }
+            // This arm REPLACES the column's whole rendered type, so it also replaces
+            // the collation `column_type_for_render` would have pinned. Without the
+            // pin the enum inherits the table default (`utf8mb4_0900_ai_ci` on a stock
+            // MySQL 8), which is the defect `mysql_pin_enum_collation` documents - and
+            // for a descriptor that asked for `caseSensitive: false` it would silently
+            // drop the facet the author DID declare.
+            let ty = enum_type
+                .map(|enum_type| mysql_pin_enum_collation(&enum_type, c.case_sensitive))
+                .unwrap_or_else(|| column_type_for_render(c, SqlDialect::Mysql, inline_pk));
+            let pk = primary_key_clause(c, SqlDialect::Mysql, inline_pk);
+            let null = null_clause(c, SqlDialect::Mysql, inline_pk);
+            let identity = mysql_identity_clause(c);
+            let generated = mysql_generated_clause(c.generated.as_ref());
+            let default = mysql_default_clause(c.default.as_deref());
+            let checks = inline_checks_clause(c);
+            parts.push(format!(
+                "{} {}{}{}{}{}{}{}",
+                mysql_quote_ident(&c.name),
+                ty,
+                identity,
+                generated,
+                pk,
+                null,
+                default,
+                checks,
+            ));
+        }
+        // InnoDB creates an implicit child index when an inline FK has no index
+        // in the same CREATE TABLE statement. The planned index must therefore be
+        // inline too; emitting it only as a later CREATE INDEX would conceal the
+        // implicit object from the preview and can leave a redundant index. These
+        // exact snapshots are skipped from the follow-on index-unit loop below.
+        for idx in mysql_inline_fk_supporting_indexes(t, inline_fks) {
+            let unique = if idx.unique { "UNIQUE " } else { "" };
+            parts.push(format!(
+                "{unique}KEY {} ({})",
+                mysql_quote_ident(&idx.name),
+                render_index_elements_mysql(idx)
+            ));
+        }
+        for fk in inline_fks {
+            parts.push(self.fk_clause(fk));
+        }
+        for c in &t.constraints {
+            if consumed_enum_checks.contains(&c.name) {
+                continue;
+            }
+            if should_render_table_pk(table, t, c) || c.kind == "CHECK" || c.kind == "UNIQUE" {
+                parts.push(format!(
+                    "CONSTRAINT {} {}",
+                    mysql_quote_ident(&c.name),
+                    mysql_requote_sql(&c.definition)
+                ));
+            }
+        }
+        vec![format!(
+            "CREATE TABLE {} ({})",
+            self.qualified(table),
+            parts.join(", ")
+        )]
+    }
+
     fn add_column(&self, table: &str, c: &ColumnSnapshot) -> (Vec<String>, Option<String>) {
         let inline_pk = false;
         let null = null_clause(c, SqlDialect::Mysql, inline_pk);
