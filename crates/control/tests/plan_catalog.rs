@@ -12,7 +12,7 @@
 //! silently skip otherwise (CI without a DB stays green). The pure tier math
 //! is unit-tested DB-free in `src/pricing.rs`.
 
-mod common;
+use crate::common;
 
 use compio_postgres::{connect, NoTls};
 use uuid::Uuid;

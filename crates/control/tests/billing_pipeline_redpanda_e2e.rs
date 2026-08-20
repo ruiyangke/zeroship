@@ -27,7 +27,7 @@ use zeroship_control::Registry;
 use zeroship_metering::{Meter, UsageOutbox};
 use zeroship_stream::{adapters, StreamConfig, StreamRegistry};
 
-mod common;
+use crate::common;
 
 fn db_url() -> String {
     zeroship_core::config::test_database_url_opt()

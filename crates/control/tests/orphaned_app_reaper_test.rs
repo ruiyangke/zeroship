@@ -25,7 +25,7 @@ use zeroship_control::{
     api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
 
-mod common;
+use crate::common;
 
 fn db_url() -> String {
     zeroship_core::config::test_database_url_opt()

@@ -19,7 +19,7 @@ use zeroship_control::{
     SecretString, StripeStore,
 };
 
-mod common;
+use crate::common;
 
 const TEST_WEBHOOK_SECRET: &str = "whsec_control_test_unconditional";
 

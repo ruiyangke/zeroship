@@ -12,7 +12,7 @@ use uuid::Uuid;
 use zeroship_control::audit::{self, Action, AuditEntry};
 use zeroship_control::{EnvStore, Registry};
 
-mod common;
+use crate::common;
 
 fn db_url() -> String {
     zeroship_core::config::test_database_url_opt()

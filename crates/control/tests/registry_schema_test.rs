@@ -7,7 +7,7 @@
 use compio_postgres::{connect, Client, NoTls};
 use zeroship_control::Registry;
 
-mod common;
+use crate::common;
 
 fn db_url() -> String {
     zeroship_core::config::test_database_url_opt()

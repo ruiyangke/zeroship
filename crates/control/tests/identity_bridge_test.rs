@@ -7,7 +7,7 @@ use zeroship_control::identity_bridge::{
     parse_gotrue_admin_email_verified, provision_or_link,
 };
 
-mod common;
+use crate::common;
 
 const PROVIDER: &str = "supabase";
 

@@ -11,7 +11,7 @@
 //! (drop+recreate `zeroship_billing_test`, re-run `deploy/ops/db-migrate.sh
 //! update`).
 
-mod common;
+use crate::common;
 
 use compio_postgres::{connect, NoTls};
 use uuid::Uuid;

@@ -12,7 +12,7 @@ use zeroship_control::bootstrap_builder::{
     BUILDER_CLIENT_ID, BUILDER_CLIENT_NAME, DEFAULT_BUILDER_REDIRECT_URI,
 };
 
-mod common;
+use crate::common;
 
 fn db_url() -> String {
     zeroship_core::config::test_database_url_opt()
