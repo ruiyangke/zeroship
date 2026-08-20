@@ -60,9 +60,23 @@ pub struct RetentionStats {
     pub subscriptions: usize,
     pub broadcasts: usize,
     pub blobs: usize,
+    /// How much of the journalled fleet this tick covered.
+    ///
+    /// Every count above is zero for a fleet with nothing old enough to prune
+    /// AND for a fleet whose only tenant with expired runs was excluded. This
+    /// field is what tells them apart. It matters more here than the safety
+    /// argument suggests: an app skipped every tick never has its journal
+    /// pruned at all, so its terminal runs, steps, signals and blobs grow
+    /// without bound while the tick keeps reporting a clean zero.
+    pub coverage: crate::cron::workflow_engine::SweepCoverage,
 }
 
 impl RetentionStats {
+    /// Sums the ROW counts only.
+    ///
+    /// `coverage` is deliberately not summed: this is called once per pruned
+    /// RUN, and coverage is per TICK, so folding it in would multiply the
+    /// fleet account by the number of rows the tick happened to delete.
     fn add(&mut self, other: Self) {
         self.runs += other.runs;
         self.steps += other.steps;
@@ -93,13 +107,16 @@ pub async fn run(state: Arc<AppState>, tick_secs: u64) {
     );
     loop {
         match tick_with_config(&state, config).await {
-            Ok(stats) if !stats.is_empty() => tracing::info!(
+            Ok(stats) if !stats.is_empty() || stats.coverage.apps_skipped > 0 => tracing::info!(
                 runs = stats.runs,
                 steps = stats.steps,
                 signals = stats.signals,
                 subscriptions = stats.subscriptions,
                 broadcasts = stats.broadcasts,
                 blobs = stats.blobs,
+                apps_swept = stats.coverage.apps_swept,
+                apps_skipped = stats.coverage.apps_skipped,
+                apps_unvisited = stats.coverage.apps_unvisited,
                 "workflow_retention tick reaped rows"
             ),
             Ok(_) => {}
@@ -143,12 +160,22 @@ pub async fn tick_with_config(
     // whole sweep and let one slow tenant block the rest. Reusing the connection
     // costs nothing here because the loop never ran two apps at once.
     let mut conn = state.registry.conn().await?;
-    let app_ids = super::workflow_engine::journalled_fleet(&conn).await?.readable;
-    let mut stats = RetentionStats::default();
-    for app_id in app_ids {
+    let fleet = super::workflow_engine::journalled_fleet(&conn).await?;
+    let mut stats = RetentionStats {
+        coverage: super::workflow_engine::SweepCoverage::opened_over(&fleet),
+        ..RetentionStats::default()
+    };
+    let mut apps = fleet.readable.into_iter();
+    // Budget checked BEFORE the pull, so an app the break never reached stays
+    // in the iterator for the `len()` at the bottom instead of being counted as
+    // swept.
+    loop {
         if remaining_batch <= 0 {
             break;
         }
+        let Some(app_id) = apps.next() else {
+            break;
+        };
         let tx = conn.transaction().await.map_err(RegistryError::from)?;
         // No per-app existence probe: `journalled_fleet` already returned only
         // apps whose journal exists AND is readable on this connection, so the
@@ -174,10 +201,30 @@ pub async fn tick_with_config(
               LIMIT $2 \
               FOR UPDATE SKIP LOCKED",
         );
-        let rows = tx
-            .query(&sql, &[&cutoff, &remaining_batch])
-            .await
-            .map_err(RegistryError::from)?;
+        // A journal the catalog called readable can still DENY this statement -
+        // the privilege changed in between, or the schema was dropped. Unlike
+        // the blob ref sweep and deploy retention, this sweep's transaction is
+        // PER APP, so the abort is confined to this tenant: roll it back and
+        // carry on with the rest of the fleet. Before this, the `?` here turned
+        // one tenant's privilege gap into a fleet-wide retention outage, which
+        // is the same defect the catalog-level skip was added to fix, one layer
+        // down.
+        let rows = match super::workflow_engine::skip_journal_scoped(
+            &app_id,
+            "retention candidate scan",
+            tx.query(&sql, &[&cutoff, &remaining_batch]).await,
+        )? {
+            Some(rows) => rows,
+            None => {
+                // The failed statement already aborted this transaction;
+                // rolling back explicitly (rather than on drop) keeps the
+                // connection clean for the next app, which shares it.
+                tx.rollback().await.map_err(RegistryError::from)?;
+                stats.coverage.skipped_one();
+                continue;
+            }
+        };
+        stats.coverage.swept_one();
 
         let mut app_blob_hashes = BTreeSet::new();
         for row in rows {
@@ -223,6 +270,7 @@ pub async fn tick_with_config(
         .await?
         .saturating_add(stats.blobs);
     }
+    stats.coverage.apps_unvisited = apps.len();
     Ok(stats)
 }
 
@@ -371,6 +419,8 @@ where
             subscriptions: nonnegative_count(&counts, "subscriptions"),
             broadcasts,
             blobs: 0,
+            // Per-RUN counts; the tick owns coverage and `add` leaves it alone.
+            ..RetentionStats::default()
         },
         blob_hashes,
     }))
