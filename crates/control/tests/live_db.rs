@@ -16,9 +16,15 @@
 //! same fleet-wide, advisory-locked sweep - six separate `RECONCILE_LOCK`s, two
 //! separate `SWEEP_LOCK`s - are no longer held apart by anything. Until now the
 //! PROCESS did it: cargo runs test binaries one at a time and never two at once.
-//! `common` is compiled once for the whole target, so
-//! `common::isolated_closed_period_now()`'s memoised far-future month is now one
-//! draw shared by five modules instead of five draws in five processes.
+//!
+//! `common` is compiled once for the whole target, so a `static` in it is shared
+//! by all 41 modules rather than being one cell per binary. The billing period
+//! helper was such a `static`; merging collapsed five memoised months into one
+//! and exposed a bug older than the merge, in which a test asserted on a
+//! period-wide count it did not own. That is FIXED - every caller now reserves a
+//! private window from `common::next_isolated_period()`, whose header explains
+//! why a lock cannot do the same job. The general lesson stands for the next
+//! `static` added here: sharing a process makes one visible to 41 modules.
 //!
 //! THREADING
 //! ---------
