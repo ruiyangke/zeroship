@@ -9479,6 +9479,30 @@ fn render_view_columns(
     Ok(format!(" ({})", qcols?.join(", ")))
 }
 
+/// The one dialect the SQLite trigger renderer speaks, named ONCE.
+///
+/// `render_sqlite_trigger_op` and the two helpers below it named `SqlDialect::Sqlite`
+/// nineteen times between them: thirteen capability and inline-render arguments that
+/// were already right, and six identifier quotes that were NOT. Those six called the
+/// PostgreSQL-pinned `dml::quote_bare_ident`, so every identifier in a rendered SQLite
+/// trigger was spelled by `PostgresDmlRenderer::quote_ident` — correct only because
+/// both vendors spell an identifier `"x"`, and a hard blocker on extracting a
+/// `zero-migrate-sqlite` crate that does not need `zero-migrate-postgres` at RUNTIME.
+/// A crate-extraction spike proved the reach was live rather than theoretical: it
+/// rendered a `createTrigger` from inside the extracted crate and got PostgreSQL's
+/// marker back in the SQLite trigger SQL.
+///
+/// Routing those six through `quote_bare_ident_for_dialect` is the fix; folding the
+/// other thirteen into the same const is what makes it stay fixed. It is the rule
+/// `backends/mod.rs` already states for a backend module — one dialect literal, its
+/// own, and everything else reads it — applied to the one SQLite render path still
+/// living in `lower.rs`. That is what turns the step-4 move of these three functions
+/// into a relocation rather than an edit: exactly one line here knows the vendor.
+///
+/// Pinned by `tests/dialect_matrix/sqlite_trigger_quoting_reaches_postgres.rs`, whose
+/// count went 6 → 0 on this change.
+const SQLITE_TRIGGER_DIALECT: SqlDialect = SqlDialect::Sqlite;
+
 pub(crate) fn render_sqlite_trigger_op(
     op: &Op,
     eff_schema: &str,
@@ -9502,36 +9526,36 @@ pub(crate) fn render_sqlite_trigger_op(
                 ));
             }
             if events.iter().any(|e| matches!(e, TriggerEvent::Truncate))
-                && !SqlDialect::Sqlite.supports(Capability::TriggerTruncateEvent)
+                && !SQLITE_TRIGGER_DIALECT.supports(Capability::TriggerTruncateEvent)
             {
                 return Err(IrLowerError::TriggerUnsupported {
                     kind: "triggerEventTruncate",
-                    dialect: SqlDialect::Sqlite,
+                    dialect: SQLITE_TRIGGER_DIALECT,
                 });
             }
             if matches!(for_each, ForEach::Statement)
-                && !SqlDialect::Sqlite.supports(Capability::TriggerStatementForEach)
+                && !SQLITE_TRIGGER_DIALECT.supports(Capability::TriggerStatementForEach)
             {
                 return Err(IrLowerError::TriggerUnsupported {
                     kind: "forEachStatement",
-                    dialect: SqlDialect::Sqlite,
+                    dialect: SQLITE_TRIGGER_DIALECT,
                 });
             }
             let TriggerAction::Body { statements } = action else {
-                if !SqlDialect::Sqlite.supports(Capability::TriggerExecuteFunction) {
+                if !SQLITE_TRIGGER_DIALECT.supports(Capability::TriggerExecuteFunction) {
                     return Err(IrLowerError::TriggerUnsupported {
                         kind: "executeFunction",
-                        dialect: SqlDialect::Sqlite,
+                        dialect: SQLITE_TRIGGER_DIALECT,
                     });
                 }
                 return Err(IrLowerError::UnsupportedOp(
                     "SQLite trigger action routed past capability check",
                 ));
             };
-            if !SqlDialect::Sqlite.supports(Capability::TriggerBody) {
+            if !SQLITE_TRIGGER_DIALECT.supports(Capability::TriggerBody) {
                 return Err(IrLowerError::TriggerUnsupported {
                     kind: "triggerBody",
-                    dialect: SqlDialect::Sqlite,
+                    dialect: SQLITE_TRIGGER_DIALECT,
                 });
             }
             if statements.is_empty() {
@@ -9542,8 +9566,16 @@ pub(crate) fn render_sqlite_trigger_op(
                 ));
             }
 
-            let qname = crate::render::dml::quote_bare_ident("trigger", name)?;
-            let qtable = crate::render::dml::quote_bare_ident("table", table)?;
+            let qname = crate::render::dml::quote_bare_ident_for_dialect(
+                "trigger",
+                name,
+                SQLITE_TRIGGER_DIALECT,
+            )?;
+            let qtable = crate::render::dml::quote_bare_ident_for_dialect(
+                "table",
+                table,
+                SQLITE_TRIGGER_DIALECT,
+            )?;
             let events_sql = events
                 .iter()
                 .map(|e| e.as_sql())
@@ -9585,7 +9617,11 @@ pub(crate) fn render_sqlite_trigger_op(
             if_exists,
             ..
         } => {
-            let qname = crate::render::dml::quote_bare_ident("trigger", name)?;
+            let qname = crate::render::dml::quote_bare_ident_for_dialect(
+                "trigger",
+                name,
+                SQLITE_TRIGGER_DIALECT,
+            )?;
             let mut up = String::from("DROP TRIGGER ");
             if if_exists.unwrap_or(false) {
                 up.push_str("IF EXISTS ");
@@ -9613,7 +9649,11 @@ fn sqlite_trigger_table_ref(
             return Err(IrLowerError::LowerCrossSchema(schema.to_string()));
         }
     }
-    Ok(crate::render::dml::quote_bare_ident("table", table)?)
+    Ok(crate::render::dml::quote_bare_ident_for_dialect(
+        "table",
+        table,
+        SQLITE_TRIGGER_DIALECT,
+    )?)
 }
 
 fn render_sqlite_trigger_stmt(
@@ -9646,7 +9686,13 @@ fn render_sqlite_trigger_stmt(
             let qtable = sqlite_trigger_table_ref(table, schema.as_deref(), eff_schema)?;
             let qcols: Result<Vec<_>, _> = columns
                 .iter()
-                .map(|c| crate::render::dml::quote_bare_ident("column", c))
+                .map(|c| {
+                    crate::render::dml::quote_bare_ident_for_dialect(
+                        "column",
+                        c,
+                        SQLITE_TRIGGER_DIALECT,
+                    )
+                })
                 .collect();
             let qcols = qcols?;
             let mut groups = Vec::with_capacity(rows.len());
@@ -9665,12 +9711,7 @@ fn render_sqlite_trigger_stmt(
                 }
                 let vals: Result<Vec<_>, _> = row
                     .iter()
-                    .map(|v| {
-                        crate::render::dml::render_value_inline(
-                            v,
-                            crate::schema::query::SqlDialect::Sqlite,
-                        )
-                    })
+                    .map(|v| crate::render::dml::render_value_inline(v, SQLITE_TRIGGER_DIALECT))
                     .collect();
                 groups.push(format!("({})", vals?.join(", ")));
             }
@@ -9699,15 +9740,19 @@ fn render_sqlite_trigger_stmt(
             for (col, rhs) in set {
                 assigns.push(format!(
                     "{} = {}",
-                    crate::render::dml::quote_bare_ident("column", col)?,
-                    crate::render::dml::render_value_inline(rhs, SqlDialect::Sqlite)?
+                    crate::render::dml::quote_bare_ident_for_dialect(
+                        "column",
+                        col,
+                        SQLITE_TRIGGER_DIALECT
+                    )?,
+                    crate::render::dml::render_value_inline(rhs, SQLITE_TRIGGER_DIALECT)?
                 ));
             }
             let mut sql = format!("UPDATE {qtable} SET {}", assigns.join(", "));
             if let Some(pred) = r#where {
                 sql.push_str(&format!(
                     " WHERE {}",
-                    crate::render::dml::render_expr_inline(pred, SqlDialect::Sqlite)?
+                    crate::render::dml::render_expr_inline(pred, SQLITE_TRIGGER_DIALECT)?
                 ));
             }
             Ok(sql)
@@ -9719,7 +9764,7 @@ fn render_sqlite_trigger_stmt(
             schema,
         } => {
             let qtable = sqlite_trigger_table_ref(table, schema.as_deref(), eff_schema)?;
-            let pred = crate::render::dml::render_expr_inline(r#where, SqlDialect::Sqlite)?;
+            let pred = crate::render::dml::render_expr_inline(r#where, SQLITE_TRIGGER_DIALECT)?;
             Ok(match limit {
                 None => format!("DELETE FROM {qtable} WHERE {pred}"),
                 // Trigger rendering has no live-catalog snapshot for the body
@@ -9736,7 +9781,7 @@ fn render_sqlite_trigger_stmt(
         }
         TriggerStmt::Select { expr } => Ok(format!(
             "SELECT {}",
-            crate::render::dml::render_expr_inline(expr, SqlDialect::Sqlite)?
+            crate::render::dml::render_expr_inline(expr, SQLITE_TRIGGER_DIALECT)?
         )),
         TriggerStmt::Raise {
             level: RaiseLevel::Ignore,

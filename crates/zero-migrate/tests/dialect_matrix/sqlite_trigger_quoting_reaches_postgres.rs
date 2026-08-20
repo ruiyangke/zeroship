@@ -8,14 +8,23 @@
 //!
 //! This is that test.
 //!
-//! # The coupling, measured rather than reasoned
+//! # The coupling, measured rather than reasoned — and now FIXED
 //!
 //! `render::dml::quote_bare_ident` is the PostgreSQL-PINNED identifier wrapper: it
 //! delegates to `quote_ident`, which is `quote_ident_for_dialect(.., SqlDialect::
 //! Postgres)`, which resolves to `PostgresDmlRenderer::quote_ident`.
-//! `render::lower::render_sqlite_trigger_op` and its helpers call it SIX times, and
+//! `render::lower::render_sqlite_trigger_op` and its helpers called it SIX times, and
 //! `backends/sqlite.rs` delegates its trigger rendering there. So every identifier in
-//! a rendered SQLite trigger is quoted by the PostgreSQL renderer.
+//! a rendered SQLite trigger was quoted by the PostgreSQL renderer.
+//!
+//! THAT IS PAST TENSE AS OF THIS FILE'S `PINNED_CALLS_IN_LOWER = 0`. Those three
+//! functions now route every identifier through `quote_bare_ident_for_dialect(..,
+//! SQLITE_TRIGGER_DIALECT)`, a single `const` in `lower.rs` that also absorbed the
+//! thirteen other `SqlDialect::Sqlite` literals they carried — so exactly one line in
+//! the SQLite trigger path knows which vendor it is, which is the rule
+//! `backends/mod.rs` already states for a backend module. The paragraphs below are
+//! kept in the past tense rather than deleted: they are the measurement that made the
+//! fix arguable, and this file's job now is to stop it coming back.
 //!
 //! VERIFIED, not inferred. A crate-extraction spike moved `backends/sqlite.rs` and
 //! `apply/backend/sqlite/` into a real `zero-migrate-sqlite` crate, replaced
@@ -46,36 +55,50 @@ use std::path::{Path, PathBuf};
 
 /// The number of PostgreSQL-pinned `quote_bare_ident` calls the SQLite trigger path
 /// is currently allowed. It is a RATCHET, not a target: see the flip note below.
-const PINNED_CALLS_IN_LOWER: usize = 6;
+///
+/// FLIPPED FROM 6 TO 0. `render_sqlite_trigger_op` and its two helpers now route
+/// every identifier through `quote_bare_ident_for_dialect(.., SQLITE_TRIGGER_DIALECT)`,
+/// a single `const SQLITE_TRIGGER_DIALECT: SqlDialect = SqlDialect::Sqlite` that also
+/// absorbed the thirteen other `SqlDialect::Sqlite` literals those three functions
+/// carried. Nothing about the emitted SQL moved — it could not, for the reason the
+/// second test below pins — so this file is now the "must never come back" guard its
+/// own flip note promised it would become, and the module header's
+/// `zero-migrate-sqlite would need zero-migrate-postgres` finding is FALSE.
+const PINNED_CALLS_IN_LOWER: usize = 0;
 
-/// The census: exactly six PG-pinned identifier quotes, all of them in `lower.rs`.
+/// The census: ZERO PG-pinned identifier quotes, in `lower.rs` or anywhere else.
 ///
-/// # This test is GREEN today ON PURPOSE, and here is the argument
+/// # This test was GREEN at 6 on purpose, and is now green at 0 for a better reason
 ///
-/// The coupling is real and unfixed, so an honest "the SQLite path must not reach
-/// PostgreSQL's renderer" assertion would be RED on this commit. A permanently-red
-/// test is not a guard - it is noise that trains people to ignore a colour. So this
-/// pins TODAY'S NUMBER instead, which buys three things a red test or an `#[ignore]`
-/// would not:
+/// While the coupling was real and unfixed, an honest "the SQLite path must not reach
+/// PostgreSQL's renderer" assertion would have been RED on every commit. A
+/// permanently-red test is not a guard - it is noise that trains people to ignore a
+/// colour. So this pinned TODAY'S NUMBER instead, which bought three things a red
+/// test or an `#[ignore]` would not:
 ///
-/// - it fails on SPREAD. A seventh call site - a new SQLite render path reaching the
-///   pinned wrapper - goes red immediately. That direction is covered by nothing
-///   else, and it is the direction this defect actually grows in.
-/// - it fails on the FIX, loudly and with instructions. When the six become zero the
-///   assertion below breaks and tells the author to set the const to 0, at which
-///   point this file becomes the permanent "must never come back" guard.
-/// - it cannot rot. `#[ignore]` produces no signal in either direction and nothing
+/// - it failed on SPREAD. A seventh call site - a new SQLite render path reaching the
+///   pinned wrapper - went red immediately. That direction was covered by nothing
+///   else, and it is the direction this defect actually grew in.
+/// - it failed on the FIX, loudly and with instructions. THAT IS WHAT HAPPENED: the
+///   six became zero, this assertion broke, and its own message said to set the const
+///   to 0. It did not have to be believed on trust; it computed the new number.
+/// - it could not rot. `#[ignore]` produces no signal in either direction and nothing
 ///   forces anyone to un-ignore it afterwards; the stale-doc history in
 ///   `backends/mod.rs` is what that failure mode looks like in this tree.
 ///
+/// At 0 the ratchet is at its stop and both halves say the same thing: no file in the
+/// crate may call the PostgreSQL-pinned wrapper. Nothing here was relaxed to get
+/// green - the assertion is strictly stronger than the one it replaced, because 0 is
+/// the only value that admits no PostgreSQL reach at all.
+///
 /// # Two ways this goes red that are not defects
 ///
-/// The count changing because `render_sqlite_trigger_op` was REFACTORED (helpers
-/// split or merged) without the coupling changing, and the count going to zero
-/// because the coupling was FIXED. Both should be read as a question about the
-/// number, not as a bug in this file. Only an INCREASE is a new defect.
+/// Neither survives the flip. The count can no longer move for a REFACTOR (a helper
+/// split cannot create a call that is not there), and it can no longer move for a FIX
+/// (there is nothing left to fix). Any increase from 0 is a new defect, full stop:
+/// route the new site through `quote_bare_ident_for_dialect(.., DIALECT)`.
 #[test]
-fn sqlite_trigger_identifiers_are_still_quoted_by_the_postgres_pinned_wrapper() {
+fn no_sqlite_render_path_is_quoted_by_the_postgres_pinned_wrapper() {
     // `include_str!` is a compile-time dependency: editing lower.rs rebuilds this
     // binary, so the count cannot silently drift out from under the pin.
     let lower = include_str!("../../src/render/lower.rs");
@@ -86,15 +109,18 @@ fn sqlite_trigger_identifiers_are_still_quoted_by_the_postgres_pinned_wrapper() 
         "render/lower.rs makes {in_lower} call(s) to the PostgreSQL-pinned \
          `dml::quote_bare_ident`; the pin says {PINNED_CALLS_IN_LOWER}.\n\
          \n\
-         MORE than the pin: a new SQLite render path is being quoted by the \
-         PostgreSQL renderer. That is the defect this test exists for - route it \
-         through `quote_bare_ident_for_dialect(.., DIALECT)` instead.\n\
+         The pin is at 0 and 0 is the stop: the SQLite trigger path was routed \
+         through `quote_bare_ident_for_dialect(.., SQLITE_TRIGGER_DIALECT)` and \
+         nothing in the crate calls the pinned wrapper any more. So {in_lower} > 0 \
+         means a render path has been quoted by the PostgreSQL renderer again - \
+         route it through `quote_bare_ident_for_dialect(.., DIALECT)`, naming the \
+         dialect ONCE per module as `lower.rs` and `backends/*.rs` both do.\n\
          \n\
-         FEWER, and ZERO especially: the coupling is being fixed. Set \
-         PINNED_CALLS_IN_LOWER to {in_lower}. At 0, delete nothing - this file \
-         becomes the guard that stops it coming back, and the module header's \
-         `zero-migrate-sqlite would need zero-migrate-postgres` finding becomes \
-         false, which is the point."
+         DO NOT RAISE THIS CONST TO MAKE THE BUILD GREEN. Raising it re-admits the \
+         `zero-migrate-sqlite needs zero-migrate-postgres at runtime` dependency \
+         that the module header measured and this commit removed, and it does so \
+         silently, because both vendors still spell an identifier `\"x\"` and no \
+         SQL-output test can tell you."
     );
 
     // ...and nowhere else in the crate acquired one. `include_str!` cannot express
@@ -140,16 +166,29 @@ fn sqlite_trigger_identifiers_are_still_quoted_by_the_postgres_pinned_wrapper() 
 /// PostgreSQL and SQLite spell an identifier identically, which is what makes the
 /// coupling above invisible to behaviour.
 ///
-/// This is the load-bearing companion to the census. While it is green, the six
-/// pinned calls are a LATENT extraction blocker that emits correct bytes. The moment
-/// it goes red - a SQLite build that quotes with brackets, a PostgreSQL build that
-/// folds case differently - those same six calls become a live wrong-SQL defect, and
-/// the census pin above stops being a tidiness argument.
+/// This was the load-bearing companion to the census while the census stood at six:
+/// it is WHY those six pinned calls were a latent extraction blocker that emitted
+/// correct bytes rather than a live wrong-SQL defect, and therefore why the coupling
+/// needed a source-editing spike to see at all.
 ///
-/// Going red here is therefore not a failure of this test. It is a promotion of the
-/// other one to urgent.
+/// # What it is for now that the census is at zero
+///
+/// It is the reason the fix is PROVABLY byte-neutral. Both `quote_ident`
+/// implementations are the same `dml::escape_quote_ident(ident)`, so re-pointing six
+/// calls from one to the other cannot move a byte of emitted SQL - which is the
+/// claim the gate's identical pass counts corroborate but cannot, on their own,
+/// distinguish from "the changed path is untested".
+///
+/// It is ALSO the tripwire for the day the two spellings diverge. That day is now
+/// allowed: `render_sqlite_trigger_op` asks for SQLite's spelling by name, so a
+/// bracket-quoting SQLite build would come out correct instead of coming out as
+/// PostgreSQL. So read a red here as a QUESTION - "who still assumes these agree?" -
+/// and answer it by re-running the census above. If the census is still 0, nothing
+/// is broken and this test has done its job and can be retired with that noted; if
+/// the census has drifted above 0, those calls are now emitting wrong SQL and this
+/// red is the escalation.
 #[test]
-fn postgres_and_sqlite_spell_an_identifier_identically_which_hides_the_coupling() {
+fn postgres_and_sqlite_still_spell_an_identifier_identically() {
     let pg = quote_ident_body(include_str!("../../src/render/backends/postgres.rs"));
     let sqlite = quote_ident_body(include_str!("../../src/render/backends/sqlite.rs"));
 
@@ -158,11 +197,16 @@ fn postgres_and_sqlite_spell_an_identifier_identically_which_hides_the_coupling(
         "PostgresDmlRenderer::quote_ident and SqliteDmlRenderer::quote_ident no \
          longer share an implementation.\n\
          \n\
-         READ THIS AS AN ESCALATION, NOT A REGRESSION. While the two agreed, the \
-         six PostgreSQL-pinned quotes in `render::lower::render_sqlite_trigger_op` \
-         (pinned by the test above) emitted correct SQLite anyway. They no longer \
-         do: SQLite triggers are now quoted by PostgreSQL's rules and the SQL is \
-         wrong. Fix those six FIRST, then update or delete this test."
+         READ THIS AS A QUESTION, NOT A REGRESSION, and the census test above \
+         answers it. If that test is GREEN at 0, no render path is asking \
+         PostgreSQL to spell a SQLite identifier, the divergence is exactly what \
+         `render_sqlite_trigger_op` naming its own dialect was FOR, and this test \
+         has outlived its subject - retire it and say so.\n\
+         \n\
+         If that test is RED above 0, this is the escalation: those calls were \
+         emitting correct SQLite only by the coincidence this assertion pinned, \
+         and they are now emitting PostgreSQL's spelling into SQLite triggers. Fix \
+         them first."
     );
 }
 

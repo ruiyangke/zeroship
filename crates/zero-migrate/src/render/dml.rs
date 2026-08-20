@@ -250,32 +250,43 @@ pub enum DmlError {
 /// (PostgreSQL `Bind` parameter count is a `u16`).
 pub(crate) const MAX_BIND_PARAMS: usize = 65535;
 
-/// Validate a bare SQL identifier and double-quote it (`"` → `""`). The ONLY
-/// identifier-emission path the assembler uses — a schema-qualified / malformed
-/// name is rejected, so an injection through an identifier slot cannot reach the
-/// DB. Bare-identifier validation mirrors [`crate::model::backfill::BackfillSpec`].
+/// Validate a bare SQL identifier and double-quote it for `dialect` (`"` → `""` on
+/// both shipping spellings). The ONLY identifier-emission path the assembler uses —
+/// a schema-qualified / malformed name is rejected, so an injection through an
+/// identifier slot cannot reach the DB. Bare-identifier validation mirrors
+/// [`crate::model::backfill::BackfillSpec`].
 ///
-/// # This wrapper is PostgreSQL-pinned, and that is now a claim about its callers
+/// # There is no longer a PostgreSQL-pinned spelling of this, and that is the point
 ///
-/// The dialect-free spelling is `SqlDialect::Postgres`, so this and
-/// [`quote_bare_ident`] / [`quote_ident_checked`] are only safe for callers that
-/// are THEMSELVES PostgreSQL-specific. That used to be untrue:
-/// `render::backends::sqlite` called [`quote_bare_ident`] for all four of its
-/// identifier emissions, so the SQLite backend was quoted by the PostgreSQL
-/// renderer — correct only because both vendors spell an identifier `"x"`, and a
-/// hard blocker on extracting a `zero-migrate-sqlite` crate.
+/// This function used to have two dialect-free wrappers, `quote_ident` and its
+/// public-in-crate sibling `quote_bare_ident`, both of which passed
+/// `SqlDialect::Postgres`. They were safe only for callers that were THEMSELVES
+/// PostgreSQL-specific, and twice they were not: `render::backends::sqlite` quoted
+/// all four of its identifier emissions with them, and after that was fixed
+/// `render::lower::render_sqlite_trigger_op` still quoted all six of its trigger
+/// identifiers with them. Both were correct SQL only because the two vendors spell
+/// an identifier `"x"`, and both were hard blockers on extracting a
+/// `zero-migrate-sqlite` crate that does not need `zero-migrate-postgres` AT
+/// RUNTIME — a crate-extraction spike demonstrated the second one by rendering a
+/// `createTrigger` from inside the extracted crate and getting PostgreSQL's marker
+/// back.
 ///
-/// Every backend module now names its own dialect through
-/// [`quote_bare_ident_for_dialect`] / [`quote_ident_checked_for_dialect`]. What
-/// still calls the pinned form is the PostgreSQL executor
-/// (`apply::backend::postgres`, `apply::role`, `apply::journal`,
-/// `render::vendor`), which travels to the PG crate with the pin intact — plus
-/// `render::lower::render_sqlite_trigger_op`, which is the ONE remaining
-/// SQLite-reaches-PG site and belongs to `lower.rs`'s own step-3 pass.
-fn quote_ident(what: &'static str, ident: &str) -> Result<String, DmlError> {
-    quote_ident_for_dialect(what, ident, SqlDialect::Postgres)
-}
-
+/// With the trigger path routed through [`quote_bare_ident_for_dialect`], rustc
+/// reported both wrappers `never used`, so they are GONE rather than merely
+/// unused: a dialect-free spelling that exists is a trap a future caller falls
+/// into, and its absence is what makes "core hard-codes a dialect behind a
+/// backend's back" unrepresentable here instead of merely absent today.
+///
+/// The other PG-pinned wrapper, [`quote_ident_checked`], is untouched and stays
+/// pinned. Its callers — `apply::backend::postgres`, `apply::role`,
+/// `apply::journal`, `render::vendor`, `conn`, `plan::author`, and the vendor-op
+/// arms of `render::lower` — really are PostgreSQL-specific and travel to the PG
+/// crate with the pin intact. (An earlier version of this note said those callers
+/// used the wrapper deleted above. They never did; they have always used
+/// `quote_ident_checked`, which is a different function with a different
+/// fail-closed contract.)
+///
+/// Pinned by `tests/dialect_matrix/sqlite_trigger_quoting_reaches_postgres.rs`.
 pub(crate) fn quote_ident_for_dialect(
     what: &'static str,
     ident: &str,
@@ -294,11 +305,9 @@ pub(crate) fn quote_ident_for_dialect(
 }
 
 /// Public-in-crate wrapper for author-supplied bare identifiers. Trigger-body
-/// rendering needs the same strict table/column/name gate as the DML assembler.
-pub(crate) fn quote_bare_ident(what: &'static str, ident: &str) -> Result<String, DmlError> {
-    quote_ident(what, ident)
-}
-
+/// rendering needs the same strict table/column/name gate as the DML assembler, and
+/// must name the dialect it is rendering for — see [`quote_ident_for_dialect`] for
+/// why the dialect-free spelling of this was deleted rather than left unused.
 pub(crate) fn quote_bare_ident_for_dialect(
     what: &'static str,
     ident: &str,
@@ -331,7 +340,7 @@ pub struct IdentQuoteError {
 /// / `dml`) routes through this so all seams are **byte-identical** AND
 /// **uniformly self-defending**.
 ///
-/// Unlike a bare authored identifier ([`quote_ident`]), an engine-supplied name
+/// Unlike a bare authored identifier ([`quote_ident_for_dialect`]), an engine-supplied name
 /// is NOT a bare `[A-Za-z_][A-Za-z0-9_]*` ident — under the Confined posture the
 /// project schema is the app id (a `UUIDv7` carrying `-`). So it is emitted
 /// escape-and-quote: double an embedded `"`, wrap in `"`.
