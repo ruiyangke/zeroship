@@ -193,6 +193,54 @@ fn gateway_signing() -> SigningKey {
     SigningKey::from_bytes(&[7u8; 32])
 }
 
+/// The OP signing key this test PROCESS publishes, and no other.
+///
+/// `zeroship.signing_keys` allows one `active` OP key per DATABASE:
+/// `publish_active_key` retires every other active row and refuses to
+/// reactivate a retired one. The fixed `[42u8; 32]` this replaces gave every
+/// run the same kid, so two runs sharing a suite database retired each
+/// other. MEASURED 2026-08-20, two auth suites on one database: 3 failures in
+/// each run, all `publish active OP key: ... has non-activatable status
+/// "retiring"` naming one kid present in both logs.
+///
+/// `gateway_signing` above is deliberately left fixed: it is the RP-side key
+/// and never reaches `zeroship.signing_keys`, so it is not a singleton and
+/// two runs holding it collide over nothing.
+/// Publish the OP key of THIS PROCESS once, however many tests ask.
+///
+/// A per-process kid is not enough on its own. Each test here publishes, and a
+/// peer run retires our row between calls, so the second REPUBLISH of our own
+/// kid fails with `is terminally retired and cannot be reactivated`. MEASURED
+/// 2026-08-20 with per-process keys but per-test publishes, two runs against
+/// one database: 3 passed in one and 1 passed / 2 failed in the other.
+///
+/// Publishing once removes the only operation that can fail. The row stays
+/// usable after a peer retires it, because the JWKS keeps `retiring` keys
+/// (`crates/auth/src/oidc/metadata.rs:71-84`) and every assertion here looks
+/// its key up by kid rather than counting them.
+async fn publish_op_key_once(issuer: &Issuer, db: &compio_postgres::Client) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static PUBLISHED: AtomicBool = AtomicBool::new(false);
+    if PUBLISHED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    issuer
+        .publish_active_key(db)
+        .await
+        .expect("publish active OP key");
+}
+
+fn op_signing() -> SigningKey {
+    static SEED: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+    let seed = SEED.get_or_init(|| {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        zeroship_core::crypto::derive_key(&format!("gateway-op-{}-{nanos}", std::process::id()))
+    });
+    SigningKey::from_bytes(seed)
+}
+
 fn protected_static_manifest(body: bytes::Bytes) -> (Manifest, MemoryBlobStore) {
     let hash = hex::encode(Sha256::digest(&body));
     let mut assets = HashMap::new();
@@ -649,7 +697,7 @@ async fn gateway_bearer_rejects_real_op_id_token_but_accepts_access_token() {
     };
 
     let pg_client = connect_test_db(&db_url).await;
-    let signing = SigningKey::from_bytes(&[42u8; 32]);
+    let signing = op_signing();
     let broker =
         BrokerSecrets::new(BROKER_MASTER.to_vec(), None).expect("auth broker secrets");
     let issuer = Arc::new(
@@ -657,10 +705,7 @@ async fn gateway_bearer_rejects_real_op_id_token_but_accepts_access_token() {
             .expect("issuer")
             .with_broker_secrets(broker),
     );
-    issuer
-        .publish_active_key(&pg_client)
-        .await
-        .expect("publish active OP key");
+    publish_op_key_once(&issuer, &pg_client).await;
 
     let user_id = Uuid::new_v4();
     let app_id = Uuid::new_v4();
@@ -748,14 +793,11 @@ async fn gateway_bearer_rejects_access_token_for_different_resource_audience() {
     };
 
     let pg_client = connect_test_db(&db_url).await;
-    let signing = SigningKey::from_bytes(&[42u8; 32]);
+    let signing = op_signing();
     let issuer = Arc::new(
         Issuer::from_signing_key(&signing, [9u8; 32], ISSUER.to_string()).expect("issuer"),
     );
-    issuer
-        .publish_active_key(&pg_client)
-        .await
-        .expect("publish active OP key");
+    publish_op_key_once(&issuer, &pg_client).await;
 
     let app_id = Uuid::new_v4();
     let client_id = format!("oac_{}", zeroship_core::typed_id::uuid_to_base62(&app_id));
@@ -819,7 +861,7 @@ async fn gateway_oidc_rp_full_dance_against_platform_op() {
     .detach();
     let pg_client = Arc::new(pg_client);
 
-    let signing = SigningKey::from_bytes(&[42u8; 32]);
+    let signing = op_signing();
     let broker =
         BrokerSecrets::new(BROKER_MASTER.to_vec(), None).expect("auth broker secrets");
     let issuer = Arc::new(
@@ -827,10 +869,7 @@ async fn gateway_oidc_rp_full_dance_against_platform_op() {
             .expect("issuer")
             .with_broker_secrets(broker),
     );
-    issuer
-        .publish_active_key(&pg_client)
-        .await
-        .expect("publish active OP key");
+    publish_op_key_once(&issuer, &pg_client).await;
 
     let user_id = Uuid::new_v4();
     let app_id = Uuid::new_v4();
