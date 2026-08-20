@@ -161,6 +161,10 @@ tests/e2e-browser/src/dev-server.ts:sdks/vite-plugin/dist/cli/migrate-dev.js
 tests/e2e_dev_vs_deployed_stream.sh:sdks/vite-plugin/dist/dev-bootstrap.js
 tests/golden_path.sh:sdks/vite-plugin/dist/index.js
 tests/lib/binary_freshness.sh:sdks/vite-plugin/dist/index.js
+AGENTS.md:sdks/db/dist/internal.js
+CONTRIBUTING.md:sdks/db/dist/internal.js
+ISSUES.md:sdks/bootstrap/dist/runtime-entry.js
+docs/build-and-deploy-golden-path.md:examples/workflows-order/dist/index.js
 "
 
 # A corpus check the count cannot do: a renamed root silently stops being
@@ -316,10 +320,13 @@ done < <( { grep -roP "$DOC_PAT" --include='*.md' \
   } | sort -u )
 
 echo "doc citations checked: $doc_found across docs/ + root *.md, excluding $DOC_EXCLUDED and dated records (allowed: $doc_allowed, unresolvable: $((missing - src_missing)))"
-# The build-state report. Deliberately a WARNING and not a failure: whether a
-# citation to a build output should count as a source citation is a contract
-# question, and this check's job is to stop a local green being mistaken for a
-# CI green, not to answer it.
+# The build-state report. Still a WARNING and not a failure, but the contract
+# question it used to leave open is now ANSWERED: a citation to a build output
+# is correct as written and belongs in ALLOW (fourth category above), so the
+# named pairs no longer fail in either tree. The warning survives because it
+# reports something ALLOW cannot - that this run resolved a target CI would
+# not, so a green here is not evidence of a green there. Any target it lists
+# that is NOT in ALLOW is on its way to failing in CI.
 if [ -s "$RESOLVED_LIST" ] && git rev-parse --git-dir >/dev/null 2>&1; then
   sort -u "$RESOLVED_LIST" > "$RESOLVED_LIST.s"
   git ls-files | sort -u > "$RESOLVED_LIST.t"
