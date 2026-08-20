@@ -2308,17 +2308,18 @@ mod tests {
     // TEXT `(client_id, pws_)` family marker (the old UUID-only denylist
     // could never match the `pws_…` subject).
 
-    async fn connect_auth_db() -> Option<crate::db::DbConfig> {
-        let dsn = zeroship_core::config::test_database_url_opt()?;
-        Some(crate::db::DbConfig::new(dsn, 4))
+    // Postgres is not optional for this workspace's tests (see
+    // crates/test-support/src/lib.rs); `test_database_url()` panics with the
+    // provisioning command rather than let these revocation tests report a
+    // pass for a check they never ran.
+    async fn connect_auth_db() -> crate::db::DbConfig {
+        let dsn = zeroship_core::config::test_database_url();
+        crate::db::DbConfig::new(dsn, 4)
     }
 
     #[ntex::test]
     async fn bearer_raw_op_revocation_is_per_app_not_global() {
-        let Some(db) = connect_auth_db().await else {
-            eprintln!("skipping (no test database; set PG_TEST_URL)");
-            return;
-        };
+        let db = connect_auth_db().await;
         let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]);
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let srv = start_jwks_server(op_jwks_doc(&jwks_signing)).await;
@@ -3478,10 +3479,7 @@ mod tests {
     /// per-app marker the Bearer arm uses). PG-gated.
     #[compio::test]
     async fn cookie_arm_rejects_revoked_family_statelessly() {
-        let Some(db) = connect_auth_db().await else {
-            eprintln!("skipping (no test database; set PG_TEST_URL)");
-            return;
-        };
+        let db = connect_auth_db().await;
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let state = build_state_with_session_and_auth_ui_url_and_db(
             gateway_signing,
@@ -3587,10 +3585,7 @@ mod tests {
     /// PG-gated.
     #[compio::test]
     async fn revocation_cache_honors_revocation_after_ttl_expiry() {
-        let Some(db) = connect_auth_db().await else {
-            eprintln!("skipping (no test database; set PG_TEST_URL)");
-            return;
-        };
+        let db = connect_auth_db().await;
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let mut state = build_state_with_session_and_auth_ui_url_and_db(
             gateway_signing,
@@ -3669,10 +3664,7 @@ mod tests {
     /// → the second read would hit the dead DB → fail closed). PG-gated.
     #[compio::test]
     async fn revocation_cache_negative_entry_serves_without_db_within_ttl() {
-        let Some(db) = connect_auth_db().await else {
-            eprintln!("skipping (no test database; set PG_TEST_URL)");
-            return;
-        };
+        let db = connect_auth_db().await;
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         // Long TTL so the warmed negative entry is unquestionably fresh for the
         // second read.
@@ -3772,10 +3764,7 @@ mod tests {
     /// would serve for the full 600 s). PG-gated.
     #[compio::test]
     async fn revocation_cache_same_node_bust_takes_effect_immediately() {
-        let Some(db) = connect_auth_db().await else {
-            eprintln!("skipping (no test database; set PG_TEST_URL)");
-            return;
-        };
+        let db = connect_auth_db().await;
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let mut state = build_state_with_session_and_auth_ui_url_and_db(
             gateway_signing,
@@ -3978,10 +3967,7 @@ mod tests {
     /// `ntex::web::test::server` JWKS mock, which requires the ntex runtime.
     #[ntex::test]
     async fn revocation_keyed_on_pws_rejects_raw_op_bearer() {
-        let Some(db) = connect_auth_db().await else {
-            eprintln!("skipping (no test database; set PG_TEST_URL)");
-            return;
-        };
+        let db = connect_auth_db().await;
 
         let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]);
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);

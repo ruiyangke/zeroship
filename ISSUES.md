@@ -34,7 +34,7 @@ builder.
 | **T2** GA | ISS-15 deploy history+rollback · ISS-36 custom domains · ISS-37 edge observability · ISS-38 CD + prod orchestration · ISS-39 prod secrets backend · ISS-40 dynamic worker fleet · ISS-43 WebSocket-in-gateway |
 | **T3** capability | ISS-28 cron/scheduled primitive · ISS-41 end-user authz (P12) · ISS-42 `@zeroship/{email,ai}` SDKs · ISS-44 non-additive migrations · ISS-45 node-compat align · ISS-46 per-tenant fairness/quotas · ISS-47 `env.assets` writes |
 | **T4** scale/later | ISS-48 teams/orgs · ISS-49 V8 snapshots · ISS-50 multi-region/HA · ISS-51 sandbox scale · ISS-52 stateless-worker migration |
-| **test infra** | ISS-53 e2e_platform.sh broken vs current config · ISS-54 no gateway-E2E coverage for primitives (+storage/auth/kv examples) |
+| **test infra** | ISS-53 e2e_platform.sh broken vs current config · ISS-54 no gateway-E2E coverage for primitives (+storage/auth/kv examples) · ISS-73 `zeroship-worker` in no gate suite, 7 red tests |
 | **test-surfaced — FIXED** | ✅ ISS-56 (serve env) · ✅ ISS-57 (CLI port) · ✅ ISS-58 (`/health`) · ✅ ISS-60 (trailing-slash, was stale doc) |
 | **test-surfaced — open** | ISS-55 `"use server"` dead in serve · ISS-59 server-only build fails · ISS-61 example/doc hygiene · ISS-62 auth `--check-config` can't dry-run |
 | **gateway-E2E (real edge)** | ✅ ISS-63 (env.db init) + ✅ ISS-66 (env.db RPC dispatch — **env.db works over the worker edge**) · ✅ ISS-64 (authed gateway RPC — offline-minted session, `e2e_auth_rpc.sh`) · ISS-65 build-alignment (low, backstopped) |
@@ -136,6 +136,77 @@ a producer stall — the starvation (and the cold-Complete latency) are real-S3-
 The bundle path (`put_blob_stream`) keeps the gate-drain loop: its source is a synchronous
 `std::io::Read` that returns immediately and cannot park the loop, so there is no async producer to
 overlap; it adopts only the warm-session `complete_multipart_on`.
+
+### ISS-73 · `zeroship-worker` is in no gate suite, and 7 of its tests have been red
+**Status:** open · **Effort:** S (the fix) · **Tier:** T2 (test infra + workflow dispatch coverage) ·
+Surfaced 2026-08-20 while verifying `feat/egress-rules-control`, outside the four checks that branch
+was asked for
+
+**The failure.** `cargo test -p zeroship-worker` reports `FAILED. 67 passed; 7 failed` on the
+`zeroship-worker` **bin** target. All seven are `handler::tests::workflow_advance_*`:
+
+```
+workflow_advance_claim_lost_nacks_without_replay
+workflow_advance_concurrent_frontier_returns_outcomes_batch
+workflow_advance_feeds_platform_counters_and_workflow_steps_metric
+workflow_advance_first_frontier_returns_step_completed
+workflow_advance_keeps_in_flight_run_on_pinned_deploy_after_redeploy
+workflow_advance_pinned_isolate_budget_lru_evicts_per_app
+workflow_advance_replays_journal_hit_without_rerunning_body
+```
+
+Each panics identically at `crates/worker/src/handler.rs:1806`:
+
+```
+provision worker workflow test journal: Db("db error: ERROR: schema \"app_<uuid>\" does not exist")
+```
+
+**Cause.** `seed_unclaimed_workflow_run` mints `app_id = Uuid::new_v4()` and calls
+`PgStore::provision`, whose DDL is `CREATE TABLE IF NOT EXISTS app_<uuid>.<table>` and deliberately
+contains no `CREATE SCHEMA` — that is asserted, in the same crate, at
+`crates/plugin-workflow/src/store/pg.rs:1961` ("worker workflow provisioning must not create roles
+or schemas"). Creating the per-app schema is the control plane's authority alone
+(`crates/control/src/migrations_api.rs:28`). Nothing in the test path invokes it, and the id is
+fresh each run, so the schema can never pre-exist. The test is asking a component that is forbidden
+to create schemas to create one.
+
+**Why nobody saw it.** Two independent silences compound.
+1. The DSN comes from `zeroship_core::config::test_database_url_opt()`, and each test returns early
+   with `eprintln!("skipping (set PG_TEST_URL for workflow apply test)")` when it is `None`. On a
+   machine with no `deploy/ops/zeroship.test.toml` and no `PG_TEST_URL` — CI's `rust` job — all
+   seven skip and the target is green. They fail only on a machine that HAS a test overlay, i.e. a
+   developer's.
+2. `zeroship-worker` is in **neither** gate suite. `tests/run_auth_suite.sh` runs
+   `zeroship-{auth,authn,authz,mailer}` plus seven named `zeroship-gateway` binaries;
+   `tests/run_billing_suite.sh` runs `zeroship-{control,migrated,migrate-adapter,metering,stream}`.
+   So the one class of machine that can see the failure is also the class that never runs the
+   target. Note the `eprintln!` skip is invisible to `tests/lib/skip_census.sh`, which keys on the
+   `ZEROSHIP-TEST-SKIPPED:` sentinel these tests do not emit.
+
+**Reproduction, and the control.** Verified by EXECUTION on main, not inferred from the diff. On a
+detached worktree at `2935fc34a` (`git worktree add --detach <path> main`, plus the three
+untracked prerequisites: `third_party/zero-migrate` rsynced in, `sdks/{bootstrap,db}/dist` copied
+in, `deploy/ops/zeroship.test.toml` copied in), `cargo test -p zeroship-worker --no-fail-fast`
+gives `67 passed; 7 failed` with the same seven names. The same command on
+`feat/egress-rules-control` gives `69 passed; 7 failed` — the +2 is that branch's own `cache.rs`
+tests, and the failing set is byte-identical. `crates/worker/src/handler.rs` and
+`crates/plugin-workflow/src/store/pg.rs` are byte-identical between the two trees.
+
+**What this entry does NOT establish.** Only that the seven fail today on main for the reason
+above. It does not say when they last passed, whether they ever passed against a real database, or
+whether the seven assertions are otherwise sound — the panic is in setup, so no assertion in any of
+the seven has been reached. It also does not survey the rest of the workspace for targets in the
+same position; `zeroship-worker` is the one that was looked at, and the coverage argument above
+applies to every package in neither suite.
+
+**Fix direction.** Two halves, and the second is the one that matters.
+- *The tests:* have the setup create the per-app schema through whatever the control plane uses, or
+  point the tests at an app the harness provisioned; alternatively emit the
+  `ZEROSHIP-TEST-SKIPPED:` sentinel so the census counts them rather than `eprintln!`.
+- *The gate:* `zeroship-worker` (and any other package in neither suite) needs to be in one. A test
+  that is green only because nothing runs it is the failure mode both suites were written to stop —
+  `tests/run_auth_suite.sh`'s own header says a suite that passes because it never ran is worse
+  than a red one, because it is trusted.
 
 ### ISS-32 · No production object storage (S3/R2)
 **Status:** FIXED (PR1–PR4, branch `design/s3-object-storage`) · **Effort:** M–L · **Tier:** T1

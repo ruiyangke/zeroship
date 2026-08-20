@@ -1509,8 +1509,12 @@ mod access_identity_tests {
         client
     }
 
-    async fn mint_fixture() -> Option<(String, Client, Client, Client, Uuid, OAuthClient, Issuer)> {
-        let dsn = zeroship_core::config::test_database_url_opt()?;
+    // A missing Postgres is a FAILURE, not a skip: these fixtures exercise
+    // the mint-vs-deletion lock race, and a silently skipped run would let
+    // that race go unchecked while the suite still read green. Dial it or
+    // panic naming the provisioning command.
+    async fn mint_fixture() -> (String, Client, Client, Client, Uuid, OAuthClient, Issuer) {
+        let dsn = zeroship_core::config::test_database_url();
         let setup = pg_connect(&dsn).await;
         let mint = pg_connect(&dsn).await;
         let deletion = pg_connect(&dsn).await;
@@ -1575,17 +1579,33 @@ mod access_identity_tests {
         // the second REPUBLISH of our own kid fails. Publishing once removes
         // the only operation that can fail; a retired row stays usable, since
         // the JWKS keeps `retiring` keys and lookups here are by kid.
+        //
+        // LOAD-THEN-STORE, NOT `swap`. The flag must record that a publish
+        // SUCCEEDED, not that one was attempted. Written as
+        // `if !PUBLISHED.swap(true, ..)` the flag is already set when the
+        // `expect` below panics, so the first test reports the true error and
+        // every later test in the process silently skips the publish and fails
+        // somewhere downstream on a key that was never registered - one real
+        // failure wearing three unrelated faces, which is the diagnosis trap
+        // this whole file's fixtures exist to avoid.
+        //
+        // The race the swap was buying is not one worth having: this suite runs
+        // `--test-threads 1`, and even threaded the worst case is publishing
+        // our own still-ACTIVE kid twice, which succeeds - `publish_active_key`
+        // refuses only `retiring` and `retired` rows. Skipping the publish
+        // entirely is the outcome that cannot be recovered from.
         {
             use std::sync::atomic::{AtomicBool, Ordering};
             static PUBLISHED: AtomicBool = AtomicBool::new(false);
-            if !PUBLISHED.swap(true, Ordering::SeqCst) {
+            if !PUBLISHED.load(Ordering::SeqCst) {
                 issuer
                     .publish_active_key(&setup)
                     .await
                     .expect("publish mint-race signing key");
+                PUBLISHED.store(true, Ordering::SeqCst);
             }
         }
-        Some((dsn, setup, mint, deletion, user_id, client, issuer))
+        (dsn, setup, mint, deletion, user_id, client, issuer)
     }
 
     /// A signing seed unique to this test process, stable within it.
@@ -1661,12 +1681,7 @@ mod access_identity_tests {
 
     #[compio::test]
     async fn access_token_mint_holds_the_user_lock_until_commit() {
-        let Some((_dsn, setup, mut mint, _deletion, user_id, client, issuer)) =
-            mint_fixture().await
-        else {
-            eprintln!("skip: no test database (set PG_TEST_URL or run tests/provision_test_backends.sh)");
-            return;
-        };
+        let (_dsn, setup, mut mint, _deletion, user_id, client, issuer) = mint_fixture().await;
         let tx = mint.transaction().await.expect("mint transaction");
         mint_access_token(&tx, &issuer, &client, user_id, &["openid".to_string()])
             .await
@@ -1691,12 +1706,7 @@ mod access_identity_tests {
 
     #[compio::test]
     async fn access_token_mint_rejects_a_deleted_principal_after_locking() {
-        let Some((_dsn, mut setup, mut mint, _deletion, user_id, client, issuer)) =
-            mint_fixture().await
-        else {
-            eprintln!("skip: no test database (set PG_TEST_URL or run tests/provision_test_backends.sh)");
-            return;
-        };
+        let (_dsn, mut setup, mut mint, _deletion, user_id, client, issuer) = mint_fixture().await;
         crate::store::users::request_deletion(&mut setup, user_id, 30)
             .await
             .expect("delete request")
@@ -1715,12 +1725,7 @@ mod access_identity_tests {
 
     #[compio::test]
     async fn deletion_marker_uses_a_post_lock_timestamp() {
-        let Some((_dsn, setup, mut mint, mut deletion, user_id, client, issuer)) =
-            mint_fixture().await
-        else {
-            eprintln!("skip: no test database (set PG_TEST_URL or run tests/provision_test_backends.sh)");
-            return;
-        };
+        let (_dsn, setup, mut mint, mut deletion, user_id, client, issuer) = mint_fixture().await;
         let tx = mint.transaction().await.expect("mint transaction");
         crate::advisory_lock::lock_refresh_user_xact(&tx, user_id)
             .await

@@ -175,10 +175,11 @@ mod tests {
 
     #[compio::test]
     async fn advisory_lock_serializes_same_key_across_sessions() {
-        let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
-            eprintln!("skip: no test database (set PG_TEST_URL or run tests/provision_test_backends.sh)");
-            return;
-        };
+        // A missing Postgres used to return early with a printed skip that
+        // the harness never counted, so a broken advisory-lock guarantee
+        // could sit green indefinitely. Dial it or panic naming the
+        // provisioning command.
+        let dsn = zeroship_core::config::test_database_url();
 
         let client_a = pg_connect(&dsn).await;
         let client_b = pg_connect(&dsn).await;

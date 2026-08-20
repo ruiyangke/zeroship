@@ -338,6 +338,16 @@ jobs:
         run: tests/cli_command_index_gate.sh
       - name: The two [[inject]] ceilings agree
         run: tests/inject_policy_mirror_gate.sh
+      # tests/lib/skip_census.sh counts skips by one token, so a test that
+      # skips WITHOUT printing it is invisible to the census whose whole job is
+      # to stop a suite quietly covering less than it claims. 49 lines across
+      # ten files were in that state on 2026-08-19; the self-test runs first
+      # because a gate that reports zero offenders and a gate whose detector
+      # matches nothing print the same thing.
+      - name: Skip-marker gate self-test
+        run: tests/skip_marker_gate.sh --self-test
+      - name: No test skips in a string the census cannot see
+        run: tests/skip_marker_gate.sh
       # A `//` comment in dispatch.rs said the transparent WebSocket proxy was
       # wired in a `proxy::` helper. That name existed in exactly one place in
       # the repo: the comment claiming it. It sat 760 lines from the function
