@@ -46,6 +46,23 @@ bodies are now one call to this binary each -- so `tests/run_auth_suite.sh`,
 `tests/run_billing_suite.sh` and `tests/sweep_test_databases.sh` did not change.
 `tests/lib/testkit.sh` finds (and, when stale, builds) the binary.
 
+## The dependency this crate must never take
+
+`zeroship-core`. It depends on `cyper` -> `hyper` -> **tokio**, and measured on
+2026-08-20 with `cargo tree -i tokio -e normal -p zeroship-control`, that is the
+only edge by which tokio enters this workspace at all. So the overlay reader
+here is forty hand-rolled lines rather than a call into
+`zeroship_core::config::test_overlay`, and there is no HTTP client: `cargo tree
+-i tokio -e normal -p zeroship-testkit` reports "did not match any packages",
+with and without dev-dependencies, while the same command on
+`zeroship-gateway` prints the full inversion tree. That pair is the check --
+the second half is what proves the instrument discriminates rather than merely
+runs.
+
+This is the constraint that will decide how much more of `tests/` can follow:
+50 of the 111 shell files call `curl`, and the in-tree HTTP client is the one
+that drags tokio.
+
 ## Two rules this crate is built around
 
 **No environment reads.** Not one, in library or binary: `std::env::var` and its
