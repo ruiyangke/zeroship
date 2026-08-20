@@ -64,18 +64,38 @@
 # missing migration. It reads that way on a PRIVATE database too, for exactly
 # the same reason, so this is a property the change neither creates nor cures.
 #
-# CONCURRENT RUNS ON ONE SHARED DATABASE ARE SAFE, and that is recent:
+# CONCURRENT RUNS ON ONE SHARED DATABASE, and the one place they were NOT safe:
 #
 #   - CREATE: two runs can both find the database absent and both issue
 #     CREATE DATABASE. `zs_suite_db_ensure` treats "it exists now" as success,
 #     so the loser proceeds instead of aborting on 42P04.
-#   - MIGRATE: `run_platform_migrations` brackets its whole run in
+#   - MIGRATE, database ALREADY migrated: safe, and measured.
+#     `run_platform_migrations` brackets its apply in
 #     `pg_advisory_lock(hashtext('zeroship'))` taken IN THE TARGET DATABASE
-#     (third_party/zero-migrate/.../apply/backend/postgres/session.rs:60). An
-#     advisory lock is database-scoped, which is precisely why it was useless
-#     while every run had its own database - and is exactly what makes it work
-#     now that they share one. The second run blocks, then finds every file
-#     already journalled and applies nothing.
+#     (third_party/zero-migrate/.../apply/backend/postgres/session.rs:60),
+#     which is exactly the lock that was useless while every run had its own
+#     database and works now that they share one. MEASURED 2026-08-20 on 5444,
+#     two migrates of one migrated database started together, three rounds:
+#     0/0, 0/0, 0/0.
+#   - MIGRATE, database NEVER migrated: NOT safe on its own, and this is the
+#     hole the design had until it was measured. The same experiment against a
+#     freshly created database:
+#         migrate A exit=0   migrate B exit=1
+#         zeroship-platform-migrate: FAILED: provision schema:
+#           duplicate key value violates unique constraint
+#           "pg_namespace_nspname_index"
+#     The project advisory lock is taken around the APPLY. Provisioning the
+#     schema happens BEFORE it, so two first-ever runs race on `CREATE SCHEMA`
+#     and one dies. This is not a rare window either: it is exactly what two
+#     agents starting together on a newly-written migration hit.
+#
+#     `zs_suite_db_provision` therefore serializes create+migrate under an
+#     `flock` keyed on host:port:database. WHAT THAT DOES NOT COVER: agents on
+#     DIFFERENT MACHINES sharing one server. Every agent here runs on one box,
+#     and CI gives each job its own Postgres service, so the covered case is
+#     the one that exists - but a second machine pointed at the same cluster
+#     would reopen the same race, and the fix then is in the migrate binary,
+#     beside cluster_lock.rs, not here.
 #   - CLUSTER-GLOBAL CATALOGS (pg_authid, pg_auth_members, pg_db_role_setting)
 #     are handled separately, since they are shared across every database on the
 #     cluster no matter which one issued the write:
@@ -281,4 +301,52 @@ zs_suite_db_ensure() {
        echo "FATAL: could not create ${name}." >&2
        return 2 ;;
   esac
+}
+
+# Create the database if absent, then run the caller's migrate command - with
+# both steps serialized against every other run on this machine targeting the
+# same database.
+#
+# Usage: zs_suite_db_provision <migrate command...>
+#
+# WHY A LOCK AT ALL, when the migrate binary already takes one. Because its
+# lock is taken around the APPLY, and the step that races is the one BEFORE it.
+# See the header for the measurement: two first-ever migrates of one database,
+# started together, give exit 0 and exit 1, the loser dying on
+# `provision schema: duplicate key value violates unique constraint
+# "pg_namespace_nspname_index"`.
+#
+# WHY flock AND NOT AN ADVISORY LOCK. A PostgreSQL session advisory lock has to
+# be HELD by an open session for the whole bracket, and the bracket here spans a
+# separate process. Holding one from bash means keeping a psql alive on a pipe
+# and having no reliable way to know the lock was granted before proceeding -
+# a lock you cannot confirm you hold is worse than none, because it reads as
+# protection. flock's guarantee is exactly the one wanted: the caller does not
+# continue until the descriptor is held. The trade is that it is per-machine;
+# the header says what that does not cover.
+#
+# THE LOCK IS HELD OVER PROVISIONING ONLY, never over the tests. A suite run is
+# tens of minutes; serializing that would mean two agents never overlap, which
+# is the entire property this file exists to deliver.
+zs_suite_db_provision() {
+  local name="${TEST_DB:?zs_suite_db_provision before zs_suite_db_resolve}"
+  local key lock
+
+  # Keyed on the SERVER as well as the database. Two clusters can carry the
+  # same database name, and a lock that ignored the port would serialize runs
+  # that cannot touch each other.
+  key="$(printf '%s' "${PG_HOST:-}:${PG_PORT:-}:${name}" | sha256sum | cut -c1-16)"
+  lock="${TMPDIR:-/tmp}/zeroship-suite-db-${key}.lock"
+
+  # The subshell exists so the descriptor closes - and the lock releases - on
+  # every path out, including a failing migrate under `set -e`.
+  (
+    if ! flock --timeout 900 9; then
+      echo "FATAL: waited 900s for another run to finish provisioning ${name}." >&2
+      echo "       Lock file: ${lock}" >&2
+      exit 2
+    fi
+    zs_suite_db_ensure || exit $?
+    "$@" || exit $?
+  ) 9>"$lock"
 }

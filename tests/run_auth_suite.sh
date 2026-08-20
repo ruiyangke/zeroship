@@ -154,20 +154,21 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-zs_suite_db_ensure || exit $?
-
-# Migrate UNCONDITIONALLY, whether this run created the database or found it.
+# Create-if-absent and migrate, both under a lock so two agents starting
+# together cannot race. Migrate UNCONDITIONALLY, whether this run created the
+# database or found it: a run that dies between CREATE and the end of its
+# migration leaves a partially journalled database, and the next run's migrate
+# is what finishes it. Skipping it on "it already existed" would hand that run
+# a half-built schema and blame the tests. The apply is idempotent - it
+# re-derives the journal and skips applied files.
 #
-# Not an optimisation left on the table. A run that dies between CREATE and the
-# end of its migration leaves a partially journalled database, and the next
-# run's migrate is what finishes it - skipping the migrate on "it already
-# existed" would hand that run a half-built schema and blame the tests. The
-# apply is idempotent (it re-derives the journal and skips applied files) and
-# `run_platform_migrations` brackets itself in an advisory lock taken IN THIS
-# DATABASE, so a concurrent peer blocks here rather than racing.
-echo "==> Migrating ${TEST_DB} (idempotent; skips what is already applied)"
-ZEROSHIP_MIGRATE_DSN="$DSN" deploy/ops/db-migrate.sh >/dev/null
-echo "==> Migration complete"
+# The lock covers PROVISIONING ONLY and is released before cargo starts; see
+# tests/lib/suite_db.sh for the measurement that put it there and for what it
+# does not cover.
+echo "==> Provisioning ${TEST_DB} (create if absent, then migrate)"
+zs_suite_db_provision \
+  env ZEROSHIP_MIGRATE_DSN="$DSN" deploy/ops/db-migrate.sh >/dev/null || exit $?
+echo "==> Provisioning complete"
 
 # Prove the database is actually reachable before trusting any result below.
 run_psql -d "$TEST_DB" -v ON_ERROR_STOP=1 -tAc "select 1" >/dev/null \
