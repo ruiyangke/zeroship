@@ -1727,13 +1727,17 @@ export function down() {}
     /// shape, over a one-file corpus that creates roles nothing else has.
     ///
     /// WHY THIS EXISTS ALONGSIDE THE TEST ABOVE. The real-corpus version is
-    /// faithful but blunt, and MEASURED at only 1 failure in 3 runs with the
-    /// cluster lock disabled (2026-08-20, :5440). Two things blunt it. The two
-    /// runs must drift into phase across 28 unrelated files before they reach
-    /// the roles file, so whether their shared-catalog statements overlap is
-    /// luck; and every platform role already exists on any cluster a suite has
-    /// ever run against, so the engine's `ifNotExists` probe turns most of the
-    /// op into a no-op and there is less left to collide.
+    /// faithful but blunt: MEASURED 2026-08-20 on :5440, it failed 1 run in 3
+    /// with the cluster lock disabled, against 0 in 3 with it enabled. Two
+    /// things blunt it. The two runs must drift into phase across 28 unrelated
+    /// files before they reach the roles file, so whether their shared-catalog
+    /// statements overlap is luck; and every platform role already exists on any
+    /// cluster a suite has ever run against, so the engine's `ifNotExists` probe
+    /// turns most of the op into a no-op and there is less left to collide.
+    ///
+    /// This version measured 3 failures in 5 per attempt under the same
+    /// mutation, and 0 in 5 with the lock enabled; the round loop below turns
+    /// that per-attempt 3-in-5 into a per-run near-certainty.
     ///
     /// This version removes both. The corpus is ONE file, so both runs reach the
     /// role statements within milliseconds of each other, and the role names are
@@ -1757,56 +1761,87 @@ export function down() {}
         };
         let _serial = DB_APPLY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
+        // ROUNDS, because one collision attempt is not a test.
+        //
+        // MEASURED 2026-08-20 on :5440 with the cluster lock disabled, one
+        // attempt per invocation: 3 failures in 5. With it enabled: 0 in 5. So a
+        // single attempt would let the defect back in about two times in five.
+        // Rounds are independent attempts, so five of them miss only if all five
+        // do: ~0.4^5, about one percent. Each round costs roughly a second.
+        //
+        // Stopping at the first red keeps a genuine regression fast to see; the
+        // round number is reported so a rare-vs-immediate failure is
+        // distinguishable in the output.
+        const ROUNDS: usize = 5;
+
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        // Short enough to stay inside PostgreSQL's 63-byte identifier limit.
-        let role_prefix = format!("zsrace{}", stamp % 1_000_000_000);
-        let roles: Vec<String> = (0..8).map(|i| format!("{role_prefix}_{i}")).collect();
+        let mut failure: Option<String> = None;
 
-        let corpus = tempfile::tempdir().expect("create temporary race corpus");
-        std::fs::write(
-            corpus.path().join("20260101000000_race_probe.ts"),
-            race_corpus_source(&roles),
-        )
-        .expect("write the race corpus");
+        for round in 0..ROUNDS {
+            // Fresh role names PER ROUND. Reusing them would leave round 2
+            // onwards finding the roles already present, and the engine's
+            // `ifNotExists` probe would skip the very statements under test --
+            // every round after the first would pass without proving anything.
+            //
+            // Short enough to stay inside PostgreSQL's 63-byte identifier limit.
+            let role_prefix = format!("zsrace{}r{round}", stamp % 1_000_000_000);
+            let roles: Vec<String> = (0..8).map(|i| format!("{role_prefix}_{i}")).collect();
 
-        let db_a = format!("zs_rolerace_a_{stamp}");
-        let db_b = format!("zs_rolerace_b_{stamp}");
-        {
-            let admin = admin_session(&url).await;
-            for db in [&db_a, &db_b] {
-                let _ = admin.batch(&format!("DROP DATABASE IF EXISTS \"{db}\"")).await;
-                admin
-                    .batch(&format!("CREATE DATABASE \"{db}\""))
-                    .await
-                    .unwrap_or_else(|e| panic!("CREATE DATABASE {db} failed: {e}"));
+            let corpus = tempfile::tempdir().expect("create temporary race corpus");
+            std::fs::write(
+                corpus.path().join("20260101000000_race_probe.ts"),
+                race_corpus_source(&roles),
+            )
+            .expect("write the race corpus");
+
+            let db_a = format!("zs_rolerace_a_{stamp}_{round}");
+            let db_b = format!("zs_rolerace_b_{stamp}_{round}");
+            {
+                let admin = admin_session(&url).await;
+                for db in [&db_a, &db_b] {
+                    let _ = admin.batch(&format!("DROP DATABASE IF EXISTS \"{db}\"")).await;
+                    admin
+                        .batch(&format!("CREATE DATABASE \"{db}\""))
+                        .await
+                        .unwrap_or_else(|e| panic!("CREATE DATABASE {db} failed: {e}"));
+                }
+            }
+
+            let outcome = run_two_concurrently(&url, &db_a, &db_b, corpus.path(), 1).await;
+
+            // Teardown runs before the assertion so a red round still leaves the
+            // cluster clean. The roles are cluster-global: leaking one leaks it
+            // into every other suite on this server.
+            {
+                let admin = admin_session(&url).await;
+                for db in [&db_a, &db_b] {
+                    let _ = admin
+                        .batch(&format!(
+                            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+                             WHERE datname = '{db}' AND pid <> pg_backend_pid()"
+                        ))
+                        .await;
+                    let _ = admin.batch(&format!("DROP DATABASE IF EXISTS \"{db}\"")).await;
+                }
+                for role in &roles {
+                    let _ = admin.batch(&format!("DROP ROLE IF EXISTS \"{role}\"")).await;
+                }
+            }
+
+            if let Err(error) = outcome {
+                failure = Some(format!("round {round} of {ROUNDS}: {error}"));
+                break;
             }
         }
 
-        let outcome = run_two_concurrently(&url, &db_a, &db_b, corpus.path(), 1).await;
-
-        // Teardown runs before the assertion so a red run still leaves the
-        // cluster clean. The roles are cluster-global: leaking one leaks it into
-        // every other suite on this server.
-        {
-            let admin = admin_session(&url).await;
-            for db in [&db_a, &db_b] {
-                let _ = admin
-                    .batch(&format!(
-                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
-                         WHERE datname = '{db}' AND pid <> pg_backend_pid()"
-                    ))
-                    .await;
-                let _ = admin.batch(&format!("DROP DATABASE IF EXISTS \"{db}\"")).await;
-            }
-            for role in &roles {
-                let _ = admin.batch(&format!("DROP ROLE IF EXISTS \"{role}\"")).await;
-            }
-        }
-
-        outcome.expect("two concurrent migrates creating the same roles must both succeed");
+        assert!(
+            failure.is_none(),
+            "two concurrent migrates creating the same roles must both succeed: {}",
+            failure.unwrap_or_default()
+        );
     }
 
     /// A one-file corpus whose whole content is role creation.
@@ -1853,25 +1888,45 @@ export function down() {}
         let cfg_a = config_for(dsn_with_db(url, db_a));
         let cfg_b = config_for(dsn_with_db(url, db_b));
 
-        // Run A on a spawned task and B inline on the same compio thread. Both
-        // sessions are therefore in flight across each other's awaits, which is
-        // what puts two statements on the server at once -- the condition the
-        // shared catalogs are unprotected against.
-        let task_a = compio::runtime::spawn(async move {
-            let started = std::time::Instant::now();
-            let result = run_platform_migrations(&cfg_a).await;
-            (started, std::time::Instant::now(), result)
+        // Run A on its OWN OS thread with its OWN compio runtime, released
+        // together with B by a barrier.
+        //
+        // THIS USED TO BE `compio::runtime::spawn` -- two tasks cooperating on
+        // one thread -- and that measured only 1 failure in 3 with the lock
+        // disabled, on BOTH corpora. The reason is that the halves of a migrate
+        // run that take real time are synchronous: V8 authoring and lowering
+        // contain no await points, so a single-threaded pair does not interleave
+        // there at all. B authored its whole corpus, and only when it finally
+        // awaited the database did A begin authoring. The two runs met only
+        // inside the short apply, which is why the collision was luck.
+        //
+        // Separate threads remove that: both runs author in parallel and reach
+        // their first shared-catalog statement together, which is the condition
+        // the test is supposed to create.
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let barrier_a = std::sync::Arc::clone(&barrier);
+        let thread_a = std::thread::spawn(move || {
+            compio::runtime::Runtime::new()
+                .expect("build run A's compio runtime")
+                .block_on(async move {
+                    barrier_a.wait();
+                    let started = std::time::Instant::now();
+                    let result = run_platform_migrations(&cfg_a)
+                        .await
+                        .map_err(|e| e.to_string());
+                    (started, std::time::Instant::now(), result)
+                })
         });
 
+        barrier.wait();
         let started_b = std::time::Instant::now();
-        let result_b = run_platform_migrations(&cfg_b).await;
+        let result_b = run_platform_migrations(&cfg_b)
+            .await
+            .map_err(|e| e.to_string());
         let ended_b = std::time::Instant::now();
 
-        // `Task::await` yields the panic payload rather than unwinding into this
-        // task, so a panicking run A would otherwise be reported as a type-level
-        // surprise instead of as the failure it is.
-        let (spawned_start_a, ended_a, result_a) = task_a
-            .await
+        let (spawned_start_a, ended_a, result_a) = thread_a
+            .join()
             .map_err(|_| "run A panicked; see the captured output above".to_string())?;
 
         // Report BOTH outcomes. Reporting only the first failure would hide the
