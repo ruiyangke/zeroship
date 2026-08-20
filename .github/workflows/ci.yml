@@ -812,11 +812,17 @@ jobs:
   # bind compose's postgres to 5440, which the service container already holds.
   #
   # The PG_* values moved from the test step to job level so BOTH steps see
-  # them: they are the provisioner's documented INPUTS, and
-  # `zs_test_config_assert_agrees` then re-reads them from the overlay and
-  # refuses if the two disagree. That refusal is the point of stating them here
-  # rather than letting the provisioner's defaults stand - it is what catches a
-  # `ports:` line and a provisioner default drifting apart.
+  # them. They are the provisioner's documented INPUTS, and the step below has
+  # to have them or it would write the provisioner's own defaults instead.
+  #
+  # DO NOT READ `zs_test_config_assert_agrees` AS A GUARD IN THIS JOB. It
+  # compares the caller's PG_* against the overlay, and here one job-level `env`
+  # feeds both the step that writes the overlay and the step that checks it, so
+  # the two cannot disagree and the comparison is vacuous. What actually catches
+  # a `ports:` line drifting from PG_PORT is the provisioner's own probe: it
+  # waits 60s for a server on the address it was handed and then fails with
+  # "PostgreSQL never came up on localhost:<port>". Loud, but from a different
+  # mechanism than the one the harness advertises.
   #
   # `redis:` is a real service and not a stub because the overlay names Redis
   # too (`worker.kv_url`), and the provisioner probes it. Neither of these two
