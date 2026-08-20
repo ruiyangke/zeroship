@@ -13,6 +13,7 @@ use compio_postgres::error::SqlState;
 use serde_json::Value;
 use uuid::Uuid;
 use zeroship_core::typed_id;
+use zeroship_plugin_workflow::store::pg::WorkflowTables;
 
 use crate::registry::RegistryError;
 use crate::AppState;
@@ -92,20 +93,38 @@ pub async fn tick_with_config(
 
 async fn gc_expired_subscriptions(state: &AppState) -> Result<(), RegistryError> {
     let conn = state.registry.conn().await?;
-    for app_id in super::workflow_engine::workflow_app_ids(&conn).await? {
-        let Some(tables) = super::workflow_engine::existing_tables(&conn, &app_id).await? else {
-            continue;
-        };
+    for app_id in super::workflow_engine::journalled_app_ids(&conn).await? {
+        let tables = WorkflowTables::for_app_id(&app_id);
         let sql = format!(
             "DELETE FROM {} \
               WHERE expires_at IS NOT NULL AND expires_at < now()",
             tables.subscriptions
         );
-        conn.execute(&sql, &[]).await.map_err(RegistryError::from)?;
+        super::workflow_engine::skip_journal_scoped(
+            &app_id,
+            "expired subscription gc",
+            conn.execute(&sql, &[]).await,
+        )?;
     }
     Ok(())
 }
 
+/// Claim and deliver the OLDEST pending broadcast, whichever tenant it belongs
+/// to.
+///
+/// The pick refuses a broadcast whose app has a journal schema it cannot enter.
+/// Without that the sweep would claim the same broadcast every tick, fail on the
+/// journal, and abort the fan-out for every other tenant behind it - a
+/// fleet-wide stall from one app, which is the defect this file's sibling sweeps
+/// were fixed for. The row stays PENDING rather than being marked completed,
+/// because "I could not read the subscribers" is not "there were none"; the
+/// broadcast drains as soon as the privilege gap is closed.
+///
+/// An app with NO journal schema at all is a different case and is deliberately
+/// still picked: there are no subscribers to deliver to, and the arm below
+/// completes the broadcast rather than leaving it forever pending. The skipped
+/// app is named in the WARN that `journalled_app_ids` emits from
+/// `gc_expired_subscriptions` on the same tick, so the stall is not silent.
 async fn drain_one_broadcast(
     state: &AppState,
     max_deliveries: i64,
@@ -123,6 +142,12 @@ async fn drain_one_broadcast(
                     AND app.workflows_enabled \
                     AND plan.workflows_allowed \
                     AND NOT plan.archived \
+                    AND NOT EXISTS ( \
+                        SELECT 1 \
+                          FROM pg_catalog.pg_namespace n \
+                         WHERE n.nspname = 'app_' || b.app_id::text \
+                           AND NOT has_schema_privilege(n.oid, 'USAGE') \
+                    ) \
                   ORDER BY b.created_at, b.id \
                   LIMIT 1 \
                   FOR UPDATE SKIP LOCKED \
