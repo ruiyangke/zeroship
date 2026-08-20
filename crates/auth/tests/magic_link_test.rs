@@ -32,91 +32,150 @@ async fn pg_connect(dsn: &str) -> Client {
     client
 }
 
-async fn install_magic_links_insert_delay(client: &Client) {
+// THE TABLES THESE TRIGGERS SIT ON ARE SHARED WITH EVERY CONCURRENT RUN, so
+// each install below scopes itself twice and both halves are load-bearing.
+//
+// The NAME is per-call. With one fixed name, a peer run's `CREATE OR REPLACE
+// FUNCTION` silently rewrites the body this run's trigger executes, and its
+// `DROP TRIGGER IF EXISTS` deletes this run's trigger outright - which removes
+// the race window the test exists to open and turns the assertion below into a
+// claim about a race that never happened.
+//
+// The `WHEN` clause is what stops the trigger FIRING for the peer's rows.
+// Renaming alone makes the collision quieter without removing it: a uniquely
+// named trigger on a shared table still sleeps 0.2s inside every insert any
+// other run makes, and these triggers exist precisely to widen a window, so an
+// unscoped one widens the peer's windows too.
+//
+// The model is `signing_key_retention_test.rs`, which has done both since it
+// was written; it discriminates on `application_name` because a retirement
+// UPDATE carries nothing else to key on. Here the inserted row carries the
+// test's own random email or nonce, so the WHEN clause can name the row itself.
+//
+// MEASURED 2026-08-20, this file's four DDL-installing modules run in two
+// concurrent processes against one shared database, five pairs each way:
+// `wrong_code_does_not_mutate_reserved_completion` failed in 2 of 10 runs
+// before, 0 of 10 after.
+//
+// WHAT THE `WHEN` CLAUSE DOES NOT DO. It is evaluated on every peer row
+// regardless - Postgres checks the expression for each insert into the shared
+// table while the trigger exists; what it saves is the 0.2s sleep, not the
+// evaluation. It does not scope the ACCESS EXCLUSIVE lock `CREATE TRIGGER` and
+// `DROP TRIGGER` take on that table, so a peer's writes still wait out this
+// run's DDL. And neither half is RAII: a panic between install and drop leaks
+// the pair. The leak is at least inert now, since a row-scoped trigger can
+// never match anything again, where the old fixed names left a live trigger
+// firing for every later run.
+//
+// Both installs return the object name; the function and the trigger share it,
+// since they live in different namespaces.
+
+async fn install_magic_links_insert_delay(client: &Client, email: &str) -> String {
+    let name = format!(
+        "test_sleep_before_magic_link_insert_{}",
+        Uuid::new_v4().simple()
+    );
     client
         .execute(
-            "CREATE OR REPLACE FUNCTION zeroship.test_sleep_before_magic_link_insert() \
-             RETURNS trigger LANGUAGE plpgsql AS $$ \
-             BEGIN \
-                 PERFORM pg_sleep(0.2); \
-                 RETURN NEW; \
-             END \
-             $$",
+            &format!(
+                "CREATE FUNCTION zeroship.{name}() \
+                 RETURNS trigger LANGUAGE plpgsql AS $$ \
+                 BEGIN \
+                     PERFORM pg_sleep(0.2); \
+                     RETURN NEW; \
+                 END \
+                 $$"
+            ),
             &[],
         )
         .await
         .expect("create insert delay function");
+    // `email` is this test's own `format!(\"...{uuid}@example.test\")`, so it
+    // carries no quote to escape; no caller-supplied string reaches this SQL.
     client
         .execute(
-            "DROP TRIGGER IF EXISTS test_sleep_before_magic_link_insert ON zeroship.magic_links",
-            &[],
-        )
-        .await
-        .expect("drop stale insert delay trigger");
-    client
-        .execute(
-            "CREATE TRIGGER test_sleep_before_magic_link_insert \
-             BEFORE INSERT ON zeroship.magic_links \
-             FOR EACH ROW EXECUTE FUNCTION zeroship.test_sleep_before_magic_link_insert()",
+            &format!(
+                "CREATE TRIGGER {name} \
+                 BEFORE INSERT ON zeroship.magic_links \
+                 FOR EACH ROW WHEN (NEW.email = '{email}'::citext) \
+                 EXECUTE FUNCTION zeroship.{name}()"
+            ),
             &[],
         )
         .await
         .expect("create insert delay trigger");
+    name
 }
 
-async fn drop_magic_links_insert_delay(client: &Client) {
+// Drops the FUNCTION as well as the trigger. Nothing dropped the function when
+// the names were fixed, which was invisible then because the next run replaced
+// the one object in place; with per-run names it would leave one orphan per run
+// in a database that is never dropped. Checked 2026-08-20: the shared test
+// database held three such `zeroship.test_sleep_*` functions with no trigger
+// referencing any of them.
+async fn drop_magic_links_insert_delay(client: &Client, name: &str) {
     client
         .execute(
-            "DROP TRIGGER IF EXISTS test_sleep_before_magic_link_insert ON zeroship.magic_links",
+            &format!("DROP TRIGGER IF EXISTS {name} ON zeroship.magic_links"),
             &[],
         )
         .await
         .ok();
+    client
+        .execute(&format!("DROP FUNCTION IF EXISTS zeroship.{name}()"), &[])
+        .await
+        .ok();
 }
 
-async fn install_magic_completion_reserve_delay(client: &Client) {
+async fn install_magic_completion_reserve_delay(client: &Client, csrf_nonce: &str) -> String {
+    let name = format!(
+        "test_sleep_before_magic_completion_reserve_{}",
+        Uuid::new_v4().simple()
+    );
     client
         .execute(
-            "CREATE OR REPLACE FUNCTION zeroship.test_sleep_before_magic_completion_reserve() \
-             RETURNS trigger LANGUAGE plpgsql AS $$ \
-             BEGIN \
-                 IF NEW.consumed_pending_at IS NOT NULL \
-                    AND OLD.consumed_pending_at IS NULL THEN \
+            &format!(
+                "CREATE FUNCTION zeroship.{name}() \
+                 RETURNS trigger LANGUAGE plpgsql AS $$ \
+                 BEGIN \
                      PERFORM pg_sleep(0.2); \
-                 END IF; \
-                 RETURN NEW; \
-             END \
-             $$",
+                     RETURN NEW; \
+                 END \
+                 $$"
+            ),
             &[],
         )
         .await
         .expect("create completion reserve delay function");
+    // The reservation predicate moved out of the function body and into `WHEN`,
+    // next to the nonce scoping, so one place decides whether this fires.
     client
         .execute(
-            "DROP TRIGGER IF EXISTS test_sleep_before_magic_completion_reserve \
-             ON zeroship.magic_completions",
-            &[],
-        )
-        .await
-        .expect("drop stale completion reserve delay trigger");
-    client
-        .execute(
-            "CREATE TRIGGER test_sleep_before_magic_completion_reserve \
-             BEFORE UPDATE OF consumed_pending_at ON zeroship.magic_completions \
-             FOR EACH ROW EXECUTE FUNCTION zeroship.test_sleep_before_magic_completion_reserve()",
+            &format!(
+                "CREATE TRIGGER {name} \
+                 BEFORE UPDATE OF consumed_pending_at ON zeroship.magic_completions \
+                 FOR EACH ROW WHEN (NEW.csrf_nonce = '{csrf_nonce}' \
+                     AND NEW.consumed_pending_at IS NOT NULL \
+                     AND OLD.consumed_pending_at IS NULL) \
+                 EXECUTE FUNCTION zeroship.{name}()"
+            ),
             &[],
         )
         .await
         .expect("create completion reserve delay trigger");
+    name
 }
 
-async fn drop_magic_completion_reserve_delay(client: &Client) {
+async fn drop_magic_completion_reserve_delay(client: &Client, name: &str) {
     client
         .execute(
-            "DROP TRIGGER IF EXISTS test_sleep_before_magic_completion_reserve \
-             ON zeroship.magic_completions",
+            &format!("DROP TRIGGER IF EXISTS {name} ON zeroship.magic_completions"),
             &[],
         )
+        .await
+        .ok();
+    client
+        .execute(&format!("DROP FUNCTION IF EXISTS zeroship.{name}()"), &[])
         .await
         .ok();
 }
@@ -155,7 +214,7 @@ async fn wrong_code_does_not_mutate_reserved_completion() {
         )
         .await
         .expect("insert completion row");
-    install_magic_completion_reserve_delay(&client).await;
+    let reserve_delay = install_magic_completion_reserve_delay(&client, &csrf_nonce).await;
 
     let correct_client = pg_connect(&dsn).await;
     let wrong_client = pg_connect(&dsn).await;
@@ -183,7 +242,7 @@ async fn wrong_code_does_not_mutate_reserved_completion() {
         "wrong code racing a reservation should return WrongCode, got {wrong:?}"
     );
 
-    drop_magic_completion_reserve_delay(&client).await;
+    drop_magic_completion_reserve_delay(&client, &reserve_delay).await;
 
     let row = client
         .query_one(
@@ -238,7 +297,7 @@ async fn concurrent_issue_leaves_one_active_token() {
     };
 
     let email = format!("magic-concurrent-{}@example.test", Uuid::new_v4().simple());
-    install_magic_links_insert_delay(&client).await;
+    let insert_delay = install_magic_links_insert_delay(&client, &email).await;
 
     let client_a = pg_connect(&dsn).await;
     let client_b = pg_connect(&dsn).await;
@@ -252,7 +311,7 @@ async fn concurrent_issue_leaves_one_active_token() {
     issue_a.await.expect("join issue A").expect("issue A");
     issue_b.await.expect("join issue B").expect("issue B");
 
-    drop_magic_links_insert_delay(&client).await;
+    drop_magic_links_insert_delay(&client, &insert_delay).await;
 
     let active_count: i64 = client
         .query_one(

@@ -86,44 +86,63 @@ async fn seed_test_plan(client: &Client) -> &'static str {
     plan_id
 }
 
-async fn install_magic_links_insert_delay(client: &Client) {
+// `zeroship.magic_links` is shared with every concurrent run, so the name is
+// per-call and the `WHEN` clause scopes the trigger to this test's own email.
+// Doing only the first is the trap: a uniquely named trigger still fires - and
+// sleeps 0.2s - inside the peer run's inserts.
+//
+// This helper was a byte-for-byte copy of `magic_link_test`'s, down to the
+// object name `test_sleep_before_magic_link_insert`, so the two collided on one
+// table even inside a SINGLE run. That was invisible only because these are
+// modules of one `tests/main.rs` binary and the gate passes `--test-threads 1`:
+// accidental isolation, exactly what this change removes the dependence on.
+//
+// The full argument, and the model it follows, is in `magic_link_test.rs`.
+async fn install_magic_links_insert_delay(client: &Client, email: &str) -> String {
+    let name = format!(
+        "test_sleep_before_reset_link_insert_{}",
+        Uuid::new_v4().simple()
+    );
     client
         .execute(
-            "CREATE OR REPLACE FUNCTION zeroship.test_sleep_before_magic_link_insert() \
-             RETURNS trigger LANGUAGE plpgsql AS $$ \
-             BEGIN \
-                 PERFORM pg_sleep(0.2); \
-                 RETURN NEW; \
-             END \
-             $$",
+            &format!(
+                "CREATE FUNCTION zeroship.{name}() \
+                 RETURNS trigger LANGUAGE plpgsql AS $$ \
+                 BEGIN \
+                     PERFORM pg_sleep(0.2); \
+                     RETURN NEW; \
+                 END \
+                 $$"
+            ),
             &[],
         )
         .await
         .expect("create insert delay function");
     client
         .execute(
-            "DROP TRIGGER IF EXISTS test_sleep_before_magic_link_insert ON zeroship.magic_links",
-            &[],
-        )
-        .await
-        .expect("drop stale insert delay trigger");
-    client
-        .execute(
-            "CREATE TRIGGER test_sleep_before_magic_link_insert \
-             BEFORE INSERT ON zeroship.magic_links \
-             FOR EACH ROW EXECUTE FUNCTION zeroship.test_sleep_before_magic_link_insert()",
+            &format!(
+                "CREATE TRIGGER {name} \
+                 BEFORE INSERT ON zeroship.magic_links \
+                 FOR EACH ROW WHEN (NEW.email = '{email}'::citext) \
+                 EXECUTE FUNCTION zeroship.{name}()"
+            ),
             &[],
         )
         .await
         .expect("create insert delay trigger");
+    name
 }
 
-async fn drop_magic_links_insert_delay(client: &Client) {
+async fn drop_magic_links_insert_delay(client: &Client, name: &str) {
     client
         .execute(
-            "DROP TRIGGER IF EXISTS test_sleep_before_magic_link_insert ON zeroship.magic_links",
+            &format!("DROP TRIGGER IF EXISTS {name} ON zeroship.magic_links"),
             &[],
         )
+        .await
+        .ok();
+    client
+        .execute(&format!("DROP FUNCTION IF EXISTS zeroship.{name}()"), &[])
         .await
         .ok();
 }
@@ -425,7 +444,7 @@ async fn concurrent_issue_leaves_one_active_reset_token() {
     let user = users::create(&client, &email, "Test", None)
         .await
         .expect("seed user");
-    install_magic_links_insert_delay(&client).await;
+    let insert_delay = install_magic_links_insert_delay(&client, &email).await;
 
     let client_a = pg_connect(&dsn).await;
     let client_b = pg_connect(&dsn).await;
@@ -439,7 +458,7 @@ async fn concurrent_issue_leaves_one_active_reset_token() {
     issue_a.await.expect("join issue A").expect("issue A");
     issue_b.await.expect("join issue B").expect("issue B");
 
-    drop_magic_links_insert_delay(&client).await;
+    drop_magic_links_insert_delay(&client, &insert_delay).await;
 
     let active_count: i64 = client
         .query_one(

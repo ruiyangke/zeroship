@@ -36,46 +36,57 @@ async fn pg_connect(dsn: &str) -> Client {
     client
 }
 
-async fn install_verifications_insert_delay(client: &Client) {
+// `zeroship.email_verifications` is shared with every concurrent run, so the
+// name is per-call and the `WHEN` clause scopes the trigger to the one user
+// this test seeded. Renaming alone is not enough: a uniquely named trigger
+// still sleeps 0.2s inside the peer run's inserts into the same table.
+//
+// The full argument, and the model it follows, is in `magic_link_test.rs`.
+async fn install_verifications_insert_delay(client: &Client, user_id: Uuid) -> String {
+    let name = format!(
+        "test_sleep_before_verification_insert_{}",
+        Uuid::new_v4().simple()
+    );
     client
         .execute(
-            "CREATE OR REPLACE FUNCTION zeroship.test_sleep_before_verification_insert() \
-             RETURNS trigger LANGUAGE plpgsql AS $$ \
-             BEGIN \
-                 PERFORM pg_sleep(0.2); \
-                 RETURN NEW; \
-             END \
-             $$",
+            &format!(
+                "CREATE FUNCTION zeroship.{name}() \
+                 RETURNS trigger LANGUAGE plpgsql AS $$ \
+                 BEGIN \
+                     PERFORM pg_sleep(0.2); \
+                     RETURN NEW; \
+                 END \
+                 $$"
+            ),
             &[],
         )
         .await
         .expect("create insert delay function");
     client
         .execute(
-            "DROP TRIGGER IF EXISTS test_sleep_before_verification_insert \
-             ON zeroship.email_verifications",
-            &[],
-        )
-        .await
-        .expect("drop stale insert delay trigger");
-    client
-        .execute(
-            "CREATE TRIGGER test_sleep_before_verification_insert \
-             BEFORE INSERT ON zeroship.email_verifications \
-             FOR EACH ROW EXECUTE FUNCTION zeroship.test_sleep_before_verification_insert()",
+            &format!(
+                "CREATE TRIGGER {name} \
+                 BEFORE INSERT ON zeroship.email_verifications \
+                 FOR EACH ROW WHEN (NEW.user_id = '{user_id}'::uuid) \
+                 EXECUTE FUNCTION zeroship.{name}()"
+            ),
             &[],
         )
         .await
         .expect("create insert delay trigger");
+    name
 }
 
-async fn drop_verifications_insert_delay(client: &Client) {
+async fn drop_verifications_insert_delay(client: &Client, name: &str) {
     client
         .execute(
-            "DROP TRIGGER IF EXISTS test_sleep_before_verification_insert \
-             ON zeroship.email_verifications",
+            &format!("DROP TRIGGER IF EXISTS {name} ON zeroship.email_verifications"),
             &[],
         )
+        .await
+        .ok();
+    client
+        .execute(&format!("DROP FUNCTION IF EXISTS zeroship.{name}()"), &[])
         .await
         .ok();
 }
@@ -101,7 +112,7 @@ async fn concurrent_issue_leaves_one_active_verification_token() {
     let user = users::create(&client, &email, "Test", None)
         .await
         .expect("seed user");
-    install_verifications_insert_delay(&client).await;
+    let insert_delay = install_verifications_insert_delay(&client, user.id).await;
 
     let client_a = pg_connect(&dsn).await;
     let client_b = pg_connect(&dsn).await;
@@ -116,7 +127,7 @@ async fn concurrent_issue_leaves_one_active_verification_token() {
     issue_a.await.expect("join issue A").expect("issue A");
     issue_b.await.expect("join issue B").expect("issue B");
 
-    drop_verifications_insert_delay(&client).await;
+    drop_verifications_insert_delay(&client, &insert_delay).await;
 
     let active_count: i64 = client
         .query_one(
