@@ -227,22 +227,23 @@ impl DmlRenderer for MysqlDmlRenderer {
         ))
     }
 
-    fn validate_view_materialized(&self, materialized: bool) -> Result<(), IrLowerError> {
+    fn view_create_prefix(
+        &self,
+        materialized: bool,
+        replace: bool,
+    ) -> Result<String, IrLowerError> {
+        // Kept as a SELF-check, not restored as a trait method. Core refuses a
+        // materialized view before it ever resolves a renderer, but it refuses the
+        // OP's `materialized`; the `down` of a `dropView` re-creates from the
+        // recorded view's own `materialized`, which core never validated. A
+        // backend asking its own `DIALECT` a capability question is legal here in
+        // a way that core asking it through a registry was not.
         if materialized && !DIALECT.supports(Capability::MaterializedView) {
             return Err(IrLowerError::ViewUnsupported {
                 kind: "materializedView",
                 dialect: DIALECT,
             });
         }
-        Ok(())
-    }
-
-    fn view_create_prefix(
-        &self,
-        materialized: bool,
-        replace: bool,
-    ) -> Result<String, IrLowerError> {
-        self.validate_view_materialized(materialized)?;
         let mut create = String::from("CREATE ");
         if replace && DIALECT.supports(Capability::CreateOrReplaceView) {
             create.push_str("OR REPLACE VIEW ");

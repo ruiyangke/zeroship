@@ -19,6 +19,32 @@
 //! normalization, drift comparison and equivalence are core's decisions even
 //! though they read the dialect, and they stay parameterized in core. See
 //! `render::value_format` for the worked counter-example.
+//!
+//! # And a THIRD class that is neither: the capability tautology
+//!
+//! A method that emits no bytes and whose three impls differ only by their own
+//! `DIALECT` const is not a vendor decision at all. `validate_view_materialized`
+//! was one: every impl read
+//! `DIALECT.supports(Capability::MaterializedView)` and built a CORE error type
+//! from it, so resolving a renderer only to ask the vendor about ITSELF put a
+//! dispatch between a question core could already answer — core holds the
+//! dialect, and [`DialectSupports`] reads the same descriptor the vendor read.
+//!
+//! It now lives in `render::lower` as a plain dialect-parameterized fn. The
+//! distinction matters for `docs/proposals/pluggable-backends.md` step 4 because
+//! this class is DELETED rather than inverted: a backend crate never has to
+//! export it, and core never has to reach a registry to run it. MEASURED at
+//! `30ca3b06`: exactly ONE of this contract's methods was in the class, and
+//! removing it changed no emitted byte — 1232 / 143 / 60 / 37 across `--lib`,
+//! `authoring_surface`, `dialect_matrix` and `fold_offline`, unchanged, with the
+//! control (an unconditional refusal in the moved fn) reddening 11 of them.
+//!
+//! It is NOT a free win for the cycle, and that is the part worth carrying
+//! forward. Deleting the method removed two `renderer(dialect)` CALLS but zero
+//! `renderer(dialect)` LOOKUPS: both sites bind the renderer for sibling spelling
+//! methods on the next line, so `render::lower` holds the same seven lookups it
+//! held before. The unit that blocks the crate split is the LOOKUP, not the call
+//! site, and the two counts are not the same number.
 
 use crate::model::expr::{CastTarget, ExtractField, ScalarFn};
 use crate::model::ir::{IrScalar, Op, TableRef};
@@ -119,7 +145,6 @@ pub(crate) trait DmlRenderer {
     fn synth_now(&self) -> String;
     fn uuid_v4(&self) -> String;
     fn uuid_v7(&self) -> Result<String, DmlError>;
-    fn validate_view_materialized(&self, materialized: bool) -> Result<(), IrLowerError>;
     fn view_create_prefix(&self, materialized: bool, replace: bool)
         -> Result<String, IrLowerError>;
     fn view_replace_prelude(&self, qname: &str, replace: bool) -> Vec<String>;
