@@ -73,6 +73,15 @@ async fn one_failure(
     let resp = http
         .request(http::Method::POST, &login_url)
         .expect("build POST /login")
+        // A client IP unique to this RUN. `/login` rate-limits per client ip,
+        // and with no header every request in every run lands in ONE shared
+        // bucket in `zeroship.rate_limits`. Invisible while each run had a
+        // private database. MEASURED 2026-08-20 with two runs sharing one:
+        // `iter 1: wrong-pw status 401 != missing-user status 429` - the
+        // enumeration assertion failing because the peer had drained the
+        // bucket, not because the two paths differ.
+        .header("x-forwarded-for", run_client_ip())
+        .expect("x-forwarded-for")
         .header("content-type", "application/x-www-form-urlencoded")
         .expect("content-type")
         .header("cookie", jar.header())
@@ -85,6 +94,21 @@ async fn one_failure(
     let status = resp.status().as_u16();
     let body_bytes = resp.text().await.expect("body");
     (status, body_bytes.len(), elapsed)
+}
+
+/// A client IP unique to this RUN, stable within it.
+///
+/// The bucket key `/login` rate-limits on. Any distinct string serves; it is
+/// never asserted on. Stable within the process so the run's own repeated
+/// probes still share one bucket, which is what the threshold assertions here
+/// are about.
+fn run_client_ip() -> String {
+    static IP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    IP.get_or_init(|| {
+        let b = *uuid::Uuid::new_v4().as_bytes();
+        format!("127.{}.{}.{}", b[0].max(1), b[1].max(1), b[2].max(1))
+    })
+    .clone()
 }
 
 // ─── Test ────────────────────────────────────────────────────────────────
