@@ -439,7 +439,7 @@ async fn ingest_at(state: &AppState, app: Uuid, requests: u64, period_start: i64
 }
 
 fn now_for_closed_period() -> i64 {
-    common::isolated_closed_period_now()
+    common::next_isolated_period()
 }
 
 fn prev_period(now: i64) -> i64 {
