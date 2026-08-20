@@ -239,6 +239,40 @@ cargo test -p compio-postgres -- --test-threads=1
 ./tests/e2e_platform.sh
 ```
 
+### The database the live-Postgres gates run against
+
+`tests/run_auth_suite.sh` does not create a database per run and does not take
+one from your environment. It uses
+`zeroship_auth_test_<hash of db/migrations-ts/*.ts>` — created if absent,
+migrated, and never dropped. Three things follow, and they are the point:
+
+- two agents on the same commit **share** that database and can run the suite
+  at the same time. The tests already scope their fixtures per run; what the
+  fresh database was buying was schema freshness, which is a property of the
+  branch, not of who launched the run.
+- a branch that adds or edits a migration gets its own database automatically,
+  because its migrations hash differently. Nobody passes a flag.
+- a database whose hash no branch produces is provably dead, which is what lets
+  `tests/sweep_test_databases.sh` reclaim it without guessing.
+
+```bash
+tests/run_auth_suite.sh                        # the shared, schema-keyed database
+tests/run_auth_suite.sh --database mine        # a private one you name and own
+tests/sweep_test_databases.sh                  # what is reclaimable (dry run)
+tests/sweep_test_databases.sh --apply          # reclaim it
+```
+
+`TEST_DB=... tests/run_auth_suite.sh` is **refused**, not honoured: the
+override is a flag so a gate cannot be redirected by a variable left in a shell
+nobody remembers exporting it in.
+
+`tests/run_billing_suite.sh` still takes a private database per run.
+`crates/control/tests/workflow_engine_test.rs` clones a whole database per test
+from whatever DSN it is handed, and `CREATE DATABASE ... WITH TEMPLATE`
+requires exclusive access to the source — so that suite cannot share one until
+it clones from a quiescent template instead. See
+`tests/tests_do_not_create_databases_gate.sh`, which records that ruling.
+
 ## Benchmarks
 
 Build the fixture binary with:
