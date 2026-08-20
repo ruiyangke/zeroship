@@ -2456,8 +2456,8 @@ mod tests {
     /// **engine-supplied** identifier (project schema / migrator role / meta
     /// schema) — those must route through [`quote_ident_checked`] so they fail
     /// closed on empty / NUL. We scan the crate source for the give-away
-    /// byte-patterns (`…(&cfg.pg.meta_schema)`, `…(&cfg.project_schema)`,
-    /// `…(role)`, `…(&exec_cfg.pg.meta_schema)`) — every such site is an
+    /// byte-patterns (`…(&cfg.confinement.meta_schema)`, `…(&cfg.project_schema)`,
+    /// `…(role)`, `…(&exec_cfg.confinement.meta_schema)`) — every such site is an
     /// engine-identifier seam that must NOT use an infallible escaper.
     ///
     /// RETARGETED WITH THE SEAM. The infallible primitive used to be
@@ -2479,7 +2479,7 @@ mod tests {
     /// only catches the exact call-site *spellings* in `needles` below (the give-away
     /// `(&cfg.…)` / `(role)` argument byte-patterns). A future engine-identifier
     /// seam bound to a *differently-named* variable — e.g.
-    /// `let s = &cfg.pg.meta_schema; pg_canonical_ident(s)` — would slip past this scan
+    /// `let s = &cfg.confinement.meta_schema; pg_canonical_ident(s)` — would slip past this scan
     /// undetected. The broader, spelling-independent guarantee that NO bare `"`-escape
     /// seam exists outside `render/backends/mod.rs` is held by
     /// `no_bare_escape_seam_outside_dml` (above); this test complements it by naming
@@ -2504,14 +2504,14 @@ mod tests {
         .iter()
         .collect::<String>();
         let needles = [
-            format!("{esc}(&cfg.pg.meta_schema"),
+            format!("{esc}(&cfg.confinement.meta_schema"),
             format!("{esc}(&cfg.project_schema"),
-            format!("{esc}(&exec_cfg.pg.meta_schema"),
+            format!("{esc}(&exec_cfg.confinement.meta_schema"),
             format!("{esc}(&exec_cfg.project_schema"),
             format!("{esc}(role"),
-            format!("{canon}(&cfg.pg.meta_schema)"),
+            format!("{canon}(&cfg.confinement.meta_schema)"),
             format!("{canon}(&cfg.project_schema)"),
-            format!("{canon}(&exec_cfg.pg.meta_schema)"),
+            format!("{canon}(&exec_cfg.confinement.meta_schema)"),
             format!("{canon}(&exec_cfg.project_schema)"),
             format!("{canon}(role)"),
         ];

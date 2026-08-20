@@ -220,7 +220,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
                     AND c.relname = 'schema_migrations'
                     AND c.relkind IN ('r', 'p')
                   LIMIT 1",
-                &[cfg.pg.meta_schema.as_str().into()],
+                &[cfg.confinement.meta_schema.as_str().into()],
             )
             .await?;
         Ok(!rows.is_empty())

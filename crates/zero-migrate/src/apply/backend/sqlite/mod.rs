@@ -1266,7 +1266,7 @@ mod lock_tests {
             .expect("second backend");
         let mut cfg =
             ExecutorConfig::new("project", "main", crate::test_fixtures::no_inject("main"));
-        cfg.pg.project_lock_timeout = Duration::from_millis(25);
+        cfg.confinement.project_lock_timeout = Duration::from_millis(25);
 
         first.acquire_project_lock(&cfg).await.expect("first lock");
         let started = Instant::now();
@@ -1299,8 +1299,8 @@ mod lock_tests {
             ExecutorConfig::new("project", "main", crate::test_fixtures::no_inject("main"));
         // A DDL budget far SHORTER than the project-lock budget. If the two are
         // coupled the second acquire gives up after 25ms.
-        cfg.pg.lock_timeout = Duration::from_millis(25);
-        cfg.pg.project_lock_timeout = Duration::from_millis(300);
+        cfg.confinement.lock_timeout = Duration::from_millis(25);
+        cfg.confinement.project_lock_timeout = Duration::from_millis(300);
 
         first.acquire_project_lock(&cfg).await.expect("first lock");
         let started = Instant::now();

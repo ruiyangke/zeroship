@@ -3055,7 +3055,7 @@ impl MigrationEngine {
                 timeout_override,
                 "timeout_ms",
                 exec_cfg.statement_timeout_ms(),
-                "pg.statement_timeout",
+                "confinement.statement_timeout",
             )
             .map_err(|error| EngineError::Apply(ApplyError::IndefiniteTimeout(error)))?;
             crate::apply::timeout::resolve_timeout_ms(
@@ -3064,7 +3064,7 @@ impl MigrationEngine {
                 lock_override,
                 "lock_timeout_ms",
                 exec_cfg.lock_timeout_ms(),
-                "pg.lock_timeout",
+                "confinement.lock_timeout",
             )
             .map_err(|error| EngineError::Apply(ApplyError::IndefiniteTimeout(error)))?;
         }

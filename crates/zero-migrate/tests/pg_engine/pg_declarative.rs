@@ -52,7 +52,7 @@ fn cfg_for(tok: &str) -> ExecutorConfig {
         format!("proj_{tok}"),
         support::no_inject(&format!("proj_{tok}")),
     );
-    c.pg.meta_schema = format!("meta_{tok}");
+    c.confinement.meta_schema = format!("meta_{tok}");
     c
 }
 
@@ -67,7 +67,10 @@ async fn ensure_project_schema<'a>(
     use zero_migrate::driver::SqlSession;
     let guard = support::SchemaGuard::arm(
         session,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+        [
+            cfg.project_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
+        ],
     );
     session
         .batch(&format!(
@@ -84,7 +87,7 @@ async fn drop_schemas(session: &PgDevSession, cfg: &ExecutorConfig) {
     let _ = session
         .batch(&format!(
             "DROP SCHEMA IF EXISTS \"{}\" CASCADE; DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
-            cfg.project_schema, cfg.pg.meta_schema
+            cfg.project_schema, cfg.confinement.meta_schema
         ))
         .await;
 }

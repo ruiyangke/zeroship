@@ -87,7 +87,7 @@ fn cfg_for(tok: &str) -> ExecutorConfig {
         format!("proj_{tok}"),
         support::no_inject(&format!("proj_{tok}")),
     );
-    c.pg.meta_schema = format!("meta_{tok}");
+    c.confinement.meta_schema = format!("meta_{tok}");
     c
 }
 

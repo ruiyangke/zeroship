@@ -15,37 +15,50 @@ use std::time::Duration;
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectError {}
 
-/// The **Postgres confinement parameters** — the per-engine apply-confinement
-/// strategy inputs that are PG-shaped and meaningless to a non-PG engine
-/// (part of the multi-engine abstraction).
+/// The **apply-confinement parameters** — the per-run inputs that bound what a
+/// migration may touch and for how long.
 ///
-/// These are NOT engine-agnostic. The PG apply leaf (`crate::apply::executor::pg`)
-/// reads them to emit its confinement bracket — `SET LOCAL search_path` (built
-/// from `project_schema` + `extension_schemas`), `SET LOCAL ROLE <migrator>`,
-/// and the mandatory `SET LOCAL statement_timeout` / `lock_timeout` — plus the
-/// `meta_schema` the journal lives in. The SQLite engine confines through a
-/// runtime two-mode authorizer (`Arc<AtomicU8>` mode-flip) instead and carries
-/// NONE of these; it builds an [`ExecutorConfig`] via [`ExecutorConfig::new`]
-/// whose `pg` block is inert default.
+/// Every field here is read by **more than one dialect**, which is why the block
+/// is named for the concept and not for an engine. The measured readership:
 ///
-/// Grouping these into one named struct keeps the neutral [`ExecutorConfig`]
-/// from being PG-shaped at the type level: a non-PG backend never reads `pg`,
-/// and the confinement STRATEGY stays where it already lives — in each
-/// backend's apply leaf (PG's `SET ROLE`/search_path/timeout bracket; SQLite's
-/// mode-flip), NOT in the neutral core.
+/// | field                  | PostgreSQL | MySQL | SQLite |
+/// |------------------------|-----------|-------|--------|
+/// | `meta_schema`          | yes (`<meta>.schema_migrations`) | yes (same journal SQL) | no (its journal is an attached `_mig` database) |
+/// | `statement_timeout`    | yes (`SET statement_timeout`) | yes (`max_execution_time`) | no |
+/// | `lock_timeout`         | yes (`SET lock_timeout`) | yes (`innodb_lock_wait_timeout`) | no |
+/// | `project_lock_timeout` | **no** (`pg_advisory_lock` takes no timeout) | yes (`GET_LOCK`) | yes (application-file lock) |
+///
+/// The genuinely PostgreSQL-only settings — the ones no other engine has any
+/// use for — stay visibly PostgreSQL under [`postgres`](Self::postgres).
+///
+/// The confinement STRATEGY still lives in each backend's apply leaf (PG's
+/// `SET ROLE`/`search_path`/timeout bracket; SQLite's two-mode authorizer
+/// `Arc<AtomicU8>` mode-flip), NOT in this neutral core — this struct carries
+/// only the inputs.
 #[derive(Debug, Clone)]
-pub struct PgConfinement {
+pub struct ConfinementConfig {
     /// The per-project **meta schema** that holds the append-only
     /// `schema_migrations` journal. Separate from the project
     /// schema so a creator migration can't touch its own history.
+    ///
+    /// Read by the PostgreSQL journal and by MySQL's, which spell the same
+    /// `<meta>.schema_migrations` namespace. SQLite does not read it: its
+    /// journal lives in a separately attached `_mig` database file.
     pub meta_schema: String,
-    /// Mandatory per-statement timeout. Maps to `SET statement_timeout`.
-    /// Bounds how long a statement may **run**; a runaway DDL/DML is cancelled
-    /// after this. This is the long-running-statement budget (default 60s).
+    /// Mandatory per-statement timeout. Bounds how long a statement may
+    /// **run**; a runaway DDL/DML is cancelled after this. This is the
+    /// long-running-statement budget (default 60s).
+    ///
+    /// Maps to `SET statement_timeout` on PostgreSQL and to
+    /// `max_execution_time` on MySQL. Both engines read a zero as "no limit",
+    /// so a zero is refused at [`crate::apply::timeout::resolve_timeout_ms`]
+    /// rather than clamped.
     pub statement_timeout: Duration,
     /// Mandatory, **separate, SHORT** lock-ACQUISITION timeout (the
     /// safe-migration lock-safety envelope — strong_migrations / Atlas PG101 &
-    /// PG103). Maps to `SET lock_timeout`. This is NOT folded into
+    /// PG103). Maps to `SET lock_timeout` on PostgreSQL and to
+    /// `innodb_lock_wait_timeout` on MySQL (rounded UP to whole seconds, MySQL's
+    /// unit). This is NOT folded into
     /// [`statement_timeout`](Self::statement_timeout): the two bound different
     /// things.
     ///
@@ -94,6 +107,23 @@ pub struct PgConfinement {
     /// the open question in the queue-versus-fail-fast ticket rather than
     /// something this field decides.
     pub project_lock_timeout: Duration,
+    /// The settings **only PostgreSQL reads** — its `SET ROLE` principal and the
+    /// extension-resolution schemas its `search_path` needs. Kept under a
+    /// PostgreSQL-named block because no other engine has a use for either: they
+    /// are not shared concepts wearing a vendor hat, they are genuinely one
+    /// vendor's.
+    pub postgres: PostgresConfinement,
+}
+
+/// The confinement settings **only the PostgreSQL backend reads**.
+///
+/// Measured: every field below is referenced solely from
+/// `apply/backend/postgres/` and the `#[cfg(pg_seam)]` precondition evaluator.
+/// The MySQL and SQLite backends read none of them, and would have nothing to do
+/// with them if they did — MySQL has no `SET ROLE`-per-transaction confinement
+/// model and SQLite has neither roles nor schemas.
+#[derive(Debug, Clone)]
+pub struct PostgresConfinement {
     /// The least-privilege `migrator` role the apply flow runs each migration's
     /// DDL + journal writes under, via `SET ROLE` / `RESET ROLE` (the
     /// DB-privilege defense layer). `None` runs as the connecting
@@ -122,12 +152,28 @@ pub struct PgConfinement {
     pub extension_schemas: Vec<String>,
 }
 
-impl PgConfinement {
-    /// The default PG confinement for a project whose journal lives in
+impl Default for PostgresConfinement {
+    /// No `SET ROLE` (the platform sets it via
+    /// [`ExecutorConfig::with_migrator_role`]) and `public` as the
+    /// extension-type resolution schema.
+    fn default() -> Self {
+        Self {
+            // Defaults to no SET ROLE; the platform sets this to the provisioned
+            // deterministic per-project migrator role. Tests opt in explicitly.
+            migrator_role: None,
+            // Extension types/functions (pgvector `vector`, PostGIS `geography`)
+            // live in `public` on the platform/dev image. Resolution-only; the
+            // migrator gets USAGE (not CREATE) on these — see the field doc.
+            extension_schemas: vec!["public".to_string()],
+        }
+    }
+}
+
+impl ConfinementConfig {
+    /// The default confinement for a project whose journal lives in
     /// `meta_schema` (the `<project_schema>_migrations` namespace by default):
-    /// conservative non-zero timeouts (no indefinite locks), no `SET ROLE`
-    /// (the platform sets it via [`ExecutorConfig::with_migrator_role`]), and
-    /// `public` as the extension-type resolution schema.
+    /// conservative non-zero timeouts (no indefinite locks) and the default
+    /// PostgreSQL-only block.
     #[must_use]
     fn new(meta_schema: String) -> Self {
         Self {
@@ -146,29 +192,26 @@ impl PgConfinement {
             // same concept. A deploy queueing behind a peer is not competing with
             // live application traffic, so it does not want the 3s DDL budget.
             project_lock_timeout: Duration::from_secs(10),
-            // Defaults to no SET ROLE; the platform sets this to the provisioned
-            // deterministic per-project migrator role. Tests opt in explicitly.
-            migrator_role: None,
-            // Extension types/functions (pgvector `vector`, PostGIS `geography`)
-            // live in `public` on the platform/dev image. Resolution-only; the
-            // migrator gets USAGE (not CREATE) on these — see the field doc.
-            extension_schemas: vec!["public".to_string()],
+            postgres: PostgresConfinement::default(),
         }
     }
 }
 
 /// Per-run executor configuration.
 ///
-/// The engine-agnostic fields (project identity + trust posture) live directly
-/// on this struct; the **PG-specific confinement parameters** are grouped under
-/// [`pg`](Self::pg) (a [`PgConfinement`]) so the neutral core is not PG-shaped
-/// at the type level. SQLite ignores the PG schema and role settings but reuses
-/// the lock-acquisition budget for its application-file lock.
+/// The project identity + trust posture live directly on this struct; the
+/// **confinement parameters** (journal namespace + the three timeout budgets)
+/// are grouped under [`confinement`](Self::confinement), and the settings only
+/// PostgreSQL reads sit one level further in
+/// [`confinement.postgres`](ConfinementConfig::postgres).
 ///
-/// The PG `statement_timeout` + `lock_timeout` under [`pg`](Self::pg) are
-/// **mandatory** (no indefinite locks / `DoS`). They are applied per
-/// migration before its SQL runs. SQLite uses `lock_timeout` when acquiring its
-/// process-wide migration lock.
+/// The `statement_timeout` + `lock_timeout` budgets are **mandatory** (no
+/// indefinite locks / `DoS`) and are applied per migration before its SQL runs —
+/// on PostgreSQL as `SET statement_timeout` / `SET lock_timeout`, on MySQL as
+/// `max_execution_time` / `innodb_lock_wait_timeout`. SQLite reads neither; it
+/// uses `project_lock_timeout` when acquiring its application-file lock, which
+/// is the same budget MySQL passes to `GET_LOCK` and which PostgreSQL alone does
+/// not read (`pg_advisory_lock` takes no timeout).
 #[derive(Debug, Clone)]
 pub struct ExecutorConfig {
     /// The project id (`prj_…`) — its bytes seed the apply-serializing advisory
@@ -178,11 +221,11 @@ pub struct ExecutorConfig {
     /// `search_path` for every apply, and the [`crate::guard::SqlGuard`]'s
     /// confinement target.
     pub project_schema: String,
-    /// The **Postgres confinement parameters** (meta schema, migrator role,
-    /// timeouts, extension-resolution schemas). PG-shaped by construction.
-    /// SQLite ignores the role, schema, and statement settings, but reuses
-    /// `lock_timeout` for its application-file lock.
-    pub pg: PgConfinement,
+    /// The **confinement parameters** — the journal's meta schema and the three
+    /// timeout budgets, each read by more than one dialect, plus the
+    /// PostgreSQL-only role and extension-schema settings nested under
+    /// [`postgres`](ConfinementConfig::postgres).
+    pub confinement: ConfinementConfig,
     /// PRIVATE (`pub(crate)`). The caller-authored composed policy every
     /// executor-path guard uses. The guard is built from this single policy source
     /// for every composable decision.
@@ -213,9 +256,10 @@ impl ExecutorConfig {
             project_id: project_id.into(),
             effective,
             project_schema,
-            // The PG-specific confinement block (meta schema, timeouts, role,
-            // extension-resolution schemas). Inert for a SQLite-backed config.
-            pg: PgConfinement::new(meta_schema),
+            // The confinement block (meta schema, timeouts) plus the
+            // PostgreSQL-only nested settings, which are inert on a
+            // non-PostgreSQL backend.
+            confinement: ConfinementConfig::new(meta_schema),
             // Confined/Platform run the full belt; only `trusted()` flips this to `Off`.
             guard_mode: crate::guard::GuardMode::Enforced,
         }
@@ -338,7 +382,7 @@ impl ExecutorConfig {
     /// flow runs migrations under. Builder convenience.
     #[must_use]
     pub fn with_migrator_role(mut self, role: impl Into<String>) -> Self {
-        self.pg.migrator_role = Some(role.into());
+        self.confinement.postgres.migrator_role = Some(role.into());
         self
     }
 
@@ -400,7 +444,7 @@ impl ExecutorConfig {
         // schema), followed by the extension schema(s) so an UNQUALIFIED extension
         // type (`vector(N)`, `geography(...)`) resolves.
         let mut parts = vec![quote(&self.project_schema)?];
-        for ext in &self.pg.extension_schemas {
+        for ext in &self.confinement.postgres.extension_schemas {
             // Avoid duplicating the project schema if it (oddly) appears.
             if ext != &self.project_schema {
                 parts.push(quote(ext)?);
@@ -412,7 +456,7 @@ impl ExecutorConfig {
     /// `statement_timeout` in whole milliseconds (the unit `SET` takes).
     #[must_use]
     pub fn statement_timeout_ms(&self) -> u64 {
-        u64::try_from(self.pg.statement_timeout.as_millis()).unwrap_or(u64::MAX)
+        u64::try_from(self.confinement.statement_timeout.as_millis()).unwrap_or(u64::MAX)
     }
 
     /// Lock-acquisition timeout in whole milliseconds, sent to PostgreSQL as
@@ -421,7 +465,7 @@ impl ExecutorConfig {
     /// queues for the project lock - see [`Self::project_lock_timeout_ms`].
     #[must_use]
     pub fn lock_timeout_ms(&self) -> u64 {
-        u64::try_from(self.pg.lock_timeout.as_millis()).unwrap_or(u64::MAX)
+        u64::try_from(self.confinement.lock_timeout.as_millis()).unwrap_or(u64::MAX)
     }
 
     /// Project-lock wait budget in whole milliseconds - how long a deploy queues
@@ -429,7 +473,7 @@ impl ExecutorConfig {
     /// application-file lock.
     #[must_use]
     pub fn project_lock_timeout_ms(&self) -> u64 {
-        u64::try_from(self.pg.project_lock_timeout.as_millis()).unwrap_or(u64::MAX)
+        u64::try_from(self.confinement.project_lock_timeout.as_millis()).unwrap_or(u64::MAX)
     }
 }
 

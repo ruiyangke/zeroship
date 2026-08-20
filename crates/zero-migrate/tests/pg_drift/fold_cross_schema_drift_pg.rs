@@ -96,7 +96,7 @@ async fn a_second_schema_folds_to_a_snapshot_live_introspection_cannot_match() {
         &session,
         [
             cfg.project_schema.clone(),
-            cfg.pg.meta_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
             other.clone(),
         ],
     );
@@ -221,7 +221,7 @@ async fn a_second_schema_folds_to_a_snapshot_live_introspection_cannot_match() {
             "DROP SCHEMA IF EXISTS {} CASCADE; DROP SCHEMA IF EXISTS {} CASCADE; \
              DROP SCHEMA IF EXISTS {} CASCADE",
             quote_ident(&cfg.project_schema),
-            quote_ident(&cfg.pg.meta_schema),
+            quote_ident(&cfg.confinement.meta_schema),
             quote_ident(&other)
         ))
         .await

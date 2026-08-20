@@ -688,8 +688,8 @@ pub(super) async fn read_progress_entries<D: SqlSession>(
                     AND COLUMN_NAME = 'checksum' \
              ) AS SIGNED) AS checksum_exists",
             &[
-                cfg.pg.meta_schema.as_str().into(),
-                cfg.pg.meta_schema.as_str().into(),
+                cfg.confinement.meta_schema.as_str().into(),
+                cfg.confinement.meta_schema.as_str().into(),
             ],
         )
         .await?;
@@ -698,7 +698,7 @@ pub(super) async fn read_progress_entries<D: SqlSession>(
         return Ok(Vec::new());
     }
     let checksum_exists: i64 = catalog.try_get("checksum_exists")?;
-    let meta = journal_sql::quote_ident_mysql(&cfg.pg.meta_schema)?;
+    let meta = journal_sql::quote_ident_mysql(&cfg.confinement.meta_schema)?;
     let checksum_expr = if checksum_exists != 0 {
         "checksum"
     } else {
@@ -730,7 +730,7 @@ async fn ensure_progress_table<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
 ) -> Result<(), ApplyError> {
-    let meta = journal_sql::quote_ident_mysql(&cfg.pg.meta_schema)?;
+    let meta = journal_sql::quote_ident_mysql(&cfg.confinement.meta_schema)?;
     conn.batch(&format!(
         "CREATE TABLE IF NOT EXISTS {meta}.schema_backfills (
             backfill_id    VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin
@@ -766,7 +766,7 @@ async fn ensure_progress_table<D: SqlSession>(
             "SELECT ENGINE AS table_engine
                FROM information_schema.TABLES
               WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'schema_backfills'",
-            &[cfg.pg.meta_schema.as_str().into()],
+            &[cfg.confinement.meta_schema.as_str().into()],
         )
         .await?;
     let columns = conn
@@ -778,7 +778,7 @@ async fn ensure_progress_table<D: SqlSession>(
                FROM information_schema.COLUMNS
               WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'schema_backfills'
               ORDER BY ORDINAL_POSITION",
-            &[cfg.pg.meta_schema.as_str().into()],
+            &[cfg.confinement.meta_schema.as_str().into()],
         )
         .await?;
     validate_progress_catalog(&tables, &columns)
@@ -881,7 +881,7 @@ async fn read_progress_with_lock<D: SqlSession>(
     backfill_id: &str,
     for_update: bool,
 ) -> Result<Progress, ApplyError> {
-    let meta = journal_sql::quote_ident_mysql(&cfg.pg.meta_schema)?;
+    let meta = journal_sql::quote_ident_mysql(&cfg.confinement.meta_schema)?;
     let lock = if for_update { " FOR UPDATE" } else { "" };
     let rows = conn
         .query(
@@ -950,7 +950,7 @@ async fn initialize_obligation<D: SqlSession>(
     guard: Option<&GuardDescriptor>,
     applied_by: &str,
 ) -> Result<(), ApplyError> {
-    let meta = journal_sql::quote_ident_mysql(&cfg.pg.meta_schema)?;
+    let meta = journal_sql::quote_ident_mysql(&cfg.confinement.meta_schema)?;
     let schema_q = journal_sql::quote_ident_mysql(&spec.schema)?;
     let table_q = quote_bare("table", &spec.table)?;
     let qualified_table = format!("{schema_q}.{table_q}");
@@ -1043,7 +1043,7 @@ async fn initialize_cohort<D: SqlSession>(
     contract: &CursorContract,
     guard: Option<&GuardDescriptor>,
 ) -> Result<(), ApplyError> {
-    let meta = journal_sql::quote_ident_mysql(&cfg.pg.meta_schema)?;
+    let meta = journal_sql::quote_ident_mysql(&cfg.confinement.meta_schema)?;
     conn.batch("START TRANSACTION").await?;
     let result = async {
         let runtime =
@@ -1164,7 +1164,7 @@ async fn mark_durable_complete<D: SqlSession>(
     contract: &CursorContract,
     guard: Option<&GuardDescriptor>,
 ) -> Result<(), ApplyError> {
-    let meta = journal_sql::quote_ident_mysql(&cfg.pg.meta_schema)?;
+    let meta = journal_sql::quote_ident_mysql(&cfg.confinement.meta_schema)?;
     conn.batch("START TRANSACTION").await?;
     let result = async {
         // Retain the target MDL through the completion checkpoint. In
@@ -1326,7 +1326,7 @@ async fn append_completed_journal<D: SqlSession>(
     applied_by: &str,
     exec_ms: i64,
 ) -> Result<(), ApplyError> {
-    let meta = journal_sql::quote_ident_mysql(&cfg.pg.meta_schema)?;
+    let meta = journal_sql::quote_ident_mysql(&cfg.confinement.meta_schema)?;
     conn.batch("START TRANSACTION").await?;
     let result = async {
         let progress = conn
@@ -2276,7 +2276,7 @@ async fn ensure_guard_installed<D: SqlSession>(
     }
     inspect_guard_interactions(conn, spec, Some(guard), false).await?;
     if state == GUARD_PLANNED {
-        let meta = journal_sql::quote_ident_mysql(&cfg.pg.meta_schema)?;
+        let meta = journal_sql::quote_ident_mysql(&cfg.confinement.meta_schema)?;
         let updated = conn
             .exec(
                 &format!(
@@ -2324,7 +2324,7 @@ async fn cleanup_guard<D: SqlSession>(
             guard.name
         )));
     }
-    let meta = journal_sql::quote_ident_mysql(&cfg.pg.meta_schema)?;
+    let meta = journal_sql::quote_ident_mysql(&cfg.confinement.meta_schema)?;
     let updated = conn
         .exec(
             &format!(
@@ -2703,7 +2703,7 @@ async fn run_one_batch_inner<D: SqlSession>(
         }
     }
 
-    let meta = journal_sql::quote_ident_mysql(&cfg.pg.meta_schema)?;
+    let meta = journal_sql::quote_ident_mysql(&cfg.confinement.meta_schema)?;
     let last = selected
         .last()
         .expect("a non-empty selected window has a last cursor");

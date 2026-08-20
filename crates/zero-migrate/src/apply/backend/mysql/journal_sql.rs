@@ -95,7 +95,7 @@ pub(crate) async fn ensure_journal<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident_mysql(&cfg.pg.meta_schema)?;
+    let meta = quote_ident_mysql(&cfg.confinement.meta_schema)?;
 
     // 1. Meta database (MySQL's "schema").
     conn.batch(&format!("CREATE DATABASE IF NOT EXISTS {meta}"))
@@ -150,7 +150,7 @@ pub(crate) async fn ensure_journal<D: SqlSession>(
               WHERE TABLE_SCHEMA = ?
                 AND TABLE_NAME = 'schema_migrations'
                 AND COLUMN_NAME = 'down'",
-            &[cfg.pg.meta_schema.as_str().into()],
+            &[cfg.confinement.meta_schema.as_str().into()],
         )
         .await?;
     if down_column.is_empty() {
@@ -252,7 +252,7 @@ pub(crate) async fn ensure_journal<D: SqlSession>(
                 AND TABLE_NAME = 'schema_migrations_supersedes'
                 AND INDEX_NAME = 'schema_migrations_supersedes_edge_uq'
               ORDER BY SEQ_IN_INDEX",
-            &[cfg.pg.meta_schema.as_str().into()],
+            &[cfg.confinement.meta_schema.as_str().into()],
         )
         .await?;
     if edge_index.is_empty() {
@@ -302,7 +302,10 @@ pub(crate) async fn ensure_journal<D: SqlSession>(
                 .query(
                     "SELECT trigger_name FROM information_schema.triggers \
                      WHERE trigger_schema = ? AND trigger_name = ?",
-                    &[cfg.pg.meta_schema.as_str().into(), trg.as_str().into()],
+                    &[
+                        cfg.confinement.meta_schema.as_str().into(),
+                        trg.as_str().into(),
+                    ],
                 )
                 .await?;
             if exists.is_empty() {
@@ -368,7 +371,7 @@ async fn ensure_binary_identity_columns<D: SqlSession>(
                   OR (TABLE_NAME = 'schema_migrations_recovery'
                       AND COLUMN_NAME IN ('version', 'checksum')))
               ORDER BY TABLE_NAME, ORDINAL_POSITION",
-            &[cfg.pg.meta_schema.as_str().into()],
+            &[cfg.confinement.meta_schema.as_str().into()],
         )
         .await?;
 
@@ -443,7 +446,7 @@ pub(crate) async fn applied<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
 ) -> Result<Vec<AppliedEntry>, JournalError> {
-    let meta = quote_ident_mysql(&cfg.pg.meta_schema)?;
+    let meta = quote_ident_mysql(&cfg.confinement.meta_schema)?;
     // An inflight marker has no sequence of its own, so it reports 0. That can
     // never be mistaken for a real one: `event_seq` is `BIGINT NOT NULL
     // AUTO_INCREMENT` and starts at 1. Callers that consult apply order drop
@@ -508,7 +511,7 @@ pub(crate) async fn net_rolled_back_versions<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
 ) -> Result<Vec<String>, JournalError> {
-    let meta = quote_ident_mysql(&cfg.pg.meta_schema)?;
+    let meta = quote_ident_mysql(&cfg.confinement.meta_schema)?;
     let rows = conn
         .query(
             &format!(
@@ -536,7 +539,7 @@ pub(crate) async fn unresolved_rollback_markers<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
 ) -> Result<Vec<String>, JournalError> {
-    let meta = quote_ident_mysql(&cfg.pg.meta_schema)?;
+    let meta = quote_ident_mysql(&cfg.confinement.meta_schema)?;
     let rows = conn
         .query(
             &format!(
@@ -562,7 +565,7 @@ pub(crate) async fn superseded_versions<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
 ) -> Result<Vec<String>, JournalError> {
-    let meta = quote_ident_mysql(&cfg.pg.meta_schema)?;
+    let meta = quote_ident_mysql(&cfg.confinement.meta_schema)?;
     let rows = conn
         .query(
             &format!(
@@ -599,7 +602,7 @@ pub(crate) async fn latest_completed_checksums<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
 ) -> Result<std::collections::HashMap<String, String>, JournalError> {
-    let meta = quote_ident_mysql(&cfg.pg.meta_schema)?;
+    let meta = quote_ident_mysql(&cfg.confinement.meta_schema)?;
     let rows = conn
         .query(
             &format!(
@@ -648,7 +651,7 @@ pub(crate) async fn record_started<D: SqlSession>(
             )));
         }
     }
-    let meta = quote_ident_mysql(&cfg.pg.meta_schema)?;
+    let meta = quote_ident_mysql(&cfg.confinement.meta_schema)?;
     let affected = conn
         .exec(
             &format!(
@@ -683,7 +686,7 @@ pub(crate) async fn append_completed<D: SqlSession>(
     cfg: &ExecutorConfig,
     rec: CompletedRecord<'_>,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident_mysql(&cfg.pg.meta_schema)?;
+    let meta = quote_ident_mysql(&cfg.confinement.meta_schema)?;
     conn.exec(
         &format!(
             "INSERT INTO {meta}.schema_migrations
@@ -738,7 +741,7 @@ pub(crate) async fn record_rolled_back<D: SqlSession>(
     applied_by: &str,
     exec_ms: i64,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident_mysql(&cfg.pg.meta_schema)?;
+    let meta = quote_ident_mysql(&cfg.confinement.meta_schema)?;
     conn.exec(
         &format!(
             "INSERT INTO {meta}.schema_migrations
@@ -768,7 +771,7 @@ pub(crate) async fn clear_inflight<D: SqlSession>(
     cfg: &ExecutorConfig,
     version: &str,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident_mysql(&cfg.pg.meta_schema)?;
+    let meta = quote_ident_mysql(&cfg.confinement.meta_schema)?;
     conn.exec(
         &format!("DELETE FROM {meta}.schema_migrations_inflight WHERE version = ?"),
         &[version.into()],
@@ -794,7 +797,7 @@ pub(crate) async fn mark_rollback_inflight<D: SqlSession>(
     checksum: &str,
     applied_by: &str,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident_mysql(&cfg.pg.meta_schema)?;
+    let meta = quote_ident_mysql(&cfg.confinement.meta_schema)?;
     conn.exec(
         &format!(
             "INSERT INTO {meta}.schema_migrations_rollback_inflight
@@ -822,7 +825,7 @@ pub(crate) async fn clear_rollback_inflight<D: SqlSession>(
     cfg: &ExecutorConfig,
     version: &str,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident_mysql(&cfg.pg.meta_schema)?;
+    let meta = quote_ident_mysql(&cfg.confinement.meta_schema)?;
     conn.exec(
         &format!("DELETE FROM {meta}.schema_migrations_rollback_inflight WHERE version = ?"),
         &[version.into()],
@@ -841,7 +844,7 @@ pub(crate) async fn has_rollback_inflight<D: SqlSession>(
     cfg: &ExecutorConfig,
     version: &str,
 ) -> Result<bool, JournalError> {
-    let meta = quote_ident_mysql(&cfg.pg.meta_schema)?;
+    let meta = quote_ident_mysql(&cfg.confinement.meta_schema)?;
     let rows = conn
         .query(
             &format!(
@@ -862,7 +865,7 @@ pub(crate) async fn inflight_for_update<D: SqlSession>(
     cfg: &ExecutorConfig,
     version: &str,
 ) -> Result<Option<MysqlInflightDdlMarker>, JournalError> {
-    let meta = quote_ident_mysql(&cfg.pg.meta_schema)?;
+    let meta = quote_ident_mysql(&cfg.confinement.meta_schema)?;
     let rows = conn
         .query(
             &format!(
@@ -898,7 +901,7 @@ pub(crate) async fn append_recovery_audit<D: SqlSession>(
     recovered_by: &str,
     reason: &str,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident_mysql(&cfg.pg.meta_schema)?;
+    let meta = quote_ident_mysql(&cfg.confinement.meta_schema)?;
     conn.exec(
         &format!(
             "INSERT INTO {meta}.schema_migrations_recovery

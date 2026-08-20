@@ -132,10 +132,13 @@ async fn deploy(tag: &str, source: &str, native_sql: &[&str]) -> Option<Applied>
     let policy = charter(&schema);
     let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy.clone());
     let quoted_schema = quote_ident(&cfg.project_schema);
-    let quoted_meta_schema = quote_ident(&cfg.pg.meta_schema);
+    let quoted_meta_schema = quote_ident(&cfg.confinement.meta_schema);
     let _schema_guard = support::SchemaGuard::arm(
         &session,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+        [
+            cfg.project_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
+        ],
     );
     session
         .batch(&format!("CREATE SCHEMA {quoted_schema}"))
@@ -281,10 +284,13 @@ async fn server_verdict(tag: &str, rendered_type: &str) -> Option<String> {
     let policy = charter(&schema);
     let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy.clone());
     let quoted_schema = quote_ident(&cfg.project_schema);
-    let quoted_meta_schema = quote_ident(&cfg.pg.meta_schema);
+    let quoted_meta_schema = quote_ident(&cfg.confinement.meta_schema);
     let _schema_guard = support::SchemaGuard::arm(
         &session,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+        [
+            cfg.project_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
+        ],
     );
     session
         .batch(&format!("CREATE SCHEMA {quoted_schema}"))

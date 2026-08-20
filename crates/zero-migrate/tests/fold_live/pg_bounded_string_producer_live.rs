@@ -177,10 +177,13 @@ async fn measure(
     let policy = support::no_inject(&schema);
     let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy.clone());
     let quoted_schema = quote_ident(&cfg.project_schema);
-    let quoted_meta = quote_ident(&cfg.pg.meta_schema);
+    let quoted_meta = quote_ident(&cfg.confinement.meta_schema);
     let _guard = support::SchemaGuard::arm(
         &session,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+        [
+            cfg.project_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
+        ],
     );
     session
         .batch(&format!("CREATE SCHEMA {quoted_schema}"))
@@ -395,10 +398,13 @@ async fn a_reimported_bounded_string_phantom_diffs_the_bound_off_a_live_column()
     let policy = support::no_inject(&schema);
     let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy.clone());
     let quoted_schema = quote_ident(&cfg.project_schema);
-    let quoted_meta = quote_ident(&cfg.pg.meta_schema);
+    let quoted_meta = quote_ident(&cfg.confinement.meta_schema);
     let _guard = support::SchemaGuard::arm(
         &session,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+        [
+            cfg.project_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
+        ],
     );
     session
         .batch(&format!("CREATE SCHEMA {quoted_schema}"))

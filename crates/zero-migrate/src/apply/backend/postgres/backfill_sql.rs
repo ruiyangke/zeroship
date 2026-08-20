@@ -1079,7 +1079,7 @@ async fn install_guard<D: SqlSession>(
     guard: &GuardIdentity,
 ) -> Result<(), ApplyError> {
     ensure_guard_target_supported(conn, spec).await?;
-    let meta = quote_ident(&cfg.pg.meta_schema)?;
+    let meta = quote_ident(&cfg.confinement.meta_schema)?;
     let schema = quote_ident(&spec.schema)?;
     let table = quote_ident(&spec.table)?;
     let function = quote_ident(&guard.function_name)?;
@@ -1154,7 +1154,7 @@ async fn verify_guard<D: SqlSession>(
                 Bind::Text(spec.schema.clone()),
                 Bind::Text(spec.table.clone()),
                 Bind::Text(guard.trigger_name.clone()),
-                Bind::Text(cfg.pg.meta_schema.clone()),
+                Bind::Text(cfg.confinement.meta_schema.clone()),
                 Bind::Text(guard.function_name.clone()),
             ],
         )
@@ -1202,7 +1202,7 @@ async fn drop_guard<D: SqlSession>(
     spec: &BackfillSpec,
     guard: &GuardIdentity,
 ) -> Result<(), ApplyError> {
-    let meta = quote_ident(&cfg.pg.meta_schema)?;
+    let meta = quote_ident(&cfg.confinement.meta_schema)?;
     let schema = quote_ident(&spec.schema)?;
     let table = quote_ident(&spec.table)?;
     let function = quote_ident(&guard.function_name)?;
@@ -1516,7 +1516,7 @@ fn verify_progress_schema(
 }
 
 async fn ensure_progress<D: SqlSession>(conn: &D, cfg: &ExecutorConfig) -> Result<(), ApplyError> {
-    let meta = quote_ident(&cfg.pg.meta_schema)?;
+    let meta = quote_ident(&cfg.confinement.meta_schema)?;
     conn.batch(&format!("CREATE SCHEMA IF NOT EXISTS {meta}"))
         .await?;
     conn.batch(&format!(
@@ -1548,7 +1548,7 @@ async fn ensure_progress<D: SqlSession>(conn: &D, cfg: &ExecutorConfig) -> Resul
     ))
     .await?;
 
-    let bind = [Bind::Text(cfg.pg.meta_schema.clone())];
+    let bind = [Bind::Text(cfg.confinement.meta_schema.clone())];
     let relation = conn.query_one(PROGRESS_RELATION_SQL, &bind).await?;
     let columns = conn.query(PROGRESS_COLUMNS_SQL, &bind).await?;
     let constraints = conn.query(PROGRESS_CONSTRAINTS_SQL, &bind).await?;
@@ -1561,7 +1561,7 @@ async fn read_progress_row<D: SqlSession>(
     backfill_id: &str,
     for_update: bool,
 ) -> Result<Option<Row>, ApplyError> {
-    let meta = quote_ident(&cfg.pg.meta_schema)?;
+    let meta = quote_ident(&cfg.confinement.meta_schema)?;
     let lock = if for_update { " FOR UPDATE" } else { "" };
     let rows = conn
         .query(
@@ -1734,14 +1734,14 @@ pub(super) async fn read_progress_entries<D: SqlSession>(
                  WHERE n.nspname = $1 AND c.relname = 'schema_backfills' \
                    AND c.relkind IN ('r', 'p') \
              ) AS table_exists",
-            &[Bind::Text(cfg.pg.meta_schema.clone())],
+            &[Bind::Text(cfg.confinement.meta_schema.clone())],
         )
         .await?;
     let table_exists: bool = catalog.try_get("table_exists")?;
     if !table_exists {
         return Ok(Vec::new());
     }
-    let meta = crate::render::dml::quote_ident_checked(&cfg.pg.meta_schema)?;
+    let meta = crate::render::dml::quote_ident_checked(&cfg.confinement.meta_schema)?;
     let rows = conn
         .query(
             &format!(
@@ -1790,7 +1790,7 @@ fn batch_session_sql(
             None,
             "timeout_ms",
             cfg.statement_timeout_ms(),
-            "pg.statement_timeout",
+            "confinement.statement_timeout",
         )?,
         resolve_timeout_ms(
             version.as_str(),
@@ -1798,7 +1798,7 @@ fn batch_session_sql(
             None,
             "lock_timeout_ms",
             cfg.lock_timeout_ms(),
-            "pg.lock_timeout",
+            "confinement.lock_timeout",
         )?,
     ))
 }
@@ -1852,7 +1852,7 @@ async fn initialize_progress<D: SqlSession>(
     allowed_engine_trigger: Option<&AllowedOnlineRenameTrigger>,
     applied_by: &str,
 ) -> Result<Progress, ApplyError> {
-    let meta = quote_ident(&cfg.pg.meta_schema)?;
+    let meta = quote_ident(&cfg.confinement.meta_schema)?;
     conn.batch("BEGIN").await?;
     let result = async {
         conn.batch(&batch_session_sql(cfg, version, spec)?).await?;
@@ -1864,7 +1864,7 @@ async fn initialize_progress<D: SqlSession>(
             verify_guard(conn, cfg, spec, guard).await?;
         }
 
-        if let Some(role) = &cfg.pg.migrator_role {
+        if let Some(role) = &cfg.confinement.postgres.migrator_role {
             conn.batch(&format!("SET LOCAL ROLE {}", quote_ident(role)?))
                 .await?;
         }
@@ -1875,7 +1875,7 @@ async fn initialize_progress<D: SqlSession>(
             .first()
             .map(|row| tuple_from_row(row, "_bf_end_", cursor))
             .transpose()?;
-        if cfg.pg.migrator_role.is_some() {
+        if cfg.confinement.postgres.migrator_role.is_some() {
             conn.batch("RESET ROLE").await?;
         }
 
@@ -2030,7 +2030,7 @@ async fn run_batch<D: SqlSession>(
         )
         .await?;
 
-        if let Some(role) = &cfg.pg.migrator_role {
+        if let Some(role) = &cfg.confinement.postgres.migrator_role {
             conn.batch(&format!("SET LOCAL ROLE {}", quote_ident(role)?))
                 .await?;
         }
@@ -2096,7 +2096,7 @@ async fn run_batch<D: SqlSession>(
             let next_cursor = selected_tuples.last().cloned();
             (selected, updated, next_cursor)
         };
-        if cfg.pg.migrator_role.is_some() {
+        if cfg.confinement.postgres.migrator_role.is_some() {
             conn.batch("RESET ROLE").await?;
         }
 
@@ -2114,7 +2114,7 @@ async fn run_batch<D: SqlSession>(
                 .map_err(|error| backend_error(format!("could not encode checkpoint: {error}")))?;
             let rows_i64 = i64::try_from(updated)
                 .map_err(|_| backend_error("updated-row count cannot be checkpointed"))?;
-            let meta = quote_ident(&cfg.pg.meta_schema)?;
+            let meta = quote_ident(&cfg.confinement.meta_schema)?;
             let advanced = conn
                 .exec(
                     &format!(
@@ -2172,7 +2172,7 @@ async fn finish_backfill<D: SqlSession>(
     allowed_engine_trigger: Option<&AllowedOnlineRenameTrigger>,
     applied_by: &str,
 ) -> Result<(), ApplyError> {
-    let meta = quote_ident(&cfg.pg.meta_schema)?;
+    let meta = quote_ident(&cfg.confinement.meta_schema)?;
     conn.batch("BEGIN").await?;
     let result = async {
         conn.batch(&batch_session_sql(cfg, version, spec)?).await?;

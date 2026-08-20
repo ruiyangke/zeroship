@@ -198,13 +198,13 @@ pub struct MigrationFlags {
     /// Must be confirmed before apply (AI never auto-applies destructive).
     pub requires_approval: bool,
     /// Optional per-migration `statement_timeout`, in **milliseconds**. `None`
-    /// falls back to `PgConfinement::statement_timeout`. A long
+    /// falls back to `ConfinementConfig::statement_timeout`. A long
     /// backfill or a big concurrent index sets its own higher ceiling so the
     /// conservative executor default does not kill it mid-flight.
     pub timeout_ms: Option<u64>,
     /// Optional per-migration `lock_timeout`, in **milliseconds**. `None` falls
     /// back to the SHORT executor-wide default
-    /// (`PgConfinement::lock_timeout`, 3s — the lock-safety
+    /// (`ConfinementConfig::lock_timeout`, 3s — the lock-safety
     /// envelope). This is the per-deploy maintenance-window knob: a planned
     /// migration that legitimately needs to wait longer to acquire its lock
     /// (run during a quiet window where a brief stall is acceptable) raises ONLY

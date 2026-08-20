@@ -189,11 +189,14 @@ async fn rolling_back_a_dropped_view_restores_it_on_postgres() {
         support::no_inject(&schema),
     );
     let quoted_schema = quote_ident(&cfg.project_schema);
-    let quoted_meta_schema = quote_ident(&cfg.pg.meta_schema);
+    let quoted_meta_schema = quote_ident(&cfg.confinement.meta_schema);
     // Both schemas, dropped on an unwind that skips the explicit cleanup below.
     let _schema_guard = support::SchemaGuard::arm(
         &session,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+        [
+            cfg.project_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
+        ],
     );
     session
         .batch(&format!("CREATE SCHEMA {quoted_schema}"))
@@ -378,10 +381,13 @@ async fn a_table_rename_reaches_the_body_a_dropped_view_is_restored_from() {
         support::no_inject(&schema),
     );
     let quoted_schema = quote_ident(&cfg.project_schema);
-    let quoted_meta_schema = quote_ident(&cfg.pg.meta_schema);
+    let quoted_meta_schema = quote_ident(&cfg.confinement.meta_schema);
     let _schema_guard = support::SchemaGuard::arm(
         &session,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+        [
+            cfg.project_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
+        ],
     );
     session
         .batch(&format!("CREATE SCHEMA {quoted_schema}"))
@@ -547,10 +553,13 @@ async fn a_raw_view_body_does_not_follow_a_table_rename_and_its_inverse_is_refus
     let policy = support::operator_charter(&schema);
     let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy.clone());
     let quoted_schema = quote_ident(&cfg.project_schema);
-    let quoted_meta_schema = quote_ident(&cfg.pg.meta_schema);
+    let quoted_meta_schema = quote_ident(&cfg.confinement.meta_schema);
     let _schema_guard = support::SchemaGuard::arm(
         &session,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+        [
+            cfg.project_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
+        ],
     );
     session
         .batch(&format!("CREATE SCHEMA {quoted_schema}"))
@@ -703,11 +712,14 @@ async fn a_guarded_drop_keeps_no_inverse_on_postgres() {
         support::no_inject(&schema),
     );
     let quoted_schema = quote_ident(&cfg.project_schema);
-    let quoted_meta_schema = quote_ident(&cfg.pg.meta_schema);
+    let quoted_meta_schema = quote_ident(&cfg.confinement.meta_schema);
     // Both schemas, dropped on an unwind that skips the explicit cleanup below.
     let _schema_guard = support::SchemaGuard::arm(
         &session,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+        [
+            cfg.project_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
+        ],
     );
     session
         .batch(&format!("CREATE SCHEMA {quoted_schema}"))
@@ -822,7 +834,10 @@ async fn a_rust_embedding_refuses_an_absent_view_drop_at_the_database() {
     let quoted_schema = quote_ident(&cfg.project_schema);
     let _schema_guard = support::SchemaGuard::arm(
         &session,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+        [
+            cfg.project_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
+        ],
     );
     session
         .batch(&format!("CREATE SCHEMA {quoted_schema}"))

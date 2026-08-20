@@ -1064,7 +1064,7 @@ async fn pg_verdict(url: &str, kind: &str, variant: &str, op: &Op) -> Verdict {
         &session,
         [
             cfg.project_schema.clone(),
-            cfg.pg.meta_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
             probe.aux_schema.clone(),
         ],
     );

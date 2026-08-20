@@ -194,7 +194,10 @@ async fn postgres_refuses_an_instead_of_trigger_on_a_table_and_keeps_one_on_a_vi
     let quoted_schema = quote_ident(&cfg.project_schema);
     let _schema_guard = support::SchemaGuard::arm(
         &session,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+        [
+            cfg.project_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
+        ],
     );
     session
         .batch(&format!("CREATE SCHEMA {quoted_schema}"))

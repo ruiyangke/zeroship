@@ -44,7 +44,7 @@ fn cfg_for(token: &str) -> ExecutorConfig {
         &schema,
         support::no_inject(&schema),
     );
-    cfg.pg.meta_schema = format!("meta_{token}");
+    cfg.confinement.meta_schema = format!("meta_{token}");
     cfg
 }
 
@@ -58,7 +58,10 @@ async fn ensure_project_schema<'a>(
 ) -> support::SchemaGuard<'a> {
     let guard = support::SchemaGuard::arm(
         session,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+        [
+            cfg.project_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
+        ],
     );
     session
         .batch(&format!(

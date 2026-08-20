@@ -149,7 +149,7 @@ pub use apply::drift::{
     diff_snapshots, diff_snapshots_with_index_aliases, AlteredObject, ChecksumDrift,
     ChecksumDriftReport, DriftError, DriftReport, OrphanJournal, StructuralDrift,
 };
-pub use conn::{ConnectError, ExecutorConfig, PgConfinement};
+pub use conn::{ConfinementConfig, ConnectError, ExecutorConfig, PostgresConfinement};
 #[cfg(pg_seam)]
 pub use driver::{Bind, ColIndex, DbError, FromValue, Row, SqlSession, Value};
 pub use engine::{

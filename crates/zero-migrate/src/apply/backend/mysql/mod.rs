@@ -794,7 +794,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
                     AND TABLE_NAME = 'schema_migrations'
                     AND TABLE_TYPE = 'BASE TABLE'
                   LIMIT 1",
-                &[cfg.pg.meta_schema.as_str().into()],
+                &[cfg.confinement.meta_schema.as_str().into()],
             )
             .await?;
         Ok(!rows.is_empty())
@@ -5132,11 +5132,11 @@ mod render_tests {
                 }),
             ),
             (
-                "pg.lock_timeout",
+                "confinement.lock_timeout",
                 Box::new(|_m: &mut Migration, cfg: &mut ExecutorConfig| {
                     // A sub-millisecond config budget truncates to zero whole
                     // milliseconds, with no migration flag and no IR involved.
-                    cfg.pg.lock_timeout = std::time::Duration::from_micros(500);
+                    cfg.confinement.lock_timeout = std::time::Duration::from_micros(500);
                 }),
             ),
         ] {
@@ -5158,6 +5158,15 @@ mod render_tests {
             assert!(
                 error.to_string().contains(label),
                 "{label}: the refusal must name the knob that produced the zero: {error}"
+            );
+            // The knob it names must be one a MySQL operator can find. The
+            // executor-config budgets are read by MySQL (`max_execution_time` /
+            // `innodb_lock_wait_timeout`) as well as by PostgreSQL, so the
+            // refusal must not send a MySQL operator hunting for a
+            // PostgreSQL-named field.
+            assert!(
+                !error.to_string().contains("pg."),
+                "{label}: a MySQL refusal must not name a PostgreSQL-scoped knob: {error}"
             );
             assert!(
                 rec.log.borrow().is_empty(),

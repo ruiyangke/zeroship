@@ -51,7 +51,7 @@ fn cfg_for(tok: &str) -> ExecutorConfig {
         format!("proj_{tok}"),
         support::no_inject(&format!("proj_{tok}")),
     );
-    c.pg.meta_schema = format!("meta_{tok}");
+    c.confinement.meta_schema = format!("meta_{tok}");
     c
 }
 
@@ -60,7 +60,7 @@ fn drop_schemas(session: &PgDevSession, cfg: &ExecutorConfig) {
         session
             .batch(&format!(
                 "DROP SCHEMA IF EXISTS \"{}\" CASCADE; DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
-                cfg.project_schema, cfg.pg.meta_schema
+                cfg.project_schema, cfg.confinement.meta_schema
             ))
             .await
             .expect("drop schemas");

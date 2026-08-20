@@ -114,12 +114,15 @@ async fn attempt_under(
     let schema = token();
     let policy = policy_for(&schema);
     let mut cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy.clone());
-    cfg.pg.meta_schema = format!("meta_{schema}");
+    cfg.confinement.meta_schema = format!("meta_{schema}");
     let quoted_schema = quote_ident(&cfg.project_schema);
-    let quoted_meta_schema = quote_ident(&cfg.pg.meta_schema);
+    let quoted_meta_schema = quote_ident(&cfg.confinement.meta_schema);
     let _schema_guard = support::SchemaGuard::arm(
         &session,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+        [
+            cfg.project_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
+        ],
     );
     session
         .batch(&format!("CREATE SCHEMA {quoted_schema}"))
@@ -730,12 +733,15 @@ async fn a_replayed_plan_is_not_re_judged_against_a_world_that_moved() {
     let schema = token();
     let policy = support::no_inject(&schema);
     let mut cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy.clone());
-    cfg.pg.meta_schema = format!("meta_{schema}");
+    cfg.confinement.meta_schema = format!("meta_{schema}");
     let quoted_schema = quote_ident(&cfg.project_schema);
-    let quoted_meta_schema = quote_ident(&cfg.pg.meta_schema);
+    let quoted_meta_schema = quote_ident(&cfg.confinement.meta_schema);
     let _schema_guard = support::SchemaGuard::arm(
         &session,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+        [
+            cfg.project_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
+        ],
     );
     session
         .batch(&format!("CREATE SCHEMA {quoted_schema}"))

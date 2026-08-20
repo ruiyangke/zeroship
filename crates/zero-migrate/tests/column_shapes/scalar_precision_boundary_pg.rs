@@ -65,7 +65,10 @@ async fn round_trip(
     );
     let _guard = support::SchemaGuard::arm(
         session,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+        [
+            cfg.project_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
+        ],
     );
     session
         .batch(&format!("CREATE SCHEMA \"{}\"", cfg.project_schema))

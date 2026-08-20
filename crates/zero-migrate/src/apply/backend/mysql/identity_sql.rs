@@ -226,7 +226,7 @@ pub(super) async fn synchronize_identity<D: SqlSession>(
         // external DDL stable across the catalog/MAX comparison and ALTER.
         let schema_q = journal_sql::quote_ident_mysql(&step.schema)?;
         let table_q = journal_sql::quote_ident_mysql(&step.table)?;
-        let meta_q = journal_sql::quote_ident_mysql(&cfg.pg.meta_schema)?;
+        let meta_q = journal_sql::quote_ident_mysql(&cfg.confinement.meta_schema)?;
         let inflight_q = journal_sql::quote_ident_mysql("schema_migrations_inflight")?;
         conn.batch(&format!(
             "LOCK TABLES {schema_q}.{table_q} WRITE, {meta_q}.{inflight_q} WRITE"

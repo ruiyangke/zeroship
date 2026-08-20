@@ -190,7 +190,10 @@ async fn an_option_less_alter_sequence_is_refused_before_any_sql_exists() {
     let quoted_schema = quote_ident(&cfg.project_schema);
     let _schema_guard = support::SchemaGuard::arm(
         &session,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+        [
+            cfg.project_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
+        ],
     );
     session
         .batch(&format!("CREATE SCHEMA {quoted_schema}"))

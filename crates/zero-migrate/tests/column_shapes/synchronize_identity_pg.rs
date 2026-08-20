@@ -30,7 +30,7 @@ fn cfg_for(token: &str) -> ExecutorConfig {
         format!("identity_app_{token}"),
         support::no_inject(&format!("identity_app_{token}")),
     );
-    cfg.pg.meta_schema = format!("identity_meta_{token}");
+    cfg.confinement.meta_schema = format!("identity_meta_{token}");
     cfg
 }
 
@@ -39,7 +39,10 @@ fn cfg_for(token: &str) -> ExecutorConfig {
 async fn setup<'a>(session: &'a PgDevSession, cfg: &ExecutorConfig) -> support::SchemaGuard<'a> {
     let guard = support::SchemaGuard::arm(
         session,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+        [
+            cfg.project_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
+        ],
     );
     session
         .batch(&format!("CREATE SCHEMA \"{}\"", cfg.project_schema))
@@ -57,7 +60,7 @@ async fn cleanup(session: &PgDevSession, cfg: &ExecutorConfig) {
         .batch(&format!(
             "DROP SCHEMA IF EXISTS \"{}\" CASCADE; \
              DROP SCHEMA IF EXISTS \"{}\" CASCADE",
-            cfg.project_schema, cfg.pg.meta_schema
+            cfg.project_schema, cfg.confinement.meta_schema
         ))
         .await;
 }

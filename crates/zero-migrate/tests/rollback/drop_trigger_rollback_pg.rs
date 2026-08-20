@@ -371,12 +371,15 @@ async fn positive_rolling_back_a_dropped_trigger_restores_its_definition() {
     let schema = token();
     let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy(&schema));
     let quoted_schema = quote_ident(&cfg.project_schema);
-    let quoted_meta_schema = quote_ident(&cfg.pg.meta_schema);
+    let quoted_meta_schema = quote_ident(&cfg.confinement.meta_schema);
     let quoted_table = quote_ident(LIVE_TABLE);
     let quoted_function = quote_ident(LIVE_FUNCTION);
     let _schema_guard = support::SchemaGuard::arm(
         &session,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+        [
+            cfg.project_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
+        ],
     );
     session
         .batch(&format!(

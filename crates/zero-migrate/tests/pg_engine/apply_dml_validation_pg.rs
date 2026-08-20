@@ -95,7 +95,7 @@ fn cfg_for(label: &str) -> ExecutorConfig {
         project_schema.clone(),
         support::no_inject(&project_schema),
     );
-    cfg.pg.meta_schema = format!("apply_dml_meta_{suffix}");
+    cfg.confinement.meta_schema = format!("apply_dml_meta_{suffix}");
     cfg
 }
 
@@ -107,13 +107,16 @@ async fn prepare_schemas<'a>(
         .batch(&format!(
             "DROP SCHEMA IF EXISTS \"{}\" CASCADE; \
              DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
-            cfg.project_schema, cfg.pg.meta_schema
+            cfg.project_schema, cfg.confinement.meta_schema
         ))
         .await
         .expect("remove stale test schemas");
     let guard = support::SchemaGuard::arm(
         session,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+        [
+            cfg.project_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
+        ],
     );
     session
         .batch(&format!("CREATE SCHEMA \"{}\"", cfg.project_schema))

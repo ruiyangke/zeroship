@@ -85,7 +85,7 @@ fn cfg_for(tok: &str) -> ExecutorConfig {
         format!("proj_{tok}"),
         support::no_inject(&format!("proj_{tok}")),
     );
-    c.pg.meta_schema = format!("meta_{tok}");
+    c.confinement.meta_schema = format!("meta_{tok}");
     c
 }
 
@@ -102,7 +102,10 @@ async fn ensure_project_schema<'a>(
     use zero_migrate::driver::SqlSession;
     let guard = support::SchemaGuard::arm(
         session,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+        [
+            cfg.project_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
+        ],
     );
     session
         .batch(&format!(
@@ -119,7 +122,7 @@ async fn drop_schemas(session: &PgDevSession, cfg: &ExecutorConfig) {
     let _ = session
         .batch(&format!(
             "DROP SCHEMA IF EXISTS \"{}\" CASCADE; DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
-            cfg.project_schema, cfg.pg.meta_schema
+            cfg.project_schema, cfg.confinement.meta_schema
         ))
         .await;
 }
@@ -474,7 +477,7 @@ async fn a_backfill_refuses_a_config_timeout_that_truncates_to_zero() {
     };
 
     let mut zero_cfg = cfg.clone();
-    zero_cfg.pg.statement_timeout = Duration::from_micros(500);
+    zero_cfg.confinement.statement_timeout = Duration::from_micros(500);
     assert_eq!(
         zero_cfg.statement_timeout_ms(),
         0,
@@ -831,7 +834,7 @@ async fn backfill_rejects_a_before_update_trigger_that_rewrites_values() {
             &format!(
                 "SELECT count(*) AS progress_rows FROM \"{}\".schema_backfills \
                  WHERE backfill_id = $1",
-                cfg.pg.meta_schema
+                cfg.confinement.meta_schema
             ),
             &[version.as_str().into()],
         )
@@ -945,7 +948,7 @@ async fn backfill_rejects_a_stored_generated_unique_cursor_before_guard_or_cohor
             &format!(
                 "SELECT count(*)::bigint AS n FROM \"{}\".schema_backfills \
                  WHERE backfill_id = $1",
-                cfg.pg.meta_schema
+                cfg.confinement.meta_schema
             ),
             &[version.as_str().into()],
         )
@@ -967,7 +970,7 @@ async fn backfill_rolls_back_when_update_policy_hides_a_selected_row() {
     let tok = token();
     let mut cfg = cfg_for(&tok);
     let role = format!("bf_role_{tok}");
-    cfg.pg.migrator_role = Some(role.clone());
+    cfg.confinement.postgres.migrator_role = Some(role.clone());
     drop_schemas(&session, &cfg).await;
     let _schemas = ensure_project_schema(&session, &cfg).await;
 
@@ -1051,7 +1054,7 @@ async fn backfill_rolls_back_when_update_policy_hides_a_selected_row() {
             &format!(
                 "SELECT last_cursor::text AS last_cursor, complete FROM \"{}\".schema_backfills \
                  WHERE backfill_id = $1",
-                cfg.pg.meta_schema
+                cfg.confinement.meta_schema
             ),
             &[version.as_str().into()],
         )
@@ -1141,7 +1144,7 @@ async fn composite_guard_backfill_survives_crash_and_cleans_up_after_resume() {
                         cursor_columns::text AS cursor_columns, guard_trigger, \
                         guard_installed, guard_cleaned, complete \
                    FROM \"{}\".schema_backfills WHERE backfill_id = $1",
-                cfg.pg.meta_schema
+                cfg.confinement.meta_schema
             ),
             &[version.as_str().into()],
         )
@@ -1236,7 +1239,7 @@ async fn composite_guard_backfill_survives_crash_and_cleans_up_after_resume() {
             &format!(
                 "SELECT guard_installed, guard_cleaned, complete \
                    FROM \"{}\".schema_backfills WHERE backfill_id = $1",
-                cfg.pg.meta_schema
+                cfg.confinement.meta_schema
             ),
             &[version.as_str().into()],
         )
@@ -1379,7 +1382,7 @@ async fn a_resumed_backfill_stops_at_the_boundary_its_first_run_captured() {
                 &format!(
                     "SELECT end_cursor::text AS end_cursor, complete \
                        FROM \"{}\".schema_backfills WHERE backfill_id = $1",
-                    cfg.pg.meta_schema
+                    cfg.confinement.meta_schema
                 ),
                 &[version.as_str().into()],
             )
@@ -1642,7 +1645,7 @@ async fn backfill_resume_rejects_a_when_false_guard_replacement() {
             &format!(
                 "SELECT guard_trigger, guard_function, guard_marker \
                    FROM \"{}\".schema_backfills WHERE backfill_id = $1",
-                cfg.pg.meta_schema
+                cfg.confinement.meta_schema
             ),
             &[version.as_str().into()],
         )
@@ -1665,7 +1668,7 @@ async fn backfill_resume_rejects_a_when_false_guard_replacement() {
              COMMENT ON TRIGGER \"{trigger}\" ON \"{schema}\".guard_tamper_items \
                  IS '{marker}'",
             schema = cfg.project_schema,
-            meta = cfg.pg.meta_schema,
+            meta = cfg.confinement.meta_schema,
         ))
         .await
         .expect("replace the guard with an inert lookalike");
@@ -1757,7 +1760,7 @@ async fn backfill_resume_rejects_cursor_metadata_and_cohort_bound_corruption() {
                 "UPDATE \"{}\".schema_backfills \
                     SET end_cursor = '[{{\"int64\":\"999\"}}]'::jsonb \
                   WHERE backfill_id = $1",
-                cfg.pg.meta_schema
+                cfg.confinement.meta_schema
             ),
             &[bound_version.as_str().into()],
         )
@@ -1818,7 +1821,7 @@ async fn backfill_resume_rejects_cursor_metadata_and_cohort_bound_corruption() {
                 "UPDATE \"{}\".schema_backfills \
                     SET cursor_columns = '[\"other_id\"]'::jsonb \
                   WHERE backfill_id = $1",
-                cfg.pg.meta_schema
+                cfg.confinement.meta_schema
             ),
             &[metadata_version.as_str().into()],
         )
@@ -1923,7 +1926,7 @@ async fn backfill_rejects_a_progress_table_with_any_extra_stale_column() {
         .batch(&format!(
             "ALTER TABLE \"{}\".schema_backfills ADD COLUMN stale_extra text; \
              UPDATE \"{}\".progress_shape_items SET value = 'pending'",
-            cfg.pg.meta_schema, cfg.project_schema
+            cfg.confinement.meta_schema, cfg.project_schema
         ))
         .await
         .expect("introduce a harmless-looking stale progress column");
@@ -1969,7 +1972,7 @@ async fn backfill_rejects_a_progress_table_with_any_extra_stale_column() {
             &format!(
                 "SELECT count(*)::bigint AS n FROM \"{}\".schema_backfills \
                   WHERE backfill_id = $1",
-                cfg.pg.meta_schema
+                cfg.confinement.meta_schema
             ),
             &[rejected_version.as_str().into()],
         )
@@ -2049,7 +2052,7 @@ async fn external_cursor_invariant_requires_explicit_approval_and_is_recorded() 
             &format!(
                 "SELECT cursor_stability::text AS stability \
                    FROM \"{}\".schema_backfills WHERE backfill_id = $1",
-                cfg.pg.meta_schema
+                cfg.confinement.meta_schema
             ),
             &[version.as_str().into()],
         )
@@ -2203,7 +2206,7 @@ async fn online_rename_backfill_rejects_replica_only_and_body_tampered_dual_writ
             &format!(
                 "SELECT count(*)::bigint AS n FROM \"{}\".schema_backfills \
                   WHERE backfill_id = $1",
-                cfg.pg.meta_schema
+                cfg.confinement.meta_schema
             ),
             &[backfill_version.as_str().into()],
         )
@@ -3076,7 +3079,7 @@ async fn inflight_marker_armed(
             &format!(
                 "SELECT EXISTS (SELECT 1 FROM \"{}\".schema_migrations_inflight \
                  WHERE version = $1) AS armed",
-                cfg.pg.meta_schema
+                cfg.confinement.meta_schema
             ),
             &[version.into()],
         )
@@ -3158,7 +3161,7 @@ async fn a_committed_non_txn_create_table_is_refused_on_replay_with_the_marker_k
             meta_schema,
         } => {
             assert_eq!(version, v1.as_str());
-            assert_eq!(meta_schema, &cfg.pg.meta_schema);
+            assert_eq!(meta_schema, &cfg.confinement.meta_schema);
             assert!(
                 reason.contains("not one of the statements recovery can re-run"),
                 "the reason names why the up was not admitted: {reason}"
@@ -3770,7 +3773,7 @@ async fn rollback_runs_down_appends_event_and_is_reappliable() {
                    count(*) FILTER (WHERE event_kind = 'applied')::int8     AS applied_n, \
                    count(*) FILTER (WHERE event_kind = 'rolled_back')::int8 AS rolled_n \
                  FROM \"{}\".schema_migrations WHERE version = $1",
-                cfg.pg.meta_schema
+                cfg.confinement.meta_schema
             ),
             &[v.as_str().into()],
         )
@@ -7748,7 +7751,7 @@ async fn a_squash_over_a_partly_applied_prefix_is_refused_and_records_nothing() 
         .query_one(
             &format!(
                 "SELECT count(*)::bigint AS n FROM \"{}\".schema_migrations_supersedes",
-                cfg.pg.meta_schema
+                cfg.confinement.meta_schema
             ),
             &[],
         )
@@ -7834,7 +7837,7 @@ async fn a_squash_over_a_partly_applied_prefix_is_refused_and_records_nothing() 
         .query_one(
             &format!(
                 "SELECT count(*)::bigint AS n FROM \"{}\".schema_migrations_supersedes",
-                fresh_cfg.pg.meta_schema
+                fresh_cfg.confinement.meta_schema
             ),
             &[],
         )

@@ -51,7 +51,7 @@ fn cfg_for(tok: &str) -> ExecutorConfig {
         format!("proj_{tok}"),
         support::no_inject(&format!("proj_{tok}")),
     );
-    c.pg.meta_schema = format!("meta_{tok}");
+    c.confinement.meta_schema = format!("meta_{tok}");
     c
 }
 
@@ -66,7 +66,10 @@ async fn ensure_project_schema<'a>(
     use zero_migrate::driver::SqlSession;
     let guard = support::SchemaGuard::arm(
         session,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+        [
+            cfg.project_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
+        ],
     );
     session
         .batch(&format!(
@@ -83,7 +86,7 @@ async fn drop_schemas(session: &PgDevSession, cfg: &ExecutorConfig) {
     let _ = session
         .batch(&format!(
             "DROP SCHEMA IF EXISTS \"{}\" CASCADE; DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
-            cfg.project_schema, cfg.pg.meta_schema
+            cfg.project_schema, cfg.confinement.meta_schema
         ))
         .await;
 }
@@ -262,7 +265,7 @@ async fn a_config_timeout_that_truncates_to_zero_milliseconds_is_refused() {
     let session = PgDevSession::connect(&url);
     let tok = token();
     let mut cfg = cfg_for(&tok);
-    cfg.pg.lock_timeout = Duration::from_micros(500);
+    cfg.confinement.lock_timeout = Duration::from_micros(500);
     assert_eq!(
         cfg.lock_timeout_ms(),
         0,
@@ -282,7 +285,7 @@ async fn a_config_timeout_that_truncates_to_zero_milliseconds_is_refused() {
         .expect_err("a config lock_timeout that truncates to 0ms must be refused")
         .to_string();
     assert!(
-        err.contains("lock_timeout = 0") && err.contains("pg.lock_timeout"),
+        err.contains("lock_timeout = 0") && err.contains("confinement.lock_timeout"),
         "the refusal must point at the config field, not at a migration flag: {err}"
     );
 

@@ -508,10 +508,13 @@ async fn postgres_control_the_same_declarative_rename_applies_and_the_rows_survi
         schema.clone(),
         policy_for(&schema),
     );
-    cfg.pg.meta_schema = format!("{schema}_meta");
+    cfg.confinement.meta_schema = format!("{schema}_meta");
     let _schemas = support::SchemaGuard::arm(
         &session,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+        [
+            cfg.project_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
+        ],
     );
     session
         .batch(&format!("CREATE SCHEMA {}", pg_ident(&schema)))

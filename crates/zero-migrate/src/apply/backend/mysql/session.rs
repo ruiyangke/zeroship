@@ -409,7 +409,7 @@ fn effective_timeout_ms(cfg: &ExecutorConfig, m: &Migration) -> Result<u64, Time
         m.flags.timeout_ms,
         "timeout_ms",
         cfg.statement_timeout_ms(),
-        "pg.statement_timeout",
+        "confinement.statement_timeout",
     )
 }
 
@@ -431,7 +431,7 @@ fn effective_lock_timeout_secs(cfg: &ExecutorConfig, m: &Migration) -> Result<u6
         m.flags.lock_timeout_ms,
         "lock_timeout_ms",
         cfg.lock_timeout_ms(),
-        "pg.lock_timeout",
+        "confinement.lock_timeout",
     )?;
     // Round UP to whole seconds (MySQL's unit), floor 1s so a sub-second budget
     // never becomes a 0 = "no wait" that fails every contended DDL.
@@ -609,7 +609,7 @@ pub(crate) async fn configure_data_session<D: SqlSession>(
         None,
         "timeout_ms",
         cfg.statement_timeout_ms(),
-        "pg.statement_timeout",
+        "confinement.statement_timeout",
     )?;
     let lock_secs = resolve_timeout_ms(
         version,
@@ -617,7 +617,7 @@ pub(crate) async fn configure_data_session<D: SqlSession>(
         None,
         "lock_timeout_ms",
         cfg.lock_timeout_ms(),
-        "pg.lock_timeout",
+        "confinement.lock_timeout",
     )?
     .div_ceil(1000)
     .max(1);
@@ -715,7 +715,7 @@ pub(crate) async fn apply_dml_transactional<D: SqlSession>(
 ) -> Result<(), ApplyError> {
     configure_data_session(conn, cfg, version).await?;
 
-    let meta = journal_sql::quote_ident_mysql(&cfg.pg.meta_schema)?;
+    let meta = journal_sql::quote_ident_mysql(&cfg.confinement.meta_schema)?;
     let started = Instant::now();
 
     conn.batch("START TRANSACTION").await?;
@@ -834,7 +834,7 @@ pub(crate) async fn apply_two_phase<D: SqlSession>(
     // assumes. Trusting the journal's net-applied state and running the `up` anyway
     // would build on a shape nobody has verified.
     if journal_sql::has_rollback_inflight(conn, cfg, version).await? {
-        let meta = journal_sql::quote_ident_mysql(&cfg.pg.meta_schema)?;
+        let meta = journal_sql::quote_ident_mysql(&cfg.confinement.meta_schema)?;
         return Err(ApplyError::Backend(format!(
             "mysql migration {version} has a rollback marker from an interrupted unwind; \
              its `down` auto-committed an unknown number of statements, so the live shape \
@@ -852,7 +852,7 @@ pub(crate) async fn apply_two_phase<D: SqlSession>(
         // so clearing the marker needs no extra privilege and no extra API.
         // `recover_inflight_ddl` is the audited alternative, and it is reachable
         // only from a Rust host that depends on this crate directly.
-        let meta = journal_sql::quote_ident_mysql(&cfg.pg.meta_schema)?;
+        let meta = journal_sql::quote_ident_mysql(&cfg.confinement.meta_schema)?;
         return Err(ApplyError::Backend(format!(
             "mysql migration {version} has an inflight marker from an interrupted \
              auto-committing DDL apply; zero-migrate will not replay possibly-applied \
@@ -1066,7 +1066,7 @@ pub(super) async fn insert_supersedes_edges<D: SqlSession>(
     squash_version: &str,
     supersedes: &[&str],
 ) -> Result<(), ApplyError> {
-    let meta = journal_sql::quote_ident_mysql(&cfg.pg.meta_schema)?;
+    let meta = journal_sql::quote_ident_mysql(&cfg.confinement.meta_schema)?;
     for sup in supersedes {
         conn.exec(
             &format!(
@@ -1256,7 +1256,7 @@ pub(crate) async fn rollback_one<D: SqlSession>(
             .await
             .map_err(RollbackError::Journal)?
         {
-            let meta = journal_sql::quote_ident_mysql(&cfg.pg.meta_schema)
+            let meta = journal_sql::quote_ident_mysql(&cfg.confinement.meta_schema)
                 .map_err(RollbackError::Journal)?;
             return Err(RollbackError::Backend(format!(
                 "mysql migration {version} has a rollback marker from an interrupted \
@@ -1369,7 +1369,7 @@ mod project_lock_timeout_tests {
     fn cfg_with(ms: u64) -> ExecutorConfig {
         let mut cfg =
             ExecutorConfig::new("project", "main", crate::test_fixtures::no_inject("main"));
-        cfg.pg.project_lock_timeout = Duration::from_millis(ms);
+        cfg.confinement.project_lock_timeout = Duration::from_millis(ms);
         cfg
     }
 

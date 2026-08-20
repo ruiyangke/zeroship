@@ -82,7 +82,7 @@ pub(super) async fn apply<D: SqlSession>(
     let column_q = quote_ident_checked(&step.column)?;
     let session_sql = session::set_local_session_sql(cfg, marker)?;
     let role_sql = session::set_local_role_sql(cfg)?;
-    let meta_q = quote_ident_checked(&cfg.pg.meta_schema)?;
+    let meta_q = quote_ident_checked(&cfg.confinement.meta_schema)?;
 
     conn.batch("BEGIN").await?;
     let started = Instant::now();
@@ -495,7 +495,7 @@ mod tests {
             "app",
             crate::test_fixtures::no_inject("app"),
         );
-        cfg.pg.meta_schema = "meta".into();
+        cfg.confinement.meta_schema = "meta".into();
         cfg
     }
 

@@ -665,7 +665,7 @@ async fn run_sql_boolean_in_txn<D: SqlSession>(
         .await?;
     // Drop to the migrator role for the read, scoped to this txn (line-2). No
     // role configured (tests / single-tenant dev) runs as the connecting role.
-    if let Some(role) = &cfg.pg.migrator_role {
+    if let Some(role) = &cfg.confinement.postgres.migrator_role {
         let role_q = crate::render::dml::quote_ident_checked(role)?;
         conn.batch(&format!("SET LOCAL ROLE {role_q}")).await?;
     }

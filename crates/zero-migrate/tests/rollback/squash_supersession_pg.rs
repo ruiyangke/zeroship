@@ -159,7 +159,7 @@ async fn journal_events(
     session: &PgDevSession,
     cfg: &ExecutorConfig,
 ) -> Result<Vec<(String, String, Option<String>)>, String> {
-    let meta = quote_ident(&cfg.pg.meta_schema);
+    let meta = quote_ident(&cfg.confinement.meta_schema);
     let rows = session
         .query(
             &format!(
@@ -189,7 +189,7 @@ async fn supersession_edges(
     session: &PgDevSession,
     cfg: &ExecutorConfig,
 ) -> Result<Vec<(String, String)>, String> {
-    let meta = quote_ident(&cfg.pg.meta_schema);
+    let meta = quote_ident(&cfg.confinement.meta_schema);
     let rows = session
         .query(
             // Named columns, not `*`: the table also carries a timestamp this
@@ -262,7 +262,10 @@ async fn squashing_a_fully_applied_prefix_records_a_supersession_and_is_idempote
     let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy(&schema));
     let _schema_guard = support::SchemaGuard::arm(
         &session,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+        [
+            cfg.project_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
+        ],
     );
     session
         .batch(&format!(
@@ -361,7 +364,7 @@ async fn squashing_a_fully_applied_prefix_records_a_supersession_and_is_idempote
         .batch(&format!(
             "DROP SCHEMA IF EXISTS {} CASCADE; DROP SCHEMA IF EXISTS {} CASCADE",
             quote_ident(&cfg.project_schema),
-            quote_ident(&cfg.pg.meta_schema)
+            quote_ident(&cfg.confinement.meta_schema)
         ))
         .await
         .expect("drop the test schemas");
@@ -376,7 +379,10 @@ async fn squashing_a_partially_applied_prefix_is_refused_and_writes_nothing() {
     let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy(&schema));
     let _schema_guard = support::SchemaGuard::arm(
         &session,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+        [
+            cfg.project_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
+        ],
     );
     session
         .batch(&format!(
@@ -437,7 +443,7 @@ async fn squashing_a_partially_applied_prefix_is_refused_and_writes_nothing() {
         .batch(&format!(
             "DROP SCHEMA IF EXISTS {} CASCADE; DROP SCHEMA IF EXISTS {} CASCADE",
             quote_ident(&cfg.project_schema),
-            quote_ident(&cfg.pg.meta_schema)
+            quote_ident(&cfg.confinement.meta_schema)
         ))
         .await
         .expect("drop the test schemas");
@@ -452,7 +458,10 @@ async fn squashing_an_unapplied_prefix_is_refused_as_not_applied() {
     let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy(&schema));
     let _schema_guard = support::SchemaGuard::arm(
         &session,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+        [
+            cfg.project_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
+        ],
     );
     session
         .batch(&format!(
@@ -517,7 +526,7 @@ async fn squashing_an_unapplied_prefix_is_refused_as_not_applied() {
         .batch(&format!(
             "DROP SCHEMA IF EXISTS {} CASCADE; DROP SCHEMA IF EXISTS {} CASCADE",
             quote_ident(&cfg.project_schema),
-            quote_ident(&cfg.pg.meta_schema)
+            quote_ident(&cfg.confinement.meta_schema)
         ))
         .await
         .expect("drop the test schemas");
@@ -574,7 +583,10 @@ async fn a_rollback_may_not_force_skip_an_irreversible_squash() {
     let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy(&schema));
     let _schema_guard = support::SchemaGuard::arm(
         &session,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+        [
+            cfg.project_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
+        ],
     );
     session
         .batch(&format!(
@@ -668,7 +680,7 @@ async fn a_rollback_may_not_force_skip_an_irreversible_squash() {
         .batch(&format!(
             "DROP SCHEMA IF EXISTS {} CASCADE; DROP SCHEMA IF EXISTS {} CASCADE",
             quote_ident(&cfg.project_schema),
-            quote_ident(&cfg.pg.meta_schema)
+            quote_ident(&cfg.confinement.meta_schema)
         ))
         .await
         .expect("drop the test schemas");
@@ -696,7 +708,10 @@ async fn a_squash_that_can_reverse_itself_still_rolls_back_under_force() {
     let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy(&schema));
     let _schema_guard = support::SchemaGuard::arm(
         &session,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+        [
+            cfg.project_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
+        ],
     );
     session
         .batch(&format!(
@@ -775,7 +790,7 @@ async fn a_squash_that_can_reverse_itself_still_rolls_back_under_force() {
         .batch(&format!(
             "DROP SCHEMA IF EXISTS {} CASCADE; DROP SCHEMA IF EXISTS {} CASCADE",
             quote_ident(&cfg.project_schema),
-            quote_ident(&cfg.pg.meta_schema)
+            quote_ident(&cfg.confinement.meta_schema)
         ))
         .await
         .expect("drop the test schemas");

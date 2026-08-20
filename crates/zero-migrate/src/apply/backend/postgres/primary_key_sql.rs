@@ -99,7 +99,7 @@ pub(super) async fn apply<D: SqlSession>(
     );
     let session_sql = session::set_local_session_sql(cfg, marker)?;
     let role_sql = session::set_local_role_sql(cfg)?;
-    let meta_q = quote_ident_checked(&cfg.pg.meta_schema)?;
+    let meta_q = quote_ident_checked(&cfg.confinement.meta_schema)?;
 
     conn.batch("BEGIN").await?;
     let started = Instant::now();
@@ -187,7 +187,7 @@ async fn apply_inside_transaction<D: SqlSession>(
             source: error.into(),
         });
     }
-    if cfg.pg.migrator_role.is_some() {
+    if cfg.confinement.postgres.migrator_role.is_some() {
         conn.batch("RESET ROLE").await?;
     }
 

@@ -966,7 +966,7 @@ async fn apply_locked<B: MigrationBackend>(
     {
         return Err(ApplyError::UnresolvedRollbackMarker {
             version,
-            meta_schema: cfg.pg.meta_schema.clone(),
+            meta_schema: cfg.confinement.meta_schema.clone(),
         });
     }
 

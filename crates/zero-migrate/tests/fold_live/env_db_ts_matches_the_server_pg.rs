@@ -293,10 +293,13 @@ async fn measure(label: &str, charter: Charter, ops: &str) -> Measured {
     let policy = charter.policy(&schema);
     let cfg = cfg_for(&schema, &policy);
     let quoted_schema = quote_ident(&cfg.project_schema);
-    let quoted_meta_schema = quote_ident(&cfg.pg.meta_schema);
+    let quoted_meta_schema = quote_ident(&cfg.confinement.meta_schema);
     let _schema_guard = support::SchemaGuard::arm(
         &session,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+        [
+            cfg.project_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
+        ],
     );
     session
         .batch(&format!("CREATE SCHEMA {quoted_schema}"))

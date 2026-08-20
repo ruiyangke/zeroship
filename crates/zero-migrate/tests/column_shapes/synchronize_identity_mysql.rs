@@ -319,7 +319,7 @@ async fn journal_rows(
         &format!(
             "SELECT CAST(count(*) AS CHAR) FROM {}.schema_migrations \
              WHERE version = '{version}'",
-            quote_ident(&cfg.pg.meta_schema),
+            quote_ident(&cfg.confinement.meta_schema),
         ),
     )
     .await

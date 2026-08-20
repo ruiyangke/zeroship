@@ -89,7 +89,7 @@ pub(super) async fn alter_column_type<D: SqlSession>(
         // restate would then write back a definition that is no longer the column's.
         let schema_q = journal_sql::quote_ident_mysql(&step.schema)?;
         let table_q = journal_sql::quote_ident_mysql(&step.table)?;
-        let meta_q = journal_sql::quote_ident_mysql(&cfg.pg.meta_schema)?;
+        let meta_q = journal_sql::quote_ident_mysql(&cfg.confinement.meta_schema)?;
         let inflight_q = journal_sql::quote_ident_mysql("schema_migrations_inflight")?;
         conn.batch(&format!(
             "LOCK TABLES {schema_q}.{table_q} WRITE, {meta_q}.{inflight_q} WRITE"

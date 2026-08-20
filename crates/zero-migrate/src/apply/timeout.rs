@@ -124,7 +124,7 @@ mod tests {
             Some(7_000),
             "lock_timeout_ms",
             3_000,
-            "pg.lock_timeout",
+            "confinement.lock_timeout",
         )
         .expect("a finite override resolves");
         assert_eq!(ms, 7_000);
@@ -138,7 +138,7 @@ mod tests {
             Some(0),
             "lock_timeout_ms",
             3_000,
-            "pg.lock_timeout",
+            "confinement.lock_timeout",
         )
         .expect_err("a zero override is refused");
         assert_eq!(err.origin, TimeoutOrigin::MigrationFlag("lock_timeout_ms"));
@@ -155,14 +155,17 @@ mod tests {
             None,
             "timeout_ms",
             0,
-            "pg.statement_timeout",
+            "confinement.statement_timeout",
         )
         .expect_err("a zero executor default is refused");
         assert_eq!(
             err.origin,
-            TimeoutOrigin::ExecutorConfig("pg.statement_timeout")
+            TimeoutOrigin::ExecutorConfig("confinement.statement_timeout")
         );
-        assert!(err.to_string().contains("pg.statement_timeout"), "{err}");
+        assert!(
+            err.to_string().contains("confinement.statement_timeout"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -174,7 +177,7 @@ mod tests {
                 Some(1),
                 "lock_timeout_ms",
                 3_000,
-                "pg.lock_timeout",
+                "confinement.lock_timeout",
             )
             .expect("1ms is a real budget"),
             1

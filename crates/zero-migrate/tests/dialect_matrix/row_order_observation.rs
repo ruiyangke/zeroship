@@ -369,7 +369,10 @@ async fn pg_row_order(url: &str, pin: Pin) -> Result<Vec<String>, String> {
     let cfg = ExecutorConfig::new(format!("prj_{schema}"), &schema, policy.clone());
     let _guard = support::SchemaGuard::arm(
         &session,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+        [
+            cfg.project_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
+        ],
     );
     session
         .batch(&format!("CREATE SCHEMA \"{}\"", cfg.project_schema))
@@ -404,7 +407,10 @@ async fn mysql_row_order(url: &str, pin: Pin) -> Result<Vec<String>, String> {
     let cfg = ExecutorConfig::new(format!("prj_{database}"), &database, policy.clone());
     let _guard = DatabaseGuard::arm(
         &session,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+        [
+            cfg.project_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
+        ],
     );
     session
         .batch(&format!(

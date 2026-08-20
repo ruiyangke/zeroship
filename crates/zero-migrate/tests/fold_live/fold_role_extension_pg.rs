@@ -134,7 +134,10 @@ async fn a_role_and_an_extension_fold_to_what_live_introspection_reports() {
     let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy.clone());
     let _guard = support::SchemaGuard::arm(
         &session,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+        [
+            cfg.project_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
+        ],
     );
     session
         .batch(&format!(
@@ -262,7 +265,7 @@ async fn a_role_and_an_extension_fold_to_what_live_introspection_reports() {
         .batch(&format!(
             "DROP SCHEMA IF EXISTS {} CASCADE; DROP SCHEMA IF EXISTS {} CASCADE",
             quote_ident(&cfg.project_schema),
-            quote_ident(&cfg.pg.meta_schema)
+            quote_ident(&cfg.confinement.meta_schema)
         ))
         .await;
     // `release` carries the `DROP EXTENSION IF EXISTS` that used to stand here, so
@@ -301,7 +304,10 @@ async fn role_attributes_round_trip_and_drift_is_named() {
     let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy.clone());
     let _guard = support::SchemaGuard::arm(
         &session,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+        [
+            cfg.project_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
+        ],
     );
     session
         .batch(&format!(
@@ -426,7 +432,7 @@ async fn role_attributes_round_trip_and_drift_is_named() {
         .batch(&format!(
             "DROP SCHEMA IF EXISTS {} CASCADE; DROP SCHEMA IF EXISTS {} CASCADE",
             quote_ident(&cfg.project_schema),
-            quote_ident(&cfg.pg.meta_schema)
+            quote_ident(&cfg.confinement.meta_schema)
         ))
         .await
         .expect("drop the test schemas");
@@ -465,7 +471,10 @@ async fn drop_owned_by_removes_the_role_s_objects_and_spares_everyone_else_s() {
     let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy.clone());
     let _guard = support::SchemaGuard::arm(
         &session,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+        [
+            cfg.project_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
+        ],
     );
     session
         .batch(&format!(
@@ -568,7 +577,7 @@ async fn drop_owned_by_removes_the_role_s_objects_and_spares_everyone_else_s() {
         .batch(&format!(
             "DROP SCHEMA IF EXISTS {} CASCADE; DROP SCHEMA IF EXISTS {} CASCADE",
             quote_ident(&cfg.project_schema),
-            quote_ident(&cfg.pg.meta_schema)
+            quote_ident(&cfg.confinement.meta_schema)
         ))
         .await
         .expect("drop the test schemas");
@@ -606,7 +615,10 @@ async fn drop_role_succeeds_refuses_while_owning_and_no_ops_under_if_exists() {
     let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy.clone());
     let _guard = support::SchemaGuard::arm(
         &session,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+        [
+            cfg.project_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
+        ],
     );
     session
         .batch(&format!(
@@ -759,7 +771,7 @@ async fn drop_role_succeeds_refuses_while_owning_and_no_ops_under_if_exists() {
         .batch(&format!(
             "DROP SCHEMA IF EXISTS {} CASCADE; DROP SCHEMA IF EXISTS {} CASCADE",
             quote_ident(&cfg.project_schema),
-            quote_ident(&cfg.pg.meta_schema)
+            quote_ident(&cfg.confinement.meta_schema)
         ))
         .await
         .expect("drop the test schemas");
@@ -793,7 +805,10 @@ async fn grant_and_revoke_move_exactly_the_named_privilege() {
     let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy.clone());
     let _guard = support::SchemaGuard::arm(
         &session,
-        [cfg.project_schema.clone(), cfg.pg.meta_schema.clone()],
+        [
+            cfg.project_schema.clone(),
+            cfg.confinement.meta_schema.clone(),
+        ],
     );
     session
         .batch(&format!(
@@ -936,7 +951,7 @@ async fn grant_and_revoke_move_exactly_the_named_privilege() {
         .batch(&format!(
             "DROP SCHEMA IF EXISTS {} CASCADE; DROP SCHEMA IF EXISTS {} CASCADE",
             quote_ident(&cfg.project_schema),
-            quote_ident(&cfg.pg.meta_schema)
+            quote_ident(&cfg.confinement.meta_schema)
         ))
         .await
         .expect("drop the test schemas");

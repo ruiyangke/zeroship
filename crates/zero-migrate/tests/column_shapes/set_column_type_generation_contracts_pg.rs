@@ -300,7 +300,7 @@ impl<'a> Deployment<'a> {
             .batch(&format!(
                 "DROP SCHEMA IF EXISTS {} CASCADE; DROP SCHEMA IF EXISTS {} CASCADE",
                 quote_ident(&self.cfg.project_schema),
-                quote_ident(&self.cfg.pg.meta_schema),
+                quote_ident(&self.cfg.confinement.meta_schema),
             ))
             .await
             .map_err(|error| format!("drop PostgreSQL test schemas: {error}"))
@@ -323,7 +323,7 @@ where
         &session,
         [
             deployment.cfg.project_schema.clone(),
-            deployment.cfg.pg.meta_schema.clone(),
+            deployment.cfg.confinement.meta_schema.clone(),
         ],
     );
     let outcome = body(&deployment).await;
