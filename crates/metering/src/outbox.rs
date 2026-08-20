@@ -70,9 +70,19 @@ pub const DEFAULT_USAGE_EVENTS_TOPIC: &str = "usage-events";
 pub const DEFAULT_MAX_RETAINED_EVENTS: usize = 100_000;
 
 /// Resolved usage-stream producer settings. The source of these values is the
-/// caller's concern (config-file overlay, env, CLI) — this crate only consumes
-/// the resolved struct, so the billing stream is configurable from
-/// `zeroship.toml` (via the `[metering]` overlay) as well as the environment.
+/// caller's concern — this crate only consumes the resolved struct.
+///
+/// Both producers now build it from their own generated `metering.*`
+/// declarations, so one operator-visible identity carries the flag, the
+/// `ZEROSHIP_METERING_*` environment name and the `[metering]` overlay path.
+/// It used to carry a `from_env()` constructor reading `REDPANDA_BROKERS` and
+/// three siblings directly, plus an `or()` back-fill each caller used to layer
+/// the file overlay underneath. That was the ONLY channel either producer had,
+/// and after 9b205f6ed removed the worker's overlay source the worker had no
+/// interface for the stream at all - every metering harness had to set ambient
+/// variables on the worker's command prefix. Use [`from_resolved`] instead.
+///
+/// [`from_resolved`]: UsageStreamSettings::from_resolved
 #[derive(Debug, Clone, Default)]
 pub struct UsageStreamSettings {
     /// Kafka-wire brokers. `None`/empty ⇒ the producer is disabled.
@@ -87,62 +97,64 @@ pub struct UsageStreamSettings {
 
 /// Treat a blank value as absent.
 ///
-/// This takes the ALREADY-READ value. It used to be `env_nonempty(key: &str)`
-/// and perform the read itself, which is the exact shape Section 4.5 of
-/// `docs/proposals/2026-08-11-config-name-alignment.md` names: a helper that
-/// accepts a `&str` name is still a read, and no scan of this file could
-/// attribute it to `REDPANDA_BROKERS` or to anything else, because the four
-/// names lived at the CALL sites and the read lived here. Moving the read up
-/// to `from_env` puts a literal next to each `declared_env!`, so the source
-/// gate sees four named, classified reads instead of one anonymous one.
-///
-/// Note this is now a pure predicate on an `Option<String>`, so it also serves
-/// a value that did not come from the environment at all.
-fn nonempty(value: Option<String>) -> Option<String> {
-    value.filter(|s| !s.trim().is_empty())
+/// A generated `Operational<String>` always resolves to SOME string, and its
+/// compiled default for three of these four is the empty one. A caller that
+/// passed that through verbatim would configure a producer with empty brokers
+/// and get an error out of the transport builder instead of the disabled
+/// producer it asked for, so the blank-is-absent rule lives here, once, rather
+/// than at each of the two call sites.
+fn nonempty(value: &str) -> Option<String> {
+    Some(value.trim())
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
 }
 
 impl UsageStreamSettings {
-    /// Read the settings from the environment (`REDPANDA_BROKERS`,
-    /// `USAGE_EVENTS_TOPIC`, `REDPANDA_PRODUCER_GROUP_ID`, `USAGE_OUTBOX_WAL_PATH`).
+    /// Build from a producer's four resolved `metering.*` settings.
+    ///
+    /// Every argument is the already-resolved value of one generated
+    /// declaration, so the flag / environment / overlay precedence has been
+    /// applied by the caller's own resolver and this crate reads nothing.
     #[must_use]
-    pub fn from_env() -> Self {
-        // All four are class `external`: the broker address, the topic and the
-        // consumer-group id are the surrounding deployment's Kafka-family
-        // contract, and none of them is a zeroship-canonical name.
+    pub fn from_resolved(brokers: &str, topic: &str, group_id: &str, wal_path: &str) -> Self {
         Self {
-            brokers: nonempty(zeroship_core::declared_env!(
-                external,
-                "REDPANDA_BROKERS",
-                crate::MeteringConsumer
-            )),
-            topic: nonempty(zeroship_core::declared_env!(
-                external,
-                "USAGE_EVENTS_TOPIC",
-                crate::MeteringConsumer
-            )),
-            group_id: nonempty(zeroship_core::declared_env!(
-                external,
-                "REDPANDA_PRODUCER_GROUP_ID",
-                crate::MeteringConsumer
-            )),
-            wal_path: nonempty(zeroship_core::declared_env!(
-                external,
-                "USAGE_OUTBOX_WAL_PATH",
-                crate::MeteringConsumer
-            )),
+            brokers: nonempty(brokers),
+            topic: nonempty(topic),
+            group_id: nonempty(group_id),
+            wal_path: nonempty(wal_path),
         }
     }
 
-    /// Back-fill any field left `None` on `self` from `fallback` (so `self`, the
-    /// higher-precedence source such as env, wins over the file overlay).
+    /// The broker list a live producer would connect to, or `None` when the
+    /// producer is disabled. The ONE place that decision is made.
     #[must_use]
-    pub fn or(mut self, fallback: Self) -> Self {
-        self.brokers = self.brokers.or(fallback.brokers);
-        self.topic = self.topic.or(fallback.topic);
-        self.group_id = self.group_id.or(fallback.group_id);
-        self.wal_path = self.wal_path.or(fallback.wal_path);
-        self
+    pub fn effective_brokers(&self) -> Option<&str> {
+        self.brokers
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Whether these settings will build a live producer.
+    ///
+    /// The same predicate [`build_usage_outbox`] branches on, exposed so a
+    /// `--check-config` report answers from the SETTINGS rather than from a
+    /// second, independent reading of where they came from. The worker's report
+    /// used to re-read `REDPANDA_BROKERS` itself, which agreed with the
+    /// producer only for as long as the environment was the sole channel.
+    #[must_use]
+    pub fn producer_enabled(&self) -> bool {
+        self.effective_brokers().is_some()
+    }
+
+    /// The topic a live producer would publish to, default included.
+    #[must_use]
+    pub fn effective_topic(&self) -> &str {
+        self.topic
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_USAGE_EVENTS_TOPIC)
     }
 }
 
@@ -168,20 +180,10 @@ pub fn build_usage_outbox(
     wal: &WalIdentity,
     settings: &UsageStreamSettings,
 ) -> Result<Option<(UsageOutbox, OutboxConfig)>, String> {
-    let Some(brokers) = settings
-        .brokers
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    else {
+    let Some(brokers) = settings.effective_brokers() else {
         return Ok(None);
     };
-    let topic = settings
-        .topic
-        .as_deref()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or(DEFAULT_USAGE_EVENTS_TOPIC)
-        .to_string();
+    let topic = settings.effective_topic().to_string();
     let group_id = settings
         .group_id
         .clone()
@@ -768,13 +770,28 @@ pub fn spawn_outbox_task(meter: Arc<Meter>, outbox: UsageOutbox, config: OutboxC
     .detach();
 }
 
+/// The fixed phrase both producers print when the usage outbox is disabled.
+///
+/// A CONSTANT, and it is why it is worth one: this state is the "green while
+/// asserting nothing" shape in its purest form. A metering harness that points
+/// control and the gateway at a broker but leaves the worker without one gets a
+/// worker that boots, serves, and silently drops every billable event - so the
+/// harness's usage assertions run against genuine silence and report the same
+/// numbers a broken producer would. Refusing to boot is not available (see the
+/// worker's `Ok(None)` arm: a no-metering worker is a supported deployment), so
+/// the guarantee is that the state is ANNOUNCED with a string a harness can
+/// grep. `tests/e2e_metering_billing.sh` and its four siblings assert on it,
+/// and `tests/lib/e2e_stack.sh`'s `e2e_assert_usage_producer` is where they do
+/// it from.
+pub const OUTBOX_DISABLED_LOG: &str = "usage-event outbox DISABLED";
+
 /// Dev/no-broker mode: keep draining so counters do not grow without bound, but
 /// make the under-billing posture explicit in logs.
 pub fn spawn_disabled_drain_task(meter: Arc<Meter>, interval: Duration, reason: String) {
     compio::runtime::spawn(async move {
         tracing::warn!(
             reason = %reason,
-            "meter outbox disabled; usage events will be drained and dropped"
+            "{OUTBOX_DISABLED_LOG}; every usage event will be drained and dropped"
         );
         loop {
             compio::time::sleep(interval).await;
@@ -783,7 +800,7 @@ pub fn spawn_disabled_drain_task(meter: Arc<Meter>, interval: Duration, reason: 
                 tracing::warn!(
                     events = events.len(),
                     reason = %reason,
-                    "meter outbox disabled; dropped usage events"
+                    "{OUTBOX_DISABLED_LOG}; dropped usage events"
                 );
             }
         }

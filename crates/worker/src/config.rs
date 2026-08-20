@@ -158,6 +158,58 @@ pub struct WorkerSettings {
     /// Maximum persisted bytes for one workflow step output blob.
     #[config(name = "worker.max_step_blob_bytes", default = 67_108_864)]
     pub max_step_blob_bytes: Operational<u64>,
+
+    /// Kafka-wire brokers for the usage-event stream, e.g. `redpanda:9092`.
+    ///
+    /// EMPTY DISABLES THE PRODUCER, and that is a supported deployment: every
+    /// non-billing e2e harness and `zeroship dev` run a worker that meters
+    /// nothing. What the empty value must never be is INVISIBLE - the boot log
+    /// says so in as many words and `--check-config` reports
+    /// `usage_stream_configured=false`, because a worker that drains and drops
+    /// billable usage looks exactly like a worker with no traffic.
+    ///
+    /// Operational, not `Secret`: the value is a host:port list an operator
+    /// reads out of their broker's own dashboard. Kafka credentials, if this
+    /// ever grows SASL, would be a separate secret-classed declaration with a
+    /// `--<name>-file` flag - not a password smuggled into this string.
+    #[config(shared = METERING_BROKERS, default = String::new())]
+    pub metering_brokers: Operational<String>,
+
+    /// Topic the usage-event producer publishes to.
+    #[config(shared = METERING_EVENTS_TOPIC,
+             default = zeroship_metering::DEFAULT_USAGE_EVENTS_TOPIC.to_owned())]
+    pub metering_events_topic: Operational<String>,
+
+    /// Consumer-group id override for the producer. Empty derives one from the
+    /// per-boot producer source.
+    #[config(shared = METERING_PRODUCER_GROUP_ID, default = String::new())]
+    pub metering_producer_group_id: Operational<String>,
+
+    /// redb write-ahead-log path for the usage outbox. Empty derives one from
+    /// the stable per-host WAL identity.
+    ///
+    /// PER PROCESS, never shared: redb is single-writer, so a worker and a
+    /// gateway on one host that name the same file leave the second producer
+    /// unable to build an outbox at all - which the worker treats as fatal.
+    #[config(shared = METERING_OUTBOX_WAL_PATH, default = String::new())]
+    pub metering_outbox_wal_path: Operational<String>,
+}
+
+/// The worker's usage-stream producer settings, resolved.
+///
+/// A free function on [`WorkerSettings`] rather than four reads at the boot
+/// site, so `--check-config` and the producer answer from ONE expression. They
+/// did not before: the report re-read `REDPANDA_BROKERS` from the environment
+/// while the producer went through `UsageStreamSettings::from_env`, and the two
+/// agreed only for as long as the environment was the sole channel.
+#[must_use]
+pub fn usage_stream_settings(settings: &WorkerSettings) -> zeroship_metering::UsageStreamSettings {
+    zeroship_metering::UsageStreamSettings::from_resolved(
+        settings.metering_brokers.get(),
+        settings.metering_events_topic.get(),
+        settings.metering_producer_group_id.get(),
+        settings.metering_outbox_wal_path.get(),
+    )
 }
 
 impl OverlaySelector for WorkerSettingsSources {
@@ -312,5 +364,88 @@ mod tests {
         // The one-variable control: a worker-scoped identity DOES carry the
         // prefix, so this is not merely asserting that everything is unprefixed.
         assert_eq!(find("max_isolates"), Some("ZEROSHIP_WORKER_MAX_ISOLATES".to_owned()));
+    }
+
+    #[test]
+    fn the_usage_stream_has_flags_and_is_not_environment_only() {
+        // REGRESSION. Until 2026-08-20 the worker's usage-stream settings had
+        // NO flag: `UsageStreamSettings::from_env` was the single channel for
+        // `REDPANDA_BROKERS` and `USAGE_EVENTS_TOPIC`, and 9b205f6ed had
+        // already removed the `--config` overlay that was the other one. Nine
+        // e2e harnesses were left setting ambient variables on the worker's
+        // command prefix because the product offered nothing else. Asserted on
+        // the COMMAND rather than on the struct: a field that resolves
+        // correctly but projects no flag is exactly the state being fixed.
+        let command = WorkerSettingsSources::command();
+        let longs = command
+            .get_arguments()
+            .filter_map(clap::Arg::get_long)
+            .collect::<Vec<_>>();
+        for expected in [
+            "metering-brokers",
+            "metering-events-topic",
+            "metering-producer-group-id",
+            "metering-outbox-wal-path",
+        ] {
+            assert!(longs.contains(&expected), "no --{expected} in {longs:?}");
+        }
+
+        // Each carries the ZEROSHIP_* twin every other flag in this tree has,
+        // and the names are UNPREFIXED: one stream serves the whole deployment,
+        // so `ZEROSHIP_WORKER_METERING_BROKERS` would be the wrong shape.
+        let env_of = |id: &str| {
+            WorkerSettingsSources::command()
+                .get_arguments()
+                .find(|arg| arg.get_id() == id)
+                .and_then(clap::Arg::get_env)
+                .map(|env| env.to_string_lossy().into_owned())
+        };
+        assert_eq!(
+            env_of("metering_brokers"),
+            Some("ZEROSHIP_METERING_BROKERS".to_owned())
+        );
+        assert_eq!(
+            env_of("metering_events_topic"),
+            Some("ZEROSHIP_METERING_EVENTS_TOPIC".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_flag_and_not_only_the_default_reaches_the_producer_settings() {
+        // The one-variable control pair: identical parses but for the flag, so
+        // this cannot pass on a resolver that ignores the flag and returns the
+        // compiled default, nor on one that always reports a producer.
+        let bare = WorkerSettings::resolve_config(
+            WorkerSettingsSources::try_parse_from(["zeroship-worker"]).expect("bare parse"),
+            None,
+        )
+        .expect("settings resolve");
+        let disabled = super::usage_stream_settings(&bare);
+        assert!(
+            !disabled.producer_enabled(),
+            "a worker told nothing about brokers must report a disabled producer"
+        );
+        assert_eq!(disabled.effective_topic(), "usage-events");
+
+        let flagged = WorkerSettings::resolve_config(
+            WorkerSettingsSources::try_parse_from([
+                "zeroship-worker",
+                "--metering-brokers",
+                "127.0.0.1:19092",
+                "--metering-events-topic",
+                "usage-e2e",
+            ])
+            .expect("flag parse"),
+            None,
+        )
+        .expect("settings resolve");
+        let enabled = super::usage_stream_settings(&flagged);
+        assert!(enabled.producer_enabled());
+        assert_eq!(enabled.effective_brokers(), Some("127.0.0.1:19092"));
+        assert_eq!(enabled.effective_topic(), "usage-e2e");
+
+        // Does NOT cover whether `main` spawns the outbox from this value; the
+        // boot arm is asserted end to end by the metering harnesses, which now
+        // fail if the worker log reports a disabled outbox.
     }
 }

@@ -510,18 +510,12 @@ fn main() -> std::io::Result<()> {
 
     // Spawn the gateway usage-event outbox (coverage #27). Drains the gateway's
     // meter every ~10s and publishes UsageEvents to the billing stream via the
-    // SAME shared producer wiring as the worker. Disabled (drain-and-drop) when
-    // REDPANDA_BROKERS is unset. Detached — never on the proxy hot path.
-    // Env wins, the `[metering]` file overlay back-fills (config-file driven).
-    let fm = &boot.overlay.config.metering;
-    let gate_stream_settings = zeroship_metering::UsageStreamSettings::from_env().or(
-        zeroship_metering::UsageStreamSettings {
-            brokers: fm.redpanda_brokers.clone(),
-            topic: fm.usage_events_topic.clone(),
-            group_id: fm.producer_group_id.clone(),
-            wal_path: fm.outbox_wal_path.clone(),
-        },
-    );
+    // SAME shared producer wiring as the worker, and now from the same
+    // operator-visible identity: the four `metering.*` declarations, whose
+    // resolver has already applied flag > `ZEROSHIP_METERING_*` > `[metering]`
+    // overlay > default. Disabled (drain-and-drop) when no brokers resolve.
+    // Detached — never on the proxy hot path.
+    let gate_stream_settings = zeroship_gateway::config::usage_stream_settings(&settings);
     match zeroship_metering::build_usage_outbox(
         &gate_meter_source,
         &gate_wal,
@@ -532,11 +526,13 @@ fn main() -> std::io::Result<()> {
             zeroship_metering::spawn_outbox_task(Arc::clone(&meter), outbox, outbox_config);
             tracing::info!(producer = %gate_meter_source, topic = %topic, "gateway usage-event outbox started");
         }
+        // Announced, not fatal - see the worker's matching arm for why a
+        // no-metering deployment stays supported and what makes it visible.
         Ok(None) => {
             zeroship_metering::spawn_disabled_drain_task(
                 Arc::clone(&meter),
                 zeroship_metering::DEFAULT_OUTBOX_INTERVAL,
-                "REDPANDA_BROKERS is not set".to_string(),
+                "no --metering-brokers / ZEROSHIP_METERING_BROKERS".to_string(),
             );
         }
         // FATAL, matching the worker. Brokers are configured, so the operator

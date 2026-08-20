@@ -310,20 +310,28 @@ pub struct SchedulerSection {
 }
 
 /// Usage-metering stream configuration supplied by the shared file overlay.
-/// These back-fill the corresponding environment variables (env wins) so the
-/// billing stream can be configured entirely from `zeroship.toml`.
+///
+/// Like [`ControlSection`], the keys here exist so `deny_unknown_fields` still
+/// ACCEPTS a `[metering]` table and still rejects a typo inside it. The
+/// producers do NOT read this struct: `metering.brokers` and its three siblings
+/// are generated declarations on the worker and the gateway, so each walks this
+/// same canonical path itself and gets the flag / `ZEROSHIP_METERING_*` tiers
+/// above it. The control plane, which consumes the stream rather than producing
+/// into it, does still read the struct - it derives `--stream-transport` /
+/// `--stream-config` defaults from the brokers the producers were pointed at.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct MeteringSection {
     /// Kafka-wire broker list for the usage-event stream, e.g.
-    /// `"redpanda:9092"` (env `REDPANDA_BROKERS`). Unset ⇒ the usage producer is
-    /// disabled (drain-and-drop).
-    pub redpanda_brokers: Option<String>,
-    /// Usage-event topic (env `USAGE_EVENTS_TOPIC`, default `"usage-events"`).
-    pub usage_events_topic: Option<String>,
-    /// Producer consumer-group id override (env `REDPANDA_PRODUCER_GROUP_ID`).
+    /// `"redpanda:9092"`. Unset ⇒ the usage producer is disabled
+    /// (drain-and-drop).
+    pub brokers: Option<String>,
+    /// Usage-event topic (default `"usage-events"`).
+    pub events_topic: Option<String>,
+    /// Producer consumer-group id override.
     pub producer_group_id: Option<String>,
-    /// redb WAL path for the outbox (env `USAGE_OUTBOX_WAL_PATH`).
+    /// redb WAL path for the outbox. Per-process: two producers on one host
+    /// must not name one redb file, which is single-writer.
     pub outbox_wal_path: Option<String>,
 }
 
