@@ -111,30 +111,26 @@ mod tests {
     use serial_test::serial;
     use uuid::Uuid;
 
-    fn test_db_url() -> Option<String> {
-        zeroship_core::config::test_database_url_opt()
-    }
-
-    async fn store(label: &str) -> Option<WorkflowSchedulerStore> {
-        let Some(db_url) = test_db_url() else {
-            eprintln!("skip: no test database (run tests/provision_test_backends.sh)");
-            return None;
-        };
+    // A missing Postgres is a FAILURE, not a skip. The timer wheel's
+    // fire/ack/reconcile guarantees are only proven against the real
+    // store; a run that quietly returned None used to let that proof lapse
+    // while the suite still reported green. Dial it or panic naming the
+    // provisioning command.
+    async fn store(label: &str) -> WorkflowSchedulerStore {
+        let db_url = zeroship_core::config::test_database_url();
         let store = WorkflowSchedulerStore::new(db_url);
         store.provision().await.expect("provision scheduler store");
         store
             .clear_for_tests()
             .await
             .unwrap_or_else(|err| panic!("clear scheduler store for {label}: {err}"));
-        Some(store)
+        store
     }
 
     #[compio::test]
     #[serial]
     async fn store_register_fire_and_ack_next_timer() {
-        let Some(store) = store("register-fire-ack").await else {
-            return;
-        };
+        let store = store("register-fire-ack").await;
         let run_id = format!("run_{}", Uuid::new_v4().simple());
         let app_id = Uuid::new_v4();
         let wake_at = Utc::now() - chrono::Duration::milliseconds(10);
@@ -166,9 +162,7 @@ mod tests {
     #[compio::test]
     #[serial]
     async fn store_reconcile_moves_inflight_back_to_timer() {
-        let Some(store) = store("reconcile-move").await else {
-            return;
-        };
+        let store = store("reconcile-move").await;
         let run_id = format!("run_{}", Uuid::new_v4().simple());
         let app_id = Uuid::new_v4();
         let wake_at = Utc::now() - chrono::Duration::milliseconds(10);

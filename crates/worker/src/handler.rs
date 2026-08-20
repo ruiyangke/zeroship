@@ -1696,7 +1696,18 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         })
     }
 
-    fn workflow_test_db_url() -> Option<String> {
+    // Postgres is not optional for this workspace's tests (see
+    // crates/test-support/src/lib.rs); the workflow-apply tests below cannot
+    // do without it, so this panics with the provisioning command rather than
+    // let them report a pass for a check they never ran.
+    fn workflow_test_db_url() -> String {
+        zeroship_core::config::test_database_url()
+    }
+
+    // Generic test-state setup (`workflow_test_state[_with_meter]`) is shared
+    // by tests that do not touch the database at all, so it keeps tolerating
+    // an absent overlay rather than forcing Postgres on every caller.
+    fn workflow_test_db_url_opt() -> Option<String> {
         zeroship_core::config::test_database_url_opt()
     }
 
@@ -1731,7 +1742,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         init_runtime();
         let app_id = Uuid::new_v4();
         let meter = Arc::new(zeroship_metering::Meter::new());
-        let db_url = workflow_test_db_url();
+        let db_url = workflow_test_db_url_opt();
         crate::cache::init_cache(
             10,
             max_pinned_isolates_per_app,
@@ -1969,16 +1980,14 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
 
     #[test]
     fn workflow_advance_first_frontier_returns_step_completed() {
-        let Ok(runtime) = compio::runtime::Runtime::new() else {
-            eprintln!("skipping (cannot create compio runtime)");
-            return;
-        };
+        // The whole workspace runs on compio/io_uring (see AGENTS.md); a
+        // machine that cannot create a compio runtime cannot run any of this
+        // suite, so this fails the test rather than reporting a pass for
+        // work it never did.
+        let runtime = compio::runtime::Runtime::new().expect("compio runtime");
 
         runtime.block_on(async {
-            let Some(db_url) = workflow_test_db_url() else {
-                eprintln!("skipping (set PG_TEST_URL for workflow apply test)");
-                return;
-            };
+            let db_url = workflow_test_db_url();
             let (app_id, blob_store, envs, logs, config, blob_root) = workflow_test_state(4);
             let deploy_hash = deploy_workflow_fixture(&blob_store, &app_id, "A").await;
             seed_unclaimed_workflow_run(
@@ -2023,16 +2032,10 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
 
     #[test]
     fn workflow_advance_claim_lost_nacks_without_replay() {
-        let Ok(runtime) = compio::runtime::Runtime::new() else {
-            eprintln!("skipping (cannot create compio runtime)");
-            return;
-        };
+        let runtime = compio::runtime::Runtime::new().expect("compio runtime");
 
         runtime.block_on(async {
-            let Some(db_url) = workflow_test_db_url() else {
-                eprintln!("skipping (set PG_TEST_URL for workflow apply test)");
-                return;
-            };
+            let db_url = workflow_test_db_url();
             let (app_id, blob_store, envs, logs, config, blob_root) = workflow_test_state(4);
             let deploy_hash = deploy_workflow_fixture(&blob_store, &app_id, "CL").await;
             seed_unclaimed_workflow_run(
@@ -2080,16 +2083,10 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
 
     #[test]
     fn workflow_advance_concurrent_frontier_returns_outcomes_batch() {
-        let Ok(runtime) = compio::runtime::Runtime::new() else {
-            eprintln!("skipping (cannot create compio runtime)");
-            return;
-        };
+        let runtime = compio::runtime::Runtime::new().expect("compio runtime");
 
         runtime.block_on(async {
-            let Some(db_url) = workflow_test_db_url() else {
-                eprintln!("skipping (set PG_TEST_URL for workflow apply test)");
-                return;
-            };
+            let db_url = workflow_test_db_url();
             let (app_id, blob_store, envs, logs, config, blob_root) = workflow_test_state(4);
             let deploy_hash = deploy_workflow_fixture(&blob_store, &app_id, "C").await;
             seed_unclaimed_workflow_run(
@@ -2134,16 +2131,10 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
 
     #[test]
     fn workflow_advance_feeds_platform_counters_and_workflow_steps_metric() {
-        let Ok(runtime) = compio::runtime::Runtime::new() else {
-            eprintln!("skipping (cannot create compio runtime)");
-            return;
-        };
+        let runtime = compio::runtime::Runtime::new().expect("compio runtime");
 
         runtime.block_on(async {
-            let Some(db_url) = workflow_test_db_url() else {
-                eprintln!("skipping (set PG_TEST_URL for workflow apply test)");
-                return;
-            };
+            let db_url = workflow_test_db_url();
             let (app_id, blob_store, envs, logs, config, meter, blob_root) =
                 workflow_test_state_with_meter(4);
             let deploy_hash = deploy_workflow_fixture(&blob_store, &app_id, "M").await;
@@ -2213,16 +2204,10 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
 
     #[test]
     fn workflow_advance_replays_journal_hit_without_rerunning_body() {
-        let Ok(runtime) = compio::runtime::Runtime::new() else {
-            eprintln!("skipping (cannot create compio runtime)");
-            return;
-        };
+        let runtime = compio::runtime::Runtime::new().expect("compio runtime");
 
         runtime.block_on(async {
-            let Some(db_url) = workflow_test_db_url() else {
-                eprintln!("skipping (set PG_TEST_URL for workflow apply test)");
-                return;
-            };
+            let db_url = workflow_test_db_url();
             let (app_id, blob_store, envs, logs, config, blob_root) = workflow_test_state(4);
             let deploy_hash = deploy_workflow_fixture(&blob_store, &app_id, "A").await;
             seed_unclaimed_workflow_run(
@@ -2278,16 +2263,10 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
 
     #[test]
     fn workflow_advance_keeps_in_flight_run_on_pinned_deploy_after_redeploy() {
-        let Ok(runtime) = compio::runtime::Runtime::new() else {
-            eprintln!("skipping (cannot create compio runtime)");
-            return;
-        };
+        let runtime = compio::runtime::Runtime::new().expect("compio runtime");
 
         runtime.block_on(async {
-            let Some(db_url) = workflow_test_db_url() else {
-                eprintln!("skipping (set PG_TEST_URL for workflow apply test)");
-                return;
-            };
+            let db_url = workflow_test_db_url();
             let (app_id, blob_store, envs, logs, config, blob_root) = workflow_test_state(4);
             let deploy_a = deploy_workflow_fixture(&blob_store, &app_id, "A").await;
             let deploy_b = deploy_workflow_fixture(&blob_store, &app_id, "B").await;
@@ -2331,16 +2310,10 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
 
     #[test]
     fn workflow_advance_pinned_isolate_budget_lru_evicts_per_app() {
-        let Ok(runtime) = compio::runtime::Runtime::new() else {
-            eprintln!("skipping (cannot create compio runtime)");
-            return;
-        };
+        let runtime = compio::runtime::Runtime::new().expect("compio runtime");
 
         runtime.block_on(async {
-            let Some(db_url) = workflow_test_db_url() else {
-                eprintln!("skipping (set PG_TEST_URL for workflow apply test)");
-                return;
-            };
+            let db_url = workflow_test_db_url();
             let (app_id, blob_store, envs, logs, config, blob_root) = workflow_test_state(1);
             let deploy_a = deploy_workflow_fixture(&blob_store, &app_id, "A").await;
             let deploy_b = deploy_workflow_fixture(&blob_store, &app_id, "B").await;
@@ -2449,10 +2422,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
     /// These are the pre-dispatch reject arms; the app id is well-formed, so
     /// the rejected request is still attributable to an app.
     fn run_pre_dispatch_reject(payload: Vec<u8>) -> Option<MeteredDispatchResult> {
-        let Ok(runtime) = compio::runtime::Runtime::new() else {
-            eprintln!("skipping (cannot create compio runtime)");
-            return None;
-        };
+        let runtime = compio::runtime::Runtime::new().expect("compio runtime");
 
         Some(runtime.block_on(async {
             let app_id = Uuid::new_v4();
@@ -2559,10 +2529,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         request_body: &[u8],
         insert_env: bool,
     ) -> Option<MeteredDispatchResult> {
-        let Ok(runtime) = compio::runtime::Runtime::new() else {
-            eprintln!("skipping (cannot create compio runtime)");
-            return None;
-        };
+        let runtime = compio::runtime::Runtime::new().expect("compio runtime");
 
         Some(runtime.block_on(async {
             init_runtime();
@@ -3031,10 +2998,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
 
     #[test]
     fn dispatch_console_lines_are_queryable_from_logs_endpoint() {
-        let Ok(runtime) = compio::runtime::Runtime::new() else {
-            eprintln!("skipping (cannot create compio runtime)");
-            return;
-        };
+        let runtime = compio::runtime::Runtime::new().expect("compio runtime");
 
         runtime.block_on(async {
             init_runtime();
@@ -3146,10 +3110,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
 
     #[test]
     fn dispatch_preserves_non_utf8_request_body_bytes() {
-        let Ok(runtime) = compio::runtime::Runtime::new() else {
-            eprintln!("skipping (cannot create compio runtime)");
-            return;
-        };
+        let runtime = compio::runtime::Runtime::new().expect("compio runtime");
 
         runtime.block_on(async {
             init_runtime();
@@ -3255,10 +3216,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
 
     #[test]
     fn dispatch_preserves_non_utf8_response_body_bytes() {
-        let Ok(runtime) = compio::runtime::Runtime::new() else {
-            eprintln!("skipping (cannot create compio runtime)");
-            return;
-        };
+        let runtime = compio::runtime::Runtime::new().expect("compio runtime");
 
         runtime.block_on(async {
             init_runtime();
@@ -3370,10 +3328,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
     /// so cpu/wall/egress/ingress drain as zero.
     #[test]
     fn dispatch_feeds_all_five_platform_counters() {
-        let Ok(runtime) = compio::runtime::Runtime::new() else {
-            eprintln!("skipping (cannot create compio runtime)");
-            return;
-        };
+        let runtime = compio::runtime::Runtime::new().expect("compio runtime");
 
         runtime.block_on(async {
             init_runtime();
@@ -3541,10 +3496,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
     fn dispatch_resolves_full_kernel_kv_storage_db_auth() {
         let kv_url = zeroship_core::config::test_kv_url();
 
-        let Ok(runtime) = compio::runtime::Runtime::new() else {
-            eprintln!("skipping (cannot create compio runtime)");
-            return;
-        };
+        let runtime = compio::runtime::Runtime::new().expect("compio runtime");
 
         runtime.block_on(async {
             init_runtime();
@@ -3753,10 +3705,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
     /// old drain recorded nothing until `on_complete` at finalize.
     #[test]
     fn long_stream_accrues_egress_before_close() {
-        let Ok(rt) = compio::runtime::Runtime::new() else {
-            eprintln!("skipping (cannot create compio runtime)");
-            return;
-        };
+        let rt = compio::runtime::Runtime::new().expect("compio runtime");
         rt.block_on(async {
             let meter = init_meter_for_stream_test();
             let app_id = Uuid::new_v4();
@@ -3840,10 +3789,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
     /// never inflate the request count.
     #[test]
     fn streaming_counts_request_exactly_once() {
-        let Ok(rt) = compio::runtime::Runtime::new() else {
-            eprintln!("skipping (cannot create compio runtime)");
-            return;
-        };
+        let rt = compio::runtime::Runtime::new().expect("compio runtime");
         rt.block_on(async {
             let meter = init_meter_for_stream_test();
             let app_id = Uuid::new_v4();
@@ -3933,10 +3879,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
     /// not finished when the competing load ran.
     #[test]
     fn in_flight_dispatch_pins_its_isolate_against_eviction() {
-        let Ok(rt) = compio::runtime::Runtime::new() else {
-            eprintln!("skipping (cannot create compio runtime)");
-            return;
-        };
+        let rt = compio::runtime::Runtime::new().expect("compio runtime");
 
         rt.block_on(async {
             init_runtime();

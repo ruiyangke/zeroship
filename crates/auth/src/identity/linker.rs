@@ -406,9 +406,14 @@ mod tests {
 
     // `compio_postgres::Client` is `!Send` (Rc-backed). The future
     // therefore inherits the not-send trait — structural, not a defect.
+    // A missing Postgres is a FAILURE, not a skip. This used to `return
+    // None` and every caller below announced a skip nobody counted, so the
+    // whole decision tree these tests cover could go unexercised while the
+    // suite still reported green. Dial it or panic naming the provisioning
+    // command.
     #[allow(dead_code, clippy::future_not_send)]
-    async fn pg() -> Option<compio_postgres::Client> {
-        let dsn = zeroship_core::config::test_database_url_opt()?;
+    async fn pg() -> compio_postgres::Client {
+        let dsn = zeroship_core::config::test_database_url();
         let (client, connection) = compio_postgres::connect(&dsn, compio_postgres::NoTls)
             .await
             .expect("connect");
@@ -418,15 +423,12 @@ mod tests {
             }
         })
         .detach();
-        Some(client)
+        client
     }
 
     #[compio::test]
     async fn needs_confirmation_when_local_user_has_password_hash() {
-        let Some(client) = pg().await else {
-            eprintln!("skipping linker live-PG test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-            return;
-        };
+        let client = pg().await;
 
         // Seed a fully-credentialed user (non-NULL password_hash).
         let email = format!("linker-pwd-{}@example.test", Uuid::new_v4().simple());
@@ -491,10 +493,7 @@ mod tests {
 
     #[compio::test]
     async fn needs_confirmation_carries_native_return_to() {
-        let Some(client) = pg().await else {
-            eprintln!("skipping linker live-PG test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-            return;
-        };
+        let client = pg().await;
 
         let email = format!("linker-native-{}@example.test", Uuid::new_v4().simple());
         let phc = crate::identity::password::hash("hunter2").expect("hash");
@@ -548,10 +547,7 @@ mod tests {
 
     #[compio::test]
     async fn auto_links_when_local_user_is_oauth_only() {
-        let Some(client) = pg().await else {
-            eprintln!("skipping linker live-PG test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-            return;
-        };
+        let client = pg().await;
 
         // Seed an OAuth-only user (NULL password_hash) — nothing to defend.
         let email = format!("linker-oauth-{}@example.test", Uuid::new_v4().simple());
@@ -602,10 +598,7 @@ mod tests {
 
     #[compio::test]
     async fn needs_confirmation_for_oauth_only_user_when_provider_untrusted_for_email() {
-        let Some(client) = pg().await else {
-            eprintln!("skipping linker live-PG test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-            return;
-        };
+        let client = pg().await;
 
         let email = format!("linker-untrusted-{}@example.test", Uuid::new_v4().simple());
         let row = client
@@ -668,10 +661,7 @@ mod tests {
 
     #[compio::test]
     async fn rejects_new_user_when_provider_untrusted_for_email_even_if_email_verified() {
-        let Some(client) = pg().await else {
-            eprintln!("skipping linker live-PG test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-            return;
-        };
+        let client = pg().await;
 
         let email = format!("linker-new-untrusted-{}@example.test", Uuid::new_v4().simple());
         let subject = format!("sub-{}", Uuid::new_v4().simple());
