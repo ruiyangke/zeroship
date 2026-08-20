@@ -165,7 +165,7 @@ pub async fn tick_with_config(
         coverage: super::workflow_engine::SweepCoverage::opened_over(&fleet),
         ..RetentionStats::default()
     };
-    let mut apps = fleet.readable.into_iter();
+    let mut apps = fleet.usable.into_iter();
     // Budget checked BEFORE the pull, so an app the break never reached stays
     // in the iterator for the `len()` at the bottom instead of being counted as
     // swept.

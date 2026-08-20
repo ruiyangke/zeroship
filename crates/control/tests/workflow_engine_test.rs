@@ -6790,6 +6790,46 @@ async fn revoke_journal_access(fx: &Fixture, app_id: &Uuid) {
         .expect("revoke journal schema access from the control role");
 }
 
+/// Leave one app's journal holding SOME of its tables and not the rest.
+///
+/// `DROP TABLE ... CASCADE` on the runs table takes the foreign keys that point
+/// at it, not the tables that hold them: `steps`, `signals`, `subscriptions` and
+/// `blobs` stay, with their rows. So the app still has journal work waiting - a
+/// lapsed subscription, a zero-refcount blob - and the one table the fleet
+/// census used to key on is gone.
+///
+/// NO PRODUCTION PATH REACHES THIS. `PgStore::provision` sends all five
+/// `CREATE TABLE`s as one simple-query batch, so a failure leaves none of them,
+/// and it creates `runs` first, so a hypothetical partial could only lack the
+/// LATER tables. Nothing in the tree drops a journal table - `delete_app`
+/// deletes `zeroship` rows and `drop_namespace` drops the app's DATA schema, the
+/// bare `<uuid>`, not `app_<uuid>` - and creator migrations cannot reach
+/// `app_<uuid>` at all. It is seeded by hand here because "the census cannot see
+/// this state" and "this state cannot happen" are different claims, and only the
+/// second one is the code's.
+async fn make_journal_incomplete(fx: &Fixture, app_id: &Uuid) {
+    let schema = quote_ident(&format!("app_{}", app_id.as_hyphenated()));
+    fx.pg
+        .inner
+        .batch_execute(&format!(
+            "DROP TABLE {schema}.\"__zeroship_workflow_runs\" CASCADE"
+        ))
+        .await
+        .expect("drop the runs table and leave the rest of the journal standing");
+}
+
+/// What the SECOND app's journal looks like: the ONE variable between the three
+/// fleet-coverage tests below.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SecondJournal {
+    /// Complete, and readable by the `zeroship_control` role.
+    Usable,
+    /// Complete, but the control role holds no USAGE on its schema.
+    Unreadable,
+    /// Readable, and missing one of its tables.
+    Incomplete,
+}
+
 struct TwoAppReap {
     registered: usize,
     /// The tick's OWN account of how much of the fleet it covered. Kept
@@ -6804,16 +6844,18 @@ struct TwoAppReap {
 /// Drive the parked-cancel reaper over TWO apps that both have a parked cancel,
 /// as the real `zeroship_control` role.
 ///
-/// `revoke_second` is the ONLY variable between the two tests below.
-async fn reap_over_two_apps(label: &str, revoke_second: bool) -> Option<TwoAppReap> {
+/// `second` is the ONLY variable between the tests below.
+async fn reap_over_two_apps(label: &str, second: SecondJournal) -> Option<TwoAppReap> {
     let fx = isolated_fixture(label).await?;
 
     let (good_app, good_deploy) = seed_app_and_deploy(&fx, "readable").await;
     let good_run = seed_parked_cancel_run(&fx, good_app, &good_deploy).await;
     let (other_app, other_deploy) = seed_app_and_deploy(&fx, "other").await;
     let _other_run = seed_parked_cancel_run(&fx, other_app, &other_deploy).await;
-    if revoke_second {
-        revoke_journal_access(&fx, &other_app).await;
+    match second {
+        SecondJournal::Usable => {}
+        SecondJournal::Unreadable => revoke_journal_access(&fx, &other_app).await,
+        SecondJournal::Incomplete => make_journal_incomplete(&fx, &other_app).await,
     }
 
     let control_url = dsn_as_role(&fx.db_url, "zeroship_control", "zeroship_control");
@@ -6885,7 +6927,7 @@ async fn reap_over_two_apps(label: &str, revoke_second: bool) -> Option<TwoAppRe
 /// migration corpus this test DB was built from does.
 #[compio::test]
 async fn parked_cancel_reaper_skips_an_app_whose_journal_is_unreadable() {
-    let Some(result) = reap_over_two_apps("skip-unreadable-journal", true).await else {
+    let Some(result) = reap_over_two_apps("skip-unreadable-journal", SecondJournal::Unreadable).await else {
         return;
     };
     assert_eq!(
@@ -6943,7 +6985,7 @@ async fn parked_cancel_reaper_skips_an_app_whose_journal_is_unreadable() {
 /// would pass the test above and fail this one.
 #[compio::test]
 async fn parked_cancel_reaper_reaps_both_apps_when_both_journals_are_readable() {
-    let Some(result) = reap_over_two_apps("reap-both-journals", false).await else {
+    let Some(result) = reap_over_two_apps("reap-both-journals", SecondJournal::Usable).await else {
         return;
     };
     assert_eq!(
@@ -7410,22 +7452,24 @@ struct FleetSweeps {
 
 /// Run every journalled-fleet sweep once over TWO apps that both have work.
 ///
-/// `revoke_second` is the ONLY variable between the two tests below.
+/// `second` is the ONLY variable between the three tests below.
 ///
 /// The sweeps run in the order the crons would leave them independent:
 /// reconcile reads only; the subscription GC and deploy retention touch rows
 /// nothing else here reads; workflow retention prunes the aged terminal run
 /// (whose blob-hash set is empty, so it does not reach the blob store); and the
 /// blob ref sweep runs last against a blob no run references.
-async fn sweeps_over_two_apps(label: &str, revoke_second: bool) -> Option<FleetSweeps> {
+async fn sweeps_over_two_apps(label: &str, second: SecondJournal) -> Option<FleetSweeps> {
     let fx = isolated_fixture(label).await?;
     let ctl = control_role_fixture(&fx, label).await;
 
     let (readable, readable_blob) =
         seed_app_for_all_sweeps(&fx, &ctl, &format!("{label}-readable")).await;
     let (other, _other_blob) = seed_app_for_all_sweeps(&fx, &ctl, &format!("{label}-other")).await;
-    if revoke_second {
-        revoke_journal_access(&fx, &other).await;
+    match second {
+        SecondJournal::Usable => {}
+        SecondJournal::Unreadable => revoke_journal_access(&fx, &other).await,
+        SecondJournal::Incomplete => make_journal_incomplete(&fx, &other).await,
     }
 
     let reconcile = workflow_engine::reconcile_scheduler_from_journal(&ctl.state)
@@ -7532,7 +7576,7 @@ async fn sweeps_over_two_apps(label: &str, revoke_second: bool) -> Option<FleetS
 /// assertion failing, which is a confusing place to read it.
 #[compio::test]
 async fn fleet_sweeps_all_report_the_tenant_they_excluded() {
-    let Some(swept) = sweeps_over_two_apps("sweep-coverage-revoked", true).await else {
+    let Some(swept) = sweeps_over_two_apps("sweep-coverage-revoked", SecondJournal::Unreadable).await else {
         return;
     };
 
@@ -7608,7 +7652,7 @@ async fn fleet_sweeps_all_report_the_tenant_they_excluded() {
 /// ref sweep, whose delete count moves 0 -> 2 on this single variable.
 #[compio::test]
 async fn fleet_sweeps_report_full_coverage_when_every_journal_is_readable() {
-    let Some(swept) = sweeps_over_two_apps("sweep-coverage-readable", false).await else {
+    let Some(swept) = sweeps_over_two_apps("sweep-coverage-readable", SecondJournal::Usable).await else {
         return;
     };
 
@@ -7646,6 +7690,330 @@ async fn fleet_sweeps_report_full_coverage_when_every_journal_is_readable() {
         "and it must remove the row, which is what makes the retained-ROW \
          assertion in the paired test a measurement rather than a row this \
          sweep never touches"
+    );
+}
+
+/// An app whose journal is missing a table must be EXCLUDED, not INVISIBLE.
+///
+/// The third state of the same two-app fixture, and the regression test for the
+/// keying defect: the census joined `pg_class` on `__zeroship_workflow_runs`
+/// alone, so an app holding the other four tables - with a lapsed subscription
+/// and a zero-refcount blob in them - matched nothing and was dropped from the
+/// result. Not swept, not skipped, in no coverage number, no WARN. Every sweep
+/// below returned exactly what a healthy ONE-app fleet returns.
+///
+/// The numbers that move, against `..._when_every_journal_is_readable` as the
+/// control and against this same test on the pre-fix code:
+///
+/// | state              | blob deletes | apps_skipped |
+/// | ------------------ | -----------: | -----------: |
+/// | both usable        |            2 |            0 |
+/// | second incomplete  |            0 |            1 |
+/// | (pre-fix, the same |            1 |            0 |
+/// |  incomplete app)   |              |              |
+///
+/// The pre-fix row is the defect in one line: one tenant's work silently not
+/// done, and a tick that reported complete coverage while not doing it.
+///
+/// `apps_skipped == 1` matching the UNREADABLE test exactly is the intended
+/// outcome, not a missing discrimination - both states mean the same thing to a
+/// sweep ("excluded, conclude nothing about this journal") and the fix routes
+/// them to the same field on purpose. What separates this test from that one is
+/// the fixture, and what separates it from the readable control is the numbers
+/// above.
+///
+/// WHAT THIS DOES NOT CATCH. The state is seeded by hand and no production path
+/// reaches it (see `make_journal_incomplete`), so this proves the census
+/// REPORTS the state, not that anything produces it. It drops exactly one table,
+/// the one the old join keyed on; it does not cover a journal missing some OTHER
+/// table, which the old join would have called complete AND readable and which
+/// this fix folds into the same arm without a fixture of its own. It asserts
+/// nothing about the WARN text. It does not exercise `apps_unvisited`, and like
+/// its two siblings it drives five sweeps in one fixture, so an earlier sweep
+/// eating a later one's work would surface as the later assertion failing.
+#[compio::test]
+async fn fleet_sweeps_all_report_a_tenant_whose_journal_is_incomplete() {
+    let Some(swept) = sweeps_over_two_apps("sweep-coverage-incomplete", SecondJournal::Incomplete)
+        .await
+    else {
+        return;
+    };
+
+    // The blob sweep goes FIRST because it is the one whose WORK count moves,
+    // and an assertion that panics earlier would leave that number unmeasured
+    // on a pre-fix run - which is how the table above got its numbers.
+    assert_eq!(
+        swept.blob_ref.deleted, 0,
+        "the blob ref sweep must delete NOTHING: an incomplete journal cannot be searched for \
+         references, so no hash in the fleet can be proven unreferenced. Before the fix this \
+         was 1 - the complete app's blob went, and the incomplete app was never even counted"
+    );
+    assert_eq!(
+        swept.blob_ref.coverage.apps_skipped, 1,
+        "the blob ref sweep must report the tenant whose journal is incomplete"
+    );
+    assert!(
+        swept.readable_blob_present,
+        "the object must survive: a delete count of zero is also what a sweep that deleted it \
+         and miscounted would report"
+    );
+    assert!(
+        swept.readable_blob_row_present,
+        "and so must the row - a row deleted with the object left behind is storage neither \
+         sweep can reclaim"
+    );
+
+    assert_eq!(
+        swept.reconcile.registered, 1,
+        "scheduler reconcile must re-register only the complete app's wake row"
+    );
+    assert_eq!(
+        swept.reconcile.coverage.apps_skipped, 1,
+        "scheduler reconcile must report the tenant whose journal is incomplete"
+    );
+    assert!(
+        !swept.reconcile.coverage.is_complete(),
+        "a reconcile that dropped a tenant must not report complete coverage"
+    );
+
+    assert_eq!(
+        swept.fanout.subscriptions_expired, 1,
+        "the subscription GC must reap only the complete app's lapsed subscription - the \
+         incomplete app's subscriptions table is right there and readable, and reaping from \
+         it is exactly the half-covered sweep this excludes"
+    );
+    assert_eq!(
+        swept.fanout.coverage.apps_skipped, 1,
+        "the subscription GC must report the tenant whose journal is incomplete"
+    );
+
+    assert_eq!(
+        swept.deploy.candidates, 1,
+        "deploy retention must consider only the complete app's superseded deploy"
+    );
+    assert_eq!(
+        swept.deploy.coverage.apps_skipped, 1,
+        "deploy retention must report the tenant whose journal is incomplete"
+    );
+
+    assert_eq!(
+        swept.retention.runs, 1,
+        "workflow retention must prune only the complete app's expired terminal run"
+    );
+    assert_eq!(
+        swept.retention.coverage.apps_skipped, 1,
+        "workflow retention must report the tenant whose journal is incomplete"
+    );
+
+}
+
+/// Seed one app a live topic subscriber and a pending broadcast for it.
+///
+/// `created_at` is explicit because the pick takes the OLDEST pending broadcast
+/// fleet-wide, and which app owns that one is the whole variable in the test
+/// below.
+async fn seed_topic_broadcast(
+    fx: &Fixture,
+    app_id: Uuid,
+    deploy_id: &str,
+    run_id: &str,
+    created_at: DateTime<Utc>,
+) -> (String, String) {
+    let topic = format!("fanout-incomplete-{}", Uuid::new_v4().simple());
+    let broadcast_id = zeroship_core::typed_id::new_workflow_broadcast_id();
+    let subscription_id = zeroship_core::typed_id::new_workflow_subscription_id();
+    let expires_at = Utc::now() + ChronoDuration::seconds(300);
+    fx.pg.set_default_app_id(app_id);
+    fx.pg
+        .execute(
+            "INSERT INTO zeroship.workflow_subscriptions \
+                (id, app_id, topic, run_id, signal_name, type_filter, ordinal, created_at, expires_at) \
+             VALUES ($1, $2, $3, $4, 'topic', 'topic.event', 0, now(), $5)",
+            &[&subscription_id, &app_id, &topic, &run_id, &expires_at],
+        )
+        .await
+        .expect("insert topic subscription");
+    fx.pg
+        .execute(
+            "INSERT INTO zeroship.workflow_broadcasts \
+                (id, app_id, topic, type, payload, origin, idempotency_key, deploy_id, \
+                 fanout_state, created_at, expires_at) \
+             VALUES ($1, $2, $3, 'topic.event', $4, 'app', $5, $6, 'pending', $7, $8)",
+            &[
+                &broadcast_id,
+                &app_id,
+                &topic,
+                &serde_json::json!({"ok": true}),
+                &format!("idem-{broadcast_id}"),
+                &deploy_id,
+                &created_at,
+                &expires_at,
+            ],
+        )
+        .await
+        .expect("insert pending broadcast");
+    (broadcast_id, topic)
+}
+
+/// A pending broadcast whose app's journal is missing a table must be LEFT
+/// pending, and must not stop the fan-out for anyone else.
+///
+/// Two failures live behind this one assertion, and the ORDER of the two
+/// broadcasts is what reaches them: the incomplete app's is older, so the pick -
+/// which takes the oldest pending broadcast fleet-wide, with no cursor - reaches
+/// it FIRST every tick.
+///
+/// Before the census learned about the other journal tables, `existing_tables`
+/// probed `runs` alone, found it missing and reported the app as holding
+/// nothing, and the arm for that COMPLETES the broadcast: this app's live topic
+/// subscriber, sitting in a `subscriptions` table that is right there and
+/// readable, would never have been delivered to and the row would say the
+/// fan-out was done. Probing every table fixes that answer but not the
+/// consequence - it makes the probe return "unreachable", which propagates and
+/// FAILS the tick, and because the pick has no cursor it would fail on the same
+/// row every tick and stall the fan-out for every other tenant. Only refusing it
+/// in the pick leaves the row pending AND lets the queue move.
+///
+/// WHAT THIS DOES NOT CATCH. It asserts the broadcast is still `pending`, not
+/// that it ever drains once the journal is whole again - nothing here repairs
+/// the journal and re-ticks. It uses one incomplete app and one healthy one, so
+/// it says nothing about two incomplete apps, and nothing about the interaction
+/// with `max_broadcasts_per_tick` beyond the 2 used here. The subscriber it
+/// seeds for the incomplete app is never checked for a signal, because dropping
+/// the runs table takes the FK its signals would need; the claim carried here is
+/// about the BROADCAST row, not about delivery.
+#[compio::test]
+#[serial]
+async fn fanout_refuses_a_broadcast_whose_journal_is_incomplete() {
+    let Some(fx) = isolated_fixture("fanout-incomplete-journal").await else {
+        return;
+    };
+
+    let (broken_app, broken_deploy) = seed_app_and_deploy(&fx, "fanout-broken").await;
+    let broken_run = seed_run(
+        &fx,
+        broken_app,
+        &broken_deploy,
+        "waiting",
+        -1_000,
+        Some("wait:0:topic:topic.event"),
+        None,
+        None,
+        None,
+    )
+    .await;
+    let (broken_broadcast, _broken_topic) = seed_topic_broadcast(
+        &fx,
+        broken_app,
+        &broken_deploy,
+        &broken_run,
+        Utc::now() - ChronoDuration::seconds(600),
+    )
+    .await;
+
+    let (good_app, good_deploy) = seed_app_and_deploy(&fx, "fanout-good").await;
+    let good_run = seed_run(
+        &fx,
+        good_app,
+        &good_deploy,
+        "waiting",
+        -1_000,
+        Some("wait:0:topic:topic.event"),
+        None,
+        None,
+        None,
+    )
+    .await;
+    let (good_broadcast, _good_topic) =
+        seed_topic_broadcast(&fx, good_app, &good_deploy, &good_run, Utc::now()).await;
+
+    make_journal_incomplete(&fx, &broken_app).await;
+
+    let stats = workflow_signal_fanout::tick_with_config(
+        &fx.state,
+        workflow_signal_fanout::FanoutSweepConfig {
+            max_broadcasts_per_tick: 2,
+            max_deliveries_per_broadcast: 100,
+        },
+    )
+    .await
+    .expect("the fan-out tick must survive an incomplete journal at the head of the queue");
+
+    assert_eq!(
+        stats.broadcasts, 1,
+        "exactly one broadcast is drainable: the incomplete app's must be refused, not drained"
+    );
+    assert_eq!(
+        stats.deliveries, 1,
+        "and the healthy app's subscriber must still be delivered to"
+    );
+
+    let broken_state: String = fx
+        .pg
+        .query_one(
+            "SELECT fanout_state FROM zeroship.workflow_broadcasts WHERE id = $1",
+            &[&broken_broadcast],
+        )
+        .await
+        .expect("load the incomplete app's broadcast")
+        .get("fanout_state");
+    assert_eq!(
+        broken_state, "pending",
+        "the incomplete app's broadcast must be LEFT pending: 'I could not read the \
+         subscribers' is not 'there were none', and completing it drops them for good"
+    );
+
+    let good_state: String = fx
+        .pg
+        .query_one(
+            "SELECT fanout_state FROM zeroship.workflow_broadcasts WHERE id = $1",
+            &[&good_broadcast],
+        )
+        .await
+        .expect("load the healthy app's broadcast")
+        .get("fanout_state");
+    assert_eq!(
+        good_state, "completed",
+        "the healthy app's broadcast must drain despite an older one being stuck at the \
+         head of the queue"
+    );
+
+    drop(fx);
+    common::drain_pg().await;
+}
+
+/// The parked-cancel reaper, on the same third state.
+///
+/// Its own pairing already exists for the UNREADABLE case
+/// (`parked_cancel_reaper_skips_an_app_whose_journal_is_unreadable` and its
+/// control), and this is the third: the reaper takes its app list from the same
+/// census, so an incomplete journal was invisible to it too and its `registered`
+/// count said nothing about the tenant it never visited.
+///
+/// WHAT THIS DOES NOT CATCH. Only the parked-cancel reaper, and only the
+/// catalog-level exclusion. The incomplete app has no parked cancel LEFT to reap
+/// - dropping the runs table took its run rows with it - so this cannot show
+/// work being withheld the way the blob-delete count does above; it shows only
+/// that the tenant is counted. `registered == 1` alone would also be produced by
+/// the pre-fix code, which is why the `apps_skipped` assertion is the one
+/// carrying the claim.
+#[compio::test]
+async fn parked_cancel_reaper_counts_an_app_whose_journal_is_incomplete() {
+    let Some(result) = reap_over_two_apps("reap-incomplete-journal", SecondJournal::Incomplete).await
+    else {
+        return;
+    };
+    assert_eq!(
+        result.registered, 1,
+        "the reaper must reap the complete app's parked cancel"
+    );
+    assert_eq!(
+        result.coverage.apps_skipped, 1,
+        "and must report the tenant whose journal is incomplete, in its RETURN VALUE"
+    );
+    assert!(
+        result.good_wake_at <= Utc::now(),
+        "the complete app's parked run must still have been pulled forward to now"
     );
 }
 
