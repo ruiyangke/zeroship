@@ -686,7 +686,23 @@ main() {
   # A variable with a `:-default` is optional by construction; only `:?` ones
   # and bare `${VAR}` ones can break a render or silently mis-render.
   OPTIONAL="$(compose_vars ':-')"
-  GENERATED="$(sed -n 's/^ *"\([A-Z_]*\)",$/\1/p' crates/cli/src/dev.rs 2>/dev/null | sort -u)"
+  # The generated-secret names, read from the const table that IS the contract:
+  # `zeroship_core::config::PLATFORM_SECRETS`. This scraped `crates/cli/src/
+  # dev.rs` for any `"NAME",` line until 2026-08-20, and that pattern matched
+  # nothing the moment dev.rs stopped keeping its own copy of the list - which
+  # would have silently emptied GENERATED and sent every generated secret down
+  # the MISSING arm on a fresh host.
+  #
+  # A field-anchored pattern over a const table is a narrower coupling than
+  # "any quoted uppercase word in a 900-line file", but it is STILL text
+  # matching source, so it is not left to chance:
+  # `crates/zeroship-gatekit/tests/generated_secret_scrape.rs` runs this exact
+  # extraction and asserts it yields PLATFORM_SECRETS exactly. It cannot go
+  # blind without that test going red.
+  GENERATED="$(sed -n 's/^ *env: "\([A-Z_]*\)",$/\1/p' crates/core/src/config/secrets.rs | sort -u)"
+  [ -n "$GENERATED" ] || fail "read ZERO generated-secret names out of \
+crates/core/src/config/secrets.rs; the table moved or the pattern rotted. \
+Refusing rather than treating every generated secret as operator-supplied."
 
   MISSING=""
   DEFAULTED=""
