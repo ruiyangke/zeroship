@@ -154,7 +154,7 @@ pub fn scan_holders(names: &[String], self_pid: i32) -> Holders {
         haystack.extend_from_slice(&environ);
         let tokens = identifier_tokens(&haystack);
         for name in names {
-            if tokens.iter().any(|t| *t == name.as_bytes()) {
+            if tokens.contains(&name.as_bytes()) {
                 out.held_by.push((name.clone(), pid));
             }
         }
