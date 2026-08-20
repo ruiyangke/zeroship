@@ -46,7 +46,9 @@
 //!   statement after the guarded create
 //!   (`third_party/zero-migrate/.../render/vendor.rs:394-401`), so `ifNotExists`
 //!   does not suppress it. It therefore races on EVERY run, including runs
-//!   against a cluster where all eleven roles already exist.
+//!   against a cluster where all ten roles already exist. Eight of the ten
+//!   carry `setSearchPath`, so that is eight unconditional shared-catalog
+//!   writes per run.
 //! - `GRANT <role> TO <role>` → `pg_auth_members`
 //!   (`20260702000900_grants.ts:19`).
 //!
