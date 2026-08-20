@@ -28,17 +28,61 @@ where
 {
     // The stream belongs to the caller, so there is no second socket to dial:
     // `allow` and `prefer` get the transport they attempt first, and no
-    // fallback. A cancel request carries no credentials and no data, so the
-    // only thing lost is the retry, not a security property.
-    let mut stream = connect_tls::negotiate_tls(
+    // fallback. What is lost is the retry.
+    //
+    // A CancelRequest carries NO query text, but it does carry the backend's
+    // process id and secret key, and that pair is a BEARER CREDENTIAL: anyone
+    // who reads it off the wire can cancel that backend's queries at will.
+    // Sending it unencrypted is a real exposure, not a free trade.
+    //
+    // Two facts, kept apart because they point in opposite directions.
+    // MEASURED against PostgreSQL 16: the server accepts a plaintext cancel
+    // even when it is `hostssl`-only, because the postmaster dispatches a
+    // CancelRequest before startup, authentication and HBA. Cancelling a
+    // `pg_sleep(30)` that way returned SQLSTATE 57014 to the TLS session that
+    // had issued it. So the cancel is DELIVERED.
+    //
+    // That is not permission to send it in the clear. libpq's plaintext cancel
+    // path - `PQcancel` / `PQrequestCancel` - is DEPRECATED, and PostgreSQL's
+    // own documentation gives this exact reason: it does not send the request
+    // encrypted even when the original connection required encryption. The
+    // current `PQcancelCreate` / `PQcancelBlocking` path reuses the original
+    // connection's `sslmode`. An earlier version of this comment cited libpq as
+    // precedent for plaintext; it was citing the interface upstream retired.
+    //
+    // `cancel_query::cancel_query` owns its socket and so applies the
+    // address-aware rule this function has no address to apply. It does NOT
+    // add a retry either - neither entry point has one.
+    cancel_query_with_encryption(
         stream,
         connect_tls::Encryption::first_for(mode),
         mode,
         negotiation,
         tls,
         has_hostname,
+        process_id,
+        secret_key,
     )
-    .await?;
+    .await
+}
+
+pub(crate) async fn cancel_query_with_encryption<S, T>(
+    stream: S,
+    encryption: connect_tls::Encryption,
+    mode: SslMode,
+    negotiation: SslNegotiation,
+    tls: T,
+    has_hostname: bool,
+    process_id: i32,
+    secret_key: i32,
+) -> Result<(), Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    T: TlsConnect<S>,
+{
+    let mut stream =
+        connect_tls::negotiate_tls(stream, encryption, mode, negotiation, tls, has_hostname)
+            .await?;
 
     let mut buf = BytesMut::new();
     frontend::cancel_request(process_id, secret_key, &mut buf);

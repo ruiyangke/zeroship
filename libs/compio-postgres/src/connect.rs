@@ -154,6 +154,18 @@ where
     }
 }
 
+/// The first transport to use for a newly opened socket.
+///
+/// Unix-domain sockets have no TLS transport regardless of `sslmode`. TCP
+/// sockets use the mode's normal ordering and may be retried by their caller.
+pub(crate) fn first_encryption_for_addr(addr: &Addr, mode: SslMode) -> Encryption {
+    match addr {
+        Addr::Tcp(_) => Encryption::first_for(mode),
+        #[cfg(unix)]
+        Addr::Unix(_) => Encryption::Plaintext,
+    }
+}
+
 /// One address, with libpq's transport ordering and its reconnect.
 ///
 /// Everything about `allow` and `prefer` that is not just "try TLS" lives here,
@@ -188,15 +200,16 @@ async fn connect_once<T>(
 where
     T: MakeTlsConnect<Socket>,
 {
+    let first = first_encryption_for_addr(&addr, config.get_ssl_mode());
+
     // libpq: "sslmode is ignored for Unix domain socket communication."
     // A local socket has no network to eavesdrop on and no host name to put in
     // a certificate, so every mode - including verify-full - is plaintext.
     #[cfg(unix)]
     if matches!(addr, Addr::Unix(_)) {
-        return connect_leg(&addr, hostname, port, tls, config, Encryption::Plaintext).await;
+        return connect_leg(&addr, hostname, port, tls, config, first).await;
     }
 
-    let first = Encryption::first_for(config.get_ssl_mode());
     let err = match connect_leg(&addr, hostname, port, tls, config, first).await {
         Ok(connected) => return Ok(connected),
         Err(e) => e,
