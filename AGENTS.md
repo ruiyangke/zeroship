@@ -140,6 +140,10 @@ crates/
 │ Tools
 +-- cli/              CLI: serve, deploy, migrate, config, login, logout, whoami, secret, var, dev
                       (no `build` — builds go through @zeroship/vite-plugin)
++-- zeroship-gatekit/ Repository GATES as Rust: shared docker-compose model, the
+                      green/red/REFUSED verdict type, and the gates themselves.
+                      Not zeroship-test-support - that crate is the test-DATABASE
+                      substrate; these read files and link no driver.
 ```
 
 Standalone, zeroship-independent driver libraries (own top-level `libs/`, publishable):

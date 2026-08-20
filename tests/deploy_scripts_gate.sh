@@ -188,7 +188,9 @@ expect_set "$CMT_ALL" "COMMENT_ONLY_VAR DEFAULTED_VAR PLAIN_VAR STRICT_VAR" \
 # ------------------------------------------------ secret_files extraction
 #
 # WHY THIS FUNCTION EXISTS. Provisioning read its list out of `ENV_KEYS` in
-# crates/cli/src/dev.rs, which is env-shaped by construction, so the seven
+# crates/cli/src/dev.rs (that const is gone since 2026-08-20; the list is
+# `zeroship_core::config::PLATFORM_SECRETS`), which is env-shaped by
+# construction, so the seven
 # secret FILES the servers open were in nobody's list and nothing created them.
 # The compose file is the only artefact that states which files this
 # deployment's binaries will be handed, so it is the thing to ask.

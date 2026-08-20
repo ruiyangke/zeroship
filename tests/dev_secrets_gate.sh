@@ -31,10 +31,13 @@
 #     the function is; a file holding the wrong kind of material passes both.
 #   - the two callers. Whether e2e_docker.sh and external_chain.sh then work is
 #     a docker question and is not asked here.
-#   - the environment-variable half against any source of truth. `ENV_KEYS` in
-#     dev.rs is the producer, but the names in that array are not distinguished
-#     in the source from any other quoted uppercase constant, so pairing them
-#     would assert this file's parse rather than the contract.
+#   - the environment-variable half against any source of truth. The producer
+#     is `zeroship_core::config::PLATFORM_SECRETS`, which dev.rs drives (it
+#     held its own `ENV_KEYS` copy until 2026-08-20), but the names in that
+#     const are not distinguished in the SOURCE TEXT from any other quoted
+#     uppercase constant, so pairing them here would assert this file's parse
+#     rather than the contract. Reading it as typed data is what
+#     crates/zeroship-gatekit does.
 # ============================================================================
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

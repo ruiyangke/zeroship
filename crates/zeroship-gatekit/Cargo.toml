@@ -1,0 +1,28 @@
+[package]
+name = "zeroship-gatekit"
+version = "0.1.0"
+edition = "2021"
+description = "Repository gates as Rust binaries: shared compose model, verdict reporting, and the gates themselves"
+
+[dependencies]
+serde = { workspace = true }
+# The compose model needs a real YAML parser. `serde_norway` is the maintained
+# fork of the (deprecated) `serde_yaml`, same API. MEASURED 2026-08-20 with
+# `cargo tree -p serde_norway -e normal`: indexmap, itoa, ryu, serde,
+# unsafe-libyaml-norway. No async runtime, no tokio.
+serde_norway = { workspace = true }
+# The rule set every secret gate reads. This dependency is the POINT of the
+# crate: the rules are compiler-checked data, not text scraped out of the
+# product's messages.
+#
+# IT IS ALSO THE COST, stated so nobody reads this crate as leaf-light.
+# MEASURED 2026-08-20, `cargo tree -p zeroship-gatekit -e normal -i tokio`:
+# tokio IS in this binary's graph, via zeroship-core -> cyper -> hyper. That is
+# the pre-existing exception AGENTS.md documents, not something this crate
+# introduces, but a gate that only reads a YAML file still links an HTTP stack
+# to reach eight strings. If the rule table ever moves to a leaf crate, this
+# dependency goes with it.
+zeroship-core = { workspace = true }
+
+[lints]
+workspace = true

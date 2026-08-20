@@ -32,16 +32,18 @@ const COMPOSE_FILE: &str = "deploy/compose/docker-compose.yml";
 /// `GATEWAY_OIDC_SECRET` is gone rather than renamed: it had no Rust reader at
 /// all. Generating a secret nothing consumes is the set-but-unread shape this
 /// migration exists to remove, and it is not made better by a canonical name.
-const ENV_KEYS: &[&str] = &[
-    "ZEROSHIP_CONTROL_KEY",
-    "ZEROSHIP_CONTROL_MASTER_KEY",
-    "ZEROSHIP_WORKER_KEY",
-    "ZEROSHIP_MIGRATED_POLICY_SEAL_KEY",
-    "ZEROSHIP_GATEWAY_STASH_SIGNING_KEY",
-    "ZEROSHIP_PAIRWISE_SALT",
-    "ZEROSHIP_AUTH_STASH_SIGNING_KEY",
-    "ZEROSHIP_AUTH_TOTP_ENC_KEY",
-];
+///
+/// THE LIST IS NOT KEPT HERE. It is `zeroship_core::config::PLATFORM_SECRETS`,
+/// which also carries the strength rule the product enforces on each name and
+/// the validator that applies it. Keeping a second copy here is what let the
+/// generator and the enforcement disagree; the compose secret-strength gate
+/// (`crates/zeroship-gatekit`) reads the same table, so a secret this command
+/// generates and a secret compose ships are judged by one rule set.
+fn env_keys() -> impl Iterator<Item = &'static str> {
+    zeroship_core::config::PLATFORM_SECRETS
+        .iter()
+        .map(|secret| secret.env)
+}
 
 const WEAK_LITERALS: &[&str] = &[
     "platform-key",
@@ -183,9 +185,9 @@ fn init_dev_secrets(secrets_dir: &Path, env_file: &Path) -> Result<InitOutcome, 
     }
 
     let mut desired_env = existing_env.clone();
-    for name in ENV_KEYS {
-        if !desired_env.contains_key(*name) {
-            desired_env.insert((*name).to_string(), random_hex(32)?);
+    for name in env_keys() {
+        if !desired_env.contains_key(name) {
+            desired_env.insert(name.to_string(), random_hex(32)?);
         }
     }
     desired_env.insert("ZEROSHIP_PAIRWISE_SALT".to_string(), pairwise.clone());
@@ -202,14 +204,13 @@ fn init_dev_secrets(secrets_dir: &Path, env_file: &Path) -> Result<InitOutcome, 
     }
     ensure_pairwise_file(&pairwise_path, pairwise.as_bytes(), &mut outcome)?;
 
-    let missing_env = ENV_KEYS
-        .iter()
-        .filter(|name| !existing_env.contains_key(**name))
-        .map(|name| ((*name).to_string(), desired_env[*name].clone()))
+    let missing_env = env_keys()
+        .filter(|name| !existing_env.contains_key(*name))
+        .map(|name| (name.to_string(), desired_env[name].clone()))
         .collect::<Vec<_>>();
     append_env_values(env_file, &original_env, &missing_env)?;
     outcome.added_env = missing_env.len();
-    outcome.existing_env = ENV_KEYS.len() - missing_env.len();
+    outcome.existing_env = env_keys().count() - missing_env.len();
     Ok(outcome)
 }
 
@@ -447,7 +448,7 @@ fn resolve_pairwise(env_value: Option<&String>, file_bytes: &[u8]) -> Result<Str
 fn parse_managed_env(contents: &[u8]) -> Result<BTreeMap<String, String>, String> {
     let text = std::str::from_utf8(contents)
         .map_err(|error| format!("environment overlay is not UTF-8: {error}"))?;
-    let managed = ENV_KEYS.iter().copied().collect::<BTreeSet<_>>();
+    let managed = env_keys().collect::<BTreeSet<_>>();
     let mut values = BTreeMap::new();
     for (line_index, line) in text.lines().enumerate() {
         let trimmed = line.trim();
@@ -514,18 +515,13 @@ fn validate_env_value(name: &str, value: &str) -> Result<(), String> {
     if decoded.iter().all(|byte| *byte == 0) {
         return Err(format!("{name} must not be all zero"));
     }
-    match name {
-        "ZEROSHIP_CONTROL_MASTER_KEY" | "ZEROSHIP_AUTH_TOTP_ENC_KEY" => {
-            zeroship_core::config::validate_master_key_material(name, value)
-        }
-        "ZEROSHIP_WORKER_KEY" => zeroship_core::config::validate_worker_key(name, value),
-        "ZEROSHIP_GATEWAY_STASH_SIGNING_KEY" | "ZEROSHIP_AUTH_STASH_SIGNING_KEY" => {
-            zeroship_core::config::validate_stash_key(name, value)
-        }
-        "ZEROSHIP_PAIRWISE_SALT" => zeroship_core::config::validate_pairwise_salt(name, value),
-        "ZEROSHIP_CONTROL_KEY" | "ZEROSHIP_MIGRATED_POLICY_SEAL_KEY" => Ok(()),
-        _ => Err(format!("unknown generated environment key {name}")),
-    }
+    // The name -> validator mapping used to be a `match` here, a second copy of
+    // a fact `crates/core` already owns. It is now one lookup into
+    // PLATFORM_SECRETS, so adding a secret to the table is what makes this
+    // command generate AND re-validate it.
+    zeroship_core::config::platform_secret(name)
+        .ok_or_else(|| format!("unknown generated environment key {name}"))?
+        .validate(value)
 }
 
 fn append_env_values(
