@@ -7125,21 +7125,35 @@ async fn run_lookup_refuses_to_report_absent_while_a_journal_is_unreadable() {
 /// blob roots are its own, so anything a sweep must SEE in object storage has
 /// to be seeded through this fixture's stores, not through `fx`'s.
 async fn control_role_fixture(fx: &Fixture, label: &str) -> Fixture {
-    // The fixture builder provisions the scheduler store, which is a CREATE
-    // SCHEMA and so needs CREATE on the DATABASE - a privilege the deployment
-    // grants its control role and this throwaway clone does not. Granted here
-    // rather than worked around, because it is orthogonal to what these tests
-    // measure: it says nothing about the per-app journal privileges, which stay
-    // exactly as the migration corpus left them.
+    // Open the PLATFORM schema up to the control role, and only that.
+    //
+    // What is being reproduced here is a non-superuser principal, because a
+    // superuser is the one principal for which `has_schema_privilege` can never
+    // answer false. The per-app journal schemas (`app_<uuid>`) are deliberately
+    // NOT touched: they keep exactly the grants the migration corpus gave them,
+    // which is the surface every assertion below actually measures.
+    //
+    // The `zeroship` grants are needed because this throwaway clone gives the
+    // control role less than a deployment does - it cannot create the scheduler
+    // store, and it holds no privilege on tables the fixture created as
+    // superuser (the scheduler timers) or that the grants migration never named
+    // (`app_deploys`). Granting them restores what a running control plane has;
+    // withholding them would only fail these tests for a reason that has
+    // nothing to do with journal coverage.
     let db_name = db_name_from_dsn(&fx.db_url).expect("the fixture DSN names a database");
     fx.pg
         .inner
         .batch_execute(&format!(
-            "GRANT CREATE ON DATABASE {} TO zeroship_control",
-            quote_ident(&db_name)
+            "GRANT CREATE ON DATABASE {db} TO zeroship_control; \
+             GRANT USAGE, CREATE ON SCHEMA zeroship TO zeroship_control; \
+             GRANT ALL ON ALL TABLES IN SCHEMA zeroship TO zeroship_control; \
+             GRANT ALL ON ALL SEQUENCES IN SCHEMA zeroship TO zeroship_control; \
+             ALTER TABLE zeroship.workflow_scheduler_timers OWNER TO zeroship_control; \
+             ALTER TABLE zeroship.workflow_scheduler_inflight OWNER TO zeroship_control;",
+            db = quote_ident(&db_name)
         ))
         .await
-        .expect("let the control role provision the scheduler store on this clone");
+        .expect("give the control role a deployment's platform-schema privileges");
     let control_url = dsn_as_role(&fx.db_url, "zeroship_control", "zeroship_control");
     build_fixture_with_gateway(
         &control_url,
