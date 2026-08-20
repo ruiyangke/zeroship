@@ -127,7 +127,7 @@ fn validate_ident(what: &'static str, value: &str) -> Result<(), BackfillError> 
 }
 
 fn quote_ident(identifier: &str) -> String {
-    crate::render::dml::escape_quote_ident(identifier)
+    crate::render::dml::escape_quote_ident_for_dialect(identifier, super::SQLITE_DIALECT)
 }
 
 fn cursor_unavailable(spec: &BackfillSpec, reason: impl Into<String>) -> BackfillError {

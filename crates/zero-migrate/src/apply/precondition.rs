@@ -162,8 +162,15 @@ fn validate_ident(what: &'static str, value: &str) -> Result<(), PreconditionErr
 
 /// Double-quote a validated identifier (belt-and-suspenders; the value has passed
 /// [`validate_ident`] so it has no `"`).
+///
+/// PostgreSQL, named rather than assumed: the only caller is the `#[cfg(pg_seam)]`
+/// `row_count` probe, which is a PG-only path. It used to reach the crate's raw
+/// escape primitive, which produced the right bytes for no stated dialect.
 fn quote_ident(ident: &str) -> String {
-    crate::render::dml::escape_quote_ident(ident)
+    crate::render::dml::escape_quote_ident_for_dialect(
+        ident,
+        crate::schema::query::SqlDialect::Postgres,
+    )
 }
 
 /// Evaluate a precondition against the live DB. Returns `true` if the assertion
