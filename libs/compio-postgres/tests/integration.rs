@@ -2325,31 +2325,149 @@ fn a_connection_does_not_outlive_the_runtime_that_opened_it() {
          hold none between iterations, got {backends:?}"
     );
 
-    // The descriptor half, which `crate::release` does NOT fix and is not
-    // trying to. Measured 2026-08-20 by running this test against the same
-    // binary with `Socket::release_handle` forced to `None`: the backend series
-    // went [1,2,3,4,5,6] and the fd series stayed [10,16,22,28,34,40] - byte
-    // for byte what it is with the release in place. The release ends the
-    // SESSION; the descriptor is co-owned by an io_uring submission that
-    // `Runtime::drop` never reclaims (`crate::live` has the mechanism), so it
-    // stays for the life of the process either way.
-    //
-    // Six per runtime is therefore a known, accepted cost, and this bound is
-    // what makes it an accepted one rather than an unmeasured one. It matters
-    // because it multiplies: `crates/auth` runs 254 tests in ONE process now
-    // (`crates/auth/tests/main.rs`), so at this rate that binary ends holding
-    // ~1,500 descriptors. That is over the 1024 soft `RLIMIT_NOFILE` that many
-    // CI images still ship, and the failure it would produce - EMFILE, from a
-    // test unrelated to whatever raised the cost - names nothing useful. If a
-    // change makes a runtime cost more descriptors, this should say so here.
-    let per_runtime: Vec<usize> = fds.windows(2).map(|w| w[1] - w[0]).collect();
-    println!("descriptors leaked per runtime:          {per_runtime:?}");
-    const BUDGET: usize = 6;
+    // The fd series is printed, not asserted, and the test below is why: in
+    // THIS process the number moves for reasons that have nothing to do with
+    // the runtime being dropped.
+}
+
+/// Name of the test below, needed as a literal because it re-executes itself.
+const FD_PROBE_TEST: &str = "a_torn_down_runtime_leaks_a_bounded_number_of_descriptors";
+
+/// Set in the re-executed child. Its presence selects the measuring arm.
+const FD_PROBE_CHILD: &str = "CPG_FD_PROBE_CHILD";
+
+/// Marks the child's machine-readable result line.
+const FD_PROBE_MARKER: &str = "FD-PROBE-SERIES ";
+
+/// The descriptor half of the invariant above, which `crate::release` does NOT
+/// fix and is not trying to.
+///
+/// Measured 2026-08-20 against the same binary with `Socket::release_handle`
+/// forced to `None`: the backend series went `[1,2,3,4,5,6]` and the fd series
+/// stayed `[10,16,22,28,34,40]` - byte for byte what it is with the release in
+/// place. The release ends the SESSION; the descriptor is co-owned by an
+/// io_uring submission that `Runtime::drop` never reclaims (`crate::live` has
+/// the mechanism), so it stays for the life of the process either way.
+///
+/// Three per runtime is a known, accepted cost, and this bound is what makes it
+/// accepted rather than unmeasured. It multiplies: `crates/auth` runs 254 tests
+/// in ONE process (`crates/auth/tests/main.rs`), so at this rate that binary
+/// ends holding ~760 descriptors. That is under the 1024 soft `RLIMIT_NOFILE`
+/// many CI images still ship - with no room for a second connection per test,
+/// which several of them open. What it would surface as is EMFILE in a test
+/// unrelated to whatever raised the cost.
+///
+/// The bound is three and not six because the test above measures TWO runtime
+/// teardowns per iteration: `tagged_backends` builds a `Runtime` and a
+/// connection of its own to ask the server its question. Its series therefore
+/// reads `[6,6,6,6,6]` for the same underlying cost, which is why the number
+/// this asserts is measured here rather than taken from what that one prints.
+///
+/// # Why this re-executes itself
+///
+/// `/proc/self/fd` is per-PROCESS, and libtest runs this file's tests on
+/// several threads of one process by default. Sibling tests opening and
+/// closing their own connections move the count underneath the loop, so the
+/// per-drop delta measures them too. Measured 2026-08-20, same binary, same
+/// database, same box, `--test-threads` the only variable:
+///
+///   default:            fds [78,122,165,170,171,176]  deltas [44,43,5,1,5]
+///   --test-threads=1:   fds [10, 16, 22, 28, 34, 40]  deltas [6,6,6,6,6]
+///
+/// An earlier version of this asserted the budget inline and passed only
+/// because it had been run serially - and it did not merely mis-measure, it
+/// PANICKED with "attempt to subtract with overflow" when a sibling closed
+/// more descriptors than the runtime leaked and the count went DOWN.
+///
+/// Tagging the descriptors the way the backend count is tagged does not rescue
+/// it: the siblings connect to the same database on the same port, so nothing
+/// observable on the socket separates their descriptors from this test's.
+/// Machine load is not the contaminant either - other PROCESSES cannot appear
+/// in `/proc/self/fd` - so the fix is not to tolerate the churn but to remove
+/// it, by doing the measuring in a child process that runs this test and
+/// nothing else. That is isolated by construction rather than by a convention
+/// the next runner has to know.
+#[test]
+fn a_torn_down_runtime_leaks_a_bounded_number_of_descriptors() {
+    if std::env::var_os(FD_PROBE_CHILD).is_some() {
+        measure_and_report_fd_series();
+        return;
+    }
+
+    let exe = std::env::current_exe().expect("current_exe");
+    let output = std::process::Command::new(&exe)
+        .args(["--exact", FD_PROBE_TEST, "--nocapture", "--test-threads=1"])
+        .env(FD_PROBE_CHILD, "1")
+        .output()
+        .expect("re-exec the test binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "the isolated child failed.\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
+    );
+
+    // Searched for anywhere in the line, not as a prefix: libtest writes
+    // `test <name> ... ` without a newline and the child's first `println!`
+    // lands on the end of it, so the marker is mid-line on the run that
+    // matters.
+    let series = stdout
+        .lines()
+        .find_map(|line| line.split_once(FD_PROBE_MARKER))
+        .map(|(_, rest)| rest)
+        .unwrap_or_else(|| {
+            panic!("child printed no {FD_PROBE_MARKER} line.\n--- stdout ---\n{stdout}")
+        });
+    let fds: Vec<i64> = series
+        .split(',')
+        .map(|n| n.trim().parse().expect("fd count"))
+        .collect();
+    assert!(fds.len() >= 2, "need at least two samples, got {fds:?}");
+
+    // Signed, so a count that goes DOWN is a number this reports rather than a
+    // panic inside the assertion that was supposed to describe it.
+    let per_runtime: Vec<i64> = fds.windows(2).map(|w| w[1] - w[0]).collect();
+    println!("open fds in the isolated child: {fds:?}");
+    println!("descriptors leaked per runtime: {per_runtime:?}");
+
+    const BUDGET: i64 = 3;
     assert!(
         per_runtime.iter().all(|&d| d <= BUDGET),
         "a torn-down runtime leaks at most {BUDGET} descriptors; got {per_runtime:?} \
-         from {fds:?}. See the comment above before raising this."
+         from {fds:?}. Read the doc comment before raising this."
     );
+}
+
+/// The child arm of [`a_torn_down_runtime_leaks_a_bounded_number_of_descriptors`].
+///
+/// Opens and drops one runtime per iteration and prints the descriptor count
+/// after each, on a line the parent parses. Sampling `/proc/self/fd` is only
+/// meaningful here because the parent invoked this process with `--exact` and
+/// `--test-threads=1`, so no other test shares it.
+fn measure_and_report_fd_series() {
+    let url = test_url();
+    let tag = "cpg_fd_probe";
+    let sep = if url.contains('?') { '&' } else { '?' };
+    let tagged = format!("{url}{sep}application_name={tag}");
+
+    let mut fds = Vec::new();
+    for _ in 0..6 {
+        let rt = compio::runtime::Runtime::new().expect("cannot create runtime");
+        rt.block_on(async {
+            let client = match connect(&tagged).await {
+                Ok(client) => client,
+                Err(e) => common::postgres_unreachable(&tagged, &e),
+            };
+            let rows = client.query("SELECT 1::int4 AS one", &[]).await.unwrap();
+            assert_eq!(rows[0].get::<_, i32>("one"), 1);
+        });
+        drop(rt);
+        fds.push(open_fds());
+    }
+
+    let series: Vec<String> = fds.iter().map(ToString::to_string).collect();
+    println!("{FD_PROBE_MARKER}{}", series.join(","));
 }
 
 /// The one-variable partner. The test above would also pass if the connection
