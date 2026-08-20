@@ -100,52 +100,124 @@ pub fn reserved_name_message(name: &str) -> String {
 /// Returns labels in source order, wildcard (`*`) blocks excluded — that one is
 /// the creator-app catch-all and claims no name.
 ///
+/// # How a site block is RECOGNISED
+///
+/// By POSITION, not by spelling: a line that opens a brace at top level is a
+/// site-address list (or, when it is a bare `{`, Caddy's global options block).
+/// That is the whole grammar: Caddy requires the opening brace to be the last
+/// token of the header line, and everything nested is a directive.
+///
+/// This used to key off the `http://` prefix instead, which had a silent hole
+/// the gate exists to prevent: Caddy accepts a SCHEME-LESS site address
+/// (`status.{$ZEROSHIP_DOMAIN} { ... }`), and such a block matched no prefix,
+/// hit the `continue`, and left the parser returning `Ok` with the edge quietly
+/// claiming a host `RESERVED_APP_NAMES` did not cover. Recognising by position
+/// turns that block into an `Err`: an unreadable site address must fail the
+/// gate, never be skipped by it.
+///
+/// A comma-separated address list (`http://a.{$D}, http://b.{$D} {`) is Caddy
+/// grammar too, and every address in it is checked; the prefix-keyed version
+/// read only the first and dropped the rest.
+///
 /// # Errors
 ///
 /// Returns the offending line when a site address is not in the expected form.
 pub fn caddy_site_labels(caddyfile: &str) -> Result<Vec<String>, String> {
-    const DOMAIN_VAR: &str = ".{$ZEROSHIP_DOMAIN";
     let mut labels = Vec::new();
+    let mut depth = 0usize;
     for line in caddyfile.lines() {
         let line = line.trim();
-        if line.starts_with('#') {
+        if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        // A site address is the only construct that opens with a scheme; the
-        // Caddyfile header explains why every block carries an explicit one.
-        let Some(rest) = line
-            .strip_prefix("http://")
-            .or_else(|| line.strip_prefix("https://"))
-        else {
-            continue;
-        };
-        let address = rest.split_whitespace().next().unwrap_or("");
-        let Some((label, _)) = address.split_once(DOMAIN_VAR) else {
-            return Err(format!(
-                "site address is not built from {DOMAIN_VAR}}}, so its hostname \
-                 label cannot be checked against RESERVED_APP_NAMES: {line}"
-            ));
-        };
-        if label.contains('.') {
-            return Err(format!(
-                "site address has a multi-label prefix; only a single hostname \
-                 label under the app domain is understood here: {line}"
-            ));
+        // `{$ZEROSHIP_DOMAIN:zeroship.localhost}` is braces that are NOT block
+        // structure. Drop every brace pair that opens and closes on this line
+        // and what remains is block structure only.
+        let structure = strip_inline_brace_pairs(line);
+        let opens = structure.matches('{').count();
+        let closes = structure.matches('}').count();
+
+        if depth == 0 && opens > 0 {
+            let Some(header) = line.strip_suffix('{').map(str::trim) else {
+                return Err(format!(
+                    "top-level line opens a block but does not end with `{{`, so its \
+                     site addresses cannot be read: {line}"
+                ));
+            };
+            // The bare `{` of Caddy's global options block. Claims no name.
+            if !header.is_empty() {
+                for address in header.split(',') {
+                    if let Some(label) = site_address_label(address.trim())? {
+                        labels.push(label);
+                    }
+                }
+            }
         }
-        if label == "*" {
-            // The creator-app catch-all. Claims no name.
-            continue;
-        }
-        if label.is_empty()
-            || !label
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        {
-            return Err(format!("site address has no usable hostname label: {line}"));
-        }
-        labels.push(label.to_owned());
+
+        // Saturating, so a Caddyfile with an unbalanced `}` keeps reading later
+        // site blocks at top level instead of going negative and skipping every
+        // one of them. A wrong depth must not make this parser quieter.
+        depth = (depth + opens).saturating_sub(closes);
     }
     Ok(labels)
+}
+
+/// Remove every `{...}` pair that opens and closes within `line`, innermost
+/// first, leaving only braces that carry block structure.
+fn strip_inline_brace_pairs(line: &str) -> String {
+    let mut out = line.to_owned();
+    while let Some(close) = out.find('}') {
+        let Some(open) = out[..close].rfind('{') else {
+            break;
+        };
+        out.replace_range(open..=close, "");
+    }
+    out
+}
+
+/// The hostname label a single Caddy site address claims under the app domain,
+/// or `None` for the wildcard catch-all.
+fn site_address_label(address: &str) -> Result<Option<String>, String> {
+    const DOMAIN_VAR: &str = ".{$ZEROSHIP_DOMAIN";
+    // Every block carries an explicit scheme on purpose; the Caddyfile header
+    // says why (`auto_https off` behind a TLS-terminating proxy). A scheme-less
+    // address is a real Caddy site block and an ERROR here, not a skipped line.
+    let Some(rest) = address
+        .strip_prefix("http://")
+        .or_else(|| address.strip_prefix("https://"))
+    else {
+        return Err(format!(
+            "site address carries no explicit http:// or https:// scheme, which \
+             this Caddyfile requires of every block: {address}"
+        ));
+    };
+    let host = rest.split_whitespace().next().unwrap_or("");
+    let Some((label, _)) = host.split_once(DOMAIN_VAR) else {
+        return Err(format!(
+            "site address is not built from {DOMAIN_VAR}}}, so its hostname \
+             label cannot be checked against RESERVED_APP_NAMES: {address}"
+        ));
+    };
+    if label.contains('.') {
+        return Err(format!(
+            "site address has a multi-label prefix; only a single hostname \
+             label under the app domain is understood here: {address}"
+        ));
+    }
+    if label == "*" {
+        // The creator-app catch-all. Claims no name.
+        return Ok(None);
+    }
+    if label.is_empty()
+        || !label
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(format!(
+            "site address has no usable hostname label: {address}"
+        ));
+    }
+    Ok(Some(label.to_owned()))
 }
 
 /// Hostname labels a compose file claims under `${ZEROSHIP_DOMAIN}`.
@@ -281,6 +353,75 @@ mod tests {
         let labels =
             caddy_site_labels("http://*.{$ZEROSHIP_DOMAIN:zeroship.localhost} {\n}\n").unwrap();
         assert!(labels.is_empty());
+    }
+
+    /// THE SHAPE THE PARSER HAS NEVER SEEN, and the one that decides whether
+    /// strictness is real: Caddy accepts a site address with NO scheme, so
+    /// `status.{$ZEROSHIP_DOMAIN} { ... }` is a live site block claiming a
+    /// fifth host. It must be refused, because a parser that skips what it
+    /// cannot read returns the same set for an edge that grew a host and leaves
+    /// `reserved_set_matches_caddyfile` GREEN while the property it protects is
+    /// broken. This is what the prefix-keyed parser did.
+    ///
+    /// Paired with the one-variable control below it: the SAME block with a
+    /// scheme parses and yields the label, so the `Err` is evidence about the
+    /// missing scheme and not about a parser that has started refusing
+    /// everything appended to the file.
+    #[test]
+    fn scheme_less_site_block_is_an_error_not_a_skipped_line() {
+        let mutated = format!(
+            "{CADDYFILE}\nstatus.{{$ZEROSHIP_DOMAIN:zeroship.localhost}} {{\n\
+             \treverse_proxy status:9099\n}}\n"
+        );
+        let err = caddy_site_labels(&mutated)
+            .expect_err("a scheme-less site block must not parse as no new labels");
+        assert!(err.contains("scheme"), "{err}");
+    }
+
+    /// The control for the test above, differing in ONE variable: the scheme.
+    #[test]
+    fn the_same_block_with_a_scheme_parses_and_claims_its_label() {
+        let mutated = format!(
+            "{CADDYFILE}\nhttp://status.{{$ZEROSHIP_DOMAIN:zeroship.localhost}} {{\n\
+             \treverse_proxy status:9099\n}}\n"
+        );
+        let labels = caddy_site_labels(&mutated).expect("the scheme-carrying block parses");
+        assert!(labels.contains(&"status".to_owned()));
+    }
+
+    /// Caddy lets one block carry several comma-separated addresses. EVERY one
+    /// claims a host, so reading only the first is the same silent hole in
+    /// another spelling.
+    #[test]
+    fn every_address_in_a_comma_separated_list_claims_its_label() {
+        let labels = caddy_site_labels(
+            "http://alpha.{$ZEROSHIP_DOMAIN:zeroship.localhost}, \
+             http://beta.{$ZEROSHIP_DOMAIN:zeroship.localhost} {\n\
+             \treverse_proxy gateway:8000\n}\n",
+        )
+        .expect("a comma-separated address list parses");
+        assert_eq!(labels, vec!["alpha".to_owned(), "beta".to_owned()]);
+    }
+
+    /// A DIRECTIVE block nested in a site block opens a brace too, and claims
+    /// no hostname. Recognising site blocks by position is only sound if depth
+    /// is tracked through the `{$ZEROSHIP_DOMAIN:...}` placeholder braces, which
+    /// are not block structure.
+    #[test]
+    fn nested_directive_blocks_claim_no_label() {
+        let labels = caddy_site_labels(
+            "http://alpha.{$ZEROSHIP_DOMAIN:zeroship.localhost} {\n\
+             \thandle /oauth2/* {\n\t\treverse_proxy auth:9092\n\t}\n}\n\
+             http://beta.{$ZEROSHIP_DOMAIN:zeroship.localhost} {\n\
+             \treverse_proxy gateway:8000\n}\n",
+        )
+        .expect("nested directive blocks parse");
+        assert_eq!(
+            labels,
+            vec!["alpha".to_owned(), "beta".to_owned()],
+            "`handle` is a directive, not a site address; and the block after \
+             the nesting must still be seen at top level"
+        );
     }
 
     #[test]
