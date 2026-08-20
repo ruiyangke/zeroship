@@ -353,22 +353,140 @@ pub fn period_date(period_start_unix: i64) -> chrono::NaiveDate {
         .expect("valid first-of-month period")
 }
 
+/// Hand this caller a far-future billing window that NO other caller can touch.
+///
+/// THIS LOOKS LIKE AN ORDINARY HELPER AND IS NOT. Read this before changing it,
+/// and before adding a caller.
+///
+/// WHAT IT GUARANTEES
+/// ------------------
+/// Every call returns an instant in a month `STRIDE_MONTHS` after the previous
+/// call's, so the windows callers actually touch are DISJOINT BY CONSTRUCTION.
+/// Not "unlikely to collide" - disjoint. Two tests can never land in one period,
+/// so a period-wide aggregate can never see a neighbour's rows.
+///
+/// WHAT IT REPLACED, AND WHY BOTH WERE WRONG
+/// -----------------------------------------
+///   `isolated_closed_period_now()`  memoised ONE random month in a `OnceLock`
+///                                   and handed it to every caller, so all 78
+///                                   seeding tests in the five billing modules
+///                                   piled into a single period.
+///   `unique_closed_period_now()`    (billing_safety_net_test) drew a FRESH
+///                                   random month per call out of 2400. Its name
+///                                   claimed uniqueness it did not have: 2400
+///                                   months is a collision space, not an
+///                                   allocator.
+///
+/// The bug they combined to produce: `billing_safety_net_test` asserts
+/// `subjects_checked == 1`, but `reconcile_pass` counts EVERY subject in the
+/// period, summed over every meter in it. A test owns its app; it did NOT own
+/// its period. When the random draw hit a seeded month the count came back 121
+/// instead of 1.
+///
+/// MEASURED 2026-08-20 (counting periods where a draw would break that
+/// assertion) - these two numbers are measured, the rates below are modelled:
+///
+///   before the binary merge   6 loaded periods, worst 96,  128 subjects
+///   after  the binary merge   2 loaded periods, worst 126, 128 subjects
+///   with this allocator       0 loaded periods, by construction
+///
+/// The 128 contaminating subjects were IDENTICAL across the first two: merging
+/// the test binaries did not create the hazard, it concentrated it. On a model
+/// of four draws against 2400 months that is ~1.0 percent per run before and
+/// ~0.33 percent after - real, and rarer, but never zero. This is zero.
+///
+/// WHY THIS ONLY BECAME CORRECT WHEN THE TEST BINARIES MERGED
+/// ---------------------------------------------------------
+/// The counter is process-global. Until 2026-08-20 these files were 48 separate
+/// executables, and a process-global counter would have restarted at zero in
+/// every one of them - handing the SAME months to different binaries while
+/// promising they were unique. It is only sound because `tests/live_db.rs` and
+/// `tests/main.rs` put every caller in ONE process. If these files are ever
+/// split back into separate targets, THIS FUNCTION SILENTLY BREAKS: it keeps
+/// returning values and they stop being unique. Split the targets and you must
+/// key the window by something the whole run agrees on instead.
+///
+/// DO NOT REPLACE THIS WITH A LOCK
+/// -------------------------------
+/// A mutex around the sweeps cannot fix what this fixes. The rows OUTLIVE the
+/// lock, and the collision is a later test DRAWING an earlier test's month -
+/// which serialisation does not prevent, because the two tests were never
+/// concurrent in the first place. The gate has always run `--test-threads 1`.
+/// The defect is address allocation, not concurrency.
+///
+/// THE CONTRACT FOR CALLERS
+/// ------------------------
+/// ONE CALL PER TEST. Bind it to a local and reuse that local; a second call
+/// gives you a DIFFERENT window, which is the point. Two call sites in
+/// `billing_credit_test` used to rely on the memoised value being the same
+/// instant twice and were hoisted to a local when this landed.
+///
+/// You may derive earlier months from the returned instant: the window reserved
+/// for you is the returned month and the `STRIDE_MONTHS - 1` months before it.
+/// Today callers reach at most two months back (`prev_period(now)` and, in one
+/// test, `prev_period(now - 40 days)`), and the self-invoicing safety net reads
+/// the returned month itself, so a stride of 4 leaves one month of slack. Reach
+/// further back than that and you are in your neighbour's window.
 #[allow(dead_code)]
-pub fn isolated_closed_period_now() -> i64 {
+pub fn next_isolated_period() -> i64 {
     use chrono::TimeZone;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
-    static NOW: OnceLock<i64> = OnceLock::new();
-    *NOW.get_or_init(|| {
-        let offset = (Uuid::new_v4().as_u128() % 2400) as i32;
-        let year = 2030 + offset / 12;
-        let month = (offset % 12) as u32 + 1;
-        chrono::Utc
-            .with_ymd_and_hms(year, month, 15, 12, 0, 0)
-            .single()
-            .expect("valid isolated billing period")
-            .timestamp()
-    })
+    /// Months per caller. See "THE CONTRACT FOR CALLERS" above.
+    const STRIDE_MONTHS: u32 = 4;
+    /// First month handed out, as an offset from January of the base year.
+    /// Starts past zero so the earliest window's back-reach stays inside it.
+    const FIRST_OFFSET_MONTHS: u32 = 4;
+    /// Windows available before the arithmetic leaves the reserved band. The
+    /// tree uses about 64; this asserts rather than wrapping into a month
+    /// another caller already owns.
+    const MAX_WINDOWS: u32 = 600;
+
+    static NEXT_WINDOW: AtomicU32 = AtomicU32::new(0);
+    let window = NEXT_WINDOW.fetch_add(1, Ordering::Relaxed);
+    assert!(
+        window < MAX_WINDOWS,
+        "next_isolated_period() exhausted its {MAX_WINDOWS} private windows. \
+         Raise MAX_WINDOWS (the band has room; see ISOLATED_PERIOD_BASE_YEAR); \
+         do NOT wrap, because wrapping silently reissues a month another test \
+         already seeded, which is the exact bug this replaced."
+    );
+
+    let offset = FIRST_OFFSET_MONTHS + window * STRIDE_MONTHS;
+    let year = ISOLATED_PERIOD_BASE_YEAR + (offset / 12) as i32;
+    let month = offset % 12 + 1;
+    chrono::Utc
+        .with_ymd_and_hms(year, month, 15, 12, 0, 0)
+        .single()
+        .expect("valid isolated billing period")
+        .timestamp()
 }
+
+/// First year of the band `next_isolated_period()` reserves. NOTHING ELSE MAY
+/// HARDCODE A PERIOD AT OR ABOVE THIS YEAR.
+///
+/// The allocator only makes windows disjoint among ITS OWN callers. Two other
+/// things write `usage_aggregates` rows into far-future months and neither goes
+/// through it:
+///
+///   * hardcoded literals - `src/cron/spend_recompute.rs` pins 2035/2036/2042/
+///     2043 and `tests/stream_forwarder_recompute_test.rs` does the same;
+///   * the LIB test binary - those `#[cfg(test)]` modules run in a DIFFERENT
+///     PROCESS from `tests/live_db.rs` against the SAME database, so the
+///     allocator's process-global counter cannot see them at all.
+///
+/// Measured 2026-08-20 with the band at 2030: `spend_recompute`'s hardcoded
+/// 2036-08 landed inside a window this allocator had handed to a proration
+/// test, putting two modules' apps in one period. Nothing asserted on that
+/// period, so it was latent - but it is the same defect, and "we got away with
+/// it" is not isolation.
+///
+/// So the band sits ABOVE every literal in the crate rather than among them,
+/// and `period_band_is_reserved_for_the_allocator` in `billing_safety_net_test`
+/// fails if a new literal moves into it. That check is what makes "disjoint by
+/// construction" a property rather than a hope; without it this constant is
+/// just a comment.
+pub const ISOLATED_PERIOD_BASE_YEAR: i32 = 2100;
 
 #[allow(dead_code)]
 pub fn lite_billing_stack(

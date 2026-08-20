@@ -36,17 +36,19 @@ fn tmpdir(label: &str) -> PathBuf {
     p
 }
 
+/// A period this test OWNS, which is what its `subjects_checked` assertions
+/// need and what the local random draw this replaced never actually gave them.
+///
+/// `reconcile_pass` counts every subject in the period, summed over every meter
+/// in it, so `assert_eq!(subjects_checked, 1)` is a claim about the whole
+/// period, not about this test's app. The old `unique_closed_period_now()` drew
+/// a fresh month out of 2400 per call and was unique only by luck; measured on
+/// 2026-08-20 it landed on a month another module had seeded and returned 121.
+/// `common::next_isolated_period()` reserves a private window instead. See its
+/// header for why a lock is the wrong repair and why this only works now that
+/// these files share one process.
 fn unique_closed_period_now() -> i64 {
-    use chrono::TimeZone;
-
-    let offset = (Uuid::new_v4().as_u128() % 2400) as i32;
-    let year = 2035 + offset / 12;
-    let month = (offset % 12) as u32 + 1;
-    chrono::Utc
-        .with_ymd_and_hms(year, month, 15, 12, 0, 0)
-        .single()
-        .expect("valid isolated billing period")
-        .timestamp()
+    common::next_isolated_period()
 }
 
 struct Fixture {
@@ -698,4 +700,116 @@ async fn finding_count_for_meter(
         .await
         .expect("count findings");
     rows[0].get("n")
+}
+
+/// The allocator's band must belong to the allocator ALONE.
+///
+/// `common::next_isolated_period()` makes its own callers disjoint, and that is
+/// all it can do: it is a process-global counter, and two other writers put rows
+/// into far-future periods without going through it - hardcoded literals, and
+/// the LIB test binary's `#[cfg(test)]` modules, which are a different PROCESS
+/// sharing the same database. Neither can be handed a window.
+///
+/// So the band is reserved by ADDRESS instead. Everything else in this crate
+/// pins periods below `common::ISOLATED_PERIOD_BASE_YEAR`; this fails if a new
+/// literal moves into the band, which is the only way the disjointness the
+/// billing assertions rely on can silently come apart.
+///
+/// Measured 2026-08-20 with the band at 2030: `src/cron/spend_recompute.rs`'s
+/// hardcoded 2036-08 sat inside a window handed to a proration test, so two
+/// modules' apps shared a period. This test is what keeps that from recurring.
+#[test]
+fn period_band_is_reserved_for_the_allocator() {
+    fn collect_rs(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_rs(&path, out);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    // Years appearing where a PERIOD is being built: the two chrono
+    // constructors, and `YYYY-MM` inside a quoted date. A bare integer is not
+    // matched - `ISOLATED_PERIOD_BASE_YEAR` itself must not trip this.
+    fn period_years(line: &str) -> Vec<i32> {
+        let mut found = Vec::new();
+        for marker in ["with_ymd_and_hms(", "from_ymd_opt("] {
+            let mut rest = line;
+            while let Some(at) = rest.find(marker) {
+                rest = &rest[at + marker.len()..];
+                let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+                if digits.len() == 4 {
+                    if let Ok(y) = digits.parse::<i32>() {
+                        found.push(y);
+                    }
+                }
+            }
+        }
+        // BYTES ONLY below. Slicing `line` by byte index panics the moment a
+        // source line holds a multi-byte character, and this crate's doc
+        // comments do - the first run of this test died on an em-dash in
+        // `src/internal.rs` rather than reporting anything.
+        let b = line.as_bytes();
+        for i in 0..b.len().saturating_sub(6) {
+            let is_year = b[i..i + 4].iter().all(u8::is_ascii_digit);
+            let looks_like_date =
+                is_year && b[i + 4] == b'-' && b[i + 5].is_ascii_digit() && b[i + 6].is_ascii_digit();
+            if looks_like_date && (i == 0 || !b[i - 1].is_ascii_digit()) {
+                let year = (0..4).fold(0i32, |acc, k| acc * 10 + i32::from(b[i + k] - b'0'));
+                found.push(year);
+            }
+        }
+        found
+    }
+
+    let crate_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    // The allocator names its own band; this file quotes the year that proved
+    // the hazard. Both are documentation of the rule, not violations of it.
+    let exempt = [
+        crate_root.join("tests/common/mod.rs"),
+        crate_root.join("tests/billing_safety_net_test.rs"),
+    ];
+
+    let mut files = Vec::new();
+    for sub in ["src", "tests"] {
+        collect_rs(&crate_root.join(sub), &mut files);
+    }
+
+    let mut offenders: Vec<String> = Vec::new();
+    for file in &files {
+        if exempt.contains(file) {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(file) else {
+            continue;
+        };
+        for (i, line) in text.lines().enumerate() {
+            for year in period_years(line) {
+                if year >= common::ISOLATED_PERIOD_BASE_YEAR {
+                    offenders.push(format!(
+                        "{}:{}: {}",
+                        file.strip_prefix(crate_root).unwrap_or(file).display(),
+                        i + 1,
+                        line.trim()
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "these pin a period inside the band reserved for \
+         common::next_isolated_period() (>= {}). Move them below it, or take a \
+         window from the allocator - a literal in the band lands on top of \
+         whichever test was handed that month:\n{}",
+        common::ISOLATED_PERIOD_BASE_YEAR,
+        offenders.join("\n")
+    );
 }

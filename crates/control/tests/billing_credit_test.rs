@@ -399,7 +399,7 @@ async fn ingest_at(state: &AppState, app: Uuid, requests: u64, period_start: i64
 }
 
 fn now_for_closed_period() -> i64 {
-    common::isolated_closed_period_now()
+    common::next_isolated_period()
 }
 
 fn prev_period(now: i64) -> i64 {
@@ -1168,6 +1168,12 @@ async fn consume_takes_per_creator_advisory_lock() {
     ensure_creator_billing(&fx.state, other).await;
     insert_grant(&fx.state, creator, 1000, "usd", chrono::Utc::now(), None).await;
 
+    // ONE instant for the whole test. `now_for_closed_period()` reserves a fresh
+    // PRIVATE window per CALL, so the two draft invoices below must both derive
+    // from this local - calling it twice would put them in unrelated windows
+    // instead of the adjacent periods this test is about.
+    let now = now_for_closed_period();
+
     // A draft invoice anchor for the consume.
     let inv = zeroship_core::typed_id::new_invoice_id();
     fx.state
@@ -1175,7 +1181,7 @@ async fn consume_takes_per_creator_advisory_lock() {
         .execute(
             "INSERT INTO zeroship.invoices (id, creator_id, period, status) \
              VALUES ($1, $2, $3::date, 'draft')",
-            &[&inv, &creator, &period_d(prev_period(now_for_closed_period()))],
+            &[&inv, &creator, &period_d(prev_period(now))],
         )
         .await
         .expect("claim draft");
@@ -1253,7 +1259,7 @@ async fn consume_takes_per_creator_advisory_lock() {
             &[
                 &inv2,
                 &creator,
-                &period_d(prev_period(now_for_closed_period() - 86_400 * 40)),
+                &period_d(prev_period(now - 86_400 * 40)),
             ],
         )
         .await
@@ -1663,6 +1669,11 @@ async fn consume_and_record_plan_change_serialize_on_the_creator_lock() {
     let app = make_owned_app(&fx.state, &plan_a, creator).await;
     insert_grant(&fx.state, creator, 1000, "usd", chrono::Utc::now(), None).await;
 
+    // ONE instant for the whole test: the draft invoice below and the plan
+    // change further down must be recorded against the SAME window, and
+    // `now_for_closed_period()` reserves a fresh private one on every call.
+    let now = now_for_closed_period();
+
     // A draft invoice anchor for the consume.
     let inv = zeroship_core::typed_id::new_invoice_id();
     fx.state
@@ -1670,7 +1681,7 @@ async fn consume_and_record_plan_change_serialize_on_the_creator_lock() {
         .execute(
             "INSERT INTO zeroship.invoices (id, creator_id, period, status) \
              VALUES ($1, $2, $3::date, 'draft')",
-            &[&inv, &creator, &period_d(prev_period(now_for_closed_period()))],
+            &[&inv, &creator, &period_d(prev_period(now))],
         )
         .await
         .expect("claim draft");
@@ -1706,7 +1717,7 @@ async fn consume_and_record_plan_change_serialize_on_the_creator_lock() {
     let creator_w = creator;
     let from_w = plan_a.clone();
     let to_w = plan_b.clone();
-    let now_unix = now_for_closed_period();
+    let now_unix = now;
     let task = compio::runtime::spawn(async move {
         zeroship_control::proration::record_plan_change_tx(
             &registry, &app_w, &creator_w, Some(&from_w), &to_w, now_unix,

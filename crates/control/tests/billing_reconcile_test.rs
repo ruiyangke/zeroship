@@ -952,7 +952,7 @@ async fn ingest_custom_metrics(
 
 /// `now` placed mid-current-month so the CLOSED period is the previous month.
 fn now_for_closed_period() -> i64 {
-    common::isolated_closed_period_now()
+    common::next_isolated_period()
 }
 
 fn prev_period(now: i64) -> i64 {
