@@ -258,7 +258,11 @@ const BLOB_REFERENCED_SQL: &str = "SELECT \
 ///
 /// Used for the ONE app whose own blob row is the row about to be deleted: that
 /// row is what the caller is collecting, so counting it would make the answer
-/// "referenced" every time. Its steps and runs are still searched.
+/// "referenced" every time. Its steps and runs are still searched, which its
+/// only caller has ALREADY established with the `NOT EXISTS` arms of its
+/// `FOR UPDATE` select. Keeping them is deliberate and untestable from outside:
+/// it makes this function answer its own question rather than one that is only
+/// true because of a guard in the caller.
 const BLOB_REFERENCED_BY_OUTPUT_SQL: &str = "SELECT \
         EXISTS (SELECT 1 FROM zeroship.workflow_steps \
                  WHERE output_kind = 'blob' AND output_hash = $1) \
@@ -374,16 +378,31 @@ where
         tables.blobs
     );
     // `changed == 0` is still honoured as "someone else got there first", but
-    // it is not what makes this safe against a concurrent reference: the
-    // `FOR UPDATE SKIP LOCKED` above is. We hold that row's lock for the rest of
-    // the transaction, and taking a new reference to a blob bumps its refcount
-    // on this same row, so a racing referencer blocks rather than slipping
-    // between the check and the delete.
+    // the race guard is the `FOR UPDATE SKIP LOCKED` above, not this count: a
+    // second sweep is skipped past the locked row and returns above, and THIS
+    // app taking a fresh reference is an `INSERT ... ON CONFLICT DO UPDATE SET
+    // refcount = refcount + 1` on the very row we hold (plugin-workflow
+    // store/pg.rs), so it blocks until we commit.
+    //
+    // What that lock does NOT cover, and did not cover before this reordering
+    // either: a DIFFERENT app taking its first reference to the same hash
+    // writes ITS OWN blobs table and is not blocked, so it can appear between
+    // the check above and the `delete_blob` below and be left with a row whose
+    // object is gone. Moving the check earlier widens that window by one
+    // statement; it does not create it. The orphan sweep is not the backstop
+    // for it either - it deletes objects, not rows.
     let changed = conn.execute(&delete_sql, &[&hash]).await?;
     if changed == 0 {
         return Ok(false);
     }
 
+    // The object goes AFTER the row, and this arm still commits the row delete
+    // with the object present. That asymmetry is deliberate and is not the
+    // defect above: the other order would delete bytes a rolled-back
+    // transaction still has a row for, and here the ORPHAN sweep is the
+    // reclaimer, which it can be precisely because the row is gone. It only
+    // reclaims while the fleet's journals are readable - so a failed store
+    // delete during a permission gap leaks until that gap closes.
     match state.workflow_blob_store.delete_blob(hash).await {
         Ok(()) => Ok(true),
         Err(e) => {
