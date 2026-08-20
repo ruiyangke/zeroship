@@ -57,7 +57,7 @@
 //!      happens to run in parallel - `drop_extension_rollback_pg.rs` says in its
 //!      own header that it cannot share `citext` with a second creator. Roles and
 //!      the `createSchema`/`dropSchema` name get a per-row unique suffix; the
-//!      extension becomes `pgcrypto` and is held under [`EXTENSION_CLAIM_KEY`]
+//!      extension becomes `pgcrypto` and is held under [`extension_claim_key`]
 //!      while a row uses it, because a name cannot isolate this one - see that
 //!      constant. This paragraph used to end "which no live test in the tree
 //!      claims", and that was FALSE when it was written: `code.extension` in
@@ -66,6 +66,9 @@
 //!      `pgcrypto` as `EXT_GUARDED`, the latter in the live
 //!      `a_guarded_extension_drop_keeps_no_inverse`. There was no unclaimed name
 //!      to pick, so the sentence was describing a choice that had not been made.
+//!      That file - and `fold_live/fold_role_extension_pg.rs`, for `unaccent` -
+//!      now takes the SAME claim, out of `support::extension_claim`, keyed by the
+//!      extension so the three binaries queue on one key instead of three.
 //!      `nextval`'s hard-coded `app` schema is retargeted at the probe schema,
 //!      because otherwise a cross-schema POLICY refusal would mask the capability
 //!      answer the row is asking about.
@@ -78,7 +81,7 @@
 //! extension, and it is isolated in TIME rather than in space: the two rows that
 //! claim it hold a cross-run advisory lock while they do, and ONLY those two rows
 //! drop it. Both halves are load-bearing and both are measured at
-//! [`EXTENSION_CLAIM_KEY`]. The
+//! [`PROBE_EXTENSION`]. The
 //! PostgreSQL sweep counts `pg_namespace` before and after itself and fails if a
 //! `zmconf_%` schema it is answerable for survives - inside the sweep, not beside
 //! it, because a check whose subject is another test's in-flight state cannot be
@@ -115,7 +118,7 @@
 //! the test is free to choose, and an extension name is a lookup into the server's
 //! library rather than an identifier. That resource is held under a lock instead,
 //! and the leftover a killed holder leaves behind is cleared by the next claimant
-//! under the same lock - see [`EXTENSION_CLAIM_KEY`] and [`claim_the_extension`].
+//! under the same lock - see [`PROBE_EXTENSION`] and [`claim_the_extension`].
 //!
 //! SCOPE. PostgreSQL, SQLite and MySQL - all three dialects the engine emits for.
 //! The MySQL leg's isolation unit is a throwaway DATABASE rather than a schema,
@@ -944,13 +947,24 @@ fn probe_prefix_for(pid: u32) -> String {
 /// `pg_engine/pg_scenarios.rs`, while the only other file that creates `pgcrypto` is
 /// that one, in the single test `a_guarded_extension_drop_keeps_no_inverse`.
 ///
-/// WHAT THIS FILE'S CLAIM DOES AND DOES NOT COVER. [`EXTENSION_CLAIM_KEY`] serializes
-/// the rows in THIS suite against each other, which is the collision that was
-/// measured. It does not reach `drop_extension_rollback_pg.rs`, which takes no
-/// claim: two gate runs whose `rollback` and `dialect_matrix` binaries overlap can
-/// still meet on `pgcrypto`. Closing that needs the same acquire in that file, or a
-/// third allowlisted extension in `support::operator_charter` - both outside this
-/// one, and neither is what went red.
+/// WHAT THIS FILE'S CLAIM COVERS - AND WHAT IT USED NOT TO. The claim now hashes
+/// [`extension_claim_key`], which is `support::extension_claim`'s key and names the
+/// EXTENSION and nothing else. It used to name this suite -
+/// `zero-migrate:dialect-conformance:extension:pgcrypto` - which serialized the rows
+/// of this file against each other and against nobody else, and
+/// `drop_extension_rollback_pg.rs` took no claim at all. MEASURED at 5b24c5a4: one
+/// PostgreSQL leg of this suite, with that file's `pgcrypto` case looped beside it,
+/// went red on a row of this table -
+///
+/// ```text
+///   dropExtension/base [postgres] could not be executed and is not pinned in
+///   NOT_EXECUTABLE: prelude apply: ... extension "pgcrypto" already exists
+///   || subject: ServerError [42704] extension "pgcrypto" does not exist
+/// ```
+///
+/// - which is this file being blamed for a neighbour's installation. Two locks with
+/// different keys protect nothing while looking exactly like protection, so the key
+/// belongs to the RESOURCE. `rollback/extension_claim_is_exclusive.rs` pins that.
 const PROBE_EXTENSION: &str = "pgcrypto";
 
 /// The advisory-lock key that makes claiming [`PROBE_EXTENSION`] safe across runs.
@@ -984,17 +998,15 @@ const PROBE_EXTENSION: &str = "pgcrypto";
 /// advisory space, and a collision between this key and some project's could only
 /// make one of them WAIT, never mis-serialize: advisory locks are re-entrant per
 /// session, so the executor's own acquire inside a claimed row is satisfied at once.
-const EXTENSION_CLAIM_KEY: &str = "zero-migrate:dialect-conformance:extension:pgcrypto";
-
-/// How long a run waits for the claim before it REPORTS rather than hangs.
 ///
-/// Spelled as a `lock_timeout`, which PostgreSQL applies to a `pg_advisory_lock`
-/// wait - VERIFIED on the 18.4 instance this suite runs against: a second session
-/// waiting on a held key aborts with `canceling statement due to lock timeout` at
-/// the bound rather than waiting forever. The whole PostgreSQL leg takes about
-/// thirty seconds and the claimed part of it is two rows, so this bound is reached
-/// by a wedged holder, not by a queue.
-const EXTENSION_CLAIM_WAIT: &str = "180s";
+/// NOT A CONSTANT OF THIS FILE any more. It is `support::extension_claim`'s key for
+/// [`PROBE_EXTENSION`], because the other binaries that install `pgcrypto` have to
+/// hash the same string or the claim serializes this suite against itself alone -
+/// which is what it did, and what let a neighbour's installation be reported as a
+/// defect in a row of [`DIALECT_TABLE`].
+fn extension_claim_key() -> String {
+    support::extension_claim::claim_key(PROBE_EXTENSION)
+}
 
 /// Whether this row is one of the two that claims [`PROBE_EXTENSION`].
 fn claims_the_extension(kind: &str) -> bool {
@@ -1003,53 +1015,17 @@ fn claims_the_extension(kind: &str) -> bool {
 
 /// Take the cross-run claim on [`PROBE_EXTENSION`], and start it from a known state.
 ///
-/// The `DROP EXTENSION IF EXISTS` here is INSIDE the claim and is a fixture
-/// precondition, the same kind of thing [`prelude`] establishes: a run killed
-/// between its CREATE and its DROP leaves the extension installed, and the next
-/// claimant's `createExtension` - the SUBJECT of one of these two rows and the
-/// PRELUDE of the other - would then answer `already exists`. That answer is about
-/// the leftover, not about the declaration. The identical statement OUTSIDE the
-/// claim is the race itself, which is why it moved in here out of the unconditional
+/// Delegates to `support::extension_claim`, which carries the bound, the
+/// `DROP EXTENSION IF EXISTS` precondition, and the reasons for both. The
+/// precondition is a fixture step of the same kind [`prelude`] establishes: a run
+/// killed between its CREATE and its DROP leaves the extension installed, and the
+/// next claimant's `createExtension` - the SUBJECT of one of these two rows and the
+/// PRELUDE of the other - would then answer `already exists`, an answer about the
+/// leftover rather than about the declaration. The identical statement OUTSIDE the
+/// claim is the race itself, which is why it does not stand in the unconditional
 /// cleanup at the foot of [`pg_verdict`].
 async fn claim_the_extension(session: &PgDevSession) -> Result<(), String> {
-    if let Err(error) = session
-        .batch(&format!("SET lock_timeout = '{EXTENSION_CLAIM_WAIT}'"))
-        .await
-    {
-        return Err(format!(
-            "could not bound the wait for the {PROBE_EXTENSION} claim: {error}"
-        ));
-    }
-    let taken = session
-        .exec(
-            "SELECT pg_advisory_lock(hashtext($1)::bigint)",
-            &[zero_migrate::driver::Bind::Text(
-                EXTENSION_CLAIM_KEY.to_string(),
-            )],
-        )
-        .await;
-    // RESET before the engine runs anything else on this PINNED connection. The
-    // bound belongs to the claim; left armed it would abort the executor's OWN
-    // `pg_advisory_lock` wait under load, and the row would be blamed for a
-    // ServerError that is this function's.
-    let _ = session.batch("RESET lock_timeout").await;
-    if let Err(error) = taken {
-        return Err(format!(
-            "waited {EXTENSION_CLAIM_WAIT} for the {PROBE_EXTENSION} claim \
-             ({EXTENSION_CLAIM_KEY}) and did not get it, so this row never asked its \
-             question: {error}"
-        ));
-    }
-    if let Err(error) = session
-        .batch(&format!("DROP EXTENSION IF EXISTS {PROBE_EXTENSION}"))
-        .await
-    {
-        return Err(format!(
-            "holds the {PROBE_EXTENSION} claim but could not clear a leftover \
-             installation before asking the row: {error}"
-        ));
-    }
-    Ok(())
+    support::extension_claim::claim(session, PROBE_EXTENSION).await
 }
 
 /// Drop what the row installed under the claim, then release the claim.
@@ -1062,17 +1038,7 @@ async fn claim_the_extension(session: &PgDevSession) -> Result<(), String> {
 /// [`pg_verdict`]'s scope, and so the next claimant is not made to wait on the drop
 /// of a session that is already finished with it.
 async fn release_the_extension(session: &PgDevSession) {
-    let _ = session
-        .batch(&format!("DROP EXTENSION IF EXISTS {PROBE_EXTENSION}"))
-        .await;
-    let _ = session
-        .exec(
-            "SELECT pg_advisory_unlock(hashtext($1)::bigint)",
-            &[zero_migrate::driver::Bind::Text(
-                EXTENSION_CLAIM_KEY.to_string(),
-            )],
-        )
-        .await;
+    support::extension_claim::release(session, PROBE_EXTENSION).await;
 }
 
 async fn pg_verdict(url: &str, kind: &str, variant: &str, op: &Op) -> Verdict {
@@ -2108,9 +2074,7 @@ async fn the_extension_claim_is_exclusive_and_only_the_extension_rows_take_it() 
     let held: bool = contender
         .query_one(
             "SELECT pg_try_advisory_lock(hashtext($1)::bigint) AS got",
-            &[zero_migrate::driver::Bind::Text(
-                EXTENSION_CLAIM_KEY.to_string(),
-            )],
+            &[zero_migrate::driver::Bind::Text(extension_claim_key())],
         )
         .await
         .expect("the contender asks for the claim")

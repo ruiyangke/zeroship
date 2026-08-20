@@ -42,6 +42,25 @@ use zero_migrate::{
 const OWNER: &str = "app_fold_role_extension";
 /// Available on the test image, and not installed by default - so creating it is
 /// a real catalog change rather than a no-op the oracle could not see.
+///
+/// Installed per DATABASE, which is what makes property (2) above visible to the
+/// oracle AND what makes it forgeable by a sibling run. `token()` puts this
+/// process's pid in every other name here, including the roles; an extension name
+/// is a lookup into the server's installed library, so `unaccent_<pid>` is `could
+/// not open extension control file` rather than an isolated extension. There is no
+/// second copy of this name to hand out, so the case isolates in TIME instead,
+/// under `support::extension_claim` - keyed by the extension so every binary that
+/// installs `unaccent` queues on one key.
+///
+/// MEASURED on the unchanged tree, four concurrent copies of this case, eight
+/// rounds, 28 of 32 processes red. Both halves of the test were corrupted, and the
+/// second is the one that matters: property (1) failed as `a role and an extension
+/// must round-trip: missing=["extension unaccent"]` when a sibling dropped it
+/// mid-case, and property (2) - the half that proves the oracle NOTICES a removal -
+/// failed as `dropping the role out of band must be reported`, `left: ["extension
+/// unaccent", "role ..."] right: ["role ..."]`, because a sibling had already
+/// removed the extension this case had not removed yet. A test whose negative
+/// control can be forged by a neighbour is not measuring the differ.
 const EXTENSION: &str = "unaccent";
 
 fn token(tag: &str) -> String {
@@ -101,6 +120,12 @@ scope = "all"
 async fn a_role_and_an_extension_fold_to_what_live_introspection_reports() {
     let url = skip_if_no_pg!();
     let session = PgDevSession::connect(&url);
+    // Before anything is created, so a case that cannot get the claim has nothing to
+    // reclaim - and LOUD, never a skip: without the extension this case cannot ask
+    // either of its two questions.
+    if let Err(why) = support::extension_claim::claim(&session, EXTENSION).await {
+        panic!("{why}");
+    }
     let schema = token("proj");
     // PostgreSQL folds unquoted role names to lower case; keep the authored name
     // already lower so the comparison is about the fold and not about casing.
@@ -233,20 +258,19 @@ async fn a_role_and_an_extension_fold_to_what_live_introspection_reports() {
     let _ = session
         .batch(&format!("DROP ROLE IF EXISTS {}", quote_ident(&role)))
         .await;
-    let _ = session
-        .batch(&format!(
-            "DROP EXTENSION IF EXISTS {}",
-            quote_ident(EXTENSION)
-        ))
-        .await;
-    session
+    let schemas = session
         .batch(&format!(
             "DROP SCHEMA IF EXISTS {} CASCADE; DROP SCHEMA IF EXISTS {} CASCADE",
             quote_ident(&cfg.project_schema),
             quote_ident(&cfg.pg.meta_schema)
         ))
-        .await
-        .expect("drop the test schemas");
+        .await;
+    // `release` carries the `DROP EXTENSION IF EXISTS` that used to stand here, so
+    // the removal happens INSIDE the claim rather than beside it, and the claim ends
+    // at the case boundary. Sequenced before the two `expect`s below, both of which
+    // panic. The unwinding path is covered by the pinned connection closing.
+    support::extension_claim::release(&session, EXTENSION).await;
+    schemas.expect("drop the test schemas");
     work.expect("fold a role and an extension against live PostgreSQL");
 }
 

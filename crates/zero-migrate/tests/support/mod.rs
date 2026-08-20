@@ -51,6 +51,14 @@ pub mod model_equivalence;
 /// a capture harness can never re-bless the file the comparison reads.
 pub mod field_defs_corpus;
 
+/// The cross-run claim on a PostgreSQL EXTENSION, which is installed per DATABASE and
+/// so cannot be localized by the pid the way every other cluster-visible name here is.
+/// It lives in `support` rather than in any one test file BECAUSE the claim only works
+/// when every binary that installs a given extension hashes the SAME key: `rollback`,
+/// `fold_live` and `dialect_matrix` are three processes contending for one server, and
+/// three private locks would protect nothing while looking exactly like protection.
+pub mod extension_claim;
+
 use std::cell::{Cell, RefCell};
 
 use bytes::BytesMut;

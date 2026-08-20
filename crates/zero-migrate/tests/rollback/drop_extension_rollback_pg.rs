@@ -40,6 +40,24 @@ const PROJECT_SCHEMA: &str = "zero_migrate";
 /// cannot share one: `pg_extension_name_index` rejects the second creator with
 /// "duplicate key value violates unique constraint". Per-schema isolation, which
 /// is enough for tables and sequences, does not isolate an extension.
+///
+/// Nor does per-PROCESS isolation, which is the part this file used to get wrong.
+/// The two names below are distinct from each other and that is all: a SECOND RUN
+/// of this same binary claims the identical pair, and so does `dialect_matrix`,
+/// which installs `pgcrypto`. MEASURED on the unchanged tree - four concurrent
+/// copies of this binary's extension cases, ten rounds, 38 of 40 processes red
+/// with `extension "citext" already exists` and `duplicate key value violates
+/// unique constraint "pg_extension_name_index"`; and one `dialect_matrix`
+/// PostgreSQL leg run beside this binary's `pgcrypto` case went red with
+/// `dropExtension/base ... extension "pgcrypto" already exists || subject:
+/// ServerError [42704] extension "pgcrypto" does not exist`.
+///
+/// A per-run unique name is not available: an extension name is a lookup into the
+/// server's installed library, so `citext_<pid>` is `could not open extension
+/// control file`, not an isolated extension. Both cases therefore isolate in TIME,
+/// under `support::extension_claim` - keyed by the EXTENSION, so this file and
+/// `dialect_matrix` queue behind one another on `pgcrypto` rather than each
+/// holding a private lock.
 const EXT: &str = "citext";
 const EXT_GUARDED: &str = "pgcrypto";
 
@@ -276,6 +294,12 @@ async fn rolling_back_a_dropped_extension_restores_it() {
     let url = skip_if_no_pg!();
     let ext = EXT;
     let session = PgDevSession::connect(&url);
+    // Taken before anything else, so a case that cannot get the claim has created
+    // nothing to reclaim - and LOUD, never a skip: a lost claim means this case did
+    // not ask its question, which is not a pass.
+    if let Err(why) = support::extension_claim::claim(&session, ext).await {
+        panic!("{why}");
+    }
     let schema = token();
     let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy(&schema));
     let quoted_schema = quote_ident(&cfg.project_schema);
@@ -359,6 +383,12 @@ async fn rolling_back_a_dropped_extension_restores_it() {
              DROP SCHEMA IF EXISTS {quoted_meta_schema} CASCADE"
         ))
         .await;
+    // After the schemas, so the extension is already gone with them, and BEFORE the
+    // verdict below, which panics: this ends the claim at the CASE boundary instead
+    // of making the next claimant wait on a session that is finished with it. The
+    // unwinding path (an `assert!` inside `work`) is covered by the pinned
+    // connection closing, which is also what covers a killed process.
+    support::extension_claim::release(&session, ext).await;
     match (work, cleanup) {
         (Ok(()), Ok(())) => {}
         (Err(work), Ok(())) => panic!("{work}"),
@@ -376,6 +406,10 @@ async fn a_guarded_extension_drop_keeps_no_inverse() {
     let url = skip_if_no_pg!();
     let ext = EXT_GUARDED;
     let session = PgDevSession::connect(&url);
+    // The `pgcrypto` half of the claim - the one `dialect_matrix` also contends for.
+    if let Err(why) = support::extension_claim::claim(&session, ext).await {
+        panic!("{why}");
+    }
     let schema = token();
     let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy(&schema));
     let quoted_schema = quote_ident(&cfg.project_schema);
@@ -446,6 +480,12 @@ async fn a_guarded_extension_drop_keeps_no_inverse() {
              DROP SCHEMA IF EXISTS {quoted_meta_schema} CASCADE"
         ))
         .await;
+    // After the schemas, so the extension is already gone with them, and BEFORE the
+    // verdict below, which panics: this ends the claim at the CASE boundary instead
+    // of making the next claimant wait on a session that is finished with it. The
+    // unwinding path (an `assert!` inside `work`) is covered by the pinned
+    // connection closing, which is also what covers a killed process.
+    support::extension_claim::release(&session, ext).await;
     match (work, cleanup) {
         (Ok(()), Ok(())) => {}
         (Err(work), Ok(())) => panic!("{work}"),
