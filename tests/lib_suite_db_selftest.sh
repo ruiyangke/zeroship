@@ -257,6 +257,40 @@ else
 fi
 
 echo
+echo "=== every function survives 'set -e', which is how both suites run it ==="
+# The case this file did NOT have, and the bug it did not catch. Both suite
+# scripts open with `set -euo pipefail`. `zs_suite_db_exists` returns 1 to mean
+# ABSENT - a perfectly ordinary answer - so a bare call to it on its own line
+# takes the whole harness down under `set -e` before the next statement runs.
+#
+# MEASURED before the fix, on a real 5444 database that did not exist yet: the
+# harness printed the resolved name and then stopped. No error, no output, exit
+# 1. It reads exactly like a psql that hung, which is why the selftest passing
+# 39/39 at the time was not evidence of anything - it runs under `set -uo
+# pipefail` with no `-e`, so it exercised the one mode the suites never use.
+cat > "$TMP/under_set_e.sh" <<EOF
+set -euo pipefail
+. "$LIB"
+run_psql() {
+  case "\$*" in
+    *"FROM pg_database"*) return 0 ;;          # absent: the 1-returning path
+    *"CREATE DATABASE"*)  return 0 ;;
+  esac
+}
+zs_suite_db_resolve zeroship_auth_test "" "$TMP/a"
+zs_suite_db_ensure
+echo "REACHED THE END"
+EOF
+out="$(bash "$TMP/under_set_e.sh" 2>&1)"
+rc=$?
+check "a create-path run under set -e finishes" "0" "$rc"
+if printf '%s' "$out" | grep -q 'REACHED THE END'; then
+  ok "and reaches the line after zs_suite_db_ensure"
+else
+  bad "it died inside the library: $out"
+fi
+
+echo
 echo "=== ensure without run_psql refuses instead of silently doing nothing ==="
 ( unset -f run_psql
   TEST_DB=zeroship_auth_test_abc zs_suite_db_ensure ) >/dev/null 2>&1

@@ -245,8 +245,13 @@ zs_suite_db_ensure() {
     return 2
   fi
 
-  zs_suite_db_exists "$name"
-  status=$?
+  # `if !`, never a bare call followed by `$?`. Both suites run under `set -e`,
+  # where a bare call returning 1 - which is this function's ordinary way of
+  # saying "absent" - kills the script before the next line runs. MEASURED: the
+  # bare form exited the harness silently right after printing the resolved
+  # name, with no error and status 1, which reads as a psql that hung.
+  status=0
+  zs_suite_db_exists "$name" || status=$?
   case "$status" in
     0) echo "==> Reusing ${name} (schema-keyed; shared with every run on this migration set)"
        return 0 ;;
@@ -257,8 +262,8 @@ zs_suite_db_ensure() {
   # stderr is captured rather than discarded: on the losing side of a create
   # race it carries the only evidence of what happened, and it is re-emitted
   # verbatim below when the database still is not there.
-  output="$(run_psql -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE ${name};" 2>&1)"
-  status=$?
+  status=0
+  output="$(run_psql -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE ${name};" 2>&1)" || status=$?
   if [ "$status" -eq 0 ]; then
     return 0
   fi
@@ -267,8 +272,9 @@ zs_suite_db_ensure() {
   # expected outcome of two agents starting together, not an error. What makes
   # it safe to swallow is that we re-ask the server rather than pattern-matching
   # the message: "it exists now" is the condition we actually need.
-  zs_suite_db_exists "$name"
-  case "$?" in
+  status=0
+  zs_suite_db_exists "$name" || status=$?
+  case "$status" in
     0) echo "==> ${name} appeared concurrently; another run created it first"
        return 0 ;;
     *) printf '%s\n' "$output" >&2
