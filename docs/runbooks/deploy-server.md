@@ -60,7 +60,7 @@ Verify before pushing. An image that builds is not an image that is correct:
 docker run --rm --entrypoint sh "$REG:$SHA" -c 'ls /usr/local/bin; ls /db/migrations-ts | wc -l'
 # expect 6 binaries: zeroship zeroship-auth zeroship-control zeroship-gate
 #                    zeroship-platform-migrate zeroship-worker
-# expect 16 (or however many db/migrations-ts/*.ts you have)
+# expect 33 (or however many db/migrations-ts/*.ts you have)
 docker run --rm --entrypoint zeroship "$REG:$SHA" --version
 ```
 
