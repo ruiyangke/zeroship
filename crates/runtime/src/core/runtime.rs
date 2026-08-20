@@ -600,6 +600,9 @@ pub struct RuntimeBuilder {
     app_id: Option<uuid::Uuid>,
     meter: Option<Arc<zeroship_metering::Meter>>,
     net_policy: NetPolicy,
+    /// Override for PHASE 2 of the egress evaluator. `None` leaves the
+    /// platform's own `SystemResolver` in place.
+    egress_resolver: Option<Rc<dyn crate::transport::egress::EgressResolver>>,
     js_driver_dsn_json: Option<String>,
     /// Idle-GC threshold override (ms). `None` → `DEFAULT_IDLE_GC_AFTER`.
     /// Lives on the builder (not `RuntimeLimits`) because it's a runtime
@@ -702,6 +705,21 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Replace PHASE 2 of the `node:net` egress evaluator - the DNS lookup and
+    /// its timeout.
+    ///
+    /// Not a creator-app capability and not reachable from JS: it is a
+    /// trusted-Rust construction knob, like `net_policy`. It exists so a test
+    /// can see whether the SHIPPED connect path resolved a name, which is the
+    /// only observable form the DNS gate has.
+    pub fn egress_resolver(
+        mut self,
+        resolver: Rc<dyn crate::transport::egress::EgressResolver>,
+    ) -> Self {
+        self.egress_resolver = Some(resolver);
+        self
+    }
+
     /// Seed the Trusted JS-driver command channel for the migrate runtime.
     ///
     /// This is not a creator-app capability. Normal worker/CLI runtimes do not
@@ -749,6 +767,7 @@ impl RuntimeBuilder {
             app_id,
             self.meter,
             self.net_policy,
+            self.egress_resolver,
             self.js_driver_dsn_json,
             idle_gc_after,
             self.runtime_descriptor,
@@ -1042,6 +1061,7 @@ impl RuntimeInner {
         app_id: Option<uuid::Uuid>,
         meter: Option<Arc<zeroship_metering::Meter>>,
         net_policy: NetPolicy,
+        egress_resolver: Option<Rc<dyn crate::transport::egress::EgressResolver>>,
         js_driver_dsn_json: Option<String>,
         idle_gc_after: Duration,
         runtime_descriptor: Option<String>,
@@ -1168,6 +1188,9 @@ impl RuntimeInner {
             meter_handle,
         )));
         state.borrow_mut().set_net_policy(net_policy);
+        if let Some(resolver) = egress_resolver {
+            state.borrow_mut().set_egress_resolver(resolver);
+        }
         if let Some(dsn_json) = js_driver_dsn_json {
             state.borrow_mut().js_driver = Some(crate::state::JsDriverState::new(dsn_json));
         }

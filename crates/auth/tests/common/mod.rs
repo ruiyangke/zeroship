@@ -451,14 +451,29 @@ impl Fixture {
 ///
 /// NOT for `signing_key_retention_test`, which is the lifecycle's own test and
 /// must drive the real `publish_active_key` directly.
+///
+/// LOAD-THEN-STORE, NOT `swap`: the flag records that a publish SUCCEEDED, not
+/// that one was attempted. With `swap` the flag is already set when the publish
+/// returns an error, so the first caller reports the real failure and every
+/// later caller in the process gets `Ok(())` with nothing published and fails
+/// somewhere downstream on a key that was never registered - one real failure
+/// wearing fifty unrelated faces.
+///
+/// The race `swap` was buying is not worth having. This suite runs
+/// `--test-threads 1`, and even threaded the worst case is republishing our own
+/// still-ACTIVE kid, which succeeds: `publish_active_key` refuses only
+/// `retiring` and `retired` rows. Skipping the publish is the outcome nothing
+/// downstream can recover from.
 pub async fn publish_op_key_once(
     issuer: &zeroship_auth::oidc::Issuer,
     db: &compio_postgres::Client,
 ) -> zeroship_auth::error::Result<()> {
     use std::sync::atomic::{AtomicBool, Ordering};
     static PUBLISHED: AtomicBool = AtomicBool::new(false);
-    if PUBLISHED.swap(true, Ordering::SeqCst) {
+    if PUBLISHED.load(Ordering::SeqCst) {
         return Ok(());
     }
-    issuer.publish_active_key(db).await
+    issuer.publish_active_key(db).await?;
+    PUBLISHED.store(true, Ordering::SeqCst);
+    Ok(())
 }

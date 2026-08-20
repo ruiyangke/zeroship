@@ -624,7 +624,8 @@ mod tests {
     use ntex::web::{self, test};
     use sha2::{Digest, Sha256};
     use zeroship_bundle::{BlobStore, LocalDiskBlobStore, Manifest, RuntimeDescriptorEntry};
-    use zeroship_core::types::{AppNetPolicy, AppRuntimeLimits, NetAllowEntry};
+    use zeroship_core::net_policy::Verdict;
+    use zeroship_core::types::{AppNetPolicy, AppRuntimeLimits, NetEgressEntry};
 
     use super::*;
 
@@ -750,13 +751,13 @@ mod tests {
             deploy_hash: Some("h1".to_string()),
             env_version: 7,
             net_policy: AppNetPolicy {
-                allow: vec![NetAllowEntry {
-                    host: "db.example.com".to_string(),
+                egress: vec![NetEgressEntry {
+                    verdict: Verdict::Accept,
+                    destination: "db.example.com".to_string(),
                     port: 5432,
                 }],
                 max_sockets: 4,
                 egress_ceiling_bytes: 1024 * 1024,
-                ..AppNetPolicy::default()
             },
         };
         assert!(
@@ -790,10 +791,7 @@ mod tests {
 
     #[test]
     fn runtime_descriptor_absent_is_schema_less() {
-        let Ok(runtime) = compio::runtime::Runtime::new() else {
-            eprintln!("skipping (cannot create compio runtime)");
-            return;
-        };
+        let runtime = compio::runtime::Runtime::new().expect("compio runtime");
         runtime.block_on(async {
             let root = tmpdir("descriptor-schema-less");
             let blob_store: Arc<dyn BlobStore> =
@@ -811,10 +809,7 @@ mod tests {
 
     #[test]
     fn runtime_descriptor_blob_fetch_failure_is_load_error() {
-        let Ok(runtime) = compio::runtime::Runtime::new() else {
-            eprintln!("skipping (cannot create compio runtime)");
-            return;
-        };
+        let runtime = compio::runtime::Runtime::new().expect("compio runtime");
         runtime.block_on(async {
             let root = tmpdir("descriptor-missing-blob");
             let blob_store: Arc<dyn BlobStore> =
@@ -871,10 +866,7 @@ mod tests {
     /// HTTP dependence fails loudly instead of silently passing).
     #[test]
     fn reconcile_swaps_isolate_on_env_only_rotation() {
-        let Ok(runtime) = compio::runtime::Runtime::new() else {
-            eprintln!("skipping (cannot create compio runtime)");
-            return;
-        };
+        let runtime = compio::runtime::Runtime::new().expect("compio runtime");
 
         runtime.block_on(async {
             // Internally idempotent (guarded by a Once in the runtime crate),

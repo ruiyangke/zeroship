@@ -19,8 +19,9 @@ use uuid::Uuid;
 
 use zeroship_control::plan_catalog::{Plan, PlanCatalog};
 use zeroship_control::pricing::{charge_cents, MetricWeight, MetricWeights, PlanPrice, FX_SCALE};
-use zeroship_control::net_grants;
+use zeroship_control::egress_rules;
 use zeroship_control::Registry;
+use zeroship_core::net_policy::Verdict;
 use zeroship_core::types::{AppNetPolicyLimits, AppRuntimeLimits};
 
 fn db_url() -> String {
@@ -261,15 +262,15 @@ async fn get_versions_derives_limits_from_catalog_not_hardcode() {
 }
 
 /// The registry projection, driven through the CREATOR authoring path rather
-/// than a raw INSERT: `net_grants::upsert_grant` / `revoke_grant` are what
-/// `/api/apps/{id}/net-grants` calls, so this pins that a creator-authored row
-/// reaches the data plane and a creator-revoked one leaves it.
+/// than a raw INSERT: `egress_rules::upsert_rule` / `delete_rule` are what
+/// `/api/apps/{id}/egress-rules` calls, so this pins that a creator-authored
+/// row reaches the data plane and a creator-deleted one leaves it.
 ///
 /// What this does NOT cover: authorization. Whether the CALLER may reach those
 /// functions for this app is the guard's job and is tested over HTTP in
-/// `net_grants_test.rs`; here they are called directly.
+/// `egress_rules_test.rs`; here they are called directly.
 #[compio::test]
-async fn get_versions_projects_app_net_grants_with_plan_caps() {
+async fn get_versions_projects_app_egress_rules_with_plan_caps() {
     let url = db_url();
     let client = pg(&url).await;
     let registry = Registry::new(&url).await.expect("registry");
@@ -284,95 +285,144 @@ async fn get_versions_projects_app_net_grants_with_plan_caps() {
     };
     catalog.upsert(&plan, Some(plan.archived)).await.expect("upsert net caps");
 
-    let name = format!("net-grant-{}", Uuid::new_v4().simple());
+    let name = format!("egress-rule-{}", Uuid::new_v4().simple());
     let app = registry
         .create_app(&name, &plan.id, &owner)
         .await
         .expect("create");
 
-    let versions = registry.get_versions().await.expect("get_versions no grants");
+    let versions = registry.get_versions().await.expect("get_versions no rules");
     assert_eq!(
         versions.get(&app.id).expect("app").net_policy,
         zeroship_core::types::AppNetPolicy::default(),
-        "no grant rows must project literal default-deny"
+        "no rule rows must project literal default-deny"
     );
 
-    let granted = net_grants::upsert_grant(
+    let written = egress_rules::upsert_rule(
         &client,
         app.id,
-        &net_grants::NetGrantBody {
-            host: "DB.Example.COM.".to_string(),
+        &egress_rules::EgressRuleBody {
+            verdict: Verdict::Accept,
+            destination: "DB.Example.COM.".to_string(),
             port: 5432,
             note: Some("primary".to_string()),
         },
         &owner.to_string(),
-        registry.frontable_suffixes(),
     )
     .await
-    .expect("creator grant");
-    assert_eq!(granted.host, "db.example.com", "the host is normalized on write");
+    .expect("creator rule");
+    assert_eq!(
+        written.rule.destination, "db.example.com",
+        "the destination is normalized on write"
+    );
 
-    let versions = registry.get_versions().await.expect("get_versions with grant");
+    let versions = registry.get_versions().await.expect("get_versions with rule");
     let net = &versions.get(&app.id).expect("app").net_policy;
-    assert_eq!(net.allow.len(), 1);
-    assert_eq!(net.allow[0].host, "db.example.com");
-    assert_eq!(net.allow[0].port, 5432);
+    assert_eq!(net.egress.len(), 1);
+    assert_eq!(net.egress[0].destination, "db.example.com");
+    assert_eq!(net.egress[0].port, 5432);
+    assert_eq!(net.egress[0].verdict, Verdict::Accept);
     assert_eq!(net.max_sockets, 9, "caps come from the plan catalog row");
     assert_eq!(net.egress_ceiling_bytes, 42 * 1024 * 1024);
 
-    // The creator names hosts within the caps and never touches the caps: the
-    // fourth grant on a `max_grants: 3` plan is refused, and the projection is
-    // still the three that were allowed.
+    // A REJECT rule projects too, and it does NOT count against the plan's
+    // accept ceiling - the two assertions below are one claim each and the
+    // second is what would break if rejects were charged.
+    egress_rules::upsert_rule(
+        &client,
+        app.id,
+        &egress_rules::EgressRuleBody {
+            verdict: Verdict::Reject,
+            destination: "203.0.113.0/24".to_string(),
+            port: 5432,
+            note: None,
+        },
+        &owner.to_string(),
+    )
+    .await
+    .expect("creator reject rule");
+
+    // The creator names destinations within the caps and never touches the
+    // caps: the fourth ACCEPT on a `max_grants: 3` plan is refused, and the
+    // projection is still the three accepts plus the uncharged reject.
     for port in [5433_u16, 5434] {
-        net_grants::upsert_grant(
+        egress_rules::upsert_rule(
             &client,
             app.id,
-            &net_grants::NetGrantBody {
-                host: "db.example.com".to_string(),
+            &egress_rules::EgressRuleBody {
+                verdict: Verdict::Accept,
+                destination: "db.example.com".to_string(),
                 port,
                 note: None,
             },
             &owner.to_string(),
-            registry.frontable_suffixes(),
         )
         .await
-        .expect("grants within the cap");
+        .expect("accept rules within the cap");
     }
-    let over = net_grants::upsert_grant(
+    let over = egress_rules::upsert_rule(
         &client,
         app.id,
-        &net_grants::NetGrantBody {
-            host: "db.example.com".to_string(),
+        &egress_rules::EgressRuleBody {
+            verdict: Verdict::Accept,
+            destination: "db.example.com".to_string(),
             port: 5435,
             note: None,
         },
         &owner.to_string(),
-        registry.frontable_suffixes(),
     )
     .await;
     assert!(
         matches!(
             over,
-            Err(net_grants::NetGrantError::CapExceeded { max: 3, current: 3 })
+            Err(egress_rules::EgressRuleError::CapExceeded {
+                verdict: Verdict::Accept,
+                max: 3,
+                current: 3
+            })
         ),
-        "the fourth grant must be refused by the plan cap, got {over:?}"
+        "the fourth accept rule must be refused by the plan cap, got {over:?}"
     );
     let versions = registry.get_versions().await.expect("get_versions at cap");
     let net = &versions.get(&app.id).expect("app").net_policy;
-    assert_eq!(net.allow.len(), 3, "the refused grant reached no runtime");
-    assert_eq!(net.max_sockets, 9, "a refused grant leaves the caps untouched");
+    assert_eq!(
+        net.egress.len(),
+        4,
+        "three accepts plus the reject; the refused accept reached no runtime"
+    );
+    assert_eq!(
+        net.egress.iter().filter(|e| e.verdict == Verdict::Reject).count(),
+        1,
+        "the reject rule projects and was not charged against the accept cap"
+    );
+    assert_eq!(net.max_sockets, 9, "a refused rule leaves the caps untouched");
     assert_eq!(net.egress_ceiling_bytes, 42 * 1024 * 1024);
 
     for port in [5432_u16, 5433, 5434] {
-        net_grants::revoke_grant(&client, app.id, "db.example.com", port)
+        egress_rules::delete_rule(&client, app.id, "db.example.com", port)
             .await
-            .expect("creator revoke");
+            .expect("creator delete");
     }
-    let versions = registry.get_versions().await.expect("get_versions after revoke");
+    // Deleting every ACCEPT leaves the reject behind, and an app that can
+    // refuse but never admit is still an app that cannot open a socket. The
+    // empty-set default-deny is the OTHER way to say that, and this asserts
+    // the two do not disagree.
+    let versions = registry.get_versions().await.expect("get_versions rejects only");
+    let net = &versions.get(&app.id).expect("app").net_policy;
+    assert_eq!(net.egress.len(), 1);
+    assert!(
+        net.egress.iter().all(|e| e.verdict == Verdict::Reject),
+        "only the reject rule survives"
+    );
+
+    egress_rules::delete_rule(&client, app.id, "203.0.113.0/24", 5432)
+        .await
+        .expect("creator delete reject");
+    let versions = registry.get_versions().await.expect("get_versions after delete");
     assert_eq!(
         versions.get(&app.id).expect("app").net_policy,
         zeroship_core::types::AppNetPolicy::default(),
-        "revoking the last grant returns to default-deny on the next version read"
+        "deleting the last rule returns to default-deny on the next version read"
     );
 
     drop(catalog);

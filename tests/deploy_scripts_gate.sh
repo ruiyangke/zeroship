@@ -728,9 +728,19 @@ fi
 # control is actually running. A stub that says nothing makes the happy path
 # fail for reasons unrelated to anything under test, and a control that cannot
 # succeed is not a control.
+# The frozen-migration ledger asks two more, and they are ANSWERS too. The
+# existence probe must say `t` or `f` and nothing else, because the script
+# refuses any third reply on purpose -- a down database and an empty deployment
+# both produce no output, and folding them together would report "nothing is
+# frozen" for a database it simply could not reach. ZS_GATE_JOURNAL_EXISTS
+# drives that arm; ZS_GATE_JOURNAL names a file holding the journal rows.
 case "$*" in
   *"config --images"*) printf '%s\n' "${ZS_GATE_RENDERED_IMAGE-${ZS_GATE_RUNNING_IMAGE:-}}" ;;
   inspect*)            printf '%s\n' "${ZS_GATE_RUNNING_IMAGE:-}" ;;
+  *to_regclass*)       printf '%s\n' "${ZS_GATE_JOURNAL_EXISTS-t}" ;;
+  *platform_migration_files*)
+    [ -n "${ZS_GATE_JOURNAL:-}" ] && [ -r "${ZS_GATE_JOURNAL:-}" ] && cat "$ZS_GATE_JOURNAL"
+    ;;
 esac
 exit 0
 STUBEOF
@@ -1215,12 +1225,22 @@ seed_deploy() { # $1 sandbox. A host that would pass every contract.
   seed_secrets "$d"
 }
 
+# The journal the stub postgres reports, seeded from the tree's own snapshot so
+# the happy path finds no drift and rewrites nothing. Using the REAL file rather
+# than a fixture is deliberate: the post-roll step writes into this repo's
+# working tree, and a fixture that disagreed with it would leave every gate run
+# dirtying a tracked file.
+LEDGER_FILE="$ROOT/db/released_migrations.tsv"
+GATE_JOURNAL="$FIX/journal.tsv"
+grep -v '^#' "$LEDGER_FILE" | grep . >"$GATE_JOURNAL"
+
 run_deploy() { # $1 sandbox, rest: extra argv. Sets DEP_RC, DEP_OUT and CAP.
   CAP_N=$((CAP_N+1))
   CAP="$FIX/capture.$CAP_N"
   : >"$CAP"
   local sb="$1"; shift
-  DEP_OUT="$(env PATH="$STUB:$PATH" ZS_GATE_CAPTURE="$CAP" ZS_GATE_RUNNING_IMAGE="$FAKE_IMAGE" "$@" \
+  DEP_OUT="$(env PATH="$STUB:$PATH" ZS_GATE_CAPTURE="$CAP" ZS_GATE_RUNNING_IMAGE="$FAKE_IMAGE" \
+    ZS_GATE_JOURNAL="$GATE_JOURNAL" "$@" \
     "$REMOTE" --host fakehost --remote-dir "$sb" \
       --registry ghcr.io/example/zeroship-platform --image "$FAKE_IMAGE" 2>&1)"
   DEP_RC=$?
@@ -1287,6 +1307,146 @@ if [ -n "$CHK_LINE" ] && [ -n "$UP_LINE" ] && [ "$CHK_LINE" -lt "$UP_LINE" ]; th
 else
   fail "--check-config at line ${CHK_LINE:-none} does not precede the roll at line ${UP_LINE:-none}; the check is a post-mortem"
 fi
+
+# --- D4: an APPLIED migration that was edited refuses BEFORE the roll -------
+#
+# The defect: the migrate runner hashes each db/migrations-ts file's bytes and
+# refuses every later run against a database whose journal recorded a different
+# hash, permanently. Editing an applied file bricks that database, and the only
+# signal `docker compose up` gives is `service "migrate" didn't complete
+# successfully: exit 2` with the container's own stderr never surfaced. It cost
+# a full day on 2026-08-19.
+#
+# The CONTROL for this pair is the happy path above, which ran with the same
+# stub journal and DID reach the roll -- so a refusal here is about the edited
+# file and not about the check existing at all.
+# Every arm from D2 down reads the HAPPY PATH's capture. These three arms each
+# run their own deploy, which repoints $CAP, so put it back before leaving.
+CAP_HAPPY="$CAP"
+LEDGER_VICTIM="$(head -1 "$GATE_JOURNAL" | cut -f1)"
+LEDGER_BACKUP="$FIX/victim.ts"
+cp "$ROOT/db/migrations-ts/$LEDGER_VICTIM" "$LEDGER_BACKUP"
+printf '\n// gate mutation\n' >>"$ROOT/db/migrations-ts/$LEDGER_VICTIM"
+SB_LEDGER="$FIX/sb_ledger"; seed_deploy "$SB_LEDGER"
+run_deploy "$SB_LEDGER"
+cp "$LEDGER_BACKUP" "$ROOT/db/migrations-ts/$LEDGER_VICTIM"
+
+[ "$DEP_RC" != 0 ] \
+  && pass "editing a migration the host already applied makes the deploy exit non-zero" \
+  || fail "a migration edited after the host applied it deployed cleanly (rc=$DEP_RC); the roll will stop at 'migrate' with a bare exit 2"
+case "$DEP_OUT" in
+  *"$LEDGER_VICTIM"*) pass "the refusal names the edited migration ($LEDGER_VICTIM)" ;;
+  *) fail "the refusal never names the file, which is the whole diagnosis compose does not give: $DEP_OUT" ;;
+esac
+seen "$CAP" '### docker compose up -d --remove-orphans' \
+  && fail "the stack was ROLLED anyway; the check has to precede the roll or 'migrate' has already refused" \
+  || pass "NOTHING IS RESTARTED when an applied migration was edited"
+
+# --- D4: a migration that sorts before an applied one refuses the roll ------
+#
+# Disjoint from the arm above and invisible to it: the file at fault is NEW, so
+# no journal row covers its bytes and its own content is fine. The version comes
+# from the file's ordinal in sorted-filename order, so inserting one mid-corpus
+# claims a version the journal already holds for a later file, and the roll
+# aborts at `migrate` with a ChecksumDrift naming the wrong file. Measured on
+# 2026-08-20 with 20260819000000_app_egress_rules.ts against a journal ending at
+# 20260820000000_control_workflow_journal_access.ts.
+#
+# The stub journal is the real ledger, so "sorts before the newest journalled
+# file" is produced by planting a file with an early date -- the same shape the
+# egress merge had.
+LEDGER_EARLY="$ROOT/db/migrations-ts/20260101000000_gate_misordered.ts"
+printf 'export const name = "gate_misordered";\nexport function up() {}\nexport function down() {}\n' >"$LEDGER_EARLY"
+SB_ORDER="$FIX/sb_order"; seed_deploy "$SB_ORDER"
+run_deploy "$SB_ORDER"
+rm -f "$LEDGER_EARLY"
+
+[ "$DEP_RC" != 0 ] \
+  && pass "a migration sorting before one the host has applied makes the deploy exit non-zero" \
+  || fail "a mid-corpus migration deployed cleanly (rc=$DEP_RC); the roll aborts at 'migrate' with ChecksumDrift naming the wrong file"
+case "$DEP_OUT" in
+  *20260101000000_gate_misordered.ts*) pass "the refusal names the misordered file, which the engine's own ChecksumDrift never does" ;;
+  *) fail "the refusal does not name the misordered file: $DEP_OUT" ;;
+esac
+seen "$CAP" '### docker compose up -d --remove-orphans' \
+  && fail "the stack was ROLLED anyway; this has to precede the roll or 'migrate' has already aborted" \
+  || pass "NOTHING IS RESTARTED when a migration sorts before an applied one"
+
+# CONTROL: the happy path above ran the same check against the same journal with
+# no planted file and DID reach the roll, so the three arms are about the file
+# and not about the check refusing everything.
+
+# --- D4: a journal probe that answers neither t nor f is refused ------------
+#
+# A down database, a wrong role and an empty deployment all produce no output
+# here. Folding them together would report "nothing is frozen" for the first
+# two -- a failure and a legitimate empty result printing identically, which is
+# the exact silence this whole check exists to remove.
+SB_PROBE="$FIX/sb_probe"; seed_deploy "$SB_PROBE"
+run_deploy "$SB_PROBE" ZS_GATE_JOURNAL_EXISTS=''
+[ "$DEP_RC" != 0 ] \
+  && pass "a migration-journal probe that answers neither t nor f refuses the deploy" \
+  || fail "an unreadable migration journal was treated as 'nothing is frozen' (rc=$DEP_RC)"
+
+# CONTROL for the pair above: `f` is a real answer and means a host with no
+# journal yet, which must deploy. Without this the two arms above would both
+# pass for a check that refuses unconditionally.
+SB_FRESH="$FIX/sb_fresh"; seed_deploy "$SB_FRESH"
+run_deploy "$SB_FRESH" ZS_GATE_JOURNAL_EXISTS='f'
+[ "$DEP_RC" = 0 ] \
+  && pass "CONTROL: a host with NO migration journal yet still deploys (nothing is frozen there)" \
+  || fail "CONTROL: a fresh host with no journal was refused (rc=$DEP_RC), so the two refusals above prove nothing: $DEP_OUT"
+
+# --- D4: a deploy from a tree with a STALE ledger rewrites it and says so ---
+#
+# This is the arm that decides whether the fix rebuilt the defect with more
+# steps. The old guard was a hand-maintained list that covered 21 files while
+# the deployed journal held 34; if a deploy from a tree that never updated the
+# list could still finish quietly, the list would go stale exactly as before,
+# just with a different file extension.
+#
+# THE FIRST VERSION OF THIS ARM TRUNCATED THE SNAPSHOT IN THE WORKING TREE AND
+# PROVED NOTHING, which is worth recording because it looked right. The script
+# asks `git diff --quiet`, so it compares the rewritten file against what is
+# COMMITTED -- and rewriting a truncated worktree file restores it to exactly
+# the committed content, no diff, exit 0. That is the correct answer to the
+# question the script asks (nothing needs committing) and the wrong scenario:
+# real staleness lives in the COMMIT, not in the worktree.
+#
+# So the disagreement is introduced on the JOURNAL side instead: the stub host
+# reports one row fewer than the committed snapshot holds. The direction is the
+# opposite of real drift, but the property under test is the mechanism -- when
+# the journal and the committed snapshot disagree, the deploy must rewrite the
+# file and refuse to finish quietly -- and that is direction-agnostic.
+#
+# The pre-roll check still passes, because every file the journal DOES name is
+# intact in the tree, so the run reaches the roll and the post-roll refresh is
+# what has to fire.
+LEDGER_SAVE="$FIX/ledger.tsv"
+cp "$LEDGER_FILE" "$LEDGER_SAVE"
+LEDGER_ROWS_BEFORE="$(grep -c '\.ts	' "$LEDGER_FILE")"
+STALE_JOURNAL="$FIX/journal.short.tsv"
+head -n -1 "$GATE_JOURNAL" >"$STALE_JOURNAL"
+SB_STALE="$FIX/sb_stale"; seed_deploy "$SB_STALE"
+run_deploy "$SB_STALE" ZS_GATE_JOURNAL="$STALE_JOURNAL"
+LEDGER_ROWS_AFTER="$(grep -c '\.ts	' "$LEDGER_FILE")"
+cp "$LEDGER_SAVE" "$LEDGER_FILE"
+
+[ "$LEDGER_ROWS_AFTER" = "$((LEDGER_ROWS_BEFORE - 1))" ] \
+  && pass "a deploy REWRITES db/released_migrations.tsv from the journal ($LEDGER_ROWS_BEFORE rows became $LEDGER_ROWS_AFTER), so coverage tracks deploys instead of whoever remembered" \
+  || fail "the ledger still holds $LEDGER_ROWS_AFTER rows after a deploy whose journal held $((LEDGER_ROWS_BEFORE - 1)); it drifts away from the deployment exactly as the hand-maintained list did"
+[ "$DEP_RC" != 0 ] \
+  && pass "the same run exits non-zero, so a stale ledger cannot be deployed past in silence" \
+  || fail "the deploy exited 0 with a ledger it had just rewritten; nothing makes anyone commit it"
+case "$DEP_OUT" in
+  *"THE DEPLOY SUCCEEDED"*) pass "the non-zero exit says the deploy succeeded, so it is not read as a failed roll" ;;
+  *) fail "the non-zero exit does not distinguish itself from a failed deploy; an operator will --rollback a healthy stack: $DEP_OUT" ;;
+esac
+seen "$CAP" '### docker compose up -d --remove-orphans' \
+  && pass "CONTROL: the stale-ledger run DID roll the stack, so the non-zero exit above is the to-do and not an early refusal" \
+  || fail "CONTROL: the stale-ledger run never reached the roll, so it proves nothing about the post-roll refresh: $DEP_OUT"
+
+CAP="$CAP_HAPPY"
 
 # --- D2: provisioning uses the IMAGE'S OWN dev init ------------------------
 seen "$CAP" "--entrypoint zeroship $FAKE_IMAGE dev init" \

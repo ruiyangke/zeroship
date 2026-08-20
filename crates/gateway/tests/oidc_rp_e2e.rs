@@ -218,16 +218,24 @@ fn gateway_signing() -> SigningKey {
 /// usable after a peer retires it, because the JWKS keeps `retiring` keys
 /// (`crates/auth/src/oidc/metadata.rs:71-84`) and every assertion here looks
 /// its key up by kid rather than counting them.
+/// LOAD-THEN-STORE, NOT `swap`: the flag records that a publish SUCCEEDED, not
+/// that one was attempted. With `swap` the flag is already set when the
+/// `expect` below panics, so the first test reports the real failure and every
+/// later test in the process skips the publish and fails downstream on a key
+/// that was never registered. The race `swap` bought is not worth having -
+/// republishing our own still-ACTIVE kid succeeds, while skipping the publish
+/// cannot be recovered from.
 async fn publish_op_key_once(issuer: &Issuer, db: &compio_postgres::Client) {
     use std::sync::atomic::{AtomicBool, Ordering};
     static PUBLISHED: AtomicBool = AtomicBool::new(false);
-    if PUBLISHED.swap(true, Ordering::SeqCst) {
+    if PUBLISHED.load(Ordering::SeqCst) {
         return;
     }
     issuer
         .publish_active_key(db)
         .await
         .expect("publish active OP key");
+    PUBLISHED.store(true, Ordering::SeqCst);
 }
 
 fn op_signing() -> SigningKey {

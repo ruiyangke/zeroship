@@ -8,6 +8,7 @@ use futures::channel::mpsc;
 
 use crate::state::{OpError, SharedState};
 use crate::transport::byte_pump::SocketStream;
+use crate::transport::egress::EgressRefusal;
 
 use super::caps::release_socket_slot;
 #[cfg(feature = "runtime_tls")]
@@ -19,7 +20,6 @@ use super::registry::{
 };
 
 pub(super) const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy)]
 pub(super) enum ConnectKind {
@@ -60,16 +60,15 @@ impl ConnectKind {
             Self::Tls { .. } => "node:tls capability denied",
         }
     }
-
-    fn connect_denied(self, host: &str, port: u16) -> String {
-        match self {
-            Self::Net => format!("node:net connect denied for {host}:{port}"),
-            #[cfg(feature = "runtime_tls")]
-            Self::Tls { .. } => format!("node:tls connect denied for {host}:{port}"),
-        }
-    }
 }
 
+/// A connect that cleared the checks a `connect()` call can answer
+/// synchronously: handler kind, port range, socket state, and whether the app
+/// holds `node:net` at all.
+///
+/// It carries NO policy conclusion. The egress verdict is
+/// `transport::egress::evaluate`'s to reach, in one place, once, on the connect
+/// task - see INVARIANT ONE-COMPOSITION.
 pub(super) struct AuthorizedConnect {
     host: String,
     port: u16,
@@ -114,9 +113,15 @@ pub(super) fn authorize_connect(
         if !s.net_policy.module_allowed() {
             return Err(capability_violation(kind.capability_denied()));
         }
-        if !s.net_policy.allows_host_port(&host, port) {
-            return Err(capability_violation(kind.connect_denied(&host, port)));
-        }
+
+        // No phase of the egress evaluator runs here - not phase 1 either,
+        // even though it is synchronous and would let a name refusal throw
+        // straight out of `connect()`. Running it here as well as on the
+        // connect task would put the DNS gate in two places, and a gate with
+        // two implementations is a gate one of whose implementations is
+        // untested. The cost is that every policy refusal now reports through
+        // the socket's `error` event, which is also what Node does for an
+        // address it cannot reach.
     }
 
     Ok(AuthorizedConnect { host, port })
@@ -380,65 +385,45 @@ async fn connect_tcp(
     Some((addr, tcp))
 }
 
+/// The whole egress decision for this connect, in ONE call.
+///
+/// Phases 1, 2 and 3 are `transport::egress::evaluate`'s, including the DNS
+/// gate and the platform floor. Nothing here re-derives any of them; this
+/// function borrows the policy and the resolver, awaits the verdict, and turns
+/// a refusal into a socket `error` event.
 async fn resolve_authorized_target(
     state: &SharedState,
     socket_id: u32,
     target: &AuthorizedConnect,
 ) -> Option<SocketAddr> {
-    let resolve_host = target.host.clone();
-    let port = target.port;
-    let resolved = compio::time::timeout(
-        resolve_timeout(),
-        compio::runtime::spawn_blocking(move || {
-            #[cfg(debug_assertions)]
-            if zeroship_core::test_env!("ZEROSHIP_NET_TEST_DNS_HANG_HOST").as_deref()
-                == Some(resolve_host.as_str())
-            {
-                let ms = zeroship_core::test_env!("ZEROSHIP_NET_TEST_DNS_HANG_MS")
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(250);
-                std::thread::sleep(Duration::from_millis(ms));
-            }
-            crate::fetch::resolve_and_check_ssrf(&resolve_host, port)
-        }),
-    )
-    .await;
-    let addr = match resolved {
-        Ok(Ok(Ok(addr))) => addr,
-        Ok(Ok(Err(e))) => {
-            push_error_and_close(state, socket_id, format!("SSRF: {e}"), "ERR_NET_SSRF");
-            return None;
-        }
-        Ok(Err(_join)) => {
-            push_error_and_close(
-                state,
-                socket_id,
-                "DNS resolve task failed".to_string(),
-                "ERR_NET_DNS",
-            );
-            return None;
-        }
-        Err(_) => {
-            push_error_and_close(
-                state,
-                socket_id,
-                "DNS resolve timed out".to_string(),
-                "ERR_NET_DNS_TIMEOUT",
-            );
-            return None;
-        }
+    // The policy and the resolver are lifted out of the RefCell BEFORE the
+    // await: a `Ref` held across it would panic the next `borrow_mut` on this
+    // thread, and the whole point of one composition is that the await is
+    // inside it.
+    let (policy, resolver) = {
+        let s = state.borrow();
+        (s.net_policy.clone(), std::rc::Rc::clone(&s.egress_resolver))
     };
-    Some(addr)
+
+    match crate::transport::egress::evaluate(&policy, &target.host, target.port, &*resolver).await {
+        // `evaluate` returns EVERY survivor in the resolver's order; taking the
+        // first is happy-eyeballs preference, not a filter.
+        Ok(kept) => kept.first().copied(),
+        Err(refusal) => {
+            report_refusal(state, socket_id, &refusal);
+            None
+        }
+    }
 }
 
-fn resolve_timeout() -> Duration {
-    zeroship_core::declared_env!(
-        platform,
-        "ZEROSHIP_NET_RESOLVE_TIMEOUT_MS",
-        crate::RuntimeConsumer
-    )
-    .and_then(|s| s.parse::<u64>().ok())
-    .filter(|ms| *ms > 0)
-    .map(Duration::from_millis)
-    .unwrap_or(RESOLVE_TIMEOUT)
+/// Render a refusal onto the socket.
+///
+/// The floor, the creator's own rules and a broken lookup get DIFFERENT codes.
+/// They are different refusals - one the creator cannot change, one they wrote,
+/// one that is not policy at all - and 5.7 asks for exactly this distinction
+/// because a v4-only range grant dropping every AAAA answer otherwise looks
+/// identical to a broken name.
+fn report_refusal(state: &SharedState, socket_id: u32, refusal: &EgressRefusal) {
+    let (code, message) = crate::transport::egress::refusal_report(refusal);
+    push_error_and_close(state, socket_id, message, code);
 }
