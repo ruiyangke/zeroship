@@ -53,9 +53,24 @@
 #                               drained the bucket and a 429 arrived where the
 #                               test asserts 401 / 303 / 200.
 #
+# Where that leaves two concurrent runs, MEASURED 2026-08-20 on one shared
+# database, the pair started together and confirmed overlapping (both runs'
+# client processes holding a backend in 13 of 15 samples):
+#
+#   whole gate, before the last fixture fixes   636 passed / 5 failed
+#                                               638 passed / 3 failed
+#   the auth integration binary, after them     252 passed / 2 failed
+#                                               253 passed / 1 failed
+#
+# and every remaining failure is in the list below. For comparison, ONE run
+# alone on the same database reports 632 for the whole gate and 254/0 for that
+# binary, so the concurrency cost is now those few tests and nothing else.
+#
 # STILL OPEN, and each is a globally-named DDL object a test installs on a
 # SHARED table. Two runs then fight over one object, and a sleeping trigger
-# meant to slow THIS run's insert also slows the peer's:
+# meant to slow THIS run's insert also slows the peer's. `:410` below is the
+# one that failed in BOTH runs of the last measurement, `magic_link_test` in
+# one of them:
 #
 #   crates/auth/tests/signup_forgot_ratelimit_test.rs:397,405,499
 #       CHECK constraint `auth_users_signup_m3_name_check` on zeroship.users
