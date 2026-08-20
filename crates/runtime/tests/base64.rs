@@ -1,7 +1,7 @@
 //! Native atob/btoa tests. WHATWG HTML §8.6
 //! (https://html.spec.whatwg.org/multipage/webappapis.html#atob-and-btoa).
 
-mod common;
+use crate::common;
 use common::{dispatch, m};
 
 #[test]

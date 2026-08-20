@@ -33,7 +33,11 @@ data/builder-client-secret
 
 # WPT is fetched on demand by crates/runtime/tests/setup-wpt.sh, not
 # tracked. Keeps .git small (the WPT depth=1 pack is ~140 MB).
-crates/runtime/tests/wpt/
+# No trailing slash: with one, this pattern matches only a directory, and a
+# SYMLINK to a WPT tree elsewhere on the machine - which is what you want in a
+# second worktree, so you clone it once instead of once per worktree - showed
+# up as untracked and got staged by a `git add crates/runtime/tests`.
+crates/runtime/tests/wpt
 
 # Reject foreign package-manager lockfiles — pnpm-lock.yaml is the source of truth.
 package-lock.json
