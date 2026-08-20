@@ -126,6 +126,11 @@ pub(crate) async fn connect_raw<S, T>(
     encryption: Encryption,
     has_hostname: bool,
     config: &Config,
+    // Taken from the socket BEFORE it was handed to this function, because
+    // `S` is generic here and only the caller knows whether it is one. The
+    // client half stores it so the session ends when the client does; see
+    // `crate::release`.
+    release: Option<crate::release::ConnectionRelease>,
 ) -> Result<(Client, Connection<S, T::Stream>), Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -163,6 +168,7 @@ where
         config.get_ssl_negotiation(),
         process_id,
         secret_key,
+        release,
     );
     let connection = Connection::new(handshake.stream, handshake.delayed, parameters, receiver);
 

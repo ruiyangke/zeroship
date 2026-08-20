@@ -120,6 +120,7 @@ mod pool;
 mod portal;
 mod prepare;
 mod query;
+mod release;
 pub mod row;
 mod simple_query;
 mod socket;
