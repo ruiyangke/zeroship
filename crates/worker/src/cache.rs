@@ -1084,10 +1084,7 @@ mod tests {
     #[test]
     fn load_app_applies_net_policy_to_runtime_builder() {
         std::thread::spawn(|| {
-            let Ok(runtime) = compio::runtime::Runtime::new() else {
-                eprintln!("skipping (cannot create compio runtime)");
-                return;
-            };
+            let runtime = compio::runtime::Runtime::new().expect("compio runtime");
 
             runtime.block_on(async {
                 let app_id = Uuid::new_v4();
@@ -1137,10 +1134,7 @@ mod tests {
     #[test]
     fn load_app_preserves_last_good_isolate_when_descriptor_validation_fails() {
         std::thread::spawn(|| {
-            let Ok(runtime) = compio::runtime::Runtime::new() else {
-                eprintln!("skipping (cannot create compio runtime)");
-                return;
-            };
+            let runtime = compio::runtime::Runtime::new().expect("compio runtime");
 
             runtime.block_on(async {
                 zeroship_runtime::init::init_v8();
@@ -1205,10 +1199,7 @@ mod tests {
     #[test]
     fn first_load_with_corrupt_descriptor_hard_errors_without_cached_isolate() {
         std::thread::spawn(|| {
-            let Ok(runtime) = compio::runtime::Runtime::new() else {
-                eprintln!("skipping (cannot create compio runtime)");
-                return;
-            };
+            let runtime = compio::runtime::Runtime::new().expect("compio runtime");
 
             runtime.block_on(async {
                 zeroship_runtime::init::init_v8();
@@ -1256,10 +1247,7 @@ mod tests {
     #[test]
     fn reading_limits_does_not_refresh_recency() {
         std::thread::spawn(|| {
-            let Ok(runtime) = compio::runtime::Runtime::new() else {
-                eprintln!("skipping reading_limits_does_not_refresh_recency (no compio runtime)");
-                return;
-            };
+            let runtime = compio::runtime::Runtime::new().expect("compio runtime");
             runtime.block_on(async {
                 let app_id = Uuid::new_v4();
                 init_cache(

@@ -1509,8 +1509,12 @@ mod access_identity_tests {
         client
     }
 
-    async fn mint_fixture() -> Option<(String, Client, Client, Client, Uuid, OAuthClient, Issuer)> {
-        let dsn = zeroship_core::config::test_database_url_opt()?;
+    // A missing Postgres is a FAILURE, not a skip: these fixtures exercise
+    // the mint-vs-deletion lock race, and a silently skipped run would let
+    // that race go unchecked while the suite still read green. Dial it or
+    // panic naming the provisioning command.
+    async fn mint_fixture() -> (String, Client, Client, Client, Uuid, OAuthClient, Issuer) {
+        let dsn = zeroship_core::config::test_database_url();
         let setup = pg_connect(&dsn).await;
         let mint = pg_connect(&dsn).await;
         let deletion = pg_connect(&dsn).await;
@@ -1560,7 +1564,7 @@ mod access_identity_tests {
             .publish_active_key(&setup)
             .await
             .expect("publish mint-race signing key");
-        Some((dsn, setup, mint, deletion, user_id, client, issuer))
+        (dsn, setup, mint, deletion, user_id, client, issuer)
     }
 
     fn token_iat(token: &str) -> i64 {
@@ -1617,12 +1621,7 @@ mod access_identity_tests {
 
     #[compio::test]
     async fn access_token_mint_holds_the_user_lock_until_commit() {
-        let Some((_dsn, setup, mut mint, _deletion, user_id, client, issuer)) =
-            mint_fixture().await
-        else {
-            eprintln!("skip: no test database (set PG_TEST_URL or run tests/provision_test_backends.sh)");
-            return;
-        };
+        let (_dsn, setup, mut mint, _deletion, user_id, client, issuer) = mint_fixture().await;
         let tx = mint.transaction().await.expect("mint transaction");
         mint_access_token(&tx, &issuer, &client, user_id, &["openid".to_string()])
             .await
@@ -1647,12 +1646,7 @@ mod access_identity_tests {
 
     #[compio::test]
     async fn access_token_mint_rejects_a_deleted_principal_after_locking() {
-        let Some((_dsn, mut setup, mut mint, _deletion, user_id, client, issuer)) =
-            mint_fixture().await
-        else {
-            eprintln!("skip: no test database (set PG_TEST_URL or run tests/provision_test_backends.sh)");
-            return;
-        };
+        let (_dsn, mut setup, mut mint, _deletion, user_id, client, issuer) = mint_fixture().await;
         crate::store::users::request_deletion(&mut setup, user_id, 30)
             .await
             .expect("delete request")
@@ -1671,12 +1665,7 @@ mod access_identity_tests {
 
     #[compio::test]
     async fn deletion_marker_uses_a_post_lock_timestamp() {
-        let Some((_dsn, setup, mut mint, mut deletion, user_id, client, issuer)) =
-            mint_fixture().await
-        else {
-            eprintln!("skip: no test database (set PG_TEST_URL or run tests/provision_test_backends.sh)");
-            return;
-        };
+        let (_dsn, setup, mut mint, mut deletion, user_id, client, issuer) = mint_fixture().await;
         let tx = mint.transaction().await.expect("mint transaction");
         crate::advisory_lock::lock_refresh_user_xact(&tx, user_id)
             .await
