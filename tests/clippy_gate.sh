@@ -106,6 +106,9 @@
 # USAGE
 #
 #   tests/clippy_gate.sh              lint and audit (what CI runs)
+#   tests/clippy_gate.sh --preflight-only
+#                                     answer "can this machine lint at all?"
+#                                     without spending a workspace build on it
 #   tests/clippy_gate.sh --audit-only <json>
 #                                     audit a previously captured json stream
 #                                     without re-running cargo
@@ -156,9 +159,12 @@ case "${1:-}" in
       exit 2
     fi
     ;;
+  --preflight-only)
+    MODE="preflight"
+    ;;
   "") ;;
   *)
-    echo "usage: $0 [--audit-only <cargo-json>]" >&2
+    echo "usage: $0 [--audit-only <cargo-json> | --preflight-only]" >&2
     exit 2
     ;;
 esac
@@ -237,7 +243,7 @@ FNR == 1 { dir = FILENAME; sub(/\/[^\/]*$/, "", dir); pending = 0 }
 }
 AWKEOF
 
-if [ "$MODE" = "run" ]; then
+if [ "$MODE" = "run" ] || [ "$MODE" = "preflight" ]; then
   # `-not -path '*/wpt/*'` because upstream WPT is a foreign tree we keep
   # pristine; nothing there is a build input of ours.
   ( cd "$ROOT" && find $SRC_ROOTS -name '*.rs' -not -path '*/wpt/*' -print0 2>/dev/null \
@@ -252,10 +258,14 @@ if [ "$MODE" = "run" ]; then
     exit 2
   fi
 
+  # Existence is checked on the ABSOLUTE path; only the DISPLAY form is made
+  # repo-relative, and only when the file is actually inside the repo. Checking
+  # a relative path would silently depend on the caller's cwd.
   : > "$TMP/missing.txt"
   while IFS= read -r p; do
-    r="$(cd "$ROOT" && realpath -m --relative-to=. "$p")"
-    [ -e "$ROOT/$r" ] || printf '%s\n' "$r" >> "$TMP/missing.txt"
+    abs="$(cd "$ROOT" && realpath -m "$p")"
+    [ -e "$abs" ] && continue
+    printf '%s\n' "${abs#"$ROOT"/}" >> "$TMP/missing.txt"
   done < "$TMP/included.txt"
   # Two files can include_str! the same generated path; report it once.
   sort -u "$TMP/missing.txt" -o "$TMP/missing.txt"
@@ -269,7 +279,7 @@ if [ "$MODE" = "run" ]; then
     head -8 "$TMP/missing.txt" | sed 's/^/         /' >&2
     [ "$nmiss" -gt 8 ] && echo "         ... and $((nmiss - 8)) more" >&2
     echo "" >&2
-    if grep -q '^crates/runtime/tests/wpt/' "$TMP/missing.txt"; then
+    if grep -q '/wpt/' "$TMP/missing.txt"; then
       echo "       Fetch the WPT tree (~1.1G, idempotent):" >&2
       echo "         ./crates/runtime/tests/setup-wpt.sh" >&2
     fi
@@ -278,6 +288,11 @@ if [ "$MODE" = "run" ]; then
       echo "         pnpm install --frozen-lockfile && pnpm build" >&2
     fi
     exit 2
+  fi
+
+  if [ "$MODE" = "preflight" ]; then
+    echo "preflight ok: $scanned include_str! literals all resolve to files on disk"
+    exit 0
   fi
 fi
 
@@ -372,10 +387,20 @@ jq -r 'select(.reason == "compiler-message")
        | [.package_id, (.message.code.code // "-"), (.message.message | gsub("\t"; " "))]
        | @tsv' "$JSON" | sort -u > "$TMP/errors.tsv"
 
+# Errors from crates.io dependencies are dropped, not renamed: they are not this
+# workspace's code and failing on them would make the gate red for something no
+# commit here can fix. They cannot hide a real problem, because a dependency
+# that fails to build takes every workspace crate downstream of it with it, and
+# THAT is what arm 2 reports. The count is printed so the drop is never silent.
 awk -F'\t' '
   NR == FNR { name[$1] = $2; next }
-  { print (($1 in name) ? name[$1] : "(external)") "\t" $2 "\t" $3 }
-' "$TMP/members.tsv" "$TMP/errors.tsv" > "$TMP/errors_named.tsv"
+  ($1 in name) { print name[$1] "\t" $2 "\t" $3; next }
+  { ext++ }
+  END { if (ext) print ext > "/dev/stderr" }
+' "$TMP/members.tsv" "$TMP/errors.tsv" > "$TMP/errors_named.tsv" 2> "$TMP/errors_external.txt"
+
+EXTERNAL_ERRS="$(tr -d '[:space:]' < "$TMP/errors_external.txt")"
+EXTERNAL_ERRS="${EXTERNAL_ERRS:-0}"
 
 LINT_ERRS="$(awk -F'\t' '$2 ~ /^clippy::/' "$TMP/errors_named.tsv")"
 HARD_ERRS="$(awk -F'\t' '$2 !~ /^clippy::/' "$TMP/errors_named.tsv")"
@@ -437,8 +462,15 @@ EXP_T="$(grep -c . "$TMP/expected.tsv" || true)"
 OBS_P="$(grep -c . "$TMP/observed_pkgs.txt" || true)"
 EXP_P="$(grep -c . "$TMP/expected_pkgs.txt" || true)"
 
-echo "linted:   $OBS_T/$EXP_T targets in $OBS_P/$EXP_P workspace packages"
+# Observed and expected are printed side by side rather than as one ratio,
+# because observed can legitimately EXCEED expected: cargo unifies features
+# across the workspace, so a target can be built under a feature its own package
+# did not resolve. An X/Y that read "6/5" would look like a bug in the gate.
+echo "linted:   $OBS_T targets in $OBS_P packages (expected $EXP_T in $EXP_P)"
 echo "warnings: $WARN_COUNT distinct lint codes (pedantic/nursery are warn by design; not gated)"
+if [ "$EXTERNAL_ERRS" -gt 0 ]; then
+  echo "note:     $EXTERNAL_ERRS error(s) in non-workspace crates, not gated on here"
+fi
 
 # --- cargo's own verdict ---------------------------------------------------
 #
