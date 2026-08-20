@@ -1736,7 +1736,6 @@ export function down() {}
         // sessions are therefore in flight across each other's awaits, which is
         // what puts two statements on the server at once -- the condition the
         // shared catalogs are unprotected against.
-        let started_a = std::time::Instant::now();
         let task_a = compio::runtime::spawn(async move {
             let started = std::time::Instant::now();
             let result = run_platform_migrations(&cfg_a).await;
@@ -1748,7 +1747,6 @@ export function down() {}
         let ended_b = std::time::Instant::now();
 
         let (spawned_start_a, ended_a, result_a) = task_a.await;
-        let _ = started_a;
 
         // Report BOTH outcomes. Reporting only the first failure would hide the
         // case where the peer failed differently, and the two runs fail in

@@ -128,7 +128,10 @@ fn advisory_key(namespace: &str) -> i64 {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    hash as i64
+    // Reinterpret rather than `as`-cast: `pg_advisory_lock` takes a signed
+    // bigint and the whole 64-bit range is a valid key, so the wrap is the
+    // intent, not an accident worth a lint suppression.
+    i64::from_ne_bytes(hash.to_ne_bytes())
 }
 
 /// The lock namespace. Runs of DIFFERENT platform projects on one cluster still
