@@ -745,11 +745,22 @@ impl Pool {
         // dirty, which makes the next checkout run its barrier and drain the
         // ROLLBACK (evicting the connection if it failed).
         //
-        // Skipped when the client is already dirty: a ROLLBACK is queued and
-        // has not been observed yet, so the status byte is stale by
-        // construction and a second one would be pure noise on the wire.
+        // An in-flight transaction-capable request also requires a rollback.
+        // Release cannot wait for the connection task to receive its
+        // ReadyForQuery, and until it does the cached status describes the
+        // preceding request. Queueing the ROLLBACK on the same FIFO puts it
+        // after that unknown request and before anything the next borrower can
+        // send.
+        //
+        // Check the in-flight count before reading status. The connection task
+        // stores status and then release-decrements the count; observing zero
+        // with the acquire load therefore makes that status store visible.
+        //
+        // Skip this when the client is already dirty: a ROLLBACK is queued and
+        // a second one would be pure noise on the wire.
         if !entry.client.is_dirty()
-            && entry.client.transaction_status() != TransactionStatus::Idle
+            && (entry.client.has_in_flight_requests()
+                || entry.client.transaction_status() != TransactionStatus::Idle)
         {
             entry.client.__private_api_rollback(None);
         }
