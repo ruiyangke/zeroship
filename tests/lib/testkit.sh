@@ -34,21 +34,27 @@
 # papered over, because the alternative is paying the lock on every selftest.
 # ============================================================================
 
-# Print the path to a `zs-testkit` that is at least as new as its sources.
+# Set ZS_TESTKIT_BIN to a `zs-testkit` at least as new as its sources.
 #
-# Usage: zs_testkit_bin
-# The result is memoised in this shell, so a script that calls forty helpers
-# pays the check once.
-zs_testkit_bin() {
-  if [ -n "${ZS_TESTKIT_BIN_CACHED:-}" ]; then
-    printf '%s' "$ZS_TESTKIT_BIN_CACHED"
-    return 0
-  fi
-
-  local root src bin newer
+# NOT a function that PRINTS the path. That is the shape this started as, and it
+# does not memoise: `$(zs_testkit_bin)` runs the body in a subshell, so the
+# variable it sets dies with the substitution and every call re-runs the `find`.
+# The sweeper calls a helper once per git ref, so "once per shell" and "once per
+# call" are 1 and 21.
+#
+# THERE IS NO OVERRIDE. The path is DERIVED from this file's own location every
+# time, never taken from a variable, so no exported name can point the harness
+# at somebody else's binary - the same reason `--database` is a flag and an
+# ambient TEST_DB is refused. `ZS_TESTKIT_CHECKED` only records that the
+# freshness check already ran, and it is keyed on the derived path, so a value
+# inherited from another checkout does not match and is simply recomputed.
+zs_testkit_resolve_bin() {
+  local root src newer
   root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
   src="$root/crates/zeroship-testkit"
-  bin="$root/target/debug/zs-testkit"
+  ZS_TESTKIT_BIN="$root/target/debug/zs-testkit"
+  [ "${ZS_TESTKIT_CHECKED:-}" = "$ZS_TESTKIT_BIN" ] && return 0
+  local bin="$ZS_TESTKIT_BIN"
 
   newer=1
   if [ -x "$bin" ]; then
@@ -65,17 +71,15 @@ zs_testkit_bin() {
     fi
   fi
 
-  ZS_TESTKIT_BIN_CACHED="$bin"
-  printf '%s' "$bin"
+  ZS_TESTKIT_CHECKED="$ZS_TESTKIT_BIN"
 }
 
 # Run a `zs-testkit` subcommand, forwarding its stdout, stderr and exit status.
 #
-# The `|| return $?` shape is deliberate: both suite scripts run under
-# `set -euo pipefail`, where a helper's ordinary "no" answer - exit 1 - would
-# otherwise take the whole harness down before the caller's own `case` ran.
+# The `|| return $?` on the resolve is deliberate: both suite scripts run under
+# `set -euo pipefail`, and a build failure has to reach the caller as a status
+# rather than as a missing file two lines later.
 zs_testkit() {
-  local bin
-  bin="$(zs_testkit_bin)" || return $?
-  "$bin" "$@"
+  zs_testkit_resolve_bin || return $?
+  "$ZS_TESTKIT_BIN" "$@"
 }
