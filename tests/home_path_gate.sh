@@ -61,6 +61,10 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# shellcheck source=tests/lib/gate_arms.sh
+. "$ROOT/tests/lib/gate_arms.sh"
+gate_arms_init home_path
+
 # third_party/ is a vendored submodule owned by another project; its contents
 # are not ours to gate. THE EXCLUSION IS THE SUBMODULE BOUNDARY, not a filter:
 # `git ls-files` reports a submodule as one gitlink entry and never descends
@@ -101,11 +105,16 @@ done < <(git ls-files -- "${EXTS[@]}" 2>/dev/null)
 # actually applied. It said "below the 400 floor" while comparing against 9000
 # during its own mutation test - a message describing a different check than
 # the one that ran, which is the exact defect class this repo keeps finding.
+# MEASURED 2026-08-20: 2212 files enumerated outside third_party/. Floor 400
+# is reused unchanged from the pre-library hand-rolled ENUM_FLOOR check this
+# replaces - it tolerates a large deletion while still catching a glob that
+# stopped matching (a broken extraction reports single digits, not hundreds).
 ENUM_FLOOR=400
-if [ "$enumerated" -lt "$ENUM_FLOOR" ]; then
+if ! gate_arm files_enumerated "$enumerated" "$ENUM_FLOOR"; then
   echo "FAIL: only $enumerated files enumerated, below the $ENUM_FLOOR floor." >&2
   echo "      The listing is truncated or the globs stopped matching, so a" >&2
   echo "      clean result would mean nothing. This is not a pass." >&2
+  gate_arms_finish || true
   exit 2
 fi
 
@@ -115,6 +124,7 @@ if [ "$vendored" -gt 0 ]; then
   echo "      being a submodule or a second vendored tree arrived; add the" >&2
   echo "      skip back, because those files belong to another project and" >&2
   echo "      their home paths are not this gate's to rule on." >&2
+  gate_arms_finish || true
   exit 2
 fi
 
@@ -123,7 +133,9 @@ if [ -n "$hits" ]; then
   echo "      on exactly one machine:" >&2
   printf '%s' "$hits" | sed 's/^/  /' >&2
   echo "      Resolve it relative to the file, or read it from the environment." >&2
+  gate_arms_finish || true
   exit 1
 fi
 
+gate_arms_finish || exit 1
 echo "home-path gate: $enumerated source/config files ($vendored under third_party/), 0 hardcoded home paths"

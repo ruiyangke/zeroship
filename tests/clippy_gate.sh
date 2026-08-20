@@ -170,6 +170,20 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Per-arm anti-vacuity accounting. Every guard this gate already had for "the
+# instrument read nothing" is expressed through it below, so a refusal names
+# WHICH enumeration collapsed instead of only which gate did.
+#
+# THE FLOORS HERE ARE ALL LOW, AND THE REASON IS NOT MODESTY. Every arm below
+# is also driven by tests/clippy_gate_selftest.sh against deliberately tiny
+# fixtures - a two-literal source root, a three-package metadata blob - through
+# the SAME code path, so a floor set anywhere near this workspace's real numbers
+# would fail the self-test rather than a broken tree. Each arm records its real
+# count next to its floor so the gap is visible.
+# shellcheck source=tests/lib/gate_arms.sh
+. "$ROOT/tests/lib/gate_arms.sh"
+gate_arms_init clippy
+
 # The feature list lives HERE and nowhere else, so the local run and the CI run
 # cannot lint different sets of targets. It was carried over verbatim from the
 # ci.yml step this replaced, with its reasoning:
@@ -297,7 +311,15 @@ if [ "$MODE" = "run" ] || [ "$MODE" = "preflight" ]; then
   scanned="$(grep -c . "$TMP/included.txt" || true)"
   # A scan that reads nothing and a tree that is genuinely complete produce the
   # same empty missing-list. Only the count tells them apart.
-  if [ "$scanned" -eq 0 ]; then
+  #
+  # The count is every literal the scan resolved and then checked for existence,
+  # which is exactly the set this arm rules on - there is no filter between the
+  # two. MEASURED in this worktree 2026-08-20: 238, of which 194 were missing
+  # (no WPT tree, no pnpm build). The floor stays at the 1 the hand-rolled check
+  # enforced, and CANNOT be raised towards 238: clippy_gate_selftest.sh case 10
+  # drives this same block over a fixture holding exactly two literals, and case
+  # 11 drives it over one holding none and requires the refusal below verbatim.
+  if ! gate_arm preflight_include_str "$scanned" 1; then
     echo "error: the include_str! preflight found no literals at all under: $SRC_ROOTS" >&2
     echo "       That is a broken scan, not a clean tree; refusing to lint on it." >&2
     exit 2
@@ -337,6 +359,10 @@ if [ "$MODE" = "run" ] || [ "$MODE" = "preflight" ]; then
 
   if [ "$MODE" = "preflight" ]; then
     echo "preflight ok: $scanned include_str! literals all resolve to files on disk"
+    # A completed run, so it owes the trailer. Exit 2 rather than 1 if an arm
+    # refused, because every other way this mode can end badly means "no
+    # measurement was taken", and an arm that ruled on too little is that.
+    gate_arms_finish || exit 2
     exit 0
   fi
 fi
@@ -371,8 +397,15 @@ jq -r '
   | [.id, .name] | @tsv
 ' "$META" | sort -u > "$TMP/members.tsv"
 
-if [ ! -s "$TMP/members.tsv" ]; then
-  echo "error: cargo metadata listed no workspace members" >&2
+# Arm 2's expectation, and the thing it rules on: one verdict per member.
+# MEASURED 2026-08-20 on this workspace, via --audit-only: 30 members. The floor
+# is 3 because clippy_gate_selftest.sh runs every audit case below against a
+# three-package metadata fixture, so 3 is the highest number that does not make
+# a broken tree and a passing self-test indistinguishable. It still separates
+# "cargo metadata answered" from "cargo metadata answered with nothing", which
+# is what the `! -s` test it replaces did.
+if ! gate_arm workspace_members "$(grep -c . "$TMP/members.tsv" || true)" 3; then
+  echo "error: cargo metadata listed no usable set of workspace members" >&2
   exit 2
 fi
 
@@ -390,8 +423,16 @@ jq -r '
   | [$p.name, .name, (.kind[0] // "?")] | @tsv
 ' "$META" | sort -u > "$TMP/expected.tsv"
 
-if [ ! -s "$TMP/expected.tsv" ]; then
-  echo "error: no expected targets derived from cargo metadata" >&2
+# Arm 3's expectation. This is the POST-FILTER number: the `select` above drops
+# every target whose required-features this run did not enable, and those are
+# out of scope rather than unlinted. MEASURED 2026-08-20, via --audit-only: 143
+# targets across the 30 members. The floor is 4 for the same reason as above -
+# clippy_gate_selftest.sh case 6 resolves its fixture down to FIVE expected
+# targets on purpose, to prove a feature-gated target is not demanded, and a
+# floor of 5 would leave that case one deletion from failing for the wrong
+# reason.
+if ! gate_arm expected_targets "$(grep -c . "$TMP/expected.tsv" || true)" 4; then
+  echo "error: too few expected targets derived from cargo metadata" >&2
   exit 2
 fi
 
@@ -540,6 +581,22 @@ EXP_P="$(grep -c . "$TMP/expected_pkgs.txt" || true)"
 # because observed can legitimately EXCEED expected: cargo unifies features
 # across the workspace, so a target can be built under a feature its own package
 # did not resolve. An X/Y that read "6/5" would look like a bug in the gate.
+# The observed side of both coverage arms, declared separately because it can
+# collapse on its own: `expected` comes from cargo metadata and `observed` from
+# the json stream, and a stream this gate cannot parse (a cargo that changed its
+# artifact shape, an --audit-only file from another tool) leaves expected intact
+# while observed goes to zero. Arm 2 would then name all 30 packages as "not
+# reached", which is a true statement about the stream and a wrong one about the
+# tree.
+#
+# THE FLOOR IS 1 AND MUST STAY THERE, which is the opposite of the advice for
+# the arms above. Observed is the one number here that is legitimately small on
+# a RED run: this file's own header records 131 of 134 targets on a warm tree
+# and 100 of 134 on a dirty one, same source, and clippy_gate_selftest.sh case 3
+# pins a stream with a single artifact in it. Any floor that would mean
+# something on a green run fires on every ordinary red one.
+gate_arm linted_targets "$OBS_T" 1 || true
+
 echo "linted:   $OBS_T targets in $OBS_P packages (expected $EXP_T in $EXP_P)"
 echo "warnings: $WARN_COUNT distinct lint codes (pedantic/nursery are warn by design; not gated)"
 if [ "$EXTERNAL_ERRS" -gt 0 ]; then
@@ -553,6 +610,13 @@ fi
 # build script that died, a lockfile it refused to update - and every one of
 # those leaves the arms above looking clean. Passing then would be the same
 # class of mistake as the one this gate exists to stop.
+# The arm trailer prints BEFORE the block below, so both of the exits that
+# follow carry it, and its verdict is folded in AFTERWARDS so the block's own
+# `rc -eq 0` test still means what it meant: "no arm above found anything
+# wrong", not "no arm above found anything wrong AND the accounting was fine".
+arms_rc=0
+gate_arms_finish || arms_rc=1
+
 if [ "$cargo_rc" -ne 0 ] && [ "$rc" -eq 0 ]; then
   echo "::error::cargo exited $cargo_rc but emitted no error diagnostic and left no target unlinted"
   echo "  Nothing in the json stream explains this, so the gate cannot say the"
@@ -560,4 +624,5 @@ if [ "$cargo_rc" -ne 0 ] && [ "$rc" -eq 0 ]; then
   exit 2
 fi
 
+[ "$arms_rc" -eq 0 ] || rc=1
 exit $rc

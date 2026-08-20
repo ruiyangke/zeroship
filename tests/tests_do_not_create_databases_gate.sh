@@ -36,6 +36,14 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# Per-arm anti-vacuity accounting (tests/lib/gate_arms.sh). This gate's own
+# comments already argue both directions must be checked ("BOTH DIRECTIONS");
+# the arm contract makes each direction declare how many items it actually
+# ruled on, not just whether it found a FAIL.
+# shellcheck source=tests/lib/gate_arms.sh
+. "$ROOT/tests/lib/gate_arms.sh"
+gate_arms_init tests_do_not_create_databases
+
 # Each entry is `<path>|<reason>`. A reason is required, and it has to say what
 # makes the file's own subject impossible to test any other way - "it needs
 # isolation" is a description of every test and exempts nothing.
@@ -122,12 +130,18 @@ candidates() {
 }
 
 offenders=""
+n_scanned=0
 while IFS= read -r file; do
   [ -f "$file" ] || continue
   case "$file" in
     */tests/*) ;;
     *) grep -q '#\[cfg(test)\]' "$file" || continue ;;
   esac
+  # Every file that reaches here gets a verdict (offender or not) from the grep
+  # below, so this is the count of files this arm actually RULED ON - not
+  # `candidates()`'s raw output, which also includes src files that never carry
+  # a `#[cfg(test)]` module and are `continue`d above without a verdict.
+  n_scanned=$((n_scanned + 1))
   # Strip line comments before matching. A doc comment describing the statement
   # is prose, and prose that trips a gate teaches people to write the gate off.
   # `[[:space:]]` rather than a literal space so a wrapped `CREATE\n DATABASE`
@@ -138,9 +152,39 @@ while IFS= read -r file; do
   fi
 done < <(candidates)
 
+# MEASURED 2026-08-20: 719 files reach a verdict (out of 1084 raw candidates
+# from `find`). Floor well under that - a collapse here means `find`'s roots or
+# path clause stopped matching, which is exactly how deploy_scripts_gate.sh's
+# argv-scan arm went vacuous (1 pre-filter row, on the one service the filter
+# excludes; 0 examined; green).
+CANDIDATE_SCAN_FLOOR=300
+if ! gate_arm candidates_scanned "$n_scanned" "$CANDIDATE_SCAN_FLOOR"; then
+  echo "GATE CANNOT ANSWER: only $n_scanned file(s) reached a CREATE DATABASE" >&2
+  echo "  verdict, below the floor of $CANDIDATE_SCAN_FLOOR. 719 were measured" >&2
+  echo "  2026-08-20. The find roots or path clause likely stopped matching, so" >&2
+  echo "  a clean report below would mean nothing." >&2
+  exit 1
+fi
+
 status=0
 
 # Direction 1: an offender nobody has ruled on.
+#
+# n_off is computed here, before the loop, because the loop is what RULES on
+# each of these files (checks it against ALLOW) - the count of items decided
+# is the count of files, not the count of FAILs. MEASURED 2026-08-20: 6, all 6
+# ruled (matching ALLOW). Floor 3: half of today's count, well clear of the
+# ordinary case (one file added or removed) but not of the enumeration or the
+# offender-detection regex breaking, which would drop this to 0.
+n_off_direction1="$(printf '%s' "$offenders" | grep -c . || true)"
+if ! gate_arm offenders_ruled "$n_off_direction1" 3; then
+  echo "GATE CANNOT ANSWER: direction 1 had $n_off_direction1 offender(s) to rule" >&2
+  echo "  on, below the floor of 3. 6 were measured 2026-08-20. Either every" >&2
+  echo "  CREATE DATABASE call site was genuinely removed from crates/ and libs/," >&2
+  echo "  or the offender-detection regex above stopped matching." >&2
+  exit 1
+fi
+
 while IFS= read -r file; do
   [ -n "$file" ] || continue
   found=0
@@ -160,6 +204,7 @@ done < <(printf '%s' "$offenders")
 
 # Direction 2: a ruling that has outlived its subject. An exemption nobody
 # removed is how the next violation gets waved through.
+n_allow_still_offending=0
 for entry in "${ALLOW[@]}"; do
   file="${entry%%|*}"
   reason="${entry#*|}"
@@ -172,7 +217,8 @@ for entry in "${ALLOW[@]}"; do
 $offenders" in
     *"
 $file
-"*) printf '    exempt  %s\n            %s\n' "$file" "$reason" ;;
+"*) n_allow_still_offending=$((n_allow_still_offending + 1))
+        printf '    exempt  %s\n            %s\n' "$file" "$reason" ;;
     *)  echo "FAIL: ${file} is exempt but no longer issues CREATE DATABASE." >&2
         echo "      Remove the entry. A stale exemption reads as a decision" >&2
         echo "      somebody is still making." >&2
@@ -180,8 +226,28 @@ $file
   esac
 done
 
+# MEASURED 2026-08-20: all 6 ALLOW entries still name a file that still issues
+# CREATE DATABASE. Floor 3, the same reasoning as offenders_ruled above: this
+# is the reverse-direction check skip_marker_gate.sh had to add after the fact
+# because its forward count collapsed to a legitimate 0 - here direction 1's
+# count is not 0, so this arm can and does count forward, but it is still a
+# distinct thing ruled on (an ALLOW entry, not an offending file) and a
+# distinct way to go vacuous (every entry's path changes, or offenders stops
+# rendering the trailing-newline-delimited form this case statement matches).
+if ! gate_arm allow_still_offends "$n_allow_still_offending" 3; then
+  echo "GATE CANNOT ANSWER: only $n_allow_still_offending of ${#ALLOW[@]} ALLOW" >&2
+  echo "  entries still match an offending file, below the floor of 3. All 6" >&2
+  echo "  matched 2026-08-20. Either most exemptions were legitimately retired" >&2
+  echo "  (direction 1 above should show the same drop) or this loop's match" >&2
+  echo "  against \$offenders stopped working." >&2
+  status=1
+fi
+
 n_off="$(printf '%s' "$offenders" | grep -c . )"
 echo "==> ${n_off} file(s) issue CREATE DATABASE, ${#ALLOW[@]} ruled on"
+
+gate_arms_finish || status=1
+
 if [ "$status" -eq 0 ]; then
   echo "TESTS-CREATE-DATABASES GATE: PASS"
 else

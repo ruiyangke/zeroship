@@ -56,6 +56,14 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# Per-arm anti-vacuity accounting (tests/lib/gate_arms.sh). Arm A's PASS state
+# is "zero hits" by design (deploy/ must NOT arm the flag), so the hit count
+# cannot be the arm's examined-count - a grep that read no files also reports
+# zero hits. The count here is what the grep actually searched.
+# shellcheck source=tests/lib/gate_arms.sh
+. "$ROOT/tests/lib/gate_arms.sh"
+gate_arms_init compose_workflow_advance_flag
+
 FLAG="workflow-advance-unsigned"
 BACKSTOP_STRING="workflow advance unsigned disabled"
 BACKSTOP_FILE="crates/worker/src/handler.rs"
@@ -73,6 +81,13 @@ else
   # spelling in a compose `command:` is the only known vector, but scanning the
   # whole tree costs nothing and catches a spelling nobody predicted.
   hits="$(grep -rn -- "$FLAG" deploy/ 2>/dev/null)"
+  N_DEPLOY_FILES=$(find deploy -type f | wc -l | tr -d ' ')
+  # MEASURED 2026-08-20: 22 files under deploy/. Floor well under that: adding
+  # or removing a handful of ops files should not trip this, while the failure
+  # this guards against - deploy/ emptied out or the find/grep losing its
+  # target - drops it to zero, which "no deploy/ file passes --FLAG" cannot be
+  # told apart from on its own.
+  gate_arm deploy_flag_scan "$N_DEPLOY_FILES" 8 || true
   if [ -z "$hits" ]; then
     ok "no deploy/ file passes --$FLAG"
   else
@@ -91,13 +106,22 @@ echo "=== arm B: the worker backstop that makes arm A protective still exists ==
 # would keep printing green over a live edge.
 if [ ! -f "$BACKSTOP_FILE" ]; then
   bad "$BACKSTOP_FILE not found - the backstop cannot be checked"
-elif grep -qF -- "$BACKSTOP_STRING" "$BACKSTOP_FILE"; then
-  ok "worker still refuses unsigned advance (\"$BACKSTOP_STRING\")"
 else
-  bad "the worker's unsigned-advance refusal is GONE from $BACKSTOP_FILE"
-  echo "       -> arm A above is now vacuous: with no backstop, the absence of"
-  echo "          the flag in deploy/ protects nothing. Re-measure with"
-  echo "          tests/e2e_gateway_workflow_advance_authz.sh before shipping."
+  N_HANDLER_LINES=$(wc -l < "$BACKSTOP_FILE" | tr -d ' ')
+  # MEASURED 2026-08-20: 4039 lines in handler.rs. Floor well under that: this
+  # is not enumerating anything the string match iterates over, it is a
+  # sanity check that the file this arm reads is a real source file and not a
+  # truncated or emptied one, which a substring grep alone cannot tell apart
+  # from a genuine absence of the backstop string.
+  gate_arm worker_backstop "$N_HANDLER_LINES" 500 || true
+  if grep -qF -- "$BACKSTOP_STRING" "$BACKSTOP_FILE"; then
+    ok "worker still refuses unsigned advance (\"$BACKSTOP_STRING\")"
+  else
+    bad "the worker's unsigned-advance refusal is GONE from $BACKSTOP_FILE"
+    echo "       -> arm A above is now vacuous: with no backstop, the absence of"
+    echo "          the flag in deploy/ protects nothing. Re-measure with"
+    echo "          tests/e2e_gateway_workflow_advance_authz.sh before shipping."
+  fi
 fi
 
 echo
@@ -108,5 +132,6 @@ if [ "$((pass + fail))" -lt 2 ]; then
   echo "  FAIL harness ran fewer than its 2 arms - treating as failure"
   exit 1
 fi
+gate_arms_finish || fail=$((fail + 1))
 [ "$fail" -eq 0 ] || exit 1
 echo "OK"

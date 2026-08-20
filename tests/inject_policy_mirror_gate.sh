@@ -34,6 +34,10 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=tests/lib/gate_arms.sh
+. "$ROOT/tests/lib/gate_arms.sh"
+gate_arms_init inject_policy_mirror
+
 TOML="$ROOT/crates/migrated/policies/confined.policy.toml"
 TS="$ROOT/sdks/vite-plugin/src/gen-types/confined-ceiling.ts"
 
@@ -58,14 +62,24 @@ B="$(extract_rule "$TS")"
 # A rule that extracts to nothing would make any two files "agree". Refuse.
 A_LINES=$(printf '%s\n' "$A" | grep -c . || true)
 B_LINES=$(printf '%s\n' "$B" | grep -c . || true)
-if [ "$A_LINES" -lt 5 ] || [ "$B_LINES" -lt 5 ]; then
+# MEASURED 2026-08-20: 14 semantic lines extracted from each ceiling. Floor 5
+# is reused unchanged from the pre-library hand-rolled check this replaces -
+# below it there is too little left to distinguish "the rule shrank" from
+# "the sed stopped matching the [[inject]] block".
+toml_ok=1
+ts_ok=1
+gate_arm toml_lines "$A_LINES" 5 || toml_ok=0
+gate_arm ts_lines "$B_LINES" 5 || ts_ok=0
+if [ "$toml_ok" -ne 1 ] || [ "$ts_ok" -ne 1 ]; then
     echo "  ✗ extracted too little to compare (toml=$A_LINES ts=$B_LINES lines)."
     echo "    The [[inject]] rule moved or changed shape; fix this gate before trusting it."
+    gate_arms_finish || true
     exit 2
 fi
 
 if [ "$A" = "$B" ]; then
     echo "  ✓ [[inject]] rule identical in both ceilings ($A_LINES lines compared)"
+    gate_arms_finish || exit 1
     exit 0
 fi
 
@@ -74,4 +88,5 @@ echo "    server ceiling: $TOML"
 echo "    build ceiling:  $TS"
 echo "    < server-only, > build-only:"
 diff <(printf '%s\n' "$A") <(printf '%s\n' "$B") | sed 's/^/      /'
+gate_arms_finish || true
 exit 1
