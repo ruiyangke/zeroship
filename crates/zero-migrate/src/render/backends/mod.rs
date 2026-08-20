@@ -7,7 +7,7 @@
 //! | here                        | there                          |
 //! |-----------------------------|--------------------------------|
 //! | `render::renderer`          | `zero-migrate-backend` (the contract) |
-//! | `render::backends::postgres`| `zero-migrate-pg`              |
+//! | `render::backends::postgres`| `zero-migrate-postgres`        |
 //! | `render::backends::sqlite`  | `zero-migrate-sqlite`          |
 //! | `render::backends::mysql`   | `zero-migrate-mysql`           |
 //! | `render::backends` (this)   | the facade's `register(..)` table |
@@ -48,10 +48,15 @@
 //! A backend can still reach another vendor's spelling THROUGH a core helper
 //! that hard-codes a dialect, and the grep above cannot see it because the
 //! literal lives in core. That was not hypothetical here: `dml::quote_ident`,
-//! `dml::quote_bare_ident` and `dml::quote_ident_checked` all pin
+//! `dml::quote_bare_ident` and `dml::quote_ident_checked` all pinned
 //! `SqlDialect::Postgres`, so all four identifier emissions in
 //! `backends/sqlite.rs` used to be quoted by the POSTGRESQL renderer. It was
 //! correct only because both vendors spell an identifier `"x"`.
+//!
+//! Of those three, only `quote_ident_checked` still EXISTS. The other two were
+//! deleted rather than left unused once their last callers named a dialect — see
+//! `dml::quote_ident_for_dialect`'s header for why an un-named spelling that exists
+//! is a trap regardless of whether anything currently falls into it.
 //!
 //! MEASURED, not reasoned, BEFORE the fix: corrupting
 //! `PostgresDmlRenderer::quote_ident` alone failed 7 of the 155 tests in the
@@ -108,13 +113,20 @@
 //! the PG-shaped constraintdef normal form described below, arriving exactly where
 //! that section says it does.
 //!
-//! # What is still coupled, and where
+//! # What is still coupled, and where: NOTHING, and that is now a pinned number
 //!
-//! Two SQLite render paths still reach the PG-pinned core wrappers, both OUTSIDE
-//! these modules and both belonging to `lower.rs`'s own step-3 pass:
-//! `render::lower::render_sqlite_trigger_op` and its helpers call the bare
-//! `dml::quote_bare_ident` at six sites. `backends/sqlite.rs` delegates its
-//! trigger rendering there, so the coupling survives one hop away.
+//! This section used to name a live instance — `render::lower::render_sqlite_trigger_op`
+//! and its helpers calling the bare `dml::quote_bare_ident` at six sites, with
+//! `backends/sqlite.rs` delegating its trigger rendering there so the coupling
+//! survived one hop away. THAT IS PAST TENSE. Those three functions route every
+//! identifier through `quote_bare_ident_for_dialect(.., SQLITE_TRIGGER_DIALECT)`, the
+//! wrapper they used no longer exists, and the count is a RATCHET AT ITS STOP rather
+//! than a claim in prose: `tests/dialect_matrix/sqlite_trigger_quoting_reaches_postgres.rs`
+//! asserts zero pinned calls in `lower.rs` AND zero anywhere else under `src/`.
+//!
+//! Prefer that test to this paragraph. The reason this section carried a false
+//! present-tense claim for as long as it did is that prose cannot go red, and the
+//! stale-doc note it used to end with was itself stale by the time anyone read it.
 //!
 //! And a DELIBERATE non-defect that looks identical to a neuter: the
 //! `pg_get_constraintdef` normal form (`declarative::quote_ident_if_needed` /
@@ -123,13 +135,19 @@
 //! `dml::pg_canonical_ident`, precisely because a red count cannot tell it apart
 //! from an unrouted emission. Re-dialecting it would be a regression.
 //!
-//! STALE DOC, KNOWN, NOT MINE TO EDIT: the enforcing test's own module comment
-//! (`backend_modules_name_one_dialect.rs`) still says the `quote_ident` coupling
-//! is "TRUE OF THIS TREE while this test passes", and points here for the
-//! measurement. That was true when it was written and is no longer. This module
-//! is the authority on that question; the test's prose needs the same edit and
-//! the change that resolved the coupling could not make it, because that file
-//! belongs to a concurrently-edited directory.
+//! The same distinction, re-measured one layer up at `7ca23cdc`, because
+//! `render::declarative` is where an audit lands next and its own `quote_ident` still
+//! reads as a PostgreSQL helper anything could call. It is not: `SqliteEmitter` spells
+//! all fourteen of its identifiers with `sqlite_ident`, and `MysqlEmitter` spells its
+//! seventeen with `mysql_quote_ident` and its own `qualified` — neither calls
+//! `quote_ident` even once. All thirty-three remaining call sites are either on a
+//! PostgreSQL-only path — a `SqlDialect::Postgres` arm, a `PgEmitter` method, a
+//! `_pg`-named renderer — or are building/parsing the constraintdef normal form
+//! above. Asserting the dialect in
+//! `DeclarativeAuthor::qualified`, the choke point the un-arm'd sites all funnel
+//! through, and running the 3372-test workspace suite: the `IS Postgres` probe passes
+//! 3372 / 0, the inverted CONTROL fails 45, so the green means "no non-PostgreSQL
+//! dialect gets here" rather than "nothing looked".
 //!
 //! So when moving a branch here, also grep the CORE helpers the moved code
 //! calls for hard-coded dialects. A directory move creates the APPEARANCE of

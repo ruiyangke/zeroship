@@ -6070,7 +6070,46 @@ impl DeclarativeAuthor {
         }
     }
 
-    /// Render `<schema>.<object>`, both parts quoted.
+    /// Render the POSTGRESQL `<schema>.<object>` reference — both parts spelled by
+    /// [`quote_ident`], and the schema qualifier itself is a PostgreSQL assumption.
+    ///
+    /// The name said nothing about a vendor, which is the exact shape the
+    /// identifier-routing audit exists to catch, so the vendor is stated here and
+    /// MEASURED rather than reasoned. Every emission site in this module that names
+    /// no dialect at its own line funnels through here — the rest sit on paths that
+    /// announce themselves (`SqlDialect::Postgres` arms, [`PgEmitter`] methods,
+    /// `_pg`-suffixed renderers) — which makes this the one choke point worth
+    /// instrumenting.
+    ///
+    /// MEASURED at `7ca23cdc` by asserting the dialect here and running
+    /// `cargo test --workspace --exclude zero-migrate-node` (37 sections, 3372 tests,
+    /// including the live PostgreSQL, MySQL and SQLite legs):
+    ///
+    /// | assertion                | result                                      |
+    /// |--------------------------|---------------------------------------------|
+    /// | dialect is NOT Postgres  | 45 failed — the instrument fires            |
+    /// | dialect IS Postgres      | 3372 passed / 0 failed, byte-identical      |
+    ///
+    /// The first row is the control, and it is the load-bearing one: a green probe
+    /// with no proof the assertion CAN fire measures nothing. So no non-PostgreSQL
+    /// dialect reaches this method on any path the suite exercises.
+    ///
+    /// NOT UNREACHABLE BY CONSTRUCTION, THOUGH — that is a claim about today's
+    /// callers, not about the type, and three `SqlDialect::Sqlite` legs would land
+    /// here if it were not for a capability gate several frames up:
+    ///
+    /// - [`Self::lower_add_constraint`] and [`Self::lower_drop_constraint`] spell
+    ///   their table reference `self.qualified(table)` on the SQLite arm;
+    /// - [`Self::render_add_fk`] spells the table with `sqlite_ident` on its SQLite
+    ///   arm but then calls [`Self::fk_clause`], which qualifies the FK's REFERENCES
+    ///   target through here regardless of dialect.
+    ///
+    /// All three are refused upstream because `Capability::AlterTableAddConstraint` /
+    /// `AlterTableDropConstraint` are false for SQLite, which is WHY the probe stays
+    /// green — the gate, not the render. Were one flipped, those legs would emit
+    /// `"schema"."table"`, which on SQLite does not error: it resolves to no table and
+    /// SILENTLY no-ops, the failure mode `SqliteEmitter::drop_index_up` documents at
+    /// length. So read a future capability change as touching this method too.
     fn qualified(&self, object: &str) -> String {
         format!(
             "{}.{}",

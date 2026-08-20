@@ -1,4 +1,4 @@
-//! PostgreSQL SQL spelling. The future `zero-migrate-pg`.
+//! PostgreSQL SQL spelling. The future `zero-migrate-postgres`.
 
 use crate::model::expr::{CastTarget, ExtractField, ScalarFn};
 use crate::model::ir::TableRef;
