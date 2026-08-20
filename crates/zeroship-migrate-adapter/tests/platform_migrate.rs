@@ -25,6 +25,7 @@ mod platform_cli {
         author_and_lower_all, run_platform_migrations, PlatformMigrateConfig, PlatformMigrateError,
         PLATFORM_MIGRATION_LEDGER_TABLE,
     };
+    use zeroship_migrate_adapter::platform::cluster_lock::DEFAULT_CLUSTER_LOCK_DATABASE;
     use zeroship_migrate_adapter::CompioPgSession;
 
     /// Serialize the live-PG apply tests. Some provision a scratch DB and create
@@ -39,7 +40,7 @@ mod platform_cli {
     /// How many files `db/migrations-ts` holds. Asserted rather than derived so
     /// that a discovery bug which silently drops a file fails loudly instead of
     /// agreeing with itself. Adding a migration updates this one constant.
-    const PLATFORM_MIGRATION_FILES: usize = 29;
+    const PLATFORM_MIGRATION_FILES: usize = 34;
 
     const DURABLE_WORKFLOW_JOURNAL_TABLES: [&str; 10] = [
         "app_deploys",
@@ -445,6 +446,7 @@ mod platform_cli {
             migrations_dir: migrations_dir(),
             project_schema: "zeroship".to_string(),
             project_id: "zeroship".to_string(),
+            cluster_lock_database: DEFAULT_CLUSTER_LOCK_DATABASE.to_string(),
         };
         let report = run_platform_migrations(&cfg)
             .await
@@ -778,6 +780,33 @@ mod platform_cli {
             return Err("zeroship_worker column grants exceed the workflow projection".to_string());
         }
 
+        // (6b) Control reaches the per-app workflow journals the same way the
+        // worker does, and by the same bounded route. It PROVISIONS them
+        // (workflow_instance_api, cron::workflow_schedules -> PgStore::provision,
+        // whose first statement is `SET ROLE zeroship_workflow_owner`) and sweeps
+        // them, so membership is required - table privileges cannot stand in for
+        // SET ROLE, and a migration cannot name an `app_<uuid>` schema that does
+        // not exist yet. Without this, every control workflow cron failed with
+        // `permission denied for schema app_<uuid>`.
+        //
+        // The second half is the bound: the role control gains owns nothing but
+        // the journals. If it ever acquires CREATE in `zeroship` or on the
+        // database, this membership stops being narrow and this check fails.
+        if !scalar_bool(
+            &probe,
+            "SELECT pg_has_role('zeroship_control', 'zeroship_workflow_owner', 'MEMBER') \
+                    AND NOT has_schema_privilege('zeroship_workflow_owner', 'zeroship', 'CREATE') \
+                    AND NOT has_database_privilege('zeroship_workflow_owner', current_database(), 'CREATE')",
+        )
+        .await
+        {
+            return Err(
+                "zeroship_control cannot reach per-app workflow journals, or the owner role it \
+                 reaches them through is no longer narrow"
+                    .to_string(),
+            );
+        }
+
         // (7) The service-assertion replay store is a SECOND trust zone, and it
         // is bounded. The worker holds write grants on
         // `service_authn.service_assertion_replay` because a callee that
@@ -909,6 +938,7 @@ mod platform_cli {
             migrations_dir: migrations_dir(),
             project_schema: "zeroship".to_string(),
             project_id: "zeroship".to_string(),
+            cluster_lock_database: DEFAULT_CLUSTER_LOCK_DATABASE.to_string(),
         };
         let report = run_platform_migrations(&cfg)
             .await
@@ -1018,6 +1048,7 @@ mod platform_cli {
             migrations_dir: migrations_dir(),
             project_schema: "zeroship".to_string(),
             project_id: "zeroship".to_string(),
+            cluster_lock_database: DEFAULT_CLUSTER_LOCK_DATABASE.to_string(),
         };
 
         // ── RUN 1: fresh DB — everything applies, nothing skips ──
@@ -1187,6 +1218,7 @@ export function down() {}
             migrations_dir: migrations_dir.to_path_buf(),
             project_schema: "zeroship".to_string(),
             project_id: "zeroship".to_string(),
+            cluster_lock_database: DEFAULT_CLUSTER_LOCK_DATABASE.to_string(),
         }
     }
 
@@ -1634,6 +1666,540 @@ export function down() {}
         }
         if !table_exists(&probe, "edited_source_probe").await {
             return Err("edited-file probe table disappeared".to_string());
+        }
+        Ok(())
+    }
+
+    // ── the cluster-global concurrency regression ───────────────────────────
+
+    /// TWO migrate runs, TWO fresh databases, ONE cluster, at the same time.
+    ///
+    /// This is the configuration every agent brief in this repo hands out — "you
+    /// get a private TEST_DB on the shared :5440 cluster" — and for the two
+    /// migrations that write shared catalogs, a private database is not
+    /// isolation. The migrations that create roles write `pg_authid`,
+    /// `pg_db_role_setting` and `pg_auth_members`, which are cluster-global, so
+    /// the per-database advisory lock `run_platform_migrations` already holds
+    /// does not exclude the peer at all. This test deliberately names no
+    /// migration file: which files carry that DDL has already changed once
+    /// (see the header of `platform::cluster_lock`), and the whole corpus is
+    /// what it runs.
+    ///
+    /// Before the cluster lock this aborted one of the two runs with an
+    /// infrastructure error carrying no test name — `tuple concurrently
+    /// updated`, or a duplicate key on `pg_authid_rolname_index` /
+    /// `pg_db_role_setting_databaseid_rol_index` — which is the shape most
+    /// easily misread as flakiness or as the reader's own change.
+    ///
+    /// A SERIAL RUN OF THIS TEST PROVES NOTHING: serial is the configuration
+    /// that already worked. The overlap assertion below is therefore part of the
+    /// test, not decoration — it fails if a future change quietly makes the two
+    /// runs sequential, which would leave every other assertion here passing
+    /// vacuously.
+    #[compio::test]
+    async fn concurrent_migrates_of_two_databases_on_one_cluster_both_succeed() {
+        let Some(url) = pg_url() else {
+            zeroship_test_support::skip(
+                "skipping the concurrent-migrate proof: no test database (set PG_TEST_URL \
+                 to a DSN on :5440 to run)",
+            );
+            return;
+        };
+        // Exclude the SIBLING tests in this binary; the two runs *inside* this
+        // test are concurrent on purpose.
+        let _serial = DB_APPLY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let db_a = format!("zs_concurrent_a_{stamp}");
+        let db_b = format!("zs_concurrent_b_{stamp}");
+
+        {
+            let admin = admin_session(&url).await;
+            for db in [&db_a, &db_b] {
+                let _ = admin.batch(&format!("DROP DATABASE IF EXISTS \"{db}\"")).await;
+                admin
+                    .batch(&format!("CREATE DATABASE \"{db}\""))
+                    .await
+                    .unwrap_or_else(|e| panic!("CREATE DATABASE {db} failed: {e}"));
+            }
+        }
+
+        let outcome = run_two_concurrently(
+            &url,
+            &db_a,
+            &db_b,
+            &migrations_dir(),
+            PLATFORM_MIGRATION_FILES,
+        )
+        .await;
+
+        {
+            let admin = admin_session(&url).await;
+            for db in [&db_a, &db_b] {
+                let _ = admin
+                    .batch(&format!(
+                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+                         WHERE datname = '{db}' AND pid <> pg_backend_pid()"
+                    ))
+                    .await;
+                let _ = admin.batch(&format!("DROP DATABASE IF EXISTS \"{db}\"")).await;
+            }
+        }
+
+        outcome.expect("two concurrent platform migrates on one cluster must both succeed");
+    }
+
+    /// The SENSITIVE half of the concurrency proof: the same two-runs-one-cluster
+    /// shape, over a one-file corpus that creates roles nothing else has.
+    ///
+    /// WHY THIS EXISTS ALONGSIDE THE TEST ABOVE. The real-corpus version is
+    /// faithful but blunt: MEASURED 2026-08-20 on :5440, it failed 1 run in 3
+    /// with the cluster lock disabled, against 0 in 3 with it enabled. Two
+    /// things blunt it. The two runs must drift into phase across 28 unrelated
+    /// files before they reach the roles file, so whether their shared-catalog
+    /// statements overlap is luck; and every platform role already exists on any
+    /// cluster a suite has ever run against, so the engine's `ifNotExists` probe
+    /// turns most of the op into a no-op and there is less left to collide.
+    ///
+    /// This version measured 3 failures in 5 per attempt under the same
+    /// mutation, and 0 in 5 with the lock enabled; the round loop below turns
+    /// that per-attempt 3-in-5 into a per-run near-certainty.
+    ///
+    /// This version removes both. The corpus is ONE file, so both runs reach the
+    /// role statements within milliseconds of each other, and the role names are
+    /// unique to this test run, so every `CREATE ROLE` and every unconditional
+    /// `ALTER ROLE … SET search_path` genuinely executes on both sides.
+    ///
+    /// It is not a weaker test for being synthetic: the lock is driven by the
+    /// LOWERED SQL, not by a filename, so this exercises the same classifier and
+    /// the same bracket the platform corpus does. What is synthetic is only the
+    /// precondition -- which is the one thing a shared cluster will not let the
+    /// real corpus establish, since dropping the live platform roles would break
+    /// every other suite using the server.
+    #[compio::test]
+    async fn concurrent_migrates_creating_the_same_roles_both_succeed() {
+        let Some(url) = pg_url() else {
+            zeroship_test_support::skip(
+                "skipping the concurrent-role proof: no test database (set PG_TEST_URL \
+                 to a DSN on :5440 to run)",
+            );
+            return;
+        };
+        let _serial = DB_APPLY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // ROUNDS, because one collision attempt is not a test.
+        //
+        // MEASURED 2026-08-20 on :5440 with the cluster lock disabled, one
+        // attempt per invocation: 3 failures in 5. With it enabled: 0 in 5. So a
+        // single attempt would let the defect back in about two times in five.
+        // Rounds are independent attempts, so five of them miss only if all five
+        // do: ~0.4^5, about one percent. Each round costs roughly a second.
+        //
+        // Stopping at the first red keeps a genuine regression fast to see; the
+        // round number is reported so a rare-vs-immediate failure is
+        // distinguishable in the output.
+        const ROUNDS: usize = 5;
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let mut failure: Option<String> = None;
+
+        for round in 0..ROUNDS {
+            // Fresh role names PER ROUND. Reusing them would leave round 2
+            // onwards finding the roles already present, and the engine's
+            // `ifNotExists` probe would skip the very statements under test --
+            // every round after the first would pass without proving anything.
+            //
+            // Short enough to stay inside PostgreSQL's 63-byte identifier limit.
+            let role_prefix = format!("zsrace{}r{round}", stamp % 1_000_000_000);
+            let roles: Vec<String> = (0..8).map(|i| format!("{role_prefix}_{i}")).collect();
+
+            let corpus = tempfile::tempdir().expect("create temporary race corpus");
+            std::fs::write(
+                corpus.path().join("20260101000000_race_probe.ts"),
+                race_corpus_source(&roles),
+            )
+            .expect("write the race corpus");
+
+            let db_a = format!("zs_rolerace_a_{stamp}_{round}");
+            let db_b = format!("zs_rolerace_b_{stamp}_{round}");
+            {
+                let admin = admin_session(&url).await;
+                for db in [&db_a, &db_b] {
+                    let _ = admin.batch(&format!("DROP DATABASE IF EXISTS \"{db}\"")).await;
+                    admin
+                        .batch(&format!("CREATE DATABASE \"{db}\""))
+                        .await
+                        .unwrap_or_else(|e| panic!("CREATE DATABASE {db} failed: {e}"));
+                }
+            }
+
+            let outcome = run_two_concurrently(&url, &db_a, &db_b, corpus.path(), 1).await;
+
+            // Teardown runs before the assertion so a red round still leaves the
+            // cluster clean. The roles are cluster-global: leaking one leaks it
+            // into every other suite on this server.
+            {
+                let admin = admin_session(&url).await;
+                for db in [&db_a, &db_b] {
+                    let _ = admin
+                        .batch(&format!(
+                            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+                             WHERE datname = '{db}' AND pid <> pg_backend_pid()"
+                        ))
+                        .await;
+                    let _ = admin.batch(&format!("DROP DATABASE IF EXISTS \"{db}\"")).await;
+                }
+                for role in &roles {
+                    let _ = admin.batch(&format!("DROP ROLE IF EXISTS \"{role}\"")).await;
+                }
+            }
+
+            if let Err(error) = outcome {
+                failure = Some(format!("round {round} of {ROUNDS}: {error}"));
+                break;
+            }
+        }
+
+        assert!(
+            failure.is_none(),
+            "two concurrent migrates creating the same roles must both succeed: {}",
+            failure.unwrap_or_default()
+        );
+    }
+
+    /// A one-file corpus whose whole content is role creation.
+    ///
+    /// `setSearchPath` is the load-bearing option, not decoration: the renderer
+    /// emits it as a SEPARATE `ALTER ROLE … SET search_path` statement that
+    /// `ifNotExists` does NOT guard, so it writes the cluster-global
+    /// `pg_db_role_setting` unconditionally. That is the statement that produces
+    /// `tuple concurrently updated`, as opposed to the duplicate-key abort the
+    /// guarded `CREATE ROLE` produces.
+    fn race_corpus_source(roles: &[String]) -> String {
+        let mut out = String::from(
+            "import { role } from \"@zeroship/migrate\";\n\n\
+             export const name = \"race_probe\";\n\n\
+             export function up() {\n",
+        );
+        for role in roles {
+            out.push_str(&format!(
+                "  role(\"{role}\").create({{ login: false, setSearchPath: [\"public\"], \
+                 ifNotExists: true }});\n"
+            ));
+        }
+        out.push_str("}\n\nexport function down() {}\n");
+        out
+    }
+
+    /// Drive both migrates so they are genuinely in flight together, and report
+    /// what happened. Returns `Ok(())` only if BOTH runs completed the whole
+    /// corpus AND their execution windows actually overlapped.
+    async fn run_two_concurrently(
+        url: &str,
+        db_a: &str,
+        db_b: &str,
+        corpus: &Path,
+        expected_files: usize,
+    ) -> Result<(), String> {
+        let config_for = |dsn: String| PlatformMigrateConfig {
+            database_url: dsn,
+            migrations_dir: corpus.to_path_buf(),
+            project_schema: "zeroship".to_string(),
+            project_id: "zeroship".to_string(),
+            cluster_lock_database: DEFAULT_CLUSTER_LOCK_DATABASE.to_string(),
+        };
+        let cfg_a = config_for(dsn_with_db(url, db_a));
+        let cfg_b = config_for(dsn_with_db(url, db_b));
+
+        // Run A on its OWN OS thread with its OWN compio runtime, released
+        // together with B by a barrier.
+        //
+        // THIS USED TO BE `compio::runtime::spawn` -- two tasks cooperating on
+        // one thread -- and that measured only 1 failure in 3 with the lock
+        // disabled, on BOTH corpora. The reason is that the halves of a migrate
+        // run that take real time are synchronous: V8 authoring and lowering
+        // contain no await points, so a single-threaded pair does not interleave
+        // there at all. B authored its whole corpus, and only when it finally
+        // awaited the database did A begin authoring. The two runs met only
+        // inside the short apply, which is why the collision was luck.
+        //
+        // Separate threads remove that: both runs author in parallel and reach
+        // their first shared-catalog statement together, which is the condition
+        // the test is supposed to create.
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let barrier_a = std::sync::Arc::clone(&barrier);
+        let thread_a = std::thread::spawn(move || {
+            compio::runtime::Runtime::new()
+                .expect("build run A's compio runtime")
+                .block_on(async move {
+                    barrier_a.wait();
+                    let started = std::time::Instant::now();
+                    let result = run_platform_migrations(&cfg_a)
+                        .await
+                        .map_err(|e| e.to_string());
+                    (started, std::time::Instant::now(), result)
+                })
+        });
+
+        barrier.wait();
+        let started_b = std::time::Instant::now();
+        let result_b = run_platform_migrations(&cfg_b)
+            .await
+            .map_err(|e| e.to_string());
+        let ended_b = std::time::Instant::now();
+
+        let (spawned_start_a, ended_a, result_a) = thread_a
+            .join()
+            .map_err(|_| "run A panicked; see the captured output above".to_string())?;
+
+        // Report BOTH outcomes. Reporting only the first failure would hide the
+        // case where the peer failed differently, and the two runs fail in
+        // different ways depending on which one lost the race.
+        let mut failures = Vec::new();
+        match &result_a {
+            Ok(report) if report.files != expected_files => failures.push(format!(
+                "run A applied {} files, expected {expected_files}",
+                report.files
+            )),
+            Ok(_) => {}
+            Err(e) => failures.push(format!("run A failed: {e}")),
+        }
+        match &result_b {
+            Ok(report) if report.files != expected_files => failures.push(format!(
+                "run B applied {} files, expected {expected_files}",
+                report.files
+            )),
+            Ok(_) => {}
+            Err(e) => failures.push(format!("run B failed: {e}")),
+        }
+        if !failures.is_empty() {
+            return Err(failures.join(" | "));
+        }
+
+        // The anti-vacuity check. If A finished before B started (or vice
+        // versa), the runs were serial and every assertion above passed for a
+        // reason that has nothing to do with the lock under test.
+        if ended_a <= started_b || ended_b <= spawned_start_a {
+            return Err(format!(
+                "the two runs did NOT overlap, so this test proved nothing about \
+                 concurrency: A ran for {:?}, B ran for {:?}",
+                ended_a.duration_since(spawned_start_a),
+                ended_b.duration_since(started_b),
+            ));
+        }
+
+        Ok(())
+    }
+
+    // ===================================================================
+    // RELEASED-BYTES GUARD
+    // ===================================================================
+
+    /// The checksums a DEPLOYED database has already recorded for the migration
+    /// files it applied, copied from that database's
+    /// `zeroship_migrations.platform_migration_files` on 2026-08-19.
+    ///
+    /// WHY THIS TABLE EXISTS. The runner hashes each file's source bytes and
+    /// refuses any file whose hash no longer matches what the journal recorded
+    /// (`platform.rs`, `PlatformMigrateError::ChecksumMismatch`). The guard is
+    /// correct and it cannot self-heal: once a deployed database has journalled a
+    /// file, EDITING that file bricks every future migrate run against it, and
+    /// the only repair is to restore the released bytes and re-land the change as
+    /// a new file.
+    ///
+    /// Nothing detected that. Four commits on 2026-08-16 edited five
+    /// already-applied files in place; every test passed, because every test
+    /// applies the corpus to an EMPTY database, where the journal is written from
+    /// the same bytes it is later checked against and so always agrees. The
+    /// failure needs a journal written from DIFFERENT bytes, which only a
+    /// deployed database had. These constants are that database's half of the
+    /// comparison, brought into the repo so the check can run without one.
+    ///
+    /// APPENDING TO THIS LIST IS PART OF SHIPPING A DEPLOY, and nothing enforces
+    /// that: a file released to production but missing here is simply not covered
+    /// by the two tests below. That is the known limit of this guard.
+    const RELEASED_PLATFORM_MIGRATIONS: [(&str, &str); 21] = [
+        ("20260702000100_schema_roles_extensions.ts", "e90eccffe56726f1485b8530876b06715d0a823397eda4237fae1992e8a29ad4"),
+        ("20260702000200_control_tables.ts", "02519586a0cd0e5e45ef736e6ca450050eb2601fee7821f28e690c7878dce634"),
+        ("20260702000300_auth_oauth_tables.ts", "7919452776a5df8ecfeed330d0f082af3827db242dbad06e59f6dbd876cd733e"),
+        ("20260702000400_billing_metering_invoice_tables.ts", "6caebcc2484bde0d8c6330c16c23c7b0ff44bf0ed0baadbb9458a2e9c35ea8ff"),
+        ("20260702000500_sandbox_tables.ts", "bfcf9709dd925d700c15a0cca36bb08a817b8fa7a4d91538b2383502283149b7"),
+        ("20260702000600_constraints_indexes_fks.ts", "8d143ec43e97fde62bff35778764c908bd90934b6f6185c713d5f2e45b92b6a6"),
+        ("20260702000700_functions_triggers_comments.ts", "0b399fe02e40f151e12185588a4a18ae88aab841e804c62c68e2df5c61931961"),
+        ("20260702000800_policies_rls.ts", "06fdfd789367eb5d08023a76983eb98f6df1fbc386647825ce0a5137f12cc7a3"),
+        ("20260702000900_grants.ts", "7d5ea9d9827b9b013934db079173297e3c3b41f90b1478fec8038b9321c8eac6"),
+        ("20260705000000_durable_workflows_journal.ts", "8056efb60fbf1c614f08bf724fe6372605b13f836ff382d40f4d6c4022390148"),
+        ("20260708000100_billing_provider_corrections.ts", "f9ca0b178aad1ebe9c225742ad5307aeacd4ca4ba0584b2771989652a297eb2b"),
+        ("20260709000100_drop_metering_exports.ts", "ff056c9e5d975b8989297a04d058c7f9741e784291599e96233a5f057126e566"),
+        ("20260811000000_auth_token_revocations_delete.ts", "00d812ae407349dcf4b02c079d2b1f7a2bebbe6b858db7c02ccc37d360892e22"),
+        ("20260811000100_workflow_scheduler_store.ts", "bf6db45369a10c41226ededbb868a868c0d39f5da2291e25e4cb7c09855856db"),
+        ("20260811000200_control_audit_grants.ts", "5fe39ae98e9c89a292ac30903a62cc66a3124a749d1c2205d767ba85b06aa9e6"),
+        ("20260811000300_control_connect_failures_grant.ts", "71378d8236f02963ddcbaf1e6503d99ffbab12d52171453fbcb2294f2b4a4808"),
+        ("20260811000400_rate_limits_write_grants.ts", "7bcac0ce93a4adbd4f0b1b7bdf183041da085ca8c84720ab43e7a6d61e0b40b5"),
+        ("20260812000000_gateway_token_revocations_update.ts", "4e785973a01c73d6c583538f928718f7e01af7d1a7df4796690ff67d5259b6ee"),
+        ("20260812000100_control_app_oauth_clients_update.ts", "307d0712f5c382adf529994f5faab3804ec4008b830511993aaefb6fba86cab3"),
+        ("20260812000200_control_upsert_update_grants.ts", "dc3ba3fe73443a97159c64d95c31d3871ad57495c3beed20e98135c3fb2e6965"),
+        ("20260812000300_auth_email_suppressions_update.ts", "1c24834981f19cd21119972a08e83f2348bd73fd3c9bc9a6e78def6e4b077e6c"),
+    ];
+
+    /// A released migration file's bytes must never change.
+    ///
+    /// DB-FREE and therefore always runs. This is the check that would have
+    /// failed on 2026-08-16 the moment the first of the five edits was made,
+    /// naming the file, instead of surfacing three months later as
+    /// `service "migrate" didn't complete successfully` on a production roll.
+    ///
+    /// WHAT THIS DOES NOT CATCH. Exactly one thing is asserted: that the files
+    /// listed above still hash to the listed values. It does NOT check that the
+    /// deltas removed from those files were re-landed anywhere, that the corpus
+    /// still produces the intended schema, or that any file absent from the list
+    /// is unedited. A commit that reverted the five files and dropped their
+    /// changes on the floor passes this test; the end-state equivalence that
+    /// rules that out is asserted by the other tests in this module, not here.
+    #[test]
+    fn released_platform_migrations_keep_their_released_bytes() {
+        let dir = migrations_dir();
+        let mut drifted = Vec::new();
+        for (filename, released) in RELEASED_PLATFORM_MIGRATIONS {
+            let path = dir.join(filename);
+            let source = std::fs::read(&path)
+                .unwrap_or_else(|e| panic!("read released migration {}: {e}", path.display()));
+            let current = zero_migrate::manifest_entry::sha256_hex(&source);
+            if current != released {
+                drifted.push(format!(
+                    "  {filename}\n    released {released}\n    current  {current}"
+                ));
+            }
+        }
+        assert!(
+            drifted.is_empty(),
+            "{} released migration file(s) were edited after they were applied to a \
+             deployed database. That database's journal still holds the released \
+             checksum, so its next migrate run refuses with ChecksumMismatch and \
+             cannot recover. Restore the released bytes and re-land the change as a \
+             NEW file:\n{}",
+            drifted.len(),
+            drifted.join("\n")
+        );
+    }
+
+    /// The same guard, driven through the real runner against a real database
+    /// whose ledger carries the RELEASED checksums rather than the corpus's own.
+    ///
+    /// The precondition a fresh-database run can never reproduce is seeded
+    /// explicitly: apply the released prefix, then overwrite the completion
+    /// ledger with the checksums the deployed database actually recorded, then
+    /// run the WHOLE corpus the way a deploy does. On the corpus as it stood on
+    /// 2026-08-19 this stops on the first drifted file with
+    /// `migration file 20260702000100_schema_roles_extensions.ts was edited after
+    /// it was applied`.
+    ///
+    /// WHAT THIS DOES NOT CATCH. It proves the checksum GATE is passed and the
+    /// remaining files apply on top of a released-prefix database. It says
+    /// nothing about whether that database ends up shaped like a fresh one -- it
+    /// asserts no schema, no grant and no row. It also seeds only the ledger, so
+    /// a deployed database that additionally carries objects no migration created
+    /// is outside what this covers.
+    #[compio::test]
+    async fn platform_migrate_accepts_a_ledger_of_released_checksums() {
+        let Some(url) = pg_url() else {
+            zeroship_test_support::skip(
+                "skipping released-ledger proof: no test database (set PG_TEST_URL \
+                 to a DSN to run)"
+            );
+            return;
+        };
+        let _serial = DB_APPLY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let corpus = tempfile::tempdir().expect("create temporary migration corpus");
+        let scratch = create_scratch_database(&url, "zs_released_ledger")
+            .await
+            .expect("create released-ledger scratch database");
+
+        let result = run_released_ledger_assertions(&scratch.dsn, corpus.path()).await;
+        drop_scratch_database(&url, &scratch)
+            .await
+            .expect("drop released-ledger scratch database");
+        result.expect("the corpus must apply over a ledger of released checksums");
+    }
+
+    async fn run_released_ledger_assertions(
+        scratch_dsn: &str,
+        corpus: &Path,
+    ) -> Result<(), String> {
+        // The released files are the oldest N by filename order, which is the
+        // order the runner applies in. Assert it rather than assume it: if a file
+        // is ever inserted with an earlier timestamp than a released one, the
+        // prefix stops being the released set and this test would seed the ledger
+        // against the wrong files.
+        let mut all: Vec<String> = std::fs::read_dir(migrations_dir())
+            .map_err(|e| format!("read platform migration corpus: {e}"))?
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".ts"))
+            .collect();
+        all.sort();
+        for (index, (filename, _)) in RELEASED_PLATFORM_MIGRATIONS.iter().enumerate() {
+            if all.get(index).map(String::as_str) != Some(*filename) {
+                return Err(format!(
+                    "released file {index} is {:?} in filename order but the released list \
+                     says {filename}; the released set is no longer a prefix of the corpus",
+                    all.get(index)
+                ));
+            }
+        }
+
+        copy_migration_prefix(corpus, RELEASED_PLATFORM_MIGRATIONS.len())?;
+        let cfg = test_config(scratch_dsn, corpus);
+        run_platform_migrations(&cfg)
+            .await
+            .map_err(|e| format!("released prefix apply failed: {e}"))?;
+
+        // SEED THE PRODUCTION FACT. Up to here the ledger holds the corpus's own
+        // checksums, which trivially agree with it -- that agreement is exactly
+        // why a fresh-database test cannot see this bug. Replacing them with the
+        // checksums a deployed database recorded is the whole experiment.
+        let probe = CompioPgSession::connect(scratch_dsn)
+            .await
+            .map_err(|e| format!("connect released-ledger probe: {e}"))?;
+        for (filename, released) in RELEASED_PLATFORM_MIGRATIONS {
+            probe
+                .batch(&format!(
+                    "UPDATE zeroship_migrations.{PLATFORM_MIGRATION_LEDGER_TABLE} \
+                     SET checksum = '{released}' WHERE filename = '{filename}'"
+                ))
+                .await
+                .map_err(|e| format!("seed released checksum for {filename}: {e}"))?;
+        }
+        let seeded = ledger_row_count(&probe).await;
+        if seeded != RELEASED_PLATFORM_MIGRATIONS.len() as i64 {
+            return Err(format!(
+                "seeded ledger holds {seeded} rows, expected {}",
+                RELEASED_PLATFORM_MIGRATIONS.len()
+            ));
+        }
+
+        copy_migration_corpus(corpus)?;
+        let run = run_platform_migrations(&cfg)
+            .await
+            .map_err(|e| format!("full corpus over a released ledger failed: {e}"))?;
+        if run.files != PLATFORM_MIGRATION_FILES {
+            return Err(format!(
+                "full corpus reported {} files, expected {PLATFORM_MIGRATION_FILES}",
+                run.files
+            ));
+        }
+        if run.applied.is_empty() {
+            return Err(
+                "full corpus applied nothing over a released ledger; the unreleased files \
+                 should have applied"
+                    .to_string(),
+            );
         }
         Ok(())
     }

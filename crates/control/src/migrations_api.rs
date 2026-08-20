@@ -10,10 +10,18 @@
 //! `crates/migrated/src/api.rs` verifies the bearer and requires
 //! `Action::AppsDeploy` on the app, and `crates/migrated/src/auth.rs`
 //! additionally requires a `role = 'owner'` row in `zeroship.app_members`. A
-//! creator PAT is a first-class caller there, not an operator-only surface -
-//! `deploy/compose/docker-compose.yml` says so in as many words on the
-//! `ZEROSHIP_MIGRATED_SIGNING_KEY_FILE` line: "MUST be the same file control
-//! signs with, or a control-issued creator PAT will not verify here".
+//! creator's own bearer is a first-class caller there, not an operator-only
+//! surface: `migrated` builds a `zeroship_authn::BearerVerifier` over the
+//! platform OP's issuer and JWKS (`--auth-platform-issuer` /
+//! `--auth-platform-jwks-url`, `crates/migrated/src/main.rs`), which is the
+//! same OP that issued the token control just verified.
+//!
+//! THIS PARAGRAPH SAID SOMETHING ELSE until 2026-08-20: that the two agree
+//! because compose points them at one `ZEROSHIP_MIGRATED_SIGNING_KEY_FILE`,
+//! quoted from the compose file. 8e365f478 deleted control's PAT signing key
+//! and that compose line with it, so the quotation named a line that no longer
+//! exists and the mechanism it described was gone. What makes the two agree is
+//! now a shared OP, not a shared file on disk.
 //!
 //! What a creator does NOT have is a route. `migrated` binds loopback in every
 //! deployment we ship (`ports: 127.0.0.1:9091:9091`) because it holds the
@@ -27,7 +35,7 @@
 //!
 //! Control forwards the CALLER'S OWN bearer, never `control_key` and never a
 //! minted service credential. `migrated` re-verifies it from scratch against
-//! the shared signing key and re-runs the same Cedar decision plus its
+//! the platform OP's JWKS and re-runs the same Cedar decision plus its
 //! owner-row check. So control contributes reachability and a first, cheap
 //! rejection - it contributes no authority. If this handler were tricked into
 //! forwarding a body for an app the caller does not own, `migrated` would still

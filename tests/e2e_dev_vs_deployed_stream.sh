@@ -343,7 +343,7 @@ docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "CREATE DATABASE $PG_DB" >/dev
 ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
 e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DB_URL"
-e2e_with_platform_mint_key "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --blob-store "$WORK/bundles" \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --blob-store "$WORK/bundles" \
   > "$WORK/control.log" 2>&1 & PIDS+=($!)
 sleep 4
 "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
@@ -408,7 +408,7 @@ tr -d '\r' < "$WORK/deployed.txt.hdr" | sed 's/^/  /'
 #
 # WHAT THE FLOOR DOES NOT CATCH: substitution. Deleting one assertion and adding
 # an easier one keeps the total at 24. Nothing here can see that; review can.
-STREAM_MIN_PASSED="${STREAM_MIN_PASSED:-24}"
+STREAM_MIN_PASSED=24
 
 echo ""
 # MUTATE_BUFFERED is named in this line too. It is a SEPARATE variable from

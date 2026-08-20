@@ -1,6 +1,6 @@
 //! OAuth 2.0 Device Authorization Grant UI regression tests.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 

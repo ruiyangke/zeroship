@@ -7,7 +7,7 @@
 //!
 //! See `docs/proposals/rpc.md` §3 ("Abort source plumbing").
 
-mod common;
+use crate::common;
 
 use std::collections::HashMap;
 use std::time::Duration;

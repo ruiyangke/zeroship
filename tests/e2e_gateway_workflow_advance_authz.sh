@@ -302,7 +302,7 @@ fi
 
 e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DBURL"
-e2e_with_platform_mint_key "$BIN/zeroship-control" \
+"$BIN/zeroship-control" \
   --port "$ZEROSHIP_CONTROL_PORT" --blob-store "$WORK/blobs" \
   --gateway-url "http://localhost:$ZEROSHIP_GATEWAY_PORT" \
   --disable-workflow-engine > "$WORK/control.log" 2>&1 &
@@ -453,7 +453,7 @@ echo "############ PHASE 2 -- worker WITHOUT the flag (deploy/compose reality) #
 # Restart the worker as the shipped compose configuration runs it.
 kill_pids; wait 2>/dev/null || true; : > "$PIDFILE"
 # control + gateway are down now too (kill_pids kills all). Rebring them.
-e2e_with_platform_mint_key "$BIN/zeroship-control" \
+"$BIN/zeroship-control" \
   --port "$ZEROSHIP_CONTROL_PORT" --blob-store "$WORK/blobs" \
   --gateway-url "http://localhost:$ZEROSHIP_GATEWAY_PORT" \
   --disable-workflow-engine > "$WORK/control2.log" 2>&1 &
@@ -565,7 +565,7 @@ echo "############ SUMMARY ############"
 # the dotless Host that bypasses the gate is not routable through Caddy.
 # Reaching the gap in the shipped topology needs BOTH the worker flag ON and
 # direct gateway access.
-AUTHZ_EXPECTED_FAILURES=${AUTHZ_EXPECTED_FAILURES:-"CONFIRMED AUTHZ GAP"}
+AUTHZ_EXPECTED_FAILURES="CONFIRMED AUTHZ GAP"
 IFS='|' read -r -a _apats <<< "$AUTHZ_EXPECTED_FAILURES"
 # FIXED-STRING matching, both directions. An earlier golden_path classifier used
 # an ERE and `sort({id:-1})` matched nothing because `{id:-1}` is an invalid

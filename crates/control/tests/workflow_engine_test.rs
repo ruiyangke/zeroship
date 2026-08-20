@@ -6582,3 +6582,189 @@ async fn gateway_402_backpressure_parks_claim_without_step_attempt() {
         rows[0].get::<_, Option<String>>("dispatch_nonce")
     );
 }
+
+// ===========================================================================
+// Fleet isolation: one app's unreadable journal must not stop the sweep
+// ===========================================================================
+
+/// Rewrite a URL DSN's userinfo so the connection authenticates as `role`.
+///
+/// The rest of this file connects as the migration superuser, which cannot
+/// reproduce this defect at all: a superuser is exempt from every schema ACL,
+/// so `to_regclass` on an unreadable journal simply succeeds. The production
+/// connection is `zeroship_control`, and only that role sees the denial.
+fn dsn_as_role(dsn: &str, role: &str, password: &str) -> String {
+    let trimmed = dsn.trim_start();
+    let scheme_end = trimmed
+        .find("://")
+        .map(|idx| idx + 3)
+        .unwrap_or_else(|| panic!("test DSN must be a URL to re-role: {dsn}"));
+    let rest = &trimmed[scheme_end..];
+    let host_start = rest.find('@').map_or(0, |idx| idx + 1);
+    format!(
+        "{}{role}:{password}@{}",
+        &trimmed[..scheme_end],
+        &rest[host_start..]
+    )
+}
+
+/// Seed one workflow run that is parked with a cancel request outstanding -
+/// exactly what `reap_parked_cancel_requested_batch` exists to pull forward.
+async fn seed_parked_cancel_run(fx: &Fixture, app_id: Uuid, deploy_id: &str) -> String {
+    let run_id = seed_run(
+        fx,
+        app_id,
+        deploy_id,
+        "sleeping",
+        60 * 60 * 1_000,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    fx.pg.set_default_app_id(app_id);
+    fx.pg
+        .execute(
+            "UPDATE zeroship.workflow_runs SET cancel_requested = true WHERE id = $1",
+            &[&run_id],
+        )
+        .await
+        .expect("park run with a cancel request");
+    run_id
+}
+
+/// Reproduce production's privilege gap on ONE app: take its journal schema away
+/// from the workflow owner role that `zeroship_control` reaches it through, so
+/// `to_regclass` raises `permission denied for schema app_<uuid>`. The journal
+/// TABLES are untouched and still exist - which is the point, because catalog
+/// visibility is not privilege.
+async fn revoke_journal_access(fx: &Fixture, app_id: &Uuid) {
+    let schema = quote_ident(&format!("app_{}", app_id.as_hyphenated()));
+    fx.pg
+        .inner
+        .batch_execute(&format!(
+            "ALTER SCHEMA {schema} OWNER TO CURRENT_USER; \
+             REVOKE ALL ON SCHEMA {schema} FROM PUBLIC; \
+             REVOKE ALL ON SCHEMA {schema} FROM zeroship_workflow_owner; \
+             REVOKE ALL ON SCHEMA {schema} FROM zeroship_control;"
+        ))
+        .await
+        .expect("revoke journal schema access from the control role");
+}
+
+struct TwoAppReap {
+    registered: usize,
+    /// `wake_at` of the READABLE app's parked run once the reaper has run. The
+    /// reaper's whole job is to pull this forward to now.
+    good_wake_at: DateTime<Utc>,
+}
+
+/// Drive the parked-cancel reaper over TWO apps that both have a parked cancel,
+/// as the real `zeroship_control` role.
+///
+/// `revoke_second` is the ONLY variable between the two tests below.
+async fn reap_over_two_apps(label: &str, revoke_second: bool) -> Option<TwoAppReap> {
+    let fx = isolated_fixture(label).await?;
+
+    let (good_app, good_deploy) = seed_app_and_deploy(&fx, "readable").await;
+    let good_run = seed_parked_cancel_run(&fx, good_app, &good_deploy).await;
+    let (other_app, other_deploy) = seed_app_and_deploy(&fx, "other").await;
+    let _other_run = seed_parked_cancel_run(&fx, other_app, &other_deploy).await;
+    if revoke_second {
+        revoke_journal_access(&fx, &other_app).await;
+    }
+
+    let control_url = dsn_as_role(&fx.db_url, "zeroship_control", "zeroship_control");
+    let registered = {
+        let control_registry = Registry::new(&control_url)
+            .await
+            .expect("connect a registry as the zeroship_control role");
+        let registered = workflow_engine::reap_parked_cancel_requested_batch(
+            &fx.scheduler_store,
+            &control_registry,
+            64,
+        )
+        .await
+        .expect("the reaper tick must survive an app whose journal it cannot read");
+        drop(control_registry);
+        registered
+    };
+
+    fx.pg.set_default_app_id(good_app);
+    let row = fx
+        .pg
+        .query_one(
+            "SELECT wake_at FROM zeroship.workflow_runs WHERE id = $1",
+            &[&good_run],
+        )
+        .await
+        .expect("reload the readable app's parked run");
+    let good_wake_at: DateTime<Utc> = row.get("wake_at");
+
+    drop(fx);
+    common::drain_pg().await;
+    Some(TwoAppReap {
+        registered,
+        good_wake_at,
+    })
+}
+
+/// TWO apps, both with a parked cancel, one journal `zeroship_control` cannot
+/// read: the tick must still reap the other one.
+///
+/// This is the discriminating case. A single-app version cannot tell "skipped
+/// the bad app" from "aborted the tick", because both leave nothing reaped when
+/// the bad app is the only app. Its pair, `..._reaps_both_when_readable`, is the
+/// same function with `revoke_second = false` - one variable - and shows the
+/// instrument can count 2, so the 1 below is a skip and not a broken harness.
+///
+/// Before the fix this could not reach an assertion at all: `workflow_app_ids`
+/// selected every app, the per-app `to_regclass` probe raised `permission denied
+/// for schema app_<uuid>`, and the `?` aborted the whole tick - which is how one
+/// e2e app produced ~4 errors/second of fleet-wide workflow outage in production
+/// on 2026-08-20.
+///
+/// WHAT THIS DOES NOT CATCH. Exactly one arm: the PARKED-CANCEL reaper skipping
+/// one unreadable app while reaping another. It does not cover the other sweeps
+/// that share `journalled_app_ids` (scheduler reconcile, signal-fanout
+/// subscription GC, workflow/deploy retention, blob GC) - those are asserted by
+/// nothing here. It does not cover the CONSERVATIVE arms: nothing here proves
+/// blob GC retains a blob, or deploy retention keeps a manifest, when an app is
+/// unreadable. It says nothing about a journal that becomes unreadable BETWEEN
+/// the app-list query and the per-app statement, nor about a connection-level
+/// failure, which is deliberately still fatal. And it does not prove the
+/// production database has the grant: it proves the migration corpus this test
+/// DB was built from does.
+#[compio::test]
+async fn parked_cancel_reaper_skips_an_app_whose_journal_is_unreadable() {
+    let Some(result) = reap_over_two_apps("skip-unreadable-journal", true).await else {
+        return;
+    };
+    assert_eq!(
+        result.registered, 1,
+        "the reaper must reap the readable app's parked cancel and skip the unreadable one"
+    );
+    assert!(
+        result.good_wake_at <= Utc::now() + ChronoDuration::seconds(5),
+        "the readable app's parked run must have been pulled forward to now, got {}",
+        result.good_wake_at
+    );
+}
+
+/// The control for the test above: identical setup, no revoke. Two readable
+/// journals reap two runs.
+///
+/// This is what makes the `1` above mean "skipped one app". Without it a `1`
+/// would be equally consistent with a reaper that only ever handles one app per
+/// tick.
+#[compio::test]
+async fn parked_cancel_reaper_reaps_both_apps_when_both_journals_are_readable() {
+    let Some(result) = reap_over_two_apps("reap-both-journals", false).await else {
+        return;
+    };
+    assert_eq!(
+        result.registered, 2,
+        "with both journals readable the reaper must reap both apps' parked cancels"
+    );
+}

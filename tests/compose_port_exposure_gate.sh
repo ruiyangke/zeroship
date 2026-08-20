@@ -141,16 +141,21 @@ fi
 echo ""
 echo "  $PASS passed, $FAIL failed, $((PASS+FAIL)) ran"
 
-# Floor counts assertions that RAN, not that PASSED: a mutation moves an outcome
+# Counts assertions that RAN, not that PASSED: a mutation moves an outcome
 # BETWEEN those columns, so only a LOST assertion drops the sum.
-# MEASURED 2026-08-12: 8 published ports in the file after removing control's
-# host publication.
-MIN_RAN="${COMPOSE_PORTS_MIN_RAN:-8}"
+#
+# EXACT, not a floor, and not overridable. MEASURED 2026-08-19: 9 published
+# ports in the tracked compose files. A minimum of 8 could not discriminate -
+# a tree that had lost one port entirely still cleared it. The count is a pure
+# parse of tracked files, so it is deterministic; when a port is added or
+# removed, re-measure and change this line in the same commit.
+EXPECT_RAN=9
 rc=0
 [ "$FAIL" -eq 0 ] || rc=1
-if [ "$PORT_RAN" -lt "$MIN_RAN" ]; then
-  echo "  x FLOOR: only $PORT_RAN published ports checked, expected at least $MIN_RAN." >&2
-  echo "    Ports went missing from the parse - a smaller green is not a pass." >&2
+if [ "$PORT_RAN" -ne "$EXPECT_RAN" ]; then
+  echo "  x COUNT: $PORT_RAN published ports checked, expected exactly $EXPECT_RAN." >&2
+  echo "    Fewer means ports went missing from the parse - a smaller green is not" >&2
+  echo "    a pass. More means a port was added; re-measure and bump this line." >&2
   rc=1
 fi
 exit $rc

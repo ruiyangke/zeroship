@@ -4,7 +4,7 @@
 //! Validates real WHATWG structured clone, not the JSON-roundtrip
 //! polyfill the old fetch.js shipped.
 
-mod common;
+use crate::common;
 use common::{dispatch, m};
 
 #[test]

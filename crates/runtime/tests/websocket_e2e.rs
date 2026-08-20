@@ -173,7 +173,27 @@ fn handle_connection(stream: TcpStream, cfg: ServerCfg) {
 // Run a JS snippet through a real Runtime with the compio loop
 // ---------------------------------------------------------------------------
 
-fn run_js_with_runtime(src: &str, max_wait: Duration) -> String {
+fn loopback_policy(port: u16) -> zeroship_runtime::NetPolicy {
+    zeroship_runtime::NetPolicy::rules(
+        vec![
+            zeroship_runtime::EgressRule::parse(
+                zeroship_runtime::Verdict::Accept,
+                "127.0.0.0/24",
+                port,
+            )
+            .unwrap(),
+        ],
+        8,
+        8 * 1024 * 1024,
+    )
+    .unwrap()
+}
+
+fn run_js_with_runtime(
+    src: &str,
+    max_wait: Duration,
+    policy: zeroship_runtime::NetPolicy,
+) -> String {
     unsafe {
         std::env::set_var("ZEROSHIP_DEV", "1");
     }
@@ -202,7 +222,13 @@ fn run_js_with_runtime(src: &str, max_wait: Duration) -> String {
         specifier: "index.js".to_string(),
         source: module_src,
     }];
-    let runtime = Runtime::builder().modules(modules).build();
+    // WebSocket egress is gated by the creator NetPolicy exactly as node:net
+    // is, so a test that connects has to grant the destination. The default
+    // policy is `Denied`, and under it `new WebSocket(...)` reaches nothing.
+    let runtime = Runtime::builder()
+        .modules(modules)
+        .net_policy(policy)
+        .build();
 
     compio::runtime::Runtime::new().unwrap().block_on(async {
         runtime.start_pump();
@@ -256,6 +282,92 @@ fn run_js_with_runtime(src: &str, max_wait: Duration) -> String {
 // Tests
 // ---------------------------------------------------------------------------
 
+/// WebSocket egress is gated by the creator's `NetPolicy`, exactly as
+/// `node:net` is and through the same `transport::egress::evaluate`.
+///
+/// `fetch` is the only ungated egress on this platform. Before this, an app
+/// whose policy was `Denied` could still open a bidirectional byte stream to
+/// any host:port that speaks RFC 6455 - the handshake consulted the platform
+/// SSRF floor and nothing else.
+///
+/// The three arms differ from each other in exactly ONE thing, the policy, and
+/// the decisive assertion is not what JS saw but whether the SERVER saw a
+/// handshake: "refused" has to mean the bytes never left.
+#[test]
+fn ws_egress_is_gated_by_the_creator_net_policy() {
+    let server = start_server(ServerCfg::default());
+    let url = server.url();
+    let port = server.addr.port();
+    let script = format!(
+        r#"
+        return new Promise((resolve) => {{
+            const ws = new WebSocket("{url}");
+            let got = "";
+            ws.onopen = () => {{ got += ";OPEN"; ws.send("hello"); }};
+            ws.onmessage = (e) => {{ got += `;MSG=${{e.data}}`; ws.close(); }};
+            ws.onerror = () => {{ got += ";ERR"; }};
+            ws.onclose = (e) => {{
+                got += `;CLOSE(${{e.code}},clean=${{e.wasClean}},reason=${{e.reason}})`;
+                resolve(got);
+            }};
+            setTimeout(() => resolve(got + ";TIMEOUT"), 4000);
+        }});
+        "#
+    );
+
+    // ARM 1 - the app holds no egress policy at all.
+    let denied = run_js_with_runtime(
+        &script,
+        Duration::from_secs(10),
+        zeroship_runtime::NetPolicy::Denied,
+    );
+    assert!(
+        !denied.contains(";OPEN") && denied.contains(";ERR"),
+        "a Denied policy must refuse the connect: {denied}"
+    );
+    assert!(
+        denied.contains("ERR_NET_EGRESS_DENIED"),
+        "the refusal must reach the app in the vocabulary node:net uses: {denied}"
+    );
+    assert!(
+        server.captured().is_empty(),
+        "the handshake reached the server: the gate did not stop the bytes"
+    );
+
+    // ARM 2 - the app HAS rules, but not for this destination. Differs from
+    // arm 1 only in the policy, and shows the gate consults the rule rather
+    // than merely checking that some policy exists.
+    let other_port = if port == 1 { 2 } else { port - 1 };
+    let wrong_port = run_js_with_runtime(
+        &script,
+        Duration::from_secs(10),
+        loopback_policy(other_port),
+    );
+    assert!(
+        !wrong_port.contains(";OPEN") && wrong_port.contains("ERR_NET_EGRESS_DENIED"),
+        "a rule at another port must not admit this one: {wrong_port}"
+    );
+    assert!(
+        server.captured().is_empty(),
+        "a rule at another port let the handshake through"
+    );
+
+    // ARM 3 - the control. Same server, same script, same everything but the
+    // port the rule names. Without it the two arms above are green against a
+    // WebSocket that can no longer connect to anything.
+    let granted = run_js_with_runtime(&script, Duration::from_secs(10), loopback_policy(port));
+    assert!(
+        granted.contains(";OPEN") && granted.contains(";MSG=hello"),
+        "a granted destination must still connect and echo: {granted}"
+    );
+    assert!(
+        !server.captured().is_empty(),
+        "the granted arm never reached the server, so arms 1 and 2 prove nothing"
+    );
+
+    server.stop();
+}
+
 /// Echo: client sends "hello", expects "hello" back.
 #[test]
 fn ws_echo_text_roundtrip() {
@@ -284,6 +396,7 @@ fn ws_echo_text_roundtrip() {
         "#
         ),
         Duration::from_secs(10),
+        loopback_policy(server.addr.port()),
     );
     server.stop();
     eprintln!("ECHO RESULT: {result}");
@@ -317,6 +430,7 @@ fn ws_extensions_rejected() {
         "#
         ),
         Duration::from_secs(10),
+        loopback_policy(server.addr.port()),
     );
     server.stop();
     // Must fail with code=1006 (not a graceful close) and err=true.
@@ -347,6 +461,7 @@ fn ws_unrequested_subprotocol_rejected() {
         "#
         ),
         Duration::from_secs(10),
+        loopback_policy(server.addr.port()),
     );
     server.stop();
     assert!(
@@ -372,6 +487,7 @@ fn ws_no_extensions_header_sent() {
         "#
         ),
         Duration::from_secs(10),
+        loopback_policy(server.addr.port()),
     );
     let captured = server.captured();
     server.stop();
@@ -415,6 +531,7 @@ fn ws_binary_arraybuffer_roundtrip() {
         "#
         ),
         Duration::from_secs(10),
+        loopback_policy(server.addr.port()),
     );
     server.stop();
     assert!(
@@ -441,6 +558,7 @@ fn ws_graceful_close_code_1000() {
         "#
         ),
         Duration::from_secs(10),
+        loopback_policy(server.addr.port()),
     );
     server.stop();
     assert!(
@@ -472,6 +590,7 @@ fn ws_ping_keepalive_pongs() {
         "#
         ),
         Duration::from_secs(10),
+        loopback_policy(server.addr.port()),
     );
     let pongs = server.pong_count();
     server.stop();
@@ -500,6 +619,7 @@ fn ws_abort_signal_reason_propagates() {
         "#
         ),
         Duration::from_secs(10),
+        loopback_policy(server.addr.port()),
     );
     server.stop();
     assert!(

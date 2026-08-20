@@ -1,16 +1,14 @@
 //! Registry — application CRUD backed by PostgreSQL (compio-postgres).
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use compio_postgres::error::SqlState;
 use compio_postgres::{Client, NoTls};
 use uuid::Uuid;
 use zeroship_core::auth::hash_api_key;
-use zeroship_core::net_policy::FrontableSuffixCatalog;
 use zeroship_core::types::{
     AppNetPolicy, AppNetPolicyLimits, AppRecord, AppRuntimeLimits, AppVersionInfo,
-    GatewayFamilyRevocation, GatewayPrincipalLifecycle, GatewaySnapshot, NetAllowEntry, RouteEntry,
+    GatewayFamilyRevocation, GatewayPrincipalLifecycle, GatewaySnapshot, NetEgressEntry, RouteEntry,
     RouteMap, VersionMap,
     FREE_TIER_NET_POLICY_LIMITS, FREE_TIER_RUNTIME_LIMITS,
 };
@@ -113,15 +111,6 @@ fn source_chain(err: &dyn std::error::Error) -> Option<String> {
 #[derive(Clone, Debug)]
 pub struct Registry {
     db_url: String,
-    /// The deployment's frontable-wildcard-suffix catalog, resolved from the
-    /// config overlay at boot rather than read per query from a table.
-    ///
-    /// It lives here because both consumers reach it through a `Registry`: the
-    /// `get_versions` projection that ships it to every worker, and the creator
-    /// net-grant writer that validates against it. [`Registry::new`] leaves it
-    /// FAIL-CLOSED, so a caller that never configures one refuses every
-    /// wildcard grant instead of silently accepting all of them.
-    frontable_suffixes: Arc<FrontableSuffixCatalog>,
 }
 
 /// Open a new compio-postgres connection and detach its driver task onto the
@@ -152,25 +141,7 @@ impl Registry {
 
         Ok(Self {
             db_url: db_url.to_string(),
-            frontable_suffixes: Arc::new(FrontableSuffixCatalog::unavailable()),
         })
-    }
-
-    /// Attach the deployment's frontable-wildcard-suffix catalog.
-    ///
-    /// Boot calls this once with the resolved `[control]
-    /// frontable_wildcard_suffixes` overlay value. Not calling it leaves the
-    /// fail-closed catalog from [`Registry::new`].
-    #[must_use]
-    pub fn with_frontable_suffixes(mut self, catalog: FrontableSuffixCatalog) -> Self {
-        self.frontable_suffixes = Arc::new(catalog);
-        self
-    }
-
-    /// The deployment's frontable-wildcard-suffix catalog.
-    #[must_use]
-    pub fn frontable_suffixes(&self) -> &FrontableSuffixCatalog {
-        &self.frontable_suffixes
     }
 
     /// Open a fresh connection. Crate-internal: stores + internal
@@ -558,29 +529,46 @@ impl Registry {
                 &[],
             )
             .await?;
-        let grant_rows = conn
+        // ORDER BY is a determinism device and must stay one. Verdicts compose
+        // as deny-overrides on an unordered SET, so a rule's effect never
+        // depends on where it sorts; the day that stops being true this clause
+        // becomes security-relevant, which is the thing it must not become.
+        let rule_rows = conn
             .query(
-                "SELECT app_id, host, port FROM zeroship.app_net_grants \
-                 ORDER BY app_id, host, port",
+                "SELECT app_id, verdict, destination, port FROM zeroship.app_egress_rules \
+                 ORDER BY app_id, kind, destination, port",
                 &[],
             )
             .await?;
-        let frontable_catalog = self.frontable_suffixes();
-        let mut grants: HashMap<Uuid, Vec<NetAllowEntry>> = HashMap::new();
-        for row in &grant_rows {
+        let mut rules: HashMap<Uuid, Vec<NetEgressEntry>> = HashMap::new();
+        for row in &rule_rows {
             let app_id: Uuid = row.get("app_id");
-            let host: String = row.get("host");
+            let destination: String = row.get("destination");
+            let verdict_text: String = row.get("verdict");
             let port_i32: i32 = row.get("port");
             let Ok(port) = u16::try_from(port_i32) else {
                 tracing::error!(
                     app_id = %app_id,
-                    host = %host,
+                    destination = %destination,
                     port = port_i32,
-                    "registry: app_net_grants row has out-of-range port; skipping"
+                    "registry: app_egress_rules row has out-of-range port; skipping"
                 );
                 continue;
             };
-            grants.entry(app_id).or_default().push(NetAllowEntry { host, port });
+            // A verdict outside the column's CHECK is a hand-edited row. Read
+            // it as REJECT rather than dropping it: a rule the control plane
+            // did not write must never be able to WIDEN what an app reaches,
+            // and reject is the only reading with that property.
+            //
+            // The SAME function the creator-facing endpoint reads with. Two
+            // copies of this arm could disagree about a row, and then a creator
+            // is shown one verdict while the runtime enforces the other.
+            let verdict = crate::egress_rules::parse_verdict(&verdict_text);
+            rules.entry(app_id).or_default().push(NetEgressEntry {
+                verdict,
+                destination,
+                port,
+            });
         }
         let mut map = HashMap::new();
         for row in &rows {
@@ -592,17 +580,21 @@ impl Registry {
             let runtime_limits_json: Option<serde_json::Value> = row.get("runtime_limits_json");
             let net_policy_limits_json: Option<serde_json::Value> =
                 row.get("net_policy_limits_json");
-            let allow = grants.remove(&id).unwrap_or_default();
-            let net_policy = if allow.is_empty() {
+            let egress = rules.remove(&id).unwrap_or_default();
+            // The empty set IS the deny-by-default state, and that meaning is
+            // unchanged by the reshape: no rows means `AppNetPolicy::default()`,
+            // which the worker reads as `NetPolicy::Denied`. An app holding only
+            // REJECT rules reaches the worker as a non-empty set that admits
+            // nothing, which is the same outcome by the ordinary rule rather
+            // than by this special case.
+            let net_policy = if egress.is_empty() {
                 AppNetPolicy::default()
             } else {
                 let caps = net_policy_limits_from_catalog(net_policy_limits_json.as_ref(), &id);
                 AppNetPolicy {
-                    allow,
+                    egress,
                     max_sockets: caps.max_sockets,
                     egress_ceiling_bytes: caps.egress_ceiling_bytes,
-                    frontable_wildcard_suffixes: frontable_catalog.suffixes.clone(),
-                    frontable_wildcard_suffixes_available: frontable_catalog.available,
                 }
             };
             let manifest = manifest_json.as_deref().and_then(|j| {
@@ -872,8 +864,8 @@ fn runtime_limits_from_catalog(
     }
 }
 
-/// Derive creator raw-TCP caps from the plan catalog. Hosts come from
-/// `app_net_grants`; this only controls socket count and per-dispatch egress
+/// Derive creator raw-TCP caps from the plan catalog. Destinations come from
+/// `app_egress_rules`; this only controls socket count and per-dispatch egress
 /// ceiling. Missing/corrupt catalog values fall back to the free-tier caps.
 fn net_policy_limits_from_catalog(
     json: Option<&serde_json::Value>,

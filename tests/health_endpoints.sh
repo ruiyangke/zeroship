@@ -142,7 +142,7 @@ for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT \
   lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 done
 
-e2e_with_platform_mint_key "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
   --blob-store "$WORK/blobs" \
   > "$WORK/control.log" 2>&1 &
 EXTRA_PIDS+=($!)
@@ -181,7 +181,7 @@ for _ in $(seq 1 30); do
 done
 
 AUTH_URL="http://localhost:$AUTH_PORT"
-e2e_with_platform_mint_key "$BIN/zeroship-auth" \
+"$BIN/zeroship-auth" \
   --addr "127.0.0.1:$AUTH_PORT" --public-url "$AUTH_URL" \
   --signing-key-file "$ZEROSHIP_AUTH_SIGNING_KEY_FILE" \
   --pairwise-salt-file "$ZEROSHIP_AUTH_PAIRWISE_SALT_FILE" \

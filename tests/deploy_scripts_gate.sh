@@ -65,6 +65,12 @@
 #     has that shape today, so it is latent, not live.
 #   - whether the host .env side of the diff is read correctly. That half is
 #     one `rsh grep` against a real host and is not reachable without ssh.
+#   - that a tree the source-tree check PASSES will then build. That check asks
+#     one question - is every declared submodule populated with the manifests
+#     the build opens - and this gate asks whether it asks it correctly. A
+#     missing npm dependency, a lockfile out of date with a package.json, a
+#     compile error, a full disk on the build host: all of them still fail the
+#     way they always did, twenty minutes in. Nothing here says the tree builds.
 # ============================================================================
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -72,7 +78,14 @@ REMOTE="$ROOT/deploy/scripts/deploy-remote.sh"
 APPDEP="$ROOT/deploy/scripts/deploy-app.sh"
 REAL_COMPOSE="$ROOT/deploy/compose/docker-compose.yml"
 REAL_OVERLAY="$ROOT/deploy/ops/zeroship.toml"
-GRANTS_MIGRATION="$ROOT/db/migrations-ts/20260702000900_grants.ts"
+# The whole committed migration corpus, NOT one named file. These two
+# assertions are about the END STATE the corpus produces, and pinning them to
+# 20260702000900_grants.ts made them assertions about WHICH FILE spells the
+# statement. That is a real difference: once a file has been applied to a
+# deployed database its bytes are frozen by the runner's checksum guard, so a
+# statement can only ever MOVE to a later file, and a gate that reads one
+# filename then reports the invariant as broken when it is intact.
+MIGRATIONS_DIR="$ROOT/db/migrations-ts"
 
 echo "============================================"
 echo "  deploy scripts: extraction, pairing, arguments"
@@ -269,20 +282,6 @@ if [ -f "$REAL_COMPOSE" ]; then
   fi
 fi
 
-# The operator overlay is shared with services that must never possess the
-# platform mint credential. A file reference here leaks the raw key through
-# their shared config or secret-directory mounts even if the binary ignores
-# the setting.
-if [ -f "$REAL_OVERLAY" ]; then
-  if grep -Eq '^[[:space:]]*platform_mint_key[[:space:]]*=' "$REAL_OVERLAY"; then
-    fail "the shared operator overlay contains auth.platform_mint_key"
-  else
-    pass "the shared operator overlay contains no platform mint credential"
-  fi
-else
-  fail "the shipped operator overlay is missing: $REAL_OVERLAY"
-fi
-
 # The worker handles attacker-controlled app code. Its default DSN must name
 # the constrained worker role, never the provisioning principal that owns the
 # platform schema. Scope the extraction to the worker service so a safe DSN on
@@ -302,11 +301,11 @@ if [ -f "$REAL_COMPOSE" ]; then
   fi
 fi
 
-if [ -f "$GRANTS_MIGRATION" ]; then
-  grep -qF 'REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA zeroship FROM zeroship_worker' "$GRANTS_MIGRATION" \
-    && pass "the platform grants revoke worker authority from every current zeroship table" \
-    || fail "the platform grants do not revoke worker authority from every current zeroship table"
-  grep -qF 'ALTER DEFAULT PRIVILEGES IN SCHEMA zeroship REVOKE ALL PRIVILEGES ON TABLES FROM zeroship_worker' "$GRANTS_MIGRATION" \
+if [ -d "$MIGRATIONS_DIR" ]; then
+  grep -rqF 'REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA zeroship FROM zeroship_worker' "$MIGRATIONS_DIR" \
+    && pass "the platform migrations revoke worker authority from every current zeroship table" \
+    || fail "the platform migrations do not revoke worker authority from every current zeroship table"
+  grep -rqF 'ALTER DEFAULT PRIVILEGES IN SCHEMA zeroship REVOKE ALL PRIVILEGES ON TABLES FROM zeroship_worker' "$MIGRATIONS_DIR" \
     && pass "future zeroship tables remain denied to the worker by default" \
     || fail "future zeroship tables are not denied to the worker by default"
 else
@@ -335,6 +334,112 @@ if [ -f "$REAL_COMPOSE" ] && [ -f "$DEV_RS" ]; then
     grep -qF '"zs-not-a-real-secret"' "$DEV_RS" \
       && fail "CONTROL: dev.rs appears to name an invented secret; the drift check discriminates nothing" \
       || pass "CONTROL: an invented secret name is NOT found in dev.rs, so the check above can fail"
+  fi
+fi
+
+# ------------------------------------------ the SOURCE tree, not the host
+#
+# WHY THIS EXISTS, measured 2026-08-19 on a real production deploy. Every other
+# check in deploy-remote.sh is about the machine we deploy TO. Nothing was about
+# the tree we BUILD, and the deploy was run from a git worktree - `git worktree
+# add` DOES NOT POPULATE SUBMODULES, so third_party/zero-migrate was an empty
+# directory. deploy/Dockerfile COPYs third_party/ into both stages, the image
+# built for about twenty minutes, and then:
+#
+#   src/gen-types/addon.ts(66,8): error TS2307:
+#       Cannot find module 'zero-migrate-node'
+#   [ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL] @zeroship/vite-plugin build
+#
+# tests/dockerfile_copy_paths_gate.sh does NOT cover this and cannot: it asks
+# `[ -e ]` of every COPY source, and `third_party/` exists - it is empty.
+# MEASURED in a worktree with the submodule unpopulated, it reports 15 passed,
+# 0 failed. Green on the exact tree whose build fails.
+echo ""
+echo "-- submodule_paths / submodule_manifests (fixtures)"
+
+cat >"$FIX/gitmodules" <<'FIXTURE'
+[submodule "third_party/zero-migrate"]
+	path = third_party/zero-migrate
+	url = https://example.invalid/zero-migrate.git
+[submodule "vendor/other"]
+	path = vendor/other/
+	url = https://example.invalid/other.git
+FIXTURE
+expect_set "$(submodule_paths "$FIX/gitmodules")" "third_party/zero-migrate vendor/other" \
+  "both declared paths are read, and a trailing slash is normalised away"
+
+# A .gitmodules with no `path =` at all. The script REFUSES on this rather than
+# looping zero times, because "no submodule was empty" is exactly what a check
+# that has stopped looking reports.
+printf '[submodule "x"]\n\turl = https://example.invalid/x.git\n' >"$FIX/gitmodules.nopath"
+if usable "$(submodule_paths "$FIX/gitmodules.nopath")"; then
+  fail "submodule_paths invented a path from a stanza that declares none"
+else
+  pass "a .gitmodules with no path line yields nothing, which the script turns into a refusal"
+fi
+
+# The two manifest producers, on fixtures shaped like the real files. The
+# DECOY entries are the point: a prefix match would scoop `zero-migrate-other`,
+# and that path is not a submodule member at all.
+cat >"$FIX/lock.yaml" <<'FIXTURE'
+importers:
+
+  .: {}
+
+  sdks/vite-plugin:
+    dependencies: {}
+
+  third_party/zero-migrate/crates/zero-migrate-node:
+    dependencies: {}
+
+  third_party/zero-migrate/packages/zero-migrate:
+    dependencies: {}
+
+  third_party/zero-migrate-other/packages/decoy:
+    dependencies: {}
+FIXTURE
+cat >"$FIX/cargo.toml" <<'FIXTURE'
+[workspace]
+members = [
+    "crates/*",
+    "third_party/zero-migrate",
+]
+[workspace.dependencies]
+zero-migrate = { path = "third_party/zero-migrate/crates/zero-migrate" }
+decoy = { path = "third_party/zero-migrate-other/crates/decoy" }
+FIXTURE
+expect_set "$(submodule_manifests third_party/zero-migrate "$FIX/lock.yaml" "$FIX/cargo.toml" | sort -u)" \
+  "third_party/zero-migrate/crates/zero-migrate-node/package.json
+   third_party/zero-migrate/packages/zero-migrate/package.json
+   third_party/zero-migrate/Cargo.toml
+   third_party/zero-migrate/crates/zero-migrate/Cargo.toml" \
+  "lockfile importers become package.json and cargo paths become Cargo.toml, under the submodule only"
+
+if submodule_manifests third_party/zero-migrate "$FIX/lock.yaml" "$FIX/cargo.toml" | grep -q 'zero-migrate-other'; then
+  fail "a sibling path that merely shares the submodule's PREFIX was scooped in; the check would demand files from a directory that is not a submodule"
+else
+  pass "third_party/zero-migrate-other is NOT matched by the third_party/zero-migrate prefix"
+fi
+
+# Against the REAL files, because the fixtures above only prove the parser and
+# the whole point is what THIS repo's build opens. Both modules named in the
+# 2026-08-19 TS2307 output must appear, or the check would not have caught it.
+if [ -f "$ROOT/pnpm-lock.yaml" ] && [ -f "$ROOT/Cargo.toml" ] && [ -f "$ROOT/.gitmodules" ]; then
+  REAL_SUB="$(submodule_paths "$ROOT/.gitmodules")"
+  REAL_MAN="$(for s in $REAL_SUB; do
+    submodule_manifests "$s" "$ROOT/pnpm-lock.yaml" "$ROOT/Cargo.toml"
+  done | sort -u)"
+  if ! usable "$REAL_MAN"; then
+    fail "no manifest was derived for any declared submodule of this repo; the preflight would inspect nothing"
+  else
+    miss=""
+    for m in third_party/zero-migrate/crates/zero-migrate-node/package.json \
+             third_party/zero-migrate/Cargo.toml; do
+      printf '%s\n' "$REAL_MAN" | grep -qx "$m" || miss="$miss $m"
+    done
+    [ -z "$miss" ] \
+      && pass "the real derivation names the addon package and the engine workspace manifest" \
+      || fail "the real derivation missed:$miss"
   fi
 fi
 
@@ -1022,6 +1127,78 @@ seen "$CAP" '### docker compose up -d' \
 # that the stack comes back. The first of those is measured separately against
 # the compiled binaries in the conditional block below; the rest need a host.
 echo ""
+# ------------------------------------ the source-tree refusal, end to end
+#
+# Sits here, far from the submodule_paths/submodule_manifests fixtures it
+# belongs with, because it needs the stub ssh built above. Those test the
+# PARSERS; this runs the real script against a throwaway git repo standing in
+# for the source tree, which works because main() takes its root from `git
+# rev-parse --show-toplevel`. Nothing here touches this repo's own
+# third_party/, which is the vendored engine and is not ours to move.
+echo "-- an unpopulated submodule stops the deploy before the build"
+
+SRC="$FIX/srctree"
+mkdir -p "$SRC/third_party/zero-migrate" "$SRC/deploy/compose"
+( cd "$SRC"
+  git init -q .
+  git config user.email gate@example.invalid
+  git config user.name gate
+  printf '[submodule "third_party/zero-migrate"]\n\tpath = third_party/zero-migrate\n\turl = https://example.invalid/x.git\n' >.gitmodules
+  printf 'importers:\n\n  third_party/zero-migrate/packages/zero-migrate:\n    dependencies: {}\n' >pnpm-lock.yaml
+  printf '[workspace]\nmembers = [\n    "third_party/zero-migrate",\n]\n' >Cargo.toml
+  git add -A >/dev/null
+  git commit -qm "gate fixture" >/dev/null )
+
+SRC_SANDBOX="$FIX/srcsandbox"; mkdir -p "$SRC_SANDBOX"
+run_src() { # rest: extra argv to deploy-remote.sh, run with $SRC as the repo root
+  ( cd "$SRC" && env PATH="$STUB:$PATH" ZS_GATE_CAPTURE=/dev/null \
+      "$REMOTE" --host fakehost --registry ghcr.io/gate/img \
+      --remote-dir "$SRC_SANDBOX" --dry-run "$@" 2>&1 )
+}
+
+# `git init` leaves the directory empty, exactly as `git worktree add` does.
+SRC_OUT="$(run_src)"; SRC_RC=$?
+[ "$SRC_RC" != 0 ] && [[ "$SRC_OUT" == *"third_party/zero-migrate"* ]] \
+  && pass "an empty submodule directory refuses the deploy (exit $SRC_RC) and names the path" \
+  || fail "an empty submodule directory did not stop the deploy (exit $SRC_RC): $SRC_OUT"
+[[ "$SRC_OUT" == *"submodule update --init"* ]] \
+  && pass "the refusal names the command that fixes it" \
+  || fail "the refusal does not say how to fix it: $SRC_OUT"
+[[ "$SRC_OUT" != *"would build and push"* ]] \
+  && pass "it stops BEFORE the build, which is the twenty minutes this exists to save" \
+  || fail "the dry run reported it would build from a tree that cannot build"
+
+# PARTIALLY populated: the directory is not empty, but a manifest the build
+# opens is absent. The empty-directory arm above cannot see this.
+mkdir -p "$SRC/third_party/zero-migrate/packages/zero-migrate"
+printf '[package]\nname = "zero-migrate"\n' >"$SRC/third_party/zero-migrate/Cargo.toml"
+SRC_OUT="$(run_src)"; SRC_RC=$?
+[ "$SRC_RC" != 0 ] && [[ "$SRC_OUT" == *"packages/zero-migrate/package.json"* ]] \
+  && pass "a PARTIAL copy is refused by the name of the manifest it is missing (exit $SRC_RC)" \
+  || fail "a partial submodule copy was accepted (exit $SRC_RC): $SRC_OUT"
+
+# CONTROL, and the gate is worthless without it: complete the tree and the same
+# invocation must get past this check. A guard that always refuses is removed
+# as fast as one that never does.
+printf '{ "name": "zero-migrate" }\n' >"$SRC/third_party/zero-migrate/packages/zero-migrate/package.json"
+SRC_OUT="$(run_src)"
+[[ "$SRC_OUT" == *"every declared submodule is populated"* ]] \
+  && pass "CONTROL: with the manifests present the same command passes the source-tree check" \
+  || fail "CONTROL: a complete source tree was still refused: $SRC_OUT"
+
+# --skip-build and --image deploy a reference that already exists, so the source
+# tree is not an input and must not gate them. Re-emptied to prove the bypass is
+# real and not just a tree that happens to pass.
+rm -rf "$SRC/third_party/zero-migrate"; mkdir -p "$SRC/third_party/zero-migrate"
+for bypass in --skip-build "--image ghcr.io/gate/img:pinned"; do
+  # shellcheck disable=SC2086
+  SRC_OUT="$(run_src $bypass)"
+  [[ "$SRC_OUT" != *"submodule directories are EMPTY"* ]] \
+    && pass "$bypass does not run the source-tree check (no image is built from this tree)" \
+    || fail "$bypass was blocked by a source-tree check that does not apply to it"
+done
+
+
 echo "-- the deploy path (stub ssh, stub docker; nothing is built or pushed)"
 
 FAKE_IMAGE="ghcr.io/example/zeroship-platform:testonly"
@@ -1289,17 +1466,12 @@ if [ ! -x "$CTL_BIN" ]; then
   echo "  note $CTL_BIN is not built; skipping (cargo build --bin zeroship-control)"
 else
   ovl_env=(
-    ZEROSHIP_AUTH_PLATFORM_MINT_KEY=3333333333333333333333333333333333333333333333333333333333333333
     ZEROSHIP_CONTROL_DATABASE_URL=postgres://u:p@postgres:5432/z
     ZEROSHIP_CONTROL_KEY=1111111111111111111111111111111111111111111111111111111111111111
     ZEROSHIP_WORKER_KEY=2222222222222222222222222222222222222222222222222222222222222222
     ZEROSHIP_PAIRWISE_SALT=4444444444444444444444444444444444444444444444444444444444444444
     ZEROSHIP_CONTROL_MASTER_KEY=5555555555555555555555555555555555555555555555555555555555555555
     ZEROSHIP_AUTH_PLATFORM_ISSUER=https://auth.example.com/oauth2
-    # The issuer above is the PUBLIC name a token's `iss` carries; this is the
-    # address control dials to mint one. Two settings on purpose, and control
-    # refuses to start with only the first.
-    ZEROSHIP_AUTH_PLATFORM_MINT_URL=http://auth:9092
   )
   # The GOOD overlay is the one this repo ships, so the control below is not a
   # hand-written minimum that happens to parse.
@@ -1337,7 +1509,16 @@ echo "  $PASS passed, $FAIL failed, $((PASS+FAIL)) ran"
 # RE-MEASURED 2026-08-13 after the deploy-path, secret_files and snapshot
 # blocks: 108 unconditional; 112 with the shipped compose + dev.rs present;
 # 114 with target/debug/zeroship-control built as well.
-MIN_RAN="${DEPLOY_SCRIPTS_MIN_RAN:-108}"
+# 2026-08-19: the overlay check for the platform mint credential is deleted, so
+# every count above drops by one. MEASURED both sides on one host with
+# target/debug/zeroship-control absent: 118 ran before, 117 after. That
+# credential is no longer a declared setting, so an overlay naming it is an
+# unknown field, which the --check-config case at the bottom already covers.
+# 2026-08-20: the source-tree block adds 11 unconditional assertions (4 parser
+# fixtures, 7 end-to-end through the stub ssh) plus 1 conditional one that needs
+# pnpm-lock.yaml, Cargo.toml and .gitmodules. MEASURED both sides on one host
+# with target/debug/zeroship-control absent: 117 ran before, 129 after.
+MIN_RAN=118
 RAN=$((PASS + FAIL))
 rc=0
 [ "$FAIL" -eq 0 ] || rc=1

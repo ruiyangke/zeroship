@@ -72,8 +72,20 @@ echo "============================================"
 echo "  zeroship E2E — Stripe-DELIVERED webhooks (stripe listen + trigger, REAL delivery)"
 echo "============================================"
 
-# --- prereq gates: skip cleanly when anything is missing --------------------
-PSQL="${ZEROSHIP_PSQL:-/nix/store/0hzvyg4lmry0cv8pgl1fw9j1rddyqqbj-postgresql-17.7/bin/psql}"
+# --- prereq gates: skip on absent Stripe credentials, REFUSE on absent psql -
+# psql: $PATH first, then any postgresql in the nix store, then refuse. This
+# replaced ZEROSHIP_PSQL, whose default was one pinned /nix/store hash that
+# resolved on exactly one machine; everywhere else it was absent and the
+# absence was `exit 0`, so this suite measured nothing and reported success.
+# Same chain as tests/e2e_auth_ui.sh, same variable name.
+PSQL="${PSQL:-}"
+if [ -z "$PSQL" ]; then
+  if command -v psql >/dev/null 2>&1; then
+    PSQL="$(command -v psql)"
+  else
+    PSQL="$(ls -d /nix/store/*postgresql*/bin/psql 2>/dev/null | head -1 || true)"
+  fi
+fi
 PGHOST=localhost; PGPORT=5440; PGUSER=postgres; PGPW=zeroship
 DB=zeroship_stripe_e2e
 
@@ -113,7 +125,10 @@ if [ -z "$STRIPE" ] || [ ! -x "$STRIPE" ]; then
 fi
 echo "  stripe CLI: $("$STRIPE" version 2>/dev/null | head -1) ($STRIPE)"
 
-[ -x "$PSQL" ] || { echo "  ⚠ SKIP: psql not found at $PSQL (set ZEROSHIP_PSQL)."; exit 0; }
+[ -n "$PSQL" ] && [ -x "$PSQL" ] || {
+  echo "  x ABORT: no psql on \$PATH or in the nix store; set PSQL to the Postgres client binary." >&2
+  exit 2
+}
 command -v node    >/dev/null 2>&1 || { echo "  ⚠ SKIP: node required."; exit 0; }
 command -v openssl >/dev/null 2>&1 || { echo "  ⚠ SKIP: openssl required."; exit 0; }
 command -v curl    >/dev/null 2>&1 || { echo "  ⚠ SKIP: curl required."; exit 0; }
@@ -228,7 +243,7 @@ ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$WORK/signing-key.pem"
 e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DBURL"
 ZEROSHIP_CONTROL_STRIPE_SECRET_KEY="$SK" ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET="$WEBHOOK_SECRET" \
-e2e_with_platform_mint_key "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
   --blob-store "$WORK/blobs" \
   --stripe-base-url "https://api.stripe.com" \
  > "$WORK/control.log" 2>&1 &

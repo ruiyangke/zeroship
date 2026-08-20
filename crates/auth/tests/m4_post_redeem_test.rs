@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-mod common;
+use crate::common;
 
 use std::future::Future;
 use std::sync::Arc;

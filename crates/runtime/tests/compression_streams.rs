@@ -9,7 +9,7 @@
 //! Round-trip + edge-case coverage per
 //! `docs/archive/compression-streams-native.md`'s test plan.
 
-mod common;
+use crate::common;
 
 use common::{dispatch, m};
 

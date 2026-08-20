@@ -36,9 +36,10 @@
 # USAGE
 #   tests/run_js_suite.sh
 #
-# ENV
-#   JS_MIN_PACKAGES (18)  packages that must actually RUN a test script
-#   JS_MIN_TESTS   (950)  total TAP assertions that must pass
+# FLOORS (constants below, not environment - a floor its caller can lower is
+# not a floor)
+#   JS_MIN_PACKAGES 18   packages that must actually RUN a test script
+#   JS_MIN_TESTS    950  total TAP assertions that must pass
 # ============================================================================
 set -uo pipefail
 
@@ -93,7 +94,7 @@ fi
 # changes only when someone adds or removes a suite, so there is no noise to
 # absorb - and a package silently dropping out is the exact defect this guards.
 # Adding a suite means raising this deliberately, which is the point.
-JS_MIN_PACKAGES="${JS_MIN_PACKAGES:-18}"
+JS_MIN_PACKAGES=18
 if [ "$packages" -lt "$JS_MIN_PACKAGES" ]; then
   echo "FAIL: only ${packages} packages ran a test script, fewer than the ${JS_MIN_PACKAGES} expected." >&2
   echo "A package whose 'test' script is renamed or removed is SKIPPED SILENTLY by pnpm -r." >&2
@@ -103,7 +104,7 @@ fi
 
 # 950 against 1056 measured 2026-08-10, ~10 percent headroom (was 800/862).
 # The +183 is @zeroship/migrate, un-excluded here.
-JS_MIN_TESTS="${JS_MIN_TESTS:-950}"
+JS_MIN_TESTS=950
 if [ "$tests_passed" -lt "$JS_MIN_TESTS" ]; then
   echo "FAIL: only ${tests_passed} JS tests passed, fewer than the ${JS_MIN_TESTS} expected." >&2
   status=1

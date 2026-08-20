@@ -15,7 +15,7 @@
 //!   - The legacy globals are gone.
 //!   - Unknown `node:*` specifiers surface a clear error.
 
-mod common;
+use crate::common;
 use common::{dispatch, m};
 
 #[test]

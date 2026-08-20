@@ -116,7 +116,13 @@ pub async fn tick_with_config(
     }
 
     let mut stats = DeployRetentionStats::default();
-    for app_id in super::workflow_engine::workflow_app_ids(&tx).await? {
+    // Only apps whose journal this connection can READ. An app excluded here
+    // keeps its superseded deploys and their manifests: this sweep reclaims a
+    // manifest on the strength of "no live run pins it", and that count comes
+    // from the journal, so an unreadable journal means the refcount is unknown
+    // and reclaiming would delete a manifest a running workflow still replays
+    // from.
+    for app_id in super::workflow_engine::journalled_app_ids(&tx).await? {
         if remaining <= 0 {
             break;
         }

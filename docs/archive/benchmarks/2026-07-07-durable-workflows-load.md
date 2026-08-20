@@ -6,7 +6,10 @@ not satisfy operator G3 sign-off by itself.
 ## Harness
 
 - Command:
-  `ZEROSHIP_DW23_BENCH_ONLY=1 ZEROSHIP_DW23_BENCH_RUNS=128 ZEROSHIP_DW23_BENCH_CONCURRENCY=32 ZEROSHIP_DW23_BENCH_MAX_SECS=90 ./tests/e2e_durable_workflows.sh`
+  `./tests/e2e_durable_workflows.sh --bench`
+- Parameters: runs=128, concurrency=32, max_secs=90. They were four environment
+  variables when this was recorded and are literals in the test now, so the
+  command above reproduces the run exactly. If they change, re-archive.
 - Stack: real control service, real gateway, real worker, real control DB,
   deployed `.zship`, and `workflow_engine::tick_with_dispatcher` driven from an
   ignored Rust test.

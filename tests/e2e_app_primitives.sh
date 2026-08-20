@@ -51,6 +51,9 @@
 #       cargo test -p zeroship-runtime --test bootstrap_install_schema_resolve
 #       4 passed; 0 failed  (resolves_and_is_callable, resolves_during_module
 #       _evaluation, shares_instance_across_imports, transitive_db_internal)
+#     That target name stopped resolving on 2026-08-20: the file is a module of
+#     tests/main.rs now. Rerun it with
+#       cargo test -p zeroship-runtime --test main -- bootstrap_install_schema_resolve::
 #
 # So db-todos DOES run on the worker. It is the DEPLOYED vehicle of
 # tests/e2e_dev_vs_deployed_db.sh, and `tests/golden_path.sh` step 10 deploys
@@ -196,7 +199,7 @@ PIDS+=($E2E_PLATFORM_OP_PID)
 ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
 e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DBURL"
-e2e_with_platform_mint_key "$BIN/zeroship-control" --port $ZEROSHIP_CONTROL_PORT \
+"$BIN/zeroship-control" --port $ZEROSHIP_CONTROL_PORT \
   --blob-store "$WORK/blobs" \
   --migrated-url "http://localhost:$ZEROSHIP_MIGRATED_PORT" \
  > "$WORK/control.log" 2>&1 &

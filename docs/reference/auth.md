@@ -211,9 +211,12 @@ silently becoming a pairwise token control would refuse. The refresh row
 stores the principal subject too, which is what makes reuse detection write
 the `zeroship.token_revocations` marker described below.
 
-`PLATFORM_TOKEN_MAX_TTL_SECS` (12 hours) still bounds control's parallel mint,
-which issues no refresh token and therefore has nothing shorter to fall back
-on.
+`PLATFORM_TOKEN_MAX_TTL_SECS` (12 hours) is the ceiling on any registered
+client's token lifetime, and it sets the signing-key retention horizon: a
+retired key is kept for that ceiling plus the JWKS cache window and the
+clock-skew allowance, so no issued token outlives the key that verifies it.
+The constant is named for the mint described above, which no longer exists;
+what it bounds today is the OP's own issuance.
 
 Control's bearer verification path honors a
 `zeroship.token_revocations` marker for `zeroship-cli`. Account deletion writes

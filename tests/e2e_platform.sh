@@ -242,7 +242,7 @@ stack_pg_up || { echo "  ✗ ephemeral Postgres bring-up failed"; exit 2; }
 # to verify the admin bearer. Name an issuer nothing serves and every
 # `/api/apps` call answers 401 {"error":"platform_token_verification_failed"},
 # which is exactly how this harness died before, silently, inside `$(curl -sf)`.
-e2e_with_platform_mint_key "$BIN/zeroship-control" --port $ZEROSHIP_CONTROL_PORT --blob-store "$WORK/blobs" \
+"$BIN/zeroship-control" --port $ZEROSHIP_CONTROL_PORT --blob-store "$WORK/blobs" \
     > "$WORK/control.log" 2>&1 &
 PIDS+=($!)
 for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
@@ -250,8 +250,7 @@ for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/ready
 # Start 3 separate workers (so we can verify routing)
 WORKER_URL_LIST=""
 for port in "${WORKER_PORTS[@]}"; do
-    e2e_without_platform_mint_key \
-      "$BIN/zeroship-worker" --port "$port" --threads 2 --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
+    "$BIN/zeroship-worker" --port "$port" --threads 2 --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
  --blob-store "$WORK/blobs" \
         --poll-interval 2 > "$WORK/worker-$port.log" 2>&1 &
     PIDS+=($!)
@@ -261,8 +260,7 @@ done
 
 # Start gateway. cd54028e7 made it refuse to start without a broker master
 # secret; $WORK/gate-secret comes from stack_workspace.
-e2e_without_platform_mint_key \
-  "$BIN/zeroship-gate" --port $ZEROSHIP_GATEWAY_PORT --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
+"$BIN/zeroship-gate" --port $ZEROSHIP_GATEWAY_PORT --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
  --worker-urls "$WORKER_URL_LIST" --poll-interval 2 \
  --blob-store "$WORK/blobs" --blob-cache-disk-root "$WORK/blob-cache" \
     --signing-key-file "$WORK/signing-key.pem" \

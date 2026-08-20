@@ -23,7 +23,7 @@ use uuid::Uuid;
 use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::server;
 
-mod common;
+use crate::common;
 use common::{native_authorize_return_to, read_set_cookie, test_auth_config, CookieJar};
 
 fn median(durations: &mut [Duration]) -> Duration {

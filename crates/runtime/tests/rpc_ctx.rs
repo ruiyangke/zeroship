@@ -8,7 +8,7 @@
 //!
 //! See `docs/proposals/rpc.md` §3 (Ambient context).
 
-mod common;
+use crate::common;
 use common::{dispatch, m};
 
 // ---------------------------------------------------------------------------

@@ -117,12 +117,12 @@ SUITE_LOG="${SUITE_LOG:-${TMPDIR:-/tmp}/plugin-db-live.log}"
 # floor ensures all three run in CI rather than only when invoked by hand.
 # The three real-Runtime unmigrated-path tests added to `native_transaction`
 # raise the measured full-suite census from 113 to 116.
-PLUGIN_DB_MIN_PASSED="${PLUGIN_DB_MIN_PASSED:-116}"
+PLUGIN_DB_MIN_PASSED=116
 
 # Only postgis. An EMPTY allowlist would be wrong in the other direction:
 # `grep -E ''` matches every line, so zs_skip_lines branches on empty rather
 # than passing it through - see the note in tests/lib/skip_census.sh.
-PLUGIN_DB_SKIP_ALLOWLIST="${PLUGIN_DB_SKIP_ALLOWLIST:-postgis}"
+PLUGIN_DB_SKIP_ALLOWLIST="postgis"
 
 . "$ROOT/tests/lib/skip_census.sh"
 

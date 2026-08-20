@@ -137,6 +137,14 @@ landlock = "0.4"
 itoa = "1"
 socket2 = { version = "0.5", features = ["all"] }
 ada-url = "3.4.4"
+# CIDR parsing + containment for the `node:net` egress rule set
+# (`zeroship_core::net_policy::Destination::Range`). Parse and `contains`
+# ONLY: its special-range predicates are not adopted and `is_blocked_ip`
+# stays hand-rolled, because every maintained crate's `is_global()` omits
+# forms `crates/runtime/src/transport/ssrf.rs` handles and adopting one
+# would silently WIDEN the SSRF floor. `default = ["std"]`, `std = []` -
+# zero transitive crates, so it adds nothing to the tokio graph.
+ipnet = { version = "2.12", features = ["serde"] }
 
 # V8
 v8 = "147"
@@ -264,3 +272,26 @@ nursery = { level = "warn", priority = -1 }
 # explicitly rather than left to `all` so that relaxing `all` cannot silently
 # relax this, and so the deny is visible where someone would look for it.
 disallowed_methods = "deny"
+
+# ---------------------------------------------------------------------------
+# Build profiles
+# ---------------------------------------------------------------------------
+
+# MEASURED 2026-08-19: with cargo's default `debug = true`, target/ reached 88G
+# on main, 128G and 111G in two agent worktrees. 57.7G of that was 145 separate
+# test executables -- cargo links one per file under tests/, and there are 313
+# such files (runtime 137, auth 52, control 47). Stripping the debug sections
+# from four of them measured 71-92% of each binary:
+#
+#   net_grants_test        639 MB ->  94 MB
+#   stripe_reconcile_test  634 MB ->  88 MB
+#   platform_migrate       389 MB -> 112 MB
+#   link_lockout_test      322 MB ->  24 MB
+#
+# `line-tables-only` keeps file and line for panics and backtraces, which is
+# what a failing test needs, and drops the type and variable DWARF, which only
+# an interactive debugger needs. The cost is real and is stated so nobody has
+# to rediscover it: `gdb`/`lldb` can no longer inspect local variables here.
+# Raise this to `true` locally if you are stepping through code.
+[profile.dev]
+debug = "line-tables-only"
