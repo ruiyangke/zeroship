@@ -97,12 +97,22 @@
 //!
 //! # The shared SQLite-DML module seam
 //!
-//! The SQLite numbered `?n` placeholder emission lives in [`sqlite_placeholder`]
-//! (called through [`placeholder`]), the SINGLE place the one-shot DML assembler
-//! and the batched-backfill SQLite executor both emit positional
-//! placeholders — so the two paths never fork a divergent copy of the `?n`-binding
-//! logic (ONE SQLite-DML-assembly module). The transport-safe bind mirror
-//! ([`crate::apply::backend::sqlite::actor::SqliteBind`]) is likewise the single
+//! The SQLite numbered `?n` placeholder spelling lives in [`sqlite_placeholder`],
+//! which the batched-backfill SQLite executor calls. The one-shot DML assembler
+//! does NOT reach it by that name: it emits through `BindCtx::push`, which asks its
+//! already-resolved backend (`self.backend.placeholder(n)`), and the SQLite backend's
+//! impl is the same spelling.
+//!
+//! **This paragraph used to claim the two paths met at a shared
+//! `placeholder(dialect, n)` function. They never did** — that function had zero
+//! callers and was deleted; see the tombstone above its old home below. The two
+//! paths agree because both end at `SqliteDmlRenderer`, not because a common
+//! function routes them, and the distinction matters: the old wording made a
+//! `renderer(dialect)` lookup nothing performed look like a dialect boundary, and it
+//! was counted as one.
+//!
+//! The transport-safe bind mirror
+//! ([`crate::apply::backend::sqlite::actor::SqliteBind`]) is the single
 //! value-binding path the SQLite executor uses.
 
 use std::collections::BTreeMap;

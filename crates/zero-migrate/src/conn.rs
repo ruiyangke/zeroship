@@ -51,8 +51,8 @@ pub struct ConfinementConfig {
     ///
     /// Maps to `SET statement_timeout` on PostgreSQL and to
     /// `max_execution_time` on MySQL. Both engines read a zero as "no limit",
-    /// so a zero is refused at [`crate::apply::timeout::resolve_timeout_ms`]
-    /// rather than clamped.
+    /// so a zero is refused at `apply::timeout::resolve_timeout_ms` (crate-private,
+    /// so named rather than linked) rather than clamped.
     pub statement_timeout: Duration,
     /// Mandatory, **separate, SHORT** lock-ACQUISITION timeout (the
     /// safe-migration lock-safety envelope — strong_migrations / Atlas PG101 &
