@@ -115,14 +115,18 @@
 //!
 //! # What is still coupled, and where: NOTHING, and that is now a pinned number
 //!
-//! This section used to name a live instance — `render::lower::render_sqlite_trigger_op`
-//! and its helpers calling the bare `dml::quote_bare_ident` at six sites, with
-//! `backends/sqlite.rs` delegating its trigger rendering there so the coupling
-//! survived one hop away. THAT IS PAST TENSE. Those three functions route every
-//! identifier through `quote_bare_ident_for_dialect(.., SQLITE_TRIGGER_DIALECT)`, the
-//! wrapper they used no longer exists, and the count is a RATCHET AT ITS STOP rather
-//! than a claim in prose: `tests/dialect_matrix/sqlite_trigger_quoting_reaches_postgres.rs`
-//! asserts zero pinned calls in `lower.rs` AND zero anywhere else under `src/`.
+//! This section used to name a live instance — `render_sqlite_trigger_op` and its
+//! helpers, then in `render::lower`, calling the bare `dml::quote_bare_ident` at six
+//! sites, with `backends/sqlite.rs` delegating its trigger rendering there so the
+//! coupling survived one hop away. THAT IS PAST TENSE TWICE OVER. Those three
+//! functions route every identifier through `quote_bare_ident_for_dialect(..,
+//! DIALECT)`, the wrapper they used no longer exists, and step 3 then moved them out
+//! of core into `backends/sqlite.rs`, so the hop is gone as well as the reach. The
+//! count is a RATCHET AT ITS STOP rather than a claim in prose:
+//! `tests/dialect_matrix/sqlite_trigger_quoting_reaches_postgres.rs` asserts zero
+//! pinned calls in the module that holds the trigger renderer AND zero anywhere else
+//! under `src/`, and anchors itself on that module so the next move of the subject
+//! goes red instead of quietly scanning the wrong file.
 //!
 //! Prefer that test to this paragraph. The reason this section carried a false
 //! present-tense claim for as long as it did is that prose cannot go red, and the

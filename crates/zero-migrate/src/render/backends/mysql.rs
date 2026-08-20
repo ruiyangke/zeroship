@@ -1,7 +1,8 @@
 //! MySQL SQL spelling. The future `zero-migrate-mysql`.
 //!
-//! This is the only backend module whose trigger spelling actually lives here;
-//! PostgreSQL's is still in `render::vendor` and SQLite's in `render::lower`.
+//! This was the only backend module whose trigger spelling actually lived here, and
+//! it is therefore the worked example step 3 followed: SQLite's now sits in
+//! `backends/sqlite.rs` in the same shape. PostgreSQL's is still in `render::vendor`.
 
 use crate::model::expr::{CastTarget, ExtractField, ScalarFn};
 use crate::model::ir::{

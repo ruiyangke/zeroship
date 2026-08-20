@@ -13,18 +13,31 @@
 //! `render::dml::quote_bare_ident` is the PostgreSQL-PINNED identifier wrapper: it
 //! delegates to `quote_ident`, which is `quote_ident_for_dialect(.., SqlDialect::
 //! Postgres)`, which resolves to `PostgresDmlRenderer::quote_ident`.
-//! `render::lower::render_sqlite_trigger_op` and its helpers called it SIX times, and
+//! `render_sqlite_trigger_op` and its helpers called it SIX times, and
 //! `backends/sqlite.rs` delegates its trigger rendering there. So every identifier in
 //! a rendered SQLite trigger was quoted by the PostgreSQL renderer.
 //!
-//! THAT IS PAST TENSE AS OF THIS FILE'S `PINNED_CALLS_IN_LOWER = 0`. Those three
-//! functions now route every identifier through `quote_bare_ident_for_dialect(..,
-//! SQLITE_TRIGGER_DIALECT)`, a single `const` in `lower.rs` that also absorbed the
-//! thirteen other `SqlDialect::Sqlite` literals they carried — so exactly one line in
-//! the SQLite trigger path knows which vendor it is, which is the rule
-//! `backends/mod.rs` already states for a backend module. The paragraphs below are
-//! kept in the past tense rather than deleted: they are the measurement that made the
-//! fix arguable, and this file's job now is to stop it coming back.
+//! THAT IS PAST TENSE AS OF THIS FILE'S `PINNED_CALLS_IN_THE_TRIGGER_PATH = 0`. Those
+//! three functions now route every identifier through `quote_bare_ident_for_dialect(..,
+//! DIALECT)`, a single `const` in the module that also absorbed the thirteen other
+//! dialect literals they carried — so exactly one line in the SQLite trigger path
+//! knows which vendor it is, which is the rule `backends/mod.rs` already states for a
+//! backend module. The paragraphs below are kept in the past tense rather than
+//! deleted: they are the measurement that made the fix arguable, and this file's job
+//! now is to stop it coming back.
+//!
+//! # The subject MOVED, and this file followed it deliberately
+//!
+//! Those three functions lived in `render/lower.rs` when this test was written, and
+//! this census read `lower.rs` by name. Step 3 of `docs/proposals/pluggable-backends.md`
+//! relocated them into `render/backends/sqlite.rs`, where MySQL's trigger spelling
+//! already lived. A census whose needle is a filename does not notice that: it would
+//! have gone on scanning a file that no longer contains its subject and reporting a
+//! comfortable zero forever. So the census names its subject FILE and its subject
+//! FUNCTION, and its first act is `assert_subject_is_where_this_file_says_it_is`,
+//! which fails if the trigger renderer is not in the file being scanned OR is still
+//! in the file it left. Repointing this file was part of the move, not a follow-up —
+//! and the anchor is what makes the next move fail loudly instead of silently.
 //!
 //! VERIFIED, not inferred. A crate-extraction spike moved `backends/sqlite.rs` and
 //! `apply/backend/sqlite/` into a real `zero-migrate-sqlite` crate, replaced
@@ -59,16 +72,28 @@ use std::path::{Path, PathBuf};
 /// is currently allowed. It is a RATCHET, not a target: see the flip note below.
 ///
 /// FLIPPED FROM 6 TO 0. `render_sqlite_trigger_op` and its two helpers now route
-/// every identifier through `quote_bare_ident_for_dialect(.., SQLITE_TRIGGER_DIALECT)`,
-/// a single `const SQLITE_TRIGGER_DIALECT: SqlDialect = SqlDialect::Sqlite` that also
-/// absorbed the thirteen other `SqlDialect::Sqlite` literals those three functions
-/// carried. Nothing about the emitted SQL moved — it could not, for the reason the
-/// second test below pins — so this file is now the "must never come back" guard its
-/// own flip note promised it would become, and the module header's
+/// every identifier through `quote_bare_ident_for_dialect(.., DIALECT)`, a single
+/// `const DIALECT` that also absorbed the thirteen other dialect literals those three
+/// functions carried. Nothing about the emitted SQL moved — it could not, for the
+/// reason the second test below pins — so this file is now the "must never come back"
+/// guard its own flip note promised it would become, and the module header's
 /// `zero-migrate-sqlite would need zero-migrate-postgres` finding is FALSE.
-const PINNED_CALLS_IN_LOWER: usize = 0;
+const PINNED_CALLS_IN_THE_TRIGGER_PATH: usize = 0;
 
-/// The census: ZERO PG-pinned identifier quotes, in `lower.rs` or anywhere else.
+/// The file the SQLite trigger spelling lives in, and the file it LEFT.
+///
+/// Both are named because the anchor is two-sided: "it is here" alone would pass on a
+/// copy, and "it is not there" alone would pass on a deletion.
+const SUBJECT_FILE: &str = "render/backends/sqlite.rs";
+const FORMER_SUBJECT_FILE: &str = "render/lower.rs";
+
+/// The subject itself. `render_sqlite_trigger_op` is the entry point
+/// `SqliteDmlRenderer::render_trigger_op` calls, and the two helpers under it are
+/// where four of the original six pinned calls sat.
+const SUBJECT_FN: &str = "fn render_sqlite_trigger_op(";
+
+/// The census: ZERO PG-pinned identifier quotes, in the SQLite trigger path's own
+/// module or anywhere else.
 ///
 /// # This test was GREEN at 6 on purpose, and is now green at 0 for a better reason
 ///
@@ -101,19 +126,23 @@ const PINNED_CALLS_IN_LOWER: usize = 0;
 /// route the new site through `quote_bare_ident_for_dialect(.., DIALECT)`.
 #[test]
 fn no_sqlite_render_path_is_quoted_by_the_postgres_pinned_wrapper() {
-    // `include_str!` is a compile-time dependency: editing lower.rs rebuilds this
-    // binary, so the count cannot silently drift out from under the pin.
-    let lower = include_str!("../../src/render/lower.rs");
-    let in_lower = count_pinned_calls(lower);
+    // `include_str!` is a compile-time dependency: editing either file rebuilds this
+    // binary, so neither the count nor the anchor can silently drift out from under
+    // the pin.
+    let subject = include_str!("../../src/render/backends/sqlite.rs");
+    let former = include_str!("../../src/render/lower.rs");
+    assert_subject_is_where_this_file_says_it_is(subject, former);
+
+    let in_subject = count_pinned_calls(subject);
 
     assert_eq!(
-        in_lower, PINNED_CALLS_IN_LOWER,
-        "render/lower.rs makes {in_lower} call(s) to the PostgreSQL-pinned \
-         `dml::quote_bare_ident`; the pin says {PINNED_CALLS_IN_LOWER}.\n\
+        in_subject, PINNED_CALLS_IN_THE_TRIGGER_PATH,
+        "src/{SUBJECT_FILE} makes {in_subject} call(s) to the PostgreSQL-pinned \
+         `dml::quote_bare_ident`; the pin says {PINNED_CALLS_IN_THE_TRIGGER_PATH}.\n\
          \n\
          The pin is at 0 and 0 is the stop: the SQLite trigger path was routed \
-         through `quote_bare_ident_for_dialect(.., SQLITE_TRIGGER_DIALECT)` and \
-         nothing in the crate calls the pinned wrapper any more. So {in_lower} > 0 \
+         through `quote_bare_ident_for_dialect(.., DIALECT)` and nothing in the \
+         crate calls the pinned wrapper any more. So {in_subject} > 0 \
          means a render path has been quoted by the PostgreSQL renderer again - \
          route it through `quote_bare_ident_for_dialect(.., DIALECT)`, naming the \
          dialect ONCE per module as `lower.rs` and `backends/*.rs` both do.\n\
@@ -143,7 +172,7 @@ fn no_sqlite_render_path_is_quoted_by_the_postgres_pinned_wrapper() {
             .unwrap_or(&file)
             .display()
             .to_string();
-        if rel != "render/lower.rs" {
+        if rel != SUBJECT_FILE {
             elsewhere.push((rel, hits));
         }
     }
@@ -151,17 +180,60 @@ fn no_sqlite_render_path_is_quoted_by_the_postgres_pinned_wrapper() {
     assert!(
         elsewhere.is_empty(),
         "the PostgreSQL-pinned `dml::quote_bare_ident` is called outside \
-         render/lower.rs: {elsewhere:?}. Every identifier seam in the crate other \
+         src/{SUBJECT_FILE}: {elsewhere:?}. Every identifier seam in the crate other \
          than the SQLite trigger path goes through `quote_ident_checked` (also \
          PG-pinned, but its callers ARE PostgreSQL). A new caller here is either a \
          PostgreSQL path that should say `quote_ident_checked`, or a non-PostgreSQL \
          path that should say `quote_bare_ident_for_dialect(.., DIALECT)`."
     );
     assert_eq!(
-        total, in_lower,
-        "crate-wide pinned-call count ({total}) disagrees with the lower.rs count \
-         ({in_lower}) even though no other file reported hits; the two counters \
+        total, in_subject,
+        "crate-wide pinned-call count ({total}) disagrees with the src/{SUBJECT_FILE} \
+         count ({in_subject}) even though no other file reported hits; the two counters \
          have diverged and one of them is lying."
+    );
+}
+
+/// The anchor: the census must be reading the file the SQLite trigger spelling is
+/// actually in.
+///
+/// # Why a census needs one
+///
+/// This file's first half is a TEXTUAL count over a NAMED file. That construction has
+/// exactly one silent failure mode, and it is not a wrong count: it is a right count
+/// of the wrong file. Move the subject out and the needle finds nothing, the count is
+/// 0, the pin is 0, and the suite is green while the thing being guarded is
+/// unguarded. That is strictly worse than deleting the test, because the green is
+/// read as evidence.
+///
+/// It is not hypothetical here. Step 3 of `docs/proposals/pluggable-backends.md`
+/// moved these three functions out of `render/lower.rs` and into
+/// `render/backends/sqlite.rs`, next to MySQL's trigger spelling. This assertion is
+/// what turned that move into a RED that had to be answered.
+///
+/// Both directions are checked on purpose. "The subject is in the file I scan" alone
+/// passes if a copy is left behind in the old home and keeps quoting through the
+/// pinned wrapper; "the subject is not in the old file" alone passes if it was simply
+/// deleted. The pair says it moved, once, to here.
+fn assert_subject_is_where_this_file_says_it_is(subject: &str, former: &str) {
+    assert!(
+        subject.contains(SUBJECT_FN),
+        "src/{SUBJECT_FILE} does not contain `{SUBJECT_FN}`, so the census below is \
+         counting a file that does not hold the SQLite trigger spelling and its zero \
+         means nothing.\n\
+         \n\
+         Either the renderer moved again — repoint SUBJECT_FILE at its new home in \
+         the SAME commit that moves it, exactly as the step-3 move did — or it was \
+         renamed, in which case repoint SUBJECT_FN. Do not delete this assertion to \
+         get green: it exists because a census that scans a file its subject has left \
+         is the one failure this test cannot otherwise see."
+    );
+    assert!(
+        !former.contains(SUBJECT_FN),
+        "src/{FORMER_SUBJECT_FILE} still contains `{SUBJECT_FN}`. The SQLite trigger \
+         spelling was moved OUT of the core lowerer into src/{SUBJECT_FILE}; a copy \
+         left behind there is a second implementation the census does not scan, and \
+         the one it does scan will happily report zero for it."
     );
 }
 

@@ -1,7 +1,18 @@
 //! SQLite SQL spelling. The future `zero-migrate-sqlite`.
+//!
+//! The trigger spelling at the bottom of this file arrived here in step 3 of
+//! `docs/proposals/pluggable-backends.md`, from `render::lower`. It is a DIRECTORY
+//! MOVE and nothing else: same functions, same bytes emitted, one const renamed. It
+//! was the last SQLite render path living in the 17k-line core lowerer, and its own
+//! doc had already said so — `backends/sqlite.rs`'s `render_trigger_op` carried a
+//! note calling the delegation "a POINTER to work that `lower.rs`'s own step-3 pass
+//! has to finish, not a boundary that is done". This is that pass. MySQL's trigger
+//! spelling was the worked example of where it lands.
 
 use crate::model::expr::{CastTarget, ExtractField, ScalarFn};
-use crate::model::ir::{IrScalar, Op, TableRef};
+use crate::model::ir::{
+    ForEach, IrScalar, Op, RaiseLevel, TableRef, TriggerAction, TriggerEvent, TriggerStmt,
+};
 use crate::render::dml::{self, DmlError};
 use crate::render::lower::IrLowerError;
 use crate::render::renderer::{Capability, DialectSupports, DmlRenderer};
@@ -10,6 +21,31 @@ use crate::schema::query::SqlDialect;
 
 /// This module's own vendor identity — the ONE dialect literal it is allowed to
 /// name. See `backends/mod.rs`.
+///
+/// # It absorbed the trigger renderer's const on the way in
+///
+/// `render_sqlite_trigger_op` and the two helpers below it named this vendor
+/// nineteen times between them while they lived in `render::lower`: thirteen
+/// capability and inline-render arguments that were already right, and six identifier
+/// quotes that were NOT. Those six called the PostgreSQL-pinned
+/// `dml::quote_bare_ident`, so every identifier in a rendered SQLite trigger was
+/// spelled by `PostgresDmlRenderer::quote_ident` — correct only because both vendors
+/// spell an identifier `"x"`, and a hard blocker on extracting a `zero-migrate-sqlite`
+/// crate that does not need `zero-migrate-postgres` at RUNTIME. A crate-extraction
+/// spike proved the reach was live rather than theoretical: it rendered a
+/// `createTrigger` from inside the extracted crate and got PostgreSQL's marker back
+/// in the SQLite trigger SQL.
+///
+/// Routing those six through `quote_bare_ident_for_dialect` was the fix; folding the
+/// other thirteen into a single const is what made it stay fixed. That const was
+/// `SQLITE_TRIGGER_DIALECT`, a `lower.rs`-local stand-in for the rule this file
+/// already obeyed, and its whole purpose was to make the eventual move of those three
+/// functions a RELOCATION rather than an edit. It worked: the move renamed one
+/// identifier and touched nothing else, and this const is the thing it was renamed to.
+///
+/// Pinned by `tests/dialect_matrix/sqlite_trigger_quoting_reaches_postgres.rs`, whose
+/// count went 6 → 0 when the fix landed and whose subject-anchor followed the three
+/// functions here.
 const DIALECT: SqlDialect = SqlDialect::Sqlite;
 
 #[derive(Debug)]
@@ -259,19 +295,327 @@ impl DmlRenderer for SqliteDmlRenderer {
         Ok(sql)
     }
 
-    /// NOTE (step 3, not yet resolved): the SQLite trigger SPELLING still lives
-    /// in `render::lower::render_sqlite_trigger_op` — roughly 250 lines inside
-    /// the 16.9k-line core lowerer. This delegation is a POINTER to work that
-    /// `lower.rs`'s own step-3 pass has to finish, not a boundary that is done.
-    /// PostgreSQL is in the same position via `render::vendor`; only MySQL's
-    /// trigger spelling actually lives in its backend module today.
+    /// STEP 3, RESOLVED. The 315 lines this used to reach across the crate for now
+    /// sit at the bottom of this file, and the delegation is a local call.
+    ///
+    /// The note that stood here said the SQLite trigger SPELLING still lived in
+    /// `render::lower::render_sqlite_trigger_op`, inside the 17k-line core lowerer,
+    /// and that this delegation was "a POINTER to work that `lower.rs`'s own step-3
+    /// pass has to finish, not a boundary that is done". Nothing about the emitted
+    /// SQL changed when it moved — that is what made it a move.
+    ///
+    /// PostgreSQL is STILL in the position SQLite just left, via `render::vendor`,
+    /// and that one is not the same shape: `render::vendor` is PostgreSQL by
+    /// CONSTRUCTION rather than by gate (it carries no dialect literal at all), so
+    /// every dialect-match census scores it zero. Do not read this resolved note as
+    /// covering it.
     fn render_trigger_op(
         &self,
         op: &Op,
         eff_schema: &str,
     ) -> Result<Vec<crate::render::vendor::VendorStatement>, IrLowerError> {
-        Ok(vec![crate::render::lower::render_sqlite_trigger_op(
-            op, eff_schema,
-        )?])
+        Ok(vec![render_sqlite_trigger_op(op, eff_schema)?])
+    }
+}
+
+fn render_sqlite_trigger_op(
+    op: &Op,
+    eff_schema: &str,
+) -> Result<crate::render::vendor::VendorStatement, IrLowerError> {
+    match op {
+        Op::CreateTrigger {
+            name,
+            table,
+            timing,
+            events,
+            for_each,
+            when,
+            action,
+            ..
+        } => {
+            if events.is_empty() {
+                return Err(IrLowerError::Vendor(
+                    crate::render::vendor::VendorError::EmptyList {
+                        what: "trigger events",
+                    },
+                ));
+            }
+            if events.iter().any(|e| matches!(e, TriggerEvent::Truncate))
+                && !DIALECT.supports(Capability::TriggerTruncateEvent)
+            {
+                return Err(IrLowerError::TriggerUnsupported {
+                    kind: "triggerEventTruncate",
+                    dialect: DIALECT,
+                });
+            }
+            if matches!(for_each, ForEach::Statement)
+                && !DIALECT.supports(Capability::TriggerStatementForEach)
+            {
+                return Err(IrLowerError::TriggerUnsupported {
+                    kind: "forEachStatement",
+                    dialect: DIALECT,
+                });
+            }
+            let TriggerAction::Body { statements } = action else {
+                if !DIALECT.supports(Capability::TriggerExecuteFunction) {
+                    return Err(IrLowerError::TriggerUnsupported {
+                        kind: "executeFunction",
+                        dialect: DIALECT,
+                    });
+                }
+                return Err(IrLowerError::UnsupportedOp(
+                    "SQLite trigger action routed past capability check",
+                ));
+            };
+            if !DIALECT.supports(Capability::TriggerBody) {
+                return Err(IrLowerError::TriggerUnsupported {
+                    kind: "triggerBody",
+                    dialect: DIALECT,
+                });
+            }
+            if statements.is_empty() {
+                return Err(IrLowerError::Vendor(
+                    crate::render::vendor::VendorError::EmptyList {
+                        what: "trigger body statements",
+                    },
+                ));
+            }
+
+            let qname = crate::render::dml::quote_bare_ident_for_dialect("trigger", name, DIALECT)?;
+            let qtable = crate::render::dml::quote_bare_ident_for_dialect("table", table, DIALECT)?;
+            let events_sql = events
+                .iter()
+                .map(|e| e.as_sql())
+                .collect::<Vec<_>>()
+                .join(" OR ");
+            let mut up = format!(
+                "CREATE TRIGGER {qname} {} {events_sql} ON {qtable}",
+                timing.as_sql()
+            );
+            up.push_str(" FOR EACH ROW");
+            if let Some(pred) = when {
+                up.push_str(&format!(
+                    " WHEN ({})",
+                    crate::render::dml::render_predicate_sqlite(pred)?
+                ));
+            }
+            let body: Result<Vec<_>, _> = statements
+                .iter()
+                .map(|stmt| render_sqlite_trigger_stmt(stmt, eff_schema))
+                .collect();
+            up.push_str(" BEGIN ");
+            up.push_str(
+                &body?
+                    .into_iter()
+                    .map(|s| format!("{s};"))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+            up.push_str(" END;");
+            Ok(crate::render::vendor::VendorStatement {
+                name: format!("create_trigger_{name}_{table}"),
+                up,
+                down: Some(format!("DROP TRIGGER IF EXISTS {qname}")),
+            })
+        }
+        Op::DropTrigger {
+            name,
+            table,
+            if_exists,
+            ..
+        } => {
+            let qname = crate::render::dml::quote_bare_ident_for_dialect("trigger", name, DIALECT)?;
+            let mut up = String::from("DROP TRIGGER ");
+            if if_exists.unwrap_or(false) {
+                up.push_str("IF EXISTS ");
+            }
+            up.push_str(&qname);
+            Ok(crate::render::vendor::VendorStatement {
+                name: format!("drop_trigger_{name}_{table}"),
+                up,
+                down: None,
+            })
+        }
+        _ => Err(IrLowerError::UnsupportedOp(
+            "non-trigger op routed to trigger renderer",
+        )),
+    }
+}
+
+fn sqlite_trigger_table_ref(
+    table: &str,
+    schema: Option<&str>,
+    eff_schema: &str,
+) -> Result<String, IrLowerError> {
+    if let Some(schema) = schema {
+        if !schema.eq_ignore_ascii_case(eff_schema) {
+            return Err(IrLowerError::LowerCrossSchema(schema.to_string()));
+        }
+    }
+    Ok(crate::render::dml::quote_bare_ident_for_dialect(
+        "table", table, DIALECT,
+    )?)
+}
+
+fn render_sqlite_trigger_stmt(
+    stmt: &TriggerStmt,
+    eff_schema: &str,
+) -> Result<String, IrLowerError> {
+    match stmt {
+        TriggerStmt::Insert {
+            table,
+            columns,
+            rows,
+            schema,
+        } => {
+            if columns.is_empty() {
+                return Err(IrLowerError::DmlAssemble(
+                    crate::render::dml::DmlError::MalformedInsert {
+                        table: table.clone(),
+                        reason: "no columns".to_string(),
+                    },
+                ));
+            }
+            if rows.is_empty() {
+                return Err(IrLowerError::DmlAssemble(
+                    crate::render::dml::DmlError::MalformedInsert {
+                        table: table.clone(),
+                        reason: "no rows".to_string(),
+                    },
+                ));
+            }
+            let qtable = sqlite_trigger_table_ref(table, schema.as_deref(), eff_schema)?;
+            let qcols: Result<Vec<_>, _> = columns
+                .iter()
+                .map(|c| crate::render::dml::quote_bare_ident_for_dialect("column", c, DIALECT))
+                .collect();
+            let qcols = qcols?;
+            let mut groups = Vec::with_capacity(rows.len());
+            for (ri, row) in rows.iter().enumerate() {
+                if row.len() != columns.len() {
+                    return Err(IrLowerError::DmlAssemble(
+                        crate::render::dml::DmlError::MalformedInsert {
+                            table: table.clone(),
+                            reason: format!(
+                                "row {ri} has {} value(s) but {} column(s) were named",
+                                row.len(),
+                                columns.len()
+                            ),
+                        },
+                    ));
+                }
+                let vals: Result<Vec<_>, _> = row
+                    .iter()
+                    .map(|v| crate::render::dml::render_value_inline(v, DIALECT))
+                    .collect();
+                groups.push(format!("({})", vals?.join(", ")));
+            }
+            Ok(format!(
+                "INSERT INTO {qtable} ({}) VALUES {}",
+                qcols.join(", "),
+                groups.join(", ")
+            ))
+        }
+        TriggerStmt::Update {
+            table,
+            set,
+            r#where,
+            schema,
+        } => {
+            if set.is_empty() {
+                return Err(IrLowerError::DmlAssemble(
+                    crate::render::dml::DmlError::EmptySet {
+                        op: "update",
+                        table: table.clone(),
+                    },
+                ));
+            }
+            let qtable = sqlite_trigger_table_ref(table, schema.as_deref(), eff_schema)?;
+            let mut assigns = Vec::with_capacity(set.len());
+            for (col, rhs) in set {
+                assigns.push(format!(
+                    "{} = {}",
+                    crate::render::dml::quote_bare_ident_for_dialect("column", col, DIALECT)?,
+                    crate::render::dml::render_value_inline(rhs, DIALECT)?
+                ));
+            }
+            let mut sql = format!("UPDATE {qtable} SET {}", assigns.join(", "));
+            if let Some(pred) = r#where {
+                sql.push_str(&format!(
+                    " WHERE {}",
+                    crate::render::dml::render_expr_inline(pred, DIALECT)?
+                ));
+            }
+            Ok(sql)
+        }
+        TriggerStmt::Delete {
+            table,
+            r#where,
+            limit,
+            schema,
+        } => {
+            let qtable = sqlite_trigger_table_ref(table, schema.as_deref(), eff_schema)?;
+            let pred = crate::render::dml::render_expr_inline(r#where, DIALECT)?;
+            Ok(match limit {
+                None => format!("DELETE FROM {qtable} WHERE {pred}"),
+                // Trigger rendering has no live-catalog snapshot for the body
+                // target. Refuse a limited delete instead of guessing at hidden
+                // rowid; the one-shot DML path can use a proven PK/UNIQUE key.
+                Some(_) => {
+                    return Err(IrLowerError::DmlAssemble(
+                        crate::render::dml::DmlError::SqliteLimitedDeleteNeedsUniqueIdentity {
+                            table: table.clone(),
+                        },
+                    ));
+                }
+            })
+        }
+        TriggerStmt::Select { expr } => Ok(format!(
+            "SELECT {}",
+            crate::render::dml::render_expr_inline(expr, DIALECT)?
+        )),
+        TriggerStmt::Raise {
+            level: RaiseLevel::Ignore,
+            ..
+        } => Ok("SELECT RAISE(IGNORE)".to_string()),
+        TriggerStmt::Raise { level, message, .. } => Ok(format!(
+            "SELECT RAISE({},{})",
+            level.as_sqlite_sql(),
+            crate::render::dml::sql_string_literal(message)
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::expr::Expr;
+    use crate::model::ir::SafeU64;
+
+    /// Relocated from `render::lower`'s test module with the renderer it covers.
+    /// A unit test for a private helper cannot outlive its module, and leaving it
+    /// behind would have meant either widening the helper's visibility or dropping
+    /// the only coverage of this refusal.
+    #[test]
+    fn sqlite_trigger_limited_delete_is_rejected_without_live_identity_facts() {
+        let stmt = TriggerStmt::Delete {
+            table: "events".to_string(),
+            r#where: Expr::UnaryOp {
+                op: crate::model::expr::UnaryOp::IsNull,
+                operand: Box::new(Expr::col("code")),
+            },
+            limit: Some(SafeU64::new(1).unwrap()),
+            schema: None,
+        };
+        let err = render_sqlite_trigger_stmt(&stmt, "app")
+            .expect_err("trigger body rendering cannot guess at hidden rowid");
+        assert!(matches!(
+            err,
+            IrLowerError::DmlAssemble(
+                crate::render::dml::DmlError::SqliteLimitedDeleteNeedsUniqueIdentity {
+                    ref table
+                }
+            ) if table == "events"
+        ));
     }
 }

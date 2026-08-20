@@ -56,11 +56,12 @@
 /// the same 155 tests, so the dependency is gone rather than merely re-covered.
 ///
 /// AN EQUIVALENT INSTANCE SURVIVED ONE HOP AWAY, and this test was equally blind to
-/// it: `render::lower::render_sqlite_trigger_op` called the PostgreSQL-pinned
-/// `dml::quote_bare_ident` six times, and `backends/sqlite.rs` delegates its trigger
-/// rendering there. That one is now fixed too — those six say
-/// `quote_bare_ident_for_dialect(.., SQLITE_TRIGGER_DIALECT)`, and the pinned wrapper
-/// they used no longer exists.
+/// it: `render_sqlite_trigger_op`, then living in `render::lower`, called the
+/// PostgreSQL-pinned `dml::quote_bare_ident` six times, and `backends/sqlite.rs`
+/// delegated its trigger rendering there. That one is now fixed too — those six say
+/// `quote_bare_ident_for_dialect(.., DIALECT)`, the pinned wrapper they used no longer
+/// exists, and step 3 moved the three functions into `backends/sqlite.rs`, which is
+/// why this test can now see them at all.
 ///
 /// HOW it was proven is the part worth keeping, because the obvious proof LIED. The
 /// neuter above works by watching a suite go red; run against the trigger path it did
