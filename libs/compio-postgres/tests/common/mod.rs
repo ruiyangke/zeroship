@@ -112,9 +112,9 @@ pub fn server_answered(error: &(dyn std::error::Error + 'static)) -> bool {
 /// Provision it, then re-run: ...
 /// ```
 ///
-/// - the wrong cause and a remedy for a server that was already up. So the
-/// branch below asks whether PostgreSQL replied before it prescribes anything,
-/// and [`error_chain`] prints what it said.
+/// That is the wrong cause, and a remedy for a server that was already up. So
+/// the branch below asks whether PostgreSQL replied before it prescribes
+/// anything, and [`error_chain`] prints what it said.
 #[track_caller]
 pub fn postgres_unreachable(dsn: &str, error: &(dyn std::error::Error + 'static)) -> ! {
     let dialled = redact_dsn(dsn);
