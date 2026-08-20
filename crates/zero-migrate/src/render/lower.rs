@@ -9229,10 +9229,7 @@ fn render_sequence_owned_by(
 /// The `dialect` in the error is PROVENANCE and travels with the decision — core
 /// now supplies it from the same value it used to look the renderer up with, so
 /// the rendered message is unchanged.
-fn validate_view_materialized(
-    dialect: SqlDialect,
-    materialized: bool,
-) -> Result<(), IrLowerError> {
+fn validate_view_materialized(dialect: SqlDialect, materialized: bool) -> Result<(), IrLowerError> {
     if materialized && !dialect.supports(Capability::MaterializedView) {
         return Err(IrLowerError::ViewUnsupported {
             kind: "materializedView",
