@@ -159,7 +159,7 @@ pass "Lago customer + subscription for creator $CREATOR"
 
 openssl genpkey -algorithm ed25519 -out "$WORK/sk.pem" 2>/dev/null; chmod 600 "$WORK/sk.pem"
 CFG_TOML="$WORK/zeroship.toml"
-printf '[metering]\nredpanda_brokers = "%s"\nusage_events_topic = "%s"\n' "$RP_BROKERS" "$USAGE_TOPIC" > "$CFG_TOML"
+printf '[metering]\nbrokers = "%s"\nevents_topic = "%s"\n' "$RP_BROKERS" "$USAGE_TOPIC" > "$CFG_TOML"
 ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$WORK/sk.pem"
 e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DBURL"

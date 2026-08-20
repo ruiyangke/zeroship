@@ -59,6 +59,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/target/release"
 # shellcheck source=tests/lib/runtime_secrets.sh
 source "$ROOT/tests/lib/runtime_secrets.sh"
+# shellcheck source=tests/lib/usage_producer.sh
+source "$ROOT/tests/lib/usage_producer.sh"
 STRICT="${STRICT:-0}"
 
 PASS=0; FAIL=0; KNOWN=0
@@ -307,15 +309,20 @@ openssl rand -base64 48 > "$WORK/gateway-broker-secret"
 chmod 600 "$WORK/gateway-broker-secret"
 
 # Shared config overlay (zeroship.toml). The [metering] section configures the
-# usage-event stream from the config FILE — for BOTH the producers (worker +
-# gateway) AND the control-plane consumers (forwarder + recompute) — instead of
-# env vars. Each binary loads it via --config. (Per-process outbox WAL paths are
-# passed separately since two producers on one host must not share one redb file.)
+# usage-event stream from the config FILE for the two binaries that load one:
+# the GATEWAY producer and the control-plane consumers (forwarder + recompute).
+# `brokers` / `events_topic` are the canonical `metering.*` names, so the
+# gateway's generated resolver walks this table itself.
+#
+# THE WORKER IS NOT ONE OF THEM and takes the same values as flags below. That
+# asymmetry is deliberate (9b205f6ed) and is exactly why the worker needed real
+# flags: it is the process running untrusted creator code, so it loads no
+# document another service's credentials were written into.
 CFG_TOML="$WORK/zeroship.toml"
 cat > "$CFG_TOML" <<TOML
 [metering]
-redpanda_brokers = "$RP_BROKERS"
-usage_events_topic = "$USAGE_TOPIC"
+brokers = "$RP_BROKERS"
+events_topic = "$USAGE_TOPIC"
 TOML
 pass "wrote shared config overlay $CFG_TOML ([metering] stream config, not env)"
 
@@ -346,23 +353,25 @@ for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 && break
 curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 \
   && pass "control healthy (lite provider, stream=redpanda, stripe→mock :$MOCK_PORT)" || { fail "control unhealthy"; tail -30 "$WORK/control.log"; exit 1; }
 
-# worker — publishes drained usage events to redpanda. The [metering] stream
-# config comes from --config; only the per-process outbox WAL path is passed
-# separately (two producers on one host must not share one redb file).
-USAGE_OUTBOX_WAL_PATH="$WORK/worker-outbox.redb" \
+# worker — publishes drained usage events to redpanda. It takes NO `--config`
+# (9b205f6ed removed its TOML overlay source as a credential boundary), so its
+# stream settings arrive as flags. The WAL path is per process: redb is
+# single-writer, so the gateway below must name a different file.
 "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads "$ZEROSHIP_WORKER_THREADS" \
-  --config "$CFG_TOML" \
+  --metering-brokers "$RP_BROKERS" --metering-events-topic "$USAGE_TOPIC" \
+  --metering-outbox-wal-path "$WORK/worker-outbox.redb" \
   --control-url "$CONTROL_URL" \
   --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" >/dev/null 2>&1 \
   && pass "worker healthy (usage outbox → redpanda $USAGE_TOPIC)" || { fail "worker unhealthy"; tail -30 "$WORK/worker.log"; exit 1; }
+e2e_assert_usage_producer "$WORK/worker.log" "worker"
 
 # gateway — pulls routes (incl. spend_state) every 2s; ALSO a usage producer
 # (gateway_egress_bytes etc.), publishing to the same stream via --config.
-USAGE_OUTBOX_WAL_PATH="$WORK/gate-outbox.redb" \
 "$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "$CONTROL_URL" \
+  --metering-outbox-wal-path "$WORK/gate-outbox.redb" \
   --config "$CFG_TOML" \
   --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/blobs" \
   --blob-cache-disk-root "$WORK/blob-cache" --poll-interval 2 \
@@ -373,6 +382,7 @@ echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 \
   && pass "gateway healthy (route-pull poll-interval 2s)" || { fail "gateway unhealthy"; tail -30 "$WORK/gate.log"; exit 1; }
+e2e_assert_usage_producer "$WORK/gate.log" "gateway"
 
 # The migration service. Same invocation as tests/e2e_db_app_end_to_end.sh.
 "$BIN/zeroship-migrated" --port "$ZEROSHIP_MIGRATED_PORT" \
