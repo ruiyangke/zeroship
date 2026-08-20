@@ -40,9 +40,10 @@ pub const FAMILIES: &[&str] = &["zeroship_auth_test", "zeroship_billing_test"];
 /// every name here, and a sweeper that treated prefixes loosely would put the
 /// platform's own database on the list.
 pub fn family_of(name: &str) -> Option<&'static str> {
-    FAMILIES.iter().copied().find(|family| {
-        name == *family || (name.len() > family.len() + 1 && name.starts_with(&format!("{family}_")))
-    })
+    FAMILIES
+        .iter()
+        .copied()
+        .find(|family| name == *family || name.starts_with(&format!("{family}_")))
 }
 
 /// Is `pid` `self_pid` or one of its descendants?
@@ -233,11 +234,18 @@ mod tests {
     }
 
     #[test]
-    fn a_family_name_with_a_bare_trailing_underscore_is_not_a_member() {
-        // `zeroship_auth_test_` is the family plus a separator and no suffix.
-        // Reclaiming it is harmless, but claiming it would mean the anchored
-        // prefix test had degenerated into a loose one.
-        assert!(family_of("zeroship_auth_test_").is_none());
+    fn a_family_name_with_a_bare_trailing_underscore_is_still_a_member() {
+        // The shell's `case "$name" in "${f}_"*)` matches a `*` of zero
+        // characters, so `zeroship_auth_test_` is OWNED. This is pinned because
+        // the port got it wrong in the first draft: an extra length guard made
+        // it unowned, which reads like strictness and is the opposite -- a
+        // database the sweeper does not own is one it can never reclaim, so the
+        // "stricter" rule leaks. Found by running the old shell function and
+        // this one over the same names, not by this test, which was written to
+        // agree with the bug.
+        assert_eq!(family_of("zeroship_auth_test_"), Some("zeroship_auth_test"));
+        // The boundary that must NOT move: no separator at all.
+        assert_eq!(family_of("zeroship_auth_testx"), None);
     }
 
     #[test]
