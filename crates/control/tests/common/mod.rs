@@ -434,11 +434,10 @@ pub fn next_isolated_period() -> i64 {
 
     /// Months per caller. See "THE CONTRACT FOR CALLERS" above.
     const STRIDE_MONTHS: u32 = 4;
-    /// First month handed out, as an offset from January of `BASE_YEAR`. Starts
-    /// past zero so the earliest window's back-reach stays inside `BASE_YEAR`.
+    /// First month handed out, as an offset from January of the base year.
+    /// Starts past zero so the earliest window's back-reach stays inside it.
     const FIRST_OFFSET_MONTHS: u32 = 4;
-    const BASE_YEAR: i32 = 2030;
-    /// Windows available before the arithmetic leaves the far-future band. The
+    /// Windows available before the arithmetic leaves the reserved band. The
     /// tree uses about 64; this asserts rather than wrapping into a month
     /// another caller already owns.
     const MAX_WINDOWS: u32 = 600;
@@ -448,13 +447,13 @@ pub fn next_isolated_period() -> i64 {
     assert!(
         window < MAX_WINDOWS,
         "next_isolated_period() exhausted its {MAX_WINDOWS} private windows. \
-         Raise MAX_WINDOWS (and check BASE_YEAR + the span still lands in the \
-         far future); do NOT wrap, because wrapping silently reissues a month \
-         another test already seeded, which is the exact bug this replaced."
+         Raise MAX_WINDOWS (the band has room; see ISOLATED_PERIOD_BASE_YEAR); \
+         do NOT wrap, because wrapping silently reissues a month another test \
+         already seeded, which is the exact bug this replaced."
     );
 
     let offset = FIRST_OFFSET_MONTHS + window * STRIDE_MONTHS;
-    let year = BASE_YEAR + (offset / 12) as i32;
+    let year = ISOLATED_PERIOD_BASE_YEAR + (offset / 12) as i32;
     let month = offset % 12 + 1;
     chrono::Utc
         .with_ymd_and_hms(year, month, 15, 12, 0, 0)
@@ -462,6 +461,32 @@ pub fn next_isolated_period() -> i64 {
         .expect("valid isolated billing period")
         .timestamp()
 }
+
+/// First year of the band `next_isolated_period()` reserves. NOTHING ELSE MAY
+/// HARDCODE A PERIOD AT OR ABOVE THIS YEAR.
+///
+/// The allocator only makes windows disjoint among ITS OWN callers. Two other
+/// things write `usage_aggregates` rows into far-future months and neither goes
+/// through it:
+///
+///   * hardcoded literals - `src/cron/spend_recompute.rs` pins 2035/2036/2042/
+///     2043 and `tests/stream_forwarder_recompute_test.rs` does the same;
+///   * the LIB test binary - those `#[cfg(test)]` modules run in a DIFFERENT
+///     PROCESS from `tests/live_db.rs` against the SAME database, so the
+///     allocator's process-global counter cannot see them at all.
+///
+/// Measured 2026-08-20 with the band at 2030: `spend_recompute`'s hardcoded
+/// 2036-08 landed inside a window this allocator had handed to a proration
+/// test, putting two modules' apps in one period. Nothing asserted on that
+/// period, so it was latent - but it is the same defect, and "we got away with
+/// it" is not isolation.
+///
+/// So the band sits ABOVE every literal in the crate rather than among them,
+/// and `period_band_is_reserved_for_the_allocator` in `billing_safety_net_test`
+/// fails if a new literal moves into it. That check is what makes "disjoint by
+/// construction" a property rather than a hope; without it this constant is
+/// just a comment.
+pub const ISOLATED_PERIOD_BASE_YEAR: i32 = 2100;
 
 #[allow(dead_code)]
 pub fn lite_billing_stack(
