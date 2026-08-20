@@ -327,9 +327,12 @@ echo "==> zeroship-migrate-adapter live-PG targets"
 # private name for the same server everything else already had. Three targets
 # read it, and each announced a skip and counted as passed on every run:
 #
-#   tests/smoke_apply_pg.rs        1 test of 1
-#   tests/author_and_apply_pg.rs   1 test of 2
-#   tests/platform_migrate.rs      the PG-apply half (ci.yml said so in a
+#   crates/zeroship-migrate-adapter/tests/smoke_apply_pg.rs
+#                                  1 test of 1
+#   crates/zeroship-migrate-adapter/tests/author_and_apply_pg.rs
+#                                  1 test of 2
+#   crates/zeroship-migrate-adapter/tests/platform_migrate.rs
+#                                  the PG-apply half (ci.yml said so in a
 #                                  comment and left it that way)
 #
 # MEASURED, one variable changed, on `author_and_apply_pg`:

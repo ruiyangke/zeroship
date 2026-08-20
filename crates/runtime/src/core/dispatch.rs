@@ -794,8 +794,8 @@ mod tests {
     /// emits things, not that it DISCRIMINATES.
     ///
     /// WHAT THIS TEST DOES NOT CATCH: that plugin-db actually produces this
-    /// code for a missing role (that is `zeroship-plugin-db`'s
-    /// `tests/missing_role.rs`), and that the message plugin-db pairs with
+    /// code for a missing role (that is
+    /// `crates/plugin-db/tests/missing_role.rs`), and that the message it pairs with
     /// it names `zeroship migrate` (that is `error.rs`'s own unit test).
     /// This test would pass if the code were stamped on an empty string.
     #[test]
