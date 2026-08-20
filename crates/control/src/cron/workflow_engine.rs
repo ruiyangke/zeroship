@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use compio_postgres::error::SqlState;
 use compio_postgres::GenericClient;
 use uuid::Uuid;
 use zeroship_plugin_workflow::advance::{
@@ -83,6 +84,105 @@ where
     Ok(tables)
 }
 
+/// What a fleet sweep learned about ONE app's workflow journal.
+///
+/// The three arms are NOT interchangeable and callers must not collapse them.
+/// `NotProvisioned` is knowledge - the app has never started a run, so its
+/// journal holds nothing. `Unreachable` is the ABSENCE of knowledge: the tables
+/// are in the catalog but this connection could not read them. A sweep that
+/// deletes on the strength of "holds nothing" (blob GC, deploy retention) must
+/// treat `Unreachable` as "may hold anything" and keep its hands off.
+#[derive(Debug, Clone)]
+pub(crate) enum AppJournal {
+    /// The journal exists and is readable on this connection.
+    Ready(WorkflowTables),
+    /// This app has no journal tables at all.
+    NotProvisioned,
+    /// The journal exists but this connection could not reach it - no USAGE on
+    /// `app_<uuid>`, a half-provisioned schema, or an app dropped mid-sweep.
+    /// Carries the database's own message so the skip log names a cause.
+    Unreachable(String),
+}
+
+/// True when a database error is scoped to ONE app's journal rather than to the
+/// sweep as a whole.
+///
+/// The four codes are the ways a per-app journal can fail while the connection
+/// itself is healthy: no USAGE on the schema, the schema gone, a table gone, a
+/// column gone (a journal provisioned by an older runtime). Every other failure
+/// - a lost connection above all, which surfaces with NO SQLSTATE at all - is
+/// deliberately excluded: a sweep that skipped past a dead connection would walk
+/// the remaining apps against it and then report a clean tick.
+pub(crate) fn is_journal_scoped_error(err: &compio_postgres::Error) -> bool {
+    matches!(
+        err.code(),
+        Some(code)
+            if *code == SqlState::INSUFFICIENT_PRIVILEGE
+                || *code == SqlState::INVALID_SCHEMA_NAME
+                || *code == SqlState::UNDEFINED_TABLE
+                || *code == SqlState::UNDEFINED_COLUMN
+    )
+}
+
+/// Convert a per-app failure into a logged skip, or propagate it.
+///
+/// `Ok(None)` means "skip this app, loudly": the caller `continue`s and the WARN
+/// below names the app, the operation and the database's own message. It is a
+/// WARN and not a silent `continue` on purpose - the defect this replaced was a
+/// fleet-wide outage, and swapping one for a sweep that quietly covers fewer
+/// tenants every tick would be the same defect with the alarm removed.
+pub(crate) fn skip_journal_scoped<T>(
+    app_id: &Uuid,
+    operation: &str,
+    result: Result<T, compio_postgres::Error>,
+) -> Result<Option<T>, RegistryError> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(err) if is_journal_scoped_error(&err) => {
+            tracing::warn!(
+                app_id = %app_id,
+                operation,
+                error = %err,
+                "skipping app in workflow sweep: its journal is unreadable"
+            );
+            Ok(None)
+        }
+        Err(err) => Err(RegistryError::from(err)),
+    }
+}
+
+/// Probe one app's journal without deciding what a failure means.
+///
+/// `to_regclass` RAISES rather than returning NULL when the caller holds no
+/// USAGE on the schema, so "does it exist" and "can I read it" are answered by
+/// the same statement and have to be separated here.
+pub(crate) async fn probe_journal<C>(conn: &C, app_id: &Uuid) -> Result<AppJournal, RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    let tables = WorkflowTables::for_app_id(app_id);
+    let result = conn
+        .query("SELECT to_regclass($1) IS NOT NULL AS exists", &[&tables.runs])
+        .await;
+    match result {
+        Ok(rows) => {
+            if rows.first().is_some_and(|row| row.get("exists")) {
+                Ok(AppJournal::Ready(tables))
+            } else {
+                Ok(AppJournal::NotProvisioned)
+            }
+        }
+        Err(err) if is_journal_scoped_error(&err) => Ok(AppJournal::Unreachable(err.to_string())),
+        Err(err) => Err(RegistryError::from(err)),
+    }
+}
+
+/// Resolve one app's journal for a caller that is working on THAT app alone.
+///
+/// An unreachable journal is an error here, because the caller has no other
+/// tenant to get on with: reporting `None` would tell it the app holds no runs,
+/// which is exactly the confusion [`AppJournal`] exists to prevent. Fleet-wide
+/// sweeps take their app list from [`journalled_app_ids`] instead.
 pub(crate) async fn existing_tables<C>(
     conn: &C,
     app_id: &Uuid,
@@ -90,39 +190,116 @@ pub(crate) async fn existing_tables<C>(
 where
     C: GenericClient + Sync,
 {
-    let tables = WorkflowTables::for_app_id(app_id);
-    let rows = conn
-        .query("SELECT to_regclass($1) IS NOT NULL AS exists", &[&tables.runs])
-        .await
-        .map_err(RegistryError::from)?;
-    if rows.first().is_some_and(|row| row.get("exists")) {
-        Ok(Some(tables))
-    } else {
-        Ok(None)
+    match probe_journal(conn, app_id).await? {
+        AppJournal::Ready(tables) => Ok(Some(tables)),
+        AppJournal::NotProvisioned => Ok(None),
+        AppJournal::Unreachable(message) => Err(RegistryError::Database(message)),
     }
 }
 
-pub(crate) async fn workflow_app_ids<C>(conn: &C) -> Result<Vec<Uuid>, RegistryError>
+/// One app that has a workflow journal, and whether this connection can read it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct JournalledApp {
+    pub app_id: Uuid,
+    /// False when this connection holds no USAGE on `app_<uuid>` or no SELECT on
+    /// the journal's runs table.
+    pub readable: bool,
+}
+
+/// Every app that HAS a workflow journal, with its readability, in id order.
+///
+/// Two decisions live in this one query.
+///
+/// WHY NOT `workflows_enabled`. Selecting every app and probing each with
+/// `to_regclass` was O(apps) round trips per tick, and the obvious fix -
+/// filtering on the rollout flag - is wrong: an app that ran workflows and was
+/// then disabled still has runs to reap, blobs to collect and parked cancels to
+/// honour, and the flag would strand every one of them. Journal EXISTENCE is the
+/// real precondition, it is what each caller was re-deriving per app, and the
+/// catalog answers it for the whole fleet in one round trip.
+///
+/// WHY `has_*_privilege` AND NOT A PROBE. `to_regclass` raises `permission
+/// denied for schema` on a journal this connection cannot read, and inside a
+/// sweep that runs in ONE transaction (deploy retention, blob GC) that error
+/// poisons every later statement - so "log and skip" would not survive the skip.
+/// `has_schema_privilege`/`has_table_privilege` return false instead of raising,
+/// so an unreadable tenant is DATA here rather than a failure, and callers
+/// decide what it means: an independent sweep skips it loudly, while a sweep
+/// that deletes on the strength of "nothing references this" must treat it as
+/// unknown and keep its hands off.
+///
+/// Catalog VISIBILITY is not privilege - `pg_class` lists relations in schemas
+/// the caller cannot enter - which is why the readability column is needed at
+/// all.
+pub(crate) async fn journalled_apps<C>(conn: &C) -> Result<Vec<JournalledApp>, RegistryError>
 where
     C: GenericClient + Sync,
 {
     let rows = conn
         .query(
-            "SELECT id \
-               FROM zeroship.apps \
-              ORDER BY id",
+            "SELECT a.id AS app_id, \
+                    (has_schema_privilege(n.oid, 'USAGE') \
+                     AND has_table_privilege(c.oid, 'SELECT')) AS readable \
+               FROM zeroship.apps a \
+               JOIN pg_catalog.pg_namespace n \
+                 ON n.nspname = 'app_' || a.id::text \
+               JOIN pg_catalog.pg_class c \
+                 ON c.relnamespace = n.oid \
+                AND c.relname = '__zeroship_workflow_runs' \
+              ORDER BY a.id",
             &[],
         )
         .await
         .map_err(RegistryError::from)?;
-    Ok(rows.into_iter().map(|row| row.get("id")).collect())
+    Ok(rows
+        .into_iter()
+        .map(|row| JournalledApp {
+            app_id: row.get("app_id"),
+            readable: row.get("readable"),
+        })
+        .collect())
 }
 
+/// Apps whose workflow journal this connection can read, in id order.
+///
+/// The app ids a fleet-wide sweep should walk. An app with a journal it cannot
+/// read is EXCLUDED and WARNED about, once per tick, naming the app - it is not
+/// dropped silently, because a sweep that quietly covers fewer tenants every
+/// tick is the same outage with the alarm removed.
+///
+/// Before this existed the sweeps selected every app and propagated the per-app
+/// probe with `?`, so one app whose schema control could not read aborted the
+/// tick for every other tenant.
+pub(crate) async fn journalled_app_ids<C>(conn: &C) -> Result<Vec<Uuid>, RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    let mut ids = Vec::new();
+    for app in journalled_apps(conn).await? {
+        if app.readable {
+            ids.push(app.app_id);
+        } else {
+            tracing::warn!(
+                app_id = %app.app_id,
+                "skipping app in workflow sweep: its journal schema is unreadable on this connection"
+            );
+        }
+    }
+    Ok(ids)
+}
+
+/// Locate the journal holding `run_id` by searching every app's journal.
+///
+/// This is a LOOKUP, not a sweep, and it deliberately does NOT skip an app whose
+/// journal it cannot read. `Ok(None)` here means "no such run", and callers act
+/// on that by dropping the work; producing it from an app that was merely
+/// unreadable would turn a permission gap into silent data loss. An unreadable
+/// journal therefore propagates and the caller retries.
 async fn find_run_tables<C>(conn: &C, run_id: &str) -> Result<Option<WorkflowTables>, RegistryError>
 where
     C: GenericClient + Sync,
 {
-    for app_id in workflow_app_ids(conn).await? {
+    for app_id in journalled_app_ids(conn).await? {
         let Some(tables) = existing_tables(conn, &app_id).await? else {
             continue;
         };
@@ -377,10 +554,8 @@ async fn reconcile_scheduler_from_journal_with_store(
 ) -> Result<usize, RegistryError> {
     let conn = registry.conn().await?;
     let mut registered = 0usize;
-    for app_id in workflow_app_ids(&conn).await? {
-        let Some(tables) = existing_tables(&conn, &app_id).await? else {
-            continue;
-        };
+    for app_id in journalled_app_ids(&conn).await? {
+        let tables = WorkflowTables::for_app_id(&app_id);
         let sql = format!(
             "SELECT id, app_id, wake_at, cancel_requested \
                FROM {} \
@@ -390,7 +565,11 @@ async fn reconcile_scheduler_from_journal_with_store(
               ORDER BY wake_at, id",
             tables.runs
         );
-        let rows = conn.query(&sql, &[&due_only]).await.map_err(RegistryError::from)?;
+        let Some(rows) =
+            skip_journal_scoped(&app_id, "scheduler reconcile scan", conn.query(&sql, &[&due_only]).await)?
+        else {
+            continue;
+        };
         for row in rows {
             let run_id: String = row.get("id");
             let app_id: Uuid = row.get("app_id");
@@ -427,13 +606,11 @@ pub async fn reap_parked_cancel_requested_batch(
 
     let conn = registry.conn().await?;
     let mut registered = 0usize;
-    for app_id in workflow_app_ids(&conn).await? {
+    for app_id in journalled_app_ids(&conn).await? {
         if registered >= usize::try_from(limit).unwrap_or(usize::MAX) {
             break;
         }
-        let Some(tables) = existing_tables(&conn, &app_id).await? else {
-            continue;
-        };
+        let tables = WorkflowTables::for_app_id(&app_id);
         let remaining = limit.saturating_sub(i64::try_from(registered).unwrap_or(i64::MAX));
         if remaining <= 0 {
             break;
@@ -455,10 +632,11 @@ pub async fn reap_parked_cancel_requested_batch(
               RETURNING r.id, r.app_id, r.wake_at",
             runs = tables.runs,
         );
-        let rows = conn
-            .query(&sql, &[&remaining])
-            .await
-            .map_err(RegistryError::from)?;
+        let Some(rows) =
+            skip_journal_scoped(&app_id, "parked-cancel scan", conn.query(&sql, &[&remaining]).await)?
+        else {
+            continue;
+        };
         for row in rows {
             let run_id: String = row.get("id");
             let app_id: Uuid = row.get("app_id");

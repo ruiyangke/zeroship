@@ -13,6 +13,7 @@ use compio_postgres::error::SqlState;
 use serde_json::Value;
 use uuid::Uuid;
 use zeroship_core::typed_id;
+use zeroship_plugin_workflow::store::pg::WorkflowTables;
 
 use crate::registry::RegistryError;
 use crate::AppState;
@@ -92,16 +93,18 @@ pub async fn tick_with_config(
 
 async fn gc_expired_subscriptions(state: &AppState) -> Result<(), RegistryError> {
     let conn = state.registry.conn().await?;
-    for app_id in super::workflow_engine::workflow_app_ids(&conn).await? {
-        let Some(tables) = super::workflow_engine::existing_tables(&conn, &app_id).await? else {
-            continue;
-        };
+    for app_id in super::workflow_engine::journalled_app_ids(&conn).await? {
+        let tables = WorkflowTables::for_app_id(&app_id);
         let sql = format!(
             "DELETE FROM {} \
               WHERE expires_at IS NOT NULL AND expires_at < now()",
             tables.subscriptions
         );
-        conn.execute(&sql, &[]).await.map_err(RegistryError::from)?;
+        super::workflow_engine::skip_journal_scoped(
+            &app_id,
+            "expired subscription gc",
+            conn.execute(&sql, &[]).await,
+        )?;
     }
     Ok(())
 }
