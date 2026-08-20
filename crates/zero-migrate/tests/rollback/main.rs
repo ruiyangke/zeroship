@@ -19,6 +19,7 @@ mod drop_sequence_rollback_pg;
 mod drop_trigger_rollback_pg;
 mod drop_view_rollback_pg;
 mod drop_view_rollback_sqlite;
+mod extension_claim_is_exclusive;
 mod inverse_carries_no_unguarded_sql;
 mod ir_reverse;
 mod journal_reverse_compat_sqlite;
