@@ -389,11 +389,21 @@ jobs:
       # results while it was written - it counted `$${VAR}` escapes and refs in
       # comments, and its rename guard first passed on the very breakage it
       # exists for, then failed on a healthy host. Both were caught by hand.
-      # Drives the pure functions against fixture compose files; runs no ssh, no
-      # docker, no network. MEASURED 2026-08-13: 64 assertions, floor 63. (This
-      # line said "30 assertions, floor 29" while the script's floor was 53.)
+      # Drives the pure functions against fixture compose files and the deploy
+      # path through a stub ssh; runs no real ssh, no docker, no network.
+      # MEASURED 2026-08-20: 129 assertions, floor 118. (This line said "64
+      # assertions, floor 63" while the script's floor was already 107 - it was
+      # written once and never re-run against the thing it describes.)
       - name: deploy scripts extraction, rename pairing and arguments
         run: tests/deploy_scripts_gate.sh
+      # tests/lib/dev_secrets.sh gates whether e2e_docker.sh and
+      # external_chain.sh may run at all, and had no test. Its hand-kept file
+      # list demanded control-signing.pem for three days after 8e365f478
+      # deleted that key, so `ensure_dev_secrets` returned 1 on every machine,
+      # always, and both harnesses died before starting - invisibly, because
+      # neither is in a suite anyone watches. Text-only: no binary, no docker.
+      - name: dev secret provisioning check can actually pass
+        run: tests/dev_secrets_gate.sh
       # A COUPLING TRIPWIRE, not a style rule. Measured 2026-08-12 by running
       # tests/e2e_gateway_workflow_advance_authz.sh: the worker's 403 without
       # --workflow-advance-unsigned is BOTH why durable workflows cannot run in
