@@ -699,15 +699,88 @@ $RENDERED
   your time."
   echo "ok  every server accepts the new configuration"
 
+  # ------------------------------------------------- secrets are actually there
+  #
+  # THE CHECK ABOVE DOES NOT COVER THIS, and the gap took production down on
+  # 2026-08-19. `secret_files` (top of this file) proves every referenced secret
+  # exists ON THE HOST; `--check-config` proves the five long-running SERVERS
+  # accept the configuration. Neither asks the one question that failed: can the
+  # container OPEN the path its own command names?
+  #
+  # It failed for `migrate`, which is in neither set -- it is a one-shot with no
+  # --check-config, and its DSN moved from a value flag to
+  # `--database-url-file /etc/zeroship/secrets/migrate-dsn` on 2026-08-16. The
+  # host-side override carries `migrate: volumes: !override []`, written when the
+  # service's ONLY volume was a repo checkout that a source-less host must not
+  # mount. The blanket empty list then silently took the new DSN mount with it,
+  # exactly the way a CASCADE takes the object nobody was looking at. The file
+  # was present on the host, so the existing check passed; it was absent inside
+  # the container, so the binary exited at ARGUMENT PARSE with code 2 and the
+  # roll reported a bare `didn't complete successfully: exit 2`.
+  #
+  # `run --rm --no-deps` gets each service its REAL merged volumes, so this
+  # asks the question against the same mounts the roll will use. Derived from
+  # the rendered config per service, so it covers one-shots and any service
+  # added later without a list to maintain.
+  say "checking every secret path a container names is readable inside it"
+  MOUNT_BAD="$(rsh "cd '$REMOTE_DIR/compose'
+  export ZEROSHIP_IMAGE='$IMAGE'
+  R=\$(mktemp)
+  docker compose config > \"\$R\" 2>/dev/null || { rm -f \"\$R\"; exit 0; }
+  for svc in \$(docker compose config --services 2>/dev/null); do
+    for p in \$(awk -v s=\"  \$svc:\" '\$0==s{f=1;next} f && /^  [a-zA-Z]/{exit} f' \"\$R\" | grep -oE '/etc/zeroship/secrets/[A-Za-z0-9._-]+' | sort -u); do
+      docker compose run --rm -T --no-deps --entrypoint sh \"\$svc\" -c \"test -r \$p\" >/dev/null 2>&1 </dev/null || echo \"\$svc \$p\"
+    done
+  done
+  rm -f \"\$R\"" || true)"
+  [ -z "$MOUNT_BAD" ] || fail "these services name a secret path they cannot open:
+$MOUNT_BAD
+  NOTHING WAS RESTARTED. The file existing on the host is not enough -- the
+  service must MOUNT it. Check the host's docker-compose.override.yml: a
+  \`volumes: !override []\` REPLACES the whole list, so a mount added to the
+  tracked compose file since that override was written is silently dropped."
+  echo "ok  every referenced secret is readable inside the service that names it"
+
   say "rolling the stack to $IMAGE"
   # One `up -d` for every service. The control key is shared, so a partial
   # restart splits the stack into two halves that cannot authenticate.
-  rsh "set -e
+  if ! rsh "set -e
   cd '$REMOTE_DIR/compose'
   sed -i 's|^ZEROSHIP_IMAGE=.*|ZEROSHIP_IMAGE=$IMAGE|' .env
   grep -q '^ZEROSHIP_IMAGE=$IMAGE\$' .env || { echo 'ZEROSHIP_IMAGE was not updated'; exit 1; }
-  docker compose up -d --remove-orphans" \
-    || fail "the roll failed. Re-run with --rollback to restore the $STAMP snapshot."
+  docker compose up -d --remove-orphans"; then
+    # WHY THIS BLOCK EXISTS. `docker compose up` reports a failed one-shot as
+    # `service "migrate" didn't complete successfully: exit 2` and NOTHING ELSE
+    # -- the container's own stdout and stderr, which say WHICH migration failed
+    # and why, are never surfaced. That is the same species of defect as
+    # suppressing stderr on a counting command: a failing run and a clean run
+    # leave the operator the identical trace, and the number alone is not a
+    # diagnosis. It cost a 20-minute build and three deploy attempts on
+    # 2026-08-19 to learn only that the exit code was 2.
+    #
+    # IT MUST RUN HERE, BEFORE ANYTHING RECREATES THE CONTAINER. The exited
+    # container still holds its logs, but `--rollback` (and any later `up`)
+    # replaces it, after which `docker logs` shows the REPLACEMENT's output --
+    # on the old image, succeeding. That is how a failure comes to look like a
+    # clean run.
+    #
+    # Every non-running service, not just `migrate`: the one-shot is the case
+    # that bit us, but a server that exits at parse time is silent in exactly
+    # the same way, and a hard-coded service list stops covering the next
+    # one-shot somebody adds.
+    printf '\n== the roll failed; container output BEFORE anything is recreated\n' >&2
+    rsh "cd '$REMOTE_DIR/compose' && docker compose ps -a --format '{{.Name}}|{{.Service}}|{{.State}}|{{.Status}}'" >&2 2>/dev/null || true
+    DOWN="$(rsh "cd '$REMOTE_DIR/compose' && docker compose ps -a --format '{{.Service}}|{{.State}}' | awk -F'|' '\$2 != \"running\" {print \$1}' | sort -u" 2>/dev/null || true)"
+    if [ -n "$DOWN" ]; then
+      for svc in $DOWN; do
+        printf '\n---- docker compose logs %s ----\n' "$svc" >&2
+        rsh "cd '$REMOTE_DIR/compose' && docker compose logs --no-color --tail=100 '$svc' 2>&1" >&2 </dev/null || true
+      done
+    else
+      printf '(no non-running service; compose failed before any container exited)\n' >&2
+    fi
+    fail "the roll failed. The container output above is why. Re-run with --rollback to restore the $STAMP snapshot."
+  fi
 
   # ----------------------------------------------------------------- verify
   say "verifying"
