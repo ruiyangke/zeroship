@@ -5,8 +5,6 @@
 //! the native read pump, `SocketEvent::Data`, and the unavoidable V8 Buffer
 //! boundary copy are all exercised.
 
-#![allow(unsafe_code)]
-
 use std::io::Write;
 use std::net::{Shutdown, SocketAddr, TcpListener};
 use std::sync::Arc;
@@ -25,32 +23,24 @@ use zeroship_runtime::{EgressRule, Verdict,
 const PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 const MAX_WAIT: Duration = Duration::from_secs(15);
 
-struct EnvGuard {
-    prev_dev: Option<std::ffi::OsString>,
+/// Sets the runtime's process-level dev-mode cell for the measured section
+/// and restores the prior value on drop. A stated setting rather than a
+/// mutation of the process environment, which races libc `getenv`.
+struct DevModeGuard {
+    prev_dev: bool,
 }
 
-impl EnvGuard {
+impl DevModeGuard {
     fn set_dev() -> Self {
-        let prev_dev = zeroship_core::declared_env_os!(
-            dev,
-            "ZEROSHIP_DEV",
-            zeroship_runtime::RuntimeConsumer
-        );
-        unsafe {
-            std::env::set_var("ZEROSHIP_DEV", "1");
-        }
+        let prev_dev = zeroship_runtime::dev_mode_enabled();
+        zeroship_runtime::set_dev_mode(true);
         Self { prev_dev }
     }
 }
 
-impl Drop for EnvGuard {
+impl Drop for DevModeGuard {
     fn drop(&mut self) {
-        unsafe {
-            match &self.prev_dev {
-                Some(value) => std::env::set_var("ZEROSHIP_DEV", value),
-                None => std::env::remove_var("ZEROSHIP_DEV"),
-            }
-        }
+        zeroship_runtime::set_dev_mode(self.prev_dev);
     }
 }
 
@@ -179,7 +169,7 @@ async fn response_body(outcome: FetchOutcome) -> Vec<u8> {
 }
 
 fn bench_node_net_read(c: &mut Criterion) {
-    let _env = EnvGuard::set_dev();
+    let _env = DevModeGuard::set_dev();
     let payload = Arc::new(vec![b'x'; PAYLOAD_BYTES]);
     let addr = spawn_tcp_source_server(payload);
     let compio_rt = compio::runtime::Runtime::new()
@@ -216,7 +206,7 @@ criterion_main!(benches);
 /// These tests target literal addresses, and an IP literal is NOT a
 /// representable `Name` - it must be written as a range, so a reader of a rule
 /// always knows which check decides it. `is_blocked_ip` would refuse loopback
-/// outright; these tests run with `ZEROSHIP_DEV=1`, which bypasses the floor
+/// outright; these tests run with dev mode on, which bypasses the floor
 /// and nothing else.
 fn accept_target(host: &str, port: u16) -> EgressRule {
     let destination = match host.parse::<std::net::IpAddr>() {

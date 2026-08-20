@@ -32,12 +32,15 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 pub use zeroship_core::net_policy::{Destination, EgressRule, EgressRules, Verdict};
 
-/// Process-wide fallback cap. Operators can lower it via
-/// `ZEROSHIP_NET_GLOBAL_MAX_SOCKETS`; tests use that hook to exercise
-/// the global-cap branch without opening thousands of fds.
+/// Process-wide fallback cap. Operators lower it via
+/// `ZEROSHIP_NET_GLOBAL_MAX_SOCKETS` on the process they start.
 const DEFAULT_GLOBAL_MAX_SOCKETS: u32 = 4096;
 
 static GLOBAL_ACTIVE_SOCKETS: AtomicU32 = AtomicU32::new(0);
+
+/// The resolved process-wide cap. `0` means "not yet resolved"; the cap itself
+/// is always positive, so the sentinel cannot collide with a real value.
+static GLOBAL_MAX_SOCKETS: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum NetPolicy {
@@ -109,7 +112,7 @@ impl NetPolicy {
 }
 
 pub(crate) fn try_acquire_global_socket() -> Result<(), String> {
-    let cap = configured_global_max_sockets();
+    let cap = global_max_sockets();
     let mut cur = GLOBAL_ACTIVE_SOCKETS.load(Ordering::Relaxed);
     loop {
         if cur >= cap {
@@ -144,15 +147,45 @@ pub(crate) fn release_global_socket() {
     }
 }
 
-fn configured_global_max_sockets() -> u32 {
-    zeroship_core::declared_env!(
-        platform,
-        "ZEROSHIP_NET_GLOBAL_MAX_SOCKETS",
-        crate::RuntimeConsumer
-    )
-    .and_then(|s| s.parse::<u32>().ok())
-    .filter(|n| *n > 0)
-    .unwrap_or(DEFAULT_GLOBAL_MAX_SOCKETS)
+/// The process-wide socket ceiling `node:net` connects are counted against.
+///
+/// PRECEDENCE. An explicit [`set_global_max_sockets`] always wins. Otherwise
+/// the first call resolves the cap ONCE from
+/// `ZEROSHIP_NET_GLOBAL_MAX_SOCKETS` on the process the operator started,
+/// falling back to [`DEFAULT_GLOBAL_MAX_SOCKETS`], and every later call
+/// returns that same answer.
+#[must_use]
+pub fn global_max_sockets() -> u32 {
+    match GLOBAL_MAX_SOCKETS.load(Ordering::Relaxed) {
+        0 => {
+            let cap = zeroship_core::declared_env!(
+                platform,
+                "ZEROSHIP_NET_GLOBAL_MAX_SOCKETS",
+                crate::RuntimeConsumer
+            )
+            .and_then(|s| s.parse::<u32>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(DEFAULT_GLOBAL_MAX_SOCKETS);
+            GLOBAL_MAX_SOCKETS.store(cap, Ordering::Relaxed);
+            cap
+        }
+        cap => cap,
+    }
+}
+
+/// State the process-wide socket ceiling explicitly, overriding
+/// `ZEROSHIP_NET_GLOBAL_MAX_SOCKETS` for the rest of the process.
+///
+/// PRECEDENCE. This wins over the environment, whether or not
+/// [`global_max_sockets`] has already resolved it.
+///
+/// It exists so a caller - notably a test that wants to exercise the
+/// global-cap branch without opening thousands of fds - can SAY the cap rather
+/// than mutate the process-global environment, which races libc `getenv`.
+/// `cap` must be positive; `0` is the "unresolved" sentinel and is clamped to
+/// `1`, the smallest cap that is a cap.
+pub fn set_global_max_sockets(cap: u32) {
+    GLOBAL_MAX_SOCKETS.store(cap.max(1), Ordering::Relaxed);
 }
 
 #[cfg(test)]

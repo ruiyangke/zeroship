@@ -6,27 +6,33 @@
 //! `tests/main.rs` because of the helper they share.
 //!
 //! `support/node_realworld.rs` owns `lock_env()`, a `static ENV_LOCK` that
-//! serialises `std::env::set_var` / `remove_var` for `ZEROSHIP_DEV` and
-//! `ZEROSHIP_NET_GLOBAL_MAX_SOCKETS` and restores the previous values on
-//! `EnvGuard::drop`. Each of the six used to reach it with its own
+//! serialises the runtime's process-wide dev-mode and global-socket-cap cells
+//! and restores the previous values on `SettingsGuard::drop`. Each of the six
+//! used to reach it with its own
 //! `#[path = "support/node_realworld.rs"] mod node_realworld;`. In separate
 //! processes that was six copies of one file and it did not matter. In one
 //! process it would be six copies of the STATIC - six independent mutexes over
-//! a single process environment, i.e. no mutual exclusion at all, with each
-//! module free to restore `ZEROSHIP_DEV` to unset while another is mid-request
+//! a single set of process-wide cells, i.e. no mutual exclusion at all, with
+//! each module free to restore dev mode to off while another is mid-request
 //! under it. The entry below declares the helper exactly once and the six
 //! modules `use crate::node_realworld`, so there is one lock again.
 //!
 //! WHAT THIS DOES NOT PROTECT AGAINST
 //! ----------------------------------
 //! The single lock only covers code that TAKES it. Any module added below that
-//! mutates the environment without `lock_env()` races every one of these, and
+//! changes those settings without `lock_env()` races every one of these, and
 //! the failure surfaces as an unrelated connection being refused rather than
 //! as a lock error. That is also why `dev_auth`, `node_net`,
 //! `node_net_security`, `node_pg_e2e` and `node_tls` are still their own
 //! targets: each carries a private `ENV_LOCK` of its own, and putting any of
-//! them in here would reintroduce exactly the two-mutexes-one-environment
+//! them in here would reintroduce exactly the two-mutexes-one-setting
 //! shape this file exists to remove.
+//!
+//! What the settings are NO LONGER is process ENVIRONMENT. They were
+//! `ZEROSHIP_DEV` and `ZEROSHIP_NET_GLOBAL_MAX_SOCKETS` set with
+//! `std::env::set_var`, which races concurrent libc `getenv` - undefined
+//! behaviour that no mutex here could have covered, since libc reads the
+//! environment from code that never takes this lock.
 //!
 //! These tests need live servers and they do NOT skip without them: the
 //! `ensure_*` helpers `docker start` the container and then panic if the port

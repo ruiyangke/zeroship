@@ -8,8 +8,8 @@
 //!      / abort behaviour without paying the runtime/V8 startup cost.
 //!
 //!   2. **V8-driven tests** — run a small JS snippet through a built
-//!      Runtime with `ZEROSHIP_NATIVE_FETCH=1` set, asserting the
-//!      `fetch()` global is wired up. These are limited because the
+//!      Runtime, asserting the `fetch()` global is wired up (the native
+//!      install is unconditional). These are limited because the
 //!      pump-driven async fetch needs a live compio runtime; the bulk
 //!      of behaviour is in the pure-Rust stratum above.
 //!
@@ -20,8 +20,6 @@
 //! strip, same-origin Authorization preserved, gzip Content-Encoding,
 //! multi-coding gzip+br, Content-Length stripped, Origin header, bad
 //! port blocked, AbortSignal.timeout.
-
-#![allow(unsafe_code)]
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -218,11 +216,10 @@ fn req(method: &str, url: &str) -> FetchRequest {
 fn run<R>(fut: impl std::future::Future<Output = R>) -> R {
     // Each test gets its own compio runtime (cheap to spin up) — the
     // SsrfResolver thread-local is per-thread so it gets a fresh client.
-    // Required: ZEROSHIP_DEV=1 so loopback isn't blocked by the SSRF
-    // string-level fast path.
-    // SAFETY: tests are not concurrent on env vars (single-process,
-    // and the value never changes after first set).
-    unsafe { std::env::set_var("ZEROSHIP_DEV", "1"); }
+    // Required: dev mode on, so loopback isn't blocked by the SSRF
+    // string-level fast path. Every test in this binary wants it on and
+    // none turns it off, so the shared cell needs no mutual exclusion.
+    zeroship_runtime::set_dev_mode(true);
     compio::runtime::Runtime::new().unwrap().block_on(fut)
 }
 

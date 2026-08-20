@@ -1,5 +1,3 @@
-#![allow(unsafe_code)]
-
 use crate::node_realworld;
 
 use std::net::SocketAddr;
@@ -9,7 +7,7 @@ use compio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use compio::net::{TcpListener, TcpStream};
 use serde_json::json;
 
-use node_realworld::{EnvGuard, allowlist, lock_env, run_js};
+use node_realworld::{SettingsGuard, allowlist, lock_env, run_js};
 
 async fn spawn_split_http_server() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -54,7 +52,7 @@ async fn handle_http_connection(mut stream: TcpStream) {
 #[test]
 fn raw_http_over_net_socket_parses_split_response() {
     let _lock = lock_env();
-    let _env = EnvGuard::set_dev();
+    let _env = SettingsGuard::set_dev();
 
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         let addr = spawn_split_http_server().await;
