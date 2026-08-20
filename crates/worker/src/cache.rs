@@ -7,7 +7,8 @@ use uuid::Uuid;
 
 use zeroship_core::types::{AppNetPolicy, AppRuntimeLimits};
 use zeroship_plugin_storage::StorageBackendConfig;
-use zeroship_runtime::{EnvSnapshot, HostPort, ModuleEntry, NetPolicy};
+use zeroship_core::net_policy::{EgressRule, Verdict};
+use zeroship_runtime::{EnvSnapshot, ModuleEntry, NetPolicy};
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::{Runtime, RuntimeLimits};
 
@@ -544,47 +545,59 @@ pub fn runtime_limits_from_app(limits: &AppRuntimeLimits) -> RuntimeLimits {
     }
 }
 
+/// Rebuild the runtime egress policy from the control-plane projection.
+///
+/// Every row is re-parsed through `EgressRule::parse`, the SAME authoring
+/// boundary the creator-facing API applies, so a hand-edited database row cannot
+/// inject a rule the API would have refused. An individually invalid row is
+/// dropped rather than failing the whole app; a rule set that is empty after
+/// that is `Denied`.
+///
+/// Dropping a bad row is safe in ONE direction only, and the direction matters:
+/// a dropped ACCEPT narrows what the app can reach, so the failure mode is the
+/// app's own traffic breaking. A dropped REJECT would WIDEN it, which is why an
+/// unparseable REJECT denies the app outright instead.
 pub fn net_policy_from_app(app_id: &Uuid, app_net: &AppNetPolicy) -> NetPolicy {
-    if app_net.allow.is_empty() {
+    if app_net.egress.is_empty() {
         return NetPolicy::Denied;
     }
 
-    let mut entries = Vec::with_capacity(app_net.allow.len());
-    for entry in &app_net.allow {
-        match HostPort::try_new_with_frontable_suffixes(
-            entry.host.clone(),
-            entry.port,
-            &app_net.frontable_wildcard_suffixes,
-            app_net.frontable_wildcard_suffixes_available,
-        ) {
-            Ok(host_port) => entries.push(host_port),
+    let mut rules = Vec::with_capacity(app_net.egress.len());
+    for entry in &app_net.egress {
+        match EgressRule::parse(entry.verdict, &entry.destination, entry.port) {
+            Ok(rule) => rules.push(rule),
             Err(err) => {
                 tracing::error!(
                     app_id = %app_id,
-                    host = %entry.host,
+                    verdict = entry.verdict.as_str(),
+                    destination = %entry.destination,
                     port = entry.port,
                     error = %err,
-                    "worker: net grant entry rejected at load; skipping this host"
+                    "worker: egress rule rejected at load"
                 );
+                if entry.verdict == Verdict::Reject {
+                    tracing::error!(
+                        app_id = %app_id,
+                        "worker: an unparseable REJECT rule would widen reach if skipped; \
+                         denying raw TCP"
+                    );
+                    return NetPolicy::Denied;
+                }
             }
         }
     }
 
-    if entries.is_empty() {
+    if rules.is_empty() {
         return NetPolicy::Denied;
     }
 
-    match NetPolicy::allowlist(
-        entries,
-        app_net.max_sockets,
-        app_net.egress_ceiling_bytes,
-    ) {
+    match NetPolicy::rules(rules, app_net.max_sockets, app_net.egress_ceiling_bytes) {
         Ok(policy) => policy,
         Err(err) => {
             tracing::error!(
                 app_id = %app_id,
                 error = %err,
-                "worker: net grant set rejected at load; denying raw TCP"
+                "worker: egress rule set rejected at load; denying raw TCP"
             );
             NetPolicy::Denied
         }
@@ -980,32 +993,40 @@ mod tests {
     }
 
     #[test]
-    fn net_policy_from_app_builds_reviewed_allowlist_from_grants() {
+    fn net_policy_from_app_builds_a_rule_set_from_projection_rows() {
         let app_id = Uuid::new_v4();
         let policy = net_policy_from_app(
             &app_id,
             &AppNetPolicy {
-                allow: vec![zeroship_core::types::NetAllowEntry {
-                    host: "DB.Example.COM.".to_string(),
+                egress: vec![zeroship_core::types::NetEgressEntry {
+                    verdict: Verdict::Accept,
+                    destination: "DB.Example.COM.".to_string(),
                     port: 5432,
                 }],
                 max_sockets: 8,
                 egress_ceiling_bytes: 2 * 1024 * 1024,
-                ..AppNetPolicy::default()
             },
         );
         match &policy {
-            NetPolicy::Allowlist {
+            NetPolicy::Rules {
+                rules,
                 max_sockets,
                 egress_ceiling_bytes,
-                ..
             } => {
                 assert_eq!(*max_sockets, 8);
                 assert_eq!(*egress_ceiling_bytes, 2 * 1024 * 1024);
-                assert!(policy.allows_host_port("db.example.com", 5432));
-                assert!(!policy.allows_host_port("other.example.com", 5432));
+                // The row is normalised on the way in, so the trailing dot and
+                // the case are gone and one destination is one rule.
+                assert_eq!(
+                    rules.name_phase("db.example.com", 5432),
+                    zeroship_core::net_policy::NamePhase::Resolve { name_accepted: true }
+                );
+                assert_eq!(
+                    rules.name_phase("other.example.com", 5432),
+                    zeroship_core::net_policy::NamePhase::NoRuleCouldAdmit
+                );
             }
-            other => panic!("expected Allowlist, got {other:?}"),
+            other => panic!("expected Rules, got {other:?}"),
         }
     }
 
@@ -1015,49 +1036,153 @@ mod tests {
         let policy = net_policy_from_app(
             &app_id,
             &AppNetPolicy {
-                allow: vec![
-                    zeroship_core::types::NetAllowEntry {
-                        host: "*".to_string(),
+                egress: vec![
+                    zeroship_core::types::NetEgressEntry {
+                        verdict: Verdict::Accept,
+                        destination: "*".to_string(),
                         port: 443,
                     },
-                    zeroship_core::types::NetAllowEntry {
-                        host: "smtp.example.com".to_string(),
+                    zeroship_core::types::NetEgressEntry {
+                        verdict: Verdict::Accept,
+                        destination: "smtp.example.com".to_string(),
                         port: 587,
                     },
                 ],
                 max_sockets: 4,
                 egress_ceiling_bytes: 1024 * 1024,
-                ..AppNetPolicy::default()
             },
         );
-        assert!(
-            policy.allows_host_port("smtp.example.com", 587),
-            "one malformed grant row must not brick the other reviewed hosts"
+        let NetPolicy::Rules { rules, .. } = &policy else {
+            panic!("expected Rules, got {policy:?}");
+        };
+        assert_eq!(
+            rules.name_phase("smtp.example.com", 587),
+            zeroship_core::net_policy::NamePhase::Resolve { name_accepted: true },
+            "one malformed ACCEPT row must not brick the other valid rules"
         );
-        assert!(!policy.allows_host_port("anything.example.com", 443));
+        assert_eq!(
+            rules.name_phase("anything.example.com", 443),
+            zeroship_core::net_policy::NamePhase::NoRuleCouldAdmit
+        );
     }
 
+    /// A hand-edited row carrying an unparseable REJECT must DENY, not be
+    /// skipped: skipping an ACCEPT narrows the app's reach, skipping a REJECT
+    /// widens it, and only one of those directions is safe to fail into.
     #[test]
-    fn net_policy_from_app_revalidates_operator_frontable_catalog() {
+    fn net_policy_from_app_denies_when_a_reject_row_is_unparseable() {
         let app_id = Uuid::new_v4();
         let policy = net_policy_from_app(
             &app_id,
             &AppNetPolicy {
-                allow: vec![zeroship_core::types::NetAllowEntry {
-                    host: "*.shared.example.test".to_string(),
-                    port: 443,
-                }],
+                egress: vec![
+                    zeroship_core::types::NetEgressEntry {
+                        verdict: Verdict::Accept,
+                        destination: "smtp.example.com".to_string(),
+                        port: 587,
+                    },
+                    zeroship_core::types::NetEgressEntry {
+                        verdict: Verdict::Reject,
+                        destination: "not a destination".to_string(),
+                        port: 587,
+                    },
+                ],
                 max_sockets: 4,
                 egress_ceiling_bytes: 1024 * 1024,
-                frontable_wildcard_suffixes: vec!["shared.example.test".to_string()],
-                frontable_wildcard_suffixes_available: true,
             },
         );
         assert!(
             matches!(policy, NetPolicy::Denied),
-            "a DB grant row with a catalog-frontable wildcard suffix must be skipped; \
-             with no remaining hosts the app is denied raw TCP"
+            "an unparseable REJECT must deny the app, never be skipped"
         );
+    }
+
+    /// The control for the row above, and the one that makes the projection's
+    /// only unsafe direction visible at all: a VALID reject row must survive
+    /// into the rule set.
+    ///
+    /// The unparseable-reject row cannot see this. Dropping every reject on the
+    /// floor leaves it green - the app is denied either way - so without this
+    /// pair `net_policy_from_app`'s own warning, that "a dropped REJECT would
+    /// WIDEN it", is a comment with nothing behind it.
+    #[test]
+    fn net_policy_from_app_keeps_a_valid_reject_row() {
+        let app_id = Uuid::new_v4();
+        let policy = net_policy_from_app(
+            &app_id,
+            &AppNetPolicy {
+                egress: vec![
+                    zeroship_core::types::NetEgressEntry {
+                        verdict: Verdict::Accept,
+                        destination: "93.184.216.0/24".to_string(),
+                        port: 443,
+                    },
+                    zeroship_core::types::NetEgressEntry {
+                        verdict: Verdict::Reject,
+                        destination: "93.184.216.7/32".to_string(),
+                        port: 443,
+                    },
+                ],
+                max_sockets: 4,
+                egress_ceiling_bytes: 1024 * 1024,
+            },
+        );
+        let NetPolicy::Rules { rules, .. } = &policy else {
+            panic!("expected Rules, got {policy:?}");
+        };
+        assert_eq!(
+            rules.address_phase("93.184.216.7".parse().unwrap(), 443, false),
+            zeroship_core::net_policy::AddressPhase::RangeRejected,
+            "the carved-out address must still be refused: a reject the \
+             projection drops WIDENS what the app reaches"
+        );
+        // The control, differing in ONE thing - the address. Everything else in
+        // the accept range is still admitted, so the row above is about the
+        // reject surviving and not about the whole rule set being dropped.
+        assert_eq!(
+            rules.address_phase("93.184.216.34".parse().unwrap(), 443, false),
+            zeroship_core::net_policy::AddressPhase::Admitted
+        );
+    }
+
+    /// Wildcards are no longer representable, so a row carrying one is dropped
+    /// at load exactly as the API would have refused it at authoring time.
+    #[test]
+    fn net_policy_from_app_drops_wildcard_rows() {
+        let app_id = Uuid::new_v4();
+        let policy = net_policy_from_app(
+            &app_id,
+            &AppNetPolicy {
+                egress: vec![zeroship_core::types::NetEgressEntry {
+                    verdict: Verdict::Accept,
+                    destination: "*.shared.example.test".to_string(),
+                    port: 443,
+                }],
+                max_sockets: 4,
+                egress_ceiling_bytes: 1024 * 1024,
+            },
+        );
+        assert!(
+            matches!(policy, NetPolicy::Denied),
+            "a wildcard row must be skipped; with no rules left the app is denied"
+        );
+
+        // The control, differing in ONE character: the same row without the
+        // `*.`. Without it this row is green against a projection that denies
+        // every app there is.
+        let exact = net_policy_from_app(
+            &app_id,
+            &AppNetPolicy {
+                egress: vec![zeroship_core::types::NetEgressEntry {
+                    verdict: Verdict::Accept,
+                    destination: "shared.example.test".to_string(),
+                    port: 443,
+                }],
+                max_sockets: 4,
+                egress_ceiling_bytes: 1024 * 1024,
+            },
+        );
+        assert!(matches!(exact, NetPolicy::Rules { .. }));
     }
 
     #[test]
@@ -1066,13 +1191,13 @@ mod tests {
         let policy = net_policy_from_app(
             &app_id,
             &AppNetPolicy {
-                allow: vec![zeroship_core::types::NetAllowEntry {
-                    host: "db.example.com".to_string(),
+                egress: vec![zeroship_core::types::NetEgressEntry {
+                    verdict: Verdict::Accept,
+                    destination: "db.example.com".to_string(),
                     port: 5432,
                 }],
                 max_sockets: u32::MAX,
                 egress_ceiling_bytes: u64::MAX,
-                ..AppNetPolicy::default()
             },
         );
         assert!(
@@ -1109,13 +1234,13 @@ mod tests {
                     br#"export default { fetch() { return new Response("ok"); } }"#,
                     AppRuntimeLimits::default(),
                     AppNetPolicy {
-                        allow: vec![zeroship_core::types::NetAllowEntry {
-                            host: "db.example.com".to_string(),
+                        egress: vec![zeroship_core::types::NetEgressEntry {
+                            verdict: Verdict::Accept,
+                            destination: "db.example.com".to_string(),
                             port: 5432,
                         }],
                         max_sockets: 6,
                         egress_ceiling_bytes: 1024 * 1024,
-                        ..AppNetPolicy::default()
                     },
                     None,
                     None,
@@ -1125,8 +1250,19 @@ mod tests {
                 let runtime = get_runtime(&app_id).expect("runtime loaded");
                 let state = runtime.state();
                 let state = state.borrow();
-                assert!(state.net_policy.allows_host_port("db.example.com", 5432));
-                assert!(!state.net_policy.allows_host_port("db.example.com", 5433));
+                let NetPolicy::Rules { rules, .. } = &state.net_policy else {
+                    panic!("expected Rules, got {:?}", state.net_policy);
+                };
+                assert_eq!(
+                    rules.name_phase("db.example.com", 5432),
+                    zeroship_core::net_policy::NamePhase::Resolve { name_accepted: true }
+                );
+                // The port is part of the rule, so the same host on another
+                // port is refused before DNS.
+                assert_eq!(
+                    rules.name_phase("db.example.com", 5433),
+                    zeroship_core::net_policy::NamePhase::NoRuleCouldAdmit
+                );
                 assert_eq!(state.net_policy.max_sockets(), 6);
             });
         })

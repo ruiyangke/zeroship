@@ -28,7 +28,7 @@ pub mod internal;
 pub mod invoice_payments;
 pub mod metering;
 pub mod migrations_api;
-pub mod net_grants;
+pub mod egress_rules;
 pub mod notify;
 pub mod oauth_grants_handlers;
 pub mod oauth_clients;

@@ -31,7 +31,7 @@ use zeroship_auth::server;
 use zeroship_core::config::{Secret, SourceKind};
 use zeroship_core::oidc_verify::JwksCache;
 
-mod common;
+use crate::common;
 use common::mock_provider::{MockProvider, MockUser, ProviderMode};
 use common::{
     location, native_authorize_return_to, read_set_cookie, test_auth_config_with, CookieJar,

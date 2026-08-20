@@ -1,6 +1,6 @@
 //! OIDC Back-Channel Logout OP emission tests.
 
-mod common;
+use crate::common;
 
 use std::sync::{Arc, Mutex};
 

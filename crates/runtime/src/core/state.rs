@@ -659,6 +659,14 @@ pub struct RuntimeState {
     /// Raw TCP policy for `node:net`. Default is `Denied`, which also
     /// makes the synthetic module unresolvable.
     pub net_policy: crate::transport::net_policy::NetPolicy,
+    /// PHASE 2 of the egress evaluator, as a seam.
+    ///
+    /// Trusted Rust construction, exactly like `net_policy`: app JavaScript
+    /// cannot read it, name it or replace it. It exists so a test can observe
+    /// WHETHER the shipped connect path resolved a name, which is the only way
+    /// the DNS gate is observable at all - a refusal that arrives quickly
+    /// cannot be told from a lookup that was fast.
+    pub egress_resolver: std::rc::Rc<dyn crate::transport::egress::EgressResolver>,
     /// Native `node:net.Socket` states, keyed by native socket id.
     pub native_sockets: HashMap<
         u32,
@@ -783,6 +791,7 @@ impl RuntimeState {
             native_ws_wrappers: HashMap::new(),
 
             net_policy: crate::transport::net_policy::NetPolicy::Denied,
+            egress_resolver: std::rc::Rc::new(crate::transport::egress::SystemResolver),
             native_sockets: HashMap::new(),
             next_native_socket_id: 1,
             native_socket_wrappers: HashMap::new(),
@@ -800,6 +809,13 @@ impl RuntimeState {
 
     pub fn set_net_policy(&mut self, policy: crate::transport::net_policy::NetPolicy) {
         self.net_policy = policy;
+    }
+
+    pub fn set_egress_resolver(
+        &mut self,
+        resolver: std::rc::Rc<dyn crate::transport::egress::EgressResolver>,
+    ) {
+        self.egress_resolver = resolver;
     }
 
     /// Register a promise passed to `ctx.waitUntil(p)` for its owning

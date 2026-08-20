@@ -37,7 +37,7 @@
 //! deliberate - it avoids a hard V8 fatal-abort - but it means the configured
 //! number is a floor that buys headroom, not a bound.
 
-mod common;
+use crate::common;
 use common::*;
 
 use std::time::Duration;

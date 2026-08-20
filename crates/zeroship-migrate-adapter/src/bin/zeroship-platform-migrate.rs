@@ -23,7 +23,16 @@
 //! Usage:
 //!   zeroship-platform-migrate --database-url-file /path/to/dsn \
 //!       [--migrations-dir db/migrations-ts] [--project-schema zeroship] \
-//!       [--project-id zeroship]
+//!       [--project-id zeroship] [--cluster-lock-database postgres]
+//!
+//! `--cluster-lock-database` names the database on the SAME cluster that
+//! concurrent migrate runs coordinate through while applying cluster-global
+//! objects (roles, databases, tablespaces). It defaults to `postgres` and only
+//! needs setting on a cluster where that maintenance database was dropped. It
+//! is a separate database from the one being migrated on purpose: a PostgreSQL
+//! advisory lock is database-scoped, so two runs migrating two different
+//! databases have nowhere else to exclude each other. See
+//! `zeroship_migrate_adapter::platform::cluster_lock`.
 //!
 //! IN A DEPLOY FILE THE DSN ARRIVES AS A PATH, NEVER AS A VALUE. A process
 //! argument list is public: `docker inspect`, `docker ps --no-trunc`, `ps` and
@@ -47,6 +56,7 @@
 
 use std::path::{Path, PathBuf};
 
+use zeroship_migrate_adapter::platform::cluster_lock::DEFAULT_CLUSTER_LOCK_DATABASE;
 use zeroship_migrate_adapter::platform::{run_platform_migrations, PlatformMigrateConfig};
 
 fn main() {
@@ -56,7 +66,8 @@ fn main() {
             eprintln!("zeroship-platform-migrate: {msg}");
             eprintln!(
                 "\nusage: zeroship-platform-migrate --database-url-file <PATH> \
-                 [--migrations-dir <dir>] [--project-schema <schema>] [--project-id <id>]"
+                 [--migrations-dir <dir>] [--project-schema <schema>] [--project-id <id>] \\
+                 [--cluster-lock-database <db>]"
             );
             std::process::exit(2);
         }
@@ -104,6 +115,7 @@ where
     let mut migrations_dir: Option<PathBuf> = None;
     let mut project_schema = String::from("zeroship");
     let mut project_id = String::from("zeroship");
+    let mut cluster_lock_database = String::from(DEFAULT_CLUSTER_LOCK_DATABASE);
 
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -125,6 +137,11 @@ where
             "--project-id" => {
                 project_id = args.next().ok_or("--project-id needs a value")?;
             }
+            "--cluster-lock-database" => {
+                cluster_lock_database = args
+                    .next()
+                    .ok_or("--cluster-lock-database needs a value")?;
+            }
             "-h" | "--help" => return Err("help".to_string()),
             other => return Err(format!("unknown argument '{other}'")),
         }
@@ -144,14 +161,25 @@ where
         // by an editor and one written by `printf` are read identically here
         // and everywhere else, rather than by a second implementation.
         //
-        // IT CHECKS NO PERMISSIONS. Measured 2026-08-16 by running this binary
-        // against a 0644 DSN file: it was accepted and the run proceeded to
-        // connect. `read_secret_file` (crates/core/src/config/secrets.rs)
-        // trims one trailing newline and does nothing else, so the mode the
-        // file arrives with is whatever created it - `zeroship dev init`
-        // writes 0600, and nothing re-checks afterwards. What the path form
-        // buys is that the DSN is absent from argv and from the environment;
-        // it is not a claim about the filesystem.
+        // IT ENFORCES OWNER-ONLY PERMISSIONS, and it refuses rather than warns.
+        // `read_secret_file` (crates/core/src/config/secrets.rs) calls
+        // `enforce_owner_only`, which rejects any file with a bit set in 0o077.
+        // MEASURED 2026-08-19 against the deployed image, one variable between
+        // the arms: a 0644 DSN file gives
+        //   secret file '...' has mode 100644; group and other permissions
+        //   must be zero (chmod 600 '...')
+        // and EXIT 2 -- the parse-failure code, not the migrate-failure code --
+        // while the same file at 0600 parses and the run proceeds to connect.
+        //
+        // THIS COMMENT SAID THE OPPOSITE UNTIL 2026-08-19: "IT CHECKS NO
+        // PERMISSIONS", citing a 2026-08-16 measurement of a 0644 file being
+        // accepted. Whatever was run then, the code above it does check, so the
+        // comment was an assertion of safety for a mode that is in fact
+        // refused. Anyone provisioning a DSN file from this note would have
+        // shipped an unbootable one-shot.
+        //
+        // What the path form buys on top of that is that the DSN is absent from
+        // argv and from the environment.
         (Some(path), None) => zeroship_core::config::read_secret_file(&path)
             .map_err(|error| format!("--database-url-file {path}: {error}"))?,
         (None, Some(dsn)) => dsn,
@@ -167,6 +195,7 @@ where
         migrations_dir,
         project_schema,
         project_id,
+        cluster_lock_database,
     })
 }
 

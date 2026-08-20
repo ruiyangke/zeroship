@@ -17,14 +17,15 @@ pub enum Action {
     DeleteVar,
     SetSecret,
     DeleteSecret,
-    /// A creator allowed one raw-TCP egress host:port for their app
-    /// (`POST /api/apps/{id}/net-grants`). The row is what the registry
-    /// projects into every runtime's allowlist, so who widened an app's reach
-    /// and when is the question this entry answers.
-    GrantAppNet,
-    /// A creator removed one raw-TCP egress host:port
-    /// (`DELETE /api/apps/{id}/net-grants`).
-    RevokeAppNet,
+    /// A creator wrote one raw-TCP egress rule for their app
+    /// (`POST /api/apps/{id}/egress-rules`). The row is what the registry
+    /// projects into every runtime, so who changed an app's reach and in
+    /// which direction is the question this entry answers - the resource
+    /// carries the verdict for exactly that reason.
+    SetAppEgressRule,
+    /// A creator removed one raw-TCP egress rule
+    /// (`DELETE /api/apps/{id}/egress-rules`).
+    DeleteAppEgressRule,
     /// Set the per-app `process.env` expose list — names of secrets the
     /// creator has opted to surface in `process.env`. Audited so ops
     /// can answer "when did we let X out of the secret namespace."
@@ -115,8 +116,8 @@ impl Action {
             Self::DeleteVar => "delete_var",
             Self::SetSecret => "set_secret",
             Self::DeleteSecret => "delete_secret",
-            Self::GrantAppNet => "grant_app_net",
-            Self::RevokeAppNet => "revoke_app_net",
+            Self::SetAppEgressRule => "set_app_egress_rule",
+            Self::DeleteAppEgressRule => "delete_app_egress_rule",
             Self::SetEnvExpose => "set_env_expose",
             Self::CreateAccount => "create_account",
             Self::LinkAccount => "link_account",

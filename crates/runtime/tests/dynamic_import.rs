@@ -15,7 +15,7 @@
 //!   - `node:async_hooks` and `node:crypto` resolve via the native
 //!     synthetic path even when only dynamically imported.
 
-mod common;
+use crate::common;
 use common::{dispatch, m};
 use zeroship_runtime::ModuleEntry;
 

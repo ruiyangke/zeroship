@@ -72,13 +72,14 @@ pub async fn tick_ref_sweep(state: &AppState) -> Result<usize, RegistryError> {
     let cutoff = Utc::now() - chrono::Duration::seconds(REF_SWEEP_GRACE_SECS);
     let mut deleted = 0usize;
     let mut remaining = MAX_REF_DELETES_PER_TICK;
-    for app_id in super::workflow_engine::workflow_app_ids(&tx).await? {
+    for app_id in super::workflow_engine::journalled_app_ids(&tx).await? {
         if remaining <= 0 {
             break;
         }
-        let Some(tables) = super::workflow_engine::existing_tables(&tx, &app_id).await? else {
-            continue;
-        };
+        // Deletes only this app's own zero-refcount blobs, so an app excluded
+        // for being unreadable costs that app its GC and nothing else. The
+        // ORPHAN sweep below is the opposite case and must not skip.
+        let tables = WorkflowTables::for_app_id(&app_id);
         let rows = tx
             .query(
                 &super::workflow_engine::journal_sql(
@@ -197,14 +198,29 @@ where
     Ok(rows.first().is_some_and(|row| row.get("locked")))
 }
 
+/// Is `hash` referenced by ANY app's journal?
+///
+/// The caller DELETES the blob when this says false, so an app whose journal
+/// cannot be read must answer TRUE, not be skipped. Skipping it would let a
+/// permission gap on one tenant delete another tenant's live workflow output -
+/// a fleet-wide sweep that reads "I could not check" as "nothing there" turns a
+/// visible outage into silent data loss.
 async fn workflow_blob_is_referenced<C>(conn: &C, hash: &str) -> Result<bool, RegistryError>
 where
     C: GenericClient + Sync,
 {
-    for app_id in super::workflow_engine::workflow_app_ids(conn).await? {
-        let Some(tables) = super::workflow_engine::existing_tables(conn, &app_id).await? else {
-            continue;
-        };
+    for app in super::workflow_engine::journalled_apps(conn).await? {
+        let app_id = app.app_id;
+        if !app.readable {
+            tracing::warn!(
+                app_id = %app_id,
+                hash = %hash,
+                "retaining workflow blob: this app's journal is unreadable, so it cannot be \
+                 proven unreferenced"
+            );
+            return Ok(true);
+        }
+        let tables = WorkflowTables::for_app_id(&app_id);
         let rows = conn
             .query(
                 &super::workflow_engine::journal_sql(

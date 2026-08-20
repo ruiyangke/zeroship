@@ -167,6 +167,37 @@ secret_files() {
     | sed 's|.*/||' | sort -u
 }
 
+# Every submodule path this repo declares, as a bare path, read out of
+# .gitmodules. Derived for the same reason every other list in this file is
+# derived: a second copy is the defect, not the one name it happens to hold.
+#
+# $1 is the .gitmodules file, defaulting to the real one; tests pass fixtures.
+submodule_paths() {
+  sed -n 's/^[[:space:]]*path[[:space:]]*=[[:space:]]*//p' "${1:-.gitmodules}" \
+    | sed 's|/*$||' | sort -u
+}
+
+# The manifests the image build opens under submodule path $1, relative to the
+# repo root. Two producers, because deploy/Dockerfile hands the tree to two
+# toolchains and each has its own idea of what must be there:
+#
+#   - pnpm-lock.yaml importers under $1  -> the `sdks` stage's
+#     `pnpm install --frozen-lockfile`, which validates the on-disk workspace
+#     against the lockfile and fails on an importer that is not present.
+#   - Cargo.toml workspace members and path dependencies under $1 -> the
+#     `builder` stage's cargo, which cannot even LOAD the workspace without
+#     the member manifests.
+#
+# $2/$3 are the lockfile and manifest, defaulting to the real ones; tests pass
+# fixtures.
+submodule_manifests() {
+  local path="$1"
+  grep -oE "^  ${path}(/[A-Za-z0-9._/-]+)?:" "${2:-pnpm-lock.yaml}" \
+    | sed 's/:$//; s/^  //; s|$|/package.json|'
+  grep -oE "\"${path}(/[A-Za-z0-9._/-]+)?\"" "${3:-Cargo.toml}" \
+    | tr -d '"' | sed 's|$|/Cargo.toml|'
+}
+
 rename_norm() {
   local n="${1#ZEROSHIP_}"
   case "$n" in
@@ -412,6 +443,83 @@ main() {
     SKIP_BUILD=1
   fi
   echo "ok  image will be $IMAGE"
+
+  # ------------------------------------------------------ source-tree contract
+  #
+  # THE HOST IS NOT THE ONLY INPUT. Every check in this script was about the
+  # machine we deploy TO. Nothing was about the tree we are about to BUILD, and
+  # that asymmetry cost a full 20-minute image build on 2026-08-19.
+  #
+  # MEASURED, during a real production deploy. It was run from a git worktree,
+  # created so the image would not be tagged -dirty. `git worktree add` DOES NOT
+  # POPULATE SUBMODULES, so third_party/zero-migrate was an EMPTY DIRECTORY - 0
+  # entries against 18 in the main checkout. deploy/Dockerfile COPYs third_party/
+  # into both the `sdks` and the `builder` stage, docker copied the empty tree,
+  # and the build died twenty minutes in:
+  #
+  #   src/gen-types/addon.ts(66,8): error TS2307:
+  #       Cannot find module 'zero-migrate-node'
+  #   src/gen-types/recorder.ts(31,8): error TS2307:
+  #       Cannot find module 'zero-migrate/internal/recorder'
+  #   [ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL] @zeroship/vite-plugin build
+  #
+  # That is detectable in well under a second before the build starts, so it is.
+  #
+  # WHY tests/dockerfile_copy_paths_gate.sh DOES NOT ALREADY COVER THIS, which is
+  # the obvious objection and has been measured rather than argued. That gate
+  # asks `[ -e ]` of every context COPY source; `third_party/` EXISTS, it is just
+  # empty. Run in a worktree with the submodule unpopulated it reports 15 passed,
+  # 0 failed - green on the exact tree whose build fails. It is a path lint, and
+  # this is a content problem.
+  #
+  # CONTENT, NOT GIT STATE. `git submodule status` is the instrument that first
+  # suggests itself and it is the wrong one: it prints `-` (uninitialised) for a
+  # worktree whose submodule content arrived by rsync rather than by `submodule
+  # update`, which is a tree that builds perfectly. Verified 2026-08-20 on two
+  # worktrees, one rsynced and one not - it says `-` for both. Docker copies
+  # files off the disk, so files off the disk is what this asks about.
+  #
+  # SKIPPED WHEN NOTHING IS BUILT. --skip-build and --image deploy an existing
+  # reference; the source tree is not an input to those and must not gate them.
+  # --rollback and --list-backups have already returned above.
+  if [ "$SKIP_BUILD" = 0 ]; then
+    say "checking the source tree can build the image"
+    [ -f .gitmodules ] || fail "no .gitmodules in $ROOT, so this check cannot name a
+  single path to verify. It exists because an unpopulated submodule builds for
+  twenty minutes and then fails; refusing rather than passing vacuously."
+    SUB_PATHS="$(submodule_paths)"
+    [ -n "$SUB_PATHS" ] || fail "no submodule path could be read out of $ROOT/.gitmodules.
+  Either the file changed shape or submodule_paths() is broken. A check that
+  inspects nothing must not report success."
+    EMPTY_SUBS=""
+    ABSENT_MANIFESTS=""
+    for sub in $SUB_PATHS; do
+      if [ -z "$(ls -A "$sub" 2>/dev/null)" ]; then
+        EMPTY_SUBS="$EMPTY_SUBS $sub"
+        continue
+      fi
+      # Populated, but the build reads specific manifests out of it. A partial
+      # copy - an interrupted rsync, a shallow archive - passes the test above
+      # and still fails the same two stages.
+      for m in $(submodule_manifests "$sub" | sort -u); do
+        [ -f "$m" ] || ABSENT_MANIFESTS="$ABSENT_MANIFESTS $m"
+      done
+    done
+    [ -z "$EMPTY_SUBS" ] || fail "submodule directories are EMPTY in $ROOT:$EMPTY_SUBS
+  deploy/Dockerfile COPYs them into the sdks and builder stages, so the build
+  would run for about twenty minutes and then die on TS2307 'Cannot find module
+  zero-migrate-node'. \`git worktree add\` does not populate submodules; this is
+  almost always a deploy run from a fresh worktree. Fix it with:
+      git -C $ROOT submodule update --init --recursive
+  or rsync the populated tree across from a checkout that has it."
+    [ -z "$ABSENT_MANIFESTS" ] || fail "manifests the image build opens are missing:$ABSENT_MANIFESTS
+  The submodule directory is not empty, so this is a PARTIAL copy - an
+  interrupted rsync or an archive that dropped paths. pnpm install
+  --frozen-lockfile needs every lockfile importer present and cargo needs every
+  workspace member manifest. Re-populate the submodule:
+      git -C $ROOT submodule update --init --recursive"
+    echo "ok  every declared submodule is populated ($(echo $SUB_PATHS))"
+  fi
 
   # Every file a deploy overwrites has to already be there, because every one is
   # backed up first and a backup of an absent file cannot be taken or restored.
@@ -699,15 +807,88 @@ $RENDERED
   your time."
   echo "ok  every server accepts the new configuration"
 
+  # ------------------------------------------------- secrets are actually there
+  #
+  # THE CHECK ABOVE DOES NOT COVER THIS, and the gap took production down on
+  # 2026-08-19. `secret_files` (top of this file) proves every referenced secret
+  # exists ON THE HOST; `--check-config` proves the five long-running SERVERS
+  # accept the configuration. Neither asks the one question that failed: can the
+  # container OPEN the path its own command names?
+  #
+  # It failed for `migrate`, which is in neither set -- it is a one-shot with no
+  # --check-config, and its DSN moved from a value flag to
+  # `--database-url-file /etc/zeroship/secrets/migrate-dsn` on 2026-08-16. The
+  # host-side override carries `migrate: volumes: !override []`, written when the
+  # service's ONLY volume was a repo checkout that a source-less host must not
+  # mount. The blanket empty list then silently took the new DSN mount with it,
+  # exactly the way a CASCADE takes the object nobody was looking at. The file
+  # was present on the host, so the existing check passed; it was absent inside
+  # the container, so the binary exited at ARGUMENT PARSE with code 2 and the
+  # roll reported a bare `didn't complete successfully: exit 2`.
+  #
+  # `run --rm --no-deps` gets each service its REAL merged volumes, so this
+  # asks the question against the same mounts the roll will use. Derived from
+  # the rendered config per service, so it covers one-shots and any service
+  # added later without a list to maintain.
+  say "checking every secret path a container names is readable inside it"
+  MOUNT_BAD="$(rsh "cd '$REMOTE_DIR/compose'
+  export ZEROSHIP_IMAGE='$IMAGE'
+  R=\$(mktemp)
+  docker compose config > \"\$R\" 2>/dev/null || { rm -f \"\$R\"; exit 0; }
+  for svc in \$(docker compose config --services 2>/dev/null); do
+    for p in \$(awk -v s=\"  \$svc:\" '\$0==s{f=1;next} f && /^  [a-zA-Z]/{exit} f' \"\$R\" | grep -oE '/etc/zeroship/secrets/[A-Za-z0-9._-]+' | sort -u); do
+      docker compose run --rm -T --no-deps --entrypoint sh \"\$svc\" -c \"test -r \$p\" >/dev/null 2>&1 </dev/null || echo \"\$svc \$p\"
+    done
+  done
+  rm -f \"\$R\"" || true)"
+  [ -z "$MOUNT_BAD" ] || fail "these services name a secret path they cannot open:
+$MOUNT_BAD
+  NOTHING WAS RESTARTED. The file existing on the host is not enough -- the
+  service must MOUNT it. Check the host's docker-compose.override.yml: a
+  \`volumes: !override []\` REPLACES the whole list, so a mount added to the
+  tracked compose file since that override was written is silently dropped."
+  echo "ok  every referenced secret is readable inside the service that names it"
+
   say "rolling the stack to $IMAGE"
   # One `up -d` for every service. The control key is shared, so a partial
   # restart splits the stack into two halves that cannot authenticate.
-  rsh "set -e
+  if ! rsh "set -e
   cd '$REMOTE_DIR/compose'
   sed -i 's|^ZEROSHIP_IMAGE=.*|ZEROSHIP_IMAGE=$IMAGE|' .env
   grep -q '^ZEROSHIP_IMAGE=$IMAGE\$' .env || { echo 'ZEROSHIP_IMAGE was not updated'; exit 1; }
-  docker compose up -d --remove-orphans" \
-    || fail "the roll failed. Re-run with --rollback to restore the $STAMP snapshot."
+  docker compose up -d --remove-orphans"; then
+    # WHY THIS BLOCK EXISTS. `docker compose up` reports a failed one-shot as
+    # `service "migrate" didn't complete successfully: exit 2` and NOTHING ELSE
+    # -- the container's own stdout and stderr, which say WHICH migration failed
+    # and why, are never surfaced. That is the same species of defect as
+    # suppressing stderr on a counting command: a failing run and a clean run
+    # leave the operator the identical trace, and the number alone is not a
+    # diagnosis. It cost a 20-minute build and three deploy attempts on
+    # 2026-08-19 to learn only that the exit code was 2.
+    #
+    # IT MUST RUN HERE, BEFORE ANYTHING RECREATES THE CONTAINER. The exited
+    # container still holds its logs, but `--rollback` (and any later `up`)
+    # replaces it, after which `docker logs` shows the REPLACEMENT's output --
+    # on the old image, succeeding. That is how a failure comes to look like a
+    # clean run.
+    #
+    # Every non-running service, not just `migrate`: the one-shot is the case
+    # that bit us, but a server that exits at parse time is silent in exactly
+    # the same way, and a hard-coded service list stops covering the next
+    # one-shot somebody adds.
+    printf '\n== the roll failed; container output BEFORE anything is recreated\n' >&2
+    rsh "cd '$REMOTE_DIR/compose' && docker compose ps -a --format '{{.Name}}|{{.Service}}|{{.State}}|{{.Status}}'" >&2 2>/dev/null || true
+    DOWN="$(rsh "cd '$REMOTE_DIR/compose' && docker compose ps -a --format '{{.Service}}|{{.State}}' | awk -F'|' '\$2 != \"running\" {print \$1}' | sort -u" 2>/dev/null || true)"
+    if [ -n "$DOWN" ]; then
+      for svc in $DOWN; do
+        printf '\n---- docker compose logs %s ----\n' "$svc" >&2
+        rsh "cd '$REMOTE_DIR/compose' && docker compose logs --no-color --tail=100 '$svc' 2>&1" >&2 </dev/null || true
+      done
+    else
+      printf '(no non-running service; compose failed before any container exited)\n' >&2
+    fi
+    fail "the roll failed. The container output above is why. Re-run with --rollback to restore the $STAMP snapshot."
+  fi
 
   # ----------------------------------------------------------------- verify
   say "verifying"

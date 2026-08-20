@@ -142,7 +142,7 @@ boot() {  # boot <label> <readyz-port> -- <cmd...>
   fi
 }
 
-boot control $ZEROSHIP_CONTROL_PORT -- e2e_with_platform_mint_key "$BIN/zeroship-control" --port $ZEROSHIP_CONTROL_PORT \
+boot control $ZEROSHIP_CONTROL_PORT -- "$BIN/zeroship-control" --port $ZEROSHIP_CONTROL_PORT \
   --blob-store "$WORK/blobs" \
   --migrated-url "http://localhost:$ZEROSHIP_MIGRATED_PORT"
 boot migrated $ZEROSHIP_MIGRATED_PORT -- "$BIN/zeroship-migrated" --port $ZEROSHIP_MIGRATED_PORT \

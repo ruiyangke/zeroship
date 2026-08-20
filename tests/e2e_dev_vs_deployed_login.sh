@@ -624,7 +624,7 @@ AUTH_URL="http://localhost:$AUTH_PORT"
 # `smtp` and the process exits with
 # `Config("ZEROSHIP_AUTH_RELAY_SMTP_HOST is required when --relay-forward-mailer=smtp")`
 # regardless of environment. Recorded in the spine; kept explicit here.
-e2e_with_platform_mint_key "$BIN/zeroship-auth" \
+"$BIN/zeroship-auth" \
   --addr "0.0.0.0:$AUTH_PORT" --public-url "$AUTH_URL" \
   --signing-key-file "$ZEROSHIP_AUTH_SIGNING_KEY_FILE" \
   --pairwise-salt-file "$ZEROSHIP_AUTH_PAIRWISE_SALT_FILE" \
@@ -640,7 +640,7 @@ curl -sf "$AUTH_URL/oauth2/.well-known/jwks.json" >/dev/null 2>&1 \
   || { fail "auth never came up"; tail -30 "$WORK/auth.log"; exit 1; }
 
 # --- control ---------------------------------------------------------------
-e2e_with_platform_mint_key "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
   --blob-store "$WORK/blobs" \
   --app-base-domain "$ZEROSHIP_CONTROL_APP_BASE_DOMAIN" \
  > "$WORK/control.log" 2>&1 &
@@ -1136,9 +1136,9 @@ fi
 # higher. The floor is a `-lt` guard and the extra row keeps satisfying it;
 # NOT bumped, because a floor nobody re-measured is worse than a floor one row
 # behind. Re-measure and bump together.
-LOGIN_MIN_PASSED="${LOGIN_MIN_PASSED:-30}"
+LOGIN_MIN_PASSED=30
 LOGIN_REQUIRED_DIVERGENT="${LOGIN_REQUIRED_DIVERGENT:-authorize.entry identity.get_session identity.rpc_shape identity.rpc_values identity.values session.exchange session.foreign_origin session.no_xzsauth signout signout.replay_rpc signout.replay_session}"
-LOGIN_EXPECTED_DIVERGENT="${LOGIN_EXPECTED_DIVERGENT:-11}"
+LOGIN_EXPECTED_DIVERGENT=11
 DIVERGENT_ROWS="${DIVERGENT_ROWS:-0}"
 
 echo ""

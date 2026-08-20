@@ -135,7 +135,7 @@ e2e_platform_op_up "$WORK/sk.pem" "$WORK" || exit 1
 e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DBURL"
 ZEROSHIP_CONTROL_STRIPE_SECRET_KEY="sk_test_unused" \
-e2e_with_platform_mint_key "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --config "$CFG_TOML" \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --config "$CFG_TOML" \
   --blob-store "$WORK/blobs" \
   --stripe-base-url "http://127.0.0.1:1" \
   --meter-provider lite --invoicer-provider lite --allow-unsupported-billing \
@@ -235,7 +235,7 @@ echo "============================================"
 # 25 passed / 1 failed = 26 RAN, not 27: the band's state check failed and its
 # TWO gateway-behaviour assertions never ran at all. So the denominator moves
 # when a band breaks, and a floor phrased on PASS alone would not have seen it.
-SPEND_MIN_RAN="${SPEND_MIN_RAN:-28}"
+SPEND_MIN_RAN=28
 RAN=$((PASS + FAIL))
 rc=0
 [ "$FAIL" -eq 0 ] || rc=1

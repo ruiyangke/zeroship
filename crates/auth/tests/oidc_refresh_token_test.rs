@@ -1,6 +1,6 @@
 //! P5b refresh-token family tests for the platform OP.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::sync::Arc;

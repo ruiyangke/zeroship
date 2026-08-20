@@ -12,7 +12,7 @@
 //! `executing_request_id` plumbing, and the callbacks are the real
 //! `get_user_callback` / `require_user_callback`.
 
-mod common;
+use crate::common;
 use common::*;
 
 use std::sync::Arc;

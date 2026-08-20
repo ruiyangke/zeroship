@@ -820,7 +820,7 @@ cut -c1-200 "$WORK/dev.raw" | sed 's/^/  /'
 #
 # WHAT THE FLOOR DOES NOT CATCH: substitution. Swapping one assertion for an
 # easier one keeps the total at 36. Nothing here can see that; review can.
-ERRORS_MIN_RAN="${ERRORS_MIN_RAN:-36}"
+ERRORS_MIN_RAN=36
 RAN=$((PASS+FAIL))
 
 echo ""

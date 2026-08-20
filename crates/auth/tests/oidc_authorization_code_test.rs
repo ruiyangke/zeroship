@@ -1,6 +1,6 @@
 //! P3 closed-world `/authorize` + `/token` auth-code + PKCE tests.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 

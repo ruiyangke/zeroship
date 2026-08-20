@@ -23,6 +23,20 @@
 
 set -euo pipefail
 
+# `--bench` runs the DW-23 load bench instead of the DW-07 keystone arm. It is
+# an ARGUMENT, not an environment variable. It used to be
+# ZEROSHIP_DW23_BENCH_ONLY, which nothing set, and its three tuning knobs
+# (RUNS / CONCURRENCY / MAX_SECS) were likewise env reads with no setter. The
+# bench parameters are now literals in the Rust test, so the archived run in
+# docs/archive/benchmarks/2026-07-07-durable-workflows-load.md reproduces from
+# the command alone.
+BENCH_ONLY=0
+case "${1:-}" in
+  --bench) BENCH_ONLY=1 ;;
+  "") ;;
+  *) echo "usage: $0 [--bench]" >&2; exit 2 ;;
+esac
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/target/release"
 # shellcheck source=tests/lib/runtime_secrets.sh
@@ -590,7 +604,7 @@ chmod 0600 "$ZEROSHIP_GATEWAY_BROKER_SECRET_FILE"
 
 e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DBURL"
-e2e_with_platform_mint_key "$BIN/zeroship-control" \
+"$BIN/zeroship-control" \
   --port "$ZEROSHIP_CONTROL_PORT" \
   --blob-store "$WORK/blobs" \
   --gateway-url "http://localhost:$ZEROSHIP_GATEWAY_PORT" \
@@ -645,9 +659,9 @@ ON CONFLICT (id) DO UPDATE SET
   ingress_disabled = false,
   updated_at = now(),
   updated_by = EXCLUDED.updated_by;
-INSERT INTO zeroship.app_net_grants (app_id, host, port, granted_by, note)
-VALUES ('$APP_ID', '127.0.0.1', $SIDE_PORT, 'dw07-e2e', 'DW-07 side-effect counter')
-ON CONFLICT (app_id, host, port) DO UPDATE SET granted_at = now(), note = EXCLUDED.note;
+INSERT INTO zeroship.app_egress_rules (app_id, verdict, kind, destination, port, created_by, note)
+VALUES ('$APP_ID', 'accept', 'cidr', '127.0.0.1/32', $SIDE_PORT, 'dw07-e2e', 'DW-07 side-effect counter')
+ON CONFLICT (app_id, kind, destination, port) DO UPDATE SET created_at = now(), note = EXCLUDED.note;
 SQL
 DEPLOY_ID="$(docker exec "$PG_ADMIN_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -At -v ON_ERROR_STOP=1 \
   -c "SELECT id FROM zeroship.app_deploys WHERE app_id = '$APP_ID' ORDER BY activated_at DESC, created_at DESC, id DESC LIMIT 1;")"
@@ -663,7 +677,7 @@ curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/" -H "X-Api-Key
 }
 pass "gateway/worker warmed real deployed app"
 
-if [ "${ZEROSHIP_DW23_BENCH_ONLY:-0}" = "1" ]; then
+if [ "$BENCH_ONLY" = "1" ]; then
   echo "=== DW-23 workflow engine load bench ==="
   ZEROSHIP_DW_E2E=1 \
   PG_TEST_URL="$DBURL" \

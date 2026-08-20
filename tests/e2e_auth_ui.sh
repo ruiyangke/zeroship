@@ -12,6 +12,9 @@ PG_PORT="5440"
 PG_USER="postgres"
 PG_PASS="zeroship"
 DSN="postgres://${PG_USER}:${PG_PASS}@${PG_HOST}:${PG_PORT}/${TEST_DB}"
+CONSENT_APP_ID="00000000-0000-0000-0000-000000000001"
+CONSENT_CLIENT_ID="oac_0000000000000000000001"
+CONSENT_REDIRECT_URI="http://127.0.0.1:9999/native-cb"
 
 # A setup failure is not a test result. This library gives observed ENOSPC
 # failures their own loud diagnosis instead of misreporting them as defects.
@@ -193,6 +196,30 @@ ZEROSHIP_MIGRATE_BIN="$BIN/zeroship-platform-migrate" \
 run_psql -d "$TEST_DB" -v ON_ERROR_STOP=1 -tAc "select 1" >/dev/null \
   || die "migrated database $TEST_DB is unreachable"
 
+step "Register the dedicated browser OIDC client"
+run_psql -d "$TEST_DB" -v ON_ERROR_STOP=1 \
+  -c "INSERT INTO zeroship.plans \
+        (id, name, runtime_limits_json, assignable_by_creator) \
+      VALUES ('free', 'Free', '{}'::jsonb, TRUE) \
+      ON CONFLICT (id) DO NOTHING;" \
+  -c "INSERT INTO zeroship.apps (id, name, api_key, api_key_hash) \
+      VALUES ('${CONSENT_APP_ID}', 'auth UI consent fixture', \
+              'auth-ui-consent-key', 'auth-ui-consent-key-hash');" \
+  -c "INSERT INTO zeroship.oauth_clients \
+        (client_id, client_name, redirect_uris, scopes, skip_consent) \
+      VALUES ('${CONSENT_CLIENT_ID}', 'Auth UI consent fixture', \
+              ARRAY['${CONSENT_REDIRECT_URI}']::text[], \
+              ARRAY['openid', 'profile', 'email', 'read:notes']::text[], FALSE);" \
+  -c "INSERT INTO zeroship.app_oauth_clients \
+        (app_id, client_id, sector_identifier) \
+      VALUES ('${CONSENT_APP_ID}', '${CONSENT_CLIENT_ID}', \
+              'https://native-app.zeroship.test');" \
+  -c "INSERT INTO zeroship.app_scope_defs \
+        (app_id, scope_id, label, description) \
+      VALUES ('${CONSENT_APP_ID}', 'read:notes', 'Read notes', \
+              'Read your notes');" >>"$MIGRATE_LOG" 2>&1 \
+  || fail_from_log "$MIGRATE_LOG" "browser OIDC client registration"
+
 step "Generate isolated auth secrets"
 "$BIN/zeroship" dev init \
   --secrets-dir="$SECRETS_DIR" \
@@ -205,8 +232,6 @@ set +a
 : "${ZEROSHIP_CONTROL_KEY:?zeroship dev init omitted ZEROSHIP_CONTROL_KEY}"
 : "${ZEROSHIP_AUTH_STASH_SIGNING_KEY:?zeroship dev init omitted the auth stash key}"
 : "${ZEROSHIP_AUTH_TOTP_ENC_KEY:?zeroship dev init omitted the auth TOTP key}"
-[ -s "$SECRETS_DIR/platform-mint-key" ] \
-  || die "zeroship dev init omitted the platform mint key file"
 
 AUTH_PORT="$(node -e '
 const net = require("node:net");
@@ -223,7 +248,6 @@ step "Boot the real native zeroship-auth binary on $BASE_URL"
 unset ZEROSHIP_CONFIG || true
 export ZEROSHIP_AUTH_DATABASE_URL="$DSN"
 (
-  export ZEROSHIP_AUTH_PLATFORM_MINT_KEY="urn:zeroship:file:$SECRETS_DIR/platform-mint-key"
   exec "$BIN/zeroship-auth" \
     --no-config \
     --provider native \
@@ -260,6 +284,8 @@ step "Run Chromium auth UI specs"
 export ZEROSHIP_AUTH_UI_BASE_URL="$BASE_URL"
 export ZEROSHIP_AUTH_UI_AUTH_LOG="$AUTH_LOG"
 export ZEROSHIP_AUTH_UI_RESULTS_JSON="$RESULTS_JSON"
+export ZEROSHIP_AUTH_UI_OIDC_CLIENT_ID="$CONSENT_CLIENT_ID"
+export ZEROSHIP_AUTH_UI_OIDC_REDIRECT_URI="$CONSENT_REDIRECT_URI"
 set +e
 (
   cd "$PROJECT"
@@ -316,6 +342,8 @@ for (const requiredTitle of [
   "failed login fields identify and describe their errors",
   "public auth pages name controls and use a sane heading order",
   "public auth pages show a focus indicator on every interactive element",
+  "TOTP challenge conditionally exposes errors and completes login",
+  "OIDC consent renders scope details, distinguishes actions, and denies access",
   "creator journey covers signup, verification, login, profile, logout, and defenses",
 ]) {
   if (!discoveredTitles.has(requiredTitle)) {
