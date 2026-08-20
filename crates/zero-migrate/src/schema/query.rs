@@ -100,6 +100,20 @@ pub use zero_migrate_ir::dialect::SqlDialect;
 /// nothing ever had. A dead encryption seam that DOCUMENTS a decode step it does not
 /// perform is worse than no seam, because the next reader budgets for it. All three
 /// are deleted rather than kept warm: 10 methods to 8.
+///
+/// IT THEN LOST A NINTH, AND FOR THE OPPOSITE REASON — `canonical_type` was ALIVE,
+/// with a real caller. It was never a SPELLING. PostgreSQL's arm was the IDENTITY
+/// (`raw.to_string()`), SQLite's folded to storage affinity and MySQL's folded
+/// `varchar(n)` to `text`, so the question it answered was "do these two type
+/// spellings MEAN the same" — a drift COMPARISON, not "how does this vendor write
+/// a type". By this crate's own backend-boundary rule (stated at length in
+/// `render::backends`'s header) comparison and normalization stay in core,
+/// dialect-PARAMETERIZED, even when the answer depends on the vendor; only
+/// spelling is core ASKING a vendor something. It is now the free function
+/// [`canonical_type_for_dialect`], sitting beside the two core folds its arms
+/// already delegated to, and that is what let `render::existence_probe` — the only
+/// caller of this trait outside this module — stop resolving a renderer at all.
+/// 8 methods to 7.
 pub trait SchemaRenderer {
     fn dialect(&self) -> SqlDialect;
     fn foreign_key_target(&self, app_id: &str, target: &str) -> String;
@@ -113,306 +127,16 @@ pub trait SchemaRenderer {
         collection: &str,
         schema: &serde_json::Value,
     ) -> Vec<String>;
-    fn canonical_type(&self, raw: &str) -> String;
 }
 
-struct PostgresSchemaRenderer;
-struct SqliteSchemaRenderer;
-struct MysqlSchemaRenderer;
-
-static POSTGRES_SCHEMA_RENDERER: PostgresSchemaRenderer = PostgresSchemaRenderer;
-static SQLITE_SCHEMA_RENDERER: SqliteSchemaRenderer = SqliteSchemaRenderer;
-static MYSQL_SCHEMA_RENDERER: MysqlSchemaRenderer = MysqlSchemaRenderer;
-
-/// Return the schema renderer for a dialect.
+/// The schema renderer for a dialect.
 ///
-/// This is the only schema-crate `SqlDialect` dispatch match for renderer
-/// selection. Adding a third dialect intentionally breaks this match until that
-/// dialect's renderer is implemented and wired.
-pub fn renderer(dialect: SqlDialect) -> &'static dyn SchemaRenderer {
-    match dialect {
-        SqlDialect::Postgres => &POSTGRES_SCHEMA_RENDERER,
-        SqlDialect::Sqlite => &SQLITE_SCHEMA_RENDERER,
-        SqlDialect::Mysql => &MYSQL_SCHEMA_RENDERER,
-    }
-}
-
-impl SchemaRenderer for PostgresSchemaRenderer {
-    fn dialect(&self) -> SqlDialect {
-        SqlDialect::Postgres
-    }
-
-    fn foreign_key_target(&self, app_id: &str, target: &str) -> String {
-        format!(
-            "{}.{}",
-            quote_ident_for_dialect(app_id, self.dialect()),
-            quote_ident_for_dialect(target, self.dialect())
-        )
-    }
-
-    fn column_type(&self, def: &serde_json::Value) -> String {
-        if def.get("encrypted").is_some() {
-            return "BYTEA".to_string();
-        }
-
-        let zs_type = def.get("type").and_then(|t| t.as_str());
-
-        if zs_type == Some("vector") {
-            let dims = def
-                .get("vectorDims")
-                .and_then(serde_json::Value::as_i64)
-                .filter(|d| *d > 0 && *d <= 16000)
-                .unwrap_or(0);
-            if dims > 0 {
-                return format!("vector({dims})");
-            }
-            return "vector".to_string();
-        }
-
-        if zs_type == Some("geoPoint") {
-            return "geography(POINT, 4326)".to_string();
-        }
-
-        if zs_type == Some("char") {
-            if let Some(len) = char_len(def) {
-                return format!("character({len})");
-            }
-        }
-
-        // `t.string({ length })` — bounded VARCHAR. A `string` token carrying an
-        // explicit `maxLength` renders `character varying(N)` (SQL-standard spelling
-        // for `VARCHAR(N)`); a `string` without one keeps the unbounded `TEXT`
-        // spelling from `def_to_pg_type` (uuid / typed-id / ref land there).
-        if zs_type == Some("string") {
-            if let Some(len) = max_length(def) {
-                return format!("character varying({len})");
-            }
-        }
-
-        // A `number` carrying `precision` is `t.numeric({ precision, scale })`, not
-        // `t.number()`. `def_to_pg_type`'s `DOUBLE PRECISION` is the right answer for
-        // the float and the wrong one for the decimal - and `author_type_override`
-        // already spells this column `numeric(p, s)` on the snapshot carrier, so
-        // reading the facet here is what stops the two carriers describing the same
-        // column differently. The doc on `def_to_pg_type`'s `number` arm explains why
-        // a BARE `number` must stay `DOUBLE PRECISION`: this branch narrows only the
-        // columns that asked for exactness.
-        if zs_type == Some("number") {
-            if let Some((precision, scale)) = decimal_precision_scale(def) {
-                return format!("numeric({precision}, {scale})");
-            }
-        }
-
-        def_to_pg_type(def).to_string()
-    }
-
-    fn json_object_default(&self) -> String {
-        "DEFAULT '{}'::jsonb".to_string()
-    }
-
-    fn json_array_default(&self) -> String {
-        "DEFAULT '[]'::jsonb".to_string()
-    }
-
-    fn current_timestamp_expr(&self) -> &'static str {
-        "NOW()"
-    }
-
-    fn column_comment_statements(
-        &self,
-        app_id: &str,
-        collection: &str,
-        schema: &serde_json::Value,
-    ) -> Vec<String> {
-        let mut statements = build_mask_sentinel_comments(app_id, collection, schema);
-        statements.extend(build_encryption_sentinel_comments(
-            app_id, collection, schema,
-        ));
-        statements
-    }
-
-    fn canonical_type(&self, raw: &str) -> String {
-        raw.to_string()
-    }
-}
-
-impl SchemaRenderer for SqliteSchemaRenderer {
-    fn dialect(&self) -> SqlDialect {
-        SqlDialect::Sqlite
-    }
-
-    fn foreign_key_target(&self, _app_id: &str, target: &str) -> String {
-        quote_ident_for_dialect(target, self.dialect())
-    }
-
-    fn column_type(&self, def: &serde_json::Value) -> String {
-        if def.get("encrypted").is_some() {
-            return "BLOB".to_string();
-        }
-
-        let zs_type = def.get("type").and_then(|t| t.as_str());
-
-        if zs_type == Some("vector") {
-            return "BLOB".to_string();
-        }
-
-        if zs_type == Some("geoPoint") {
-            return "BLOB".to_string();
-        }
-
-        // A `number` carrying `precision` is a FIXED-PRECISION decimal, and SQLite
-        // has no storage class for one. `REAL` is the right answer for the float that
-        // shares this token and a lossy one for the decimal: REAL affinity converts a
-        // stored decimal STRING to a binary double on the way in, and the 12-step
-        // rebuild re-renders `CREATE TABLE` from this map and copies every existing
-        // row through it - so a rebuild triggered by an unrelated column rewrote
-        // `12345678901234.5678` to `12345678901234.6`, measured in
-        // `tests/fold_live/sqlite_decimal_rebuild_live.rs`.
-        //
-        // `TEXT` is not a new opinion: `render::lower::author_type_override` already
-        // answers `text`/`TEXT` for `ColType::Decimal` on SQLite, with this same
-        // reason written beside it, and `sqlite_canonical_type` already folds
-        // `numeric`/`decimal` to `text` affinity. The two carriers disagreed only
-        // because the token map had no way to say "decimal"; it does now.
-        if zs_type == Some("number") && decimal_precision_scale(def).is_some() {
-            return "TEXT".to_string();
-        }
-
-        match zs_type {
-            Some("string") => "TEXT".to_string(),
-            Some("char") => "TEXT".to_string(),
-            Some("number") => "REAL".to_string(),
-            Some("real") => "REAL".to_string(),
-            Some("boolean") => "INTEGER".to_string(),
-            Some("date") => "TEXT".to_string(),
-            Some("calendarDate") => "TEXT".to_string(),
-            Some("json") | Some("object") | Some("array") | Some("union") => "TEXT".to_string(),
-            Some("textArray") => "TEXT".to_string(),
-            Some("ref") => "TEXT".to_string(),
-            Some("literal") => match def.get("literalValue") {
-                // Exact decimal TEXT affinity, matching the numeric/decimal column
-                // mapping and the `t.numeric()` SQLite override; NUMERIC/REAL affinity
-                // would coerce a wide literal through a binary float.
-                Some(serde_json::Value::Number(_)) => "TEXT".to_string(),
-                Some(serde_json::Value::Bool(_)) => "INTEGER".to_string(),
-                _ => "TEXT".to_string(),
-            },
-            // `bigInt` is the DSL token — the one `render::lower::col_type_to_token`
-            // emits for `ColType::BigInt` and the one the SDK's `t.bigInt()` writes.
-            // Only the SQL type NAMES (`bigint`, `int8`, `int4`) were listed here, so
-            // the token the rest of this codebase actually produces reached the
-            // `_ => "TEXT"` arm below and the column was declared TEXT — TEXT affinity,
-            // which converts an integer to its decimal string on the way in. The SQLite
-            // 12-step rebuild re-renders `CREATE TABLE` from this map and copies every
-            // existing row through it, so a `renameColumn` on an unrelated column of
-            // the same table silently rewrote a `t.bigInt()` column's values to
-            // strings. Measured against a live database in
-            // `tests/fold_live/sqlite_field_def_type_tokens_live.rs`.
-            //
-            // The two sibling emitters already spelled it this way and this arm was the
-            // odd one out: `def_to_pg_type` maps `Some("bigInt") => "BIGINT"`, the MySQL
-            // arm lists `Some("bigInt") | Some("bigint") | Some("int8")`, and
-            // `def_to_constraints_for_dialect` — 700 lines below in THIS file — already
-            // lists `Some("bigInt")` among the numeric tokens whose DEFAULT it renders.
-            // A `t.bigInt()` column therefore kept its DEFAULT while losing its type.
-            Some("bigInt") | Some("bigint") | Some("int8") | Some("integer") | Some("int")
-            | Some("int4") => "INTEGER".to_string(),
-            Some("smallInt") => "INTEGER".to_string(),
-            // `ColType::Bytes`'s own doc-comment is "`BYTEA` on PG, `BLOB` on SQLite",
-            // and the MySQL arm maps it to `LONGBLOB`. SQLite had no arm at all, so a
-            // `bytes` column was re-declared TEXT by a rebuild. TEXT affinity leaves an
-            // already-stored BLOB value alone, so this did not corrupt existing rows the
-            // way the `bigInt` gap did; what it broke is the declared type every later
-            // write and index build resolves against.
-            Some("bytes") => "BLOB".to_string(),
-            Some("inet") => "TEXT".to_string(),
-            _ => "TEXT".to_string(),
-        }
-    }
-
-    fn json_object_default(&self) -> String {
-        "DEFAULT '{}'".to_string()
-    }
-
-    fn json_array_default(&self) -> String {
-        "DEFAULT '[]'".to_string()
-    }
-
-    fn current_timestamp_expr(&self) -> &'static str {
-        "CURRENT_TIMESTAMP"
-    }
-
-    fn column_comment_statements(
-        &self,
-        _app_id: &str,
-        _collection: &str,
-        _schema: &serde_json::Value,
-    ) -> Vec<String> {
-        Vec::new()
-    }
-
-    fn canonical_type(&self, raw: &str) -> String {
-        sqlite_canonical_type(raw).to_string()
-    }
-}
-
-impl SchemaRenderer for MysqlSchemaRenderer {
-    fn dialect(&self) -> SqlDialect {
-        SqlDialect::Mysql
-    }
-
-    fn foreign_key_target(&self, app_id: &str, target: &str) -> String {
-        format!(
-            "{}.{}",
-            quote_ident_for_dialect(app_id, self.dialect()),
-            quote_ident_for_dialect(target, self.dialect())
-        )
-    }
-
-    /// The MySQL column type for a field def, with an explicit collation on every
-    /// CHARACTER spelling.
-    ///
-    /// The collation is pinned through
-    /// [`crate::render::declarative::mysql_pin_collation`] - the same function the
-    /// snapshot-carrier renderer pins through - so the two MySQL renderers cannot
-    /// answer the same column with different comparison semantics. Without it every
-    /// character column this arm emits inherits the table default, which on a stock
-    /// MySQL 8 server is `utf8mb4_0900_ai_ci`: `'Active' = 'active'` compares TRUE and
-    /// a UNIQUE index rejects the second of the two, where PostgreSQL and SQLite
-    /// separate them. See [`mysql_base_column_type_for_def`] for which spellings are
-    /// character types and which are deliberately left bare.
-    fn column_type(&self, def: &serde_json::Value) -> String {
-        crate::render::declarative::mysql_pin_collation(
-            &mysql_base_column_type_for_def(def),
-            def_case_sensitive(def),
-        )
-    }
-
-    fn json_object_default(&self) -> String {
-        "DEFAULT (JSON_OBJECT())".to_string()
-    }
-
-    fn json_array_default(&self) -> String {
-        "DEFAULT (JSON_ARRAY())".to_string()
-    }
-
-    fn current_timestamp_expr(&self) -> &'static str {
-        "CURRENT_TIMESTAMP(6)"
-    }
-
-    fn column_comment_statements(
-        &self,
-        _app_id: &str,
-        _collection: &str,
-        _schema: &serde_json::Value,
-    ) -> Vec<String> {
-        Vec::new()
-    }
-
-    fn canonical_type(&self, raw: &str) -> String {
-        mysql_canonical_type(raw)
-    }
-}
+/// The exhaustive dispatch itself lives in `crate::schema::backends` — one
+/// module per shipping vendor, mirroring `render::backends` — and is re-exported
+/// here so every existing `schema::query::renderer(..)` call site resolves
+/// unchanged. See that module's header for what the split buys and for the two
+/// couplings it deliberately does NOT remove.
+pub use crate::schema::backends::renderer;
 
 #[cfg(test)]
 mod schema_renderer_tests {
@@ -901,7 +625,7 @@ fn validate_schema(name: &str) -> Result<(), QueryError> {
 /// schema-kernel tests could not see the crate's single quoting home at all, which
 /// is what "second physical home" means operationally. No test was lost and no
 /// emitted byte changed — only who decided it.
-fn quote_ident_for_dialect(name: &str, dialect: SqlDialect) -> String {
+pub(in crate::schema) fn quote_ident_for_dialect(name: &str, dialect: SqlDialect) -> String {
     crate::render::dml::escape_quote_ident_for_dialect(name, dialect)
 }
 
@@ -2622,7 +2346,8 @@ pub fn def_to_column_type_for_dialect(def: &serde_json::Value, dialect: SqlDiale
 
 /// The MySQL type spelling for a field def, BEFORE any collation suffix.
 ///
-/// Split out of [`MysqlSchemaRenderer::column_type`] so the collation is pinned in
+/// Split out of `MysqlSchemaRenderer::column_type` — now over in
+/// `schema::backends::mysql` — so the collation is pinned in
 /// exactly ONE place rather than on each of the nine arms that produce a character
 /// type. Which arms those are is what the split makes checkable:
 ///
@@ -2637,7 +2362,7 @@ pub fn def_to_column_type_for_dialect(def: &serde_json::Value, dialect: SqlDiale
 ///
 /// The classification is [`crate::render::declarative::mysql_spelling_takes_collation`]
 /// reading this function's OUTPUT; nothing here decides it a second time.
-fn mysql_base_column_type_for_def(def: &serde_json::Value) -> String {
+pub(in crate::schema) fn mysql_base_column_type_for_def(def: &serde_json::Value) -> String {
     if def.get("encrypted").is_some() {
         return "LONGBLOB".to_string();
     }
@@ -2716,18 +2441,18 @@ fn mysql_base_column_type_for_def(def: &serde_json::Value) -> String {
 /// case-SENSITIVE intent and maps to `None` - the same canonical spelling
 /// `ColumnSnapshot::case_sensitive` uses, which is why the two carriers can share one
 /// clause builder.
-fn def_case_sensitive(def: &serde_json::Value) -> Option<bool> {
+pub(in crate::schema) fn def_case_sensitive(def: &serde_json::Value) -> Option<bool> {
     def.get("caseSensitive")
         .and_then(serde_json::Value::as_bool)
 }
 
-fn char_len(def: &serde_json::Value) -> Option<u64> {
+pub(in crate::schema) fn char_len(def: &serde_json::Value) -> Option<u64> {
     def.get("charLen")
         .and_then(serde_json::Value::as_u64)
         .filter(|len| *len > 0)
 }
 
-fn max_length(def: &serde_json::Value) -> Option<u64> {
+pub(in crate::schema) fn max_length(def: &serde_json::Value) -> Option<u64> {
     def.get("maxLength")
         .and_then(serde_json::Value::as_u64)
         .filter(|len| *len > 0)
@@ -2754,7 +2479,7 @@ fn max_length(def: &serde_json::Value) -> Option<u64> {
 /// A zero or absent `precision` is NOT a decimal: `DECIMAL(0, …)` is not a type any
 /// dialect accepts, so a malformed facet falls back to the float spelling the column
 /// had before rather than emitting DDL no server will take.
-fn decimal_precision_scale(def: &serde_json::Value) -> Option<(u64, u64)> {
+pub(in crate::schema) fn decimal_precision_scale(def: &serde_json::Value) -> Option<(u64, u64)> {
     let precision = def
         .get("precision")
         .and_then(serde_json::Value::as_u64)
@@ -2924,7 +2649,7 @@ fn union_check_constraint_name(collection: &str, disc: &str, value_tag: &str) ->
 /// `INTEGER` FK would fail with `column type mismatch` when the referenced key is
 /// text on Postgres. SQLite treats declared types as advisory, but typed-id values
 /// are still TEXT-shaped strings at storage time.
-fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
+pub(in crate::schema) fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
     match def.get("type").and_then(|t| t.as_str()) {
         Some("string") => "TEXT",
         Some("char") => "TEXT",
@@ -2998,6 +2723,30 @@ fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
             _ => "TEXT",
         },
         _ => "TEXT",
+    }
+}
+
+/// Fold a raw type spelling to the form the drift comparators compare, for a
+/// named dialect.
+///
+/// A COMPARATOR, not a speller, and that is why it is a core free function rather
+/// than a [`SchemaRenderer`] method — which is what it used to be. It answers "do
+/// these two type spellings MEAN the same on this vendor", which is core DECIDING
+/// something about a vendor; a renderer method is core ASKING a vendor how to
+/// write something. `render::backends`'s header states that boundary and names
+/// `render::value_format` as the worked example of the same shape.
+///
+/// The PostgreSQL arm being the IDENTITY is the tell: a vendor with nothing to
+/// spell has nothing to be asked. The other two arms delegate to the two folds
+/// that already existed as core free functions and that core already called
+/// directly — [`sqlite_canonical_type`] and [`mysql_canonical_type`] — so this
+/// changes no byte, only who owns the question.
+#[must_use]
+pub fn canonical_type_for_dialect(raw: &str, dialect: SqlDialect) -> String {
+    match dialect {
+        SqlDialect::Postgres => raw.to_string(),
+        SqlDialect::Sqlite => sqlite_canonical_type(raw).to_string(),
+        SqlDialect::Mysql => mysql_canonical_type(raw),
     }
 }
 

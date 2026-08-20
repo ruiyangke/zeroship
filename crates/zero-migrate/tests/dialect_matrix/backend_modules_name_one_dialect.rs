@@ -1,5 +1,13 @@
-//! The one-dialect-literal rule of `src/render/backends/`, enforced rather than
-//! documented.
+//! The one-dialect-literal rule of the backend module directories, enforced rather
+//! than documented.
+//!
+//! There are TWO of them, because there are two renderer registries: the DML
+//! spelling of `src/render/backends/` and the schema/DDL spelling of
+//! `src/schema/backends/`. Both are covered here. The second directory came later
+//! — `SchemaRenderer`'s three vendors lived as bare structs and `impl` blocks in
+//! the middle of `schema/query.rs` long after the DML vendors had modules — and it
+//! is guarded from its first commit precisely because the rule is invisible to
+//! behaviour tests, so an unguarded module drifts silently.
 //!
 //! `backends/mod.rs` states the rule in prose: a backend module names its own
 //! dialect exactly ONCE, as its `DIALECT` const, and names no other dialect at all.
@@ -14,12 +22,12 @@
 //! rule gets its own check or it has none, which is what it had.
 //!
 //! WHY THIS FILE AND NOT A `#[cfg(test)] mod tests` IN `backends/mod.rs`. The check
-//! reads the three modules as TEXT, which a unit test could do with `include_str!`
-//! just as well. It lives out here because it is a fact about the render layer's
-//! SHAPE rather than about its behaviour, and because this theme binary is where the
-//! other "what does each dialect declare" checks already are. It still reads the
+//! reads the six modules as TEXT, which a unit test could do with `include_str!`
+//! just as well. It lives out here because it is a fact about the two layers'
+//! SHAPE rather than about their behaviour, and because this theme binary is where
+//! the other "what does each dialect declare" checks already are. It still reads the
 //! real files, so it tracks them: `include_str!` is a compile-time dependency, and
-//! editing any of the three rebuilds this binary.
+//! editing any of the six rebuilds this binary.
 
 /// The rule, as a test: one dialect literal per backend module, its own, and it is
 /// the `DIALECT` const.
@@ -87,18 +95,33 @@
 fn a_backend_module_names_only_its_own_dialect_and_only_once() {
     let cases = [
         (
-            "postgres.rs",
+            "render/backends/postgres.rs",
             include_str!("../../src/render/backends/postgres.rs"),
             "Postgres",
         ),
         (
-            "sqlite.rs",
+            "render/backends/sqlite.rs",
             include_str!("../../src/render/backends/sqlite.rs"),
             "Sqlite",
         ),
         (
-            "mysql.rs",
+            "render/backends/mysql.rs",
             include_str!("../../src/render/backends/mysql.rs"),
+            "Mysql",
+        ),
+        (
+            "schema/backends/postgres.rs",
+            include_str!("../../src/schema/backends/postgres.rs"),
+            "Postgres",
+        ),
+        (
+            "schema/backends/sqlite.rs",
+            include_str!("../../src/schema/backends/sqlite.rs"),
+            "Sqlite",
+        ),
+        (
+            "schema/backends/mysql.rs",
+            include_str!("../../src/schema/backends/mysql.rs"),
             "Mysql",
         ),
     ];
@@ -110,7 +133,7 @@ fn a_backend_module_names_only_its_own_dialect_and_only_once() {
             let expected = usize::from(other == own);
             assert_eq!(
                 hits, expected,
-                "backends/{file} names {needle} {hits} time(s); expected {expected} \
+                "src/{file} names {needle} {hits} time(s); expected {expected} \
                  (its own dialect exactly once, as the DIALECT const; no other dialect). \
                  See the one-dialect-literal rule in backends/mod.rs."
             );
@@ -125,7 +148,7 @@ fn a_backend_module_names_only_its_own_dialect_and_only_once() {
         let declaration = format!("const DIALECT: SqlDialect = SqlDialect::{own};");
         assert!(
             carriers.len() == 1 && carriers[0].contains(declaration.as_str()),
-            "backends/{file} must carry its dialect literal on exactly one line and that \
+            "src/{file} must carry its dialect literal on exactly one line and that \
              line must declare `{declaration}`; a module whose single mention is somewhere \
              else has lost the const that makes the vendor deletable. Found: {carriers:?}"
         );

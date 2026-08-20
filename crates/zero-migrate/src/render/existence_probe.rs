@@ -102,7 +102,7 @@ use crate::model::probe::{ExpectColumn, GuardDir, GuardProbe};
 use crate::model::snapshot::SchemaSnapshot;
 use crate::plan::author::PG_MAX_IDENT_BYTES;
 use crate::render::renderer::{Capability, DialectSupports};
-use crate::schema::query::{renderer as schema_renderer, SqlDialect};
+use crate::schema::query::{canonical_type_for_dialect, SqlDialect};
 
 // `GuardProbe::schema()` now lives on the type itself in `zero_migrate_ir::probe`
 // (the type moved into the leaf wire-contract crate — an inherent `impl` here would
@@ -600,8 +600,8 @@ fn column_shape_divergence(shape: &ExpectColumnShape<'_>) -> Option<GuardVerdict
     // to the SQLite affinity the emitter would have written, AND the already-SQLite
     // live token folded to the same canonical form). On PG, compare the raw
     // `information_schema` spellings unchanged.
-    let renderer = schema_renderer(dialect);
-    let dtypes_match = renderer.canonical_type(expect_dtype) == renderer.canonical_type(live_dtype);
+    let dtypes_match = canonical_type_for_dialect(expect_dtype, dialect)
+        == canonical_type_for_dialect(live_dtype, dialect);
     if !dtypes_match {
         return Some(drift(
             &format!("column {table}.{column}"),

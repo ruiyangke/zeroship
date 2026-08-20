@@ -16,7 +16,13 @@
 //!   ([`query::def_to_column_type_for_dialect`], [`query::sqlite_canonical_type`],
 //!   [`query::mysql_canonical_type`]), the encryption + mask sentinel
 //!   builders, and the identifier/field validators. Dual-dialect (PG + SQLite,
-//!   with a MySQL render leg).
+//!   with a MySQL render leg). It also owns the `SchemaRenderer` CONTRACT and
+//!   re-exports the dispatch; the vendors themselves are next door.
+//! - `backends` — one module per shipping dialect, holding that dialect's
+//!   `SchemaRenderer` impl and nothing else, plus the single exhaustive dispatch
+//!   match over them. The sibling of `render::backends`, and the same
+//!   one-dialect-literal rule applies (enforced by
+//!   `tests/dialect_matrix/backend_modules_name_one_dialect.rs`).
 //! - [`diff`] — the **diff classifier** ([`diff::compute_diff`],
 //!   [`diff::ChangeKind`], [`diff::ChangeClass`]) and the schema **metadata
 //!   types** ([`diff::MaskMeta`], [`diff::EncryptionMeta`], [`diff::MaskKind`],
@@ -40,6 +46,7 @@
     clippy::too_many_arguments
 )]
 
+pub(crate) mod backends;
 pub mod descriptors;
 pub mod diff;
 pub mod error;
