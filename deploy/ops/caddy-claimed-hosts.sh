@@ -83,35 +83,68 @@ fi
 
 [ -f "$CADDYFILE" ] || { echo "REFUSED: $CADDYFILE not found." >&2; exit 1; }
 
-# Prefer a real caddy binary; fall back to the pinned image. REFUSE rather than
-# skip if neither is there: a gate that silently does nothing when its tool is
-# missing prints the same green as a gate that ran and passed.
-CADDY_IMAGE="caddy:2-alpine"
+# THE CADDY THAT ANSWERS MUST BE THE CADDY THAT RUNS. Adapting is a question
+# about a specific Caddy's behaviour, so asking a different build than the edge
+# is a wrong answer that still looks like an answer. The image is therefore read
+# out of the compose file that runs the edge, not written here - bumping the
+# edge bumps the adapter, in one place.
+COMPOSE="$ROOT/deploy/compose/docker-compose.yml"
+CADDY_IMAGE="$(
+  awk '
+    /^  caddy:[[:space:]]*$/ { in_svc = 1; next }
+    /^  [a-z]/               { in_svc = 0 }
+    in_svc && /^    image:/  { print $2; exit }
+  ' "$COMPOSE" 2>/dev/null
+)"
+if [ -z "$CADDY_IMAGE" ]; then
+  echo "REFUSED: no image found for the 'caddy' service in $COMPOSE, so there is" >&2
+  echo "         no way to know which Caddy the edge runs. Adapting with some" >&2
+  echo "         other build would answer a question about a different Caddy." >&2
+  exit 1
+fi
+
+# Docker with the pinned image FIRST, a local binary only as a fallback: a
+# developer's `caddy` is whatever version they happen to have, and would
+# generate an artifact CI then disagrees with. REFUSE rather than skip if
+# neither is there - a gate that silently does nothing when its tool is missing
+# prints the same green as a gate that ran and passed.
+CADDY_HOW=""
+if command -v docker >/dev/null 2>&1; then
+  CADDY_HOW=docker
+elif command -v caddy >/dev/null 2>&1; then
+  CADDY_HOW=local
+  echo "warn: docker is unavailable, so this is using the local caddy binary" >&2
+  echo "      rather than the edge's pinned $CADDY_IMAGE. If they differ, the" >&2
+  echo "      artifact may not describe the Caddy that actually runs." >&2
+else
+  echo "REFUSED: neither 'docker' nor a 'caddy' binary is available, so the edge" >&2
+  echo "         config cannot be adapted. This check cannot be skipped:" >&2
+  echo "         make docker able to run $CADDY_IMAGE, or install caddy." >&2
+  exit 1
+fi
+
 adapt() {
-  if command -v caddy >/dev/null 2>&1; then
-    ZEROSHIP_DOMAIN="$SENTINEL" caddy adapt \
-      --config "$CADDYFILE" --adapter caddyfile --pretty
-  elif command -v docker >/dev/null 2>&1; then
+  if [ "$CADDY_HOW" = docker ]; then
     # Mount the Caddyfile's own directory, so `import ./sibling` resolves the
-    # same way it would for the caddy binary.
+    # same way it would for the caddy binary. An import reaching OUTSIDE that
+    # directory fails to adapt, which is an error here rather than a config
+    # this cannot see.
     docker run --rm -i \
       -e ZEROSHIP_DOMAIN="$SENTINEL" \
       -v "$(cd "$(dirname "$CADDYFILE")" && pwd):/w:ro" -w /w \
       "$CADDY_IMAGE" \
       caddy adapt --config "$(basename "$CADDYFILE")" --adapter caddyfile --pretty
   else
-    echo "REFUSED: neither a 'caddy' binary nor 'docker' is available, so the" >&2
-    echo "         edge config cannot be adapted. This check cannot be skipped:" >&2
-    echo "         install caddy, or make docker able to run $CADDY_IMAGE." >&2
-    exit 1
+    ZEROSHIP_DOMAIN="$SENTINEL" caddy adapt \
+      --config "$CADDYFILE" --adapter caddyfile --pretty
   fi
 }
 
 caddy_version() {
-  if command -v caddy >/dev/null 2>&1; then
-    caddy version 2>/dev/null | head -1
-  else
+  if [ "$CADDY_HOW" = docker ]; then
     docker run --rm "$CADDY_IMAGE" caddy version 2>/dev/null | head -1
+  else
+    caddy version 2>/dev/null | head -1
   fi
 }
 
