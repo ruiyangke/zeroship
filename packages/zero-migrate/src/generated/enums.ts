@@ -119,11 +119,11 @@ export type IndexSortOrder = "asc" | "desc";
  * The CLOSED index-method lexicon (`createIndex` `using` union). A CLOSED enum — serde rejects any out-of-set token at DESERIALIZE,
  * so a hand-crafted IR envelope cannot smuggle an arbitrary / injection-shaped
  * method string into an unvalidated position that would reach the render seam.
- * `gin`/`gist`/`ivfflat`/`hnsw` are Postgres-only logical hints; `fts5` maps to
- * the `SQLite` FTS5 virtual-table path (per-dialect lowering is the render seam's job).
+ * `gin`/`gist`/`ivfflat`/`hnsw` are Postgres-only logical hints (per-dialect
+ * lowering is the render seam's job).
  * Camel/lower-cased on the wire (`"btree"`, `"ivfflat"`, …).
  */
-export type IndexMethod = "btree" | "brin" | "gin" | "gist" | "ivfflat" | "hnsw" | "fts5";
+export type IndexMethod = "btree" | "brin" | "gin" | "gist" | "ivfflat" | "hnsw";
 
 /**
  * A comparison operator for a [`Precondition::RowCount`] assertion.

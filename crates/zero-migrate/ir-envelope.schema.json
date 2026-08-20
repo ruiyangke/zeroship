@@ -5278,7 +5278,7 @@
       ]
     },
     "IndexMethod": {
-      "description": "The CLOSED index-method lexicon (`createIndex` `using` union). A CLOSED enum — serde rejects any out-of-set token at DESERIALIZE,\nso a hand-crafted IR envelope cannot smuggle an arbitrary / injection-shaped\nmethod string into an unvalidated position that would reach the render seam.\n`gin`/`gist`/`ivfflat`/`hnsw` are Postgres-only logical hints; `fts5` maps to\nthe `SQLite` FTS5 virtual-table path (per-dialect lowering is the render seam's job).\nCamel/lower-cased on the wire (`\"btree\"`, `\"ivfflat\"`, …).",
+      "description": "The CLOSED index-method lexicon (`createIndex` `using` union). A CLOSED enum — serde rejects any out-of-set token at DESERIALIZE,\nso a hand-crafted IR envelope cannot smuggle an arbitrary / injection-shaped\nmethod string into an unvalidated position that would reach the render seam.\n`gin`/`gist`/`ivfflat`/`hnsw` are Postgres-only logical hints (per-dialect\nlowering is the render seam's job).\nCamel/lower-cased on the wire (`\"btree\"`, `\"ivfflat\"`, …).",
       "oneOf": [
         {
           "description": "B-tree (the default).",
@@ -5309,11 +5309,6 @@
           "description": "pgvector HNSW ANN.",
           "type": "string",
           "const": "hnsw"
-        },
-        {
-          "description": "Full-text search (PG GIN-over-tsvector / `SQLite` FTS5 virtual table).",
-          "type": "string",
-          "const": "fts5"
         }
       ]
     },

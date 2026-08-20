@@ -109,43 +109,6 @@ fn lit(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
-/// Parse the FTS5 source-column list for a `sqlite_master` table row that is an
-/// FTS5 virtual table, or `None` if the row is not one. `name` must end in `__fts`
-/// (the engine's vtable-name contract) AND `sql` must be a `… USING fts5(…)`
-/// create — both, so a creator table coincidentally named `x__fts` that is a plain
-/// (non-fts5) table is NOT misread as an FTS index.
-fn parse_fts5_index(name: &str, sql: &str) -> Option<Vec<String>> {
-    if !name.ends_with("__fts") {
-        return None;
-    }
-    crate::schema::fts_sqlite::parse_fts5_columns(sql)
-}
-
-/// The parent collection of an FTS5 vtable named `<coll>__fts` (strip the
-/// `__fts` suffix). Caller guarantees the `__fts` suffix (via [`parse_fts5_index`]).
-fn fts_parent_collection(vtable: &str) -> String {
-    vtable.strip_suffix("__fts").unwrap_or(vtable).to_string()
-}
-
-/// True iff `name` is an FTS5 SHADOW table — one of the auxiliary tables FTS5
-/// auto-creates for a vtable `<v>`: `<v>_data` / `<v>_idx` / `<v>_docsize` /
-/// `<v>_config` / `<v>_content`. These must be excluded from the app-schema
-/// snapshot (like the `sqlite_*` internals) so they do not read as drift. A shadow
-/// is recognised iff stripping a known suffix yields a name that is itself an FTS5
-/// vtable present in `raw_names` (so a creator table merely ending in `_data` is
-/// not excluded).
-fn is_fts5_shadow_table(name: &str, raw_names: &[String]) -> bool {
-    const SUFFIXES: &[&str] = &["_data", "_idx", "_docsize", "_config", "_content"];
-    for suf in SUFFIXES {
-        if let Some(base) = name.strip_suffix(suf) {
-            if base.ends_with("__fts") && raw_names.iter().any(|n| n == base) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 /// Introspect the LIVE structure of the connection's `main` database (the tenant
 /// app file) into a [`SchemaSnapshot`], the same shape the PG path returns.
 ///
@@ -192,22 +155,6 @@ pub(crate) async fn snapshot_schema_for(
 
     // (table_name -> stored CREATE sql), for inline sentinel recovery per column.
     let mut create_sql: BTreeMap<String, String> = BTreeMap::new();
-    // **FTS** — the FTS5 virtual tables found in this pass, as
-    // `(parent_collection, IndexSnapshot)`. They are NOT base tables (they are the
-    // FTS *index*), so they are NOT inserted into `tables` directly; instead each is
-    // attached as an `IndexSnapshot` to its PARENT collection after the base-table
-    // loop, matching what `desired_snapshot_for_dialect` (SQLite) produces — so a
-    // re-diff of an unchanged FTS schema is ZERO-drift. The FTS5 *shadow* tables
-    // (`<vtable>_data`/`_idx`/`_docsize`/`_config`/`_content`) are excluded from the
-    // snapshot entirely (like the `sqlite_*` internals) so they never read as drift.
-    let mut fts_indexes: Vec<(String, IndexSnapshot)> = Vec::new();
-    // First pass over the raw table rows: classify each as an FTS5 vtable (parse its
-    // `fts5(...)` column list), an FTS5 shadow table (skip), or a real base table.
-    let raw_names: Vec<String> = table_rows
-        .iter()
-        .filter_map(|r| cell(r, 0).ok())
-        .filter(|n| !is_internal(n))
-        .collect();
     for r in &table_rows {
         let name = cell(r, 0)?;
         if is_internal(&name) {
@@ -218,42 +165,6 @@ pub(crate) async fn snapshot_schema_for(
         } else {
             None
         };
-        // An FTS5 virtual table: `sql` starts `CREATE VIRTUAL TABLE … USING fts5`.
-        // Convert it to an FTS5 IndexSnapshot on its parent collection and DROP it
-        // from the base-table set.
-        if let Some(sql) = &stored_sql_opt {
-            if let Some(columns) = parse_fts5_index(&name, sql) {
-                let parent = fts_parent_collection(&name);
-                fts_indexes.push((
-                    parent,
-                    IndexSnapshot {
-                        name: name.clone(),
-                        unique: false,
-                        elements: columns
-                            .iter()
-                            .cloned()
-                            .map(IndexElementSnapshot::column)
-                            .collect(),
-                        columns,
-                        access_method: "fts5".to_string(),
-                        predicate: None,
-                        include: Vec::new(),
-                        with: None,
-                        only: false,
-                        opclass: None,
-                        nulls_not_distinct: false,
-                        comment: None,
-                        expr_cascade_columns: None,
-                    },
-                ));
-                continue;
-            }
-        }
-        // An FTS5 SHADOW table (`<vtable>_data` etc.) — exclude from the snapshot. A
-        // shadow's parent vtable is some `<x>__fts` that exists among the raw names.
-        if is_fts5_shadow_table(&name, &raw_names) {
-            continue;
-        }
         if let Some(sql) = &stored_sql_opt {
             create_sql.insert(name.clone(), sql.clone());
         }
@@ -318,17 +229,6 @@ pub(crate) async fn snapshot_schema_for(
         introspect_columns(actor, &schema_ident, &table, stored, &mut tables).await?;
         introspect_indexes_and_unique(actor, &schema_ident, &table, &mut tables).await?;
         introspect_foreign_keys(actor, &schema_ident, &table, stored, &mut tables).await?;
-    }
-
-    // **FTS** — attach each recognised FTS5 vtable as an `IndexSnapshot` on its
-    // PARENT collection (now that the base tables are populated). If the parent is
-    // somehow absent (an orphaned FTS index — should never happen, the engine emits
-    // them together), the index is dropped silently rather than synthesising a
-    // phantom table.
-    for (parent, idx) in fts_indexes {
-        if let Some(t) = tables.get_mut(&parent) {
-            t.indexes.push(idx);
-        }
     }
 
     // Deterministic ordering: sort every child vector by name (the PG path sorts via

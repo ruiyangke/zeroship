@@ -349,10 +349,6 @@ export interface FieldDescriptorDto {
   encrypted?: JsonValue
   /** The `.mask({ kind, classification })` sub-object (verbatim). */
   mask?: JsonValue
-  /** `t.string().fts(language?)` participation flag. */
-  fts?: boolean
-  /** The FTS tsvector configuration token. */
-  ftsLanguage?: string
   /** A generated/computed column facet (structured IR, never raw SQL). */
   generated?: JsonValue
   /** A SQL identity column facet. */

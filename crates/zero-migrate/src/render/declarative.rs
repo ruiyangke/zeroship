@@ -1896,6 +1896,122 @@ pub(crate) struct LoweredCreateTable {
     pub(crate) deferred_foreign_keys: Vec<DeferredForeignKeyUnit>,
 }
 
+/// The virtual-table module of a stored `CREATE VIRTUAL TABLE … USING <module>(…)`
+/// statement, or `None` when `sql` is not a virtual-table create.
+///
+/// Recognition is keyed on the `CREATE … VIRTUAL TABLE … USING <module>` token
+/// SHAPE, never on a module allowlist or a table-name convention — an `fts5`
+/// vtable, a `vec0` vtable and a module this engine has never heard of are all
+/// recognised on identical terms. Only the header (everything ahead of the first
+/// `(`) is tokenised, so a column or option named `virtual` inside the argument
+/// list cannot promote an ordinary table into a virtual one.
+///
+/// Returns `None` on every non-SQLite snapshot, where `stored_create_sql` is
+/// absent — PostgreSQL has no virtual tables and nothing to guard.
+fn virtual_table_module(sql: &str) -> Option<String> {
+    let head = &sql[..sql.find('(').unwrap_or(sql.len())];
+    let lower = head.to_ascii_lowercase();
+    let tokens: Vec<&str> = lower.split_whitespace().collect();
+    // `VIRTUAL TABLE` must appear as adjacent tokens, preceded by `CREATE`.
+    let vt = tokens.windows(2).position(|w| w == ["virtual", "table"])?;
+    if !tokens[..vt].contains(&"create") {
+        return None;
+    }
+    // The module name is the token after `USING`, which follows `VIRTUAL TABLE`.
+    let using = tokens.iter().position(|t| *t == "using")?;
+    if using < vt {
+        return None;
+    }
+    let module: String = tokens
+        .get(using + 1)?
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    (!module.is_empty()).then_some(module)
+}
+
+#[cfg(test)]
+mod virtual_table_module_tests {
+    use super::virtual_table_module;
+
+    /// The FTS5 shape the engine and plugin-db's data plane both emit.
+    #[test]
+    fn recognises_an_fts5_external_content_vtable() {
+        assert_eq!(
+            virtual_table_module(
+                r#"CREATE VIRTUAL TABLE IF NOT EXISTS "posts__fts" USING fts5("body", content="posts", content_rowid="rowid")"#
+            )
+            .as_deref(),
+            Some("fts5")
+        );
+    }
+
+    /// The `vec0` shape plugin-db's runtime `ensure_vector_index` emits, verbatim.
+    /// The guard cannot be exercised end-to-end against a real `vec0` table (the
+    /// hardened connection refuses to load `sqlite-vec`), so its DDL is pinned here
+    /// instead — recognition of the shape is proven; the live drop of one is not.
+    #[test]
+    fn recognises_a_vec0_vtable() {
+        assert_eq!(
+            virtual_table_module(
+                r#"CREATE VIRTUAL TABLE IF NOT EXISTS "docs__vec_embedding" USING vec0("embedding" float[768] distance_metric=cosine)"#
+            )
+            .as_deref(),
+            Some("vec0")
+        );
+    }
+
+    /// The point of keying on the token shape: a module this engine has never heard
+    /// of is recognised on identical terms, with no allowlist to fall out of date.
+    #[test]
+    fn recognises_a_module_the_engine_has_never_heard_of() {
+        assert_eq!(
+            virtual_table_module(r#"CREATE VIRTUAL TABLE "t" USING some_future_module(a, b)"#)
+                .as_deref(),
+            Some("some_future_module")
+        );
+        assert_eq!(
+            virtual_table_module(r#"CREATE TEMP VIRTUAL TABLE "t" USING rtree(id, minX, maxX)"#)
+                .as_deref(),
+            Some("rtree")
+        );
+    }
+
+    /// An ordinary table is not a virtual one, however it is spelled.
+    #[test]
+    fn an_ordinary_create_table_is_not_a_virtual_table() {
+        assert_eq!(
+            virtual_table_module(r#"CREATE TABLE "posts" ("body" TEXT)"#),
+            None
+        );
+        // A shadow table: a PLAIN table, so the guard does not fire on it. The
+        // parent vtable is what stops the drop pass.
+        assert_eq!(
+            virtual_table_module(
+                r#"CREATE TABLE 'posts__fts_data'(id INTEGER PRIMARY KEY, block BLOB)"#
+            ),
+            None
+        );
+    }
+
+    /// Only the header is tokenised, so a COLUMN named `virtual` cannot promote an
+    /// ordinary table into a virtual one and block its legitimate drop.
+    #[test]
+    fn a_column_named_virtual_does_not_forge_a_virtual_table() {
+        assert_eq!(
+            virtual_table_module(r#"CREATE TABLE "t" ("virtual" TEXT, "table" TEXT)"#),
+            None
+        );
+    }
+
+    /// A virtual-table create with no `USING` clause is malformed; refuse to guess
+    /// a module rather than reporting an empty one.
+    #[test]
+    fn a_vtable_create_without_a_using_clause_yields_no_module() {
+        assert_eq!(virtual_table_module(r#"CREATE VIRTUAL TABLE "t""#), None);
+    }
+}
+
 /// Wrap a single-statement migration as a [`LoweredUnit`]: the statement list is
 /// exactly `[up]` (the canonical `up` is one indivisible statement). Used by every
 /// `lower_*` that renders a lone `CREATE` / `ALTER` / `DROP` with no follow-on
@@ -2055,18 +2171,6 @@ pub struct FieldDescriptor {
     /// + a `COMMENT … zero-migrate:mask:…` sentinel. Mirrors `mask` on the wire `FieldDef`.
     #[serde(default)]
     pub mask: Option<serde_json::Value>,
-    /// `t.string().fts(language?)` — `true` ⇒ this text column participates in the
-    /// collection's composite full-text index. Every `.fts()`-marked column
-    /// folds into ONE `__fts` GENERATED tsvector column + a `<coll>__fts_idx` GIN
-    /// index. Mirrors `fts` on the wire `FieldDef`.
-    #[serde(default)]
-    pub fts: bool,
-    /// `t.string().fts(language)` — the tsvector configuration token (`english`,
-    /// `simple`, …). The collection's FTS index uses the first non-empty language
-    /// among its `.fts()` fields, else `english`. Mirrors `ftsLanguage` on the
-    /// wire `FieldDef`.
-    #[serde(rename = "ftsLanguage", default)]
-    pub fts_language: Option<String>,
     /// A generated/computed column facet. The expression is structured IR, never
     /// raw SQL. Mirrors `generated` on the migrate FieldDef bridge.
     #[serde(default)]
@@ -2475,15 +2579,6 @@ pub fn descriptor_to_sdk_schema(d: &CollectionDescriptor) -> serde_json::Value {
         }
         if let Some(prefix) = &f.id_prefix {
             def.insert("idPrefix".into(), serde_json::Value::String(prefix.clone()));
-        }
-        if f.fts {
-            def.insert("fts".into(), serde_json::Value::Bool(true));
-            if let Some(lang) = &f.fts_language {
-                def.insert(
-                    "ftsLanguage".into(),
-                    serde_json::Value::String(lang.clone()),
-                );
-            }
         }
         schema.insert(f.name.clone(), serde_json::Value::Object(def));
     }
@@ -4270,42 +4365,6 @@ fn build_table_snapshot_impl(
         ));
     }
 
-    // - full-text search, DIALECT-AWARE (alongside the FK definition spelling
-    // handled above):
-    //
-    // - **Postgres**: every `.fts()`-marked text column folds into ONE composite
-    //   `__fts` GENERATED tsvector column + a `<coll>__fts_idx` GIN index
-    //   (matching plugin-db's runtime `__fts` / `<coll>__fts_idx`
-    //   contract the data plane's `fts_search` reads). The generated-column form
-    //   is trigger-free, so the whole FTS shape is pure DDL the engine owns.
-    // - **SQLite**: `tsvector` has no SQLite spelling, so there is NO `__fts`
-    //   column and NO GIN index. Instead the FTS index is an FTS5 **virtual
-    //   table** (`<coll>__fts`) over the source columns + AFTER triggers — the
-    //   SAME structure plugin-db's runtime `ensure_fts_index` and the shared
-    //   `crate::schema::fts_sqlite` builders produce. It is modelled as an
-    //   `IndexSnapshot` with `access_method = "fts5"` over the SOURCE columns so
-    //   the SQLite emitter emits the vtable+triggers and a live re-diff (the
-    //   drift introspector recognises the vtable) round-trips ZERO-drift.
-    //
-    // Without modelling the engine-built FTS objects in `desired`, the live
-    // ones would be unknown to the differ and phantom-dropped; modelling them
-    // also makes the engine the authority that EMITS them (the schema-authority
-    // cutover intent).
-    match dialect {
-        SqlDialect::Postgres => {
-            if let Some((fts_col, fts_idx)) = fts_objects_pg(&d.name, &d.fields) {
-                columns.push(fts_col);
-                indexes.push(fts_idx);
-            }
-        }
-        SqlDialect::Sqlite => {
-            if let Some(fts_idx) = fts_index_snapshot_sqlite(&d.name, &d.fields) {
-                indexes.push(fts_idx);
-            }
-        }
-        SqlDialect::Mysql => {}
-    }
-
     // The declarative desired-snapshot path remains name-sorted to match
     // snapshot_schema. Resolved createTable IR is already explicit table shape,
     // so its column Vec order is the byte contract for CREATE TABLE rendering.
@@ -5071,168 +5130,6 @@ fn fold_ann_index_for_dialect(
     Some(idx)
 }
 
-/// The fixed name of the composite full-text tsvector column + its GIN index,
-/// matching plugin-db's runtime contract (`__fts` column read by `fts_search`,
-/// `<coll>__fts_idx` GIN index).
-fn fts_column_name() -> &'static str {
-    "__fts"
-}
-/// Delegates to [`crate::schema::query::fts_index_name`] so the desired snapshot and
-/// the data plane derive one spelling, including the clip PostgreSQL applies to an
-/// over-long name at CREATE. Capping only here would move the desired-vs-live mismatch
-/// rather than close it.
-fn fts_index_name(table: &str) -> String {
-    crate::schema::query::fts_index_name(table)
-}
-
-/// The tsvector configuration (language) for a collection's FTS index: the first
-/// non-empty `ftsLanguage` declared on any `.fts()` field, else `english` (the
-/// SDK default). Mirrors `crate::schema::query::build_create_indexes`'s
-/// first-non-empty-wins rule.
-fn fts_language(fields: &[FieldDescriptor]) -> String {
-    fields
-        .iter()
-        .filter(|f| f.fts)
-        .find_map(|f| f.fts_language.clone().filter(|l| !l.is_empty()))
-        .unwrap_or_else(|| "english".to_string())
-}
-
-/// **Postgres FTS** — build the generated `__fts` tsvector COLUMN + its GIN index
-/// for the `.fts()`-marked text columns of a collection, or `None` when the
-/// collection has no FTS fields.
-///
-/// The column is `GENERATED ALWAYS AS (to_tsvector('<lang>'::regconfig,
-/// coalesce("c1",''::text) || ' '::text || …)) STORED` — a trigger-free,
-/// fully-declarative form the engine owns end-to-end (plugin-db's runtime form
-/// used a `tsvector_update_trigger`, which is not declarative; the engine, as the
-/// sole schema authority, replaces it). The index is `USING gin("__fts")`. The
-/// `__fts` column name + `<coll>__fts_idx` index name are the contract
-/// `fts_search` reads, so they are preserved.
-fn fts_objects_pg(
-    table: &str,
-    fields: &[FieldDescriptor],
-) -> Option<(ColumnSnapshot, IndexSnapshot)> {
-    let fts_cols: Vec<&FieldDescriptor> = fields.iter().filter(|f| f.fts).collect();
-    if fts_cols.is_empty() {
-        return None;
-    }
-    let language = fts_language(fields);
-    // `coalesce("c1",'') || ' ' || coalesce("c2",'') …` over the source columns,
-    // in declared order. Mirrors plugin-db's `coalesce_concat`.
-    let concat = fts_cols
-        .iter()
-        .map(|f| format!("coalesce({}, ''::text)", quote_ident(&f.name)))
-        .collect::<Vec<_>>()
-        .join(" || ' '::text || ");
-    let generation_expr = format!("to_tsvector('{language}'::regconfig, {concat})");
-    let col = ColumnSnapshot {
-        name: fts_column_name().to_string(),
-        data_type: "tsvector".to_string(),
-        nullable: true,
-        // The GENERATED expression rides on `default` (emission-only metadata —
-        // `render_create_table` / `render_add_column` turn it into the
-        // `GENERATED ALWAYS AS (...) STORED` clause via the `GENERATED:` prefix).
-        // `snapshot_schema` does not introspect generation expressions, so it is
-        // NOT a drift attribute (excluded from `ColumnSnapshot` equality) — the
-        // `__fts` COLUMN itself round-trips as a plain nullable tsvector column.
-        default: Some(format!("{GENERATED_PREFIX}{generation_expr}")),
-        // The structural facet, which is NOT emission-only and DOES round-trip:
-        // this column really is `GENERATED ALWAYS AS (...) STORED` in PostgreSQL, so
-        // `pg_attribute.attgenerated` reads `'s'` on the live side. Saying
-        // `NotGenerated` here because the expression rides on `default` rather than
-        // on `generated` would report drift on every FTS-enabled collection.
-        generated_kind: Some(GeneratedKindSnapshot::Stored),
-        ddl_type_override: None,
-        inline_checks: Vec::new(),
-        generated: None,
-        identity: None,
-        sqlite_rowid: false,
-        value_format: None,
-        catalog_uuid_format_check: false,
-        id_default: None,
-        mysql_default_generated: None,
-        case_sensitive: None,
-        collation: None,
-        mysql_text_storage: None,
-        mysql_physical_type: None,
-        encryption_sentinel: None,
-        comment_sentinel: None,
-        comment: None,
-    };
-    let idx = IndexSnapshot {
-        name: fts_index_name(table),
-        unique: false,
-        columns: vec![fts_column_name().to_string()],
-        elements: vec![IndexElementSnapshot::column(fts_column_name())],
-        access_method: "gin".to_string(),
-        predicate: None,
-        include: Vec::new(),
-        with: None,
-        only: false,
-        opclass: None,
-        nulls_not_distinct: false,
-        comment: None,
-        expr_cascade_columns: None,
-    };
-    Some((col, idx))
-}
-
-/// The `access_method` sentinel that marks an [`IndexSnapshot`] as the SQLite
-/// FTS5 virtual table (vs. a PG `gin`/`gist`/`ivfflat` index or a plain `btree`).
-/// The SQLite emitter ([`SqliteEmitter::create_index`]) branches on this to emit
-/// the `CREATE VIRTUAL TABLE … USING fts5(...)` + AFTER triggers instead of a
-/// plain `CREATE INDEX`, and the SQLite drift introspector stamps it on the live
-/// vtable it recognises — so an FTS index round-trips ZERO-drift.
-pub(crate) const SQLITE_FTS5_ACCESS_METHOD: &str = "fts5";
-
-/// The name of the SQLite FTS5 virtual table for a collection (`<coll>__fts`).
-/// Matches [`crate::schema::fts_sqlite::fts_vtable_name`] and plugin-db's runtime
-/// `ensure_fts_index` contract, so an engine-emitted vtable and a runtime-built one
-/// are interchangeable. NOTE: this is DELIBERATELY the bare `<coll>__fts` (the
-/// vtable name), NOT the PG `<coll>__fts_idx` index name — on SQLite the FTS index
-/// *is* the vtable, and the drift introspector reads the vtable's name back.
-fn sqlite_fts_vtable_name(table: &str) -> String {
-    crate::schema::fts_sqlite::fts_vtable_name(table)
-}
-
-/// **SQLite FTS** — model a collection's `.fts()` fields as the FTS5 virtual-table
-/// [`IndexSnapshot`] the SQLite emitter produces, or `None` when the collection has
-/// no FTS fields.
-///
-/// Shape: `access_method = "fts5"`, `name = "<coll>__fts"` (the vtable), `columns =`
-/// the SOURCE columns (in declared order — NOT a `__fts` generated column, which
-/// has no SQLite spelling). The SQLite drift introspector parses the live vtable's
-/// `fts5(...)` column list back to this exact list, so a re-diff is zero-drift.
-fn fts_index_snapshot_sqlite(table: &str, fields: &[FieldDescriptor]) -> Option<IndexSnapshot> {
-    let cols: Vec<String> = fields
-        .iter()
-        .filter(|f| f.fts)
-        .map(|f| f.name.clone())
-        .collect();
-    if cols.is_empty() {
-        return None;
-    }
-    Some(IndexSnapshot {
-        name: sqlite_fts_vtable_name(table),
-        unique: false,
-        elements: cols
-            .iter()
-            .cloned()
-            .map(IndexElementSnapshot::column)
-            .collect(),
-        columns: cols,
-        access_method: SQLITE_FTS5_ACCESS_METHOD.to_string(),
-        predicate: None,
-        include: Vec::new(),
-        with: None,
-        only: false,
-        opclass: None,
-        nulls_not_distinct: false,
-        comment: None,
-        expr_cascade_columns: None,
-    })
-}
-
 /// Validate a legacy internal platform-ID prefix.
 ///
 /// Schema-authority: DELEGATES to the shared kernel's
@@ -5550,6 +5447,50 @@ pub enum DeclarativeError {
     DropOfUnownedTable {
         /// The live table whose ownership the caller did not supply.
         table: String,
+    },
+    /// A live table absent from `desired` whose stored `CREATE` is a
+    /// `CREATE VIRTUAL TABLE`. The drop pass refuses it instead of authoring a
+    /// `DROP TABLE`.
+    ///
+    /// A virtual table is not an ordinary table: it is the visible half of a
+    /// module's storage. `fts5` and `vec0` both keep their real payload in
+    /// auto-created SHADOW tables (`<v>_data`, `<v>_idx`, …), and dropping the
+    /// vtable CASCADES those away — so a diff that "tidies up an undeclared table"
+    /// silently destroys a search or vector index that may be expensive or
+    /// impossible to rebuild.
+    ///
+    /// This engine never AUTHORS a virtual table, so one found live was created by
+    /// something else — a data-plane runtime that manages its own indexes, or an
+    /// engine version that still emitted them. Either way it is not the schema
+    /// differ's to remove.
+    ///
+    /// Keyed on `CREATE VIRTUAL TABLE`, never on a module name or a table-name
+    /// suffix, so a module nobody here has thought of is covered on the same terms.
+    /// Fires AHEAD of the ownership check: the ownership guard only catches a
+    /// caller that cannot confirm ownership, and a caller that maps every live
+    /// table to the deploying app would otherwise sail straight through it.
+    ///
+    /// **This is forward infrastructure, not only a safety net.** Full-text search
+    /// is intended to return as something COMPOSED from primitives rather than a
+    /// builtin, and a composed feature that expands to `CREATE VIRTUAL TABLE` needs
+    /// drift to tolerate virtual tables GENERALLY — which is why this is keyed on
+    /// the DDL shape instead of the `fts5` special case it replaced. Refusing to
+    /// drop them is the first half; teaching drift to RECOGNISE a composed vtable as
+    /// a declared object is the second half, and does not exist yet. See
+    /// `docs/proposals/fts-macro.md`.
+    #[error(
+        "refusing to drop live table '{table}': it is a VIRTUAL TABLE (module \
+         '{module}'), not an ordinary table. Dropping it would cascade away the \
+         module's backing shadow tables and destroy the index they hold. This \
+         engine never authors virtual tables, so this one was created outside it — \
+         drop it deliberately with whatever component created it, or declare it in \
+         the project union, rather than letting a schema diff remove it"
+    )]
+    DropOfVirtualTable {
+        /// The live virtual table the drop pass refused.
+        table: String,
+        /// The module from its `USING` clause (`fts5`, `vec0`, …).
+        module: String,
     },
     /// A `ref` field declared a cross-app FK whose **target table is not in the
     /// union schema** (cross-app FK). A cross-app FK may reference a
@@ -6222,6 +6163,11 @@ impl DeclarativeAuthor {
     /// - [`DeclarativeError::DropOfUnownedTable`] — a `DROP TABLE` of a live table
     ///   whose ownership the caller did not supply in `live_ownership` (fail-closed
     ///   — defends against a partial-union deploy, 2b).
+    /// - [`DeclarativeError::DropOfVirtualTable`] — a `DROP TABLE` of a live
+    ///   VIRTUAL table (`fts5`, `vec0`, any module). Refused ahead of the ownership
+    ///   check, because dropping a vtable cascades away the shadow tables holding
+    ///   its index. This engine never authors virtual tables, so a live one belongs
+    ///   to whatever component created it.
     /// - [`DeclarativeError::CrossAppFkTargetMissing`] — an FK whose target table
     ///   is declared by no member app and is not live (cross-app FK).
     /// - [`DeclarativeError::RenameHintUnmatched`] — a hint named a pair that is
@@ -6754,6 +6700,23 @@ impl DeclarativeAuthor {
         for table in live.tables.keys() {
             if desired.tables.contains_key(table) {
                 continue;
+            }
+            // VIRTUAL-TABLE GUARD — deliberately AHEAD of the ownership check.
+            // Ownership only fails closed when the caller CANNOT confirm an owner;
+            // an orchestrator that maps every live table to the deploying app (the
+            // shape a data-plane host naturally supplies) resolves cleanly and would
+            // reach `render_drop_table`. A virtual table must be refused for BOTH
+            // callers, so the check sits upstream of ownership rather than beside it.
+            if let Some(module) = live
+                .tables
+                .get(table)
+                .and_then(|t| t.stored_create_sql.as_deref())
+                .and_then(virtual_table_module)
+            {
+                return Err(DeclarativeError::DropOfVirtualTable {
+                    table: table.clone(),
+                    module,
+                });
             }
             match live_ownership.get(table) {
                 Some(owner) if owner == &self.owner_app => {
@@ -8683,17 +8646,11 @@ impl DeclarativeAuthor {
         // emitter writes them directly, no name-based reconstruction.) This method
         // owns only the migration identity / deps.
         let (up, down) = self.emitter().create_index(table, idx);
-        // **FTS** — the SQLite FTS5 index is a `CREATE VIRTUAL TABLE … USING fts5(…)`
-        // (+ sync triggers), which the hardened SQLite authorizer permits ONLY under
-        // EngineJournal mode (a creator may never make a vtable). Mark the migration
-        // `engine_goodie_ddl` so the apply path runs its `up` in engine mode. This is
-        // safe — the DDL is engine-authored from the `.fts()` descriptor, not raw
-        // creator SQL. Every other index (PG gin/gist/ivfflat, plain btree) is
-        // ordinary CreatorUp-confined DDL, byte-identical to before.
-        let flags = MigrationFlags {
-            engine_goodie_ddl: idx.access_method == SQLITE_FTS5_ACCESS_METHOD,
-            ..MigrationFlags::default()
-        };
+        // Every index this path authors is ordinary CreatorUp-confined DDL. Nothing
+        // here sets `engine_goodie_ddl`: the engine no longer emits any virtual
+        // table, which was the sole reason a create-index `up` ever needed
+        // EngineJournal mode.
+        let flags = MigrationFlags::default();
         self.make(
             &format!("create_index_{}", idx.name),
             up,
@@ -9622,47 +9579,6 @@ impl DdlEmitter for PgEmitter {
     }
 }
 
-/// **SQLite FTS5** — build the `(up, down)` for a collection's FTS5 index, an
-/// external-content virtual table + AFTER triggers (the same structure plugin-db's
-/// runtime `ensure_fts_index` builds, via the SHARED
-/// [`crate::schema::fts_sqlite`] builders in their UNqualified `main` form).
-///
-/// `up` (one multi-statement batch, run under EngineJournal — see the
-/// `engine_goodie_ddl` flag): CREATE VIRTUAL TABLE → initial population →
-/// AFTER INSERT/DELETE/UPDATE triggers. `down`: DROP the three triggers + DROP the
-/// vtable (CreatorUp-allowed: a plain `DROP TABLE`/`DROP TRIGGER` on `main`). The
-/// vtable's drop cascades its FTS5 shadow tables (`_data`/`_idx`/…).
-fn sqlite_fts5_create_teardown(table: &str, source_columns: &[String]) -> (String, String) {
-    use crate::schema::fts_sqlite as fts;
-    let cols = source_columns.to_vec();
-    // UNqualified `main` form (`schema = None`) — the confined SQLite engine opens
-    // the per-app file directly as `main`.
-    let create = fts::build_create_fts_table_sql(None, table, &cols);
-    let populate = fts::build_initial_population_sql(None, table, &cols);
-    let ai = fts::build_insert_trigger_sql(None, table, &cols);
-    let ad = fts::build_delete_trigger_sql(None, table, &cols);
-    let au = fts::build_update_trigger_sql(None, table, &cols);
-    // `execute_batch` runs all statements; mirror the create-table-sqlite path's
-    // `;\n` joining so a single migration `up` materialises the whole FTS shape.
-    let up = [create, populate, ai, ad, au].join(";\n");
-
-    let vtable = fts::fts_vtable_name(table);
-    let [ai_n, ad_n, au_n] = fts::fts_trigger_names(table);
-    // Drop the triggers BEFORE the vtable (so the trigger bodies' vtable reference
-    // is gone before the vtable). All unqualified `main` objects.
-    let down = format!(
-        "DROP TRIGGER IF EXISTS {};\n\
-         DROP TRIGGER IF EXISTS {};\n\
-         DROP TRIGGER IF EXISTS {};\n\
-         DROP TABLE IF EXISTS {}",
-        quote_ident(&ai_n),
-        quote_ident(&ad_n),
-        quote_ident(&au_n),
-        quote_ident(&vtable),
-    );
-    (up, down)
-}
-
 fn mysql_default_clause(default: Option<&str>) -> String {
     match default {
         Some("'{}'::jsonb") => " DEFAULT (JSON_OBJECT())".to_string(),
@@ -9829,17 +9745,6 @@ impl DdlEmitter for SqliteEmitter {
     }
 
     fn create_index(&self, table: &str, idx: &IndexSnapshot) -> (String, String) {
-        // **FTS** — an `access_method = "fts5"` index is NOT a plain `CREATE INDEX`:
-        // on SQLite the FTS index is an FTS5 external-content VIRTUAL TABLE
-        // (`<coll>__fts`) over the source columns, mirrored by three AFTER triggers.
-        // Emit the SAME structure plugin-db's runtime `ensure_fts_index` builds, via
-        // the shared `crate::schema::fts_sqlite` builders (UNqualified `main`
-        // form). This replaces the broken PG-shaped `__fts`-column GIN index that
-        // would otherwise be emitted over a column the SQLite create-table never
-        // materialises (`no such column: "__fts"`).
-        if idx.access_method == SQLITE_FTS5_ACCESS_METHOD {
-            return sqlite_fts5_create_teardown(table, &idx.columns);
-        }
         let unique = if idx.unique { "UNIQUE " } else { "" };
         let col_list = render_index_elements_sqlite(idx);
         // SQLite indexes are UNqualified (`main` = the app file), and
@@ -10466,7 +10371,6 @@ mod snapshot_builder_refactor_safety_tests {
                     name: "title".into(),
                     ty: "string".into(),
                     required: true,
-                    fts: true,
                     ..Default::default()
                 },
                 FieldDescriptor {

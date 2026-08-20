@@ -44,7 +44,6 @@ use zero_migrate::apply::backend::sqlite::authorizer::Mode;
 use zero_migrate::model::migration::{
     Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
 };
-use zero_migrate::schema::fts_sqlite;
 use zero_migrate::SqliteBackend;
 
 /// A tenant's two file paths inside a fresh temp dir.
@@ -71,21 +70,6 @@ fn backend(p: &Paths) -> SqliteBackend {
 
 fn mig(up: &str) -> Migration {
     mig_with_flags(up, MigrationFlags::default())
-}
-
-/// An ENGINE-GOODIE `up`: descriptor-derived DDL the engine authored itself, which
-/// the apply path runs under `EngineJournal` instead of `CreatorUp`. It is the only
-/// way a virtual table can be created on this connection - the authorizer denies
-/// `CREATE VIRTUAL TABLE` outright in creator mode - and therefore the only way an
-/// FTS5 index and its shadow tables come to exist in a tenant's app file.
-fn mig_engine_goodie(up: &str) -> Migration {
-    mig_with_flags(
-        up,
-        MigrationFlags {
-            engine_goodie_ddl: true,
-            ..MigrationFlags::default()
-        },
-    )
 }
 
 fn mig_with_flags(up: &str, flags: MigrationFlags) -> Migration {
@@ -568,10 +552,12 @@ async fn confine_direct_sqlite_master_write_blocked_by_writable_schema_off() {
 // ---------------------------------------------------------------------------
 // SQLITE_DBCONFIG_DEFENSIVE: a creator `up` may not write an FTS5 SHADOW TABLE.
 //
-// The reachable shape, end to end on the real backend. The engine creates an FTS5
-// index in the tenant's app file from a `.fts` descriptor, as an engine-goodie
-// `up` (the authorizer admits `CREATE VIRTUAL TABLE ... USING fts5(...)` only in
-// EngineJournal mode). FTS5 lays down its b-tree in ORDINARY tables next to it -
+// The reachable shape, end to end on the real backend. The tenant's app file holds
+// an FTS5 index -- put there by an older engine or by a data-plane runtime, since
+// this engine authors no FTS DDL and the authorizer now denies
+// `CREATE VIRTUAL TABLE ... USING fts5(...)` in EVERY mode. The seed is therefore a
+// raw connection; what matters to this test is that the objects EXIST, not who made
+// them. FTS5 lays down its b-tree in ORDINARY tables next to the vtable -
 // `<name>_data`, `<name>_idx`, `<name>_docsize`, `<name>_config` - in `main`. A
 // LATER ordinary creator `up` then runs in CreatorUp against that same `main`,
 // where the authorizer's own rules permit creator DML on any table that is neither
@@ -589,29 +575,41 @@ async fn confine_direct_sqlite_master_write_blocked_by_writable_schema_off() {
 /// what DEFENSIVE refuses; FTS5 itself reaches it through the virtual table.
 const FTS_SHADOW_TABLE: &str = "docs__fts_data";
 
-/// Build the engine's own FTS5 create DDL for `docs(body)`, so the vtable under
-/// test is the one the engine actually emits and not a hand-rolled lookalike.
-fn fts_create_ddl() -> String {
-    format!(
-        "{};",
-        fts_sqlite::build_create_fts_table_sql(None, "docs", &["body".to_string()])
+/// Seed `docs` + its FTS5 index into the app file on a RAW connection, the way a
+/// LEGACY database carries them, BEFORE the hardened backend opens it.
+///
+/// WHY RAW, since the engine used to author this. Full-text support was removed:
+/// the engine emits no FTS DDL and the authorizer no longer admits a
+/// `CREATE VIRTUAL TABLE … USING fts5(…)` in ANY mode. But removing the FEATURE
+/// did not remove the DATA — databases in the field still hold these objects, put
+/// there by an older engine or by a data-plane runtime that manages its own
+/// indexes. DEFENSIVE is what stops a creator `up` rewriting their b-tree, and this
+/// is its only test vector, so the seed moved to a raw connection rather than the
+/// guard losing its pin. The DDL is spelled literally here for the same reason: the
+/// shared builder it used to call no longer exists.
+fn seed_legacy_fts_index(app: &std::path::Path, with_row: bool) {
+    let conn = rusqlite::Connection::open(app).expect("open the app file raw to seed");
+    conn.execute_batch(
+        "CREATE TABLE docs (id INTEGER PRIMARY KEY, body TEXT);\n\
+         CREATE VIRTUAL TABLE \"docs__fts\" \
+         USING fts5(\"body\", content=\"docs\", content_rowid=\"rowid\");",
     )
+    .expect("seed the legacy FTS5 index");
+    if with_row {
+        conn.execute_batch(
+            "INSERT INTO docs (body) VALUES ('hello world');\n\
+             INSERT INTO \"docs__fts\" (rowid, \"body\") SELECT rowid, body FROM docs;",
+        )
+        .expect("seed a row into the legacy index");
+    }
 }
 
 #[compio::test]
 async fn confine_creator_write_to_an_fts5_shadow_table_denied_by_defensive() {
     let p = paths("fts_shadow");
+    seed_legacy_fts_index(&p.app, false);
     let be = backend(&p);
     be.ensure_journal_sqlite().await.expect("bootstrap journal");
-    be.apply_one_additive(
-        &mig("CREATE TABLE docs (id INTEGER PRIMARY KEY, body TEXT);"),
-        "deployer",
-    )
-    .await
-    .expect("the tenant table applies");
-    be.apply_one_additive(&mig_engine_goodie(&fts_create_ddl()), "deployer")
-        .await
-        .expect("the engine-goodie FTS5 create applies under EngineJournal");
 
     // The shadow tables now exist in `main`, reachable by name from creator SQL.
     let shadow = be
@@ -698,13 +696,12 @@ async fn confine_creator_write_to_an_fts5_shadow_table_denied_by_defensive() {
          INSERT INTO docs (body) VALUES ('hello world');",
     )
     .expect("control seed");
-    conn.execute_batch(&fts_create_ddl())
-        .expect("control FTS5 create");
-    conn.execute_batch(&format!(
-        "{};",
-        fts_sqlite::build_initial_population_sql(None, "docs", &["body".to_string()])
-    ))
-    .expect("control FTS5 population");
+    conn.execute_batch(
+        "CREATE VIRTUAL TABLE \"docs__fts\" \
+         USING fts5(\"body\", content=\"docs\", content_rowid=\"rowid\");\n\
+         INSERT INTO \"docs__fts\" (rowid, \"body\") SELECT rowid, body FROM docs;",
+    )
+    .expect("control FTS5 create + population");
     let matched: i64 = conn
         .query_row(
             "SELECT count(*) FROM \"docs__fts\" WHERE \"docs__fts\" MATCH 'hello'",
@@ -1328,29 +1325,9 @@ async fn a_creator_can_observe_the_app_files_data_version_counter() {
 #[compio::test]
 async fn a_creator_can_wipe_an_fts_index_through_the_vtable() {
     let p = paths("fts_delete_all");
+    seed_legacy_fts_index(&p.app, true);
     let be = backend(&p);
     be.ensure_journal_sqlite().await.expect("bootstrap journal");
-    be.apply_one_additive(
-        &mig("CREATE TABLE docs (id INTEGER PRIMARY KEY, body TEXT);"),
-        "deployer",
-    )
-    .await
-    .expect("the tenant table applies");
-    be.apply_one_additive(
-        &mig("INSERT INTO docs (body) VALUES ('hello world');"),
-        "creator",
-    )
-    .await
-    .expect("a row to index");
-    // The engine's own create + population batch, from the shared builders.
-    let batch = format!(
-        "{};\n{};",
-        fts_sqlite::build_create_fts_table_sql(None, "docs", &["body".to_string()]),
-        fts_sqlite::build_initial_population_sql(None, "docs", &["body".to_string()])
-    );
-    be.apply_one_additive(&mig_engine_goodie(&batch), "deployer")
-        .await
-        .expect("the engine-goodie FTS5 create + population applies");
 
     // The index holds the row. Read on a REOPENED RAW connection: the engine never
     // issues an FTS5 MATCH, so `match` is deliberately absent from the authorizer's

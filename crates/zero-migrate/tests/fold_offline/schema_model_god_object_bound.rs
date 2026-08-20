@@ -111,8 +111,6 @@ fn route_the_runtime_descriptor() -> Routing {
         case_sensitive,
         encrypted,
         mask,
-        fts,
-        fts_language,
         generated,
         identity,
     } = FieldDescriptor::default();
@@ -215,16 +213,6 @@ fn route_the_runtime_descriptor() -> Routing {
          hide the authored number.",
     );
     routing.would_join_the_model(
-        "fts",
-        fts,
-        "whether this column joins the composite FTS index.",
-    );
-    routing.would_join_the_model(
-        "fts_language",
-        fts_language,
-        "the tsvector configuration token.",
-    );
-    routing.would_join_the_model(
         "references",
         references,
         "the FK TARGET as an authored fact. Today it exists only inside a rendered \
@@ -268,7 +256,7 @@ fn route_the_runtime_descriptor() -> Routing {
 
 /// **The answer.** Counted, pinned, and a compile error to ignore.
 #[test]
-fn the_unified_model_would_grow_twenty_fields_and_only_one_is_a_projections_private_state() {
+fn the_unified_model_would_grow_eighteen_fields_and_only_one_is_a_projections_private_state() {
     let routing = route_the_runtime_descriptor();
     let total = routing.already_in_the_model.len()
         + routing.would_join_the_model.len()
@@ -278,8 +266,12 @@ fn the_unified_model_would_grow_twenty_fields_and_only_one_is_a_projections_priv
     // whether a column is a float or a fixed-precision decimal and the SQLite emitter
     // was answering `REAL` for both. That is the case this file demands be made in a
     // diff that moves a visible number, and this is it.
+    //
+    // 30 → 28: `fts` and `fts_language` removed with full-text support. Both were
+    // routed as `would_join_the_model`, so the whole movement lands on that bucket
+    // (20 → 18) and none of it on the other three.
     assert_eq!(
-        total, 30,
+        total, 28,
         "`FieldDescriptor` changed field count; every field must be routed: {routing:#?}"
     );
 
@@ -291,7 +283,7 @@ fn the_unified_model_would_grow_twenty_fields_and_only_one_is_a_projections_priv
     );
     assert_eq!(
         routing.would_join_the_model.len(),
-        20,
+        18,
         "descriptor facts a UNIFIED model would have to grow. This number IS the spike's \
          answer and it is not a threshold to relax - a diff that moves it is a diff that \
          changes how big the neutral model becomes: {:?}",
@@ -313,9 +305,9 @@ fn the_unified_model_would_grow_twenty_fields_and_only_one_is_a_projections_priv
     );
 
     // The load-bearing conclusion, asserted rather than left in prose: only ONE of the
-    // runtime descriptor's thirty fields is something a neutral model must refuse.
+    // runtime descriptor's twenty-eight fields is something a neutral model must refuse.
     // The unification is therefore NOT blocked by a vocabulary clash - it is blocked, if
-    // at all, by SIZE, and the size is 16 + 20 = 36 neutral column fields.
+    // at all, by SIZE, and the size is 16 + 18 = 34 neutral column fields.
     assert!(
         routing.projection_local.len() <= 1,
         "more than one descriptor field is projection-private, which is the shape that \
@@ -323,8 +315,8 @@ fn the_unified_model_would_grow_twenty_fields_and_only_one_is_a_projections_priv
     );
     assert_eq!(
         16 + routing.would_join_the_model.len(),
-        36,
-        "the neutral `Column` has 16 fields today; a unified one would have 36. Recorded \
+        34,
+        "the neutral `Column` has 16 fields today; a unified one would have 34. Recorded \
          so the cost is a number in a test rather than an opinion in a proposal."
     );
 }

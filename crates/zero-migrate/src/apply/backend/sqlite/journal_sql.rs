@@ -550,14 +550,11 @@ async fn run_apply_txn(
         // 2. Run the `up`. Ordinary creator/AI DDL runs under the confined
         // **CreatorUp** mode (denied from `_mig`, from transaction boundaries,
         // from PRAGMA, from making a vtable). The ONE exception is **engine-emitted
-        // goodie DDL**: the SQLite FTS5 virtual table +
-        // its sync triggers. That DDL is engine-AUTHORED from a `.fts` descriptor
-        // (no untrusted SQL string), and the hardened authorizer allows
-        // `CREATE VIRTUAL TABLE … USING fts5(…)` ONLY in EngineJournal mode. So a
-        // goodie-DDL `up` runs under EngineJournal; everything else stays confined.
-        // (The `_mig` journal write below is a SEPARATE EngineJournal phase either
-        // way; the goodie `up` never touches `_mig` — it only creates the vtable +
-        // triggers in `main`.)
+        // goodie DDL**, which runs under EngineJournal instead. No engine path sets
+        // that flag today -- its only producer was the FTS5 vtable create, removed
+        // with full-text support -- so in the current tree every `up` takes the
+        // confined branch. The routing is kept because the flag is part of the
+        // checksum image; see `MigrationFlags::engine_goodie_ddl`.
         let up_mode = if m.flags.engine_goodie_ddl {
             Mode::EngineJournal
         } else {

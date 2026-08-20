@@ -2449,7 +2449,7 @@ fn validate_mysql_key_storage_op(
     schema_mode: LogicalSchemaMode<'_>,
     catalog: CatalogColumnEvidence<'_>,
 ) -> Result<(), AuthoringError> {
-    use crate::model::ir::{IndexMethod, IrConstraintKind, Op};
+    use crate::model::ir::{IrConstraintKind, Op};
 
     let check = |position: &str,
                  schema: Option<&str>,
@@ -2503,21 +2503,15 @@ fn validate_mysql_key_storage_op(
         Ok(())
     };
 
-    // A full-text key is the one MySQL key kind a TEXT column takes whole, so a
-    // prefix length is neither required nor spellable there.
-    let keyed_columns =
-        |columns: &[crate::model::ir::IndexElement], using: Option<IndexMethod>| -> Vec<String> {
-            if matches!(using, Some(IndexMethod::Fts5)) {
-                return vec![];
-            }
-            columns
-                .iter()
-                .filter_map(|element| match element {
-                    crate::model::ir::IndexElement::Column { name, .. } => Some(name.clone()),
-                    crate::model::ir::IndexElement::Expr { .. } => None,
-                })
-                .collect()
-        };
+    let keyed_columns = |columns: &[crate::model::ir::IndexElement]| -> Vec<String> {
+        columns
+            .iter()
+            .filter_map(|element| match element {
+                crate::model::ir::IndexElement::Column { name, .. } => Some(name.clone()),
+                crate::model::ir::IndexElement::Expr { .. } => None,
+            })
+            .collect()
+    };
 
     match op {
         Op::Dialectal {
@@ -2547,7 +2541,6 @@ fn validate_mysql_key_storage_op(
         Op::CreateIndex {
             table,
             columns,
-            using,
             schema,
             ..
         } => {
@@ -2556,7 +2549,7 @@ fn validate_mysql_key_storage_op(
                 "createIndex",
                 schema.as_deref(),
                 table,
-                &keyed_columns(columns, *using),
+                &keyed_columns(columns),
             )?;
         }
         Op::CreateTable {
@@ -2588,7 +2581,7 @@ fn validate_mysql_key_storage_op(
                     "createTable.indexes",
                     schema.as_deref(),
                     name,
-                    &keyed_columns(&index.columns, index.using),
+                    &keyed_columns(&index.columns),
                 )?;
             }
             for constraint in constraints {

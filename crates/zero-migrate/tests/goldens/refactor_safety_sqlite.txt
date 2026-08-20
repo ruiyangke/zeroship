@@ -253,30 +253,6 @@ TableSnapshot {
     ],
     indexes: [
         IndexSnapshot {
-            name: "articles__fts",
-            unique: false,
-            columns: [
-                "title",
-            ],
-            elements: [
-                Column {
-                    name: "title",
-                    order: None,
-                    opclass: None,
-                    collation: None,
-                },
-            ],
-            access_method: "fts5",
-            predicate: None,
-            include: [],
-            with: None,
-            only: false,
-            opclass: None,
-            nulls_not_distinct: false,
-            comment: None,
-            expr_cascade_columns: None,
-        },
-        IndexSnapshot {
             name: "articles_author_slug_idx",
             unique: false,
             columns: [
