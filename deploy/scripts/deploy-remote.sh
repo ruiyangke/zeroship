@@ -729,6 +729,33 @@ main() {
   fi
   echo "ok  no required variable is missing"
 
+  # ------------------------------------------- no applied migration was edited
+  #
+  # BEFORE the roll, because after it the damage is done: `migrate` is the first
+  # thing `up -d` runs and a ChecksumMismatch there reports a bare
+  # `service "migrate" didn't complete successfully: exit 2`.
+  #
+  # And before the --dry-run exit below, because it costs two read-only SELECTs
+  # and telling an operator what would go wrong is the whole point of a dry run.
+  say "checking no migration this database already applied was edited"
+  fetch_platform_journal "$JOURNAL_FILE"
+  case "$JOURNAL_STATE" in
+    absent)
+      echo "ok  no migration journal on $HOST yet; nothing is frozen"
+      ;;
+    present)
+      LEDGER_DRIFT="$(released_ledger_drift "$JOURNAL_FILE" db/migrations-ts)"
+      [ -z "$LEDGER_DRIFT" ] || fail "these migration files were edited after $HOST applied them:
+$LEDGER_DRIFT
+  NOTHING WAS RESTARTED. The runner hashes each file's source bytes and refuses
+  every later run against this database on mismatch, permanently -- there is no
+  self-healing arm and adding one would defeat the guard. Restore the released
+  bytes (git show <the commit before the edit>) and re-land the change as a NEW
+  migration file. \`git log -p -- db/migrations-ts/<file>\` finds the edit."
+      echo "ok  all $(wc -l < "$JOURNAL_FILE") applied migrations still have their released bytes"
+      ;;
+  esac
+
   if [ "$DRY_RUN" = 1 ]; then
     say "dry run: stopping before build"
     echo "would build and push $IMAGE, snapshot every deploy input, sync compose + Caddyfile + ops/zeroship.toml, provision generated secrets and secret files, run --check-config for every server, and roll the stack"
@@ -955,30 +982,6 @@ $MOUNT_BAD
   \`volumes: !override []\` REPLACES the whole list, so a mount added to the
   tracked compose file since that override was written is silently dropped."
   echo "ok  every referenced secret is readable inside the service that names it"
-
-  # ------------------------------------------- no applied migration was edited
-  #
-  # BEFORE the roll, because after it the damage is done: `migrate` is the first
-  # thing `up -d` runs and a ChecksumMismatch there reports a bare
-  # `service "migrate" didn't complete successfully: exit 2`.
-  say "checking no migration this database already applied was edited"
-  fetch_platform_journal "$JOURNAL_FILE"
-  case "$JOURNAL_STATE" in
-    absent)
-      echo "ok  no migration journal on $HOST yet; nothing is frozen"
-      ;;
-    present)
-      LEDGER_DRIFT="$(released_ledger_drift "$JOURNAL_FILE" db/migrations-ts)"
-      [ -z "$LEDGER_DRIFT" ] || fail "these migration files were edited after $HOST applied them:
-$LEDGER_DRIFT
-  NOTHING WAS RESTARTED. The runner hashes each file's source bytes and refuses
-  every later run against this database on mismatch, permanently -- there is no
-  self-healing arm and adding one would defeat the guard. Restore the released
-  bytes (git show <the commit before the edit>) and re-land the change as a NEW
-  migration file. \`git log -p -- db/migrations-ts/<file>\` finds the edit."
-      echo "ok  all $(wc -l < "$JOURNAL_FILE") applied migrations still have their released bytes"
-      ;;
-  esac
 
   say "rolling the stack to $IMAGE"
   # One `up -d` for every service. The control key is shared, so a partial
