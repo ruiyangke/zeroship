@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+# ============================================================================
+# Regenerate (or verify) deploy/ops/caddy-claimed-hosts.json - the record of
+# every hostname the edge config claims, as answered by CADDY ITSELF.
+#
+# WHY THIS EXISTS. crates/control/src/reserved_names.rs must know which
+# hostname labels under {$ZEROSHIP_DOMAIN} the edge already claims, so
+# RESERVED_APP_NAMES can refuse them to creators. It used to answer that by
+# parsing deploy/ops/Caddyfile with a hand-written text parser, and that parser
+# had a silent hole every time it met a spelling it had not been taught:
+#
+#   MEASURED 2026-08-20 against the parser as it stood. Each of these routes a
+#   host away from creator apps, and each returned a set with NO new label:
+#     @status host status.{$ZEROSHIP_DOMAIN} + handle @status   -> Ok, unchanged
+#     @h header Host h.{$ZEROSHIP_DOMAIN}    + handle @h        -> Ok([])
+#     @b { host b.{$ZEROSHIP_DOMAIN} }       + handle @b        -> Ok([])
+#     import sites/*.caddy  (a whole site block in another file) -> Ok([])
+#
+# The fix is not a better parser. Caddyfile is Caddy's language, it grows
+# matcher modules we do not control, and `@x expression {host}.startsWith(...)`
+# is not statically decidable at all. So we stop parsing it: `caddy adapt`
+# lowers the Caddyfile to Caddy's JSON config, in which EVERY host claim -
+# site block, named matcher, header matcher, imported file - is a concrete
+# `match` entry. Verified 2026-08-20: adapt resolves `{$ENV:default}`, resolves
+# `import`, and emits the matcher host as a nested `match[].host[]`.
+#
+# The adapted config is committed so the Rust gate needs no Caddy, no docker
+# and no network to run - it is an `include_str!` like the Caddyfile was. What
+# keeps it honest is the `caddyfile_sha256` field: the Rust gate recomputes it
+# over the Caddyfile's bytes and REFUSES if they differ, so editing the edge
+# without regenerating goes red instead of quietly leaving the gate asserting
+# about a config the edge no longer has.
+#
+# WHAT THIS SCRIPT DOES NOT PROVE. `--check` re-derives the artifact from the
+# repo's Caddyfile. It says nothing about the Caddyfile deployed on a host;
+# that is deploy/scripts/deploy-remote.sh's scp, which overwrites the host copy
+# from this repo on every roll.
+#
+# USAGE
+#   deploy/ops/caddy-claimed-hosts.sh --write   # regenerate the artifact
+#   deploy/ops/caddy-claimed-hosts.sh --check   # fail if it is stale or edited
+# ============================================================================
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+CADDYFILE="$ROOT/deploy/ops/Caddyfile"
+ARTIFACT="$ROOT/deploy/ops/caddy-claimed-hosts.json"
+
+# The domain the Caddyfile is adapted against. `.invalid` is reserved by
+# RFC 2606 and can never be a real deployment domain, so a host in the adapted
+# config that does NOT end in it is a literal domain baked into the edge -
+# which the Caddyfile's own header forbids, and which the Rust gate refuses.
+SENTINEL="zsdomain.invalid"
+
+MODE=""
+case "${1:-}" in
+  --write) MODE=write ;;
+  --check) MODE=check ;;
+  *)
+    echo "usage: $0 --write | --check" >&2
+    exit 2
+    ;;
+esac
+
+[ -f "$CADDYFILE" ] || { echo "REFUSED: $CADDYFILE not found." >&2; exit 1; }
+
+# Prefer a real caddy binary; fall back to the pinned image. REFUSE rather than
+# skip if neither is there: a gate that silently does nothing when its tool is
+# missing prints the same green as a gate that ran and passed.
+CADDY_IMAGE="caddy:2-alpine"
+adapt() {
+  if command -v caddy >/dev/null 2>&1; then
+    ZEROSHIP_DOMAIN="$SENTINEL" caddy adapt \
+      --config "$CADDYFILE" --adapter caddyfile --pretty
+  elif command -v docker >/dev/null 2>&1; then
+    docker run --rm -i \
+      -e ZEROSHIP_DOMAIN="$SENTINEL" \
+      -v "$ROOT/deploy/ops:/w:ro" -w /w \
+      "$CADDY_IMAGE" \
+      caddy adapt --config Caddyfile --adapter caddyfile --pretty
+  else
+    echo "REFUSED: neither a 'caddy' binary nor 'docker' is available, so the" >&2
+    echo "         edge config cannot be adapted. This check cannot be skipped:" >&2
+    echo "         install caddy, or make docker able to run $CADDY_IMAGE." >&2
+    exit 1
+  fi
+}
+
+caddy_version() {
+  if command -v caddy >/dev/null 2>&1; then
+    caddy version 2>/dev/null | head -1
+  else
+    docker run --rm "$CADDY_IMAGE" caddy version 2>/dev/null | head -1
+  fi
+}
+
+SHA="$(sha256sum "$CADDYFILE" | cut -d' ' -f1)"
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+# `caddy adapt` writes warnings to stderr and the config to stdout. Let stderr
+# through so an adapt warning is visible rather than swallowed.
+adapt > "$TMP/config.json"
+
+# The adapted config is nested under `config` alongside the provenance fields,
+# so the Rust gate reads one file and can tell whether it describes the
+# Caddyfile in front of it.
+jq -n \
+  --arg sha "$SHA" \
+  --arg sentinel "$SENTINEL" \
+  --arg version "$(caddy_version)" \
+  --slurpfile config "$TMP/config.json" \
+  '{
+     _comment: "GENERATED by deploy/ops/caddy-claimed-hosts.sh --write. Do not hand-edit: crates/control/src/reserved_names.rs reads it as the authority on which hostnames the edge claims.",
+     caddyfile_sha256: $sha,
+     sentinel_domain: $sentinel,
+     caddy_version: $version,
+     config: $config[0]
+   }' > "$TMP/artifact.json"
+
+if [ "$MODE" = write ]; then
+  mv "$TMP/artifact.json" "$ARTIFACT"
+  echo "ok  wrote $ARTIFACT"
+  echo "    caddyfile_sha256 = $SHA"
+  exit 0
+fi
+
+# --check
+if [ ! -f "$ARTIFACT" ]; then
+  echo "FAIL $ARTIFACT does not exist. Run: $0 --write" >&2
+  exit 1
+fi
+
+# `caddy_version` is provenance, not a claim about the edge, and it moves every
+# time the image is bumped. Compare everything else.
+strip_version() { jq 'del(.caddy_version)' "$1"; }
+
+if diff -u <(strip_version "$ARTIFACT") <(strip_version "$TMP/artifact.json") \
+     > "$TMP/diff" 2>&1; then
+  echo "ok  $ARTIFACT matches deploy/ops/Caddyfile as Caddy adapts it"
+  exit 0
+fi
+
+echo "FAIL $ARTIFACT does NOT match what Caddy makes of deploy/ops/Caddyfile." >&2
+echo "     Either the Caddyfile changed without regenerating, or the artifact" >&2
+echo "     was hand-edited. Run: $0 --write" >&2
+echo >&2
+sed -n '1,80p' "$TMP/diff" >&2
+exit 1
