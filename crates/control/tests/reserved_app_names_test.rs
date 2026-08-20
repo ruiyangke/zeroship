@@ -60,7 +60,7 @@ use zeroship_control::{
     api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
 
-mod common;
+use crate::common;
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 

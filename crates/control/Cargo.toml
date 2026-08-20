@@ -3,6 +3,13 @@ name = "zeroship-control"
 version = "0.1.0"
 edition = "2021"
 description = "zeroship control plane — admin API, internal API, Postgres, VFS"
+# Cargo links one executable per `tests/*.rs`. Autodiscovery is OFF and the four
+# `[[test]]` targets at the bottom of this file are the only integration-test
+# targets; the other 44 files are `mod` declarations inside two of them. Adding a
+# `tests/<name>.rs` therefore requires a `mod <name>;` line in `tests/main.rs` or
+# `tests/live_db.rs` - see those files' headers for which, for the measured size
+# win, and for what sharing one process stops protecting.
+autotests = false
 
 [[package.metadata.zeroship-config.targets]]
 target = "zeroship-control"
@@ -143,21 +150,25 @@ tracing-subscriber = { workspace = true }
 # `cargo test --workspace` - which provisions no database - could never be green.
 #
 # The failing-without-a-database property is what this feature encodes, and the
-# set below was originally determined by MEASUREMENT, not by grep: every control
-# test executable was built once and then run with the DSN environment variables
-# pointed at a dead port. The ones that failed are listed here; the six that
-# passed (authz_guard_supabase_test, billing_pipeline_redpanda_e2e,
+# set was originally determined by MEASUREMENT, not by grep: every control test
+# executable was built once and then run with the DSN environment variables
+# pointed at a dead port. The ones that failed are gated; the six that passed
+# (authz_guard_supabase_test, billing_pipeline_redpanda_e2e,
 # durable_workflows_keystone_e2e, no_liquibase_residue_test,
-# provider_conformance, trusted_clients_test) are deliberately NOT listed, so
-# they keep running under a bare `cargo test --workspace`.
+# provider_conformance, trusted_clients_test) are deliberately NOT, so they keep
+# running under a bare `cargo test --workspace`.
 #
-# The list is 43 targets as of 2026-08-17 (counted: 49 files in tests/, 43
-# `required-features` entries, 6 ungated). It read "44" until then, which was
-# stale by two deletions; the count is stated once here rather than twice
-# because a number repeated is a number that rots. `egress_rules_test` was added
-# to it by CONSTRUCTION - it builds an `AppState` against a live DSN and cannot
-# reach its first assertion without one - not by re-running the dead-port
-# measurement.
+# THE SET IS NOW A MODULE LIST, NOT A TARGET LIST. Until 2026-08-20 each gated
+# file carried its own `[[test]]` with `required-features`, and the membership
+# question was "is there a stanza for it". It is now "is it declared by
+# `tests/live_db.rs` (gated) or by `tests/main.rs` (not)", plus the two files
+# that kept a stanza of their own for reasons that have nothing to do with the
+# gate - see the target block below. 42 files are gated and 6 are not, out of 48
+# in `tests/`; the count lives here once, and `git grep -c '^mod ' --
+# crates/control/tests/live_db.rs` recomputes it rather than trusting it.
+# `egress_rules_test` joined the gated set by CONSTRUCTION - it builds an
+# `AppState` against a live DSN and cannot reach its first assertion without one
+# - not by re-running the dead-port measurement.
 #
 # Gating hides a target from the default build, which is exactly the failure
 # mode a gate is supposed to prevent, so it is only honest while something else
@@ -166,208 +177,50 @@ tracing-subscriber = { workspace = true }
 #     cargo test -p zeroship-control --features live-db-tests
 #
 # which builds and runs every target whose `required-features` are satisfied -
-# the ones below AND the six ungated ones. There is no second list to keep in
-# step: a target added to this file is covered by that command the moment it is
-# added, and a target removed from it stops being gated rather than stops being
-# run. `tests/run_billing_suite.sh` drives that one command (it no longer
+# the gated ones AND the ungated ones. There is no second list to keep in step:
+# a module added to `tests/live_db.rs` is covered by that command the moment it
+# is added, and one moved to `tests/main.rs` stops being gated rather than stops
+# being run. `tests/run_billing_suite.sh` drives that one command (it no longer
 # enumerates binaries by name), and CI's `billing-gate` job runs the script.
+#
+# `autotests = false` is what makes the module lists load-bearing: a new
+# `tests/<name>.rs` that nothing declares is compiled by NOTHING and reports no
+# failure. That is the one way this arrangement can silently lose coverage, and
+# it is the reason both entry files say so in their own headers.
 [features]
 live-db-tests = []
 
+# ---------------------------------------------------------------------------
+# The four integration-test targets
+# ---------------------------------------------------------------------------
+# `autotests = false` at the top of this file, so these four are the whole set
+# and every other `tests/*.rs` is a module of one of them.
+#
+# The split is forced, not stylistic:
+#   main      the files that pass with NO database. They must keep running under
+#             a bare `cargo test --workspace`, so this target carries no
+#             `required-features`.
+#   live_db   the files that cannot reach their first assertion without a
+#             migrated PostgreSQL. `required-features` is a property of a
+#             TARGET, so these cannot share a target with the ones above
+#             without either gating those out of the default build or ungating
+#             these into it.
+# and two files that break as MODULES, each kept whole rather than edited:
+#   workflow_engine_test       clones the migrated database per test with
+#                              `CREATE DATABASE ... WITH TEMPLATE`, which
+#                              PostgreSQL refuses while a sibling module of the
+#                              same binary holds a session on the template.
+#   no_liquibase_residue_test  greps this crate's sources for the dead migration
+#                              tool's name; a `mod ...;` line naming it in an
+#                              entry file is itself an occurrence, so the guard
+#                              would fail on its own declaration.
 [[test]]
-name = "account_status_test"
-path = "tests/account_status_test.rs"
-required-features = ["live-db-tests"]
+name = "main"
+path = "tests/main.rs"
 
 [[test]]
-name = "app_logs_http_test"
-path = "tests/app_logs_http_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "app_oauth_client_test"
-path = "tests/app_oauth_client_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "audit_retention_test"
-path = "tests/audit_retention_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "authz_guard_oauth_test"
-path = "tests/authz_guard_oauth_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "billing_credit_test"
-path = "tests/billing_credit_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "billing_dispute_test"
-path = "tests/billing_dispute_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "billing_invoice_payments_test"
-path = "tests/billing_invoice_payments_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "billing_notify_test"
-path = "tests/billing_notify_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "billing_proration_test"
-path = "tests/billing_proration_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "billing_read_api_test"
-path = "tests/billing_read_api_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "billing_reconcile_test"
-path = "tests/billing_reconcile_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "billing_redesign_regression_test"
-path = "tests/billing_redesign_regression_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "billing_refund_void_test"
-path = "tests/billing_refund_void_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "billing_safety_net_test"
-path = "tests/billing_safety_net_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "billing_tax_test"
-path = "tests/billing_tax_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "bootstrap_builder_test"
-path = "tests/bootstrap_builder_test.rs"
-required-features = ["live-db-tests"]
-
-
-[[test]]
-name = "connect_fee_test"
-path = "tests/connect_fee_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "delete_app_billing_fk_test"
-path = "tests/delete_app_billing_fk_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "deploy_http_test"
-path = "tests/deploy_http_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "deploy_test"
-path = "tests/deploy_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "device_handlers_test"
-path = "tests/device_handlers_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "env_store"
-path = "tests/env_store.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "identity_bridge_test"
-path = "tests/identity_bridge_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "egress_rules_test"
-path = "tests/egress_rules_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "oauth_grants_handlers_test"
-path = "tests/oauth_grants_handlers_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "oauth_clients_test"
-path = "tests/oauth_clients_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "orphaned_app_reaper_test"
-path = "tests/orphaned_app_reaper_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "plan_catalog"
-path = "tests/plan_catalog.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "registry_schema_test"
-path = "tests/registry_schema_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "reserved_app_names_test"
-path = "tests/reserved_app_names_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "set_plan_authz_test"
-path = "tests/set_plan_authz_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "spend"
-path = "tests/spend.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "spend_limit_http_test"
-path = "tests/spend_limit_http_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "spend_reconcile_test"
-path = "tests/spend_reconcile_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "stream_forwarder_recompute_test"
-path = "tests/stream_forwarder_recompute_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "stripe_reconcile_test"
-path = "tests/stripe_reconcile_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "stripe_store"
-path = "tests/stripe_store.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "stripe_webhook_test"
-path = "tests/stripe_webhook_test.rs"
+name = "live_db"
+path = "tests/live_db.rs"
 required-features = ["live-db-tests"]
 
 [[test]]
@@ -376,14 +229,8 @@ path = "tests/workflow_engine_test.rs"
 required-features = ["live-db-tests"]
 
 [[test]]
-name = "workflow_instance_api_test"
-path = "tests/workflow_instance_api_test.rs"
-required-features = ["live-db-tests"]
-
-[[test]]
-name = "workflow_plugin"
-path = "tests/workflow_plugin.rs"
-required-features = ["live-db-tests"]
+name = "no_liquibase_residue_test"
+path = "tests/no_liquibase_residue_test.rs"
 
 [lints]
 workspace = true

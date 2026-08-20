@@ -29,7 +29,7 @@ use zeroship_core::auth_provider::{
 use zeroship_core::config::OriginScheme;
 use zeroship_core::device_grant;
 
-mod common;
+use crate::common;
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 const TEST_CONTROL_KEY: &str = "test-control-key";

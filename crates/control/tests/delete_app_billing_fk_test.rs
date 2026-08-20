@@ -14,7 +14,7 @@
 //! against a live, migrated Postgres. Gated on a configured test database
 //! (`zeroship_core::config::test_database_url_opt`); silent skip.
 
-mod common;
+use crate::common;
 
 use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;

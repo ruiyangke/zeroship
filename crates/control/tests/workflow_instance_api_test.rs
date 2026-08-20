@@ -8,7 +8,7 @@
 
 #![allow(clippy::await_holding_lock, clippy::future_not_send)]
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::sync::Arc;

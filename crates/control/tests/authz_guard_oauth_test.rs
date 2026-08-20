@@ -27,7 +27,7 @@ use zeroship_core::device_grant::{
     OP_PROVIDER, PLATFORM_CLI_CLIENT_ID, PLATFORM_CLI_REGISTERED_SCOPES,
 };
 
-mod common;
+use crate::common;
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 const PLATFORM_ISSUER: &str = "https://auth.zeroship.test";

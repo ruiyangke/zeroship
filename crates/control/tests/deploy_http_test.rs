@@ -40,7 +40,7 @@ use zeroship_control::{
     StripeStore,
 };
 
-mod common;
+use crate::common;
 
 // ---------------------------------------------------------------------------
 // Test gating

@@ -24,7 +24,7 @@ use zeroship_bundle::{
 };
 use zeroship_control::deploy::{self, IngestError};
 
-mod common;
+use crate::common;
 
 // ---------------------------------------------------------------------------
 // Helpers

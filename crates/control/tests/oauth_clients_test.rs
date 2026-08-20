@@ -22,7 +22,7 @@ use zeroship_core::auth::hash_api_key;
 use zeroship_core::config::OauthClientRegistration;
 use zeroship_core::device_grant::PLATFORM_CLI_CLIENT_ID;
 
-mod common;
+use crate::common;
 
 fn db_url() -> String {
     common::require_control_db()
