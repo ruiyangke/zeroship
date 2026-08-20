@@ -157,11 +157,12 @@ pub enum EdgeRouting {
 /// whatever app holds the name.
 const GATEWAY_UPSTREAM: &str = "gateway:8000";
 
-/// Where the edge sends each reserved name. This is the table the module
-/// header's Shadowed/Reachable prose describes, and
-/// `edge_routing_matches_the_adapted_config` holds it to the adapted config —
-/// so moving `console` off the gateway fails here instead of leaving the
-/// reasoning stale.
+/// Where the edge sends each reserved name.
+///
+/// This is the table the module header's Shadowed/Reachable prose describes,
+/// and `edge_routing_matches_the_adapted_config` holds it to the adapted
+/// config — so moving `console` off the gateway fails here instead of leaving
+/// the reasoning stale.
 pub const EDGE_ROUTING: &[(&str, EdgeRouting)] = &[
     ("api", EdgeRouting::Reachable),
     ("auth", EdgeRouting::Shadowed),
@@ -207,6 +208,24 @@ pub struct HostClaim {
     /// A route nested inside another contributes to both; the semantics are
     /// "reachable under", not "dialed directly by".
     pub upstreams: Vec<String>,
+}
+
+impl HostClaim {
+    /// Which of the two failure modes in this module's header reserving this
+    /// name prevents, read off where the edge actually sends it.
+    ///
+    /// A host the edge hands to the gateway and nothing else is Reachable: the
+    /// gateway resolves it as an ordinary creator app. Anything else terminates
+    /// somewhere that is not the app router, so a creator app holding the name
+    /// would never see a request.
+    #[must_use]
+    pub fn routing(&self) -> EdgeRouting {
+        if self.upstreams.len() == 1 && self.upstreams[0] == GATEWAY_UPSTREAM {
+            EdgeRouting::Reachable
+        } else {
+            EdgeRouting::Shadowed
+        }
+    }
 }
 
 /// Caddy HTTP matchers that cannot claim a hostname, and are therefore safe to
@@ -579,11 +598,7 @@ mod tests {
             "EDGE_ROUTING must classify every reserved name"
         );
         for claim in &claims {
-            let observed = if claim.upstreams == vec![GATEWAY_UPSTREAM.to_owned()] {
-                EdgeRouting::Reachable
-            } else {
-                EdgeRouting::Shadowed
-            };
+            let observed = claim.routing();
             let declared = table
                 .get(claim.label.as_str())
                 .copied()
@@ -594,6 +609,26 @@ mod tests {
                 claim.label, claim.upstreams
             );
         }
+    }
+
+    /// Reachable means the gateway resolves the host as an ordinary creator
+    /// app, so it has to be the ONLY upstream. A host that also reaches
+    /// somewhere else is partly terminated before the app router and is
+    /// Shadowed — the arm `edge_routing_matches_the_adapted_config` cannot
+    /// reach, because today's edge has no such block.
+    #[test]
+    fn a_host_that_reaches_more_than_the_gateway_is_shadowed() {
+        let only = |ups: &[&str]| HostClaim {
+            label: "x".to_owned(),
+            upstreams: ups.iter().map(|s| (*s).to_owned()).collect(),
+        };
+        assert_eq!(only(&["gateway:8000"]).routing(), EdgeRouting::Reachable);
+        assert_eq!(only(&["auth:9092"]).routing(), EdgeRouting::Shadowed);
+        assert_eq!(
+            only(&["gateway:8000", "status:9099"]).routing(),
+            EdgeRouting::Shadowed
+        );
+        assert_eq!(only(&[]).routing(), EdgeRouting::Shadowed);
     }
 
     /// Compose spells some of the same hosts out. Everything it claims under
