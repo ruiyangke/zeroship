@@ -5,6 +5,11 @@ edition = "2021"
 publish = false
 description = "The test harness's own logic, in Rust rather than shell: the generated test overlay, the branch-keyed suite database, and the sweeper's verdicts. compio-postgres replaces psql; nothing here pulls tokio."
 
+[[package.metadata.zeroship-config.targets]]
+target = "zs-testkit"
+class = "test-dev-tool"
+reason = "The test harness's own CLI. It is not in the platform image and reads no server configuration overlay."
+
 [[bin]]
 name = "zs-testkit"
 path = "src/main.rs"
