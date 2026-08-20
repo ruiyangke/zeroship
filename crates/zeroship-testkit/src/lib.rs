@@ -37,9 +37,9 @@ pub mod sweep;
 
 /// The exit codes the shell library used, kept because callers switch on them.
 ///
-/// `1` and `2` are NOT interchangeable here: [`suite_db::exists`] returns
-/// "absent" as 1 and "could not tell" as 2, and the whole point of that
-/// function is that the two are different answers.
+/// `1` and `2` are NOT interchangeable here: the `suite-db exists` subcommand
+/// returns "absent" as 1 and "could not tell" as 2, and the whole point of that
+/// question is that the two are different answers.
 pub mod exit {
     /// Success.
     pub const OK: i32 = 0;
