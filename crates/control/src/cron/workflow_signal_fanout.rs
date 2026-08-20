@@ -13,7 +13,7 @@ use compio_postgres::error::SqlState;
 use serde_json::Value;
 use uuid::Uuid;
 use zeroship_core::typed_id;
-use zeroship_plugin_workflow::store::pg::WorkflowTables;
+use zeroship_plugin_workflow::store::pg::{self, WorkflowTables};
 
 use crate::cron::workflow_engine::SweepCoverage;
 use crate::registry::RegistryError;
@@ -148,7 +148,7 @@ async fn gc_expired_subscriptions(state: &AppState) -> Result<SubscriptionGc, Re
         deleted: 0,
         coverage: SweepCoverage::opened_over(&fleet),
     };
-    for app_id in fleet.readable {
+    for app_id in fleet.usable {
         let tables = WorkflowTables::for_app_id(&app_id);
         let sql = format!(
             "DELETE FROM {} \
@@ -188,19 +188,36 @@ async fn gc_expired_subscriptions(state: &AppState) -> Result<SubscriptionGc, Re
 /// so `gc_expired_subscriptions` counts it into [`FanoutStats::coverage`] and
 /// WARNs naming it. The stall is visible in the return value, not only in a log.
 ///
-/// An app with NO journal schema at all is a different case and is deliberately
+/// An app with NO journal tables at all is a different case and is deliberately
 /// still picked: there are no subscribers to deliver to, and the arm below
 /// completes the broadcast rather than leaving it forever pending. That app is
 /// reported NOWHERE - it is absent from `journalled_apps`' catalog join, so
 /// there is no WARN and no `apps_skipped` for it. This paragraph claimed the
 /// opposite until it was checked; the WARN it pointed at only ever covers the
-/// UNREADABLE case above.
+/// EXCLUDED cases above.
+///
+/// It says "no journal tables", not "no runs table", and the difference is the
+/// point: an app holding a subscriptions table with rows in it and no runs
+/// table used to fall into this same silent arm, and completing a broadcast for
+/// it would have dropped real subscribers. The pick's second `NOT EXISTS` now
+/// refuses an app whose journal holds SOME of its tables, exactly as the first
+/// refuses one whose schema cannot be entered, so the broadcast stays pending
+/// and the tenant is counted by `gc_expired_subscriptions`.
+///
+/// That exclusion belongs in the PICK and not further down. `existing_tables`
+/// answers `Unreachable` for such a journal, which would propagate and fail the
+/// tick - and because the pick takes the OLDEST pending broadcast fleet-wide
+/// with no cursor, it would take the same one every tick and stall the fan-out
+/// for every other tenant behind it. Refusing it here leaves the row where it is
+/// and lets the queue move.
 async fn drain_one_broadcast(
     state: &AppState,
     max_deliveries: i64,
 ) -> Result<FanoutStats, RegistryError> {
     let mut conn = state.registry.conn().await?;
     let tx = conn.transaction().await.map_err(RegistryError::from)?;
+    let journal_tables: Vec<String> = pg::journal_table_names().to_vec();
+    let journal_table_count = i64::try_from(journal_tables.len()).unwrap_or(i64::MAX);
     let rows = tx
         .query(
             "WITH picked AS ( \
@@ -218,6 +235,17 @@ async fn drain_one_broadcast(
                          WHERE n.nspname = 'app_' || b.app_id::text \
                            AND NOT has_schema_privilege(n.oid, 'USAGE') \
                     ) \
+                    AND NOT EXISTS ( \
+                        SELECT 1 \
+                          FROM pg_catalog.pg_namespace n \
+                          JOIN pg_catalog.pg_class c \
+                            ON c.relnamespace = n.oid \
+                           AND c.relkind = 'r' \
+                           AND c.relname = ANY($1::text[]) \
+                         WHERE n.nspname = 'app_' || b.app_id::text \
+                         GROUP BY n.oid \
+                        HAVING count(*) <> $2 \
+                    ) \
                   ORDER BY b.created_at, b.id \
                   LIMIT 1 \
                   FOR UPDATE SKIP LOCKED \
@@ -226,7 +254,7 @@ async fn drain_one_broadcast(
                     b.idempotency_key, b.expires_at \
                FROM zeroship.workflow_broadcasts b \
                JOIN picked p ON p.id = b.id",
-            &[],
+            &[&journal_tables, &journal_table_count],
         )
         .await
         .map_err(RegistryError::from)?;
