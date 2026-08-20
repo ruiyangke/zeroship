@@ -25,6 +25,7 @@ mod gen_types_dialectal_table_shape;
 mod gen_types_drop_column_dialect_legs;
 mod op_support_matrix;
 mod partition_recording_dialect_legs;
+mod row_order_observation;
 mod sqlite_declaration_flip_over_refusal_control;
 mod sqlite_trigger_quoting_reaches_postgres;
 mod sqlite_trigger_render_bytes;
