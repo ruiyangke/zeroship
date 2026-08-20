@@ -183,11 +183,18 @@ async fn gc_expired_subscriptions(state: &AppState) -> Result<SubscriptionGc, Re
 /// because "I could not read the subscribers" is not "there were none"; the
 /// broadcast drains as soon as the privilege gap is closed.
 ///
+/// A broadcast left pending this way IS accounted for elsewhere in this tick:
+/// the same privilege gap makes `journalled_fleet` report that app unreadable,
+/// so `gc_expired_subscriptions` counts it into [`FanoutStats::coverage`] and
+/// WARNs naming it. The stall is visible in the return value, not only in a log.
+///
 /// An app with NO journal schema at all is a different case and is deliberately
 /// still picked: there are no subscribers to deliver to, and the arm below
-/// completes the broadcast rather than leaving it forever pending. The skipped
-/// app is named in the WARN that `journalled_fleet` emits from
-/// `gc_expired_subscriptions` on the same tick, so the stall is not silent.
+/// completes the broadcast rather than leaving it forever pending. That app is
+/// reported NOWHERE - it is absent from `journalled_apps`' catalog join, so
+/// there is no WARN and no `apps_skipped` for it. This paragraph claimed the
+/// opposite until it was checked; the WARN it pointed at only ever covers the
+/// UNREADABLE case above.
 async fn drain_one_broadcast(
     state: &AppState,
     max_deliveries: i64,
