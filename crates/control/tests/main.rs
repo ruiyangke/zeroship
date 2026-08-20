@@ -94,53 +94,46 @@
 //!                        in `tests/common/`, not eleven private ones - which
 //!                        edits test bodies and was deliberately left undone
 //!                        here.
-//!   shared `common`      CHECKED, a behaviour change, and the one that found a
-//!                        REAL PRE-EXISTING BUG. Read this before "fixing" it.
+//!   shared `common`      CHECKED, and the one that found a REAL PRE-EXISTING
+//!                        BUG. It is FIXED; this entry says what the fix is so
+//!                        nobody reintroduces the shape.
 //!
-//!                        `common::isolated_closed_period_now()` memoises a
-//!                        random far-future month in a `OnceLock`. `common` is
-//!                        compiled once per TARGET, so its five callers
-//!                        (billing_credit / billing_proration /
-//!                        billing_reconcile / billing_refund_void / billing_tax)
-//!                        used to draw five months and now share one. Each of
-//!                        those tests asserts on rows keyed by its own app id,
-//!                        so they are fine.
+//!                        `common` is compiled once per TARGET, so a `static` in
+//!                        it is shared by every module of that target rather
+//!                        than being one cell per binary. The billing period
+//!                        helper was such a `static`, and merging the binaries
+//!                        turned five memoised months into one.
 //!
-//!                        `billing_safety_net_test` is NOT fine, and was not
-//!                        before this merge either. It draws its OWN period
-//!                        (`unique_closed_period_now`, a fresh `Uuid` per call,
-//!                        2400 possible months) and then asserts
-//!                        `subjects_checked == 1`. But `reconcile_pass` counts
-//!                        EVERY subject in that period, summed over every meter
-//!                        the period contains
-//!                        (`cron/billing_reconcile.rs`, `add_safety_net_summary`
-//!                        + the per-meter loop). The test owns its app; it does
-//!                        NOT own its period. The assertion holds only while its
-//!                        random draw misses every month another test seeded.
+//!                        That exposed a bug older than this merge:
+//!                        `billing_safety_net_test` asserts
+//!                        `subjects_checked == 1`, but `reconcile_pass` counts
+//!                        EVERY subject in the period, summed over every meter
+//!                        in it (`cron/billing_reconcile.rs`,
+//!                        `add_safety_net_summary` + the per-meter loop). A test
+//!                        owns its app; it did NOT own its period, and drew one
+//!                        at random out of 2400 months.
 //!
-//!                        MEASURED 2026-08-20, same script, same 78 seeding
-//!                        tests, counting loaded periods (ones where a draw
-//!                        would make `subjects_checked != 1`):
+//!                        MEASURED 2026-08-20, counting periods where a draw
+//!                        would break that assertion (these are measured; the
+//!                        per-run rates that follow are MODELLED from them):
 //!
-//!                          main        6 loaded periods, worst 96,  128 subjects
-//!                          this branch 2 loaded periods, worst 126, 128 subjects
+//!                          before the merge  6 loaded, worst 96,  128 subjects
+//!                          after  the merge  2 loaded, worst 126, 128 subjects
+//!                          with the fix      0 loaded, by construction
 //!
-//!                        The 128 contaminating subjects are IDENTICAL. Merging
-//!                        did not create them, it concentrated them: fewer
-//!                        months to hit, more damage when hit. On the model of 4
-//!                        draws against 2400 months that is ~1.0 percent per run
-//!                        before and ~0.33 percent after - so a red run here is
-//!                        REAL and roughly three times RARER than it was, not a
-//!                        regression this merge introduced.
+//!                        The 128 contaminating subjects were IDENTICAL in the
+//!                        first two: merging did not create them, it
+//!                        concentrated them. ~1.0 percent per run before,
+//!                        ~0.33 percent after - rarer, never zero.
 //!
-//!                        The repair is per-test period ISOLATION, not a lock: a
-//!                        lock cannot help, because the rows outlive it and the
+//!                        FIXED by `common::next_isolated_period()`, which
+//!                        reserves a private window per call, replacing both the
+//!                        memoised month and `unique_closed_period_now`'s random
+//!                        draw. NOT by a lock: the rows outlive a lock and the
 //!                        collision is a later test DRAWING an earlier test's
-//!                        month. Hand every caller a distinct month from one
-//!                        process-global allocator in `tests/common/`, which
-//!                        makes the count 0 by construction - and which only
-//!                        BECOMES correct once these files share a process, as
-//!                        they now do.
+//!                        month, which serialisation cannot prevent. Read that
+//!                        function's header before touching it - it is only
+//!                        sound because these files now share one process.
 //!   ports, temp paths    CHECKED. No test binds a fixed port (the only literal
 //!                        ports in the directory are `:5440` inside DSN
 //!                        fallbacks), and every `std::env::temp_dir()` path is

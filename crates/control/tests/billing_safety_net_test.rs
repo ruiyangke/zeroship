@@ -36,17 +36,19 @@ fn tmpdir(label: &str) -> PathBuf {
     p
 }
 
+/// A period this test OWNS, which is what its `subjects_checked` assertions
+/// need and what the local random draw this replaced never actually gave them.
+///
+/// `reconcile_pass` counts every subject in the period, summed over every meter
+/// in it, so `assert_eq!(subjects_checked, 1)` is a claim about the whole
+/// period, not about this test's app. The old `unique_closed_period_now()` drew
+/// a fresh month out of 2400 per call and was unique only by luck; measured on
+/// 2026-08-20 it landed on a month another module had seeded and returned 121.
+/// `common::next_isolated_period()` reserves a private window instead. See its
+/// header for why a lock is the wrong repair and why this only works now that
+/// these files share one process.
 fn unique_closed_period_now() -> i64 {
-    use chrono::TimeZone;
-
-    let offset = (Uuid::new_v4().as_u128() % 2400) as i32;
-    let year = 2035 + offset / 12;
-    let month = (offset % 12) as u32 + 1;
-    chrono::Utc
-        .with_ymd_and_hms(year, month, 15, 12, 0, 0)
-        .single()
-        .expect("valid isolated billing period")
-        .timestamp()
+    common::next_isolated_period()
 }
 
 struct Fixture {

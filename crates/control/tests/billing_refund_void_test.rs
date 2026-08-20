@@ -409,7 +409,7 @@ async fn ingest_at(state: &AppState, app: Uuid, requests: u64, period_start: i64
 }
 
 fn now_for_closed_period() -> i64 {
-    common::isolated_closed_period_now()
+    common::next_isolated_period()
 }
 
 /// A run-unique idempotency key. `refunds.idempotency_key` is GLOBALLY unique and the
