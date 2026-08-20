@@ -87,6 +87,19 @@ const PINNED_CALLS_IN_THE_TRIGGER_PATH: usize = 0;
 const SUBJECT_FILE: &str = "render/backends/sqlite.rs";
 const FORMER_SUBJECT_FILE: &str = "render/lower.rs";
 
+/// The census floor for the crate-wide half below.
+///
+/// That half must WALK the tree, because `include_str!` cannot express "no other
+/// file". A walk fails OPEN: narrow its root and it iterates nothing, finds nothing,
+/// and reports clean. Rooted at `CARGO_MANIFEST_DIR` it was MEASURED blind — a pinned
+/// call planted in `zero-migrate-ir` did not register — and after the backend crates
+/// are extracted it would go blind to the very modules this file exists to watch.
+///
+/// So the walk covers every crate, and this floor asserts the walk FOUND them. Raise
+/// it when a crate is added. If one is genuinely removed, lower it deliberately and
+/// say so — never to get green.
+const WORKSPACE_CRATE_FLOOR: usize = 5;
+
 /// The subject itself. `render_sqlite_trigger_op` is the entry point
 /// `SqliteDmlRenderer::render_trigger_op` calls, and the two helpers under it are
 /// where four of the original six pinned calls sat.
@@ -154,33 +167,82 @@ fn no_sqlite_render_path_is_quoted_by_the_postgres_pinned_wrapper() {
          SQL-output test can tell you."
     );
 
-    // ...and nowhere else in the crate acquired one. `include_str!` cannot express
-    // "no other file", so this half walks the real tree at run time.
-    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    // ...and nowhere else in the WORKSPACE acquired one. `include_str!` cannot
+    // express "no other file", so this half walks the real tree at run time.
+    //
+    // IT WALKS EVERY CRATE, NOT JUST THIS ONE'S `src`, AND THAT IS THE POINT. A walk
+    // rooted at `CARGO_MANIFEST_DIR` is a census whose UNIVERSE SHRINKS when the
+    // thing it guards moves away: once the backend crates are extracted,
+    // `zero-migrate/src` simply stops containing the vendor modules, the walk finds
+    // zero in a smaller tree, and this half passes while guarding nothing. That is
+    // not a hypothetical - the crate-scoped version was MEASURED blind, reporting
+    // clean with a pinned call planted in `zero-migrate-ir`.
+    //
+    // Generalised, because this file is the worked example: ANY assertion that scans
+    // a DIRECTORY rather than a NAMED SET reports success when its subject leaves
+    // the directory. The `include_str!` half above cannot fail that way - a dangling
+    // path is a compile error - which is exactly why the two halves are kept
+    // together.
+    let crates_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("this crate lives at <workspace>/crates/<name>")
+        .to_path_buf();
+    let this_crate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .file_name()
+        .expect("crate directory has a name")
+        .to_string_lossy()
+        .into_owned();
+    let subject_rel = format!("{this_crate}/src/{SUBJECT_FILE}");
+
+    let mut roots: Vec<PathBuf> = std::fs::read_dir(&crates_root)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", crates_root.display()))
+        .map(|e| e.expect("dir entry").path().join("src"))
+        .filter(|p| p.is_dir())
+        .collect();
+    roots.sort();
+
+    // The census floor. A scan over a DISCOVERED set fails OPEN: break the discovery
+    // and it iterates nothing, finds nothing, and reports clean. This is the same
+    // floor the schema and DML backend tripwires carry, for the same reason.
+    assert!(
+        roots.len() >= WORKSPACE_CRATE_FLOOR,
+        "found only {} crate `src` root(s) under {}, expected at least \
+         {WORKSPACE_CRATE_FLOOR}: {roots:?}.\n\
+         \n\
+         This census walks the tree, so a broken or narrowed discovery makes it \
+         iterate NOTHING and pass. Raise the floor when a crate is ADDED; if a crate \
+         was REMOVED, say so deliberately - do not lower it to get green.",
+        roots.len(),
+        crates_root.display()
+    );
+
     let mut elsewhere: Vec<(String, usize)> = Vec::new();
     let mut total = 0usize;
-    for file in rust_sources(&src) {
-        let text = std::fs::read_to_string(&file)
-            .unwrap_or_else(|e| panic!("reading {}: {e}", file.display()));
-        let hits = count_pinned_calls(&text);
-        if hits == 0 {
-            continue;
-        }
-        total += hits;
-        let rel = file
-            .strip_prefix(&src)
-            .unwrap_or(&file)
-            .display()
-            .to_string();
-        if rel != SUBJECT_FILE {
-            elsewhere.push((rel, hits));
+    for root in &roots {
+        for file in rust_sources(root) {
+            let text = std::fs::read_to_string(&file)
+                .unwrap_or_else(|e| panic!("reading {}: {e}", file.display()));
+            let hits = count_pinned_calls(&text);
+            if hits == 0 {
+                continue;
+            }
+            total += hits;
+            let rel = file
+                .strip_prefix(&crates_root)
+                .unwrap_or(&file)
+                .display()
+                .to_string();
+            if rel != subject_rel {
+                elsewhere.push((rel, hits));
+            }
         }
     }
 
     assert!(
         elsewhere.is_empty(),
         "the PostgreSQL-pinned `dml::quote_bare_ident` is called outside \
-         src/{SUBJECT_FILE}: {elsewhere:?}. Every identifier seam in the crate other \
+         {subject_rel}: {elsewhere:?}. Paths are workspace-relative because this \
+         census walks EVERY crate, not just this one. Every identifier seam other \
          than the SQLite trigger path goes through `quote_ident_checked` (also \
          PG-pinned, but its callers ARE PostgreSQL). A new caller here is either a \
          PostgreSQL path that should say `quote_ident_checked`, or a non-PostgreSQL \
@@ -188,7 +250,7 @@ fn no_sqlite_render_path_is_quoted_by_the_postgres_pinned_wrapper() {
     );
     assert_eq!(
         total, in_subject,
-        "crate-wide pinned-call count ({total}) disagrees with the src/{SUBJECT_FILE} \
+        "workspace-wide pinned-call count ({total}) disagrees with the {subject_rel} \
          count ({in_subject}) even though no other file reported hits; the two counters \
          have diverged and one of them is lying."
     );
