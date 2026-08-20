@@ -11,6 +11,7 @@ use crate::model::ir::{
 use crate::render::dml::{self, DmlError};
 use crate::render::lower::IrLowerError;
 use crate::render::renderer::{Capability, DialectSupports, DmlRenderer};
+use crate::render::step::BindValue;
 use crate::schema::query::SqlDialect;
 
 /// This module's own vendor identity — the ONE dialect literal it is allowed to
@@ -23,6 +24,7 @@ use crate::schema::query::SqlDialect;
 /// what keeps that from being a hard-coded vendor name inside a vendor module.
 const DIALECT: SqlDialect = SqlDialect::Mysql;
 
+#[derive(Debug)]
 pub(super) struct MysqlDmlRenderer;
 
 pub(super) static RENDERER: MysqlDmlRenderer = MysqlDmlRenderer;
@@ -129,6 +131,15 @@ impl DmlRenderer for MysqlDmlRenderer {
         // MySQL requires expression defaults for BLOB columns. Parentheses
         // keep the same literal valid in defaults and ordinary expressions.
         format!("(X'{}')", hex::encode(bytes))
+    }
+
+    /// mysql2 carries a raw binary bind as text and would corrupt it, so the
+    /// value goes over as canonical base64 and the server decodes it. The apply
+    /// backend enforces the other half of this contract: a raw binary bind that
+    /// reaches the MySQL session without a `FROM_BASE64` wrapper is refused.
+    fn bind_bytes(&self, bytes: &[u8], push: &mut dyn FnMut(BindValue) -> String) -> String {
+        let placeholder = push(BindValue::Text(super::base64_standard(bytes)));
+        format!("FROM_BASE64({placeholder})")
     }
 
     fn render_in_list(

@@ -6,6 +6,7 @@ use crate::model::ir::{IrScalar, Op, TriggerAction};
 use crate::render::dml::{self, DmlError};
 use crate::render::lower::IrLowerError;
 use crate::render::renderer::{Capability, DialectSupports, DmlRenderer};
+use crate::render::step::BindValue;
 use crate::schema::query::SqlDialect;
 
 /// This module's own vendor identity — the ONE dialect literal it is allowed to
@@ -14,6 +15,7 @@ use crate::schema::query::SqlDialect;
 /// needs when it becomes its own crate.
 const DIALECT: SqlDialect = SqlDialect::Postgres;
 
+#[derive(Debug)]
 pub(super) struct PostgresDmlRenderer;
 
 pub(super) static RENDERER: PostgresDmlRenderer = PostgresDmlRenderer;
@@ -70,9 +72,16 @@ impl DmlRenderer for PostgresDmlRenderer {
     }
 
     fn inline_bytes_literal(&self, bytes: &[u8]) -> String {
-        use base64::Engine as _;
-        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let encoded = super::base64_standard(bytes);
         format!("decode({}, 'base64')", dml::sql_string_literal(&encoded))
+    }
+
+    /// PostgreSQL's schema-blind DML seam takes the canonical base64 as a TEXT
+    /// bind and decodes it inside the statement, so the bound spelling is the
+    /// inline one with a placeholder where the literal would be.
+    fn bind_bytes(&self, bytes: &[u8], push: &mut dyn FnMut(BindValue) -> String) -> String {
+        let placeholder = push(BindValue::Text(super::base64_standard(bytes)));
+        format!("decode({placeholder}, 'base64')")
     }
 
     fn render_in_list(

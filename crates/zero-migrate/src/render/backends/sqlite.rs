@@ -5,12 +5,14 @@ use crate::model::ir::{IrScalar, Op, TableRef};
 use crate::render::dml::{self, DmlError};
 use crate::render::lower::IrLowerError;
 use crate::render::renderer::{Capability, DialectSupports, DmlRenderer};
+use crate::render::step::BindValue;
 use crate::schema::query::SqlDialect;
 
 /// This module's own vendor identity — the ONE dialect literal it is allowed to
 /// name. See `backends/mod.rs`.
 const DIALECT: SqlDialect = SqlDialect::Sqlite;
 
+#[derive(Debug)]
 pub(super) struct SqliteDmlRenderer;
 
 pub(super) static RENDERER: SqliteDmlRenderer = SqliteDmlRenderer;
@@ -50,6 +52,12 @@ impl DmlRenderer for SqliteDmlRenderer {
 
     fn inline_bytes_literal(&self, bytes: &[u8]) -> String {
         format!("X'{}'", hex::encode(bytes))
+    }
+
+    /// rusqlite binds a byte vector natively, so SQLite needs NO decoder around
+    /// the placeholder and NO base64 detour — the bytes stay bytes end to end.
+    fn bind_bytes(&self, bytes: &[u8], push: &mut dyn FnMut(BindValue) -> String) -> String {
+        push(BindValue::Bytes(bytes.to_vec()))
     }
 
     fn render_in_list(

@@ -107,7 +107,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::render::renderer::{Capability, DialectSupports};
+use crate::render::renderer::{Capability, DialectSupports, DmlRenderer};
 use crate::schema::query::SqlDialect;
 
 use crate::model::expr::{
@@ -443,10 +443,10 @@ pub(crate) fn pg_canonical_ident(ident: &str) -> String {
 ///   SQLite DDL emission (the same property the createTable lowering relies on).
 fn qualify_table(
     project_schema: &str,
-    dialect: SqlDialect,
+    backend: &dyn DmlRenderer,
     table: &str,
 ) -> Result<String, DmlError> {
-    crate::render::renderer::renderer(dialect).qualify_table(project_schema, table)
+    backend.qualify_table(project_schema, table)
 }
 
 /// Map an [`IrScalar`] to a [`BindValue`] for native parameter binding — the
@@ -518,6 +518,7 @@ pub(crate) fn inline_string_literal(s: &str, dialect: SqlDialect) -> String {
 }
 
 pub(crate) fn inline_literal(s: &IrScalar, dialect: SqlDialect) -> Result<String, DmlError> {
+    let backend = crate::render::backends::renderer(dialect);
     Ok(match s {
         IrScalar::Null => "NULL".to_string(),
         IrScalar::Bool(b) => {
@@ -528,13 +529,9 @@ pub(crate) fn inline_literal(s: &IrScalar, dialect: SqlDialect) -> Result<String
             }
         }
         IrScalar::Int(i) | IrScalar::Int64(i) => i.to_string(),
-        IrScalar::Decimal(d) => {
-            crate::render::renderer::renderer(dialect).inline_decimal_literal(d)
-        }
-        IrScalar::Str(s) => inline_string_literal(s, dialect),
-        IrScalar::Bytes(bytes) => {
-            crate::render::renderer::renderer(dialect).inline_bytes_literal(bytes)
-        }
+        IrScalar::Decimal(d) => backend.inline_decimal_literal(d),
+        IrScalar::Str(s) => backend.inline_string_literal(s),
+        IrScalar::Bytes(bytes) => backend.inline_bytes_literal(bytes),
     })
 }
 
@@ -663,7 +660,7 @@ fn render_in_list(
     expr: &str,
     elems: &[IrScalar],
     negated: bool,
-    dialect: SqlDialect,
+    backend: &dyn DmlRenderer,
 ) -> Result<String, DmlError> {
     if elems.is_empty() {
         return Ok(if negated { "TRUE" } else { "FALSE" }.to_string());
@@ -674,15 +671,15 @@ fn render_in_list(
     } else {
         ","
     };
-    crate::render::renderer::renderer(dialect).render_in_list(expr, elems, negated, joiner)
+    backend.render_in_list(expr, elems, negated, joiner)
 }
 
 fn render_pg_regex_match(
     expr: &str,
     pattern: &str,
-    dialect: SqlDialect,
+    backend: &dyn DmlRenderer,
 ) -> Result<String, DmlError> {
-    crate::render::renderer::renderer(dialect).render_regex_match(expr, pattern)
+    backend.render_regex_match(expr, pattern)
 }
 
 pub(crate) fn extract_field_name(field: ExtractField) -> &'static str {
@@ -699,9 +696,9 @@ pub(crate) fn extract_field_name(field: ExtractField) -> &'static str {
 fn render_extract(
     field: ExtractField,
     expr: &str,
-    dialect: SqlDialect,
+    backend: &dyn DmlRenderer,
 ) -> Result<String, DmlError> {
-    Ok(crate::render::renderer::renderer(dialect).render_extract(field, expr))
+    Ok(backend.render_extract(field, expr))
 }
 
 fn render_pg_extract_field(field: PgExtractField) -> &'static str {
@@ -802,9 +799,9 @@ fn binary_op_sql(op: BinaryOp) -> &'static str {
 /// `Concat` rendered as `a || b` there would silently corrupt to a boolean. MySQL
 /// concatenation is the `CONCAT(a, b)` function. PG and SQLite use the `||`
 /// operator, where it is genuinely concatenation.
-fn render_binop(op: BinaryOp, l: &str, r: &str, dialect: SqlDialect) -> String {
+fn render_binop(op: BinaryOp, l: &str, r: &str, backend: &dyn DmlRenderer) -> String {
     if matches!(op, BinaryOp::Concat) {
-        crate::render::renderer::renderer(dialect).render_concat(l, r)
+        backend.render_concat(l, r)
     } else {
         format!("({} {} {})", l, binary_op_sql(op), r)
     }
@@ -815,8 +812,8 @@ fn render_binop(op: BinaryOp, l: &str, r: &str, dialect: SqlDialect) -> String {
 /// MySQL has NO `IS DISTINCT FROM`, so the engine owns the lowering to
 /// `NOT (<l> <=> <r>)` — `<=>` is MySQL's NULL-safe equality operator, so its
 /// negation is exactly the "distinct from" (NULL-aware inequality) predicate.
-fn render_distinct_from(l: &str, r: &str, dialect: SqlDialect) -> String {
-    crate::render::renderer::renderer(dialect).render_distinct_from(l, r)
+fn render_distinct_from(l: &str, r: &str, backend: &dyn DmlRenderer) -> String {
+    backend.render_distinct_from(l, r)
 }
 
 /// The SQL spelling of an allow-listed named scalar function. These
@@ -851,7 +848,7 @@ fn scalar_fn_sql(f: ScalarFn) -> &'static str {
 /// Render an allow-listed [`ScalarFn`] call from its already-rendered argument
 /// fragments. Most are `<name>(<args>)`; the VENDOR `CurrentUser` is a bare
 /// reserved keyword with NO parens (PG rejects `current_user()`).
-fn render_scalar_fn_call(f: ScalarFn, args: &[String], dialect: SqlDialect) -> String {
+fn render_scalar_fn_call(f: ScalarFn, args: &[String], backend: &dyn DmlRenderer) -> String {
     match f {
         ScalarFn::CurrentUser => "current_user".to_string(),
         // `mod` renders as the `%` OPERATOR — NOT a `mod(...)` call — because
@@ -862,7 +859,7 @@ fn render_scalar_fn_call(f: ScalarFn, args: &[String], dialect: SqlDialect) -> S
         ScalarFn::Mod => format!("({})", args.join(" % ")),
         // Every other spelling is the vendor's to answer. A backend returning
         // `None` takes the shared `<name>(<args>)` table below.
-        _ => crate::render::renderer::renderer(dialect)
+        _ => backend
             .render_scalar_fn_override(f, args)
             .unwrap_or_else(|| format!("{}({})", scalar_fn_sql(f), args.join(", "))),
     }
@@ -919,15 +916,18 @@ fn render_agg(
 
 /// The portable cast-target SQL type per dialect. `bytes` is `BYTEA` on
 /// PG / `BLOB` on SQLite; the rest share spelling.
-fn cast_target_sql(target: crate::model::expr::CastTarget, dialect: SqlDialect) -> &'static str {
-    crate::render::renderer::renderer(dialect).cast_target(target)
+fn cast_target_sql(
+    target: crate::model::expr::CastTarget,
+    backend: &dyn DmlRenderer,
+) -> &'static str {
+    backend.cast_target(target)
 }
 
 /// Render a `c.fn.concatWs(delim, a, b, …)` per dialect: PG `concat_ws`;
 /// SQLite has no `concat_ws`, so it lowers to a NULL-skipping fold over `||` using
 /// the pinned, portable shape. The args are already rendered fragments.
-fn render_concat_ws(rendered: &[String], dialect: SqlDialect) -> String {
-    crate::render::renderer::renderer(dialect).render_concat_ws(rendered)
+fn render_concat_ws(rendered: &[String], backend: &dyn DmlRenderer) -> String {
+    backend.render_concat_ws(rendered)
 }
 
 /// The MAX literal part index `c.fn.splitPart` admits — the O(2ⁿ) inline-unroll
@@ -972,7 +972,7 @@ fn render_split_part(
     col_sql: &str,
     delim_arg: &Expr,
     n_arg: &Expr,
-    dialect: SqlDialect,
+    backend: &dyn DmlRenderer,
 ) -> Result<String, DmlError> {
     // GRAMMAR (both dialects): a string-literal delimiter, a positive integer
     // literal n. These are unrenderable on EITHER backend.
@@ -1012,7 +1012,7 @@ fn render_split_part(
         }
     };
 
-    crate::render::renderer::renderer(dialect).render_split_part(col_sql, delim, n)
+    backend.render_split_part(col_sql, delim, n)
 }
 
 /// Select the [`Expr::Dialectal`] leg to render for `dialect`: the
@@ -1258,6 +1258,19 @@ fn validate_mysql_assignment_semantics(
 /// [`BindValue`] list.
 struct BindCtx {
     dialect: SqlDialect,
+    /// The backend for [`dialect`](Self::dialect), RESOLVED ONCE at construction.
+    ///
+    /// `&'static dyn` because [`crate::render::backends::renderer`] hands back
+    /// borrows of statics: carrying one costs no lifetime parameter on this
+    /// struct and no allocation. Every render step reached from this context asks
+    /// THIS object how the vendor spells something, instead of re-deriving the
+    /// answer from `dialect` at each point of use.
+    ///
+    /// `dialect` survives alongside it because the walk still calls core doors
+    /// that take a `SqlDialect` (`quote_ident_for_dialect`, `inline_literal`,
+    /// …); those doors have callers outside `render::`, so converting them is a
+    /// later step. Anything the BACKEND can answer must go through `backend`.
+    backend: &'static dyn DmlRenderer,
     binds: Vec<BindValue>,
 }
 
@@ -1265,6 +1278,7 @@ impl BindCtx {
     fn new(dialect: SqlDialect) -> Self {
         Self {
             dialect,
+            backend: crate::render::backends::renderer(dialect),
             binds: Vec::new(),
         }
     }
@@ -1272,25 +1286,20 @@ impl BindCtx {
     /// Append a bound scalar and return its dialect placeholder.
     fn push_bind(&mut self, b: BindValue) -> String {
         self.binds.push(b);
-        placeholder(self.dialect, self.binds.len())
+        self.backend.placeholder(self.binds.len())
     }
 
-    /// Bind one typed IR scalar without losing binary values. PostgreSQL's
-    /// schema-blind DML seam and mysql2 both accept the canonical base64 as text;
-    /// the SQL wrapper decodes it inside the statement. SQLite can bind the byte
-    /// vector directly through rusqlite.
+    /// Bind one typed IR scalar without losing binary values.
+    ///
+    /// The binary case is the VENDOR's to answer — which carrier the value
+    /// travels in, and what (if anything) wraps the placeholder — so it goes
+    /// through [`DmlRenderer::bind_bytes`]. This method used to make that choice
+    /// itself, with a three-way `match` on `self.dialect` spelling
+    /// `decode(.., 'base64')` / `FROM_BASE64(..)` / raw bytes in core.
     fn push_scalar(&mut self, value: &IrScalar) -> String {
         if let IrScalar::Bytes(bytes) = value {
-            if !matches!(self.dialect, SqlDialect::Sqlite) {
-                use base64::Engine as _;
-                let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-                let placeholder = self.push_bind(BindValue::Text(encoded));
-                return match self.dialect {
-                    SqlDialect::Postgres => format!("decode({placeholder}, 'base64')"),
-                    SqlDialect::Mysql => format!("FROM_BASE64({placeholder})"),
-                    SqlDialect::Sqlite => unreachable!("handled above"),
-                };
-            }
+            let backend = self.backend;
+            return backend.bind_bytes(bytes, &mut |b| self.push_bind(b));
         }
         self.push_bind(scalar_to_bind(value))
     }
@@ -1317,11 +1326,11 @@ fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError>
         Expr::BinOp { op, lhs, rhs } => {
             let l = render_expr_bound(lhs, ctx)?;
             let r = render_expr_bound(rhs, ctx)?;
-            render_binop(*op, &l, &r, ctx.dialect)
+            render_binop(*op, &l, &r, ctx.backend)
         }
         Expr::UnaryOp { op, operand } => {
             let o = render_expr_bound(operand, ctx)?;
-            render_unary(*op, &o, ctx.dialect)
+            render_unary(*op, &o, ctx.backend)
         }
         Expr::Case { branches, r#else } => {
             let mut s = String::from("CASE");
@@ -1342,14 +1351,14 @@ fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError>
             for a in args {
                 rs.push(render_expr_bound(a, ctx)?);
             }
-            render_scalar_fn_call(*r#fn, &rs, ctx.dialect)
+            render_scalar_fn_call(*r#fn, &rs, ctx.backend)
         }
         Expr::FnSynth { r#fn, args } => render_synth_bound(*r#fn, args, ctx)?,
-        Expr::UuidV4 => crate::render::renderer::renderer(ctx.dialect).uuid_v4(),
-        Expr::UuidV7 => crate::render::renderer::renderer(ctx.dialect).uuid_v7()?,
+        Expr::UuidV4 => ctx.backend.uuid_v4(),
+        Expr::UuidV7 => ctx.backend.uuid_v7()?,
         Expr::Cast { operand, target } => {
             let o = render_expr_bound(operand, ctx)?;
-            format!("CAST({o} AS {})", cast_target_sql(*target, ctx.dialect))
+            format!("CAST({o} AS {})", cast_target_sql(*target, ctx.backend))
         }
         Expr::Between { operand, low, high } => {
             let o = render_expr_bound(operand, ctx)?;
@@ -1365,7 +1374,7 @@ fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError>
         Expr::DistinctFrom { left, right } => {
             let l = render_expr_bound(left, ctx)?;
             let r = render_expr_bound(right, ctx)?;
-            render_distinct_from(&l, &r, ctx.dialect)
+            render_distinct_from(&l, &r, ctx.backend)
         }
         Expr::Agg {
             func,
@@ -1389,11 +1398,11 @@ fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError>
             negated,
         } => {
             let e = render_expr_bound(expr, ctx)?;
-            render_in_list(&e, elems, *negated, ctx.dialect)?
+            render_in_list(&e, elems, *negated, ctx.backend)?
         }
         Expr::PgRegexMatch { expr, pattern } => {
             let e = render_expr_bound(expr, ctx)?;
-            render_pg_regex_match(&e, pattern, ctx.dialect)?
+            render_pg_regex_match(&e, pattern, ctx.backend)?
         }
         Expr::PgColumnSize { expr } => {
             if !ctx.dialect.supports(Capability::PostgresVendorPrimitives) {
@@ -1406,7 +1415,7 @@ fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError>
         }
         Expr::Extract { field, from } => {
             let e = render_expr_bound(from, ctx)?;
-            render_extract(*field, &e, ctx.dialect)?
+            render_extract(*field, &e, ctx.backend)?
         }
         Expr::PgExtract { field, from } => {
             let e = render_expr_bound(from, ctx)?;
@@ -1436,9 +1445,9 @@ fn render_synth_bound(f: SynthFn, args: &[Expr], ctx: &mut BindCtx) -> Result<St
             for a in args {
                 rs.push(render_expr_bound(a, ctx)?);
             }
-            Ok(render_concat_ws(&rs, ctx.dialect))
+            Ok(render_concat_ws(&rs, ctx.backend))
         }
-        SynthFn::Now => Ok(crate::render::renderer::renderer(ctx.dialect).synth_now()),
+        SynthFn::Now => Ok(ctx.backend.synth_now()),
         SynthFn::SplitPart => {
             // splitPart(col, delim, n): the column arg may itself be a ColRef or an
             // in-AST sub-expression — render it (binding any nested Literals), then
@@ -1451,7 +1460,7 @@ fn render_synth_bound(f: SynthFn, args: &[Expr], ctx: &mut BindCtx) -> Result<St
                 )));
             }
             let col_sql = render_expr_bound(&args[0], ctx)?;
-            render_split_part(&col_sql, &args[1], &args[2], ctx.dialect)
+            render_split_part(&col_sql, &args[1], &args[2], ctx.backend)
         }
     }
 }
@@ -1464,15 +1473,15 @@ fn render_value_bound(value: &IrValue, ctx: &mut BindCtx) -> Result<String, DmlE
 }
 
 /// Render a unary op around an already-rendered operand, dialect-aware.
-fn render_unary(op: UnaryOp, operand: &str, dialect: SqlDialect) -> String {
+fn render_unary(op: UnaryOp, operand: &str, backend: &dyn DmlRenderer) -> String {
     match op {
         UnaryOp::Not => format!("(NOT {operand})"),
         UnaryOp::IsNull => format!("({operand} IS NULL)"),
         UnaryOp::IsNotNull => format!("({operand} IS NOT NULL)"),
         // The boolean predicates are the vendor's to spell: SQLite has no native
         // boolean type (values are 0/1) and rejects `IS TRUE` / `IS FALSE` at apply.
-        UnaryOp::IsTrue => crate::render::renderer::renderer(dialect).render_is_true(operand),
-        UnaryOp::IsFalse => crate::render::renderer::renderer(dialect).render_is_false(operand),
+        UnaryOp::IsTrue => backend.render_is_true(operand),
+        UnaryOp::IsFalse => backend.render_is_false(operand),
     }
 }
 
@@ -1497,9 +1506,36 @@ pub(crate) fn render_value_inline(
     }
 }
 
+/// The DOOR into the inline walk: it RESOLVES the backend once and hands it to
+/// the recursive worker.
+///
+/// The door still takes a [`SqlDialect`] because its callers — in
+/// `render::lower`, `render::declarative`, `model::` and `apply::` — hold one,
+/// and the walk itself still needs it for the sibling core doors
+/// (`quote_ident_for_dialect`, `inline_literal`) that have not moved yet. What
+/// the split buys is that the RECURSION carries a resolved backend instead of
+/// re-deriving it from the dialect at each node, which is the same arrangement
+/// [`BindCtx`] gives the bound walk.
 pub(crate) fn render_expr_inline_with_col<F>(
     expr: &Expr,
     dialect: SqlDialect,
+    col_ref: &F,
+) -> Result<String, DmlError>
+where
+    F: Fn(&str) -> Result<String, DmlError>,
+{
+    render_expr_inline_walk(
+        expr,
+        dialect,
+        crate::render::backends::renderer(dialect),
+        col_ref,
+    )
+}
+
+fn render_expr_inline_walk<F>(
+    expr: &Expr,
+    dialect: SqlDialect,
+    backend: &dyn DmlRenderer,
     col_ref: &F,
 ) -> Result<String, DmlError>
 where
@@ -1518,26 +1554,26 @@ where
         },
         Expr::Literal { value } => inline_literal(value, dialect)?,
         Expr::BinOp { op, lhs, rhs } => {
-            let l = render_expr_inline_with_col(lhs, dialect, col_ref)?;
-            let r = render_expr_inline_with_col(rhs, dialect, col_ref)?;
-            render_binop(*op, &l, &r, dialect)
+            let l = render_expr_inline_walk(lhs, dialect, backend, col_ref)?;
+            let r = render_expr_inline_walk(rhs, dialect, backend, col_ref)?;
+            render_binop(*op, &l, &r, backend)
         }
         Expr::UnaryOp { op, operand } => render_unary(
             *op,
-            &render_expr_inline_with_col(operand, dialect, col_ref)?,
-            dialect,
+            &render_expr_inline_walk(operand, dialect, backend, col_ref)?,
+            backend,
         ),
         Expr::Case { branches, r#else } => {
             let mut s = String::from("CASE");
             for b in branches {
-                let c = render_expr_inline_with_col(&b.when, dialect, col_ref)?;
-                let r = render_expr_inline_with_col(&b.then, dialect, col_ref)?;
+                let c = render_expr_inline_walk(&b.when, dialect, backend, col_ref)?;
+                let r = render_expr_inline_walk(&b.then, dialect, backend, col_ref)?;
                 s.push_str(&format!(" WHEN {c} THEN {r}"));
             }
             if let Some(e) = r#else {
                 s.push_str(&format!(
                     " ELSE {}",
-                    render_expr_inline_with_col(e, dialect, col_ref)?
+                    render_expr_inline_walk(e, dialect, backend, col_ref)?
                 ));
             }
             s.push_str(" END");
@@ -1546,9 +1582,9 @@ where
         Expr::FnCall { r#fn, args } => {
             let rs: Result<Vec<_>, _> = args
                 .iter()
-                .map(|a| render_expr_inline_with_col(a, dialect, col_ref))
+                .map(|a| render_expr_inline_walk(a, dialect, backend, col_ref))
                 .collect();
-            render_scalar_fn_call(*r#fn, &rs?, dialect)
+            render_scalar_fn_call(*r#fn, &rs?, backend)
         }
         Expr::FnSynth { r#fn, args } => match r#fn {
             SynthFn::SplitPart => {
@@ -1562,42 +1598,42 @@ where
                         args.len()
                     )));
                 }
-                let col_sql = render_expr_inline_with_col(&args[0], dialect, col_ref)?;
-                render_split_part(&col_sql, &args[1], &args[2], dialect)?
+                let col_sql = render_expr_inline_walk(&args[0], dialect, backend, col_ref)?;
+                render_split_part(&col_sql, &args[1], &args[2], backend)?
             }
             SynthFn::ConcatWs => {
                 let rs: Result<Vec<_>, _> = args
                     .iter()
-                    .map(|a| render_expr_inline_with_col(a, dialect, col_ref))
+                    .map(|a| render_expr_inline_walk(a, dialect, backend, col_ref))
                     .collect();
-                render_concat_ws(&rs?, dialect)
+                render_concat_ws(&rs?, backend)
             }
-            SynthFn::Now => crate::render::renderer::renderer(dialect).synth_now(),
+            SynthFn::Now => backend.synth_now(),
         },
-        Expr::UuidV4 => crate::render::renderer::renderer(dialect).uuid_v4(),
-        Expr::UuidV7 => crate::render::renderer::renderer(dialect).uuid_v7()?,
+        Expr::UuidV4 => backend.uuid_v4(),
+        Expr::UuidV7 => backend.uuid_v7()?,
         Expr::Cast { operand, target } => {
             format!(
                 "CAST({} AS {})",
-                render_expr_inline_with_col(operand, dialect, col_ref)?,
-                cast_target_sql(*target, dialect)
+                render_expr_inline_walk(operand, dialect, backend, col_ref)?,
+                cast_target_sql(*target, backend)
             )
         }
         Expr::Between { operand, low, high } => {
-            let o = render_expr_inline_with_col(operand, dialect, col_ref)?;
-            let lo = render_expr_inline_with_col(low, dialect, col_ref)?;
-            let hi = render_expr_inline_with_col(high, dialect, col_ref)?;
+            let o = render_expr_inline_walk(operand, dialect, backend, col_ref)?;
+            let lo = render_expr_inline_walk(low, dialect, backend, col_ref)?;
+            let hi = render_expr_inline_walk(high, dialect, backend, col_ref)?;
             format!("({o} BETWEEN {lo} AND {hi})")
         }
         Expr::Like { operand, pattern } => {
-            let o = render_expr_inline_with_col(operand, dialect, col_ref)?;
-            let p = render_expr_inline_with_col(pattern, dialect, col_ref)?;
+            let o = render_expr_inline_walk(operand, dialect, backend, col_ref)?;
+            let p = render_expr_inline_walk(pattern, dialect, backend, col_ref)?;
             format!("({o} LIKE {p})")
         }
         Expr::DistinctFrom { left, right } => {
-            let l = render_expr_inline_with_col(left, dialect, col_ref)?;
-            let r = render_expr_inline_with_col(right, dialect, col_ref)?;
-            render_distinct_from(&l, &r, dialect)
+            let l = render_expr_inline_walk(left, dialect, backend, col_ref)?;
+            let r = render_expr_inline_walk(right, dialect, backend, col_ref)?;
+            render_distinct_from(&l, &r, backend)
         }
         Expr::Agg {
             func,
@@ -1606,11 +1642,11 @@ where
             distinct,
         } => {
             let a = match arg {
-                Some(e) => Some(render_expr_inline_with_col(e, dialect, col_ref)?),
+                Some(e) => Some(render_expr_inline_walk(e, dialect, backend, col_ref)?),
                 None => None,
             };
             let d = match delimiter {
-                Some(e) => Some(render_expr_inline_with_col(e, dialect, col_ref)?),
+                Some(e) => Some(render_expr_inline_walk(e, dialect, backend, col_ref)?),
                 None => None,
             };
             render_agg(*func, a.as_deref(), d.as_deref(), *distinct)?
@@ -1620,12 +1656,12 @@ where
             elems,
             negated,
         } => {
-            let e = render_expr_inline_with_col(expr, dialect, col_ref)?;
-            render_in_list(&e, elems, *negated, dialect)?
+            let e = render_expr_inline_walk(expr, dialect, backend, col_ref)?;
+            render_in_list(&e, elems, *negated, backend)?
         }
         Expr::PgRegexMatch { expr, pattern } => {
-            let e = render_expr_inline_with_col(expr, dialect, col_ref)?;
-            render_pg_regex_match(&e, pattern, dialect)?
+            let e = render_expr_inline_walk(expr, dialect, backend, col_ref)?;
+            render_pg_regex_match(&e, pattern, backend)?
         }
         Expr::PgColumnSize { expr } => {
             if !dialect.supports(Capability::PostgresVendorPrimitives) {
@@ -1635,15 +1671,15 @@ where
             }
             format!(
                 "pg_column_size({})",
-                render_expr_inline_with_col(expr, dialect, col_ref)?
+                render_expr_inline_walk(expr, dialect, backend, col_ref)?
             )
         }
         Expr::Extract { field, from } => {
-            let e = render_expr_inline_with_col(from, dialect, col_ref)?;
-            render_extract(*field, &e, dialect)?
+            let e = render_expr_inline_walk(from, dialect, backend, col_ref)?;
+            render_extract(*field, &e, backend)?
         }
         Expr::PgExtract { field, from } => {
-            let e = render_expr_inline_with_col(from, dialect, col_ref)?;
+            let e = render_expr_inline_walk(from, dialect, backend, col_ref)?;
             render_pg_extract(*field, &e, dialect)?
         }
         Expr::PgInterval { duration } => render_pg_interval_literal(duration, dialect)?,
@@ -1654,7 +1690,7 @@ where
             mysql,
         } => {
             let leg = select_dialect_leg(dialect, default, pg, sqlite, mysql)?;
-            render_expr_inline_with_col(leg, dialect, col_ref)?
+            render_expr_inline_walk(leg, dialect, backend, col_ref)?
         }
     })
 }
@@ -1728,14 +1764,14 @@ pub fn assemble_insert(
             reason: "no rows".to_string(),
         });
     }
-    let qtable = qualify_table(project_schema, dialect, table)?;
+    let mut ctx = BindCtx::new(dialect);
+    let qtable = qualify_table(project_schema, ctx.backend, table)?;
     let qcols: Result<Vec<_>, _> = columns
         .iter()
         .map(|c| quote_ident_for_dialect("column", c, dialect))
         .collect();
     let qcols = qcols?;
 
-    let mut ctx = BindCtx::new(dialect);
     let mut value_groups: Vec<String> = Vec::with_capacity(rows.len());
     for (ri, row) in rows.iter().enumerate() {
         if row.len() != columns.len() {
@@ -1934,11 +1970,11 @@ pub fn assemble_update(
             table: table.to_string(),
         });
     }
-    let qtable = qualify_table(project_schema, dialect, table)?;
+    let mut ctx = BindCtx::new(dialect);
+    let qtable = qualify_table(project_schema, ctx.backend, table)?;
     if matches!(dialect, SqlDialect::Mysql) {
         validate_mysql_assignment_semantics("update", table, set)?;
     }
-    let mut ctx = BindCtx::new(dialect);
     // BTreeMap ⇒ deterministic, canonical assignment order.
     let mut assigns = Vec::with_capacity(set.len());
     for (col, rhs) in set {
@@ -1988,8 +2024,8 @@ pub(crate) fn assemble_delete_with_sqlite_identity(
     limit: Option<u64>,
     sqlite_identity_columns: Option<&[String]>,
 ) -> Result<AssembledDml, DmlError> {
-    let qtable = qualify_table(project_schema, dialect, table)?;
     let mut ctx = BindCtx::new(dialect);
+    let qtable = qualify_table(project_schema, ctx.backend, table)?;
     let w = render_expr_bound(r#where, &mut ctx)?;
     let template = match (dialect, limit) {
         (_, None) => format!("DELETE FROM {qtable} WHERE {w}"),
@@ -2119,6 +2155,30 @@ mod tests {
     use crate::model::expr::Expr;
 
     const SCHEMA: &str = "app_proj";
+
+    /// A `BindCtx` RESOLVES its backend once, at construction, and carries the
+    /// registry's own object for its dialect.
+    ///
+    /// The comparison is POINTER IDENTITY against
+    /// [`crate::render::backends::renderer`], not behavioural agreement, because
+    /// behavioural agreement is exactly what a re-lookup would also satisfy. What
+    /// this pins is that `BindCtx::backend` and `BindCtx::dialect` cannot drift:
+    /// a future constructor that resolved the wrong dialect, or a `backend` field
+    /// wired to a hand-built renderer that bypasses the registry, fails here even
+    /// though every emitted byte would still match.
+    #[test]
+    fn bind_ctx_resolves_its_backend_once_from_its_dialect() {
+        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+            let ctx = BindCtx::new(dialect);
+            let carried = std::ptr::from_ref(ctx.backend).cast::<u8>();
+            let registry =
+                std::ptr::from_ref(crate::render::backends::renderer(dialect)).cast::<u8>();
+            assert_eq!(
+                carried, registry,
+                "BindCtx::new({dialect:?}) must carry the registry's backend for that dialect"
+            );
+        }
+    }
 
     // ---- the ONE shared engine identifier seam --------------------------------
 

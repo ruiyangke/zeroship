@@ -182,6 +182,18 @@ pub(in crate::render::backends) fn ansi_double_quote_ident(ident: &str) -> Strin
     format!("\"{}\"", ident.replace('"', "\"\""))
 }
 
+/// Canonical (padded, non-URL-safe) base64 — the wire form the two vendors that
+/// carry binary through TEXT both decode.
+///
+/// Same reasoning as [`ansi_double_quote_ident`]: two of the three shipping
+/// vendors agree on the ENCODING, so the shared spelling lives here, private to
+/// the backends, and each vendor still names its own DECODER. The alphabet is not
+/// a core decision, and core cannot reach it.
+pub(in crate::render::backends) fn base64_standard(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
 /// The ONE exhaustive dispatch match over the shipping backends.
 ///
 /// This is the facade's registry: the only place in the crate that knows WHICH

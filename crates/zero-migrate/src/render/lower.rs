@@ -1601,6 +1601,18 @@ pub struct IrAuthor {
     project_schema: String,
     decl: DeclarativeAuthor,
     dialect: SqlDialect,
+    /// The backend for [`dialect`](Self::dialect), RESOLVED ONCE in
+    /// [`new`](Self::new).
+    ///
+    /// `&'static dyn` because [`crate::render::backends::renderer`] returns
+    /// borrows of statics, so this costs the struct no lifetime parameter and no
+    /// allocation. Lowering methods ask THIS object how the vendor spells a
+    /// thing rather than re-deriving it from `dialect` at each point of use.
+    ///
+    /// `dialect` remains because lowering also asks CAPABILITY and SEMANTIC
+    /// questions of the dialect itself, which are core's to answer and are not
+    /// the backend's business.
+    backend: &'static dyn crate::render::renderer::DmlRenderer,
     /// The exact composed policy whose inject rules shaped resolved create-table
     /// IR. Lowering never consults an ambient system-field profile.
     effective: EffectivePolicy,
@@ -3195,6 +3207,7 @@ impl IrAuthor {
             scope: crate::model::policy::SchemaScope::Single(project_schema.clone()),
             project_schema,
             dialect,
+            backend: crate::render::backends::renderer(dialect),
             effective: effective.clone(),
             default_schema: None,
         }
@@ -6644,7 +6657,7 @@ impl IrAuthor {
         eff_schema: &str,
         parent: &str,
     ) -> Result<String, IrLowerError> {
-        crate::render::renderer::renderer(self.dialect)
+        self.backend
             .qualify_table(eff_schema, parent)
             .map_err(IrLowerError::DmlAssemble)
     }
@@ -6675,9 +6688,8 @@ impl IrAuthor {
                 });
             }
         }
-        let stmts =
-            crate::render::renderer::renderer(self.dialect).render_trigger_op(op, eff_schema)?;
-        let history_down = trigger_inverse_from_history(op, live_schema, eff_schema, self.dialect);
+        let stmts = self.backend.render_trigger_op(op, eff_schema)?;
+        let history_down = trigger_inverse_from_history(op, live_schema, eff_schema, self.backend);
         Ok(stmts
             .into_iter()
             .map(|s| {
@@ -6699,7 +6711,14 @@ impl IrAuthor {
         confinement: &crate::model::policy::SchemaScope,
         live_schema: &LiveSchema,
     ) -> Result<Vec<LoweredUnit>, IrLowerError> {
-        let stmt = render_view_op(op, eff_schema, self.dialect, Some(confinement), live_schema)?;
+        let stmt = render_view_op(
+            op,
+            eff_schema,
+            self.dialect,
+            self.backend,
+            Some(confinement),
+            live_schema,
+        )?;
         Ok(vec![
             decl.lower_vendor_statements(&stmt.name, stmt.up, stmt.down)
         ])
@@ -8871,7 +8890,7 @@ fn trigger_inverse_from_history(
     op: &Op,
     live_schema: &LiveSchema,
     eff_schema: &str,
-    dialect: SqlDialect,
+    backend: &dyn crate::render::renderer::DmlRenderer,
 ) -> Option<String> {
     match op {
         Op::DropTrigger {
@@ -8896,7 +8915,7 @@ fn trigger_inverse_from_history(
                 action: snapshot.action.clone(),
                 when: snapshot.when.clone(),
             };
-            let mut statements = crate::render::renderer::renderer(dialect)
+            let mut statements = backend
                 .render_trigger_op(&create, &key.schema)
                 .ok()?
                 .into_iter();
@@ -9345,6 +9364,7 @@ fn render_view_op(
     op: &Op,
     eff_schema: &str,
     dialect: SqlDialect,
+    backend: &dyn crate::render::renderer::DmlRenderer,
     scope: Option<&crate::model::policy::SchemaScope>,
     live_schema: &LiveSchema,
 ) -> Result<ViewStatement, IrLowerError> {
@@ -9359,18 +9379,17 @@ fn render_view_op(
         } => {
             let materialized = materialized.unwrap_or(false);
             validate_view_materialized(dialect, materialized)?;
-            let renderer = crate::render::renderer::renderer(dialect);
-            let qname = renderer.view_object_name(name, eff_schema)?;
+            let qname = backend.view_object_name(name, eff_schema)?;
             let cols = render_view_columns(columns.as_deref(), dialect)?;
             let query_sql = render_view_query(query, eff_schema, dialect, scope)?;
             let replace = replace.unwrap_or(false);
-            let mut create = renderer.view_create_prefix(materialized, replace)?;
+            let mut create = backend.view_create_prefix(materialized, replace)?;
             create.push_str(&qname);
             create.push_str(&cols);
             create.push_str(" AS ");
             create.push_str(&query_sql);
 
-            let mut up = renderer.view_replace_prelude(&qname, replace);
+            let mut up = backend.view_replace_prelude(&qname, replace);
             up.push(create);
 
             let drop_kw = if materialized {
@@ -9413,8 +9432,7 @@ fn render_view_op(
         } => {
             let materialized = materialized.unwrap_or(false);
             validate_view_materialized(dialect, materialized)?;
-            let renderer = crate::render::renderer::renderer(dialect);
-            let qname = renderer.view_object_name(name, eff_schema)?;
+            let qname = backend.view_object_name(name, eff_schema)?;
             let mut up = if materialized {
                 String::from("DROP MATERIALIZED VIEW ")
             } else {
@@ -9448,11 +9466,10 @@ fn render_view_op(
                     .and_then(|view| view.authored_query.as_ref().map(|query| (view, query)))
                     .map(|(view, query)| {
                         let create_schema = view.authored_schema.as_deref().unwrap_or(eff_schema);
-                        let renderer = crate::render::renderer::renderer(dialect);
-                        let create_name = renderer.view_object_name(name, create_schema)?;
+                        let create_name = backend.view_object_name(name, create_schema)?;
                         let cols = render_view_columns(view.columns.as_deref(), dialect)?;
                         let body = render_view_query(query, create_schema, dialect, scope)?;
-                        let mut create = renderer.view_create_prefix(view.materialized, false)?;
+                        let mut create = backend.view_create_prefix(view.materialized, false)?;
                         create.push_str(&create_name);
                         create.push_str(&cols);
                         create.push_str(" AS ");
@@ -11551,6 +11568,27 @@ mod tests {
     ) -> IrAuthor {
         let effective = crate::test_fixtures::confined_charter();
         IrAuthor::new(project_schema, owner_app, dialect, &effective)
+    }
+
+    /// An `IrAuthor` RESOLVES its backend once, at construction, and carries the
+    /// registry's own object for its dialect.
+    ///
+    /// The sibling of `dml::tests::bind_ctx_resolves_its_backend_once_from_its_dialect`,
+    /// and for the same reason: pointer identity is the only assertion that can
+    /// tell "resolved once from `self.dialect`" apart from "looked up again, or
+    /// hand-built", since both would emit identical SQL.
+    #[test]
+    fn ir_author_resolves_its_backend_once_from_its_dialect() {
+        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+            let author = test_ir_author("app", "app_a", dialect);
+            let carried = std::ptr::from_ref(author.backend).cast::<u8>();
+            let registry =
+                std::ptr::from_ref(crate::render::backends::renderer(dialect)).cast::<u8>();
+            assert_eq!(
+                carried, registry,
+                "IrAuthor::new(.., {dialect:?}, ..) must carry the registry's backend"
+            );
+        }
     }
     use std::collections::BTreeMap;
 
