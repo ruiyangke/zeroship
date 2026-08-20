@@ -161,6 +161,19 @@ the services read them without complaint. Local dev is the odd one out, using
 hardcoded literals. Unify by making the file-provisioned path universal and
 automatic.
 
+AMENDED 2026-08-20. The file list above is a MEASUREMENT of the host on
+2026-08-12 and is left as it was taken, but two of its seven names have since
+changed and the list should not be read as current. `control-signing.pem` was
+control's PAT signing key; 8e365f478 (2026-08-17) deleted the key, its compose
+mount and its entry in `secret_specs()`, and `zeroship dev init` has not
+written it since. Nothing removed the orphan from the production host, so it is
+still on disk there, still 119 bytes, and no service reads it. The set the
+shipped compose now names is those six minus `control-signing.pem`, plus
+`migrate-dsn`. Both halves are derived rather than listed as of 2026-08-20
+(`secret_files()` in `deploy/scripts/deploy-remote.sh`, `_dev_secrets_missing`
+in `tests/lib/dev_secrets.sh`), so the next such change does not need a doc
+edit to stay true.
+
 Generation must be coordinated, because several secrets are SHARED: gateway and
 auth read one `broker-secret` file, and auth's `pairwise-salt` file content must
 equal the `PAIRWISE_SALT` value control and gateway read, since all three derive
