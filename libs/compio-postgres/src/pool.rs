@@ -752,15 +752,20 @@ impl Pool {
         // after that unknown request and before anything the next borrower can
         // send.
         //
-        // Check the in-flight count before reading status. The connection task
-        // stores status and then release-decrements the count; observing zero
-        // with the acquire load therefore makes that status store visible.
+        // Anything but a settled `Idle` gets a ROLLBACK. `None` - a request
+        // whose `ReadyForQuery` the connection task has not consumed yet - is
+        // included deliberately: release cannot wait for it, and guessing
+        // `Idle` is how an aborted transaction reaches the next borrower.
         //
-        // Skip this when the client is already dirty: a ROLLBACK is queued and
-        // a second one would be pure noise on the wire.
+        // This used to read the in-flight count and the status as two separate
+        // arms, in an order the comment had to explain. `transaction_status`
+        // now folds the check into its own return type, so there is no ordering
+        // left to get wrong here.
+        //
+        // Skipped when the client is already dirty: a ROLLBACK is queued and a
+        // second one would be pure noise on the wire.
         if !entry.client.is_dirty()
-            && (entry.client.has_in_flight_requests()
-                || entry.client.transaction_status() != TransactionStatus::Idle)
+            && entry.client.transaction_status() != Some(TransactionStatus::Idle)
         {
             entry.client.__private_api_rollback(None);
         }

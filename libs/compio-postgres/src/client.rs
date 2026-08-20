@@ -228,9 +228,18 @@ impl InnerClient {
         })
     }
 
-    /// The transaction state the server reported in the last `ReadyForQuery`.
-    pub(crate) fn transaction_status(&self) -> TransactionStatus {
-        TransactionStatus::from_byte(self.tx_status.load(Ordering::Relaxed))
+    /// The transaction state the server reported in the last `ReadyForQuery`,
+    /// or `None` while a transaction-capable request has yet to reach its own.
+    ///
+    /// The in-flight check comes FIRST, and its `Acquire` is what publishes the
+    /// task's `Relaxed` status store, so a `Some` is never stale.
+    pub(crate) fn transaction_status(&self) -> Option<TransactionStatus> {
+        if self.has_in_flight_requests() {
+            return None;
+        }
+        Some(TransactionStatus::from_byte(
+            self.tx_status.load(Ordering::Relaxed),
+        ))
     }
 
     /// Whether a transaction-capable request has not reached its terminating
@@ -814,12 +823,22 @@ impl Client {
     }
 
     /// The transaction state the server reported in the last `ReadyForQuery`
-    /// on this connection.
+    /// on this connection, or `None` if that answer is not settled yet.
     ///
-    /// The connection task records this in server wire order, independently
-    /// of whether response streams are polled, retained, or dropped.
+    /// The connection task records the status in server wire order, whether or
+    /// not response streams are polled, retained or dropped. But it records it
+    /// when IT consumes the `ReadyForQuery`, and that is not the moment your
+    /// `await` returns: an `ErrorResponse` and its trailing `ReadyForQuery` can
+    /// arrive in different batches, so a failed statement can hand you its
+    /// `SQLSTATE` before the task has seen the terminator.
+    ///
+    /// `None` IS THE POINT. Returning a stale `Idle` there is the bug this
+    /// signature exists to prevent - a caller checking "am I in a transaction?"
+    /// after an error would be told no, skip its rollback, and hand the next
+    /// user of the connection an aborted transaction. Treat `None` as "ask
+    /// again after the next round trip", not as "idle".
     #[must_use]
-    pub fn transaction_status(&self) -> TransactionStatus {
+    pub fn transaction_status(&self) -> Option<TransactionStatus> {
         self.inner.transaction_status()
     }
 

@@ -440,7 +440,7 @@ async fn simple_query_stream_ends_after_reporting_a_database_error() {
         stream.next().await.is_none(),
         "the stream produced another item after its database error"
     );
-    assert_eq!(client.transaction_status(), TransactionStatus::Idle);
+    assert_eq!(client.transaction_status(), Some(TransactionStatus::Idle));
 }
 
 // ---------------------------------------------------------------------------
@@ -2079,7 +2079,7 @@ async fn released_open_transaction_is_not_inherited_by_the_next_borrower() {
             .unwrap();
         assert_eq!(
             client.transaction_status(),
-            TransactionStatus::InTransaction,
+            Some(TransactionStatus::InTransaction),
             "the session should be inside a transaction before release"
         );
     }
@@ -2087,7 +2087,7 @@ async fn released_open_transaction_is_not_inherited_by_the_next_borrower() {
     let client = pool.get().await.unwrap();
     assert_eq!(
         client.transaction_status(),
-        TransactionStatus::Idle,
+        Some(TransactionStatus::Idle),
         "the next borrower inherited an open transaction"
     );
     // The uncommitted row is visible only from inside the transaction that
@@ -2123,7 +2123,7 @@ async fn released_transaction_aborted_by_a_later_batch_is_not_inherited_by_the_n
         client.simple_query("").await.unwrap();
         assert_eq!(
             client.transaction_status(),
-            TransactionStatus::Failed,
+            Some(TransactionStatus::Failed),
             "the session should be in an aborted transaction before release"
         );
     }
@@ -2131,7 +2131,7 @@ async fn released_transaction_aborted_by_a_later_batch_is_not_inherited_by_the_n
     let client = pool.get().await.unwrap();
     let one: i32 = client.query_one_scalar("SELECT 1", &[]).await.unwrap();
     assert_eq!(one, 1, "the next borrower inherited an aborted transaction");
-    assert_eq!(client.transaction_status(), TransactionStatus::Idle);
+    assert_eq!(client.transaction_status(), Some(TransactionStatus::Idle));
 }
 
 #[compio::test]
@@ -2159,7 +2159,7 @@ async fn released_transaction_aborted_in_one_batch_is_not_inherited_by_the_next_
         ),
     };
     assert_eq!(one, 1);
-    assert_eq!(client.transaction_status(), TransactionStatus::Idle);
+    assert_eq!(client.transaction_status(), Some(TransactionStatus::Idle));
 }
 
 #[compio::test]
@@ -2204,7 +2204,7 @@ async fn older_response_stream_does_not_hide_a_later_failed_transaction() {
         ),
     };
     assert_eq!(one, 1);
-    assert_eq!(client.transaction_status(), TransactionStatus::Idle);
+    assert_eq!(client.transaction_status(), Some(TransactionStatus::Idle));
 }
 
 #[compio::test]
@@ -2228,7 +2228,7 @@ async fn dropped_unpolled_begin_stream_is_not_inherited_by_the_next_borrower() {
     assert_eq!(one, 1);
     assert_eq!(
         client.transaction_status(),
-        TransactionStatus::Idle,
+        Some(TransactionStatus::Idle),
         "the next borrower inherited the unpolled stream's transaction"
     );
 }
@@ -2267,7 +2267,7 @@ async fn errored_batch_in_an_implicit_transaction_rolls_back_session_changes_and
         client.simple_query("").await.unwrap();
         assert_eq!(
             client.transaction_status(),
-            TransactionStatus::Idle,
+            Some(TransactionStatus::Idle),
             "an errored implicit transaction must end idle"
         );
     }
@@ -2334,13 +2334,13 @@ async fn released_session_changes_in_an_aborted_transaction_are_rolled_back() {
         // Preserve immediate error delivery while making the status assertion
         // wait for the failed batch's trailing ReadyForQuery.
         client.simple_query("").await.unwrap();
-        assert_eq!(client.transaction_status(), TransactionStatus::Failed);
+        assert_eq!(client.transaction_status(), Some(TransactionStatus::Failed));
     }
 
     let client = pool.get().await.unwrap();
     let one: i32 = client.query_one_scalar("SELECT 1::int4", &[]).await.unwrap();
     assert_eq!(one, 1);
-    assert_eq!(client.transaction_status(), TransactionStatus::Idle);
+    assert_eq!(client.transaction_status(), Some(TransactionStatus::Idle));
 
     let application_name: String = client
         .query_one_scalar("SELECT current_setting('application_name')", &[])
@@ -2384,7 +2384,7 @@ async fn clean_release_hands_off_same_connection_without_queuing_rollback() {
         .await
         .unwrap();
     assert_eq!(one, 1);
-    assert_eq!(client.transaction_status(), TransactionStatus::Idle);
+    assert_eq!(client.transaction_status(), Some(TransactionStatus::Idle));
     assert!(!client.is_dirty());
 
     let waiter = {
@@ -2452,7 +2452,7 @@ async fn release_rollback_keeps_session_state_the_next_borrower_may_rely_on() {
     }
 
     let client = pool.get().await.unwrap();
-    assert_eq!(client.transaction_status(), TransactionStatus::Idle);
+    assert_eq!(client.transaction_status(), Some(TransactionStatus::Idle));
 
     let held: i64 = client
         .query_one_scalar(
