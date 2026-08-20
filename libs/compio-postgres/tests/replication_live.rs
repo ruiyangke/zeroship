@@ -24,6 +24,161 @@ fn test_url() -> String {
         .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
 }
 
+/// The credentials and database from the test DSN, with no host or port.
+///
+/// The multi-host tests below need to place the live endpoint at a chosen
+/// position in a list, which a DSN's single host cannot express.
+fn credentials_only(url: &str) -> Config {
+    let parsed: Config = url.parse().expect("test DSN did not parse");
+    let mut config = Config::new();
+    if let Some(user) = parsed.get_user() {
+        config.user(user);
+    }
+    if let Some(password) = parsed.get_password() {
+        config.password(password);
+    }
+    if let Some(dbname) = parsed.get_dbname() {
+        config.dbname(dbname);
+    }
+    config
+}
+
+/// The host and port the test DSN names.
+fn live_endpoint(url: &str) -> (String, u16) {
+    let parsed: Config = url.parse().expect("test DSN did not parse");
+    let host = match parsed.get_hosts().first().expect("test DSN names no host") {
+        compio_postgres::config::Host::Tcp(host) => host.clone(),
+        #[cfg(unix)]
+        compio_postgres::config::Host::Unix(path) => {
+            panic!("this test needs a TCP endpoint, got the socket {}", path.display())
+        }
+    };
+    let port = parsed.get_ports().first().copied().unwrap_or(5432);
+    (host, port)
+}
+
+/// A TCP port on loopback with nothing listening on it.
+///
+/// Bound and released rather than picked from thin air: the kernel hands out
+/// a port it knows is free, and it does not hand the same one out again while
+/// this test runs. A port nobody listens on REFUSES, which is what makes the
+/// first attempt below fail fast instead of hanging on a backlog.
+async fn closed_port() -> u16 {
+    let listener = compio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a loopback port");
+    let port = listener.local_addr().expect("listener address").port();
+    drop(listener);
+    port
+}
+
+/// A replication connection must try every host in the configuration.
+///
+/// `connect_replication` took `get_hosts().first()` and stopped there, so a
+/// two-endpoint configuration had no failover at all: if the first host was
+/// down, the call failed while a healthy second host sat unused. The same
+/// `first()` was applied to DNS resolution, which is the more common way to
+/// meet this - a name that resolves to both an AAAA and an A record against a
+/// server bound only to IPv4 fails on the first address every time.
+#[compio::test]
+async fn replication_connect_tries_every_configured_host() {
+    let url = test_url();
+    let (live_host, live_port) = live_endpoint(&url);
+    let dead_port = closed_port().await;
+
+    let mut config = credentials_only(&url);
+    config.host("127.0.0.1");
+    config.port(dead_port);
+    config.host(live_host);
+    config.port(live_port);
+    config.application_name("cpg_replication_failover");
+
+    let mut replication =
+        match compio_postgres::replication::connect_replication(NoTls, &config).await {
+            Ok(connection) => connection,
+            Err(e) if common::server_answered(&e) => panic!(
+                "the server refused a replication connection: {}",
+                common::error_chain(&e)
+            ),
+            Err(e) => panic!(
+                "a live host listed after a dead one was never tried: {}",
+                common::error_chain(&e)
+            ),
+        };
+
+    let identity = replication
+        .identify_system()
+        .await
+        .expect("IDENTIFY_SYSTEM failed on the host that was reached");
+    assert!(
+        identity.xlogpos.contains('/'),
+        "xlogpos {:?} is not an LSN",
+        identity.xlogpos
+    );
+}
+
+/// The control for the host walk: one port covers every host.
+///
+/// libpq broadcasts a single `port` across all hosts and only requires a
+/// one-per-host list when more than one is given. A host walk that demands
+/// `ports.len() == hosts.len()`, or that indexes the port list by host
+/// position without falling back to the first entry, refuses this
+/// configuration - which is a valid one.
+#[compio::test]
+async fn replication_connect_broadcasts_a_single_port_across_hosts() {
+    let url = test_url();
+    let (live_host, live_port) = live_endpoint(&url);
+
+    let mut config = credentials_only(&url);
+    config.host(live_host.clone());
+    config.host(live_host);
+    config.port(live_port);
+    config.application_name("cpg_replication_one_port");
+
+    let mut replication =
+        match compio_postgres::replication::connect_replication(NoTls, &config).await {
+            Ok(connection) => connection,
+            Err(e) if common::server_answered(&e) => panic!(
+                "the server refused a replication connection: {}",
+                common::error_chain(&e)
+            ),
+            Err(e) => panic!(
+                "two hosts sharing one port must connect: {}",
+                common::error_chain(&e)
+            ),
+        };
+
+    replication
+        .identify_system()
+        .await
+        .expect("IDENTIFY_SYSTEM failed");
+}
+
+/// The control for the failure path: when no host answers, the error is the
+/// last endpoint's, not a success and not a hang.
+#[compio::test]
+async fn replication_connect_reports_the_error_when_no_host_answers() {
+    let url = test_url();
+    let first_dead = closed_port().await;
+    let second_dead = closed_port().await;
+
+    let mut config = credentials_only(&url);
+    config.host("127.0.0.1");
+    config.port(first_dead);
+    config.host("127.0.0.1");
+    config.port(second_dead);
+
+    let err = compio_postgres::replication::connect_replication(NoTls, &config)
+        .await
+        .err()
+        .expect("no host was listening, so this cannot succeed");
+    assert!(
+        !common::server_answered(&err),
+        "nothing answered, so this must be a connect failure: {}",
+        common::error_chain(&err)
+    );
+}
+
 /// `IDENTIFY_SYSTEM` must return the server's real identity.
 ///
 /// `postgres-protocol` consumes the `DataRow`'s `u16` field count during

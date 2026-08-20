@@ -62,7 +62,7 @@
 
 use crate::buf_stream::BufStream;
 use crate::codec::FrontendMessage;
-use crate::config::{Config, ReplicationMode};
+use crate::config::{Config, LoadBalanceHosts, ReplicationMode};
 use crate::connect_socket::connect_socket;
 use crate::connect_tls::{Encryption, negotiate_tls};
 use crate::maybe_tls_stream::MaybeTlsStream;
@@ -73,6 +73,7 @@ use crate::config::Host;
 use bytes::{BufMut, BytesMut};
 use compio::io::{AsyncRead, AsyncWrite};
 use fallible_iterator::FallibleIterator;
+use rand::seq::SliceRandom;
 use postgres_protocol::message::backend::{DataRowBody, Message};
 use postgres_protocol::message::frontend;
 use std::collections::HashMap;
@@ -127,67 +128,35 @@ pub async fn connect_replication<T>(
 where
     T: MakeTlsConnect<Socket>,
 {
-    // Mirror connect.rs' host selection but in a flattened form: we
-    // walk the first host (the platform always uses a single endpoint
-    // for replication; multi-host failover would need extra plumbing
-    // because `ReplicationConnection` doesn't currently re-handshake
-    // on failover).
+    // Host selection is `connect.rs`'s, and deliberately so: a `Config` here
+    // is the same `Config` the query path takes, so a list of endpoints has to
+    // mean the same thing on both. This walked `get_hosts().first()` and
+    // stopped, which gave a multi-endpoint configuration no failover at all
+    // and - because the same `first()` was applied to DNS - made a name that
+    // resolves to an AAAA and an A record fail on the first address against a
+    // server bound only to IPv4.
     if config.get_hosts().is_empty() && config.get_hostaddrs().is_empty() {
         return Err(Error::config(
             "replication: host or hostaddr is required".into(),
         ));
     }
 
-    let host = config.get_hosts().first().cloned();
-    let hostaddr = config.get_hostaddrs().first().copied();
-    let port = config.get_ports().first().copied().unwrap_or(5432);
+    if !config.get_hosts().is_empty()
+        && !config.get_hostaddrs().is_empty()
+        && config.get_hosts().len() != config.get_hostaddrs().len()
+    {
+        let msg = format!(
+            "number of hosts ({}) is different from number of hostaddrs ({})",
+            config.get_hosts().len(),
+            config.get_hostaddrs().len(),
+        );
+        return Err(Error::config(msg.into()));
+    }
 
-    let (addr, hostname) = match (host, hostaddr) {
-        (_, Some(ip)) => (
-            Addr::Tcp(ip),
-            config
-                .get_hosts()
-                .first()
-                .and_then(|h| match h {
-                    Host::Tcp(s) => Some(s.clone()),
-                    #[cfg(unix)]
-                    Host::Unix(_) => None,
-                }),
-        ),
-        (Some(Host::Tcp(h)), None) => {
-            // Resolve via compio.
-            use compio::net::ToSocketAddrsAsync;
-            let mut addrs = (&*h, port)
-                .to_socket_addrs_async()
-                .await
-                .map_err(Error::connect)?;
-            let first = addrs
-                .next()
-                .ok_or_else(|| Error::config("replication: DNS yielded no addresses".into()))?;
-            (Addr::Tcp(first.ip()), Some(h))
-        }
-        #[cfg(unix)]
-        (Some(Host::Unix(p)), None) => (Addr::Unix(p), None),
-        (None, None) => unreachable!("guarded above"),
-    };
-
-    let socket = connect_socket(
-        &addr,
-        port,
-        config.get_connect_timeout().copied(),
-        config.get_tcp_user_timeout().copied(),
-        if config.get_keepalives() {
-            Some(&config.keepalive_config)
-        } else {
-            None
-        },
-    )
-    .await?;
-
-    let tls_inst = tls
-        .make_tls_connect(hostname.as_deref().unwrap_or(""))
-        .map_err(|e| Error::tls(e.into()))?;
-    let has_hostname = hostname.is_some();
+    let num_hosts = std::cmp::max(config.get_hosts().len(), config.get_hostaddrs().len());
+    if config.get_ports().len() > 1 && config.get_ports().len() != num_hosts {
+        return Err(Error::config("invalid number of ports".into()));
+    }
 
     // We need a Config with replication=database set. Most callers
     // already set it; tolerate both shapes and force-set as a defensive
@@ -197,10 +166,133 @@ where
         cfg.replication(ReplicationMode::Logical);
     }
 
-    // One attempt, no reconnect: this path opens its own socket rather than
-    // going through `connect::connect`, so it does not inherit the `allow` /
-    // `prefer` fallback that lives there. Those two modes therefore get the
-    // transport they try first and stop. A replication connection is a
+    let mut indices = (0..num_hosts).collect::<Vec<_>>();
+    if cfg.get_load_balance_hosts() == LoadBalanceHosts::Random {
+        indices.shuffle(&mut rand::rng());
+    }
+
+    let mut error = None;
+    for i in indices {
+        let host = config.get_hosts().get(i);
+        let hostaddr = config.get_hostaddrs().get(i).copied();
+        // libpq broadcasts a single port across every host and only demands
+        // one per host when more than one is given.
+        let port = config
+            .get_ports()
+            .get(i)
+            .or_else(|| config.get_ports().first())
+            .copied()
+            .unwrap_or(5432);
+        // `host` is the TLS validation hostname even when `hostaddr` supplies
+        // the address to dial.
+        let hostname = match host {
+            Some(Host::Tcp(host)) => Some(host.clone()),
+            #[cfg(unix)]
+            Some(Host::Unix(_)) => None,
+            None => None,
+        };
+
+        match connect_replication_host(host, hostaddr, hostname, port, &mut tls, &cfg).await {
+            Ok(connection) => return Ok(connection),
+            Err(e) => error = Some(e),
+        }
+    }
+
+    Err(error.expect("num_hosts > 0, so at least one endpoint was attempted"))
+}
+
+/// Every address one configured endpoint denotes, in order, until one
+/// connects.
+async fn connect_replication_host<T>(
+    host: Option<&Host>,
+    hostaddr: Option<std::net::IpAddr>,
+    hostname: Option<String>,
+    port: u16,
+    tls: &mut T,
+    cfg: &Config,
+) -> Result<ReplicationConnection<Socket, T::Stream>, Error>
+where
+    T: MakeTlsConnect<Socket>,
+{
+    // A numeric `hostaddr` is the address; `host` stays the name TLS
+    // validates against. There is nothing to resolve.
+    if let Some(ip) = hostaddr {
+        return connect_replication_addr(Addr::Tcp(ip), hostname.as_deref(), port, tls, cfg).await;
+    }
+
+    match host.expect("one of host / hostaddr is present at this index") {
+        Host::Tcp(host) => {
+            use compio::net::ToSocketAddrsAsync;
+            let mut addrs = (&**host, port)
+                .to_socket_addrs_async()
+                .await
+                .map_err(Error::connect)?
+                .collect::<Vec<_>>();
+
+            if cfg.get_load_balance_hosts() == LoadBalanceHosts::Random {
+                addrs.shuffle(&mut rand::rng());
+            }
+
+            let mut error = None;
+            for addr in addrs {
+                match connect_replication_addr(
+                    Addr::Tcp(addr.ip()),
+                    hostname.as_deref(),
+                    port,
+                    tls,
+                    cfg,
+                )
+                .await
+                {
+                    Ok(connection) => return Ok(connection),
+                    Err(e) => error = Some(e),
+                }
+            }
+
+            Err(error.unwrap_or_else(|| {
+                Error::config("replication: DNS yielded no addresses".into())
+            }))
+        }
+        #[cfg(unix)]
+        Host::Unix(path) => {
+            connect_replication_addr(Addr::Unix(path.clone()), None, port, tls, cfg).await
+        }
+    }
+}
+
+/// One address: a socket, one transport, one startup exchange.
+async fn connect_replication_addr<T>(
+    addr: Addr,
+    hostname: Option<&str>,
+    port: u16,
+    tls: &mut T,
+    cfg: &Config,
+) -> Result<ReplicationConnection<Socket, T::Stream>, Error>
+where
+    T: MakeTlsConnect<Socket>,
+{
+    let socket = connect_socket(
+        &addr,
+        port,
+        cfg.get_connect_timeout().copied(),
+        cfg.get_tcp_user_timeout().copied(),
+        if cfg.get_keepalives() {
+            Some(&cfg.keepalive_config)
+        } else {
+            None
+        },
+    )
+    .await?;
+
+    let tls_inst = tls
+        .make_tls_connect(hostname.unwrap_or(""))
+        .map_err(|e| Error::tls(e.into()))?;
+    let has_hostname = hostname.is_some();
+
+    // One transport per address, no reconnect: this path opens its own socket
+    // rather than going through `connect::connect`, so it does not inherit the
+    // `allow` / `prefer` fallback that lives there. Those two modes therefore
+    // get the transport they try first and stop. A replication connection is a
     // deliberate, operator-configured thing - it is not the surface where
     // "whatever the server happens to accept" is worth the plumbing.
     let stream = negotiate_tls(
@@ -216,11 +308,12 @@ where
     // Run the normal startup + auth handshake — connect_raw_into
     // exposes the post-handshake BufStream that the replication
     // connection then owns.
-    let (stream, parameters) = handshake_replication(stream, &cfg).await?;
+    let (stream, parameters) = handshake_replication(stream, cfg).await?;
 
     Ok(ReplicationConnection {
         stream: BufStream::new(stream),
         parameters,
+        in_flight: InFlight::default(),
     })
 }
 
@@ -257,6 +350,73 @@ where
 pub struct ReplicationConnection<S, T> {
     stream: BufStream<MaybeTlsStream<S, T>>,
     parameters: HashMap<String, String>,
+    /// See [`InFlight`].
+    in_flight: InFlight,
+}
+
+/// Records that an I/O call owns the stream, so that a call which never
+/// returned can be told from one that did.
+///
+/// NONE OF THESE METHODS IS CANCEL-SAFE, and the flag is how that is enforced
+/// rather than merely documented. Dropping the future of an awaited call
+/// leaves the connection out of step with the server in a way no later call
+/// can repair:
+///
+/// * A read hands its buffer to the kernel with the submitted operation.
+///   Cancelling it discards whatever was delivered into that buffer, so the
+///   bytes are off the socket and nowhere - the next read resumes in the
+///   middle of a frame and reads a payload byte as a tag.
+/// * A write is a loop over partial writes ([`BufStream::flush`] takes the
+///   encoded frame out of the write buffer BEFORE it awaits), so a cancelled
+///   one can leave a fraction of a frame on the wire with the rest discarded.
+///   The peer is then parsing our frame's middle as a frame's start.
+///
+/// The flag is set on entry and cleared on return. A future dropped in
+/// between never reaches the clear, so it stays set and every later call on
+/// the same connection fails. This does not recover the connection - nothing
+/// can - it stops the driver from pretending the connection is still in step.
+///
+/// This is reachable from ordinary code, not just from a timeout: a consumer
+/// driving `next()` inside a `futures::select!` drops the losing branch's
+/// future on every iteration.
+#[derive(Debug, Default)]
+struct InFlight {
+    /// A call has claimed the stream and not yet given it back.
+    busy: bool,
+    /// The stream can never be used again, whatever happens next.
+    ///
+    /// Separate from `busy` because the two recover differently: a call that
+    /// returns clears `busy`, and nothing clears this. A framer that has lost
+    /// sync does not know where the next real frame begins, so there is no
+    /// state to recover TO.
+    poisoned: bool,
+}
+
+impl InFlight {
+    /// Claim the stream for one I/O call, or refuse because a previous call
+    /// never gave it back, or because the stream is unusable.
+    fn enter(&mut self) -> Result<(), Error> {
+        if self.busy || self.poisoned {
+            return Err(Error::cancelled());
+        }
+        self.busy = true;
+        Ok(())
+    }
+
+    /// Give the stream back after a call returned under its own power.
+    fn leave(&mut self) {
+        self.busy = false;
+    }
+
+    /// Retire the stream permanently.
+    ///
+    /// For failures that leave the wire in a state no later call can make
+    /// sense of - a frame header the protocol cannot express, so the framer
+    /// has no idea where the next one starts. Returning the same error
+    /// forever would look transient to a caller that retries.
+    fn poison(&mut self) {
+        self.poisoned = true;
+    }
 }
 
 impl<S, T> ReplicationConnection<S, T>
@@ -277,6 +437,13 @@ where
     ///
     /// Returns `{systemid, timeline, xlogpos, dbname}` per the docs.
     pub async fn identify_system(&mut self) -> Result<IdentifySystem, Error> {
+        self.in_flight.enter()?;
+        let result = self.identify_system_inner().await;
+        self.in_flight.leave();
+        result
+    }
+
+    async fn identify_system_inner(&mut self) -> Result<IdentifySystem, Error> {
         send_simple_query(&mut self.stream, "IDENTIFY_SYSTEM").await?;
 
         // IDENTIFY_SYSTEM returns: RowDescription, DataRow,
@@ -328,6 +495,13 @@ where
         mut self,
         opts: StartReplicationOptions<'_>,
     ) -> Result<ReplicationStream<S, T>, Error> {
+        // Taken and never given back: this call consumes the connection, so a
+        // future dropped part-way through takes the stream with it and there
+        // is nothing left to refuse. The claim still has to happen, because a
+        // connection whose `identify_system` was dropped must not go on to
+        // start streaming on a stream that is mid-frame.
+        self.in_flight.enter()?;
+
         let mut cmd = String::with_capacity(128);
         cmd.push_str("START_REPLICATION SLOT \"");
         cmd.push_str(opts.slot_name);
@@ -358,15 +532,12 @@ where
                     return Ok(ReplicationStream {
                         stream: self.stream,
                         lsn: LsnTracker::new(parse_lsn(opts.start_lsn).unwrap_or(0)),
+                        in_flight: InFlight::default(),
                     });
                 }
                 ERROR_RESPONSE_TAG => {
                     let bytes = self.stream.buf().split_to(header.body_len()).freeze();
-                    let mut body = BytesMut::with_capacity(bytes.len() + 5);
-                    body.put_u8(ERROR_RESPONSE_TAG);
-                    body.put_u32(header.length);
-                    body.extend_from_slice(&bytes);
-                    return Err(error_from_error_response_body(body));
+                    return Err(error_from_error_response_frame(&header, &bytes));
                 }
                 NOTICE_RESPONSE_TAG => {
                     // Drop the notice payload silently.
@@ -429,6 +600,9 @@ pub struct ReplicationStream<S, T> {
     stream: BufStream<MaybeTlsStream<S, T>>,
     /// The two StandbyStatusUpdate positions (received vs flushed).
     lsn: LsnTracker,
+    /// See [`InFlight`]. Neither [`ReplicationStream::next`] nor
+    /// [`ReplicationStream::send_standby_status_update`] is cancel-safe.
+    in_flight: InFlight,
 }
 
 /// Tracks the two distinct LSN positions a logical-replication client
@@ -526,9 +700,41 @@ where
     /// Returns `Ok(None)` on a clean `CopyDone` from the server.
     /// Internal `ErrorResponse` / `NoticeResponse` frames inside the
     /// CopyBoth channel surface as `Err` / `Ok` accordingly.
+    ///
+    /// NOT CANCEL-SAFE. Dropping this future before it resolves loses the
+    /// bytes its read had in flight and leaves the stream mid-frame; every
+    /// later call on the stream then fails. See [`InFlight`]. To read with a
+    /// timeout, hold ONE future across the wait rather than starting a new
+    /// one each time round.
     pub async fn next(&mut self) -> Result<Option<ReplicationMessage>, Error> {
+        self.in_flight.enter()?;
+        let result = self.next_inner().await;
+        self.in_flight.leave();
+        result
+    }
+
+    async fn next_inner(&mut self) -> Result<Option<ReplicationMessage>, Error> {
         loop {
-            let header = read_header(&mut self.stream).await?;
+            // A header this call could not read is a lost frame boundary, so
+            // the stream is retired rather than left re-readable.
+            //
+            // POISON HERE, not on every error out of this function. A
+            // server-sent `ErrorResponse` below is a complete, well-framed
+            // message that leaves the wire exactly where it should be, and a
+            // caller may reasonably carry on after one. A header we could not
+            // make sense of is different in kind: the framer does not know
+            // where the next message starts, so there is nothing to
+            // resynchronise to. Without this, `read_header`'s floor check
+            // returns before it consumes the five header bytes, and the next
+            // call re-reads them for the identical error forever - which a
+            // caller that retries cannot tell from something transient.
+            let header = match read_header(&mut self.stream).await {
+                Ok(header) => header,
+                Err(e) => {
+                    self.in_flight.poison();
+                    return Err(e);
+                }
+            };
             match header.tag {
                 COPY_DATA_TAG => {
                     let body = self.stream.buf().split_to(header.body_len()).freeze();
@@ -613,10 +819,15 @@ where
                     return Ok(None);
                 }
                 ERROR_RESPONSE_TAG => {
-                    let _ = self.stream.buf().split_to(header.body_len()).freeze();
-                    return Err(Error::io(std::io::Error::other(
-                        "replication stream: ErrorResponse",
-                    )));
+                    // The walsender's own failures arrive here: the slot
+                    // dropped underneath us, the requested WAL segment
+                    // recycled, the publication gone. A consumer has to tell
+                    // those apart - one is fatal, one means re-create and
+                    // re-snapshot - so the SQLSTATE and the server's message
+                    // travel with the error rather than being dropped for a
+                    // fixed string.
+                    let bytes = self.stream.buf().split_to(header.body_len()).freeze();
+                    return Err(error_from_error_response_frame(&header, &bytes));
                 }
                 NOTICE_RESPONSE_TAG => {
                     let _ = self.stream.buf().split_to(header.body_len()).freeze();
@@ -672,7 +883,21 @@ where
     ///
     /// `reply_requested = true` makes the server reply with an
     /// immediate PrimaryKeepalive — typically left `false`.
+    ///
+    /// NOT CANCEL-SAFE. Dropping this future before it resolves can leave a
+    /// fraction of the frame on the wire, which no later frame can repair;
+    /// every later call on the stream then fails. See [`InFlight`].
     pub async fn send_standby_status_update(
+        &mut self,
+        reply_requested: bool,
+    ) -> Result<(), Error> {
+        self.in_flight.enter()?;
+        let result = self.send_standby_status_update_inner(reply_requested).await;
+        self.in_flight.leave();
+        result
+    }
+
+    async fn send_standby_status_update_inner(
         &mut self,
         reply_requested: bool,
     ) -> Result<(), Error> {
@@ -700,9 +925,26 @@ impl WireHeader {
     /// Number of payload bytes after the header in the read buffer.
     /// `length` counts the length field (4 bytes) so `length - 4` is
     /// the payload size.
+    ///
+    /// The subtraction is total because [`read_header`] refuses to build a
+    /// `WireHeader` whose `length` is below 4, which is the only way it could
+    /// underflow. Do not relax that check without giving this a return type:
+    /// an underflow here is a panic in a debug build and a `usize::MAX`-ish
+    /// size handed to `split_to` in a release one, and both kill the
+    /// replication task on a frame that should merely have ended the stream.
     fn body_len(&self) -> usize {
         self.length as usize - 4
     }
+}
+
+/// The error a frame whose declared length cannot describe a body raises.
+fn impossible_frame_length(length: u32) -> Error {
+    Error::io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!(
+            "replication frame declares length {length}, below the 4 bytes of the length field"
+        ),
+    ))
 }
 
 /// Read one bespoke message header (peel 1-byte tag + 4-byte length
@@ -718,6 +960,13 @@ where
         .peek_u32_be(1)
         .expect("fill(5) guarantees 5 bytes are buffered");
     stream.validate_length(length)?;
+    // `validate_length` is a CEILING - it stops a crafted 4 GB frame from
+    // being buffered. The floor is checked here: the length field counts
+    // itself, so 4 is the smallest value the protocol can express and
+    // anything below it describes a body of negative size.
+    if length < 4 {
+        return Err(impossible_frame_length(length));
+    }
     let total_len = 1 + length as usize;
     stream.fill(total_len).await?;
     let buf = stream.buf();
@@ -796,6 +1045,19 @@ where
     dst.put_i64(timestamp);
     dst.put_u8(if reply_requested { 1 } else { 0 });
     Ok(())
+}
+
+/// Turn an `ErrorResponse` whose header [`read_header`] already peeled back
+/// into an [`Error`] carrying the server's `DbError`.
+///
+/// The framer in `postgres_protocol` wants a whole wire message, so the tag
+/// and length go back on in front of the payload before it runs.
+fn error_from_error_response_frame(header: &WireHeader, payload: &[u8]) -> Error {
+    let mut body = BytesMut::with_capacity(payload.len() + 5);
+    body.put_u8(ERROR_RESPONSE_TAG);
+    body.put_u32(header.length);
+    body.extend_from_slice(payload);
+    error_from_error_response_body(body)
 }
 
 /// Turn a reconstructed `ErrorResponse` wire message (`E` tag + 4-byte
@@ -1884,6 +2146,374 @@ mod tests {
         let bytes = vec![b'I', 0, 0, 0x40, 0, b'N', 0, 1];
         let err = pgoutput::decode(&bytes).unwrap_err();
         assert!(matches!(err, pgoutput::DecodeError::UnexpectedEof));
+    }
+
+    /// A byte source that hands the framer exactly the bytes a test wrote and
+    /// reports EOF once they run out.
+    ///
+    /// Only the READ direction carries meaning here: every assertion below is
+    /// about what the decoder makes of a frame, so writes are accepted and
+    /// discarded. For anything whose subject is what went upstream, or how the
+    /// stream behaves under a cancelled I/O call, the tests use a real socket
+    /// instead - a hand-rolled peer's answer to "how many bytes reached the
+    /// server" is whatever the peer was written to say.
+    struct ScriptedPeer {
+        unread: Vec<u8>,
+    }
+
+    impl compio::io::AsyncRead for ScriptedPeer {
+        async fn read<B: compio::buf::IoBufMut>(
+            &mut self,
+            buf: B,
+        ) -> compio::buf::BufResult<usize, B> {
+            let mut src: &[u8] = &self.unread;
+            let before = src.len();
+            let result = src.read(buf).await;
+            let consumed = before - src.len();
+            self.unread.drain(..consumed);
+            result
+        }
+    }
+
+    impl compio::io::AsyncWrite for ScriptedPeer {
+        async fn write<B: compio::buf::IoBuf>(
+            &mut self,
+            buf: B,
+        ) -> compio::buf::BufResult<usize, B> {
+            compio::buf::BufResult(Ok(compio::buf::IoBuf::buf_len(&buf)), buf)
+        }
+        async fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A `ReplicationStream` reading the given bytes as if the walsender had
+    /// sent them inside the CopyBoth channel.
+    fn stream_over(bytes: Vec<u8>) -> ReplicationStream<ScriptedPeer, ScriptedPeer> {
+        ReplicationStream {
+            stream: BufStream::new(MaybeTlsStream::Raw(ScriptedPeer { unread: bytes })),
+            lsn: LsnTracker::new(0),
+            in_flight: InFlight::default(),
+        }
+    }
+
+    /// A message header whose declared length is below the 4 bytes the length
+    /// field itself occupies must be rejected, not turned into a body size.
+    ///
+    /// The length field counts itself, so 4 is the smallest value the protocol
+    /// can express and `length - 4` is the payload size. Nothing checked the
+    /// floor, so a declared 0..=3 underflowed that subtraction: a panic in a
+    /// debug build, and in a release build a `usize::MAX`-ish size handed
+    /// straight to `split_to`, which panics too. Either way a malformed frame
+    /// took down the replication task instead of ending the stream.
+    #[compio::test]
+    async fn a_frame_length_below_the_length_field_is_an_error() {
+        for declared in 0u32..4 {
+            let mut wire = vec![COPY_DATA_TAG];
+            wire.extend_from_slice(&declared.to_be_bytes());
+            // Trailing bytes so the 5-byte header read itself is satisfied and
+            // the failure is the arithmetic, not a short read.
+            wire.extend_from_slice(&[0u8; 8]);
+
+            let mut stream = stream_over(wire);
+            assert!(
+                stream.next().await.is_err(),
+                "a frame declaring length {declared} must be an error, not a panic"
+            );
+        }
+    }
+
+    /// The smallest length the protocol can express is 4 - an empty body - and
+    /// it must still decode. `CopyDone` is exactly that frame.
+    ///
+    /// This is the control for the floor check above: a fix that rejects
+    /// `length <= 4`, or that demands a non-empty body, turns this red.
+    #[compio::test]
+    async fn a_frame_declaring_an_empty_body_still_decodes() {
+        let mut wire = vec![COPY_DONE_TAG];
+        wire.extend_from_slice(&4u32.to_be_bytes());
+
+        let mut stream = stream_over(wire);
+        assert!(
+            stream
+                .next()
+                .await
+                .expect("CopyDone is a valid empty-bodied frame")
+                .is_none(),
+            "CopyDone ends the stream"
+        );
+    }
+
+    /// A frame the framer cannot resynchronise from must poison the stream,
+    /// not repeat forever.
+    ///
+    /// `read_header` returns the floor error BEFORE consuming the five header
+    /// bytes, and `next` gives the stream back unconditionally, so the same
+    /// bad header is re-read on the next call: identical error, no forward
+    /// progress, no way for a caller to tell it apart from something
+    /// transient. A consumer whose policy is "log and retry" spins on it.
+    ///
+    /// This is the same rule the cancellation guard already applies. A framer
+    /// that has lost sync does not know where the next real frame starts, so
+    /// there is nothing to resynchronise TO - refusing is the only honest
+    /// answer.
+    #[compio::test]
+    async fn a_frame_the_framer_cannot_resynchronise_from_poisons_the_stream() {
+        let mut wire = vec![COPY_DATA_TAG];
+        wire.extend_from_slice(&0u32.to_be_bytes());
+
+        let mut stream = stream_over(wire);
+        let first = stream
+            .next()
+            .await
+            .expect_err("a length below the protocol minimum is not decodable");
+        assert!(
+            !first.is_cancelled(),
+            "the first failure is the framing error itself, not a refusal"
+        );
+
+        let second = stream
+            .next()
+            .await
+            .expect_err("a stream that lost framing must not be reusable");
+        assert!(
+            second.is_cancelled(),
+            "the stream re-read the same bad header instead of refusing: {second}"
+        );
+    }
+
+    /// An `ErrorResponse` arriving mid-stream must reach the caller with the
+    /// server's SQLSTATE and message.
+    ///
+    /// This is how a walsender reports that the slot was dropped underneath
+    /// us, or that the requested WAL segment has been recycled - the two
+    /// failures a consumer has to tell apart, because one is fatal and the
+    /// other means "re-create the slot and re-snapshot". The arm dropped the
+    /// payload on the floor and returned a bare io error reading
+    /// "replication stream: ErrorResponse", so both looked identical.
+    #[compio::test]
+    async fn a_mid_stream_error_response_surfaces_the_sqlstate() {
+        let wire = error_response_message(&[
+            (b'S', "ERROR"),
+            (b'V', "ERROR"),
+            (b'C', "58P01"),
+            (b'M', "requested WAL segment has already been removed"),
+        ]);
+
+        let mut stream = stream_over(wire.to_vec());
+        let err = stream
+            .next()
+            .await
+            .expect_err("an ErrorResponse must end the stream with an error");
+
+        let db = err
+            .as_db_error()
+            .expect("a mid-stream ErrorResponse must surface as a DbError");
+        assert_eq!(db.code().code(), "58P01");
+        assert_eq!(
+            db.message(),
+            "requested WAL segment has already been removed"
+        );
+    }
+
+    /// The control for the arm above: a well-formed `XLogData` frame still
+    /// decodes into its payload, and a `NoticeResponse` is still skipped
+    /// rather than raised.
+    ///
+    /// A fix that routes every non-CopyData tag through the error path, or
+    /// that treats any frame it cannot turn into a `DbError` as a failure,
+    /// turns this red.
+    #[compio::test]
+    async fn a_notice_is_skipped_and_the_next_xlog_frame_decodes() {
+        let notice = {
+            let mut msg = BytesMut::new();
+            msg.put_u8(NOTICE_RESPONSE_TAG);
+            let payload = b"Mterminating walsender\0\0";
+            msg.put_u32(u32::try_from(payload.len() + 4).unwrap());
+            msg.extend_from_slice(payload);
+            msg
+        };
+
+        let mut body = vec![XLOG_DATA_TAG];
+        body.extend_from_slice(&0x100u64.to_be_bytes());
+        body.extend_from_slice(&0x200u64.to_be_bytes());
+        body.extend_from_slice(&700_000_000_000i64.to_be_bytes());
+        body.extend_from_slice(b"pgoutput-payload");
+
+        let mut wire = notice.to_vec();
+        wire.push(COPY_DATA_TAG);
+        wire.extend_from_slice(&u32::try_from(body.len() + 4).unwrap().to_be_bytes());
+        wire.extend_from_slice(&body);
+
+        let mut stream = stream_over(wire);
+        match stream.next().await.expect("a valid XLogData frame decodes") {
+            Some(ReplicationMessage::XLogData {
+                wal_start,
+                wal_end,
+                body,
+                ..
+            }) => {
+                assert_eq!(wal_start, 0x100);
+                assert_eq!(wal_end, 0x200);
+                assert_eq!(&body[..], b"pgoutput-payload");
+            }
+            other => panic!("expected XLogData, got {other:?}"),
+        }
+        assert_eq!(stream.last_received_lsn(), 0x200);
+    }
+
+    /// Open a real, connected TCP socket pair. The returned peer is silent for
+    /// as long as the caller holds it.
+    ///
+    /// A real socket, not a scripted one: what these tests turn on is what
+    /// happens when an in-flight `io_uring` operation is dropped, and a
+    /// hand-rolled stream that returns `Pending` reproduces the scheduling
+    /// shape without reproducing the submitted operation underneath it.
+    async fn silent_peer() -> (
+        ReplicationStream<compio::net::TcpStream, compio::net::TcpStream>,
+        compio::net::TcpStream,
+    ) {
+        let listener = compio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("listener address");
+        let accepting = compio::runtime::spawn(async move {
+            listener.accept().await.expect("accept").0
+        });
+        let client = compio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect to the listener");
+        let server = accepting.await.expect("accept task");
+
+        (
+            ReplicationStream {
+                stream: BufStream::new(MaybeTlsStream::Raw(client)),
+                lsn: LsnTracker::new(0),
+                in_flight: InFlight::default(),
+            },
+            server,
+        )
+    }
+
+    /// A read dropped while its operation is in flight must leave the stream
+    /// refusing every later call.
+    ///
+    /// The bytes are gone: the buffer went to the kernel with the submitted
+    /// read and whatever was delivered into it is discarded when the operation
+    /// is cancelled. Nothing recorded that, so the stream stayed usable and
+    /// the next `next()` resumed mid-frame - the framer would read a payload
+    /// byte as a tag and either raise a nonsense "unexpected tag" or, worse,
+    /// accept it. This is reachable from ordinary code: the WAL consumer in
+    /// `zeroship-plugin-db` drives `next()` inside a `futures::select!`, which
+    /// drops the losing branch's future every iteration.
+    ///
+    /// The fix cannot un-lose the bytes. What it can do - and what this pins -
+    /// is refuse to pretend the stream is still in step.
+    #[compio::test]
+    async fn a_dropped_read_poisons_the_stream() {
+        let (mut stream, _peer) = silent_peer().await;
+
+        {
+            let mut reading = std::pin::pin!(stream.next());
+            assert!(
+                futures_util::poll!(reading.as_mut()).is_pending(),
+                "the peer sent nothing, so the read must still be in flight"
+            );
+        }
+
+        // Bounded, because the failure being pinned is a stream that carries
+        // on waiting: without the timeout an unfixed driver hangs here rather
+        // than reporting.
+        let again = compio::time::timeout(std::time::Duration::from_secs(2), stream.next()).await;
+        let Ok(result) = again else {
+            panic!("the stream went back to waiting for a frame after a dropped read");
+        };
+        let err = result.expect_err("a stream with a dropped read in flight must refuse to read");
+        assert!(
+            err.is_cancelled(),
+            "the refusal must be reported as a cancellation, got: {err}"
+        );
+    }
+
+    /// A feedback write dropped while its operation is in flight must leave
+    /// the stream refusing every later call.
+    ///
+    /// `BufStream::flush` takes the encoded frame OUT of the write buffer
+    /// before it awaits, and `write_all` is a loop over partial writes, so a
+    /// drop can leave a fraction of a `StandbyStatusUpdate` on the wire with
+    /// the rest discarded. The walsender is then reading the middle of our
+    /// frame as the start of the next one. Sending a fresh, well-formed frame
+    /// on top of that - which is what the driver did - cannot recover it.
+    #[compio::test]
+    async fn a_dropped_feedback_write_poisons_the_stream() {
+        let (mut stream, _peer) = silent_peer().await;
+
+        {
+            let mut sending = std::pin::pin!(stream.send_standby_status_update(false));
+            assert!(
+                futures_util::poll!(sending.as_mut()).is_pending(),
+                "the write is submitted, not completed, on its first poll"
+            );
+        }
+
+        let err = stream
+            .send_standby_status_update(false)
+            .await
+            .expect_err("a stream with a dropped write in flight must refuse to send");
+        assert!(
+            err.is_cancelled(),
+            "the refusal must be reported as a cancellation, got: {err}"
+        );
+    }
+
+    /// The control for both poison arms: a stream nobody cancelled keeps
+    /// working across repeated reads and writes.
+    ///
+    /// A guard that arms on entry and never disarms, or one that treats an
+    /// ordinary completed call as a cancellation, turns this red.
+    #[compio::test]
+    async fn an_uncancelled_stream_keeps_reading_and_writing() {
+        let (mut stream, mut peer) = silent_peer().await;
+
+        stream
+            .send_standby_status_update(false)
+            .await
+            .expect("first feedback frame");
+        stream
+            .send_standby_status_update(true)
+            .await
+            .expect("a second feedback frame on the same stream");
+
+        let mut keepalive = vec![COPY_DATA_TAG];
+        let mut body = vec![PRIMARY_KEEPALIVE_TAG];
+        body.extend_from_slice(&0x2A0u64.to_be_bytes());
+        body.extend_from_slice(&700_000_000_000i64.to_be_bytes());
+        body.push(0);
+        keepalive.extend_from_slice(&u32::try_from(body.len() + 4).unwrap().to_be_bytes());
+        keepalive.extend_from_slice(&body);
+        // Two frames, so the read after a completed read is exercised too.
+        let mut wire = keepalive.clone();
+        wire.extend_from_slice(&keepalive);
+        let compio::buf::BufResult(sent, _) =
+            compio::io::AsyncWriteExt::write_all(&mut peer, wire).await;
+        sent.expect("peer wrote two keepalives");
+
+        for _ in 0..2 {
+            match stream.next().await.expect("keepalive decodes") {
+                Some(ReplicationMessage::PrimaryKeepalive { wal_end, .. }) => {
+                    assert_eq!(wal_end, 0x2A0);
+                }
+                other => panic!("expected PrimaryKeepalive, got {other:?}"),
+            }
+        }
+
+        stream
+            .send_standby_status_update(false)
+            .await
+            .expect("feedback still works after reads");
     }
 
     #[test]
