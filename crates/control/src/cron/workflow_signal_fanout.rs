@@ -53,15 +53,22 @@ pub struct FanoutStats {
     /// The GC half is the one that walks every app once and can silently cover
     /// fewer of them.
     pub coverage: SweepCoverage,
+    /// Lapsed subscription rows deleted by the GC half.
+    ///
+    /// Reported so `coverage` has a work count to sit beside. Without one this
+    /// struct said what the GC covered but never what it did, and "swept 3 apps"
+    /// is not a claim anyone can check against the tenant that complained.
+    pub subscriptions_expired: usize,
 }
 
 impl FanoutStats {
     /// Sums the WORK counts only.
     ///
-    /// `coverage` is deliberately not summed: the subscription GC runs ONCE per
-    /// tick, before the broadcast loop this is called from, so adding it per
-    /// drained broadcast would multiply one sweep's account of the fleet by the
-    /// number of broadcasts that happened to be pending.
+    /// `coverage` and `subscriptions_expired` are deliberately not summed: the
+    /// subscription GC runs ONCE per tick, before the broadcast loop this is
+    /// called from, so adding either per drained broadcast would multiply one
+    /// sweep's account of the fleet by the number of broadcasts that happened
+    /// to be pending.
     fn add(&mut self, other: Self) {
         self.broadcasts += other.broadcasts;
         self.deliveries += other.deliveries;
@@ -105,8 +112,12 @@ pub async fn tick_with_config(
 ) -> Result<FanoutStats, RegistryError> {
     let max_broadcasts = config.max_broadcasts_per_tick.max(1);
     let max_deliveries = config.max_deliveries_per_broadcast.max(1);
-    let mut stats = FanoutStats::default();
-    stats.coverage = gc_expired_subscriptions(state).await?;
+    let gc = gc_expired_subscriptions(state).await?;
+    let mut stats = FanoutStats {
+        coverage: gc.coverage,
+        subscriptions_expired: gc.deleted,
+        ..FanoutStats::default()
+    };
     for _ in 0..max_broadcasts {
         let drained = drain_one_broadcast(state, max_deliveries).await?;
         if drained.broadcasts == 0 {
@@ -124,10 +135,18 @@ pub async fn tick_with_config(
 /// outlives its expiry keeps receiving broadcasts, so an app excluded from this
 /// sweep every tick delivers signals to runs that stopped listening. Nothing in
 /// the delete count would ever say so.
-async fn gc_expired_subscriptions(state: &AppState) -> Result<SweepCoverage, RegistryError> {
+struct SubscriptionGc {
+    deleted: usize,
+    coverage: SweepCoverage,
+}
+
+async fn gc_expired_subscriptions(state: &AppState) -> Result<SubscriptionGc, RegistryError> {
     let conn = state.registry.conn().await?;
     let fleet = super::workflow_engine::journalled_fleet(&conn).await?;
-    let mut coverage = SweepCoverage::opened_over(&fleet);
+    let mut gc = SubscriptionGc {
+        deleted: 0,
+        coverage: SweepCoverage::opened_over(&fleet),
+    };
     for app_id in fleet.readable {
         let tables = WorkflowTables::for_app_id(&app_id);
         let sql = format!(
@@ -135,21 +154,21 @@ async fn gc_expired_subscriptions(state: &AppState) -> Result<SweepCoverage, Reg
               WHERE expires_at IS NOT NULL AND expires_at < now()",
             tables.subscriptions
         );
-        if super::workflow_engine::skip_journal_scoped(
+        match super::workflow_engine::skip_journal_scoped(
             &app_id,
             "expired subscription gc",
             conn.execute(&sql, &[]).await,
-        )?
-        .is_some()
-        {
-            coverage.swept_one();
-        } else {
-            coverage.skipped_one();
+        )? {
+            Some(deleted) => {
+                gc.deleted = gc.deleted.saturating_add(usize::try_from(deleted).unwrap_or(0));
+                gc.coverage.swept_one();
+            }
+            None => gc.coverage.skipped_one(),
         }
     }
     // No batch limit: every readable app is visited, so `apps_unvisited` is
     // structurally zero here.
-    Ok(coverage)
+    Ok(gc)
 }
 
 /// Claim and deliver the OLDEST pending broadcast, whichever tenant it belongs
