@@ -388,6 +388,22 @@ cargo test -p zeroship-gateway
 cargo test -p zeroship-runtime --lib
 cargo test -p compio-postgres -- --test-threads=1   # needs DB
 
+# Lint the workspace. NONE of the per-crate runs above invoke clippy, which is
+# why main went red twice in a week without anyone noticing. Run this before you
+# push, not just before you wonder why CI is red.
+#
+# It is not a bare `cargo clippy --workspace`: a deny-level lint in one crate
+# ABORTS the run before the crates downstream of it are ever scheduled, and a
+# crate that was never reached prints exactly what a clean crate prints. The
+# gate audits cargo's own json stream against `cargo metadata` and names any
+# package or target that went unlinted. CI runs this same script.
+#
+# It needs `pnpm build` and setup-wpt.sh to have run (crates/runtime
+# `include_str!`s their output); it refuses, naming them, rather than linting a
+# smaller workspace.
+./tests/clippy_gate.sh
+./tests/clippy_gate.sh --preflight-only   # "can this machine lint at all?" - seconds
+
 # Web Platform Tests (WPT) — fetched on demand by setup-wpt.sh, NOT
 # tracked in git. The script shallow-clones a pinned commit into
 # crates/runtime/tests/wpt/ (gitignored). The `crates/runtime/tests/
