@@ -496,6 +496,36 @@ control `ports` entry, so the loopback fallback is additive and does not use
 docker compose config | grep -A4 'published: "9090"'   # exactly one entry, host_ip 127.0.0.1
 ```
 
+**A blanket `volumes: !override []` silently drops mounts added later.** The
+server override empties the `migrate` service's `volumes` because the tracked
+compose file bind-mounts `../../db/migrations-ts`, which a source-less host must
+not create. `!override` REPLACES the whole list, so it also drops any mount
+added to the tracked file afterwards. That is what broke the 2026-08-19 roll:
+the migrate DSN moved to `--database-url-file
+/etc/zeroship/secrets/migrate-dsn`, the file was provisioned on the host, the
+empty list meant the container never saw it, and the binary exited at argument
+parse. The failure surfaced only as
+`service "migrate" didn't complete successfully: exit 2`.
+
+Enumerate the mounts to KEEP rather than emptying the list:
+
+```yaml
+  migrate:
+    image: ${ZEROSHIP_IMAGE}
+    volumes: !override
+      # NOT [] -- the migrations are baked into the image, but the DSN is not.
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/migrate-dsn:/etc/zeroship/secrets/migrate-dsn:ro
+```
+
+`deploy-remote.sh` now refuses a roll when any service names a
+`/etc/zeroship/secrets/...` path it cannot open inside its own container, so
+this class of drop is caught before the stack is touched. Verify the merge
+rather than the intent:
+
+```bash
+docker compose config | awk '/^  migrate:/,/^  [a-z]/' | grep -A3 volumes
+```
+
 **Editing the Dockerfile after `docker build` starts does nothing.** BuildKit
 reads it once at invocation. A file added mid-build is silently absent from the
 result, and the build still succeeds. Always inspect the built image rather than
