@@ -537,6 +537,15 @@ fn cursor_component_mutated(component: &str) -> ApplyError {
     )
 }
 
+/// Gate an author-supplied bare identifier, then let the MySQL backend spell it.
+///
+/// The MySQL twin of `apply::backend::postgres::backfill_sql::quote_ident`, which
+/// has always forwarded to `render::dml`. This one used to end in a bare
+/// ``format!("`{ident}`")`` — byte-identical (the gate above admits no backtick, so
+/// there is nothing to double) but an unrouted spelling, and one that the
+/// backtick-doubling scan in `render::dml::tests` CANNOT see precisely because it
+/// does no doubling. That is the documented limit of a byte-pattern guard, so this
+/// site is fixed by hand rather than by the ratchet.
 fn quote_bare(what: &'static str, ident: &str) -> Result<String, ApplyError> {
     let valid = ident
         .as_bytes()
@@ -551,7 +560,10 @@ fn quote_bare(what: &'static str, ident: &str) -> Result<String, ApplyError> {
             "mysql backfill: invalid {what} identifier {ident:?}"
         )));
     }
-    Ok(format!("`{ident}`"))
+    Ok(crate::render::dml::escape_quote_ident_for_dialect(
+        ident,
+        crate::schema::query::SqlDialect::Mysql,
+    ))
 }
 
 fn optional_text(value: Option<&str>) -> Bind {

@@ -58,8 +58,30 @@ use crate::render::renderer::{Capability, DialectSupports};
 use crate::schema::query::SqlDialect;
 use crate::IndexSortOrder;
 
+/// The ONE dialect identity of every MySQL-owned render path in this module — the
+/// twin of [`SQLITE_DIALECT`] below, and a const for the same reason: the 21 call
+/// sites of [`mysql_quote_ident`] name no vendor themselves, so when `MysqlEmitter`
+/// and its helpers move into `render::backends::mysql` this const IS that module's
+/// `DIALECT` and the migration is one line.
+const MYSQL_DIALECT: SqlDialect = SqlDialect::Mysql;
+
+/// EMIT an identifier in MySQL's OWN spelling, decided by the MySQL backend.
+///
+/// The twin of [`sqlite_ident`] below, and it got here by the same route with one
+/// difference worth keeping straight. `sqlite_ident`'s predecessor reached NO
+/// renderer at all. This one reached the WRONG WAY DOWN: it forwarded to
+/// `schema::query::mysql_quote_ident`, a `pub` function in CORE that held the
+/// backtick bytes and that `render::backends::mysql` ALSO called to get its own
+/// spelling.
+///
+/// So no vendor was ever unnamed here — this function's name says MySQL, at all 21
+/// sites — and nothing was mis-emitted. What was wrong was the direction of the
+/// dependency, and it only bites at the crate split: `zero-migrate-mysql` cannot
+/// ask `zero-migrate` how to spell an identifier without recreating the cycle the
+/// split exists to break. The bytes now live in the backend, and this is a door to
+/// them like any other.
 fn mysql_quote_ident(ident: &str) -> String {
-    crate::schema::query::mysql_quote_ident(ident)
+    crate::render::dml::escape_quote_ident_for_dialect(ident, MYSQL_DIALECT)
 }
 
 fn mysql_qualified(schema: &str, object: &str) -> String {
