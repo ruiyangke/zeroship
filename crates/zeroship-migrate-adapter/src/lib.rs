@@ -161,6 +161,32 @@ impl CompioPgSession {
         Ok(Self::new(client))
     }
 
+    /// Open a fresh session from an already-parsed [`compio_postgres::Config`],
+    /// spawning + detaching its driver loop exactly as [`CompioPgSession::connect`]
+    /// does.
+    ///
+    /// This exists so a caller can derive one DSN from another by editing a
+    /// PARSED field rather than by string surgery on the URL. The platform
+    /// cluster lock needs the caller's DSN with only `dbname` swapped, and a
+    /// Postgres DSN admits percent-encoded userinfo, `?`-query parameters and
+    /// comma-separated multi-host lists, so rewriting the database name with a
+    /// regex or a `rsplit('/')` would silently corrupt a password containing `/`
+    /// or `?`. Round-tripping through `Config` cannot.
+    ///
+    /// # Errors
+    /// Returns the underlying [`compio_postgres::Error`] if the session cannot be
+    /// established.
+    pub async fn connect_with_config(config: &compio_postgres::Config) -> Result<Self, PgError> {
+        let (client, connection) = config.connect(compio_postgres::NoTls).await?;
+        compio::runtime::spawn(async move {
+            if let Err(e) = connection.run().await {
+                tracing::error!(error = %e, "zeroship-migrate-adapter: pg connection loop ended with error");
+            }
+        })
+        .detach();
+        Ok(Self::new(client))
+    }
+
     /// Borrow the underlying compio client (for out-of-band probes in tests /
     /// callers that need a raw verb outside the seam).
     #[must_use]

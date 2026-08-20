@@ -86,6 +86,9 @@ mod policy_tests {
 use crate::CompioPgSession;
 
 mod author;
+pub mod cluster_lock;
+
+use cluster_lock::{sql_touches_cluster_global, ClusterGlobalLock};
 
 /// The owner-app label stamped on every platform migration (ownership is enforced
 /// UPSTREAM by the IR-load gate; for the platform schema the whole `zeroship`
@@ -105,6 +108,16 @@ pub struct PlatformMigrateConfig {
     pub project_schema: String,
     /// The advisory-lock / journal project id (conventionally `zeroship`).
     pub project_id: String,
+    /// The database on this cluster that concurrent migrate runs coordinate
+    /// through when applying CLUSTER-GLOBAL objects (roles, databases,
+    /// tablespaces). Defaults to [`cluster_lock::DEFAULT_CLUSTER_LOCK_DATABASE`].
+    ///
+    /// It is a separate knob from `database_url` precisely BECAUSE the objects
+    /// at stake are not in `database_url`'s database: a PostgreSQL advisory lock
+    /// is database-scoped, so two runs migrating two different databases can
+    /// only exclude each other somewhere they both connect. See
+    /// [`cluster_lock`].
+    pub cluster_lock_database: String,
 }
 
 /// What a platform migrate run produced.
@@ -930,6 +943,37 @@ pub async fn run_platform_migrations(
                 })
                 .collect();
 
+            // ── the CLUSTER-GLOBAL bracket ──────────────────────────────────
+            //
+            // Scoped to the files that actually write a shared catalog, decided
+            // from the LOWERED SQL rather than from a filename list. Two of the
+            // 29 platform migrations qualify today (the roles/extensions file
+            // and the grants file); a new migration that adds a role is covered
+            // the day it lands, without anyone remembering to extend a list.
+            //
+            // The remaining 27 files apply with no cluster lock at all, so two
+            // concurrent runs still overlap across almost the whole run. That is
+            // the point: the project lock above already serializes same-database
+            // runs, and serializing everything behind one cluster-wide lock
+            // would make every concurrent migrate strictly sequential to buy
+            // nothing the two files below do not already buy.
+            let needs_cluster_lock = lowered.plan.steps.iter().any(|step| match step {
+                PlanStep::Ddl(m) => sql_touches_cluster_global(&m.up),
+                _ => false,
+            });
+            let cluster_lock = if needs_cluster_lock {
+                Some(
+                    ClusterGlobalLock::acquire(
+                        &cfg.database_url,
+                        &cfg.cluster_lock_database,
+                        &file,
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
+
             let outcome = engine
                 .apply_plan_with_touched_and_depends_scoped(
                     &lowered.plan.steps,
@@ -953,7 +997,22 @@ pub async fn run_platform_migrations(
                 .map_err(|e| PlatformMigrateError::Apply {
                     file: file.clone(),
                     message: e.to_string(),
-                })?;
+                });
+
+            // Release BEFORE propagating an apply failure. The lock is
+            // session-scoped so dropping the coordination session would free it
+            // anyway, but the failure path is exactly when a peer is queued
+            // behind us, and an explicit release hands it over now rather than
+            // whenever this process happens to unwind.
+            if let Some(lock) = cluster_lock {
+                let released = lock.release(&file).await;
+                // An apply error is the more informative of the two; a release
+                // error only matters when the apply itself succeeded.
+                if outcome.is_ok() {
+                    released?;
+                }
+            }
+            let outcome = outcome?;
 
             let applied: Vec<String> = outcome
                 .applied
