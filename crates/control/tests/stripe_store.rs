@@ -4,7 +4,7 @@
 //! run `tests/provision_test_backends.sh` to provision one) to run; tests
 //! silently skip otherwise.
 
-mod common;
+use crate::common;
 
 use compio_postgres::{connect, NoTls};
 use uuid::Uuid;

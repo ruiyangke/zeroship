@@ -20,7 +20,7 @@ use zeroship_core::auth_provider::{
     AuthProvider, SupabaseConfig, SupabaseProvider,
 };
 
-mod common;
+use crate::common;
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 const SUPABASE_URL: &str = "https://project.supabase.test";

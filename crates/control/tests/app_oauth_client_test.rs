@@ -15,7 +15,7 @@ use zeroship_control::{
 };
 use zeroship_core::config::OriginScheme;
 
-mod common;
+use crate::common;
 
 fn db_url() -> String {
     zeroship_core::config::test_database_url_opt()

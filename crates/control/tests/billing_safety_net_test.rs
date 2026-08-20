@@ -4,7 +4,7 @@
 //! through the real `ControlLiteStore` into `invoices`/`invoice_lines` and the
 //! real `billing_reconciliation_findings` table.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::sync::Arc;
