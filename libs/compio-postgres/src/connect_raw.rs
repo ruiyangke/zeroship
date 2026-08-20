@@ -37,32 +37,37 @@ use postgres_protocol::message::frontend;
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 
-/// A normal PostgreSQL startup emits no notices, and a new session cannot
-/// ordinarily receive notifications before it has issued `LISTEN`. This leaves
-/// room for the extension and hook warnings a heavily-configured server emits.
+/// How many notices the handshake will retain.
 ///
-/// It is NOT what bounds the memory - see [`MAX_DELAYED_HANDSHAKE_BYTES`].
+/// A normal PostgreSQL startup emits none, and a new session cannot ordinarily
+/// receive a notification before it has issued `LISTEN`. This leaves room for
+/// the extension and hook warnings a heavily-configured server emits.
 const MAX_DELAYED_HANDSHAKE_MESSAGES: usize = 256;
 
-/// The real ceiling on what the handshake will retain.
+/// How many BYTES the handshake will retain, which is the bound that matters.
 ///
-/// A COUNT CAP ALONE BOUNDS NOTHING THAT MATTERS, and this pair exists because
-/// the first version of this guard had only the count. A single frame may be
-/// [`MAX_MESSAGE_SIZE`](crate::buf_stream::MAX_MESSAGE_SIZE) - 64 MiB - so 255
-/// frames is roughly 16 GiB of retained `Bytes`, per connection, multiplied by
-/// the pool's `max_size`. A peer chooses frame SIZE, so a count cap constrains
-/// only a chatty server, which was never the concern; it leaves the case the
-/// comment claimed to cover completely open, and does so while reading as
-/// protection.
+/// The two caps are not redundant, and neither substitutes for the other. A
+/// count alone leaves the peer free to choose frame SIZE: a single frame may be
+/// [`MAX_MESSAGE_SIZE`](crate::buf_stream::MAX_MESSAGE_SIZE), 64 MiB, so 255 of
+/// them is about 16 GiB of retained `Bytes` per connection, times the pool's
+/// `max_size`. A byte budget alone would let a peer hold a slot open with
+/// unlimited tiny frames. Both, or neither is a bound.
 ///
-/// This matters more than it looks because the window is entirely
-/// pre-authentication: on the md5 and SCRAM paths no password has been sent
-/// yet, and under `sslmode=disable` or a `prefer` downgrade the peer's
-/// identity has not been checked at all.
+/// The window is entirely pre-authentication: on the md5 and SCRAM paths no
+/// password has been sent yet, and under `sslmode=disable` or a `prefer`
+/// downgrade the peer's identity has not been checked at all.
 ///
-/// 1 MiB across the whole queue. Real handshake notices are short - a line of
-/// text apiece - so this is orders of magnitude above anything a server sends
-/// and far below anything worth holding.
+/// CHARGE THE FRAME, NOT THE PARSED VIEW. `Message::parse` splits the whole
+/// `tag + length + body` off the read buffer and the message owns all of it,
+/// so nothing computed from the fields can stand in. A `NotificationResponse`
+/// whose channel and payload are followed by 64 MiB of padding parses
+/// successfully and its fields sum to six bytes; an earlier version of this
+/// guard measured exactly that and admitted the full 16 GiB it was written to
+/// prevent. `read_backend` hands the frame length over for this reason.
+///
+/// 1 MiB across the whole queue. Real handshake notices are a line of text
+/// apiece, so this is orders of magnitude above anything a server sends and far
+/// below anything worth holding.
 const MAX_DELAYED_HANDSHAKE_BYTES: usize = 1024 * 1024;
 
 /// Carries the handshake-time state: the wrapped stream, a cursor through
@@ -124,12 +129,12 @@ where
 
             let batch = read_backend(&mut self.stream).await?;
             match batch {
-                BackendMessage::Async(msg) => match msg {
+                BackendMessage::Async { message: msg, frame_len } => match msg {
                     Message::NoticeResponse(_) | Message::NotificationResponse(_) => {
                         // Preserve ordering — the connection task
                         // will replay these in front of its first
                         // real read.
-                        self.delay(msg)?;
+                        self.delay(msg, frame_len)?;
                     }
                     // ParameterStatus must be surfaced to the handshake
                     // caller so `read_info` updates the parameter map
@@ -147,7 +152,7 @@ where
         }
     }
 
-    fn delay(&mut self, msg: Message) -> Result<(), Error> {
+    fn delay(&mut self, msg: Message, frame_len: usize) -> Result<(), Error> {
         if self.delayed.len() >= MAX_DELAYED_HANDSHAKE_MESSAGES {
             return Err(Error::io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -158,11 +163,10 @@ where
             )));
         }
 
-        // The byte budget, which is the one that actually bounds memory. A
-        // frame may be 64 MiB, so the count above would otherwise admit
-        // gigabytes; see `MAX_DELAYED_HANDSHAKE_BYTES`.
-        let size = delayed_message_size(&msg);
-        let retained = self.delayed_bytes.saturating_add(size);
+        // The frame length as it came off the wire. NOT a size derived from the
+        // parsed message - see `MAX_DELAYED_HANDSHAKE_BYTES` for why that
+        // measures a quantity the peer controls independently of what is held.
+        let retained = self.delayed_bytes.saturating_add(frame_len);
         if retained > MAX_DELAYED_HANDSHAKE_BYTES {
             return Err(Error::io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -565,12 +569,14 @@ where
                     body.value().map_err(Error::parse)?.to_string(),
                 );
             }
-            Some(Message::NoticeResponse(body)) => {
-                // Preserve ordering by pushing back into the handshake
-                // delayed queue; the connection task will replay these
-                // on startup.
-                handshake.delay(Message::NoticeResponse(body))?;
-            }
+            // NO `NoticeResponse` ARM HERE, and its absence is deliberate.
+            // `Handshake::next` only yields what `read_backend` did not classify
+            // as async, and `read_backend` never leaves a notice inside a
+            // `Normal` batch: at offset zero it returns `Async`, and further in
+            // it ends the batch before the frame. So a notice cannot reach this
+            // match, and the arm that used to sit here was unreachable - it
+            // queued into `delayed` a second time, which is why the byte budget
+            // has exactly one enforcement point rather than two.
             Some(Message::ReadyForQuery(_)) => return Ok((process_id, secret_key, parameters)),
             Some(Message::ErrorResponse(body)) => return Err(Error::db(body)),
             Some(_) => return Err(Error::unexpected_message()),
@@ -696,6 +702,50 @@ mod tests {
         );
     }
 
+    /// The byte budget must charge what a message RETAINS, not what its
+    /// parsed fields sum to.
+    ///
+    /// `Message::parse` splits the whole frame off the read buffer and the
+    /// message owns all of it, so a notice whose fields are followed by
+    /// padding holds the padding too. The first version of this guard walked
+    /// the parsed fields instead: the frame below measured a handful of bytes
+    /// and retained a megabyte, so a peer could stay under the budget while
+    /// holding whatever it liked. Sixteen of these is past 1 MiB but nowhere
+    /// near the 256-message count cap, so only the byte budget can reject it.
+    #[compio::test]
+    async fn handshake_charges_a_padded_notice_its_whole_frame() {
+        let padded = (0..16).map(|index| {
+            let mut body = Vec::new();
+            body.extend_from_slice(b"SNOTICE\0");
+            body.extend_from_slice(b"VNOTICE\0");
+            body.extend_from_slice(b"C00000\0");
+            body.push(b'M');
+            body.extend_from_slice(format!("padded {index}").as_bytes());
+            body.extend_from_slice(b"\0\0");
+            // Trailing bytes the field walk never reaches and the message
+            // still owns.
+            body.extend_from_slice(&vec![0x41u8; 128 * 1024]);
+            frame(b'N', &body)
+        });
+        let (stream, _) = scripted_server_after_startup(Some(successful_handshake(padded))).await;
+
+        let error = match plaintext_config().connect_raw(stream, NoTls).await {
+            Ok(_) => panic!("the handshake retained 2 MiB of padded notices"),
+            Err(error) => error,
+        };
+        let cause = error
+            .into_source()
+            .expect("the byte-budget error must explain the limit");
+        let io = cause
+            .downcast_ref::<std::io::Error>()
+            .expect("the byte budget is a protocol I/O error");
+        assert_eq!(io.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            io.to_string().contains("bytes"),
+            "the error must name the byte budget, not the message count: {io}"
+        );
+    }
+
     #[compio::test]
     async fn handshake_replays_a_few_delayed_notices() {
         const NOTICE_TEXTS: [&str; 3] = ["first warning", "second warning", "third warning"];
@@ -760,41 +810,3 @@ mod tests {
     }
 }
 
-/// Bytes a delayed handshake message retains.
-///
-/// Only the payload the message owns; the enum discriminant and the `Bytes`
-/// header are fixed overhead and would only obscure the budget. Anything that
-/// is not one of the two delayed kinds counts as zero, because nothing else
-/// reaches `delay`.
-fn delayed_message_size(msg: &Message) -> usize {
-    match msg {
-        // `NoticeResponseBody` keeps its buffer private and exposes only
-        // `fields()`, so the payload is measured by walking them: each field is
-        // a type byte, the value, and a NUL. That is the frame's body to within
-        // the trailing terminator, which is close enough for a budget whose
-        // job is to separate kilobytes from gigabytes.
-        //
-        // A field that fails to parse ends the walk. The bytes already counted
-        // still count, and a malformed notice is about to fail the handshake on
-        // its own account.
-        Message::NoticeResponse(body) => {
-            let mut fields = body.fields();
-            let mut total = 0usize;
-            while let Ok(Some(field)) = fields.next() {
-                total = total.saturating_add(field.value().len()).saturating_add(2);
-            }
-            total
-        }
-        // `channel()` and `message()` are fallible because they validate
-        // UTF-8. A body that fails that check is malformed and about to be
-        // rejected anyway, so it contributes what it parsed.
-        Message::NotificationResponse(body) => body
-            .channel()
-            .map(str::len)
-            .unwrap_or(0)
-            .saturating_add(body.message().map(str::len).unwrap_or(0))
-            .saturating_add(4),
-        // Nothing else reaches `delay`.
-        _ => 0,
-    }
-}

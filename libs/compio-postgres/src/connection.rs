@@ -507,7 +507,9 @@ impl Dispatch<'_> {
     /// Dispatch a single decoded backend frame.
     fn handle_message(&mut self, message: BackendMessage) -> Result<(), Error> {
         match message {
-            BackendMessage::Async(m) => route_async(self.parameters, self.async_sender, m),
+            BackendMessage::Async { message, .. } => {
+                route_async(self.parameters, self.async_sender, message)
+            }
             BackendMessage::Normal {
                 messages,
                 request_complete,
