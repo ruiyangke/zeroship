@@ -791,10 +791,7 @@ mod tests {
 
     #[test]
     fn runtime_descriptor_absent_is_schema_less() {
-        let Ok(runtime) = compio::runtime::Runtime::new() else {
-            eprintln!("skipping (cannot create compio runtime)");
-            return;
-        };
+        let runtime = compio::runtime::Runtime::new().expect("compio runtime");
         runtime.block_on(async {
             let root = tmpdir("descriptor-schema-less");
             let blob_store: Arc<dyn BlobStore> =
@@ -812,10 +809,7 @@ mod tests {
 
     #[test]
     fn runtime_descriptor_blob_fetch_failure_is_load_error() {
-        let Ok(runtime) = compio::runtime::Runtime::new() else {
-            eprintln!("skipping (cannot create compio runtime)");
-            return;
-        };
+        let runtime = compio::runtime::Runtime::new().expect("compio runtime");
         runtime.block_on(async {
             let root = tmpdir("descriptor-missing-blob");
             let blob_store: Arc<dyn BlobStore> =
@@ -872,10 +866,7 @@ mod tests {
     /// HTTP dependence fails loudly instead of silently passing).
     #[test]
     fn reconcile_swaps_isolate_on_env_only_rotation() {
-        let Ok(runtime) = compio::runtime::Runtime::new() else {
-            eprintln!("skipping (cannot create compio runtime)");
-            return;
-        };
+        let runtime = compio::runtime::Runtime::new().expect("compio runtime");
 
         runtime.block_on(async {
             // Internally idempotent (guarded by a Once in the runtime crate),
