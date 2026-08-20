@@ -8575,9 +8575,37 @@ impl IrAuthor {
                         "validated addConstraint(fk) with no local column reached lower",
                     ));
                 }
-                if not_valid == &Some(true) && !matches!(self.dialect, SqlDialect::Postgres) {
+                if not_valid == &Some(true)
+                    && !self
+                        .dialect
+                        .supports(Capability::AlterTableValidateConstraint)
+                {
                     // NOT VALID is PostgreSQL-only (validate refuses it off PG);
                     // defense-in-depth for direct lower callers.
+                    //
+                    // Asked as a CAPABILITY, not as `dialect != Postgres`, because
+                    // `AlterTableValidateConstraint` is documented as exactly this
+                    // question - "`ALTER TABLE ... VALIDATE CONSTRAINT` (the `NOT
+                    // VALID` adoption path)" - and a NOT VALID constraint nobody can
+                    // ever VALIDATE is a permanently unenforced constraint, not a
+                    // spelling difference. That makes it a claim about the DATABASE
+                    // rather than about our renderer, which is the distinction
+                    // `require_capability_for` argues for at length two thousand
+                    // lines up, and therefore a capability question.
+                    //
+                    // `Op::ValidateConstraint` already gates on this exact capability
+                    // (see `require_capability_for` above); NOT VALID is the half
+                    // that creates the work VALIDATE finishes, so the two agreeing is
+                    // the consistent state and the vendor test here was the odd one.
+                    //
+                    // A fourth backend that adopts constraints online passes on its
+                    // own answer instead of inheriting PostgreSQL's by falling into
+                    // the else. Today the capability sits in `POSTGRES_CAPABILITIES`
+                    // and in neither other descriptor, so this is byte-identical to
+                    // the vendor test it replaces on all three shipping dialects.
+                    //
+                    // The message still says "non-Postgres" because it is a pinned
+                    // diagnostic string; only the PREDICATE moved.
                     return Err(IrLowerError::UnsupportedOp(
                         "validated non-Postgres addConstraint(fk) NOT VALID reached lower",
                     ));
