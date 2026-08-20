@@ -555,7 +555,9 @@ jobs:
       # database or filesystem side effect, which is the property under test.
       - name: --check-config on all five server binaries
         run: tests/config_check_e2e.sh
-      - name: Test-target enumeration floor
+      - name: Test-census gate self-test
+        run: bash tests/test_target_census_selftest.sh
+      - name: Test-target and test-name census
         run: |
           # Keep stderr and check it, rather than discarding it. This step counts
           # what got BUILT, so anything that stops the build - a compile error, a
@@ -583,47 +585,40 @@ jobs:
             grep -E '^error' "$RUNNER_TEMP/targets.err" | sort -u | head -20
             exit 1
           fi
-          count=$(grep -o '"executable":"[^"]*"' "$RUNNER_TEMP/targets.json" \
-            | grep -v '"executable":null' \
-            | sort -u | wc -l)
-          # Floor set below the local measurement (261) because the count is
-          # environment-sensitive (feature resolution, optional deps) and the CI
-          # number has never been observed. The step prints the real count: once a
-          # run has shown it, raise this to that number to make the check tight.
+          # THIS USED TO BE A FLOOR ON THE NUMBER OF TEST BINARIES, and it had
+          # become unsatisfiable without anyone noticing. The history is worth
+          # keeping because the failure is instructive and not obvious.
           #
-          # 290 -> 245 when the live-database gate landed. The local measurement
-          # fell 306 -> 261, exactly the 45 targets that now carry
-          # `required-features = ["live-db-tests"]` (44 zeroship-control
-          # integration binaries + zeroship-migrated's apply_api_test). Those are
-          # the targets that panic on connect without a PostgreSQL, which this
-          # job does not provision; they are built and run by the billing-gate
-          # job instead. The floor moves by the measured delta and no further -
-          # it is not slack, and nothing else was allowed to disappear behind it.
-          # 245 -> 250: the local measurement moved 261 -> 266 as test targets were
-          # added, so the floor moves by that same +5 and no further. It is still
-          # NOT tight, and deliberately so - the count is environment-sensitive
-          # (feature resolution, optional deps) and no CI run has ever reported
-          # its own number, which is the only thing that would justify fitting
-          # this to the real value. The step prints the count on every run; the
-          # first CI number that appears is what to set here.
+          # The floor was 250 against a "local measurement" of 265. That 265 was
+          # not a measurement: 266 was measured on 2026-08-07 (1ab7b4c92f) and
+          # 265 was 266 minus one, written on 2026-08-19 (d9d6d5d07) when
+          # compio-postgres's tls_live target gained required-features. Nothing
+          # re-ran the count. Then, both AFTER that comment was written:
           #
-          # The count is one LOWER than it was, deliberately, and the floor does
-          # not move for it. `libs/compio-postgres/tests/tls_live.rs` used to be
-          # built by this job and contribute nothing: the whole file was
-          # `#![cfg(feature = "tls")]`, so without the feature it compiled to an
-          # empty binary that ran zero tests and reported ok. It now declares
-          # `required-features = ["tls", "live-tls-tests"]`, so it is not built
-          # here at all - a target that is visibly absent rather than one that
-          # is present and hollow. It is built and run by the two
-          # compio-postgres steps further down, which is where it can actually
-          # connect to something. Exactly one target, so the recorded local
-          # measurement of 266 becomes 265, still clear of this floor.
-          floor=250
-          echo "test targets built: $count (floor $floor)"
-          if [ "$count" -lt "$floor" ]; then
-            echo "::error::built test targets ($count) fell below the floor ($floor); a suite stopped being built"
-            exit 1
-          fi
+          #   3f7d74ee9  2026-08-19 13:18  crates/auth     53 binaries -> 1
+          #   2ee8bba08  2026-08-20 01:33  crates/runtime  140 -> 9
+          #
+          # -183 against 15 points of slack. Neither change lost a test - the
+          # auth one was proved with a byte-identical 415-name `--list` across
+          # the old binaries and the new target - and neither touched this file.
+          #
+          # So the guard fired on precisely the change everyone wanted, and the
+          # obvious repair - lower the number until it passes - would have turned
+          # it into a rubber stamp, because after that nothing distinguishes "we
+          # consolidated" from "a suite vanished". A count of CONTAINERS cannot
+          # tell those apart. The gate below counts TESTS, which consolidation
+          # cannot move, and asserts per-package that every crate still builds
+          # SOMETHING, which is the part a workspace-wide number never saw.
+          #
+          # Deliberately still an asymmetry, the one this file already argues for
+          # above: adding tests or splitting binaries needs no edit here, losing
+          # coverage needs a reviewed one.
+          #
+          # The number lives in tests/test_target_census_gate.sh and is NOT
+          # restated here. Two copies of a measurement is how the deploy-scripts
+          # comment came to say "64 assertions, floor 63" while the script's own
+          # floor was 107. One copy, next to the code that reads it.
+          bash tests/test_target_census_gate.sh "$RUNNER_TEMP/targets.json"
       # `cargo test --workspace` SKIPS any target whose `required-features` are
       # not enabled, and skips it silently - the target is never built, so it
       # contributes no test count and no failure. plugin-db puts three suites
