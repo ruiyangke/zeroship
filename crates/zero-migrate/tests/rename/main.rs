@@ -10,6 +10,7 @@
 #[path = "../support/mod.rs"]
 mod support;
 
+mod declarative_rename_mysql;
 mod ir_rename_sqlite_basic;
 mod op_after_rename_targets_old_name;
 mod rename_carrier_sweep_pg;

@@ -1042,9 +1042,17 @@ impl MigrationEngine {
 
         // Shape-adapter: declarative plan → the neutral ordered PlanStep
         // list, in the historical execution order (plain DDL spine, then each
-        // SQLite rebuild, then each PG online rename's EXPAND). Empty `rebuilds`
-        // on PG and empty `renames` on SQLite, so each dialect produces exactly
-        // the steps its old code path drove.
+        // SQLite rebuild, then each PG online rename's EXPAND).
+        //
+        // All THREE dialects, because a two-dialect claim here is what let the gap
+        // below go unnoticed: `rebuilds` is non-empty only on SQLite (PG and MySQL
+        // use native ALTER), and `renames` is non-empty only on PostgreSQL — SQLite
+        // routes a rename through its rebuild, and MySQL is refused at PLAN time by
+        // `DeclarativeError::MysqlRenameColumnUnsupported` because the
+        // `PgExpandContract` step this loop builds needs an `OnlineSchemaChange`
+        // capability the MySQL backend does not have. So each dialect produces
+        // exactly the steps its old code path drove, and the `renames` loop below is
+        // reachable on PostgreSQL alone.
         let mut steps: Vec<PlanStep> = Vec::new();
         for p in &plan.plain.items {
             steps.push(PlanStep::Ddl(p.migration.clone()));

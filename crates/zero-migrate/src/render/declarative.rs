@@ -5432,6 +5432,46 @@ pub enum DeclarativeError {
         /// Which facet moved, so the message names the change and not just the site.
         change: &'static str,
     },
+    /// A rename hint asked this differ to rename a MySQL column, which it authors as
+    /// the PostgreSQL expand-contract sequence MySQL cannot drive.
+    ///
+    /// The rename author is dialect-blind: only SQLite `continue`s past it (its
+    /// renames route through the 12-step rebuild), so PostgreSQL AND MySQL both
+    /// pushed an `ExpandContractPlan` into the plan's `renames`. The engine then maps
+    /// every one of them to `RenameStep::PgExpandContract` unconditionally, and the
+    /// MySQL backend exposes no `OnlineSchemaChange` capability to run it - so the
+    /// deploy died mid-apply on an internal "routing bug" message, AFTER the plain
+    /// DDL ahead of it had already committed, leaving a schema that was neither the
+    /// old shape nor the new one and that no retry could complete.
+    ///
+    /// **The engine already declared this unsupported everywhere else**: the
+    /// disposition table records `renameColumn | base | mysql: Unsupported`,
+    /// `docs/dialects.md` prints `No`, and the IR lane's `lower_ir_rename` answers
+    /// `Err(UnsupportedInV1)` at plan time. Only the differ dissented, and it was the
+    /// one path that reached a live server.
+    ///
+    /// Note the DIRECTION, because the previous MySQL disagreement in this codebase
+    /// ran the other way: for `setColumnType` the table said *portable* while the
+    /// engine refused - the table was right and the engine under-delivered. This one
+    /// is the mirror image. The table said *unsupported* and the engine
+    /// OVER-delivered, planning an apply that could not work. Same class of
+    /// table-vs-engine disagreement, opposite sign; check which way the next one
+    /// points before assuming the table is the thing that needs correcting.
+    #[error(
+        "cannot rename column {table}.{from} to {to} on MySQL: the differ authors a \
+         rename as the PostgreSQL expand-contract sequence (add shadow column, \
+         dual-write trigger, backfill, deferred drop) and the MySQL backend has no \
+         online schema-change capability to drive it. Author the rename as an \
+         explicit migration with the SQL you want."
+    )]
+    MysqlRenameColumnUnsupported {
+        /// The table holding the column the diff stopped on.
+        table: String,
+        /// The column the hint renames away from.
+        from: String,
+        /// The column the hint renames to.
+        to: String,
+    },
     /// A declared IDENTITY column's type moved off the three types PostgreSQL lets
     /// an identity column have.
     ///
@@ -6599,6 +6639,26 @@ impl DeclarativeAuthor {
             // defers the contract to a subsequent deploy. The `from`/`to` columns
             // are excluded from the plain drop/add passes below so they are not
             // double-handled.
+            // MySQL reaches the expand-contract author below, whose plan it cannot
+            // execute: the engine lowers every authored rename to
+            // `RenameStep::PgExpandContract`, and the MySQL backend's `online()` is
+            // `None`, so the deploy died mid-apply on an internal routing-bug message
+            // with the plain DDL ahead of it already committed. Refuse before
+            // authoring, naming the columns, for the reason on the error variant.
+            // This mirrors the `MysqlAlterColumnUnsupported` arm below and the IR
+            // lane's `lower_ir_rename`, so an authored rename and a declarative one
+            // refuse alike rather than one lane silently planning an apply that
+            // cannot finish.
+            if self.dialect == SqlDialect::Mysql {
+                if let Some(r) = table_renames.first() {
+                    return Err(DeclarativeError::MysqlRenameColumnUnsupported {
+                        table: table.clone(),
+                        from: r.from.clone(),
+                        to: r.to.clone(),
+                    });
+                }
+            }
+
             let ec = ExpandContractAuthor::new(&self.project_schema, &self.owner_app);
             for r in &table_renames {
                 let plan = ec.author(&OnlineIntent::RenameColumn {
