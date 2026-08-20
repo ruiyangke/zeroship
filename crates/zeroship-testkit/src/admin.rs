@@ -66,7 +66,7 @@ impl Server {
     ///    is not a second source, it is a place for them to drift.
     ///
     /// The database is `postgres` rather than the overlay's, because you cannot
-    /// create a database from inside it; see [`PgAdmin::simple`].
+    /// create a database from inside it; see `PgAdmin::simple`.
     pub fn from_overlay(loaded: &crate::overlay::Loaded) -> Result<Server, String> {
         let port: u16 = loaded.port.parse().map_err(|_| {
             format!(
