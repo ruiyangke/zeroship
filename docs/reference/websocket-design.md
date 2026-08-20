@@ -55,13 +55,20 @@ This is also the mechanism used by the bootstrap subscription fallback in [`crat
 
 [`handshake.rs`](../../crates/runtime/src/web/websocket/handshake.rs) performs the RFC 6455 client handshake directly:
 
-- URL validation mirrors fetch's SSRF checks
 - `Sec-WebSocket-Accept` is recomputed and verified
 - echoed subprotocols must have been offered
 - non-empty `Sec-WebSocket-Extensions` is rejected
 - permessage-deflate is not negotiated
 
 The handshake also returns any bytes pipelined after the `101` response so the frame reader does not lose the first frame.
+
+### Outbound WebSocket is gated by the app's egress rules
+
+An outbound `new WebSocket(url)` is a raw bidirectional byte stream the moment the upgrade completes, so it is subject to the app's egress rule set exactly as `node:net` is, and through the same evaluator ([`transport/egress.rs`](../../crates/runtime/src/transport/egress.rs)). One rule set covers both: a rule accepting `api.example.com:443` admits that destination over either transport, and an app that holds no accept rule opens no WebSocket at all.
+
+The connect task resolves the verdict before the handshake runs and hands `run_handshake` an address that is already authorized; the handshake makes no policy decision of its own. A refusal fires `error` and then `close` with code `1006`; because the `error` event carries no payload by spec, the reason on the close event names which check refused — `ERR_NET_SSRF` for the platform SSRF floor, `ERR_NET_EGRESS_DENIED` for the app's own rules. These are the same codes `node:net` reports, from the same classifier.
+
+`fetch` remains ungated. It is the only outbound path an app can use with no rule at all. Writing egress rules: [`control.md`](control.md).
 
 ### Runtime event flow
 

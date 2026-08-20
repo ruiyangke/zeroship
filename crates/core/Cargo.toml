@@ -33,6 +33,7 @@ zeroship-bundle = { workspace = true }
 # gateway (P3-U3) and control plane (P3-U7) as OIDC RPs.
 jsonwebtoken = { workspace = true }
 parking_lot = "0.12"
+ipnet = { workspace = true }
 cyper = { workspace = true }
 # JWKS refresh bounds its outbound OP fetch with `compio::time::timeout`
 # (zero-tokio). The workspace `compio` carries the `time` feature; the

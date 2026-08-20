@@ -1,16 +1,22 @@
 //! RFC 6455 §4.1 client-side WebSocket handshake.
 //!
 //! Drives the connect spawn from `WebSocketImpl::new` on a compio
-//! task. SSRF discipline mirrors fetch's two-step guard:
+//! task.
 //!
-//!   1. String-level validation: `crate::fetch::validate_url` rejects
-//!      literal private / loopback / link-local IPs in the URL itself.
-//!   2. DNS resolution: `crate::fetch::resolve_and_check_ssrf`
-//!      resolves the hostname and revalidates each candidate against
-//!      the blocklist; the returned `SocketAddr` is what we hand
-//!      `TcpStream::connect`. This closes the "DNS rebinding" hole
-//!      where a public hostname resolves to `127.0.0.1` between the
-//!      URL check and the actual connect.
+//! **This module decides nothing about where a connect may go.** The
+//! destination arrives as an already-authorized `SocketAddr`:
+//! `network::spawn_connect_task` puts it through
+//! `transport::egress::evaluate`, the same single composition `node:net`
+//! goes through, which applies the creator's `NetPolicy` AND the platform
+//! SSRF floor and hands back an address to connect to. A WebSocket is a
+//! raw bidirectional byte stream once the upgrade completes, so gating it
+//! anywhere else - or by a second grammar - is the drift that lets one
+//! transport reach what the other refuses. `fetch` is the only ungated
+//! egress on this platform.
+//!
+//! Connecting to that exact `SocketAddr`, and never re-resolving, is also
+//! what closes the DNS-rebinding hole where a public hostname resolves to
+//! `127.0.0.1` between the check and the connect.
 //!
 //! Header validation:
 //!   - Sec-WebSocket-Accept: COMPUTE the expected digest ourselves and
@@ -208,12 +214,15 @@ impl Default for HandshakeOptions {
 /// misbehaving servers.
 const MAX_RESPONSE_BYTES: usize = 16 * 1024;
 
-/// Run RFC 6455 §4.1 client handshake on `url`.
+/// Run RFC 6455 §4.1 client handshake on `url`, against the already-authorized
+/// `addr`.
+///
+/// `addr` is `transport::egress::evaluate`'s output. This function does not
+/// resolve, does not consult the policy, and does not re-check the floor: doing
+/// any of them here would be a second egress decision, and INVARIANT
+/// ONE-COMPOSITION exists because two of those disagree eventually.
 ///
 /// Steps:
-///   1. String-level SSRF validation rejects literal blocked IPs.
-///   2. DNS-level SSRF validation checks the resolved address and
-///      SocketAddr and we connect to that address directly.
 ///   3. Generate Sec-WebSocket-Key (16 random bytes, base64).
 ///   4. Build the GET request with Upgrade/Connection/Sec-WebSocket-*
 ///      headers; emit Origin only if explicitly set.
@@ -226,17 +235,13 @@ const MAX_RESPONSE_BYTES: usize = 16 * 1024;
 ///      the response (the framer must consume those first).
 pub async fn run_handshake(
     url: url::Url,
+    addr: std::net::SocketAddr,
     opts: HandshakeOptions,
 ) -> Result<Established, HandshakeError> {
-    // String-level SSRF validation.
-    crate::fetch::validate_url(url.as_str()).map_err(HandshakeError::Ssrf)?;
-
-    // DNS revalidation.
     let host = url.host_str().ok_or(HandshakeError::MissingHost)?.to_string();
     let port = url
         .port_or_known_default()
         .unwrap_or_else(|| if url.scheme() == "wss" { 443 } else { 80 });
-    let addr = crate::fetch::resolve_and_check_ssrf(&host, port).map_err(HandshakeError::Ssrf)?;
 
     // Step 3: 16 random bytes → base64.
     let mut key_bytes = [0u8; 16];

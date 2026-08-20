@@ -6,8 +6,9 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use zeroship_runtime::channel::CancelFlag;
-use zeroship_runtime::{
-    EnvSnapshot, FetchOutcome, HostPort, ModuleEntry, NetPolicy, RequestCtx, Runtime, SettledFetch,
+use zeroship_runtime::{EgressRule, Verdict,
+    
+    EnvSnapshot, FetchOutcome, ModuleEntry, NetPolicy, RequestCtx, Runtime, SettledFetch,
 };
 
 const PG_BUNDLE: &str = include_str!("fixtures/pg/pg-8.16.3.bundle.mjs");
@@ -79,8 +80,8 @@ async fn run_pg_js(module_src: String, max_wait: Duration) -> JsResult {
     let runtime = Runtime::builder()
         .modules(modules)
         .net_policy(
-            NetPolicy::allowlist(
-                vec![HostPort::new(PG_HOST, PG_PORT)],
+            NetPolicy::rules(
+                vec![accept_target(PG_HOST, PG_PORT)],
                 32,
                 8 * 1024 * 1024,
             )
@@ -368,4 +369,20 @@ export default {{
         Some(&serde_json::Value::String("hello-push".to_string())),
         "LISTEN/NOTIFY payload mismatch: {body}"
     );
+}
+
+/// Build an ACCEPT rule for a `node:net` test target.
+///
+/// These tests target literal addresses, and an IP literal is NOT a
+/// representable `Name` - it must be written as a range, so a reader of a rule
+/// always knows which check decides it. `is_blocked_ip` would refuse loopback
+/// outright; these tests run with `ZEROSHIP_DEV=1`, which bypasses the floor
+/// and nothing else.
+fn accept_target(host: &str, port: u16) -> EgressRule {
+    let destination = match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => format!("{v4}/32"),
+        Ok(std::net::IpAddr::V6(v6)) => format!("{v6}/128"),
+        Err(_) => host.to_string(),
+    };
+    EgressRule::parse(Verdict::Accept, &destination, port).expect("valid test egress rule")
 }
