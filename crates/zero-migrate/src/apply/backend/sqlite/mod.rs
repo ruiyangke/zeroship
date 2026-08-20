@@ -69,7 +69,7 @@ use crate::apply::journal::{AppliedEntry, JournalError};
 use crate::conn::ExecutorConfig;
 use crate::model::migration::Migration;
 use crate::model::snapshot::SchemaSnapshot;
-use crate::render::plan::SqliteRebuildSpec;
+use crate::render::plan::TableRebuildSpec;
 use crate::schema::query::SqlDialect;
 
 pub use actor::{MigrationActor, SqliteActorError};
@@ -254,7 +254,7 @@ impl SqliteBackend {
     /// `foreign_keys` back ON), or a poisoned connection.
     pub async fn rebuild_one(
         &self,
-        spec: &SqliteRebuildSpec,
+        spec: &TableRebuildSpec,
         m: &Migration,
         applied_by: &str,
     ) -> Result<(), RebuildError> {
@@ -874,14 +874,14 @@ impl MigrationBackend for SqliteBackend {
 
     async fn rebuild_one(
         &self,
-        spec: &SqliteRebuildSpec,
+        spec: &TableRebuildSpec,
         m: &Migration,
         scope: &crate::approval::ApprovalScope,
         applied_by: &str,
     ) -> Result<(), ApplyError> {
         // **Per-version scope (executor-layer defense in depth).** A rebuild on a
         // populated table is destructive (drop + recreate + copy; `m.flags.destructive`
-        // is true for a `SqliteRebuild` by construction), so under
+        // is true for a `TableRebuild` by construction), so under
         // `ApprovalScope::Versions` it runs ONLY if the operator individually reviewed
         // THIS rebuild's version — mirroring the engine's per-version gate and keyed on
         // the same rule as `PlanStep::approval_scope_version`. So a direct seam caller

@@ -73,7 +73,7 @@ use crate::apply::journal::{self, AppliedEntry, JournalError};
 use crate::conn::ExecutorConfig;
 use crate::model::migration::{Checksum, Migration, MigrationId};
 use crate::model::snapshot::SchemaSnapshot;
-use crate::render::plan::{DatabaseRequirements, SqliteRebuildSpec};
+use crate::render::plan::{DatabaseRequirements, TableRebuildSpec};
 use crate::render::step::{
     AlterColumnTypeStep, AlterPrimaryKeyStep, BindValue, SynchronizeIdentityStep,
 };
@@ -728,13 +728,13 @@ pub trait MigrationBackend {
     /// the existing-table changes SQLite has no native `ALTER` for, and `plan.renames`
     /// is empty on SQLite so this is reached only with a SQLite-produced spec. The
     /// Postgres impl rejects it ([`ApplyError::Backend`]): PG never produces a
-    /// `SqliteRebuild` (its differ uses native `ALTER` / expand-contract), so a rebuild
+    /// `TableRebuild` (its differ uses native `ALTER` / expand-contract), so a rebuild
     /// reaching the PG backend is a routing bug, surfaced as a clear error rather than
     /// a silent pass.
     ///
     /// **Per-version approval scope (executor-layer defense in depth).** A
     /// rebuild on a populated table is destructive (drop + recreate + copy), so when
-    /// `m.flags.destructive` (always true for a `SqliteRebuild` by construction,
+    /// `m.flags.destructive` (always true for a `TableRebuild` by construction,
     /// [`crate::render::declarative`]) the `scope` must admit `m.version` — mirroring
     /// [`PlanStep::approval_scope_version`](crate::render::step::PlanStep::approval_scope_version)'s
     /// rule. The engine's `apply_plan` gate runs first; this is the independent
@@ -750,7 +750,7 @@ pub trait MigrationBackend {
     /// intact), or — on the PG backend — the unreachable-routing reject.
     async fn rebuild_one(
         &self,
-        spec: &SqliteRebuildSpec,
+        spec: &TableRebuildSpec,
         m: &Migration,
         scope: &crate::approval::ApprovalScope,
         applied_by: &str,

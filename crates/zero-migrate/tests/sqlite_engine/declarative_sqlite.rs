@@ -627,7 +627,7 @@ async fn second_deploy_drop_index_actually_drops_on_sqlite() {
 
 /// (c) P3b — a rebuild-needing existing-table op (ALTER COLUMN TYPE) now GENERATES
 /// a 12-step table rebuild on `SQLite` (it no longer fails closed). The plan carries
-/// ONE `SqliteRebuild` naming the op; it is NOT dangling `ALTER COLUMN … TYPE` PG
+/// ONE `TableRebuild` naming the op; it is NOT dangling `ALTER COLUMN … TYPE` PG
 /// DDL (a non-existent statement on `SQLite`) and NOT a silent pass.
 #[compio::test]
 async fn second_deploy_type_change_generates_rebuild_on_sqlite() {

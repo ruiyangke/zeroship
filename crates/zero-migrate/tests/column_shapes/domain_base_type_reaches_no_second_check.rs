@@ -237,7 +237,7 @@ fn a_sqlite_rebuild_keeps_the_domain_storage_and_one_check() {
     let steps = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite, &effective)
         .lower_steps(&rename, &live)
         .expect("the rename lowers to a rebuild");
-    let [PlanStep::OnlineRename(RenameStep::SqliteRebuild(rebuild))] = steps.as_slice() else {
+    let [PlanStep::OnlineRename(RenameStep::TableRebuild(rebuild))] = steps.as_slice() else {
         panic!("a SQLite renameColumn lowers to one rebuild step: {steps:#?}");
     };
     let create = &rebuild.spec.new_table_create;

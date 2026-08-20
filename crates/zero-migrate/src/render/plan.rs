@@ -8,7 +8,7 @@
 //! runs in order. The step *types* reuse the engine's existing phase artifacts
 //! ([`Migration`], [`BackfillSpec`](crate::model::backfill::BackfillSpec),
 //! [`ExpandContractPlan`](crate::render::expand_contract::ExpandContractPlan), and the
-//! existing [`declarative::SqliteRebuild`](crate::render::declarative::SqliteRebuild)) —
+//! existing [`declarative::TableRebuild`](crate::render::declarative::TableRebuild)) —
 //! this introduces **no** new rebuild struct and **no** change to [`Migration`].
 //!
 //! # Naming — a deliberate collision avoidance
@@ -128,7 +128,7 @@ pub enum SqliteSequencePolicy {
 
 /// The fully-resolved specification for ONE table rebuild.
 #[derive(Debug, Clone)]
-pub struct SqliteRebuildSpec {
+pub struct TableRebuildSpec {
     /// The existing table being rebuilt (the final name; the new table is renamed
     /// INTO this).
     pub table: String,
@@ -157,7 +157,7 @@ pub struct SqliteRebuildSpec {
     pub reason: String,
 }
 
-impl SqliteRebuildSpec {
+impl TableRebuildSpec {
     /// The engine-chosen temp-table name for `table`.
     #[must_use]
     pub fn tmp_name(table: &str) -> String {

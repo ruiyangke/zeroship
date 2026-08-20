@@ -2,7 +2,7 @@
 //! **`SQLite`** leg, and the dialect-router unit facts.
 //!
 //! The `SQLite` leg lowers ONE `op.renameColumn` to ONE
-//! `PlanStep::OnlineRename(RenameStep::SqliteRebuild(_))` (the 12-step OFFLINE
+//! `PlanStep::OnlineRename(RenameStep::TableRebuild(_))` (the 12-step OFFLINE
 //! table rebuild), executed via `MigrationBackend::rebuild_one` — NOT `run_online`
 //! (`SQLite` has no online schema-change capability). These tests drive the REAL
 //! lowering (`IrAuthor::lower_steps`) and APPLY through the engine's single shared
@@ -10,7 +10,7 @@
 //!
 //! - a seeded row SURVIVES the rename, the OLD column is gone, the journal records
 //!   the rebuild migration (proving the `rebuild_one` path, NOT `run_online`);
-//! - the lowered step is a `SqliteRebuild`, never a `PgExpandContract` (the leg
+//! - the lowered step is a `TableRebuild`, never an `ExpandContract` (the leg
 //!   dispatch, asserted structurally before apply);
 //! - a neutral `ColType` renders the correct `SQLite` affinity in the rebuilt CREATE;
 //! - a `SQLite` rename whose live table structure is ABSENT fails closed
@@ -220,10 +220,10 @@ async fn first_deploy(be: &SqliteBackend, descriptors: &[CollectionDescriptor]) 
 }
 
 // The SQLite leg: ONE `op.renameColumn` lowers to ONE
-// `RenameStep::SqliteRebuild` and applies via `rebuild_one` THROUGH the single
+// `RenameStep::TableRebuild` and applies via `rebuild_one` THROUGH the single
 // shared `apply_plan`. The seeded row survives, the old column is gone, the
-// journal records the rebuild — and the lowered step is a SqliteRebuild, NOT a
-// PgExpandContract (so NO run_online path is taken).
+// journal records the rebuild — and the lowered step is a TableRebuild, NOT a
+// ExpandContract (so NO run_online path is taken).
 #[compio::test]
 async fn renamecolumn_lowers_and_applies_as_sqlite_rebuild_through_apply_plan() {
     let p = paths("sqlite_rebuild");
@@ -276,10 +276,10 @@ async fn renamecolumn_lowers_and_applies_as_sqlite_rebuild_through_apply_plan() 
     // RenameStep is the SQLite REBUILD — NOT a PG expand-contract.
     assert_eq!(steps.len(), 1, "one renameColumn → one plan step");
     let rebuild_version = match &steps[0] {
-        PlanStep::OnlineRename(RenameStep::SqliteRebuild(rb)) => {
+        PlanStep::OnlineRename(RenameStep::TableRebuild(rb)) => {
             rb.migration.version.as_str().to_string()
         }
-        PlanStep::OnlineRename(RenameStep::PgExpandContract(_)) => {
+        PlanStep::OnlineRename(RenameStep::ExpandContract(_)) => {
             panic!("SQLite must lower to a rebuild, NOT a PG expand-contract")
         }
         other => panic!("expected an OnlineRename step, got {other:?}"),
@@ -479,7 +479,7 @@ async fn renamecolumn_sqlite_renders_neutral_type_as_affinity_not_pg_string() {
     let steps = author.lower_steps(&ir, &live).expect("rename lowers");
 
     let rebuild = match &steps[0] {
-        PlanStep::OnlineRename(RenameStep::SqliteRebuild(rb)) => rb,
+        PlanStep::OnlineRename(RenameStep::TableRebuild(rb)) => rb,
         other => panic!("expected a SQLite rebuild, got {other:?}"),
     };
     // The rebuilt CREATE renders the renamed `total` column with INTEGER affinity
@@ -760,7 +760,7 @@ fn renamecolumn_sqlite_retains_fk_to_another_known_live_table() {
         )
         .expect("the known external FK target permits the scoped rename diff");
     let create = match &steps[..] {
-        [PlanStep::OnlineRename(RenameStep::SqliteRebuild(rebuild))] => {
+        [PlanStep::OnlineRename(RenameStep::TableRebuild(rebuild))] => {
             &rebuild.spec.new_table_create
         }
         other => panic!("expected one SQLite rebuild, got {other:?}"),

@@ -211,7 +211,7 @@ async fn dropping_a_foreign_key_on_sqlite_still_clears_the_authoring_gate() {
     // The whole point: validate + lower, not lower alone.
     let steps = load_and_lower(&drop_constraint_ir(&fk_name), &live);
     assert_eq!(steps.len(), 1, "one constraint drop is one atomic rebuild");
-    let PlanStep::OnlineRename(RenameStep::SqliteRebuild(rebuild)) = &steps[0] else {
+    let PlanStep::OnlineRename(RenameStep::TableRebuild(rebuild)) = &steps[0] else {
         panic!("dropConstraint on SQLite must lower to a 12-step rebuild, got {steps:?}");
     };
     assert_eq!(rebuild.spec.table, "posts");
@@ -283,7 +283,7 @@ async fn adding_a_foreign_key_on_sqlite_still_clears_the_authoring_gate() {
     assert!(
         matches!(
             &steps[0],
-            PlanStep::OnlineRename(RenameStep::SqliteRebuild(_))
+            PlanStep::OnlineRename(RenameStep::TableRebuild(_))
         ),
         "addConstraint(fk) on SQLite must lower to a 12-step rebuild, got {steps:?}"
     );

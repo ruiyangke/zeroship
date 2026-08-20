@@ -788,9 +788,8 @@ pub fn validate_historical_apply_evidence(
 ) -> Result<(), String> {
     let mut saw_historical_rename = false;
     for step in &artifact.plan.steps {
-        let zero_migrate::PlanStep::OnlineRename(zero_migrate::RenameStep::PgExpandContract(
-            rename,
-        )) = step
+        let zero_migrate::PlanStep::OnlineRename(zero_migrate::RenameStep::ExpandContract(rename)) =
+            step
         else {
             continue;
         };
@@ -1308,14 +1307,14 @@ fn step_has_journal_phase(
         zero_migrate::PlanStep::SynchronizeIdentity(step) => {
             has_version(step.migration.version.as_str())
         }
-        zero_migrate::PlanStep::OnlineRename(zero_migrate::RenameStep::PgExpandContract(
-            rename,
-        )) => rename
-            .expand
-            .iter()
-            .chain(&rename.contract)
-            .any(|migration| has_version(migration.version.as_str())),
-        zero_migrate::PlanStep::OnlineRename(zero_migrate::RenameStep::SqliteRebuild(rename)) => {
+        zero_migrate::PlanStep::OnlineRename(zero_migrate::RenameStep::ExpandContract(rename)) => {
+            rename
+                .expand
+                .iter()
+                .chain(&rename.contract)
+                .any(|migration| has_version(migration.version.as_str()))
+        }
+        zero_migrate::PlanStep::OnlineRename(zero_migrate::RenameStep::TableRebuild(rename)) => {
             has_version(rename.migration.version.as_str())
         }
     }
@@ -2458,7 +2457,7 @@ scope = "all"
                 .steps
                 .iter()
                 .find_map(|step| match step {
-                    PlanStep::OnlineRename(zero_migrate::RenameStep::PgExpandContract(rename)) => {
+                    PlanStep::OnlineRename(zero_migrate::RenameStep::ExpandContract(rename)) => {
                         Some(rename)
                     }
                     _ => None,
@@ -2505,7 +2504,7 @@ scope = "all"
                 .steps
                 .iter()
                 .find_map(|step| match step {
-                    PlanStep::OnlineRename(zero_migrate::RenameStep::PgExpandContract(rename)) => {
+                    PlanStep::OnlineRename(zero_migrate::RenameStep::ExpandContract(rename)) => {
                         Some(rename)
                     }
                     _ => None,
@@ -2641,7 +2640,7 @@ scope = "all"
             .steps
             .iter()
             .find_map(|step| match step {
-                PlanStep::OnlineRename(zero_migrate::RenameStep::PgExpandContract(rename)) => {
+                PlanStep::OnlineRename(zero_migrate::RenameStep::ExpandContract(rename)) => {
                     Some(rename)
                 }
                 _ => None,
@@ -2666,7 +2665,7 @@ scope = "all"
             .steps
             .iter()
             .find_map(|step| match step {
-                PlanStep::OnlineRename(zero_migrate::RenameStep::PgExpandContract(rename)) => {
+                PlanStep::OnlineRename(zero_migrate::RenameStep::ExpandContract(rename)) => {
                     Some(rename)
                 }
                 _ => None,
@@ -2888,7 +2887,7 @@ scope = "all"
             .steps
             .iter()
             .find_map(|step| match step {
-                PlanStep::OnlineRename(zero_migrate::RenameStep::PgExpandContract(rename)) => {
+                PlanStep::OnlineRename(zero_migrate::RenameStep::ExpandContract(rename)) => {
                     Some(rename)
                 }
                 _ => None,

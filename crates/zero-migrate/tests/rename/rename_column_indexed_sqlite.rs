@@ -6,7 +6,7 @@
 //! VERBATIM after the swap. The only replay-skip is for columns the rebuild DROPS, and
 //! a rename's `from` is deliberately NOT a drop (a rename CARRIES the column). So on the
 //! FOLD-seeded leg - where the new table is rendered outright with the POST-rename
-//! column name and `SqliteRebuildSpec::column_renames` is empty - a captured
+//! column name and `TableRebuildSpec::column_renames` is empty - a captured
 //!
 //! ```sql
 //! CREATE INDEX "parts_qty_idx" ON "parts" ("qty")
@@ -38,7 +38,7 @@
 //! SQLite's own `ALTER TABLE ... RENAME COLUMN`, and captures the dependents AFTER -
 //! by which point SQLite's parser has already rewritten every index, trigger and view
 //! in the catalog. The replay stays verbatim. This is the same delegation
-//! `SqliteRebuildSpec::column_renames` already makes on the CATALOG leg, moved to the
+//! `TableRebuildSpec::column_renames` already makes on the CATALOG leg, moved to the
 //! other end of the rebuild because on this leg the new table is created with the new
 //! name already in place.
 //!
@@ -57,7 +57,7 @@ use zero_migrate::render::lower::{IrAuthor, LiveSchema};
 use zero_migrate::{
     fold_ops, resolve_create_table_policy, Approval, ColType, ExecutorConfig, Migration,
     MigrationEngine, MigrationIr, Op, PlanStep, RenameStep, SqlDialect, SqliteBackend,
-    SqliteRebuildSpec, SqliteSequencePolicy,
+    SqliteSequencePolicy, TableRebuildSpec,
 };
 
 const PROJECT: &str = "prj_indexed_rename";
@@ -330,7 +330,7 @@ async fn apply_fold_seeded_rename(
     let steps = author
         .lower_steps(&rename_ir(), &live)
         .expect("the rename lowers against the folded live schema");
-    let [PlanStep::OnlineRename(RenameStep::SqliteRebuild(rebuild))] = steps.as_slice() else {
+    let [PlanStep::OnlineRename(RenameStep::TableRebuild(rebuild))] = steps.as_slice() else {
         panic!("a SQLite renameColumn lowers to exactly one rebuild step: {steps:#?}");
     };
     // The leg under test: the fold carries no stored CREATE, so the executor gets NO
@@ -773,7 +773,7 @@ async fn a_trigger_body_follows_the_rename_too() {
 //     That leg must not move.
 // ---------------------------------------------------------------------------------
 
-/// The catalog leg is where `SqliteRebuildSpec::column_renames` is non-empty, and it is
+/// The catalog leg is where `TableRebuildSpec::column_renames` is non-empty, and it is
 /// the leg the executor's NEW pre-rename must stay out of: its `copy_columns` are pure
 /// identity pairs, so the executor derives NO implied rename from them and the deferred
 /// `RENAME COLUMN` stays the only one. Pinned end to end, with an index in place, so a
@@ -821,7 +821,7 @@ async fn a_catalog_sourced_rename_of_an_indexed_column_still_replays_the_stored_
     let steps = author
         .lower_steps(&rename_ir(), &live)
         .expect("the rename lowers against the catalog live schema");
-    let [PlanStep::OnlineRename(RenameStep::SqliteRebuild(rebuild))] = steps.as_slice() else {
+    let [PlanStep::OnlineRename(RenameStep::TableRebuild(rebuild))] = steps.as_slice() else {
         panic!("a SQLite renameColumn lowers to exactly one rebuild step: {steps:#?}");
     };
     assert_eq!(
@@ -895,7 +895,7 @@ async fn a_catalog_sourced_rename_of_an_indexed_column_still_replays_the_stored_
 
 /// PostgreSQL and MySQL rename a column with a native `ALTER TABLE`, so nothing they
 /// emit ever reaches the 12-step rebuild this fix changed. Measured by lowering the SAME
-/// rename IR under each dialect and asserting the step is NOT a `SqliteRebuild`; the two
+/// rename IR under each dialect and asserting the step is NOT a `TableRebuild`; the two
 /// backends' `rebuild_one` implementations then refuse such a step outright as a routing
 /// bug, so the two facts together close the path.
 #[test]
@@ -915,7 +915,7 @@ fn neither_postgres_nor_mysql_lowers_a_rename_into_a_sqlite_rebuild() {
         assert!(
             !create_steps
                 .iter()
-                .any(|s| matches!(s, PlanStep::OnlineRename(RenameStep::SqliteRebuild(_)))),
+                .any(|s| matches!(s, PlanStep::OnlineRename(RenameStep::TableRebuild(_)))),
             "{dialect:?} emits no rebuild for the create"
         );
 
@@ -934,7 +934,7 @@ fn neither_postgres_nor_mysql_lowers_a_rename_into_a_sqlite_rebuild() {
                 assert!(
                     !steps
                         .iter()
-                        .any(|s| matches!(s, PlanStep::OnlineRename(RenameStep::SqliteRebuild(_)))),
+                        .any(|s| matches!(s, PlanStep::OnlineRename(RenameStep::TableRebuild(_)))),
                     "{dialect:?} renames a column natively and never routes through the \
                      SQLite 12-step rebuild: {steps:#?}"
                 );
@@ -1085,9 +1085,9 @@ async fn a_rename_onto_a_name_the_live_table_still_carries_is_declined_not_force
         .await
         .expect("a row that tells the two columns apart");
 
-    let spec = SqliteRebuildSpec {
+    let spec = TableRebuildSpec {
         table: "t".into(),
-        tmp_table: SqliteRebuildSpec::tmp_name("t"),
+        tmp_table: TableRebuildSpec::tmp_name("t"),
         new_table_create: "CREATE TABLE \"t__zero_migrate_rebuild\" \
                            (\"id\" TEXT PRIMARY KEY, \"amount\" INTEGER)"
             .into(),
@@ -1146,9 +1146,9 @@ async fn a_rebuild_that_renames_one_column_and_drops_another_keeps_only_the_surv
         .await
         .expect("a row");
 
-    let spec = SqliteRebuildSpec {
+    let spec = TableRebuildSpec {
         table: "t".into(),
-        tmp_table: SqliteRebuildSpec::tmp_name("t"),
+        tmp_table: TableRebuildSpec::tmp_name("t"),
         new_table_create: "CREATE TABLE \"t__zero_migrate_rebuild\" \
                            (\"id\" TEXT PRIMARY KEY, \"amount\" INTEGER)"
             .into(),
@@ -1306,7 +1306,7 @@ columns = [
 
 /// A destructive journal migration for a directly-constructed rebuild spec (the same
 /// helper `sqlite_rebuild_apply.rs` uses).
-fn rebuild_migration(spec: &SqliteRebuildSpec) -> Migration {
+fn rebuild_migration(spec: &TableRebuildSpec) -> Migration {
     use zero_migrate::model::migration::{Checksum, ChecksumInput, MigrationFlags, MigrationId};
     let flags = MigrationFlags {
         destructive: true,

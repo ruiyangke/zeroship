@@ -41,7 +41,7 @@
 //! the stored-shape arm has already returned. Two tests below pin that: one asserts
 //! the catalog leg still replays its stored body, and one asserts the shape DECISION
 //! itself is unchanged through its only observable projection,
-//! `SqliteRebuildSpec::column_renames` (populated only when `preserve_stored_shape`
+//! `TableRebuildSpec::column_renames` (populated only when `preserve_stored_shape`
 //! holds).
 
 use std::collections::BTreeSet;
@@ -308,7 +308,7 @@ async fn a_sqlite_rename_rebuild_emits_a_foreign_key_over_the_new_local_column()
     let steps = author
         .lower_steps(&rename_ir(), &live)
         .expect("the rename lowers against the folded live schema");
-    let [PlanStep::OnlineRename(RenameStep::SqliteRebuild(rebuild))] = steps.as_slice() else {
+    let [PlanStep::OnlineRename(RenameStep::TableRebuild(rebuild))] = steps.as_slice() else {
         panic!("a SQLite renameColumn lowers to exactly one rebuild step: {steps:#?}");
     };
     let create_sql = rebuild.spec.new_table_create.clone();
@@ -528,7 +528,7 @@ async fn sqlite_refuses_a_stale_child_key_and_silently_accepts_a_stale_parent_ke
 
 /// The SHAPE DECISION on its own, separated from what either arm then emits.
 ///
-/// `SqliteRebuildSpec::column_renames` is populated as
+/// `TableRebuildSpec::column_renames` is populated as
 /// `pure_rename.filter(|_| preserve_stored_shape)`, so it is a direct read of the two
 /// facts this fix had to leave untouched: whether `pure_sqlite_column_rename` still
 /// matched, and whether the stored shape is still preserved. Lowering the SAME rename
@@ -560,7 +560,7 @@ async fn the_stored_shape_decision_is_unchanged_by_the_constraint_rewrite() {
         let steps = author
             .lower_steps(&rename_ir(), live)
             .expect("the rename lowers");
-        let [PlanStep::OnlineRename(RenameStep::SqliteRebuild(rebuild))] = steps.as_slice() else {
+        let [PlanStep::OnlineRename(RenameStep::TableRebuild(rebuild))] = steps.as_slice() else {
             panic!("a SQLite renameColumn lowers to exactly one rebuild step: {steps:#?}");
         };
         rebuild.spec.column_renames.clone()
@@ -636,7 +636,7 @@ async fn a_catalog_sourced_rename_still_replays_the_stored_body() {
     let steps = author
         .lower_steps(&rename_ir(), &live)
         .expect("the rename lowers against the catalog live schema");
-    let [PlanStep::OnlineRename(RenameStep::SqliteRebuild(rebuild))] = steps.as_slice() else {
+    let [PlanStep::OnlineRename(RenameStep::TableRebuild(rebuild))] = steps.as_slice() else {
         panic!("a SQLite renameColumn lowers to exactly one rebuild step: {steps:#?}");
     };
 
@@ -771,7 +771,7 @@ async fn a_second_rename_starts_from_a_folded_definition_the_first_rename_alread
     let steps = author
         .lower_steps(&second, &folded_live_schema(&history))
         .expect("the second rename lowers");
-    let [PlanStep::OnlineRename(RenameStep::SqliteRebuild(rebuild))] = steps.as_slice() else {
+    let [PlanStep::OnlineRename(RenameStep::TableRebuild(rebuild))] = steps.as_slice() else {
         panic!("a SQLite renameColumn lowers to exactly one rebuild step: {steps:#?}");
     };
     assert!(

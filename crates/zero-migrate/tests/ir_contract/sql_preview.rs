@@ -544,7 +544,7 @@ fn render_plan_sql_surfaces_lowered_ddl_offline() {
     }
 }
 
-/// `render_plan_sql` over a PG `OnlineRename(PgExpandContract)` plan. This is
+/// `render_plan_sql` over a PG `OnlineRename(ExpandContract)` plan. This is
 /// the public-API entrypoint for a hand-built rename plan (no CLI path feeds an
 /// `OnlineRename` step). It locks the no-fabrication contract for the rename render
 /// surface: the expand/contract ADDITIVE DDL must appear ONLY as `--`-comment lines
@@ -565,7 +565,7 @@ fn render_plan_sql_online_rename_is_labeled_never_fabricated() {
             ty: "text".to_string(),
         })
         .expect("expand-contract author lowers the rename");
-    let rename = RenameStep::PgExpandContract(ec);
+    let rename = RenameStep::ExpandContract(ec);
 
     // Build a real, fully-formed AppliedPlan in-memory (lower a trivial createTable IR
     // via the same author the engine uses), then swap its single DDL step for the

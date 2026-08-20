@@ -2104,7 +2104,7 @@ async fn online_rename_backfill_rejects_replica_only_and_body_tampered_dual_writ
         .expect("online rename has a backfill marker")
         .version
         .clone();
-    let step = PlanStep::OnlineRename(RenameStep::PgExpandContract(rename));
+    let step = PlanStep::OnlineRename(RenameStep::ExpandContract(rename));
 
     zero_migrate::fault::arm(
         zero_migrate::fault::points::EXPAND_BETWEEN_E2_AND_BACKFILL,
@@ -2312,7 +2312,7 @@ async fn interrupt_online_rename_deploy(
         .steps
         .iter()
         .find_map(|step| match step {
-            PlanStep::OnlineRename(RenameStep::PgExpandContract(plan)) => Some(plan.clone()),
+            PlanStep::OnlineRename(RenameStep::ExpandContract(plan)) => Some(plan.clone()),
             _ => None,
         })
         .expect("rename envelope lowers to a PostgreSQL online rename");
@@ -4110,7 +4110,7 @@ async fn pending_online_renames_can_be_completed_or_aborted_safely() {
     let apply_pending = apply_plan.trigger_version.as_str().to_string();
     engine
         .apply_plan_with_touched_and_depends(
-            &[PlanStep::OnlineRename(RenameStep::PgExpandContract(
+            &[PlanStep::OnlineRename(RenameStep::ExpandContract(
                 apply_plan,
             ))],
             &["apply_users".into()],
@@ -4207,7 +4207,7 @@ async fn pending_online_renames_can_be_completed_or_aborted_safely() {
         .collect();
     engine
         .apply_plan_with_touched_and_depends(
-            &[PlanStep::OnlineRename(RenameStep::PgExpandContract(
+            &[PlanStep::OnlineRename(RenameStep::ExpandContract(
                 direct_plan,
             ))],
             &["direct_users".into()],
@@ -4323,7 +4323,7 @@ async fn pending_online_renames_can_be_completed_or_aborted_safely() {
         .unwrap_or_else(|| abort_plan.expand[0].version.clone());
     engine
         .apply_plan_with_touched_and_depends(
-            &[PlanStep::OnlineRename(RenameStep::PgExpandContract(
+            &[PlanStep::OnlineRename(RenameStep::ExpandContract(
                 abort_plan.clone(),
             ))],
             &["abort_users".into()],
@@ -4368,7 +4368,7 @@ async fn pending_online_renames_can_be_completed_or_aborted_safely() {
 
     let replay = engine
         .apply_plan_with_touched_and_depends(
-            &[PlanStep::OnlineRename(RenameStep::PgExpandContract(
+            &[PlanStep::OnlineRename(RenameStep::ExpandContract(
                 abort_plan,
             ))],
             &["abort_users".into()],
@@ -4455,7 +4455,7 @@ async fn pending_online_renames_can_be_completed_or_aborted_safely() {
     let partial_abort_pending = partial_abort_plan.trigger_version.as_str().to_string();
     engine
         .apply_plan_with_touched_and_depends(
-            &[PlanStep::OnlineRename(RenameStep::PgExpandContract(
+            &[PlanStep::OnlineRename(RenameStep::ExpandContract(
                 partial_abort_plan,
             ))],
             &["abort_partial_users".into()],
@@ -4546,7 +4546,7 @@ async fn pending_online_renames_can_be_completed_or_aborted_safely() {
     let drift_pending = drift_plan.trigger_version.as_str().to_string();
     engine
         .apply_plan_with_touched_and_depends(
-            &[PlanStep::OnlineRename(RenameStep::PgExpandContract(
+            &[PlanStep::OnlineRename(RenameStep::ExpandContract(
                 drift_plan,
             ))],
             &["drift_users".into()],
@@ -4607,7 +4607,7 @@ async fn pending_online_renames_can_be_completed_or_aborted_safely() {
     let numeric_pending = numeric_plan.trigger_version.as_str().to_string();
     engine
         .apply_plan_with_touched_and_depends(
-            &[PlanStep::OnlineRename(RenameStep::PgExpandContract(
+            &[PlanStep::OnlineRename(RenameStep::ExpandContract(
                 numeric_plan,
             ))],
             &["numeric_users".into()],
@@ -4659,7 +4659,7 @@ async fn pending_online_renames_can_be_completed_or_aborted_safely() {
     let timestamp_pending = timestamp_plan.trigger_version.as_str().to_string();
     engine
         .apply_plan_with_touched_and_depends(
-            &[PlanStep::OnlineRename(RenameStep::PgExpandContract(
+            &[PlanStep::OnlineRename(RenameStep::ExpandContract(
                 timestamp_plan,
             ))],
             &["timestamp_users".into()],
@@ -4738,7 +4738,7 @@ async fn pending_online_renames_can_be_completed_or_aborted_safely() {
         let named_pending = named_plan.trigger_version.as_str().to_string();
         engine
             .apply_plan_with_touched_and_depends(
-                &[PlanStep::OnlineRename(RenameStep::PgExpandContract(
+                &[PlanStep::OnlineRename(RenameStep::ExpandContract(
                     named_plan,
                 ))],
                 &[table.to_string()],
@@ -4820,7 +4820,7 @@ async fn a_partially_journaled_resolution_cannot_switch_actions() {
     let apply_pending = apply_plan.trigger_version.as_str().to_string();
     engine
         .apply_plan_with_touched_and_depends(
-            &[PlanStep::OnlineRename(RenameStep::PgExpandContract(
+            &[PlanStep::OnlineRename(RenameStep::ExpandContract(
                 apply_plan.clone(),
             ))],
             &["legacy_apply_users".into()],
@@ -4909,7 +4909,7 @@ async fn a_partially_journaled_resolution_cannot_switch_actions() {
     let abort_pending = abort_plan.trigger_version.as_str().to_string();
     engine
         .apply_plan_with_touched_and_depends(
-            &[PlanStep::OnlineRename(RenameStep::PgExpandContract(
+            &[PlanStep::OnlineRename(RenameStep::ExpandContract(
                 abort_plan,
             ))],
             &["legacy_abort_users".into()],
@@ -5027,7 +5027,7 @@ async fn a_failed_resolution_tombstone_append_retries_without_repeating_cleanup(
     let pending_version = plan.trigger_version.as_str().to_string();
     engine
         .apply_plan_with_touched_and_depends(
-            &[PlanStep::OnlineRename(RenameStep::PgExpandContract(plan))],
+            &[PlanStep::OnlineRename(RenameStep::ExpandContract(plan))],
             &["tombstone_retry_users".into()],
             &[],
             Approval::Approved,
@@ -5954,7 +5954,7 @@ async fn a_pg_rename_read_by_a_generated_column_is_refused_before_the_chain_star
             ty: "int".into(),
         })
         .expect("author the rename");
-    let step = PlanStep::OnlineRename(RenameStep::PgExpandContract(rename));
+    let step = PlanStep::OnlineRename(RenameStep::ExpandContract(rename));
 
     let outcome = engine
         .apply_plan_with_touched_and_depends(
@@ -6265,7 +6265,7 @@ async fn a_pg_rename_whose_old_column_carries_a_check_is_not_refused() {
             ty: "int".into(),
         })
         .expect("author the rename");
-    let step = PlanStep::OnlineRename(RenameStep::PgExpandContract(rename));
+    let step = PlanStep::OnlineRename(RenameStep::ExpandContract(rename));
 
     engine
         .apply_plan_with_touched_and_depends(
@@ -6992,7 +6992,7 @@ async fn a_plan_carrying_the_contract_ids_with_other_sql_does_not_discharge() {
     let pending_version = plan.trigger_version.as_str().to_string();
     engine
         .apply_plan_with_touched_and_depends(
-            &[PlanStep::OnlineRename(RenameStep::PgExpandContract(plan))],
+            &[PlanStep::OnlineRename(RenameStep::ExpandContract(plan))],
             &["forge_users".into()],
             &[],
             Approval::Approved,
@@ -7175,7 +7175,7 @@ async fn a_plan_carrying_the_contract_ids_with_other_sql_does_not_discharge() {
     let control_pending = control_plan.trigger_version.as_str().to_string();
     engine
         .apply_plan_with_touched_and_depends(
-            &[PlanStep::OnlineRename(RenameStep::PgExpandContract(
+            &[PlanStep::OnlineRename(RenameStep::ExpandContract(
                 control_plan,
             ))],
             &["forge_users".into()],
@@ -7295,7 +7295,7 @@ async fn a_rename_whose_source_has_dependents_is_declined_before_the_expand() {
 
     let refusal = engine
         .apply_plan_with_touched_and_depends(
-            &[PlanStep::OnlineRename(RenameStep::PgExpandContract(
+            &[PlanStep::OnlineRename(RenameStep::ExpandContract(
                 rename_plan("dep_users", "email", "email_address"),
             ))],
             &["dep_users".into()],
@@ -7363,7 +7363,7 @@ async fn a_rename_whose_source_has_dependents_is_declined_before_the_expand() {
     // view, but on a column this rename does not touch.
     engine
         .apply_plan_with_touched_and_depends(
-            &[PlanStep::OnlineRename(RenameStep::PgExpandContract(
+            &[PlanStep::OnlineRename(RenameStep::ExpandContract(
                 rename_plan("bystander_users", "nickname", "handle"),
             ))],
             &["bystander_users".into()],
@@ -7391,7 +7391,7 @@ async fn a_rename_whose_source_has_dependents_is_declined_before_the_expand() {
         .expect("drop the dependent view");
     engine
         .apply_plan_with_touched_and_depends(
-            &[PlanStep::OnlineRename(RenameStep::PgExpandContract(
+            &[PlanStep::OnlineRename(RenameStep::ExpandContract(
                 rename_plan("dep_users", "email", "email_address"),
             ))],
             &["dep_users".into()],
@@ -7576,7 +7576,7 @@ async fn a_contract_whose_expand_never_landed_is_refused() {
     let backend = PostgresBackend::new_generic(&session);
     engine
         .apply_plan_with_touched_and_depends(
-            &[PlanStep::OnlineRename(RenameStep::PgExpandContract(
+            &[PlanStep::OnlineRename(RenameStep::ExpandContract(
                 plan.clone(),
             ))],
             &["gate_users".into()],
@@ -8279,7 +8279,7 @@ async fn re_supplying_settled_work_is_a_no_op_rather_than_a_refusal() {
     let plan = author.author(&intent).expect("author the rename");
     let pending_version = plan.trigger_version.as_str().to_string();
     let expand_step = || {
-        [PlanStep::OnlineRename(RenameStep::PgExpandContract(
+        [PlanStep::OnlineRename(RenameStep::ExpandContract(
             plan.clone(),
         ))]
     };

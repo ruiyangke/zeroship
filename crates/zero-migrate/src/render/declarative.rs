@@ -53,7 +53,7 @@ use crate::model::table_shape::ResolvedInject;
 use crate::render::expand_contract::{
     ExpandContractAuthor, ExpandContractError, ExpandContractPlan, OnlineIntent,
 };
-use crate::render::plan::SqliteRebuildSpec;
+use crate::render::plan::TableRebuildSpec;
 use crate::render::renderer::{Capability, DialectSupports};
 use crate::schema::query::SqlDialect;
 use crate::IndexSortOrder;
@@ -5864,14 +5864,14 @@ pub struct DeclarativePlan {
     /// the existing-table changes that SQLite has no native
     /// `ALTER` for (type change, nullability change, column RENAME's rebuild,
     /// ADD/DROP CONSTRAINT, in-place FK redefinition). Each is a 12-step table
-    /// rebuild ([`SqliteRebuildSpec`]) paired with its journal [`Migration`]. NOT
+    /// rebuild ([`TableRebuildSpec`]) paired with its journal [`Migration`]. NOT
     /// flattened into `migrations`: a rebuild is not a single `up` statement — it is
     /// a structured engine-mode operation with `foreign_keys` toggles straddling the
     /// transaction (the SQLite in-txn no-op rule), driven by
     /// [`SqliteBackend::rebuild_one`](crate::SqliteBackend::rebuild_one). The
     /// destructive/approval gate keys on the paired migration's flags
     /// (`destructive + requires_approval`). Always empty on the PG path.
-    pub rebuilds: Vec<SqliteRebuild>,
+    pub rebuilds: Vec<TableRebuild>,
     /// The live indexes this diff accepted under the OTHER derivation of their own
     /// name, instead of emitting a CREATE plus a DROP for them. Reported so an
     /// alias-accepted no-op is visible rather than silent; it drives no DDL.
@@ -5886,7 +5886,7 @@ pub struct DeclarativePlan {
     pub created_tables: Vec<String>,
 }
 
-/// one SQLite 12-step table rebuild: the execution [`SqliteRebuildSpec`]
+/// one SQLite 12-step table rebuild: the execution [`TableRebuildSpec`]
 /// plus the [`Migration`] that carries its checksum / journal identity / approval
 /// flags. The differ produces these for the existing-table ops SQLite cannot ALTER
 /// natively.
@@ -5904,7 +5904,7 @@ pub struct DeclarativePlan {
 /// executor-internal [`SqliteBackend::rebuild_one`](crate::SqliteBackend::rebuild_one)
 /// seam remains for tests; the engine path is the gated production drive.
 #[derive(Debug, Clone)]
-pub struct SqliteRebuild {
+pub struct TableRebuild {
     /// The journal migration: its `version` is the rebuild's identity, its
     /// `checksum` certifies the rebuild, and its flags (`destructive = true,
     /// requires_approval = true`) route it through the gate. Its `up` carries the
@@ -5913,7 +5913,7 @@ pub struct SqliteRebuild {
     /// plain `up` execution.
     pub migration: Migration,
     /// The fully-resolved 12-step rebuild specification the backend executes.
-    pub spec: SqliteRebuildSpec,
+    pub spec: TableRebuildSpec,
 }
 
 impl DeclarativePlan {
@@ -6390,7 +6390,7 @@ impl DeclarativeAuthor {
         // nullability change, column rename rebuild, ADD/DROP CONSTRAINT, FK
         // redefinition). Each is a structured 12-step rebuild, NOT a plain `up` — so
         // it is carried separately, like `renames`, never flattened into `out`.
-        let mut rebuilds: Vec<SqliteRebuild> = Vec::new();
+        let mut rebuilds: Vec<TableRebuild> = Vec::new();
 
         // --- New tables (in desired, not in live), in FK-dependency order. ---
         let new_tables: Vec<&String> = desired
@@ -6560,7 +6560,7 @@ impl DeclarativeAuthor {
             // an in-place FK redefinition — are reconciled by the 12-step table
             // REBUILD. A rebuild reconciles the WHOLE table at once (every
             // changed column + the new constraint/FK set), so we detect it up front,
-            // emit ONE structured `SqliteRebuild`, and `continue` past the PG-shaped
+            // emit ONE structured `TableRebuild`, and `continue` past the PG-shaped
             // per-op emission below (which has no SQLite form for these). The
             // natively-expressible existing-table ops (ADD COLUMN, DROP COLUMN, DROP
             // INDEX, ADD INDEX) still flow through the per-op path when NO rebuild is
@@ -7579,7 +7579,7 @@ impl DeclarativeAuthor {
         None
     }
 
-    /// build the [`SqliteRebuild`] (spec + journal migration) that
+    /// build the [`TableRebuild`] (spec + journal migration) that
     /// reconciles `live` → `desired` for one existing table via the 12-step rebuild.
     ///
     /// For a catalog-introspected table, the new-table CREATE is a surgical rewrite
@@ -7598,7 +7598,7 @@ impl DeclarativeAuthor {
         desired: &mut TableSnapshot,
         reason: String,
         inject: &ResolvedInject,
-    ) -> Result<SqliteRebuild, DeclarativeError> {
+    ) -> Result<TableRebuild, DeclarativeError> {
         if self.dialect != SqlDialect::Sqlite {
             return Err(DeclarativeError::Invalid(format!(
                 "internal: requested a SQLite constraint rebuild from a {:?} author",
@@ -7628,7 +7628,7 @@ impl DeclarativeAuthor {
         // snapshot. A second FK op in the same migration must rewrite the first
         // operation's shape, never resurrect the original catalog text.
         desired.stored_create_sql = Some(create_real.clone());
-        let tmp = SqliteRebuildSpec::tmp_name(table);
+        let tmp = TableRebuildSpec::tmp_name(table);
         let Some((open, _)) = sqlite_create_body_bounds(&create_real) else {
             return Err(DeclarativeError::Invalid(format!(
                 "internal: SQLite constraint rebuild of '{table}' could not locate the emitted CREATE TABLE body"
@@ -7687,7 +7687,7 @@ impl DeclarativeAuthor {
             .map(|index| self.emitter().create_index(table, index).0)
             .collect();
 
-        let spec = SqliteRebuildSpec {
+        let spec = TableRebuildSpec {
             table: table.to_string(),
             tmp_table: tmp,
             new_table_create,
@@ -7709,7 +7709,7 @@ impl DeclarativeAuthor {
             destructive_flags(),
             Vec::new(),
         );
-        Ok(SqliteRebuild { migration, spec })
+        Ok(TableRebuild { migration, spec })
     }
 
     fn build_sqlite_rebuild(
@@ -7721,14 +7721,14 @@ impl DeclarativeAuthor {
         table_renames: &[&ResolvedRename],
         reason: String,
         effective: &zero_migrate_policy::EffectivePolicy,
-    ) -> Result<SqliteRebuild, DeclarativeError> {
+    ) -> Result<TableRebuild, DeclarativeError> {
         // Render the body under the real table identity so derived constraint names
         // remain stable, while self-referential FKs target the temporary table for
         // the copy/drop phase. Then re-point only the leading CREATE target. SQLite
         // updates that self-reference when the temporary table is renamed into its
         // final name; targeting the old table here would fire ON DELETE actions when
         // the old table is dropped.
-        let tmp = SqliteRebuildSpec::tmp_name(table);
+        let tmp = TableRebuildSpec::tmp_name(table);
         let pure_rename = pure_sqlite_column_rename(lt, dt, table_renames);
         let preserve_stored_shape = pure_rename.is_some() && dt.stored_create_sql.is_some();
         let create_real = self.render_create_table_sqlite_rebuild(
@@ -7841,7 +7841,7 @@ impl DeclarativeAuthor {
             .map(ToString::to_string)
             .collect();
 
-        let spec = SqliteRebuildSpec {
+        let spec = TableRebuildSpec {
             table: table.to_string(),
             tmp_table: tmp,
             new_table_create,
@@ -7883,7 +7883,7 @@ impl DeclarativeAuthor {
             Vec::new(),
         );
 
-        Ok(SqliteRebuild { migration, spec })
+        Ok(TableRebuild { migration, spec })
     }
 
     /// The cross-subsystem `renameColumn` bridge.
@@ -7897,7 +7897,7 @@ impl DeclarativeAuthor {
     ///   through [`ExpandContractAuthor::author`] — the SAME author the declarative
     ///   diff path calls, so the E1..C2 ids + intra-chain `depends_on` are authored
     ///   identically. The returned [`ExpandContractPlan`] is wrapped
-    ///   verbatim into [`crate::render::step::RenameStep::PgExpandContract`].
+    ///   verbatim into [`crate::render::step::RenameStep::ExpandContract`].
     ///
     /// - **SQLite** ⇒ synthesize the DESIRED post-rename inputs the differ's
     ///   12-step rebuild planner consumes — the live `TableSnapshot` with the
@@ -7906,9 +7906,9 @@ impl DeclarativeAuthor {
     ///   per-column SQLite affinity from the SDK schema `Value`'s field token, not
     ///   from this snapshot `data_type`), the live SDK schema `Value` with the same
     ///   field-key rename, and a [`RenameHint`] — and route them through
-    ///   [`Self::diff`]. The diff yields exactly ONE [`SqliteRebuild`] (a rename
+    ///   [`Self::diff`]. The diff yields exactly ONE [`TableRebuild`] (a rename
     ///   always needs a rebuild on SQLite), wrapped into
-    ///   [`crate::render::step::RenameStep::SqliteRebuild`]. NO PG type string is ever passed to this leg
+    ///   [`crate::render::step::RenameStep::TableRebuild`]. NO PG type string is ever passed to this leg
     ///   — the affinity comes from the SDK Value, which the caller built from the
     ///   dialect-neutral `ColType`.
     ///
@@ -7957,7 +7957,7 @@ impl DeclarativeAuthor {
                             "renameColumn expand-contract author rejected '{table}.{from}→{to}': {e}"
                         ))
                     })?;
-                Ok(crate::render::step::RenameStep::PgExpandContract(plan))
+                Ok(crate::render::step::RenameStep::ExpandContract(plan))
             }
             SqlDialect::Sqlite => {
                 let rebuild = self.sqlite_rename_rebuild(
@@ -7970,7 +7970,7 @@ impl DeclarativeAuthor {
                     known_live_tables,
                     effective,
                 )?;
-                Ok(crate::render::step::RenameStep::SqliteRebuild(rebuild))
+                Ok(crate::render::step::RenameStep::TableRebuild(rebuild))
             }
             SqlDialect::Mysql => Err(DeclarativeError::UnsupportedInV1(
                 "renameColumn is render-only for MySQL, not live-rendered".to_string(),
@@ -7980,7 +7980,7 @@ impl DeclarativeAuthor {
 
     /// the SQLite arm of [`Self::lower_ir_rename`]: synthesize the desired
     /// post-rename snapshot + SDK schema + [`RenameHint`] from the live table facts
-    /// and route them through [`Self::diff`], returning the SINGLE [`SqliteRebuild`]
+    /// and route them through [`Self::diff`], returning the SINGLE [`TableRebuild`]
     /// it produces. Factored out so the dialect router stays readable.
     ///
     /// The desired snapshot is the live snapshot with `from` renamed to `to` (the
@@ -8012,7 +8012,7 @@ impl DeclarativeAuthor {
         live_owner: &str,
         known_live_tables: &BTreeSet<String>,
         effective: &zero_migrate_policy::EffectivePolicy,
-    ) -> Result<SqliteRebuild, DeclarativeError> {
+    ) -> Result<TableRebuild, DeclarativeError> {
         // ---- desired snapshot: live with `from`→`to` renamed (type unchanged) ----
         let mut desired_table = live_snapshot.clone();
         let mut found = false;

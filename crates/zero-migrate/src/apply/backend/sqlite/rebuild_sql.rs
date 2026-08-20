@@ -39,7 +39,7 @@
 //! and every other table's `REFERENCES` clause in one consistent step (measured:
 //! independent of whether `foreign_keys` is on); the capture below then reads DDL
 //! that already names the new column, and the replay stays verbatim. This is the
-//! same delegation [`SqliteRebuildSpec::column_renames`] makes on the stored-shape
+//! same delegation [`TableRebuildSpec::column_renames`] makes on the stored-shape
 //! leg, at the other end of the rebuild — that leg creates the table under the OLD
 //! name and renames LAST, this one has the new name baked into `new_table_create`
 //! and must rename FIRST.
@@ -104,7 +104,7 @@ use std::time::Instant;
 
 use crate::model::ir::AlterPrimaryKeyAction;
 use crate::model::migration::Migration;
-use crate::render::plan::{SqliteRebuildSpec, SqliteSequencePolicy};
+use crate::render::plan::{SqliteSequencePolicy, TableRebuildSpec};
 
 use super::actor::{MigrationActor, SqliteActorError};
 use super::authorizer::Mode;
@@ -197,7 +197,7 @@ fn quote_ident(s: &str) -> String {
 /// `foreign_keys=ON` afterwards (the caller must tear it down).
 pub(crate) async fn rebuild_one(
     actor: &MigrationActor,
-    spec: &SqliteRebuildSpec,
+    spec: &TableRebuildSpec,
     m: &Migration,
     applied_by: &str,
 ) -> Result<(), RebuildError> {
@@ -288,7 +288,7 @@ async fn restore_foreign_keys(
 /// partial journal. Returns `Ok(())` only if the rebuild DDL + journal row committed.
 async fn run_rebuild_txn(
     actor: &MigrationActor,
-    spec: &SqliteRebuildSpec,
+    spec: &TableRebuildSpec,
     m: &Migration,
     applied_by: &str,
 ) -> Result<(), RebuildError> {
@@ -401,7 +401,7 @@ async fn finish_rebuild_txn(
 /// EngineJournal check/journal write.
 async fn run_rebuild_steps(
     actor: &MigrationActor,
-    spec: &SqliteRebuildSpec,
+    spec: &TableRebuildSpec,
     m: &Migration,
     applied_by: &str,
     started: Instant,
@@ -630,7 +630,7 @@ async fn run_rebuild_steps(
 
 /// The column renames a rebuild carries IMPLICITLY, as `(from, to)` pairs.
 ///
-/// `SqliteRebuildSpec` states a rename in ONE place the executor can read on every
+/// `TableRebuildSpec` states a rename in ONE place the executor can read on every
 /// leg: the copy mapping. `copy_columns` is `(dest, src)`, and the planner emits a
 /// pair whose `dest` differs from its `src` for exactly one reason — the data is
 /// moving from an old column name into a new one. Every other producer of the field
@@ -645,7 +645,7 @@ async fn run_rebuild_steps(
 /// A pair differing only in ASCII CASE is not a rename here: SQLite resolves an
 /// identifier case-insensitively, so the captured DDL replays fine against the new
 /// spelling and a `RENAME COLUMN` would be pure churn.
-fn implied_column_renames(spec: &SqliteRebuildSpec) -> Vec<(String, String)> {
+fn implied_column_renames(spec: &TableRebuildSpec) -> Vec<(String, String)> {
     spec.copy_columns
         .iter()
         .filter(|(dest, src)| !dest.eq_ignore_ascii_case(src))
@@ -691,7 +691,7 @@ async fn live_column_names(
 /// on the creator's app schema, the same privilege the rest of the rebuild DDL uses.
 async fn rename_live_columns(
     actor: &MigrationActor,
-    spec: &SqliteRebuildSpec,
+    spec: &TableRebuildSpec,
 ) -> Result<Vec<(String, String)>, RebuildError> {
     let mut pending = implied_column_renames(spec);
     if pending.is_empty() {
@@ -937,7 +937,7 @@ mod tests {
     #[test]
     fn tmp_name_is_engine_chosen_suffix() {
         assert_eq!(
-            SqliteRebuildSpec::tmp_name("users"),
+            TableRebuildSpec::tmp_name("users"),
             "users__zero_migrate_rebuild"
         );
     }
@@ -986,10 +986,10 @@ mod tests {
         assert!(!ddl_references_column("anything", ""));
     }
 
-    fn spec_with(copy_columns: &[(&str, &str)]) -> SqliteRebuildSpec {
-        SqliteRebuildSpec {
+    fn spec_with(copy_columns: &[(&str, &str)]) -> TableRebuildSpec {
+        TableRebuildSpec {
             table: "t".to_string(),
-            tmp_table: SqliteRebuildSpec::tmp_name("t"),
+            tmp_table: TableRebuildSpec::tmp_name("t"),
             new_table_create: String::new(),
             copy_columns: copy_columns
                 .iter()

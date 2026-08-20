@@ -217,7 +217,7 @@ async fn a_sqlite_rename_rebuild_emits_a_check_body_over_the_new_column_name() {
     let steps = author
         .lower_steps(&rename_ir(), &live)
         .expect("the rename lowers against the folded live schema");
-    let [PlanStep::OnlineRename(RenameStep::SqliteRebuild(rebuild))] = steps.as_slice() else {
+    let [PlanStep::OnlineRename(RenameStep::TableRebuild(rebuild))] = steps.as_slice() else {
         panic!("a SQLite renameColumn lowers to exactly one rebuild step: {steps:#?}");
     };
     let create_sql = rebuild.spec.new_table_create.clone();
@@ -372,7 +372,7 @@ async fn a_catalog_sourced_rename_still_replays_the_stored_body() {
     let steps = author
         .lower_steps(&rename_ir(), &live)
         .expect("the rename lowers against the catalog live schema");
-    let [PlanStep::OnlineRename(RenameStep::SqliteRebuild(rebuild))] = steps.as_slice() else {
+    let [PlanStep::OnlineRename(RenameStep::TableRebuild(rebuild))] = steps.as_slice() else {
         panic!("a SQLite renameColumn lowers to exactly one rebuild step: {steps:#?}");
     };
     let create_sql = &rebuild.spec.new_table_create;
@@ -501,7 +501,7 @@ async fn a_second_rename_starts_from_a_folded_body_the_first_rename_already_move
     let steps = author
         .lower_steps(&second, &folded_live_schema(&history))
         .expect("the second rename lowers");
-    let [PlanStep::OnlineRename(RenameStep::SqliteRebuild(rebuild))] = steps.as_slice() else {
+    let [PlanStep::OnlineRename(RenameStep::TableRebuild(rebuild))] = steps.as_slice() else {
         panic!("a SQLite renameColumn lowers to exactly one rebuild step: {steps:#?}");
     };
     assert!(

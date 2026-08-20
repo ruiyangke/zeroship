@@ -735,7 +735,7 @@ fn render_synchronize_identity(
 fn render_online_rename(op: &Op, rename: &RenameStep, out: &mut Vec<Rendered>) {
     let subject = rename_subject(op);
     match rename {
-        RenameStep::PgExpandContract(ec) => {
+        RenameStep::ExpandContract(ec) => {
             out.push(Rendered::label(format!(
                 "{RUNTIME_RESOLVED} online rename {subject}: expand-contract (E1..C2); \
                  the BACKFILL is windowed by PK and the CONTRACT cutover is partitioned across \
@@ -746,7 +746,7 @@ fn render_online_rename(op: &Op, rename: &RenameStep, out: &mut Vec<Rendered>) {
                 out.push(Rendered::comment(indent_sql(&m.up)));
             }
         }
-        RenameStep::SqliteRebuild(rb) => {
+        RenameStep::TableRebuild(rb) => {
             out.push(Rendered::label(format!(
                 "{RUNTIME_RESOLVED} online rename {subject}: SQLite 12-step table rebuild; \
                  needs the live table structure — exact rebuild SQL depends on live state"
@@ -759,7 +759,7 @@ fn render_online_rename(op: &Op, rename: &RenameStep, out: &mut Vec<Rendered>) {
 /// Online-rename render with NO op context (the `.sql`/AppliedPlan path).
 fn render_online_rename_no_op(rename: &RenameStep, out: &mut Vec<Rendered>) {
     match rename {
-        RenameStep::PgExpandContract(ec) => {
+        RenameStep::ExpandContract(ec) => {
             out.push(Rendered::label(format!(
                 "{RUNTIME_RESOLVED} online rename (expand-contract): backfill windowed by PK + \
                  cross-deploy contract cutover — exact statement stream depends on live state"
@@ -768,7 +768,7 @@ fn render_online_rename_no_op(rename: &RenameStep, out: &mut Vec<Rendered>) {
                 out.push(Rendered::comment(indent_sql(&m.up)));
             }
         }
-        RenameStep::SqliteRebuild(_) => {
+        RenameStep::TableRebuild(_) => {
             out.push(Rendered::label(format!(
                 "{RUNTIME_RESOLVED} online rename (SQLite 12-step rebuild): needs live table \
                  structure — exact rebuild SQL depends on live state"

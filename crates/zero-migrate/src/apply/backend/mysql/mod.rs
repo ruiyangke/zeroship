@@ -60,7 +60,7 @@ use crate::conn::ExecutorConfig;
 use crate::driver::{Row, SqlSession};
 use crate::model::migration::{Checksum, Migration, MigrationId};
 use crate::model::snapshot::SchemaSnapshot;
-use crate::render::plan::{DatabaseFeature, DatabaseRequirements, SqliteRebuildSpec};
+use crate::render::plan::{DatabaseFeature, DatabaseRequirements, TableRebuildSpec};
 use crate::render::step::{
     AlterColumnTypeStep, AlterPrimaryKeyStep, BindValue, SynchronizeIdentityStep,
 };
@@ -921,7 +921,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
 
     async fn rebuild_one(
         &self,
-        spec: &SqliteRebuildSpec,
+        spec: &TableRebuildSpec,
         _m: &Migration,
         _scope: &crate::approval::ApprovalScope,
         _applied_by: &str,

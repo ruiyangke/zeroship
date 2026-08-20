@@ -1006,8 +1006,8 @@ impl MigrationEngine {
     /// interleave/journal/`pending_contract` orchestration; it is now a
     /// shape-adapter that lowers the declarative [`DeclarativeDeployPlan`] into the
     /// neutral ordered [`PlanStep`] list — its `plain.items` → [`PlanStep::Ddl`],
-    /// its `rebuilds` → [`PlanStep::OnlineRename`]`(`[`RenameStep::SqliteRebuild`]`)`,
-    /// its `renames` → [`PlanStep::OnlineRename`]`(`[`RenameStep::PgExpandContract`]`)`,
+    /// its `rebuilds` → [`PlanStep::OnlineRename`]`(`[`RenameStep::TableRebuild`]`)`,
+    /// its `renames` → [`PlanStep::OnlineRename`]`(`[`RenameStep::ExpandContract`]`)`,
     /// preserving the historical order plain → rebuilds → renames — then feeds it
     /// to [`apply_plan`](Self::apply_plan). There is exactly ONE
     /// orchestrator; the declarative path is a *producer* of `Vec<PlanStep>`.
@@ -1050,12 +1050,12 @@ impl MigrationEngine {
             steps.push(PlanStep::Ddl(p.migration.clone()));
         }
         for rebuild in &plan.rebuilds {
-            steps.push(PlanStep::OnlineRename(RenameStep::SqliteRebuild(
+            steps.push(PlanStep::OnlineRename(RenameStep::TableRebuild(
                 rebuild.clone(),
             )));
         }
         for rename in &plan.renames {
-            steps.push(PlanStep::OnlineRename(RenameStep::PgExpandContract(
+            steps.push(PlanStep::OnlineRename(RenameStep::ExpandContract(
                 rename.clone(),
             )));
         }
@@ -1122,9 +1122,9 @@ impl MigrationEngine {
     /// hygiene + journaling to the earlier per-batch path.
     ///
     /// # `OnlineRename` dual-execution dispatch
-    /// A [`RenameStep::PgExpandContract`] runs E1+E2→backfill→E3 atomically under
+    /// A [`RenameStep::ExpandContract`] runs E1+E2→backfill→E3 atomically under
     /// the held lock via `run_online` and surfaces C1/C2 as `pending_contract`
-    /// (the cross-deploy partition). A [`RenameStep::SqliteRebuild`] is one
+    /// (the cross-deploy partition). A [`RenameStep::TableRebuild`] is one
     /// atomic offline `rebuild_one` (approval-gated + net-applied-skipped); it has
     /// NO `pending_contract`.
     ///
@@ -1863,7 +1863,7 @@ impl MigrationEngine {
         for step in steps {
             let clears_nothing = prefix_clears_nothing;
             prefix_clears_nothing &= crate::apply::plan_precondition::clears_no_obstruction(step);
-            let PlanStep::OnlineRename(RenameStep::PgExpandContract(plan)) = step else {
+            let PlanStep::OnlineRename(RenameStep::ExpandContract(plan)) = step else {
                 continue;
             };
             if !clears_nothing {
@@ -2025,7 +2025,7 @@ impl MigrationEngine {
             recognizes_contract_apply(&exec_cfg.project_schema, pc, &ddl_up_by_version)
         };
         // The set of EXPAND trigger versions this plan RE-PRESENTS — a
-        // `PgExpandContract` step whose `pending_version` matches an outstanding
+        // `ExpandContract` step whose `pending_version` matches an outstanding
         // obligation is the SAME rename re-running idempotently (deploy N retried),
         // NOT a new op touching the pending table. Such a self
         // re-run must NOT be refused by its OWN obligation (the EXPAND
@@ -2033,7 +2033,7 @@ impl MigrationEngine {
         let self_expand_versions: std::collections::BTreeSet<&str> = steps
             .iter()
             .filter_map(|s| match s {
-                PlanStep::OnlineRename(RenameStep::PgExpandContract(ec)) => {
+                PlanStep::OnlineRename(RenameStep::ExpandContract(ec)) => {
                     Some(ec.trigger_version.as_str())
                 }
                 _ => None,
@@ -2289,7 +2289,7 @@ impl MigrationEngine {
         // back so the control loop can drive the same-deploy abort over exactly these.
         let mut opened_obligations: Vec<crate::apply::journal::PendingContract> = Vec::new();
         // Pending versions this loop has ALREADY recorded a `pending` row for, so a
-        // second `PgExpandContract` step in the SAME deploy sharing the same
+        // second `ExpandContract` step in the SAME deploy sharing the same
         // deterministic `pending_version` does NOT append a duplicate `pending` row.
         // `outstanding_pending_contracts` collapses by pending_version
         // (DISTINCT ON), so net state was always correct; this keeps the append-only
@@ -2401,7 +2401,7 @@ impl MigrationEngine {
                     applied.skipped.extend(outcome.skipped);
                     applied.recovered.extend(outcome.recovered);
                 }
-                PlanStep::OnlineRename(RenameStep::SqliteRebuild(rebuild)) => {
+                PlanStep::OnlineRename(RenameStep::TableRebuild(rebuild)) => {
                     // Re-expresses the declarative `plan.rebuilds` loop
                     // (`engine.rs:491-503`): approval gate + net-applied-skip +
                     // `rebuild_one`.
@@ -2468,7 +2468,7 @@ impl MigrationEngine {
                     applied.applied.push(version);
                     i += 1;
                 }
-                PlanStep::OnlineRename(RenameStep::PgExpandContract(rename)) => {
+                PlanStep::OnlineRename(RenameStep::ExpandContract(rename)) => {
                     // Re-expresses the declarative online drive
                     // (`engine.rs:533-552`): run EXPAND+backfill atomically under
                     // the held lock, defer C1/C2 as `pending_contract`.
@@ -2477,7 +2477,7 @@ impl MigrationEngine {
                             ApplyError::Backend(
                                 "plan carries a PG online rename but the backend has no \
                                  online schema-change capability (a SQLite rename must be a \
-                                 RenameStep::SqliteRebuild; a PgExpandContract here is a \
+                                 RenameStep::TableRebuild; an ExpandContract here is a \
                                  routing bug)"
                                     .to_string(),
                             ),
@@ -2485,7 +2485,7 @@ impl MigrationEngine {
                     };
                     let scope_version = steps[i]
                         .approval_scope_version()
-                        .expect("PgExpandContract is always approval-gated");
+                        .expect("ExpandContract is always approval-gated");
                     let was_completed = completed_gated.contains(scope_version);
                     // **Per-version scope (anti-bypass).** A pending PG online rename's
                     // EXPAND mutates data (the dual-write backfill mirrors every
@@ -2571,7 +2571,7 @@ impl MigrationEngine {
                     let pending_version = rename.trigger_version.as_str().to_string();
                     // The rename's PLAN-GROUP version — the stable identity the
                     // SUPPLIED set / `depends_on` key on for orphan/blocked. It is E1's deterministic id (the
-                    // `PgExpandContract` plan anchors its plan version on E1, see
+                    // `ExpandContract` plan anchors its plan version on E1, see
                     // `render::lower::plan_step_version`). Deterministic per rename,
                     // so a re-lowered IR reproduces it — which is exactly
                     // what `status` re-derives from the supplied set to decide
@@ -3017,7 +3017,7 @@ impl MigrationEngine {
                     step.migration.flags.timeout_ms,
                     step.migration.flags.lock_timeout_ms,
                 )),
-                PlanStep::OnlineRename(RenameStep::SqliteRebuild(rebuild)) => budgets.push((
+                PlanStep::OnlineRename(RenameStep::TableRebuild(rebuild)) => budgets.push((
                     rebuild.migration.version.as_str(),
                     rebuild.migration.flags.timeout_ms,
                     rebuild.migration.flags.lock_timeout_ms,
@@ -3025,7 +3025,7 @@ impl MigrationEngine {
                 // An expand-contract carries real migrations on both halves plus a
                 // config-budgeted backfill between them. All of it runs under this
                 // one plan, so all of it is in scope.
-                PlanStep::OnlineRename(RenameStep::PgExpandContract(plan)) => {
+                PlanStep::OnlineRename(RenameStep::ExpandContract(plan)) => {
                     for m in plan.expand.iter().chain(plan.contract.iter()) {
                         budgets.push((
                             m.version.as_str(),
@@ -3141,7 +3141,7 @@ impl MigrationEngine {
                     step.migration.checksum.as_str(),
                     false,
                 )?,
-                PlanStep::OnlineRename(RenameStep::SqliteRebuild(rebuild)) => {
+                PlanStep::OnlineRename(RenameStep::TableRebuild(rebuild)) => {
                     journal_completed_for_approval(
                         &journal,
                         rebuild.migration.version.as_str(),
@@ -3149,7 +3149,7 @@ impl MigrationEngine {
                         false,
                     )?
                 }
-                PlanStep::OnlineRename(RenameStep::PgExpandContract(rename)) => {
+                PlanStep::OnlineRename(RenameStep::ExpandContract(rename)) => {
                     let mut all_completed = !rename.expand.is_empty();
                     for migration in &rename.expand {
                         all_completed &= journal_completed_for_approval(
@@ -3762,12 +3762,12 @@ pub struct DeclarativeDeployPlan {
     /// **SQLite only** — the existing-table changes SQLite has no native
     /// `ALTER` for (type / nullability change, column rename, ADD/DROP CONSTRAINT,
     /// FK redefinition), each a structured 12-step table rebuild
-    /// ([`SqliteRebuild`](crate::render::declarative::SqliteRebuild)). Driven through
+    /// ([`TableRebuild`](crate::render::declarative::TableRebuild)). Driven through
     /// [`MigrationBackend::rebuild_one`]
     /// by [`apply_declarative`](MigrationEngine::apply_declarative), under the
     /// destructive/approval gate (the paired migration is `destructive +
     /// requires_approval`). ALWAYS empty on the PG dialect.
-    pub rebuilds: Vec<crate::render::declarative::SqliteRebuild>,
+    pub rebuilds: Vec<crate::render::declarative::TableRebuild>,
     /// The live indexes the differ accepted under the OTHER derivation of their own
     /// name rather than churning CREATE + DROP for
     /// ([`AcceptedIndexAlias`](crate::render::declarative::AcceptedIndexAlias)).

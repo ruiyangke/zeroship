@@ -852,7 +852,7 @@ fn sqlite_drop_then_add_change_uses_the_prior_rebuild_shape() {
     .lower_steps(&changed, &live)
     .expect("SQLite drop+add change lowers to rebuilds");
     assert_eq!(steps.len(), 2);
-    let PlanStep::OnlineRename(RenameStep::SqliteRebuild(second)) = &steps[1] else {
+    let PlanStep::OnlineRename(RenameStep::TableRebuild(second)) = &steps[1] else {
         panic!("second FK change must be a rebuild: {steps:#?}");
     };
     assert!(second

@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use crate::model::ir::AlterPrimaryKeyAction;
-use crate::render::plan::{SqliteRebuildSpec, SqliteSequencePolicy};
+use crate::render::plan::{SqliteSequencePolicy, TableRebuildSpec};
 
 use super::actor::{MigrationActor, SqliteActorError};
 use super::authorizer::Mode;
@@ -238,7 +238,7 @@ pub(crate) async fn resolve(
     schema: &str,
     table: &str,
     action: &AlterPrimaryKeyAction,
-) -> Result<SqliteRebuildSpec, SqliteActorError> {
+) -> Result<TableRebuildSpec, SqliteActorError> {
     let _ = schema;
     actor.set_mode(Mode::EngineJournal).await?;
     let create_rows = actor
@@ -368,7 +368,7 @@ pub(crate) async fn resolve(
     .map_err(|error| fail(error.to_string()))?;
     let (open, _) = crate::render::declarative::sqlite_create_body_bounds(&rewritten)
         .ok_or_else(|| fail("rewritten CREATE TABLE has no body"))?;
-    let tmp_table = SqliteRebuildSpec::tmp_name(table);
+    let tmp_table = TableRebuildSpec::tmp_name(table);
     let new_table_create = format!("CREATE TABLE {} {}", ident(&tmp_table), &rewritten[open..]);
     let generated = crate::render::declarative::sqlite_generated_columns(&rewritten);
     let copy_columns = columns
@@ -381,7 +381,7 @@ pub(crate) async fn resolve(
         .map(|column| (column.name.clone(), column.name.clone()))
         .collect();
 
-    Ok(SqliteRebuildSpec {
+    Ok(TableRebuildSpec {
         table: table.to_string(),
         tmp_table,
         new_table_create,

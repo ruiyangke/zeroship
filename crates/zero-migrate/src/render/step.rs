@@ -5,7 +5,7 @@ use zero_migrate_ir::dialect::DialectId;
 use crate::model::backfill::BackfillSpec;
 use crate::model::ir::AlterPrimaryKeyAction;
 use crate::model::migration::{Checksum, Migration, MigrationId};
-use crate::render::declarative::SqliteRebuild;
+use crate::render::declarative::TableRebuild;
 use crate::render::expand_contract::{ExpandContractPlan, OnlineIntent};
 
 /// The dialect reach of an applied plan, derived from its ops. A separate,
@@ -42,15 +42,28 @@ impl DialectScope {
     }
 }
 
-/// A rename lowered to ONE of two **dialect-distinct executable shapes**, chosen
-/// by the deploy-target dialect at lowering.
+/// A rename lowered to ONE of two **executable STRATEGIES**, selected at lowering
+/// by what the deploy target can express.
+///
+/// The arms name the strategy, not a vendor, and that is load-bearing rather than
+/// stylistic: the spellings `PgExpandContract` / `SqliteRebuild` asserted a
+/// one-vendor guarantee the lowering does not enforce. The differ's only gate here
+/// is `is_sqlite`, so a MySQL rename fell through to the expand-contract author and
+/// was wrapped in a variant named for PostgreSQL. That is a MISSING PLAN-TIME
+/// REFUSAL, not MySQL support — `docs/dialects.md`, `model::dialect_table` and
+/// `lower_ir_rename` all declare MySQL column rename unsupported, and the
+/// declarative differ is the lone dissenter. The strategy names are honest about
+/// what each arm IS without re-encoding a dialect claim the type cannot keep.
+/// `dialect_matrix::plan_vocabulary_names_strategies_not_vendors` holds the line.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum RenameStep {
-    /// **Postgres**: an online expand-contract.
-    PgExpandContract(ExpandContractPlan),
-    /// **SQLite**: an OFFLINE 12-step table rebuild.
-    SqliteRebuild(SqliteRebuild),
+    /// An ONLINE expand-contract: add the new shape, dual-write, backfill, then
+    /// drop the old in a later deploy. PostgreSQL is its legitimate producer.
+    ExpandContract(ExpandContractPlan),
+    /// An OFFLINE create-copy-swap table rebuild, for a target with no native
+    /// `ALTER` for the change. SQLite's 12-step procedure is its one producer.
+    TableRebuild(TableRebuild),
 }
 
 /// A typed scalar bound into a parameterized [`PlanStep::Dml`] statement.
@@ -242,8 +255,8 @@ impl PlanStep {
             PlanStep::AlterPrimaryKey(step) => step.migration.flags.destructive,
             PlanStep::AlterColumnType(step) => step.migration.flags.destructive,
             PlanStep::SynchronizeIdentity(step) => step.migration.flags.destructive,
-            PlanStep::OnlineRename(RenameStep::SqliteRebuild(rb)) => rb.migration.flags.destructive,
-            PlanStep::OnlineRename(RenameStep::PgExpandContract(_)) => false,
+            PlanStep::OnlineRename(RenameStep::TableRebuild(rb)) => rb.migration.flags.destructive,
+            PlanStep::OnlineRename(RenameStep::ExpandContract(_)) => false,
         }
     }
 
@@ -278,12 +291,12 @@ impl PlanStep {
             {
                 Some(step.migration.version.as_str())
             }
-            PlanStep::OnlineRename(RenameStep::SqliteRebuild(rb))
+            PlanStep::OnlineRename(RenameStep::TableRebuild(rb))
                 if rb.migration.flags.destructive || rb.migration.flags.requires_approval =>
             {
                 Some(rb.migration.version.as_str())
             }
-            PlanStep::OnlineRename(RenameStep::PgExpandContract(ec)) => Some(
+            PlanStep::OnlineRename(RenameStep::ExpandContract(ec)) => Some(
                 ec.expand
                     .first()
                     .map_or_else(|| ec.trigger_version.as_str(), |e1| e1.version.as_str()),
@@ -334,10 +347,10 @@ impl PlanStep {
     #[must_use]
     pub fn touched_table(&self) -> Option<&str> {
         match self {
-            PlanStep::OnlineRename(RenameStep::PgExpandContract(ec)) => match &ec.intent {
+            PlanStep::OnlineRename(RenameStep::ExpandContract(ec)) => match &ec.intent {
                 OnlineIntent::RenameColumn { table, .. } => Some(table.as_str()),
             },
-            PlanStep::OnlineRename(RenameStep::SqliteRebuild(rb)) => Some(rb.spec.table.as_str()),
+            PlanStep::OnlineRename(RenameStep::TableRebuild(rb)) => Some(rb.spec.table.as_str()),
             PlanStep::Backfill { spec, .. } => Some(spec.table.as_str()),
             PlanStep::AlterPrimaryKey(step) => Some(step.table.as_str()),
             PlanStep::AlterColumnType(step) => Some(step.table.as_str()),
