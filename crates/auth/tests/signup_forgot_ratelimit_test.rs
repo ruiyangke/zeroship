@@ -392,24 +392,49 @@ async fn signup_non_duplicate_create_error_renders_error_page() {
         return;
     };
 
+    // `zeroship.users` is shared with every concurrent run, so this constraint
+    // is scoped twice and both halves are load-bearing.
+    //
+    // The NAME is per-run. Under the fixed `auth_users_signup_m3_name_check`
+    // a peer reaching this same test dropped, re-added and finally dropped THE
+    // SAME constraint this run depends on, leaving a window with no constraint
+    // at all in which the create this test needs to FAIL instead succeeds and
+    // the handler redirects.
+    //
+    // The PREDICATE names this run's own row. `CHECK (name <> 'M3_FAIL')`
+    // rejected any row so named, by anyone, for as long as it existed - so a
+    // peer holding its own M3_FAIL row mid-test made the ADD itself fail the
+    // validation scan. That arm also outlives the run that caused it: a process
+    // that dies between the ADD and the DROP leaves the constraint on a
+    // database nothing drops, and every later run - including single ones -
+    // fails the same way on the residue.
+    //
+    // MEASURED 2026-08-20, the four DDL-installing auth test modules run in two
+    // concurrent processes against one database, five pairs: this test failed
+    // in 9 of the 10 runs, in both shapes - `left: 302, right: 200` and
+    // `check constraint "auth_users_signup_m3_name_check" of relation "users"
+    // is violated by some row`. With the scoping below, and nothing else
+    // changed, 0 of 10.
+    //
+    // What this does NOT remove: `ADD CONSTRAINT` still takes ACCESS EXCLUSIVE
+    // on the shared table, so a peer's writes to `users` block for the length
+    // of the catalogue update and the validation scan. That is brief and it is
+    // a wait, not a failure; only not doing DDL on a shared table removes it.
+    let email = format!("signup-m3-{}@zeroship.test", Uuid::new_v4().simple());
+    let name_check = format!(
+        "auth_users_signup_m3_name_check_{}",
+        Uuid::new_v4().simple()
+    );
     client
         .execute(
-            "ALTER TABLE zeroship.users \
-             DROP CONSTRAINT IF EXISTS auth_users_signup_m3_name_check",
-            &[],
-        )
-        .await
-        .expect("drop stale test constraint");
-    client
-        .execute(
-            "ALTER TABLE zeroship.users \
-             ADD CONSTRAINT auth_users_signup_m3_name_check CHECK (name <> 'M3_FAIL')",
+            &format!(
+                "ALTER TABLE zeroship.users ADD CONSTRAINT {name_check} \
+                 CHECK (name <> 'M3_FAIL' OR email::text <> '{email}')"
+            ),
             &[],
         )
         .await
         .expect("add test constraint");
-
-    let email = format!("signup-m3-{}@zeroship.test", Uuid::new_v4().simple());
     let pg = Arc::new(client);
     let cfg = Arc::new(test_cfg(&dsn));
     let mailer = Arc::new(CountingMailer::default());
@@ -496,8 +521,7 @@ async fn signup_non_duplicate_create_error_renders_error_page() {
     assert_eq!(created, 0, "failed signup must not create user");
 
     pg.execute(
-        "ALTER TABLE zeroship.users \
-         DROP CONSTRAINT IF EXISTS auth_users_signup_m3_name_check",
+        &format!("ALTER TABLE zeroship.users DROP CONSTRAINT IF EXISTS {name_check}"),
         &[],
     )
     .await

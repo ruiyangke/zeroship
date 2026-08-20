@@ -4,6 +4,7 @@
 //! random email so concurrent runs don't collide; the cleanup at the end
 //! removes every row the test inserted.
 
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
 use compio_postgres::{connect, Client, NoTls};
@@ -28,6 +29,36 @@ fn test_cfg(db_url: &str) -> AuthConfig {
         Some("test-stash-key-not-for-prod-32bytes!".to_owned()),
     );
     cfg
+}
+
+/// A per-call loopback address for the `x-forwarded-for` header every `/reset`
+/// POST below carries.
+///
+/// `reset::post` keys its rate limit on `reset_ip:{client_ip}`, and
+/// `headers::client_ip` reads THAT HEADER ALONE - `TestRequest::peer_addr` does
+/// not reach `req.peer_addr()`, so a request without the header resolves to
+/// `0.0.0.0` and lands in one bucket shared by every request, every test and
+/// every concurrent run. `Bucket::RESET_IP` is 30 tokens refilling at 30/hour,
+/// so that bucket does not recover inside a test session: once two runs have
+/// drained it, every later run on the same database keeps taking 429 where
+/// these tests assert 302, for an hour, whether or not anything is running
+/// concurrently.
+///
+/// MEASURED 2026-08-20, five concurrent pairs of the four DDL-installing auth
+/// modules on one shared database: of this file's three `reset_post_*` tests,
+/// two failed in 10 of 10 runs and the third in 9, every one of them
+/// `left: 429, right: 302` with a `password_reset_throttled` audit row naming
+/// bucket `reset_per_ip`.
+///
+/// `signup_forgot_ratelimit_test` carries the same helper for the same reason.
+fn unique_loopback() -> IpAddr {
+    let bytes = *Uuid::new_v4().as_bytes();
+    IpAddr::V4(Ipv4Addr::new(
+        127,
+        bytes[0].max(1),
+        bytes[1].max(1),
+        bytes[2].max(1),
+    ))
 }
 
 fn read_set_cookie(headers: &ntex::http::HeaderMap, name: &str) -> Option<String> {
@@ -86,44 +117,63 @@ async fn seed_test_plan(client: &Client) -> &'static str {
     plan_id
 }
 
-async fn install_magic_links_insert_delay(client: &Client) {
+// `zeroship.magic_links` is shared with every concurrent run, so the name is
+// per-call and the `WHEN` clause scopes the trigger to this test's own email.
+// Doing only the first is the trap: a uniquely named trigger still fires - and
+// sleeps 0.2s - inside the peer run's inserts.
+//
+// This helper was a byte-for-byte copy of `magic_link_test`'s, down to the
+// object name `test_sleep_before_magic_link_insert`, so the two collided on one
+// table even inside a SINGLE run. That was invisible only because these are
+// modules of one `tests/main.rs` binary and the gate passes `--test-threads 1`:
+// accidental isolation, exactly what this change removes the dependence on.
+//
+// The full argument, and the model it follows, is in `magic_link_test.rs`.
+async fn install_magic_links_insert_delay(client: &Client, email: &str) -> String {
+    let name = format!(
+        "test_sleep_before_reset_link_insert_{}",
+        Uuid::new_v4().simple()
+    );
     client
         .execute(
-            "CREATE OR REPLACE FUNCTION zeroship.test_sleep_before_magic_link_insert() \
-             RETURNS trigger LANGUAGE plpgsql AS $$ \
-             BEGIN \
-                 PERFORM pg_sleep(0.2); \
-                 RETURN NEW; \
-             END \
-             $$",
+            &format!(
+                "CREATE FUNCTION zeroship.{name}() \
+                 RETURNS trigger LANGUAGE plpgsql AS $$ \
+                 BEGIN \
+                     PERFORM pg_sleep(0.2); \
+                     RETURN NEW; \
+                 END \
+                 $$"
+            ),
             &[],
         )
         .await
         .expect("create insert delay function");
     client
         .execute(
-            "DROP TRIGGER IF EXISTS test_sleep_before_magic_link_insert ON zeroship.magic_links",
-            &[],
-        )
-        .await
-        .expect("drop stale insert delay trigger");
-    client
-        .execute(
-            "CREATE TRIGGER test_sleep_before_magic_link_insert \
-             BEFORE INSERT ON zeroship.magic_links \
-             FOR EACH ROW EXECUTE FUNCTION zeroship.test_sleep_before_magic_link_insert()",
+            &format!(
+                "CREATE TRIGGER {name} \
+                 BEFORE INSERT ON zeroship.magic_links \
+                 FOR EACH ROW WHEN (NEW.email = '{email}'::citext) \
+                 EXECUTE FUNCTION zeroship.{name}()"
+            ),
             &[],
         )
         .await
         .expect("create insert delay trigger");
+    name
 }
 
-async fn drop_magic_links_insert_delay(client: &Client) {
+async fn drop_magic_links_insert_delay(client: &Client, name: &str) {
     client
         .execute(
-            "DROP TRIGGER IF EXISTS test_sleep_before_magic_link_insert ON zeroship.magic_links",
+            &format!("DROP TRIGGER IF EXISTS {name} ON zeroship.magic_links"),
             &[],
         )
+        .await
+        .ok();
+    client
+        .execute(&format!("DROP FUNCTION IF EXISTS zeroship.{name}()"), &[])
         .await
         .ok();
 }
@@ -229,6 +279,10 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
         .finish();
     let post_req = test::TestRequest::post()
         .uri("/reset")
+        // Not `peer_addr`: the handler keys its rate limit on the FORWARDED ip
+        // alone, and without this header every run shares `reset_ip:0.0.0.0`.
+        // See `unique_loopback` for the measurement.
+        .header("x-forwarded-for", unique_loopback().to_string())
         .header("content-type", "application/x-www-form-urlencoded")
         .header("cookie", format!("__Host-zsidp_csrf={csrf}"))
         .set_payload(body)
@@ -362,6 +416,10 @@ async fn reset_post_consumes_magic_login_state_for_same_email() {
         .finish();
     let post_req = test::TestRequest::post()
         .uri("/reset")
+        // Not `peer_addr`: the handler keys its rate limit on the FORWARDED ip
+        // alone, and without this header every run shares `reset_ip:0.0.0.0`.
+        // See `unique_loopback` for the measurement.
+        .header("x-forwarded-for", unique_loopback().to_string())
         .header("content-type", "application/x-www-form-urlencoded")
         .header("cookie", format!("__Host-zsidp_csrf={csrf}"))
         .set_payload(body)
@@ -425,7 +483,7 @@ async fn concurrent_issue_leaves_one_active_reset_token() {
     let user = users::create(&client, &email, "Test", None)
         .await
         .expect("seed user");
-    install_magic_links_insert_delay(&client).await;
+    let insert_delay = install_magic_links_insert_delay(&client, &email).await;
 
     let client_a = pg_connect(&dsn).await;
     let client_b = pg_connect(&dsn).await;
@@ -439,7 +497,7 @@ async fn concurrent_issue_leaves_one_active_reset_token() {
     issue_a.await.expect("join issue A").expect("issue A");
     issue_b.await.expect("join issue B").expect("issue B");
 
-    drop_magic_links_insert_delay(&client).await;
+    drop_magic_links_insert_delay(&client, &insert_delay).await;
 
     let active_count: i64 = client
         .query_one(
@@ -756,6 +814,10 @@ async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
         .finish();
     let post_req = test::TestRequest::post()
         .uri("/reset")
+        // Not `peer_addr`: the handler keys its rate limit on the FORWARDED ip
+        // alone, and without this header every run shares `reset_ip:0.0.0.0`.
+        // See `unique_loopback` for the measurement.
+        .header("x-forwarded-for", unique_loopback().to_string())
         .header("content-type", "application/x-www-form-urlencoded")
         .header("cookie", format!("__Host-zsidp_csrf={csrf}"))
         .set_payload(body)
