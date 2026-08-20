@@ -797,12 +797,24 @@ jobs:
   # far as dialling it.
   #
   # MEASURED 2026-08-20 on a worktree with no overlay, against a real
-  # postgres:16 with no POSTGRES_DB and no postgres-init.sql - the same shape as
-  # a `services:` container - with this job's own PG_* values:
-  #   without the provisioning step  exit 2, 0 `test result:` lines
-  #   with it                        the suite runs and reports its tally
-  # The transcript is in the branch's commit body; the numbers are auth-gate's
-  # because it is the cheaper of the two to build.
+  # postgres:16 with no POSTGRES_DB and no postgres-init.sql (so the `postgres`
+  # role has no search_path either) - the same shape as a `services:` container.
+  # Same command, same server, one variable apart:
+  #   no overlay    exit 2,  0 `test result:` lines, 0 tests
+  #   overlay       exit 0, 26 `test result:` lines,
+  #                 "AUTH SUITE: 641 tests passed, 0 unexpected skips,
+  #                  1 allowlisted (floor 604)"
+  # THE NUMBERS ARE auth-gate's. billing-gate was NOT run: it additionally needs
+  # a Redpanda this machine had no free port for, and its 748-test suite plus a
+  # cold zeroship-control build did not fit the session. Its overlay hurdle is
+  # the same `zs_test_config_load` call and the same fix; what is unverified is
+  # everything AFTER that line.
+  #
+  # A separate control, so the fix cannot be read as having quietened the
+  # refusal: with the overlay naming :5444 and the caller asking for :5432, the
+  # same command still exits 2 with 0 tests and prints "the server you asked for
+  # is not the server the overlay names". tests/lib_test_config_selftest.sh
+  # covers all 16 arms and is green.
   #
   # `--check` is the arm that ADOPTS a server rather than starting one: it skips
   # the `docker compose up` entirely and only probes the addresses it is given,
