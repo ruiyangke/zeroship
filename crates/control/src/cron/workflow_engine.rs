@@ -365,16 +365,30 @@ where
 
 /// Locate the journal holding `run_id` by searching every app's journal.
 ///
-/// This is a LOOKUP, not a sweep, and it deliberately does NOT skip an app whose
-/// journal it cannot read. `Ok(None)` here means "no such run", and callers act
-/// on that by dropping the work; producing it from an app that was merely
-/// unreadable would turn a permission gap into silent data loss. An unreadable
-/// journal therefore propagates and the caller retries.
+/// This is a LOOKUP, not a sweep, and `Ok(None)` here means "no such run".
+/// Callers act on that by dropping the work: `sync_scheduler_for_run_on` acks
+/// the scheduler timer as TERMINAL, retiring a live run's timer for good, and
+/// `cascade_cancel_children` reports that there are no children to cancel.
+/// Manufacturing `None` from an app that was merely unreadable would turn a
+/// permission gap into silent data loss.
+///
+/// So the readable journals are searched FIRST and an unreadable app only
+/// matters once the search comes up empty - at which point "no such run" is not
+/// a safe answer and this errors instead, leaving the caller to retry. That
+/// ordering is the design: a healthy tenant's run is still found while another
+/// app's privilege gap is open, so this is NOT the fleet-wide coupling the
+/// sweeps were fixed to remove, but no `None` is ever produced from one.
+///
+/// The paragraph above described an INTENT the code did not implement until
+/// this was fixed: the app list came from a helper that dropped unreadable apps
+/// with a WARN, so an unreadable journal really did produce `Ok(None)` and the
+/// run's timer really was acked terminal.
 async fn find_run_tables<C>(conn: &C, run_id: &str) -> Result<Option<WorkflowTables>, RegistryError>
 where
     C: GenericClient + Sync,
 {
-    for app_id in journalled_fleet(conn).await?.readable {
+    let fleet = journalled_fleet(conn).await?;
+    for app_id in fleet.readable {
         let Some(tables) = existing_tables(conn, &app_id).await? else {
             continue;
         };
@@ -387,7 +401,29 @@ where
             return Ok(Some(tables));
         }
     }
+    if let Some(app_id) = fleet.unreadable.first() {
+        return Err(RegistryError::Database(format!(
+            "cannot decide whether workflow run {run_id} exists: \
+             app {app_id}'s journal is unreadable on this connection"
+        )));
+    }
     Ok(None)
+}
+
+/// Integration-test window onto [`find_run_tables`], which is private because
+/// nothing outside this module should be locating a run by fleet scan.
+///
+/// Exposed so a test can assert the DIFFERENCE between "no such run" and "could
+/// not tell", which is the whole point of that function and is otherwise only
+/// observable through several layers of scheduler ack.
+#[cfg(feature = "live-db-tests")]
+#[allow(clippy::future_not_send)]
+pub async fn __find_run_app_for_test(
+    registry: &Registry,
+    run_id: &str,
+) -> Result<Option<Uuid>, RegistryError> {
+    let conn = registry.conn().await?;
+    Ok(find_run_tables(&conn, run_id).await?.map(|t| t.app_id))
 }
 
 #[async_trait(?Send)]
