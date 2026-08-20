@@ -465,6 +465,66 @@ pub fn reset_context_for_tests() {
     ctx_mut(|c| *c = context::IsolateDbContext::new());
 }
 
+/// Test helper: hand this isolate the column root keys its backends
+/// should resolve `t.encrypted(...)` columns from, instead of
+/// `ZEROSHIP_COLUMN_KEY_<KEYID>`.
+///
+/// Each entry is `(key_id, root_hex)` where `root_hex` is 64 hex
+/// characters. The keys land in the per-isolate context
+/// (`IsolateDbContext::set_supplied_root_keys`), so every backend
+/// constructed on this thread AFTERWARDS picks them up - including the
+/// ones a test never sees, such as the `SqliteBackend` that
+/// `init_pool_async` builds behind a V8 dispatch and the
+/// `PostgresBackend` that `set_pool` builds. That is the whole point:
+/// the process environment was the only channel that reached those, and
+/// mutating it is process-global, racy, and `unsafe`. A thread-local is
+/// none of the three, so two tests running in parallel on different
+/// threads cannot see each other's roots.
+///
+/// An EMPTY slice installs a source that provably holds no key, which is
+/// how a test asserts the `column_key_not_configured` error without
+/// depending on what the ambient environment happens to contain.
+///
+/// The returned guard withdraws the whole source on drop, so a test's
+/// roots do not leak into the next test that runs on the same thread.
+/// Hold it for the body of the test (`let _keys = ...;`).
+///
+/// # Panics
+/// If any `root_hex` is not 64 hex characters. A malformed fixture key
+/// is a test bug, and failing here names the key id instead of
+/// surfacing as a decrypt failure later.
+#[cfg(any(test, feature = "test-helpers"))]
+#[doc(hidden)]
+#[must_use]
+pub fn supply_root_keys_for_tests(roots: &[(&str, &str)]) -> SuppliedRootKeysGuard {
+    let keys = Rc::new(crate::encryption::SuppliedRootKeys::new());
+    for (key_id, hex) in roots {
+        keys.insert_hex(key_id, hex)
+            .unwrap_or_else(|e| panic!("fixture root key '{key_id}' must parse: {e:?}"));
+    }
+    ctx_mut(|c| c.set_supplied_root_keys(Some(Rc::clone(&keys))));
+    SuppliedRootKeysGuard { _keys: keys }
+}
+
+/// Guard returned by [`supply_root_keys_for_tests`]. Withdraws the
+/// isolate's supplied root keys on drop.
+///
+/// Opaque on purpose: the source itself stays reachable only through the
+/// context, so a test cannot hold a root alive past the guard.
+#[cfg(any(test, feature = "test-helpers"))]
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct SuppliedRootKeysGuard {
+    _keys: Rc<crate::encryption::SuppliedRootKeys>,
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+impl Drop for SuppliedRootKeysGuard {
+    fn drop(&mut self) {
+        ctx_mut(|c| c.set_supplied_root_keys(None));
+    }
+}
+
 /// Test helper: install a `SqliteBackend` into the per-
 /// isolate context so the unmask integration suite can drive
 /// `crud::unmask::dispatch_unmask` against a freshly-constructed

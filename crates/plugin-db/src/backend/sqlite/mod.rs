@@ -407,15 +407,15 @@ impl SqliteBackend {
         #[cfg(any(test, feature = "test-helpers"))]
         let nonce_cache = session_minter::NonceCache::new_shared(nonce_capacity);
 
-        // Wire the column-key store. SQLite has no
-        // admin-schema sidecar (no SECURITY DEFINER getter equivalent),
-        // so the only sourcing variant is `EnvVar` - mirrors the
-        // session-minter pattern where the secret comes from
-        // `ZEROSHIP_SESSION_SECRET`. Cache lives for the lifetime of
-        // the backend; clears on backend drop.
-        let key_store = crate::encryption::KeyStore::new(
-            crate::encryption::KeySource::EnvVar,
-        );
+        // Wire the column-key store. SQLite has no admin-schema sidecar
+        // (no SECURITY DEFINER getter equivalent), so sourcing is always
+        // LOCAL: the roots this isolate was handed, else
+        // `ZEROSHIP_COLUMN_KEY_<KEYID>` - mirrors the session-minter
+        // pattern where the secret comes from `ZEROSHIP_SESSION_SECRET`.
+        // Cache lives for the lifetime of the backend; clears on backend
+        // drop.
+        let key_store =
+            crate::encryption::KeyStore::new(crate::context::sqlite_key_source());
 
         Self {
             memory_db_dir,
@@ -471,12 +471,11 @@ impl SqliteBackend {
         let nonce_cache =
             session_minter::NonceCache::new_shared(session_minter::DEFAULT_NONCE_CAPACITY);
 
-        // Same `KeyStore::EnvVar` shape as `new()`. The
-        // test helper diverges only on the session-minter secret; the
-        // column-key store reads from env vars regardless.
-        let key_store = crate::encryption::KeyStore::new(
-            crate::encryption::KeySource::EnvVar,
-        );
+        // Same local-source shape as `new()`. The test helper diverges
+        // only on the session-minter secret; the column-key store reads
+        // the isolate's local source regardless.
+        let key_store =
+            crate::encryption::KeyStore::new(crate::context::sqlite_key_source());
 
         Ok(Self {
             memory_db_dir: None,
@@ -2075,13 +2074,14 @@ impl crate::backend::SpatialIndex for SqliteBackend {
 //
 // Symmetric to the PG-side impl in `backend/postgres.rs`. Crypto math
 // is shared with PG via `crate::encryption::aead`; key sourcing
-// diverges: SQLite is env-var-only (`KeySource::EnvVar`) because
-// there's no admin-schema sidecar (no SECURITY DEFINER getter
-// equivalent on SQLite). Mirrors the session-minter pattern where
-// the secret comes from `ZEROSHIP_SESSION_SECRET`.
+// diverges: SQLite is local-only (`KeySource::Local`) because there's
+// no admin-schema sidecar (no SECURITY DEFINER getter equivalent on
+// SQLite), so a root comes either from the isolate's supplied keys or
+// from `ZEROSHIP_COLUMN_KEY_<KEYID>`. Mirrors the session-minter
+// pattern where the secret comes from `ZEROSHIP_SESSION_SECRET`.
 //
-// Key sourcing on SQLite is env-var-only; the `sqlite` feature gate on
-// this file already restricts the build to SQLite-enabled targets.
+// The `sqlite` feature gate on this file already restricts the build to
+// SQLite-enabled targets.
 
 // Real `EncryptedColumn` body. Delegates to the workspace
 // `crate::encryption::aead` module (mode-dispatch on encrypt; mode-

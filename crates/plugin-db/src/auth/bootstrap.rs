@@ -601,8 +601,9 @@ async fn install_mask_policy_functions(pool: &Pool) -> Result<(), DbError> {
 ///
 /// Returns the 32-byte root key for `p_key_id`, or NULL when the row is
 /// absent. `KeySource::PgAdminTable` calls this; NULL falls through to
-/// env-var sourcing so apps that haven't run the column-keys migration
-/// continue to function unchanged.
+/// that source's local fallback (supplied roots, else env vars) so apps
+/// that haven't run the column-keys migration continue to function
+/// unchanged.
 ///
 /// EXECUTE granted to PUBLIC — the function is the ONLY way app code
 /// reaches the raw bytes (the table itself is REVOKEd above). The

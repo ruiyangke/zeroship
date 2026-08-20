@@ -4889,40 +4889,28 @@ use zeroship_plugin_db::backend::{EncryptedColumn as _, EncryptionMode, Postgres
 use zeroship_plugin_db::encryption;
 use zeroship_plugin_db::error::DbError;
 
-/// Helper: set a synthetic root key in `ZEROSHIP_COLUMN_KEY_DEFAULT`
-/// for the duration of a test, restoring the previous value on drop.
-struct WithEnv {
-    name: &'static str,
-    prev: Option<String>,
-}
-#[allow(unsafe_code)]
-impl WithEnv {
-    /// `prev` is supplied by the CALLER, already read through a declared key.
-    /// Reading it here from `name: &str` made this an unattributable read: the
-    /// literal lived at the call site and the read lived here.
-    fn set(name: &'static str, value: &str, prev: Option<String>) -> Self {
-        // SAFETY: each test that touches the env var serialises via
-        // --test-threads=1 (per `required-features`). The
-        // `ZEROSHIP_COLUMN_KEY_*` namespace is plugin-db-owned; no
-        // other crate touches it. Std env mutation is `unsafe` in
-        // 2024-edition; we accept the contract here.
-        unsafe {
-            std::env::set_var(name, value);
-        }
-        Self { name, prev }
-    }
-}
-#[allow(unsafe_code)]
-impl Drop for WithEnv {
-    fn drop(&mut self) {
-        // SAFETY: same justification as above.
-        unsafe {
-            match &self.prev {
-                Some(p) => std::env::set_var(self.name, p),
-                None => std::env::remove_var(self.name),
-            }
-        }
-    }
+/// Helper: hand this isolate a synthetic root key for `key_id`, so the
+/// `PostgresBackend` the test (or the CRUD path behind it) constructs
+/// resolves column keys from it.
+///
+/// This REPLACES a `set_var("ZEROSHIP_COLUMN_KEY_<KEYID>", ...)` guard.
+/// The env var was the only channel that reached a backend the test did
+/// not build itself, and it was process-global: every test in this binary
+/// shared one `ZEROSHIP_COLUMN_KEY_DEFAULT`, so the guard's own comment
+/// claiming `--test-threads=1` serialisation (which nothing in
+/// `Cargo.toml` actually requests) was the only thing standing between
+/// six tests and each other's roots. The isolate context is per-thread,
+/// so that race cannot happen here.
+///
+/// The PG resolve path is unchanged: `PostgresBackend` still calls the
+/// SECURITY DEFINER `__zeroship_admin.get_column_key` getter first and
+/// only falls back to this source when the getter returns NULL, which is
+/// the same arm the env var used to occupy.
+///
+/// The returned guard withdraws the keys on drop; keep it alive for the
+/// test body.
+fn with_root_key(key_id: &str, root_hex: &str) -> zeroship_plugin_db::SuppliedRootKeysGuard {
+    zeroship_plugin_db::supply_root_keys_for_tests(&[(key_id, root_hex)])
 }
 
 /// Gate #1: round-trip an encrypted string column. Insert a
@@ -4933,11 +4921,7 @@ async fn encrypted_column_round_trip_randomised() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     // Synthetic 32-byte root key.
-    let _env = WithEnv::set(
-        "ZEROSHIP_COLUMN_KEY_DEFAULT",
-        &"a".repeat(64),
-        zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_DEFAULT"),
-    );
+    let _keys = with_root_key("default", &"a".repeat(64));
 
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{SCHEMA}\" CASCADE"), &[])
         .await
@@ -5015,11 +4999,7 @@ async fn encrypted_column_round_trip_randomised() {
 async fn encrypted_randomised_row_swap_rejected() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    let _env = WithEnv::set(
-        "ZEROSHIP_COLUMN_KEY_DEFAULT",
-        &"b".repeat(64),
-        zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_DEFAULT"),
-    );
+    let _keys = with_root_key("default", &"b".repeat(64));
 
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{SCHEMA}\" CASCADE"), &[])
         .await
@@ -5122,11 +5102,7 @@ async fn encrypted_randomised_row_swap_rejected() {
 async fn encrypted_deterministic_equality_lookup() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    let _env = WithEnv::set(
-        "ZEROSHIP_COLUMN_KEY_DEFAULT",
-        &"c".repeat(64),
-        zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_DEFAULT"),
-    );
+    let _keys = with_root_key("default", &"c".repeat(64));
 
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{SCHEMA}\" CASCADE"), &[])
         .await
@@ -5214,16 +5190,11 @@ async fn encrypted_deterministic_equality_lookup() {
 ///     the encrypted column to plaintext and wraps the masked column.
 /// Nothing here consults the declared schema for the crypto/mask decisions --
 /// the seam is `crud::introspect_schema::runtime_schema_for`, exercised faithfully.
-#[allow(unsafe_code)]
 #[compio::test]
 async fn p4_round_trip_encrypted_masked_vector_via_introspected_metadata() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-    let _env = WithEnv::set(
-        "ZEROSHIP_COLUMN_KEY_DEFAULT",
-        &"d".repeat(64),
-        zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_DEFAULT"),
-    );
+    let _keys = with_root_key("default", &"d".repeat(64));
 
     let app = "p4_round_trip";
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
@@ -5432,7 +5403,6 @@ async fn pg_table_exists(pool: &std::rc::Rc<Pool>, app: &str, table: &str) -> bo
 ///   * no per-app schema/audit journal was created (the old `bootstrap` did),
 /// proving the runtime is no longer a PG schema applier. The engine's
 /// deploy-apply is the sole PG authority.
-#[allow(unsafe_code)]
 #[compio::test]
 async fn p5_pg_register_model_issues_no_runtime_ddl() {
     let url = require_pg().await;
@@ -5490,16 +5460,11 @@ async fn p5_pg_register_model_issues_no_runtime_ddl() {
 /// count is unchanged), yet encryption + mask CRUD still round-trip end-to-end
 /// driven by the INTROSPECTED metadata -- proving the data plane is
 /// intact while the runtime applied nothing.
-#[allow(unsafe_code)]
 #[compio::test]
 async fn p5_pg_crud_works_via_engine_created_schema_no_runtime_ddl() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-    let _env = WithEnv::set(
-        "ZEROSHIP_COLUMN_KEY_DEFAULT",
-        &"e".repeat(64),
-        zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_DEFAULT"),
-    );
+    let _keys = with_root_key("default", &"e".repeat(64));
 
     let app = "p5_engine_created";
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
@@ -5657,21 +5622,22 @@ async fn p5_pg_crud_works_via_engine_created_schema_no_runtime_ddl() {
     release_pg(pool).await;
 }
 
-/// When `ZEROSHIP_COLUMN_KEY_DEFAULT` is unset (no env
-/// var AND the `__zeroship_admin.column_keys` row is missing), the
-/// PG resolver surfaces a typed `column_key_not_configured`
-/// Configuration error rather than panicking or returning Internal.
-#[allow(unsafe_code)]
+/// When no root key is configured for `missing_test` (the fallback
+/// source holds none AND the `__zeroship_admin.column_keys` row is
+/// missing), the PG resolver surfaces a typed
+/// `column_key_not_configured` Configuration error rather than panicking
+/// or returning Internal.
 #[compio::test]
 async fn encrypted_column_missing_key_typed_error() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    // Defensively clear the env var (and don't restore — this test
-    // runs with --test-threads=1).
-    // SAFETY: same justification as `WithEnv`.
-    unsafe {
-        std::env::remove_var("ZEROSHIP_COLUMN_KEY_MISSING_TEST");
-    }
+    // Resolve against a source that provably has NO key: an empty
+    // supplied set. The previous form deleted one env var name and
+    // trusted the ambient environment to be otherwise clean, so a
+    // `ZEROSHIP_COLUMN_KEY_MISSING_TEST` exported outside the test would
+    // have turned this assertion green-for-the-wrong-reason. An empty
+    // set cannot.
+    let _keys = zeroship_plugin_db::supply_root_keys_for_tests(&[]);
 
     let backend = PostgresBackend::new(pool.clone(), url.clone());
     let err = backend
@@ -5690,9 +5656,13 @@ async fn encrypted_column_missing_key_typed_error() {
 
 /// **I1** — the SECURITY DEFINER `__zeroship_admin.get_column_key`
 /// path must read `bytea` in binary form rather than falling through
-/// to the env-var source. Pin it by seeding the admin table with one
-/// root and the env var with a different root: the resolved key must
+/// to the fallback source. Pin it by seeding the admin table with one
+/// root and the fallback with a DIFFERENT root: the resolved key must
 /// match the admin-table root.
+///
+/// The contrast is the whole test, so the fallback must genuinely hold a
+/// root. It used to be an env var; it is now a supplied root, which is
+/// the same fallback arm reached by the same code path.
 #[compio::test]
 async fn pg_admin_table_key_source_reads_bytea_directly() {
     use hkdf::Hkdf;
@@ -5705,14 +5675,9 @@ async fn pg_admin_table_key_source_reads_bytea_directly() {
         .expect("ensure_admin_schema");
 
     let key_id = "admin_table_test";
-    let env_name = "ZEROSHIP_COLUMN_KEY_ADMIN_TABLE_TEST";
     let admin_root_hex = "11".repeat(32);
-    let env_root_hex = "22".repeat(32);
-    let _env = WithEnv::set(
-        env_name,
-        &env_root_hex,
-        zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_ADMIN_TABLE_TEST"),
-    );
+    let fallback_root_hex = "22".repeat(32);
+    let _keys = with_root_key(key_id, &fallback_root_hex);
 
     pool.execute(
         r#"DELETE FROM "__zeroship_admin"."column_keys" WHERE key_id = $1"#,
@@ -5753,7 +5718,7 @@ async fn pg_admin_table_key_source_reads_bytea_directly() {
 
     assert_eq!(
         resolved.k_enc, expected_k_enc,
-        "resolve_key must use the admin-table root, not the env-var fallback",
+        "resolve_key must use the admin-table root, not the fallback source",
     );
     assert_eq!(resolved.k_siv, expected_k_siv);
     drop(backend);
@@ -7577,16 +7542,16 @@ async fn drop_namespace_retries_from_step_3_on_partial_failure() {
 // stamped token entirely (read the never-set env var → always `"cold_start"`), so
 // the bumped token had no effect and the stale v1 schema (no `phone` mask) was
 // returned.
-#[allow(unsafe_code)]
 #[compio::test]
 async fn t6_introspection_cache_invalidates_on_deploy_token_bump() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-    let _env = WithEnv::set(
-        "ZEROSHIP_COLUMN_KEY_DEFAULT",
-        &"t".repeat(64),
-        zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_DEFAULT"),
-    );
+    // "f", not the "t" this fixture carried while it was an env var. "t" is
+    // not a hex digit, so that root could never have decoded; the env path
+    // only found out at first `resolve_key`, and this test never encrypts
+    // anything, so the bad fixture sat here unreported. Supplied roots parse
+    // on install, which is where a fixture typo should surface.
+    let _keys = with_root_key("default", &"f".repeat(64));
 
     let app = "t6_deploy_cache";
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])

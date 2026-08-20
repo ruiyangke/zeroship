@@ -38,6 +38,7 @@ use compio_postgres::{Client, Pool};
 
 use crate::backend::sqlite::session::SqliteSessionHandle;
 use crate::backend::{BackendHandle, PostgresBackend};
+use crate::encryption::{LocalKeySource, SuppliedRootKeys};
 use crate::broker::ChangeEvent;
 use crate::error::DbError;
 
@@ -328,6 +329,23 @@ pub struct IsolateDbContext {
     /// server-injected `app_id` — in the SUCCESS arm only. Platform-measured,
     /// unforgeable by app code. `None` in meter-less test harnesses.
     meter: Option<Arc<zeroship_metering::Meter>>,
+
+    /// Column root keys handed to this isolate directly, in place of
+    /// `ZEROSHIP_COLUMN_KEY_<KEYID>`.
+    ///
+    /// Every backend installed on this isolate resolves column keys
+    /// through [`Self::local_key_source`], so this is the per-isolate
+    /// injection vehicle for root key material - the same shape the
+    /// server-injected `app_id` and deploy token already use, and the one
+    /// a host that holds key material (rather than exporting it into the
+    /// process environment) would install into.
+    ///
+    /// `None` today on every production vector: nothing in the worker or
+    /// the CLI installs roots here yet, so those backends read env vars.
+    /// The installer that does exist is
+    /// `crate::supply_root_keys_for_tests`, which is how the test suites
+    /// drive encrypted columns without mutating the process environment.
+    supplied_root_keys: Option<Rc<SuppliedRootKeys>>,
 }
 
 impl IsolateDbContext {
@@ -355,6 +373,35 @@ impl IsolateDbContext {
             backend: None,
             backend_init_in_progress: false,
             meter: None,
+            supplied_root_keys: None,
+        }
+    }
+
+    // ----- column root keys -------------------------------------------
+
+    /// Install the root-key material this isolate's backends should resolve
+    /// column keys from, in place of `ZEROSHIP_COLUMN_KEY_<KEYID>`.
+    ///
+    /// `None` restores env sourcing. Installing an EMPTY
+    /// [`SuppliedRootKeys`] is not the same thing: that is a source that
+    /// provably holds no key, which is what a caller wants when it needs
+    /// the not-configured error to be a fact about the source rather than
+    /// about the ambient environment.
+    pub(crate) fn set_supplied_root_keys(&mut self, keys: Option<Rc<SuppliedRootKeys>>) {
+        self.supplied_root_keys = keys;
+    }
+
+    /// The local root-key source every backend built on this isolate
+    /// should use: whatever was installed above, else the env vars.
+    ///
+    /// Backends call this THROUGH the context they are being installed
+    /// into rather than reaching for the thread-local themselves, because
+    /// [`Self::set_pool`] constructs a `PostgresBackend` while it already
+    /// holds `&mut self` and a second borrow of `ISOLATE_CTX` would panic.
+    pub(crate) fn local_key_source(&self) -> LocalKeySource {
+        match &self.supplied_root_keys {
+            Some(keys) => LocalKeySource::Supplied(Rc::clone(keys)),
+            None => LocalKeySource::EnvVar,
         }
     }
 
@@ -395,7 +442,16 @@ impl IsolateDbContext {
     /// [`BackendHandle::Postgres`] arm.
     pub(crate) fn set_pool(&mut self, pool: Rc<Pool>) {
         let url = self.db_url.clone().unwrap_or_default();
-        let backend = Rc::new(PostgresBackend::new(Rc::clone(&pool), url));
+        // Admin table first, this isolate's local source behind it.
+        let key_source = crate::encryption::KeySource::pg_admin_table_with_fallback(
+            Rc::clone(&pool),
+            self.local_key_source(),
+        );
+        let backend = Rc::new(PostgresBackend::new_with_key_source(
+            Rc::clone(&pool),
+            url,
+            key_source,
+        ));
         self.backend = Some(BackendHandle::Postgres(backend));
         self.pool = Some(pool);
     }
@@ -850,6 +906,32 @@ pub fn with<R>(f: impl FnOnce(&IsolateDbContext) -> R) -> R {
 /// Same re-entrancy rule as [`with`].
 pub fn with_mut<R>(f: impl FnOnce(&mut IsolateDbContext) -> R) -> R {
     ISOLATE_CTX.with(|c| f(&mut c.borrow_mut()))
+}
+
+/// The column-key source for a backend that constructs itself rather than
+/// being built by [`IsolateDbContext::set_pool`].
+///
+/// The SQLite backend is in that position: `SqliteBackend::{new, open}`
+/// are called directly (by `init_pool_async`, and by tests) and then
+/// handed to `set_sqlite_backend`, so they read the isolate's installed
+/// root keys here. Same re-entrancy rule as [`with`] - do not call this
+/// from inside a context closure.
+pub(crate) fn sqlite_key_source() -> crate::encryption::KeySource {
+    crate::encryption::KeySource::Local(with(IsolateDbContext::local_key_source))
+}
+
+/// The column-key source for a `PostgresBackend` that constructs itself
+/// rather than being built by [`IsolateDbContext::set_pool`]: the admin
+/// table first, this isolate's local source behind it.
+///
+/// `set_pool` does NOT call this - it already holds `&mut` on the context
+/// and reads [`IsolateDbContext::local_key_source`] off `self` instead.
+/// Same re-entrancy rule as [`with`].
+pub(crate) fn pg_key_source(pool: Rc<Pool>) -> crate::encryption::KeySource {
+    crate::encryption::KeySource::pg_admin_table_with_fallback(
+        pool,
+        with(IsolateDbContext::local_key_source),
+    )
 }
 
 #[cfg(test)]
