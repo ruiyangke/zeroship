@@ -11,9 +11,18 @@
 #
 # DISPOSITION vocabulary (per (row, dialect)):
 #   portable             core construct that renders/validates on this dialect
-#   transparentDegradable native where supported, absence-tolerable elsewhere
-#                         (NOT produced by the current engine; reserved, and no
-#                          row in this file uses it)
+#   transparentDegradable native where supported, absence-tolerable elsewhere.
+#                         This legend used to end "(NOT produced by the current
+#                         engine; reserved, and no row in this file uses it)".
+#                         BOTH halves were false. TWO rows use it, on both
+#                         non-PostgreSQL dialects: createPartition/base and
+#                         createTable/partitionedCollapse. And it is live, not
+#                         reserved - the generated table carries it
+#                         (model/dialect_table.rs), op_support.rs groups it with
+#                         portable and vendor as SUPPORTED, and lowering acts on
+#                         it: createPartition on MySQL/SQLite collapses the child
+#                         into its parent behind a mirror guard instead of
+#                         creating a relation.
 #   vendor               vendor-tier construct, admitted only on this dialect
 #   unsupported          refused on this dialect
 #

@@ -25,8 +25,12 @@
 //!     `dialect-table-drift` test byte-checks; here checked Rust-side, node-free).
 //!
 //! The disposition vocabulary is portable / vendor (both supported cells),
-//! transparentDegradable (reserved for explicit opt-in collapses), and
-//! unsupported.
+//! transparentDegradable, and unsupported. `transparentDegradable` is LIVE, not
+//! reserved: two rows carry it on both non-PostgreSQL dialects
+//! (`createPartition/base` and `createTable/partitionedCollapse`), `op_support.rs`
+//! groups it with portable and vendor as SUPPORTED, and lowering collapses a
+//! partition child into its parent behind a mirror guard rather than creating a
+//! relation. The sidecar's own legend claimed the opposite until it was measured.
 //!
 //! The CORPUS itself now lives in `tests/dialect_corpus/mod.rs`, unchanged, so the
 //! live conformance layer (`dialect_conformance_live.rs`) drives the SAME
