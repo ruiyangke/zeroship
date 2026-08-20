@@ -69,7 +69,7 @@ impl DmlRenderer for SqliteDmlRenderer {
     ) -> Result<String, DmlError> {
         let rendered = elems
             .iter()
-            .map(|elem| dml::render_in_list_elem_portable(elem, DIALECT))
+            .map(|elem| dml::render_in_list_elem_portable(elem, self))
             .collect::<Result<Vec<_>, _>>()?;
         let op = if negated { "NOT IN" } else { "IN" };
         Ok(format!("({expr} {op} ({}))", rendered.join(joiner)))

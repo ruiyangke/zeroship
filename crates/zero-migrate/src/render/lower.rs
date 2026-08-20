@@ -57,7 +57,7 @@ use crate::render::declarative::{
     LoweredCreateTable, LoweredUnit,
 };
 use crate::render::plan::{AppliedPlan, DatabaseFeature, DatabaseRequirements};
-use crate::render::renderer::{Capability, DialectSupports};
+use crate::render::renderer::{Capability, DialectSupports, DmlRenderer};
 use crate::render::step::{
     AlterColumnTypeStep, AlterPrimaryKeyStep, BindValue, PlanStep, RenameStep,
     SynchronizeIdentityStep,
@@ -8890,7 +8890,7 @@ fn trigger_inverse_from_history(
     op: &Op,
     live_schema: &LiveSchema,
     eff_schema: &str,
-    backend: &dyn crate::render::renderer::DmlRenderer,
+    backend: &dyn DmlRenderer,
 ) -> Option<String> {
     match op {
         Op::DropTrigger {
@@ -9364,7 +9364,7 @@ fn render_view_op(
     op: &Op,
     eff_schema: &str,
     dialect: SqlDialect,
-    backend: &dyn crate::render::renderer::DmlRenderer,
+    backend: &dyn DmlRenderer,
     scope: Option<&crate::model::policy::SchemaScope>,
     live_schema: &LiveSchema,
 ) -> Result<ViewStatement, IrLowerError> {
@@ -9498,7 +9498,15 @@ pub(crate) fn render_view_query(
     scope: Option<&crate::model::policy::SchemaScope>,
 ) -> Result<String, IrLowerError> {
     match query {
-        ViewQuery::Structured { select } => render_select_ast(select, eff_schema, dialect),
+        // THE DOOR: the structured leg resolves the backend once, here, and hands it
+        // down. Same arrangement as `dml::render_expr_inline_with_col` and
+        // `BindCtx::new` — the caller holds a `SqlDialect`, the walk holds a vendor.
+        ViewQuery::Structured { select } => render_select_ast(
+            select,
+            eff_schema,
+            dialect,
+            crate::render::backends::renderer(dialect),
+        ),
         ViewQuery::Raw { sql } => {
             let target = match dialect {
                 SqlDialect::Postgres => crate::model::validate::Dialect::Postgres,
@@ -9512,10 +9520,16 @@ pub(crate) fn render_view_query(
     }
 }
 
+/// The structured view-query walk. It carries BOTH a dialect and a backend, the
+/// same split `dml::render_expr_inline_walk` uses: `backend` answers anything the
+/// vendor spells, `dialect` is still needed for the sibling core doors this walk
+/// calls (`render_expr_inline`, `quote_bare_ident_for_dialect`), which have callers
+/// in `apply::` and `model::` and so have not been converted.
 fn render_select_ast(
     select: &SelectAst,
     eff_schema: &str,
     dialect: SqlDialect,
+    backend: &dyn DmlRenderer,
 ) -> Result<String, IrLowerError> {
     let projection = if select.projection.is_empty() {
         "*".to_string()
@@ -9529,11 +9543,11 @@ fn render_select_ast(
     };
     let mut sql = format!(
         "SELECT {projection} FROM {}",
-        render_table_ref(&select.from, eff_schema, dialect)?
+        render_table_ref(&select.from, eff_schema, backend)?
     );
     for join in &select.joins {
         sql.push(' ');
-        sql.push_str(&render_join(join, eff_schema, dialect)?);
+        sql.push_str(&render_join(join, eff_schema, dialect, backend)?);
     }
     if let Some(pred) = &select.r#where {
         sql.push_str(" WHERE ");
@@ -9568,11 +9582,16 @@ fn render_select_ast(
     Ok(sql)
 }
 
-fn render_join(join: &Join, eff_schema: &str, dialect: SqlDialect) -> Result<String, IrLowerError> {
+fn render_join(
+    join: &Join,
+    eff_schema: &str,
+    dialect: SqlDialect,
+    backend: &dyn DmlRenderer,
+) -> Result<String, IrLowerError> {
     Ok(format!(
         "{} JOIN {} ON {}",
         join.kind.as_sql(),
-        render_table_ref(&join.table, eff_schema, dialect)?,
+        render_table_ref(&join.table, eff_schema, backend)?,
         crate::render::dml::render_expr_inline(&join.on, dialect)?
     ))
 }
@@ -9631,12 +9650,22 @@ fn render_col_ref(
     }
 }
 
+/// A private leaf that forwards to the vendor's own `render_table_ref`.
+///
+/// It used to take `dialect: SqlDialect` and resolve the registry itself, and it was
+/// counted as one of the crate's dialect boundaries on that basis. It never was one:
+/// both its callers ([`render_select_ast`] and [`render_join`]) are private, in this
+/// file, and were already several frames deep in a walk that had a `dialect` threaded
+/// through it. So the lookup was a POINT-OF-USE resolution in the middle of a walk —
+/// the one shape that does not survive
+/// `docs/proposals/pluggable-backends.md` step 4. The resolution moved up to the
+/// `render_view_query` door instead, where the walk enters.
 fn render_table_ref(
     table: &TableRef,
     eff_schema: &str,
-    dialect: SqlDialect,
+    backend: &dyn DmlRenderer,
 ) -> Result<String, IrLowerError> {
-    crate::render::renderer::renderer(dialect).render_table_ref(table, eff_schema)
+    backend.render_table_ref(table, eff_schema)
 }
 
 fn render_view_columns(

@@ -20,6 +20,7 @@ mod dialect_conformance_live;
 mod dialect_table_faithfulness;
 mod dialectal_containers_are_expanded;
 mod dialectal_ops;
+mod dml_emitters_do_not_relookup_a_backend;
 mod gen_types_dialectal_runtime_metadata;
 mod gen_types_dialectal_table_shape;
 mod gen_types_drop_column_dialect_legs;

@@ -465,16 +465,20 @@ fn scalar_to_bind(s: &IrScalar) -> BindValue {
     }
 }
 
-/// The dialect-specific positional placeholder for the `n`-th (1-based) bind.
-/// Postgres uses `$n`; SQLite uses `?n` (the numbered form, so the binds stay
-/// positional and reusable). This is the SINGLE placeholder-emission point the
-/// one-shot assembler and the batched-backfill SQLite executor both call —
-/// the shared SQLite-DML seam. Postgres routes through the same fn for one
-/// consistent counter.
-#[must_use]
-pub fn placeholder(dialect: SqlDialect, n: usize) -> String {
-    crate::render::renderer::renderer(dialect).placeholder(n)
-}
+/* `pub fn placeholder(dialect, n)` USED TO LIVE HERE, and its doc claimed to be
+ * "the SINGLE placeholder-emission point the one-shot assembler and the batched-
+ * backfill SQLite executor both call". It was not: it had ZERO callers in
+ * `crates/`, `sdks/` or `packages/`, and had had none for as long as the two
+ * places it named have existed. The one-shot assembler emits through
+ * `BindCtx::push`, which asks its RESOLVED backend (`self.backend.placeholder(n)`);
+ * the SQLite executor uses `sqlite_placeholder` below.
+ *
+ * It was `pub`, so the compiler could not report it unused, and it was counted as
+ * one of the crate's dialect boundaries on the strength of that doc comment. It was
+ * neither a boundary nor reachable — just a `renderer(dialect)` lookup that nothing
+ * performed. 0.1.0 was never published and nothing outside this repo consumes the
+ * crate, so deleting it costs nothing and stops the miscount recurring.
+ */
 
 /// The SQLite numbered placeholder (`?n`) — factored out as the shared-module
 /// entry the batched-backfill SQLite executor reuses for per-batch statement
@@ -549,10 +553,19 @@ pub(crate) fn pg_text_literal(s: &str, what: &'static str) -> Result<String, Dml
     Ok(format!("{}::text", sql_string_literal(s)))
 }
 
+/// Validate an in-list / regex text operand, then let the CALLER'S OWN backend
+/// spell it.
+///
+/// It takes the backend rather than a [`SqlDialect`] because every caller is a
+/// backend rendering for itself: `backends/mysql.rs::render_regex_match` and
+/// [`render_in_list_elem_portable`] below. Taking a dialect here meant core
+/// resolving the registry to reach the vendor that had just called in — see
+/// [`render_in_list_elem_portable`] for the whole shape. Core owns whether the
+/// operand is LEGAL (non-empty, no NUL); the vendor owns how it is WRITTEN.
 pub(crate) fn in_list_text_literal(
     s: &str,
     what: &'static str,
-    dialect: SqlDialect,
+    backend: &dyn DmlRenderer,
 ) -> Result<String, DmlError> {
     if s.is_empty() {
         return Err(DmlError::UnrenderableExpr(format!(
@@ -564,7 +577,7 @@ pub(crate) fn in_list_text_literal(
             "{what} contains a NUL byte"
         )));
     }
-    Ok(inline_string_literal(s, dialect))
+    Ok(backend.inline_string_literal(s))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -629,16 +642,39 @@ pub(crate) fn render_in_list_elem_pg(elem: &IrScalar) -> Result<String, DmlError
     })
 }
 
+/// One in-list element in the spelling of the backend that asked, for the two
+/// vendors whose in-list is a plain `IN (...)` over inline literals.
+///
+/// # It takes a BACKEND, and that is the whole point
+///
+/// This used to take `dialect: SqlDialect`, and its only two callers —
+/// `backends/sqlite.rs::render_in_list` and `backends/mysql.rs::render_in_list` —
+/// handed it their own `DIALECT` const. Core then resolved that dialect back
+/// through [`crate::render::backends::renderer`] to reach the very backend that had
+/// called in. Under `docs/proposals/pluggable-backends.md` step 4 that reads
+/// `zero-migrate-sqlite` -> core -> `zero-migrate-sqlite`: a dependency cycle in the
+/// exact shape the crate split exists to remove, and one that emits byte-identical
+/// SQL either way, so no behaviour test can see it. The backends now pass `self`,
+/// and the round trip is gone.
+///
+/// # Why PostgreSQL has a separate, lookup-free helper
+///
+/// Not because PostgreSQL is exempt from the rule. [`render_in_list_elem_pg`] can be
+/// lookup-free because every PG in-list spelling is FIXED — `'x'::text` for a
+/// string, the decimal verbatim — so it needs no vendor at all. SQLite quotes
+/// decimals to match its lossless TEXT storage and MySQL emits strings as a UTF-8
+/// hex literal, so this helper genuinely needs a vendor. It just needs the CALLER's,
+/// which the caller already is.
+///
+/// Pinned by `tests/dialect_matrix/dml_emitters_do_not_relookup_a_backend.rs`.
 pub(crate) fn render_in_list_elem_portable(
     elem: &IrScalar,
-    dialect: SqlDialect,
+    backend: &dyn DmlRenderer,
 ) -> Result<String, DmlError> {
     Ok(match elem {
-        IrScalar::Str(s) => in_list_text_literal(s, "inList element", dialect)?,
+        IrScalar::Str(s) => in_list_text_literal(s, "inList element", backend)?,
         IrScalar::Int(i) | IrScalar::Int64(i) => i.to_string(),
-        IrScalar::Decimal(d) => {
-            crate::render::renderer::renderer(dialect).inline_decimal_literal(d)
-        }
+        IrScalar::Decimal(d) => backend.inline_decimal_literal(d),
         IrScalar::Bool(b) => {
             if *b {
                 "TRUE".to_string()

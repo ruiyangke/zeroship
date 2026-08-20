@@ -151,7 +151,7 @@ impl DmlRenderer for MysqlDmlRenderer {
     ) -> Result<String, DmlError> {
         let rendered = elems
             .iter()
-            .map(|elem| dml::render_in_list_elem_portable(elem, DIALECT))
+            .map(|elem| dml::render_in_list_elem_portable(elem, self))
             .collect::<Result<Vec<_>, _>>()?;
         let op = if negated { "NOT IN" } else { "IN" };
         Ok(format!("({expr} {op} ({}))", rendered.join(joiner)))
@@ -160,7 +160,7 @@ impl DmlRenderer for MysqlDmlRenderer {
     fn render_regex_match(&self, expr: &str, pattern: &str) -> Result<String, DmlError> {
         Ok(format!(
             "({expr} REGEXP {})",
-            dml::in_list_text_literal(pattern, "regex pattern", DIALECT)?
+            dml::in_list_text_literal(pattern, "regex pattern", self)?
         ))
     }
 
@@ -210,7 +210,7 @@ impl DmlRenderer for MysqlDmlRenderer {
     }
 
     fn render_split_part(&self, col_sql: &str, delim: &str, n: i64) -> Result<String, DmlError> {
-        let d = dml::inline_string_literal(delim, DIALECT);
+        let d = self.inline_string_literal(delim);
         Ok(format!(
             "substring_index(substring_index({col_sql}, {d}, {n}), {d}, -1)"
         ))
@@ -610,7 +610,7 @@ fn render_mysql_trigger_stmt(stmt: &TriggerStmt, eff_schema: &str) -> Result<Str
             Ok(format!(
                 "SIGNAL SQLSTATE {} SET MESSAGE_TEXT = {}",
                 crate::render::dml::mysql_grammar_string_literal(errcode),
-                crate::render::dml::inline_string_literal(message, DIALECT)
+                RENDERER.inline_string_literal(message)
             ))
         }
     }
