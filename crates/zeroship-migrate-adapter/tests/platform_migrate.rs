@@ -1746,7 +1746,12 @@ export function down() {}
         let result_b = run_platform_migrations(&cfg_b).await;
         let ended_b = std::time::Instant::now();
 
-        let (spawned_start_a, ended_a, result_a) = task_a.await;
+        // `Task::await` yields the panic payload rather than unwinding into this
+        // task, so a panicking run A would otherwise be reported as a type-level
+        // surprise instead of as the failure it is.
+        let (spawned_start_a, ended_a, result_a) = task_a
+            .await
+            .map_err(|_| "run A panicked; see the captured output above".to_string())?;
 
         // Report BOTH outcomes. Reporting only the first failure would hide the
         // case where the peer failed differently, and the two runs fail in
