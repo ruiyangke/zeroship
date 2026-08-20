@@ -206,7 +206,7 @@ ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$WORK/signing-key.pem"
 e2e_platform_op_up "$WORK/signing-key.pem" "$WORK" || exit 1
 e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DBURL"
-e2e_with_platform_mint_key "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
   --blob-store "$BLOB_S3" \
  > "$WORK/control.log" 2>&1 &
 echo $! >> "$PIDFILE"

@@ -624,7 +624,7 @@ AUTH_URL="http://localhost:$AUTH_PORT"
 # `smtp` and the process exits with
 # `Config("ZEROSHIP_AUTH_RELAY_SMTP_HOST is required when --relay-forward-mailer=smtp")`
 # regardless of environment. Recorded in the spine; kept explicit here.
-e2e_with_platform_mint_key "$BIN/zeroship-auth" \
+"$BIN/zeroship-auth" \
   --addr "0.0.0.0:$AUTH_PORT" --public-url "$AUTH_URL" \
   --signing-key-file "$ZEROSHIP_AUTH_SIGNING_KEY_FILE" \
   --pairwise-salt-file "$ZEROSHIP_AUTH_PAIRWISE_SALT_FILE" \
@@ -640,7 +640,7 @@ curl -sf "$AUTH_URL/oauth2/.well-known/jwks.json" >/dev/null 2>&1 \
   || { fail "auth never came up"; tail -30 "$WORK/auth.log"; exit 1; }
 
 # --- control ---------------------------------------------------------------
-e2e_with_platform_mint_key "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
+"$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
   --blob-store "$WORK/blobs" \
   --app-base-domain "$ZEROSHIP_CONTROL_APP_BASE_DOMAIN" \
  > "$WORK/control.log" 2>&1 &

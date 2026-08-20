@@ -604,7 +604,7 @@ chmod 0600 "$ZEROSHIP_GATEWAY_BROKER_SECRET_FILE"
 
 e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DBURL"
-e2e_with_platform_mint_key "$BIN/zeroship-control" \
+"$BIN/zeroship-control" \
   --port "$ZEROSHIP_CONTROL_PORT" \
   --blob-store "$WORK/blobs" \
   --gateway-url "http://localhost:$ZEROSHIP_GATEWAY_PORT" \

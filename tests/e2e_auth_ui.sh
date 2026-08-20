@@ -232,8 +232,6 @@ set +a
 : "${ZEROSHIP_CONTROL_KEY:?zeroship dev init omitted ZEROSHIP_CONTROL_KEY}"
 : "${ZEROSHIP_AUTH_STASH_SIGNING_KEY:?zeroship dev init omitted the auth stash key}"
 : "${ZEROSHIP_AUTH_TOTP_ENC_KEY:?zeroship dev init omitted the auth TOTP key}"
-[ -s "$SECRETS_DIR/platform-mint-key" ] \
-  || die "zeroship dev init omitted the platform mint key file"
 
 AUTH_PORT="$(node -e '
 const net = require("node:net");
@@ -250,7 +248,6 @@ step "Boot the real native zeroship-auth binary on $BASE_URL"
 unset ZEROSHIP_CONFIG || true
 export ZEROSHIP_AUTH_DATABASE_URL="$DSN"
 (
-  export ZEROSHIP_AUTH_PLATFORM_MINT_KEY="urn:zeroship:file:$SECRETS_DIR/platform-mint-key"
   exec "$BIN/zeroship-auth" \
     --no-config \
     --provider native \
