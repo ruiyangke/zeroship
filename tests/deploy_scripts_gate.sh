@@ -269,20 +269,6 @@ if [ -f "$REAL_COMPOSE" ]; then
   fi
 fi
 
-# The operator overlay is shared with services that must never possess the
-# platform mint credential. A file reference here leaks the raw key through
-# their shared config or secret-directory mounts even if the binary ignores
-# the setting.
-if [ -f "$REAL_OVERLAY" ]; then
-  if grep -Eq '^[[:space:]]*platform_mint_key[[:space:]]*=' "$REAL_OVERLAY"; then
-    fail "the shared operator overlay contains auth.platform_mint_key"
-  else
-    pass "the shared operator overlay contains no platform mint credential"
-  fi
-else
-  fail "the shipped operator overlay is missing: $REAL_OVERLAY"
-fi
-
 # The worker handles attacker-controlled app code. Its default DSN must name
 # the constrained worker role, never the provisioning principal that owns the
 # platform schema. Scope the extraction to the worker service so a safe DSN on
@@ -1289,17 +1275,12 @@ if [ ! -x "$CTL_BIN" ]; then
   echo "  note $CTL_BIN is not built; skipping (cargo build --bin zeroship-control)"
 else
   ovl_env=(
-    ZEROSHIP_AUTH_PLATFORM_MINT_KEY=3333333333333333333333333333333333333333333333333333333333333333
     ZEROSHIP_CONTROL_DATABASE_URL=postgres://u:p@postgres:5432/z
     ZEROSHIP_CONTROL_KEY=1111111111111111111111111111111111111111111111111111111111111111
     ZEROSHIP_WORKER_KEY=2222222222222222222222222222222222222222222222222222222222222222
     ZEROSHIP_PAIRWISE_SALT=4444444444444444444444444444444444444444444444444444444444444444
     ZEROSHIP_CONTROL_MASTER_KEY=5555555555555555555555555555555555555555555555555555555555555555
     ZEROSHIP_AUTH_PLATFORM_ISSUER=https://auth.example.com/oauth2
-    # The issuer above is the PUBLIC name a token's `iss` carries; this is the
-    # address control dials to mint one. Two settings on purpose, and control
-    # refuses to start with only the first.
-    ZEROSHIP_AUTH_PLATFORM_MINT_URL=http://auth:9092
   )
   # The GOOD overlay is the one this repo ships, so the control below is not a
   # hand-written minimum that happens to parse.
@@ -1337,7 +1318,11 @@ echo "  $PASS passed, $FAIL failed, $((PASS+FAIL)) ran"
 # RE-MEASURED 2026-08-13 after the deploy-path, secret_files and snapshot
 # blocks: 108 unconditional; 112 with the shipped compose + dev.rs present;
 # 114 with target/debug/zeroship-control built as well.
-MIN_RAN=108
+# RE-MEASURED 2026-08-19 after deleting the overlay check for the platform
+# mint credential: 107 unconditional. That credential is no longer a declared
+# setting, so an overlay naming it is an unknown field, which is the defect the
+# --check-config case at the bottom of this file already covers.
+MIN_RAN=107
 RAN=$((PASS + FAIL))
 rc=0
 [ "$FAIL" -eq 0 ] || rc=1

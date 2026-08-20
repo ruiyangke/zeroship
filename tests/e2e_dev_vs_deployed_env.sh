@@ -386,11 +386,6 @@ if [ -n "$worker_pid" ] && [ -r "/proc/$worker_pid/environ" ]; then
   # that decides whether every leak verdict below means anything -- unable to
   # report success at all. No pipeline here.
   tr '\0' '\n' < "/proc/$worker_pid/environ" > "$WORK/worker.environ" 2>/dev/null || true
-  if grep -q '^ZEROSHIP_AUTH_PLATFORM_MINT_KEY=' "$WORK/worker.environ"; then
-    fail "ISOLATION: the deployed worker inherited ZEROSHIP_AUTH_PLATFORM_MINT_KEY"
-  else
-    pass "ISOLATION: the deployed worker process has no platform mint credential"
-  fi
   if grep -qF "$CANARY_KEY=$CANARY_VAL" "$WORK/worker.environ"; then
     CANARY_IN_WORKER=1
     pass "PRECONDITION: the deployed worker (pid $worker_pid) HAS $CANARY_KEY=$CANARY_VAL in its own process environment -- there is something to leak"

@@ -302,7 +302,7 @@ fi
 
 e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DBURL"
-e2e_with_platform_mint_key "$BIN/zeroship-control" \
+"$BIN/zeroship-control" \
   --port "$ZEROSHIP_CONTROL_PORT" --blob-store "$WORK/blobs" \
   --gateway-url "http://localhost:$ZEROSHIP_GATEWAY_PORT" \
   --disable-workflow-engine > "$WORK/control.log" 2>&1 &
@@ -453,7 +453,7 @@ echo "############ PHASE 2 -- worker WITHOUT the flag (deploy/compose reality) #
 # Restart the worker as the shipped compose configuration runs it.
 kill_pids; wait 2>/dev/null || true; : > "$PIDFILE"
 # control + gateway are down now too (kill_pids kills all). Rebring them.
-e2e_with_platform_mint_key "$BIN/zeroship-control" \
+"$BIN/zeroship-control" \
   --port "$ZEROSHIP_CONTROL_PORT" --blob-store "$WORK/blobs" \
   --gateway-url "http://localhost:$ZEROSHIP_GATEWAY_PORT" \
   --disable-workflow-engine > "$WORK/control2.log" 2>&1 &
