@@ -27,7 +27,7 @@
 
 #![cfg(feature = "runtime_native_websocket")]
 
-mod common;
+use crate::common;
 use common::*;
 
 use std::sync::Arc;

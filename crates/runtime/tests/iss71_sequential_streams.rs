@@ -7,7 +7,7 @@
 //! the same async-generator stream procedure several times in a row on one
 //! `Runtime` and assert every run yields all three frames + `d:{}`.
 
-mod common;
+use crate::common;
 use common::*;
 
 use std::time::Duration;

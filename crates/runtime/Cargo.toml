@@ -13,6 +13,16 @@ description = "zeroship V8 runtime — compio/io_uring, ESM modules, WebCrypto, 
 # built via the explicit [[bench]] entries below.
 autobenches = false
 
+# Cargo links one executable per `tests/*.rs`, and each of them statically
+# links this crate, V8 and the whole dependency graph. There were 137 such
+# files and they cost 18.97 GiB of target/ (measured 2026-08-20 at
+# `[profile.dev] debug = "line-tables-only"`). The `[[test]]` entries below are
+# now the ONLY integration-test targets, so a new `tests/<name>.rs` is compiled
+# by NOTHING until it is either listed here or declared as `mod <name>;` in one
+# of the three consolidated entries. `tests/main.rs` carries the measurement
+# and the per-target reasoning; read it before adding an entry here.
+autotests = false
+
 [[package.metadata.zeroship-config.targets]]
 target = "echo-server"
 class = "test-dev-tool"
@@ -22,6 +32,62 @@ reason = "Feature-gated HTTP echo peer used only by runtime benchmarks."
 target = "zeroship-bench-server"
 class = "test-dev-tool"
 reason = "Feature-gated V8 server used only by runtime benchmarks."
+
+# 102 former test files, now modules.
+[[test]]
+name = "main"
+path = "tests/main.rs"
+
+# The 23 `wpt_*.rs` modules. NOT in `main` because every one of them
+# `include_str!`s `tests/wpt/`, which is not tracked in git -
+# `tests/setup-wpt.sh` fetches it on demand. A checkout that has not run that
+# script cannot compile them at all, and this keeps that true of one target
+# instead of every integration test in the crate.
+[[test]]
+name = "wpt"
+path = "tests/wpt.rs"
+
+# The six `node_*_e2e.rs` modules. NOT in `main` because they mutate process
+# environment behind `support/node_realworld.rs::lock_env()`, and that lock
+# only excludes if there is exactly one copy of its `static` in the process.
+[[test]]
+name = "node_realworld"
+path = "tests/node_realworld.rs"
+
+# One target each. Every one of these saves, overwrites and RESTORES process
+# environment behind an `ENV_LOCK` private to the file, so two of them in one
+# process would be two mutexes over one environment: one restores
+# `ZEROSHIP_DEV` to unset while the other is mid-request under it and
+# `transport/ssrf.rs` starts blocking loopback. Sharing one lock would mean
+# editing their bodies, so they stay apart.
+[[test]]
+name = "dev_auth"
+path = "tests/dev_auth.rs"
+
+[[test]]
+name = "node_net"
+path = "tests/node_net.rs"
+
+[[test]]
+name = "node_net_security"
+path = "tests/node_net_security.rs"
+
+[[test]]
+name = "node_pg_e2e"
+path = "tests/node_pg_e2e.rs"
+
+[[test]]
+name = "node_tls"
+path = "tests/node_tls.rs"
+
+# Sets `--allow-natives-syntax --turbofan` via `V8::set_flags_from_string` and
+# depends on winning the race with `init_v8()`'s `Once`. V8 flags are
+# process-global and silently ignored after `V8::initialize()`, so any
+# neighbour that builds a `Runtime` first would drop them and
+# `%OptimizeFunctionOnNextCall` would stop existing.
+[[test]]
+name = "v8_fastcall_smoke"
+path = "tests/v8_fastcall_smoke.rs"
 
 [dependencies]
 # V8
