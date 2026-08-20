@@ -2,10 +2,10 @@
 //!
 //! The native install is unconditional, so these tests exercise the
 //! hand-rolled callback directly without flipping any env-var gate.
-//! The historical `ZEROSHIP_NATIVE_FETCH` set call survives below
-//! because some sister tests share the same `init_v8` state and a
-//! stale unset would change behaviour for them; the call is now a
-//! no-op for `install_fetch_global` itself.
+//! A `ZEROSHIP_NATIVE_FETCH=1` set call survived here long after the
+//! gate it fed was deleted; no Rust in the tree reads that name any
+//! more (checked across the whole tracked source), so it is gone
+//! rather than converted.
 //!
 //! Coverage:
 //!   1. `install_fetch_global` registers `globalThis.fetch` as a
@@ -18,8 +18,6 @@
 //!
 //! Async tests (real network round-trips) live in `fetch_native.rs`
 //! and run against a live HTTP fixture.
-
-#![allow(unsafe_code)]
 
 use zeroship_runtime::dom;
 use zeroship_runtime::fetch_native;
@@ -45,10 +43,6 @@ fn run_in_v8<F, R>(src: &str, f: F) -> R
 where
     F: FnOnce(v8::Local<v8::Value>, &mut v8::PinScope) -> R,
 {
-    // install_fetch_global is unconditional now. The set_var call is a
-    // no-op kept for symmetry with legacy tests that may still
-    // reference the var via shared process-wide state.
-    unsafe { std::env::set_var("ZEROSHIP_NATIVE_FETCH", "1"); }
     init_v8();
     let mut isolate = v8::Isolate::new(v8::CreateParams::default());
     v8::scope!(let handle_scope, &mut isolate);

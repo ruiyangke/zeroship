@@ -22,6 +22,7 @@
 //! callback installed by `fetch_native::install_fetch_global`.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use cyper::resolve::Resolve;
 use futures::Stream;
@@ -31,16 +32,76 @@ use http::Uri;
 /// Maximum response body size: 10 MB.
 pub const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024;
 
+/// The process-level dev-relaxation cell. `0` = not yet resolved, `1` = off,
+/// `2` = on. Written once by [`dev_mode_enabled`] on the first read, or
+/// explicitly at any time by [`set_dev_mode`].
+static DEV_MODE: AtomicU8 = AtomicU8::new(DEV_MODE_UNRESOLVED);
+
+const DEV_MODE_UNRESOLVED: u8 = 0;
+const DEV_MODE_OFF: u8 = 1;
+const DEV_MODE_ON: u8 = 2;
+
 /// Development-only network relaxation gate.
 ///
-/// The dev runtime sets `ZEROSHIP_DEV=1`. Any other value, including
-/// `0` or the empty string, is non-dev and must fail closed.
+/// PRECEDENCE. An explicit [`set_dev_mode`] always wins. Otherwise the first
+/// call resolves the mode ONCE from the environment - the dev runtime's
+/// parent sets `ZEROSHIP_DEV=1` on the child (`sdks/vite-plugin/src/
+/// constants.ts`, `tests/e2e_durable_workflows.sh`) - and every later call
+/// returns that same answer. Any other value, including `0` or the empty
+/// string, is non-dev and fails closed.
+///
+/// The parent-to-child environment contract is unchanged; what the cell
+/// removes is the need for anything INSIDE this process to mutate the
+/// environment to change the answer. `std::env::set_var` races concurrent
+/// libc `getenv` (undefined behaviour, which is why Rust 2024 marks it
+/// `unsafe`), so a caller that wants a mode states it with [`set_dev_mode`]
+/// instead.
 #[must_use]
 pub fn dev_mode_enabled() -> bool {
-    zeroship_core::config::env_is_exact(
-        zeroship_core::declared_env!(dev, "ZEROSHIP_DEV", crate::RuntimeConsumer).as_deref(),
-        "1",
-    )
+    match DEV_MODE.load(Ordering::Relaxed) {
+        DEV_MODE_ON => true,
+        DEV_MODE_OFF => false,
+        _ => {
+            let enabled = dev_mode_from_env_value(
+                zeroship_core::declared_env!(dev, "ZEROSHIP_DEV", crate::RuntimeConsumer)
+                    .as_deref(),
+            );
+            DEV_MODE.store(
+                if enabled { DEV_MODE_ON } else { DEV_MODE_OFF },
+                Ordering::Relaxed,
+            );
+            enabled
+        }
+    }
+}
+
+/// Which spellings of `ZEROSHIP_DEV` mean dev: exactly `1`, and nothing else.
+///
+/// Split out from [`dev_mode_enabled`] so the question is answerable without
+/// an environment at all - the cached cell above resolves this once per
+/// process, so a test cannot ask it twice by any other route.
+fn dev_mode_from_env_value(raw: Option<&str>) -> bool {
+    zeroship_core::config::env_is_exact(raw, "1")
+}
+
+/// State the dev relaxation explicitly, overriding `ZEROSHIP_DEV` for the rest
+/// of the process.
+///
+/// PRECEDENCE. This wins over the environment, whether or not
+/// [`dev_mode_enabled`] has already resolved it, and it wins permanently -
+/// there is no arm that re-reads the environment afterwards.
+///
+/// It exists so a caller - an embedding process, or a test - can SAY which
+/// mode it wants. The alternative a test would otherwise reach for is
+/// `std::env::set_var("ZEROSHIP_DEV", ..)`, which mutates the process-global
+/// environment underneath every other thread and races libc `getenv`. A test
+/// that toggles the mode still needs its own mutual exclusion: this cell is
+/// process-wide, so two tests disagreeing about the mode still disagree.
+pub fn set_dev_mode(enabled: bool) {
+    DEV_MODE.store(
+        if enabled { DEV_MODE_ON } else { DEV_MODE_OFF },
+        Ordering::Relaxed,
+    );
 }
 
 fn ipv4_from_segments(high: u16, low: u16) -> Ipv4Addr {
@@ -122,8 +183,8 @@ pub fn is_blocked_ip(addr: IpAddr) -> bool {
 /// time via `SsrfResolver` — domain names that resolve into blocked ranges
 /// are rejected there, since this function cannot see them.
 ///
-/// In dev mode (`ZEROSHIP_DEV=1`), localhost/loopback is allowed so the
-/// Vite plugin's ModuleRunner can fetch modules from the Vite dev server.
+/// In dev mode (see [`dev_mode_enabled`]), localhost/loopback is allowed so
+/// the Vite plugin's ModuleRunner can fetch modules from the Vite dev server.
 pub fn validate_url(url: &str) -> Result<(), String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("Invalid URL: {e}"))?;
 
@@ -230,6 +291,46 @@ impl Resolve for SsrfResolver {
 mod tests {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
+
+    /// `ZEROSHIP_DEV` relaxes the guard only when it is exactly `1`. `0`, the
+    /// empty string, an unset variable and anything truthy-looking are all
+    /// non-dev, and each must fail CLOSED.
+    ///
+    /// This lived in `tests/node_net_security.rs`, which looped a live
+    /// `set_var("ZEROSHIP_DEV", ..)` over two non-affirmative spellings and
+    /// asserted the connect was still refused. Dev mode is a cached
+    /// process-level cell now, so no test can ask the environment twice; the
+    /// spelling question is asked here, and the integration tests ask the
+    /// separate question of whether an off mode still refuses.
+    #[test]
+    fn only_exactly_one_is_dev_mode() {
+        assert!(dev_mode_from_env_value(Some("1")));
+        assert!(!dev_mode_from_env_value(Some("0")));
+        assert!(!dev_mode_from_env_value(Some("")));
+        assert!(!dev_mode_from_env_value(Some("true")));
+        assert!(!dev_mode_from_env_value(Some("yes")));
+        assert!(!dev_mode_from_env_value(Some("11")));
+        assert!(!dev_mode_from_env_value(None));
+    }
+
+    // NO TEST IN THIS MODULE CALLS `set_dev_mode`, deliberately.
+    //
+    // The cell is process-wide, and `dev_mode_enabled` is read by
+    // `validate_url` here AND by `egress::filter_answer`, whose floor tests
+    // (`ssrf_floor_beats_a_granted_name`, `ssrf_floor_beats_a_granted_range`
+    // and every other `evaluate` row) assert refusals that only hold while
+    // dev mode is off. cargo runs the lib tests on several threads, so a unit
+    // test here that flipped the cell would intermittently run those under a
+    // mode they never asked for, and the failure would surface in a module
+    // that changed nothing.
+    //
+    // `set_dev_mode` is exercised in both directions by the integration
+    // binaries instead, which already serialise on a per-binary `ENV_LOCK`:
+    // `tests/node_net.rs` (`SettingsGuard::set(false, ..)` versus
+    // `set(true, ..)`) and `tests/node_net_security.rs`
+    // (`dev_mode_off_does_not_relax_ssrf` versus the `dev_mode: true` rows).
+    // What is checked HERE is the part with no cell in it: which spellings of
+    // the environment value mean dev.
 
     #[test]
     fn blocks_loopback_v4() {

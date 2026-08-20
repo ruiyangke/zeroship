@@ -59,6 +59,7 @@ use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::RwLock;
 use std::time::Duration;
 
 use zeroship_core::net_policy::{AddressPhase, NamePhase};
@@ -69,6 +70,22 @@ use super::ssrf::{dev_mode_enabled, is_blocked_ip};
 /// Fallback bound on PHASE 2. Overridable with
 /// `ZEROSHIP_NET_RESOLVE_TIMEOUT_MS`; the timeout fails CLOSED.
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The resolved PHASE 2 bound, in milliseconds. `0` means "not yet resolved";
+/// the bound itself is always positive, so the sentinel cannot collide with a
+/// real value.
+static RESOLVE_TIMEOUT_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Debug-only hold on [`blocking_resolve`], as an explicit process-level
+/// setting: `Some((host, delay))` sleeps `delay` before resolving exactly
+/// `host`. `None` (the default, and the only value production ever holds)
+/// resolves immediately.
+///
+/// The consult site below is `#[cfg(debug_assertions)]`, so a release build
+/// carries no hold at all - the same shape as the `ZEROSHIP_NET_TEST_DNS_HANG_*`
+/// reads this replaces. The setter is compiled unconditionally so a
+/// `--release` test run still builds; it just stores into a cell nothing reads.
+static RESOLVE_HANG: RwLock<Option<(String, Duration)>> = RwLock::new(None);
 
 /// Count of resolutions the DNS gate OPENED - lookups performed for a name no
 /// `Name` rule admitted, which happen only because the app holds a `Range`
@@ -167,11 +184,16 @@ fn blocking_resolve(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
     // A debug-only hook so `dns_timeout_fails_closed` can hold the lookup open
     // without depending on a real slow nameserver.
     #[cfg(debug_assertions)]
-    if zeroship_core::test_env!("ZEROSHIP_NET_TEST_DNS_HANG_HOST").as_deref() == Some(host) {
-        let ms = zeroship_core::test_env!("ZEROSHIP_NET_TEST_DNS_HANG_MS")
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(250);
-        std::thread::sleep(Duration::from_millis(ms));
+    {
+        let hang = RESOLVE_HANG
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .as_ref()
+            .filter(|(hang_host, _)| hang_host == host)
+            .map(|(_, delay)| *delay);
+        if let Some(delay) = hang {
+            std::thread::sleep(delay);
+        }
     }
     // Strip IPv6 literal brackets before to_socket_addrs.
     let host_clean = host.trim_start_matches('[').trim_end_matches(']');
@@ -185,16 +207,60 @@ fn blocking_resolve(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
     Ok(addrs)
 }
 
-fn resolve_timeout() -> Duration {
-    zeroship_core::declared_env!(
-        platform,
-        "ZEROSHIP_NET_RESOLVE_TIMEOUT_MS",
-        crate::RuntimeConsumer
-    )
-    .and_then(|s| s.parse::<u64>().ok())
-    .filter(|ms| *ms > 0)
-    .map(Duration::from_millis)
-    .unwrap_or(RESOLVE_TIMEOUT)
+/// The bound PHASE 2 runs under.
+///
+/// PRECEDENCE. An explicit [`set_resolve_timeout`] always wins. Otherwise the
+/// first call resolves the bound ONCE from `ZEROSHIP_NET_RESOLVE_TIMEOUT_MS`
+/// on the process the operator started, falling back to [`RESOLVE_TIMEOUT`],
+/// and every later call returns that same answer.
+#[must_use]
+pub fn resolve_timeout() -> Duration {
+    match RESOLVE_TIMEOUT_MS.load(Ordering::Relaxed) {
+        0 => {
+            let timeout = zeroship_core::declared_env!(
+                platform,
+                "ZEROSHIP_NET_RESOLVE_TIMEOUT_MS",
+                crate::RuntimeConsumer
+            )
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|ms| *ms > 0)
+            .map(Duration::from_millis)
+            .unwrap_or(RESOLVE_TIMEOUT);
+            RESOLVE_TIMEOUT_MS.store(
+                u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+                Ordering::Relaxed,
+            );
+            timeout
+        }
+        ms => Duration::from_millis(ms),
+    }
+}
+
+/// State the PHASE 2 bound explicitly, overriding
+/// `ZEROSHIP_NET_RESOLVE_TIMEOUT_MS` for the rest of the process.
+///
+/// PRECEDENCE. This wins over the environment, whether or not
+/// [`resolve_timeout`] has already resolved it.
+///
+/// It exists so a caller - notably a test proving the timeout fails CLOSED -
+/// can SAY the bound rather than mutate the process-global environment, which
+/// races libc `getenv`. A zero bound would mean "unresolved", so it is clamped
+/// to 1ms.
+pub fn set_resolve_timeout(timeout: Duration) {
+    let ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+    RESOLVE_TIMEOUT_MS.store(ms.max(1), Ordering::Relaxed);
+}
+
+/// Hold PHASE 2's blocking lookup open for `host` by `delay`, or clear the
+/// hold with `None`.
+///
+/// Debug builds only: the consult site inside `blocking_resolve` is
+/// `#[cfg(debug_assertions)]`, so in a release build this stores into a cell
+/// nothing reads. It exists so `dns_timeout_fails_closed` can make a real
+/// lookup slow without depending on a real slow nameserver, and without
+/// mutating the process environment.
+pub fn set_resolve_hang(hang: Option<(String, Duration)>) {
+    *RESOLVE_HANG.write().unwrap_or_else(|err| err.into_inner()) = hang;
 }
 
 /// Why a connect was refused. The three-way distinction inside

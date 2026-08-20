@@ -1,5 +1,3 @@
-#![allow(unsafe_code)]
-
 use crate::node_realworld;
 
 use std::time::Duration;
@@ -7,7 +5,7 @@ use std::time::Duration;
 use serde_json::json;
 
 use node_realworld::{
-    EnvGuard, allowlist, ensure_mysql, lock_env, module, run_js,
+    SettingsGuard, allowlist, ensure_mysql, lock_env, module, run_js,
 };
 
 const MYSQL2_BUNDLE: &str = include_str!("fixtures/mysql2/mysql2-3.14.1.bundle.mjs");
@@ -17,7 +15,7 @@ const MYSQL_DATABASE: &str = "zeroship_e2e";
 #[test]
 fn unmodified_mysql2_driver_queries_live_mysql_and_pool_temp_table() {
     let _lock = lock_env();
-    let _env = EnvGuard::set_dev();
+    let _env = SettingsGuard::set_dev();
     let server = ensure_mysql();
 
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {

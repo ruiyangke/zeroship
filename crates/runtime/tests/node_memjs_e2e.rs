@@ -1,19 +1,17 @@
-#![allow(unsafe_code)]
-
 use crate::node_realworld;
 
 use std::time::Duration;
 
 use serde_json::json;
 
-use node_realworld::{allowlist, ensure_memcached, lock_env, module, run_js, EnvGuard};
+use node_realworld::{allowlist, ensure_memcached, lock_env, module, run_js, SettingsGuard};
 
 const MEMJS_BUNDLE: &str = include_str!("fixtures/memjs/memjs-1.3.2.bundle.mjs");
 
 #[test]
 fn unmodified_memjs_driver_round_trips_live_memcached_binary_protocol() {
     let _lock = lock_env();
-    let _env = EnvGuard::set_dev();
+    let _env = SettingsGuard::set_dev();
     let server = ensure_memcached();
 
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {

@@ -1,19 +1,17 @@
-#![allow(unsafe_code)]
-
 use crate::node_realworld;
 
 use std::time::Duration;
 
 use serde_json::json;
 
-use node_realworld::{allowlist, ensure_pg_migrate_postgres, lock_env, module, run_js, EnvGuard};
+use node_realworld::{allowlist, ensure_pg_migrate_postgres, lock_env, module, run_js, SettingsGuard};
 
 const PG_BUNDLE: &str = include_str!("fixtures/pg/pg-8.16.3.bundle.mjs");
 
 #[test]
 fn unmodified_pg_pool_surfaces_dropped_backend_and_reconnects() {
     let _lock = lock_env();
-    let _env = EnvGuard::set_dev();
+    let _env = SettingsGuard::set_dev();
     let server = ensure_pg_migrate_postgres();
 
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {

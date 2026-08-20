@@ -411,6 +411,7 @@ async fn handle_connection(
     mut stream: TcpStream,
     runtime: Runtime,
     app_env: Rc<EnvSnapshot>,
+    dev_auth: Rc<crate::dev_auth::DevAuthSettings>,
 ) {
     let mut data = Vec::with_capacity(8192);
     let mut read_buf = Vec::with_capacity(4096);
@@ -600,6 +601,7 @@ async fn handle_connection(
                     },
                     &runtime,
                     &app_env,
+                    &dev_auth,
                 ).await;
                 if !wrote_ok { return; }
                 if is_upgrade { return; }
@@ -923,6 +925,7 @@ async fn handle_request(
     request: IncomingRequest<'_>,
     runtime: &Runtime,
     app_env: &EnvSnapshot,
+    dev_auth: &crate::dev_auth::DevAuthSettings,
 ) -> bool {
     let IncomingRequest { method, url, request_headers, body, ws_pending } = request;
 
@@ -935,15 +938,17 @@ async fn handle_request(
     let cancel = CancelFlag::new();
     let ctx = RequestCtx::new(cancel.clone());
 
-    // Dev-tier auth: in self-contained dev (`ZEROSHIP_DEV=1`) there is no
-    // gateway to HMAC-sign a `ZeroShip-User` header, so the JS dev-auth
-    // provider (`@zeroship/bootstrap/dev`) mints a local `__zeroship_dev_session`
+    // Dev-tier auth: in self-contained dev there is no gateway to HMAC-sign a
+    // `ZeroShip-User` header, so the JS dev-auth provider
+    // (`@zeroship/bootstrap/dev`) mints a local `__zeroship_dev_session`
     // cookie instead. Resolve the dev identity from that cookie and thread it
     // through the SAME `call_fetch_handler_with_user` path the worker uses for
     // the gateway header — identical `user_json` shape, identical native
     // plumbing (`env.auth.getUser()` + `currentUser()`). Returns `None` (and
     // dispatches anonymously) outside dev or when no valid cookie is present.
-    let user_json = crate::dev_auth::resolve_dev_user_json(request_headers);
+    // `dev_auth` was resolved once in `run_single_worker`, so neither
+    // condition is re-read per request.
+    let user_json = crate::dev_auth::resolve_dev_user_json(request_headers, dev_auth);
 
     let outcome =
         runtime.call_fetch_handler_with_user(method, url, request_headers, body, &env, ctx, user_json);
@@ -1669,7 +1674,12 @@ fn accept_error_backoff(consecutive_errors: u32) -> Duration {
         .min(ACCEPT_ERROR_MAX_BACKOFF)
 }
 
-async fn accept_loop(listener: TcpListener, runtime: Runtime, app_env: Rc<EnvSnapshot>) {
+async fn accept_loop(
+    listener: TcpListener,
+    runtime: Runtime,
+    app_env: Rc<EnvSnapshot>,
+    dev_auth: Rc<crate::dev_auth::DevAuthSettings>,
+) {
     let mut consecutive_errors = 0_u32;
     loop {
         match listener.accept().await {
@@ -1677,10 +1687,11 @@ async fn accept_loop(listener: TcpListener, runtime: Runtime, app_env: Rc<EnvSna
                 consecutive_errors = 0;
                 let rt = runtime.clone();
                 let env = app_env.clone();
+                let dev_auth = dev_auth.clone();
                 compio::runtime::spawn(async move {
                     crate::panic_util::guard(
                         "handle_connection",
-                        handle_connection(stream, rt, env),
+                        handle_connection(stream, rt, env, dev_auth),
                     )
                     .await;
                 })
@@ -1731,6 +1742,12 @@ fn run_single_worker(
     // accepts; an `Rc` clone is one refcount bump per connection.
     let app_env = Rc::new(app_env_from_prefixed_vars(&env_vars));
 
+    // Resolve the two dev-auth conditions ONCE per worker, here where the
+    // process starts, rather than per request inside the resolver. In prod
+    // both are off/absent and every request takes the `dev_mode == false`
+    // arm; in `pnpm dev` the Vite plugin set both on this child before exec.
+    let dev_auth = Rc::new(crate::dev_auth::DevAuthSettings::from_env());
+
     compio::runtime::RuntimeBuilder::new()
         .build()
         .unwrap()
@@ -1771,7 +1788,7 @@ fn run_single_worker(
             // Accept loop
             crate::panic_util::guard(
                 "runtime_accept_loop",
-                accept_loop(listener, runtime, app_env),
+                accept_loop(listener, runtime, app_env, dev_auth),
             )
             .await;
             Ok(())

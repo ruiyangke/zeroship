@@ -161,14 +161,10 @@ export async function run() {{
 }
 
 fn set_dev_env() {
-    // SAFETY: env::set_var is `unsafe` to remind users that race
-    // conditions exist on multi-threaded reads, but the test process
-    // is single-threaded at this entry point and the SSRF guard is the
-    // only consumer.
-    #[allow(unsafe_code)]
-    unsafe {
-        std::env::set_var("ZEROSHIP_DEV", "1");
-    }
+    // State the dev relaxation on the runtime's own process-level cell. The
+    // SSRF guard is the only consumer, and every test in this binary wants it
+    // ON, so nothing here ever needs to turn it back off.
+    zeroship_runtime::set_dev_mode(true);
 }
 
 // ---------------------------------------------------------------------------

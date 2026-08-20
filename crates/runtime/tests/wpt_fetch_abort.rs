@@ -19,8 +19,6 @@
 //!
 //! Pass criterion: ≥75% per the brief.
 
-#![allow(unsafe_code)]
-
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -123,9 +121,10 @@ fn start_server(delay_ms: u64) -> Server {
 }
 
 fn run<R>(fut: impl std::future::Future<Output = R>) -> R {
-    unsafe {
-        std::env::set_var("ZEROSHIP_DEV", "1");
-    }
+    // Dev mode on, so the SSRF fast path does not block the loopback
+    // fixture server. Every test in this binary wants it on and none turns
+    // it off, so the process-level cell needs no mutual exclusion.
+    zeroship_runtime::set_dev_mode(true);
     compio::runtime::Runtime::new().unwrap().block_on(fut)
 }
 
