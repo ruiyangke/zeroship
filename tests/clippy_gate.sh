@@ -58,11 +58,29 @@
 # expectation from its own subject agrees with itself by construction; this one
 # cannot.
 #
-# `--keep-going` is added so that a failure in one crate does not stop cargo
-# scheduling units in crates that do not depend on it. It shrinks how much of
-# the workspace goes unreached on a red run; it cannot eliminate it, because a
-# crate whose dependency failed genuinely cannot be linted. That residue is
-# precisely what arm 2 reports by name instead of leaving silent.
+# `--keep-going` IS DELIBERATELY ABSENT, and that is a measurement rather than an
+# oversight. It looks like the obvious mitigation - "keep scheduling units in
+# crates that do not depend on the one that failed" - so it was tried, twice,
+# each time against a control differing in that flag alone:
+#
+#   on main as it stands (two independent crates failing):
+#     with --keep-going    136 workspace artifacts, errors in 2 packages
+#     without              136 workspace artifacts, errors in the same 2
+#
+#   with a deny lint planted in crates/gateway:
+#     with --keep-going    107 workspace artifacts
+#     without              107 workspace artifacts
+#
+# Identical. In the second run NINE zeroship-core test targets - which do not
+# depend on the gateway in any direction - produced no artifact under BOTH
+# arrangements, having produced one in the green run minutes earlier. Cargo
+# stops draining its queue when a unit fails, and this flag did not change that
+# on this tree.
+#
+# It could not have fixed the failure that motivated this gate anyway: there,
+# crates/core failed and auth and control are DOWNSTREAM of core, so no amount
+# of keeping going reaches them. The audit below is what works, because it
+# reports the shortfall instead of trying to prevent it.
 #
 # A PREFLIGHT, BEFORE ANY OF IT
 #
@@ -91,6 +109,21 @@
 #      The enabled feature set is resolved by asking `cargo metadata` for it
 #      under the SAME `--features` flags the lint run uses, so the two cannot
 #      disagree about which targets were in scope.
+#
+# READING A RED RUN: THE COVERAGE NUMBER IS ONLY STABLE WHEN IT IS GREEN
+#
+# Once a unit fails, how much of the rest cargo had already got through depends
+# on what was warm in target/. MEASURED on the SAME source tree, main as it
+# stands, two runs an hour apart:
+#
+#   after a full build, almost everything fresh    131 of 134 targets linted
+#   with several crates dirty from other work      100 of 134 targets linted
+#
+# Same three lints both times. So on a red run, arm 3's list is a snapshot of
+# where cargo stopped, not a property of the tree - and on CI, where nothing is
+# warm, expect it to be long. Fix the errors and re-run; a green run linted
+# every target by construction, because nothing stopped it. That asymmetry is
+# fine for a gate: it only ever has to be trustworthy about GREEN.
 #
 # WHAT THIS CANNOT SEE
 #
@@ -146,7 +179,7 @@ FEATURES="zeroship-control/live-db-tests,zeroship-migrated/live-db-tests"
 # and flattening that grading would promote every pedantic and nursery warning
 # to a hard error, which the workspace does not satisfy and is not trying to.
 # Deny-level lints still fail, because they are declared deny.
-CARGO_ARGS=(clippy --workspace --all-targets --keep-going --features "$FEATURES")
+CARGO_ARGS=(clippy --workspace --all-targets --features "$FEATURES")
 
 MODE="run"
 CAPTURED=""
@@ -384,7 +417,8 @@ awk -F'\t' '
 # --- errors, split by whose fault they are ---------------------------------
 jq -r 'select(.reason == "compiler-message")
        | select(.message.level == "error")
-       | [.package_id, (.message.code.code // "-"), (.message.message | gsub("\t"; " "))]
+       | [.package_id, (.message.code.code // "-"), (.message.message | gsub("\t"; " ")),
+          (.target.name // "?"), (.target.kind[0] // "?")]
        | @tsv' "$JSON" | sort -u > "$TMP/errors.tsv"
 
 # Errors from crates.io dependencies are dropped, not renamed: they are not this
@@ -394,7 +428,7 @@ jq -r 'select(.reason == "compiler-message")
 # THAT is what arm 2 reports. The count is printed so the drop is never silent.
 awk -F'\t' '
   NR == FNR { name[$1] = $2; next }
-  ($1 in name) { print name[$1] "\t" $2 "\t" $3; next }
+  ($1 in name) { print name[$1] "\t" $2 "\t" $3 "\t" $4 "\t" $5; next }
   { ext++ }
   END { if (ext) print ext > "/dev/stderr" }
 ' "$TMP/members.tsv" "$TMP/errors.tsv" > "$TMP/errors_named.tsv" 2> "$TMP/errors_external.txt"
@@ -402,8 +436,20 @@ awk -F'\t' '
 EXTERNAL_ERRS="$(tr -d '[:space:]' < "$TMP/errors_external.txt")"
 EXTERNAL_ERRS="${EXTERNAL_ERRS:-0}"
 
-LINT_ERRS="$(awk -F'\t' '$2 ~ /^clippy::/' "$TMP/errors_named.tsv")"
-HARD_ERRS="$(awk -F'\t' '$2 !~ /^clippy::/' "$TMP/errors_named.tsv")"
+# Projected to (package, code, message) and deduped AGAIN: the same source line
+# is re-linted once per target that compiles it, so one doc comment in a shared
+# `tests/common/mod.rs` reports once per test binary in the crate. Deduping on
+# the full row including the target would print it three times and make the
+# count read as three separate faults.
+LINT_ERRS="$(awk -F'\t' '$2 ~ /^clippy::/ {printf "%s\t%s\t%s\n", $1, $2, $3}' "$TMP/errors_named.tsv" | sort -u)"
+HARD_ERRS="$(awk -F'\t' '$2 !~ /^clippy::/ {printf "%s\t%s\t%s\n", $1, $2, $3}' "$TMP/errors_named.tsv" | sort -u)"
+
+# The (package, target, kind) triples that FAILED. A target that errors emits no
+# artifact, so without this arm 3 would name every failing target a second time
+# under a heading that is supposed to mean "never reached" - and a heading that
+# fires for two different things stops being read as either.
+awk -F'\t' '{printf "%s\t%s\t%s\n", $1, $4, $5}' "$TMP/errors_named.tsv" \
+  | sort -u > "$TMP/errored_targets.tsv"
 
 WARN_COUNT="$(jq -r 'select(.reason == "compiler-message")
                      | select(.message.level == "warning")
@@ -442,8 +488,13 @@ if [ -n "$UNREACHED_PKGS" ]; then
 fi
 
 # --- arm 3: target coverage ------------------------------------------------
-UNREACHED_TARGETS="$(comm -23 "$TMP/expected.tsv" "$TMP/observed.tsv")"
-# A package already named by arm 2 would repeat every one of its targets here.
+#
+# Expected minus observed, then minus the two sets that are already reported:
+# targets that failed (arm 1 named the error) and whole packages that were never
+# scheduled (arm 2 named the package). What is left is the residue neither can
+# see - a target that quietly stopped being built while its package kept going.
+comm -23 "$TMP/expected.tsv" "$TMP/observed.tsv" > "$TMP/unreached_all.tsv"
+UNREACHED_TARGETS="$(comm -23 "$TMP/unreached_all.tsv" "$TMP/errored_targets.tsv")"
 if [ -n "$UNREACHED_PKGS" ]; then
   UNREACHED_TARGETS="$(printf '%s\n' "$UNREACHED_TARGETS" \
     | grep -v -F -f <(printf '%s\n' $UNREACHED_PKGS | sed 's/$/\t/') || true)"
@@ -452,8 +503,18 @@ fi
 if [ -n "$UNREACHED_TARGETS" ]; then
   rc=1
   n="$(printf '%s\n' "$UNREACHED_TARGETS" | grep -c . || true)"
-  echo "::error::$n declared target(s) whose required-features were satisfied produced no artifact - they went unlinted"
+  echo "::error::$n declared target(s) whose required-features were satisfied produced no artifact and reported no error - they went unlinted"
   printf '%s\n' "$UNREACHED_TARGETS" | awk -F'\t' '{printf "  %s  %s (%s)\n", $1, $2, $3}' | head -20
+  if [ -n "$LINT_ERRS$HARD_ERRS" ]; then
+    echo "  Cargo stops draining its queue when a unit fails, so on a red run this"
+    echo "  list is mostly collateral: targets nothing was wrong with that simply"
+    echo "  never got their turn. Fix the errors above and re-run - this list is"
+    echo "  the reason the run above is not evidence that they are clean."
+  else
+    echo "  Nothing errored in these, and nothing built them. A target that stops"
+    echo "  being built stops being linted, silently, which is the whole failure"
+    echo "  this arm exists to catch."
+  fi
 fi
 
 # --- the numbers -----------------------------------------------------------
