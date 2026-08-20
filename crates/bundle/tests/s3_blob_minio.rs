@@ -102,11 +102,20 @@ fn s3_url() -> String {
 }
 
 fn s3_store() -> S3BlobStore {
+    s3_store_with_concurrency(zeroship_bundle::limits::DEFAULT_UPLOAD_CONCURRENCY)
+}
+
+/// The same store with the in-flight part-upload concurrency stated at the
+/// call site. `S3BlobStore` has taken this as a constructor argument since the
+/// crate stopped reading its own configuration, so a test that wants a
+/// specific value passes it here; planting `ZEROSHIP_BLOB_UPLOAD_CONCURRENCY`
+/// in the process environment never reached this store at all.
+fn s3_store_with_concurrency(upload_concurrency: usize) -> S3BlobStore {
     let cfg = S3Config::parse_url(&s3_url()).expect("parse minio url");
     S3BlobStore::new(
         cfg,
         S3Credentials::new(ACCESS_KEY, SECRET_KEY, None),
-        zeroship_bundle::limits::DEFAULT_UPLOAD_CONCURRENCY,
+        upload_concurrency,
     )
 }
 
@@ -170,7 +179,7 @@ fn s3_blob_store_roundtrip_and_parity() {
                 // Parallel multipart: a many-part blob under concurrency > 1
                 // round-trips byte-exact AND keeps content-address integrity
                 // (parts finish out of order; the SHA-256 is over read order).
-                run_s3_parallel_many_parts(&s3).await;
+                run_s3_parallel_many_parts().await;
                 // Content-address integrity under concurrency: a hash that
                 // does not match the streamed bytes must ABORT before
                 // complete_multipart — nothing committed, no orphaned upload.
@@ -272,8 +281,10 @@ impl std::io::Read for VecReader {
 /// way out, so a byte-exact round-trip proves BOTH the parts were uploaded in
 /// the correct order (sorted before complete, despite finishing out of order)
 /// AND the content address held. Pre-change this path was strictly sequential.
-async fn run_s3_parallel_many_parts(store: &S3BlobStore) {
-    std::env::set_var("ZEROSHIP_BLOB_UPLOAD_CONCURRENCY", "4");
+async fn run_s3_parallel_many_parts() {
+    // Force 4-way concurrency explicitly so the test does not depend on the
+    // default.
+    let store = s3_store_with_concurrency(4);
 
     // 5 full parts + a remainder = 6 parts, past the concurrency of 4 so
     // several waves overlap and finish out of order. Bounded by MAX_BLOB_BYTES
@@ -293,8 +304,6 @@ async fn run_s3_parallel_many_parts(store: &S3BlobStore) {
     let got = store.get_blob(&big_hash).await.expect("parallel: get_blob");
     assert_eq!(got.len(), big_len, "parallel: size");
     assert_eq!(got.as_ref(), &big[..], "parallel: byte-compare (part ordering?)");
-
-    std::env::remove_var("ZEROSHIP_BLOB_UPLOAD_CONCURRENCY");
 }
 
 /// Content-address integrity under concurrency: declare a hash that does NOT
@@ -303,8 +312,7 @@ async fn run_s3_parallel_many_parts(store: &S3BlobStore) {
 /// `complete_multipart`; the mismatch must abort the upload — the object must
 /// NOT materialize under the wrong key, and no orphaned multipart remains.
 async fn run_s3_parallel_hash_mismatch_aborts() {
-    std::env::set_var("ZEROSHIP_BLOB_UPLOAD_CONCURRENCY", "4");
-    let store = s3_store();
+    let store = s3_store_with_concurrency(4);
 
     // A multipart-sized blob (≥ 1 full part so a real multipart upload runs),
     // but we lie about its hash. declared size matches the real byte count so
@@ -318,7 +326,6 @@ async fn run_s3_parallel_hash_mismatch_aborts() {
     let res = store
         .put_blob_stream(&wrong_hash, big_len as u64, &mut reader)
         .await;
-    std::env::remove_var("ZEROSHIP_BLOB_UPLOAD_CONCURRENCY");
     assert!(
         matches!(res, Err(BlobError::HashMismatch { .. })),
         "integrity: hash mismatch must fail with HashMismatch, got {res:?}"
