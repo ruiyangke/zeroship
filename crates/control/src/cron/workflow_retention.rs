@@ -123,16 +123,32 @@ pub async fn tick_with_config(
     let mut remaining_batch = config.batch_size.max(1);
     let cutoff = Utc::now() - chrono::Duration::milliseconds(retention_window_ms);
 
-    let app_ids = {
-        let conn = state.registry.conn().await?;
-        super::workflow_engine::journalled_fleet(&conn).await?.readable
-    };
+    // ONE connection for the whole tick, opened before the app list and reused
+    // by every iteration below.
+    //
+    // `Registry::conn` is not a pool checkout: it runs `compio_postgres::connect`
+    // and detaches a driver task, so it is a TCP connect plus a startup and auth
+    // round trip every time (crates/control/src/registry.rs `open_conn`). Taking
+    // one INSIDE the loop cost two fresh connections per app per tick - this one
+    // and the one `delete_zero_ref_hashes_for_app` used to open for itself.
+    // MEASURED as `pg_stat_database.sessions` over one tick: 2N + 1, so 25
+    // sessions for 12 apps against 1 now. Peak CONCURRENT connections was about
+    // 2 either way, which is why sampling `pg_stat_activity` cannot see this at
+    // all.
+    //
+    // Per-app TRANSACTION boundaries are unchanged: `conn.transaction()` is still
+    // called once per app inside the loop and committed before the next. That is
+    // deliberate, and the alternative - one transaction spanning the fleet - is
+    // worse: it would hold every app's `FOR UPDATE SKIP LOCKED` row locks for the
+    // whole sweep and let one slow tenant block the rest. Reusing the connection
+    // costs nothing here because the loop never ran two apps at once.
+    let mut conn = state.registry.conn().await?;
+    let app_ids = super::workflow_engine::journalled_fleet(&conn).await?.readable;
     let mut stats = RetentionStats::default();
     for app_id in app_ids {
         if remaining_batch <= 0 {
             break;
         }
-        let mut conn = state.registry.conn().await?;
         let tx = conn.transaction().await.map_err(RegistryError::from)?;
         // No per-app existence probe: `journalled_fleet` already returned only
         // apps whose journal exists AND is readable on this connection, so the
@@ -195,8 +211,12 @@ pub async fn tick_with_config(
             }
         }
         tx.commit().await.map_err(RegistryError::from)?;
+        // A SECOND transaction on the SAME connection, deliberately after the
+        // commit above: the blob deletes touch the object store, and the
+        // refcount decrements they act on must be durable first.
         stats.blobs = workflow_blob_gc::delete_zero_ref_hashes_for_app(
             state,
+            &mut conn,
             &tables,
             app_blob_hashes,
         )

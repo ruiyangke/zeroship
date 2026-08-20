@@ -6825,3 +6825,184 @@ async fn parked_cancel_reaper_reaps_both_apps_when_both_journals_are_readable() 
         "a tick that covered every tenant must report complete coverage"
     );
 }
+
+// ===========================================================================
+// Retention sweep: connections held must not scale with the fleet
+// ===========================================================================
+
+/// Sessions this database has ever accepted, from the server's own counter.
+///
+/// `pg_stat_activity` cannot answer the question this test asks. The retention
+/// sweep is entirely serial - one app's transaction commits before the next one
+/// opens - so its peak CONCURRENT backend count was about 2 whether it opened
+/// one connection or one per app, and a sampler would have printed the same
+/// number before and after the fix. What scaled with the fleet was the number
+/// of connections OPENED, because `Registry::conn` runs a fresh
+/// `compio_postgres::connect` every call, and `pg_stat_database.sessions` is
+/// where Postgres records that.
+///
+/// Read on the fixture's OWN connection, which is already open and so is
+/// counted identically in both snapshots.
+async fn sessions_opened(fx: &Fixture) -> i64 {
+    fx.pg
+        .inner
+        .batch_execute("SELECT pg_stat_clear_snapshot()")
+        .await
+        .expect("clear the per-transaction stats snapshot");
+    let row = fx
+        .pg
+        .inner
+        .query_one(
+            "SELECT sessions FROM pg_stat_database WHERE datname = current_database()",
+            &[],
+        )
+        .await
+        .expect("read pg_stat_database.sessions");
+    row.get::<_, i64>("sessions")
+}
+
+/// Seed one app whose journal holds one expired terminal run with a blob
+/// output, so a retention tick has real work on every app in the fleet.
+///
+/// The blob matters: without one the tick's blob-GC call short-circuits on an
+/// empty hash set and never reaches its own connection, and that was the SECOND
+/// per-app `Registry::conn` site.
+async fn seed_expired_run_with_blob(fx: &Fixture, label: &str, terminal_at: DateTime<Utc>) {
+    let (app_id, deploy_id) = seed_app_and_deploy(fx, label).await;
+    let run_id = seed_run(fx, app_id, &deploy_id, "completed", -1_000, None, None, None, None).await;
+    fx.pg.set_default_app_id(app_id);
+    fx.pg
+        .execute(
+            "UPDATE zeroship.workflow_runs SET wake_at = NULL, terminal_at = $2 WHERE id = $1",
+            &[&run_id, &terminal_at],
+        )
+        .await
+        .expect("age the terminal run past the retention window");
+
+    let bytes = format!("fleet-blob-{label}").into_bytes();
+    let hash = sha256_hex(&bytes);
+    fx.state
+        .workflow_blob_store
+        .put_blob(&hash, &bytes)
+        .await
+        .expect("write workflow blob");
+    fx.pg
+        .execute(
+            "INSERT INTO zeroship.workflow_blobs \
+                (hash, size, content_type, refcount, last_referenced_at) \
+             VALUES ($1, $2, 'application/json', 1, $3)",
+            &[&hash, &(bytes.len() as i64), &terminal_at],
+        )
+        .await
+        .expect("insert workflow blob ref");
+    fx.pg
+        .execute(
+            "INSERT INTO zeroship.workflow_steps \
+                (run_id, ordinal, name, name_occurrence, kind, state, output_kind, \
+                 output_hash, output_size, output_content_type, batch_id, batch_width, finished_at) \
+             VALUES ($1, 0, 'blob-out', 0, 'run', 'completed', 'blob', \
+                     $2, $3, 'application/json', 'wfd_fleet', 1, $4)",
+            &[&run_id, &hash, &(bytes.len() as i64), &terminal_at],
+        )
+        .await
+        .expect("insert blob step");
+}
+
+struct FleetSweep {
+    apps: usize,
+    sessions_opened: i64,
+    runs_reaped: usize,
+}
+
+/// Run ONE retention tick over a fleet of `apps` apps and report how many
+/// database sessions it opened.
+async fn retention_over_fleet(label: &str, apps: usize) -> Option<FleetSweep> {
+    let fx = isolated_fixture(label).await?;
+    let window_ms = 2 * 24 * 60 * 60 * 1_000;
+    let terminal_at = Utc::now() - ChronoDuration::milliseconds(window_ms + 60_000);
+    for i in 0..apps {
+        seed_expired_run_with_blob(&fx, &format!("{label}-{i}"), terminal_at).await;
+    }
+
+    let before = sessions_opened(&fx).await;
+    let stats = workflow_retention::tick_with_config(
+        &fx.state,
+        workflow_retention::WorkflowRetentionConfig {
+            retention_window_ms: window_ms,
+            batch_size: 256,
+        },
+    )
+    .await
+    .expect("run retention sweep over the fleet");
+    let after = sessions_opened(&fx).await;
+
+    drop(fx);
+    common::drain_pg().await;
+    Some(FleetSweep {
+        apps,
+        sessions_opened: after - before,
+        runs_reaped: stats.runs,
+    })
+}
+
+/// A retention tick over a 12-app fleet must open the SAME number of database
+/// connections as one over a 2-app fleet.
+///
+/// The two sweeps are one variable apart - fleet size - and both do real
+/// per-app work, which `runs_reaped` asserts so that an equal session count
+/// cannot come from a sweep that skipped the loop entirely.
+///
+/// MEASURED, by reverting the fix and re-running this test: the old shape took
+/// `state.registry.conn()` inside the per-app loop AND again inside the blob GC
+/// it calls, and opened `2N + 1` sessions - 5 for 2 apps, 25 for 12. The fixed
+/// shape opens 1, for both fleet sizes.
+///
+/// WHAT THIS DOES NOT CATCH. It measures CONNECTIONS OPENED, and says nothing
+/// about connections held CONCURRENTLY - that was about 2 before the change and
+/// is 1 after, and no assertion here would notice a future change that opened
+/// them in parallel instead of in sequence. It does not check transaction
+/// SCOPE: a rewrite that collapsed the per-app transactions into one
+/// fleet-spanning transaction would open exactly one session and pass this test
+/// while holding every tenant's row locks for the whole sweep. It does not
+/// check lock DURATION at all. It does not cover the other fleet sweeps
+/// (scheduler reconcile, signal fanout, deploy retention, blob GC) - deploy
+/// retention and the blob ref sweep already hoist their connection, but nothing
+/// here would notice if that regressed. And 12 apps is not 10k: it shows the
+/// count is flat between two sizes, not that it is flat at scale.
+#[compio::test]
+async fn retention_tick_opens_the_same_connections_for_a_large_fleet_as_a_small_one() {
+    let Some(small) = retention_over_fleet("fleet-conn-small", 2).await else {
+        return;
+    };
+    let Some(large) = retention_over_fleet("fleet-conn-large", 12).await else {
+        return;
+    };
+
+    // A floor, not an equality: the CONTROL_TEST_DB template may already hold
+    // journalled apps of its own with expired runs. The point of asserting it
+    // at all is that both sweeps did real per-app work, so an equal session
+    // count cannot come from a loop that never ran.
+    assert!(
+        small.runs_reaped >= small.apps,
+        "the small sweep must prune at least one run per seeded app, got {} for {} apps",
+        small.runs_reaped,
+        small.apps
+    );
+    assert!(
+        large.runs_reaped >= large.apps,
+        "the large sweep must prune at least one run per seeded app, got {} for {} apps",
+        large.runs_reaped,
+        large.apps
+    );
+    assert_eq!(
+        large.sessions_opened, small.sessions_opened,
+        "connections opened must not scale with the fleet: {} apps opened {} \
+         sessions, {} apps opened {}",
+        small.apps, small.sessions_opened, large.apps, large.sessions_opened
+    );
+    assert!(
+        large.sessions_opened <= 2,
+        "a retention tick should open one connection, got {}",
+        large.sessions_opened
+    );
+}
