@@ -3902,23 +3902,21 @@ pub fn desired_snapshot(
     desired_snapshot_for_dialect(project_schema, descriptors, SqlDialect::Postgres, effective)
 }
 
-/// Dialect-aware [`desired_snapshot`]. Two pieces of desired shape differ by
+/// Dialect-aware [`desired_snapshot`]. One piece of desired shape differs by
 /// engine:
 ///
-/// - **Postgres** — a `.fts()` field folds into ONE `__fts` GENERATED `tsvector`
-///   column + a `<coll>__fts_idx` GIN index (the trigger-free declarative form the
-///   engine owns end-to-end). BYTE-IDENTICAL to the pre-dialect snapshot.
-/// - **SQLite** — a `.fts()` field folds into an FTS5 **virtual table**
-///   (`<coll>__fts`) over the source columns, mirrored by AFTER triggers — the same
-///   structure plugin-db's runtime `ensure_fts_index` builds and the shared
-///   `crate::schema::fts_sqlite` builders emit. NO `__fts` column, NO GIN index
-///   (`tsvector` has no SQLite spelling).
 /// - **Foreign keys** — PostgreSQL/MySQL snapshot definitions qualify the target
 ///   with the project schema; SQLite definitions leave it unqualified because its
 ///   `REFERENCES` grammar does not accept a database/schema qualifier.
 ///
-/// Modelling the FTS index as what the per-dialect emitter actually produces is
-/// what makes a re-diff of an unchanged FTS schema ZERO-drift on both legs.
+/// This list used to open with two FTS bullets, in the present tense: that a
+/// `.fts()` field folded into a `__fts` GENERATED `tsvector` column plus a GIN
+/// index on PostgreSQL, and into an FTS5 virtual table mirrored by AFTER triggers
+/// on SQLite. **Full-text support was removed from this engine**, down to the
+/// `IndexMethod` variant, on the grounds that FTS is not an atomic type and should
+/// be composed from smaller primitives — see `docs/proposals/fts-macro.md`. There
+/// is no `.fts()` facet to fold: the authoring surface has none, and no code path
+/// here produces either shape.
 pub fn desired_snapshot_for_dialect(
     project_schema: &str,
     descriptors: &[CollectionDescriptor],
@@ -3988,10 +3986,9 @@ pub fn desired_snapshot_for_dialect(
 /// extraction is BYTE-PRESERVING: the differ produces a byte-identical snapshot
 /// before and after the lift (a refactor-safety fixture asserts this).
 ///
-/// Full-text search and FK definition spelling are dialect-divergent: PG folds a
-/// `.fts()` field into a `__fts` generated tsvector column + GIN index while
-/// SQLite folds it into an FTS5 virtual-table index, and SQLite FK targets are
-/// unqualified. Column `data_type` remains in the PG `information_schema`
+/// FK definition spelling is dialect-divergent: SQLite FK targets are
+/// unqualified. (Full-text search was named here too, until it was removed from
+/// the engine entirely.) Column `data_type` remains in the PG `information_schema`
 /// spelling; SQLite comparison canonicalises it (see [`ddl_to_information_schema`]
 /// / [`sqlite_canonical_type`]).
 ///
@@ -5128,12 +5125,19 @@ fn geo_index_snapshot(table: &str, f: &FieldDescriptor) -> Option<IndexSnapshot>
 /// snapshot therefore describes an index no emitter creates, and the exact-name
 /// index pairing compares the access method, so the label re-diffs as an in-place
 /// redefinition of an index that is already exactly what the dialect can build.
-/// Emitted SQL is unchanged either way. `MysqlEmitter::create_index` reads neither
-/// field. `SqliteEmitter::create_index` DOES read `access_method`, but only to
-/// route the `fts5` sentinel to a virtual-table CREATE, and this fold is called at
-/// the vector and geoPoint sites alone - the FTS snapshot never reaches it, so the
-/// sentinel cannot be folded away. This is the rule the `.fts()` fold below already
-/// follows, applied to the two facets that had not learned it.
+/// Emitted SQL is unchanged either way. NEITHER `MysqlEmitter::create_index` NOR
+/// `SqliteEmitter::create_index` reads `access_method` or `opclass` at all, so
+/// clearing them below cannot move a byte on either leg.
+///
+/// That last sentence used to read differently, and the difference is worth
+/// keeping. It claimed `SqliteEmitter::create_index` DID read `access_method`, "but
+/// only to route the `fts5` sentinel to a virtual-table CREATE", and used that to
+/// argue the sentinel could not be folded away. **Full-text support has since been
+/// removed from the engine entirely** — there is no `fts5` sentinel, no `.fts()`
+/// facet, and `SqliteEmitter::create_index` reads `access_method` ZERO times. The
+/// code was already correct; only its stated reason had gone false, which is the
+/// more dangerous half — a future reader could have restored a routing path for a
+/// sentinel that no longer exists.
 fn fold_ann_index_for_dialect(
     mut idx: IndexSnapshot,
     dialect: SqlDialect,
