@@ -84,5 +84,9 @@ http://api.{$ZEROSHIP_DOMAIN:zeroship.localhost} {
 # Catch-all for hosted creator-app subdomains ({app}.<domain>).
 # Least specific - only matches hosts not claimed by a block above.
 http://*.{$ZEROSHIP_DOMAIN:zeroship.localhost} {
+	@status host status.{$ZEROSHIP_DOMAIN:zeroship.localhost}
+	handle @status {
+		reverse_proxy status:9099
+	}
 	reverse_proxy gateway:8000
 }

@@ -246,7 +246,7 @@ async fn every_reserved_name_is_refused_and_an_ordinary_name_is_accepted() {
         RESERVED_APP_NAMES,
         ["api", "auth", "console", "control"],
         "the set under test is the one the Caddyfile defines; \
-         reserved_names::reserved_set_matches_caddyfile is what keeps it that way"
+         reserved_names::reserved_set_matches_the_edge is what keeps it that way"
     );
 
     for name in RESERVED_APP_NAMES {

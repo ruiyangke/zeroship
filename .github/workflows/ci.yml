@@ -389,6 +389,21 @@ jobs:
       # it from 10 passed / 0 failed to 8 / 2, exit 1. Text-only, runs no docker.
       - name: compose exposes only the edge on 0.0.0.0
         run: tests/compose_port_exposure_gate.sh
+      # THE ONE STEP IN THIS JOB THAT USES DOCKER, and it has to.
+      # crates/control/src/reserved_names.rs decides which app names creators
+      # may not take by reading deploy/ops/caddy-claimed-hosts.json - the
+      # Caddyfile as `caddy adapt` lowers it. Its cargo test binds the artifact
+      # to the Caddyfile's sha256, so an edge edit without a regenerate is
+      # already red there. What that test structurally CANNOT check is whether
+      # the artifact is what Caddy actually produces: a hand-edited JSON with
+      # an untouched Caddyfile keeps the sha valid. Only re-running the adapter
+      # catches it, and only this step does that.
+      #
+      # It REFUSES rather than skips when caddy and docker are both absent. A
+      # gate that quietly does nothing when its tool is missing prints the same
+      # green as one that ran.
+      - name: edge claimed-host artifact is what caddy makes of the Caddyfile
+        run: deploy/ops/caddy-claimed-hosts.sh --check
       # Derived from crates/core/src/config/secrets.rs: compose shipped a
       # 10-byte WORKER_KEY and a 27-byte STASH_SIGNING_KEY against a 32-byte
       # minimum, so worker and control refused to start. Text-only.
