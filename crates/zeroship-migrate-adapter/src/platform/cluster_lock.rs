@@ -32,9 +32,11 @@
 //! `pg_tablespace`. A write to any of them is cluster-global no matter which
 //! database issued it.
 //!
-//! `db/migrations-ts/20260702000100_schema_roles_extensions.ts` writes three of
-//! them, and `db/migrations-ts/20260702000900_grants.ts` writes two more —
-//! the cluster-global surface is NOT confined to one file:
+//! Two files write three of them, and the set of files is NOT stable — which is
+//! why the bracket below is keyed on lowered SQL and not on a filename list.
+//! As of 2026-08-20 they are
+//! `db/migrations-ts/20260702000100_schema_roles_extensions.ts` and
+//! `db/migrations-ts/20260818000200_worker_database_authority.ts`:
 //!
 //! - `CREATE ROLE` → `pg_authid`. The DSL's `ifNotExists` renders as a PL/pgSQL
 //!   `DO $$ IF NOT EXISTS (SELECT 1 FROM pg_roles …) THEN CREATE ROLE … $$`
@@ -46,11 +48,21 @@
 //!   statement after the guarded create
 //!   (`third_party/zero-migrate/.../render/vendor.rs:394-401`), so `ifNotExists`
 //!   does not suppress it. It therefore races on EVERY run, including runs
-//!   against a cluster where all ten roles already exist. Eight of the ten
-//!   carry `setSearchPath`, so that is eight unconditional shared-catalog
-//!   writes per run.
-//! - `GRANT <role> TO <role>` → `pg_auth_members`
-//!   (`20260702000900_grants.ts:19`).
+//!   against a cluster where every role already exists. Eight of the nine roles
+//!   in the roles file carry `setSearchPath`, so that is eight unconditional
+//!   shared-catalog writes per run.
+//! - `GRANT <role> TO <role>` → `pg_auth_members`, and `ALTER ROLE … WITH …` →
+//!   `pg_authid` (`20260818000200_worker_database_authority.ts:35-43`).
+//!
+//! THE FILE LIST ABOVE ALREADY MOVED ONCE, hours after this module landed. It
+//! read `20260702000900_grants.ts:19` when written, and that was true: the
+//! membership grant and the two `ALTER ROLE … WITH` statements lived there. The
+//! 2026-08-19 migration freeze restored the released bytes of the applied files
+//! and re-landed those statements as the new `worker_database_authority.ts`, so
+//! a filename list would have silently stopped protecting the one file that
+//! carries the role membership grant. `sql_touches_cluster_global` reads the
+//! rendered statement, so it followed the move with no edit here. Treat the
+//! names above as a reading aid with a date on it, never as the mechanism.
 //!
 //! Reproduced directly on the 5440 cluster from two different databases, no
 //! migrate binary involved — three distinct aborts, all of them the shape that
@@ -379,7 +391,13 @@ mod tests {
     /// The statements the platform migrations ACTUALLY render for the three
     /// shared catalogs they write. Sources, in order: the `ifNotExists` DO-block
     /// from vendor.rs:361-366, the unconditional search_path push from
-    /// vendor.rs:394-401, and the two raw() statements at grants.ts:10-21.
+    /// vendor.rs:394-401, and the raw() statements now carried by
+    /// `20260818000200_worker_database_authority.ts:35-43`.
+    ///
+    /// These are pinned as STRINGS on purpose. They are what the renderer
+    /// emits, not what any migration file spells, so the migration freeze
+    /// moving those statements between files did not touch this test -- and
+    /// would not have, whichever file they landed in.
     #[test]
     fn the_real_cluster_global_statements_are_classified_as_such() {
         for sql in [
