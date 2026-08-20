@@ -214,6 +214,15 @@ pub(crate) struct JournalledApp {
     pub app_id: Uuid,
     /// False when this connection holds no USAGE on `app_<uuid>` or no SELECT on
     /// the journal's runs table.
+    ///
+    /// Answered by `has_*_privilege`, which counts a privilege the role could
+    /// reach through role MEMBERSHIP - control reaches the journals by being a
+    /// member of `zeroship_workflow_owner`. That is the right answer only
+    /// because the connecting role INHERITs; a NOINHERIT role would be reported
+    /// readable here and then be denied by the statement, because it would have
+    /// to `SET ROLE` first. `zeroship_control` is created without NOINHERIT
+    /// (db/migrations-ts/20260702000100_schema_roles_extensions.ts), so this
+    /// holds; if that ever changes, this column starts lying.
     pub readable: bool,
 }
 
