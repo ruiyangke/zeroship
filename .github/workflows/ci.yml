@@ -754,21 +754,40 @@ jobs:
           if [ "${ZS_SKIP_COUNT:-0}" -gt 0 ]; then
             echo "::notice title=Skipped live-backend tests::${ZS_SKIP_COUNT} test(s) passed without exercising anything; see the Skip census step."
           fi
-      # The lint policy lives in the root Cargo.toml `[workspace.lints]` table:
-      # `clippy::all` is deny, `pedantic` and `nursery` are warn. Passing
-      # `-D warnings` here would flatten that grading and promote every pedantic
-      # and nursery warning to a hard error, which the workspace does not satisfy.
-      # Run `cargo clippy --workspace --all-targets` to see where it currently
-      # stands. Let the declared levels decide: deny-level lints still fail here.
+      # The gate's own self-test: fixtures only, no build, seconds. It runs
+      # BEFORE the gate so that a gate which has stopped discriminating is
+      # reported as such rather than as a clean workspace.
+      - name: Clippy gate self-test
+        run: tests/clippy_gate_selftest.sh
+      # This step used to be a bare
       #
-      # `--all-targets` only reaches targets whose `required-features` are
-      # satisfied, so the 45 live-database test files would silently stop being
-      # linted the moment they were gated - a second, quieter coverage loss on
-      # top of the one the floor above measures. Naming the feature keeps
-      # exactly the set that was linted before still linted.
-      - run: >
-          cargo clippy --workspace --all-targets
-          --features zeroship-control/live-db-tests,zeroship-migrated/live-db-tests
+      #   cargo clippy --workspace --all-targets --features <the two live-db ones>
+      #
+      # and it went red on main, unnoticed, twice in a week. The reason was
+      # structural rather than anybody's carelessness: the per-crate `cargo test`
+      # runs people do locally never invoke clippy, so this job was the only
+      # thing that did, and its result is one tick among many.
+      #
+      # Worse, the SECOND break showed the one-liner cannot be trusted even when
+      # someone is looking. A deny-level lint in crates/core aborted the run
+      # before crates/auth and crates/control were ever scheduled, so the output
+      # said nothing about them - and "said nothing" is exactly what a clean
+      # crate looks like. A run reporting no auth errors had not found auth
+      # clean; it had never reached auth.
+      #
+      # tests/clippy_gate.sh runs the same invocation and then AUDITS cargo's
+      # `--message-format=json` stream against `cargo metadata`, so every
+      # workspace package and every in-scope target has to show up as linted for
+      # the step to pass. It also refuses, distinguishably, when a gitignored
+      # build input is missing - which is why the `pnpm build` and WPT steps
+      # earlier in this job are load-bearing for it.
+      #
+      # The invocation, including the feature list and the deliberate absence of
+      # `-D warnings`, now lives in the script and nowhere else, so a developer
+      # running it locally and this step cannot lint different things. The
+      # reasoning for both is in the script header.
+      - name: Clippy, with proof every crate was linted
+        run: tests/clippy_gate.sh
 
   # The live-database gate. zeroship-control and zeroship-migrated between them
   # hold 45 test targets that dial a real Postgres and panic on connect without
