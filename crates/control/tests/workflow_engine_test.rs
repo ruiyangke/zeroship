@@ -1886,7 +1886,7 @@ async fn control_scheduler_reconcile_seeds_from_per_app_journal() {
     let seeded = workflow_engine::reconcile_scheduler_from_journal(&fx.state)
         .await
         .expect("control scheduler reconcile");
-    assert_eq!(seeded, 2);
+    assert_eq!(seeded.registered, 2);
     assert!(store.timer(&due_run).await.expect("due timer").is_some());
     assert!(store.timer(&future_run).await.expect("future timer").is_some());
 
@@ -3370,7 +3370,7 @@ async fn workflow_blob_ref_gc_reclaims_zero_refs_but_not_referenced_hashes() {
         let deleted = workflow_blob_gc::tick_ref_sweep(&fx.state)
             .await
             .expect("run ref gc");
-        assert_eq!(deleted, 1);
+        assert_eq!(deleted.deleted, 1);
         assert!(fx
             .state
             .workflow_blob_store

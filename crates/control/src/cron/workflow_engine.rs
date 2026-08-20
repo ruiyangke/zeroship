@@ -282,16 +282,30 @@ where
 
 /// How much of the fleet one sweep tick actually covered.
 ///
-/// The three fields ACCOUNT for the fleet: `apps_swept + apps_skipped +
-/// apps_unvisited` is the number of apps that had a journal when the tick
-/// started. That is the whole point of the type. A sweep that returns only a
-/// work count cannot distinguish "nothing to do" from "one tenant excluded
-/// because we could not read it", and the only signal for the second is a WARN
-/// string in a log nobody greps - a count that means two different things is
-/// the same defect species as a grep that returns empty for two different
-/// reasons.
+/// The three fields ACCOUNT for the JOURNALLED fleet: `apps_swept +
+/// apps_skipped + apps_unvisited` is the number of apps that had a workflow
+/// journal when the tick started. That is the whole point of the type. A sweep
+/// that returns only a work count cannot distinguish "nothing to do" from "one
+/// tenant excluded because we could not read it", and the only signal for the
+/// second is a WARN string in a log nobody greps - a count that means two
+/// different things is the same defect species as a grep that returns empty for
+/// two different reasons.
 ///
 /// A caller therefore decides on [`Self::is_complete`], not on a log line.
+///
+/// WHY THE DENOMINATOR IS THE JOURNALLED FLEET AND NOT `zeroship.apps`. An app
+/// row with no journal is not a half-provisioned tenant, it is the NORMAL state
+/// of every app that has never run a workflow: the journal tables are created
+/// lazily, by the worker on its first workflow dispatch for that app
+/// (`crates/worker/src/handler.rs`, `ensure_workflow_journal` behind the
+/// `PROVISIONED_WORKFLOW_JOURNALS` cache) and by `claim.rs` on the claim path -
+/// never at app creation. Counting those apps here would make `apps_total`
+/// scale with the platform rather than with the workflow fleet, and would put a
+/// permanent nonzero "not covered" number in front of an operator for tenants
+/// that have nothing for any of these sweeps to do. There is also no partial
+/// arm to catch: `PgStore::provision` installs all five journal tables in one
+/// `batch_execute`, which Postgres runs as a single implicit transaction, so
+/// "schema present, runs table missing" is not a reachable state.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct SweepCoverage {
     /// Apps the tick actually ran its per-app statement against.
@@ -307,6 +321,35 @@ pub struct SweepCoverage {
 }
 
 impl SweepCoverage {
+    /// Open a tick's coverage against the catalog probe.
+    ///
+    /// The apps this connection cannot read are already excluded before the
+    /// sweep's first per-app statement runs, so they are counted here rather
+    /// than discovered later. Every fleet sweep starts from this, so that
+    /// "unreadable in the catalog" cannot be counted by one sweep and dropped
+    /// by the next.
+    pub(crate) fn opened_over(fleet: &JournalledFleet) -> Self {
+        Self {
+            apps_swept: 0,
+            apps_skipped: fleet.unreadable.len(),
+            apps_unvisited: 0,
+        }
+    }
+
+    /// Record that the tick ran its per-app statement against one app.
+    pub(crate) fn swept_one(&mut self) {
+        self.apps_swept = self.apps_swept.saturating_add(1);
+    }
+
+    /// Record that one app was excluded AFTER the catalog said it was readable
+    /// - the per-app statement was denied instead.
+    ///
+    /// A different path from [`Self::opened_over`], the same consequence for
+    /// that tenant, so deliberately the same field.
+    pub(crate) fn skipped_one(&mut self) {
+        self.apps_skipped = self.apps_skipped.saturating_add(1);
+    }
+
     /// Apps that had a journal when the tick started.
     #[must_use]
     pub fn apps_total(self) -> usize {
@@ -606,7 +649,12 @@ pub async fn run_inflight_reaper(state: Arc<AppState>, tick_secs: u64) {
         return;
     }
     match reconcile_scheduler_from_journal_with_store(&store, &state.registry, false).await {
-        Ok(n) if n > 0 => tracing::info!(registered = n, "workflow scheduler DR reconcile seeded timers"),
+        Ok(r) if r.registered > 0 || r.coverage.apps_skipped > 0 => tracing::info!(
+            registered = r.registered,
+            apps_swept = r.coverage.apps_swept,
+            apps_skipped = r.coverage.apps_skipped,
+            "workflow scheduler DR reconcile seeded timers"
+        ),
         Ok(_) => {}
         Err(e) => tracing::error!(error = %e, "workflow scheduler DR reconcile failed"),
     }
@@ -627,9 +675,12 @@ pub async fn run_inflight_reaper(state: Arc<AppState>, tick_secs: u64) {
             Err(e) => tracing::error!(error = %e, "workflow parked-cancel reaper tick failed"),
         }
         match reconcile_scheduler_from_journal_with_store(&store, &state.registry, true).await {
-            Ok(n) if n > 0 => {
-                tracing::info!(registered = n, "workflow scheduler DR reconcile seeded due timers")
-            }
+            Ok(r) if r.registered > 0 || r.coverage.apps_skipped > 0 => tracing::info!(
+                registered = r.registered,
+                apps_swept = r.coverage.apps_swept,
+                apps_skipped = r.coverage.apps_skipped,
+                "workflow scheduler DR reconcile seeded due timers"
+            ),
             Ok(_) => {}
             Err(e) => tracing::error!(error = %e, "workflow scheduler DR reconcile tick failed"),
         }
@@ -650,13 +701,28 @@ pub async fn run_inflight_reaper(state: Arc<AppState>, tick_secs: u64) {
     }
 }
 
+/// What one scheduler reconcile pass did, and over how much of the fleet.
+///
+/// This sweep is the DR backstop for scheduler-store loss: it re-registers
+/// every live wake row it can see. A tenant it could not read is a tenant whose
+/// timers were NOT restored, and `registered` alone reports that identically to
+/// a fleet whose timers were all already present.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SchedulerReconcile {
+    /// Wake rows re-registered with the scheduler store.
+    pub registered: usize,
+    pub coverage: SweepCoverage,
+}
+
 /// One-shot control-mediated scheduler seed from per-app workflow journals.
 ///
 /// The scheduler store never reads the journal directly. Control owns the
 /// platform connection, provisions every app-local journal, and uses the
 /// scheduler's normal ack API to register current wake rows.
 #[allow(clippy::future_not_send)]
-pub async fn reconcile_scheduler_from_journal(state: &AppState) -> Result<usize, RegistryError> {
+pub async fn reconcile_scheduler_from_journal(
+    state: &AppState,
+) -> Result<SchedulerReconcile, RegistryError> {
     let store = WorkflowSchedulerStore::new(state.registry.workflow_store_db_url().to_string());
     store
         .ensure_ready()
@@ -670,10 +736,14 @@ async fn reconcile_scheduler_from_journal_with_store(
     scheduler_store: &WorkflowSchedulerStore,
     registry: &Registry,
     due_only: bool,
-) -> Result<usize, RegistryError> {
+) -> Result<SchedulerReconcile, RegistryError> {
     let conn = registry.conn().await?;
-    let mut registered = 0usize;
-    for app_id in journalled_fleet(&conn).await?.readable {
+    let fleet = journalled_fleet(&conn).await?;
+    let mut reconcile = SchedulerReconcile {
+        registered: 0,
+        coverage: SweepCoverage::opened_over(&fleet),
+    };
+    for app_id in fleet.readable {
         let tables = WorkflowTables::for_app_id(&app_id);
         let sql = format!(
             "SELECT id, app_id, wake_at, cancel_requested \
@@ -687,8 +757,10 @@ async fn reconcile_scheduler_from_journal_with_store(
         let Some(rows) =
             skip_journal_scoped(&app_id, "scheduler reconcile scan", conn.query(&sql, &[&due_only]).await)?
         else {
+            reconcile.coverage.skipped_one();
             continue;
         };
+        reconcile.coverage.swept_one();
         for row in rows {
             let run_id: String = row.get("id");
             let app_id: Uuid = row.get("app_id");
@@ -702,10 +774,13 @@ async fn reconcile_scheduler_from_journal_with_store(
                 .ack_register_next(&run_id, app_id, wake_at)
                 .await
                 .map_err(scheduler_store_error_to_registry)?;
-            registered = registered.saturating_add(1);
+            reconcile.registered = reconcile.registered.saturating_add(1);
         }
     }
-    Ok(registered)
+    // No batch limit on this sweep: it walks every readable app to completion,
+    // so `apps_unvisited` is structurally zero here rather than merely
+    // unobserved. If a limit is ever added, it must be counted.
+    Ok(reconcile)
 }
 
 /// What one [`reap_parked_cancel_requested_batch`] tick did, and over how much
@@ -744,11 +819,7 @@ pub async fn reap_parked_cancel_requested_batch(
     let fleet = journalled_fleet(&conn).await?;
     let mut reap = ParkedCancelReap {
         registered: 0,
-        coverage: SweepCoverage {
-            apps_swept: 0,
-            apps_skipped: fleet.unreadable.len(),
-            apps_unvisited: 0,
-        },
+        coverage: SweepCoverage::opened_over(&fleet),
     };
     // `apps` is walked by `next()` rather than by `for`, so that a `break` on
     // the batch limit leaves the untouched apps IN the iterator and `len()`
@@ -790,10 +861,10 @@ pub async fn reap_parked_cancel_requested_batch(
             // Readable in the catalog, denied by the statement: a different
             // exclusion from the one counted above, but the same consequence
             // for this tenant, so it lands in the same field.
-            reap.coverage.apps_skipped = reap.coverage.apps_skipped.saturating_add(1);
+            reap.coverage.skipped_one();
             continue;
         };
-        reap.coverage.apps_swept = reap.coverage.apps_swept.saturating_add(1);
+        reap.coverage.swept_one();
         for row in rows {
             let run_id: String = row.get("id");
             let app_id: Uuid = row.get("app_id");
@@ -871,15 +942,31 @@ where
         .max(1);
     let per_app_fair_limit = config.per_app_fair_limit.max(1);
     let per_app_fair_limit_usize = usize::try_from(per_app_fair_limit).unwrap_or(usize::MAX);
-    // Coverage is DROPPED here on purpose: `fire_once` returns a fired-timer
-    // count, and threading a second sweep's coverage through it would say
-    // nothing about the timer loop below, which is what this function is. The
-    // reaper's own caller (`run_inflight_reaper`) is where the coverage of this
-    // sweep is reported. That does mean a `zeroship-control` running only the
-    // engine cron still learns about a skipped tenant from the WARN alone.
-    let _reap =
+    // Coverage is not threaded into this function's RETURN on purpose:
+    // `fire_once` returns a fired-timer count for the timer loop below, and a
+    // different sweep's coverage says nothing about that loop. It is not
+    // dropped either - `workflow_scan` and `workflow_reaper` are independent
+    // cron options (`cron/mod.rs`), so a deployment running only the engine
+    // would otherwise see this sweep's exclusions nowhere at all, since
+    // `run_inflight_reaper` is the only other place it is reported.
+    //
+    // This is a LOG, and a log is weaker than a return value: it is here
+    // because the alternative is a struct return that rewrites ~45 `fire_once`
+    // assertion sites across two live test files. See the module's test
+    // `parked_cancel_reaper_*` pair for the return-value discrimination this
+    // sweep does have.
+    let reap =
         reap_parked_cancel_requested_batch(scheduler_store, &state.registry, per_app_fair_limit)
             .await?;
+    if reap.coverage.apps_skipped > 0 {
+        tracing::warn!(
+            registered = reap.registered,
+            apps_swept = reap.coverage.apps_swept,
+            apps_skipped = reap.coverage.apps_skipped,
+            apps_unvisited = reap.coverage.apps_unvisited,
+            "workflow engine tick reaped parked cancels over PART of the fleet"
+        );
+    }
     let mut scheduler_config = SchedulerConfig {
         max_due_per_tick: per_app_fair_limit_usize,
         max_loaded_timers: fair_limit,
