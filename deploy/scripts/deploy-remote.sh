@@ -90,6 +90,79 @@ usage() {
 say()  { printf '\n== %s\n' "$*"; }
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
+# ====================================================================
+# THE FROZEN-MIGRATION LEDGER
+# ====================================================================
+#
+# The migrate runner hashes each `db/migrations-ts/*.ts` file's source bytes and
+# refuses every later run against a database whose journal recorded a different
+# hash -- permanently, with no self-healing arm. Editing an applied file
+# therefore bricks that database; it blocked a roll here for a full day on
+# 2026-08-19.
+#
+# `crates/zeroship-migrate-adapter/tests/platform_migrate.rs` holds the CI half
+# of that guard, and it can only check the files listed in
+# `db/released_migrations.tsv`. Nothing in the repo can learn which files are
+# actually applied -- only a deployed database knows -- so the list went stale
+# the moment a deploy applied files nobody added to it: it was written covering
+# 21 files while the deployed journal held 34, and it reported the identical
+# green either way.
+#
+# This script is the only place that both KNOWS the journal and RUNS every time
+# the journal changes, so it owns keeping the list honest. Two uses below:
+#
+#   before the roll   refuse when a file the journal already recorded has
+#                     different bytes in this tree. That is the ChecksumMismatch
+#                     the `migrate` one-shot would hit, caught while nothing has
+#                     been restarted and reported with the filename instead of a
+#                     bare `exit 2`.
+#   after the roll    rewrite db/released_migrations.tsv from the journal the
+#                     roll just wrote, and exit non-zero when that produced a
+#                     diff, naming the file to commit.
+#
+# WHAT THIS DOES NOT COVER. A file edited BEFORE it was ever deployed is
+# invisible to both: it is in no journal, so no checksum exists to compare it
+# against. That is deliberate -- an undeployed migration is not frozen -- but it
+# means a green run never meant "no migration was edited". Nor does it cover a
+# SECOND deployment further behind: the file is one cluster's journal.
+
+# Where the checked-in snapshot lives, relative to the repo root.
+RELEASED_LEDGER_FILE="db/released_migrations.tsv"
+
+# released_ledger_drift <journal_tsv> <migrations_dir>
+#
+# Print one line per journalled file whose bytes in THIS tree no longer hash to
+# what the journal recorded. Empty output means every applied file is intact.
+#
+# `sha256sum` and not a recomputed ledger entry: the comparison is only worth
+# anything because one side comes from a database this tree cannot write.
+released_ledger_drift() {
+  local journal="$1" dir="$2" filename checksum current
+  while IFS=$'\t' read -r filename checksum; do
+    case "$filename" in ''|'#'*) continue ;; esac
+    if [ ! -f "$dir/$filename" ]; then
+      printf '%s DELETED from the tree (journal has %s)\n' "$filename" "$checksum"
+      continue
+    fi
+    current="$(sha256sum "$dir/$filename" | cut -d' ' -f1)"
+    [ "$current" = "$checksum" ] \
+      || printf '%s journal=%s tree=%s\n' "$filename" "$checksum" "$current"
+  done < "$journal"
+}
+
+# released_ledger_render <journal_tsv> <ledger_file>
+#
+# Print the ledger file's leading comment header verbatim, then the journal rows.
+# The header is the prose explaining why the values may not be recomputed from
+# the tree, so it has to survive every refresh.
+released_ledger_render() {
+  local journal="$1" ledger="$2"
+  if [ -r "$ledger" ]; then
+    awk '/^#/ || /^[[:space:]]*$/ { print; next } { exit }' "$ledger"
+  fi
+  cat "$journal"
+}
+
 # Two things are NOT compose variables and must not be counted, both of which
 # this check reported as missing on its first run against a healthy host:
 #   - `$${VAR}` is an ESCAPED reference: compose emits a literal `$VAR` for the
@@ -306,6 +379,40 @@ main() {
   # is not loaded this fails immediately instead of hanging a CI job.
   SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=5 -o ServerAliveCountMax=3)
   rsh() { ssh "${SSH_OPTS[@]}" "$HOST" "$@"; }
+
+  # Dump `zeroship_migrations.platform_migration_files` into $1 and set
+  # JOURNAL_STATE to `present` or `absent`.
+  #
+  # The existence probe is a SEPARATE query and uses `to_regclass`, which returns
+  # NULL rather than erroring on a missing relation. Selecting from the table and
+  # treating any psql failure as "no journal" would fold a down database, a wrong
+  # password and an empty deployment into one answer, and the first two would then
+  # read as "nothing is frozen" -- a failure and a legitimate empty result
+  # printing identically is the exact shape this whole guard exists to remove.
+  JOURNAL_FILE="$(mktemp)"
+  trap 'rm -f "$JOURNAL_FILE"' EXIT
+  JOURNAL_STATE=""
+  fetch_platform_journal() {
+    local out="$1" exists
+    exists="$(rsh "cd '$REMOTE_DIR/compose' && docker compose exec -T postgres \
+      psql -U postgres -d zeroship -At -c \
+      \"SELECT to_regclass('zeroship_migrations.platform_migration_files') IS NOT NULL\"" \
+      | tr -d '[:space:]')" \
+      || fail "cannot read the migration journal on $HOST. That is not the same as
+  there being none: a down database, a wrong role and an empty deployment all
+  fail here, and treating them alike would report 'nothing is frozen' for the
+  first two. Fix the connection or check \`docker compose ps postgres\`."
+    case "$exists" in
+      t) JOURNAL_STATE="present" ;;
+      f) JOURNAL_STATE="absent"; : > "$out"; return 0 ;;
+      *) fail "the journal existence probe on $HOST answered $exists, not t or f" ;;
+    esac
+    rsh "cd '$REMOTE_DIR/compose' && docker compose exec -T postgres \
+      psql -U postgres -d zeroship -At -F'\t' -c \
+      \"SELECT filename, checksum FROM zeroship_migrations.platform_migration_files \
+        ORDER BY filename\"" > "$out" \
+      || fail "the migration journal on $HOST exists but could not be read"
+  }
 
   # ---------------------------------------------------------------- preflight
   say "preflight"
@@ -849,6 +956,30 @@ $MOUNT_BAD
   tracked compose file since that override was written is silently dropped."
   echo "ok  every referenced secret is readable inside the service that names it"
 
+  # ------------------------------------------- no applied migration was edited
+  #
+  # BEFORE the roll, because after it the damage is done: `migrate` is the first
+  # thing `up -d` runs and a ChecksumMismatch there reports a bare
+  # `service "migrate" didn't complete successfully: exit 2`.
+  say "checking no migration this database already applied was edited"
+  fetch_platform_journal "$JOURNAL_FILE"
+  case "$JOURNAL_STATE" in
+    absent)
+      echo "ok  no migration journal on $HOST yet; nothing is frozen"
+      ;;
+    present)
+      LEDGER_DRIFT="$(released_ledger_drift "$JOURNAL_FILE" db/migrations-ts)"
+      [ -z "$LEDGER_DRIFT" ] || fail "these migration files were edited after $HOST applied them:
+$LEDGER_DRIFT
+  NOTHING WAS RESTARTED. The runner hashes each file's source bytes and refuses
+  every later run against this database on mismatch, permanently -- there is no
+  self-healing arm and adding one would defeat the guard. Restore the released
+  bytes (git show <the commit before the edit>) and re-land the change as a NEW
+  migration file. \`git log -p -- db/migrations-ts/<file>\` finds the edit."
+      echo "ok  all $(wc -l < "$JOURNAL_FILE") applied migrations still have their released bytes"
+      ;;
+  esac
+
   say "rolling the stack to $IMAGE"
   # One `up -d` for every service. The control key is shared, so a partial
   # restart splits the stack into two halves that cannot authenticate.
@@ -913,9 +1044,48 @@ $MOUNT_BAD
       || fail "the app probe failed against the new deploy. Re-run with --rollback to restore the $STAMP snapshot."
   fi
 
+  # ------------------------------------------- record what this deploy froze
+  #
+  # This roll just journalled every migration it applied, and those files are
+  # frozen from now on. Writing the snapshot HERE -- from the journal, into the
+  # operator's own checkout -- is what stops the repo's coverage drifting behind
+  # the deployment's, which is exactly how the guard came to cover 21 of 34
+  # files while reporting green.
+  #
+  # It writes rather than instructs, because the transcription step is where the
+  # procedure was going to be skipped. Nothing is written to $HOST.
+  say "recording the migrations this deploy froze"
+  fetch_platform_journal "$JOURNAL_FILE"
+  if [ "$JOURNAL_STATE" = "present" ]; then
+    released_ledger_render "$JOURNAL_FILE" "$RELEASED_LEDGER_FILE" > "$RELEASED_LEDGER_FILE.new"
+    mv "$RELEASED_LEDGER_FILE.new" "$RELEASED_LEDGER_FILE"
+    if git diff --quiet -- "$RELEASED_LEDGER_FILE"; then
+      echo "ok  $RELEASED_LEDGER_FILE already matches the journal on $HOST"
+    else
+      LEDGER_REFRESHED=1
+    fi
+  else
+    echo "ok  no journal on $HOST; nothing to record"
+  fi
+
   say "deployed $IMAGE to $HOST"
   echo "snapshot $STAMP covers $SNAPSHOT_MEMBERS"
   echo "roll back with: $0 --host $HOST --rollback"
+
+  # The one non-zero exit that does NOT mean the deploy failed, and it says so
+  # in the first line because an exit code alone cannot. It is non-zero anyway:
+  # a warning is what the old maintained-by-hand list effectively was, and it
+  # went thirteen files stale.
+  if [ "${LEDGER_REFRESHED:-0}" = "1" ]; then
+    printf '\nTHE DEPLOY SUCCEEDED AND THE STACK IS HEALTHY. This exit code is a to-do.\n' >&2
+    printf '%s was rewritten from the journal this roll wrote:\n\n' "$RELEASED_LEDGER_FILE" >&2
+    git --no-pager diff --stat -- "$RELEASED_LEDGER_FILE" >&2
+    printf '\nCommit it. Those files are frozen now, and until the commit lands CI\n' >&2
+    printf 'cannot tell an edit to one of them from an ordinary change.\n' >&2
+    printf '\n    git add %s && git commit -m "chore(db): record the migrations this deploy froze"\n\n' \
+      "$RELEASED_LEDGER_FILE" >&2
+    exit 1
+  fi
 }
 
 # Only run when EXECUTED. Sourcing this file must have no side effects: the
