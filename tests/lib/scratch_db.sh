@@ -40,6 +40,27 @@
 # about; the ceiling is the server's, and a third concurrent suite needs a
 # bigger max_connections rather than a change here.
 #
+# THE SECOND WAY A PRIVATE DATABASE IS NOT ISOLATION, and the reason the
+# paragraph above was not the whole story: a per-run database does not isolate
+# CLUSTER-GLOBAL objects, because they are not in any database. The platform
+# migrations create roles, role memberships and role-level `search_path`
+# settings, which live in the shared catalogs `pg_authid`, `pg_auth_members`
+# and `pg_db_role_setting`. Two suites migrating two private databases on one
+# cluster write those same rows, and PostgreSQL aborts one of them with
+# `tuple concurrently updated` or a duplicate key on `pg_authid_rolname_index`
+# -- an infrastructure error with NO test name attached, which reads like
+# flakiness or like the reader's own change.
+#
+# That is now handled INSIDE `zeroship-platform-migrate`, which takes a
+# cluster-wide advisory lock in a coordination database around exactly the
+# migrations whose SQL writes a shared catalog
+# (`crates/zeroship-migrate-adapter/src/platform/cluster_lock.rs`). Nothing is
+# required of a caller of this file. It is recorded here because the measured
+# note above says concurrent runs are SAFE, and until that lock existed the
+# catalog race was a way they were not -- one that the 2026-08-17 two-auth-suite
+# measurement happened not to trigger, since the race is probabilistic rather
+# than certain.
+#
 # tests/lib_scratch_db_selftest.sh covers both directions of both functions.
 # ============================================================================
 
