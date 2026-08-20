@@ -19,7 +19,6 @@ mod drift_plain_column_default_pg;
 mod drift_view_body_pg;
 mod f721_unguarded_index_shape;
 mod fold_cross_schema_drift_pg;
-mod fts_index_name_truncation_pg;
 mod index_exact_name_shape_pg;
 mod index_name_scheme_alias_pg;
 mod rls_drift;

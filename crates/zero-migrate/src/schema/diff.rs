@@ -266,17 +266,6 @@ pub struct ColumnInfo {
         reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path."
     )]
     pub vector_dims: Option<i32>,
-    /// Whether this column is enrolled in the
-    /// collection's composite FTS index (one composite index per
-    /// collection). PG: presence of the column in the
-    /// `tsvector_update_trigger(__fts, ...)` arg list. SQLite:
-    /// presence in the `<coll>__fts` external-content vtable's
-    /// column list. `false` for every existing column by default.
-    #[allow(
-        dead_code,
-        reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path."
-    )]
-    pub is_fts_source: bool,
     /// Whether this column is a `geography(POINT,
     /// 4326)` (PG) or a BLOB column with a `length("col") = 16`
     /// CHECK constraint (SQLite). `false` for every existing column
@@ -324,10 +313,10 @@ pub struct ColumnInfo {
 
 impl Default for ColumnInfo {
     /// `Default` impl so call sites can use
-    /// `..Default::default()` for the vector/FTS/geopoint fields
+    /// `..Default::default()` for the vector/geopoint fields
     /// without restating the other field defaults. The B-tree column
     /// shape is: empty type string, nullable, no default, no
-    /// volatility, no vector dimension, not an FTS source, not a
+    /// volatility, no vector dimension, not a
     /// geopoint, **no encryption**. Every existing
     /// introspection / test site overrides `pg_type` + `not_null`
     /// explicitly.
@@ -337,7 +326,6 @@ impl Default for ColumnInfo {
             not_null: false,
             default_expr: None,
             vector_dims: None,
-            is_fts_source: false,
             is_geopoint: false,
             encryption: None,
             // mask defaults to None. Every existing
@@ -769,7 +757,7 @@ SELECT c.relname AS table_name,
                 not_null,
                 default_expr,
                 encryption,
-                // remaining fields default; vector/fts/geo are populated from
+                // remaining fields default; vector/geo are populated from
                 // `information_schema` + `pg_indexes` introspection.
                 ..Default::default()
             },

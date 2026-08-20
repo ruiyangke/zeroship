@@ -837,10 +837,6 @@ pub struct FieldDescriptorDto {
     pub encrypted: Option<JsonValue>,
     /// The `.mask({ kind, classification })` sub-object (verbatim).
     pub mask: Option<JsonValue>,
-    /// `t.string().fts(language?)` participation flag.
-    pub fts: Option<bool>,
-    /// The FTS tsvector configuration token.
-    pub fts_language: Option<String>,
     /// A generated/computed column facet (structured IR, never raw SQL).
     pub generated: Option<JsonValue>,
     /// A SQL identity column facet.

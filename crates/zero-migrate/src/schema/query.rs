@@ -1774,8 +1774,7 @@ pub fn build_add_column(
 /// must not be retried — see the proposal's INVALID-index recovery).
 ///
 /// `kind` carries the index *shape* — B-tree (the default for
-/// every existing call site), vector (pgvector / Rust flat-scan), full-text
-/// (tsvector+GIN on PG, FTS5 on SQLite), or spatial (PostGIS GIST on PG,
+/// every existing call site), vector (pgvector / Rust flat-scan), or spatial (PostGIS GIST on PG,
 /// haversine post-filter on SQLite). The default is [`IndexKind::BTree`]
 /// so existing call sites that build B-tree indexes (`build_create_indexes`,
 /// `build_named_indexes`) need no churn — they construct with explicit
@@ -1797,7 +1796,7 @@ pub struct IndexSpec {
     /// the orchestrator that consumes these ops: appbase's `plugin-db` splits on
     /// `ChangeKind::AddIndex`, releasing the advisory lock before pass 2 because
     /// holding it through `CREATE INDEX CONCURRENTLY` deadlocks. This comment
-    /// used to name `Vector` / `Fts` / `Spatial` as the ones that "dispatch
+    /// used to name `Vector` / `Spatial` as the ones that "dispatch
     /// through Pass 2", which would read as false the moment a fifth kind is
     /// added. The partition is by op, not by kind.
     pub kind: IndexKind,
@@ -1835,13 +1834,6 @@ pub enum IndexKind {
         /// Distance metric — see [`crate::schema::descriptors::VectorMetric`].
         metric: crate::schema::descriptors::VectorMetric,
     },
-    /// Full-text index. `language` is the tsvector configuration
-    /// (`english`, `simple`, …) on PG; SQLite FTS5 ignores it (its
-    /// default tokenizer is language-agnostic Unicode).
-    Fts {
-        /// Tokeniser language. Honoured on PG; ignored on SQLite.
-        language: String,
-    },
     /// Spatial index over a `geography(POINT, 4326)` (PG) or BLOB-
     /// packed `(lat, lng)` (SQLite) column. PG: `USING GIST`;
     /// SQLite: no actual index (haversine post-filter).
@@ -1878,21 +1870,6 @@ pub fn build_create_indexes(
 
     let table_qualified = format!("{}.{}", quote_ident(app_id), quote_ident(collection));
 
-    // Accumulate FTS-marked columns into a single composite
-    // index per collection. The SDK's
-    // `.fts()` per-field modifier sets `def.fts = true; def.ftsLanguage =
-    // <lang>` on each text column; we collect those into one
-    // `IndexSpec { kind: Fts { language } }` after the per-field loop.
-    //
-    // **Language**: every `.fts()`-marked column must agree on the
-    // language token (a single `__fts` tsvector column can only carry
-    // one config). We pick the first non-empty language we see and
-    // ignore mismatches at this layer; the SDK is expected to validate
-    // language consistency at schema-definition time. If no language is
-    // declared the fallback is `english`.
-    let mut fts_cols: Vec<String> = Vec::new();
-    let mut fts_language: Option<String> = None;
-
     for (field, def) in obj {
         // Skip top-level metadata keys (`_meta`,
         // `_indexes`) so the `_` reserved-prefix check in
@@ -1915,24 +1892,6 @@ pub fn build_create_indexes(
                 kind: IndexKind::Spatial,
             });
             continue;
-        }
-
-        // Collect FTS-marked text columns. A column is
-        // FTS-marked when `def.fts === true`; the language defaults to
-        // `english` (matches the SDK default in `t.string().fts()`).
-        if def.get("fts").and_then(|v| v.as_bool()) == Some(true) {
-            fts_cols.push(field.clone());
-            if fts_language.is_none() {
-                if let Some(lang) = def.get("ftsLanguage").and_then(|v| v.as_str()) {
-                    if !lang.is_empty() {
-                        fts_language = Some(lang.to_string());
-                    }
-                }
-            }
-            // Fall through — an FTS-marked column can also carry an
-            // `index: true` or `unique: true` modifier and the user
-            // still wants the B-tree alongside the FTS index. The
-            // composite FTS index is emitted once after the loop.
         }
 
         // Vector fields always emit an `IndexKind::Vector`
@@ -2108,22 +2067,6 @@ pub fn build_create_indexes(
         }
     }
 
-    // Emit a single composite FTS spec covering every
-    // `.fts()`-marked column on this collection. The PG impl
-    // builds the `__fts tsvector` column + GIN index + trigger; the
-    // `sql` field stays empty because the impl builds its own DDL.
-    if !fts_cols.is_empty() {
-        let language = fts_language.unwrap_or_else(|| "english".to_string());
-        let name = fts_index_name(collection);
-        out.push(IndexSpec {
-            name,
-            columns: fts_cols,
-            unique: false,
-            sql: String::new(),
-            kind: IndexKind::Fts { language },
-        });
-    }
-
     Ok(out)
 }
 
@@ -2283,61 +2226,6 @@ pub fn index_name(table: &str, columns: &[&str], unique: bool) -> String {
         prefix.pop();
     }
     format!("{prefix}_{hash}")
-}
-
-/// The Postgres GIN index name for a collection's composite full-text column:
-/// `<collection>__fts_idx`, clipped the way the server itself clips it.
-///
-/// This is the one derivation both halves of the engine use. The migration engine's
-/// declarative author calls it to build the desired `IndexSnapshot`, and
-/// [`build_create_indexes`] calls it to build the data plane's [`IndexSpec`], so the
-/// two cannot drift apart into a CREATE/DROP churn.
-///
-/// The clip exists because PostgreSQL truncates any identifier over `NAMEDATALEN - 1`
-/// bytes at CREATE with only a NOTICE. A collection name over 54 bytes pushes
-/// `<collection>__fts_idx` past that bound, so the name the catalog ends up holding is
-/// not the name that was emitted. Since the index diff is keyed on NAME, the desired
-/// (full) spelling then reads as missing and the live (truncated) spelling as
-/// unexpected on every re-diff: a `CREATE INDEX IF NOT EXISTS` that the server skips
-/// because the truncated relation already exists, paired with a `DROP INDEX` naming
-/// the truncated spelling that really removes it. Deriving the truncated spelling here
-/// makes the desired name equal to what is already on disk, so the pair never forms.
-///
-/// This is NOT the `cap_ident_name` / `index_name` hash-tail scheme, deliberately.
-/// Those two REPLACE the tail of an over-long name, which would rename an index that
-/// already exists on a live database under the server's own truncation; and neither
-/// produces a `__fts_idx` spelling at all, which is the contract the data plane's
-/// `fts_search` reads. Mimicking the server renames nothing.
-///
-/// The clip counts BYTES but stops on a character boundary rather than splitting a
-/// UTF-8 sequence, which is what the server does too: on PostgreSQL 18.4 with a UTF8
-/// server encoding, a 64-byte name of one ASCII byte plus 21 three-byte characters is
-/// stored as 61 bytes (21 characters), not cut at byte 63 mid-sequence. It is also the
-/// rule [`crate::plan::author::cap_ident_name`] applies to its readable prefix.
-/// Collection names reaching here are bare identifiers (ASCII letters, digits,
-/// underscore), so bytes and characters agree in practice; the boundary check is what
-/// keeps a non-ASCII name from panicking rather than a case anyone is expected to hit.
-///
-/// COLLISION IS LEFT OPEN: two collections whose names share a 54-byte prefix derive
-/// the same 63-byte index name, and in one schema the second `CREATE INDEX IF NOT
-/// EXISTS` is skipped, leaving that collection without a full-text index. That is
-/// exactly what the server already does with the untruncated names, so this derivation
-/// neither introduces the collision nor closes it. Closing it needs a distinguishing
-/// tail, which is the rename this function exists to avoid.
-#[must_use]
-pub fn fts_index_name(collection: &str) -> String {
-    let natural = format!("{collection}__fts_idx");
-    if natural.len() <= crate::plan::author::PG_MAX_IDENT_BYTES {
-        return natural;
-    }
-    let mut clipped = String::with_capacity(crate::plan::author::PG_MAX_IDENT_BYTES);
-    for ch in natural.chars() {
-        if clipped.len() + ch.len_utf8() > crate::plan::author::PG_MAX_IDENT_BYTES {
-            break;
-        }
-        clipped.push(ch);
-    }
-    clipped
 }
 
 /// 8-char base32 fingerprint over sha256 of the input.
@@ -5516,44 +5404,6 @@ columns = [
                 "hash suffix must be base32-lowercase + digits: {tail}"
             );
         }
-    }
-
-    /// The FTS index name keeps its `__fts_idx` spelling below the bound and is
-    /// clipped to PostgreSQL's own 63 bytes above it - never rewritten with a hash
-    /// tail, which would rename an index the server already holds under its own
-    /// truncation.
-    #[test]
-    fn fts_index_name_clips_at_the_postgres_bound() {
-        assert_eq!(fts_index_name("articles"), "articles__fts_idx");
-
-        // 54 bytes is the last collection name whose derived index name fits.
-        let fits = "a".repeat(54);
-        assert_eq!(fts_index_name(&fits), format!("{fits}__fts_idx"));
-        assert_eq!(fts_index_name(&fits).len(), 63);
-
-        // One byte over, and the result is the first 63 bytes of the natural name -
-        // byte-for-byte what the server would have stored had the full name been sent.
-        let over = "a".repeat(55);
-        let natural = format!("{over}__fts_idx");
-        assert_eq!(natural.len(), 64);
-        assert_eq!(fts_index_name(&over), natural[..63]);
-    }
-
-    /// The clip stops on a character boundary rather than splitting a UTF-8 sequence,
-    /// so a non-ASCII collection name yields a shorter name instead of a panic.
-    #[test]
-    fn fts_index_name_clips_on_a_character_boundary() {
-        // One ASCII byte + 21 three-byte characters: the 63rd byte falls INSIDE the
-        // 21st character, so a byte-exact `[..63]` would panic. The clip stops at 61.
-        let wide = format!("a{}", "\u{4e2d}".repeat(21));
-        assert_eq!(wide.len(), 64);
-        let name = fts_index_name(&wide);
-        assert_eq!(
-            name,
-            format!("a{}", "\u{4e2d}".repeat(20)),
-            "the clip stops before the character that would cross 63 bytes"
-        );
-        assert_eq!(name.len(), 61);
     }
 
     /// The debug_assert at the end of `build_create_table_with_fks_for_dialect`

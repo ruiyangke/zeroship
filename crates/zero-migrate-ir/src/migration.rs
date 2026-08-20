@@ -243,12 +243,15 @@ pub struct MigrationFlags {
     /// engine-AUTHORED DDL (NOT raw creator/AI SQL) that must run under the `SQLite`
     /// **`EngineJournal`** authorizer mode rather than the confined **`CreatorUp`** mode.
     ///
-    /// The only DDL that needs this today is the `SQLite` **FTS5 virtual table** (+ its
-    /// sync triggers): the hardened `SQLite` authorizer denies `CREATE VIRTUAL TABLE …
-    /// USING fts5(…)` in `CreatorUp` (a creator may never make a vtable) and allows it
-    /// ONLY in engine mode. The FTS index is emitted by the engine from a `.fts()`
-    /// descriptor — it carries no untrusted SQL string — so running it in engine mode
-    /// does not widen the creator surface. `false` (default) ⇒ the historical
+    /// **NOTHING IN THE ENGINE SETS THIS TODAY.** Its only producer was the `SQLite`
+    /// FTS5 virtual-table create, removed with full-text support; the IR lane cannot
+    /// grant it either, because `validate_ir_plan_execution_metadata` rejects an
+    /// authored value outright. The flag is therefore a constant `false` in the
+    /// current tree. It is retained rather than deleted because it is covered by the
+    /// canonical checksum image below, so removing it would invalidate every
+    /// recorded migration's checksum — a strictly larger change than the removal
+    /// that stranded it, and one that belongs with the IR-version question. See
+    /// `docs/proposals/fts-macro.md`. `false` (default) ⇒ the historical
     /// CreatorUp-confined `up` (every ordinary CREATE TABLE / ADD COLUMN / CREATE
     /// INDEX), byte-identical to before this flag existed; the **Postgres** path never
     /// sets it (PG has no confined-creator-mode split).

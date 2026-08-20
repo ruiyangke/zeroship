@@ -1240,7 +1240,7 @@ fn apply_fold_alter_primary_key(
 /// [`snapshot_schema`](crate::apply::drift::snapshot_schema).
 ///
 /// `dialect` selects the per-dialect shaping the shared builder applies (PG vs
-/// SQLite FTS folding, etc.); `project_schema` is embedded in FK `definition`s
+/// SQLite shaping, etc.); `project_schema` is embedded in FK `definition`s
 /// (`REFERENCES <schema>.<target>(id)`) — pass the schema the live DB is
 /// introspected under for the round-trip equality to hold. `effective` is the
 /// explicit policy used to recognize each resolved create-table injection prefix;

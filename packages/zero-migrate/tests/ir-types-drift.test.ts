@@ -105,7 +105,7 @@ const TS = {
   ].sort(),
   AggFunc: ["count", "sum", "avg", "min", "max", "stringAgg", "arrayAgg", "boolAnd", "boolOr"].sort(),
   IndexSortOrder: ["asc", "desc"].sort(),
-  IndexMethod: ["btree", "brin", "gin", "gist", "ivfflat", "hnsw", "fts5"].sort(),
+  IndexMethod: ["btree", "brin", "gin", "gist", "ivfflat", "hnsw"].sort(),
   PartitionSpec: ["hash", "list", "range"].sort(),
   PartitionBounds: ["default", "hash", "list", "range"].sort(),
   PartitionBoundValue: ["int", "maxValue", "minValue", "string"].sort(),

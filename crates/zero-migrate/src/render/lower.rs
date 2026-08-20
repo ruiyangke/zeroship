@@ -11319,7 +11319,6 @@ pub(crate) fn index_method_access(m: IndexMethod) -> &'static str {
         IndexMethod::Gist => "gist",
         IndexMethod::Ivfflat => "ivfflat",
         IndexMethod::Hnsw => "hnsw",
-        IndexMethod::Fts5 => "fts5",
     }
 }
 

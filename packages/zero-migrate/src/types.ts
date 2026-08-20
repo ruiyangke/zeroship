@@ -788,7 +788,7 @@ export type DomainCheckFn = (v: DomainValueBuilder) => ExprChain | Expr;
  *  `FkAction` — these ARE rendered now. */
 export type RefAction = "cascade" | "restrict" | "setNull" | "setDefault" | "noAction";
 
-export type IndexMethod = "btree" | "hash" | "gin" | "gist" | "spgist" | "brin" | "ivfflat" | "hnsw" | "fts5";
+export type IndexMethod = "btree" | "hash" | "gin" | "gist" | "spgist" | "brin" | "ivfflat" | "hnsw";
 
 export interface PartitionBoundSentinel {
   readonly __zeroMigratePartitionBound: "minValue" | "maxValue";

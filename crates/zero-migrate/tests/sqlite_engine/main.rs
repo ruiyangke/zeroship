@@ -24,3 +24,4 @@ mod sqlite_goodies;
 mod sqlite_multi_app;
 mod sqlite_rebuild_apply;
 mod unmet_precondition_blocks_the_ddl;
+mod virtual_table_drop_refusal;

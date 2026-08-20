@@ -25,7 +25,6 @@
 //!   / [`mask_codec::parse_mask_sentinel`]).
 //! - [`descriptors`] — the schema-shape **enums** ([`descriptors::VectorMetric`],
 //!   [`descriptors::EncryptionMode`]) + [`descriptors::GeoPoint`].
-//! - [`fts_sqlite`] — the SQLite full-text-search vtable helpers.
 //! - [`error`] - leaf error types (`SchemaError` under the `introspect` feature
 //!   and [`error::MaskSentinelError`]).
 
@@ -44,6 +43,5 @@
 pub mod descriptors;
 pub mod diff;
 pub mod error;
-pub mod fts_sqlite;
 pub mod mask_codec;
 pub mod query;

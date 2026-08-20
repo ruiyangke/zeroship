@@ -913,7 +913,6 @@ fn create_index_variant(
                 | IndexMethod::Gist
                 | IndexMethod::Ivfflat
                 | IndexMethod::Hnsw
-                | IndexMethod::Fts5
         )
     ) || !include.is_empty()
         || with.as_ref().is_some_and(|params| !params.is_empty())

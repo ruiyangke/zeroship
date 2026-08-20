@@ -152,8 +152,6 @@ pub fn field_dto_to_engine(
         case_sensitive: dto.case_sensitive,
         encrypted: dto.encrypted,
         mask: dto.mask,
-        fts: dto.fts.unwrap_or(false),
-        fts_language: dto.fts_language,
         generated,
         identity,
     })
@@ -261,8 +259,6 @@ pub fn field_to_dto(field: &FieldDescriptor) -> FieldDescriptorDto {
         case_sensitive: field.case_sensitive,
         encrypted: field.encrypted.clone(),
         mask: field.mask.clone(),
-        fts: Some(field.fts),
-        fts_language: field.fts_language.clone(),
         generated: field
             .generated
             .as_ref()

@@ -1787,8 +1787,8 @@ pub struct SequenceOwnedBy {
 /// The CLOSED index-method lexicon (`createIndex` `using` union). A CLOSED enum — serde rejects any out-of-set token at DESERIALIZE,
 /// so a hand-crafted IR envelope cannot smuggle an arbitrary / injection-shaped
 /// method string into an unvalidated position that would reach the render seam.
-/// `gin`/`gist`/`ivfflat`/`hnsw` are Postgres-only logical hints; `fts5` maps to
-/// the `SQLite` FTS5 virtual-table path (per-dialect lowering is the render seam's job).
+/// `gin`/`gist`/`ivfflat`/`hnsw` are Postgres-only logical hints (per-dialect
+/// lowering is the render seam's job).
 /// Camel/lower-cased on the wire (`"btree"`, `"ivfflat"`, …).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -1805,8 +1805,6 @@ pub enum IndexMethod {
     Ivfflat,
     /// pgvector HNSW ANN.
     Hnsw,
-    /// Full-text search (PG GIN-over-tsvector / `SQLite` FTS5 virtual table).
-    Fts5,
 }
 
 /// Typed `PostgreSQL` index storage parameters. Closed set: never raw SQL.

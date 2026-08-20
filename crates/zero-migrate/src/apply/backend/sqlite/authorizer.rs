@@ -504,12 +504,20 @@ fn decide(current: Mode, ctx: &AuthContext<'_>) -> Authorization {
         //
         // FTS5's `xUpdate` issues this pragma internally on the FIRST access to an
         // index object on a connection, so without it NOTHING can be written to an
-        // FTS5 index: the engine's own initial-population `INSERT ... SELECT` is
-        // refused under EngineJournal, and a creator write mirrored by the `__fts_ai`
-        // sync trigger is refused under CreatorUp. Both modes are required, not just
+        // FTS5 index.
+        //
+        // STILL REQUIRED AFTER FULL-TEXT REMOVAL, for a reason that outlived the
+        // feature. The engine no longer authors any FTS DDL, so it never populates
+        // an index itself. But removing the FEATURE does not remove the DATA: a
+        // database created by an older engine — or by a data-plane runtime that
+        // manages its own indexes — still carries `<coll>__fts` and its
+        // `__fts_ai`/`_ad`/`_au` sync triggers. An ordinary creator INSERT into the
+        // base table fires those triggers, which routes into the FTS5 index and
+        // issues this pragma. Denying it here would break plain writes to any table
+        // that still has an FTS mirror attached. Both modes are required, not just
         // the engine's -- the statement is cached per connection, so an
-        // EngineJournal-only allow would pass on the connection that populated the
-        // index and fail on the next fresh one.
+        // EngineJournal-only allow would pass on one connection and fail on the next
+        // fresh one.
         //
         // Scoped to the app database and matched AHEAD of the pragma arm below,
         // rather than added to `is_engine_allowed_pragma`, which is name-only by
@@ -552,14 +560,11 @@ fn decide(current: Mode, ctx: &AuthContext<'_>) -> Authorization {
         // load_extension and any new vtable module: denied in both modes. (Belt
         // and suspenders alongside `load_extension_disable` at open)
         AuthAction::CreateVtable { module_name, .. } => match current {
-            // Engine-emitted goodie DDL may create an fts5/vec0 vtable, ONLY in
-            // engine mode. Creator mode can never make a vtable.
-            Mode::EngineJournal
-                if module_name.eq_ignore_ascii_case("fts5")
-                    || module_name.eq_ignore_ascii_case("vec0") =>
-            {
-                Authorization::Allow
-            }
+            // `vec0` only, and ONLY in engine mode. Creator mode can never make a
+            // vtable. `fts5` was removed from this allowance with full-text support:
+            // the engine authors no FTS DDL any more, so conceding the capability
+            // would grant a create nothing asks for.
+            Mode::EngineJournal if module_name.eq_ignore_ascii_case("vec0") => Authorization::Allow,
             _ => Authorization::Deny,
         },
 
