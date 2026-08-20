@@ -58,8 +58,21 @@
 #     third option, of skipping without saying so.
 #   - Test code outside crates/ and libs/. sdks/ is TypeScript and has its own
 #     runner; tests/ is shell.
-#   - The ALLOWLIST below is a hole by construction. Two entries today, each
+#   - The ALLOW list below is a hole by construction. Two entries today, each
 #     with a reason. A third needs one too.
+#   - COMPLIANCE. This is a violation lint and it can only ever see violations:
+#     the remedy it recommends, `zeroship_test_support::skip`, writes to the
+#     stderr HANDLE and so matches no print-macro pattern, and the other remedy
+#     is a panic. That is not a defect - a lint that found conformance would be
+#     a different tool - but it means the ONLY evidence this gate looked at
+#     anything is the pre-filter row count and the ALLOW list, so both are now
+#     asserted below rather than assumed. 238 call sites use the remedy
+#     (measured 2026-08-20), so it is adopted, not merely advised.
+#
+# WHY THE COUNTS ARE PRINTED. Until 2026-08-20 this ran 8 raw rows through a
+# file-path ALLOW list that excused all 8, then printed "ok no test announces a
+# skip" - the same line a tree with no rows at all would print, and the same
+# line a broken `grep` would print. It examined nothing and said so nowhere.
 
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -98,7 +111,16 @@ skip_shaped_lines() {
 #     a census of its own, already visible in the run output; marking the header
 #     would make the census count one skip per runner instead of the real
 #     number, which is worse than not counting it.
-ALLOWLIST='crates/zeroship-migrate-adapter/src/bin/zeroship-platform-migrate\.rs|crates/runtime/tests/wpt_'
+#
+# EACH PATTERN IS AS NARROW AS THE THING IT EXCUSES. The wpt entry used to be
+# the bare path prefix `crates/runtime/tests/wpt_`, which excused every line in
+# seven files, so a genuine marker-less skip written inside a WPT runner would
+# have been waved through with the report header. It now matches the header
+# SHAPE as well as the path.
+ALLOW=(
+  'crates/zeroship-migrate-adapter/src/bin/zeroship-platform-migrate\.rs:[0-9]+:.*skipped  \{name\}|a shipping binary reporting an already-applied migration to an operator'
+  'crates/runtime/tests/wpt_[a-z_]+\.rs:[0-9]+:.*=== Skipped|the WPT runners own report header, which precedes their own census'
+)
 
 self_test() {
   echo "skip marker gate self-test"
@@ -153,21 +175,127 @@ fi
 
 echo "skip marker gate"
 
-OFFENDERS="$(skip_shaped_lines crates libs | grep -vE "$ALLOWLIST" || true)"
+STATUS=0
+
+# --- Arm: every copy of the marker is byte-identical ----------------------
+#
+# THE OTHER WAY A SKIP GOES UNCOUNTED, and the one arm here whose subject is
+# non-empty by construction. The census enumerates a run log by ONE token, and
+# that token is written out by hand in several places: the authority
+# (`crates/test-support/src/lib.rs`), a verbatim `SKIP_MARKER` const in each
+# standalone driver that keeps its own announcer, an inlined copy in a
+# `format!`, and `ZS_SKIP_MARKER` in the census itself. One character wrong in
+# any of them and every skip announced through that copy leaves the census
+# silently - which is this gate's whole subject, arriving by a different door.
+#
+# `tests/lib/skip_census.sh` says these copies are "kept byte-identical". That
+# was an instruction to a reader, not a check; nothing verified it. It also said
+# there were three copies under libs/, and there are two -- compio-postgres
+# deliberately has none and its header says so.
+#
+# The search pattern is the marker with its last segment dropped, so a typo in
+# that segment still MATCHES and is reported as a mismatch instead of vanishing
+# from the search. A typo further left leaves the family entirely, and the floor
+# below catches that instead. Derived from $MARKER rather than written out,
+# because a second literal in this file would be one more copy to drift -- and
+# because the first version of this arm spelled it and then reported its own
+# prose as drift, which is a fair demonstration that it looks at what it says.
+MARKER_FAMILY="${MARKER%-*}"
+MARKER_SITE_FLOOR=20
+MARKER_TOKENS="$(grep -rnoE "${MARKER_FAMILY}[A-Z0-9_-]*" crates libs tests)"
+N_MARKER=0
+[ -n "$MARKER_TOKENS" ] && N_MARKER="$(printf '%s\n' "$MARKER_TOKENS" | wc -l | tr -d ' ')"
+
+if [ "$N_MARKER" -lt "$MARKER_SITE_FLOOR" ]; then
+  echo "GATE CANNOT ANSWER: only $N_MARKER marker token(s) found, below the floor"
+  echo "  of $MARKER_SITE_FLOOR. 27 were measured 2026-08-20. The search stopped"
+  echo "  matching, so 'no drift' would mean nothing."
+  exit 1
+fi
+
+DRIFTED="$(printf '%s\n' "$MARKER_TOKENS" | grep -v ":${MARKER}\$" || true)"
+if [ -z "$DRIFTED" ]; then
+  echo "  ok   all $N_MARKER copies of $MARKER are byte-identical"
+else
+  echo "  FAIL these tokens are in the marker's family but are not the marker:"
+  printf '%s\n' "$DRIFTED" | sed 's/^/       /'
+  echo "       tests/lib/skip_census.sh enumerates a run log by the exact string."
+  echo "       A skip announced through a drifted copy leaves the census without"
+  echo "       a number moving, which is the failure this whole gate is about."
+  STATUS=1
+fi
+
+RAW="$(skip_shaped_lines crates libs)"
 
 # `printf | wc -l` and not `grep -c`: an empty string still has one line, and
 # `grep -c` exits 1 on zero matches, which an `&&` chain would swallow into a
 # missing legitimate zero.
-COUNT=0
-[ -n "$OFFENDERS" ] && COUNT="$(printf '%s\n' "$OFFENDERS" | wc -l | tr -d ' ')"
+n_lines() { [ -n "$1" ] && printf '%s\n' "$1" | wc -l | tr -d ' ' || echo 0; }
+
+N_RAW="$(n_lines "$RAW")"
+
+# THE CANNOT-ANSWER BRANCH. A pattern that stopped matching and a tree with no
+# skip-shaped prints in it print the same verdict, and this gate's whole subject
+# is the difference between those two. 8 rows on 2026-08-20; the floor is 1
+# because ANY row proves the detector ran, and because the honest end state of
+# this gate is a small number, not a large one.
+if [ "$N_RAW" -eq 0 ]; then
+  echo "GATE CANNOT ANSWER: the skip-shaped-print pattern matched nothing in"
+  echo "  crates/ or libs/. Every skip announcement in this workspace would have"
+  echo "  to have been deleted for that to be real; the likelier reading is that"
+  echo "  the pattern or the paths stopped matching. Run --self-test."
+  exit 1
+fi
+
+# Direction 1: a row nobody has ruled on.
+OFFENDERS=""
+N_EXCUSED=0
+while IFS= read -r row; do
+  [ -n "$row" ] || continue
+  excused=0
+  for entry in "${ALLOW[@]}"; do
+    printf '%s\n' "$row" | grep -qE "${entry%%|*}" && { excused=1; break; }
+  done
+  if [ "$excused" -eq 1 ]; then
+    N_EXCUSED=$((N_EXCUSED + 1))
+  else
+    OFFENDERS="${OFFENDERS}${row}
+"
+  fi
+done < <(printf '%s\n' "$RAW")
+
+COUNT="$(n_lines "${OFFENDERS%$'\n'}")"
+
+# Direction 2, the one this gate did not have. `tests/tests_do_not_create_
+# databases_gate.sh` is the model: an exemption that no longer matches anything
+# must FAIL, or the ALLOW list silently becomes the whole world. It doubles as
+# this gate's positive control - both entries match today, so if the detector
+# breaks they stop matching and say so here as well as at the floor above.
+for entry in "${ALLOW[@]}"; do
+  pattern="${entry%%|*}"
+  reason="${entry#*|}"
+  if printf '%s\n' "$RAW" | grep -qE "$pattern"; then
+    printf '  exempt %s\n         %s\n' \
+      "$(printf '%s\n' "$RAW" | grep -cE "$pattern") row(s) matching ${pattern%%:*}" "$reason"
+  else
+    echo "  FAIL ALLOW excuses a shape nothing matches: $pattern"
+    echo "       Either the code it excused is gone -- remove the entry -- or the"
+    echo "       detector stopped matching, in which case the verdict below is"
+    echo "       meaningless. A stale exemption reads as a decision somebody is"
+    echo "       still making."
+    STATUS=1
+  fi
+done
+
+echo "  ${N_RAW} skip-shaped print(s) found, ${N_EXCUSED} excused, ${COUNT} unruled"
 
 if [ "$COUNT" -eq 0 ]; then
-  echo "  ok   no test announces a skip the census cannot see"
-  exit 0
+  [ "$STATUS" -eq 0 ] && echo "  ok   no test announces a skip the census cannot see"
+  exit "$STATUS"
 fi
 
 echo "  FAIL $COUNT skip-shaped line(s) do not carry $MARKER:"
-printf '%s\n' "$OFFENDERS" | sed 's/^/       /'
+printf '%s' "$OFFENDERS" | sed 's/^/       /'
 cat <<EOF
 
 Each of these announces that a test did nothing, in a string
@@ -189,7 +317,8 @@ Three fixes, in order of preference:
      those and replays them only for a FAILING test, so the announcement is
      invisible on a pass, which is the run where it matters.
 
-  3. If it is not a test skip at all, add it to ALLOWLIST at the top of this
-     file WITH A REASON.
+  3. If it is not a test skip at all, add it to ALLOW at the top of this file
+     WITH A REASON, and make the pattern as narrow as the line it excuses --
+     a bare path prefix excuses every future line in that file too.
 EOF
 exit 1

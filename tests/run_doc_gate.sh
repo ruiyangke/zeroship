@@ -75,7 +75,8 @@
 # is not a bound)
 #   DOC_MAX_DEFAULT 1   max unresolved links with default features
 #   DOC_MAX_ALL     0   max unresolved links with --all-features
-#   DOC_MIN_CRATES  26  workspace members that must actually be documented
+#   DOC_MIN_CRATES      DERIVED from `cargo metadata`, not written down - see
+#                       below for why the constant that was here went stale
 # ============================================================================
 set -uo pipefail
 
@@ -89,7 +90,29 @@ cd "$ROOT"
 
 DOC_MAX_DEFAULT=1
 DOC_MAX_ALL=0
-DOC_MIN_CRATES=26
+
+# HOW MANY CRATES A REAL RUN DOCUMENTS, asked of the workspace manifest rather
+# than written down. This was `DOC_MIN_CRATES=26` against 30 real members
+# (measured 2026-08-20 by a cold `cargo clean --doc && cargo doc --no-deps
+# --workspace`: 30 `Documenting` lines, exit 0). A build that died after the
+# 26th crate therefore read as a clean pass, and the gap only ever widens,
+# because every new crate loosens a constant nobody re-runs. Two crates landed
+# on 2026-08-20 alone.
+#
+# Deriving it does not violate the "not environment" rule in the header above:
+# the number comes from the workspace's own membership, which the caller cannot
+# move without editing a Cargo.toml, and it is exact rather than slack.
+DOC_MIN_CRATES="$(cargo metadata --no-deps --format-version 1 2>/dev/null \
+  | jq '.packages | length')"
+
+# jq missing, cargo failing, or a manifest error all yield an empty or tiny
+# number, and a floor of 0 passes every dead build. Refuse instead.
+if ! [ "${DOC_MIN_CRATES:-0}" -ge 10 ] 2>/dev/null; then
+  echo "FAIL: could not read the workspace member count (got '${DOC_MIN_CRATES:-}')." >&2
+  echo "      That number IS the control that separates a clean doc build from" >&2
+  echo "      one that never ran, so the gate refuses rather than defaulting." >&2
+  exit 2
+fi
 
 LOG="$(mktemp)"
 trap 'rm -f "$LOG"' EXIT

@@ -1234,9 +1234,16 @@ async fn execute_resource_tree(
     //    `kind: "mutation"` cannot be served via GET, and
     //    `kind: "subscription"` requires GET + Upgrade headers. We
     //    surface 405 for the wrong method and 426 UPGRADE_REQUIRED
-    //    when Upgrade headers are missing. The actual handshake runs
-    //    in `proxy_subscription_upgrade` once we get past the rest of
-    //    the pre-dispatch checks.
+    //    when Upgrade headers are missing. NOTHING RUNS THE HANDSHAKE:
+    //    a request that clears these checks reaches
+    //    `handle_subscription_dispatch`, which returns 501. Until
+    //    2026-08-20 this named a proxy-upgrade helper as the place it
+    //    ran; that name was in no file but this comment -- the same
+    //    defect as the one recorded at "THE TRANSPARENT WS PROXY DOES
+    //    NOT EXIST" below, and invisible to a gate hardcoded to that
+    //    one identifier. Backticks in this file
+    //    mean "a symbol that exists"; a deleted or never-built one is
+    //    described, not cited (tests/ws_subscription_stub_gate.sh).
     if let Some(kind) = policy.kind {
         let method = req.method();
         let allow = match kind {
@@ -2436,7 +2443,7 @@ async fn handle_dispatch(
     // The worker reaches this branch on resources its own JS code
     // gated as `user`/`admin` when the gateway forwarded without a
     // `ZeroShip-User` header. (Resource-tree `user`/`admin` are
-    // already short-circuited by `auth_satisfied` upstream, so they
+    // already short-circuited by `resolve_auth` upstream, so they
     // never reach the worker.) API clients still see the 401 verbatim.
     //
     // Both arms REPLACE the worker's answer with the gateway's own, so both
@@ -4105,7 +4112,7 @@ mod tests {
     //
     // The Outcome::Worker arm wires `compute_bucket_id` and
     // `state.per_rule_rate_limits.check(...)` together. Driving the full
-    // `execute_outcome` would need a constructable `web::types::State`,
+    // `execute_resource_tree` would need a constructable `web::types::State`,
     // which ntex doesn't expose outside its `App` builder. Instead we
     // recreate the exact bucket-key composition the router uses and
     // assert it agrees with the registry's view of "drained vs fresh"

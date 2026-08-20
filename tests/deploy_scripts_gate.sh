@@ -251,34 +251,57 @@ fi
 # (deploy/scripts/deploy-remote.sh: "zeroship-platform-migrate has no
 # --check-config and mounts no overlay"), and its DSN path is a flag precisely
 # so the credential stays out of both argv and the container environment.
+#
+# WHAT THE ANTI-HOLLOW GUARD BELOW DID NOT COVER UNTIL 2026-08-20, and it is
+# the instructive part. The scan matched exactly ONE `--<name>-file` row in the
+# shipped compose -- `migrate --database-url-file` -- and `migrate` is the one
+# service the filter excludes, so the set it examined was EMPTY and the pass
+# below was reporting on nothing. The guard that was here proves the service
+# WALK still sees every dry-run service, which is a real check and stays; it
+# says nothing about whether the flag MATCHER still matches, and a matcher that
+# matches nothing prints the same clean line as a compose file with no flags.
+# So the flag-row count is now floored and the rows are named in the pass, which
+# is the only thing that tells a reader the filter had work to do.
 if [ -f "$REAL_COMPOSE" ]; then
   DRY_RUN_SERVICES=""
   for svc in $CHECK_SERVICES; do DRY_RUN_SERVICES="$DRY_RUN_SERVICES ${svc%%:*}"; done
+
   # `<service>\t<flag>` for every `--<name>-file` on a live line, attributed to
-  # the service block it sits in.
-  FLAG_FILES="$(
+  # the service block it sits in. NOT yet filtered to the dry-run set.
+  ALL_FLAG_FILES="$(
     awk '
       /^  [a-z][a-z0-9_-]*:[[:space:]]*$/ { svc = $1; sub(/:$/, "", svc); next }
       /^[[:space:]]*#/ { next }
       svc != "" && match($0, /--[a-z-]+-file/) {
         print svc "\t" substr($0, RSTART, RLENGTH)
       }
-    ' "$REAL_COMPOSE" | sort -u | while IFS=$'\t' read -r s f; do
+    ' "$REAL_COMPOSE" | sort -u
+  )"
+  N_ALL_FLAGS=0
+  [ -n "$ALL_FLAG_FILES" ] && N_ALL_FLAGS="$(printf '%s\n' "$ALL_FLAG_FILES" | wc -l | tr -d ' ')"
+
+  FLAG_FILES="$(
+    printf '%s' "$ALL_FLAG_FILES" | while IFS=$'\t' read -r s f; do
+      [ -n "$s" ] || continue
       case " $DRY_RUN_SERVICES " in *" $s "*) echo "$s $f" ;; esac
     done
   )"
-  # Anti-hollow: the walk is worthless if it stops attributing lines to
-  # services, and that looks exactly like compliance. Every dry-run service
+
+  # Anti-hollow, part one: the walk is worthless if it stops attributing lines
+  # to services, and that looks exactly like compliance. Every dry-run service
   # must be visible to it.
   SEEN_SERVICES="$(awk '/^  [a-z][a-z0-9_-]*:[[:space:]]*$/ { s=$1; sub(/:$/,"",s); print s }' "$REAL_COMPOSE" | sort -u)"
   MISSING_SEEN=""
   for s in $DRY_RUN_SERVICES; do
     echo "$SEEN_SERVICES" | grep -qx "$s" || MISSING_SEEN="$MISSING_SEEN $s"
   done
+
   if [ -n "$MISSING_SEEN" ]; then
     fail "the service walk did not see$MISSING_SEEN, so a clean result below would mean nothing"
+  elif [ "$N_ALL_FLAGS" -eq 0 ]; then
+    fail "the --<name>-file matcher found no row anywhere in $REAL_COMPOSE, not even on the services the pre-roll does not dry-run. It matched 1 on 2026-08-20; a matcher that matches nothing reports the same clean result as a compose file with no flags"
   elif [ -z "$FLAG_FILES" ]; then
-    pass "no dry-run service passes a secret path as a command flag, so --check-config sees every one of them"
+    pass "no dry-run service passes a secret path as a command flag, so --check-config sees every one of them ($N_ALL_FLAGS flag row(s) in the file, $(printf '%s\n' "$ALL_FLAG_FILES" | tr '\t' ' ' | tr '\n' ';') -- all outside the dry-run set $(echo $DRY_RUN_SERVICES))"
   else
     fail "these secret paths are passed as command flags on a service the pre-roll dry-runs, and are therefore invisible to --check-config: $(echo $FLAG_FILES). Move them to their canonical ZEROSHIP_*_FILE environment name"
   fi

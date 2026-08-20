@@ -386,6 +386,14 @@ jobs:
       # ten files were in that state on 2026-08-19; the self-test runs first
       # because a gate that reports zero offenders and a gate whose detector
       # matches nothing print the same thing.
+      #
+      # AND ON THE REAL TREE IT WAS THE SECOND ONE. Measured 2026-08-20: 8 rows
+      # found, 0 removed by the marker filter, all 8 removed by an ALLOW list of
+      # bare path prefixes, so the run examined nothing and printed the clean
+      # line anyway. The gate now prints found/excused/unruled, refuses a zero
+      # pre-filter, fails an ALLOW entry that matches nothing, and matches the
+      # excused SHAPE rather than the whole file - a marker-less skip injected
+      # into a WPT runner was excused before that change and is named after it.
       - name: Skip-marker gate self-test
         run: tests/skip_marker_gate.sh --self-test
       - name: No test skips in a string the census cannot see
@@ -399,6 +407,16 @@ jobs:
       # Nothing could see it. A `//` comment is not a doc comment, so neither
       # rustdoc's intra-doc gate (tests/run_doc_gate.sh above) nor the citation
       # gates look at it. Text-only, runs no gateway.
+      #
+      # The gate watched that ONE identifier, so after the fix it examined zero
+      # names and reported the same green it reports on a clean file. Measured
+      # 2026-08-20 while it said "0 mention(s), 0 definition(s) -- no phantom":
+      # three more comment-only names were live in that file, one of them nine
+      # lines from the fix. Arm 1 now checks every backticked name the file
+      # cites. Self-test first, because a detector that matches nothing and a
+      # file with no phantoms print the same thing.
+      - name: WS stub gate self-test
+        run: tests/ws_subscription_stub_gate.sh --self-test
       - name: websocket subscription stub agrees with what describes it
         run: tests/ws_subscription_stub_gate.sh
       # NOTHING IN THIS REPO BUILDS THE PLATFORM IMAGE. Measured 2026-08-11:
