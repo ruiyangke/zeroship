@@ -283,6 +283,7 @@ pub(crate) fn clears_no_obstruction(step: &PlanStep) -> bool {
         // removals too. Pinned by `the_step_kind_verdicts_agree_with_the_op_model`
         // so the duplication cannot drift silently.
         PlanStep::AlterPrimaryKey(_)
+        | PlanStep::AlterColumnType(_)
         | PlanStep::SynchronizeIdentity(_)
         | PlanStep::OnlineRename(_) => false,
     }

@@ -59,7 +59,8 @@ use crate::render::declarative::{
 use crate::render::plan::{AppliedPlan, DatabaseFeature, DatabaseRequirements};
 use crate::render::renderer::{Capability, DialectSupports};
 use crate::render::step::{
-    AlterPrimaryKeyStep, BindValue, PlanStep, RenameStep, SynchronizeIdentityStep,
+    AlterColumnTypeStep, AlterPrimaryKeyStep, BindValue, PlanStep, RenameStep,
+    SynchronizeIdentityStep,
 };
 use crate::render::value_format::{
     authored_id_default, authored_text_id_default, authored_uuid_id_default,
@@ -105,6 +106,10 @@ enum LoweredOp {
     /// An explicit primary-key lifecycle mutation. It remains structured until
     /// apply so catalog preconditions are checked under the migration lock.
     PrimaryKey(Box<AlterPrimaryKeyStep>),
+    /// A column retype the target dialect spells by restating the whole column
+    /// definition. It stays structured until apply so the backend can read the
+    /// definition the server itself reports (see `AlterColumnTypeStep`).
+    ColumnType(Box<AlterColumnTypeStep>),
     /// An import-time identity synchronization, kept structured through apply.
     IdentitySynchronization(Box<SynchronizeIdentityStep>),
     /// a DML op (`insert`/`update`/`del`/`backfill`) lowered through the
@@ -2688,6 +2693,7 @@ impl LoweredArtifact {
                     out.push(rb.migration.clone());
                 }
                 PlanStep::AlterPrimaryKey(step) => out.push(step.migration.clone()),
+                PlanStep::AlterColumnType(step) => out.push(step.migration.clone()),
                 PlanStep::SynchronizeIdentity(step) => out.push(step.migration.clone()),
                 PlanStep::Dml { .. } | PlanStep::Backfill { .. } => {}
             }
@@ -3654,6 +3660,11 @@ impl IrAuthor {
                 PlanStep::AlterPrimaryKey(_) => {
                     return Err(IrLowerError::UnsupportedOp(
                         "alterPrimaryKey requires lower_plan",
+                    ));
+                }
+                PlanStep::AlterColumnType(_) => {
+                    return Err(IrLowerError::UnsupportedOp(
+                        "a restated setColumnType requires lower_plan",
                     ));
                 }
                 PlanStep::SynchronizeIdentity(_) => {
@@ -4635,6 +4646,7 @@ impl IrAuthor {
             }
             LoweredOp::Rename(step) => out.push(PlanStep::OnlineRename(*step)),
             LoweredOp::PrimaryKey(step) => out.push(PlanStep::AlterPrimaryKey(*step)),
+            LoweredOp::ColumnType(step) => out.push(PlanStep::AlterColumnType(*step)),
             LoweredOp::IdentitySynchronization(step) => {
                 out.push(PlanStep::SynchronizeIdentity(*step));
             }
@@ -5729,6 +5741,77 @@ impl IrAuthor {
                         column: column.clone(),
                         direction: g.into(),
                     });
+                }
+                // MySQL spells a retype `MODIFY COLUMN`, which restates the WHOLE
+                // column definition and silently discards every facet the statement
+                // omits. The definition is not in the op, so the statement cannot be
+                // written here — it is written at APPLY, from the definition the
+                // server itself reports, exactly the way this backend's
+                // `dropIdentityFrom` already does. See `AlterColumnTypeStep` for why
+                // the live snapshot lowering DOES have is not good enough.
+                if self.dialect == SqlDialect::Mysql {
+                    // A guard cannot ride along: the executor attributes a
+                    // `GuardProbe` verdict to a rendered Migration, and this step has
+                    // none until apply. Fail closed rather than silently drop it —
+                    // the same contract `alterPrimaryKey` and `renameColumn` state.
+                    if guard.is_some() {
+                        return Err(IrLowerError::GuardProbeUnbuildable("setColumnType"));
+                    }
+                    // The BARE type. The rendered MySQL spelling carries the engine's
+                    // own `CHARACTER SET … COLLATE …` choice, which is right when the
+                    // engine creates a column and wrong when it retypes one — see
+                    // `mysql_type_without_collation`.
+                    let ddl_type = crate::render::declarative::mysql_type_without_collation(
+                        &crate::render::declarative::column_type_for_render(
+                            &col,
+                            self.dialect,
+                            false,
+                        ),
+                    )
+                    .to_string();
+                    let owner_app = self.decl.owner_app().to_string();
+                    let up = format!(
+                        "-- zero-migrate: restate {eff_schema}.{table}.{column} as {ddl_type}"
+                    );
+                    let flags = MigrationFlags {
+                        transactional: false,
+                        destructive: true,
+                        requires_approval: true,
+                        ..MigrationFlags::default()
+                    };
+                    let migration = Migration {
+                        version: provisional_step_version(
+                            op_index,
+                            &owner_app,
+                            "alter_column_type",
+                        ),
+                        name: format!("alter_column_type_{table}_{column}"),
+                        checksum: Checksum::of(&ChecksumInput {
+                            up: &up,
+                            down: None,
+                            flags: &flags,
+                            owner_app: &owner_app,
+                            depends_on: &[],
+                            supersedes: &[],
+                            preconditions: &[],
+                        }),
+                        up,
+                        down: None,
+                        flags,
+                        owner_app,
+                        depends_on: Vec::new(),
+                        supersedes: Vec::new(),
+                        preconditions: Vec::new(),
+                        existence_guard: None,
+                        effect: None,
+                    };
+                    return Ok(LoweredOp::ColumnType(Box::new(AlterColumnTypeStep {
+                        migration,
+                        schema: eff_schema,
+                        table: table.clone(),
+                        column: column.clone(),
+                        ddl_type,
+                    })));
                 }
                 self.refuse_mysql_alter_column("setColumnType")?;
                 let mut units = vec![decl.lower_alter_column_type(table, &col)];
@@ -7399,6 +7482,15 @@ impl IrAuthor {
                 });
                 return Ok(());
             }
+            LoweredOp::ColumnType(step) => {
+                steps.push(PlanStep::AlterColumnType(*step));
+                op_spans.push(LoweredOpSpan {
+                    op: op.clone(),
+                    step_range: step_start..steps.len(),
+                    additional_step_ranges: Vec::new(),
+                });
+                return Ok(());
+            }
             LoweredOp::IdentitySynchronization(step) => {
                 steps.push(PlanStep::SynchronizeIdentity(*step));
                 op_spans.push(LoweredOpSpan {
@@ -8414,6 +8506,15 @@ impl IrAuthor {
     /// and MySQL's spelling needs the whole column definition restated, which the
     /// op does not carry.
     ///
+    /// `setColumnType` NO LONGER PASSES THROUGH HERE, and how it left is the
+    /// instruction for its two remaining siblings. "The op does not carry the
+    /// definition" was true and was never the whole question: the SERVER carries it,
+    /// in `SHOW CREATE TABLE`, and a retype now lowers to a `PlanStep::AlterColumnType`
+    /// that reads it under the apply lock. `setColumnNotNull` and `dropColumnNotNull`
+    /// are the same shape - `MODIFY COLUMN` with one facet changed instead of the
+    /// type - and are still refused here only because no one has driven one end to
+    /// end against a live server, which is the bar the retype had to clear.
+    ///
     /// Keeping the two apart matters because they answer different questions and
     /// a reader who merges them concludes the capability table is lying about
     /// MySQL. It is not: `true` is the true answer about the engine, and the
@@ -8433,14 +8534,15 @@ impl IrAuthor {
         self.refuse_mysql_alter_column(op)
     }
 
-    /// The MySQL half of [`Self::require_alter_column_rendering`], separable
-    /// because `setColumnType` must refuse an unrepresentable named type FIRST.
+    /// The MySQL half of [`Self::require_alter_column_rendering`], kept separate
+    /// because the two halves are about different things and one of them is
+    /// shrinking.
     ///
-    /// An `enum`/`domain` target on MySQL is refused with `NamedTypeUnsupported`,
-    /// which is the more useful answer: that type cannot exist on MySQL at all, so
-    /// it is not fixable by hand-authoring the SQL, whereas an alter-column change
-    /// is. Running this check first would replace the specific diagnosis with the
-    /// general one.
+    /// It covers `setColumnNotNull` and `dropColumnNotNull` only. `setColumnType`
+    /// used to be its third caller and now lowers to a restate step instead; see
+    /// [`Self::require_alter_column_rendering`] for why that is the route out for
+    /// these two as well, and `crate::render::step::AlterColumnTypeStep` for what
+    /// taking it costs.
     fn refuse_mysql_alter_column(&self, op: &'static str) -> Result<(), IrLowerError> {
         if self.dialect == SqlDialect::Mysql {
             return Err(IrLowerError::MysqlAlterColumnUnsupported(op));
@@ -10005,6 +10107,7 @@ fn validate_repeatable_ir_steps(ir: &MigrationIr, steps: &[PlanStep]) -> Result<
             PlanStep::Dml { .. } => "a DML step",
             PlanStep::Backfill { .. } => "a backfill step",
             PlanStep::AlterPrimaryKey(_) => "an alter-primary-key step",
+            PlanStep::AlterColumnType(_) => "a restated column-type step",
             PlanStep::SynchronizeIdentity(_) => "a synchronize-identity step",
             PlanStep::OnlineRename(_) => "an online rename step",
         };
@@ -10044,6 +10147,12 @@ fn stamp_ir_plan_steps(ir: &MigrationIr, steps: &mut [PlanStep]) -> (MigrationId
                 );
             }
             PlanStep::AlterPrimaryKey(step) => {
+                replacements.insert(
+                    step.migration.version.as_str().to_string(),
+                    ir_step_version(&plan_version, ordinal),
+                );
+            }
+            PlanStep::AlterColumnType(step) => {
                 replacements.insert(
                     step.migration.version.as_str().to_string(),
                     ir_step_version(&plan_version, ordinal),
@@ -10117,6 +10226,10 @@ fn stamp_ir_plan_steps(ir: &MigrationIr, steps: &mut [PlanStep]) -> (MigrationId
                 let next = ir_step_version(&plan_version, ordinal);
                 restamp_ir_migration(&mut step.migration, next, &anchor, &replacements, &ir.flags);
             }
+            PlanStep::AlterColumnType(step) => {
+                let next = ir_step_version(&plan_version, ordinal);
+                restamp_ir_migration(&mut step.migration, next, &anchor, &replacements, &ir.flags);
+            }
             PlanStep::SynchronizeIdentity(step) => {
                 let next = ir_step_version(&plan_version, ordinal);
                 restamp_ir_migration(&mut step.migration, next, &anchor, &replacements, &ir.flags);
@@ -10169,6 +10282,7 @@ fn stamp_ir_plan_steps(ir: &MigrationIr, steps: &mut [PlanStep]) -> (MigrationId
             PlanStep::Dml { .. }
             | PlanStep::Backfill { .. }
             | PlanStep::AlterPrimaryKey(_)
+            | PlanStep::AlterColumnType(_)
             | PlanStep::SynchronizeIdentity(_)
             | PlanStep::OnlineRename(_) => {
                 preceding_ddl = None;

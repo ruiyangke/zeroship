@@ -33,6 +33,7 @@
 //! mis-apply, exactly as the host-PG backend fails closed on its
 //! online harness and SQLite fails closed on its capability gaps.
 
+pub(crate) mod alter_column_type_sql;
 pub(crate) mod backfill_sql;
 pub(crate) mod drift_sql;
 pub(crate) mod identity_sql;
@@ -60,7 +61,9 @@ use crate::driver::{Row, SqlSession};
 use crate::model::migration::{Checksum, Migration, MigrationId};
 use crate::model::snapshot::SchemaSnapshot;
 use crate::render::plan::{DatabaseFeature, DatabaseRequirements, SqliteRebuildSpec};
-use crate::render::step::{AlterPrimaryKeyStep, BindValue, SynchronizeIdentityStep};
+use crate::render::step::{
+    AlterColumnTypeStep, AlterPrimaryKeyStep, BindValue, SynchronizeIdentityStep,
+};
 use crate::schema::query::SqlDialect;
 
 /// The generic MySQL [`MigrationBackend`] implementation.
@@ -941,6 +944,18 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         applied_by: &str,
     ) -> Result<bool, ApplyError> {
         primary_key_sql::alter_primary_key(self.conn, cfg, step, approval, scope, applied_by).await
+    }
+
+    async fn alter_column_type(
+        &self,
+        cfg: &ExecutorConfig,
+        step: &AlterColumnTypeStep,
+        approval: crate::approval::Approval,
+        scope: &crate::approval::ApprovalScope,
+        applied_by: &str,
+    ) -> Result<bool, ApplyError> {
+        alter_column_type_sql::alter_column_type(self.conn, cfg, step, approval, scope, applied_by)
+            .await
     }
 
     async fn synchronize_identity(

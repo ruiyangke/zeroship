@@ -2682,6 +2682,24 @@ impl MigrationEngine {
                     }
                     i += 1;
                 }
+                PlanStep::AlterColumnType(step) => {
+                    let version = step.migration.version.as_str();
+                    if completed_gated.contains(version) {
+                        applied.skipped.push(version.to_string());
+                        i += 1;
+                        continue;
+                    }
+                    let ran = backend
+                        .alter_column_type(exec_cfg, step, approval, scope, applied_by)
+                        .await
+                        .map_err(EngineError::Apply)?;
+                    if ran {
+                        applied.applied.push(version.to_string());
+                    } else {
+                        applied.skipped.push(version.to_string());
+                    }
+                    i += 1;
+                }
                 PlanStep::SynchronizeIdentity(step) => {
                     let version = step.migration.version.as_str();
                     let ran = backend
@@ -2984,6 +3002,11 @@ impl MigrationEngine {
                 PlanStep::Dml { version, .. } | PlanStep::Backfill { version, .. } => {
                     budgets.push((version.as_str(), None, None));
                 }
+                PlanStep::AlterColumnType(step) => budgets.push((
+                    step.migration.version.as_str(),
+                    step.migration.flags.timeout_ms,
+                    step.migration.flags.lock_timeout_ms,
+                )),
                 PlanStep::AlterPrimaryKey(step) => budgets.push((
                     step.migration.version.as_str(),
                     step.migration.flags.timeout_ms,
@@ -3099,6 +3122,12 @@ impl MigrationEngine {
                     &progress,
                     version.as_str(),
                     checksum.as_str(),
+                )?,
+                PlanStep::AlterColumnType(step) => journal_completed_for_approval(
+                    &journal,
+                    step.migration.version.as_str(),
+                    step.migration.checksum.as_str(),
+                    false,
                 )?,
                 PlanStep::AlterPrimaryKey(step) => journal_completed_for_approval(
                     &journal,

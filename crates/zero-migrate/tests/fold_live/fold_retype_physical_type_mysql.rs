@@ -20,9 +20,10 @@
 //! `render::fold::restamp_mysql_physical_types`:
 //!
 //! 1. `a_narrowing_retype_folds_the_contract_mysql_reports_for_the_target` - the
-//!    retype the field was named for. It also pins the fact that a `setColumnType`
-//!    CANNOT be applied on MySQL at all, which is why its oracle is a separately
-//!    deployed column rather than a drift report.
+//!    retype the field was named for, DEPLOYED. It used to pin the opposite fact,
+//!    that a `setColumnType` could not be applied on MySQL at all; the op now lowers
+//!    to a restate step, so the retyped column itself is an oracle alongside the
+//!    separately deployed one.
 //! 2. `folded_column_shapes_describe_the_physical_type_mysql_holds` - the reachable
 //!    half. `createTable` and `addColumn` DO deploy on MySQL, and a drift report
 //!    against the server is the assertion.
@@ -187,25 +188,23 @@ async fn live_column_types(
     Ok(out.join(", "))
 }
 
-/// A `varchar(255) -> varchar(64)` retype folds to the contract MySQL ITSELF reports
-/// for a `varchar(64)` column - and the retype never reaches a MySQL server.
+/// A `varchar(255) -> varchar(64)` retype DEPLOYS on MySQL, and the fold describes
+/// what the server then holds.
 ///
-/// Both halves are the finding, and the second one is why the first is written this
-/// way. `render::lower`'s `refuse_mysql_alter_column` refuses EVERY alter-column op
-/// on MySQL unconditionally, `setColumnType` included, because the renderers emit
-/// PostgreSQL `ALTER COLUMN` syntax and MySQL's `MODIFY COLUMN` needs the whole
-/// column definition restated. So a retype cannot be APPLIED here, and no phantom
-/// drift line can be produced from one: the plan dies at lower time, before anything
-/// is deployed. The first assertion below pins that, so a reader does not conclude
-/// from the second one that the retype path is live on MySQL.
+/// Both halves are the finding. The first half used to be the opposite claim -
+/// `refuse_mysql_alter_column` refused every alter-column op on MySQL, so a retype
+/// could not be applied and this test pinned the refusal. That is gone:
+/// `setColumnType` lowers to a restate step that reads the live column definition
+/// from `SHOW CREATE TABLE` at apply, so the retype runs and the server is now
+/// available as the oracle for BOTH halves.
 ///
 /// The folded contract still has to be right, because `fold_ops` is public API and
-/// the fold is the expected side of every structural comparison. The ORACLE is the
-/// server rather than a literal: a second table is deployed carrying a `varchar(64)`
-/// column outright, introspected through the shipped `snapshot_schema`, and the
-/// contract MySQL reports for it is what the retype's fold must produce. A literal
+/// the fold is the expected side of every structural comparison. Two independent
+/// server answers have to agree with it: a second table deployed carrying a
+/// `varchar(64)` column OUTRIGHT, and the retyped column itself. A literal
 /// `Character { fixed: false, length: 64 }` in this file would be a second spelling
-/// of the derivation under test.
+/// of the derivation under test; a stale contract here would report drift on a
+/// database that holds exactly what was asked for.
 ///
 /// WIDTH is the case chosen deliberately: `mysql_canonical_type` folds every
 /// `varchar(n)` to the literal `text`, so 255 and 64 are the same `data_type` string
@@ -279,41 +278,35 @@ async fn a_narrowing_retype_folds_the_contract_mysql_reports_for_the_target() {
              "toType":{"string":{"length":64}}}
         ]}"#;
 
-        // HALF ONE: the op cannot be deployed on MySQL at all.
-        let refused = apply_doc(
-            &session,
-            &cfg,
-            narrow,
-            &registry(&[("widths", OWNER)]),
-            &live,
-        )
-        .await;
-        match refused {
-            Ok(_) => {
-                return Err(
-                    "setColumnType lowered on MySQL; the alter-column refusal this test \
-                     documents is gone, and the retype now needs live drift coverage \
-                     rather than the fold-side oracle below"
-                        .to_string(),
-                )
-            }
-            Err(error) if error.contains("setColumnType is not supported on MySQL") => {}
-            Err(error) => {
-                return Err(format!(
-                    "setColumnType on MySQL failed for an unexpected reason: {error}"
-                ))
-            }
+        // HALF ONE: the op DEPLOYS, and the server holds the narrowed type.
+        all_ops.extend(
+            apply_doc(
+                &session,
+                &cfg,
+                narrow,
+                &registry(&[("widths", OWNER)]),
+                &live,
+            )
+            .await
+            .map_err(|error| format!("deploy the narrowing retype on MySQL: {error}"))?,
+        );
+        let deployed = MysqlBackend::new_generic(&session)
+            .snapshot_schema(&cfg)
+            .await
+            .map_err(|error| format!("snapshot after the retype: {error}"))?;
+        let deployed_contract = column_contract(&deployed, "widths", "label")?;
+        if deployed_contract != target_contract {
+            return Err(format!(
+                "the retype deployed but MySQL reports {deployed_contract:?} for \
+                 widths.label, not the {target_contract:?} it reports for a column \
+                 declared string(64) outright"
+            ));
         }
 
-        // HALF TWO: the fold still has to describe the target correctly.
-        let authored: MigrationIr = serde_json::from_str(narrow)
-            .map_err(|error| format!("parse the retype IR: {error}"))?;
+        // HALF TWO: the fold still has to describe the target correctly. The retype's
+        // ops are already in `all_ops` from the deploy above, so what is folded here
+        // is exactly the stream that ran.
         let policy = support::no_inject(&cfg.project_schema);
-        all_ops.extend(
-            resolve_create_table_policy(&authored, &policy, &cfg.project_schema)
-                .map_err(|error| format!("resolve the retype IR: {error}"))?
-                .ops,
-        );
         let folded = fold_ops(&all_ops, SqlDialect::Mysql, &cfg.project_schema, &policy)
             .map_err(|error| format!("fold the retype offline: {error}"))?;
         let folded_contract = column_contract(&folded, "widths", "label")?;

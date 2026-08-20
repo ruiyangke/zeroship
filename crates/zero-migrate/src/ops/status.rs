@@ -188,6 +188,9 @@ impl PlanStatusManifest {
                 PlanStep::AlterPrimaryKey(step) => {
                     steps.push(migration_step(&step.migration, PlanStatusStepKind::Ddl));
                 }
+                PlanStep::AlterColumnType(step) => {
+                    steps.push(migration_step(&step.migration, PlanStatusStepKind::Ddl));
+                }
                 PlanStep::SynchronizeIdentity(step) => {
                     let mut status =
                         migration_step(&step.migration, PlanStatusStepKind::SynchronizeIdentity);
