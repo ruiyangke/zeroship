@@ -18,6 +18,135 @@ const KNOWN_WEAK_WORKER_KEYS: &[&str] = &["dev-worker-key-not-for-production-use
 const KNOWN_WEAK_MASTER_KEYS: &[&str] =
     &["00000000000000000000000000000000000000000000000000000000000000ff"];
 
+/// The raw-UTF-8 byte floor every string-secret validator below enforces.
+///
+/// THE CONSTANT IS THE RULE. [`validate_stash_key`], [`validate_pairwise_salt`]
+/// and [`validate_worker_key`] each compare against it AND interpolate it into
+/// their refusal, so the threshold a message promises and the threshold the
+/// code applies cannot drift apart, and [`PLATFORM_SECRETS`] states the same
+/// number rather than a second copy of it.
+pub const MIN_SECRET_BYTES: usize = 32;
+
+/// The DECODED byte floor [`validate_master_key_material`] enforces: key
+/// material is carried as hex or base64url text, so its length rule is about
+/// what it decodes to, not how long the text is.
+pub const MIN_DECODED_KEY_BYTES: usize = 32;
+
+/// The strength rule one platform secret must satisfy.
+///
+/// Three arms, and the third is not an oversight: `Unrestricted` says the
+/// product enforces no length floor on that secret, which is a different claim
+/// from "nobody has looked". Whoever adds a floor changes the arm here and
+/// swaps the row's validator; a test drives both and refuses a row where they
+/// disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretStrength {
+    /// Raw UTF-8 length of at least this many bytes.
+    RawBytes(usize),
+    /// Decodes (hex or base64url) to at least this many bytes.
+    DecodedBytes(usize),
+    /// Generated material the product applies no length rule to.
+    Unrestricted,
+}
+
+/// One platform secret, named by the environment variable an operator sets.
+///
+/// The NAME lives here and not in a validator's message on purpose: a single
+/// validator is shared by binaries reading DIFFERENT variables (both stash
+/// keys run [`validate_stash_key`]), so no name baked into a validator can be
+/// right for all its callers. A per-variable row can be, and is.
+///
+/// A row carries BOTH the rule and the validator that applies it, and
+/// `platform_secret_rows_state_the_floor_their_validator_applies` drives every
+/// row at its floor and one byte under. A row whose `strength` disagrees with
+/// its `validate` therefore fails a test rather than describing a check that
+/// is not the one running.
+#[derive(Debug, Clone, Copy)]
+pub struct PlatformSecret {
+    /// The environment variable name, exactly as compose and `zeroship dev
+    /// init` spell it.
+    pub env: &'static str,
+    /// What the product refuses to start without.
+    pub strength: SecretStrength,
+    /// The validator this variable's binaries actually run, taking the
+    /// operator-facing label and the material.
+    validate: fn(&str, &str) -> Result<(), String>,
+}
+
+/// Every secret `zeroship dev init` generates, with the strength rule the
+/// product enforces on it.
+///
+/// This is the enumerable form of "which secrets have a minimum". It is read
+/// by `zeroship dev init` (to generate and re-validate the overlay) and by the
+/// compose secret-strength gate (`crates/zeroship-gatekit`), so a deployment
+/// file shipping a value below the floor is a build failure rather than a
+/// crash-loop on the next bring-up.
+pub const PLATFORM_SECRETS: &[PlatformSecret] = &[
+    PlatformSecret {
+        env: "ZEROSHIP_CONTROL_KEY",
+        strength: SecretStrength::Unrestricted,
+        validate: require_nonempty,
+    },
+    PlatformSecret {
+        env: "ZEROSHIP_CONTROL_MASTER_KEY",
+        strength: SecretStrength::DecodedBytes(MIN_DECODED_KEY_BYTES),
+        validate: validate_master_key_material,
+    },
+    PlatformSecret {
+        env: "ZEROSHIP_WORKER_KEY",
+        strength: SecretStrength::RawBytes(MIN_SECRET_BYTES),
+        validate: validate_worker_key,
+    },
+    PlatformSecret {
+        env: "ZEROSHIP_MIGRATED_POLICY_SEAL_KEY",
+        strength: SecretStrength::Unrestricted,
+        validate: require_nonempty,
+    },
+    PlatformSecret {
+        env: "ZEROSHIP_GATEWAY_STASH_SIGNING_KEY",
+        strength: SecretStrength::RawBytes(MIN_SECRET_BYTES),
+        validate: validate_stash_key,
+    },
+    PlatformSecret {
+        env: "ZEROSHIP_PAIRWISE_SALT",
+        strength: SecretStrength::RawBytes(MIN_SECRET_BYTES),
+        validate: validate_pairwise_salt,
+    },
+    PlatformSecret {
+        env: "ZEROSHIP_AUTH_STASH_SIGNING_KEY",
+        strength: SecretStrength::RawBytes(MIN_SECRET_BYTES),
+        validate: validate_stash_key,
+    },
+    PlatformSecret {
+        env: "ZEROSHIP_AUTH_TOTP_ENC_KEY",
+        strength: SecretStrength::DecodedBytes(MIN_DECODED_KEY_BYTES),
+        validate: validate_master_key_material,
+    },
+];
+
+/// Look up a platform secret by the environment variable name.
+#[must_use]
+pub fn platform_secret(env: &str) -> Option<&'static PlatformSecret> {
+    PLATFORM_SECRETS.iter().find(|secret| secret.env == env)
+}
+
+impl PlatformSecret {
+    /// Run this secret's real validator against `value`, labelled with this
+    /// secret's own environment variable name.
+    ///
+    /// THE LINK THAT MAKES THE TABLE AUTHORITATIVE. Every consumer of
+    /// [`PLATFORM_SECRETS`] goes through here rather than re-deriving which
+    /// validator a name gets, so a row cannot describe a check other than the
+    /// one that runs.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the underlying validator's message unchanged.
+    pub fn validate(&self, value: &str) -> Result<(), String> {
+        (self.validate)(self.env, value)
+    }
+}
+
 fn reject_known_weak(label: &str, value: &str, denylist: &[&str]) -> Result<(), String> {
     if denylist.contains(&value) {
         Err(format!(
@@ -60,12 +189,12 @@ pub fn require_nonempty(label: &str, value: &str) -> Result<(), String> {
 pub fn validate_stash_key(label: &str, value: &str) -> Result<(), String> {
     reject_known_weak(label, value, KNOWN_WEAK_STASH_KEYS)?;
     if value.is_empty() {
-        return Err(format!("{label} is required; set a strong (>=32 byte) value"));
+        return Err(format!("{label} is required; set a strong (>={MIN_SECRET_BYTES} byte) value"));
     }
 
-    if value.len() < 32 {
+    if value.len() < MIN_SECRET_BYTES {
         return Err(format!(
-            "{label} is too short ({} bytes); minimum 32 bytes",
+            "{label} is too short ({} bytes); minimum {MIN_SECRET_BYTES} bytes",
             value.len()
         ));
     }
@@ -93,14 +222,14 @@ pub fn validate_pairwise_salt(label: &str, value: &str) -> Result<(), String> {
     reject_known_weak(label, value, KNOWN_WEAK_PAIRWISE_SALTS)?;
     if value.is_empty() {
         return Err(format!(
-            "{label} is required; set a strong (>=32 byte) value \
+            "{label} is required; set a strong (>={MIN_SECRET_BYTES} byte) value \
              (identical on gateway + control, never rotated without a migration)"
         ));
     }
 
-    if value.len() < 32 {
+    if value.len() < MIN_SECRET_BYTES {
         return Err(format!(
-            "{label} is too short ({} bytes); minimum 32 bytes",
+            "{label} is too short ({} bytes); minimum {MIN_SECRET_BYTES} bytes",
             value.len()
         ));
     }
@@ -128,12 +257,12 @@ pub fn validate_pairwise_salt(label: &str, value: &str) -> Result<(), String> {
 pub fn validate_worker_key(label: &str, value: &str) -> Result<(), String> {
     reject_known_weak(label, value, KNOWN_WEAK_WORKER_KEYS)?;
     if value.is_empty() {
-        return Err(format!("{label} is required; set a strong (>=32 byte) value"));
+        return Err(format!("{label} is required; set a strong (>={MIN_SECRET_BYTES} byte) value"));
     }
 
-    if value.len() < 32 {
+    if value.len() < MIN_SECRET_BYTES {
         return Err(format!(
-            "{label} is too short ({} bytes); minimum 32 bytes",
+            "{label} is too short ({} bytes); minimum {MIN_SECRET_BYTES} bytes",
             value.len()
         ));
     }
@@ -155,7 +284,7 @@ pub fn decoded_master_key_len(value: &str) -> Option<usize> {
 
     if trimmed.len().is_multiple_of(2) && trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
         if let Ok(bytes) = hex::decode(trimmed) {
-            if bytes.len() >= 32 {
+            if bytes.len() >= MIN_DECODED_KEY_BYTES {
                 return Some(bytes.len());
             }
         }
@@ -177,10 +306,10 @@ pub fn decoded_master_key_len(value: &str) -> Option<usize> {
 pub fn validate_master_key_material(label: &str, value: &str) -> Result<(), String> {
     reject_known_weak(label, value, KNOWN_WEAK_MASTER_KEYS)?;
     match decoded_master_key_len(value) {
-        Some(n) if n >= 32 => Ok(()),
-        Some(n) => Err(format!("{label} decodes to {n} bytes; minimum is 32 bytes")),
+        Some(n) if n >= MIN_DECODED_KEY_BYTES => Ok(()),
+        Some(n) => Err(format!("{label} decodes to {n} bytes; minimum is {MIN_DECODED_KEY_BYTES} bytes")),
         None => Err(format!(
-            "{label} must be hex or base64url encoded and decode to at least 32 bytes"
+            "{label} must be hex or base64url encoded and decode to at least {MIN_DECODED_KEY_BYTES} bytes"
         )),
     }
 }
@@ -477,9 +606,96 @@ mod tests {
         decoded_master_key_len, enforce_owner_only, is_loopback_url, parse_secret_ref,
         read_secret_file, require_nonempty, validate_secret_material,
         resolve_secret, validate_master_key_material, validate_pairwise_salt, validate_secret_ref,
-        validate_stash_key, validate_worker_key, SecretError, SecretRef, KNOWN_WEAK_MASTER_KEYS,
-        KNOWN_WEAK_PAIRWISE_SALTS, KNOWN_WEAK_STASH_KEYS, KNOWN_WEAK_WORKER_KEYS,
+        validate_stash_key, validate_worker_key, SecretError, SecretRef, SecretStrength,
+        KNOWN_WEAK_MASTER_KEYS, KNOWN_WEAK_PAIRWISE_SALTS, KNOWN_WEAK_STASH_KEYS,
+        KNOWN_WEAK_WORKER_KEYS, MIN_SECRET_BYTES, PLATFORM_SECRETS,
     };
+
+    /// THE DEFECT THIS TABLE EXISTS FOR. `tests/compose_secret_strength_gate.sh`
+    /// used to derive its rule set by regexing the refusal message text out of
+    /// this file. 2c56e92a3 replaced the baked-in `WORKER_KEY` in those messages
+    /// with a `{label}` format parameter - a correct change - and the regex
+    /// silently matched nothing from that day on. The gate's anti-vacuity guard
+    /// caught it, so it went RED rather than falsely green, but the invariant
+    /// went unenforced for seven days.
+    ///
+    /// The fix is that the rule set is TYPED DATA, and this is the test that
+    /// keeps a row honest: every row is driven at exactly its stated floor and
+    /// one byte under, through the validator the row itself names. A row whose
+    /// `strength` does not describe what its `validate` does fails here.
+    #[test]
+    fn platform_secret_rows_state_the_floor_their_validator_applies() {
+        assert!(
+            !PLATFORM_SECRETS.is_empty(),
+            "an empty rule table is the vacuous case; a gate reading it would check nothing"
+        );
+
+        for secret in PLATFORM_SECRETS {
+            match secret.strength {
+                SecretStrength::RawBytes(floor) => {
+                    let under = "a".repeat(floor - 1);
+                    assert!(
+                        secret.validate(&under).expect_err("under the floor").contains("too short"),
+                        "{} claims a {floor}-byte raw floor but accepted {} bytes",
+                        secret.env,
+                        under.len()
+                    );
+                    secret
+                        .validate(&"a".repeat(floor))
+                        .unwrap_or_else(|e| panic!("{} must accept {floor} bytes: {e}", secret.env));
+                }
+                SecretStrength::DecodedBytes(floor) => {
+                    let under = hex::encode(vec![0xab; floor - 1]);
+                    secret.validate(&under).expect_err("under the decoded floor");
+                    secret
+                        .validate(&hex::encode(vec![0xab; floor]))
+                        .unwrap_or_else(|e| {
+                            panic!("{} must accept {floor} decoded bytes: {e}", secret.env)
+                        });
+                }
+                SecretStrength::Unrestricted => {
+                    // No floor is a positive claim, so it is asserted: a
+                    // one-byte value passes. Empty is still refused, which is
+                    // what keeps this from being "the validator accepts
+                    // anything".
+                    secret.validate("x").unwrap_or_else(|e| {
+                        panic!("{} claims no length rule but refused 1 byte: {e}", secret.env)
+                    });
+                    secret.validate("").expect_err("an unset secret is still refused");
+                }
+            }
+
+            // Every refusal must name the row's own variable, so a gate that
+            // prints the message points the operator at the thing to set.
+            let message = secret.validate("").expect_err("empty is always refused");
+            assert!(
+                message.starts_with(secret.env),
+                "refusal {message:?} must name {}",
+                secret.env
+            );
+        }
+    }
+
+    /// The message and the comparison must quote the SAME number. This is what
+    /// stops a future edit from moving one and not the other - the exact drift
+    /// the old text-scraping gate would have reported as a rule set of its own.
+    #[test]
+    fn the_length_refusal_quotes_the_constant_it_compares_against() {
+        for validate in [validate_stash_key, validate_pairwise_salt, validate_worker_key] {
+            let under = "a".repeat(MIN_SECRET_BYTES - 1);
+            assert_eq!(
+                validate(SENTINEL, &under).expect_err("under the floor"),
+                format!(
+                    "{SENTINEL} is too short ({} bytes); minimum {MIN_SECRET_BYTES} bytes",
+                    MIN_SECRET_BYTES - 1
+                )
+            );
+            // The one-variable partner: one more byte and the same call passes,
+            // so the assertion above is not passing because everything is
+            // refused.
+            validate(SENTINEL, &"a".repeat(MIN_SECRET_BYTES)).expect("at the floor");
+        }
+    }
 
     #[test]
     fn require_nonempty_rejects_missing_values() {
