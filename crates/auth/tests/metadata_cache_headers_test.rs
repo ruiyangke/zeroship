@@ -48,8 +48,7 @@ async fn boot() -> Option<(web::test::TestServer, cyper::Client)> {
     let issuer = Arc::new(
         Issuer::from_signing_key(&signing, [9u8; 32], ISSUER.to_string()).expect("issuer"),
     );
-    issuer
-        .publish_active_key(&db)
+    common::publish_op_key_once(&issuer, &db)
         .await
         .expect("publish active OP signing key");
 

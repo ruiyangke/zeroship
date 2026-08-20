@@ -167,8 +167,7 @@ async fn open_conn() -> Client {
 async fn access_token_roundtrip_served_jwks_public_only_and_issuer_consistency() {
     let db = open_conn().await;
     let issuer = test_issuer();
-    issuer
-        .publish_active_key(&db)
+    common::publish_op_key_once(&issuer, &db)
         .await
         .expect("publish active signing key");
 

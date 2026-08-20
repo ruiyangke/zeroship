@@ -47,8 +47,7 @@ async fn logout_emission_posts_signed_logout_token_with_sid() {
         return;
     };
     let issuer = test_issuer();
-    issuer
-        .publish_active_key(&db)
+    common::publish_op_key_once(&issuer, &db)
         .await
         .expect("publish active OP key");
     let captured = Arc::new(Mutex::new(Vec::<String>::new()));
