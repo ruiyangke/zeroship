@@ -865,8 +865,12 @@ impl Client {
         self.inner.set_dirty();
 
         let buf = self.inner().with_buf(|buf| {
+            // One spelling of "end this savepoint's scope", shared with
+            // `Transaction::rollback`: the rollback-on-drop path has to leave
+            // the server in the same state the explicit call would, or which
+            // exit a caller took would decide whether a savepoint outlives it.
             let sql = match name {
-                Some(name) => format!("ROLLBACK TO {name}"),
+                Some(name) => crate::transaction::rollback_savepoint(name),
                 None => "ROLLBACK".to_string(),
             };
             // H6: Don't panic on NUL in savepoint names. `frontend::query`
