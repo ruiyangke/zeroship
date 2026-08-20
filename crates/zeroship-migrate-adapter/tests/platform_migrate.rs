@@ -39,7 +39,7 @@ mod platform_cli {
     /// How many files `db/migrations-ts` holds. Asserted rather than derived so
     /// that a discovery bug which silently drops a file fails loudly instead of
     /// agreeing with itself. Adding a migration updates this one constant.
-    const PLATFORM_MIGRATION_FILES: usize = 33;
+    const PLATFORM_MIGRATION_FILES: usize = 34;
 
     const DURABLE_WORKFLOW_JOURNAL_TABLES: [&str; 10] = [
         "app_deploys",
@@ -776,6 +776,33 @@ mod platform_cli {
         .await
         {
             return Err("zeroship_worker column grants exceed the workflow projection".to_string());
+        }
+
+        // (6b) Control reaches the per-app workflow journals the same way the
+        // worker does, and by the same bounded route. It PROVISIONS them
+        // (workflow_instance_api, cron::workflow_schedules -> PgStore::provision,
+        // whose first statement is `SET ROLE zeroship_workflow_owner`) and sweeps
+        // them, so membership is required - table privileges cannot stand in for
+        // SET ROLE, and a migration cannot name an `app_<uuid>` schema that does
+        // not exist yet. Without this, every control workflow cron failed with
+        // `permission denied for schema app_<uuid>`.
+        //
+        // The second half is the bound: the role control gains owns nothing but
+        // the journals. If it ever acquires CREATE in `zeroship` or on the
+        // database, this membership stops being narrow and this check fails.
+        if !scalar_bool(
+            &probe,
+            "SELECT pg_has_role('zeroship_control', 'zeroship_workflow_owner', 'MEMBER') \
+                    AND NOT has_schema_privilege('zeroship_workflow_owner', 'zeroship', 'CREATE') \
+                    AND NOT has_database_privilege('zeroship_workflow_owner', current_database(), 'CREATE')",
+        )
+        .await
+        {
+            return Err(
+                "zeroship_control cannot reach per-app workflow journals, or the owner role it \
+                 reaches them through is no longer narrow"
+                    .to_string(),
+            );
         }
 
         // (7) The service-assertion replay store is a SECOND trust zone, and it
