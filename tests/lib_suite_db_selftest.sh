@@ -30,6 +30,7 @@ LIB="$ROOT/tests/lib/suite_db.sh"
 . "$LIB"
 
 TMP="$(mktemp -d)"
+S_PROV="$TMP/provision_probe.sh"
 trap 'rm -rf "$TMP"' EXIT
 
 fail=0
@@ -288,6 +289,47 @@ if printf '%s' "$out" | grep -q 'REACHED THE END'; then
   ok "and reaches the line after zs_suite_db_ensure"
 else
   bad "it died inside the library: $out"
+fi
+
+echo
+echo "=== provision serializes create+migrate against a concurrent run ==="
+# The step the migrate binary's own advisory lock does NOT cover. MEASURED on
+# 5444 before this lock existed, two first-ever migrates of one database
+# started together:
+#     migrate A exit=0   migrate B exit=1
+#     FAILED: provision schema: duplicate key value violates unique
+#             constraint "pg_namespace_nspname_index"
+# The project lock is taken around the APPLY; `CREATE SCHEMA` happens before
+# it. After the lock, the same experiment gives 0 and 0 with one CREATE and one
+# reuse.
+#
+# Asserted by OVERLAP, not by exit codes: two migrates that both succeed prove
+# nothing on their own, since they might simply not have collided. The fake
+# migrate below records the interval it ran for, and the check is that the two
+# intervals do not intersect.
+cat > "$S_PROV" <<EOF
+set -euo pipefail
+. "$LIB"
+PG_HOST=h; PG_PORT=1; TEST_DB=zeroship_selftest_lockprobe
+run_psql() { case "\$*" in *"FROM pg_database"*) printf '1\n' ;; esac; }
+TMPDIR="$TMP" zs_suite_db_provision bash -c '
+  printf "start %s\n" "\$(date +%s%N)" >> "$TMP/interval.log"
+  sleep 1
+  printf "end   %s\n" "\$(date +%s%N)" >> "$TMP/interval.log"
+'
+EOF
+: > "$TMP/interval.log"
+bash "$S_PROV" >/dev/null 2>&1 & pa=$!
+bash "$S_PROV" >/dev/null 2>&1 & pb=$!
+wait "$pa"; ra=$?
+wait "$pb"; rb=$?
+check "both provisions succeed" "0" "$((ra + rb))"
+# start end start end  = serialized.  start start end end = overlapped.
+order="$(awk '{print $1}' "$TMP/interval.log" | tr -d ' ' | tr '\n' ' ')"
+if [ "$order" = "start end start end " ]; then
+  ok "the two migrate commands did not overlap ($order)"
+else
+  bad "the migrate commands overlapped or did not both run: '$order'"
 fi
 
 echo
