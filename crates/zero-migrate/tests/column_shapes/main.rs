@@ -25,6 +25,7 @@ mod set_column_type_facets;
 mod set_column_type_facets_pg;
 mod set_column_type_generation_contracts;
 mod set_column_type_generation_contracts_pg;
+mod synchronize_identity_mysql;
 mod synchronize_identity_pg;
 mod synchronize_identity_sqlite;
 mod type_id_value_format;
