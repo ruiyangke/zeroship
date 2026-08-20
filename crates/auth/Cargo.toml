@@ -3,6 +3,13 @@ name = "zeroship-auth"
 version = "0.1.0"
 edition = "2021"
 description = "zeroship auth service — login/consent UI, identity flows, native OIDC OP"
+# Every `tests/*.rs` file is a MODULE of `tests/main.rs`, not a target of its
+# own. Auto-discovery would link one executable per file - 52 of them, each one
+# a full static link of this crate and its dependency graph - so it is off, and
+# the single `[[test]]` below is the only integration-test target. Adding a
+# `tests/<name>.rs` therefore requires `mod <name>;` in `tests/main.rs`; see
+# that file's header for the numbers and for how to select a subset now.
+autotests = false
 
 [[package.metadata.zeroship-config.targets]]
 target = "zeroship-auth"
@@ -12,6 +19,10 @@ reason = "Initial long-running authentication service in the server configuratio
 [[bin]]
 name = "zeroship-auth"
 path = "src/main.rs"
+
+[[test]]
+name = "main"
+path = "tests/main.rs"
 
 [dependencies]
 zeroship-core = { workspace = true }

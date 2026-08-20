@@ -264,8 +264,11 @@ where
         .make_tls_connect(hostname.unwrap_or(""))
         .map_err(|e| Error::tls(e.into()))?;
     let has_hostname = hostname.is_some();
+    // Taken while the socket is still a `Socket` - `connect_raw` is generic
+    // over the stream and the TLS wrapper hides the descriptor.
+    let release = socket.release_handle();
     let (mut client, connection) =
-        connect_raw(socket, tls, encryption, has_hostname, config).await?;
+        connect_raw(socket, tls, encryption, has_hostname, config, release).await?;
 
     // TargetSessionAttrs post-connect probe. The source interleaves a
     // `simple_query_raw("SHOW transaction_read_only")` with

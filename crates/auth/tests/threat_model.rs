@@ -13,7 +13,7 @@
 
 use uuid::Uuid;
 
-mod common;
+use crate::common;
 use common::{
     cleanup_rate_limits_like, cleanup_user, read_set_cookie, CookieJar, Fixture,
     TEST_CONSOLE_ORIGIN,

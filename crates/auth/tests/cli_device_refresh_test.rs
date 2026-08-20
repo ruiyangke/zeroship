@@ -9,7 +9,7 @@
 //! then be refused by `zeroship_authn::BearerVerifier::verify_bearer`, which
 //! is the failure this file exists to make loud.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::sync::Arc;

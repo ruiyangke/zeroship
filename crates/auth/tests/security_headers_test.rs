@@ -24,7 +24,7 @@
 //! - Routes that set their own CSP (the nonce-bearing interstitials). This
 //!   asserts the baseline on a plain UI route.
 
-mod common;
+use crate::common;
 use common::Fixture;
 
 /// `(header, expected exact value)` for the headers whose value is fixed.
