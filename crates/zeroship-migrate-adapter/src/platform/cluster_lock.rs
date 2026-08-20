@@ -201,9 +201,14 @@ impl ClusterGlobalLock {
             let holders = Self::describe_holders(&session).await;
             return Err(PlatformMigrateError::Apply {
                 file: file.to_string(),
+                // Deliberately NOT phrased as "timed out": a lock_timeout
+                // cancellation and a connection dropping mid-wait arrive here
+                // identically, and naming only the first would send a reader
+                // hunting a peer that was never there. The wait bound is stated
+                // as a bound; the server's own text says which one happened.
                 message: format!(
-                    "cluster lock: waited {CLUSTER_LOCK_WAIT} for the cluster-global apply \
-                     lock on database '{lock_database}' and did not get it: {error}.{holders}"
+                    "cluster lock: could not take the cluster-global apply lock on database \
+                     '{lock_database}' (waited up to {CLUSTER_LOCK_WAIT}): {error}.{holders}"
                 ),
             });
         }
