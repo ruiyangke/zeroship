@@ -1,7 +1,7 @@
 //! Native DOMException tests. WebIDL §3.14
 //! (https://webidl.spec.whatwg.org/#idl-DOMException).
 
-mod common;
+use crate::common;
 use common::{dispatch, m};
 
 #[test]

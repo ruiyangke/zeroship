@@ -12,7 +12,7 @@
 
 #![cfg(target_os = "linux")]
 
-mod common;
+use crate::common;
 use common::*;
 
 use std::time::Duration;
