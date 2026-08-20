@@ -2843,3 +2843,131 @@ async fn a_pool_refuses_a_configuration_it_cannot_honour() {
     .await;
     assert!(ok.is_ok(), "a coherent single-connection pool was refused");
 }
+
+/// Dropping the client is the ordinary way to close a connection, and the
+/// connection task must report that as success.
+///
+/// `Connection::run`'s documented use is `spawn(async { if let Err(e) =
+/// connection.run().await { log(e) } })` - the shape every caller in this
+/// repo and in tokio-postgres's own README uses. If a routine close resolves
+/// to `Err`, every application logs a connection error on every close, and a
+/// REAL failure becomes indistinguishable from shutting down. The shutdown
+/// path already treats an undeliverable `Terminate` as a courtesy rather than
+/// an error for exactly this reason (`connection.rs`, the `terminate_sent`
+/// branch), so `run` resolving to `Err` here defeats that intent.
+#[compio::test]
+async fn dropping_the_client_closes_the_connection_without_an_error() {
+    let Some(url) = require_pg().await else { return };
+
+    let (client, connection) = compio_postgres::connect(&url, NoTls).await.unwrap();
+    let task = compio::runtime::spawn(async move { connection.run().await });
+
+    client.execute("SELECT 1", &[]).await.unwrap();
+    drop(client);
+
+    let outcome = task.await.expect("the connection task panicked");
+    if let Err(e) = outcome {
+        panic!(
+            "a clean drop resolved run() to an error: {}",
+            common::error_chain(&e)
+        );
+    }
+}
+
+/// The clean-close rule must not swallow a genuine failure.
+///
+/// With the client still alive and holding an in-flight query, losing the
+/// backend under it is a connection error and must be reported. Without this
+/// test the clean-close rule could be satisfied by absorbing read errors as
+/// well as undeliverable housekeeping writes.
+#[compio::test]
+async fn losing_the_backend_under_a_live_client_is_still_an_error() {
+    let Some(url) = require_pg().await else { return };
+
+    let (client, connection) = compio_postgres::connect(&url, NoTls).await.unwrap();
+    let task = compio::runtime::spawn(async move { connection.run().await });
+
+    // Terminating our own backend mid-statement leaves the request in the
+    // response queue and closes the socket under it, so the read terminal is
+    // reached with work outstanding.
+    let killed = client
+        .simple_query("SELECT pg_terminate_backend(pg_backend_pid())")
+        .await;
+    assert!(killed.is_err(), "the backend survived its own termination");
+
+    let outcome = task.await.expect("the connection task panicked");
+    assert!(
+        outcome.is_err(),
+        "losing the backend under a live client was reported as a clean close"
+    );
+
+    // The client remains alive until after the driver reports the failure.
+    drop(client);
+}
+
+/// An implicit rollback is drop-time housekeeping, just like statement close.
+/// Its delivery is not promised once the last client releases the socket.
+#[compio::test]
+async fn dropping_an_unfinished_transaction_and_the_client_closes_without_an_error() {
+    let Some(url) = require_pg().await else { return };
+
+    let (mut client, connection) = compio_postgres::connect(&url, NoTls).await.unwrap();
+    let task = compio::runtime::spawn(async move { connection.run().await });
+
+    let transaction = client.transaction().await.unwrap();
+    drop(transaction);
+    drop(client);
+
+    let outcome = task.await.expect("the connection task panicked");
+    if let Err(error) = outcome {
+        panic!(
+            "dropping an unfinished transaction and its client failed run(): {}",
+            common::error_chain(&error)
+        );
+    }
+}
+
+/// Portal close is the same discarded-response housekeeping class as
+/// statement close. Dropping it must not turn client shutdown into an error.
+#[compio::test]
+async fn dropping_a_bound_portal_and_its_client_closes_without_an_error() {
+    let Some(url) = require_pg().await else { return };
+
+    let (mut client, connection) = compio_postgres::connect(&url, NoTls).await.unwrap();
+    let task = compio::runtime::spawn(async move { connection.run().await });
+
+    let statement = client.prepare("SELECT $1::INT4").await.unwrap();
+    let transaction = client.transaction().await.unwrap();
+    let portal = transaction.bind(&statement, &[&1_i32]).await.unwrap();
+    drop(portal);
+    drop(transaction);
+    drop(statement);
+    drop(client);
+
+    let outcome = task.await.expect("the connection task panicked");
+    if let Err(error) = outcome {
+        panic!(
+            "dropping a bound portal and its client failed run(): {}",
+            common::error_chain(&error)
+        );
+    }
+}
+
+/// A real request remains fallible even if the last client drops after queuing
+/// it. The response stream outlives the client and still represents an awaited
+/// operation; only explicitly marked drop-time housekeeping may be absorbed.
+#[compio::test]
+async fn an_awaited_query_queued_before_client_drop_still_reports_its_write_error() {
+    let Some(url) = require_pg().await else { return };
+
+    let (client, connection) = compio_postgres::connect(&url, NoTls).await.unwrap();
+    let observer = client.simple_query_raw("SELECT 1").await.unwrap();
+    drop(client);
+
+    let outcome = connection.run().await;
+    assert!(
+        outcome.is_err(),
+        "an awaited query write was treated as fire-and-forget housekeeping"
+    );
+    drop(observer);
+}
