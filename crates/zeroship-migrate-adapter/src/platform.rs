@@ -959,6 +959,12 @@ pub async fn run_platform_migrations(
             // nothing the two files below do not already buy.
             let needs_cluster_lock = lowered.plan.steps.iter().any(|step| match step {
                 PlanStep::Ddl(m) => sql_touches_cluster_global(&m.up),
+                // A DML step is a parameterized insert/update into a project
+                // table, so it cannot reach a shared catalog. Classified anyway,
+                // on the same over-inclusive principle as the classifier itself:
+                // a false positive costs one serialized file, a false negative
+                // costs the race.
+                PlanStep::Dml { template, .. } => sql_touches_cluster_global(template),
                 _ => false,
             });
             let cluster_lock = if needs_cluster_lock {
