@@ -523,7 +523,7 @@ pub enum Host {
 ///     This option is ignored when connecting with Unix sockets. Defaults to 2 hours.
 /// * `keepalives_interval` - The time interval between TCP keepalive probes.
 ///     This option is ignored when connecting with Unix sockets.
-/// * `keepalives_retries` - The maximum number of TCP keepalive probes that will be sent before dropping a connection.
+/// * `keepalives_count` - The maximum number of TCP keepalive probes that will be sent before dropping a connection.
 ///     This option is ignored when connecting with Unix sockets.
 /// * `target_session_attrs` - Specifies requirements of the session. `read-write` requires
 ///     `transaction_read_only` to be `off`, while `read-only` requires it to be `on`. `primary` requires a server
@@ -962,14 +962,14 @@ impl Config {
     ///
     /// This is ignored for Unix domain sockets, or if the `keepalives` option is disabled.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn keepalives_retries(&mut self, keepalives_retries: u32) -> &mut Config {
-        self.keepalive_config.retries = Some(keepalives_retries);
+    pub fn keepalives_count(&mut self, keepalives_count: u32) -> &mut Config {
+        self.keepalive_config.retries = Some(keepalives_count);
         self
     }
 
     /// Gets the maximum number of TCP keepalive probes that will be sent before dropping a connection.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn get_keepalives_retries(&self) -> Option<u32> {
+    pub fn get_keepalives_count(&self) -> Option<u32> {
         self.keepalive_config.retries
     }
 
@@ -1185,11 +1185,11 @@ impl Config {
                 }
             }
             #[cfg(not(target_arch = "wasm32"))]
-            "keepalives_retries" => {
-                let keepalives_retries = value.parse::<u32>().map_err(|_| {
-                    Error::config_parse(Box::new(InvalidValue("keepalives_retries")))
+            "keepalives_count" => {
+                let keepalives_count = value.parse::<u32>().map_err(|_| {
+                    Error::config_parse(Box::new(InvalidValue("keepalives_count")))
                 })?;
-                self.keepalives_retries(keepalives_retries);
+                self.keepalives_count(keepalives_count);
             }
             "target_session_attrs" => {
                 let target_session_attrs = match value {
@@ -1403,7 +1403,7 @@ impl fmt::Debug for Config {
             config_dbg = config_dbg
                 .field("keepalives_idle", &self.keepalive_config.idle)
                 .field("keepalives_interval", &self.keepalive_config.interval)
-                .field("keepalives_retries", &self.keepalive_config.retries);
+                .field("keepalives_count", &self.keepalive_config.retries);
         }
 
         config_dbg
@@ -2292,5 +2292,28 @@ mod dsn_parse_tests {
             .parse::<Config>()
             .expect("trailing whitespace made a valid connection string fail");
         assert_eq!(config.get_ssl_mode(), SslMode::Require);
+    }
+
+    /// libpq spells the third keepalive knob `keepalives_count`, so a connection
+    /// string copied from the PostgreSQL documentation uses that name. We carried
+    /// tokio-postgres's `keepalives_retries` instead, and unknown keys are refused,
+    /// so such a string was rejected outright rather than tuning the probe count.
+    #[test]
+    fn the_libpq_spelling_of_the_keepalive_probe_count_is_accepted() {
+        for dsn in [
+            "host=h keepalives=1 keepalives_count=9",
+            "postgresql://h/db?keepalives=1&keepalives_count=9",
+        ] {
+            let config = dsn
+                .parse::<Config>()
+                .unwrap_or_else(|error| panic!("{dsn:?} did not parse: {error}"));
+            assert_eq!(config.get_keepalives_count(), Some(9), "for {dsn:?}");
+        }
+
+        // The control, differing only in the key: the old spelling is gone rather
+        // than aliased, so it now fails the same way any unknown key does.
+        "host=h keepalives=1 keepalives_retries=9"
+            .parse::<Config>()
+            .expect_err("keepalives_retries survived as an alias");
     }
 }
