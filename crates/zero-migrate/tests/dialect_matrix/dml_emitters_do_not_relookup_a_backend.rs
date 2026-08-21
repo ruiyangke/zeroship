@@ -101,24 +101,31 @@
 //! The census floor is what surfaced the miss; that is the whole argument for having
 //! one, arriving in the needle rather than in the region cutter.
 //!
-//! # What this does NOT catch, and one of these is a live instance
+//! # What this does NOT catch
 //!
 //! It reads `render/dml.rs` and `render/lower.rs`, and it sees only the two states a
 //! function can be in THERE.
 //!
-//! * **The identifier seam, which is the same cycle and is currently DELIBERATE.**
-//!   All three backend modules call `dml::quote_bare_ident_for_dialect(.., DIALECT)`
-//!   and `dml::quote_ident_checked_for_dialect(.., DIALECT)` — 23 call sites across
-//!   the three — and those forward to `dml::escape_quote_ident_for_dialect`, which
-//!   is `renderer(dialect).quote_ident(ident)`. That is vendor -> core -> the SAME
-//!   vendor, structurally identical to the in-list cycle above, and PostgreSQL is
-//!   NOT exempt from it. `backends/mysql.rs`'s `DIALECT` header records it as
-//!   intended ("the round trip goes back out through the `DmlRenderer` trait
-//!   object"), and `BindCtx::backend`'s doc records why it has not been converted:
-//!   those doors have callers in `apply::` and `model::` that hold only a dialect.
-//!   It is a decision to be made, not an oversight, so this file does not fail on
-//!   it — but it is not caught either, and reading a green run as "the DML tree has
-//!   no vendor -> core -> vendor cycle left" would be wrong.
+//! * **The identifier seam, which used to be the same cycle and is now CLOSED.**
+//!   All three backend modules used to call `dml::quote_bare_ident_for_dialect(..,
+//!   DIALECT)` and `dml::quote_ident_checked_for_dialect(.., DIALECT)`, which
+//!   forwarded to `dml::escape_quote_ident_for_dialect`, i.e.
+//!   `renderer(dialect).quote_ident(ident)` — vendor -> core -> the SAME vendor,
+//!   structurally identical to the in-list cycle above, and PostgreSQL was not
+//!   exempt. Those doors were converted to take a resolved backend, so today the
+//!   vendors call `quote_bare_ident_for_backend` (23 sites),
+//!   `quote_ident_checked_for_backend` (9) and `quote_ident_for_backend` (8), and
+//!   no vendor crate contains a `*_for_dialect(` CALL at all. Grep for the bare name
+//!   rather than the call form and you get six hits across the three crates; every
+//!   one is prose describing the seam as it used to be, which is the difference
+//!   between counting mentions and counting calls. The helpers now live in
+//!   `zero_migrate_backend::dml`, which resolves no registry at all, so the round
+//!   trip has no way back into core.
+//!
+//!   This bullet is kept rather than deleted because the conversion is what the
+//!   census floor below is measuring, and a reader who finds the floor dropping
+//!   needs to know these carriers are the reason it is as high as it is. It is NOT
+//!   an outstanding decision any more; do not re-add a `_for_dialect` door here.
 //! * A core emitter that still takes `dialect: SqlDialect` and looks a backend up.
 //!   Such a function is not a carrier, so it is not scanned. The census floor is the
 //!   partial guard — converting a carrier back drops the count and fails — but a
