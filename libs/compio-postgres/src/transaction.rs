@@ -145,13 +145,14 @@ impl<'a> Transaction<'a> {
     /// This is equivalent to `Transaction`'s `Drop` implementation, but
     /// provides any error encountered to the caller.
     pub async fn rollback(mut self) -> Result<(), Error> {
-        self.done = true;
         let query = if let Some(sp) = self.savepoint.as_ref() {
             rollback_savepoint(&sp.name)
         } else {
             "ROLLBACK".to_string()
         };
-        let r = self.client.batch_execute(&query).await;
+        let responses = crate::simple_query::start_batch_execute(self.client.inner(), &query)?;
+        self.done = true;
+        let r = crate::simple_query::finish_batch_execute(responses).await;
         if r.is_ok() {
             // Explicit rollback awaited to completion — the connection is
             // clean regardless of what came before.
