@@ -1080,7 +1080,7 @@ fn apply_fold_alter_primary_key(
     }
 
     if let Some(target) = action.target_columns() {
-        if dialect == SqlDialect::Sqlite
+        if dialect.supports(Capability::IntegerPrimaryKeyRowidAlias)
             && target.len() == 1
             && snap
                 .columns
@@ -1137,7 +1137,7 @@ fn apply_fold_alter_primary_key(
                 column: column.clone(),
             })?;
         let generated = folded.identity.is_some()
-            || (dialect == SqlDialect::Sqlite
+            || (dialect.supports(Capability::IntegerPrimaryKeyRowidAlias)
                 && sqlite_folded_rowid_generation(snap, old_columns, column));
         if !generated {
             return Err(FoldError::InvalidPrimaryKeyIdentityTransition {
@@ -1160,7 +1160,7 @@ fn apply_fold_alter_primary_key(
                 });
             };
             let generated = folded.identity.is_some()
-                || (dialect == SqlDialect::Sqlite
+                || (dialect.supports(Capability::IntegerPrimaryKeyRowidAlias)
                     && sqlite_folded_rowid_generation(snap, old_columns, column));
             let keeps_identity_contract = match dialect {
                 SqlDialect::Postgres => action
@@ -2831,7 +2831,9 @@ impl<'a> CatalogFold<'a> {
                 let before = snap.constraints.len();
                 snap.constraints.retain(|c| &c.name != name);
                 let removed_constraint = snap.constraints.len() != before;
-                if !removed_constraint && matches!(dialect, SqlDialect::Mysql) {
+                if !removed_constraint
+                    && !dialect.supports(Capability::UniqueConstraintDistinctFromIndex)
+                {
                     // MySQL's catalog collapses a named table UNIQUE and its backing
                     // unique index into one key object. A catalog-seeded fold therefore
                     // has no ConstraintSnapshot to remove: DROP CONSTRAINT of that
@@ -3254,7 +3256,7 @@ impl<'a> CatalogFold<'a> {
             triggers,
             ..
         } = self;
-        if dialect == SqlDialect::Sqlite {
+        if dialect.supports(Capability::IntegerPrimaryKeyRowidAlias) {
             for snap in tables.values_mut() {
                 apply_fold_sqlite_rowid_metadata(snap)?;
             }
@@ -3278,7 +3280,8 @@ impl<'a> CatalogFold<'a> {
         // `synchronize_identity_fold_validates_target_without_changing_schema` folds a
         // PostgreSQL base under all three dialects and asserts the result is unchanged,
         // and the dialect test alone failed it on `None` against `Some({})`.
-        let speaks = dialect == SqlDialect::Postgres || base.vendor_objects.is_some();
+        let speaks =
+            dialect.supports(Capability::PostgresVendorPrimitives) || base.vendor_objects.is_some();
         let vendor_objects = speaks.then(|| VendorObjectIdentities {
             // The body comes from the SAME `functions` map the rollback history uses, so
             // a `CREATE OR REPLACE` that overwrote an entry above contributes the LAST
@@ -4022,7 +4025,7 @@ fn apply_fold_named_type_column_metadata(
             }
         },
         ColType::Domain { name, .. } => {
-            if matches!(dialect, SqlDialect::Postgres) {
+            if dialect.supports(Capability::MaterializedDomainType) {
                 let registry_schema = named_types.domain_schema_or(name, project_schema);
                 let (data_type, ddl_type) =
                     postgres_named_type_metadata(&source.ty, registry_schema)
@@ -4061,7 +4064,7 @@ fn apply_fold_named_type_column_metadata(
             )?;
             col.data_type = base.data_type;
             col.ddl_type_override = base.ddl_type_override;
-            if matches!(dialect, SqlDialect::Postgres) {
+            if dialect.supports(Capability::MaterializedDomainType) {
                 col.data_type = pg_type_data_type(&def.schema, name);
             } else {
                 if def.not_null {
@@ -4560,13 +4563,15 @@ fn rename_definition_column_group(
 /// clean apply report that constraint as missing on every re-introspection.
 fn unique_constraint(name: &str, columns: &[String], dialect: SqlDialect) -> FoldedConstraint {
     FoldedConstraint {
-        constraint: (!matches!(dialect, SqlDialect::Mysql)).then(|| ConstraintSnapshot {
-            name: name.to_string(),
-            kind: "UNIQUE".to_string(),
-            definition: format!("UNIQUE ({})", constraintdef_cols(columns)),
-            comment: None,
-            cascade_columns: None,
-        }),
+        constraint: dialect
+            .supports(Capability::UniqueConstraintDistinctFromIndex)
+            .then(|| ConstraintSnapshot {
+                name: name.to_string(),
+                kind: "UNIQUE".to_string(),
+                definition: format!("UNIQUE ({})", constraintdef_cols(columns)),
+                comment: None,
+                cascade_columns: None,
+            }),
         index: Some(IndexSnapshot::btree(
             name.to_string(),
             true,

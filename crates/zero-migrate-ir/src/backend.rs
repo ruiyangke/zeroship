@@ -108,6 +108,20 @@ pub enum Capability {
     TransactionalDdl,
     /// `DEFERRABLE` / `INITIALLY DEFERRED` constraint checking.
     DeferrableConstraint,
+    /// A named `UNIQUE` constraint is a CATALOG OBJECT distinct from the index
+    /// backing it, so dropping the constraint leaves any same-name index alone.
+    ///
+    /// Where this is NO the catalog collapses the two into one key object, and a
+    /// snapshot that still carried a synthetic constraint row would report it
+    /// missing on every re-introspection.
+    UniqueConstraintDistinctFromIndex,
+    /// An INTEGER PRIMARY KEY ALIASES the table's row id, so declaring one
+    /// silently makes the column auto-generating.
+    ///
+    /// A storage-model fact, not a syntax one: core must refuse to INTRODUCE
+    /// such a primary key, because the generation it turns on was never
+    /// authored.
+    IntegerPrimaryKeyRowidAlias,
 }
 
 impl Capability {
@@ -141,6 +155,8 @@ impl Capability {
         Capability::SchemaWideIndexNames,
         Capability::TransactionalDdl,
         Capability::DeferrableConstraint,
+        Capability::UniqueConstraintDistinctFromIndex,
+        Capability::IntegerPrimaryKeyRowidAlias,
     ];
 
     /// This capability's bit position in a [`CapabilitySet`].
@@ -276,7 +292,8 @@ pub const POSTGRES_CAPABILITIES: CapabilitySet = CapabilitySet::empty()
     .with(Capability::CommentOn)
     .with(Capability::SchemaWideIndexNames)
     .with(Capability::TransactionalDdl)
-    .with(Capability::DeferrableConstraint);
+    .with(Capability::DeferrableConstraint)
+    .with(Capability::UniqueConstraintDistinctFromIndex);
 
 /// `SQLite`'s capability answers.
 pub const SQLITE_CAPABILITIES: CapabilitySet = CapabilitySet::empty()
@@ -287,7 +304,9 @@ pub const SQLITE_CAPABILITIES: CapabilitySet = CapabilitySet::empty()
     .with(Capability::TriggerBody)
     .with(Capability::SchemaWideIndexNames)
     .with(Capability::TransactionalDdl)
-    .with(Capability::DeferrableConstraint);
+    .with(Capability::DeferrableConstraint)
+    .with(Capability::UniqueConstraintDistinctFromIndex)
+    .with(Capability::IntegerPrimaryKeyRowidAlias);
 
 /// `MySQL`'s capability answers.
 pub const MYSQL_CAPABILITIES: CapabilitySet = CapabilitySet::empty()

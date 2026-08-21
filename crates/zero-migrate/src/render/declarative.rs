@@ -5246,7 +5246,7 @@ fn fk_definition_for_dialect(
     if on_delete != "NO ACTION" {
         let _ = write!(def, " ON DELETE {on_delete}");
     }
-    if deferrable && !matches!(dialect, SqlDialect::Mysql) {
+    if deferrable && dialect.supports(Capability::DeferrableConstraint) {
         def.push_str(" DEFERRABLE");
         if initially_deferred {
             def.push_str(" INITIALLY DEFERRED");
@@ -5258,7 +5258,7 @@ fn fk_definition_for_dialect(
     // that dialect at validate, so the flag can never arrive here on another leg,
     // and gating on the dialect keeps a SQLite rebuild from splicing the token into
     // a `CREATE TABLE` clause it would not parse.
-    if not_valid && matches!(dialect, SqlDialect::Postgres) {
+    if not_valid && dialect.supports(Capability::AlterTableValidateConstraint) {
         def.push_str(NOT_VALID_DEFINITION_SUFFIX);
     }
     def

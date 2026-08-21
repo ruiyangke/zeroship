@@ -5530,7 +5530,7 @@ impl IrAuthor {
                 let up = format!("-- zero-migrate: alter primary key on {eff_schema}.{table}");
                 let owner_app = self.decl.owner_app().to_string();
                 let flags = MigrationFlags {
-                    transactional: self.dialect != SqlDialect::Mysql,
+                    transactional: self.dialect.supports(Capability::TransactionalDdl),
                     destructive,
                     requires_approval: destructive,
                     ..MigrationFlags::default()
@@ -5578,7 +5578,7 @@ impl IrAuthor {
                 );
                 let owner_app = self.decl.owner_app().to_string();
                 let flags = MigrationFlags {
-                    transactional: self.dialect != SqlDialect::Mysql,
+                    transactional: self.dialect.supports(Capability::TransactionalDdl),
                     ..MigrationFlags::default()
                 };
                 let migration = Migration {

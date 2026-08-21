@@ -241,6 +241,8 @@ mod tests {
                     (Capability::SchemaWideIndexNames, true),
                     (Capability::TransactionalDdl, true),
                     (Capability::DeferrableConstraint, true),
+                    (Capability::UniqueConstraintDistinctFromIndex, true),
+                    (Capability::IntegerPrimaryKeyRowidAlias, false),
                 ],
             ),
             (
@@ -273,6 +275,8 @@ mod tests {
                     (Capability::SchemaWideIndexNames, true),
                     (Capability::TransactionalDdl, true),
                     (Capability::DeferrableConstraint, true),
+                    (Capability::UniqueConstraintDistinctFromIndex, true),
+                    (Capability::IntegerPrimaryKeyRowidAlias, true),
                 ],
             ),
             (
@@ -305,6 +309,8 @@ mod tests {
                     (Capability::SchemaWideIndexNames, false),
                     (Capability::TransactionalDdl, false),
                     (Capability::DeferrableConstraint, false),
+                    (Capability::UniqueConstraintDistinctFromIndex, false),
+                    (Capability::IntegerPrimaryKeyRowidAlias, false),
                 ],
             ),
         ];

@@ -16,6 +16,7 @@
 use crate::model::expr::{Expr, SynthFn};
 use crate::model::ir::{ColType, IndexElement, IrColumn, IrDefault, IrIndex};
 use crate::model::table_shape::ResolvedInject;
+use crate::render::renderer::{Capability, DialectSupports};
 use zero_migrate_policy::EffectivePolicy;
 
 /// Errors from query building.
@@ -1354,7 +1355,7 @@ fn build_fk_clause(
     } else {
         quote_ident_for_dialect(target_column, dialect)
     };
-    let deferrable_clause = if deferrable && !matches!(dialect, SqlDialect::Mysql) {
+    let deferrable_clause = if deferrable && dialect.supports(Capability::DeferrableConstraint) {
         " DEFERRABLE INITIALLY DEFERRED"
     } else {
         ""
