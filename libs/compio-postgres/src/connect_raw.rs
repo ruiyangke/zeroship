@@ -266,13 +266,14 @@ where
     .map_err(Error::target_session_attrs)?;
 
     let (sender, receiver) = mpsc::unbounded();
-    let client = Client::new(
+    let client = Client::new_with_statement_cache_capacity(
         sender,
         config.get_ssl_mode(),
         config.get_ssl_negotiation(),
         process_id,
         secret_key,
         release,
+        config.get_statement_cache_capacity(),
     );
     let connection = Connection::new(
         handshake.stream,

@@ -279,6 +279,8 @@ pub enum Host {
 /// * `dbname` - The name of the database to connect to. Defaults to the username.
 /// * `options` - Command line options used to configure the server.
 /// * `application_name` - Sets the `application_name` parameter on the server.
+/// * `statement_cache_capacity` - Maximum number of implicit raw-SQL prepared
+///     statements retained per connection. Defaults to 0 (disabled).
 /// * `sslmode` - Controls usage of TLS, with libpq's six values and libpq's meanings: `disable`, `allow`, `prefer`
 ///     (the default), `require`, `verify-ca`, `verify-full`. See [`SslMode`] for what each one does, and
 ///     [`SslRootCert`] for the certificate-verification table - in particular, `require` encrypts but does *not*
@@ -396,6 +398,7 @@ pub struct Config {
     pub(crate) dbname: Option<String>,
     pub(crate) options: Option<String>,
     pub(crate) application_name: Option<String>,
+    pub(crate) statement_cache_capacity: usize,
     pub(crate) ssl_mode: SslMode,
     pub(crate) ssl_negotiation: SslNegotiation,
     pub(crate) ssl_root_cert: SslRootCert,
@@ -430,6 +433,7 @@ impl Config {
             dbname: None,
             options: None,
             application_name: None,
+            statement_cache_capacity: 0,
             ssl_mode: SslMode::Prefer,
             ssl_negotiation: SslNegotiation::Postgres,
             ssl_root_cert: SslRootCert::Unset,
@@ -519,6 +523,35 @@ impl Config {
     /// been set with the `application_name` method.
     pub fn get_application_name(&self) -> Option<&str> {
         self.application_name.as_deref()
+    }
+
+    /// Sets the maximum number of implicit raw-SQL prepared statements cached
+    /// on each connection.
+    ///
+    /// Entries are keyed by the exact SQL text and evicted least-recently used.
+    /// Explicit [`Client::prepare`](crate::Client::prepare) calls remain
+    /// caller-owned and are not cached. [`Uncached`](crate::Uncached) bypasses
+    /// an enabled cache for one operation.
+    ///
+    /// The cache is disabled by default. Keep it disabled when connecting
+    /// through a transaction-mode connection pooler: persistent named
+    /// statements are scoped to a `PostgreSQL` session, while successive
+    /// transactions through such a pooler may use different sessions.
+    ///
+    /// If `PostgreSQL` reports that a cached statement's result type changed
+    /// or that its server-side name is missing, that operation returns the
+    /// server's `0A000` or `26000` error and evicts the stale entry. After any
+    /// required transaction recovery, the next call for the same SQL prepares
+    /// its replacement.
+    pub const fn statement_cache_capacity(&mut self, capacity: usize) -> &mut Config {
+        self.statement_cache_capacity = capacity;
+        self
+    }
+
+    /// Gets the per-connection prepared-statement cache capacity.
+    #[must_use]
+    pub const fn get_statement_cache_capacity(&self) -> usize {
+        self.statement_cache_capacity
     }
 
     /// Sets the SSL configuration.
@@ -823,6 +856,12 @@ impl Config {
             "application_name" => {
                 self.application_name(value);
             }
+            "statement_cache_capacity" => {
+                let capacity = value.parse().map_err(|_| {
+                    Error::config_parse(Box::new(InvalidValue("statement_cache_capacity")))
+                })?;
+                self.statement_cache_capacity(capacity);
+            }
             "sslmode" => {
                 let mode = match value {
                     "disable" => SslMode::Disable,
@@ -1060,10 +1099,11 @@ impl Config {
 
     /// Connects to a PostgreSQL database over an arbitrary stream.
     ///
-    /// Uses `user`, `password`, `dbname`, `options`, `application_name`, and
-    /// `connect_timeout`; all other settings are ignored. The timeout starts
-    /// with TLS negotiation on the supplied stream and covers startup and
-    /// authentication. It cannot cover the caller's work to open that stream.
+    /// Uses `user`, `password`, `dbname`, `options`, `application_name`,
+    /// `connect_timeout`, and `statement_cache_capacity`; all other settings
+    /// are ignored. The timeout starts with TLS negotiation on the supplied
+    /// stream and covers startup and authentication. It cannot cover the
+    /// caller's work to open that stream.
     ///
     /// One exception, and it is the reason this is not simply "sslmode is
     /// ignored": the caller owns the stream, so this entry point cannot open a
@@ -1127,6 +1167,7 @@ impl fmt::Debug for Config {
             .field("dbname", &self.dbname)
             .field("options", &self.options)
             .field("application_name", &self.application_name)
+            .field("statement_cache_capacity", &self.statement_cache_capacity)
             .field("ssl_mode", &self.ssl_mode)
             .field("ssl_negotiation", &self.ssl_negotiation)
             .field("ssl_root_cert", &self.ssl_root_cert)
@@ -1763,6 +1804,29 @@ mod tests {
                 .err()
                 .unwrap_or_else(|| panic!("{s} parsed, so an empty path reads as absent"));
         }
+    }
+
+    #[test]
+    fn statement_cache_capacity_is_opt_in_and_parses_in_both_dsn_forms() {
+        assert_eq!(Config::new().get_statement_cache_capacity(), 0);
+        assert_eq!(
+            "host=h statement_cache_capacity=7"
+                .parse::<Config>()
+                .unwrap()
+                .get_statement_cache_capacity(),
+            7
+        );
+        assert_eq!(
+            "postgresql://h/db?statement_cache_capacity=9"
+                .parse::<Config>()
+                .unwrap()
+                .get_statement_cache_capacity(),
+            9
+        );
+
+        "host=h statement_cache_capacity=-1"
+            .parse::<Config>()
+            .expect_err("a cache capacity cannot be negative");
     }
 }
 

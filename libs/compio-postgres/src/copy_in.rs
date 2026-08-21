@@ -251,6 +251,7 @@ where
             return Err(Error::unexpected_message());
         }
         Err(e) => {
+            statement.invalidate_cache_on_error(&e);
             abort(&mut sender).await;
             return Err(e);
         }
@@ -263,6 +264,7 @@ where
             return Err(Error::unexpected_message());
         }
         Err(e) => {
+            statement.invalidate_cache_on_error(&e);
             abort(&mut sender).await;
             return Err(e);
         }
