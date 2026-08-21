@@ -1969,7 +1969,7 @@ pub(crate) fn render_ir_default(
             "json value defaults require a column type at render",
         )),
         IrDefault::Nextval { sequence } => {
-            if !matches!(dialect, SqlDialect::Postgres) {
+            if !dialect.supports(Capability::Sequence) {
                 return Err(IrLowerError::UnsupportedOp(
                     "nextval defaults are PostgreSQL-only",
                 ));
@@ -4229,7 +4229,7 @@ impl IrAuthor {
     /// several other arms also read live structure an earlier op can invalidate - is
     /// its own ticket, not this gate.
     fn refuse_repeat_sqlite_rename_target(&self, ir: &MigrationIr) -> Result<(), IrLowerError> {
-        if self.dialect != SqlDialect::Sqlite {
+        if self.dialect.supports(Capability::NativeAlterColumn) {
             return Ok(());
         }
         // Descends `Op::Dialectal` for the SAME reason the lowering below does: a
@@ -5616,7 +5616,7 @@ impl IrAuthor {
             Op::AddConstraint {
                 table, constraint, ..
             } => {
-                if self.dialect == SqlDialect::Sqlite
+                if !self.dialect.supports(Capability::AlterTableAddConstraint)
                     && matches!(constraint.kind, IrConstraintKind::Fk { .. })
                 {
                     if guard.is_some() {
@@ -5707,7 +5707,7 @@ impl IrAuthor {
                 units
             }
             Op::DropConstraint { table, name, .. } => {
-                if self.dialect == SqlDialect::Sqlite {
+                if !self.dialect.supports(Capability::AlterTableDropConstraint) {
                     if guard.is_some() {
                         return Err(IrLowerError::GuardProbeUnbuildable("dropConstraint"));
                     }
@@ -7665,7 +7665,7 @@ impl IrAuthor {
                 }
             },
             ColType::Domain { name, .. } => {
-                if matches!(self.dialect, SqlDialect::Postgres) {
+                if self.dialect.supports(Capability::MaterializedDomainType) {
                     let registry_schema = named_types.domain_schema_or(name, default_schema);
                     let (data_type, ddl_type) =
                         postgres_named_type_metadata(&source.ty, registry_schema)?.ok_or(
@@ -7698,7 +7698,7 @@ impl IrAuthor {
                 )?;
                 col.data_type = base.data_type;
                 col.ddl_type_override = base.ddl_type_override;
-                if matches!(self.dialect, SqlDialect::Postgres) {
+                if self.dialect.supports(Capability::MaterializedDomainType) {
                     col.data_type = pg_type_data_type(&def.schema, name);
                     col.ddl_type_override = Some(pg_type_qname(&def.schema, name)?);
                 } else {
