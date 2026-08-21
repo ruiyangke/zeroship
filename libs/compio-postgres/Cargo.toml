@@ -82,6 +82,12 @@ whoami = "2.0"
 compio = { workspace = true }
 socket2 = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# `requirepeer` needs both the kernel's peer credentials and the canonical
+# passwd-database name for that UID. nix provides safe wrappers for
+# SO_PEERCRED/getpwuid_r and carries no async runtime.
+nix = { version = "0.31.2", features = ["socket", "user"] }
+
 [dependencies.compio-tls]
 workspace = true
 optional = true

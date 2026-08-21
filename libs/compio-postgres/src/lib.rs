@@ -130,9 +130,10 @@
 //! be used when TLS is not required.
 //!
 //! The `tls` Cargo feature adds `MakeRustlsConnect`, a rustls backend that reads its trust anchors from the
-//! connection configuration (TLS version bounds, `sslrootcert`, `sslcrl` /
-//! `sslcrldir`, plus `sslcert`/`sslkey`/`sslpassword` for client-certificate
-//! auth) and implements `tls-server-end-point` channel binding. With that
+//! connection configuration (TLS version bounds, SNI policy, `sslrootcert`,
+//! `sslcrl` / `sslcrldir`, plus `sslcertmode` and
+//! `sslcert`/`sslkey`/`sslpassword` for client-certificate auth) and implements
+//! `tls-server-end-point` channel binding. With that
 //! feature on, [`Pool`] builds one automatically for a
 //! connection configuration whose `sslmode` permits TLS; see the `tls_rustls` module (`src/tls_rustls.rs`) and
 //! the `Transport` section of the `pool` module docs (`src/pool.rs`).

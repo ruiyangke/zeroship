@@ -499,6 +499,7 @@ where
         } else {
             None
         },
+        config.get_require_peer(),
     )
     .await?;
 
@@ -531,6 +532,7 @@ where
         } else {
             None
         },
+        require_peer: config.get_require_peer().map(str::to_owned),
     });
 
     Ok((client, connection))
@@ -790,6 +792,146 @@ mod tests {
         .detach();
 
         (addr, startup_observed)
+    }
+
+    #[cfg(target_os = "linux")]
+    struct TempSocketDir(std::path::PathBuf);
+
+    #[cfg(target_os = "linux")]
+    impl TempSocketDir {
+        fn create() -> TempSocketDir {
+            static NEXT_DIR: std::sync::atomic::AtomicUsize =
+                std::sync::atomic::AtomicUsize::new(0);
+
+            // Keep this below Linux's 108-byte sockaddr_un limit even when the
+            // repository lives under a long worktree path.
+            let path = std::path::PathBuf::from("/tmp").join(format!(
+                "cpg-peer-{}-{}",
+                std::process::id(),
+                NEXT_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&path).expect("create temporary socket directory");
+            TempSocketDir(path)
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for TempSocketDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Accept the rejected socket first and prove it receives zero PostgreSQL
+    /// bytes, then complete a real startup exchange on the matching attempt.
+    #[cfg(target_os = "linux")]
+    async fn scripted_requirepeer_server() -> (
+        TempSocketDir,
+        compio::runtime::JoinHandle<()>,
+    ) {
+        let socket_dir = TempSocketDir::create();
+        let socket_path = socket_dir.0.join(".s.PGSQL.5432");
+        let listener = compio::net::UnixListener::bind(&socket_path)
+            .await
+            .expect("bind scripted Unix server");
+        let server = compio::runtime::spawn(async move {
+            let (mut rejected, _) = listener.accept().await.expect("accept rejected peer");
+            let compio::BufResult(result, _) = rejected.read(vec![0u8; 1]).await;
+            assert_eq!(
+                result.expect("read rejected peer"),
+                0,
+                "requirepeer mismatch sent PostgreSQL bytes before checking SO_PEERCRED"
+            );
+
+            let (mut accepted, _) = listener.accept().await.expect("accept matching peer");
+            let compio::BufResult(result, length) = accepted.read_exact(vec![0u8; 4]).await;
+            result.expect("read matching startup length");
+            let length = u32::from_be_bytes(length.try_into().unwrap()) as usize;
+            assert!(length >= 8, "startup packet is too short: {length}");
+            let compio::BufResult(result, _) =
+                accepted.read_exact(vec![0u8; length - 4]).await;
+            result.expect("read matching startup packet");
+            let compio::BufResult(result, _) =
+                accepted.write_all(successful_handshake()).await;
+            result.expect("write matching startup response");
+            accepted.flush().await.expect("flush startup response");
+        });
+
+        (socket_dir, server)
+    }
+
+    /// The pair exercises real Linux peer credentials through the complete
+    /// Config connection path. The wrong name is rejected before StartupMessage;
+    /// changing only that name to the socket owner's canonical OS name connects.
+    #[cfg(target_os = "linux")]
+    #[compio::test]
+    async fn requirepeer_matches_the_unix_server_process_owner() {
+        let (socket_dir, server) = scripted_requirepeer_server().await;
+        let actual = nix::unistd::User::from_uid(nix::unistd::Uid::effective())
+            .expect("look up current operating-system user")
+            .expect("the current user ID has no passwd-database entry")
+            .name;
+        let wrong = format!("{actual}-definitely-not-the-peer");
+
+        let mut rejected = Config::new();
+        rejected
+            .user("scripted-user")
+            .host_path(&socket_dir.0)
+            .port(5432)
+            .ssl_mode(SslMode::Disable)
+            .require_peer(&wrong);
+        let outcome = compio::time::timeout(Duration::from_secs(2), rejected.connect(NoTls))
+            .await
+            .expect("wrong requirepeer check timed out");
+        let error = match outcome {
+            Ok(_) => panic!("a wrong Unix peer user connected"),
+            Err(error) => error,
+        };
+        let cause = error.source().map(ToString::to_string).unwrap_or_default();
+        assert!(
+            cause.contains("requirepeer")
+                && cause.contains(&wrong)
+                && cause.contains(&actual),
+            "the mismatch did not name both peer users: {error}: {cause}"
+        );
+
+        let mut accepted = Config::new();
+        accepted
+            .user("scripted-user")
+            .host_path(&socket_dir.0)
+            .port(5432)
+            .ssl_mode(SslMode::Disable)
+            .require_peer(&actual);
+        let connected = compio::time::timeout(Duration::from_secs(2), accepted.connect(NoTls))
+            .await
+            .expect("matching requirepeer connection timed out")
+            .expect("the Unix server's actual owner must connect");
+        drop(connected);
+
+        compio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("scripted requirepeer server timed out")
+            .expect("scripted requirepeer server panicked");
+    }
+
+    /// libpq gates `requirepeer` on AF_UNIX. A value that is certainly wrong
+    /// must therefore remain a no-op on TCP, not become a cross-transport
+    /// policy the reference client never promised.
+    #[compio::test]
+    async fn requirepeer_is_ignored_on_tcp_like_libpq() {
+        let (addr, startup_observed) =
+            scripted_server_after_startup(Some(successful_handshake())).await;
+        let mut config = config_for(addr, Duration::from_secs(2));
+        config.require_peer("definitely-not-the-tcp-peer");
+
+        let connected = compio::time::timeout(Duration::from_secs(5), config.connect(NoTls))
+            .await
+            .expect("TCP requirepeer control timed out")
+            .expect("libpq ignores requirepeer on TCP");
+        startup_observed
+            .await
+            .expect("TCP server did not receive StartupMessage");
+        drop(connected);
     }
 
     /// Accept one PostgreSQL SSLRequest, agree to TLS, and leave the
