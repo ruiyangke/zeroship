@@ -3988,10 +3988,6 @@ fn apply_fold_value_format_column_metadata(
     Ok(())
 }
 
-fn pg_type_data_type(schema: &str, name: &str) -> String {
-    format!("{schema}.{name}")
-}
-
 fn apply_fold_named_type_column_metadata(
     table: &str,
     source: &IrColumn,
@@ -4071,31 +4067,27 @@ fn apply_fold_named_type_column_metadata(
             col.ddl_type_override = base.ddl_type_override;
             col.unbounded_text = base.unbounded_text;
             col.authored_type = base.authored_type;
-            if dialect.supports(Capability::MaterializedDomainType) {
-                col.data_type = pg_type_data_type(&def.schema, name);
-            } else {
-                if def.not_null {
-                    col.nullable = false;
+            if def.not_null {
+                col.nullable = false;
+            }
+            if col.default.is_none() {
+                if let Some(default) = &def.default {
+                    col.default = Some(
+                        render_ir_default_for_type(default, &def.as_type, dialect)
+                            .map_err(fold_named_type_error)?,
+                    );
                 }
-                if col.default.is_none() {
-                    if let Some(default) = &def.default {
-                        col.default = Some(
-                            render_ir_default_for_type(default, &def.as_type, dialect)
-                                .map_err(fold_named_type_error)?,
-                        );
-                    }
-                }
-                if let Some(check) = &def.check {
-                    let value_sql = zero_migrate_backend::dml::quote_ident_for_backend(
-                        "column",
-                        &source.name,
-                        crate::render::backends::renderer(&dialect.id()),
-                    )
-                    .map_err(|e| FoldError::NamedTypeRender(e.to_string()))?;
-                    let expr = render_domain_check(check, dialect, &value_sql)
-                        .map_err(fold_named_type_error)?;
-                    col.inline_checks.push(format!("CHECK ({expr})"));
-                }
+            }
+            if let Some(check) = &def.check {
+                let value_sql = zero_migrate_backend::dml::quote_ident_for_backend(
+                    "column",
+                    &source.name,
+                    crate::render::backends::renderer(&dialect.id()),
+                )
+                .map_err(|e| FoldError::NamedTypeRender(e.to_string()))?;
+                let expr = render_domain_check(check, dialect, &value_sql)
+                    .map_err(fold_named_type_error)?;
+                col.inline_checks.push(format!("CHECK ({expr})"));
             }
         }
         _ => {}
