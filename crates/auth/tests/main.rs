@@ -151,5 +151,6 @@ mod token_sweep_test;
 mod totp_enroll_reauth_test;
 mod totp_gates_every_mint_path_test;
 mod totp_login_challenge_test;
+mod totp_removal_notice_test;
 mod totp_store_test;
 mod verification_test;
