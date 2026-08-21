@@ -17,7 +17,7 @@
 // `read_backend` always returns a fresh batch.
 
 use crate::buf_stream::BufStream;
-use crate::client::Client;
+use crate::client::{Client, StatementCacheSettings};
 use crate::codec::{BackendMessage, BackendMessages, FrontendMessage, read_backend, write_frontend};
 use crate::config::{self, AuthMethod, Config, ReplicationMode, TargetSessionAttrs};
 use crate::connect_tls::{Encryption, negotiate_tls};
@@ -274,14 +274,17 @@ where
 
     let (sender, receiver) = mpsc::unbounded();
     let drop_release = release.as_ref().map(|release| release.connection_guard());
-    let client = Client::new_with_statement_cache_capacity(
+    let client = Client::new_with_statement_cache(
         sender,
         config.get_ssl_mode(),
         config.get_ssl_negotiation(),
         process_id,
         secret_key,
         release,
-        config.get_statement_cache_capacity(),
+        StatementCacheSettings::new(
+            config.get_statement_cache_capacity(),
+            config.get_statement_cache_execution_threshold(),
+        ),
     );
     let connection = Connection::new(
         handshake.stream,
