@@ -252,6 +252,15 @@ where
     // only governs the socket waits around it. We diverge deliberately and
     // give resolution its own budget, because an unresponsive resolver
     // otherwise hangs a connect that asked for a time limit.
+    //
+    // This bounds THE CALLER'S WAIT, not the resolver's work. compio resolves
+    // via `spawn_blocking` around the blocking `to_socket_addrs`
+    // (compio-net-0.11.1 src/resolve/unix.rs), so timing out here drops our
+    // future but cannot cancel an in-flight `getaddrinfo`; that thread stays
+    // occupied until the C resolver returns on its own. Repeated timeouts
+    // against a black-holed nameserver therefore tie up blocking-pool threads.
+    // Returning control to the caller is still the right trade, but do not
+    // read this budget as a bound on resources.
     let addrs = with_connect_timeout(
         timeout,
         endpoint.addresses(resolver, config.get_load_balance_hosts()),
