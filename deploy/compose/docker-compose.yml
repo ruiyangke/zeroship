@@ -416,10 +416,12 @@ services:
       # which the least-priv role above cannot do.
       #
       # A FILE REFERENCE, NOT A LITERAL, and the same file the `migrate`
-      # one-shot above opens. Until 2026-08-21 the default here was the inline
-      # DSN `postgres://postgres:<password>@postgres:5432/zeroship`, which put
-      # the cluster SUPERUSER credential in a tracked file that people copy and
-      # in this container's /proc/<pid>/environ. Check 6c of
+      # one-shot above opens. Until 2026-08-21 the default here was an inline
+      # DSN authenticating as the POSTGRES_USER superuser against the postgres
+      # service, which put the cluster SUPERUSER credential in a tracked file
+      # that people copy and in this container's /proc/<pid>/environ. The
+      # example is deliberately NOT written out: this file is scanned for that
+      # grammar, and a comment holding it would be a credential too. Check 6c of
       # tests/config_name_alignment_gate.sh had banned exactly that grammar in
       # argv since 2026-08-16 and could not see an `environment:` default;
       # check 6d now does, and it derives the superuser's name from the
