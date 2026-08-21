@@ -70,6 +70,69 @@ async fn events_through(
 }
 
 #[compio::test]
+async fn observer_without_threshold_reports_every_query() {
+    const SQL: &str = "SELECT 10::int4 /* cpg_obs_no_threshold */";
+
+    let client = connect().await;
+    let mut events = client.query_events();
+
+    client.simple_query(SQL).await.unwrap();
+
+    let event = next_event(&mut events, SQL).await;
+    assert_eq!(event.outcome(), &QueryOutcome::Success);
+}
+
+#[compio::test]
+async fn observer_threshold_filters_query_below_cutoff() {
+    const SQL: &str = "SELECT 11::int4 /* cpg_obs_below_threshold */";
+
+    let client = connect().await;
+    let mut events = client.query_events_with_threshold(Duration::MAX);
+
+    compio::time::timeout(EVENT_TIMEOUT, client.simple_query(SQL))
+        .await
+        .expect("below-threshold query did not complete")
+        .unwrap();
+
+    // Replacing the observer drops the old sender after all prior work has
+    // completed, giving absence a deterministic barrier instead of a timer.
+    let replacement = client.query_events();
+    let observed = compio::time::timeout(EVENT_TIMEOUT, events.next())
+        .await
+        .expect("replaced query observer did not close");
+    assert!(observed.is_none(), "below-threshold query was reported");
+    drop(replacement);
+}
+
+#[compio::test]
+async fn observer_threshold_reports_query_above_cutoff() {
+    const SQL: &str = "SELECT pg_sleep(0.100) /* cpg_obs_above_threshold */";
+    const THRESHOLD: Duration = Duration::from_millis(50);
+
+    let client = connect().await;
+    let mut events = client.query_events_with_threshold(THRESHOLD);
+
+    client.simple_query(SQL).await.unwrap();
+
+    let event = next_event(&mut events, SQL).await;
+    assert!(event.elapsed() >= THRESHOLD);
+    assert_eq!(event.outcome(), &QueryOutcome::Success);
+}
+
+#[compio::test]
+async fn zero_threshold_reports_every_query() {
+    const SQL: &str = "SELECT 12::int4 /* cpg_obs_zero_threshold */";
+
+    let client = connect().await;
+    let mut events = client.query_events_with_threshold(Duration::ZERO);
+
+    client.simple_query(SQL).await.unwrap();
+
+    let event = next_event(&mut events, SQL).await;
+    assert_eq!(event.outcome(), &QueryOutcome::Success);
+}
+
+#[compio::test]
 async fn observer_reports_sql_elapsed_success_rows_without_bound_values() {
     const SQL: &str =
         "SELECT $1::text AS value FROM generate_series(1, 3) /* cpg_obs_success */";
