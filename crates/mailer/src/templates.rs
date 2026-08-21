@@ -4,7 +4,7 @@
 //! file. Render with `Template::render()` from askama; the result goes into
 //! `mailer::Email::{html, text}`.
 //!
-//! Keep templates minimal — inline CSS only, no images, no external assets.
+//! Keep templates minimal - inline CSS only, no images, no external assets.
 //! Email-client rendering is wildly inconsistent; minimal is safe.
 
 #![allow(clippy::must_use_candidate, clippy::missing_const_for_fn)]
@@ -13,7 +13,7 @@ use askama::Template;
 
 use crate::{Address, Email};
 
-// ─── verify-email ────────────────────────────────────────────
+// --- verify-email ---
 
 #[derive(Template, Debug)]
 #[template(path = "verify_email.html")]
@@ -31,7 +31,7 @@ pub struct VerifyEmailText<'a> {
     pub expires_in: &'a str,
 }
 
-// ─── magic-link ──────────────────────────────────────────────
+// --- magic-link ---
 
 #[derive(Template, Debug)]
 #[template(path = "magic_link.html")]
@@ -53,7 +53,7 @@ pub struct MagicLinkText<'a> {
     pub requesting_location: &'a str,
 }
 
-// ─── invite ──────────────────────────────────────────────────
+// --- invite ---
 
 #[derive(Template, Debug)]
 #[template(path = "invite.html")]
@@ -71,7 +71,7 @@ pub struct InviteText<'a> {
     pub expires_in: &'a str,
 }
 
-// ─── password-reset ──────────────────────────────────────────
+// --- password-reset ---
 
 #[derive(Template, Debug)]
 #[template(path = "password_reset.html")]
@@ -89,7 +89,7 @@ pub struct PasswordResetText<'a> {
     pub expires_in: &'a str,
 }
 
-// ─── email-change ────────────────────────────────────────────
+// --- email-change ---
 
 #[derive(Template, Debug)]
 #[template(path = "email_change.html")]
@@ -109,7 +109,7 @@ pub struct EmailChangeText<'a> {
     pub expires_in: &'a str,
 }
 
-// ─── reauthentication ────────────────────────────────────────
+// --- reauthentication ---
 
 #[derive(Template, Debug)]
 #[template(path = "reauthentication.html")]
@@ -127,7 +127,7 @@ pub struct ReauthenticationText<'a> {
     pub expires_in: &'a str,
 }
 
-// ─── suspicious-activity ─────────────────────────────────────
+// --- suspicious-activity ---
 
 #[derive(Template, Debug)]
 #[template(path = "suspicious_activity.html")]
@@ -147,7 +147,7 @@ pub struct SuspiciousActivityText<'a> {
     pub action_link: Option<&'a str>,
 }
 
-// ─── second-factor removed ───────────────────────────────────
+// --- second-factor removed ---
 
 /// Sent when a CONFIRMED TOTP credential stops gating login.
 ///
@@ -178,7 +178,7 @@ pub struct SecondFactorRemovedText<'a> {
     pub reset_link: &'a str,
 }
 
-// ─── account-deletion request (ISS-12) ───────────────────────
+// --- account-deletion request (ISS-12) ---
 
 #[derive(Template, Debug)]
 #[template(path = "account_deletion_requested.html")]
@@ -198,10 +198,10 @@ pub struct AccountDeletionRequestedText<'a> {
     pub grace_days: i64,
 }
 
-// ─── Render helper ───────────────────────────────────────────
+// --- Render helper ---
 
 /// Render an html+txt template pair into an `Email` with the given recipient,
-/// from-address, and subject. The pair must agree on field shapes — typed at
+/// from-address, and subject. The pair must agree on field shapes - typed at
 /// the call site by the template structs.
 pub fn build_email(
     to: Address,
