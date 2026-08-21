@@ -57,8 +57,9 @@ use zero_migrate::render::lower::{IrAuthor, LiveSchema};
 use zero_migrate::{
     fold_ops, resolve_create_table_policy, Approval, ColType, ExecutorConfig, Migration,
     MigrationEngine, MigrationIr, Op, PlanStep, RenameStep, SqlDialect, SqliteBackend,
-    SqliteSequencePolicy, TableRebuildSpec,
+    TableRebuildSpec,
 };
+use zero_migrate_sqlite::SqliteSequencePolicy;
 
 const PROJECT: &str = "prj_indexed_rename";
 const APP: &str = "app_indexed_rename";

@@ -426,7 +426,7 @@ pub use model::backfill::{
 pub use model::probe::{ExpectColumn, GuardDir, GuardProbe};
 pub use render::plan::{
     AppliedPlan, DatabaseFeature, DatabaseRequirements, NotSingleStep, RollbackAssessment,
-    SqliteSequencePolicy, TableRebuildSpec,
+    TableRebuildSpec,
 };
 pub use render::step::{
     tables_touched_by, AlterPrimaryKeyStep, BindValue, DialectScope, PlanStep, RenameStep,

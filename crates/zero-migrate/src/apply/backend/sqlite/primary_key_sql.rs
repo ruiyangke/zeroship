@@ -3,7 +3,8 @@
 use std::collections::BTreeMap;
 
 use crate::model::ir::AlterPrimaryKeyAction;
-use crate::render::plan::{SqliteSequencePolicy, TableRebuildSpec};
+use crate::render::plan::TableRebuildSpec;
+use zero_migrate_sqlite::SqliteSequencePolicy;
 
 use super::actor::{MigrationActor, SqliteActorError};
 use super::authorizer::Mode;

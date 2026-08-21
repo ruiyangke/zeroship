@@ -5632,7 +5632,7 @@ impl DeclarativeAuthor {
             recreate_objects,
             column_renames: Vec::new(),
             dropped_columns,
-            sequence_policy: crate::render::plan::SqliteSequencePolicy::Preserve,
+            sequence_policy: zero_migrate_sqlite::SqliteSequencePolicy::Preserve,
             reason,
         };
         let preview_up = std::iter::once(spec.new_table_create.as_str())
@@ -5793,7 +5793,7 @@ impl DeclarativeAuthor {
                 .map(|rename| vec![(rename.from.clone(), rename.to.clone())])
                 .unwrap_or_default(),
             dropped_columns,
-            sequence_policy: crate::render::plan::SqliteSequencePolicy::Preserve,
+            sequence_policy: zero_migrate_sqlite::SqliteSequencePolicy::Preserve,
             reason,
         };
 

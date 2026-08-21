@@ -26,11 +26,13 @@ mod ddl;
 mod descriptor;
 mod dml;
 pub mod guard;
+mod plan;
 mod schema;
 mod stored_ddl;
 mod value_format;
 
 pub use guard::SqliteGuard;
+pub use plan::SqliteSequencePolicy;
 
 use zero_migrate_backend::registry::BackendVendor;
 

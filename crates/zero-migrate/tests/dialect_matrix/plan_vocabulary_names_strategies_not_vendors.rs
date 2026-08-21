@@ -45,10 +45,9 @@
 //! # What is NOT a violation
 //!
 //! A type that really is one vendor's SHOULD say so; renaming that would be dishonest
-//! in the other direction. [`SqliteSequencePolicy`] models the `sqlite_sequence` table
-//! and the `AUTOINCREMENT` high-water mark — artifacts no other engine has — so it is
-//! exempted BY NAME below, with that reason attached. The exemption list is
-//! deliberately one entry long: a second one should have to be argued for in a diff.
+//! in the other direction. `SqliteSequencePolicy` models the `sqlite_sequence` table
+//! and the `AUTOINCREMENT` high-water mark — artifacts no other engine has — so it
+//! lives in `zero-migrate-sqlite`, outside the shared vocabulary scanned here.
 //!
 //! The surrounding rebuild vocabulary is not vendor-shaped and is not exempt. Of the
 //! nine fields on the rebuild spec, eight (`table`, `tmp_table`, `new_table_create`,
@@ -100,12 +99,6 @@ fn the_lowered_plan_vocabulary_names_no_vendor() {
     /// Vendor spellings as they appear inside a CamelCase identifier. `Pg` is listed
     /// separately from `Postgres` because both spellings are live in this crate.
     const VENDORS: [&str; 4] = ["Pg", "Postgres", "Mysql", "Sqlite"];
-
-    /// The one type whose SHAPE is a vendor's, so its NAME should be too: it models
-    /// the `sqlite_sequence` row and the `AUTOINCREMENT` high-water mark, which no
-    /// other engine has. Adding an entry here is a claim that a second type is
-    /// genuinely one vendor's — make it in a diff, with the artifact named.
-    const VENDOR_SHAPED: [&str; 1] = ["SqliteSequencePolicy"];
 
     /// Every CamelCase identifier on a line — a variant name and its payload types
     /// both, so `Foo(BarPlan)` yields `Foo` and `BarPlan`.
@@ -163,7 +156,6 @@ fn the_lowered_plan_vocabulary_names_no_vendor() {
 
     let offenders: Vec<String> = scanned
         .iter()
-        .filter(|(name, _)| !VENDOR_SHAPED.contains(name))
         .filter_map(|(name, site)| {
             VENDORS
                 .iter()
@@ -186,17 +178,16 @@ fn the_lowered_plan_vocabulary_names_no_vendor() {
          drop the old) against `TableRebuild` (create-copy-swap, for an engine with \
          no native `ALTER`). If the type is genuinely ONE vendor's — it models an \
          artifact no other engine has, the way `SqliteSequencePolicy` models \
-         `sqlite_sequence` — then it SHOULD say so: add it to `VENDOR_SHAPED` above \
-         with the artifact named. Backends themselves (`PostgresBackend`, \
+         `sqlite_sequence` — then move it to that vendor crate. Backends themselves (`PostgresBackend`, \
          `MysqlBackend`, `SqliteBackend`) are correctly vendor-named and are not \
          scanned here.",
         offenders.join("\n  "),
     );
 
     assert!(
-        arms >= 2 && plan_types >= 7,
+        arms >= 2 && plan_types >= 6,
         "scanned {arms} `RenameStep` arm(s) and {plan_types} `pub` type(s) in \
-         render/plan.rs, expected at least 2 and 7\n\
+         render/plan.rs, expected at least 2 and 6\n\
          \n\
          This is the boundary self-check on the scans above, and it fires in two very \
          different situations. Either a scan broke — the `pub enum RenameStep {{` \

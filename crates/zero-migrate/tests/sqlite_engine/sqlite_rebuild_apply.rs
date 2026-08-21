@@ -29,8 +29,9 @@ use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
     CollectionDescriptor, DeclarativeAuthor, FieldDescriptor, IndexDescriptor, IrAuthor,
     LiveSchema, Migration, MigrationIr, PlanStep, RebuildError, RenameStep, SchemaSnapshot,
-    SqliteBackend, SqliteSequencePolicy, TableRebuild, TableRebuildSpec,
+    SqliteBackend, TableRebuild, TableRebuildSpec,
 };
+use zero_migrate_sqlite::SqliteSequencePolicy;
 
 const PROJECT: &str = "prj_demo";
 const APP: &str = "app_demo";

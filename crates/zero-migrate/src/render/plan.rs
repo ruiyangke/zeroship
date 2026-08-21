@@ -31,6 +31,7 @@
 use crate::model::migration::{Checksum, Migration, MigrationFlags, MigrationId};
 use crate::model::precondition::PreconditionCheck;
 use crate::render::step::{DialectScope, PlanStep, StepReversibility};
+use zero_migrate_sqlite::SqliteSequencePolicy;
 
 /// A database feature whose exact IR lowering has live target requirements.
 /// These are derived from the typed expression AST and carried on the complete
@@ -106,24 +107,6 @@ impl DatabaseRequirements {
     pub fn iter(&self) -> impl Iterator<Item = DatabaseFeature> + '_ {
         self.features.iter().copied()
     }
-}
-
-/// How a SQLite table rebuild handles the table's `sqlite_sequence` row.
-///
-/// Rebuilds preserve an existing `AUTOINCREMENT` high-water mark by default. The
-/// only caller that should request [`SqliteSequencePolicy::Remove`] is a
-/// structured operation which has explicitly validated and declared removal of
-/// the table's `AUTOINCREMENT` identity facet. The removal happens inside the
-/// rebuild transaction, so an aborted rebuild restores the original sequence row
-/// together with the original table.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum SqliteSequencePolicy {
-    /// Capture and monotonically restore the pre-rebuild high-water mark.
-    #[default]
-    Preserve,
-    /// Do not restore the old high-water mark and delete any row for the rebuilt
-    /// table. This is the explicit identity-removal transition.
-    Remove,
 }
 
 /// The fully-resolved specification for ONE table rebuild.

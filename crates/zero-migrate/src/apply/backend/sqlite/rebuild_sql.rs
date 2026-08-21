@@ -104,7 +104,8 @@ use std::time::Instant;
 
 use crate::model::ir::AlterPrimaryKeyAction;
 use crate::model::migration::Migration;
-use crate::render::plan::{SqliteSequencePolicy, TableRebuildSpec};
+use crate::render::plan::TableRebuildSpec;
+use zero_migrate_sqlite::SqliteSequencePolicy;
 
 use super::actor::{MigrationActor, SqliteActorError};
 use super::authorizer::Mode;
