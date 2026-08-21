@@ -456,13 +456,17 @@ mod tests {
     use super::*;
     use crate::NoTls;
     use crate::config::SslMode;
+    use crate::tls::{MakeTlsConnect, NoTlsStream, TlsConnect};
     use compio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
     use compio::net::TcpListener;
     use futures_channel::oneshot;
+    use std::collections::HashSet;
     use std::error::Error as _;
     use std::future;
     use std::net::SocketAddr;
     use std::time::Duration;
+
+    const SSL_REQUEST_CODE: u32 = 80_877_103;
 
     fn frame(tag: u8, body: &[u8]) -> Vec<u8> {
         let mut frame = Vec::with_capacity(5 + body.len());
@@ -477,6 +481,10 @@ mod tests {
         script.extend_from_slice(&frame(b'K', &[0; 8]));
         script.extend_from_slice(&frame(b'Z', b"I"));
         script
+    }
+
+    fn refused_handshake() -> Vec<u8> {
+        frame(b'E', b"SERROR\0C57P03\0Mscripted refusal\0\0")
     }
 
     async fn scripted_server_after_startup(
@@ -527,6 +535,57 @@ mod tests {
         (addr, startup_observed)
     }
 
+    /// Accept one PostgreSQL SSLRequest, agree to TLS, and leave the
+    /// connector's scripted handshake failure to end the address attempt.
+    async fn tls_handshake_server_bound(
+        bind: SocketAddr,
+    ) -> (SocketAddr, oneshot::Receiver<u32>) {
+        let listener = TcpListener::bind(bind).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (opening_seen, opening_observed) = oneshot::channel();
+
+        compio::runtime::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let compio::BufResult(result, opening) = socket.read_exact(vec![0u8; 8]).await;
+            result.unwrap();
+            assert_eq!(u32::from_be_bytes(opening[..4].try_into().unwrap()), 8);
+            let code = u32::from_be_bytes(opening[4..].try_into().unwrap());
+            let _ = opening_seen.send(code);
+
+            let compio::BufResult(result, _) = socket.write_all(vec![b'S']).await;
+            result.unwrap();
+            socket.flush().await.unwrap();
+        })
+        .detach();
+
+        (addr, opening_observed)
+    }
+
+    /// Advertises a usable TLS implementation, then fails after the server
+    /// accepts the SSLRequest. The stream type is uninhabited because a
+    /// successful test handshake would be a fixture bug.
+    struct HandshakeFailingTls;
+
+    impl<S> MakeTlsConnect<S> for HandshakeFailingTls {
+        type Stream = NoTlsStream;
+        type TlsConnect = HandshakeFailingTls;
+        type Error = io::Error;
+
+        fn make_tls_connect(&mut self, _domain: &str) -> Result<Self::TlsConnect, Self::Error> {
+            Ok(HandshakeFailingTls)
+        }
+    }
+
+    impl<S> TlsConnect<S> for HandshakeFailingTls {
+        type Stream = NoTlsStream;
+        type Error = io::Error;
+        type Future = future::Ready<Result<NoTlsStream, io::Error>>;
+
+        fn connect(self, _stream: S) -> Self::Future {
+            future::ready(Err(io::Error::other("scripted TLS handshake failure")))
+        }
+    }
+
     fn config_for(addr: SocketAddr, connect_timeout: Duration) -> Config {
         let mut config = Config::new();
         config
@@ -562,6 +621,18 @@ mod tests {
         }
     }
 
+    struct RecordingResolver {
+        address: SocketAddr,
+        calls: Vec<(String, u16)>,
+    }
+
+    impl Resolver for RecordingResolver {
+        async fn resolve(&mut self, host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
+            self.calls.push((host.to_owned(), port));
+            Ok(vec![self.address])
+        }
+    }
+
     fn hostname_config_for(addr: SocketAddr, connect_timeout: Duration) -> Config {
         let mut config = Config::new();
         config
@@ -571,6 +642,34 @@ mod tests {
             .ssl_mode(SslMode::Disable)
             .connect_timeout(connect_timeout);
         config
+    }
+
+    #[compio::test]
+    async fn resolver_receives_endpoint_hostname_and_port() {
+        let mut config = Config::new();
+        config
+            .host("resolver-argument.example")
+            .port(6543)
+            .ssl_mode(SslMode::Disable);
+        let endpoint = endpoints(&config)
+            .expect("one hostname is a valid endpoint list")
+            .pop()
+            .expect("the endpoint list contains the hostname");
+        let mut resolver = RecordingResolver {
+            address: "127.0.0.9:6543".parse().unwrap(),
+            calls: Vec::new(),
+        };
+
+        endpoint
+            .addresses(&mut resolver, LoadBalanceHosts::Disable)
+            .await
+            .expect("the recording resolver returned one address");
+
+        assert_eq!(
+            resolver.calls,
+            vec![("resolver-argument.example".to_owned(), 6543)],
+            "Endpoint::addresses must pass its configured hostname and port unchanged"
+        );
     }
 
     #[compio::test]
@@ -682,6 +781,173 @@ mod tests {
         async fn resolve(&mut self, _host: &str, _port: u16) -> io::Result<Vec<SocketAddr>> {
             Ok(self.0.clone())
         }
+    }
+
+    /// Four entries have 24 possible permutations. If the shuffle is correct
+    /// and uniform, the chance that all 64 trials produce the same ordering is
+    /// 24^-63, approximately 1.11e-87.
+    #[compio::test]
+    async fn random_load_balance_shuffles_resolved_addresses() {
+        let mut config = Config::new();
+        config
+            .host("random-addresses.example")
+            .ssl_mode(SslMode::Disable);
+        let endpoint = endpoints(&config)
+            .expect("one hostname is a valid endpoint list")
+            .pop()
+            .expect("the endpoint list contains the hostname");
+        let addresses = vec![
+            "127.0.0.1:5432".parse().unwrap(),
+            "127.0.0.2:5432".parse().unwrap(),
+            "127.0.0.3:5432".parse().unwrap(),
+            "127.0.0.4:5432".parse().unwrap(),
+        ];
+        let mut orders = HashSet::new();
+
+        for _ in 0..64 {
+            let mut resolver = ListResolver(addresses.clone());
+            let order = endpoint
+                .addresses(&mut resolver, LoadBalanceHosts::Random)
+                .await
+                .expect("the resolver returned four addresses")
+                .into_iter()
+                .map(|addr| match addr {
+                    Addr::Tcp(ip) => ip,
+                    #[cfg(unix)]
+                    Addr::Unix(path) => {
+                        panic!("a hostname resolver returned a Unix path: {}", path.display())
+                    }
+                })
+                .collect::<Vec<_>>();
+            orders.insert(order);
+        }
+
+        assert!(
+            orders.len() > 1,
+            "LoadBalanceHosts::Random never changed the resolved-address order in 64 trials"
+        );
+    }
+
+    /// The endpoint shuffle is separate from the address shuffle above and
+    /// therefore needs its own observation. It has the same 24^-63 false-fail
+    /// probability across four entries and 64 trials.
+    #[test]
+    fn random_load_balance_shuffles_configured_endpoints() {
+        let mut config = Config::new();
+        for i in 0..4 {
+            config
+                .host(format!("random-endpoint-{i}.example"))
+                .port(6000 + i);
+        }
+        config
+            .ssl_mode(SslMode::Disable)
+            .load_balance_hosts(LoadBalanceHosts::Random);
+        let mut orders = HashSet::new();
+
+        for _ in 0..64 {
+            let order = endpoints(&config)
+                .expect("four hostname/port pairs are valid endpoints")
+                .into_iter()
+                .map(|endpoint| {
+                    (
+                        endpoint
+                            .hostname()
+                            .expect("configured TCP host has a hostname")
+                            .to_owned(),
+                        endpoint.port(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            orders.insert(order);
+        }
+
+        assert!(
+            orders.len() > 1,
+            "LoadBalanceHosts::Random never changed the endpoint order in 64 trials"
+        );
+    }
+
+    /// A TLS-handshake failure on one resolved address must not stop the
+    /// address walk. Both probes report the opening protocol code so this
+    /// proves the test traversed TLS legs rather than plaintext sockets.
+    #[compio::test]
+    async fn tls_failure_advances_to_second_resolved_address() {
+        let (first, first_opening) =
+            tls_handshake_server_bound("127.0.0.1:0".parse().unwrap()).await;
+        let second_bind = SocketAddr::from(([127, 0, 0, 2], first.port()));
+        let (second, second_opening) = tls_handshake_server_bound(second_bind).await;
+
+        let mut config = Config::new();
+        config
+            .user("scripted-user")
+            .host("scripted.example")
+            .port(first.port())
+            .ssl_mode(SslMode::Require);
+        let mut resolver = ListResolver(vec![first, second]);
+
+        let result = compio::time::timeout(
+            Duration::from_secs(5),
+            connect_with_resolver(HandshakeFailingTls, &config, &mut resolver),
+        )
+        .await
+        .expect("the TLS address walk hung");
+        assert!(result.is_err(), "both scripted TLS handshakes fail");
+
+        async fn opening_code(seen: oneshot::Receiver<u32>) -> u32 {
+            compio::time::timeout(Duration::from_secs(2), seen)
+                .await
+                .expect("the resolved address was never dialled")
+                .expect("the TLS probe closed without reporting its opening message")
+        }
+
+        assert_eq!(opening_code(first_opening).await, SSL_REQUEST_CODE);
+        assert_eq!(
+            opening_code(second_opening).await,
+            SSL_REQUEST_CODE,
+            "the first TLS failure stopped the resolved-address walk"
+        );
+    }
+
+    /// A failed first address does not merely make the walk dial address two:
+    /// a healthy second PostgreSQL server must be allowed to win the walk.
+    #[compio::test]
+    async fn connect_succeeds_via_second_resolved_address() {
+        let (first, first_seen) =
+            scripted_server_after_startup(Some(refused_handshake())).await;
+        let second_bind = SocketAddr::from(([127, 0, 0, 2], first.port()));
+        let (second, second_seen) =
+            scripted_server_bound(second_bind, Some(successful_handshake())).await;
+        let config = hostname_config_for(first, Duration::from_secs(5));
+        let mut resolver = ListResolver(vec![first, second]);
+
+        let (client, connection) = compio::time::timeout(
+            Duration::from_secs(10),
+            connect_with_resolver(NoTls, &config, &mut resolver),
+        )
+        .await
+        .expect("the resolved-address walk hung")
+        .expect("the healthy second address must complete the connection");
+
+        async fn startup_seen(seen: oneshot::Receiver<()>, address: &str) {
+            compio::time::timeout(Duration::from_secs(2), seen)
+                .await
+                .unwrap_or_else(|_| panic!("the {address} server was never dialled"))
+                .unwrap_or_else(|_| {
+                    panic!("the {address} server closed without observing startup")
+                });
+        }
+
+        startup_seen(first_seen, "first").await;
+        startup_seen(second_seen, "healthy second").await;
+        let socket_config = client
+            .cancel_token()
+            .socket_config
+            .expect("a connected client records its socket address");
+        assert!(
+            matches!(socket_config.addr, Addr::Tcp(ip) if ip == second.ip()),
+            "the returned client must record the healthy second address"
+        );
+        drop((client, connection));
     }
 
     /// `connect_timeout` restarts for EVERY resolved address, not once per

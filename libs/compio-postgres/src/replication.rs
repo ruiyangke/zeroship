@@ -1682,9 +1682,11 @@ mod tests {
     use super::*;
     use crate::NoTls;
     use crate::config::{SslMode, SslRootCert};
+    use crate::tls::{NoTlsStream, TlsConnect};
     use compio::io::{AsyncReadExt, AsyncWriteExt};
     use pgoutput::{PgOutputMessage, TupleColumn};
     use std::error::Error as _;
+    use std::future;
 
     fn startup_frame(tag: u8, body: &[u8]) -> Vec<u8> {
         let mut frame = Vec::with_capacity(5 + body.len());
@@ -1694,11 +1696,38 @@ mod tests {
         frame
     }
 
+    fn successful_replication_handshake() -> Vec<u8> {
+        let mut response = startup_frame(b'R', &0u32.to_be_bytes());
+        response.extend_from_slice(&startup_frame(b'K', &[0; 8]));
+        response.extend_from_slice(&startup_frame(b'Z', b"I"));
+        response
+    }
+
+    fn refused_replication_handshake() -> Vec<u8> {
+        startup_frame(b'E', b"SERROR\0C57P03\0Mscripted refusal\0\0")
+    }
+
     async fn scripted_replication_server() -> std::net::SocketAddr {
-        let listener = compio::net::TcpListener::bind("127.0.0.1:0")
+        scripted_replication_server_bound(
+            "127.0.0.1:0".parse().unwrap(),
+            successful_replication_handshake(),
+        )
+        .await
+        .0
+    }
+
+    async fn scripted_replication_server_bound(
+        bind: std::net::SocketAddr,
+        response: Vec<u8>,
+    ) -> (
+        std::net::SocketAddr,
+        futures_channel::oneshot::Receiver<()>,
+    ) {
+        let listener = compio::net::TcpListener::bind(bind)
             .await
             .expect("bind scripted replication server");
         let addr = listener.local_addr().expect("scripted server address");
+        let (startup_seen, startup_observed) = futures_channel::oneshot::channel();
 
         compio::runtime::spawn(async move {
             let (mut socket, _) = listener
@@ -1711,17 +1740,70 @@ mod tests {
             assert!(length >= 4, "startup packet length includes its header");
             let compio::BufResult(result, _) = socket.read_exact(vec![0u8; length - 4]).await;
             result.expect("read startup body");
+            let _ = startup_seen.send(());
 
-            let mut response = startup_frame(b'R', &0u32.to_be_bytes());
-            response.extend_from_slice(&startup_frame(b'K', &[0; 8]));
-            response.extend_from_slice(&startup_frame(b'Z', b"I"));
             let compio::BufResult(result, _) = socket.write_all(response).await;
-            result.expect("write successful startup response");
+            result.expect("write scripted startup response");
             socket.flush().await.expect("flush startup response");
         })
         .detach();
 
-        addr
+        (addr, startup_observed)
+    }
+
+    /// Accept one PostgreSQL SSLRequest and agree to TLS. The test connector
+    /// then fails its handshake, ending this address attempt immediately.
+    async fn replication_tls_handshake_server_bound(
+        bind: std::net::SocketAddr,
+    ) -> (
+        std::net::SocketAddr,
+        futures_channel::oneshot::Receiver<u32>,
+    ) {
+        let listener = compio::net::TcpListener::bind(bind)
+            .await
+            .expect("bind TLS replication probe");
+        let addr = listener.local_addr().expect("TLS replication probe address");
+        let (opening_seen, opening_observed) = futures_channel::oneshot::channel();
+
+        compio::runtime::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept TLS replication probe");
+            let compio::BufResult(result, opening) = socket.read_exact(vec![0u8; 8]).await;
+            result.expect("read replication SSLRequest");
+            assert_eq!(u32::from_be_bytes(opening[..4].try_into().unwrap()), 8);
+            let code = u32::from_be_bytes(opening[4..].try_into().unwrap());
+            let _ = opening_seen.send(code);
+
+            let compio::BufResult(result, _) = socket.write_all(vec![b'S']).await;
+            result.expect("accept scripted TLS negotiation");
+            socket.flush().await.expect("flush TLS acceptance");
+        })
+        .detach();
+
+        (addr, opening_observed)
+    }
+
+    struct HandshakeFailingTls;
+
+    impl<S> MakeTlsConnect<S> for HandshakeFailingTls {
+        type Stream = NoTlsStream;
+        type TlsConnect = HandshakeFailingTls;
+        type Error = std::io::Error;
+
+        fn make_tls_connect(&mut self, _domain: &str) -> Result<Self::TlsConnect, Self::Error> {
+            Ok(HandshakeFailingTls)
+        }
+    }
+
+    impl<S> TlsConnect<S> for HandshakeFailingTls {
+        type Stream = NoTlsStream;
+        type Error = std::io::Error;
+        type Future = future::Ready<Result<NoTlsStream, std::io::Error>>;
+
+        fn connect(self, _stream: S) -> Self::Future {
+            future::ready(Err(std::io::Error::other(
+                "scripted TLS handshake failure",
+            )))
+        }
     }
 
     /// A replication server that accepts, reads the startup packet, and then
@@ -1758,7 +1840,6 @@ mod tests {
     /// The protocol code in the first 8 bytes a client writes: either an
     /// `SSLRequest` or a 3.0 `StartupMessage`. That single u32 is what says
     /// which transport the driver chose, without needing a TLS stack.
-    #[cfg(unix)]
     const SSL_REQUEST_CODE: u32 = 80_877_103;
     #[cfg(unix)]
     const STARTUP_V3_CODE: u32 = 196_608;
@@ -1881,6 +1962,109 @@ mod tests {
         ) -> std::io::Result<Vec<std::net::SocketAddr>> {
             Ok(self.0.clone())
         }
+    }
+
+    /// The replication address walk must continue after a real TLS-handshake
+    /// failure. Seeing SSLRequest on both probes proves neither attempt fell
+    /// through to plaintext.
+    #[compio::test]
+    async fn replication_tls_failure_advances_to_second_resolved_address() {
+        let (first, first_opening) =
+            replication_tls_handshake_server_bound("127.0.0.1:0".parse().unwrap()).await;
+        let second_bind = std::net::SocketAddr::from(([127, 0, 0, 2], first.port()));
+        let (second, second_opening) =
+            replication_tls_handshake_server_bound(second_bind).await;
+
+        let mut config = Config::new();
+        config
+            .user("scripted-user")
+            .host("scripted.example")
+            .port(first.port())
+            .ssl_mode(SslMode::Require)
+            .replication(ReplicationMode::Logical);
+        let endpoint = endpoints(&config)
+            .expect("one hostname is a valid endpoint list")
+            .pop()
+            .expect("the endpoint list contains the hostname");
+        let mut resolver = ListResolver(vec![first, second]);
+        let mut tls = HandshakeFailingTls;
+
+        let result = compio::time::timeout(
+            std::time::Duration::from_secs(5),
+            connect_replication_host(&endpoint, &mut resolver, &mut tls, &config),
+        )
+        .await
+        .expect("the TLS replication address walk hung");
+        assert!(result.is_err(), "both scripted TLS handshakes fail");
+
+        async fn opening_code(seen: futures_channel::oneshot::Receiver<u32>) -> u32 {
+            compio::time::timeout(std::time::Duration::from_secs(2), seen)
+                .await
+                .expect("the resolved replication address was never dialled")
+                .expect("the TLS probe closed without reporting its opening message")
+        }
+
+        assert_eq!(opening_code(first_opening).await, SSL_REQUEST_CODE);
+        assert_eq!(
+            opening_code(second_opening).await,
+            SSL_REQUEST_CODE,
+            "the first TLS failure stopped the replication address walk"
+        );
+    }
+
+    /// A successful second address must win even when the first address has
+    /// already produced a valid PostgreSQL startup error.
+    #[compio::test]
+    async fn replication_connect_succeeds_via_second_resolved_address() {
+        let (first, first_seen) = scripted_replication_server_bound(
+            "127.0.0.1:0".parse().unwrap(),
+            refused_replication_handshake(),
+        )
+        .await;
+        let second_bind = std::net::SocketAddr::from(([127, 0, 0, 2], first.port()));
+        let (second, second_seen) =
+            scripted_replication_server_bound(second_bind, successful_replication_handshake())
+                .await;
+
+        let mut config = Config::new();
+        config
+            .user("scripted-user")
+            .host("scripted.example")
+            .port(first.port())
+            .ssl_mode(SslMode::Disable)
+            .replication(ReplicationMode::Logical);
+        let endpoint = endpoints(&config)
+            .expect("one hostname is a valid endpoint list")
+            .pop()
+            .expect("the endpoint list contains the hostname");
+        let mut resolver = ListResolver(vec![first, second]);
+        let mut tls = NoTls;
+
+        let connection = compio::time::timeout(
+            std::time::Duration::from_secs(5),
+            connect_replication_host(&endpoint, &mut resolver, &mut tls, &config),
+        )
+        .await
+        .expect("the replication address walk hung")
+        .expect("the healthy second address must complete replication startup");
+
+        async fn startup_seen(
+            seen: futures_channel::oneshot::Receiver<()>,
+            address: &str,
+        ) {
+            compio::time::timeout(std::time::Duration::from_secs(2), seen)
+                .await
+                .unwrap_or_else(|_| panic!("the {address} replication server was never dialled"))
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "the {address} replication server closed without observing startup"
+                    )
+                });
+        }
+
+        startup_seen(first_seen, "first").await;
+        startup_seen(second_seen, "healthy second").await;
+        drop(connection);
     }
 
     /// The replication walk budgets `connect_timeout` per ADDRESS, exactly as
