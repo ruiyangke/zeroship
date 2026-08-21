@@ -239,6 +239,8 @@ mod tests {
                     (Capability::ExclusionConstraint, true),
                     (Capability::CommentOn, true),
                     (Capability::SchemaWideIndexNames, true),
+                    (Capability::TransactionalDdl, true),
+                    (Capability::DeferrableConstraint, true),
                 ],
             ),
             (
@@ -269,6 +271,8 @@ mod tests {
                     (Capability::ExclusionConstraint, false),
                     (Capability::CommentOn, false),
                     (Capability::SchemaWideIndexNames, true),
+                    (Capability::TransactionalDdl, true),
+                    (Capability::DeferrableConstraint, true),
                 ],
             ),
             (
@@ -299,6 +303,8 @@ mod tests {
                     (Capability::ExclusionConstraint, false),
                     (Capability::CommentOn, false),
                     (Capability::SchemaWideIndexNames, false),
+                    (Capability::TransactionalDdl, false),
+                    (Capability::DeferrableConstraint, false),
                 ],
             ),
         ];
