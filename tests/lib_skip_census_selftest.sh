@@ -14,10 +14,12 @@
 #                                           counted those would cry wolf until
 #                                           people stopped reading it
 #
-# It also pins the two traps that would each silently turn the census into a
-# constant zero or a constant pass. Both are cases where the WRONG behaviour
-# still looks like a working gate, which is why they are asserted rather than
-# left to inspection.
+# It also pins the three traps that would each silently turn the census into a
+# constant zero or a constant pass. All three are cases where the WRONG
+# behaviour still looks like a working gate, which is why they are asserted
+# rather than left to inspection. The third - an unusable log reporting zero
+# rather than refusing - was ASSERTED THE WRONG WAY ROUND here until 2026-08-21;
+# see the block that now carries it.
 #
 # Run directly: tests/lib_skip_census_selftest.sh
 set -uo pipefail
@@ -151,15 +153,126 @@ expect_status 0 "fully allowlisted run returns 0" 'AUTH_TEST_SMTP_SINK' \
   'ZEROSHIP-TEST-SKIPPED: smtp sink absent (AUTH_TEST_SMTP_SINK)'
 expect_status 1 "an unexplained skip returns 1" 'AUTH_TEST_SMTP_SINK' \
   'ZEROSHIP-TEST-SKIPPED: e2e_dragonfly: ZEROSHIP_KV_URL unset'
-# A missing or unreadable log is not a pass in disguise: it reports zero
-# offenders, and the caller's own ran-something / floor check is what catches a
-# run that produced no log at all. Pinned so the behaviour is stated, not
-# assumed.
-zs_skip_census "$TMP/does_not_exist" '' >/dev/null 2>&1
-if [ "$ZS_SKIP_COUNT" = "0" ]; then
-  pass=$((pass + 1)); echo "ok   - missing log reports 0 (caller's floor is what catches it)"
+
+echo
+echo "=== trap 3: an UNUSABLE SOURCE must REFUSE, not report zero ==="
+# THIS BLOCK ASSERTED THE OPPOSITE UNTIL 2026-08-21, and the reversal is the
+# point rather than a change of taste. It read:
+#
+#   "A missing or unreadable log is not a pass in disguise: it reports zero
+#    offenders, and the caller's own ran-something / floor check is what catches
+#    a run that produced no log at all."
+#
+# The first clause was false and the second was an assumption about callers that
+# the library cannot enforce. Measured on main at bfa6ad692:
+#
+#   $ . tests/lib/skip_census.sh; zs_skip_census /definitely/not/a/real/path
+#   ==> skip census: 0 test(s) announced they did nothing (0 allowlisted, 0 not)
+#   $ echo $?
+#   0
+#
+# A clean green, with a positive claim about a run, over a file that does not
+# exist. That is exactly the shape this whole library exists to remove - a check
+# that examined nothing printing what a clean tree prints - arriving one level
+# out, in the instrument instead of the suite.
+#
+# The "caller's floor catches it" half does hold for the three shell suites,
+# which each carry a MIN_PASSED floor over the same log. It does not hold for
+# the report-only census in ci.yml, and it did not hold for the ad-hoc harness
+# that found this: a library whose safety is a property of its callers is safe
+# only until someone writes a new one.
+#
+# REFUSED IS NOT FAILED. Status 2 says no verdict was reachable; status 1 says a
+# verdict was reached and it was bad. Asserted separately below, because a fix
+# that turned every missing log into a plain 1 would be indistinguishable here
+# from one that refuses, and callers branch on the difference.
+expect_refusal() {
+  local label="$1" path="$2" rc
+  zs_skip_census "$path" '' >/dev/null 2>&1 && rc=0 || rc=$?
+  if [ "$rc" = "2" ] && [ "${ZS_SKIP_REFUSED:-<unset>}" = "1" ]; then
+    pass=$((pass + 1)); echo "ok   - $label (rc=$rc, REFUSED)"
+  else
+    fail=$((fail + 1))
+    echo "FAIL - $label: expected rc=2 and ZS_SKIP_REFUSED=1, got rc=$rc refused=${ZS_SKIP_REFUSED:-<unset>}" >&2
+  fi
+}
+
+expect_refusal "a path that does not exist" "$TMP/does_not_exist"
+# The case the broken redirect actually produced: the open succeeded, so the
+# file is there, and it is empty. Indistinguishable from a clean run by count
+# alone, which is why it needs its own arm.
+: > "$TMP/empty_log"
+expect_refusal "an existing but EMPTY log" "$TMP/empty_log"
+# Readable but not a regular file. This library reads the log twice, so a
+# directory (grep prints "Is a directory" and matches nothing) cannot serve it.
+mkdir -p "$TMP/a_directory"
+expect_refusal "a directory" "$TMP/a_directory"
+printf 'ZEROSHIP-TEST-SKIPPED: unreadable\n' > "$TMP/no_perm"
+chmod 000 "$TMP/no_perm"
+if [ -r "$TMP/no_perm" ]; then
+  # root, or a filesystem that ignores the mode. Say so rather than passing an
+  # arm that examined nothing - that is this file's own subject matter.
+  echo "skip - unreadable log: this user can read mode 000, no case to run" >&2
 else
-  fail=$((fail + 1)); echo "FAIL - missing log: expected 0, got $ZS_SKIP_COUNT" >&2
+  expect_refusal "a log this user cannot read" "$TMP/no_perm"
+fi
+expect_refusal "no path at all" ""
+
+# THE OTHER HALF, and without it the fix would have replaced a false green with
+# a false red - which is worse, because a red gets worked around. A real log
+# with no announcements in it must still report 0 and return 0.
+printf 'test alpha ... ok\ntest result: ok. 2 passed; 0 failed\n' > "$TMP/clean_real_log"
+zs_skip_census "$TMP/clean_real_log" '' >/dev/null 2>&1 && rc=0 || rc=$?
+if [ "$rc" = "0" ] && [ "$ZS_SKIP_COUNT" = "0" ] && [ "${ZS_SKIP_REFUSED:-<unset>}" = "0" ]; then
+  pass=$((pass + 1)); echo "ok   - a REAL log with zero markers still reports 0 and returns 0"
+else
+  fail=$((fail + 1))
+  echo "FAIL - real clean log: expected rc=0 count=0 refused=0, got rc=$rc count=$ZS_SKIP_COUNT refused=${ZS_SKIP_REFUSED:-<unset>}" >&2
+fi
+# One-variable control against the refusal arms above: same call, same allowlist,
+# the ONLY difference is that the file exists and has bytes.
+if [ "$(zs_skip_census "$TMP/clean_real_log" '' 2>/dev/null | grep -c 'skip census')" = "1" ]; then
+  pass=$((pass + 1)); echo "ok   - control: a usable log still PRINTS its census line"
+else
+  fail=$((fail + 1)); echo "FAIL - control: usable log did not print a census line" >&2
+fi
+# A refusal must print NO census line. The line is a positive claim about a run;
+# emitting it over an unreadable source is the artefact of the original bug, so
+# its absence is asserted rather than left to the status.
+if [ "$(zs_skip_census "$TMP/does_not_exist" '' 2>/dev/null | grep -c 'skip census')" = "0" ]; then
+  pass=$((pass + 1)); echo "ok   - a refusal emits ZERO census lines on stdout"
+else
+  fail=$((fail + 1)); echo "FAIL - refusal still printed a census line on stdout" >&2
+fi
+# The refusal must NAME the path, or the reader cannot tell which redirect broke.
+# `grep -c` and not `grep -q`: this file runs under `set -o pipefail`, and
+# `grep -q` exits on the first match, SIGPIPEs the producer, and makes the whole
+# pipeline 141 however well the assertion went. That cost one confusing red here
+# before it was spotted, which is the same class of thing this file is about.
+if [ "$(zs_skip_census "$TMP/does_not_exist" '' 2>&1 >/dev/null | grep -c "$TMP/does_not_exist")" != "0" ]; then
+  pass=$((pass + 1)); echo "ok   - the refusal names the offending path on stderr"
+else
+  fail=$((fail + 1)); echo "FAIL - the refusal did not name the path" >&2
+fi
+
+echo
+echo "=== zs_skip_lines: the same hole, checked directly ==="
+# zs_skip_lines had the identical `return 0` on an unreadable log. No caller
+# rules on its status today (all three suites use it only to PRINT offending
+# lines, after the census has already failed), but a helper that answers "no
+# skips here" about a file it never opened is one caller away from being the
+# same bug again.
+zs_skip_lines "$TMP/does_not_exist" >/dev/null 2>&1 && lrc=0 || lrc=$?
+if [ "$lrc" = "2" ]; then
+  pass=$((pass + 1)); echo "ok   - zs_skip_lines refuses a missing log (rc=2)"
+else
+  fail=$((fail + 1)); echo "FAIL - zs_skip_lines: expected rc=2 on a missing log, got $lrc" >&2
+fi
+zs_skip_lines "$TMP/clean_real_log" >/dev/null 2>&1 && lrc=0 || lrc=$?
+if [ "$lrc" = "0" ]; then
+  pass=$((pass + 1)); echo "ok   - control: zs_skip_lines returns 0 over a real clean log"
+else
+  fail=$((fail + 1)); echo "FAIL - zs_skip_lines on a real clean log: expected 0, got $lrc" >&2
 fi
 
 echo

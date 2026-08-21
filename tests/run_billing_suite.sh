@@ -410,14 +410,29 @@ echo "=================================================================="
 # The auth gate has worked this way throughout, and the asymmetry was the whole
 # problem: the same announcement failed one suite and was printed by the other,
 # so which of two gates you ran decided whether a missing backend counted.
-if ! zs_skip_census "$SUITE_LOG" "$BILLING_SKIP_ALLOWLIST"; then
+#
+# Status 2 is a REFUSAL, not a skip count: the log is missing or empty, so the
+# suite above it very likely never ran and there is no census to read. Reported
+# separately because the two demand opposite responses, and because the blank
+# ZS_SKIP_COUNT a refusal leaves behind would otherwise print as
+# "FAIL:  test(s) skipped".
+census_rc=0
+zs_skip_census "$SUITE_LOG" "$BILLING_SKIP_ALLOWLIST" || census_rc=$?
+if [ "$census_rc" -eq "$ZS_SKIP_REFUSED_STATUS" ]; then
+  echo "FAIL: the skip census refused ${SUITE_LOG}, so this run proved nothing about skips." >&2
+  fail=1
+  failed+=("skip-census-refused")
+  billing_skips="refused"
+elif [ "$census_rc" -ne 0 ]; then
   echo "FAIL: ${ZS_SKIP_COUNT} test(s) skipped that this gate does not tolerate." >&2
   echo "A skipped billing test is a silent pass. Offending lines:" >&2
   zs_skip_lines "$SUITE_LOG" "$BILLING_SKIP_ALLOWLIST" | sort -u | head -20 >&2
   fail=1
   failed+=("skip-census")
+  billing_skips="$ZS_SKIP_COUNT"
+else
+  billing_skips="$ZS_SKIP_COUNT"
 fi
-billing_skips="$ZS_SKIP_COUNT"
 
 if [ "$fail" -ne 0 ]; then
   echo "LIVE-DATABASE SUITE FAILED: ${failed[*]}" >&2
