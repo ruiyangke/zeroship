@@ -10,6 +10,26 @@ class = "test-dev-tool"
 reason = "A repository gate. It READS the deployment's compose file and is not in it; it has no configuration overlay of its own."
 
 [[package.metadata.zeroship-config.targets]]
+target = "compose-port-exposure"
+class = "test-dev-tool"
+reason = "A repository gate. It READS the deployment's compose file and Caddyfile and is in neither; it has no configuration overlay of its own."
+
+[[package.metadata.zeroship-config.targets]]
+target = "compose-stateful-volume"
+class = "test-dev-tool"
+reason = "A repository gate. It READS the deployment's compose file and is not in it; it has no configuration overlay of its own."
+
+[[package.metadata.zeroship-config.targets]]
+target = "compose-backing-service-reach"
+class = "test-dev-tool"
+reason = "A repository gate. It READS the deployment's compose file and is not in it; it has no configuration overlay of its own."
+
+[[package.metadata.zeroship-config.targets]]
+target = "compose-workflow-advance-flag"
+class = "test-dev-tool"
+reason = "A repository gate. It READS the deploy tree and one worker source file; it is not a deployed service and has no configuration overlay."
+
+[[package.metadata.zeroship-config.targets]]
 target = "gate-arm-census"
 class = "test-dev-tool"
 reason = "The meta-gate. It reads the repository's own gate scripts; it is not a deployed service and has no configuration overlay."

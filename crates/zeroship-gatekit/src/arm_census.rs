@@ -286,6 +286,91 @@ impl Arm<'_> {
     }
 }
 
+/// A Rust gate's whole run: the arms it declared, and its report.
+///
+/// WHY THE TWO ARE ONE OBJECT. In the shell library the arm's floor and the
+/// gate's exit code are joined by `gate_arms_finish`, which a gate must
+/// remember to call - and a gate that forgets leaks its refusals, which
+/// `audit` above exists to catch. Here the join is structural: an arm that did
+/// not clear its floor refuses the [`Report`] at the moment it is recorded, so
+/// there is no ordering a gate author can get wrong and no `finish` to omit.
+#[derive(Debug)]
+pub struct GateRun {
+    gate: &'static str,
+    arms: Vec<Arm<'static>>,
+    report: Report,
+}
+
+impl GateRun {
+    /// Start a run for the gate with this id (the script basename without
+    /// `_gate.sh`, so a CI log line points at a file).
+    #[must_use]
+    pub fn new(gate: &'static str) -> Self {
+        Self {
+            gate,
+            arms: Vec::new(),
+            report: Report::new(),
+        }
+    }
+
+    /// Record one arm: how many items it ruled on, and the floor that must
+    /// clear. Returns whether it cleared, so a caller may skip work that would
+    /// be meaningless - but the verdict is carried into the report either way,
+    /// so an ignored return value cannot lose it.
+    pub fn arm(&mut self, arm: &'static str, examined: usize, floor: usize) -> bool {
+        let arm = Arm {
+            gate: self.gate,
+            arm,
+            examined,
+            floor,
+        };
+        let cleared = arm.cleared();
+        if !cleared {
+            self.report.refuse(format!(
+                "{}/{} ruled on {} item(s), floor {}. THIS IS NOT A PASS AND IT IS NOT A FINDING \
+                 ABOUT THE TREE: the arm had (almost) nothing to rule on, so its clean result says \
+                 nothing. Something it enumerates stopped matching. Fix the enumeration; do not \
+                 lower the floor.",
+                arm.gate, arm.arm, arm.examined, arm.floor
+            ));
+        }
+        self.arms.push(arm);
+        cleared
+    }
+
+    /// The arms declared so far.
+    #[must_use]
+    pub fn arms(&self) -> &[Arm<'static>] {
+        &self.arms
+    }
+
+    /// The report, to add checks to.
+    pub const fn report_mut(&mut self) -> &mut Report {
+        &mut self.report
+    }
+
+    /// The report, to read a verdict from.
+    #[must_use]
+    pub const fn report(&self) -> &Report {
+        &self.report
+    }
+
+    /// The census lines, one per arm, in declaration order.
+    ///
+    /// The binary prints these BEFORE the verdict, because a gate's most
+    /// important number is how much it enumerated: a smaller green is not a
+    /// pass, and the only way to see that is to print the count on every run.
+    #[must_use]
+    pub fn census(&self) -> String {
+        let mut out = String::new();
+        for arm in &self.arms {
+            out.push_str(&arm.line());
+            out.push('\n');
+        }
+        out
+    }
+}
+
 /// One `zsgate-arm` census line, as emitted by a gate at runtime.
 #[derive(Debug, PartialEq, Eq)]
 pub struct EmittedArm {
