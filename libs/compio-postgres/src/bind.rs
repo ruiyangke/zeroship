@@ -31,7 +31,14 @@ where
 
     let mut responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
 
-    match responses.next().await? {
+    let message = match responses.next().await {
+        Ok(message) => message,
+        Err(error) => {
+            statement.invalidate_cache_on_error(&error);
+            return Err(error);
+        }
+    };
+    match message {
         Message::BindComplete => {}
         _ => return Err(Error::unexpected_message()),
     }

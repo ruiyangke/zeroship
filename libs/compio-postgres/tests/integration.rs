@@ -14,7 +14,8 @@
 
 use compio_postgres::error::SqlState;
 use compio_postgres::{
-    Client, Error, NoTls, Pool, PoolConfig, SimpleQueryMessage, TransactionStatus,
+    Client, Config, Error, NoTls, Pool, PoolConfig, SimpleQueryMessage, TransactionStatus,
+    Uncached,
 };
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -83,6 +84,21 @@ fn schema_scoped_url(url: &str, schema: &str) -> String {
 /// Open a client and spawn its driver on the compio runtime.
 async fn connect(url: &str) -> Result<Client, Error> {
     let (client, connection) = compio_postgres::connect(url, NoTls).await?;
+    compio::runtime::spawn(async move {
+        if let Err(e) = connection.run().await {
+            eprintln!("connection error: {e}");
+        }
+    })
+    .detach();
+    Ok(client)
+}
+
+/// Open a client whose implicit raw-SQL prepared-statement cache has the
+/// requested per-connection capacity.
+async fn connect_with_statement_cache(url: &str, capacity: usize) -> Result<Client, Error> {
+    let mut config: Config = url.parse()?;
+    config.statement_cache_capacity(capacity);
+    let (client, connection) = config.connect(NoTls).await?;
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
             eprintln!("connection error: {e}");
@@ -4173,6 +4189,254 @@ async fn prepared_statement_count(client: &Client) -> usize {
         .expect("count query returns one row")
         .parse()
         .unwrap()
+}
+
+/// Capacity zero is the compatibility mode: every raw SQL call prepares its
+/// own statement, just as it did before the opt-in cache existed. Keep the
+/// returned rows alive so their Statement clones keep all four server names
+/// observable at once.
+#[compio::test]
+async fn statement_cache_capacity_zero_prepares_every_call() {
+    let url = test_url();
+    let client = connect_with_statement_cache(&url, 0).await.unwrap();
+
+    const SQL: &str = "SELECT 51::int4 AS cpg_cache_disabled";
+    let mut results = Vec::new();
+    for _ in 0..4 {
+        results.push(client.query(SQL, &[]).await.unwrap());
+    }
+
+    assert_eq!(prepared_statement_names(&client, SQL).await.len(), 4);
+
+    drop(results);
+    client.simple_query("").await.unwrap();
+    assert!(prepared_statement_names(&client, SQL).await.is_empty());
+}
+
+/// An enabled cache prepares one server statement and reuses it for every
+/// identical raw SQL string on this connection.
+#[compio::test]
+async fn statement_cache_reuses_identical_sql() {
+    let url = test_url();
+    let client = connect_with_statement_cache(&url, 2).await.unwrap();
+
+    const SQL: &str = "SELECT 52::int4 AS cpg_cache_hit";
+    let mut results = Vec::new();
+    for _ in 0..8 {
+        let rows = client.query(SQL, &[]).await.unwrap();
+        assert_eq!(rows[0].get::<_, i32>(0), 52);
+        results.push(rows);
+    }
+
+    assert_eq!(prepared_statement_names(&client, SQL).await.len(), 1);
+
+    drop(results);
+    client.simple_query("").await.unwrap();
+    assert_eq!(prepared_statement_names(&client, SQL).await.len(), 1);
+}
+
+#[compio::test]
+async fn statement_cache_is_per_connection() {
+    let url = test_url();
+    let first = connect_with_statement_cache(&url, 1).await.unwrap();
+    let second = connect_with_statement_cache(&url, 1).await.unwrap();
+
+    const SQL: &str = "SELECT 60::int4 AS cpg_cache_per_connection";
+    drop(first.query(SQL, &[]).await.unwrap());
+    drop(second.query(SQL, &[]).await.unwrap());
+
+    assert_eq!(prepared_statement_names(&first, SQL).await.len(), 1);
+    assert_eq!(prepared_statement_names(&second, SQL).await.len(), 1);
+}
+
+#[compio::test]
+async fn statement_cache_evicts_the_least_recently_used_sql() {
+    let url = test_url();
+    let client = connect_with_statement_cache(&url, 2).await.unwrap();
+
+    const SQL_A: &str = "SELECT 61::int4 AS cpg_cache_lru_a";
+    const SQL_B: &str = "SELECT 62::int4 AS cpg_cache_lru_b";
+    const SQL_C: &str = "SELECT 63::int4 AS cpg_cache_lru_c";
+
+    drop(client.query(SQL_A, &[]).await.unwrap());
+    drop(client.query(SQL_B, &[]).await.unwrap());
+    drop(client.query(SQL_A, &[]).await.unwrap());
+    drop(client.query(SQL_C, &[]).await.unwrap());
+    client.simple_query("").await.unwrap();
+
+    assert_eq!(prepared_statement_names(&client, SQL_A).await.len(), 1);
+    assert!(prepared_statement_names(&client, SQL_B).await.is_empty());
+    assert_eq!(prepared_statement_names(&client, SQL_C).await.len(), 1);
+}
+
+/// Eviction releases the cache's clone immediately, while rows from an
+/// outstanding use keep that statement alive until their last clone drops.
+#[compio::test]
+async fn statement_cache_eviction_closes_after_outstanding_clones() {
+    let url = test_url();
+    let client = connect_with_statement_cache(&url, 1).await.unwrap();
+
+    const SQL_A: &str = "SELECT 53::int4 AS cpg_cache_evicted";
+    const SQL_B: &str = "SELECT 54::int4 AS cpg_cache_retained";
+
+    let rows_a = client.query(SQL_A, &[]).await.unwrap();
+    assert_eq!(prepared_statement_names(&client, SQL_A).await.len(), 1);
+
+    let rows_b = client.query(SQL_B, &[]).await.unwrap();
+    drop(rows_b);
+    client.simple_query("").await.unwrap();
+
+    assert_eq!(prepared_statement_names(&client, SQL_A).await.len(), 1);
+    assert_eq!(prepared_statement_names(&client, SQL_B).await.len(), 1);
+
+    drop(rows_a);
+    client.simple_query("").await.unwrap();
+    assert!(prepared_statement_names(&client, SQL_A).await.is_empty());
+    assert_eq!(prepared_statement_names(&client, SQL_B).await.len(), 1);
+}
+
+/// Concurrent cold misses may race through Parse/Describe, but cache
+/// insertion elects one winner and drops every losing Statement. Both callers
+/// execute the winner, so no losing server name remains live.
+#[compio::test]
+async fn statement_cache_concurrent_misses_keep_one_statement() {
+    let url = test_url();
+    let client = connect_with_statement_cache(&url, 2).await.unwrap();
+
+    const SQL: &str = "SELECT 55::int4 AS cpg_cache_concurrent";
+    let (first, second) = futures_util::future::join(
+        client.query(SQL, &[]),
+        client.query(SQL, &[]),
+    )
+    .await;
+    let first = first.unwrap();
+    let second = second.unwrap();
+
+    assert_eq!(first[0].get::<_, i32>(0), 55);
+    assert_eq!(second[0].get::<_, i32>(0), 55);
+    assert_eq!(prepared_statement_names(&client, SQL).await.len(), 1);
+
+    drop((first, second));
+    client.simple_query("").await.unwrap();
+    assert_eq!(prepared_statement_names(&client, SQL).await.len(), 1);
+}
+
+/// `Uncached` skips both cache lookup and insertion for exactly this use. The
+/// same-SQL arm proves it does not silently reuse the cached Statement; the
+/// unique-SQL arm proves it does not populate an empty slot.
+#[compio::test]
+async fn statement_cache_bypass_is_one_shot() {
+    let url = test_url();
+    let client = connect_with_statement_cache(&url, 3).await.unwrap();
+
+    const CACHED_SQL: &str = "SELECT 56::int4 AS cpg_cache_bypass_existing";
+    const ONE_SHOT_SQL: &str = "SELECT 57::int4 AS cpg_cache_bypass_one_shot";
+
+    let cached_rows = client.query(CACHED_SQL, &[]).await.unwrap();
+    drop(cached_rows);
+    assert_eq!(prepared_statement_names(&client, CACHED_SQL).await.len(), 1);
+
+    let bypass_rows = client
+        .query(&Uncached::new(CACHED_SQL), &[])
+        .await
+        .unwrap();
+    assert_eq!(prepared_statement_names(&client, CACHED_SQL).await.len(), 2);
+
+    drop(bypass_rows);
+    client.simple_query("").await.unwrap();
+    assert_eq!(prepared_statement_names(&client, CACHED_SQL).await.len(), 1);
+
+    let one_shot_rows = client
+        .query(&Uncached::new(ONE_SHOT_SQL), &[])
+        .await
+        .unwrap();
+    assert_eq!(one_shot_rows[0].get::<_, i32>(0), 57);
+    drop(one_shot_rows);
+    client.simple_query("").await.unwrap();
+    assert!(prepared_statement_names(&client, ONE_SHOT_SQL)
+        .await
+        .is_empty());
+}
+
+/// A cached plan whose result shape changed is not retried invisibly. The
+/// first execution surfaces PostgreSQL's 0A000, evicts that exact Statement,
+/// and leaves the connection aligned so the next call can reprepare it.
+#[compio::test]
+async fn statement_cache_evicts_stale_result_shape_after_0a000() {
+    let url = test_url();
+    let client = connect_with_statement_cache(&url, 2).await.unwrap();
+
+    const SQL: &str = "SELECT * FROM cpg_cache_plan_shape";
+    client
+        .batch_execute(
+            "DROP TABLE IF EXISTS cpg_cache_plan_shape; \
+             CREATE TEMP TABLE cpg_cache_plan_shape (id int4); \
+             INSERT INTO cpg_cache_plan_shape VALUES (58)",
+        )
+        .await
+        .unwrap();
+
+    let first_rows = client.query(SQL, &[]).await.unwrap();
+    assert_eq!(first_rows[0].get::<_, i32>("id"), 58);
+    drop(first_rows);
+
+    client
+        .batch_execute(
+            "ALTER TABLE cpg_cache_plan_shape \
+             ADD COLUMN label text NOT NULL DEFAULT 'fresh'",
+        )
+        .await
+        .unwrap();
+
+    let stale_error = client.query(SQL, &[]).await.unwrap_err();
+    assert_eq!(stale_error.code(), Some(&SqlState::FEATURE_NOT_SUPPORTED));
+
+    client.simple_query("").await.unwrap();
+    assert!(prepared_statement_names(&client, SQL).await.is_empty());
+
+    let refreshed_rows = client.query(SQL, &[]).await.unwrap();
+    assert_eq!(refreshed_rows[0].len(), 2);
+    assert_eq!(refreshed_rows[0].get::<_, i32>("id"), 58);
+    assert_eq!(refreshed_rows[0].get::<_, &str>("label"), "fresh");
+    assert_eq!(prepared_statement_names(&client, SQL).await.len(), 1);
+
+    assert_eq!(simple_query_scalar_i32(&client, "SELECT 59::int4").await.unwrap(), 59);
+    client
+        .batch_execute("DROP TABLE cpg_cache_plan_shape")
+        .await
+        .unwrap();
+}
+
+/// If server-side state is cleared behind the cache, the first use surfaces
+/// PostgreSQL's 26000 and evicts the missing Statement. The following use
+/// reparses it on the same still-usable connection.
+#[compio::test]
+async fn statement_cache_evicts_a_statement_missing_after_deallocate_all() {
+    let url = test_url();
+    let client = connect_with_statement_cache(&url, 2).await.unwrap();
+
+    const SQL: &str = "SELECT 64::int4 AS cpg_cache_deallocated";
+    let first_rows = client.query(SQL, &[]).await.unwrap();
+    assert_eq!(first_rows[0].get::<_, i32>(0), 64);
+    drop(first_rows);
+
+    client.batch_execute("DEALLOCATE ALL").await.unwrap();
+    assert!(prepared_statement_names(&client, SQL).await.is_empty());
+
+    let missing_error = client.query(SQL, &[]).await.unwrap_err();
+    assert_eq!(missing_error.code(), Some(&SqlState::INVALID_SQL_STATEMENT_NAME));
+
+    client.simple_query("").await.unwrap();
+    let refreshed_rows = client.query(SQL, &[]).await.unwrap();
+    assert_eq!(refreshed_rows[0].get::<_, i32>(0), 64);
+    assert_eq!(prepared_statement_names(&client, SQL).await.len(), 1);
+
+    assert_eq!(
+        simple_query_scalar_i32(&client, "SELECT 65::int4")
+            .await
+            .unwrap(),
+        65
+    );
 }
 
 async fn simple_query_scalar_i32(client: &Client, sql: &str) -> Result<i32, Error> {

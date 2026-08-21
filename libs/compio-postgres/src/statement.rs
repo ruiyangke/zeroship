@@ -90,6 +90,16 @@ impl Statement {
         &self.0.name
     }
 
+    pub(crate) fn same_instance(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    pub(crate) fn invalidate_cache_on_error(&self, error: &crate::Error) {
+        if let Some(client) = self.0.client.upgrade() {
+            client.invalidate_cached_statement_on_error(self, error);
+        }
+    }
+
     /// Returns the expected types of the statement's parameters.
     pub fn params(&self) -> &[Type] {
         &self.0.params
