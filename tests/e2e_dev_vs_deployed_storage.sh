@@ -554,10 +554,17 @@ cp "$WORK/deployed.txt" "$KEEP/deployed.txt" 2>/dev/null || true
 # answering, the static one when an assertion leaves the file.
 #
 # 53 IS THE LOWER OF THE TWO LEGITIMATE CONFIGURATIONS, which is where a floor
-# has to sit -- the same reasoning golden_path.sh applies to its ZEROSHIP_TOKEN
-# arm. `DEPLOYED_STORAGE=file` skips the "MinIO ready" pass and yields 53; the
-# default s3 mode yields 54. CI runs the s3 mode, so CI sits one above the
-# floor, and that one is the only headroom here.
+# has to sit. `DEPLOYED_STORAGE=file` skips the "MinIO ready" pass and yields
+# 53; the default s3 mode yields 54. CI runs the s3 mode, so CI sits one above
+# the floor, and that one is the only headroom here.
+#
+# golden_path.sh USED TO BE THE PRECEDENT CITED HERE, for its ZEROSHIP_TOKEN
+# arm, and it no longer applies that reasoning: its arm is now an argument
+# (`--provision=`) and its floor SUBTRACTS a per-arm delta instead of sitting at
+# the lower configuration, precisely so the arm CI runs has no headroom. Which
+# rule is right depends on whether the configurations are chosen or discovered.
+# This one is chosen too, so the same move is available here and has simply not
+# been made; do not read the citation's removal as a reason it could not be.
 #
 # WHAT THE FLOOR DOES NOT CATCH: substitution. Swapping one assertion for an
 # easier one keeps the total unchanged. Nothing here can see that; review can.
