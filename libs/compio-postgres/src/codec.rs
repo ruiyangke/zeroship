@@ -86,6 +86,15 @@ impl BackendMessages {
             None
         }
     }
+
+    /// Return the tag of the first frame without consuming it.
+    ///
+    /// The prepare path uses this at the connection boundary to decide
+    /// whether a cancelled `Parse` created its named statement. The response
+    /// still has to be delivered intact when its caller is alive.
+    pub(crate) fn first_tag(&self) -> Option<u8> {
+        self.0.first().copied()
+    }
 }
 
 impl FallibleIterator for BackendMessages {

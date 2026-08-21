@@ -83,6 +83,7 @@ pub struct Request {
     pub sender: mpsc::Sender<BackendMessages>,
     pub(crate) disposition: RequestDisposition,
     pub(crate) transaction_effect: TransactionEffect,
+    pub(crate) prepare_cleanup: Option<crate::prepare::PrepareCleanup>,
 }
 
 /// Whether a caller awaits the request outcome.
@@ -120,6 +121,7 @@ struct Response {
     sender: mpsc::Sender<BackendMessages>,
     disposition: RequestDisposition,
     transaction_effect: TransactionEffect,
+    prepare_cleanup: Option<crate::prepare::PrepareCleanup>,
 }
 
 struct PendingResponse {
@@ -440,11 +442,13 @@ where
             sender,
             disposition,
             transaction_effect,
+            prepare_cleanup,
         } = request;
         self.responses.push_back(Response {
             sender,
             disposition,
             transaction_effect,
+            prepare_cleanup,
         });
 
         match messages {
@@ -547,6 +551,20 @@ impl Dispatch<'_> {
                 _ => return Err(Error::unexpected_message()),
             },
         };
+
+        if let Some(cleanup) = response.prepare_cleanup.as_ref() {
+            match messages.first_tag() {
+                Some(postgres_protocol::message::backend::PARSE_COMPLETE_TAG) => {
+                    cleanup.observe(true);
+                    response.prepare_cleanup = None;
+                }
+                Some(postgres_protocol::message::backend::ERROR_RESPONSE_TAG) => {
+                    cleanup.observe(false);
+                    response.prepare_cleanup = None;
+                }
+                _ => {}
+            }
+        }
 
         if let Some(status) = ready_status
             && response.transaction_effect == TransactionEffect::MayChange
@@ -1212,11 +1230,13 @@ where
                         sender,
                         disposition,
                         transaction_effect,
+                        prepare_cleanup,
                     } = request;
                     responses.push_back(Response {
                         sender,
                         disposition,
                         transaction_effect,
+                        prepare_cleanup,
                     });
                     match messages {
                         RequestMessages::Single(msg) => {
@@ -1608,6 +1628,7 @@ mod tests {
             sender,
             disposition: RequestDisposition::Housekeeping,
             transaction_effect: TransactionEffect::Neutral,
+            prepare_cleanup: None,
         }]);
         let mut pending_responses = VecDeque::new();
         let tx_status = AtomicU8::new(b'T');
