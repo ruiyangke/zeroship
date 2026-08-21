@@ -608,18 +608,6 @@ fn validate_schema(name: &str) -> Result<(), QueryError> {
  * through the registered schema renderer.
  */
 
-/// Render an author string in an expression/default/check position. MySQL gets
-/// UTF-8 hex with a character-set introducer so inherited backslash modes cannot
-/// reinterpret the value; PostgreSQL and SQLite retain standard quote doubling.
-fn schema_string_literal(value: &str, dialect: SqlDialect) -> String {
-    match dialect {
-        SqlDialect::Mysql => format!("_utf8mb4 X'{}'", hex::encode(value.as_bytes())),
-        SqlDialect::Postgres | SqlDialect::Sqlite => {
-            format!("'{}'", value.replace('\'', "''"))
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // DDL builders for registerModel
 // ---------------------------------------------------------------------------
@@ -804,7 +792,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
             {
                 continue;
             }
-            let col_def = field_to_column_for_dialect(field, def, dialect, backend, &inject)?;
+            let col_def = field_to_column_for_dialect(field, def, backend, &inject)?;
             columns.push(col_def);
 
             // Path B sibling-column emission. When the
@@ -888,9 +876,8 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
             // `def_to_constraints`, so we don't repeat the IN-list here.
             if def.get("discriminator").and_then(|v| v.as_str()) == Some("__discriminator__") {
                 if let Some(variants) = def.get("variants").and_then(|v| v.as_array()) {
-                    let constraint_clauses = emit_union_variant_checks(
-                        collection, field, def, variants, dialect, backend,
-                    );
+                    let constraint_clauses =
+                        emit_union_variant_checks(collection, field, def, variants, backend);
                     union_checks.extend(constraint_clauses);
                 }
             }
@@ -1023,9 +1010,17 @@ fn build_injected_columns(
             })
             .transpose()?
             .unwrap_or_default();
+        // The old PostgreSQL/SQLite arm returned this codec's string directly.
+        // Pass only its bare-vs-quoted classification now: those two backends use
+        // their own identical ANSI quote spelling for the quoted case, while
+        // MySQL explicitly ignores the flag and uses its own quote spelling.
+        // Thus the backend owns every emitted byte without changing the result for
+        // any identifier, including reserved words, mixed case, or embedded quotes.
+        let canonical_bare =
+            crate::render::declarative::quote_ident_if_needed(&column.name) == column.name;
         columns.push(format!(
             "{} {data_type}{primary_key_clause}{null_clause}{default_clause}",
-            injected_column_ident(&column.name, dialect, backend),
+            backend.injected_column_ident(&column.name, canonical_bare),
         ));
     }
 
@@ -1051,23 +1046,6 @@ fn build_injected_columns(
         ));
     }
     Ok(columns)
-}
-
-/// Keep the established CREATE-table spelling for policy-owned prefix columns:
-/// PostgreSQL/SQLite use the normalized policy identifier directly, while MySQL
-/// uses backticks. The policy is the trusted source of these canonical names;
-/// author-controlled identifiers continue through the regular quoting path.
-fn injected_column_ident(
-    name: &str,
-    dialect: SqlDialect,
-    backend: &'static dyn SchemaRenderer,
-) -> String {
-    match dialect {
-        SqlDialect::Mysql => backend.quote_ident(name),
-        SqlDialect::Postgres | SqlDialect::Sqlite => {
-            crate::render::declarative::quote_ident_if_needed(name)
-        }
-    }
 }
 
 fn render_injected_default(
@@ -1280,10 +1258,12 @@ fn build_fk_clause(
         def.get("refName").and_then(serde_json::Value::as_str),
     );
 
-    let on_delete =
-        normalize_fk_action_for_dialect(def.get("onDelete").and_then(|v| v.as_str()), dialect);
-    let on_update =
-        normalize_fk_action_for_dialect(def.get("onUpdate").and_then(|v| v.as_str()), dialect);
+    let on_delete = backend.canonical_fk_action(normalize_fk_action_inner(
+        def.get("onDelete").and_then(|v| v.as_str()),
+    ));
+    let on_update = backend.canonical_fk_action(normalize_fk_action_inner(
+        def.get("onUpdate").and_then(|v| v.as_str()),
+    ));
     let deferrable = def
         .get("deferrable")
         .and_then(|v| v.as_bool())
@@ -1350,11 +1330,7 @@ pub fn normalize_fk_action(s: Option<&str>) -> &'static str {
 /// forms.
 pub fn normalize_fk_action_for_dialect(s: Option<&str>, dialect: SqlDialect) -> &'static str {
     let action = normalize_fk_action_inner(s);
-    if matches!(dialect, SqlDialect::Mysql) && matches!(action, "RESTRICT" | "NO ACTION") {
-        "NO ACTION"
-    } else {
-        action
-    }
+    renderer(&dialect.id()).canonical_fk_action(action)
 }
 
 /// Build ALTER TABLE ADD COLUMN IF NOT EXISTS for a single field.
@@ -2038,8 +2014,6 @@ pub(crate) fn validate_encryption_sentinel_for_field(
 fn field_to_column_for_dialect(
     field: &str,
     def: &serde_json::Value,
-    // Threaded, not derived. See `build_injected_columns`.
-    dialect: SqlDialect,
     backend: &'static dyn SchemaRenderer,
     inject: &ResolvedInject,
 ) -> Result<String, QueryError> {
@@ -2070,7 +2044,7 @@ fn field_to_column_for_dialect(
         ""
     };
     let sql_type = backend.column_type(&column_snapshot_for_type_def(def), false);
-    let constraints = def_to_constraints_for_dialect(field, def, dialect, backend);
+    let constraints = def_to_constraints_for_dialect(field, def, backend);
     // The sentinel comment (when present) sits between the type and the
     // constraints so the parsed shape is `"<col>" BYTEA /* zero-migrate:enc:... */
     // <constraints>`. PG ignores the comment; SQLite preserves it in
@@ -2122,7 +2096,6 @@ fn emit_union_variant_checks(
     disc_field: &str,
     disc_def: &serde_json::Value,
     variants: &[serde_json::Value],
-    dialect: SqlDialect,
     backend: &'static dyn SchemaRenderer,
 ) -> Vec<String> {
     let disc_col = backend.quote_ident(disc_field);
@@ -2165,7 +2138,7 @@ fn emit_union_variant_checks(
             _ => {
                 // string discriminator
                 let s = lit.as_str().unwrap_or("");
-                schema_string_literal(s, dialect)
+                backend.schema_string_literal(s)
             }
         };
 
@@ -2248,19 +2221,12 @@ fn union_check_constraint_name(collection: &str, disc: &str, value_tag: &str) ->
 fn def_to_constraints(field: &str, def: &serde_json::Value) -> String {
     // CALLER-FIXED TARGET: the sole caller is `build_add_column`, whose whole
     // The sole caller is PostgreSQL-only; it supplies that registered renderer.
-    def_to_constraints_for_dialect(
-        field,
-        def,
-        SqlDialect::Postgres,
-        renderer(&SqlDialect::Postgres.id()),
-    )
+    def_to_constraints_for_dialect(field, def, renderer(&SqlDialect::Postgres.id()))
 }
 
 fn def_to_constraints_for_dialect(
     field: &str,
     def: &serde_json::Value,
-    // Threaded, not derived. See `build_injected_columns`.
-    dialect: SqlDialect,
     backend: &'static dyn SchemaRenderer,
 ) -> String {
     let mut parts = Vec::new();
@@ -2287,7 +2253,7 @@ fn def_to_constraints_for_dialect(
             // below while a `t.text()` column's survived.
             Some("string") | Some("char") | Some("inet") => {
                 if let Some(s) = default.as_str() {
-                    parts.push(format!("DEFAULT {}", schema_string_literal(s, dialect)));
+                    parts.push(format!("DEFAULT {}", backend.schema_string_literal(s)));
                 }
             }
             // The NUMERIC tokens, all through the one precision-preserving
@@ -2393,7 +2359,7 @@ fn def_to_constraints_for_dialect(
     if def.get("type").and_then(|t| t.as_str()) == Some("literal") {
         if let Some(lit) = def.get("literalValue") {
             let lit_sql = match lit {
-                serde_json::Value::String(s) => Some(schema_string_literal(s, dialect)),
+                serde_json::Value::String(s) => Some(backend.schema_string_literal(s)),
                 serde_json::Value::Number(n) => Some(n.to_string()),
                 serde_json::Value::Bool(b) => Some(b.to_string()),
                 _ => None,
@@ -2405,7 +2371,7 @@ fn def_to_constraints_for_dialect(
     }
 
     // Enum constraint — supports both string and numeric values
-    if matches!(dialect, SqlDialect::Mysql) && string_enum_values(def).is_some() {
+    if backend.suppress_string_enum_check(def) {
         return parts.join(" ");
     }
 
@@ -2414,7 +2380,7 @@ fn def_to_constraints_for_dialect(
             .iter()
             .filter_map(|v| {
                 if let Some(s) = v.as_str() {
-                    Some(schema_string_literal(s, dialect))
+                    Some(backend.schema_string_literal(s))
                 } else if let Some(n) = v.as_i64() {
                     Some(n.to_string())
                 } else if let Some(n) = v.as_f64() {

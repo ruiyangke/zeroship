@@ -111,6 +111,28 @@ pub trait SchemaRenderer: std::fmt::Debug + Sync {
         unqualified: bool,
     ) -> String;
 
+    /// Render an author-controlled string in a schema expression position.
+    ///
+    /// Required because string-escape modes and literal carriers are vendor
+    /// grammar, even when two vendors currently share quote doubling.
+    fn schema_string_literal(&self, value: &str) -> String;
+
+    /// Render one policy-owned injected column identifier.
+    ///
+    /// `canonical_bare` is the caller's already-computed answer to the neutral
+    /// policy-name question: may this canonical identifier remain bare in the
+    /// established constraint-definition spelling? The backend still owns the
+    /// emitted spelling and must explicitly choose whether to use that fact.
+    fn injected_column_ident(&self, name: &str, canonical_bare: bool) -> String;
+
+    /// Canonicalize one already-tokenized foreign-key action for this backend's
+    /// catalog/render comparison form.
+    fn canonical_fk_action(&self, action: &'static str) -> &'static str;
+
+    /// Whether this field's string enum is represented by a native type and must
+    /// therefore omit the otherwise portable membership CHECK.
+    fn suppress_string_enum_check(&self, def: &serde_json::Value) -> bool;
+
     /// Pin this vendor's explicit collation spelling onto a rendered type when the
     /// type can carry one.
     fn pin_collation(&self, rendered: &str, case_sensitive: Option<bool>) -> String;

@@ -328,6 +328,26 @@ impl SchemaRenderer for DuckDbSchemaRenderer {
         )
     }
 
+    fn schema_string_literal(&self, value: &str) -> String {
+        format!("'{}'", value.replace('\'', "''"))
+    }
+
+    fn injected_column_ident(&self, name: &str, canonical_bare: bool) -> String {
+        if canonical_bare {
+            name.to_string()
+        } else {
+            self.quote_ident(name)
+        }
+    }
+
+    fn canonical_fk_action(&self, action: &'static str) -> &'static str {
+        action
+    }
+
+    fn suppress_string_enum_check(&self, _def: &serde_json::Value) -> bool {
+        false
+    }
+
     /// This stub deliberately supports no collation spelling. The required method
     /// makes that refusal-to-transform explicit in the outsider's own crate.
     fn pin_collation(&self, rendered: &str, _case_sensitive: Option<bool>) -> String {

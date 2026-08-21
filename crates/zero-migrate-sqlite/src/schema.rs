@@ -114,6 +114,30 @@ impl SchemaRenderer for SqliteSchemaRenderer {
         }
     }
 
+    fn schema_string_literal(&self, value: &str) -> String {
+        format!("'{}'", value.replace('\'', "''"))
+    }
+
+    fn injected_column_ident(&self, name: &str, canonical_bare: bool) -> String {
+        if canonical_bare {
+            name.to_string()
+        } else {
+            self.quote_ident(name)
+        }
+    }
+
+    /// SQLite preserves `RESTRICT` and `NO ACTION` as distinct stored-DDL
+    /// spellings, so its explicit canonicalizer is an identity.
+    fn canonical_fk_action(&self, action: &'static str) -> &'static str {
+        action
+    }
+
+    /// SQLite string enums are TEXT columns whose membership CHECK carries the
+    /// constraint, so it never suppresses that CHECK.
+    fn suppress_string_enum_check(&self, _def: &serde_json::Value) -> bool {
+        false
+    }
+
     /// SQLite's `column_type` owns its `text COLLATE NOCASE` spelling directly;
     /// there is no separate character-set/collation suffix for this hook to add.
     fn pin_collation(&self, rendered: &str, _case_sensitive: Option<bool>) -> String {

@@ -104,6 +104,28 @@ impl SchemaRenderer for MysqlSchemaRenderer {
         )
     }
 
+    fn schema_string_literal(&self, value: &str) -> String {
+        format!("_utf8mb4 X'{}'", hex::encode(value.as_bytes()))
+    }
+
+    fn injected_column_ident(&self, name: &str, _canonical_bare: bool) -> String {
+        self.quote_ident(name)
+    }
+
+    /// InnoDB has no deferred constraint checks, so its `RESTRICT` and
+    /// `NO ACTION` catalog/render forms collapse to the same default.
+    fn canonical_fk_action(&self, action: &'static str) -> &'static str {
+        if matches!(action, "RESTRICT" | "NO ACTION") {
+            "NO ACTION"
+        } else {
+            action
+        }
+    }
+
+    fn suppress_string_enum_check(&self, def: &serde_json::Value) -> bool {
+        zero_migrate_backend::schema::string_enum_values(def).is_some()
+    }
+
     fn pin_collation(&self, rendered: &str, case_sensitive: Option<bool>) -> String {
         mysql_pin_collation(rendered, case_sensitive)
     }

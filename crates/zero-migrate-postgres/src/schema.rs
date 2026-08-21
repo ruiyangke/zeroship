@@ -92,6 +92,29 @@ impl SchemaRenderer for PostgresSchemaRenderer {
         )
     }
 
+    fn schema_string_literal(&self, value: &str) -> String {
+        format!("'{}'", value.replace('\'', "''"))
+    }
+
+    fn injected_column_ident(&self, name: &str, canonical_bare: bool) -> String {
+        if canonical_bare {
+            name.to_string()
+        } else {
+            self.quote_ident(name)
+        }
+    }
+
+    /// PostgreSQL preserves `RESTRICT` and `NO ACTION` as distinct catalog
+    /// spellings, so its explicit canonicalizer is an identity.
+    fn canonical_fk_action(&self, action: &'static str) -> &'static str {
+        action
+    }
+
+    /// PostgreSQL string enums remain ordinary columns plus membership CHECKs.
+    fn suppress_string_enum_check(&self, _def: &serde_json::Value) -> bool {
+        false
+    }
+
     /// PostgreSQL represents the portable case-insensitive choice as the `citext`
     /// TYPE in `column_type`; named catalog collations are separate column facets.
     /// There is therefore no engine-added type suffix to pin here.
