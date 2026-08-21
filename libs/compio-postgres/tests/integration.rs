@@ -3476,3 +3476,427 @@ async fn an_awaited_query_queued_before_client_drop_still_reports_its_write_erro
     );
     drop(observer);
 }
+
+// ---------------------------------------------------------------------------
+// Prepared-statement behavior and regressions.
+// ---------------------------------------------------------------------------
+
+/// Find the server-side names for exact SQL without preparing another
+/// statement as part of the lookup. The simple protocol leaves prepare.rs's
+/// global name counter untouched.
+async fn prepared_statement_names(client: &Client, sql: &str) -> Vec<String> {
+    let escaped = sql.replace('\'', "''");
+    let messages = client
+        .simple_query(&format!(
+            "SELECT name FROM pg_prepared_statements WHERE statement = '{escaped}'"
+        ))
+        .await
+        .unwrap();
+
+    messages
+        .iter()
+        .filter_map(|message| match message {
+            SimpleQueryMessage::Row(row) => row.get(0),
+            _ => None,
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+async fn prepared_statement_name(client: &Client, sql: &str) -> String {
+    let names = prepared_statement_names(client, sql).await;
+    assert_eq!(
+        names.len(),
+        1,
+        "expected exactly one prepared statement for {sql:?}, got {names:?}"
+    );
+    names[0].clone()
+}
+
+fn driver_statement_id(name: &str) -> usize {
+    name.strip_prefix('s')
+        .and_then(|id| id.parse().ok())
+        .expect("driver statement names are s followed by a usize")
+}
+
+/// Reserve enough consecutive names on this session that unrelated parallel
+/// tests cannot advance prepare.rs's process-global counter past all of them
+/// between the probe and the colliding Parse.
+async fn reserve_driver_statement_names(client: &Client, after: usize, value: i32) -> usize {
+    use std::fmt::Write;
+
+    const RESERVATIONS: usize = 4096;
+    let mut sql = String::with_capacity(RESERVATIONS * 40);
+    for offset in 1..=RESERVATIONS {
+        let id = after.wrapping_add(offset);
+        writeln!(&mut sql, "PREPARE s{id} AS SELECT {value}::int4;").unwrap();
+    }
+    client.batch_execute(&sql).await.unwrap();
+    RESERVATIONS
+}
+
+async fn prepared_statement_count(client: &Client) -> usize {
+    client
+        .simple_query("SELECT count(*) FROM pg_prepared_statements")
+        .await
+        .unwrap()
+        .iter()
+        .find_map(|message| match message {
+            SimpleQueryMessage::Row(row) => row.get(0),
+            _ => None,
+        })
+        .expect("count query returns one row")
+        .parse()
+        .unwrap()
+}
+
+async fn simple_query_scalar_i32(client: &Client, sql: &str) -> Result<i32, Error> {
+    let messages = client.simple_query(sql).await?;
+    Ok(messages
+        .iter()
+        .find_map(|message| match message {
+            SimpleQueryMessage::Row(row) => row.get(0),
+            _ => None,
+        })
+        .expect("scalar query returns one row")
+        .parse()
+        .unwrap())
+}
+
+/// Prepare- and execute-time server errors end with Sync/ReadyForQuery. The
+/// connection task must drain that terminator even though the caller stops at
+/// ErrorResponse.
+#[compio::test]
+async fn prepared_statement_server_errors_do_not_poison_the_connection() {
+    use compio_postgres::types::Type;
+
+    let Some(url) = require_pg().await else { return };
+    let client = connect(&url).await.unwrap();
+
+    client
+        .batch_execute(
+            "DROP TABLE IF EXISTS cpg_prep_result_shape; \
+             CREATE TEMP TABLE cpg_prep_result_shape (id int4); \
+             INSERT INTO cpg_prep_result_shape VALUES (1)",
+        )
+        .await
+        .unwrap();
+    let result_shape = client
+        .prepare("SELECT * FROM cpg_prep_result_shape")
+        .await
+        .unwrap();
+    client
+        .batch_execute("ALTER TABLE cpg_prep_result_shape ADD COLUMN label text")
+        .await
+        .unwrap();
+    let shape_error = client.query(&result_shape, &[]).await.unwrap_err();
+    let shape_code = shape_error.code().map(SqlState::code).map(str::to_string);
+    let shape_detail = common::error_chain(&shape_error);
+    let recovered_after_shape: i32 = client
+        .query_one_scalar("SELECT 45::int4", &[])
+        .await
+        .unwrap();
+    drop(result_shape);
+    client
+        .batch_execute("DROP TABLE cpg_prep_result_shape")
+        .await
+        .unwrap();
+
+    client
+        .batch_execute(
+            "DROP TABLE IF EXISTS cpg_prep_dropped; \
+             CREATE TEMP TABLE cpg_prep_dropped (id int4)",
+        )
+        .await
+        .unwrap();
+    let dropped = client
+        .prepare("SELECT * FROM cpg_prep_dropped")
+        .await
+        .unwrap();
+    client
+        .batch_execute("DROP TABLE cpg_prep_dropped")
+        .await
+        .unwrap();
+    let dropped_error = client.query(&dropped, &[]).await.unwrap_err();
+    let dropped_code = dropped_error
+        .code()
+        .map(SqlState::code)
+        .map(str::to_string);
+    let dropped_detail = common::error_chain(&dropped_error);
+    let recovered_after_drop: i32 = client
+        .query_one_scalar("SELECT 46::int4", &[])
+        .await
+        .unwrap();
+    drop(dropped);
+
+    client
+        .batch_execute(
+            "DROP TABLE IF EXISTS cpg_prep_typed; \
+             CREATE TEMP TABLE cpg_prep_typed (n int4)",
+        )
+        .await
+        .unwrap();
+    let typed_error = client
+        .prepare_typed(
+            "INSERT INTO cpg_prep_typed (n) VALUES ($1)",
+            &[Type::TEXT],
+        )
+        .await
+        .unwrap_err();
+    let typed_code = typed_error
+        .code()
+        .map(SqlState::code)
+        .map(str::to_string);
+    let typed_detail = common::error_chain(&typed_error);
+    let recovered_after_typed: i32 = client
+        .query_one_scalar("SELECT 47::int4", &[])
+        .await
+        .unwrap();
+    client
+        .batch_execute("DROP TABLE cpg_prep_typed")
+        .await
+        .unwrap();
+
+    assert_eq!(shape_code.as_deref(), Some("0A000"), "{shape_detail}");
+    assert_eq!(dropped_code.as_deref(), Some("42P01"), "{dropped_detail}");
+    assert_eq!(typed_code.as_deref(), Some("42804"), "{typed_detail}");
+    assert_eq!(
+        (
+            recovered_after_shape,
+            recovered_after_drop,
+            recovered_after_typed,
+        ),
+        (45, 46, 47)
+    );
+}
+
+/// Public prepare() does not deduplicate SQL. Each call owns a distinct server
+/// statement, and only dropping the last clone closes that statement's name.
+#[compio::test]
+async fn identical_sql_has_distinct_names_and_each_drop_closes_one() {
+    let Some(url) = require_pg().await else { return };
+    let client = connect(&url).await.unwrap();
+
+    const SQL: &str = "SELECT 48::int4 AS cpg_prep_duplicate_sql";
+    let first = client.prepare(SQL).await.unwrap();
+    let first_clone = first.clone();
+    let second = client.prepare(SQL).await.unwrap();
+    let mut while_both_live = prepared_statement_names(&client, SQL).await;
+    while_both_live.sort();
+
+    drop(first);
+    client.simple_query("").await.unwrap();
+    let while_clone_live = prepared_statement_names(&client, SQL).await;
+
+    drop(first_clone);
+    client.simple_query("").await.unwrap();
+    let after_first_drop = prepared_statement_names(&client, SQL).await;
+    let second_value: i32 = client.query_one_scalar(&second, &[]).await.unwrap();
+
+    drop(second);
+    client.simple_query("").await.unwrap();
+    let after_second_drop = prepared_statement_names(&client, SQL).await;
+
+    assert_eq!(while_both_live.len(), 2, "same SQL was unexpectedly deduplicated");
+    assert_ne!(while_both_live[0], while_both_live[1]);
+    assert_eq!(while_clone_live.len(), 2);
+    assert_eq!(after_first_drop.len(), 1);
+    assert_eq!(second_value, 48);
+    assert!(after_second_drop.is_empty());
+}
+
+/// PostgreSQL prepared statements are session-scoped, not
+/// transaction-scoped, so a Statement prepared in a rolled-back transaction
+/// remains valid on the same Client.
+#[compio::test]
+async fn statement_prepared_in_rolled_back_transaction_remains_usable() {
+    let Some(url) = require_pg().await else { return };
+    let mut client = connect(&url).await.unwrap();
+
+    let transaction = client.transaction().await.unwrap();
+    let statement = transaction
+        .prepare("SELECT $1::int4 + 1")
+        .await
+        .unwrap();
+    transaction.rollback().await.unwrap();
+
+    let value: i32 = client.query_one_scalar(&statement, &[&48_i32]).await.unwrap();
+    let recovered: i32 = client
+        .query_one_scalar("SELECT 50::int4", &[])
+        .await
+        .unwrap();
+    drop(statement);
+    client.simple_query("").await.unwrap();
+
+    assert_eq!(value, 49);
+    assert_eq!(recovered, 50);
+}
+
+/// SQL PREPARE and protocol Parse share one namespace. A collision must return
+/// PostgreSQL's original error without closing the statement which already
+/// owned the generated name.
+#[compio::test]
+async fn generated_name_collision_preserves_existing_statement() {
+    let Some(url) = require_pg().await else { return };
+    let client = connect(&url).await.unwrap();
+
+    const PROBE_SQL: &str = "SELECT 8675309::int4 AS cpg_prep_name_probe";
+    let probe = client.prepare(PROBE_SQL).await.unwrap();
+    let probe_name = prepared_statement_name(&client, PROBE_SQL).await;
+    let probe_id = driver_statement_id(&probe_name);
+
+    drop(probe);
+    client.simple_query("").await.unwrap();
+    let reserved = reserve_driver_statement_names(&client, probe_id, 99).await;
+    assert_eq!(prepared_statement_count(&client).await, reserved);
+    client.batch_execute("BEGIN").await.unwrap();
+
+    let prepared = client
+        .prepare("SELECT 1::int4 AS cpg_prep_collision_result")
+        .await;
+    let prepare_code = prepared
+        .as_ref()
+        .err()
+        .and_then(Error::code)
+        .map(SqlState::code)
+        .map(str::to_string);
+    let collided_name = prepared
+        .as_ref()
+        .err()
+        .and_then(Error::as_db_error)
+        .and_then(|error| error.message().split('"').nth(1))
+        .map(str::to_string);
+    client.batch_execute("ROLLBACK").await.unwrap();
+
+    // After rolling back PostgreSQL's expected failed-transaction state, the
+    // ErrorResponse and trailing ReadyForQuery must leave this same connection
+    // aligned.
+    let recovered_after_prepare = simple_query_scalar_i32(&client, "SELECT 41::int4")
+        .await
+        .unwrap();
+
+    let existing_value = match collided_name.as_ref() {
+        Some(name) => Some(
+            simple_query_scalar_i32(&client, &format!("EXECUTE {name}"))
+                .await,
+        ),
+        None => None,
+    };
+
+    // On the regression path EXECUTE fails because the guard deleted the
+    // collided statement. Prove that error does not poison the protocol.
+    let recovered_after_execute = simple_query_scalar_i32(&client, "SELECT 42::int4")
+        .await
+        .unwrap();
+
+    drop(prepared);
+    client.batch_execute("DEALLOCATE ALL").await.unwrap();
+
+    assert_eq!(recovered_after_prepare, 41);
+    assert_eq!(recovered_after_execute, 42);
+    assert_eq!(prepare_code.as_deref(), Some("42P05"));
+    let existing_outcome = match existing_value {
+        Some(Ok(value)) => format!("value {value}"),
+        Some(Err(error)) => format!(
+            "error {:?}: {}",
+            error.code(),
+            common::error_chain(&error)
+        ),
+        None => "prepare did not return a colliding statement name".to_string(),
+    };
+    assert_eq!(
+        existing_outcome, "value 99",
+        "prepare destroyed the statement which owned the collided name"
+    );
+}
+
+/// Cancellation before ParseComplete is the ambiguous collision case: cleanup
+/// must wait to learn whether this Parse acquired the name before sending
+/// Close, or it can delete the statement which caused 42P05.
+#[compio::test]
+async fn cancelled_name_collision_preserves_existing_statement() {
+    use std::future::Future;
+    use std::pin::pin;
+    use std::task::{Context, Waker};
+
+    let Some(url) = require_pg().await else { return };
+    let client = connect(&url).await.unwrap();
+
+    const PROBE_SQL: &str = "SELECT 7654321::int4 AS cpg_prep_cancel_name_probe";
+    let probe = client.prepare(PROBE_SQL).await.unwrap();
+    let probe_name = prepared_statement_name(&client, PROBE_SQL).await;
+    let probe_id = driver_statement_id(&probe_name);
+
+    drop(probe);
+    client.simple_query("").await.unwrap();
+    let reserved = reserve_driver_statement_names(&client, probe_id, 98).await;
+    assert_eq!(prepared_statement_count(&client).await, reserved);
+
+    {
+        let mut prepare = pin!(client.prepare("SELECT 2::int4"));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(
+            prepare.as_mut().poll(&mut cx).is_pending(),
+            "the first poll ran the connection task and stopped testing cancellation"
+        );
+    }
+
+    client.simple_query("").await.unwrap();
+    let remaining = prepared_statement_count(&client).await;
+    let recovered = simple_query_scalar_i32(&client, "SELECT 51::int4")
+        .await
+        .unwrap();
+    client.batch_execute("DEALLOCATE ALL").await.unwrap();
+
+    assert_eq!(recovered, 51);
+    assert_eq!(
+        remaining, reserved,
+        "cancelled colliding Parse closed a statement it never owned"
+    );
+}
+
+/// PostgreSQL 14 added multiranges, and postgres-types exposes
+/// Kind::Multirange. User-defined multiranges must carry the same subtype
+/// metadata as their corresponding user-defined ranges.
+#[compio::test]
+async fn custom_multirange_resolves_its_element_type() {
+    use compio_postgres::types::{Kind, Type};
+
+    let Some(url) = require_pg().await else { return };
+    let client = connect(&url).await.unwrap();
+
+    client
+        .batch_execute(
+            "DROP TYPE IF EXISTS cpg_prep_range CASCADE; \
+             DROP TYPE IF EXISTS cpg_prep_multirange CASCADE; \
+             CREATE TYPE cpg_prep_range AS RANGE ( \
+                 subtype = int4, \
+                 multirange_type_name = cpg_prep_multirange \
+             )",
+        )
+        .await
+        .unwrap();
+
+    let statement = client
+        .prepare("SELECT '{}'::cpg_prep_multirange")
+        .await
+        .unwrap();
+    let actual = statement.columns()[0].type_().kind().clone();
+
+    let recovered: i32 = client
+        .query_one_scalar("SELECT 44::int4", &[])
+        .await
+        .unwrap();
+
+    drop(statement);
+    client
+        .batch_execute(
+            "DROP TYPE IF EXISTS cpg_prep_range CASCADE; \
+             DROP TYPE IF EXISTS cpg_prep_multirange CASCADE",
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(recovered, 44);
+    assert_eq!(actual, Kind::Multirange(Type::INT4));
+}

@@ -190,10 +190,26 @@ impl InnerClient {
     /// into the unbounded `UnboundedSender<Request>` channel. Failure
     /// means the connection task has terminated (socket closed).
     pub fn send(&self, messages: RequestMessages) -> Result<Responses, Error> {
-        self.send_with(
+        self.send_inner(
             messages,
             RequestDisposition::Awaited,
             TransactionEffect::MayChange,
+            None,
+        )
+    }
+
+    /// Send a Parse request with cancellation ownership tracked by the
+    /// connection task until it observes ParseComplete or ErrorResponse.
+    pub(crate) fn send_prepare(
+        &self,
+        messages: RequestMessages,
+        cleanup: prepare::PrepareCleanup,
+    ) -> Result<Responses, Error> {
+        self.send_inner(
+            messages,
+            RequestDisposition::Awaited,
+            TransactionEffect::MayChange,
+            Some(cleanup),
         )
     }
 
@@ -205,12 +221,23 @@ impl InnerClient {
         disposition: RequestDisposition,
         transaction_effect: TransactionEffect,
     ) -> Result<Responses, Error> {
+        self.send_inner(messages, disposition, transaction_effect, None)
+    }
+
+    fn send_inner(
+        &self,
+        messages: RequestMessages,
+        disposition: RequestDisposition,
+        transaction_effect: TransactionEffect,
+        prepare_cleanup: Option<prepare::PrepareCleanup>,
+    ) -> Result<Responses, Error> {
         let (sender, receiver) = mpsc::channel(1);
         let request = Request {
             messages,
             sender,
             disposition,
             transaction_effect,
+            prepare_cleanup,
         };
         if transaction_effect == TransactionEffect::MayChange {
             self.in_flight_requests.fetch_add(1, Ordering::Relaxed);

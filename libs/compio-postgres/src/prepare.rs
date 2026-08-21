@@ -1,11 +1,12 @@
 // Ported from tokio-postgres (MIT/Apache-2.0). Copyright (c) 2016 Steven Fackler.
 //
-// Near-verbatim translation of tokio-postgres's `prepare.rs`. The logic
-// — Parse + Describe + Sync, parameter/column resolution, recursive type
-// info via pg_catalog — is protocol + SQL, so only the I/O glue changes.
-// The recursive helpers (`prepare_rec`, `get_type_rec`) remain boxed
-// futures because the recursion between `prepare` ↔ `get_type` ↔
-// `prepare_rec` cannot be expressed as a plain async fn.
+// Originates as a translation of tokio-postgres's `prepare.rs`. The core
+// Parse + Describe + Sync and pg_catalog flow remains recognizable, while
+// cancellation ownership, recursive-type cycle detection, cache races, and
+// multirange resolution deliberately diverge and are documented inline. The
+// recursive helpers (`prepare_rec`, `get_type_rec`) remain boxed futures
+// because the recursion between `prepare` ↔ `get_type` ↔ `prepare_rec`
+// cannot be expressed as a plain async fn.
 
 use crate::client::InnerClient;
 use crate::codec::FrontendMessage;
@@ -18,13 +19,14 @@ use bytes::Bytes;
 use fallible_iterator::FallibleIterator;
 use futures_util::TryStreamExt;
 use log::debug;
+use parking_lot::Mutex;
 use postgres_protocol::message::backend::Message;
 use postgres_protocol::message::frontend;
 use std::collections::HashSet;
 use std::future::Future;
 use std::io;
 use std::pin::{Pin, pin};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const TYPEINFO_QUERY: &str = "\
@@ -33,6 +35,15 @@ FROM pg_catalog.pg_type t
 LEFT OUTER JOIN pg_catalog.pg_range r ON r.rngtypid = t.oid
 INNER JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid
 WHERE t.oid = $1
+";
+
+// Multiranges and pg_range.rngmultitypid weren't added until Postgres 14.
+// This query is prepared only after pg_type reports typtype = 'm', so older
+// servers never parse a catalog column they do not have.
+const TYPEINFO_MULTIRANGE_QUERY: &str = "\
+SELECT rngsubtype
+FROM pg_catalog.pg_range
+WHERE rngmultitypid = $1
 ";
 
 // Range types weren't added until Postgres 9.2, so pg_range may not exist
@@ -69,6 +80,101 @@ ORDER BY attnum
 
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrepareState {
+    Pending,
+    Parsed,
+    Rejected,
+    Cancelled,
+    Finished,
+}
+
+/// Shared ownership decision for a `Parse` whose caller can disappear before
+/// it receives the first backend message.
+///
+/// The connection task observes `ParseComplete` or `ErrorResponse` before it
+/// hands that message to the caller. If the prepare future was cancelled
+/// first, that task can therefore close only a name this Parse actually
+/// acquired. If the caller observed `ParseComplete` first, the guard below
+/// performs the same cleanup synchronously from its own `Drop`.
+#[derive(Clone)]
+pub(crate) struct PrepareCleanup(Arc<PrepareCleanupInner>);
+
+struct PrepareCleanupInner {
+    client: Weak<InnerClient>,
+    name: String,
+    state: Mutex<PrepareState>,
+}
+
+impl PrepareCleanup {
+    fn new(client: &Arc<InnerClient>, name: &str) -> PrepareCleanup {
+        PrepareCleanup(Arc::new(PrepareCleanupInner {
+            client: Arc::downgrade(client),
+            name: name.to_string(),
+            state: Mutex::new(PrepareState::Pending),
+        }))
+    }
+
+    /// Record a normal `ParseComplete` or `ErrorResponse` outcome. The
+    /// connection task calls this even when the response receiver was already
+    /// dropped.
+    pub(crate) fn observe(&self, parsed: bool) {
+        let close = {
+            let mut state = self.0.state.lock();
+            match (*state, parsed) {
+                (PrepareState::Pending, true) => *state = PrepareState::Parsed,
+                (PrepareState::Pending, false) => *state = PrepareState::Rejected,
+                (PrepareState::Cancelled, _) => *state = PrepareState::Finished,
+                _ => return,
+            }
+            parsed && *state == PrepareState::Finished
+        };
+        if close {
+            self.close();
+        }
+    }
+
+    /// Release a successfully parsed name to the returned Statement.
+    fn disarm(&self) {
+        let mut state = self.0.state.lock();
+        debug_assert_eq!(*state, PrepareState::Parsed);
+        *state = PrepareState::Finished;
+    }
+
+    /// Cancel the caller's interest. Cleanup is immediate if ParseComplete
+    /// was already observed, deferred if its response is still in flight, and
+    /// suppressed if PostgreSQL rejected the Parse.
+    fn cancel(&self) {
+        let close = {
+            let mut state = self.0.state.lock();
+            match *state {
+                PrepareState::Pending => {
+                    *state = PrepareState::Cancelled;
+                    false
+                }
+                PrepareState::Parsed => {
+                    *state = PrepareState::Finished;
+                    true
+                }
+                PrepareState::Rejected => {
+                    *state = PrepareState::Finished;
+                    false
+                }
+                PrepareState::Cancelled | PrepareState::Finished => return,
+            }
+        };
+        if close {
+            self.close();
+        }
+    }
+
+    fn close(&self) {
+        if let Some(client) = self.0.client.upgrade() {
+            crate::statement::close_statement(&client, &self.0.name);
+        }
+    }
+}
+
 /// Owns a statement name from the moment `Parse` is queued until a `Statement`
 /// takes over responsibility for closing it.
 ///
@@ -77,27 +183,29 @@ static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 /// `Statement` exists until the whole exchange succeeds - so a future dropped
 /// in that window (a cancelled caller, a timeout, an error out of the
 /// `get_type` lookups) would leave the parsed statement on the server for the
-/// rest of the session with nothing able to name it. This guard closes it
-/// instead; `disarm` hands the name over once a `Statement` is about to exist.
-struct ParsedStatementGuard<'a> {
-    client: &'a Arc<InnerClient>,
+/// rest of the session with nothing able to name it. This guard either closes
+/// it or leaves that decision with the connection until Parse's outcome is
+/// known; `disarm` hands the name over once a `Statement` is about to exist.
+struct ParsedStatementGuard {
+    cleanup: PrepareCleanup,
     name: Option<String>,
 }
 
-impl ParsedStatementGuard<'_> {
+impl ParsedStatementGuard {
     /// Release the name to the caller, which is about to build the `Statement`
     /// whose `Drop` closes it from here on.
     fn disarm(mut self) -> String {
+        self.cleanup.disarm();
         self.name
             .take()
             .expect("a guard holds its name until it is disarmed exactly once")
     }
 }
 
-impl Drop for ParsedStatementGuard<'_> {
+impl Drop for ParsedStatementGuard {
     fn drop(&mut self) {
-        if let Some(name) = self.name.take() {
-            crate::statement::close_statement(self.client, &name);
+        if self.name.take().is_some() {
+            self.cleanup.cancel();
         }
     }
 }
@@ -110,13 +218,17 @@ pub async fn prepare(
     let name = format!("s{}", NEXT_ID.fetch_add(1, Ordering::SeqCst));
     let buf = encode(client, &name, query, types)?;
     // Armed before the Parse is queued, because from that point on the server
-    // may hold the statement and only the guard can still name it. Encoding
-    // failures above send nothing, so they need no guard.
+    // may hold the statement and the shared cleanup is its only prospective
+    // owner. Encoding failures above send nothing, so they need no guard.
+    let cleanup = PrepareCleanup::new(client, &name);
     let guard = ParsedStatementGuard {
-        client,
+        cleanup: cleanup.clone(),
         name: Some(name),
     };
-    let mut responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
+    let mut responses = client.send_prepare(
+        RequestMessages::Single(FrontendMessage::Raw(buf)),
+        cleanup,
+    )?;
 
     match responses.next().await? {
         Message::ParseComplete => {}
@@ -274,6 +386,10 @@ async fn get_type_body(
     } else if relid != 0 {
         let fields = get_composite_fields(client, relid, in_flight).await?;
         Kind::Composite(fields)
+    } else if type_ == b'm' as i8 {
+        let rngsubtype = get_multirange_subtype(client, oid).await?;
+        let type_ = get_type_rec(client, rngsubtype, in_flight).await?;
+        Kind::Multirange(type_)
     } else if let Some(rngsubtype) = rngsubtype {
         let type_ = get_type_rec(client, rngsubtype, in_flight).await?;
         Kind::Range(type_)
@@ -293,6 +409,16 @@ fn get_type_rec<'a>(
     in_flight: &'a mut HashSet<Oid>,
 ) -> Pin<Box<dyn Future<Output = Result<Type, Error>> + Send + 'a>> {
     Box::pin(get_type_inner(client, oid, in_flight))
+}
+
+async fn get_multirange_subtype(client: &Arc<InnerClient>, oid: Oid) -> Result<Oid, Error> {
+    let stmt = prepare_rec(client, TYPEINFO_MULTIRANGE_QUERY, &[]).await?;
+    let mut rows = pin!(query::query(client, stmt, slice_iter(&[&oid])).await?);
+
+    match rows.try_next().await? {
+        Some(row) => row.try_get(0),
+        None => Err(Error::unexpected_message()),
+    }
 }
 
 async fn typeinfo_statement(client: &Arc<InnerClient>) -> Result<Statement, Error> {
