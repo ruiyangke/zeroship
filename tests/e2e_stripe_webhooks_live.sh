@@ -38,10 +38,19 @@
 # patched. A leg that genuinely can't be automated (real Connect onboarding) is
 # reported with how far it got — never faked.
 #
-# DO NO HARM: dedicated DB `zeroship_stripe_e2e` on :5440 (never the real
-# `zeroship` DB nor zeroship_billing_test). Dedicated control port. Self-managed
-# up/down; tears down `stripe listen` + control on exit. Skips CLEANLY (exit 0)
-# when prereqs are absent (no nix/stripe-cli, no PG :5440, no docker, no keys).
+# DO NO HARM: a PER-RUN dedicated DB on :5440 (never the real `zeroship` DB,
+# never zeroship_billing_test, never a peer harness's database) and a PER-RUN
+# control port. Self-managed up/down; tears down `stripe listen` + control on
+# exit. Skips CLEANLY (exit 0) when prereqs are absent (no nix/stripe-cli, no
+# PG :5440, no docker, no keys).
+#
+# BOTH HALVES OF THAT USED TO BE FIXED CONSTANTS, and both were shared. The
+# database was `zeroship_stripe_e2e`, the same literal as
+# tests/e2e_stripe_billing.sh and tests/e2e_stripe_connect_live.sh, and Stage 1
+# opened by terminating every backend on it and dropping it; the control port
+# was 9182, the same literal as tests/create_demo_invoices.sh:116. Two of those
+# running together on one box is one of them destroying the other's run. See
+# tests/lib/scratch_db.sh and tests/lib/e2e_ports.sh.
 #
 # Usage:
 #   source /home/ruiyang/.config/zeroship-stripe-test.env   # sets the TEST keys
@@ -87,7 +96,16 @@ if [ -z "$PSQL" ]; then
   fi
 fi
 PGHOST=localhost; PGPORT=5440; PGUSER=postgres; PGPW=zeroship
-DB=zeroship_stripe_e2e
+
+# Per-run database name. `run_psql` is the seam tests/lib/scratch_db.sh reaches
+# the server through, so it is defined before the resolve.
+run_psql() { PGPASSWORD="$PGPW" "$PSQL" -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" "$@"; }
+# shellcheck source=tests/lib/scratch_db.sh
+source "$ROOT/tests/lib/scratch_db.sh"
+zs_scratch_db_resolve zeroship_stripe_e2e || exit $?
+DB="$TEST_DB"
+# shellcheck source=tests/lib/e2e_ports.sh
+source "$ROOT/tests/lib/e2e_ports.sh"
 
 if [ -z "${STRIPE_TEST_SECRET_KEY:-}" ]; then
   echo "  ⚠ SKIP: STRIPE_TEST_SECRET_KEY not set."
@@ -153,7 +171,9 @@ jget()  { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{c
 # Stripe CLI wrapper — every call authed with the TEST key (no browser login).
 scli()  { "$STRIPE" "$@" --api-key "$SK"; }
 
-ZEROSHIP_CONTROL_PORT=9182
+# Allocated, not the constant 9182 this harness used to share with
+# tests/create_demo_invoices.sh:116.
+zs_ports_reserve ZEROSHIP_CONTROL_PORT || exit 1
 CONTROL_URL="http://localhost:$ZEROSHIP_CONTROL_PORT"
 WORK="$(mktemp -d -t zs-e2e-whlive-XXXXXX)"
 mkdir -p "$WORK/blobs"
@@ -161,22 +181,33 @@ PIDFILE="$WORK/pids"; : > "$PIDFILE"
 LISTEN_LOG="$WORK/listen.log"
 
 cleanup() {
+  local rc=$?
   echo ""
   echo "=== Cleanup ==="
   if [ -f "$PIDFILE" ]; then
     while read -r pid; do [ -n "$pid" ] && kill "$pid" 2>/dev/null || true; done < "$PIDFILE"
   fi
-  # Belt-and-suspenders: kill any stray stripe-listen we spawned.
-  pkill -f "stripe listen .*$ZEROSHIP_CONTROL_PORT" 2>/dev/null || true
+  # Belt-and-suspenders for a stripe-listen that re-execs or double-forks past
+  # the PID above. SCOPED BY PID (`pkill -P`), never by pattern: a
+  # `pkill -f "stripe listen ..."` matches on a command line, and the killer's
+  # own shell can carry that string.
+  [ -n "${LISTEN_PID:-}" ] && pkill -P "$LISTEN_PID" 2>/dev/null
   wait 2>/dev/null || true
   [ -n "${WORK:-}" ] && rm -rf "$WORK"
-  echo "  control + stripe-listen down; $WORK cleaned. (DB $DB left for inspection; the real"
-  echo "  zeroship DB + zeroship_billing_test were NEVER touched.)"
+  # Drop on SUCCESS only: on a red run the rows control wrote from Stripe's own
+  # delivered envelopes ARE the finding.
+  zs_scratch_db_cleanup_on_success "$rc"
+  zs_ports_release
+  echo "  control + stripe-listen down; $WORK cleaned. (The real zeroship DB +"
+  echo "  zeroship_billing_test were NEVER touched.)"
   echo "  NOTE: Stripe TEST-mode objects (cus_/pi_/ch_/re_/du_) created by this run are harmless test artifacts."
+  return 0
 }
 trap cleanup EXIT
 
-lsof -ti :"$ZEROSHIP_CONTROL_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+# NO `lsof -ti :$PORT | xargs kill -9` HERE ANY MORE - see the header. An
+# allocated port has no leaked previous run to reclaim it from, and that line
+# could not tell one from a peer agent's live control plane.
 
 # Wait until the `payment_intents/$1` resolves to status `succeeded` (the
 # off-session confirm is usually synchronous, but be robust).
@@ -207,13 +238,15 @@ wait_for_db() {
 echo ""
 echo "=== Stage 1: dedicated DB + platform migrations + control (REAL Stripe) + stripe-listen forwarder ==="
 # ===========================================================================
-"$PSQL" -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d postgres -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL || { fail "could not (re)create $DB"; exit 1; }
-SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$DB' AND pid<>pg_backend_pid();
-DROP DATABASE IF EXISTS $DB;
+# NO `pg_terminate_backend` AND NO PRE-DROP: the name carries a per-run token,
+# so nothing can already hold it, and both statements were only ever able to hit
+# a PEER's database. `pg_terminate_backend` over `datname=` is `WITH (FORCE)`
+# spelled out by hand.
+"$PSQL" -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d postgres -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL || { fail "could not create $DB"; exit 1; }
 CREATE DATABASE $DB;
 ALTER DATABASE $DB SET search_path = zeroship, public;
 SQL
-pass "(re)created dedicated DB $DB on :$PGPORT"
+pass "created per-run DB $DB on :$PGPORT"
 
 MIG_LOG="$WORK/migrate.log"
 if ZEROSHIP_MIGRATE_DSN="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB" "$ROOT/deploy/ops/db-migrate.sh" > "$MIG_LOG" 2>&1; then
@@ -256,7 +289,8 @@ curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 \
 # Start the REAL forwarder: Stripe streams every test-mode event to our control,
 # REAL-signed with the secret we captured above. Long-lived; torn down on exit.
 scli listen --forward-to "$CONTROL_URL/internal/webhooks/stripe" --skip-verify > "$LISTEN_LOG" 2>&1 &
-echo $! >> "$PIDFILE"
+LISTEN_PID=$!
+echo "$LISTEN_PID" >> "$PIDFILE"
 for _ in $(seq 1 25); do grep -q "Ready!" "$LISTEN_LOG" 2>/dev/null && break; sleep 1; done
 if grep -q "Ready!" "$LISTEN_LOG" 2>/dev/null; then
   pass "stripe listen forwarder READY — Stripe now DELIVERS real signed events to control"

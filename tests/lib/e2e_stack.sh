@@ -33,10 +33,25 @@
 # falls back to plain echo). Errors during bring-up return non-zero so the
 # caller can decide whether to abort.
 #
-# Tunables (export BEFORE calling stack_up; sensible defaults pick a private
-# port band so multiple harnesses can run back-to-back without colliding):
+# Tunables (export BEFORE calling stack_up):
 #   ZEROSHIP_CONTROL_PORT ZEROSHIP_WORKER_PORT ZEROSHIP_GATEWAY_PORT PG_PORT
 #   E2E_PLATFORM_OP_PORT         - listen ports
+#
+# THE DEFAULTS BELOW ARE A FALLBACK, NOT A DESIGN. A per-harness constant lets
+# a harness run back-to-back with a DIFFERENT harness; it does nothing for the
+# case that actually happens on a shared box - two agents running the SAME
+# harness, or two harnesses whose bands were chosen independently and overlap
+# (9181 is both tests/e2e_stripe_billing.sh's and
+# tests/e2e_real_app_end_to_end.sh's; 9393/8393/8303 is both
+# tests/e2e_dev_vs_deployed_db.sh's and tests/e2e_redeploy_replaces_app.sh's,
+# and those two run in the SAME CI job). A caller that wants isolation calls
+# `zs_ports_reserve` (tests/lib/e2e_ports.sh) BEFORE sourcing this file; the
+# `:=` defaults then leave its allocation alone, and `stack_up`'s port-freeing
+# step skips a port that was allocated rather than pinned.
+#
+# The harness OP already works this way and has since it was written: it binds
+# port 0 and reads the number back from a file (tests/lib/runtime_secrets.sh
+# e2e_platform_op_up). Nothing about a listen port here is different.
 #   PG_CONTAINER                 - docker container name
 #   ZEROSHIP_WORKER_THREADS      - worker --threads
 #   E2E_ROOT                     - repo root (auto-derived)
@@ -254,8 +269,22 @@ stack_up() {
   stack_pg_up || return 1
 
   # --- free the ports -------------------------------------------------------
+  # ONLY the ports this run did NOT allocate. `lsof -ti :$p | xargs kill -9`
+  # exists because a harness that pins a CONSTANT has to reclaim that constant
+  # from its own leaked previous run - and it cannot tell that corpse from a
+  # peer agent's live control plane fifteen minutes into its own run. MEASURED
+  # 2026-08-21: an unrelated server on :9181 was SIGKILLed by a single run of
+  # tests/e2e_stripe_billing.sh, which carried the same line.
+  #
+  # A port that came from `zs_ports_reserve` (tests/lib/e2e_ports.sh) was
+  # verified free at the moment it was claimed and is held for the life of the
+  # run, so anything listening on it is by definition a stranger. Skipping it
+  # here is not a special case - it is the whole reason to allocate.
   local i p
-  for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
+  for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT; do
+    case " ${ZS_PORTS_HELD:-} " in *" $p "*) continue ;; esac
+    lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+  done
 
   # --- control --------------------------------------------------------------
   # Every credential arrives through the canonical environment names exported by

@@ -171,6 +171,61 @@ else
 fi
 
 echo
+echo "=== the OTHER policy: drop-on-success keeps a failed run's database ==="
+# Two runs of ONE script differing in ONE variable - the exit status - because
+# "keeps on failure" and "never drops at all" print the same empty psql log.
+cat > "$TMP/policy_run.sh" <<EOF
+set -uo pipefail
+. "$LIB"
+run_psql() { printf '%s\n' "\$*" >> "$TMP/psql.log"; }
+zs_scratch_db_resolve zeroship_auth_test
+cleanup() { local rc=\$?; zs_scratch_db_cleanup_on_success "\$rc"; }
+trap cleanup EXIT
+printf '%s\n' "\$TEST_DB" > "$TMP/policy_name"
+exit "\$1"
+EOF
+
+: > "$TMP/psql.log"
+bash "$TMP/policy_run.sh" 0 >/dev/null 2>&1
+check "a green run under this policy exits 0" "0" "$?"
+green_name="$(cat "$TMP/policy_name")"
+if grep -qF "DROP DATABASE IF EXISTS ${green_name} WITH (FORCE)" "$TMP/psql.log"; then
+  ok "a SUCCEEDING run drops ${green_name}"
+else
+  bad "a green run leaked ${green_name}: $(cat "$TMP/psql.log")"
+fi
+
+: > "$TMP/psql.log"
+bash "$TMP/policy_run.sh" 7 >/dev/null 2>&1
+check "a red run under this policy keeps its status" "7" "$?"
+red_name="$(cat "$TMP/policy_name")"
+if [ -s "$TMP/psql.log" ]; then
+  bad "a FAILING run destroyed its own debugging artifact ${red_name}: $(cat "$TMP/psql.log")"
+else
+  ok "a FAILING run keeps ${red_name} for inspection"
+fi
+
+# The status is an argument with no default, so a call site that forgets it
+# must refuse rather than guess. Refusing means keeping the database.
+: > "$TMP/psql.log"
+( ZS_SCRATCH_DB_GENERATED=1 TEST_DB=x zs_scratch_db_cleanup_on_success ) >/dev/null 2>&1
+check "a missing status returns 0 rather than aborting the trap" "0" "$?"
+if [ -s "$TMP/psql.log" ]; then
+  bad "a missing status was read as success and dropped the database"
+else
+  ok "a missing status refuses and keeps the database"
+fi
+
+: > "$TMP/psql.log"
+( ZS_SCRATCH_DB_GENERATED=0 TEST_DB=zeroship_auth_test_byhand \
+  zs_scratch_db_cleanup_on_success 0 ) >/dev/null 2>&1
+if [ -s "$TMP/psql.log" ]; then
+  bad "drop-on-success touched a caller-named database: $(cat "$TMP/psql.log")"
+else
+  ok "control: a caller-named database is left alone by this policy too"
+fi
+
+echo
 echo "=================================================================="
 echo "scratch db selftest: ${pass} passed, ${fail} failed"
 [ "$fail" -eq 0 ] || exit 1

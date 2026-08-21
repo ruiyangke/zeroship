@@ -77,11 +77,20 @@ if [ "$FRESH_RC" = "2" ]; then
 fi
 
 # --- stack ------------------------------------------------------------------
-export ZEROSHIP_CONTROL_PORT=${ZEROSHIP_CONTROL_PORT:-9137}
-export ZEROSHIP_WORKER_PORT=${ZEROSHIP_WORKER_PORT:-8117}
-export ZEROSHIP_GATEWAY_PORT=${ZEROSHIP_GATEWAY_PORT:-8031}
-export PG_PORT=${PG_PORT:-5471}
-export PG_CONTAINER=${PG_CONTAINER:-zs-e2e-bslash-pg}
+# PER-RUN ports and a PER-RUN container name. These were the constants
+# 9137/8117/8031/5471 and `zs-e2e-bslash-pg`, and all five are shared state:
+# :5471 is also tests/e2e_metering_billing.sh:102's Postgres, and a second run
+# of THIS harness collides with the first on every one of them. Worse, the
+# constants forced `stack_up` to open by SIGKILLing whatever held them, which
+# on this box means a peer agent's server (tests/lib/e2e_ports.sh has the
+# measurement). Allocated ports have nothing to reclaim, so nothing is killed.
+#
+# `stack_up` reads and re-exports these, and every use of them in this file is
+# AFTER `stack_up` returns, so the allocated values are what the requests go to.
+# shellcheck source=tests/lib/e2e_ports.sh
+source "$ROOT/tests/lib/e2e_ports.sh"
+zs_ports_reserve ZEROSHIP_CONTROL_PORT ZEROSHIP_WORKER_PORT ZEROSHIP_GATEWAY_PORT PG_PORT || exit 1
+export PG_CONTAINER="zs-e2e-bslash-pg-$$"
 # Debug logging on the gateway so the matched path is recoverable from gate.log
 # when a status alone is ambiguous.
 export ZEROSHIP_OBSERVABILITY_LOG_FILTER=${ZEROSHIP_OBSERVABILITY_LOG_FILTER:-info,zeroship_gateway=debug}
@@ -89,7 +98,7 @@ export ZEROSHIP_OBSERVABILITY_LOG_FILTER=${ZEROSHIP_OBSERVABILITY_LOG_FILTER:-in
 # shellcheck source=tests/lib/e2e_stack.sh
 source "$ROOT/tests/lib/e2e_stack.sh"
 
-cleanup() { stack_down; }
+cleanup() { stack_down; zs_ports_release; }
 trap cleanup EXIT
 
 echo "=== bring-up ==="
