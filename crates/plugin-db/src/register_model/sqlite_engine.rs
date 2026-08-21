@@ -131,10 +131,18 @@ pub(crate) async fn run_sqlite_via_engine(
     // the ceiling's mandatory [[inject]] to add the seven system columns (id,
     // created_at, …) + system indexes + `["id"]` PK to every table — plugin-db's
     // descriptors carry only the creator's own columns. The engine ships no
-    // production confined-inject ceiling, so the monorepo supplies it (mirrors
-    // crates/migrated/policies/confined.policy.toml). Its grants/inject are
-    // `scope = "all"`, so it applies regardless of the (SQLite-inert) schema name.
-    const CONFINED_CEILING_TOML: &str = include_str!("../../policies/confined.policy.toml");
+    // production confined-inject ceiling, so the monorepo supplies it. Its
+    // grants/inject are `scope = "all"`, so it applies regardless of the
+    // (SQLite-inert) schema name.
+    //
+    // The grants are this crate's; the `[[inject]]` rule is the platform-wide
+    // fragment in `policies/`, shared byte for byte with the deployed server
+    // ceiling rather than mirrored into a second file. `concat!` folds both
+    // `include_str!`s at compile time.
+    const CONFINED_CEILING_TOML: &str = concat!(
+        include_str!("../../policies/confined.policy.toml"),
+        include_str!("../../../../policies/confined-system-shape.inject.toml"),
+    );
     let effective = effective_policy_from_charter_toml(CONFINED_CEILING_TOML)
         .map_err(|e| DbError::internal(format!("sqlite engine: confined policy failed: {e}")))?;
 

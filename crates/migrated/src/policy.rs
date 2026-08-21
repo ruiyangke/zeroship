@@ -47,7 +47,16 @@ const SEAL_MATCHER_VERSION: u32 = 1;
 
 /// The monorepo-owned CONFINED ceiling — the default operator ceiling a creator app
 /// gets (the successor to the engine's deleted `PolicyProfile::confined()`).
-pub const CONFINED_CEILING_TOML: &str = include_str!("../policies/confined.policy.toml");
+///
+/// Assembled from two files. The grants are this crate's own; the mandatory
+/// system-table `[[inject]]` rule is the platform-wide fragment in `policies/`,
+/// which every other consumer of that rule also concatenates rather than copies.
+/// `concat!` folds both `include_str!`s at compile time, so the fragment's bytes
+/// are literally in this binary.
+pub const CONFINED_CEILING_TOML: &str = concat!(
+    include_str!("../policies/confined.policy.toml"),
+    include_str!("../../../policies/confined-system-shape.inject.toml"),
+);
 /// The monorepo-owned no-inject charter used only to guard DDL rendered by managed
 /// lowering. Its grants mirror [`CONFINED_CEILING_TOML`]; its inject block is omitted.
 const CONFINED_GUARD_CHARTER_TOML: &str =

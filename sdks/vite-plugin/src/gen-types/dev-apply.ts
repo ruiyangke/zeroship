@@ -28,6 +28,7 @@ import { mkdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
 import { loadMigrateAddon, type ApplyReply } from "./addon.js";
+import { CONFINED_SYSTEM_SHAPE_INJECT_TOML } from "./confined-system-shape.generated.js";
 import { recordMigrationsDir } from "./recorder.js";
 
 /** The dev app_id, mirroring `crates/runtime/src/core/plugin.rs`'s fallback. */
@@ -39,21 +40,13 @@ export const DEV_STATE_DIR = ".zeroship";
 /**
  * The confined charter the dev apply runs under.
  *
- * The `[[inject]]` block is copied VERBATIM from
- * `./confined-ceiling.ts`'s `CONFINED_SCHEMA_EMIT_CEILING_TOML`. That the two
- * describe the SAME table is load-bearing: if they disagree, gen-types'
- * descriptor and the applied schema disagree, and the engine's own contract is
- * that emit and apply are byte-identical.
- *
- * The `NOW()` SPELLING is not. This comment claimed it was until 2026-08-20.
- * `inject_default_to_ir` lower-cases the token before matching it against
- * `"now" | "now()" | "current_timestamp"`
- * (third_party/zero-migrate/crates/zero-migrate/src/model/table_shape.rs), so
- * all three spellings lower to the identical `SynthFn::Now`. `NOW()` is used
- * here because every other copy uses it and
- * `tests/inject_policy_mirror_gate.sh` compares the copies byte for byte after
- * whitespace folding - a cosmetic difference it cannot tell from a real one is
- * worth removing, which is a smaller claim than the one this comment made.
+ * The GRANTS are this path's own; the `[[inject]]` block is the platform-wide
+ * fragment `policies/confined-system-shape.inject.toml`, the same bytes the
+ * emit ceiling in `./confined-ceiling.ts` and the deployed server ceiling take.
+ * That the three describe the SAME table is load-bearing: if they disagreed,
+ * gen-types' descriptor and the applied schema would disagree, and the engine's
+ * own contract is that emit and apply are byte-identical. They no longer can:
+ * there is one copy of the rule and everything concatenates it.
  *
  * The grants are what the emit path does NOT need, because emit renders no DDL:
  * creating tables, renaming, and destructive ops. Deliberately ABSENT are
@@ -61,7 +54,8 @@ export const DEV_STATE_DIR = ".zeroship";
  * engine turned those into declared-only knobs that REJECT a non-default value
  * (`DeclaredOnlyNonDefault`), so including them fails the apply outright.
  */
-export const CONFINED_APPLY_CHARTER_TOML = `policy_version = 1
+export const CONFINED_APPLY_CHARTER_TOML =
+  `policy_version = 1
 
 [[grant]]
 key = "schema.create_table"
@@ -78,35 +72,7 @@ key = "safety.destructive_ops"
 value = "allow"
 scope = "all"
 
-# The mandatory platform system-table shape — the seven system columns + the
-# ["id"] primary key + the three system indexes injected into every created
-# table. MUST stay identical to the [[inject]] rule in confined-ceiling.ts.
-[[inject]]
-scope = "all"
-mandatory = true
-primary_key = ["id"]
-author_primary_key = "forbid"
-columns = [
-  # The three NOT NULL columns carry defaults because the data plane does not
-  # send them. crud/system_fields_pass.rs omits created_at/updated_at/version
-  # from every INSERT by design and relies on the DDL to supply the canonical
-  # value; without these the first insert into any migration-created table fails
-  # with "null value in column created_at violates not-null constraint".
-  # id is deliberately defaultless - it is minted into the INSERT instead.
-  { name = "id",         type = "text",        nullable = false },
-  { name = "created_at", type = "timestamptz", nullable = false, default = "NOW()" },
-  { name = "updated_at", type = "timestamptz", nullable = false, default = "NOW()" },
-  { name = "created_by", type = "text",        nullable = true  },
-  { name = "updated_by", type = "text",        nullable = true  },
-  { name = "version",    type = "integer",     nullable = false, default = "1" },
-  { name = "deleted_at", type = "timestamptz", nullable = true  },
-]
-indexes = [
-  { name = "ix_deleted_at", columns = ["deleted_at"] },
-  { name = "ix_updated_at", columns = ["updated_at"] },
-  { name = "ix_created_by", columns = ["created_by"] },
-]
-`;
+` + CONFINED_SYSTEM_SHAPE_INJECT_TOML;
 
 /**
  * The state directory the worker's SQLite backend will use, derived from the

@@ -4,8 +4,16 @@
 #
 # The managed server binds the creation and movement grants below, plus the
 # default-deny cross-schema grant, to one exact app schema before composing this
-# charter. Keep these grants aligned with confined.policy.toml. The only intentional
-# difference is the absence of the mandatory system-shape [[inject]].
+# charter. Keep these grants aligned with confined.policy.toml.
+#
+# THE ONE INTENTIONAL DIFFERENCE is that this charter is used ALONE, while
+# confined.policy.toml is concatenated with
+# policies/confined-system-shape.inject.toml before it is loaded
+# (`crates/migrated/src/policy.rs`). The two grant files now look almost
+# identical because the inject rule left both of them; the difference is in the
+# constant, not in the file. Do not "fix" that by adding the fragment here - the
+# rendered-DDL guard must vet a CREATE TABLE that the inject already expanded,
+# so injecting again would double the system columns.
 
 policy_version = 1
 
