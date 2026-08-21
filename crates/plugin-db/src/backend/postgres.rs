@@ -1581,12 +1581,7 @@ mod backup_pg {
             std::process::Command::new(binary).args(&args).output()
         })
         .await
-        .map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("{binary}: spawn_blocking task panicked"),
-            )
-        })?
+        .map_err(|_| std::io::Error::other(format!("{binary}: spawn_blocking task panicked")))?
     }
 
     pub(super) async fn snapshot_impl(

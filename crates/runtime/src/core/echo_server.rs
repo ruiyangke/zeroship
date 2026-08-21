@@ -36,10 +36,10 @@ fn main() {
                 };
                 // Naive: assume each read contains a complete request
                 // For benchmarking this is fine
-                if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
-                    if stream.write_all(&resp).is_err() {
-                        return;
-                    }
+                if buf[..n].windows(4).any(|w| w == b"\r\n\r\n")
+                    && stream.write_all(&resp).is_err()
+                {
+                    return;
                 }
             }
         });

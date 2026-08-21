@@ -313,16 +313,28 @@ struct WriterResult {
     body: String,
 }
 
+/// The anchor thread's four channel ends, carried together because they are one
+/// handshake (ready -> close -> closed -> finish) rather than four parameters.
+struct AnchorChannels {
+    ready: std::sync::mpsc::Sender<Result<AnchorReady, String>>,
+    close: flume::Receiver<()>,
+    closed: std::sync::mpsc::Sender<Result<(), String>>,
+    finish: flume::Receiver<()>,
+}
+
 fn spawn_anchor(
     url: String,
     app_uuid: uuid::Uuid,
     app_id: String,
     worker_id: String,
-    ready: std::sync::mpsc::Sender<Result<AnchorReady, String>>,
-    close: flume::Receiver<()>,
-    closed: std::sync::mpsc::Sender<Result<(), String>>,
-    finish: flume::Receiver<()>,
+    channels: AnchorChannels,
 ) -> JoinHandle<Result<(), String>> {
+    let AnchorChannels {
+        ready,
+        close,
+        closed,
+        finish,
+    } = channels;
     thread::spawn(move || {
         init_v8();
         let thread_id = thread::current().id();
@@ -488,7 +500,7 @@ async fn slot_state(pool: &Pool, slot: &str) -> Result<Option<bool>, String> {
     let rows = pool
         .query_text_params(
             "SELECT active FROM pg_replication_slots WHERE slot_name = $1",
-            &[&slot],
+            &[slot],
         )
         .await
         .map_err(|error| format!("query replication slot: {error}"))?;
@@ -500,7 +512,7 @@ async fn slot_state(pool: &Pool, slot: &str) -> Result<Option<bool>, String> {
 async fn publication_exists(pool: &Pool, publication: &str) -> Result<bool, String> {
     pool.query_text_params(
         "SELECT 1 FROM pg_publication WHERE pubname = $1",
-        &[&publication],
+        &[publication],
     )
     .await
     .map(|rows| !rows.is_empty())
@@ -625,10 +637,12 @@ fn db_live_stream_crosses_v8_isolates_and_releases_worker_slot() {
         app_uuid,
         app_id.clone(),
         worker_id.clone(),
-        anchor_ready_tx,
-        close_rx,
-        closed_tx,
-        finish_rx,
+        AnchorChannels {
+            ready: anchor_ready_tx,
+            close: close_rx,
+            closed: closed_tx,
+            finish: finish_rx,
+        },
     );
 
     let mut subscriber: Option<JoinHandle<Result<SubscriberResult, String>>> = None;
@@ -755,9 +769,8 @@ fn db_live_stream_crosses_v8_isolates_and_releases_worker_slot() {
         exercise.unwrap_or_else(|error| panic!("distributed live exercise failed: {error}"));
     close_result.unwrap_or_else(|error| panic!("last-subscriber close failed: {error}"));
     anchor_result.unwrap_or_else(|error| panic!("anchor failed: {error}"));
-    assert_eq!(
+    assert!(
         slot_removed.expect("slot teardown query"),
-        true,
         "last subscriber close must drop this worker's logical slot"
     );
     assert!(

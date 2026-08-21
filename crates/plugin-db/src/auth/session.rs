@@ -399,7 +399,7 @@ impl crate::backend::SessionMinter for crate::backend::PostgresBackend {
             actor_kind: init.actor_kind.clone(),
             actor_id: init.actor_id.clone(),
         };
-        let local_token = mint_session_token(&*client, local_init, ttl_secs).await?;
+        let local_token = mint_session_token(&client, local_init, ttl_secs).await?;
 
         // Legacy → trait struct translation. backend_pid is the
         // mint-time `pg_backend_pid()` captured inside the free fn;
@@ -444,7 +444,7 @@ impl crate::backend::SessionMinter for crate::backend::PostgresBackend {
             expires_at_iso: token.expires_at_iso.clone(),
             signature: token.signature.clone(),
         };
-        init_session_with_pid(&*client, &local_token, Some(token.backend_pid)).await
+        init_session_with_pid(&client, &local_token, Some(token.backend_pid)).await
     }
 }
 
