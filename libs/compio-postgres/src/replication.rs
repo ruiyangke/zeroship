@@ -114,7 +114,12 @@ pub const HOT_STANDBY_FEEDBACK_TAG: u8 = b'h';
 
 /// Open a replication-mode connection.
 ///
-/// Equivalent to [`crate::Config::connect`] but the returned value is a
+/// Takes the same [`Config`] as [`crate::Config::connect`] and walks the same
+/// endpoint list, but is NOT equivalent to it. Known differences, none of them
+/// accidental: this path opens one transport per address with no `allow` /
+/// `prefer` fallback, it does not honour `target_session_attrs`, and it
+/// currently applies `sslmode` to Unix-socket addresses where the query path
+/// follows libpq and ignores it. The returned value is a
 /// [`ReplicationConnection`] (no separate `run`-loop task). The
 /// connection enters walsender mode via `replication=database`. The
 /// regular `query` / `execute` surface is **not exposed** on the
@@ -153,9 +158,22 @@ where
 /// connects.
 ///
 /// The deadline is applied exactly as `connect::connect_host` applies it:
-/// once to resolution, then AFRESH per address. The two walks are the same
-/// walk, so they must budget the same way -- see that function for why
-/// per-address matches libpq and why bounding resolution does not.
+/// once to resolution, then AFRESH per address. See that function for why
+/// per-address matches libpq, and for what bounding resolution does and does
+/// not buy.
+///
+/// Budgeting is the ONLY axis on which these two walks are claimed to agree.
+/// They deliberately differ elsewhere and a reader should not generalise:
+/// the query path retries a failed TLS leg in the clear under a permissive
+/// `sslmode` and this path does not, `sslmode` is handled differently over
+/// Unix sockets, and `target_session_attrs` is honoured only by the query
+/// path.
+///
+/// Before this shared shape, the replication deadline covered only the
+/// socket dial (`connect_socket` took the timeout directly); TLS, startup
+/// and authentication ran unbounded. Extending it to the whole attempt is
+/// the change, not the per-address restart, which the socket-level timeout
+/// already had.
 async fn connect_replication_host<T, R>(
     endpoint: &Endpoint,
     resolver: &mut R,
@@ -1743,11 +1761,16 @@ mod tests {
     /// The replication walk budgets `connect_timeout` per ADDRESS, exactly as
     /// `connect::connect_host` does.
     ///
-    /// This is the same walk over the same `Endpoint` list, so a divergence
-    /// here means a replication client and a query client disagree about what
-    /// `connect_timeout` means. It was wrapped once around the whole host walk,
-    /// which let the first stalled address consume the entire budget and
-    /// stranded every healthy address behind it.
+    /// Both walks iterate the same `Endpoint` list, so a divergence in the
+    /// BUDGET means a replication client and a query client disagree about
+    /// what `connect_timeout` means. (They still differ elsewhere -- see
+    /// `connect_replication_host` -- so this says nothing about the rest.)
+    ///
+    /// What this test actually pins: that the deadline restarts for the
+    /// SECOND address rather than being spent once for the whole walk. It
+    /// does NOT prove the second address received a FULL fresh budget, only
+    /// that it was dialled at all -- a residual-budget regression would still
+    /// pass here.
     #[compio::test]
     async fn replication_connect_timeout_restarts_for_each_resolved_address() {
         let (first, first_seen) =
