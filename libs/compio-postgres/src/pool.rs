@@ -86,7 +86,7 @@ use std::time::{Duration, Instant};
 #[cfg(doc)]
 use crate::config::SslMode;
 use crate::tls::NoTls;
-use crate::{Client, Config, Connection, Error, Socket, TransactionStatus};
+use crate::{CancelToken, Client, Config, Connection, Error, Socket, TransactionStatus};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -140,6 +140,7 @@ pub struct PoolConfig {
     max_lifetime: Duration,
     idle_timeout: Duration,
     connection_timeout: Duration,
+    command_timeout: Option<Duration>,
     validation_bypass: Duration,
     after_connect: Option<Rc<AfterConnectHook>>,
     before_acquire: Option<Rc<BeforeAcquireHook>>,
@@ -154,6 +155,7 @@ impl Default for PoolConfig {
             max_lifetime: Duration::from_secs(1800),
             idle_timeout: Duration::from_secs(600),
             connection_timeout: Duration::from_secs(30),
+            command_timeout: None,
             validation_bypass: Duration::from_millis(500),
             after_connect: None,
             before_acquire: None,
@@ -234,6 +236,41 @@ impl PoolConfig {
     #[must_use]
     pub fn get_connection_timeout(&self) -> Duration {
         self.connection_timeout
+    }
+
+    /// Set the client command deadline applied by [`PooledClient::command`].
+    ///
+    /// This builds clock (1), a client-side command deadline. When it expires,
+    /// the pool sends a `PostgreSQL` `CancelRequest` using the connector it owns,
+    /// waits for the postmaster to close that cancellation connection, then
+    /// drains through `ReadyForQuery` before returning a distinguishable
+    /// [`Error::is_command_timeout`] error. It is disabled by default.
+    ///
+    /// It is deliberately separate from the other four clocks:
+    ///
+    /// - `PostgreSQL`'s server-side `statement_timeout` is a GUC, already
+    ///   reachable with `options=-c statement_timeout=...`.
+    /// - This driver has no socket read deadline. `tcp_user_timeout` limits
+    ///   how long transmitted TCP data may remain unacknowledged; it is not a
+    ///   read deadline.
+    /// - [`Config::connect_timeout`] applies per address to connection setup,
+    ///   including the handshake.
+    /// - [`PoolConfig::connection_timeout`] limits waiting to acquire a pooled
+    ///   connection.
+    ///
+    /// This is pool policy, not a libpq connection parameter, and therefore is
+    /// not accepted in a `PostgreSQL` connection string. See
+    /// [`PooledClient::command`] for the exclusive command scope and its
+    /// streaming limitations.
+    pub fn command_timeout(&mut self, command_timeout: Duration) -> &mut Self {
+        self.command_timeout = Some(command_timeout);
+        self
+    }
+
+    /// Get the configured client command deadline, or `None` when disabled.
+    #[must_use]
+    pub fn get_command_timeout(&self) -> Option<Duration> {
+        self.command_timeout
     }
 
     /// Set the alive-validation bypass window (default: 500 ms).
@@ -347,6 +384,7 @@ impl std::fmt::Debug for PoolConfig {
             .field("max_lifetime", &self.max_lifetime)
             .field("idle_timeout", &self.idle_timeout)
             .field("connection_timeout", &self.connection_timeout)
+            .field("command_timeout", &self.command_timeout)
             .field("validation_bypass", &self.validation_bypass)
             .field("after_connect", &self.after_connect.is_some())
             .field("before_acquire", &self.before_acquire.is_some())
@@ -614,6 +652,19 @@ impl Transport {
         let (client, connection) = self.config.connect(NoTls).await?;
         spawn_connection_task(connection);
         Ok(client)
+    }
+
+    /// Send an out-of-band `CancelRequest` with the same transport policy as
+    /// this pool's sessions, then wait for the postmaster to consume it. The
+    /// connector has to be supplied at cancel time, which is why automatic
+    /// cancellation lives here rather than on `Client`.
+    async fn cancel_query(&self, token: &CancelToken) -> Result<(), Error> {
+        #[cfg(feature = "tls")]
+        if let Some(tls) = &self.tls {
+            return token.cancel_query_confirmed(tls.clone()).await;
+        }
+
+        token.cancel_query_confirmed(NoTls).await
     }
 
     /// Retry [`Transport::connect_one`] up to 3 times with 100ms, 400ms, 1.6s
@@ -1587,8 +1638,10 @@ impl Pool {
         sql: &str,
         params: &[&(dyn crate::types::ToSql + Sync)],
     ) -> Result<Vec<crate::Row>, Error> {
-        let client = self.get().await?;
-        client.query(sql, params).await
+        let mut client = self.get().await?;
+        client
+            .command(async |client| client.query(sql, params).await)
+            .await
     }
 
     /// Query with text-format string parameters. Parameters are bound as
@@ -1599,8 +1652,10 @@ impl Pool {
         sql: &str,
         params: &[&str],
     ) -> Result<Vec<crate::Row>, Error> {
-        let client = self.get().await?;
-        client.query_text_params(sql, params).await
+        let mut client = self.get().await?;
+        client
+            .command(async |client| client.query_text_params(sql, params).await)
+            .await
     }
 
     /// Acquire a connection, execute a statement, return the connection.
@@ -1614,8 +1669,10 @@ impl Pool {
         sql: &str,
         params: &[&(dyn crate::types::ToSql + Sync)],
     ) -> Result<u64, Error> {
-        let client = self.get().await?;
-        client.execute(sql, params).await
+        let mut client = self.get().await?;
+        client
+            .command(async |client| client.execute(sql, params).await)
+            .await
     }
 
     /// Acquire a connection and run one or more `;`-separated statements via the
@@ -1630,8 +1687,10 @@ impl Pool {
     /// Returns [`Error`] if a connection cannot be acquired or the server
     /// rejects any statement in the batch.
     pub async fn batch_execute(&self, sql: &str) -> Result<(), Error> {
-        let client = self.get().await?;
-        client.batch_execute(sql).await
+        let mut client = self.get().await?;
+        client
+            .command(async |client| client.batch_execute(sql).await)
+            .await
     }
 
     // ── Pool stats (for metrics endpoint) ────────────────────────────────
@@ -2096,13 +2155,154 @@ impl Drop for CloseWaiter<'_> {
 // PooledClient
 // ---------------------------------------------------------------------------
 
+/// How long timeout recovery may spend sending `CancelRequest` and proving that
+/// the original session reached `ReadyForQuery`.
+///
+/// This is a bounded cleanup grace after clock (1), not a sixth user-facing
+/// deadline. Without it, a hung cancellation connection or a lost packet could
+/// turn an expired command deadline into an indefinitely pending future. If it
+/// expires, the pool synchronously shuts down and later evicts the session.
+const COMMAND_TIMEOUT_RECOVERY_GRACE: Duration = Duration::from_secs(5);
+
 /// A borrowed connection that returns to the pool on drop.
 ///
 /// Dereferences to [`Client`] — call any client method (`.query(...)`,
-/// `.execute(...)`, `.transaction()`, …) directly on the borrow.
+/// `.execute(...)`, `.transaction()`, …) directly on the borrow. Those direct
+/// calls retain bare-Client semantics and do not acquire a command deadline;
+/// use [`PooledClient::command`] to apply this pool's configured deadline.
+/// [`Pool::query`], [`Pool::execute`], and the other Pool convenience methods
+/// enter that scope automatically.
 pub struct PooledClient<'a> {
     entry: Option<PoolEntry>,
     pool: &'a Pool,
+}
+
+impl PooledClient<'_> {
+    /// Run one exclusive logical command under the pool's command deadline.
+    ///
+    /// If [`PoolConfig::command_timeout`] is configured, expiry sends a real
+    /// `PostgreSQL` `CancelRequest` over a new connection using the pool-owned
+    /// TLS connector. It waits for the postmaster to close that dedicated
+    /// connection so a late cancel cannot hit the next query. The timed
+    /// operation future is dropped, but the connection task continues draining
+    /// its server responses. This method then sends a FIFO `Sync` barrier and,
+    /// if needed, rolls back a cancelled transaction. It does not return until
+    /// the same session is idle at `ReadyForQuery`. A successful recovery
+    /// returns an
+    /// [`Error`] for which [`Error::is_command_timeout`] is true; `PostgreSQL`'s
+    /// own errors, including SQLSTATE `57014`, remain ordinary database
+    /// errors.
+    ///
+    /// `&mut self` makes the timeout's backend-wide `CancelRequest` exclusive to
+    /// this pooled lease. The closure should still run one sequential logical
+    /// command: deliberately starting pipelined requests inside it defeats the
+    /// one-command targeting guarantee because `PostgreSQL` cancellation names a
+    /// backend, not an individual request.
+    ///
+    /// A streaming command is covered only while the returned stream or `COPY`
+    /// handle is consumed inside the closure. Returning that handle makes the
+    /// closure finish and therefore ends this deadline scope.
+    ///
+    /// If sending `CancelRequest` fails, or recovery does not prove
+    /// `ReadyForQuery` within a bounded grace period, the physical socket is
+    /// synchronously shut down. The timeout remains distinguishable through
+    /// [`Error::is_command_timeout`], its source describes the recovery
+    /// failure, and this pool entry is evicted rather than reused.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use compio_postgres::{Error, PooledClient};
+    /// async fn load(client: &mut PooledClient<'_>) -> Result<i32, Error> {
+    ///     client
+    ///         .command(async |client| {
+    ///             client
+    ///                 .query_one_scalar("SELECT 42::int4", &[])
+    ///                 .await
+    ///         })
+    ///         .await
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns the operation's own [`Error`] when it finishes before the
+    /// deadline. On expiry, returns an error classified by
+    /// [`Error::is_command_timeout`]; a source error means cancellation could
+    /// not prove the session reusable and the physical connection was retired.
+    pub async fn command<T, F>(&mut self, operation: F) -> Result<T, Error>
+    where
+        F: for<'client> AsyncFnOnce(&'client mut Client) -> Result<T, Error>,
+    {
+        let command_timeout = self.pool.config.command_timeout;
+        let transport = &self.pool.transport;
+        let Some(entry) = self.entry.as_mut() else {
+            // `entry` is taken only by Drop, which cannot race a method call.
+            // Keep the impossible state an ordinary closed-client error rather
+            // than putting a panic edge on a public database operation.
+            return Err(Error::closed());
+        };
+        let client = &mut entry.client;
+
+        let Some(command_timeout) = command_timeout else {
+            return operation(client).await;
+        };
+
+        let cancel_token = client.cancel_token();
+        if let Ok(result) = compio::time::timeout(command_timeout, operation(client)).await {
+            return result;
+        }
+
+        let recovery = compio::time::timeout(COMMAND_TIMEOUT_RECOVERY_GRACE, async {
+            // Waiting for EOF on the dedicated cancel connection is the
+            // cross-connection ordering barrier: write/flush alone would let a
+            // delayed CancelRequest arrive after this backend's Sync and hit
+            // the next command instead.
+            transport.cancel_query(&cancel_token).await?;
+            // A query future can return its ErrorResponse before the
+            // connection task receives the trailing ReadyForQuery.
+            // Sync is a FIFO proof that every response belonging to
+            // the dropped operation has been drained.
+            client.check_connection().await?;
+
+            if client.transaction_status() != Some(TransactionStatus::Idle) {
+                // Cancellation inside a raw BEGIN leaves the backend in `E`,
+                // where every follow-up statement fails with 25P02. Roll back
+                // inside the same bounded recovery window so success means the
+                // held client is immediately usable, not merely frame-aligned.
+                client.__private_api_rollback(None);
+                client.check_connection().await?;
+                if client.transaction_status() != Some(TransactionStatus::Idle) {
+                    return Err(Error::io(io::Error::other(
+                        "command-timeout recovery did not restore an idle transaction state",
+                    )));
+                }
+                client.clear_dirty();
+            }
+
+            Ok(())
+        })
+        .await;
+
+        match recovery {
+            Ok(Ok(())) => Err(Error::command_timeout(None)),
+            Ok(Err(error)) => {
+                client.force_close();
+                Err(Error::command_timeout(Some(Box::new(error))))
+            }
+            Err(_) => {
+                client.force_close();
+                Err(Error::command_timeout(Some(Box::new(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "CancelRequest recovery did not reach ReadyForQuery within {}s; \
+                         the pooled session was discarded",
+                        COMMAND_TIMEOUT_RECOVERY_GRACE.as_secs()
+                    ),
+                )))))
+            }
+        }
+    }
 }
 
 impl Deref for PooledClient<'_> {
