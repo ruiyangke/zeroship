@@ -1933,7 +1933,9 @@ mod tests {
     use futures_channel::oneshot;
     use std::io::{Read, Write};
     use std::net::{Shutdown, SocketAddr, TcpListener};
+    use std::sync::atomic::AtomicBool;
     use std::sync::mpsc as std_mpsc;
+    use std::task::{Context, Wake, Waker};
     use std::time::Duration;
 
     struct ObservedSocket {
@@ -1952,6 +1954,54 @@ mod tests {
     struct UnsplittableSocket {
         inner: Socket,
         split_attempted: Rc<Cell<bool>>,
+    }
+
+    struct WriteFailingSplitStream {
+        read_half_dropped: Rc<Cell<bool>>,
+    }
+
+    struct TimeoutSplitStream {
+        read_half_dropped: Rc<Cell<bool>>,
+    }
+
+    struct ParkedReadHalf {
+        dropped: Rc<Cell<bool>>,
+    }
+
+    impl Drop for ParkedReadHalf {
+        fn drop(&mut self) {
+            self.dropped.set(true);
+        }
+    }
+
+    struct FailingWriteHalf;
+
+    struct SuccessfulWriteHalf;
+
+    struct RetirementCheckingWake {
+        tx_status: Arc<AtomicU8>,
+        observed: AtomicBool,
+    }
+
+    impl RetirementCheckingWake {
+        fn observe(&self) {
+            assert_eq!(
+                self.tx_status.load(Ordering::Acquire),
+                READ_RETIRED_STATUS,
+                "reader failure became observable before pool poison"
+            );
+            self.observed.store(true, Ordering::Release);
+        }
+    }
+
+    impl Wake for RetirementCheckingWake {
+        fn wake(self: Arc<Self>) {
+            self.observe();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.observe();
+        }
     }
 
     impl AsyncRead for ObservedSocket {
@@ -1994,6 +2044,97 @@ mod tests {
         }
     }
 
+    impl AsyncRead for WriteFailingSplitStream {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            std::future::pending::<()>().await;
+            BufResult(Ok(0), buf)
+        }
+    }
+
+    impl AsyncWrite for WriteFailingSplitStream {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            BufResult(
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "scripted write failure",
+                )),
+                buf,
+            )
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl AsyncRead for TimeoutSplitStream {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            std::future::pending::<()>().await;
+            BufResult(Ok(0), buf)
+        }
+    }
+
+    impl AsyncWrite for TimeoutSplitStream {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            let len = buf.buf_len();
+            BufResult(Ok(len), buf)
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl AsyncRead for ParkedReadHalf {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            std::future::pending::<()>().await;
+            BufResult(Ok(0), buf)
+        }
+    }
+
+    impl AsyncWrite for FailingWriteHalf {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            BufResult(
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "scripted write failure",
+                )),
+                buf,
+            )
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl AsyncWrite for SuccessfulWriteHalf {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            let len = buf.buf_len();
+            BufResult(Ok(len), buf)
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     impl AsyncRead for ObservedReadHalf {
         async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
             let result = self.inner.read(buf).await;
@@ -2032,6 +2173,34 @@ mod tests {
         fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
             self.split_attempted.set(true);
             Err(self)
+        }
+    }
+
+    impl SplitStream for WriteFailingSplitStream {
+        type ReadHalf = ParkedReadHalf;
+        type WriteHalf = FailingWriteHalf;
+
+        fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+            Ok((
+                ParkedReadHalf {
+                    dropped: self.read_half_dropped,
+                },
+                FailingWriteHalf,
+            ))
+        }
+    }
+
+    impl SplitStream for TimeoutSplitStream {
+        type ReadHalf = ParkedReadHalf;
+        type WriteHalf = SuccessfulWriteHalf;
+
+        fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+            Ok((
+                ParkedReadHalf {
+                    dropped: self.read_half_dropped,
+                },
+                SuccessfulWriteHalf,
+            ))
         }
     }
 
@@ -2451,6 +2620,130 @@ mod tests {
     }
 
     #[compio::test]
+    async fn write_error_teardown_drops_the_parked_read_half() {
+        compio::time::timeout(Duration::from_secs(1), async {
+            let read_half_dropped = Rc::new(Cell::new(false));
+            let stream = BufStream::new(WriteFailingSplitStream {
+                read_half_dropped: Rc::clone(&read_half_dropped),
+            });
+            let (read_half, write_half) = match stream.try_into_split() {
+                Ok(halves) => halves,
+                Err(_) => panic!("the teardown fixture did not split"),
+            };
+            let (request_tx, request_rx) = mpsc::unbounded();
+            let (response_tx, _response_rx) = mpsc::channel(1);
+            request_tx
+                .unbounded_send(Request {
+                    messages: RequestMessages::Single(FrontendMessage::Raw(
+                        bytes::Bytes::from_static(b"scripted request"),
+                    )),
+                    sender: response_tx,
+                    disposition: RequestDisposition::Awaited,
+                    transaction_effect: TransactionEffect::MayChange,
+                    prepare_cleanup: None,
+                    statement: None,
+                    observation: None,
+                })
+                .expect("queue the write-failing request");
+
+            let result =
+                Connection::<WriteFailingSplitStream, WriteFailingSplitStream>::run_multiplexed(
+                    read_half,
+                    write_half,
+                    HashMap::new(),
+                    request_rx,
+                    None,
+                    Arc::new(AtomicU8::new(b'I')),
+                    Arc::new(AtomicUsize::new(1)),
+                    None,
+                    None,
+                )
+                .await;
+
+            let error = result.expect_err("the scripted write unexpectedly succeeded");
+            assert_eq!(
+                error.as_io().map(std::io::Error::kind),
+                Some(std::io::ErrorKind::BrokenPipe)
+            );
+            assert!(
+                read_half_dropped.get(),
+                "write-error teardown returned while its read task still owned the read half"
+            );
+            drop(request_tx);
+        })
+        .await
+        .expect("write-error teardown test exceeded its watchdog");
+    }
+
+    #[compio::test]
+    async fn reader_poison_precedes_actual_timeout_publication() {
+        compio::time::timeout(Duration::from_secs(1), async {
+            let read_half_dropped = Rc::new(Cell::new(false));
+            let mut stream = BufStream::new(TimeoutSplitStream {
+                read_half_dropped: Rc::clone(&read_half_dropped),
+            });
+            stream.set_read_timeout(Some(Duration::ZERO));
+            let read_deadline = stream.read_deadline();
+            let (read_half, write_half) = match stream.try_into_split() {
+                Ok(halves) => halves,
+                Err(_) => panic!("the timeout fixture did not split"),
+            };
+
+            let tx_status = Arc::new(AtomicU8::new(b'I'));
+            let checker = Arc::new(RetirementCheckingWake {
+                tx_status: Arc::clone(&tx_status),
+                observed: AtomicBool::new(false),
+            });
+            let waker = Waker::from(Arc::clone(&checker));
+            let mut context = Context::from_waker(&waker);
+            let (response_tx, mut response_rx) = mpsc::channel(1);
+            assert!(
+                response_rx.poll_next_unpin(&mut context).is_pending(),
+                "the empty response channel was unexpectedly ready"
+            );
+
+            let (request_tx, request_rx) = mpsc::unbounded();
+            request_tx
+                .unbounded_send(Request {
+                    messages: RequestMessages::Single(FrontendMessage::Raw(
+                        bytes::Bytes::from_static(b"scripted request"),
+                    )),
+                    sender: response_tx,
+                    disposition: RequestDisposition::Awaited,
+                    transaction_effect: TransactionEffect::MayChange,
+                    prepare_cleanup: None,
+                    statement: None,
+                    observation: None,
+                })
+                .expect("queue the timeout request");
+
+            let result = Connection::<TimeoutSplitStream, TimeoutSplitStream>::run_multiplexed(
+                read_half,
+                write_half,
+                HashMap::new(),
+                request_rx,
+                None,
+                Arc::clone(&tx_status),
+                Arc::new(AtomicUsize::new(1)),
+                read_deadline,
+                None,
+            )
+            .await;
+
+            let error = result.expect_err("the zero-budget read unexpectedly succeeded");
+            assert!(error.is_read_timeout());
+            assert!(
+                checker.observed.load(Ordering::Acquire),
+                "the operation was not woken with its distinguishable read timeout"
+            );
+            assert!(read_half_dropped.get());
+            drop(request_tx);
+        })
+        .await
+        .expect("reader-poison ordering test exceeded its watchdog");
+    }
+
+    #[compio::test]
     async fn ordinary_reader_failure_stays_behind_an_already_decoded_frame() {
         let (mut read_tx, mut read_rx) = mpsc::channel(2);
         let (read_terminal_tx, mut read_terminal_rx) = mpsc::unbounded();
@@ -2487,6 +2780,61 @@ mod tests {
             read_terminal_rx.try_recv().is_err(),
             "ordinary EOF leaked onto the ReadTimeout priority channel"
         );
+    }
+
+    #[compio::test]
+    async fn read_timeout_bypasses_a_full_frame_channel() {
+        compio::time::timeout(Duration::from_secs(1), async {
+            let (mut read_tx, mut read_rx) = mpsc::channel(1);
+            let (read_terminal_tx, mut read_terminal_rx) = mpsc::unbounded();
+            read_tx
+                .send(ReadEvent::Message(ReadEnvelope {
+                    message: BackendMessage::Normal {
+                        messages: BackendMessages::empty(),
+                        request_complete: false,
+                    },
+                    acknowledgement: None,
+                }))
+                .await
+                .expect("fill scripted frame channel");
+
+            publish_reader_failure(
+                Error::read_timeout(Duration::from_millis(75)),
+                &mut read_tx,
+                &read_terminal_tx,
+            )
+            .await;
+
+            assert!(
+                matches!(read_terminal_rx.next().await, Some(error) if error.is_read_timeout()),
+                "read timeout did not reach its out-of-band channel"
+            );
+            assert!(
+                matches!(read_rx.next().await, Some(ReadEvent::Message(_))),
+                "read timeout displaced the frame already in the bounded FIFO"
+            );
+        })
+        .await
+        .expect("read-timeout priority-channel test exceeded its watchdog");
+    }
+
+    #[test]
+    fn reader_channel_close_is_an_error_while_an_awaited_response_exists() {
+        let (sender, _receiver) = mpsc::channel(1);
+        let mut responses = VecDeque::from([Response {
+            sender,
+            disposition: RequestDisposition::Awaited,
+            transaction_effect: TransactionEffect::MayChange,
+            prepare_cleanup: None,
+            statement: None,
+            observation: None,
+            read_obligation: ReadObligation::new(None, false),
+        }]);
+        let pending_responses = VecDeque::new();
+
+        let error = classify_read_terminal(None, &mut responses, &pending_responses)
+            .expect_err("reader channel close hid an unfinished response");
+        assert!(error.is_closed());
     }
 
     #[compio::test]

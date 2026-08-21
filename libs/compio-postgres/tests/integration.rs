@@ -4331,6 +4331,55 @@ async fn prepared_statement_count(client: &Client) -> usize {
         .unwrap()
 }
 
+/// Two callers can miss the internal type-info statement cache together.
+/// The winner remains cached; the losing server statement must be closed once
+/// the cache lock elects the winner.
+#[compio::test]
+async fn concurrent_typeinfo_cache_loser_is_closed() {
+    use std::time::Duration;
+
+    compio::time::timeout(Duration::from_secs(10), async {
+        let Some(url) = require_pg().await else { return };
+        let client = connect(&url).await.unwrap();
+        client
+            .batch_execute(
+                "DROP TYPE IF EXISTS pg_temp.cpg_typeinfo_race CASCADE; \
+                 CREATE TYPE pg_temp.cpg_typeinfo_race AS ENUM ('value')",
+            )
+            .await
+            .unwrap();
+
+        let (first, second) = futures_util::future::join(
+            client.prepare("SELECT 'value'::pg_temp.cpg_typeinfo_race"),
+            client.prepare("SELECT 'value'::pg_temp.cpg_typeinfo_race"),
+        )
+        .await;
+        let first = first.unwrap();
+        let second = second.unwrap();
+        drop((first, second));
+        client.simple_query("").await.unwrap();
+
+        const TYPEINFO_QUERY: &str = "\
+SELECT t.typname, t.typtype, t.typelem, r.rngsubtype, t.typbasetype, n.nspname, t.typrelid
+FROM pg_catalog.pg_type t
+LEFT OUTER JOIN pg_catalog.pg_range r ON r.rngtypid = t.oid
+INNER JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid
+WHERE t.oid = $1
+";
+        assert_eq!(
+            prepared_statement_names(&client, TYPEINFO_QUERY).await.len(),
+            1,
+            "concurrent type-info cache loser leaked its server statement"
+        );
+        client
+            .batch_execute("DROP TYPE pg_temp.cpg_typeinfo_race CASCADE")
+            .await
+            .unwrap();
+    })
+    .await
+    .expect("type-info cache-loser claim test exceeded its 10 second deadline");
+}
+
 /// Capacity zero is the compatibility mode: every raw SQL call prepares its
 /// own statement, just as it did before the opt-in cache existed. Keep the
 /// returned rows alive so their Statement clones keep all four server names
@@ -4420,6 +4469,38 @@ async fn statement_cache_execution_threshold_one_promotes_immediately() {
     let second_live: i64 = client.query_one_scalar(SQL, &[&SQL]).await.unwrap();
     assert_eq!(second_live, 1);
     assert_eq!(prepared_statement_name(&client, SQL).await, first_name);
+}
+
+/// Once SQL has crossed the admission threshold, losing its server-side
+/// statement must not charge it the threshold again. The retry itself observes
+/// whether it ran under a name, so a transient unnamed Parse cannot satisfy
+/// the assertion after being closed.
+#[compio::test]
+async fn statement_cache_stale_reprepare_keeps_admission() {
+    use std::time::Duration;
+
+    compio::time::timeout(Duration::from_secs(10), async {
+        let url = test_url();
+        let client = connect_with_statement_cache_threshold(&url, 2, 3)
+            .await
+            .unwrap();
+
+        const SQL: &str = "SELECT count(*)::int8 FROM pg_prepared_statements \
+            WHERE statement = $1::text AND NOT from_sql \
+            /* cpg_cache_stale_keeps_admission */";
+
+        for expected_live in [0_i64, 0, 1] {
+            let live: i64 = client.query_one_scalar(SQL, &[&SQL]).await.unwrap();
+            assert_eq!(live, expected_live);
+        }
+        client.batch_execute("DEALLOCATE ALL").await.unwrap();
+
+        let live: i64 = client.query_one_scalar(SQL, &[&SQL]).await.unwrap();
+        assert_eq!(live, 1, "stale admitted SQL returned to probation");
+        assert_eq!(prepared_statement_names(&client, SQL).await.len(), 1);
+    })
+    .await
+    .expect("stale-admission claim test exceeded its 10 second deadline");
 }
 
 #[compio::test]
