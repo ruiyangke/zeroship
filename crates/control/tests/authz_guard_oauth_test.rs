@@ -36,11 +36,7 @@ const PLATFORM_KID: &str = "platform-control-authz-kid";
 const PLATFORM_KEY_SEED: u8 = 31;
 
 fn db_url() -> String {
-    zeroship_core::config::test_database_url_opt()
-        .filter(|u| !u.trim().is_empty())
-        .unwrap_or_else(|| {
-            "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()
-        })
+    crate::common::require_control_db()
 }
 
 fn auth_role_db_url(database_url: &str) -> String {

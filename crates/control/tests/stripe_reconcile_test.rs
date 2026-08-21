@@ -10,7 +10,7 @@
 //! `Stripe-Version` headers, the HTTP round-trip and the JSON parse are all exercised end to
 //! end. The reconcile core (`stripe_reconcile::tick_with`) runs against a live, migrated
 //! Postgres (a configured test database, `zeroship_core::config::test_database_url_opt`;
-//! silent skip otherwise) with real `invoices` / `refunds` /
+//! the run refuses otherwise) with real `invoices` / `refunds` /
 //! `billing_disputes` / `billing_provider_refs` / `billing_reconciliation_findings` rows.
 //!
 //! The required cases (each seeds its OWN creator + globally-unique Stripe ids, so the

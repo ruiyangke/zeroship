@@ -197,11 +197,7 @@ mod live_db_tests {
     use super::*;
 
     async fn pg() -> compio_postgres::Client {
-        let db_url = zeroship_core::config::test_database_url_opt()
-            .filter(|u| !u.trim().is_empty())
-            .unwrap_or_else(|| {
-                "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()
-            });
+        let db_url = crate::test_live_db::require();
         let (client, conn) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
             .await
             .expect("pg connect");

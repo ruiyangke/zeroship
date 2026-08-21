@@ -4,7 +4,7 @@
 //!
 //! FAITHFUL by construction: every assertion runs against a live, migrated Postgres
 //! (a configured test database, `zeroship_core::config::test_database_url_opt`;
-//! silent skip otherwise) and exercises the REAL paths —
+//! the run refuses otherwise) and exercises the REAL paths --
 //!   * the REAL reconciler `billing_reconcile::tick_with` → `bill_creator` (so the tax
 //!     call runs INSIDE the real finalize-in-one-UPDATE and the REAL balance CHECK
 //!     `total = subtotal − credit + tax` validates the row);

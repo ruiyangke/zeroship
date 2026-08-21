@@ -5,7 +5,8 @@
 //! writes the enriched `SpendStateChange` audit row (#8). No shims.
 //!
 //! Gated on a configured test database
-//! (`zeroship_core::config::test_database_url_opt`); silent skip otherwise.
+//! (`common::require_control_db`); an absent or unmigrated one REFUSES
+//! the run.
 //! The DB must have changeset 0039 applied.
 
 use crate::common;

@@ -20,7 +20,10 @@
 //!   - savepoint depth cap (9th level → `savepoint_depth_exceeded`);
 //!   - tx-view is collections-only (no `commit`/`rollback`).
 //!
-//! Requires: `docker start pg-test` (Postgres on port 5434).
+//! Requires: the test PostgreSQL named by the overlay
+//! (`deploy/ops/zeroship.test.toml`, written by
+//! `tests/provision_test_backends.sh`) or by `PG_TEST_URL`. There is no
+//! compiled default; see `crates/core/src/config/test_overlay.rs`.
 //! Run: `cargo test -p zeroship-plugin-db --test native_transaction -- --test-threads=1`
 //!
 //! NOTE (baseline): every test here runs `registerModel("notes", ...)`
@@ -48,8 +51,7 @@ use zeroship_runtime::runtime::Runtime;
 use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, SettledFetch};
 
 fn pg_url() -> String {
-    zeroship_core::config::test_database_url_opt()
-        .unwrap_or_else(|| "postgres://postgres:test@localhost:5434/postgres".to_string())
+    zeroship_core::config::test_database_url()
 }
 
 thread_local! {

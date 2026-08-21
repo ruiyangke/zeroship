@@ -13,7 +13,8 @@
 //! longer exists there — the query would error.)
 //!
 //! Gated on a configured test database
-//! (`zeroship_core::config::test_database_url_opt`); silent skip otherwise.
+//! (`common::require_control_db`); an absent or unmigrated one REFUSES
+//! the run.
 
 #![allow(clippy::future_not_send)]
 
