@@ -482,6 +482,11 @@ pub enum Host {
 /// * `sslcert` - Path to the client certificate chain (PEM) for client-certificate authentication. Must be given
 ///     together with `sslkey`.
 /// * `sslkey` - Path to the private key (PEM) matching `sslcert`.
+/// * `sslpassword` - Passphrase for an encrypted PKCS#8 `sslkey`. A blank value
+///     behaves as absent, and a value is ignored when `sslkey` is unencrypted.
+/// * `sslcrl` - Path to a PEM certificate revocation list used while verifying
+///     the server certificate. As in libpq, a missing or unreadable file has no
+///     effect.
 /// * `host` - The host to connect to. On Unix platforms, if the host starts with a `/` character it is treated as the
 ///     path to the directory containing Unix domain sockets. Otherwise, it is treated as a hostname. Multiple hosts
 ///     can be specified, separated by commas. Each host will be tried in turn when connecting. Required if connecting
@@ -599,6 +604,8 @@ pub struct Config {
     pub(crate) ssl_root_cert: SslRootCert,
     pub(crate) ssl_cert: Option<String>,
     pub(crate) ssl_key: Option<String>,
+    pub(crate) ssl_password: Option<Vec<u8>>,
+    pub(crate) ssl_crl: Option<String>,
     pub(crate) host: Vec<Host>,
     pub(crate) hostaddr: Vec<IpAddr>,
     pub(crate) port: Vec<u16>,
@@ -635,6 +642,8 @@ impl Config {
             ssl_root_cert: SslRootCert::Unset,
             ssl_cert: None,
             ssl_key: None,
+            ssl_password: None,
+            ssl_crl: None,
             host: vec![],
             hostaddr: vec![],
             port: vec![],
@@ -779,7 +788,7 @@ impl Config {
 
     /// Sets the trust anchors used to verify the server's certificate.
     ///
-    /// Defaults to [`SslRootCert::System`].
+    /// Defaults to [`SslRootCert::Unset`].
     pub fn ssl_root_cert(&mut self, ssl_root_cert: SslRootCert) -> &mut Config {
         self.ssl_root_cert = ssl_root_cert;
         self
@@ -812,6 +821,37 @@ impl Config {
     /// Gets the path to the client private key, if one has been set.
     pub fn get_ssl_key(&self) -> Option<&str> {
         self.ssl_key.as_deref()
+    }
+
+    /// Sets the passphrase used to decrypt an encrypted PKCS#8 client key.
+    ///
+    /// A blank passphrase behaves as though none was supplied. The value is
+    /// ignored when [`Config::ssl_key`] names an unencrypted key.
+    pub fn ssl_password<T>(&mut self, ssl_password: T) -> &mut Config
+    where
+        T: AsRef<[u8]>,
+    {
+        self.ssl_password = Some(ssl_password.as_ref().to_vec());
+        self
+    }
+
+    /// Gets the client private-key passphrase, if one has been set.
+    pub fn get_ssl_password(&self) -> Option<&[u8]> {
+        self.ssl_password.as_deref()
+    }
+
+    /// Sets the PEM certificate revocation list used for server verification.
+    ///
+    /// A blank path behaves as though none was supplied. libpq also ignores a
+    /// CRL file that does not exist or cannot be loaded.
+    pub fn ssl_crl(&mut self, ssl_crl: impl Into<String>) -> &mut Config {
+        self.ssl_crl = Some(ssl_crl.into());
+        self
+    }
+
+    /// Gets the certificate revocation list path, if one has been set.
+    pub fn get_ssl_crl(&self) -> Option<&str> {
+        self.ssl_crl.as_deref()
     }
 
     /// Adds a host to the configuration.
@@ -1119,6 +1159,12 @@ impl Config {
                 }
                 self.ssl_key(value);
             }
+            "sslpassword" => {
+                self.ssl_password(value);
+            }
+            "sslcrl" => {
+                self.ssl_crl(value);
+            }
             "host" => {
                 for host in value.split(',') {
                     self.host(host);
@@ -1368,7 +1414,7 @@ impl FromStr for Config {
     }
 }
 
-// Omit password from debug output
+// Omit passwords from debug output.
 impl fmt::Debug for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         struct Redaction {}
@@ -1391,6 +1437,11 @@ impl fmt::Debug for Config {
             .field("ssl_root_cert", &self.ssl_root_cert)
             .field("ssl_cert", &self.ssl_cert)
             .field("ssl_key", &self.ssl_key)
+            .field(
+                "ssl_password",
+                &self.ssl_password.as_ref().map(|_| Redaction {}),
+            )
+            .field("ssl_crl", &self.ssl_crl)
             .field("host", &self.host)
             .field("hostaddr", &self.hostaddr)
             .field("port", &self.port)
@@ -2003,8 +2054,9 @@ mod tests {
     }
 
     #[test]
-    fn tls_file_parameters_are_recognised() {
-        let config = "host=h sslrootcert=/etc/ca.pem sslcert=/etc/c.pem sslkey=/etc/k.pem"
+    fn tls_file_and_secret_parameters_are_recognised() {
+        let config = "host=h sslrootcert=/etc/ca.pem sslcert=/etc/c.pem sslkey=/etc/k.pem \
+                      sslpassword=key-secret sslcrl=/etc/root.crl"
             .parse::<Config>()
             .unwrap();
         assert_eq!(
@@ -2013,6 +2065,22 @@ mod tests {
         );
         assert_eq!(config.get_ssl_cert(), Some("/etc/c.pem"));
         assert_eq!(config.get_ssl_key(), Some("/etc/k.pem"));
+        assert_eq!(config.get_ssl_password(), Some(b"key-secret".as_slice()));
+        assert_eq!(config.get_ssl_crl(), Some("/etc/root.crl"));
+
+        let debug = format!("{config:?}");
+        assert!(
+            !debug.contains("key-secret"),
+            "Debug leaked sslpassword: {debug}"
+        );
+
+        let mut built = Config::new();
+        built
+            .ssl_password(b"built-secret")
+            .ssl_crl("/tmp/built.crl");
+        assert_eq!(built.get_ssl_password(), Some(b"built-secret".as_slice()));
+        assert_eq!(built.get_ssl_crl(), Some("/tmp/built.crl"));
+        assert!(!format!("{built:?}").contains("built-secret"));
     }
 
     /// `system` is the one `sslrootcert` value that is a keyword rather than a
@@ -2041,15 +2109,13 @@ mod tests {
         assert!(SslRootCert::File("/ca.pem".into()).is_configured());
     }
 
-    /// The recognised-key set stays closed: a plausible neighbour of the three
-    /// keys added above is still an error, not a silently ignored parameter.
-    /// libpq has `sslpassword` and `sslcrl`; this driver does not.
+    /// The recognised-key set stays closed: a plausible misspelling remains an
+    /// error after adding the adjacent libpq parameters.
     #[test]
     fn unknown_ssl_parameters_are_still_rejected() {
         for s in [
-            "host=h sslpassword=hunter2",
-            "host=h sslcrl=/etc/crl.pem",
             "host=h sslrootcrt=/etc/ca.pem",
+            "host=h sslpassphrase=secret",
         ] {
             let err = s.parse::<Config>().err().unwrap_or_else(|| {
                 panic!("{s} parsed, so an unrecognised parameter is being ignored")
@@ -2077,6 +2143,16 @@ mod tests {
                 .err()
                 .unwrap_or_else(|| panic!("{s} parsed, so an empty path reads as absent"));
         }
+    }
+
+    /// libpq treats blank sslpassword and sslcrl values as absent at TLS setup
+    /// time. Preserve the parsed values so callers can still distinguish an
+    /// explicitly blank setting from one that was never supplied.
+    #[test]
+    fn empty_sslpassword_and_sslcrl_parse_but_have_no_tls_effect() {
+        let config = "host=h sslpassword='' sslcrl=''".parse::<Config>().unwrap();
+        assert_eq!(config.get_ssl_password(), Some(b"".as_slice()));
+        assert_eq!(config.get_ssl_crl(), Some(""));
     }
 
     #[test]
