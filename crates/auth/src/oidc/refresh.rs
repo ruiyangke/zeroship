@@ -33,7 +33,7 @@ const FAMILY_IDLE_DAYS: i64 = 7;
 const FAMILY_ABSOLUTE_DAYS: i64 = 30;
 const IDEM_WINDOW_SECS: i64 = 30;
 const IDEM_AAD_PREFIX: &[u8] = b"zs:auth:refresh_idem:v1\0";
-const REFRESH_POOL_CONNECTION_TIMEOUT_SECS: u64 = 30;
+const REFRESH_POOL_ACQUIRE_TIMEOUT_SECS: u64 = 30;
 
 thread_local! {
     static REFRESH_POOLS: RefCell<HashMap<RefreshPoolKey, Rc<Pool>>> =
@@ -109,7 +109,7 @@ impl RefreshSessionPool {
         pool_config
             .max_size(self.inner.pool_size)
             .min_idle(1)
-            .connection_timeout(Duration::from_secs(REFRESH_POOL_CONNECTION_TIMEOUT_SECS));
+            .acquire_timeout(Duration::from_secs(REFRESH_POOL_ACQUIRE_TIMEOUT_SECS));
         let pool = Rc::new(
             Pool::connect_with_pool_config(&self.inner.db_url, pool_config).await?,
         );

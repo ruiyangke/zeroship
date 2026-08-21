@@ -1079,7 +1079,7 @@ impl Config {
     /// TCP/TLS setup, startup, and authentication),
     /// [`crate::PoolConfig::command_timeout`] (clock 1: a whole pooled command
     /// plus `CancelRequest` recovery), or
-    /// [`crate::PoolConfig::connection_timeout`] (clock 5: pool acquisition).
+    /// [`crate::PoolConfig::acquire_timeout`] (clock 5: pool acquisition).
     /// It also does not replace `tcp_user_timeout`, which bounds how long
     /// transmitted TCP data may remain unacknowledged rather than silence from
     /// a connected peer.

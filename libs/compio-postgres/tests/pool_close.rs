@@ -24,7 +24,7 @@ fn config(max_size: usize, min_idle: usize) -> PoolConfig {
     config
         .max_size(max_size)
         .min_idle(min_idle)
-        .connection_timeout(Duration::from_secs(30))
+        .acquire_timeout(Duration::from_secs(30))
         .validation_bypass(Duration::from_secs(60));
     config
 }
