@@ -298,6 +298,62 @@ _e2e_secret_file() {
   chmod 600 "$path"
 }
 
+# zs_platform_migrate <migrate-bin> <dsn> [flag ...]
+#
+# Run the `zeroship-platform-migrate` one-shot with the DSN off the argv.
+#
+# THE ONLY WAY TO GIVE THAT BINARY A DSN IS A PATH. The `--database-url` value
+# flag was deleted: the DSN these harnesses pass is the postgres SUPERUSER one,
+# and an argument list is public to every process in the PID namespace and to
+# `ps` for every user on the box. The binary declares the DSN `Secret<String>`,
+# and the
+# config generator emits exactly one carrier for that class, `--<name>-file`.
+#
+# WHERE THE FILE LIVES, AND WHO REMOVES IT. Creation and removal are both in
+# THIS function, so the lifetime is one invocation and no caller has to
+# remember a cleanup step or install a trap:
+#
+#   - PER RUN, never a fixed path. `mktemp` picks the name, so two harnesses -
+#     or two agents running the SAME harness - cannot collide on it. A shared
+#     `$WORK/migrate-dsn` would be the same defect this repo has fixed for
+#     ports, scratch databases and state directories.
+#   - 0600, set EXPLICITLY. `mktemp` already creates at 0600, but the mode is
+#     not incidental here: `read_secret_file` (crates/core/src/config/
+#     secrets.rs) calls `enforce_owner_only` and REFUSES any file with a bit set
+#     in 0o077, exiting before it connects. Stating the chmod means a future
+#     edit that changes how the file is created cannot silently produce a
+#     world-readable one that fails as "the migrate binary is broken".
+#   - Removed unconditionally after the child exits, on the failure arm too,
+#     and the child's exit status is what this function returns.
+#
+# DOES NOT COVER: a harness SIGKILLed between the write and the `rm` leaves one
+# 0600 file behind in $TMPDIR. That is a leaked file readable only by the user
+# who ran the suite, which is strictly less exposure than the argv form gave
+# every user on the box for the whole life of every run.
+#
+# The DSN is passed as an ARGUMENT to this function and never through the
+# environment: an exported name would be inherited by every other child the
+# harness spawns, which is the exposure the flag deletion exists to remove.
+zs_platform_migrate() {
+  if [ "$#" -lt 2 ]; then
+    echo "zs_platform_migrate: usage: zs_platform_migrate <migrate-bin> <dsn> [flag ...]" >&2
+    return 2
+  fi
+  local bin="$1" dsn="$2" dsn_file rc
+  shift 2
+  if [ -z "$dsn" ]; then
+    echo "zs_platform_migrate: refusing to write an empty DSN file" >&2
+    return 2
+  fi
+  dsn_file="$(mktemp "${TMPDIR:-/tmp}/zeroship-migrate-dsn.XXXXXXXX")" || return 1
+  chmod 600 "$dsn_file" || { rm -f "$dsn_file"; return 1; }
+  printf '%s' "$dsn" > "$dsn_file" || { rm -f "$dsn_file"; return 1; }
+  "$bin" --database-url-file "$dsn_file" "$@"
+  rc=$?
+  rm -f "$dsn_file"
+  return "$rc"
+}
+
 # e2e_export_database_urls <dsn>
 #
 # One admin DSN, seven canonical names. The services' database roles are DISTINCT

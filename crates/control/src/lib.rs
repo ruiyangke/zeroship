@@ -4,6 +4,14 @@
 //! registry + env store + handler types. The `zeroship-control` binary
 //! (`src/main.rs`) is a thin wrapper around these modules.
 
+// `cron::workflow_engine::register_run_timer_in_tx` is a long async fn whose
+// generated future nests deeply enough that computing its layout exceeds
+// rustc's default query depth: on rustc 1.94.0 this crate does not compile at
+// all without the raise, and the error names this crate and this function.
+// `tests/workflow_engine_test.rs` has carried the same line for the same
+// reason; the LIBRARY needs it too.
+#![recursion_limit = "256"]
+
 pub mod account_status;
 pub mod api;
 pub mod app_oauth_client;

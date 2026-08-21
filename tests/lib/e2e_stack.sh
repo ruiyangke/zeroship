@@ -250,9 +250,8 @@ stack_pg_up() {
   fi
 
   local mig_log="$WORK/migrate.log"
-  if "$E2E_BIN/zeroship-platform-migrate" \
+  if zs_platform_migrate "$E2E_BIN/zeroship-platform-migrate" "postgres://postgres:zeroship@localhost:$PG_PORT/zeroship" \
       --migrations-dir "$E2E_ROOT/db/migrations-ts" \
-      --database-url "postgres://postgres:zeroship@localhost:$PG_PORT/zeroship" \
       --project-schema zeroship --project-id zeroship > "$mig_log" 2>&1; then
     _stk_ok "platform migrations applied cleanly from scratch (zeroship-platform-migrate)"
   else

@@ -103,7 +103,7 @@ docker exec "$PG_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 \
     < "$ROOT/deploy/ops/postgres-init.sql" >/dev/null 2>&1
 
 DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"
-if "$BIN/zeroship-platform-migrate" --database-url "$DBURL" \
+if zs_platform_migrate "$BIN/zeroship-platform-migrate" "$DBURL" \
     --migrations-dir "$ROOT/db/migrations-ts" \
     --project-schema zeroship --project-id zeroship > "$WORK/platmig.log" 2>&1; then
   pass "platform migrations applied from scratch"

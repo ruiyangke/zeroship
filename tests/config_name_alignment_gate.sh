@@ -192,9 +192,12 @@ compose_service_env() {
 # `next`s past everything else. Every flag and every VALUE in a command block is
 # therefore invisible to checks 6 and 6b, which read `environment:` alone. That
 # blind spot held a live credential: the platform-migrate one-shot passed a
-# postgres SUPERUSER DSN as `--database-url <dsn>`, readable through `docker
-# inspect`, `docker ps --no-trunc` and /proc/<pid>/cmdline for anything in that
-# PID namespace. Nothing failed, because nothing looked.
+# postgres SUPERUSER DSN through the value form of `--database-url`, readable
+# through `docker inspect`, `docker ps --no-trunc` and /proc/<pid>/cmdline for
+# anything in that PID namespace. Nothing failed, because nothing looked.
+# That flag no longer exists - the one-shot declares its DSN `Secret<String>`,
+# which generates only a `-file` carrier - so this extractor now guards the
+# shape rather than that one instance of it.
 #
 # A service with NO `environment:` block emits no rows from `compose_service_env`
 # at all, so it was doubly unseen - which is exactly what the migrate one-shot

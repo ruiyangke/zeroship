@@ -343,12 +343,18 @@ Run platform migrations before booting services:
 
 ```bash
 cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate
+umask 077 && printf '%s' "$DATABASE_URL" > ./migrate-dsn
 ./target/release/zeroship-platform-migrate \
-  --database-url "$DATABASE_URL" \
+  --database-url-file ./migrate-dsn \
   --migrations-dir ./db/migrations-ts \
   --project-schema zeroship \
   --project-id zeroship
+rm -f ./migrate-dsn
 ```
+
+The DSN is supplied as an owner-only file, never as an argument: there is no
+`--database-url` value flag, and the reader refuses a file with any bit set in
+`0o077`.
 
 Then start `zeroship-auth` with the variables above. On boot it publishes the
 active public JWK metadata from `AUTH_SIGNING_KEY_FILE` into Postgres and serves

@@ -95,6 +95,9 @@ pub struct FileConfig {
     /// Migration-service settings.
     #[serde(default)]
     pub migrated: MigratedSection,
+    /// Platform-schema migrate one-shot settings.
+    #[serde(default)]
+    pub platform_migrate: PlatformMigrateSection,
     /// Standalone workflow-scheduler settings.
     #[serde(default)]
     pub workflow_scheduler: SchedulerSection,
@@ -275,6 +278,23 @@ pub struct MigratedSection {
     pub tmp_dir: Option<std::path::PathBuf>,
     /// Active managed ceiling version stamped into sealed profiles.
     pub policy_ceiling_version: Option<u64>,
+}
+
+/// Platform-schema migrate one-shot values supplied by the overlay.
+/// See [`ControlSection`].
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct PlatformMigrateSection {
+    /// Admin `PostgreSQL` DSN for platform DDL.
+    pub database_url: Option<String>,
+    /// Directory holding the `db/migrations-ts/*.ts` platform migrations.
+    pub migrations_dir: Option<std::path::PathBuf>,
+    /// The primary platform schema.
+    pub project_schema: Option<String>,
+    /// The advisory-lock / journal project id.
+    pub project_id: Option<String>,
+    /// Database on the same cluster that concurrent runs coordinate through.
+    pub cluster_lock_database: Option<String>,
 }
 
 /// Workflow-scheduler operational values supplied by the overlay.
