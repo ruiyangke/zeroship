@@ -253,12 +253,29 @@ pub async fn is_live(db: &Client, raw_token: &str) -> Result<bool> {
 ///
 ///   1. bumps `users.credential_version` (mirrors `users::update_password_hash`
 ///      — defense in depth for the IdP-session credential-version gate);
-///   2. writes a `(client_id, pairwise_sub)` family marker for EVERY app the
-///      user holds an identity with, drawing the `pairwise_sub` the cookie
-///      carries from `app_user_identities` (the access-token issuer and gateway
-///      session minters persist that authoritative reverse mapping). This
-///      rejects every already-live
-///      app-session cookie / wrapper token for that family from now on; and
+///   2. writes a `(client_id, sub)` family marker for every family the user
+///      holds, from the UNION of two sources: `app_user_identities` (the
+///      `pairwise_sub` an app-session cookie carries, persisted by the
+///      access-token issuer and the gateway session minters) and the live
+///      `oauth_refresh_tokens` rows (which also covers the `zeroship-cli`
+///      platform family). This rejects every already-live app-session cookie /
+///      wrapper token for those families from now on; and
+///
+///      **The UNION is load-bearing, not tidying.** These were two sibling
+///      CTEs, each its own `INSERT ... ON CONFLICT (client_id, sub) DO UPDATE`.
+///      For a non-brokered app client the two sources carry the SAME pair -
+///      `app_user_identities.pairwise_sub` and `oauth_refresh_tokens.sub` are
+///      both `Issuer::pairwise_subject(user_id, sector_identifier)` - and
+///      PostgreSQL refuses to let one command upsert a key twice:
+///      `ON CONFLICT DO UPDATE command cannot affect row a second time`. That
+///      error aborts the WHOLE statement, so the password change, the token
+///      consume, the anchor revoke and both markers all rolled back and the
+///      handler returned "internal error". The reset silently did NOTHING and
+///      every session survived. It was the DEFAULT path, not an edge: the
+///      gateway always requests `offline_access`, so one app login writes both
+///      rows. Deduplicating the two sources into ONE insert is what makes the
+///      key unique within the command. Regression:
+///      `reset_still_applies_when_user_holds_a_refresh_token_for_the_same_app`.
 ///   3. revokes (`revoked_at = NOW()`) every `app_session_anchors` row for the
 ///      user, so `anchors::read_live` returns `None` and `?mint=1` fails closed
 ///      — no fresh cookie can be minted to outrun the family marker.
@@ -333,38 +350,33 @@ pub async fn complete(
                    AND ml.user_id = u.id \
                    AND ml.consumed_at IS NULL \
                  RETURNING u.id AS user_id, u.email AS email \
-             ), wrapper_family_markers AS ( \
-                 INSERT INTO zeroship.token_revocations (client_id, sub, revoked_after) \
-                 SELECT aui.app_client_id, aui.pairwise_sub, NOW() \
-                 FROM zeroship.app_user_identities aui \
-                 JOIN consumed c ON c.user_id = aui.global_user_id \
-                 ON CONFLICT (client_id, sub) \
-                   DO UPDATE SET revoked_after = \
-                     GREATEST(zeroship.token_revocations.revoked_after, EXCLUDED.revoked_after) \
              ), revoked_anchors AS ( \
                  UPDATE zeroship.app_session_anchors a \
                  SET revoked_at = NOW() \
                  FROM consumed c \
                  WHERE a.global_user_id = c.user_id \
                    AND a.revoked_at IS NULL \
-             ), refresh_families AS ( \
-                 SELECT DISTINCT ort.client_id, ort.sub, NOW() AS revoked_after \
+             ), family_targets AS ( \
+                 SELECT aui.app_client_id AS client_id, aui.pairwise_sub AS sub \
+                 FROM zeroship.app_user_identities aui \
+                 JOIN consumed c ON c.user_id = aui.global_user_id \
+                 UNION \
+                 SELECT ort.client_id, ort.sub \
                  FROM zeroship.oauth_refresh_tokens ort \
                  JOIN consumed c ON c.user_id = ort.user_id \
                  WHERE ort.revoked_at IS NULL \
+             ), family_markers AS ( \
+                 INSERT INTO zeroship.token_revocations (client_id, sub, revoked_after) \
+                 SELECT client_id, sub, NOW() FROM family_targets \
+                 ON CONFLICT (client_id, sub) \
+                   DO UPDATE SET revoked_after = \
+                     GREATEST(zeroship.token_revocations.revoked_after, EXCLUDED.revoked_after) \
              ), refresh_revoked AS ( \
                  UPDATE zeroship.oauth_refresh_tokens ort \
                  SET revoked_at = NOW() \
                  FROM consumed c \
                  WHERE ort.user_id = c.user_id \
                    AND ort.revoked_at IS NULL \
-             ), refresh_family_markers AS ( \
-                 INSERT INTO zeroship.token_revocations (client_id, sub, revoked_after) \
-                 SELECT client_id, sub, revoked_after \
-                 FROM refresh_families \
-                 ON CONFLICT (client_id, sub) \
-                   DO UPDATE SET revoked_after = \
-                     GREATEST(zeroship.token_revocations.revoked_after, EXCLUDED.revoked_after) \
              ) \
              SELECT user_id, email FROM consumed",
             &[&token_hash.as_slice(), &PURPOSE, &password_hash, &NS_USER],
