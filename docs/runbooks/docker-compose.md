@@ -40,10 +40,16 @@ command. It defaults to the gitignored `deploy/compose/secrets` directory and
 the sibling `deploy/compose/.env` file. The deployment runbook covers custom
 paths because Compose must receive both the custom env-file and mount path.
 
-The secret directory contains exactly eight files:
+The secret directory contains exactly seven files:
 
-`gateway-signing.pem` `auth-signing.pem` `broker-secret`
+`migrate-dsn` `gateway-signing.pem` `auth-signing.pem` `broker-secret`
 `pairwise-salt` `refresh-hash-key` `refresh-idem-key`
+
+That is `secret_specs()` in `crates/cli/src/dev.rs` (six) plus `pairwise-salt`,
+which is written separately because its bytes must equal the `.env` scalar
+below. This list said "eight" and named six until 2026-08-21; the one it left
+out was `migrate-dsn`, the privileged DSN, which is also the file
+`tests/config_name_alignment_gate.sh` cited `dev.rs` as proof did not exist.
 
 The env overlay contains eight generated scalar values:
 
@@ -427,6 +433,15 @@ The privileged DSN is mounted as a file, not passed as an argument: there is no
 `--database-url` value flag, because a container's argv is published by
 `docker inspect`, `docker ps --no-trunc` and /proc/<pid>/cmdline. The file must
 be mode 0600.
+
+`migrated` mounts the SAME file and reads it through
+`ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL`, which defaults to
+`urn:zeroship:file:/etc/zeroship/secrets/migrate-dsn`. Those are the only two
+readers of a superuser credential in the deployment and they now take it from
+one place: repointing `secrets/migrate-dsn` at a real database moves both. Until
+2026-08-21 `migrated` carried its own inline superuser DSN default, so the same
+repointing moved the one-shot and silently left `migrated` provisioning against
+the in-compose Postgres.
 
 The source of truth is the committed JS DSL corpus in `db/migrations-ts/`; the
 runner records each `.ts` file to transient IR and applies that plan.

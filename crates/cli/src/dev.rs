@@ -220,16 +220,22 @@ type SecretSpec = (
     fn(&[u8]) -> Result<(), String>,
 );
 
-/// The compose `migrate` one-shot's privileged DSN.
+/// The compose deployment's privileged DSN, read by BOTH services that need
+/// one: the `migrate` one-shot (`--database-url-file`) and `migrated`'s
+/// provisioning setting (`ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL`, spelled
+/// as a `urn:zeroship:file:` reference at the same container path).
 ///
 /// COUPLED TO deploy/compose/docker-compose.yml: `postgres` there is reachable
 /// on the compose network as host `postgres`, and its `POSTGRES_PASSWORD` is
 /// the literal `zeroship`. Change either and this must change with it - which
 /// is the point of writing it down in one place instead of leaving it inline in
-/// the deploy file, where it also sat in the one-shot's ARGV.
+/// the deploy file, where it also sat in the one-shot's ARGV until 2026-08-16
+/// and in `migrated`'s `environment:` block until 2026-08-21.
 ///
 /// Written only when absent, so an operator who repoints this file at a real
-/// database keeps their value across re-runs.
+/// database keeps their value across re-runs - and, since 2026-08-21, moves
+/// BOTH readers together. While `migrated` carried its own inline default the
+/// repointing silently moved only the platform one-shot.
 const COMPOSE_MIGRATE_DSN: &str = "postgres://postgres:zeroship@postgres:5432/zeroship\n";
 
 fn generate_migrate_dsn() -> Result<Vec<u8>, String> {
