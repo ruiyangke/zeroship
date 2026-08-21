@@ -70,6 +70,7 @@ use crate::connect::{
 use crate::connect_socket::connect_socket;
 use crate::connect_tls::negotiate_tls;
 use crate::maybe_tls_stream::MaybeTlsStream;
+use crate::release::ConnectionRelease;
 use crate::tls::MakeTlsConnect;
 use crate::{Error, Socket};
 use bytes::{BufMut, BytesMut};
@@ -232,6 +233,10 @@ where
         },
     )
     .await?;
+    // Keep an owned dup before TLS wraps the descriptor. A read timeout may
+    // cancel a partially completed frame, so logical poisoning alone is not
+    // enough: the peer must observe this physical session end immediately.
+    let release = socket.release_handle();
 
     let tls_inst = tls
         .make_tls_connect(hostname.unwrap_or(""))
@@ -266,10 +271,13 @@ where
     // connection then owns.
     let (stream, parameters) = handshake_replication(stream, cfg).await?;
 
+    let mut stream = BufStream::new(stream);
+    stream.set_read_timeout(cfg.get_read_timeout().copied());
     Ok(ReplicationConnection {
-        stream: BufStream::new(stream),
+        stream,
         parameters,
         in_flight: InFlight::default(),
+        release,
     })
 }
 
@@ -308,6 +316,9 @@ pub struct ReplicationConnection<S, T> {
     parameters: HashMap<String, String>,
     /// See [`InFlight`].
     in_flight: InFlight,
+    /// Standard socket paths retain a synchronous shutdown handle so a
+    /// cancelled partial read cannot leave a live walsender behind.
+    release: Option<ConnectionRelease>,
 }
 
 /// Records that an I/O call owns the stream, so that a call which never
@@ -394,7 +405,17 @@ where
     /// Returns `{systemid, timeline, xlogpos, dbname}` per the docs.
     pub async fn identify_system(&mut self) -> Result<IdentifySystem, Error> {
         self.in_flight.enter()?;
+        self.stream.begin_read_response();
         let result = self.identify_system_inner().await;
+        self.stream.finish_read_response();
+        if result.as_ref().is_err_and(Error::is_read_timeout) {
+            // A timeout cancels a possibly partial frame read. Retrying on the
+            // same replication session would parse from an unknown boundary.
+            self.in_flight.poison();
+            if let Some(release) = &self.release {
+                release.shutdown();
+            }
+        }
         self.in_flight.leave();
         result
     }
@@ -457,6 +478,7 @@ where
         // connection whose `identify_system` was dropped must not go on to
         // start streaming on a stream that is mid-frame.
         self.in_flight.enter()?;
+        self.stream.begin_read_response();
 
         let mut cmd = String::with_capacity(128);
         cmd.push_str("START_REPLICATION SLOT \"");
@@ -485,10 +507,14 @@ where
                     // format byte). The CopyBoth channel is open after
                     // this.
                     let _ = self.stream.buf().split_to(header.body_len()).freeze();
+                    // Streaming reads arm their own budget in `next`; an idle
+                    // stream must not inherit the command's old deadline.
+                    self.stream.finish_read_response();
                     return Ok(ReplicationStream {
                         stream: self.stream,
                         lsn: LsnTracker::new(parse_lsn(opts.start_lsn).unwrap_or(0)),
                         in_flight: InFlight::default(),
+                        release: self.release,
                     });
                 }
                 ERROR_RESPONSE_TAG => {
@@ -559,6 +585,7 @@ pub struct ReplicationStream<S, T> {
     /// See [`InFlight`]. Neither [`ReplicationStream::next`] nor
     /// [`ReplicationStream::send_standby_status_update`] is cancel-safe.
     in_flight: InFlight,
+    release: Option<ConnectionRelease>,
 }
 
 /// Tracks the two distinct LSN positions a logical-replication client
@@ -664,7 +691,15 @@ where
     /// one each time round.
     pub async fn next(&mut self) -> Result<Option<ReplicationMessage>, Error> {
         self.in_flight.enter()?;
+        self.stream.begin_read_response();
         let result = self.next_inner().await;
+        self.stream.finish_read_response();
+        if result.as_ref().is_err_and(Error::is_read_timeout) {
+            self.in_flight.poison();
+            if let Some(release) = &self.release {
+                release.shutdown();
+            }
+        }
         self.in_flight.leave();
         result
     }
@@ -1699,6 +1734,7 @@ mod tests {
     use pgoutput::{PgOutputMessage, TupleColumn};
     use std::error::Error as _;
     use std::future;
+    use std::time::Duration;
 
     fn startup_frame(tag: u8, body: &[u8]) -> Vec<u8> {
         let mut frame = Vec::with_capacity(5 + body.len());
@@ -2673,6 +2709,7 @@ mod tests {
             stream: BufStream::new(MaybeTlsStream::Raw(ScriptedPeer { unread: bytes })),
             lsn: LsnTracker::new(0),
             in_flight: InFlight::default(),
+            release: None,
         }
     }
 
@@ -2916,12 +2953,15 @@ mod tests {
             .await
             .expect("connect to the listener");
         let server = accepting.await.expect("accept task");
+        let release = ConnectionRelease::dup_of(&client)
+            .expect("duplicate replication timeout release handle");
 
         (
             ReplicationStream {
                 stream: BufStream::new(MaybeTlsStream::Raw(client)),
                 lsn: LsnTracker::new(0),
                 in_flight: InFlight::default(),
+                release: Some(release),
             },
             server,
         )
@@ -2964,6 +3004,56 @@ mod tests {
         assert!(
             err.is_cancelled(),
             "the refusal must be reported as a cancellation, got: {err}"
+        );
+    }
+
+    /// A configured socket-read deadline is terminal for CopyBoth framing.
+    /// The first call must retain its specific timeout classification; every
+    /// later call must refuse rather than try to resume the possibly partial
+    /// frame.
+    #[compio::test]
+    async fn a_read_timeout_poisons_the_replication_stream() {
+        let (mut stream, mut peer) = silent_peer().await;
+        stream
+            .stream
+            .set_read_timeout(Some(Duration::from_millis(75)));
+
+        let first = compio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("replication read exceeded its outer watchdog")
+            .expect_err("silent replication peer produced a frame");
+        assert!(
+            first.is_read_timeout(),
+            "replication lost the socket-read timeout classification: {first}"
+        );
+
+        let disconnected = compio::time::timeout(Duration::from_secs(2), async {
+            let compio::buf::BufResult(result, _) = peer.read(vec![0u8; 1]).await;
+            result
+        })
+        .await
+        .expect("timed-out replication socket remained open past its watchdog");
+        assert!(
+            matches!(disconnected, Ok(0))
+                || disconnected.as_ref().is_err_and(|error| {
+                    matches!(
+                        error.kind(),
+                        std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::ConnectionAborted
+                            | std::io::ErrorKind::BrokenPipe
+                            | std::io::ErrorKind::NotConnected
+                    )
+                }),
+            "replication timeout did not physically retire the socket: {disconnected:?}"
+        );
+
+        let second = stream
+            .next()
+            .await
+            .expect_err("timed-out replication framing was reused");
+        assert!(
+            second.is_cancelled(),
+            "timed-out replication stream did not refuse reuse: {second}"
         );
     }
 

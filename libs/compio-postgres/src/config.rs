@@ -651,6 +651,9 @@ pub struct Config {
     pub(crate) hostaddr: Vec<IpAddr>,
     pub(crate) port: Vec<u16>,
     pub(crate) connect_timeout: Option<Duration>,
+    /// Programmatic-only post-startup socket-read policy. It is deliberately
+    /// absent from the libpq connection-string parser.
+    pub(crate) read_timeout: Option<Duration>,
     pub(crate) tcp_user_timeout: Option<Duration>,
     pub(crate) keepalives: bool,
     #[cfg(not(target_arch = "wasm32"))]
@@ -693,6 +696,7 @@ impl Config {
             hostaddr: vec![],
             port: vec![],
             connect_timeout: None,
+            read_timeout: None,
             tcp_user_timeout: None,
             keepalives: true,
             #[cfg(not(target_arch = "wasm32"))]
@@ -1058,6 +1062,36 @@ impl Config {
     /// `connect_timeout` method.
     pub fn get_connect_timeout(&self) -> Option<&Duration> {
         self.connect_timeout.as_ref()
+    }
+
+    /// Sets the maximum period in which a successfully flushed protocol
+    /// response may make no socket-read progress. Defaults to no limit.
+    ///
+    /// This is clock (3), the post-startup socket-read inactivity deadline.
+    /// It is armed only while the connection owes a protocol response, resets
+    /// after each successful underlying read, and retires the connection on
+    /// expiry because a cancelled, possibly partial read cannot be resumed.
+    /// It is programmatic connection policy, not a libpq parameter, so the
+    /// connection-string parser intentionally does not accept a spelling for
+    /// it.
+    ///
+    /// This does not replace [`Config::connect_timeout`] (clock 4: resolution,
+    /// TCP/TLS setup, startup, and authentication),
+    /// [`crate::PoolConfig::command_timeout`] (clock 1: a whole pooled command
+    /// plus `CancelRequest` recovery), or
+    /// [`crate::PoolConfig::connection_timeout`] (clock 5: pool acquisition).
+    /// It also does not replace `tcp_user_timeout`, which bounds how long
+    /// transmitted TCP data may remain unacknowledged rather than silence from
+    /// a connected peer.
+    pub fn read_timeout(&mut self, read_timeout: Duration) -> &mut Config {
+        self.read_timeout = Some(read_timeout);
+        self
+    }
+
+    /// Gets the socket-read inactivity deadline, if one was configured with
+    /// [`Config::read_timeout`].
+    pub fn get_read_timeout(&self) -> Option<&Duration> {
+        self.read_timeout.as_ref()
     }
 
     /// Sets the TCP user timeout.
@@ -1546,10 +1580,11 @@ impl Config {
     /// Connects to a PostgreSQL database over an arbitrary stream.
     ///
     /// Uses `user`, `password`, `dbname`, `options`, `application_name`,
-    /// `connect_timeout`, `statement_cache_capacity`, and `require_auth`; all
-    /// other settings are ignored. The timeout starts with TLS negotiation on
-    /// the supplied stream and covers startup and authentication. It cannot
-    /// cover the caller's work to open that stream.
+    /// `connect_timeout`, `read_timeout`, `statement_cache_capacity`, and
+    /// `require_auth`; all other settings are ignored. The connect timeout
+    /// starts with TLS negotiation on the supplied stream and covers startup
+    /// and authentication. It cannot cover the caller's work to open that
+    /// stream. The read timeout is installed only after startup succeeds.
     ///
     /// One exception, and it is the reason this is not simply "sslmode is
     /// ignored": the caller owns the stream, so this entry point cannot open a
@@ -1635,6 +1670,7 @@ impl fmt::Debug for Config {
             .field("hostaddr", &self.hostaddr)
             .field("port", &self.port)
             .field("connect_timeout", &self.connect_timeout)
+            .field("read_timeout", &self.read_timeout)
             .field("tcp_user_timeout", &self.tcp_user_timeout)
             .field("keepalives", &self.keepalives);
 
