@@ -441,22 +441,41 @@ passed="$(grep -oE '^test result: ok\. [0-9]+ passed' "$SUITE_LOG" \
 # Raise it deliberately when the suite grows. A fixed floor gets looser with
 # every test added, which is the wrong direction for a guard against coverage
 # loss.
-# 660 -> 670 for the zeroship-migrate-adapter group added above. The +10 is the
-# measured contribution of that group's PASSING targets, counted the way the
-# tally below counts (`test result: ok.` lines only), against the same database
-# this script provisions:
-#     lib unittests                2
-#     bin zeroship-platform-migrate 5
-#     author_and_apply_pg           2
-#     smoke_apply_pg                1
-# `platform_migrate` contributes 0 to this number because it is RED - 3 passed,
-# 5 failed, every one of the five on `PLATFORM_MIGRATION_FILES = 22`
-# (crates/zeroship-migrate-adapter/tests/platform_migrate.rs:42) against the 23
-# files now in db/migrations-ts. That constant already fails the DB-FREE test in
-# the same binary, which the `rust` job runs today, so the red is not something
-# this group introduced. When it is corrected, raise this floor by a further 8
-# rather than treating the gap as slack.
-BILLING_MIN_PASSED=670
+# 660 -> 670 for the zeroship-migrate-adapter group added above, on the +10 that
+# group's then-passing targets contributed.
+#
+# 670 -> 758, MEASURED 2026-08-20 on the first run of this script that ever
+# reached its end: 816 passed, 0 failed, WITHOUT REDPANDA_BROKERS, so 816 is
+# still the lower of the two legitimate configurations. 758 is ~7 percent under
+# it, the margin this file and the auth gate both carry.
+#
+#   control  264 + 16 + 358 + 19 + 1 + 56     = 714
+#   migrated 30 + 5 + 25 + 3 + 3              =  66
+#   adapter  6 + 5 + 2 + 15 + 1               =  29
+#   metering 7                                =   7
+#
+# TWO REASONS THE GAP WAS 146 AND NOT SLACK, and the note that stood here
+# asserted the second one is why it is worth spelling out:
+#
+#   - `platform_migrate` was RED on `PLATFORM_MIGRATION_FILES = 22`, so this
+#     note said the adapter group contributed 10 and told the next reader to
+#     "raise this floor by a further 8" once that was fixed. The constant was
+#     DELETED (the file asserts by name now, see its header), the target is
+#     green, and the group contributes 29 - so the instruction was for a number
+#     that no longer describes anything. A comment that names a deleted constant
+#     reads as a live measurement.
+#   - The gate itself had never run to its end. It aborted inside
+#     `zeroship-control --test main` on a stack overflow, so no run since
+#     2026-08-08 produced a total to compare 670 against.
+#
+# WHAT THIS FLOOR DOES NOT CATCH, measured on the runs above rather than
+# reasoned: it did not catch that abort and 758 would not have either. The
+# aborting run tallied 791, because a binary that dies prints no
+# `test result: ok.` line and its tests are simply absent from a total that is
+# still large. What caught it was `run_group`'s exit status. A floor bounds how
+# much can go missing QUIETLY; it is not a second opinion on a group that fails
+# loudly, and 758 tolerates the loss of any group up to 58 tests.
+BILLING_MIN_PASSED=758
 if [ "$passed" -lt "$BILLING_MIN_PASSED" ]; then
   echo "FAIL: only ${passed} billing tests passed, fewer than the ${BILLING_MIN_PASSED} this gate expects." >&2
   echo "A group that silently stopped running is indistinguishable from a group that passed." >&2
