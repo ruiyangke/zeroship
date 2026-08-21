@@ -7286,6 +7286,7 @@ dependencies = [
  "zeroize",
  "zeroship-core",
  "zeroship-metering",
+ "zeroship-migrate-adapter",
  "zeroship-plugin-workflow",
  "zeroship-runtime",
  "zeroship-runtime-macros",

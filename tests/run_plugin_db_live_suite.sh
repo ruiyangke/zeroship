@@ -91,6 +91,15 @@ SUITE_LOG="${SUITE_LOG:-${TMPDIR:-/tmp}/plugin-db-live.log}"
 # MEASURED on a fresh database provisioned per the requirements above:
 #   integration         103 passed / 0 failed / 8 ignored / 0 skips
 #   native_transaction    8 passed / 0 failed / 0 ignored / 0 skips
+# Those two lines are the 2026-08-18 reading and are left as read. `integration`
+# now reports 6 ignored, not 8, and only ONE of the two is this change: removing
+# `#[ignore]` from `parity_matrix_pg_matches_sqlite_projection` (accounted at the
+# floor below). The other had already gone by 2026-08-21 -- the tree holds seven
+# `#[ignore]` in this file before that removal, counted by grep, so the target
+# lost one between the two dates and nothing recorded it. Treat the passed/failed
+# columns of the old reading the same way: re-measure rather than adjust.
+# The 6 that remain are the pgvector (3), PostGIS (1) and pg_dump (2)
+# prerequisites named above.
 # The floor is the SUM, 111, and it is the measured number rather than a round
 # one below it: these binaries have a fixed test count, so any shortfall means a
 # target stopped running rather than a test getting faster. Raise it
@@ -117,7 +126,14 @@ SUITE_LOG="${SUITE_LOG:-${TMPDIR:-/tmp}/plugin-db-live.log}"
 # floor ensures all three run in CI rather than only when invoked by hand.
 # The three real-Runtime unmigrated-path tests added to `native_transaction`
 # raise the measured full-suite census from 113 to 116.
-PLUGIN_DB_MIN_PASSED=116
+#   +1  parity_matrix_pg_matches_sqlite_projection, 2026-08-21. It is not a NEW
+#       test - it has been in `integration` all along, `#[ignore]`d with the
+#       reason "default gate runs the sqlite leg only", which named THIS script
+#       and was wrong about it: nothing here passes `--ignored`, so the one job
+#       that could run it never did, and it sat broken from the 2026-08-10
+#       registerModel cutover until someone read it. Removing the attribute is
+#       what puts it in this count.
+PLUGIN_DB_MIN_PASSED=117
 
 # Only postgis. An EMPTY allowlist would be wrong in the other direction:
 # `grep -E ''` matches every line, so zs_skip_lines branches on empty rather
