@@ -817,10 +817,18 @@ impl Config {
     /// transactions through such a pooler may use different sessions.
     ///
     /// If `PostgreSQL` reports that a cached statement's result type changed
-    /// or that its server-side name is missing, that operation returns the
-    /// server's `0A000` or `26000` error and evicts the stale entry. After any
-    /// required transaction recovery, the next call for the same SQL prepares
-    /// its replacement.
+    /// (`0A000` from its plan-cache routines) or that its server-side name is
+    /// missing (`26000`), the stale entry is evicted and the operation is
+    /// prepared and run again, once. The caller sees the result, not the
+    /// error. A second consecutive failure propagates.
+    ///
+    /// Two limits are worth knowing before enabling this. Inside a transaction
+    /// nothing is retried, because `0A000` has already aborted it, so the error
+    /// propagates and the transaction still needs recovery. And `26000` is
+    /// matched on its SQLSTATE alone, which cannot prove the statement did no
+    /// work: a function that performs non-transactional work and then raises
+    /// `26000` would be run twice. No row reaches the caller before the retry
+    /// decision, so a retry never duplicates rows -- only such side effects.
     pub const fn statement_cache_capacity(&mut self, capacity: usize) -> &mut Config {
         self.statement_cache_capacity = capacity;
         self
