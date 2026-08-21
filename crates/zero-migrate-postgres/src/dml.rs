@@ -4,6 +4,7 @@ use zero_migrate_backend::dml::{self, DmlError};
 use zero_migrate_backend::error::IrLowerError;
 use zero_migrate_backend::renderer::{Capability, DialectSupports, DmlRenderer};
 use zero_migrate_backend::step::BindValue;
+use zero_migrate_ir::backend::BackendDescriptor;
 use zero_migrate_ir::dialect::SqlDialect;
 use zero_migrate_ir::expr::{CastTarget, ExtractField, ScalarFn};
 use zero_migrate_ir::ir::TableRef;
@@ -30,8 +31,8 @@ fn quote_engine_ident_as_dml(what: &'static str, ident: &str) -> Result<String, 
 }
 
 impl DmlRenderer for PostgresDmlRenderer {
-    fn dialect(&self) -> SqlDialect {
-        DIALECT
+    fn descriptor(&self) -> &'static BackendDescriptor {
+        &zero_migrate_ir::backend::POSTGRES_DESCRIPTOR
     }
 
     fn quote_ident(&self, ident: &str) -> String {

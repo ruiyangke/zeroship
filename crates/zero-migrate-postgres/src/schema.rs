@@ -4,7 +4,7 @@ use zero_migrate_backend::schema::{
     build_encryption_sentinel_comments, build_mask_sentinel_comments, char_len,
     decimal_precision_scale, def_to_pg_type, max_length, quote_ident_for_backend, SchemaRenderer,
 };
-use zero_migrate_ir::dialect::SqlDialect;
+use zero_migrate_ir::dialect::{DialectId, SqlDialect};
 
 /// This module's own vendor identity — the ONE dialect literal it is allowed to
 /// name. See `backends/mod.rs` for why. Deleting this const is the whole of the
@@ -17,8 +17,8 @@ pub(super) struct PostgresSchemaRenderer;
 pub(super) static RENDERER: PostgresSchemaRenderer = PostgresSchemaRenderer;
 
 impl SchemaRenderer for PostgresSchemaRenderer {
-    fn dialect(&self) -> SqlDialect {
-        DIALECT
+    fn dialect(&self) -> DialectId {
+        DIALECT.id()
     }
 
     fn foreign_key_target(&self, app_id: &str, target: &str) -> String {

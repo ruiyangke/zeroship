@@ -117,8 +117,12 @@
 
 use std::collections::BTreeMap;
 
-use crate::renderer::{Capability, DialectSupports, DmlRenderer};
-use zero_migrate_ir::dialect::SqlDialect;
+use crate::renderer::{Capability, DmlRenderer};
+// The canonical ids, imported under a module alias so every comparison below reads
+// `dialect_id::MYSQL` — a NAMED constant from the id vocabulary — rather than a
+// bare `MYSQL` that would look like a local vendor literal in a crate whose whole
+// job is to name no vendor.
+use zero_migrate_ir::dialect::{self as dialect_id, DialectId};
 
 use crate::step::BindValue;
 use zero_migrate_ir::expr::{
@@ -784,8 +788,7 @@ fn render_pg_extract(
     expr: &str,
     backend: &dyn DmlRenderer,
 ) -> Result<String, DmlError> {
-    let dialect = backend.dialect();
-    if !dialect.supports(Capability::PostgresVendorPrimitives) {
+    if !backend.supports(Capability::PostgresVendorPrimitives) {
         return Err(DmlError::UnrenderableExpr(
             "PG EXTRACT is PostgreSQL-only".to_string(),
         ));
@@ -800,8 +803,7 @@ fn render_pg_interval_literal(
     duration: &Duration,
     backend: &dyn DmlRenderer,
 ) -> Result<String, DmlError> {
-    let dialect = backend.dialect();
-    if !dialect.supports(Capability::PostgresVendorPrimitives) {
+    if !backend.supports(Capability::PostgresVendorPrimitives) {
         return Err(DmlError::UnrenderableExpr(
             "PG interval literal is PostgreSQL-only".to_string(),
         ));
@@ -1085,22 +1087,41 @@ fn render_split_part(
 /// (`EXPR_NOT_PORTABLE`) before assembly — but the seam is fail-closed
 /// defensively: it returns [`DmlError::UnrenderableExpr`] rather than silently
 /// dropping the value.
+///
+/// # Why this compares ids instead of matching a variant
+///
+/// `dialect` is an OPEN [`DialectId`] now, so there is no exhaustive `match` to
+/// write. That is not a loss of safety here, because the three names on the
+/// right-hand side are not a closed vendor set core is choosing between: they are
+/// the three FIELD NAMES of [`Expr::Dialectal`], which is a WIRE contract with
+/// `deny_unknown_fields`. An authored `Dialectal` node can carry a `pg`, a
+/// `sqlite`, a `mysql` and a `default` leg and nothing else, whatever backend is
+/// rendering it, until the IR version that gives the node an open leg map.
+///
+/// So a fourth backend takes the `default` leg — the same leg PostgreSQL takes
+/// when the author wrote no `pg` leg — and gets the same fail-closed refusal when
+/// there is no `default`. It never silently renders another vendor's leg.
 fn select_dialect_leg<'a>(
-    dialect: SqlDialect,
+    dialect: DialectId,
     default: &'a Option<Box<Expr>>,
     pg: &'a Option<Box<Expr>>,
     sqlite: &'a Option<Box<Expr>>,
     mysql: &'a Option<Box<Expr>>,
 ) -> Result<&'a Expr, DmlError> {
-    let own = match dialect {
-        SqlDialect::Postgres => pg,
-        SqlDialect::Sqlite => sqlite,
-        SqlDialect::Mysql => mysql,
+    let own = if dialect == dialect_id::POSTGRES {
+        pg
+    } else if dialect == dialect_id::SQLITE {
+        sqlite
+    } else if dialect == dialect_id::MYSQL {
+        mysql
+    } else {
+        &None
     };
     own.as_deref().or(default.as_deref()).ok_or_else(|| {
         DmlError::UnrenderableExpr(format!(
-            "dialect() has no leg for the {dialect:?} target and no default — the \
-             structural validator must refuse this before assembly"
+            "dialect() has no leg for the {} target and no default — the \
+             structural validator must refuse this before assembly",
+            dialect.as_str()
         ))
     })
 }
@@ -1282,7 +1303,7 @@ fn mysql_expr_references_column(expr: &Expr, column: &str) -> Result<bool, DmlEr
             sqlite,
             mysql,
         } => mysql_expr_references_column(
-            select_dialect_leg(SqlDialect::Mysql, default, pg, sqlite, mysql)?,
+            select_dialect_leg(dialect_id::MYSQL, default, pg, sqlite, mysql)?,
             column,
         )?,
     })
@@ -1466,11 +1487,7 @@ pub fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlEr
             render_pg_regex_match(&e, pattern, ctx.backend)?
         }
         Expr::PgColumnSize { expr } => {
-            if !ctx
-                .backend
-                .dialect()
-                .supports(Capability::PostgresVendorPrimitives)
-            {
+            if !ctx.backend.supports(Capability::PostgresVendorPrimitives) {
                 return Err(DmlError::UnrenderableExpr(
                     "pg_column_size is PostgreSQL-only".to_string(),
                 ));
@@ -1603,7 +1620,6 @@ fn render_expr_inline_walk_for_backend<F>(
 where
     F: Fn(&str) -> Result<String, DmlError>,
 {
-    let dialect = backend.dialect();
     Ok(match expr {
         Expr::ColRef { name, table } => match table {
             // Qualified ref: quote the table via the per-dialect identifier
@@ -1727,7 +1743,7 @@ where
             render_pg_regex_match(&e, pattern, backend)?
         }
         Expr::PgColumnSize { expr } => {
-            if !dialect.supports(Capability::PostgresVendorPrimitives) {
+            if !backend.supports(Capability::PostgresVendorPrimitives) {
                 return Err(DmlError::UnrenderableExpr(
                     "pg_column_size is PostgreSQL-only".to_string(),
                 ));
@@ -1866,9 +1882,10 @@ pub fn assemble_insert_for_backend(
     );
 
     if let Some(oc) = on_conflict {
-        if !dialect.supports(Capability::InsertOnConflictClause) {
+        if !backend.supports(Capability::InsertOnConflictClause) {
             return Err(DmlError::UnrenderableExpr(format!(
-                "structured onConflict is unavailable for the {dialect:?} target"
+                "structured onConflict is unavailable for the {} target",
+                dialect.as_str()
             )));
         }
         template.push_str(&render_on_conflict(table, &qtable, columns, oc, &mut ctx)?);
@@ -1910,7 +1927,18 @@ fn render_on_conflict(
         .map(|c| quote_ident_for_backend("column", c, ctx.backend))
         .collect();
     let qcols = qcols?;
-    if matches!(ctx.backend.dialect(), SqlDialect::Mysql) {
+    // A SPELLING gate, not a capability one: both shapes mean "upsert", and
+    // `InsertOnConflictClause` — already asked by the caller — is what decides
+    // whether the backend can do it at all. MySQL writes
+    // `ON DUPLICATE KEY UPDATE`, the ANSI-ish vendors write `ON CONFLICT (...)`.
+    //
+    // OPEN QUESTION, deliberately left visible rather than papered over: a fourth
+    // backend that claims `InsertOnConflictClause` gets the `ON CONFLICT` spelling
+    // by falling through here, which is a GUESS about its syntax. The fix is a
+    // vendor trait method that renders the whole clause, the way
+    // `render_trigger_op` already does for triggers; that is a spelling move, not
+    // an identity one, so it is not part of this change.
+    if ctx.backend.dialect() == dialect_id::MYSQL {
         return render_on_conflict_mysql(table, qtable, insert_columns, oc, &qcols, ctx);
     }
 
@@ -2037,7 +2065,15 @@ pub fn assemble_update_for_backend(
     }
     let mut ctx = BindCtx::new(backend);
     let qtable = qualify_table(project_schema, ctx.backend, table)?;
-    if matches!(dialect, SqlDialect::Mysql) {
+    // A CAPABILITY question with no capability to ask yet, and this comment is the
+    // honest form of that: "does this backend evaluate a SET list simultaneously,
+    // or left to right?" is a semantic fact about the vendor, not a spelling and
+    // not a provenance. All three shipping backends can answer it (PostgreSQL and
+    // SQLite simultaneously, MySQL left-to-right), so it wants to become
+    // `Capability::SimultaneousSetAssignment` — a claim every backend must state.
+    // Adding a capability changes the pinned matrix, so it is its own change; the
+    // gate stays an id comparison until then rather than being silently widened.
+    if dialect == dialect_id::MYSQL {
         validate_mysql_assignment_semantics("update", table, set)?;
     }
     // BTreeMap ⇒ deterministic, canonical assignment order.
@@ -2100,11 +2136,23 @@ pub fn assemble_delete_with_sqlite_identity_for_backend(
     let mut ctx = BindCtx::new(backend);
     let qtable = qualify_table(project_schema, ctx.backend, table)?;
     let w = render_expr_bound(r#where, &mut ctx)?;
-    let template = match (dialect, limit) {
-        (_, None) => format!("DELETE FROM {qtable} WHERE {w}"),
+    // The tuple `match (dialect, limit)` this replaces was exhaustive over a closed
+    // enum; `dialect` is open now, so the vendor selection is a GUARD on each arm
+    // and the arms themselves are untouched — same order, same bodies, same SQL.
+    //
+    // The one arm that is new is the last, and it REFUSES. A limited DELETE is
+    // three unrelated shapes here, one of them built on a PostgreSQL pseudo-column
+    // pair (`tableoid, ctid`) that exists nowhere else, so there is no shape a
+    // fourth backend could be handed by default. Falling through to any of them
+    // would emit syntactically plausible SQL that deletes the wrong rows on a
+    // backend nobody tested. The real home for all three is a vendor trait method,
+    // the way `render_trigger_op` already is; that is a relocation, not this
+    // change.
+    let template = match limit {
+        None => format!("DELETE FROM {qtable} WHERE {w}"),
         // PostgreSQL and SQLite cannot take a bare limited DELETE portably. The
         // limit binds natively while a subquery selects exact row identities.
-        (SqlDialect::Sqlite, Some(n)) => {
+        Some(n) if dialect == dialect_id::SQLITE => {
             let identity_columns = sqlite_identity_columns
                 .filter(|columns| !columns.is_empty())
                 .ok_or_else(|| DmlError::SqliteLimitedDeleteNeedsUniqueIdentity {
@@ -2134,16 +2182,25 @@ pub fn assemble_delete_with_sqlite_identity_for_backend(
                  (SELECT {selected_identity} FROM {qtable} WHERE {w} LIMIT {ph})"
             )
         }
-        (SqlDialect::Postgres, Some(n)) => {
+        Some(n) if dialect == dialect_id::POSTGRES => {
             let ph = ctx.push_bind(BindValue::Int(i64::try_from(n).unwrap_or(i64::MAX)));
             format!(
                 "DELETE FROM {qtable} WHERE (tableoid, ctid) IN \
                  (SELECT tableoid, ctid FROM {qtable} WHERE {w} LIMIT {ph})"
             )
         }
-        (SqlDialect::Mysql, Some(n)) => {
+        Some(n) if dialect == dialect_id::MYSQL => {
             let ph = ctx.push_bind(BindValue::Int(i64::try_from(n).unwrap_or(i64::MAX)));
             format!("DELETE FROM {qtable} WHERE {w} LIMIT {ph}")
+        }
+        Some(_) => {
+            return Err(DmlError::UnrenderableExpr(format!(
+                "a row-limited DELETE has no portable spelling and the {} backend has \
+                 not declared one — the three shipping shapes are a vendor \
+                 pseudo-column pair, a unique-identity subquery, and a native LIMIT \
+                 clause, and none of them may be guessed for another vendor",
+                dialect.as_str()
+            )))
         }
     };
     Ok(AssembledDml {
@@ -2205,7 +2262,9 @@ fn assemble_backfill_clauses_inner_for_backend(
             table: table.to_string(),
         });
     }
-    if matches!(dialect, SqlDialect::Mysql) {
+    // The same SET-list evaluation-order question as `assemble_update_for_backend`
+    // above, and the same open capability. See the comment there.
+    if dialect == dialect_id::MYSQL {
         validate_mysql_assignment_semantics("backfill", table, set)?;
     }
     // BTreeMap ⇒ canonical order.

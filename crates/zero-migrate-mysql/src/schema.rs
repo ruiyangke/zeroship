@@ -3,7 +3,7 @@
 use zero_migrate_backend::schema::{
     def_case_sensitive, mysql_base_column_type_for_def, quote_ident_for_backend, SchemaRenderer,
 };
-use zero_migrate_ir::dialect::SqlDialect;
+use zero_migrate_ir::dialect::{DialectId, SqlDialect};
 
 /// This module's own vendor identity — the ONE dialect literal it is allowed to
 /// name. See `backends/mod.rs`.
@@ -15,8 +15,8 @@ pub(super) struct MysqlSchemaRenderer;
 pub(super) static RENDERER: MysqlSchemaRenderer = MysqlSchemaRenderer;
 
 impl SchemaRenderer for MysqlSchemaRenderer {
-    fn dialect(&self) -> SqlDialect {
-        DIALECT
+    fn dialect(&self) -> DialectId {
+        DIALECT.id()
     }
 
     fn foreign_key_target(&self, app_id: &str, target: &str) -> String {

@@ -8,6 +8,7 @@ use zero_migrate_backend::dml::{self, DmlError};
 use zero_migrate_backend::error::IrLowerError;
 use zero_migrate_backend::renderer::{Capability, DialectSupports, DmlRenderer};
 use zero_migrate_backend::step::BindValue;
+use zero_migrate_ir::backend::BackendDescriptor;
 use zero_migrate_ir::dialect::SqlDialect;
 use zero_migrate_ir::expr::{CastTarget, ExtractField, ScalarFn};
 use zero_migrate_ir::ir::{
@@ -31,8 +32,8 @@ pub(super) struct MysqlDmlRenderer;
 pub(super) static RENDERER: MysqlDmlRenderer = MysqlDmlRenderer;
 
 impl DmlRenderer for MysqlDmlRenderer {
-    fn dialect(&self) -> SqlDialect {
-        DIALECT
+    fn descriptor(&self) -> &'static BackendDescriptor {
+        &zero_migrate_ir::backend::MYSQL_DESCRIPTOR
     }
 
     /// THE single physical home of MySQL's backtick identifier spelling: double

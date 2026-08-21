@@ -49,7 +49,7 @@
 use crate::dml::DmlError;
 use crate::error::IrLowerError;
 use crate::step::BindValue;
-use zero_migrate_ir::dialect::SqlDialect;
+use zero_migrate_ir::dialect::{DialectId, SqlDialect};
 use zero_migrate_ir::expr::{CastTarget, ExtractField, ScalarFn};
 use zero_migrate_ir::ir::{IrScalar, Op, TableRef};
 
@@ -79,10 +79,18 @@ impl DialectSupports for SqlDialect {
 
 /// Dialect-specific DML/view/trigger rendering.
 ///
-/// No method has a default body: adding a dialect requires an explicit impl for
-/// every render decision. The single exhaustive dispatch match lives in
+/// No SPELLING method has a default body: adding a dialect requires an explicit
+/// impl for every render decision. The single exhaustive dispatch match lives in
 /// `crate::render::backends`, so a third `SqlDialect` variant breaks there at
 /// compile time until its renderer is implemented and wired.
+///
+/// The two exceptions are [`dialect`](Self::dialect) and
+/// [`supports`](Self::supports), and they are exceptions because neither is a
+/// render decision: both are DERIVED from the one thing a backend does declare
+/// about itself, its [`descriptor`](Self::descriptor). Giving them bodies here is
+/// what stops a vendor from answering the identity question and the capability
+/// question inconsistently — there is one source of truth per backend and the
+/// trait reads it.
 ///
 /// `Debug` is a SUPERTRAIT because the carriers that now hold a resolved
 /// `&'static dyn DmlRenderer` ([`crate::dml::BindCtx`],
@@ -104,7 +112,53 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
     /// It is NOT a second dialect literal in a vendor module. Each impl returns its
     /// module's existing `DIALECT` const, so the one-dialect-literal rule (and the
     /// test that enforces it) is unaffected.
-    fn dialect(&self) -> SqlDialect;
+    ///
+    /// # Why the OPEN id and not the closed enum
+    ///
+    /// It returned [`SqlDialect`] until now, and that single return type was what
+    /// stopped a fourth backend from lowering a migration. A vendor crate cannot
+    /// produce a value of a closed enum it does not own, so the only body that
+    /// type-checked outside this workspace's three vendors was `todo!()`: the crate
+    /// compiled and panicked the first time anything asked it who it was. The
+    /// registry was never the blocker — a stub backend registers and is reached
+    /// through the real registry — this signature was.
+    ///
+    /// [`DialectId`] is `const`-constructible from a `&'static str`, so an outsider
+    /// writes `DialectId::new("duckdb")` at item scope and answers honestly. It is
+    /// deliberately NOT exhaustively matchable, which is why the leg selection and
+    /// vendor gates below the trait compare against the canonical id CONSTANTS and
+    /// carry an explicit fail-closed arm for an id they do not recognise, instead of
+    /// a `match` the compiler would have completed for them.
+    ///
+    /// The direction stays one-way: an id does not convert back to a variant. See
+    /// [`SqlDialect::id`].
+    fn dialect(&self) -> DialectId {
+        self.descriptor().id
+    }
+
+    /// What this backend IS: its id, its human-facing name, its capability set and
+    /// its limits, all in one value the backend declares in its own crate.
+    ///
+    /// The renderer used to hand back an identity ([`dialect`](Self::dialect)) and
+    /// core turned that identity into capabilities through
+    /// `SqlDialect::descriptor` — an exhaustive match in `zero-migrate-ir`, i.e. a
+    /// table core owns about vendors core does not. That is the same closed-set
+    /// problem the identity had, one level up: an outsider's id has no arm in that
+    /// match, so the honest answer for it was "no capabilities at all", and a
+    /// backend that answers NO to everything cannot render anything.
+    ///
+    /// Asking the VENDOR instead removes the table. A backend crate declares one
+    /// `BackendDescriptor` const and returns it here; core reads capabilities off
+    /// the value rather than deriving them from a name it recognises.
+    fn descriptor(&self) -> &'static zero_migrate_ir::backend::BackendDescriptor;
+
+    /// Ask THIS backend a capability question.
+    ///
+    /// The [`DialectSupports`] shape one line at a time: `supports` never branched
+    /// on the vendor, it read the vendor's descriptor, so it belongs on the vendor.
+    fn supports(&self, cap: Capability) -> bool {
+        self.descriptor().capabilities.contains(cap)
+    }
 
     fn quote_ident(&self, ident: &str) -> String;
     fn qualify_table(&self, project_schema: &str, table: &str) -> Result<String, DmlError>;

@@ -13,6 +13,7 @@ use zero_migrate_backend::dml::{self, DmlError};
 use zero_migrate_backend::error::IrLowerError;
 use zero_migrate_backend::renderer::{Capability, DialectSupports, DmlRenderer};
 use zero_migrate_backend::step::BindValue;
+use zero_migrate_ir::backend::BackendDescriptor;
 use zero_migrate_ir::dialect::SqlDialect;
 use zero_migrate_ir::expr::{CastTarget, ExtractField, ScalarFn};
 use zero_migrate_ir::ir::{
@@ -54,8 +55,8 @@ pub(super) struct SqliteDmlRenderer;
 pub(super) static RENDERER: SqliteDmlRenderer = SqliteDmlRenderer;
 
 impl DmlRenderer for SqliteDmlRenderer {
-    fn dialect(&self) -> SqlDialect {
-        DIALECT
+    fn descriptor(&self) -> &'static BackendDescriptor {
+        &zero_migrate_ir::backend::SQLITE_DESCRIPTOR
     }
 
     fn quote_ident(&self, ident: &str) -> String {

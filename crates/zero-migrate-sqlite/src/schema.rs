@@ -3,7 +3,7 @@
 use zero_migrate_backend::schema::{
     decimal_precision_scale, quote_ident_for_backend, SchemaRenderer,
 };
-use zero_migrate_ir::dialect::SqlDialect;
+use zero_migrate_ir::dialect::{DialectId, SqlDialect};
 
 /// This module's own vendor identity — the ONE dialect literal it is allowed to
 /// name. See `backends/mod.rs`.
@@ -15,8 +15,8 @@ pub(super) struct SqliteSchemaRenderer;
 pub(super) static RENDERER: SqliteSchemaRenderer = SqliteSchemaRenderer;
 
 impl SchemaRenderer for SqliteSchemaRenderer {
-    fn dialect(&self) -> SqlDialect {
-        DIALECT
+    fn dialect(&self) -> DialectId {
+        DIALECT.id()
     }
 
     fn foreign_key_target(&self, _app_id: &str, target: &str) -> String {
