@@ -72,9 +72,14 @@ pub struct CreateTableRequest<'a> {
     ///
     /// SQLite ignores this and inlines every `FOREIGN KEY` straight off
     /// `snapshot.constraints`, because it has no late `ADD CONSTRAINT` to defer
-    /// TO — the routing decision that produces this slice is made in
-    /// [`DeclarativeAuthor::lower_create_table`], gated on
+    /// TO — the routing decision that produces this slice is made in the engine's
+    /// `DeclarativeAuthor::lower_create_table`, gated on
     /// `Capability::AlterTableAddConstraint`.
+    ///
+    /// Deliberately NOT an intra-doc link: `DeclarativeAuthor` lives in the
+    /// `zero-migrate` engine, which depends on this crate and not the other way
+    /// round. A resolvable link here would require the arrow this whole split
+    /// exists to remove, so the reference stays prose.
     pub inline_fks: &'a [&'a ConstraintSnapshot],
     /// The names of `snapshot.indexes` the active policy INJECTED, resolved by
     /// core before any vendor is consulted.
