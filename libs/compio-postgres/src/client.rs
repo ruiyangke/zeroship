@@ -7,7 +7,9 @@
 
 use crate::codec::{BackendMessages, FrontendMessage};
 use crate::config::{SslMode, SslNegotiation};
-use crate::connection::{Request, RequestMessages};
+use crate::connection::{
+    Request, RequestDisposition, RequestMessages, TransactionEffect,
+};
 use crate::copy_in::CopyInSink;
 use crate::copy_out::CopyOutStream;
 use crate::keepalive::KeepaliveConfig;
@@ -36,7 +38,7 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
@@ -87,44 +89,14 @@ impl TransactionStatus {
 pub struct Responses {
     receiver: mpsc::Receiver<BackendMessages>,
     cur: BackendMessages,
-    /// Shared with the [`InnerClient`] that issued the request: every
-    /// `ReadyForQuery` seen here writes its transaction-status byte back, so
-    /// the client always carries the server's own answer for the last
-    /// completed exchange.
-    ///
-    /// This is the one place worth recording it. `query.rs`, `simple_query.rs`,
-    /// `copy_in.rs` and `copy_out.rs` all read their responses through this
-    /// stream, so covering it covers every statement the client can run - and
-    /// a path added later gets it without having to remember to.
-    tx_status: Arc<AtomicU8>,
 }
 
 impl Responses {
     pub fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<Result<Message, Error>> {
         loop {
             match self.cur.next().map_err(Error::parse)? {
-                Some(Message::ErrorResponse(body)) => {
-                    // The server follows an ErrorResponse with a
-                    // `ReadyForQuery` this stream never reaches: the caller
-                    // gets the error and drops the stream. Record what that
-                    // byte would have said. A statement that fails inside a
-                    // transaction block aborts the whole block (`T` -> `E`);
-                    // one that fails outside a block leaves the session idle,
-                    // and a block already aborted stays aborted.
-                    let _ = self.tx_status.compare_exchange(
-                        b'T',
-                        b'E',
-                        Ordering::Relaxed,
-                        Ordering::Relaxed,
-                    );
-                    return Poll::Ready(Err(Error::db(body)));
-                }
-                Some(message) => {
-                    if let Message::ReadyForQuery(body) = &message {
-                        self.tx_status.store(body.status(), Ordering::Relaxed);
-                    }
-                    return Poll::Ready(Ok(message));
-                }
+                Some(Message::ErrorResponse(body)) => return Poll::Ready(Err(Error::db(body))),
+                Some(message) => return Poll::Ready(Ok(message)),
                 None => {}
             }
 
@@ -180,11 +152,19 @@ pub struct InnerClient {
     /// invoking UB on a future cross-thread move.
     dirty: AtomicBool,
 
-    /// Transaction-status byte from the last `ReadyForQuery` this client
-    /// observed (`I`/`T`/`E`), starting at `I` because a session that has just
-    /// finished startup is idle. Written by every [`Responses`] stream this
-    /// client hands out; read by the pool on release.
+    /// Transaction-status byte from the last `ReadyForQuery` the connection
+    /// task received (`I`/`T`/`E`), starting at `I` because a session that has
+    /// just finished startup is idle. The connection task is the sole writer;
+    /// the pool reads it on release.
     tx_status: Arc<AtomicU8>,
+
+    /// Transaction-capable requests whose `ReadyForQuery` has not reached the
+    /// connection task yet. This is separate from `tx_status`: a pooled client
+    /// can be released before the task gets a chance to observe the response,
+    /// so an idle status is authoritative only when this count is zero. The
+    /// driver's internal `Close + Sync` maintenance is not counted because it
+    /// cannot change transaction state.
+    in_flight_requests: Arc<AtomicUsize>,
 
     /// Shuts the connection's socket down when this `InnerClient` drops - that
     /// is, when the last handle that could still issue a query on this
@@ -210,22 +190,64 @@ impl InnerClient {
     /// into the unbounded `UnboundedSender<Request>` channel. Failure
     /// means the connection task has terminated (socket closed).
     pub fn send(&self, messages: RequestMessages) -> Result<Responses, Error> {
+        self.send_with(
+            messages,
+            RequestDisposition::Awaited,
+            TransactionEffect::MayChange,
+        )
+    }
+
+    /// Send a request whose response obligation and transaction effect differ
+    /// from the common awaited, transaction-capable case.
+    pub(crate) fn send_with(
+        &self,
+        messages: RequestMessages,
+        disposition: RequestDisposition,
+        transaction_effect: TransactionEffect,
+    ) -> Result<Responses, Error> {
         let (sender, receiver) = mpsc::channel(1);
-        let request = Request { messages, sender };
-        self.sender
-            .unbounded_send(request)
-            .map_err(|_| Error::closed())?;
+        let request = Request {
+            messages,
+            sender,
+            disposition,
+            transaction_effect,
+        };
+        if transaction_effect == TransactionEffect::MayChange {
+            self.in_flight_requests.fetch_add(1, Ordering::Relaxed);
+        }
+        if self.sender.unbounded_send(request).is_err() {
+            if transaction_effect == TransactionEffect::MayChange {
+                self.in_flight_requests.fetch_sub(1, Ordering::Relaxed);
+            }
+            return Err(Error::closed());
+        }
 
         Ok(Responses {
             receiver,
             cur: BackendMessages::empty(),
-            tx_status: Arc::clone(&self.tx_status),
         })
     }
 
-    /// The transaction state the server reported in the last `ReadyForQuery`.
-    pub(crate) fn transaction_status(&self) -> TransactionStatus {
-        TransactionStatus::from_byte(self.tx_status.load(Ordering::Relaxed))
+    /// The transaction state the server reported in the last `ReadyForQuery`,
+    /// or `None` while a transaction-capable request has yet to reach its own.
+    ///
+    /// The in-flight check comes FIRST, and its `Acquire` is what publishes the
+    /// task's `Relaxed` status store, so a `Some` is never stale.
+    pub(crate) fn transaction_status(&self) -> Option<TransactionStatus> {
+        if self.has_in_flight_requests() {
+            return None;
+        }
+        Some(TransactionStatus::from_byte(
+            self.tx_status.load(Ordering::Relaxed),
+        ))
+    }
+
+    /// Whether a transaction-capable request has not reached its terminating
+    /// `ReadyForQuery` in the connection task. The acquire pairs with the
+    /// task's release decrement, making a zero observation publish the
+    /// preceding status store.
+    pub(crate) fn has_in_flight_requests(&self) -> bool {
+        self.in_flight_requests.load(Ordering::Acquire) != 0
     }
 
     pub(crate) fn typeinfo(&self) -> Option<Statement> {
@@ -352,6 +374,7 @@ impl Client {
                 buffer: Default::default(),
                 dirty: AtomicBool::new(false),
                 tx_status: Arc::new(AtomicU8::new(b'I')),
+                in_flight_requests: Arc::new(AtomicUsize::new(0)),
                 _release: release,
             }),
             socket_config: None,
@@ -364,6 +387,18 @@ impl Client {
 
     pub(crate) fn inner(&self) -> &Arc<InnerClient> {
         &self.inner
+    }
+
+    pub(crate) fn tx_status_handle(&self) -> Arc<AtomicU8> {
+        Arc::clone(&self.inner.tx_status)
+    }
+
+    pub(crate) fn in_flight_requests_handle(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.inner.in_flight_requests)
+    }
+
+    pub(crate) fn has_in_flight_requests(&self) -> bool {
+        self.inner.has_in_flight_requests()
     }
 
     pub(crate) fn set_socket_config(&mut self, socket_config: SocketConfig) {
@@ -788,15 +823,22 @@ impl Client {
     }
 
     /// The transaction state the server reported in the last `ReadyForQuery`
-    /// on this connection.
+    /// on this connection, or `None` if that answer is not settled yet.
     ///
-    /// The answer covers statements this client awaited to completion. A
-    /// fire-and-forget command whose response was never read - the ROLLBACK
-    /// `Transaction::drop` queues is the only one the driver itself issues -
-    /// is not reflected until something reads a later `ReadyForQuery`;
-    /// [`Client::is_dirty`] reports that a command is outstanding.
+    /// The connection task records the status in server wire order, whether or
+    /// not response streams are polled, retained or dropped. But it records it
+    /// when IT consumes the `ReadyForQuery`, and that is not the moment your
+    /// `await` returns: an `ErrorResponse` and its trailing `ReadyForQuery` can
+    /// arrive in different batches, so a failed statement can hand you its
+    /// `SQLSTATE` before the task has seen the terminator.
+    ///
+    /// `None` IS THE POINT. Returning a stale `Idle` there is the bug this
+    /// signature exists to prevent - a caller checking "am I in a transaction?"
+    /// after an error would be told no, skip its rollback, and hand the next
+    /// user of the connection an aborted transaction. Treat `None` as "ask
+    /// again after the next round trip", not as "idle".
     #[must_use]
-    pub fn transaction_status(&self) -> TransactionStatus {
+    pub fn transaction_status(&self) -> Option<TransactionStatus> {
         self.inner.transaction_status()
     }
 
@@ -823,8 +865,12 @@ impl Client {
         self.inner.set_dirty();
 
         let buf = self.inner().with_buf(|buf| {
+            // One spelling of "end this savepoint's scope", shared with
+            // `Transaction::rollback`: the rollback-on-drop path has to leave
+            // the server in the same state the explicit call would, or which
+            // exit a caller took would decide whether a savepoint outlives it.
             let sql = match name {
-                Some(name) => format!("ROLLBACK TO {name}"),
+                Some(name) => crate::transaction::rollback_savepoint(name),
                 None => "ROLLBACK".to_string(),
             };
             // H6: Don't panic on NUL in savepoint names. `frontend::query`
@@ -848,7 +894,11 @@ impl Client {
 
         let _ = self
             .inner()
-            .send(RequestMessages::Single(FrontendMessage::Raw(buf)));
+            .send_with(
+                RequestMessages::Single(FrontendMessage::Raw(buf)),
+                RequestDisposition::Housekeeping,
+                TransactionEffect::MayChange,
+            );
     }
 
     #[doc(hidden)]
