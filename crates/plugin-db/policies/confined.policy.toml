@@ -8,16 +8,28 @@
 # `crates/migrated/policies/confined.policy.toml` (seven system columns + three
 # system indexes + `["id"]` PK + `author_primary_key = "forbid"`, injected
 # `scope = "all"` into every created table) — keep the column/index/PK set in
-# lockstep; the system-field shape is a platform invariant.
+# lockstep; the system-field shape is a platform invariant. That lockstep is
+# checked, not merely asked for: `tests/inject_policy_mirror_gate.sh` compares
+# this [[inject]] rule against every other copy of it in the tree.
 #
-# ONE deliberate divergence: this ceiling stamps the system-column DB DEFAULTS
-# (`created_at`/`updated_at` = now(), `version` = 1) directly on the inject
-# columns. The creator path (migrated) gets those defaults from the JS RECORDER at
-# author time, so its ceiling omits them; this SQLite `register_model` path has no
-# recorder, so plugin-db INSERTs (which never supply created_at/updated_at/version
-# — see `crud/system_fields_pass`) rely on the DDL default firing. `now()` is the
-# canonical synth form; the dialect-aware desired-snapshot render localizes it to
-# `CURRENT_TIMESTAMP` for SQLite (this path uses `desired_snapshot_for_dialect`).
+# NO divergence. This header claimed one until 2026-08-20 -- that the DB DEFAULTS
+# on `created_at`/`updated_at`/`version` were stamped HERE and omitted from the
+# creator ceiling, which "gets those defaults from the JS RECORDER at author
+# time". That stopped being true on 2026-08-09, when `ddf636140` put the same
+# three defaults on the creator ceiling precisely because nothing else supplies
+# them: plugin-db INSERTs never send created_at/updated_at/version (see
+# `crud/system_fields_pass`), so without a DDL default the first insert into any
+# created table fails NOT NULL. Both paths need them for the same reason.
+#
+# The spelling is `NOW()`, matching the other copies. It was `now()` here until
+# the mirror gate was widened to six copies. Nothing turns on the case:
+# `inject_default_to_ir` lower-cases the token before matching it against
+# `"now" | "now()" | "current_timestamp"`
+# (third_party/zero-migrate/crates/zero-migrate/src/model/table_shape.rs), so all
+# three spellings produce the identical `SynthFn::Now` IR, and the dialect-aware
+# desired-snapshot render localizes THAT to `CURRENT_TIMESTAMP` for SQLite (this
+# path uses `desired_snapshot_for_dialect`). Byte-identical copies are worth more
+# than a second accepted spelling.
 policy_version = 1
 
 [[grant]]
@@ -69,8 +81,8 @@ primary_key = ["id"]
 author_primary_key = "forbid"
 columns = [
   { name = "id",         type = "text",        nullable = false },
-  { name = "created_at", type = "timestamptz", nullable = false, default = "now()" },
-  { name = "updated_at", type = "timestamptz", nullable = false, default = "now()" },
+  { name = "created_at", type = "timestamptz", nullable = false, default = "NOW()" },
+  { name = "updated_at", type = "timestamptz", nullable = false, default = "NOW()" },
   { name = "created_by", type = "text",        nullable = true  },
   { name = "updated_by", type = "text",        nullable = true  },
   { name = "version",    type = "integer",     nullable = false, default = "1" },
