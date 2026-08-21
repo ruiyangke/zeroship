@@ -4042,24 +4042,27 @@ impl IrAuthor {
         pending_foreign_keys: &mut Vec<DeferredForeignKeyUnit>,
     ) -> Result<(), IrLowerError> {
         if let Op::Dialectal { legs } = op {
-            if let Some(leg) = self.selected_dialectal_leg(legs) {
-                for inner in leg {
-                    if matches!(inner, Op::Dialectal { .. }) {
-                        return Err(IrLowerError::UnsupportedOp(
-                            "nested dialectal op reached lower",
-                        ));
-                    }
-                    self.lower_op_into_steps(
-                        inner,
-                        plan_index,
-                        out,
-                        live_tables,
-                        partition_state,
-                        live,
-                        named_types,
-                        pending_foreign_keys,
-                    )?;
+            let leg = self
+                .selected_dialectal_leg(legs)
+                .ok_or(IrLowerError::UnsupportedOp(
+                    "dialectal op has no leg for target dialect",
+                ))?;
+            for inner in leg {
+                if matches!(inner, Op::Dialectal { .. }) {
+                    return Err(IrLowerError::UnsupportedOp(
+                        "nested dialectal op reached lower",
+                    ));
                 }
+                self.lower_op_into_steps(
+                    inner,
+                    plan_index,
+                    out,
+                    live_tables,
+                    partition_state,
+                    live,
+                    named_types,
+                    pending_foreign_keys,
+                )?;
             }
             return Ok(());
         }
@@ -6794,31 +6797,33 @@ impl IrAuthor {
         skips_static_guard: bool,
     ) -> Result<(), IrGuardedLowerError> {
         if let Op::Dialectal { legs } = op {
-            if let Some(leg) = self.selected_dialectal_leg(legs) {
-                for inner in leg {
-                    if matches!(inner, Op::Dialectal { .. }) {
-                        return Err(IrLowerError::UnsupportedOp(
-                            "nested dialectal op reached lower",
-                        )
-                        .into());
-                    }
-                    self.lower_op_guarded(
-                        inner,
-                        plan_index,
-                        steps,
-                        fragments,
-                        op_spans,
-                        live_tables,
-                        partition_state,
-                        live,
-                        named_types,
-                        pending_foreign_keys,
-                        guard_scope,
-                        guard,
-                        raw_island_guard,
-                        skips_static_guard,
-                    )?;
+            let leg = self
+                .selected_dialectal_leg(legs)
+                .ok_or(IrLowerError::UnsupportedOp(
+                    "dialectal op has no leg for target dialect",
+                ))?;
+            for inner in leg {
+                if matches!(inner, Op::Dialectal { .. }) {
+                    return Err(
+                        IrLowerError::UnsupportedOp("nested dialectal op reached lower").into(),
+                    );
                 }
+                self.lower_op_guarded(
+                    inner,
+                    plan_index,
+                    steps,
+                    fragments,
+                    op_spans,
+                    live_tables,
+                    partition_state,
+                    live,
+                    named_types,
+                    pending_foreign_keys,
+                    guard_scope,
+                    guard,
+                    raw_island_guard,
+                    skips_static_guard,
+                )?;
             }
             return Ok(());
         }
@@ -15912,7 +15917,7 @@ columns = [
     }
 
     #[test]
-    fn empty_and_unselected_dialectal_plans_have_idempotent_anchors() {
+    fn empty_and_explicit_empty_dialectal_plans_have_idempotent_anchors() {
         let parse = |ops: serde_json::Value| {
             serde_json::from_value::<MigrationIr>(serde_json::json!({
                 "ir_version": 1,
@@ -15930,7 +15935,8 @@ columns = [
                     "op": "update",
                     "table": "accounts",
                     "set": { "score": 7 }
-                }]
+                }],
+                "sqlite": []
             }
         }]));
         let author = test_ir_author("app", "app_a", SqlDialect::Sqlite);
@@ -15945,7 +15951,10 @@ columns = [
             )
         };
 
-        for (label, ir) in [("empty", &empty), ("unselected dialect leg", &dialectal)] {
+        for (label, ir) in [
+            ("empty", &empty),
+            ("explicit empty dialect leg", &dialectal),
+        ] {
             let (first, repeated) = lower_twice(ir);
             assert_eq!(first.version, repeated.version, "{label} plan id");
             assert_eq!(first.checksum, repeated.checksum, "{label} checksum");

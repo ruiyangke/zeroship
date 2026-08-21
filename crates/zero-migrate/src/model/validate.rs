@@ -6087,7 +6087,21 @@ fn validate_dialectal_op(
             validate_op_authorized(op, dialect, op_index, schema_scope, authority)?;
         }
     }
-    Ok(())
+    if legs.contains_key(&target_dialect.id()) {
+        return Ok(());
+    }
+    Err(mk(
+        target_dialect,
+        op_index,
+        format!(
+            "dialectal op has no leg for the {} target; the per-dialect operation does not cover this dialect",
+            target_dialect.as_str()
+        ),
+        format!(
+            "add a {} leg to the dialectal op",
+            target_dialect.as_str()
+        ),
+    ))
 }
 
 /// [`validate_op`] threaded with the active
@@ -6830,7 +6844,7 @@ pub fn validate_op_authorized(
         | Op::PgRaw { .. } => Ok(()),
         // Unreachable: the early return at the top of this function hands every
         // dialectal op to `validate_dialectal_op`, which authorizes each leg's inner
-        // ops and checks the `default` leg against all three dialects. Listing it
+        // ops and requires an exact leg for the target. Listing it
         // alongside the ops that genuinely need no check would tell a reader auditing
         // this match the opposite of what happens.
         Op::Dialectal { .. } => Ok(()),

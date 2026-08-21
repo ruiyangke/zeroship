@@ -102,12 +102,13 @@ fn a_rename_in_an_unselected_leg_does_not_trigger_the_refusal() {
     let error = lower_error(
         r#"[{"op":"renameColumn","table":"notes","from":"a","to":"b","type":"text"},
             {"op":"dialectal","legs":{"postgres":[
-              {"op":"renameColumn","table":"notes","from":"b","to":"c","type":"text"}]}}]"#,
+              {"op":"renameColumn","table":"notes","from":"b","to":"c","type":"text"}],
+              "sqlite":[]}}]"#,
     )
     .unwrap_or_default();
     assert!(
         !error.contains("renamed twice in one migration"),
-        "SQLite selects no leg here, so there is exactly one rebuild and the \
+        "SQLite selects its explicit empty leg here, so there is exactly one rebuild and the \
          repeat-rename refusal must not fire: {error}"
     );
 }

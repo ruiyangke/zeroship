@@ -183,10 +183,10 @@ fn a_nested_index_after_a_drop_is_still_allowed() {
 #[test]
 fn a_leg_for_another_dialect_still_mutates_nothing() {
     // THE BOUNDARY, and the one most easily lost by expanding every leg: under
-    // PostgreSQL the `sqlite` leg never runs, so a drop inside it must NOT
-    // vacate anything. Expanding all legs would refuse this.
+    // PostgreSQL its explicit leg is empty, so the `sqlite` leg never runs and a
+    // drop inside it must NOT vacate anything. Expanding all legs would refuse this.
     verdict(&format!(
-        r#"{A},{{"op":"dialectal","legs":{{"sqlite":[{{"op":"dropTable","table":"a"}}]}}}},{ADD_Z}"#
+        r#"{A},{{"op":"dialectal","legs":{{"postgres":[],"sqlite":[{{"op":"dropTable","table":"a"}}]}}}},{ADD_Z}"#
     ))
     .expect("the sqlite leg is not emitted on PostgreSQL");
 }

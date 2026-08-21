@@ -59,6 +59,11 @@
 # tests/sqlite_rebuild_field_defs_live.rs measures - against a real SQLite database -
 # that no stream carrying any of these five differences can be deployed there at all.
 #
+# THIRD EDIT. Removing dialectal fallbacks deliberately changes the two non-Postgres
+# outcomes for the postgres-only `dialectal_ops` fixture. SQLite and MySQL now record
+# one refusal apiece instead of artifacts for the prefix before the wrapper; an absent
+# exact target leg is not permission to silently discard the operation.
+#
 # There is deliberately NO re-bless environment variable, matching
 # tests/op_fixture_goldens.rs and both predecessors.
 fixture:alter_primary_key|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
@@ -140,27 +145,8 @@ fixture:dialectal_ops|Postgres|field|docs|updated_by|{"type":"string","maxLength
 fixture:dialectal_ops|Postgres|field|docs|version|{"type":"int","required":true}
 fixture:dialectal_ops|Postgres|field|docs|deleted_at|{"type":"date"}
 fixture:dialectal_ops|Postgres|field|docs|embedding|{"type":"vector","vectorDims":3,"vectorMetric":"cosine"}
-fixture:dialectal_ops|Sqlite|sha|runtime.json|731b2f0508849e2e1c9c100ab1f74b124ff2e7c055e29d471c28b991ad9dcf5f
-fixture:dialectal_ops|Sqlite|sha|env.db.ts|a5ce483ecc6079bc4c0ae56a34095838edd39f5866006075b4905b0b4e4084ef
-fixture:dialectal_ops|Sqlite|field|docs|id|{"type":"string","maxLength":255,"required":true}
-fixture:dialectal_ops|Sqlite|field|docs|created_at|{"type":"date","required":true}
-fixture:dialectal_ops|Sqlite|field|docs|updated_at|{"type":"date","required":true}
-fixture:dialectal_ops|Sqlite|field|docs|created_by|{"type":"string","maxLength":255}
-fixture:dialectal_ops|Sqlite|field|docs|updated_by|{"type":"string","maxLength":255}
-fixture:dialectal_ops|Sqlite|field|docs|version|{"type":"int","required":true}
-fixture:dialectal_ops|Sqlite|field|docs|deleted_at|{"type":"date"}
-fixture:dialectal_ops|Sqlite|field|docs|embedding|{"type":"vector","vectorDims":3,"vectorMetric":"cosine"}
-fixture:dialectal_ops|Sqlite|sqlite_create_refused|docs|reserved system field name: Field name 'id' is reserved by the active table-injection policy. Injected fields (id, created_at, updated_at, created_by, updated_by, version, deleted_at) are managed by the platform and cannot be overridden.
-fixture:dialectal_ops|Mysql|sha|runtime.json|731b2f0508849e2e1c9c100ab1f74b124ff2e7c055e29d471c28b991ad9dcf5f
-fixture:dialectal_ops|Mysql|sha|env.db.ts|a5ce483ecc6079bc4c0ae56a34095838edd39f5866006075b4905b0b4e4084ef
-fixture:dialectal_ops|Mysql|field|docs|id|{"type":"string","maxLength":255,"required":true}
-fixture:dialectal_ops|Mysql|field|docs|created_at|{"type":"date","required":true}
-fixture:dialectal_ops|Mysql|field|docs|updated_at|{"type":"date","required":true}
-fixture:dialectal_ops|Mysql|field|docs|created_by|{"type":"string","maxLength":255}
-fixture:dialectal_ops|Mysql|field|docs|updated_by|{"type":"string","maxLength":255}
-fixture:dialectal_ops|Mysql|field|docs|version|{"type":"int","required":true}
-fixture:dialectal_ops|Mysql|field|docs|deleted_at|{"type":"date"}
-fixture:dialectal_ops|Mysql|field|docs|embedding|{"type":"vector","vectorDims":3,"vectorMetric":"cosine"}
+fixture:dialectal_ops|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: dialectal op has no leg for target dialect
+fixture:dialectal_ops|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: dialectal op has no leg for target dialect
 fixture:dml|Postgres|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
 fixture:dml|Postgres|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
 fixture:dml|Sqlite|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d

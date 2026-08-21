@@ -1318,11 +1318,13 @@ fn the_move_changed_no_refusal_that_the_old_path_already_made() {
 
 /// Stream/dialect cases in which BOTH sides refuse.
 ///
-/// 73 of 177 (59 streams x 3 dialects, less the 4 the policy resolution rejects before
+/// 75 of 177 (59 streams x 3 dialects, less the 4 the policy resolution rejects before
 /// either side is reached).
-const CONTROL_REFUSALS: usize = 73;
-/// Stream/dialect cases in which BOTH sides accept. 104 of the same 177.
-const CONTROL_ACCEPTANCES: usize = 104;
+/// The two additions are SQLite and MySQL over the postgres-only `dialectal_ops`
+/// fixture after dialectal fallbacks were removed.
+const CONTROL_REFUSALS: usize = 75;
+/// Stream/dialect cases in which BOTH sides accept. 102 of the same 177.
+const CONTROL_ACCEPTANCES: usize = 102;
 
 /// The control above compares two Rust functions. This one checks that the probe
 /// streams reach the arms they were written for, by asserting the exact refusals

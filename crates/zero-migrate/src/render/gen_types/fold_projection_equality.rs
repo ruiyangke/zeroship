@@ -487,7 +487,7 @@ fn the_gate_has_the_shape_it_claims() {
 ///
 /// | | equal | differs | both refused | fold refused | sum |
 /// |---|---|---|---|---|---|
-/// | `snapshot` | 683 | 0 | 196 | 0 | 879 |
+/// | `snapshot` | 681 | 0 | 198 | 0 | 879 |
 /// | `field_defs` (retired here) | 677 | 6 | 196 | 0 | 879 |
 /// | `authoring_tables` (retired by consumer 2) | 677 | 6 | 0 | 196 | 879 |
 /// | `runtime_metadata` (retired by consumer 1) | 683 | 0 | 0 | 196 | 879 |
@@ -495,24 +495,27 @@ fn the_gate_has_the_shape_it_claims() {
 /// So: 2,720 over FOUR legs at step 3; 2,037 over THREE when consumer 1 deleted
 /// `runtime_metadata_from_ops` (2,720 - 2,037 = 683, that leg's equal share); 1,360
 /// over TWO when consumer 2 deleted `authoring_tables_from_ops` (2,037 - 1,360 = 677);
-/// and 683 over ONE now (1,360 - 683 = 677, this leg's equal share, the same figure
+/// and 683 over ONE after consumer 3 (1,360 - 683 = 677, this leg's equal share, the same figure
 /// because the two artifact legs measured the same corpus and diverged on the same
-/// count of prefixes).
+/// count of prefixes). Removing dialectal fallbacks then reclassified exactly two
+/// final prefixes of the `dialectal_ops` stem: its postgres-only leg is now refused
+/// for SQLite and MySQL. The current split is therefore 681 equal / 198 both-refused.
 ///
 /// The CORPUS itself is unchanged across this move, which is the claim the arithmetic
 /// above is only circumstantial evidence for and which is checked directly: `STEMS`,
 /// `STREAMS` and `CASES` are untouched, `measured.len()` is still asserted equal to
 /// `(STEMS + STREAMS + CASES) * DIALECTS * PROJECTIONS`, and
 /// [`TABLES_PROBED_PER_FIELD`] - which sweeps `corpus_streams()` and does not depend
-/// on `PROJECTIONS` at all - is still 97. A stream deleted from the corpus would move
-/// both of those; retiring a leg moves neither.
+/// on `PROJECTIONS` at all - moved from 97 to 95 for those same two newly refused
+/// target attempts. A stream deleted from the corpus would move `measured.len()` too;
+/// the dialectal coverage refusal does not.
 ///
 /// What now covers the retired legs is
 /// `tests/gen_types_runtime_metadata_from_the_fold.rs`,
 /// `tests/gen_types_authoring_tables_from_the_fold.rs` and
 /// `tests/gen_types_field_defs_from_the_fold.rs`, whose goldens were captured from the
 /// walkers before they were deleted.
-const EQUAL_COMPARISONS: usize = 683;
+const EQUAL_COMPARISONS: usize = 681;
 /// Comparisons whose two texts differ. Every one is attributed in [`DIVERGENCES`].
 ///
 /// Was 12, then 6, and now ZERO - and zero here is NOT "the divergences were fixed".
@@ -524,11 +527,11 @@ const EQUAL_COMPARISONS: usize = 683;
 const DIFFERING_COMPARISONS: usize = 0;
 /// Prefixes both sides refuse.
 ///
-/// 392 -> 196, which is exactly the retired leg's own 196 and nothing else. The
-/// remaining leg's share is unchanged, and [`FOLD_REFUSAL_PREFIXES`] - measured without
-/// reference to any leg - is still 196, which is the check that the fold's refusal set
-/// did not move when a leg left.
-const BOTH_REFUSED: usize = 196;
+/// 392 -> 196 when one leg retired. Removing dialectal fallbacks then added exactly
+/// two refusals: the SQLite and MySQL target attempts over the postgres-only
+/// `dialectal_ops` fixture. [`FOLD_REFUSAL_PREFIXES`] measures the same 198 without
+/// reference to a projection leg.
+const BOTH_REFUSED: usize = 198;
 /// Prefixes the fold refuses and a walker answers about.
 ///
 /// ZERO. `authoring_tables_from_ops` was the last walker in this gate with no coherence
@@ -814,7 +817,7 @@ fn the_neutral_vendor_split_loses_no_field_on_a_folded_shape() {
 }
 
 /// Tables compared field by field by the probe above.
-const TABLES_PROBED_PER_FIELD: usize = 97;
+const TABLES_PROBED_PER_FIELD: usize = 95;
 
 // ---------------------------------------------------------------------------
 // The fold's own refusal set, stated independently of any leg
@@ -901,7 +904,7 @@ fn the_folds_refusal_set_is_the_catalog_replays_refusal_set() {
     // Neuter: give the authored `createEnum` and `createTable` sites a distinct error
     // string AND run the authored half first - both halves of what this check exists to
     // catch - and it still reports empty. So this is a GUARD, not evidence: it costs a
-    // string compare on 196 prefixes and it starts speaking the day a corpus stream
+    // string compare on 198 prefixes and it starts speaking the day a corpus stream
     // reaches an authored-only refusal, which is also the day the ORDER of the two
     // `advance` calls in `single_fold::fold` starts being observable. Do not read a
     // green here as a measurement that the order is right.
@@ -922,7 +925,7 @@ fn the_folds_refusal_set_is_the_catalog_replays_refusal_set() {
         refused, FOLD_REFUSAL_PREFIXES,
         "prefixes BOTH refuse. Pinned, not bounded: this is the fold's whole refusal \
          set, and it is the number `FOLD_REFUSED` and `BOTH_REFUSED` are both derived \
-         from - 196 per leg, 392 across the two surviving legs"
+         from - currently 198 in the one surviving leg"
     );
     assert!(
         accepted >= 500,
@@ -932,10 +935,10 @@ fn the_folds_refusal_set_is_the_catalog_replays_refusal_set() {
 
 /// Prefixes the fold and the catalog replay both refuse, over the whole corpus.
 ///
-/// UNCHANGED by step 4 consumer 2, which is the direct answer to "did the fold start
-/// refusing more when the leg retired". It did not: the same 196 prefixes, and the
-/// same ones the `snapshot` leg's `both_refused` counted before the move.
-const FOLD_REFUSAL_PREFIXES: usize = 196;
+/// Step 4 consumer 2 left this at 196. Removing dialectal fallbacks deliberately added
+/// exactly two: SQLite and MySQL now refuse the postgres-only `dialectal_ops` fixture
+/// instead of silently folding its absent target leg to nothing.
+const FOLD_REFUSAL_PREFIXES: usize = 198;
 
 // ---------------------------------------------------------------------------
 // The evidence behind the two recorded divergences

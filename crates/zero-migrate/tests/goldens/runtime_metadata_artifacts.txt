@@ -30,6 +30,10 @@
 # `runtime.json` embeds it. The `sha|env.db.ts` half did NOT move on any row: the
 # authoring surface always replayed the richer IR and already spelled `t.numeric(38, 0)`.
 #
+# THIRD HAND EDIT. The postgres-only `dialectal_ops` fixture now refuses SQLite and
+# MySQL artifact generation. Removing dialectal fallbacks makes an absent exact target
+# leg a refusal rather than permission to emit artifacts for the pre-wrapper prefix.
+#
 # There is deliberately no re-bless environment variable, matching
 # tests/op_fixture_goldens.rs: updating a line is a hand edit that shows up in review.
 fixture:alter_primary_key|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
@@ -85,18 +89,8 @@ fixture:dialectal_ops|Postgres|options|docs|softDelete=false|versioning=false|st
 fixture:dialectal_ops|Postgres|index|docs|0|name=docs_deleted_at_idx|fields=deleted_at|unique=false
 fixture:dialectal_ops|Postgres|index|docs|1|name=docs_updated_at_idx|fields=updated_at|unique=false
 fixture:dialectal_ops|Postgres|index|docs|2|name=docs_created_by_idx|fields=created_by|unique=false
-fixture:dialectal_ops|Sqlite|sha|runtime.json|731b2f0508849e2e1c9c100ab1f74b124ff2e7c055e29d471c28b991ad9dcf5f
-fixture:dialectal_ops|Sqlite|sha|env.db.ts|a5ce483ecc6079bc4c0ae56a34095838edd39f5866006075b4905b0b4e4084ef
-fixture:dialectal_ops|Sqlite|options|docs|softDelete=false|versioning=false|strictness=strict
-fixture:dialectal_ops|Sqlite|index|docs|0|name=docs_deleted_at_idx|fields=deleted_at|unique=false
-fixture:dialectal_ops|Sqlite|index|docs|1|name=docs_updated_at_idx|fields=updated_at|unique=false
-fixture:dialectal_ops|Sqlite|index|docs|2|name=docs_created_by_idx|fields=created_by|unique=false
-fixture:dialectal_ops|Mysql|sha|runtime.json|731b2f0508849e2e1c9c100ab1f74b124ff2e7c055e29d471c28b991ad9dcf5f
-fixture:dialectal_ops|Mysql|sha|env.db.ts|a5ce483ecc6079bc4c0ae56a34095838edd39f5866006075b4905b0b4e4084ef
-fixture:dialectal_ops|Mysql|options|docs|softDelete=false|versioning=false|strictness=strict
-fixture:dialectal_ops|Mysql|index|docs|0|name=docs_deleted_at_idx|fields=deleted_at|unique=false
-fixture:dialectal_ops|Mysql|index|docs|1|name=docs_updated_at_idx|fields=updated_at|unique=false
-fixture:dialectal_ops|Mysql|index|docs|2|name=docs_created_by_idx|fields=created_by|unique=false
+fixture:dialectal_ops|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: dialectal op has no leg for target dialect
+fixture:dialectal_ops|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: dialectal op has no leg for target dialect
 fixture:dml|Postgres|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
 fixture:dml|Postgres|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
 fixture:dml|Sqlite|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d

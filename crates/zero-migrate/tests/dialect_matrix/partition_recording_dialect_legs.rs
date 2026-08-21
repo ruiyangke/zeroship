@@ -67,19 +67,20 @@ fn an_orphan_partition_inside_the_selected_leg_is_refused() {
     );
 }
 
-/// The control that keeps this SELECTED-leg rather than every-leg. SQLite skips the
-/// PostgreSQL leg entirely, so nothing there is recorded and nothing is refused -
-/// refusing here would reject a migration that is correct on this target.
+/// The control that keeps this SELECTED-leg rather than every-leg. SQLite selects its
+/// explicit empty leg and skips the PostgreSQL leg entirely, so nothing there is
+/// recorded and nothing is refused - refusing here would reject a migration that is
+/// correct on this target.
 #[test]
 fn an_orphan_partition_in_an_unselected_leg_is_not_refused() {
     let error = refusal(
-        &format!(r#"[{{"op":"dialectal","legs":{{"postgres":[{ORPHAN_CHILD}]}}}}]"#),
+        &format!(r#"[{{"op":"dialectal","legs":{{"postgres":[{ORPHAN_CHILD}],"sqlite":[]}}}}]"#),
         ValidatorDialect::Sqlite,
     );
     assert!(
         error.is_none(),
-        "SQLite never runs the postgres leg, so its partitions are not this target's to \
-         validate: {error:?}"
+        "SQLite selects its empty leg and never runs the postgres leg, so its partitions \
+         are not this target's to validate: {error:?}"
     );
 }
 

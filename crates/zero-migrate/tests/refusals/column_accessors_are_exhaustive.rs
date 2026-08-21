@@ -31,9 +31,9 @@
 //! this file had ever descended into.
 //!
 //! ONLY THE LEG THAT RUNS IS DESCENDED INTO. A `dialectal` op carries a sequence
-//! per backend identity; refusing on a reference in a leg the target never emits
-//! would reject a migration the server never sees. Controls below hold that line
-//! from both sides.
+//! per backend identity and must carry an exact leg for the target; refusing on a
+//! reference in another leg would reject a migration the server never sees. Controls
+//! below hold that line from both sides.
 //!
 //! STILL OPEN, MEASURED, AND NAMED RATHER THAN IMPLIED: the TABLE-level walk has
 //! the same container blindness. A `dropTable` nested in a `dialectal` leg does
@@ -103,10 +103,14 @@ fn a_dialectal_leg_naming_a_dropped_column_is_refused() {
 
 #[test]
 fn a_misspelled_leg_key_is_not_selected_for_postgres() {
-    verdict(&format!(
+    let error = verdict(&format!(
         r#"{A},{DROP_V},{{"op":"dialectal","legs":{{"postgre":[{INDEX_V}]}}}}"#
     ))
-    .expect("a misspelled key cannot select or execute its invalid PostgreSQL operation");
+    .expect_err("a misspelled key cannot cover the postgres target");
+    assert!(
+        error.contains("no leg for the postgres target"),
+        "the typo must fail closed as missing exact coverage: {error}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -128,12 +132,12 @@ fn a_dialectal_leg_naming_a_live_column_is_still_allowed() {
 
 #[test]
 fn a_leg_for_another_dialect_is_not_descended_into() {
-    // THE BOUNDARY. Under PostgreSQL the `sqlite` leg never runs, so a reference
-    // inside it cannot fail at apply. Descending into every leg regardless -
+    // THE BOUNDARY. Under PostgreSQL its explicit leg is empty, so the `sqlite` leg
+    // never runs and a reference inside it cannot fail at apply. Descending into every leg regardless -
     // the obvious implementation, and the one that looks more thorough - would
     // refuse a migration the server never sees.
     verdict(&format!(
-        r#"{A},{DROP_V},{{"op":"dialectal","legs":{{"sqlite":[{INDEX_V}]}}}}"#
+        r#"{A},{DROP_V},{{"op":"dialectal","legs":{{"postgres":[],"sqlite":[{INDEX_V}]}}}}"#
     ))
     .expect("the sqlite leg is not emitted on PostgreSQL");
 }

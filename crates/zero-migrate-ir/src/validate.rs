@@ -1000,8 +1000,8 @@ impl Ctx<'_> {
     ///    masked by the coverage refusal.
     /// 3. **Scope check, per-TARGET** — the target must have its OWN leg; else
     ///    refuse fail-closed with
-    ///    [`CODE_EXPR_NOT_PORTABLE`]. This is per-target: a `dialect()` missing
-    ///    the postgres leg is fine targeting PostgreSQL, refused targeting
+    ///    [`CODE_EXPR_NOT_PORTABLE`]. This is per-target: a `dialect()` carrying
+    ///    only a postgres leg is accepted targeting PostgreSQL, refused targeting
     ///    SQLite/MySQL.
     ///
     /// RATCHET: each leg counts toward the ratcheted budget. The budget mechanism

@@ -792,10 +792,11 @@ fn push_fold_op<'a>(
             if inside_dialectal {
                 return Err(FoldError::Unsupported("nested dialectal op reached fold"));
             }
-            if let Some(leg) = selected_dialectal_leg(dialect, legs) {
-                for inner in leg {
-                    push_fold_op(out, inner, dialect, true)?;
-                }
+            let leg = selected_dialectal_leg(dialect, legs).ok_or(FoldError::Unsupported(
+                "dialectal op has no leg for target dialect",
+            ))?;
+            for inner in leg {
+                push_fold_op(out, inner, dialect, true)?;
             }
             Ok(())
         }
@@ -810,10 +811,9 @@ fn push_fold_op<'a>(
 ///
 /// Answers "the dialect argument decides part of this history's content", which is
 /// the fact a caller needs in order to know whether the dialect it supplied mattered.
-/// Deliberately NOT "a leg was selected": a postgres-only wrapper folded under
-/// SQLite matches no leg, so it contributes nothing and the fold succeeds - the
-/// dialect decided that op's entire content, and a selection-shaped answer would
-/// report `false` at the one moment the answer carries weight.
+/// Deliberately NOT "a leg was selected": exact target-leg coverage is enforced by
+/// `flatten_dialectal_ops`, while this helper only reports whether the history carries
+/// a wrapper at all.
 ///
 /// A TOP-LEVEL scan is complete because a leg cannot itself hold a wrapper: nesting
 /// is refused by the validator, and `push_fold_op` returns

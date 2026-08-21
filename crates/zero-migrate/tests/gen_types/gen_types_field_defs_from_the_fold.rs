@@ -626,20 +626,19 @@ fn the_move_changed_no_refusal_that_the_old_path_already_made() {
 
 /// Stream/dialect cases in which BOTH sides refuse.
 ///
-/// 74 of 171 — 57 streams (27 fixtures, 23 carriers, 7 probes) times 3 dialects, with
-/// none rejected by the policy resolution before either side is reached (74 + 97 = 171,
+/// 76 of 171 — 57 streams (27 fixtures, 23 carriers, 7 probes) times 3 dialects, with
+/// none rejected by the policy resolution before either side is reached (76 + 95 = 171,
 /// which is the identity that says so).
 ///
-/// This is the number the control exists for. It was MEASURED at 74 with the walker
-/// still in place and it is 74 after the switch: the move refuses exactly what the old
-/// path refused, on every one of these streams.
-const CONTROL_REFUSALS: usize = 74;
-/// Stream/dialect cases in which BOTH sides accept. 97 of the same 171.
+/// The consumer move left this at 74. Removing dialectal fallbacks deliberately moved
+/// the SQLite and MySQL attempts over the postgres-only `dialectal_ops` fixture here.
+const CONTROL_REFUSALS: usize = 76;
+/// Stream/dialect cases in which BOTH sides accept. 95 of the same 171.
 ///
 /// Measured at 94 before the `column_level_reference_policy` carrier was added and 97
-/// after, and the +3 is that carrier on three dialects and nothing else — which is why
-/// a moving number here is still readable rather than alarming.
-const CONTROL_ACCEPTANCES: usize = 97;
+/// after. Removing dialectal fallbacks then moved exactly two of those acceptances to
+/// refusals, leaving 95.
+const CONTROL_ACCEPTANCES: usize = 95;
 
 /// The control above compares two Rust functions. This one checks that the probe streams
 /// still reach the arms they were written for, by asserting the exact refusal each

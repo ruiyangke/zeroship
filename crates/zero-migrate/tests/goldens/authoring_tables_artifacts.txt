@@ -54,6 +54,11 @@
 # artifact does not carry the field defs, so only the `runtime.json` hash moves; ZERO
 # `sha|env.db.ts` lines and ZERO per-column lines moved, which is the same containment
 # control the first edit used.
+#
+# THIRD EDIT: the postgres-only `dialectal_ops` fixture now refuses SQLite and MySQL
+# artifact generation. An absent exact target leg no longer silently discards the
+# wrapper and emits artifacts for the prefix before it. Each old per-artifact group is
+# replaced by one explicit refusal line; the PostgreSQL outcome is byte-identical.
 carrier:attached_partition_detached|Mysql|column|p1|0|bucket: t.int().notNull(),
 carrier:attached_partition_detached|Mysql|column|p1|1|payload: t.text(),
 carrier:attached_partition_detached|Mysql|column|par|0|bucket: t.int().notNull(),
@@ -514,20 +519,7 @@ fixture:ddl_drop|Sqlite|refused|gen-types: fold the declared ops into a schema f
 fixture:ddl_rename_table|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: table `accounts` does not exist
 fixture:ddl_rename_table|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: table `accounts` does not exist
 fixture:ddl_rename_table|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: table `accounts` does not exist
-fixture:dialectal_ops|Mysql|column|docs|0|id: t.string({ length: 255 }).primaryKey(),
-fixture:dialectal_ops|Mysql|column|docs|1|created_at: t.timestamp().notNull(),
-fixture:dialectal_ops|Mysql|column|docs|2|updated_at: t.timestamp().notNull(),
-fixture:dialectal_ops|Mysql|column|docs|3|created_by: t.string({ length: 255 }),
-fixture:dialectal_ops|Mysql|column|docs|4|updated_by: t.string({ length: 255 }),
-fixture:dialectal_ops|Mysql|column|docs|5|version: t.int().notNull(),
-fixture:dialectal_ops|Mysql|column|docs|6|deleted_at: t.timestamp(),
-fixture:dialectal_ops|Mysql|column|docs|7|embedding: t.vector({ dimensions: 3, metric: "cosine" }),
-fixture:dialectal_ops|Mysql|index|docs|0|{ name: "docs_deleted_at_idx", on: ["deleted_at"] },
-fixture:dialectal_ops|Mysql|index|docs|1|{ name: "docs_updated_at_idx", on: ["updated_at"] },
-fixture:dialectal_ops|Mysql|index|docs|2|{ name: "docs_created_by_idx", on: ["created_by"] },
-fixture:dialectal_ops|Mysql|primary_key|docs|single:id
-fixture:dialectal_ops|Mysql|sha|env.db.ts|a5ce483ecc6079bc4c0ae56a34095838edd39f5866006075b4905b0b4e4084ef
-fixture:dialectal_ops|Mysql|sha|runtime.json|731b2f0508849e2e1c9c100ab1f74b124ff2e7c055e29d471c28b991ad9dcf5f
+fixture:dialectal_ops|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: dialectal op has no leg for target dialect
 fixture:dialectal_ops|Postgres|column|docs|0|id: t.string({ length: 255 }).primaryKey(),
 fixture:dialectal_ops|Postgres|column|docs|1|created_at: t.timestamp().notNull(),
 fixture:dialectal_ops|Postgres|column|docs|2|updated_at: t.timestamp().notNull(),
@@ -543,20 +535,7 @@ fixture:dialectal_ops|Postgres|index|docs|3|{ name: "docs_embedding_hnsw_idx", o
 fixture:dialectal_ops|Postgres|primary_key|docs|single:id
 fixture:dialectal_ops|Postgres|sha|env.db.ts|0e86a8cb73947cd55e4c22a4d52cf7f19d0c757e3ecae3f7dde690fa210df141
 fixture:dialectal_ops|Postgres|sha|runtime.json|731b2f0508849e2e1c9c100ab1f74b124ff2e7c055e29d471c28b991ad9dcf5f
-fixture:dialectal_ops|Sqlite|column|docs|0|id: t.string({ length: 255 }).primaryKey(),
-fixture:dialectal_ops|Sqlite|column|docs|1|created_at: t.timestamp().notNull(),
-fixture:dialectal_ops|Sqlite|column|docs|2|updated_at: t.timestamp().notNull(),
-fixture:dialectal_ops|Sqlite|column|docs|3|created_by: t.string({ length: 255 }),
-fixture:dialectal_ops|Sqlite|column|docs|4|updated_by: t.string({ length: 255 }),
-fixture:dialectal_ops|Sqlite|column|docs|5|version: t.int().notNull(),
-fixture:dialectal_ops|Sqlite|column|docs|6|deleted_at: t.timestamp(),
-fixture:dialectal_ops|Sqlite|column|docs|7|embedding: t.vector({ dimensions: 3, metric: "cosine" }),
-fixture:dialectal_ops|Sqlite|index|docs|0|{ name: "docs_deleted_at_idx", on: ["deleted_at"] },
-fixture:dialectal_ops|Sqlite|index|docs|1|{ name: "docs_updated_at_idx", on: ["updated_at"] },
-fixture:dialectal_ops|Sqlite|index|docs|2|{ name: "docs_created_by_idx", on: ["created_by"] },
-fixture:dialectal_ops|Sqlite|primary_key|docs|single:id
-fixture:dialectal_ops|Sqlite|sha|env.db.ts|a5ce483ecc6079bc4c0ae56a34095838edd39f5866006075b4905b0b4e4084ef
-fixture:dialectal_ops|Sqlite|sha|runtime.json|731b2f0508849e2e1c9c100ab1f74b124ff2e7c055e29d471c28b991ad9dcf5f
+fixture:dialectal_ops|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: dialectal op has no leg for target dialect
 fixture:dml|Mysql|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
 fixture:dml|Mysql|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
 fixture:dml|Postgres|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9

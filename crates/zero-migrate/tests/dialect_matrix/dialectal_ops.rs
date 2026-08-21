@@ -64,7 +64,7 @@ fn pg_only_ir() -> MigrationIr {
 }
 
 #[test]
-fn lower_selects_postgres_leg_and_skips_absent_sqlite_mysql_legs() {
+fn lower_selects_postgres_leg_and_refuses_absent_sqlite_mysql_legs() {
     let pg_steps = IrAuthor::new(
         PROJECT,
         APP,
@@ -84,12 +84,13 @@ fn lower_selects_postgres_leg_and_skips_absent_sqlite_mysql_legs() {
     );
 
     for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
-        let steps = IrAuthor::new(PROJECT, APP, dialect, &support::no_inject("app"))
+        let err = IrAuthor::new(PROJECT, APP, dialect, &support::no_inject("app"))
             .lower_steps(&pg_only_ir(), &LiveSchema::default())
-            .unwrap_or_else(|err| panic!("{dialect:?} absent dialectal leg should skip: {err}"));
+            .expect_err("an absent exact dialectal leg must fail closed");
         assert!(
-            steps.is_empty(),
-            "{dialect:?} should skip absent postgres-only leg"
+            err.to_string()
+                .contains("dialectal op has no leg for target dialect"),
+            "{dialect:?} should refuse an absent postgres-only leg: {err}"
         );
     }
 }
@@ -198,7 +199,7 @@ fn authored_create_table_lowers_under_the_charter_that_shaped_it() {
 }
 
 #[compio::test]
-async fn sqlite_apply_skips_absent_postgres_leg_without_column_effect() {
+async fn sqlite_apply_selects_explicit_empty_leg_without_column_effect() {
     let p = paths("sqlite_skip");
     let be = backend(&p);
     let ir = resolved_envelope_json(
@@ -206,7 +207,7 @@ async fn sqlite_apply_skips_absent_postgres_leg_without_column_effect() {
           {"op":"createTable","name":"docs","columns":[{"name":"title","type":"text"}]},
           {"op":"dialectal","legs":{"postgres":[
             {"op":"addColumn","table":"docs","column":"pg_only","type":"text"}
-          ]}}
+          ],"sqlite":[]}}
         ]}"#,
     );
 
@@ -218,11 +219,11 @@ async fn sqlite_apply_skips_absent_postgres_leg_without_column_effect() {
     );
     let migrations = author
         .load_and_lower(&ir, APP, &registry(&[]), &LiveSchema::default())
-        .expect("SQLite should lower createTable and skip the absent dialectal leg");
+        .expect("SQLite should lower createTable and select its explicit empty leg");
     assert_eq!(
         migrations.len(),
         1,
-        "SQLite lower should emit only createTable; its dialectal leg is absent"
+        "SQLite lower should emit only createTable; its explicit dialectal leg is empty"
     );
 
     let engine = MigrationEngine::new();
@@ -278,4 +279,27 @@ fn validate_rejects_empty_and_nested_dialectal_ops() {
     );
     let err = validate_ir(&nested, Dialect::Postgres).unwrap_err();
     assert_eq!(err.code, CODE_OP_INVALID);
+}
+
+#[test]
+fn validate_rejects_absent_and_misspelled_target_dialectal_legs() {
+    let absent = pg_only_ir();
+    let err = validate_ir(&absent, Dialect::Sqlite)
+        .expect_err("an absent exact target leg must fail closed");
+    assert_eq!(err.code, CODE_OP_INVALID);
+    assert!(err.reason.contains("sqlite target"), "got: {err}");
+
+    let misspelled = ir(
+        "misspelled_postgres",
+        vec![Op::Dialectal {
+            legs: BTreeMap::from([(
+                zero_migrate_ir::dialect::DialectId::new("postgre"),
+                vec![hnsw_index_op()],
+            )]),
+        }],
+    );
+    let err = validate_ir(&misspelled, Dialect::Postgres)
+        .expect_err("a misspelled key cannot cover the postgres target");
+    assert_eq!(err.code, CODE_OP_INVALID);
+    assert!(err.reason.contains("postgres target"), "got: {err}");
 }
