@@ -106,18 +106,29 @@ impl<'a> Transaction<'a> {
 
     /// Consumes the transaction, committing all changes made within it.
     pub async fn commit(mut self) -> Result<(), Error> {
-        let query = if let Some(sp) = self.savepoint.as_ref() {
+        if self.savepoint.is_some() && self.client.transaction_status().is_none() {
+            self.client.simple_query("").await?;
+        }
+        let responses = if let Some(sp) = self.savepoint.as_ref() {
             let name = quote_identifier(&sp.name);
-            format!("RELEASE {name}")
+            let query = format!("RELEASE {name}");
+            if self.client.transaction_status() == Some(crate::TransactionStatus::Failed) {
+                crate::simple_query::start_batch_execute_with_error_cleanup(
+                    self.client.inner(),
+                    &query,
+                    &rollback_savepoint(&sp.name),
+                )?
+            } else {
+                crate::simple_query::start_batch_execute(self.client.inner(), &query)?
+            }
         } else {
-            "COMMIT".to_string()
+            crate::simple_query::start_batch_execute(self.client.inner(), "COMMIT")?
         };
         // `done` disarms the rollback-on-drop, so it must not be set until the
         // COMMIT has actually been enqueued. Setting it first - as this did
         // until 2026-08-21 - means anything that unwinds while the query is
         // still being built leaves the transaction open on the server with
         // nothing left to undo it.
-        let responses = crate::simple_query::start_batch_execute(self.client.inner(), &query)?;
         self.done = true;
         let r = crate::simple_query::finish_batch_execute(responses).await;
         if r.is_ok() {

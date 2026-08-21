@@ -353,3 +353,82 @@ async fn nonpositive_portal_limits_return_every_row() {
     .expect("portal row-limit claim test exceeded its 10 second deadline");
 }
 
+#[compio::test]
+async fn abandoned_failed_nested_commit_recovers_before_the_next_outer_operation() {
+    compio::time::timeout(TEST_TIMEOUT, async {
+        let url = test_url();
+        let mut client = connect(&url)
+            .await
+            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        let name = common::test_object_name("cpg_failed_nested_commit");
+        let mut transaction = client.transaction().await.unwrap();
+        let nested = transaction.savepoint(name).await.unwrap();
+        let failure = nested
+            .batch_execute("SELECT 1 / 0")
+            .await
+            .expect_err("the nested transaction did not enter its aborted state");
+        assert_eq!(
+            failure.code(),
+            Some(&compio_postgres::error::SqlState::DIVISION_BY_ZERO)
+        );
+
+        {
+            let mut commit = Box::pin(nested.commit());
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(
+                matches!(commit.as_mut().poll(&mut context), Poll::Pending),
+                "failed nested commit completed before it could be abandoned"
+            );
+        }
+
+        let value: i32 = transaction
+            .query_one("SELECT 7::int4", &[])
+            .await
+            .expect("failed nested commit recovery did not precede the next outer operation")
+            .get(0);
+        assert_eq!(value, 7);
+        transaction.rollback().await.unwrap();
+    })
+    .await
+    .expect("failed nested commit abandonment test exceeded its watchdog");
+}
+
+#[compio::test]
+async fn abandoning_bind_before_bind_complete_closes_the_server_portal() {
+    const SQL: &str = "SELECT 83::int4 /* cpg_abandoned_bind_portal */";
+    const BARRIER: &str = "SELECT 84::int4 /* cpg_abandoned_bind_barrier */";
+
+    compio::time::timeout(TEST_TIMEOUT, async {
+        let url = test_url();
+        let mut client = connect(&url)
+            .await
+            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        let transaction = client.transaction().await.unwrap();
+        let statement = transaction.prepare(SQL).await.unwrap();
+
+        let mut bind = Box::pin(transaction.bind(&statement, &[]));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(
+            matches!(bind.as_mut().poll(&mut context), Poll::Pending),
+            "bind completed before its queued response could be abandoned"
+        );
+        drop(bind);
+
+        transaction.simple_query(BARRIER).await.unwrap();
+        let leaked: i64 = transaction
+            .query_one(
+                "SELECT count(*)::int8 FROM pg_cursors \
+                 WHERE name LIKE 'p%' \
+                 AND statement LIKE '%cpg_abandoned_bind_portal%'",
+                &[],
+            )
+            .await
+            .expect("could not inspect portals after the abandoned bind")
+            .get(0);
+        assert_eq!(leaked, 0, "an abandoned bind left its named portal alive");
+
+        transaction.rollback().await.unwrap();
+    })
+    .await
+    .expect("abandoned-bind cleanup claim exceeded its watchdog");
+}
