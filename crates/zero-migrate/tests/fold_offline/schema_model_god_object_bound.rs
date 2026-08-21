@@ -144,7 +144,7 @@ fn route_the_runtime_descriptor() -> Routing {
         ty,
         "the DSL AUTHORING TOKEN (`string`, `ref`, `actor`, `id`). `Column::data_type` \
          is the SQL catalog type, which is a different vocabulary at a different \
-         resolution - `dsl_to_pg_data_type` is a one-way map, so the token cannot be \
+         resolution - descriptor type resolution is one-way, so the token cannot be \
          recovered from the type. Section C is right that these are not the same fact.",
     );
     routing.would_join_the_model(

@@ -489,7 +489,8 @@ pub struct FieldDescriptor {
     pub name: String,
     /// The DSL type token (`string`, `number`, `boolean`, `date`,
     /// `calendarDate`, `json`, `object`, `array`, `union`, `ref`, `bytes`,
-    /// `actor`, `id`). See [`dsl_to_pg_data_type`].
+    /// `actor`, `id`). The descriptor-aware type resolver maps this token and its
+    /// sibling facets to the selected backend's physical type.
     #[serde(rename = "type")]
     pub ty: String,
     /// `true` ⇒ the column is `NOT NULL`.
@@ -760,7 +761,7 @@ struct ResolvedRename {
 }
 
 // ---------------------------------------------------------------------------
-// DSL-type → information_schema.data_type mapping.
+// Descriptor → information_schema.data_type mapping.
 //
 // Schema-authority: the engine's own earlier-subset type table was DELETED and the
 // column-type resolution now DELEGATES to the shared `crate::schema` kernel
@@ -771,42 +772,6 @@ struct ResolvedRename {
 // map (an unknown token mapping to the shared `TEXT` fallback is still rejected,
 // never silently degraded).
 // ---------------------------------------------------------------------------
-
-/// Map a bare DSL type TOKEN to the `information_schema.columns.data_type`
-/// spelling the snapshot stores, by routing through the shared kernel.
-///
-/// This is the token-only convenience entry (kept as the engine's public surface,
-/// and used by `desired_snapshot` for token-only fields). Fields carrying the
-/// parameterised goodies (`vector(dims)`, `encrypted{…}`, `mask{…}`) need their
-/// whole descriptor, so `desired_snapshot` calls `field_data_type` directly;
-/// this wrapper builds a minimal descriptor from the token. `actor`/`id` are
-/// engine-only text spellings the shared SDK map does not name, folded to
-/// `string` here.
-///
-/// The fail-closed contract is preserved: a typo / out-of-scope token that the
-/// shared map degrades to its `TEXT` fallback is rejected with
-/// [`DeclarativeError::UnsupportedType`] rather than silently materialised as a
-/// `text` column the creator never declared.
-///
-/// # Errors
-/// [`DeclarativeError::UnsupportedType`] if `dsl_type` is not a supported token.
-pub fn dsl_to_pg_data_type(dsl_type: &str) -> Result<String, DeclarativeError> {
-    // Schema-authority: delegate to the shared kernel rather than the engine's
-    // old subset table. `actor`/`id` are engine-only spellings of `text` that
-    // the shared SDK map does not name (it has no `actor`/`id` tokens), so fold
-    // them here before handing off. Everything else (incl. the goodies
-    // vector/geoPoint/encrypted — accepted now, no longer `UnsupportedType`)
-    // routes through `field_data_type` with a minimal `def`.
-    let f = FieldDescriptor {
-        name: String::new(),
-        ty: match dsl_type {
-            "actor" | "id" => "string".to_string(),
-            other => other.to_string(),
-        },
-        ..Default::default()
-    };
-    field_data_type(&f)
-}
 
 /// Build the SDK `FieldDef` JSON (`{ type, encrypted?, vectorDims?, vectorMetric?,
 /// mask?, literalValue? }`) the shared `crate::schema` kernel consumes, from the
@@ -2238,7 +2203,7 @@ impl DesiredSchema {
 /// For each collection it emits a [`TableSnapshot`] whose:
 /// - **columns** are exactly the active policy's resolved injected columns plus
 ///   one column per declared field, with the `data_type` from
-///   [`dsl_to_pg_data_type`] and `nullable = !required`;
+///   the descriptor-aware type resolver and `nullable = !required`;
 /// - **constraints** carry the policy-resolved primary key (when present) and one
 ///   FOREIGN KEY per `ref` field;
 /// - **indexes** carry the policy-resolved indexes, the declared named indexes,
@@ -6084,14 +6049,12 @@ impl DeclarativeAuthor {
         //      rename the field KEY `from`→`to` (facets preserved verbatim) to get the
         //      post-rename shape — byte-identical to a `t.*`-diff rename.
         //
-        //  (2) **POST-rename Value** (the field is already keyed `to`) — the
-        //      production catalog-sourced path (`LiveSchema::from_sqlite_catalog`)
-        //      supplies the POST-deploy DESIRED descriptor `Value` (the field is already
-        //      `to`, with its FULL facets — encryption/mask/FK/enum/default/… — none
-        //      dropped, because they come straight from the descriptor, NOT a lossy
-        //      catalog reconstruction). The live `from` column's facets are identical to
-        //      the desired `to` column's (a rename preserves facets), so the desired
-        //      post-rename `Value` IS the correct post-rename CREATE source as-is.
+        //  (2) **POST-rename Value** (the field is already keyed `to`) — the engine's
+        //      single-fold projection supplies the post-deploy desired `Value`, with
+        //      the authored facets preserved by the model rather than reconstructed
+        //      from the lossy catalog shape. The live `from` column's facets are
+        //      identical to the desired `to` column's (a rename preserves facets), so
+        //      the desired post-rename `Value` IS the correct CREATE source as-is.
         //
         // We require the live `from` column to be present in `live_snapshot` (checked
         // above) so the value-copy mapping is authoritative; the SDK `Value` may then be
@@ -7056,39 +7019,11 @@ impl DeclarativeAuthor {
     }
 
     /// The `(table, constraint)` references every stand-alone
-    /// `ALTER TABLE … {ADD|DROP} CONSTRAINT` statement needs, quoted for the target
-    /// dialect.
-    ///
-    /// Identifier syntax follows the TARGET dialect, exactly as `render_add_fk`
-    /// does a few hundred lines up. Without this the MySQL leg emitted
-    /// PostgreSQL double quotes — `ALTER TABLE "db"."t" ADD CONSTRAINT "t_uq"
-    /// UNIQUE (val)` — which MySQL rejects as a syntax error PARTWAY THROUGH a
-    /// deploy, even though it declares `Capability::AlterTableAddConstraint` and
-    /// supports the statement perfectly well in its own spelling.
-    ///
-    /// Only the MySQL arm was introduced: PostgreSQL and SQLite keep the exact
-    /// bytes they emitted before, because this seam is shared with the differ and
-    /// the FK rendering is deliberately byte-identical between the imperative and
-    /// declarative paths.
-    ///
-    /// NOT a [`DdlEmitter`] method, and this was RE-MEASURED rather than assumed:
-    /// the pluggable-backends census sorted these sites into "genuine three-way
-    /// statement, wants the contract", and the STATEMENTS are nothing of the kind.
-    /// `ADD CONSTRAINT <name> <body>` and `DROP CONSTRAINT <name>` are spelled with
-    /// the identical keywords on all three dialects — only these two identifiers
-    /// vary — so three contract impls would have been three copies of one
-    /// `format!`. That is the Class C shape ([`Self::alter_column_default_stmt`]),
-    /// not the Class B shape, and the two functions that used to spell this `match`
-    /// held it VERBATIM, comments included.
+    /// `ALTER TABLE … {ADD|DROP} CONSTRAINT` statement needs. Both identifiers are
+    /// already delegated to the selected backend; the former dialect-match arms
+    /// were byte-identical.
     fn constraint_refs(&self, table: &str, name: &str) -> (String, String) {
-        match self.dialect {
-            SqlDialect::Mysql => (self.qualified(table), self.quote_ident(name)),
-            // The SQLite leg is split out so its identifier is spelled by the
-            // SQLite backend. Byte-identical to the PG leg today; that is the
-            // point — agreement is not routing.
-            SqlDialect::Sqlite => (self.qualified(table), self.quote_ident(name)),
-            SqlDialect::Postgres => (self.qualified(table), self.quote_ident(name)),
-        }
+        (self.qualified(table), self.quote_ident(name))
     }
 
     /// The ONE spelling of `ALTER TABLE … DROP CONSTRAINT <name>`.

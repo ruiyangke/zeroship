@@ -362,7 +362,7 @@ fn canonical_extension_type(format_type: &str) -> String {
         return "text".to_string();
     }
     // PostGIS geography point: `geography(Point,4326)` → `geography(POINT, 4326)`
-    // (the engine's `field_to_column` / `dsl_to_pg_data_type` spelling). Match on
+    // (the engine's descriptor-to-column spelling). Match on
     // the lowercased form so we are robust to PG capitalisation changes, and
     // re-emit the exact engine spelling rather than echoing PG's.
     if lower == "geography(point,4326)" {
