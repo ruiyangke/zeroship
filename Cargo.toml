@@ -282,21 +282,60 @@ disallowed_methods = "deny"
 # Build profiles
 # ---------------------------------------------------------------------------
 
-# MEASURED 2026-08-19: with cargo's default `debug = true`, target/ reached 88G
-# on main, 128G and 111G in two agent worktrees. 57.7G of that was 145 separate
-# test executables -- cargo links one per file under tests/, and there are 313
-# such files (runtime 137, auth 52, control 47). Stripping the debug sections
-# from four of them measured 71-92% of each binary:
+# RE-MEASURED 2026-08-21 as a real A/B: `cargo test --no-run --workspace` from
+# an empty target dir under each profile, on one 16-core box. Both runs exited 0
+# and linked the same 156 executables, so the totals compare like with like:
 #
-#   net_grants_test        639 MB ->  94 MB
-#   stripe_reconcile_test  634 MB ->  88 MB
-#   platform_migrate       389 MB -> 112 MB
-#   link_lockout_test      322 MB ->  24 MB
+#   cargo default (debug = true)    49,246,889,485 B   45.86 GiB   636.5 s
+#   debug = "line-tables-only"      21,991,315,736 B   20.48 GiB   347.0 s
 #
-# `line-tables-only` keeps file and line for panics and backtraces, which is
-# what a failing test needs, and drops the type and variable DWARF, which only
-# an interactive debugger needs. The cost is real and is stated so nobody has
-# to rediscover it: `gdb`/`lldb` can no longer inspect local variables here.
-# Raise this to `true` locally if you are stepping through code.
+# That is the case for this setting: 25.4 GiB off every full target dir, -55.3%.
+# The warm edit-test loop got faster too (touch one crate, rebuild one package):
+# 19.8 s -> 15.5 s, three runs each, /proc/loadavg 7-11 throughout. The cold
+# times above were taken at different loads (20.6 vs 6.0) and are NOT a clean
+# reading; on this box a repeated cold build of one package varied 121-287 s.
+#
+# The 2026-08-19 note this replaces measured `strip` on four linked test
+# binaries and reported 71-92% per binary. That is what `debug = 0` saves, not
+# what this line saves, and it overstated the effect of what actually landed.
+#
+# What is lost was established by panicking, not by assertion. A real panic
+# under this profile prints every frame with `file:line` exactly as under
+# `debug = true`, for our own code and for dependency frames alike; under
+# `debug = 0` every `at <file>:<line>` line disappears. What goes is the type
+# and variable DWARF, so `gdb`/`lldb` cannot inspect locals here. Raise this to
+# `true` locally if you are stepping through code.
+#
+# Measured and rejected, so nobody re-runs them. Percentages are one package's
+# target dir against the same scope's cargo default:
+#
+#   debug = 0                        -57.8%  no `file:line` in any backtrace
+#   incremental = false              -60.4%  warm rebuild 18.5 s -> 43.9 s (2.4x)
+#   strip = "debuginfo"              -27.3%  dep rlibs keep their DWARF; worse
+#   debug = true + split-debuginfo   -25.9%  keeps the debugger, loses to this
+#   [profile.dev.package."*"] = 0    -54.8%  dep `file:line` SURVIVES wherever
+#                                            the code was monomorphised into the
+#                                            caller, so the loss is unpredictable
+#   [profile.dev.build-override]     -46.8%  0.84% better than this line alone
+#
+# `split-debuginfo = "unpacked"` ON TOP of this line is the one that works: full
+# workspace 20.48 -> 17.80 GiB, a further -13.1%, and backtraces are unharmed
+# (`.debug_line` stays in the binary; verified by running a copied binary with
+# the .dwo files deleted). It is not taken because it adds 42,619 .dwo files per
+# target dir and does not touch the term that actually dominates:
+#
+# ACCUMULATION, not per-build size, is why a target dir reaches 85G. A fresh
+# full build here is 20.48 GiB; the main checkout's target/debug measured 85 GiB
+# over 154,422 files and 1,567 incremental session dirs for the same ~156
+# executables -- 14 hash variants of libserde alone. Cargo never collects
+# artifacts for configurations it has stopped building, so the directory holds
+# roughly 4x a fresh build. This profile halves what each build ADDS; only
+# `cargo clean`, or deleting `target/debug/incremental`, removes what earlier
+# builds left behind.
 [profile.dev]
 debug = "line-tables-only"
+
+# `[profile.test]` is deliberately absent. Cargo derives it from `[profile.dev]`,
+# and a test target's dependencies are built with `dev` regardless. Checked, not
+# assumed: building under `debug = 0` produced a test binary whose OWN frames
+# lost `file:line`, which they could only do by inheriting the dev setting.
