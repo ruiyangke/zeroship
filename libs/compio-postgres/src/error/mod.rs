@@ -378,8 +378,9 @@ enum Kind {
     Config,
     RowCount,
     Connect,
-    /// A post-startup target-session probe failed. This stays distinct from a
-    /// transport failure so `sslmode=allow` does not retry the same endpoint.
+    /// A post-startup target-session probe proved that the endpoint does not
+    /// meet the requested property. This stays distinct from a transport
+    /// failure so `sslmode=allow` does not retry the same endpoint.
     TargetSessionAttrs,
     Timeout,
 }
@@ -475,8 +476,9 @@ impl Error {
         self.0.kind == Kind::TlsHandshake
     }
 
-    /// Whether startup succeeded and the post-startup session-property check
-    /// failed. Transport fallback must not reinterpret this as a TLS failure.
+    /// Whether the post-startup session-property check proved that the
+    /// endpoint does not meet the requirement. Transport fallback must not
+    /// reinterpret this as a TLS failure.
     pub(crate) fn is_target_session_attrs(&self) -> bool {
         self.0.kind == Kind::TargetSessionAttrs
     }

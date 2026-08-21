@@ -262,8 +262,7 @@ where
         target_session_attrs,
         &mut parameters,
     )
-    .await
-    .map_err(Error::target_session_attrs)?;
+    .await?;
 
     let (sender, receiver) = mpsc::unbounded();
     let client = Client::new_with_statement_cache_capacity(
@@ -416,30 +415,24 @@ fn require_target_session_attrs(
 ) -> Result<(), Error> {
     match (target, state) {
         (TargetSessionAttrs::ReadWrite, TargetSessionState::TransactionReadOnly(true)) => {
-            Err(Error::connect(io::Error::new(
-                io::ErrorKind::PermissionDenied,
+            Err(target_session_attrs_mismatch(
                 "database does not allow writes",
-            )))
+            ))
         }
         (TargetSessionAttrs::ReadOnly, TargetSessionState::TransactionReadOnly(false)) => {
-            Err(Error::connect(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "database is not read only",
-            )))
+            Err(target_session_attrs_mismatch("database is not read only"))
         }
         (TargetSessionAttrs::Primary, TargetSessionState::InRecovery(true)) => {
-            Err(Error::connect(io::Error::new(
-                io::ErrorKind::PermissionDenied,
+            Err(target_session_attrs_mismatch(
                 "database server is in recovery",
-            )))
+            ))
         }
         (
             TargetSessionAttrs::Standby | TargetSessionAttrs::PreferStandby,
             TargetSessionState::InRecovery(false),
-        ) => Err(Error::connect(io::Error::new(
-            io::ErrorKind::PermissionDenied,
+        ) => Err(target_session_attrs_mismatch(
             "database server is not in recovery",
-        ))),
+        )),
         (TargetSessionAttrs::Any, _)
         | (
             TargetSessionAttrs::ReadWrite,
@@ -459,6 +452,13 @@ fn require_target_session_attrs(
             "target session attribute probe returned the wrong property",
         ))),
     }
+}
+
+fn target_session_attrs_mismatch(message: &'static str) -> Error {
+    Error::target_session_attrs(Error::connect(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        message,
+    )))
 }
 
 /// Run the regular startup + auth + parameter-read handshake against

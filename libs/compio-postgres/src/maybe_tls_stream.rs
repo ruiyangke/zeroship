@@ -80,7 +80,8 @@ where
     fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
         match self {
             // The plain transport splits into two owned, independently
-            // pollable halves — the path the connection pool always takes.
+            // pollable halves, so plaintext connections use the multiplexed
+            // path.
             MaybeTlsStream::Raw(s) => s.try_into_split().map_err(MaybeTlsStream::Raw),
             // rustls keeps shared session state across the read and write
             // directions, so a TLS stream cannot be torn into halves that
