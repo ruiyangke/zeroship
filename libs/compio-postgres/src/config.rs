@@ -217,6 +217,180 @@ pub enum ChannelBinding {
     Require,
 }
 
+/// An authentication method understood by PostgreSQL 16's `require_auth`
+/// connection parameter.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AuthMethod {
+    /// Cleartext password authentication (`password`).
+    Password,
+    /// PostgreSQL's MD5 challenge-response authentication (`md5`).
+    Md5,
+    /// GSSAPI authentication (`gss`).
+    Gss,
+    /// Windows SSPI authentication (`sspi`).
+    Sspi,
+    /// SCRAM-SHA-256, with or without channel binding (`scram-sha-256`).
+    ScramSha256,
+    /// No explicit PostgreSQL-protocol authentication challenge (`none`).
+    None,
+}
+
+impl AuthMethod {
+    /// Returns this method's PostgreSQL connection-string spelling.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Password => "password",
+            Self::Md5 => "md5",
+            Self::Gss => "gss",
+            Self::Sspi => "sspi",
+            Self::ScramSha256 => "scram-sha-256",
+            Self::None => "none",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "password" => Some(Self::Password),
+            "md5" => Some(Self::Md5),
+            "gss" => Some(Self::Gss),
+            "sspi" => Some(Self::Sspi),
+            "scram-sha-256" => Some(Self::ScramSha256),
+            "none" => Some(Self::None),
+            _ => None,
+        }
+    }
+}
+
+/// A non-empty collection of authentication methods for a [`RequireAuth`]
+/// policy.
+///
+/// Use [`AuthMethods::new`] for the first method and [`AuthMethods::with`] to
+/// add alternatives. Adding the same method twice is idempotent, so the typed
+/// builder cannot create the duplicate or empty lists rejected by the
+/// connection-string grammar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthMethods(Vec<AuthMethod>);
+
+impl AuthMethods {
+    /// Creates a collection containing one authentication method.
+    pub fn new(method: AuthMethod) -> Self {
+        Self(vec![method])
+    }
+
+    /// Adds another acceptable or rejected method to this collection.
+    pub fn with(mut self, method: AuthMethod) -> Self {
+        if !self.contains(method) {
+            self.0.push(method);
+        }
+        self
+    }
+
+    /// Returns whether this collection contains `method`.
+    pub fn contains(&self, method: AuthMethod) -> bool {
+        self.0.contains(&method)
+    }
+}
+
+/// Policy restricting which authentication methods a server may request.
+///
+/// This is PostgreSQL 16's `require_auth` connection parameter. A positive
+/// list is represented by [`RequireAuth::Require`], a fully-negated list by
+/// [`RequireAuth::Reject`], and an omitted or empty parameter by
+/// [`RequireAuth::Any`]. Including [`AuthMethod::None`] in a required list
+/// permits the server to skip an explicit authentication exchange; rejecting
+/// it requires the server to complete one.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum RequireAuth {
+    /// Accept any supported method, including no authentication challenge.
+    #[default]
+    Any,
+    /// Require exactly one of the listed methods.
+    Require(AuthMethods),
+    /// Reject the listed methods and accept any other supported method.
+    Reject(AuthMethods),
+}
+
+impl RequireAuth {
+    fn parse(value: &str) -> Result<Self, InvalidRequireAuth> {
+        if value.is_empty() {
+            return Ok(Self::Any);
+        }
+
+        let mut methods = Vec::new();
+        let mut expected_negated = None;
+
+        for part in value.split(',') {
+            let (negated, method_name) = match part.strip_prefix('!') {
+                Some(method) => (true, method),
+                None => (false, part),
+            };
+
+            match expected_negated {
+                None => expected_negated = Some(negated),
+                Some(false) if negated => {
+                    return Err(InvalidRequireAuth(format!(
+                        "negative method {part:?} cannot be mixed with non-negative methods"
+                    )));
+                }
+                Some(true) if !negated => {
+                    return Err(InvalidRequireAuth(format!(
+                        "method {part:?} cannot be mixed with negative methods"
+                    )));
+                }
+                Some(_) => {}
+            }
+
+            let method = AuthMethod::parse(method_name).ok_or_else(|| {
+                InvalidRequireAuth(format!("unknown authentication method {method_name:?}"))
+            })?;
+            if methods.contains(&method) {
+                return Err(InvalidRequireAuth(format!(
+                    "method {part:?} is specified more than once"
+                )));
+            }
+            methods.push(method);
+        }
+
+        let methods = AuthMethods(methods);
+        if expected_negated == Some(true) {
+            Ok(Self::Reject(methods))
+        } else {
+            Ok(Self::Require(methods))
+        }
+    }
+
+    pub(crate) fn allows(&self, method: AuthMethod) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Require(methods) => methods.contains(method),
+            Self::Reject(methods) => !methods.contains(method),
+        }
+    }
+}
+
+impl fmt::Display for RequireAuth {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Any => fmt.write_str(""),
+            Self::Require(methods) | Self::Reject(methods) => {
+                let negated = matches!(self, Self::Reject(_));
+                for (index, method) in methods.0.iter().enumerate() {
+                    if index != 0 {
+                        fmt.write_str(",")?;
+                    }
+                    if negated {
+                        fmt.write_str("!")?;
+                    }
+                    fmt.write_str(method.as_str())?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 /// Load balancing configuration.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -342,6 +516,10 @@ pub enum Host {
 /// * `channel_binding` - Controls usage of channel binding in the authentication process. If set to `disable`, channel
 ///     binding will not be used. If set to `prefer`, channel binding will be used if available, but not used otherwise.
 ///     If set to `require`, the authentication process will fail if channel binding is not used. Defaults to `prefer`.
+/// * `require_auth` - A comma-separated allowlist of authentication methods, or a list in which every method is
+///     prefixed by `!` to reject those methods. PostgreSQL 16 accepts `password`, `md5`, `gss`, `sspi`,
+///     `scram-sha-256`, and `none`. An omitted or empty value accepts any method and permits the server to skip
+///     authentication.
 /// * `load_balance_hosts` - Controls the order in which the client tries to connect to the available hosts and
 ///     addresses. Once a connection attempt is successful no other hosts and addresses will be tried. This parameter
 ///     is typically used in combination with multiple host names or a DNS record that returns multiple IPs. If set to
@@ -414,6 +592,7 @@ pub struct Config {
     pub(crate) keepalive_config: KeepaliveConfig,
     pub(crate) target_session_attrs: TargetSessionAttrs,
     pub(crate) channel_binding: ChannelBinding,
+    pub(crate) require_auth: RequireAuth,
     pub(crate) load_balance_hosts: LoadBalanceHosts,
     pub(crate) replication: Option<ReplicationMode>,
 }
@@ -453,6 +632,7 @@ impl Config {
             },
             target_session_attrs: TargetSessionAttrs::Any,
             channel_binding: ChannelBinding::Prefer,
+            require_auth: RequireAuth::Any,
             load_balance_hosts: LoadBalanceHosts::Disable,
             replication: None,
         }
@@ -806,6 +986,19 @@ impl Config {
         self.channel_binding
     }
 
+    /// Restricts which authentication methods the server may use.
+    ///
+    /// Defaults to [`RequireAuth::Any`].
+    pub fn require_auth(&mut self, require_auth: RequireAuth) -> &mut Config {
+        self.require_auth = require_auth;
+        self
+    }
+
+    /// Gets the authentication-method policy.
+    pub fn get_require_auth(&self) -> &RequireAuth {
+        &self.require_auth
+    }
+
     /// Sets the host load balancing behavior.
     ///
     /// Defaults to `disable`.
@@ -1007,6 +1200,11 @@ impl Config {
                 };
                 self.channel_binding(channel_binding);
             }
+            "require_auth" => {
+                let require_auth = RequireAuth::parse(value)
+                    .map_err(|error| Error::config_parse(Box::new(error)))?;
+                self.require_auth(require_auth);
+            }
             "load_balance_hosts" => {
                 let load_balance_hosts = match value {
                     "disable" => LoadBalanceHosts::Disable,
@@ -1100,10 +1298,10 @@ impl Config {
     /// Connects to a PostgreSQL database over an arbitrary stream.
     ///
     /// Uses `user`, `password`, `dbname`, `options`, `application_name`,
-    /// `connect_timeout`, and `statement_cache_capacity`; all other settings
-    /// are ignored. The timeout starts with TLS negotiation on the supplied
-    /// stream and covers startup and authentication. It cannot cover the
-    /// caller's work to open that stream.
+    /// `connect_timeout`, `statement_cache_capacity`, and `require_auth`; all
+    /// other settings are ignored. The timeout starts with TLS negotiation on
+    /// the supplied stream and covers startup and authentication. It cannot
+    /// cover the caller's work to open that stream.
     ///
     /// One exception, and it is the reason this is not simply "sslmode is
     /// ignored": the caller owns the stream, so this entry point cannot open a
@@ -1191,6 +1389,7 @@ impl fmt::Debug for Config {
         config_dbg
             .field("target_session_attrs", &self.target_session_attrs)
             .field("channel_binding", &self.channel_binding)
+            .field("require_auth", &self.require_auth)
             .field("load_balance_hosts", &self.load_balance_hosts)
             .finish()
     }
@@ -1217,6 +1416,17 @@ impl fmt::Display for InvalidValue {
 }
 
 impl error::Error for InvalidValue {}
+
+#[derive(Debug)]
+struct InvalidRequireAuth(String);
+
+impl fmt::Display for InvalidRequireAuth {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(fmt, "invalid value for option `require_auth`: {}", self.0)
+    }
+}
+
+impl error::Error for InvalidRequireAuth {}
 
 struct Parser<'a> {
     s: &'a str,
@@ -1384,7 +1594,15 @@ impl<'a> Parser<'a> {
         self.skip_ws();
         self.eat('=')?;
         self.skip_ws();
-        let value = self.value()?;
+        // libpq treats a require_auth value that ends with `=` (optionally
+        // followed by whitespace) as the empty, unrestricted policy. The
+        // inherited parser rejects unquoted empty values for every other
+        // option, so keep this compatibility exception narrowly scoped.
+        let value = if keyword == "require_auth" && self.it.peek().is_none() {
+            String::new()
+        } else {
+            self.value()?
+        };
 
         Ok(Some((keyword, value)))
     }
@@ -1585,7 +1803,9 @@ impl<'a> UrlParser<'a> {
 mod tests {
     use std::net::IpAddr;
 
-    use crate::config::{SslMode, SslNegotiation, SslRootCert};
+    use crate::config::{
+        AuthMethod, AuthMethods, RequireAuth, SslMode, SslNegotiation, SslRootCert,
+    };
     use crate::{Config, config::Host};
 
     /// All six libpq spellings parse, to the six distinct modes.
@@ -1827,6 +2047,110 @@ mod tests {
         "host=h statement_cache_capacity=-1"
             .parse::<Config>()
             .expect_err("a cache capacity cannot be negative");
+    }
+
+    #[test]
+    fn require_auth_parses_the_postgresql_16_policy_shape() {
+        assert_eq!(Config::new().get_require_auth(), &RequireAuth::Any);
+        assert_eq!(
+            "host=h require_auth=''"
+                .parse::<Config>()
+                .unwrap()
+                .get_require_auth(),
+            &RequireAuth::Any
+        );
+        assert_eq!(
+            "postgresql://h/db?require_auth="
+                .parse::<Config>()
+                .unwrap()
+                .get_require_auth(),
+            &RequireAuth::Any
+        );
+        assert_eq!(
+            "host=h require_auth=   "
+                .parse::<Config>()
+                .unwrap()
+                .get_require_auth(),
+            &RequireAuth::Any
+        );
+
+        let all_methods = AuthMethods::new(AuthMethod::Password)
+            .with(AuthMethod::Md5)
+            .with(AuthMethod::Gss)
+            .with(AuthMethod::Sspi)
+            .with(AuthMethod::ScramSha256)
+            .with(AuthMethod::None);
+        assert_eq!(
+            "host=h require_auth=password,md5,gss,sspi,scram-sha-256,none"
+                .parse::<Config>()
+                .unwrap()
+                .get_require_auth(),
+            &RequireAuth::Require(all_methods)
+        );
+        assert_eq!(
+            "postgresql://h/db?require_auth=!password,!none"
+                .parse::<Config>()
+                .unwrap()
+                .get_require_auth(),
+            &RequireAuth::Reject(
+                AuthMethods::new(AuthMethod::Password).with(AuthMethod::None)
+            )
+        );
+
+        let mut built = Config::new();
+        built.require_auth(RequireAuth::Require(AuthMethods::new(
+            AuthMethod::ScramSha256,
+        )));
+        assert_eq!(
+            built.get_require_auth(),
+            &RequireAuth::Require(AuthMethods::new(AuthMethod::ScramSha256))
+        );
+
+        let unique = AuthMethods::new(AuthMethod::ScramSha256)
+            .with(AuthMethod::None)
+            .with(AuthMethod::ScramSha256);
+        assert_eq!(
+            RequireAuth::Require(unique).to_string(),
+            "scram-sha-256,none"
+        );
+    }
+
+    #[test]
+    fn malformed_require_auth_lists_are_rejected_during_dsn_parsing() {
+        for value in [
+            "bogus",
+            "password,password",
+            "!md5,!md5",
+            "none,none",
+            "!none,!none",
+            "password,!md5",
+            "!password,md5",
+            "none,!password",
+            "password,",
+            ",password",
+            "password,,md5",
+            "!",
+            "!!md5",
+            "SCRAM-SHA-256",
+            "scram-sha-256-plus",
+            "oauth",
+            " password",
+            "password ",
+            "password, md5",
+        ] {
+            let dsn = format!("host=h require_auth='{value}'");
+            let error = dsn
+                .parse::<Config>()
+                .err()
+                .unwrap_or_else(|| panic!("malformed require_auth={value:?} parsed"));
+            let cause = std::error::Error::source(&error)
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            assert!(
+                cause.contains("require_auth"),
+                "require_auth={value:?} produced an unclear error: {cause:?}"
+            );
+        }
     }
 }
 
