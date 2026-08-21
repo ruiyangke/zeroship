@@ -127,18 +127,25 @@ impl<'a> TransactionBuilder<'a> {
             }
         }
 
-        // This is done as `Future` created by this method can be dropped after
-        // `RequestMessages` is synchronously send to the `Connection` by
-        // `batch_execute()`, but before `Responses` is asynchronously polled to
-        // completion. In that case `Transaction` won't be created and thus
-        // won't be rolled back.
+        // The future this method returns can be dropped after `RequestMessages`
+        // has synchronously reached the `Connection` but before `Responses` is
+        // polled to completion. No `Transaction` exists yet in that case, so
+        // nothing else would roll the START back.
+        //
+        // The guard is armed only once the request is ENQUEUED, which is why
+        // the send is split out of the await. Arming it across the encode and
+        // the logging - both of which can fail or unwind - would fire a
+        // ROLLBACK for a START that never left this process, and that rollback
+        // lands on whatever transaction the caller already had open.
+        let responses = crate::simple_query::start_batch_execute(self.client.inner(), &query)?;
         {
             let mut cleaner = RollbackIfNotDone {
                 client: self.client,
                 done: false,
             };
-            self.client.batch_execute(&query).await?;
+            let result = crate::simple_query::finish_batch_execute(responses).await;
             cleaner.done = true;
+            result?;
         }
 
         Ok(Transaction::new(self.client))
