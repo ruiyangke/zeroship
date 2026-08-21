@@ -508,6 +508,61 @@ impl TransactionStatus {
     }
 }
 
+#[cfg(test)]
+mod transaction_status_tests {
+    use super::{Client, TransactionStatus};
+    use crate::codec::FrontendMessage;
+    use crate::config::{SslMode, SslNegotiation};
+    use crate::connection::RequestMessages;
+    use bytes::BytesMut;
+    use futures_channel::mpsc;
+
+    #[test]
+    fn unknown_ready_for_query_status_is_conservatively_failed() {
+        assert_eq!(
+            TransactionStatus::from_byte(b'X'),
+            TransactionStatus::Failed
+        );
+    }
+
+    #[test]
+    fn failed_send_does_not_leave_transaction_status_unsettled() {
+        let (sender, receiver) = mpsc::unbounded();
+        drop(receiver);
+
+        let client = Client::new(
+            sender,
+            SslMode::Disable,
+            SslNegotiation::Postgres,
+            0,
+            0,
+            None,
+        );
+        assert_eq!(
+            client.transaction_status(),
+            Some(TransactionStatus::Idle)
+        );
+
+        let result = client.inner().send(RequestMessages::Single(
+            FrontendMessage::Raw(BytesMut::new().freeze()),
+        ));
+        assert!(
+            result.is_err(),
+            "the disconnected request channel accepted a send"
+        );
+
+        assert!(
+            !client.has_in_flight_requests(),
+            "failed send leaked its transaction-capable in-flight count"
+        );
+        assert_eq!(
+            client.transaction_status(),
+            Some(TransactionStatus::Idle),
+            "failed send left the settled session looking unsettled"
+        );
+    }
+}
+
 /// A stream of backend messages for a single in-flight request.
 ///
 /// Yields messages one at a time via `next().await`. The connection task
@@ -671,10 +726,14 @@ mod type_cache_tests {
         StatementCacheSettings, statement_uses_cached_typeinfo,
     };
     use crate::config::{SslMode, SslNegotiation};
-    use crate::Statement;
+    use crate::{Error, Statement};
     use crate::types::{Kind, Type};
+    use bytes::{BufMut, BytesMut};
     use futures_channel::mpsc;
+    use postgres_protocol::message::backend::Message;
     use std::num::NonZeroUsize;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::Arc;
 
     fn custom_type() -> Type {
         Type::new(
@@ -696,6 +755,86 @@ mod type_cache_tests {
             None,
             StatementCacheSettings::new(1, NonZeroUsize::MIN),
         )
+    }
+
+    fn invalid_statement_name_error() -> Error {
+        let payload = b"SERROR\0C26000\0Mscripted stale statement\0\0";
+        let mut frame = BytesMut::new();
+        frame.put_u8(b'E');
+        frame.put_u32(u32::try_from(payload.len() + 4).unwrap());
+        frame.extend_from_slice(payload);
+
+        match Message::parse(&mut frame).expect("parse scripted ErrorResponse") {
+            Some(Message::ErrorResponse(body)) => Error::db(body),
+            _ => panic!("scripted 26000 did not decode as ErrorResponse"),
+        }
+    }
+
+    #[test]
+    fn encoder_panic_does_not_leak_bytes_into_the_next_message() {
+        let client = client_with_statement_cache();
+
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            client.inner().with_buf(|buf| {
+                buf.extend_from_slice(b"stale frontend bytes");
+                panic!("scripted encoder panic");
+            });
+        }));
+        assert!(panic.is_err(), "the scripted encoder did not panic");
+
+        client.inner().with_buf(|buf| {
+            assert!(
+                buf.is_empty(),
+                "a panicking encoder left stale bytes for the next message: {buf:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn late_cached_error_does_not_evict_newer_same_sql_statement() {
+        const SQL: &str = "SELECT 1";
+
+        let client = client_with_statement_cache();
+        let generation = client.inner().type_cache_generation();
+        let old = Statement::new(
+            client.inner(),
+            "old".to_string(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let old_winner =
+            client
+                .inner()
+                .cache_statement(SQL, old.clone(), generation);
+        assert!(old_winner.same_instance(&old));
+
+        let replacement = Statement::new(
+            client.inner(),
+            "replacement".to_string(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let displaced = {
+            let mut cache = client.inner().statement_cache.lock();
+            cache
+                .statements
+                .insert(Arc::<str>::from(SQL), replacement.clone())
+                .expect("old statement was cached")
+        };
+        drop(displaced);
+
+        client
+            .inner()
+            .invalidate_cached_statement_on_error(&old, &invalid_statement_name_error());
+
+        let survivor = client
+            .inner()
+            .cached_statement(SQL)
+            .expect("a late error evicted the newer same-SQL statement");
+        assert!(
+            survivor.same_instance(&replacement),
+            "a late error replaced the newer same-SQL cache identity"
+        );
     }
 
     #[test]
@@ -871,6 +1010,14 @@ pub struct InnerClient {
     /// `None` for [`Config::connect_raw`](crate::Config::connect_raw), whose
     /// stream belongs to the caller and need not be a socket at all.
     release: Option<ConnectionRelease>,
+}
+
+struct ClearBufferOnDrop<'a>(&'a mut BytesMut);
+
+impl Drop for ClearBufferOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.clear();
+    }
 }
 
 impl InnerClient {
@@ -1309,9 +1456,8 @@ impl InnerClient {
         F: FnOnce(&mut BytesMut) -> R,
     {
         let mut buffer = self.buffer.lock();
-        let r = f(&mut buffer);
-        buffer.clear();
-        r
+        let clear = ClearBufferOnDrop(&mut buffer);
+        f(&mut *clear.0)
     }
 
     /// Mark the connection as "dirty" — a fire-and-forget message (e.g.

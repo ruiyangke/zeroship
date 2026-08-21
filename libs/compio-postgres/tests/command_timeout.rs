@@ -137,6 +137,34 @@ async fn command_inside_the_deadline_is_untouched() {
 }
 
 #[compio::test]
+async fn direct_pooled_client_query_does_not_enter_command_scope() {
+    compio::time::timeout(OUTER_WATCHDOG, async {
+        let pool = connect_pool(Duration::from_millis(50)).await;
+        let client = pool.get().await.expect("check out the only connection");
+        let backend_pid = client.process_id();
+
+        let started = Instant::now();
+        let row = client
+            .query_one(
+                "SELECT pg_backend_pid(), 42::int4 FROM pg_sleep(0.20)",
+                &[],
+            )
+            .await
+            .expect("a direct pooled-client query inherited the command deadline");
+
+        assert!(
+            started.elapsed() >= Duration::from_millis(150),
+            "the query did not expose three configured command budgets"
+        );
+        assert_eq!(row.get::<_, i32>(0), backend_pid);
+        assert_eq!(row.get::<_, i32>(1), 42);
+        assert!(!client.is_closed());
+    })
+    .await
+    .expect("direct pooled-client deadline control exceeded its watchdog");
+}
+
+#[compio::test]
 async fn server_statement_timeout_remains_a_server_error() {
     compio::time::timeout(OUTER_WATCHDOG, async {
         let pool = connect_pool(Duration::from_millis(750)).await;

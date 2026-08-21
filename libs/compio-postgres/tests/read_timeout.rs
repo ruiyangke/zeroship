@@ -799,3 +799,97 @@ async fn copy_input_time_is_not_charged_as_server_read_silence() {
     .await
     .expect("COPY input deadline control exceeded its outer watchdog");
 }
+
+#[compio::test]
+async fn copy_done_starts_a_deadline_for_the_final_server_response() {
+    use bytes::Bytes;
+
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = StubServer::spawn(|listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_startup(&mut stream, 501);
+
+            for expected in [b'P', b'D', b'S'] {
+                let (tag, body) = read_frontend_frame(&mut stream);
+                assert_eq!(tag, expected, "unexpected COPY prepare frame");
+                if tag == b'S' {
+                    assert!(body.is_empty(), "COPY prepare Sync carried a body");
+                }
+            }
+
+            let mut response = backend_frame(b'1', &[]);
+            response.extend_from_slice(&backend_frame(b't', &[0, 0]));
+            response.extend_from_slice(&backend_frame(b'n', &[]));
+            response.extend_from_slice(&backend_frame(b'Z', b"I"));
+            stream
+                .write_all(&response)
+                .expect("describe scripted COPY statement");
+            stream.flush().expect("flush scripted COPY description");
+
+            for expected in [b'B', b'E', b'S'] {
+                let (tag, body) = read_frontend_frame(&mut stream);
+                assert_eq!(tag, expected, "unexpected COPY startup frame");
+                if tag == b'S' {
+                    assert!(body.is_empty(), "COPY startup Sync carried a body");
+                }
+            }
+
+            let mut response = backend_frame(b'2', &[]);
+            response.extend_from_slice(&backend_frame(b'G', &[0, 0, 0]));
+            stream
+                .write_all(&response)
+                .expect("accept scripted COPY input");
+            stream.flush().expect("flush scripted CopyInResponse");
+
+            let (tag, body) = read_frontend_frame(&mut stream);
+            assert_eq!(tag, b'c', "COPY finish did not send CopyDone");
+            assert!(body.is_empty(), "CopyDone carried an unexpected body");
+            let (tag, body) = read_frontend_frame(&mut stream);
+            assert_eq!(tag, b'S', "COPY finish did not send its Sync barrier");
+            assert!(body.is_empty(), "COPY terminal Sync carried a body");
+
+            // COPY's input phase is over, so PostgreSQL now owes
+            // CommandComplete + ReadyForQuery. Withhold both and prove that
+            // the terminal phase has its own read deadline.
+            expect_disconnect(&mut stream);
+        });
+
+        let (client, connection) = stub_config(server.addr)
+            .connect(NoTls)
+            .await
+            .expect("connect to terminal-silent COPY peer");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+        let statement = client
+            .prepare("COPY scripted_terminal_deadline FROM STDIN")
+            .await
+            .expect("prepare scripted COPY statement");
+        let sink = client
+            .copy_in::<_, Bytes>(&statement)
+            .await
+            .expect("enter scripted COPY input mode");
+        let mut sink = std::pin::pin!(sink);
+
+        let finish_error = compio::time::timeout(Duration::from_secs(1), sink.as_mut().finish())
+            .await
+            .expect("COPY finish exceeded its outer watchdog")
+            .expect_err("terminal-silent COPY completed");
+        assert!(
+            finish_error.is_read_timeout(),
+            "COPY terminal silence lost its read-timeout classification: {finish_error:?}"
+        );
+
+        let driver_error = compio::time::timeout(Duration::from_secs(2), driver)
+            .await
+            .expect("terminal-silent COPY driver exceeded its outer watchdog")
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            .expect_err("terminal-silent COPY ended the connection cleanly");
+        assert!(driver_error.is_read_timeout());
+        assert!(client.is_closed(), "timed-out COPY client remained usable");
+        drop(sink);
+        drop(statement);
+        drop(client);
+        server.finish();
+    })
+    .await
+    .expect("COPY terminal deadline test exceeded its outer watchdog");
+}
