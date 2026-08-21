@@ -74,7 +74,7 @@
 #![allow(dead_code)]
 
 pub use crate::cancel_token::CancelToken;
-pub use crate::client::{Client, TransactionStatus};
+pub use crate::client::{Client, QueryEvent, QueryOutcome, TransactionStatus};
 pub use crate::config::Config;
 pub use crate::connection::Connection;
 pub use crate::copy_in::CopyInSink;

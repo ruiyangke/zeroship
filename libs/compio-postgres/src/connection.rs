@@ -58,6 +58,7 @@
 // batch ordering are identical across them.
 
 use crate::buf_stream::{BufReadHalf, BufStream, BufWriteHalf, SplitStream};
+use crate::client::{QueryObservation, ResponseMessages};
 use crate::codec::{BackendMessage, BackendMessages, FrontendMessage, read_backend, write_frontend};
 use crate::copy_in::CopyInReceiver;
 use crate::error::DbError;
@@ -75,15 +76,17 @@ use std::future::poll_fn;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::task::Poll;
+use std::time::Instant;
 
 /// A request from a `Client` to be forwarded to the server by the
 /// `Connection` task.
 pub struct Request {
     pub messages: RequestMessages,
-    pub sender: mpsc::Sender<BackendMessages>,
+    pub sender: mpsc::Sender<ResponseMessages>,
     pub(crate) disposition: RequestDisposition,
     pub(crate) transaction_effect: TransactionEffect,
     pub(crate) prepare_cleanup: Option<crate::prepare::PrepareCleanup>,
+    pub(crate) observation: Option<QueryObservation>,
 }
 
 /// Whether a caller awaits the request outcome.
@@ -118,16 +121,25 @@ pub enum RequestMessages {
 /// Bookkeeping for a single in-flight request: the channel we send
 /// response batches back on. Matches the shape of the tokio version.
 struct Response {
-    sender: mpsc::Sender<BackendMessages>,
+    sender: mpsc::Sender<ResponseMessages>,
     disposition: RequestDisposition,
     transaction_effect: TransactionEffect,
     prepare_cleanup: Option<crate::prepare::PrepareCleanup>,
+    observation: Option<QueryObservation>,
 }
 
 struct PendingResponse {
-    sender: mpsc::Sender<BackendMessages>,
-    messages: BackendMessages,
+    sender: mpsc::Sender<ResponseMessages>,
+    messages: ResponseMessages,
     disposition: RequestDisposition,
+}
+
+impl Drop for Response {
+    fn drop(&mut self) {
+        if let Some(observation) = &self.observation {
+            observation.connection_closed();
+        }
+    }
 }
 
 enum RequestOutcome {
@@ -443,12 +455,15 @@ where
             disposition,
             transaction_effect,
             prepare_cleanup,
+            observation,
         } = request;
+        let copy_observation = observation.clone();
         self.responses.push_back(Response {
             sender,
             disposition,
             transaction_effect,
             prepare_cleanup,
+            observation,
         });
 
         match messages {
@@ -477,6 +492,9 @@ where
                 loop {
                     match receiver.next().await {
                         Some(msg) => {
+                            if let Some(observation) = &copy_observation {
+                                observation.inspect_frontend(&msg);
+                            }
                             write_frontend(&mut self.stream, msg)?;
                             self.stream.flush().await?;
                         }
@@ -581,6 +599,31 @@ impl Dispatch<'_> {
             }
         }
 
+        let completion_observation = response.observation.clone();
+        let messages = if let Some(observation) = response
+            .observation
+            .as_ref()
+            .filter(|observation| observation.is_execution())
+        {
+            let mut observed = VecDeque::new();
+            loop {
+                match messages.next() {
+                    Ok(Some(message)) => {
+                        observation.observe_server_message(&message);
+                        observed.push_back(Ok(message));
+                    }
+                    Ok(None) => break,
+                    Err(error) => {
+                        observed.push_back(Err(Error::parse(error)));
+                        break;
+                    }
+                }
+            }
+            ResponseMessages::Observed(observed)
+        } else {
+            ResponseMessages::Raw(messages)
+        };
+
         match response.sender.try_send(messages) {
             Ok(()) => {
                 if !request_complete {
@@ -613,6 +656,11 @@ impl Dispatch<'_> {
                     self.responses.push_front(response);
                 }
             }
+        }
+        if request_complete
+            && let Some(observation) = completion_observation
+        {
+            observation.server_complete(Instant::now());
         }
         Ok(())
     }
@@ -1078,6 +1126,7 @@ where
         let mut pending_responses: VecDeque<PendingResponse> = VecDeque::new();
         // COPY-IN frame source, set while streaming a `COPY ... FROM STDIN`.
         let mut copy_in: Option<CopyInReceiver> = None;
+        let mut copy_in_observation: Option<QueryObservation> = None;
         // The `Client` handle dropped (`receiver` closed). We do NOT send
         // `Terminate` until no awaited response remains (mirrors
         // tokio-postgres `poll_write`), then send it exactly once. A discarded
@@ -1231,12 +1280,15 @@ where
                         disposition,
                         transaction_effect,
                         prepare_cleanup,
+                        observation,
                     } = request;
+                    let request_observation = observation.clone();
                     responses.push_back(Response {
                         sender,
                         disposition,
                         transaction_effect,
                         prepare_cleanup,
+                        observation,
                     });
                     match messages {
                         RequestMessages::Single(msg) => {
@@ -1289,6 +1341,7 @@ where
                             debug_assert_eq!(transaction_effect, TransactionEffect::MayChange);
                             // Enter COPY mode; frames stream via branch (4).
                             copy_in = Some(rx);
+                            copy_in_observation = request_observation;
                         }
                     }
                 }
@@ -1302,6 +1355,9 @@ where
 
                 // ---------- COPY-IN frame ----------
                 MuxEvent::CopyFrame(Some(msg)) => {
+                    if let Some(observation) = &copy_in_observation {
+                        observation.inspect_frontend(&msg);
+                    }
                     write_frontend(&mut write_half, msg)?;
                     // Same cancel-safe flush+read-drain interleave as the
                     // request path: a COPY frame the server rejects mid-stream
@@ -1331,6 +1387,7 @@ where
                     // COPY stream ended (the receiver already appended
                     // CopyDone+Sync / CopyFail+Sync as its terminal frame).
                     copy_in = None;
+                    copy_in_observation = None;
                 }
             }
             }
@@ -1600,7 +1657,7 @@ mod tests {
         let responses = VecDeque::new();
         let pending_responses = VecDeque::from([PendingResponse {
             sender,
-            messages: BackendMessages::empty(),
+            messages: ResponseMessages::Raw(BackendMessages::empty()),
             disposition: RequestDisposition::Awaited,
         }]);
         let write_error = Error::io(std::io::Error::new(
@@ -1629,6 +1686,7 @@ mod tests {
             disposition: RequestDisposition::Housekeeping,
             transaction_effect: TransactionEffect::Neutral,
             prepare_cleanup: None,
+            observation: None,
         }]);
         let mut pending_responses = VecDeque::new();
         let tx_status = AtomicU8::new(b'T');

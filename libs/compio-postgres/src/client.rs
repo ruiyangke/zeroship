@@ -40,7 +40,376 @@ use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::task::{Context, Poll, ready};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// The result of one SQL execution reported by the query observer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum QueryOutcome {
+    /// PostgreSQL completed the execution successfully.
+    Success,
+    /// PostgreSQL rejected the execution.
+    ///
+    /// Only SQLSTATE is retained. Server error text and detail can echo bound
+    /// values, so they are deliberately excluded from observation events.
+    DatabaseError {
+        /// The SQLSTATE carried by PostgreSQL, when its error frame was valid.
+        code: Option<crate::error::SqlState>,
+    },
+    /// The caller dropped the response future or stream before its terminal
+    /// protocol message, or PostgreSQL returned SQLSTATE `57014`.
+    Cancelled,
+}
+
+/// A completed SQL execution.
+///
+/// The SQL text is reported verbatim, including placeholders such as `$1`.
+/// Bound parameter values are never decoded, copied, or attached to the
+/// event. SQL literals are part of the SQL text itself and are therefore
+/// visible; callers should keep secrets in bound parameters.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueryEvent {
+    sql: Arc<str>,
+    elapsed: Duration,
+    outcome: QueryOutcome,
+    rows: Option<u64>,
+}
+
+impl QueryEvent {
+    /// The exact SQL text supplied to PostgreSQL.
+    #[must_use]
+    pub fn sql(&self) -> &str {
+        &self.sql
+    }
+
+    /// Time from enqueueing the execution until its terminal server response.
+    #[must_use]
+    pub const fn elapsed(&self) -> Duration {
+        self.elapsed
+    }
+
+    /// Whether the execution succeeded, failed, or was abandoned by its caller.
+    #[must_use]
+    pub const fn outcome(&self) -> &QueryOutcome {
+        &self.outcome
+    }
+
+    /// Rows returned or affected when PostgreSQL supplied a meaningful count.
+    #[must_use]
+    pub const fn rows(&self) -> Option<u64> {
+        self.rows
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QueryProtocol {
+    Extended,
+    Simple,
+}
+
+#[derive(Clone)]
+struct QueryObserver(Arc<QueryObserverInner>);
+
+struct QueryObserverInner {
+    sender: mpsc::UnboundedSender<QueryEvent>,
+    registry: Mutex<FrontendRegistry>,
+    active: AtomicBool,
+}
+
+#[derive(Default)]
+struct FrontendRegistry {
+    statements: HashMap<String, Arc<str>>,
+    portals: HashMap<String, Arc<str>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct QueryObservation(Arc<QueryObservationInner>);
+
+struct QueryObservationInner {
+    observer: QueryObserver,
+    started_at: Instant,
+    state: Mutex<QueryObservationState>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConsumerDisposition {
+    Pending,
+    Completed,
+    Cancelled,
+}
+
+struct QueryObservationState {
+    sql: Option<Arc<str>>,
+    protocol: Option<QueryProtocol>,
+    enqueued: bool,
+    consumer: ConsumerDisposition,
+    data_rows: u64,
+    command_rows: Option<u64>,
+    portal_suspended: bool,
+    error: Option<crate::error::SqlState>,
+    server_completed_at: Option<Instant>,
+    emitted: bool,
+}
+
+impl QueryObserver {
+    fn new(sender: mpsc::UnboundedSender<QueryEvent>) -> Self {
+        Self(Arc::new(QueryObserverInner {
+            sender,
+            registry: Mutex::default(),
+            active: AtomicBool::new(true),
+        }))
+    }
+
+    fn is_active(&self) -> bool {
+        self.0.active.load(Ordering::Relaxed)
+    }
+
+    fn inspect_frontend(&self, message: &FrontendMessage, observation: &QueryObservation) {
+        let FrontendMessage::Raw(bytes) = message else {
+            return;
+        };
+        let mut registry = self.0.registry.lock();
+        inspect_frontend_frames(bytes, &mut registry, observation);
+    }
+
+    fn emit(&self, event: QueryEvent) {
+        if self.0.sender.unbounded_send(event).is_err() {
+            self.0.active.store(false, Ordering::Relaxed);
+        }
+    }
+}
+
+impl QueryObservation {
+    fn new(observer: QueryObserver) -> Self {
+        Self(Arc::new(QueryObservationInner {
+            observer,
+            started_at: Instant::now(),
+            state: Mutex::new(QueryObservationState {
+                sql: None,
+                protocol: None,
+                enqueued: false,
+                consumer: ConsumerDisposition::Pending,
+                data_rows: 0,
+                command_rows: None,
+                portal_suspended: false,
+                error: None,
+                server_completed_at: None,
+                emitted: false,
+            }),
+        }))
+    }
+
+    fn set_execution(&self, sql: Arc<str>, protocol: QueryProtocol) {
+        let mut state = self.0.state.lock();
+        if state.sql.is_none() {
+            state.sql = Some(sql);
+            state.protocol = Some(protocol);
+        }
+        drop(state);
+        self.maybe_emit();
+    }
+
+    fn mark_enqueued(&self) {
+        self.0.state.lock().enqueued = true;
+        self.maybe_emit();
+    }
+
+    pub(crate) fn is_execution(&self) -> bool {
+        self.0.state.lock().sql.is_some()
+    }
+
+    pub(crate) fn inspect_frontend(&self, message: &FrontendMessage) {
+        self.0.observer.inspect_frontend(message, self);
+    }
+
+    pub(crate) fn observe_server_message(&self, message: &Message) {
+        let mut state = self.0.state.lock();
+        match message {
+            Message::DataRow(_) => state.data_rows = state.data_rows.saturating_add(1),
+            Message::CommandComplete(body) => {
+                state.command_rows = query::extract_row_affected(body).ok();
+            }
+            Message::PortalSuspended => state.portal_suspended = true,
+            Message::ErrorResponse(body) => state.error = error_sqlstate(body),
+            _ => {}
+        }
+    }
+
+    pub(crate) fn server_complete(&self, at: Instant) {
+        self.0.state.lock().server_completed_at.get_or_insert(at);
+        self.maybe_emit();
+    }
+
+    pub(crate) fn connection_closed(&self) {
+        let mut state = self.0.state.lock();
+        if state.server_completed_at.is_none() {
+            state.server_completed_at = Some(Instant::now());
+            state.error = Some(crate::error::SqlState::QUERY_CANCELED);
+        }
+        drop(state);
+        self.maybe_emit();
+    }
+
+    fn observe_consumer_message(&self, message: &Message) {
+        let mut state = self.0.state.lock();
+        if state.consumer != ConsumerDisposition::Pending {
+            return;
+        }
+        let extended_terminal = state.protocol == Some(QueryProtocol::Extended)
+            && matches!(
+                message,
+                Message::CommandComplete(_)
+                    | Message::PortalSuspended
+                    | Message::CopyDone
+                    | Message::EmptyQueryResponse
+            );
+        if extended_terminal
+            || matches!(message, Message::ErrorResponse(_) | Message::ReadyForQuery(_))
+        {
+            state.consumer = ConsumerDisposition::Completed;
+            drop(state);
+            self.maybe_emit();
+        }
+    }
+
+    fn cancel_consumer(&self) {
+        let mut state = self.0.state.lock();
+        if state.consumer == ConsumerDisposition::Pending {
+            state.consumer = ConsumerDisposition::Cancelled;
+            drop(state);
+            self.maybe_emit();
+        }
+    }
+
+    fn maybe_emit(&self) {
+        let event = {
+            let mut state = self.0.state.lock();
+            if state.emitted
+                || !state.enqueued
+                || state.consumer == ConsumerDisposition::Pending
+                || state.server_completed_at.is_none()
+                || state.sql.is_none()
+            {
+                return;
+            }
+
+            let outcome = if state.consumer == ConsumerDisposition::Cancelled
+                || state.error.as_ref() == Some(&crate::error::SqlState::QUERY_CANCELED)
+            {
+                QueryOutcome::Cancelled
+            } else if state.error.is_some() {
+                QueryOutcome::DatabaseError {
+                    code: state.error.clone(),
+                }
+            } else {
+                QueryOutcome::Success
+            };
+            let rows = match outcome {
+                QueryOutcome::Success => state.command_rows.or_else(|| {
+                    (state.data_rows != 0 || state.portal_suspended).then_some(state.data_rows)
+                }),
+                _ => None,
+            };
+            let completed_at = state
+                .server_completed_at
+                .expect("checked that server completion is present");
+            state.emitted = true;
+            QueryEvent {
+                sql: state.sql.clone().expect("checked that SQL is present"),
+                elapsed: completed_at.saturating_duration_since(self.0.started_at),
+                outcome,
+                rows,
+            }
+        };
+        self.0.observer.emit(event);
+    }
+}
+
+fn error_sqlstate(
+    body: &postgres_protocol::message::backend::ErrorResponseBody,
+) -> Option<crate::error::SqlState> {
+    let mut fields = body.fields();
+    while let Some(field) = fields.next().ok()? {
+        if field.type_() == b'C' {
+            let code = std::str::from_utf8(field.value_bytes()).ok()?;
+            return Some(crate::error::SqlState::from_code(code));
+        }
+    }
+    None
+}
+
+fn cstr(input: &[u8]) -> Option<(&str, &[u8])> {
+    let end = input.iter().position(|byte| *byte == 0)?;
+    let value = std::str::from_utf8(&input[..end]).ok()?;
+    Some((value, &input[end + 1..]))
+}
+
+fn inspect_frontend_frames(
+    mut bytes: &[u8],
+    registry: &mut FrontendRegistry,
+    observation: &QueryObservation,
+) {
+    while bytes.len() >= 5 {
+        let length = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
+        let Some(frame_len) = length.checked_add(1) else {
+            return;
+        };
+        if length < 4 || frame_len > bytes.len() {
+            return;
+        }
+        let tag = bytes[0];
+        let body = &bytes[5..frame_len];
+        match tag {
+            b'P' => {
+                if let Some((name, rest)) = cstr(body)
+                    && let Some((sql, _)) = cstr(rest)
+                {
+                    registry
+                        .statements
+                        .insert(name.to_string(), Arc::<str>::from(sql));
+                }
+            }
+            b'B' => {
+                if let Some((portal, rest)) = cstr(body)
+                    && let Some((statement, _)) = cstr(rest)
+                {
+                    if let Some(sql) = registry.statements.get(statement).cloned() {
+                        registry.portals.insert(portal.to_string(), sql);
+                    } else {
+                        registry.portals.remove(portal);
+                    }
+                }
+            }
+            b'E' => {
+                if let Some((portal, _)) = cstr(body)
+                    && let Some(sql) = registry.portals.get(portal).cloned()
+                {
+                    observation.set_execution(sql, QueryProtocol::Extended);
+                }
+            }
+            b'Q' => {
+                if let Some((sql, _)) = cstr(body) {
+                    observation.set_execution(Arc::<str>::from(sql), QueryProtocol::Simple);
+                }
+            }
+            b'C' if !body.is_empty() => {
+                if let Some((name, _)) = cstr(&body[1..]) {
+                    match body[0] {
+                        b'S' => {
+                            registry.statements.remove(name);
+                        }
+                        b'P' => {
+                            registry.portals.remove(name);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+        bytes = &bytes[frame_len..];
+    }
+}
 
 /// The transaction state the server reported in the most recent
 /// `ReadyForQuery`.
@@ -87,16 +456,42 @@ impl TransactionStatus {
 /// which carries `ReadyForQuery`. Bounding the read buffer requires that; see
 /// `codec::read_backend`.
 pub struct Responses {
-    receiver: mpsc::Receiver<BackendMessages>,
-    cur: BackendMessages,
+    receiver: mpsc::Receiver<ResponseMessages>,
+    cur: ResponseMessages,
+    observation: Option<QueryObservation>,
+}
+
+pub(crate) enum ResponseMessages {
+    Raw(BackendMessages),
+    Observed(VecDeque<Result<Message, Error>>),
+}
+
+impl ResponseMessages {
+    fn empty() -> Self {
+        Self::Raw(BackendMessages::empty())
+    }
+
+    fn next(&mut self) -> Result<Option<Message>, Error> {
+        match self {
+            Self::Raw(messages) => messages.next().map_err(Error::parse),
+            Self::Observed(messages) => messages.pop_front().transpose(),
+        }
+    }
 }
 
 impl Responses {
     pub fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<Result<Message, Error>> {
         loop {
-            match self.cur.next().map_err(Error::parse)? {
-                Some(Message::ErrorResponse(body)) => return Poll::Ready(Err(Error::db(body))),
-                Some(message) => return Poll::Ready(Ok(message)),
+            match self.cur.next()? {
+                Some(message) => {
+                    if let Some(observation) = &self.observation {
+                        observation.observe_consumer_message(&message);
+                    }
+                    if let Message::ErrorResponse(body) = message {
+                        return Poll::Ready(Err(Error::db(body)));
+                    }
+                    return Poll::Ready(Ok(message));
+                }
                 None => {}
             }
 
@@ -110,6 +505,14 @@ impl Responses {
     /// Pull the next backend message from the response stream.
     pub async fn next(&mut self) -> Result<Message, Error> {
         future::poll_fn(|cx| self.poll_next(cx)).await
+    }
+}
+
+impl Drop for Responses {
+    fn drop(&mut self) {
+        if let Some(observation) = &self.observation {
+            observation.cancel_consumer();
+        }
     }
 }
 
@@ -140,6 +543,8 @@ struct StatementCache {
 /// can keep a `Weak<InnerClient>` back-reference.
 pub struct InnerClient {
     sender: mpsc::UnboundedSender<Request>,
+    query_observer_enabled: AtomicBool,
+    query_observer: Mutex<Option<QueryObserver>>,
     cached_typeinfo: Mutex<CachedTypeInfo>,
     statement_cache_capacity: usize,
     statement_cache: Mutex<StatementCache>,
@@ -242,6 +647,7 @@ impl InnerClient {
         transaction_effect: TransactionEffect,
         prepare_cleanup: Option<prepare::PrepareCleanup>,
     ) -> Result<Responses, Error> {
+        let observation = self.start_observation(&messages);
         let (sender, receiver) = mpsc::channel(1);
         let request = Request {
             messages,
@@ -249,6 +655,7 @@ impl InnerClient {
             disposition,
             transaction_effect,
             prepare_cleanup,
+            observation: observation.clone(),
         };
         if transaction_effect == TransactionEffect::MayChange {
             self.in_flight_requests.fetch_add(1, Ordering::Relaxed);
@@ -260,10 +667,45 @@ impl InnerClient {
             return Err(Error::closed());
         }
 
+        if let Some(observation) = &observation {
+            observation.mark_enqueued();
+        }
+
         Ok(Responses {
             receiver,
-            cur: BackendMessages::empty(),
+            cur: ResponseMessages::empty(),
+            observation,
         })
+    }
+
+    fn start_observation(&self, messages: &RequestMessages) -> Option<QueryObservation> {
+        if !self.query_observer_enabled.load(Ordering::Acquire) {
+            return None;
+        }
+
+        let observer = {
+            let mut observer = self.query_observer.lock();
+            let selected = if observer.as_ref().is_some_and(QueryObserver::is_active) {
+                observer.clone()
+            } else {
+                *observer = None;
+                self.query_observer_enabled.store(false, Ordering::Release);
+                None
+            };
+            drop(observer);
+            selected
+        }?;
+
+        let observation = QueryObservation::new(observer.clone());
+        if let RequestMessages::Single(message) = messages {
+            observer.inspect_frontend(message, &observation);
+        }
+        Some(observation)
+    }
+
+    fn install_query_observer(&self, sender: mpsc::UnboundedSender<QueryEvent>) {
+        *self.query_observer.lock() = Some(QueryObserver::new(sender));
+        self.query_observer_enabled.store(true, Ordering::Release);
     }
 
     /// The transaction state the server reported in the last `ReadyForQuery`,
@@ -537,6 +979,8 @@ impl Client {
         Self {
             inner: Arc::new(InnerClient {
                 sender,
+                query_observer_enabled: AtomicBool::new(false),
+                query_observer: Mutex::new(None),
                 cached_typeinfo: Default::default(),
                 statement_cache_capacity,
                 statement_cache: Mutex::default(),
@@ -572,6 +1016,27 @@ impl Client {
 
     pub(crate) fn set_socket_config(&mut self, socket_config: SocketConfig) {
         self.socket_config = Some(socket_config);
+    }
+
+    /// Installs query execution observation for this physical connection.
+    ///
+    /// The returned unbounded receiver yields one completion event for each
+    /// SQL execution enqueued after installation. Calling this again replaces
+    /// the observer for future requests; already in-flight requests retain the
+    /// receiver that observed their start.
+    ///
+    /// The driver only performs a non-blocking channel send. It never invokes
+    /// caller code from the connection task, so an async consumer may issue a
+    /// query on this client without re-entering that task. Because the channel
+    /// is unbounded, callers must keep draining it to bound memory use.
+    ///
+    /// Install before preparing statements whose later executions need their
+    /// SQL reported. Observation is intentionally disabled by default.
+    #[must_use = "the receiver must be retained to observe query events"]
+    pub fn query_events(&self) -> mpsc::UnboundedReceiver<QueryEvent> {
+        let (sender, receiver) = mpsc::unbounded();
+        self.inner.install_query_observer(sender);
+        receiver
     }
 
     /// Creates a new prepared statement.
