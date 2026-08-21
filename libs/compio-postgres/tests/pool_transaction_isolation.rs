@@ -1,3 +1,9 @@
+// `connect_pool` nests several `compio::time::timeout` wrappers around the
+// pool handshake, and rustc computes the layout of that async body as one
+// query chain. The default depth is not enough for it; without this the
+// target fails to compile from a COLD cache, which incremental builds hide.
+#![recursion_limit = "256"]
+
 //! A pooled connection must not hand its successor an open transaction.
 //!
 //! This lives in its own target, and uses ONLY pre-existing driver API, so that
