@@ -86,11 +86,13 @@ pub(crate) mod vector;
 // `session_minter.rs` so the cryptography stays out of the
 // orchestration body.
 pub(crate) mod session_minter;
-// `fk_parse` was lifted out of this cfg-gated subtree - the
-// cross-app FK check applies on BOTH backends (PG and SQLite) so it
-// lives at `crate::cross_app_fk` and is compiled unconditionally. The
-// module's design lineage (SQLite ATTACH file isolation per design §18
-// Q1) is documented in the new file's rustdoc.
+// `fk_parse` was lifted out of this cfg-gated subtree so it would
+// compile on a PG-only build; it lives at `crate::cross_app_fk`. It is
+// compiled unconditionally but CALLED from nowhere a request reaches -
+// see that module's header for the enumeration, and do not cite it as
+// the thing keeping FKs inside an app. The module's design lineage
+// (SQLite ATTACH file isolation per design section 18 Q1) is documented
+// there too.
 
 use cdc::CommitPacket;
 use dialect::SqliteDialect;

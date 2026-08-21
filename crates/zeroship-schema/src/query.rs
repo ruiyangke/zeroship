@@ -8712,6 +8712,75 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
+    // Where an FK target's SCHEMA comes from.
+    //
+    // Two properties of this renderer:
+    //
+    //   1. `build_fk_clause` runs `validate_collection(target)`, whose
+    //      charset is `[A-Za-z0-9_]`, so a dot-qualified target is not a
+    //      legal collection name at all; and
+    //   2. `PostgresSchemaRenderer::foreign_key_target` qualifies with
+    //      `app_id` -- the CALLER's app -- and never reads a schema out
+    //      of the author's target string.
+    //
+    // Property 2 is the load-bearing one: 1 alone would be defeated by
+    // any future target syntax that encodes a qualifier without a dot.
+    //
+    // WHAT THESE DO NOT PROVE, AND IT MATTERS. They are NOT evidence
+    // about a deployed app. This crate is consumed only by plugin-db
+    // (checked 2026-08-20: nothing else names it in a Cargo.toml), and
+    // plugin-db's callers of these builders all sit in
+    // `#[cfg(any(test, feature = "test-helpers"))]` code -- production
+    // `registerModel` issues no DDL. The migration engine, which does
+    // apply schema at deploy, carries its OWN copy of this renderer in
+    // `third_party/zero-migrate`. Read the deployed behaviour off the
+    // foreign keys section of `docs/reference/db.md`, which names the
+    // engine's checks; these tests pin only what this crate renders.
+    // -----------------------------------------------------------------
+
+    /// Case: a dot-qualified `<other_app>.<collection>` target.
+    #[test]
+    fn fk_target_naming_another_app_is_not_a_legal_collection_name() {
+        let def = json!({"type": "ref", "refTarget": "other_app.users"});
+        let err = build_add_foreign_key("app_demo", "posts", "authorId", &def)
+            .expect_err("a dot-qualified FK target must not build");
+        match err {
+            QueryError::InvalidCollection(msg) => assert!(
+                msg.contains("other_app.users"),
+                "error must name the offending target: {msg}"
+            ),
+            other => panic!("expected InvalidCollection, got {other:?}"),
+        }
+    }
+
+    /// Control for the case above, differing in ONE variable: the same
+    /// call with the dot removed. If this went red too, the test above
+    /// would be proving only that `build_add_foreign_key` rejects
+    /// things, not that it rejects the qualifier.
+    #[test]
+    fn fk_target_without_a_qualifier_builds() {
+        let def = json!({"type": "ref", "refTarget": "other_app_users"});
+        let sql = build_add_foreign_key("app_demo", "posts", "authorId", &def)
+            .expect("an unqualified target must build");
+        assert!(
+            sql.contains("REFERENCES \"app_demo\".\"other_app_users\" (id)"),
+            "{sql}"
+        );
+    }
+
+    /// The rendered schema tracks `app_id`, not anything the schema
+    /// author wrote. Same target string, two callers, two schemas.
+    #[test]
+    fn fk_reference_schema_is_the_calling_app_not_the_target() {
+        let def = json!({"type": "ref", "refTarget": "users"});
+        let a = build_add_foreign_key("app_a", "posts", "authorId", &def).expect("app_a");
+        let b = build_add_foreign_key("app_b", "posts", "authorId", &def).expect("app_b");
+        assert!(a.contains("REFERENCES \"app_a\".\"users\" (id)"), "{a}");
+        assert!(b.contains("REFERENCES \"app_b\".\"users\" (id)"), "{b}");
+        assert!(!a.contains("app_b"), "app_a's FK must not name app_b: {a}");
+    }
+
+    // -----------------------------------------------------------------
     // FK column type cascade (TEXT, was INTEGER previously)
     // -----------------------------------------------------------------
 
