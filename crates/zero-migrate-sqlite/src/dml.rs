@@ -348,7 +348,7 @@ impl DmlRenderer for SqliteDmlRenderer {
         Vec<zero_migrate_backend::vendor::VendorStatement>,
         zero_migrate_backend::vendor::VendorError,
     > {
-        Err(zero_migrate_backend::vendor::VendorError::VendorOpsUnsupported(DIALECT))
+        Err(zero_migrate_backend::vendor::VendorError::VendorOpsUnsupported(DIALECT.id()))
     }
 }
 

@@ -20,7 +20,7 @@
 //! This module is render-only; it assumes the op already passed both gates.
 
 use crate::dml::IdentQuoteError;
-use zero_migrate_ir::dialect::SqlDialect;
+use zero_migrate_ir::dialect::DialectId;
 
 /// A single rendered vendor statement: a name (for the journaled `Migration`), the
 /// forward SQL (no trailing `;`), and the reverse SQL (or `None` for an
@@ -105,6 +105,17 @@ pub enum VendorError {
     /// `Capability::PostgresVendorPrimitives` BEFORE it asks a renderer, and it
     /// refuses with `IrLowerError::VendorPgOnly`, which names the op kind. This
     /// variant is what a vendor returns when something reaches it anyway.
-    #[error("vendor render: {0:?} renders no vendor ops (every vendor op is PgOnly)")]
-    VendorOpsUnsupported(SqlDialect),
+    ///
+    /// # Why this carries a `DialectId` and not the enum
+    ///
+    /// This is PROVENANCE — data recording WHICH backend refused — and it never
+    /// dispatches on the value. Typing it as the closed `SqlDialect` meant a
+    /// fourth backend could not state its own refusal at all: it has no variant
+    /// to name itself with, so the required method it must implement had no
+    /// value it could legally return. The stub in
+    /// `tests/a_fourth_backend_names_itself.rs` failed to compile on exactly
+    /// that, which is the cheapest possible demonstration that the type was
+    /// wrong rather than the newcomer.
+    #[error("vendor render: {0} renders no vendor ops (every vendor op is PgOnly)")]
+    VendorOpsUnsupported(DialectId),
 }

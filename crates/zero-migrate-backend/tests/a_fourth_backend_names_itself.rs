@@ -231,6 +231,26 @@ impl DmlRenderer for DuckDbDmlRenderer {
             "duckdb has no triggers".to_string(),
         )))
     }
+
+    /// The newcomer WRITES ITS OWN REFUSAL, and that is the point of the method
+    /// having no default body.
+    ///
+    /// `render_vendor_op` covers sixteen op kinds that are PostgreSQL-only. A
+    /// default body would have let this backend inherit somebody else's answer
+    /// silently; a required method makes the omission `E0046` in the newcomer's
+    /// own crate, so the only way to compile is to state a position. DuckDb has no
+    /// vendor-op surface, so it refuses, naming ITSELF — exactly as the shipping
+    /// SQLite and MySQL renderers do.
+    fn render_vendor_op(
+        &self,
+        _op: &zero_migrate_ir::ir::Op,
+        _eff_schema: &str,
+    ) -> Result<
+        Vec<zero_migrate_backend::vendor::VendorStatement>,
+        zero_migrate_backend::vendor::VendorError,
+    > {
+        Err(zero_migrate_backend::vendor::VendorError::VendorOpsUnsupported(DUCKDB))
+    }
 }
 
 impl SchemaRenderer for DuckDbSchemaRenderer {
