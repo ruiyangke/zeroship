@@ -582,7 +582,8 @@ pub fn pg_text_literal(s: &str, what: &'static str) -> Result<String, DmlError> 
 /// Validate an in-list / regex text operand, then let the CALLER'S OWN backend
 /// spell it.
 ///
-/// It takes the backend rather than a [`SqlDialect`] because every caller is a
+/// It takes the backend rather than a
+/// [`SqlDialect`](zero_migrate_ir::dialect::SqlDialect) because every caller is a
 /// backend rendering for itself: `backends/mysql.rs::render_regex_match` and
 /// [`render_in_list_elem_portable`] below. Taking a dialect here meant core
 /// resolving the registry to reach the vendor that had just called in — see
@@ -1594,13 +1595,11 @@ pub fn render_value_inline_for_backend(
 /// The DOOR into the inline walk: it RESOLVES the backend once and hands it to
 /// the recursive worker.
 ///
-/// The door still takes a [`SqlDialect`] because its callers — in
-/// `render::lower`, `render::declarative`, `model::` and `apply::` — hold one,
-/// and the walk itself still needs it for the sibling core doors
-/// (`quote_ident_for_backend`, `inline_literal_for_backend`) that have not moved yet. What
-/// the split buys is that the RECURSION carries a resolved backend instead of
-/// re-deriving it from the dialect at each node, which is the same arrangement
-/// [`BindCtx`] gives the bound walk.
+/// Its callers — in `render::lower`, `render::declarative`, `model::` and
+/// `apply::` — hold a [`SqlDialect`](zero_migrate_ir::dialect::SqlDialect) and
+/// resolve their backend from it. What the split buys is that the RECURSION
+/// carries a resolved backend instead of re-deriving it from the dialect at each
+/// node, which is the same arrangement [`BindCtx`] gives the bound walk.
 pub fn render_expr_inline_with_col_for_backend<F>(
     expr: &Expr,
     backend: &dyn DmlRenderer,

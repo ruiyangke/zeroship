@@ -74,7 +74,7 @@ use zero_migrate_ir::dialect::DialectId;
 /// 8 methods to 7.
 pub trait SchemaRenderer: std::fmt::Debug + Sync {
     /// Which vendor this is, as the OPEN [`DialectId`] rather than the closed
-    /// [`SqlDialect`].
+    /// [`SqlDialect`](zero_migrate_ir::dialect::SqlDialect).
     ///
     /// The same signature change, and for the same reason, as
     /// [`DmlRenderer::dialect`](crate::renderer::DmlRenderer::dialect): a backend
