@@ -3,13 +3,71 @@
 
 use compio_postgres::{Client, Error, NoTls};
 use futures_util::FutureExt;
+use log::{Level, LevelFilter, Log, Metadata, Record};
+use std::cell::Cell;
+use std::future::Future;
 use std::panic::AssertUnwindSafe;
+use std::sync::Once;
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 #[allow(dead_code)]
 mod common;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+const PANIC_COMMIT_LOG: &str = "executing statement batch: COMMIT";
+const PANIC_START_LOG: &str = "executing statement batch: START TRANSACTION";
+
+struct PanicOnTransactionLog;
+
+thread_local! {
+    static PANIC_COMMIT_ARMED: Cell<bool> = const { Cell::new(false) };
+    static PANIC_START_ARMED: Cell<bool> = const { Cell::new(false) };
+}
+
+impl Log for PanicOnTransactionLog {
+    fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+        metadata.level() <= Level::Debug
+    }
+
+    fn log(&self, record: &Record<'_>) {
+        if self.enabled(record.metadata())
+            && record.args().to_string().contains(PANIC_COMMIT_LOG)
+            && PANIC_COMMIT_ARMED.with(|armed| armed.replace(false))
+        {
+            panic!("panic requested before COMMIT was encoded");
+        }
+        if self.enabled(record.metadata())
+            && record.args().to_string().contains(PANIC_START_LOG)
+            && PANIC_START_ARMED.with(|armed| armed.replace(false))
+        {
+            panic!("panic requested before START TRANSACTION was encoded");
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+static PANIC_TRANSACTION_LOGGER: PanicOnTransactionLog = PanicOnTransactionLog;
+static INSTALL_PANIC_TRANSACTION_LOGGER: Once = Once::new();
+
+fn install_transaction_panic_logger() {
+    INSTALL_PANIC_TRANSACTION_LOGGER.call_once(|| {
+        log::set_logger(&PANIC_TRANSACTION_LOGGER).expect("install the transaction panic logger");
+        log::set_max_level(LevelFilter::Debug);
+    });
+}
+
+fn arm_commit_log_panic() {
+    install_transaction_panic_logger();
+    PANIC_COMMIT_ARMED.with(|armed| armed.set(true));
+}
+
+fn arm_start_log_panic() {
+    install_transaction_panic_logger();
+    PANIC_START_ARMED.with(|armed| armed.set(true));
+}
 
 fn test_url() -> String {
     common::env::get(common::env::TestEnvKey::PgTestUrl)
@@ -141,6 +199,128 @@ async fn successful_rollback_clears_dirty_after_nested_savepoint_drop() {
 }
 
 #[compio::test]
+async fn panicking_transaction_start_setup_preserves_a_preexisting_transaction() {
+    compio::time::timeout(TEST_TIMEOUT, async {
+        let url = test_url();
+        let mut client = connect(&url)
+            .await
+            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        let table = common::test_object_name("cpg_panicking_start");
+        client
+            .batch_execute(&format!(
+                "CREATE TEMP TABLE {table} (value int NOT NULL); BEGIN; \
+                 INSERT INTO {table} VALUES (1)"
+            ))
+            .await
+            .unwrap();
+
+        arm_start_log_panic();
+        let panic = AssertUnwindSafe(client.build_transaction().start())
+            .catch_unwind()
+            .await;
+        assert!(panic.is_err(), "the START setup logger did not panic");
+        drop(panic);
+
+        client.simple_query("").await.unwrap();
+        assert_eq!(
+            client.transaction_status(),
+            Some(compio_postgres::TransactionStatus::InTransaction),
+            "panicking START setup rolled back the pre-existing transaction"
+        );
+        let count: i64 = client
+            .query_one_scalar(&format!("SELECT count(*)::int8 FROM {table}"), &[])
+            .await
+            .expect("the pre-existing transaction was unusable after START setup panicked");
+        assert_eq!(count, 1, "panicking START setup discarded existing writes");
+        client.batch_execute("ROLLBACK").await.unwrap();
+    })
+    .await
+    .expect("panicking transaction-start test exceeded its watchdog");
+}
+
+#[compio::test]
+async fn panicking_commit_setup_rolls_back_before_the_next_operation() {
+    compio::time::timeout(TEST_TIMEOUT, async {
+        let url = test_url();
+        let mut client = connect(&url)
+            .await
+            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        let table = common::test_object_name("cpg_panicking_commit");
+        client
+            .batch_execute(&format!("CREATE TEMP TABLE {table} (value int NOT NULL)"))
+            .await
+            .unwrap();
+
+        let transaction = client.transaction().await.unwrap();
+        transaction
+            .execute(&format!("INSERT INTO {table} VALUES (1)"), &[])
+            .await
+            .unwrap();
+
+        arm_commit_log_panic();
+        let panic = AssertUnwindSafe(transaction.commit()).catch_unwind().await;
+        assert!(panic.is_err(), "the COMMIT setup logger did not panic");
+
+        client.simple_query("").await.unwrap();
+        let count: i64 = client
+            .query_one_scalar(&format!("SELECT count(*)::int8 FROM {table}"), &[])
+            .await
+            .expect("the operation after the panicking commit was unusable");
+        assert_eq!(count, 0, "the panicking commit left its writes live");
+        assert_eq!(
+            client.transaction_status(),
+            Some(compio_postgres::TransactionStatus::Idle),
+            "the panicking commit left the next operation inside its transaction"
+        );
+    })
+    .await
+    .expect("panicking commit cleanup test exceeded its watchdog");
+}
+
+#[compio::test]
+async fn abandoned_savepoint_creation_cleans_its_server_name() {
+    compio::time::timeout(TEST_TIMEOUT, async {
+        let url = test_url();
+        let mut client = connect(&url)
+            .await
+            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        let name = common::test_object_name("cpg_abandoned_savepoint_creation");
+        let mut transaction = client.transaction().await.unwrap();
+
+        {
+            let mut creation = Box::pin(transaction.savepoint(name.clone()));
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(
+                matches!(creation.as_mut().poll(&mut context), Poll::Pending),
+                "savepoint creation completed before its queued request could be abandoned"
+            );
+        }
+
+        transaction.simple_query("").await.unwrap();
+        let release = transaction
+            .batch_execute(&format!("RELEASE SAVEPOINT {name}"))
+            .await
+            .expect_err("the abandoned savepoint name remained defined on the server");
+        assert_eq!(
+            release.code(),
+            Some(&compio_postgres::error::SqlState::S_E_INVALID_SPECIFICATION),
+            "RELEASE failed for a reason other than the savepoint being absent: {}",
+            common::error_chain(&release)
+        );
+
+        transaction.rollback().await.unwrap();
+        let value: i32 = client
+            .query_one_scalar("SELECT 42::int4", &[])
+            .await
+            .expect("the cleanup left the connection unusable");
+        assert_eq!(value, 42);
+    })
+    .await
+    .expect("abandoned savepoint cleanup test exceeded its watchdog");
+}
+
+
+#[compio::test]
 async fn nonpositive_portal_limits_return_every_row() {
     compio::time::timeout(TEST_TIMEOUT, async {
         let url = test_url();
@@ -172,3 +352,4 @@ async fn nonpositive_portal_limits_return_every_row() {
     .await
     .expect("portal row-limit claim test exceeded its 10 second deadline");
 }
+

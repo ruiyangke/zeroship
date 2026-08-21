@@ -35,6 +35,22 @@ struct Savepoint {
     depth: u32,
 }
 
+/// Undoes a SAVEPOINT whose creation was abandoned before any `Transaction`
+/// took ownership of the name.
+struct SavepointCreationGuard<'a> {
+    client: &'a Client,
+    name: &'a str,
+    done: bool,
+}
+
+impl Drop for SavepointCreationGuard<'_> {
+    fn drop(&mut self) {
+        if !self.done {
+            self.client.__private_api_rollback(Some(self.name));
+        }
+    }
+}
+
 fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
@@ -90,14 +106,20 @@ impl<'a> Transaction<'a> {
 
     /// Consumes the transaction, committing all changes made within it.
     pub async fn commit(mut self) -> Result<(), Error> {
-        self.done = true;
         let query = if let Some(sp) = self.savepoint.as_ref() {
             let name = quote_identifier(&sp.name);
             format!("RELEASE {name}")
         } else {
             "COMMIT".to_string()
         };
-        let r = self.client.batch_execute(&query).await;
+        // `done` disarms the rollback-on-drop, so it must not be set until the
+        // COMMIT has actually been enqueued. Setting it first - as this did
+        // until 2026-08-21 - means anything that unwinds while the query is
+        // still being built leaves the transaction open on the server with
+        // nothing left to undo it.
+        let responses = crate::simple_query::start_batch_execute(self.client.inner(), &query)?;
+        self.done = true;
+        let r = crate::simple_query::finish_batch_execute(responses).await;
         if r.is_ok() {
             // batch_execute awaited the command to completion — the
             // connection is in a known-clean state. Clear any dirty flag
@@ -423,7 +445,22 @@ impl<'a> Transaction<'a> {
         let name = name.unwrap_or_else(|| format!("sp_{depth}"));
         let quoted_name = quote_identifier(&name);
         let query = format!("SAVEPOINT {quoted_name}");
-        self.batch_execute(&query).await?;
+        // Between the SAVEPOINT reaching the connection and this future being
+        // polled to completion, no `Transaction` exists yet, so nothing owns
+        // the name. Dropping the future there left it defined on the server,
+        // where it shadows an enclosing savepoint of the same name and keeps a
+        // subtransaction open. The guard is armed only across that window.
+        let responses = crate::simple_query::start_batch_execute(self.client.inner(), &query)?;
+        {
+            let mut cleanup = SavepointCreationGuard {
+                client: self.client,
+                name: &name,
+                done: false,
+            };
+            let result = crate::simple_query::finish_batch_execute(responses).await;
+            cleanup.done = true;
+            result?;
+        }
 
         Ok(Transaction {
             client: self.client,
