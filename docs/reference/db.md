@@ -1093,9 +1093,12 @@ is that the first live query pays the provisioning and startup latency.
 
 Closing the last subscription in a worker stops its consumer and drops that
 worker's slot. Other workers keep their independent slots and the shared
-publication. App deletion stops local consumers, drops every slot with that
-app's exact prefix, and then drops the publication; workers retry this
-idempotent teardown when a control-plane removal poll fails.
+publication. When an app is deleted, each worker notices it leaving the route
+feed, stops its local consumers, and drops the slots it owns for that app; the
+teardown is idempotent and retried when a removal poll fails. Deleting an app
+does NOT drop the publication, the app's schema, or its per-app role: those
+outlive the app today. See
+`docs/proposals/2026-08-20-deleted-app-schema-lifecycle.md`.
 
 ## Errors
 
