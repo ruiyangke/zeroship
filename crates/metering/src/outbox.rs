@@ -1009,6 +1009,63 @@ mod tests {
     }
 
     #[test]
+    fn a_second_live_producer_is_refused_the_wal() {
+        // The claim three comments in this file rest on, and that nothing
+        // measured until now: redb is single-writer, so two LIVE producers
+        // that resolved to one `WalIdentity` collide loudly rather than
+        // interleaving or corrupting. The worker's fatal boot-refusal arm
+        // (crates/worker/src/main.rs) is built on it - if the second opener
+        // silently succeeded, two co-located workers would share one file and
+        // the refusal that arm exists to trigger would never fire.
+        //
+        // `wal_identity` is deliberately stable per (role, host), so two
+        // same-role peers that agree on `host` DO name one path. That is safe
+        // only because of what this test measures. Note what it does NOT
+        // catch: redb falls back to `lock_supported: false` on a filesystem
+        // whose `flock` returns `Unsupported` (some network mounts), and there
+        // the second opener succeeds. This runs on the test runner's own
+        // filesystem and says nothing about that case.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("contended.redb");
+
+        let first = UsageWal::open(&path).expect("first open");
+        let refused = UsageWal::open(&path);
+        let message = match refused {
+            Err(OutboxWalError::Redb(message)) => message,
+            Err(other) => panic!("second opener failed, but not as a WAL open error: {other:?}"),
+            Ok(_) => panic!(
+                "a second live producer opened the same WAL at {}; redb is not \
+                 refusing it, so two co-located same-role producers would share \
+                 one file instead of the second one refusing to boot",
+                path.display()
+            ),
+        };
+        // Not just "it errored" - a permissions or disk error would also be an
+        // Err and would make this test pass for a reason that has nothing to
+        // do with contention. Pin redb's lock refusal specifically.
+        assert!(
+            message.contains("Database already open"),
+            "second open failed for some reason other than the single-writer \
+             lock, so this test is not measuring contention: {message}"
+        );
+        // The worker logs this string and exits; an operator diagnosing which
+        // co-located producer holds the file needs the path in it.
+        assert!(
+            message.contains(&path.display().to_string()),
+            "the refusal does not name the contended file: {message}"
+        );
+
+        // CONTROL, differing in exactly one variable: the first handle is no
+        // longer live. Same path, same call. This is the restart case, and it
+        // must succeed - otherwise the assertion above would hold for a
+        // `UsageWal::open` that simply never opens an existing file twice, and
+        // would say nothing about concurrency.
+        drop(first);
+        UsageWal::open(&path)
+            .expect("reopening after the first producer exited must succeed, or the refusal above is not about liveness");
+    }
+
+    #[test]
     fn a_reopened_wal_still_holds_the_unpublished_events() {
         // The half of the fix that the path change exists to enable. Without
         // this, a stable path would be necessary but unproven: the claim is
