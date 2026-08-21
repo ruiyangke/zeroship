@@ -147,6 +147,37 @@ pub struct SuspiciousActivityText<'a> {
     pub action_link: Option<&'a str>,
 }
 
+// ─── second-factor removed ───────────────────────────────────
+
+/// Sent when a CONFIRMED TOTP credential stops gating login.
+///
+/// Two routes reach that state: `/me/2fa/disable`, and a `/me/2fa/enroll` that
+/// replaces a confirmed credential (which resets it to pending, so the login
+/// challenge is off until the new one is confirmed).
+///
+/// The call to action is a PASSWORD RESET, not a "review your sessions" link,
+/// and that is the whole point: neither route tears any session down, because
+/// both already demand a proof (a current code or the password) that would let
+/// the same actor sign back in the moment 2FA is off. A password reset is the
+/// one action that does revoke everything - refresh families, app-session
+/// anchors, `credential_version`, and the live session rows - so telling the
+/// account holder is what puts that remedy within reach.
+#[derive(Template, Debug)]
+#[template(path = "second_factor_removed.html")]
+pub struct SecondFactorRemovedHtml<'a> {
+    pub name: &'a str,
+    pub time: &'a str, // human-readable timestamp
+    pub reset_link: &'a str,
+}
+
+#[derive(Template, Debug)]
+#[template(path = "second_factor_removed.txt")]
+pub struct SecondFactorRemovedText<'a> {
+    pub name: &'a str,
+    pub time: &'a str,
+    pub reset_link: &'a str,
+}
+
 // ─── account-deletion request (ISS-12) ───────────────────────
 
 #[derive(Template, Debug)]
@@ -317,5 +348,36 @@ mod tests {
             !html.contains("Change your password"),
             "action button should be hidden when action_link is None"
         );
+    }
+
+    /// Both arms of the pair must carry the reset link. The txt arm is the one
+    /// that regresses silently: a plain-text body that renders but drops the
+    /// remedy still looks like a delivered notice, and the reset is the only
+    /// action that revokes anything after a second factor comes off.
+    #[test]
+    fn renders_second_factor_removed_with_the_reset_remedy() {
+        let time = "2026-08-21 09:12 UTC";
+        let link = "https://auth.zeroship.ai/forgot";
+        let html = SecondFactorRemovedHtml {
+            name: "Frank",
+            time,
+            reset_link: link,
+        }
+        .render()
+        .expect("render html");
+        let text = SecondFactorRemovedText {
+            name: "Frank",
+            time,
+            reset_link: link,
+        }
+        .render()
+        .expect("render text");
+
+        for body in [html.as_str(), text.as_str()] {
+            assert!(body.contains("Frank"), "missing name in {body:?}");
+            assert!(body.contains(time), "missing time in {body:?}");
+            assert!(body.contains(link), "missing reset link in {body:?}");
+            assert!(body.contains("removed"), "missing the event in {body:?}");
+        }
     }
 }
