@@ -293,17 +293,14 @@ async fn pool_reconnect_missing_app_shaped_login_role_stays_internal() {
     let role = format!("app_{}_role", uuid::Uuid::new_v4().simple());
     let (url, server) = spawn_pool_reconnect_server(&role);
 
-    let pool = compio_postgres::Pool::connect_with_config(
-        &url,
-        compio_postgres::PoolConfig {
-            max_size: 1,
-            min_idle: 0,
-            max_lifetime: std::time::Duration::ZERO,
-            ..compio_postgres::PoolConfig::default()
-        },
-    )
-    .await
-    .expect("warm pool as the temporary login role");
+    let mut pool_config = compio_postgres::PoolConfig::new();
+    pool_config
+        .max_size(1)
+        .min_idle(0)
+        .max_lifetime(std::time::Duration::ZERO);
+    let pool = compio_postgres::Pool::connect_with_pool_config(&url, pool_config)
+        .await
+        .expect("warm pool as the temporary login role");
 
     let err = match pool.get().await {
         Ok(_) => panic!("expired pool entry must reconnect after its login role is dropped"),

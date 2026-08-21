@@ -1400,13 +1400,12 @@ async fn pool_exhaustion() {
     // acquisitions below now come from `idle` and open no sockets, so the only
     // thing the 200 ms budget times is the third `get()`, which is what the
     // test is named after.
-    let config = compio_postgres::PoolConfig {
-        max_size: 2,
-        min_idle: 2,
-        connection_timeout: std::time::Duration::from_millis(200),
-        ..compio_postgres::PoolConfig::default()
-    };
-    let pool = Pool::connect_with_config(&url, config).await.unwrap();
+    let mut config = compio_postgres::PoolConfig::new();
+    config
+        .max_size(2)
+        .min_idle(2)
+        .connection_timeout(std::time::Duration::from_millis(200));
+    let pool = Pool::connect_with_pool_config(&url, config).await.unwrap();
     assert_eq!(
         pool.idle_count(),
         2,
@@ -1530,19 +1529,18 @@ async fn get_cancellation_during_connect_does_not_leak_permits() {
     use futures_util::poll;
 
     let Some(url) = require_pg().await else { return };
-    let config = compio_postgres::PoolConfig {
-        max_size: 4,
-        min_idle: 0,
+    let mut config = compio_postgres::PoolConfig::new();
+    config
+        .max_size(4)
+        .min_idle(0)
         // Normal timeout: cancellation is driven by dropping the future, not by
         // the timer firing, so this value is irrelevant to the race (and safely
         // long so a genuine acquire never times out).
-        connection_timeout: std::time::Duration::from_secs(30),
+        .connection_timeout(std::time::Duration::from_secs(30))
         // Large, so acquiring the already-warm connection never does a network
         // round-trip (no validation / dirty barrier).
-        validation_bypass: std::time::Duration::from_secs(60),
-        ..compio_postgres::PoolConfig::default()
-    };
-    let pool = Pool::connect_with_config(&url, config).await.unwrap();
+        .validation_bypass(std::time::Duration::from_secs(60));
+    let pool = Pool::connect_with_pool_config(&url, config).await.unwrap();
 
     // The warm-up opened exactly one connection (min_idle=0 -> warm = max(0,1)
     // = 1). Hold it so `idle` is empty and every further get() must take the
@@ -1688,18 +1686,21 @@ async fn freed_connection_goes_to_front_waiter_not_a_barging_fresh_caller() {
 
     // Single slot so "the freed connection" is unambiguous, and the only way a
     // fresh caller can get one is by intercepting the entry freed for waiter A.
-    let config = compio_postgres::PoolConfig {
-        max_size: 1,
-        min_idle: 0,
-        connection_timeout: std::time::Duration::from_secs(5),
+    let mut config = compio_postgres::PoolConfig::new();
+    config
+        .max_size(1)
+        .min_idle(0)
+        .connection_timeout(std::time::Duration::from_secs(5))
         // Large so reacquiring the warm entry never does a network round-trip
         // (no validation / dirty barrier) — keeps the interleaving synchronous
         // and deterministic.
-        validation_bypass: std::time::Duration::from_secs(60),
-        ..compio_postgres::PoolConfig::default()
-    };
+        .validation_bypass(std::time::Duration::from_secs(60));
     // Warm-up opens exactly one connection (min_idle=0 -> warm = max(0,1) = 1).
-    let pool = Rc::new(Pool::connect_with_config(&url, config).await.unwrap());
+    let pool = Rc::new(
+        Pool::connect_with_pool_config(&url, config)
+            .await
+            .unwrap(),
+    );
     assert_eq!(pool.total_count(), 1, "warm-up should open exactly one conn");
 
     // Acquire and hold the only slot. idle now empty, pool full.
@@ -1803,14 +1804,17 @@ async fn handed_off_connection_is_reclaimed_if_waiter_is_cancelled() {
 
     let Some(url) = require_pg().await else { return };
 
-    let config = compio_postgres::PoolConfig {
-        max_size: 1,
-        min_idle: 0,
-        connection_timeout: std::time::Duration::from_secs(5),
-        validation_bypass: std::time::Duration::from_secs(60),
-        ..compio_postgres::PoolConfig::default()
-    };
-    let pool = Rc::new(Pool::connect_with_config(&url, config).await.unwrap());
+    let mut config = compio_postgres::PoolConfig::new();
+    config
+        .max_size(1)
+        .min_idle(0)
+        .connection_timeout(std::time::Duration::from_secs(5))
+        .validation_bypass(std::time::Duration::from_secs(60));
+    let pool = Rc::new(
+        Pool::connect_with_pool_config(&url, config)
+            .await
+            .unwrap(),
+    );
     assert_eq!(pool.total_count(), 1);
 
     // Hold the only slot.
@@ -2813,17 +2817,12 @@ async fn frontend_encode_failure_is_not_blamed_on_the_server() {
 /// A pool sized to exactly one connection, so a release and the next
 /// acquisition are guaranteed to be the same backend session.
 async fn single_connection_pool(url: &str) -> Pool {
-    Pool::connect_with_config(
-        url,
-        PoolConfig {
-            max_size: 1,
-            min_idle: 1,
-            validation_bypass: std::time::Duration::from_secs(60),
-            ..PoolConfig::default()
-        },
-    )
-    .await
-    .unwrap()
+    let mut config = PoolConfig::new();
+    config
+        .max_size(1)
+        .min_idle(1)
+        .validation_bypass(std::time::Duration::from_secs(60));
+    Pool::connect_with_pool_config(url, config).await.unwrap()
 }
 
 #[compio::test]
@@ -3856,7 +3855,7 @@ async fn a_pool_never_opens_more_connections_than_its_max_size() {
 async fn a_pool_with_room_still_warms_up_to_min_idle() {
     let Some(url) = require_pg().await else { return };
 
-    let expected = PoolConfig::default().min_idle;
+    let expected = PoolConfig::default().get_min_idle();
     let pool = Pool::connect(&url, 8).await.unwrap();
     assert_eq!(
         pool.total_count(),
@@ -3874,35 +3873,23 @@ async fn a_pool_with_room_still_warms_up_to_min_idle() {
 /// can wake, so the caller pays the full `connection_timeout` - 30s by
 /// default - to learn what the constructor already knew.
 ///
-/// `min_idle > max_size` is reachable without ever typing `min_idle`, because
-/// `PoolConfig` has public fields and `..Default::default()` fills it in.
+/// `min_idle > max_size` is reachable without setting `min_idle`, because
+/// `PoolConfig::default()` supplies 2 when a caller lowers only `max_size`.
 #[compio::test]
 async fn a_pool_refuses_a_configuration_it_cannot_honour() {
     let Some(url) = require_pg().await else { return };
 
-    let zero = Pool::connect_with_config(
-        &url,
-        PoolConfig {
-            max_size: 0,
-            min_idle: 0,
-            ..Default::default()
-        },
-    )
-    .await;
+    let mut zero_config = PoolConfig::new();
+    zero_config.max_size(0).min_idle(0);
+    let zero = Pool::connect_with_pool_config(&url, zero_config).await;
     assert!(
         zero.is_err(),
         "a pool with max_size 0 was constructed; every checkout on it would time out"
     );
 
-    let inverted = Pool::connect_with_config(
-        &url,
-        PoolConfig {
-            max_size: 1,
-            min_idle: 4,
-            ..Default::default()
-        },
-    )
-    .await;
+    let mut inverted_config = PoolConfig::new();
+    inverted_config.max_size(1).min_idle(4);
+    let inverted = Pool::connect_with_pool_config(&url, inverted_config).await;
     assert!(
         inverted.is_err(),
         "a pool was constructed with min_idle above max_size"
@@ -3910,15 +3897,9 @@ async fn a_pool_refuses_a_configuration_it_cannot_honour() {
 
     // The control: the shape that reaches the refusal by accident must still
     // work once the two numbers agree.
-    let ok = Pool::connect_with_config(
-        &url,
-        PoolConfig {
-            max_size: 1,
-            min_idle: 1,
-            ..Default::default()
-        },
-    )
-    .await;
+    let mut ok_config = PoolConfig::new();
+    ok_config.max_size(1).min_idle(1);
+    let ok = Pool::connect_with_pool_config(&url, ok_config).await;
     assert!(ok.is_ok(), "a coherent single-connection pool was refused");
 }
 

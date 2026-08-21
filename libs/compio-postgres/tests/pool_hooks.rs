@@ -1,7 +1,8 @@
 //! Live coverage for pool connection lifecycle hooks.
 
 use compio_postgres::error::SqlState;
-use compio_postgres::{Pool, PoolConfig, PoolHooks};
+use compio_postgres::config::TargetSessionAttrs;
+use compio_postgres::{Config, Pool, PoolConfig};
 use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
@@ -15,16 +16,16 @@ fn test_url() -> String {
 }
 
 fn config(max_size: usize, min_idle: usize) -> PoolConfig {
-    PoolConfig {
-        max_size,
-        min_idle,
-        validation_bypass: Duration::from_secs(60),
-        ..PoolConfig::default()
-    }
+    let mut config = PoolConfig::new();
+    config
+        .max_size(max_size)
+        .min_idle(min_idle)
+        .validation_bypass(Duration::from_secs(60));
+    config
 }
 
-async fn connect_pool(url: &str, config: PoolConfig, hooks: PoolHooks) -> Pool {
-    Pool::connect_with_config_and_hooks(url, config, hooks)
+async fn connect_pool(url: &str, config: PoolConfig) -> Pool {
+    Pool::connect_with_pool_config(url, config)
         .await
         .unwrap_or_else(|error| common::postgres_unreachable(url, &error))
 }
@@ -34,7 +35,8 @@ async fn after_connect_runs_once_for_a_reused_connection() {
     let url = test_url();
     let calls = Rc::new(Cell::new(0));
     let hook_calls = Rc::clone(&calls);
-    let hooks = PoolHooks::new().after_connect(move |client| {
+    let mut config = config(1, 1);
+    config.after_connect(move |client| {
         let hook_calls = Rc::clone(&hook_calls);
         Box::pin(async move {
             client.simple_query("").await?;
@@ -42,7 +44,7 @@ async fn after_connect_runs_once_for_a_reused_connection() {
             Ok(())
         })
     });
-    let pool = connect_pool(&url, config(1, 1), hooks).await;
+    let pool = connect_pool(&url, config).await;
 
     let mut backend_pid = None;
     for _ in 0..4 {
@@ -63,14 +65,15 @@ async fn after_connect_runs_once_for_a_reused_connection() {
 #[compio::test]
 async fn after_connect_initializes_a_session_guc() {
     let url = test_url();
-    let hooks = PoolHooks::new().after_connect(|client| {
+    let mut config = config(1, 1);
+    config.after_connect(|client| {
         Box::pin(async move {
             client
                 .batch_execute("SET cpg_hooks_after_connect.marker = 'installed'")
                 .await
         })
     });
-    let pool = connect_pool(&url, config(1, 1), hooks).await;
+    let pool = connect_pool(&url, config).await;
 
     let rows = pool
         .query(
@@ -89,7 +92,8 @@ async fn after_connect_failure_discards_the_connection() {
     let failed_pid = Rc::new(Cell::new(None));
     let hook_calls = Rc::clone(&calls);
     let hook_failed_pid = Rc::clone(&failed_pid);
-    let hooks = PoolHooks::new().after_connect(move |client| {
+    let mut config = config(2, 1);
+    config.after_connect(move |client| {
         let invocation = hook_calls.get() + 1;
         hook_calls.set(invocation);
         if invocation == 2 {
@@ -108,7 +112,7 @@ async fn after_connect_failure_discards_the_connection() {
             }
         })
     });
-    let pool = connect_pool(&url, config(2, 1), hooks).await;
+    let pool = connect_pool(&url, config).await;
     let held = pool.get().await.unwrap();
 
     let error = pool
@@ -152,7 +156,8 @@ async fn before_acquire_false_discards_and_retries() {
     let rejected_pid = Rc::new(Cell::new(None));
     let hook_calls = Rc::clone(&calls);
     let hook_rejected_pid = Rc::clone(&rejected_pid);
-    let hooks = PoolHooks::new().before_acquire(move |client| {
+    let mut config = config(1, 1);
+    config.before_acquire(move |client| {
         let hook_calls = Rc::clone(&hook_calls);
         let hook_rejected_pid = Rc::clone(&hook_rejected_pid);
         Box::pin(async move {
@@ -170,7 +175,7 @@ async fn before_acquire_false_discards_and_retries() {
             }
         })
     });
-    let pool = connect_pool(&url, config(1, 1), hooks).await;
+    let pool = connect_pool(&url, config).await;
 
     let client = pool.get().await.unwrap();
     let rejected_pid = rejected_pid
@@ -200,7 +205,8 @@ async fn cancelling_an_async_hook_releases_its_capacity_slot() {
     let url = test_url();
     let calls = Rc::new(Cell::new(0));
     let hook_calls = Rc::clone(&calls);
-    let hooks = PoolHooks::new().before_acquire(move |client| {
+    let mut pool_config = config(1, 1);
+    pool_config.before_acquire(move |client| {
         let invocation = hook_calls.get() + 1;
         hook_calls.set(invocation);
         Box::pin(async move {
@@ -211,9 +217,8 @@ async fn cancelling_an_async_hook_releases_its_capacity_slot() {
             Ok(true)
         })
     });
-    let mut pool_config = config(1, 1);
-    pool_config.connection_timeout = Duration::from_secs(1);
-    let pool = connect_pool(&url, pool_config, hooks).await;
+    pool_config.connection_timeout(Duration::from_secs(1));
+    let pool = connect_pool(&url, pool_config).await;
 
     pool.get()
         .await
@@ -237,11 +242,12 @@ async fn after_release_false_discards_the_dirty_session() {
     let url = test_url();
     let calls = Rc::new(Cell::new(0));
     let hook_calls = Rc::clone(&calls);
-    let hooks = PoolHooks::new().after_release(move |_client| {
+    let mut config = config(1, 1);
+    config.after_release(move |_client| {
         hook_calls.set(hook_calls.get() + 1);
         false
     });
-    let pool = connect_pool(&url, config(1, 1), hooks).await;
+    let pool = connect_pool(&url, config).await;
 
     let first_pid = {
         let client = pool.get().await.unwrap();
@@ -287,26 +293,24 @@ async fn after_release_false_discards_the_dirty_session() {
 /// writable server: the probe must reject it, and the hook must never see it.
 #[compio::test]
 async fn the_session_attrs_probe_runs_before_after_connect() {
-    let url = format!("{}?target_session_attrs=read-only", test_url());
+    let url = test_url();
+    let mut connection_config: Config = url.parse().expect("parse the live PostgreSQL URL");
+    connection_config.target_session_attrs(TargetSessionAttrs::ReadOnly);
     let calls = Rc::new(Cell::new(0));
     let hook_calls = Rc::clone(&calls);
 
-    let hooks = PoolHooks::new().after_connect(move |_client| {
+    let mut pool_config = config(1, 1);
+    pool_config.after_connect(move |_client| {
         let hook_calls = Rc::clone(&hook_calls);
         Box::pin(async move {
             hook_calls.set(hook_calls.get() + 1);
             Ok(())
         })
     });
-    let config = PoolConfig {
-        max_size: 1,
-        min_idle: 1,
-        ..PoolConfig::default()
-    };
 
     // The live server is writable, so every candidate fails the read-only
     // requirement and no connection is ever produced.
-    let outcome = Pool::connect_with_config_and_hooks(&url, config, hooks).await;
+    let outcome = Pool::connect_with_config(connection_config, pool_config).await;
     assert!(
         outcome.is_err(),
         "a writable server satisfied target_session_attrs=read-only"
