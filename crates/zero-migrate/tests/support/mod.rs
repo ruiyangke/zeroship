@@ -117,6 +117,26 @@ pub fn confined_charter() -> EffectivePolicy {
         .expect("explicit confined test charter composes")
 }
 
+/// The SQLite LINE-1 guard, selected the way the engine selects it.
+///
+/// These tests used to write `zero_migrate::SqliteGuard::new()`, naming a vendor
+/// crate's guard TYPE through a re-export at the engine's crate root. That re-export
+/// is gone; the guard is not. [`zero_migrate::guard_for`] resolves the SAME factory
+/// the apply path resolves — `zero-migrate-sqlite`'s `BackendVendor::guard`, which is
+/// literally `Box::new(SqliteGuard::new())` — so this is the same guard object,
+/// chosen through the registry instead of by name.
+///
+/// The policy is a fixture rather than a decision: SQLite's guard is the TRUSTING one
+/// and its `check` returns the empty outcome for every input, so nothing here reads
+/// the charter. The dialect is the only field that selects anything.
+#[must_use]
+pub fn sqlite_line1_guard() -> Box<dyn zero_migrate::guard::MigrationGuard> {
+    zero_migrate::guard_for(&zero_migrate::guard::GuardConfig::from_policy(
+        no_inject("main"),
+        zero_migrate::SqlDialect::Sqlite,
+    ))
+}
+
 #[must_use]
 pub fn no_inject(schema: &str) -> EffectivePolicy {
     let charter_toml = format!(

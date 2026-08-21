@@ -258,7 +258,7 @@ async fn rolling_back_a_replace_restores_the_previous_body() {
         &migrations,
         Approval::Approved,
         APP,
-        &zero_migrate::SqliteGuard::new(),
+        &*support::sqlite_line1_guard(),
     )
     .await
     .expect("rolling back the replace must succeed");
@@ -335,7 +335,7 @@ async fn a_replace_is_refused_as_irreversible_rather_than_dropping_the_view() {
         &migrations,
         Approval::Approved,
         APP,
-        &zero_migrate::SqliteGuard::new(),
+        &*support::sqlite_line1_guard(),
     )
     .await
     .expect_err("a replace carries no faithful inverse, so the rollback must refuse");
