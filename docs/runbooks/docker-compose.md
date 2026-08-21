@@ -40,10 +40,16 @@ command. It defaults to the gitignored `deploy/compose/secrets` directory and
 the sibling `deploy/compose/.env` file. The deployment runbook covers custom
 paths because Compose must receive both the custom env-file and mount path.
 
-The secret directory contains exactly eight files:
+The secret directory contains exactly seven files:
 
-`gateway-signing.pem` `auth-signing.pem` `broker-secret`
+`migrate-dsn` `gateway-signing.pem` `auth-signing.pem` `broker-secret`
 `pairwise-salt` `refresh-hash-key` `refresh-idem-key`
+
+That is `secret_specs()` in `crates/cli/src/dev.rs` (six) plus `pairwise-salt`,
+which is written separately because its bytes must equal the `.env` scalar
+below. This list said "eight" and named six until 2026-08-21; the one it left
+out was `migrate-dsn`, the privileged DSN, which is also the file
+`tests/config_name_alignment_gate.sh` cited `dev.rs` as proof did not exist.
 
 The env overlay contains eight generated scalar values:
 
