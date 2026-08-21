@@ -47,6 +47,37 @@ where
     I: IntoIterator<Item = P>,
     I::IntoIter: ExactSizeIterator,
 {
+    query_inner(client, statement, params, false).await
+}
+
+/// Start a cache-hit query, retaining its first execution message until the
+/// returned RowStream is polled. Waiting for this one message keeps a 26000
+/// raised during Execute inside the retryable call without allowing any row
+/// to escape before the decision.
+pub(crate) async fn query_cached<P, I>(
+    client: &InnerClient,
+    statement: Statement,
+    params: I,
+) -> Result<RowStream, Error>
+where
+    P: BorrowToSql,
+    I: IntoIterator<Item = P>,
+    I::IntoIter: ExactSizeIterator,
+{
+    query_inner(client, statement, params, true).await
+}
+
+async fn query_inner<P, I>(
+    client: &InnerClient,
+    statement: Statement,
+    params: I,
+    prefetch_first: bool,
+) -> Result<RowStream, Error>
+where
+    P: BorrowToSql,
+    I: IntoIterator<Item = P>,
+    I::IntoIter: ExactSizeIterator,
+{
     let buf = if log_enabled!(Level::Debug) {
         let params = params.into_iter().collect::<Vec<_>>();
         debug!(
@@ -58,16 +89,28 @@ where
     } else {
         encode(client, &statement, params)?
     };
-    let responses = match start(client, buf, &statement).await {
+    let mut responses = match start(client, buf, &statement).await {
         Ok(responses) => responses,
         Err(error) => {
             statement.invalidate_cache_on_error(&error);
             return Err(error);
         }
     };
+    let pending = if prefetch_first {
+        match responses.next().await {
+            Ok(message) => Some(message),
+            Err(error) => {
+                statement.invalidate_cache_on_error(&error);
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
     Ok(RowStream {
         statement,
         responses,
+        pending,
         rows_affected: None,
     })
 }
@@ -131,6 +174,7 @@ pub async fn query_text_params(
                 return Ok(RowStream {
                     statement: Statement::unnamed(vec![], vec![]),
                     responses,
+                    pending: None,
                     rows_affected: None,
                 });
             }
@@ -151,6 +195,7 @@ pub async fn query_text_params(
                 return Ok(RowStream {
                     statement: Statement::unnamed(vec![], columns),
                     responses,
+                    pending: None,
                     rows_affected: None,
                 });
             }
@@ -260,6 +305,7 @@ where
                 return Ok(RowStream {
                     statement: Statement::unnamed(vec![], vec![]),
                     responses,
+                    pending: None,
                     rows_affected: None,
                 });
             }
@@ -280,6 +326,7 @@ where
                 return Ok(RowStream {
                     statement: Statement::unnamed(vec![], columns),
                     responses,
+                    pending: None,
                     rows_affected: None,
                 });
             }
@@ -360,6 +407,7 @@ pub async fn query_portal(
     Ok(RowStream {
         statement: portal.statement().clone(),
         responses,
+        pending: None,
         rows_affected: None,
     })
 }
@@ -522,6 +570,7 @@ pin_project! {
     pub struct RowStream {
         statement: Statement,
         responses: Responses,
+        pending: Option<Message>,
         rows_affected: Option<u64>,
     }
 }
@@ -532,12 +581,15 @@ impl Stream for RowStream {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
         loop {
-            let message = match ready!(this.responses.poll_next(cx)) {
-                Ok(message) => message,
-                Err(error) => {
-                    this.statement.invalidate_cache_on_error(&error);
-                    return Poll::Ready(Some(Err(error)));
-                }
+            let message = match this.pending.take() {
+                Some(message) => message,
+                None => match ready!(this.responses.poll_next(cx)) {
+                    Ok(message) => message,
+                    Err(error) => {
+                        this.statement.invalidate_cache_on_error(&error);
+                        return Poll::Ready(Some(Err(error)));
+                    }
+                },
             };
             match message {
                 Message::DataRow(body) => {
