@@ -891,6 +891,203 @@ async fn transaction_rollback_explicit() {
 }
 
 // ---------------------------------------------------------------------------
+// Savepoint identifiers
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn savepoint_name_with_a_space_is_quoted() {
+    let Some(url) = require_pg().await else { return };
+    let mut client = connect(&url).await.unwrap();
+
+    let mut tx = client.transaction().await.unwrap();
+    let result = match tx.savepoint("my savepoint").await {
+        Ok(savepoint) => savepoint.commit().await,
+        Err(error) => Err(error),
+    };
+    tx.rollback().await.unwrap();
+
+    if let Err(error) = result {
+        panic!(
+            "a legal savepoint identifier containing a space was rejected: {}",
+            common::error_chain(&error)
+        );
+    }
+}
+
+#[compio::test]
+async fn mixed_case_savepoint_keeps_its_exact_name_and_rolls_back_rows() {
+    let Some(url) = require_pg().await else { return };
+    let mut client = connect(&url).await.unwrap();
+
+    client
+        .batch_execute("CREATE TABLE cpg_tx_mixed_case (n int)")
+        .await
+        .unwrap();
+
+    let exact_rollback = {
+        let mut tx = client.transaction().await.unwrap();
+        let savepoint = tx.savepoint("MyPoint").await.unwrap();
+        savepoint
+            .execute("INSERT INTO cpg_tx_mixed_case VALUES (1)", &[])
+            .await
+            .unwrap();
+
+        let result = savepoint
+            .batch_execute(r#"ROLLBACK TO SAVEPOINT "MyPoint""#)
+            .await;
+        if result.is_ok() {
+            savepoint.commit().await.unwrap();
+        } else {
+            // Recover the transaction on the unfixed implementation so the
+            // deliberate RED run can still drop its table before asserting.
+            savepoint.rollback().await.unwrap();
+        }
+        tx.commit().await.unwrap();
+        result
+    };
+
+    let rows = client
+        .query("SELECT n FROM cpg_tx_mixed_case", &[])
+        .await
+        .unwrap();
+
+    client
+        .batch_execute("DROP TABLE cpg_tx_mixed_case")
+        .await
+        .unwrap();
+
+    assert!(
+        rows.is_empty(),
+        "ROLLBACK TO the exact mixed-case name kept rows: {rows:?}"
+    );
+    if let Err(error) = exact_rollback {
+        panic!(
+            "the savepoint was not created with its exact mixed-case name: {}",
+            common::error_chain(&error)
+        );
+    }
+}
+
+#[compio::test]
+async fn savepoint_name_with_a_double_quote_is_escaped() {
+    let Some(url) = require_pg().await else { return };
+    let mut client = connect(&url).await.unwrap();
+
+    let mut tx = client.transaction().await.unwrap();
+    let result = match tx.savepoint("quoted\"point").await {
+        Ok(savepoint) => {
+            let result = savepoint
+                .batch_execute(r#"ROLLBACK TO SAVEPOINT "quoted""point""#)
+                .await;
+            if result.is_ok() {
+                savepoint.commit().await.unwrap();
+            } else {
+                savepoint.rollback().await.unwrap();
+            }
+            result
+        }
+        Err(error) => Err(error),
+    };
+    tx.rollback().await.unwrap();
+
+    if let Err(error) = result {
+        panic!(
+            "a legal savepoint identifier containing a double quote was rejected: {}",
+            common::error_chain(&error)
+        );
+    }
+}
+
+#[compio::test]
+async fn semicolon_in_savepoint_name_does_not_split_the_simple_query() {
+    let Some(url) = require_pg().await else { return };
+    let mut client = connect(&url).await.unwrap();
+
+    client
+        .batch_execute("CREATE TABLE cpg_tx_semicolon (n int)")
+        .await
+        .unwrap();
+
+    let injected_rows = {
+        let mut tx = client.transaction().await.unwrap();
+        let savepoint = tx
+            .savepoint("point; INSERT INTO cpg_tx_semicolon VALUES (99); --")
+            .await
+            .unwrap();
+        savepoint.rollback().await.unwrap();
+        let count: i64 = tx
+            .query_one("SELECT count(*) FROM cpg_tx_semicolon", &[])
+            .await
+            .unwrap()
+            .get(0);
+        tx.rollback().await.unwrap();
+        count
+    };
+
+    client
+        .batch_execute("DROP TABLE cpg_tx_semicolon")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        injected_rows, 0,
+        "the savepoint name was parsed as extra simple-query statements"
+    );
+}
+
+#[compio::test]
+async fn inner_savepoint_rollback_keeps_outer_work() {
+    let Some(url) = require_pg().await else { return };
+    let mut client = connect(&url).await.unwrap();
+
+    client
+        .batch_execute("CREATE TABLE cpg_tx_nested (n int)")
+        .await
+        .unwrap();
+
+    {
+        let mut tx = client.transaction().await.unwrap();
+        tx.execute("INSERT INTO cpg_tx_nested VALUES (1)", &[])
+            .await
+            .unwrap();
+        {
+            let mut outer = tx.transaction().await.unwrap();
+            outer
+                .execute("INSERT INTO cpg_tx_nested VALUES (2)", &[])
+                .await
+                .unwrap();
+            {
+                let inner = outer.transaction().await.unwrap();
+                inner
+                    .execute("INSERT INTO cpg_tx_nested VALUES (3)", &[])
+                    .await
+                    .unwrap();
+                inner.rollback().await.unwrap();
+            }
+            outer
+                .execute("INSERT INTO cpg_tx_nested VALUES (4)", &[])
+                .await
+                .unwrap();
+            outer.commit().await.unwrap();
+        }
+        tx.commit().await.unwrap();
+    }
+
+    let rows = client
+        .query("SELECT n FROM cpg_tx_nested ORDER BY n", &[])
+        .await
+        .unwrap();
+    let kept: Vec<i32> = rows.iter().map(|row| row.get(0)).collect();
+
+    client
+        .batch_execute("DROP TABLE cpg_tx_nested")
+        .await
+        .unwrap();
+
+    assert_eq!(kept, vec![1, 2, 4]);
+}
+
+// ---------------------------------------------------------------------------
 // Savepoint scope: what a rolled-back nested transaction leaves behind
 // ---------------------------------------------------------------------------
 
@@ -3787,6 +3984,74 @@ async fn dropping_an_unfinished_transaction_and_the_client_closes_without_an_err
     if let Err(error) = outcome {
         panic!(
             "dropping an unfinished transaction and its client failed run(): {}",
+            common::error_chain(&error)
+        );
+    }
+}
+
+/// Forgetting the guard leaves the server transaction open, so closing the
+/// client itself must make PostgreSQL roll its uncommitted row back.
+#[compio::test]
+async fn dropping_the_client_with_a_server_transaction_open_rolls_back() {
+    let Some(url) = require_pg().await else { return };
+
+    let observer = connect(&url).await.unwrap();
+    observer
+        .batch_execute("CREATE TABLE cpg_tx_client_drop (n int)")
+        .await
+        .unwrap();
+
+    let (mut client, connection) = compio_postgres::connect(&url, NoTls).await.unwrap();
+    let task = compio::runtime::spawn(async move { connection.run().await });
+    let backend_pid: i32 = client
+        .query_one_scalar("SELECT pg_backend_pid()", &[])
+        .await
+        .unwrap();
+
+    let transaction = client.transaction().await.unwrap();
+    transaction
+        .execute("INSERT INTO cpg_tx_client_drop VALUES (1)", &[])
+        .await
+        .unwrap();
+
+    // Bypass Transaction::drop on purpose: the server still owns the open
+    // transaction when dropping the last client closes the connection.
+    std::mem::forget(transaction);
+    drop(client);
+    let task_outcome = compio::time::timeout(std::time::Duration::from_secs(5), task).await;
+
+    let row_count: i64 = observer
+        .query_one_scalar("SELECT count(*) FROM cpg_tx_client_drop", &[])
+        .await
+        .unwrap();
+
+    observer
+        .batch_execute("SET lock_timeout = '5s'")
+        .await
+        .unwrap();
+    observer
+        .batch_execute("DROP TABLE cpg_tx_client_drop")
+        .await
+        .unwrap();
+    let session_count: i64 = observer
+        .query_one_scalar(
+            "SELECT count(*) FROM pg_stat_activity WHERE pid = $1",
+            &[&backend_pid],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(row_count, 0, "the disconnected transaction committed its row");
+    assert_eq!(
+        session_count, 0,
+        "the client was dropped but its PostgreSQL session stayed open"
+    );
+
+    let join_result = task_outcome.expect("the connection task did not close within 5 seconds");
+    let outcome = join_result.expect("the connection task panicked");
+    if let Err(error) = outcome {
+        panic!(
+            "closing a client with an open transaction failed run(): {}",
             common::error_chain(&error)
         );
     }
