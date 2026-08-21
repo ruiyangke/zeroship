@@ -16,8 +16,9 @@
 //! | [`ddl::DdlEmitter`] | how does this vendor spell schema-changing statements |
 //! | [`guard::MigrationGuard`] | what does this vendor REFUSE to run |
 //! | [`stored_ddl::StoredDdl`] | how does this vendor parse catalog-stored table DDL |
+//! | [`value_format::ValueFormatRenderer`] | how does this vendor render and normalize ID formats |
 //!
-//! The same dependency rule governs all five: a trait declared in the engine would
+//! The same dependency rule governs all six: a trait declared in the engine would
 //! force every vendor to depend on the engine, which already depends on every vendor.
 //!
 //! ```text
@@ -41,8 +42,8 @@
 //! The split is also what the `-ir` half already assumes. `DialectId`, `Capability`,
 //! `BackendDescriptor` and `BackendRegistry` were promoted into `-ir` because they
 //! are IDENTITY and CAPABILITY — facts about a backend that a checksummer or a
-//! policy engine legitimately reads. `DmlRenderer` and `SchemaRenderer` are neither;
-//! they are the spelling.
+//! policy engine legitimately reads. The renderer/parser traits are neither; they
+//! are backend-owned spelling and normalization.
 //!
 //! # What had to come with the traits, and the measurement that bounded it
 //!
@@ -63,12 +64,10 @@
 //!
 //! # What is NOT here
 //!
-//! The engine's `render::lower`, `render::declarative`, `render::fold`,
-//! `render::value_format` and the bulk of `schema::query`. All of them read the
-//! dialect, and none of them is a spelling: they COMPARE, NORMALIZE and DECIDE, which
-//! stays in the engine, dialect-parameterized. The test is the direction of the arrow
-//! — spelling is the engine ASKING a vendor how to write something; semantics is the
-//! engine DECIDING something about a vendor.
+//! The engine's `render::lower`, `render::declarative`, `render::fold`, and the bulk
+//! of `schema::query`. The engine still composes comparisons and decisions; the
+//! backend contract supplies every vendor-specific spelling and catalog-normalization
+//! fact those algorithms consume.
 
 pub mod advisory;
 pub mod ddl;
@@ -86,4 +85,5 @@ pub mod snapshot;
 pub mod spelling;
 pub mod step;
 pub mod stored_ddl;
+pub mod value_format;
 pub mod vendor;

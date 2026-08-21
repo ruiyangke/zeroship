@@ -6,215 +6,20 @@
 //! that turns that metadata into the exact column collation and inline format
 //! `CHECK` consumed by the shared DDL emitters.
 
-use crate::model::expr::{BinaryOp, CastTarget, Expr, ScalarFn, SynthFn};
+use crate::model::expr::Expr;
 use crate::model::ir::{validate_type_id_prefix, IrDefault, IrScalar, SequenceRef, ValueFormat};
 use crate::model::snapshot::{
     canonical_id_default_expression, ColumnCollationSnapshot, IdDefaultSnapshot,
 };
-use crate::render::dml::{mysql_grammar_string_literal, sql_string_literal};
 use crate::schema::query::SqlDialect;
+use zero_migrate_backend::value_format::{
+    CatalogSqlContext, LiteralCastKind, ValueFormatColumnMetadata, ValueFormatRenderer,
+};
 
 const TYPE_ID_SUFFIX_LEN: usize = 26;
 const TYPE_ID_ALPHABET: &str = "0123456789abcdefghjkmnpqrstvwxyz";
 const ULID_LEN: usize = 26;
 const ULID_ALPHABET: &str = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-const UUID_TEXT_LEN: usize = 36;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PgDefaultType {
-    Text,
-    Integer,
-    Real,
-    Boolean,
-    Bytes,
-    Uuid,
-}
-
-fn pg_cast_target_type(target: CastTarget) -> PgDefaultType {
-    match target {
-        CastTarget::Text => PgDefaultType::Text,
-        CastTarget::Int => PgDefaultType::Integer,
-        CastTarget::Real => PgDefaultType::Real,
-        CastTarget::Boolean => PgDefaultType::Boolean,
-        CastTarget::Bytes => PgDefaultType::Bytes,
-        CastTarget::Uuid => PgDefaultType::Uuid,
-    }
-}
-
-fn pg_default_expr_type(expr: &Expr) -> Option<PgDefaultType> {
-    fn common<'a>(expressions: impl IntoIterator<Item = &'a Expr>) -> Option<PgDefaultType> {
-        let mut inferred = None;
-        for expression in expressions {
-            if matches!(
-                expression,
-                Expr::Literal {
-                    value: IrScalar::Null
-                }
-            ) {
-                continue;
-            }
-            let candidate = pg_default_expr_type(expression)?;
-            match inferred {
-                None => inferred = Some(candidate),
-                Some(previous) if previous == candidate => {}
-                Some(_) => return None,
-            }
-        }
-        inferred
-    }
-
-    match expr {
-        Expr::Literal { value } => match value {
-            IrScalar::Null => None,
-            IrScalar::Bool(_) => Some(PgDefaultType::Boolean),
-            IrScalar::Int(value) | IrScalar::Int64(value) if i32::try_from(*value).is_ok() => {
-                Some(PgDefaultType::Integer)
-            }
-            IrScalar::Str(_) => Some(PgDefaultType::Text),
-            IrScalar::Bytes(_) => Some(PgDefaultType::Bytes),
-            IrScalar::Int(_) | IrScalar::Int64(_) | IrScalar::Decimal(_) => None,
-        },
-        Expr::BinOp { op, lhs, rhs } => match op {
-            BinaryOp::Eq
-            | BinaryOp::Ne
-            | BinaryOp::Lt
-            | BinaryOp::Le
-            | BinaryOp::Gt
-            | BinaryOp::Ge
-            | BinaryOp::And
-            | BinaryOp::Or => Some(PgDefaultType::Boolean),
-            BinaryOp::Concat => Some(PgDefaultType::Text),
-            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => {
-                let left = pg_default_expr_type(lhs)?;
-                (pg_default_expr_type(rhs) == Some(left)
-                    && matches!(left, PgDefaultType::Integer | PgDefaultType::Real))
-                .then_some(left)
-            }
-        },
-        Expr::UnaryOp { .. }
-        | Expr::Between { .. }
-        | Expr::Like { .. }
-        | Expr::DistinctFrom { .. }
-        | Expr::InList { .. }
-        | Expr::PgRegexMatch { .. } => Some(PgDefaultType::Boolean),
-        Expr::Case { branches, r#else } => common(
-            branches
-                .iter()
-                .map(|branch| &branch.then)
-                .chain(r#else.iter().map(Box::as_ref)),
-        ),
-        Expr::FnCall { r#fn, args } => match r#fn {
-            ScalarFn::Lower
-            | ScalarFn::Upper
-            | ScalarFn::Trim
-            | ScalarFn::Substr
-            | ScalarFn::Replace
-            | ScalarFn::CurrentSetting => Some(PgDefaultType::Text),
-            // CURRENT_USER is special SQL syntax rather than an ordinary text
-            // function call. PostgreSQL retains an explicit cast around it in
-            // pg_get_expr, so it must not enter redundant-cast elimination.
-            ScalarFn::CurrentUser => None,
-            ScalarFn::Length => Some(PgDefaultType::Integer),
-            ScalarFn::Abs => args.first().and_then(pg_default_expr_type),
-            ScalarFn::Mod => common(args).filter(|kind| *kind == PgDefaultType::Integer),
-            ScalarFn::Coalesce | ScalarFn::Nullif => common(args),
-            // PostgreSQL resolves these through numeric/double-precision
-            // overloads whose return type is not necessarily CastTarget::Real.
-            ScalarFn::Round | ScalarFn::Floor | ScalarFn::Ceil => None,
-        },
-        Expr::FnSynth { r#fn, .. } => match r#fn {
-            SynthFn::ConcatWs | SynthFn::SplitPart => Some(PgDefaultType::Text),
-            SynthFn::Now => None,
-        },
-        Expr::UuidV4 | Expr::UuidV7 => Some(PgDefaultType::Uuid),
-        Expr::Cast { target, .. } => Some(pg_cast_target_type(*target)),
-        Expr::PgColumnSize { .. } => Some(PgDefaultType::Integer),
-        Expr::Agg { .. }
-        | Expr::Extract { .. }
-        | Expr::PgExtract { .. }
-        | Expr::PgInterval { .. }
-        | Expr::Dialectal { .. }
-        | Expr::ColRef { .. } => None,
-    }
-}
-
-fn normalize_redundant_pg_default_casts(expr: &Expr) -> Expr {
-    fn visit(expr: &mut Expr) {
-        match expr {
-            Expr::BinOp { lhs, rhs, .. } => {
-                visit(lhs);
-                visit(rhs);
-            }
-            Expr::UnaryOp { operand, .. }
-            | Expr::Cast { operand, .. }
-            | Expr::PgColumnSize { expr: operand }
-            | Expr::Extract { from: operand, .. }
-            | Expr::PgExtract { from: operand, .. } => visit(operand),
-            Expr::Case { branches, r#else } => {
-                for branch in branches {
-                    visit(&mut branch.when);
-                    visit(&mut branch.then);
-                }
-                if let Some(r#else) = r#else {
-                    visit(r#else);
-                }
-            }
-            Expr::FnCall { args, .. } | Expr::FnSynth { args, .. } => {
-                for argument in args {
-                    visit(argument);
-                }
-            }
-            Expr::Between { operand, low, high } => {
-                visit(operand);
-                visit(low);
-                visit(high);
-            }
-            Expr::Like { operand, pattern } => {
-                visit(operand);
-                visit(pattern);
-            }
-            Expr::DistinctFrom { left, right } => {
-                visit(left);
-                visit(right);
-            }
-            Expr::Agg { arg, delimiter, .. } => {
-                if let Some(arg) = arg {
-                    visit(arg);
-                }
-                if let Some(delimiter) = delimiter {
-                    visit(delimiter);
-                }
-            }
-            Expr::InList { expr, .. } | Expr::PgRegexMatch { expr, .. } => visit(expr),
-            Expr::Dialectal { legs } => {
-                for leg in legs.values_mut() {
-                    visit(leg);
-                }
-            }
-            Expr::ColRef { .. }
-            | Expr::Literal { .. }
-            | Expr::UuidV4
-            | Expr::UuidV7
-            | Expr::PgInterval { .. } => {}
-        }
-
-        let replacement = match expr {
-            Expr::Cast { operand, target }
-                if pg_default_expr_type(operand) == Some(pg_cast_target_type(*target)) =>
-            {
-                Some((**operand).clone())
-            }
-            _ => None,
-        };
-        if let Some(replacement) = replacement {
-            *expr = replacement;
-        }
-    }
-
-    let mut normalized = expr.clone();
-    visit(&mut normalized);
-    normalized
-}
 
 /// Project a structured authored default into the narrow ID-default drift key.
 pub(crate) fn authored_id_default(
@@ -223,6 +28,7 @@ pub(crate) fn authored_id_default(
     dialect: SqlDialect,
     default_schema: Option<&str>,
 ) -> IdDefaultSnapshot {
+    let backend = crate::render::backends::value_format_renderer(dialect);
     match default {
         None => IdDefaultSnapshot::Absent,
         Some(IrDefault::Literal {
@@ -257,13 +63,9 @@ pub(crate) fn authored_id_default(
         }
         Some(_) => {
             let normalized_rendered = match default {
-                Some(IrDefault::Expr { expr }) if dialect == SqlDialect::Postgres => {
-                    crate::render::dml::render_expr_inline(
-                        &normalize_redundant_pg_default_casts(expr),
-                        dialect,
-                    )
-                    .ok()
-                }
+                Some(IrDefault::Expr { expr }) => backend
+                    .normalize_authored_default_expr(expr)
+                    .and_then(|expr| crate::render::dml::render_expr_inline(&expr, dialect).ok()),
                 _ => None,
             };
             let rendered = normalized_rendered.as_deref().or(rendered);
@@ -292,17 +94,14 @@ pub(crate) fn authored_uuid_id_default(
     dialect: SqlDialect,
     default_schema: Option<&str>,
 ) -> IdDefaultSnapshot {
+    let backend = crate::render::backends::value_format_renderer(dialect);
     let snapshot = authored_storage_literal_snapshot(
         authored_id_default(default, rendered, dialect, default_schema),
         rendered,
         dialect,
     );
-    let snapshot = if dialect == SqlDialect::Mysql {
-        mysql_text_literal_snapshot(snapshot)
-    } else {
-        snapshot
-    };
-    uuid_literal_snapshot(snapshot, dialect == SqlDialect::Postgres)
+    let snapshot = backend.normalize_text_literal_snapshot(snapshot);
+    backend.normalize_uuid_literal_snapshot(snapshot)
 }
 
 /// TypeID/ULID columns persist character storage. Project authored scalar
@@ -316,16 +115,13 @@ pub(crate) fn authored_text_id_default(
     dialect: SqlDialect,
     default_schema: Option<&str>,
 ) -> IdDefaultSnapshot {
+    let backend = crate::render::backends::value_format_renderer(dialect);
     let snapshot = authored_storage_literal_snapshot(
         authored_id_default(default, rendered, dialect, default_schema),
         rendered,
         dialect,
     );
-    if dialect == SqlDialect::Mysql {
-        mysql_text_literal_snapshot(snapshot)
-    } else {
-        snapshot
-    }
+    backend.normalize_text_literal_snapshot(snapshot)
 }
 
 fn authored_literal_fingerprint(value: &IrScalar) -> String {
@@ -346,20 +142,21 @@ fn authored_literal_fingerprint(value: &IrScalar) -> String {
 }
 
 /// Project a live catalog default into the same semantic key as
-/// [`authored_id_default`]. `mysql_expression_default` is the authoritative
-/// `EXTRA`/`DEFAULT_GENERATED` distinction: MySQL's `COLUMN_DEFAULT` strips SQL
+/// [`authored_id_default`]. `expression_default` is the authoritative catalog
+/// expression/literal distinction when the backend exposes one: some catalogs strip SQL
 /// quotes from literals, so the text alone cannot distinguish a literal such as
 /// `"uuid()"` from an expression.
 pub(crate) fn catalog_id_default(
     default: Option<&str>,
     dialect: SqlDialect,
-    mysql_expression_default: Option<bool>,
+    expression_default: Option<bool>,
 ) -> IdDefaultSnapshot {
     let Some(default) = default else {
         return IdDefaultSnapshot::Absent;
     };
 
-    if dialect == SqlDialect::Mysql && mysql_expression_default == Some(false) {
+    let backend = crate::render::backends::value_format_renderer(dialect);
+    if backend.catalog_default_is_unquoted_literal(expression_default) {
         return IdDefaultSnapshot::Literal(
             serde_json::to_string(default).expect("string serialization is infallible"),
         );
@@ -379,28 +176,22 @@ pub(crate) fn catalog_id_default(
 pub(crate) fn catalog_uuid_id_default(
     default: Option<&str>,
     dialect: SqlDialect,
-    mysql_expression_default: Option<bool>,
+    expression_default: Option<bool>,
 ) -> IdDefaultSnapshot {
-    let snapshot = catalog_id_default(default, dialect, mysql_expression_default);
-    let snapshot = if dialect == SqlDialect::Mysql {
-        mysql_text_literal_snapshot(snapshot)
-    } else {
-        snapshot
-    };
-    uuid_literal_snapshot(snapshot, dialect == SqlDialect::Postgres)
+    let backend = crate::render::backends::value_format_renderer(dialect);
+    let snapshot = catalog_id_default(default, dialect, expression_default);
+    let snapshot = backend.normalize_text_literal_snapshot(snapshot);
+    backend.normalize_uuid_literal_snapshot(snapshot)
 }
 
 pub(crate) fn catalog_text_id_default(
     default: Option<&str>,
     dialect: SqlDialect,
-    mysql_expression_default: Option<bool>,
+    expression_default: Option<bool>,
 ) -> IdDefaultSnapshot {
-    let snapshot = catalog_id_default(default, dialect, mysql_expression_default);
-    if dialect == SqlDialect::Mysql {
-        mysql_text_literal_snapshot(snapshot)
-    } else {
-        snapshot
-    }
+    let backend = crate::render::backends::value_format_renderer(dialect);
+    let snapshot = catalog_id_default(default, dialect, expression_default);
+    backend.normalize_text_literal_snapshot(snapshot)
 }
 
 /// Compare a catalog default whose dialect-specific expression/literal marker
@@ -411,25 +202,26 @@ pub(crate) fn catalog_id_default_for_expected(
     expected: &IdDefaultSnapshot,
     default: Option<&str>,
     dialect: Option<SqlDialect>,
-    mysql_expression_default: Option<bool>,
+    expression_default: Option<bool>,
 ) -> IdDefaultSnapshot {
     let Some(default) = default else {
         return IdDefaultSnapshot::Absent;
     };
     if matches!(expected, IdDefaultSnapshot::UuidLiteral(_)) {
         let Some(dialect) = dialect else {
-            return uuid_literal_snapshot(
-                IdDefaultSnapshot::Literal(
-                    serde_json::to_string(default).expect("string serialization is infallible"),
-                ),
-                false,
+            return IdDefaultSnapshot::Literal(
+                serde_json::to_string(default).expect("string serialization is infallible"),
             );
         };
-        return catalog_uuid_id_default(Some(default), dialect, mysql_expression_default);
+        return catalog_uuid_id_default(Some(default), dialect, expression_default);
     }
-    if dialect == Some(SqlDialect::Mysql) {
-        if let Some(expression_default) = mysql_expression_default {
-            return catalog_id_default(Some(default), SqlDialect::Mysql, Some(expression_default));
+    if let Some(dialect) = dialect {
+        if crate::render::backends::value_format_renderer(dialect)
+            .catalog_default_marker_is_authoritative()
+        {
+            if let Some(expression_default) = expression_default {
+                return catalog_id_default(Some(default), dialect, Some(expression_default));
+            }
         }
     }
     if matches!(expected, IdDefaultSnapshot::Literal(_)) {
@@ -457,26 +249,21 @@ pub(crate) fn catalog_id_default_for_expected(
 }
 
 fn default_matches_uuid(default: &str, dialect: SqlDialect, v7: bool) -> bool {
-    // CORE-ASKS-VENDOR, and it stays that way. This module is the worked
-    // counter-example named in `render::renderer`: fingerprinting a catalog
-    // default is NORMALIZATION, which is core's decision even though it reads the
-    // dialect. The one question the vendor owns here is what its own uuid default
-    // LOOKS like, so the backend is resolved once and asked once.
-    let backend = crate::render::backends::renderer(dialect);
+    let dml = crate::render::backends::renderer(dialect);
+    let backend = crate::render::backends::value_format_renderer(dialect);
     let rendered = if v7 {
-        backend.uuid_v7().ok()
+        dml.uuid_v7().ok()
     } else {
-        Some(backend.uuid_v4())
+        Some(dml.uuid_v4())
     };
     rendered.is_some_and(|rendered| {
         let actual = catalog_expression_fingerprint_in_dialect(default, dialect);
-        actual == catalog_expression_fingerprint_in_dialect(&rendered, dialect)
-            || (dialect == SqlDialect::Postgres
-                && actual
-                    == catalog_expression_fingerprint_in_dialect(
-                        &format!("pg_catalog.{rendered}"),
-                        dialect,
-                    ))
+        backend
+            .uuid_generator_candidates(&rendered)
+            .iter()
+            .any(|candidate| {
+                actual == catalog_expression_fingerprint_in_dialect(candidate, dialect)
+            })
     })
 }
 
@@ -488,71 +275,20 @@ fn id_default_from_literal_fingerprint(literal: String) -> IdDefaultSnapshot {
     }
 }
 
-fn uuid_literal_snapshot(
-    snapshot: IdDefaultSnapshot,
-    canonicalize_postgres_spelling: bool,
-) -> IdDefaultSnapshot {
-    if !canonicalize_postgres_spelling {
-        return snapshot;
-    }
-    let IdDefaultSnapshot::Literal(fingerprint) = snapshot else {
-        return snapshot;
-    };
-    let canonical = serde_json::from_str::<String>(&fingerprint)
-        .ok()
-        .and_then(|value| uuid::Uuid::parse_str(&value).ok())
-        .map(|value| {
-            serde_json::to_string(&value.to_string()).expect("UUID serialization is infallible")
-        })
-        .unwrap_or(fingerprint);
-    IdDefaultSnapshot::UuidLiteral(canonical)
-}
-
 fn authored_storage_literal_snapshot(
     snapshot: IdDefaultSnapshot,
     rendered: Option<&str>,
     dialect: SqlDialect,
 ) -> IdDefaultSnapshot {
-    if dialect == SqlDialect::Mysql || !matches!(snapshot, IdDefaultSnapshot::Literal(_)) {
+    let backend = crate::render::backends::value_format_renderer(dialect);
+    if !backend.authored_storage_uses_rendered_literal()
+        || !matches!(snapshot, IdDefaultSnapshot::Literal(_))
+    {
         return snapshot;
     }
     rendered
         .and_then(|rendered| sql_literal_fingerprint_in_dialect(rendered, dialect))
         .map_or(snapshot, id_default_from_literal_fingerprint)
-}
-
-fn mysql_text_literal_snapshot(snapshot: IdDefaultSnapshot) -> IdDefaultSnapshot {
-    let IdDefaultSnapshot::Literal(fingerprint) = snapshot else {
-        return snapshot;
-    };
-    let stored = if let Ok(value) = serde_json::from_str::<String>(&fingerprint) {
-        value
-    } else if fingerprint == "true" {
-        "1".to_string()
-    } else if fingerprint == "false" {
-        "0".to_string()
-    } else if crate::model::ir::is_decimal_string(&fingerprint) {
-        fingerprint
-            .strip_prefix('+')
-            .unwrap_or(&fingerprint)
-            .to_string()
-    } else {
-        return IdDefaultSnapshot::Literal(fingerprint);
-    };
-    IdDefaultSnapshot::Literal(
-        serde_json::to_string(&stored).expect("string serialization is infallible"),
-    )
-}
-
-#[derive(Clone, Copy)]
-enum LiteralCastKind {
-    Text,
-    SignedInteger { bits: u8 },
-    UnsignedInteger { bits: u8 },
-    ExactNumeric,
-    Real,
-    Boolean,
-    Uuid,
 }
 
 fn canonical_decimal_sql_literal(value: &str) -> Option<String> {
@@ -581,16 +317,19 @@ fn canonical_decimal_sql_literal(value: &str) -> Option<String> {
 }
 
 fn sql_literal_fingerprint(expression: &str) -> Option<String> {
-    sql_literal_fingerprint_with_dialect(expression, None)
+    sql_literal_fingerprint_with_backend(expression, None)
 }
 
 fn sql_literal_fingerprint_in_dialect(expression: &str, dialect: SqlDialect) -> Option<String> {
-    sql_literal_fingerprint_with_dialect(expression, Some(dialect))
+    sql_literal_fingerprint_with_backend(
+        expression,
+        Some(crate::render::backends::value_format_renderer(dialect)),
+    )
 }
 
-fn sql_literal_fingerprint_with_dialect(
+fn sql_literal_fingerprint_with_backend(
     expression: &str,
-    dialect: Option<SqlDialect>,
+    backend: Option<&dyn ValueFormatRenderer>,
 ) -> Option<String> {
     fn top_level_token(tokens: &[String], needle: &str, from_end: bool) -> Option<usize> {
         let mut depth = 0_i32;
@@ -611,47 +350,30 @@ fn sql_literal_fingerprint_with_dialect(
         found
     }
 
-    fn cast_kind(tokens: &[String], dialect: Option<SqlDialect>) -> Option<LiteralCastKind> {
+    fn cast_kind(
+        tokens: &[String],
+        backend: Option<&dyn ValueFormatRenderer>,
+    ) -> Option<LiteralCastKind> {
         let compact = tokens.join("");
-        let compact = if dialect.is_none() || dialect == Some(SqlDialect::Mysql) {
-            compact
-                .split_once("charset")
-                .map_or(compact.as_str(), |(base, _)| base)
-        } else {
-            compact.as_str()
-        };
-        if compact == "uuid" {
-            return Some(LiteralCastKind::Uuid);
+        if let Some(backend) = backend {
+            return backend.literal_cast_kind(&compact);
         }
-        if matches!(compact, "text" | "charactervarying" | "varchar")
-            || ((dialect.is_none() || dialect == Some(SqlDialect::Mysql))
-                && matches!(compact, "character" | "char"))
-        {
-            return Some(LiteralCastKind::Text);
-        }
-        let numeric_kind = match compact {
-            "smallint" | "int2" => Some(LiteralCastKind::SignedInteger { bits: 16 }),
-            "integer" | "int" | "int4" => Some(LiteralCastKind::SignedInteger { bits: 32 }),
-            "bigint" | "int8" | "signed" => Some(LiteralCastKind::SignedInteger { bits: 64 }),
-            "unsigned" => Some(LiteralCastKind::UnsignedInteger { bits: 64 }),
-            "numeric" | "decimal" => Some(LiteralCastKind::ExactNumeric),
-            "real" | "double" | "doubleprecision" => Some(LiteralCastKind::Real),
-            _ => None,
-        };
-        if numeric_kind.is_some() {
-            return numeric_kind;
-        }
-        matches!(compact, "boolean" | "bool").then_some(LiteralCastKind::Boolean)
+        crate::render::backends::value_format_renderers()
+            .find_map(|backend| backend.literal_cast_kind(&compact))
     }
 
-    fn apply_cast(input: String, target: &[String], dialect: Option<SqlDialect>) -> Option<String> {
+    fn apply_cast(
+        input: String,
+        target: &[String],
+        backend: Option<&dyn ValueFormatRenderer>,
+    ) -> Option<String> {
         // A typed NULL remains the absence-equivalent SQL NULL even for cast
         // targets outside the portable scalar surface (for example BYTEA).
         if input == "null" {
             return Some(input);
         }
 
-        let kind = cast_kind(target, dialect)?;
+        let kind = cast_kind(target, backend)?;
         let string = serde_json::from_str::<String>(&input).ok();
         let number = canonical_decimal_sql_literal(&input);
         match kind {
@@ -723,23 +445,23 @@ fn sql_literal_fingerprint_with_dialect(
         Some(decoded)
     }
 
-    fn leaf(tokens: &[String], dialect: Option<SqlDialect>) -> Option<String> {
+    fn leaf(tokens: &[String], backend: Option<&dyn ValueFormatRenderer>) -> Option<String> {
         if tokens.len() == 1 {
             if let Some(decoded) = decode_quoted_string(&tokens[0]) {
                 return serde_json::to_string(&decoded).ok();
             }
         }
 
-        // MySQL's renderer uses a charset-qualified hex string so its meaning
-        // cannot depend on NO_BACKSLASH_ESCAPES. Treat that exact text carrier
-        // as a string, while leaving an ordinary binary X'..' literal outside
-        // the ID-literal comparison surface.
-        if (dialect.is_none() || dialect == Some(SqlDialect::Mysql))
-            && tokens.len() == 3
-            && tokens[0].starts_with('_')
-            && tokens[1] == "x"
-        {
-            let encoded = decode_quoted_string(&tokens[2])?;
+        let carrier = backend
+            .and_then(|backend| backend.catalog_literal_hex_carrier(tokens))
+            .or_else(|| {
+                backend.is_none().then(|| {
+                    crate::render::backends::value_format_renderers()
+                        .find_map(|backend| backend.catalog_literal_hex_carrier(tokens))
+                })?
+            });
+        if let Some(carrier) = carrier {
+            let encoded = decode_quoted_string(carrier)?;
             let decoded = String::from_utf8(hex::decode(encoded).ok()?).ok()?;
             return serde_json::to_string(&decoded).ok();
         }
@@ -753,7 +475,7 @@ fn sql_literal_fingerprint_with_dialect(
         canonical_decimal_sql_literal(compact)
     }
 
-    fn parse(tokens: &[String], dialect: Option<SqlDialect>) -> Option<String> {
+    fn parse(tokens: &[String], backend: Option<&dyn ValueFormatRenderer>) -> Option<String> {
         let tokens = strip_outer_token_parens(tokens);
 
         if tokens.first().map(String::as_str) == Some("cast")
@@ -765,37 +487,25 @@ fn sql_literal_fingerprint_with_dialect(
             if separator == 0 || separator + 1 == body.len() {
                 return None;
             }
-            let input = parse(&body[..separator], dialect)?;
-            return apply_cast(input, &body[separator + 1..], dialect);
+            let input = parse(&body[..separator], backend)?;
+            return apply_cast(input, &body[separator + 1..], backend);
         }
 
         if let Some(separator) = top_level_token(tokens, "::", true) {
             if separator == 0 || separator + 1 == tokens.len() {
                 return None;
             }
-            let input = parse(&tokens[..separator], dialect)?;
-            return apply_cast(input, &tokens[separator + 1..], dialect);
+            let input = parse(&tokens[..separator], backend)?;
+            return apply_cast(input, &tokens[separator + 1..], backend);
         }
 
-        leaf(tokens, dialect)
+        leaf(tokens, backend)
     }
 
     parse(
-        &catalog_sql_tokens_with_dialect(None, expression, dialect),
-        dialect,
+        &catalog_sql_tokens_with_backend(None, expression, backend, CatalogSqlContext::Literal),
+        backend,
     )
-}
-
-/// The physical column details implied by one logical value format.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ValueFormatColumnMetadata {
-    /// Exact dialect DDL type, including the format's bytewise collation.
-    pub ddl_type: String,
-    /// Exact non-default catalog collation identity, when the dialect exposes
-    /// one independently from its DDL type spelling.
-    pub collation: Option<ColumnCollationSnapshot>,
-    /// Null-tolerant canonical spelling check, including its `CHECK` wrapper.
-    pub inline_check: String,
 }
 
 /// Engine-owned format contract recovered from one catalog CHECK.
@@ -820,6 +530,7 @@ pub(crate) fn recover_format_check(
     check_sql: &str,
     dialect: SqlDialect,
 ) -> Option<RecoveredFormatCheck> {
+    let backend = crate::render::backends::value_format_renderer(dialect);
     if let Ok(Some(uuid)) = uuid_column_metadata(column, dialect) {
         if canonical_check_sql(column, check_sql) == canonical_check_sql(column, &uuid.inline_check)
         {
@@ -839,24 +550,7 @@ pub(crate) fn recover_format_check(
             candidates.push(candidate);
         }
     }
-    if dialect == SqlDialect::Sqlite {
-        let lower_guard = format!("*[^{TYPE_ID_ALPHABET}]*");
-        let upper_guard = format!("*[^{ULID_ALPHABET}]*");
-        if literals.iter().any(|literal| literal == &upper_guard) {
-            candidates.push(ValueFormat::Ulid);
-        }
-        if literals.iter().any(|literal| literal == &lower_guard) {
-            let stored_prefix = literals.iter().find(|literal| {
-                literal.ends_with('_') && !literal.starts_with('*') && literal.as_str() != "[0-7]"
-            });
-            let prefix = stored_prefix.map_or_else(String::new, |stored| {
-                stored.strip_suffix('_').unwrap_or(stored).to_string()
-            });
-            if validate_type_id_prefix(&prefix).is_ok() {
-                candidates.push(ValueFormat::TypeId { prefix });
-            }
-        }
-    }
+    candidates.extend(backend.recovery_candidates(&literals, TYPE_ID_ALPHABET, ULID_ALPHABET));
 
     let mut unique_candidates = Vec::new();
     for candidate in candidates {
@@ -923,14 +617,11 @@ fn sql_string_literals(sql: &str) -> Vec<String> {
     literals
 }
 
-fn catalog_sql_tokens(column: Option<&str>, sql: &str) -> Vec<String> {
-    catalog_sql_tokens_with_dialect(column, sql, None)
-}
-
-fn catalog_sql_tokens_with_dialect(
+fn catalog_sql_tokens_with_backend(
     column: Option<&str>,
     sql: &str,
-    dialect: Option<SqlDialect>,
+    backend: Option<&dyn ValueFormatRenderer>,
+    context: CatalogSqlContext,
 ) -> Vec<String> {
     let bytes = sql.as_bytes();
     let mut out = Vec::new();
@@ -996,12 +687,16 @@ fn catalog_sql_tokens_with_dialect(
                 cursor += 1;
             }
             let word = &sql[start..cursor];
-            if (dialect.is_none() || dialect == Some(SqlDialect::Mysql))
-                && word.starts_with('_')
-                && bytes.get(cursor) == Some(&b'\'')
-            {
-                // MySQL catalog charset introducer; the following literal is
-                // retained by the next iteration.
+            let followed_by_quote = bytes.get(cursor) == Some(&b'\'');
+            let is_introducer = backend.map_or_else(
+                || {
+                    crate::render::backends::value_format_renderers().any(|backend| {
+                        backend.is_catalog_string_introducer(word, followed_by_quote)
+                    })
+                },
+                |backend| backend.is_catalog_string_introducer(word, followed_by_quote),
+            );
+            if is_introducer {
                 continue;
             }
             if column.is_some_and(|column| word.eq_ignore_ascii_case(column)) {
@@ -1029,6 +724,13 @@ fn catalog_sql_tokens_with_dialect(
         } else {
             out.push(char::from(byte.to_ascii_lowercase()).to_string());
             cursor += 1;
+        }
+    }
+    if let Some(backend) = backend {
+        backend.normalize_catalog_tokens(context, &mut out);
+    } else {
+        for backend in crate::render::backends::value_format_renderers() {
+            backend.normalize_catalog_tokens(context, &mut out);
         }
     }
     out
@@ -1152,73 +854,12 @@ impl BooleanFingerprint {
 }
 
 fn canonical_check_sql(column: &str, sql: &str) -> String {
-    let mut tokens = catalog_sql_tokens(Some(column), sql);
-    strip_pg_catalog_qualifiers(&mut tokens);
+    let mut tokens =
+        catalog_sql_tokens_with_backend(Some(column), sql, None, CatalogSqlContext::Check);
     if tokens.first().is_some_and(|token| token == "check") {
         tokens.remove(0);
     }
-    // PostgreSQL annotates regex literals as `::text`; that catalog-only cast
-    // is not present in the authored CHECK contract.
-    let mut cursor = 0_usize;
-    while cursor + 1 < tokens.len() {
-        if tokens[cursor] == "::" && tokens[cursor + 1] == "text" {
-            tokens.drain(cursor..=cursor + 1);
-        } else {
-            cursor += 1;
-        }
-    }
     BooleanFingerprint::parse(&tokens).serialize()
-}
-
-/// PostgreSQL's deparser qualifies pinned built-ins when a same-spelling object
-/// earlier on `search_path` would otherwise change name resolution. The OID is
-/// still the same pg_catalog object, so that qualification is catalog decoration
-/// rather than format/default semantics. User-schema qualifiers are retained.
-fn strip_pg_catalog_qualifiers(tokens: &mut Vec<String>) {
-    let mut cursor = 0_usize;
-    while cursor + 1 < tokens.len() {
-        if matches!(tokens[cursor].as_str(), "pg_catalog" | "ident:pg_catalog")
-            && tokens[cursor + 1] == "."
-        {
-            tokens.drain(cursor..=cursor + 1);
-        } else {
-            cursor += 1;
-        }
-    }
-
-    // When a same-spelling operator is visible earlier on search_path,
-    // pg_get_constraintdef/pg_get_expr renders the pinned built-in as
-    // `OPERATOR(pg_catalog.~)`. After removing the catalog qualifier, discard
-    // only the OPERATOR wrapper and retain every punctuation token inside it;
-    // multi-byte operators therefore keep the same tokenizer shape as authored
-    // infix SQL.
-    let mut cursor = 0_usize;
-    while cursor + 3 < tokens.len() {
-        if tokens[cursor] != "operator" || tokens[cursor + 1] != "(" {
-            cursor += 1;
-            continue;
-        }
-        let mut depth = 0_i32;
-        let mut close = None;
-        for (index, token) in tokens.iter().enumerate().skip(cursor + 1) {
-            match token.as_str() {
-                "(" => depth += 1,
-                ")" => {
-                    depth -= 1;
-                    if depth == 0 {
-                        close = Some(index);
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        let Some(close) = close else {
-            break;
-        };
-        tokens.remove(close);
-        tokens.drain(cursor..cursor + 2);
-    }
 }
 
 /// Catalog-stable fingerprint for the closed expression-default subset. It
@@ -1226,14 +867,20 @@ fn strip_pg_catalog_qualifiers(tokens: &mut Vec<String>) {
 /// grouping parentheses normalize away without erasing semantically meaningful
 /// grouping (or parentheses inside string literals).
 pub(crate) fn catalog_expression_fingerprint(sql: &str) -> String {
-    catalog_expression_fingerprint_with_dialect(sql, None)
+    catalog_expression_fingerprint_with_backend(sql, None)
 }
 
 pub(crate) fn catalog_expression_fingerprint_in_dialect(sql: &str, dialect: SqlDialect) -> String {
-    catalog_expression_fingerprint_with_dialect(sql, Some(dialect))
+    catalog_expression_fingerprint_with_backend(
+        sql,
+        Some(crate::render::backends::value_format_renderer(dialect)),
+    )
 }
 
-fn catalog_expression_fingerprint_with_dialect(sql: &str, dialect: Option<SqlDialect>) -> String {
+fn catalog_expression_fingerprint_with_backend(
+    sql: &str,
+    backend: Option<&dyn ValueFormatRenderer>,
+) -> String {
     fn top_level_token(tokens: &[String], needle: &str, from_end: bool) -> Option<usize> {
         let mut depth = 0_i32;
         let mut found = None;
@@ -1253,10 +900,10 @@ fn catalog_expression_fingerprint_with_dialect(sql: &str, dialect: Option<SqlDia
         found
     }
 
-    fn cast_parts(
-        tokens: &[String],
-        dialect: Option<SqlDialect>,
-    ) -> Option<(&[String], &[String])> {
+    fn cast_parts<'a>(
+        tokens: &'a [String],
+        backend: Option<&dyn ValueFormatRenderer>,
+    ) -> Option<(&'a [String], &'a [String])> {
         let tokens = strip_outer_token_parens(tokens);
         if tokens.first().map(String::as_str) == Some("cast")
             && tokens.get(1).map(String::as_str) == Some("(")
@@ -1279,7 +926,7 @@ fn catalog_expression_fingerprint_with_dialect(sql: &str, dialect: Option<SqlDia
             if separator > 0
                 && !target.is_empty()
                 && operand_is_primary
-                && is_cast_target(target, dialect)
+                && is_cast_target(target, backend)
             {
                 return Some((operand, target));
             }
@@ -1287,74 +934,33 @@ fn catalog_expression_fingerprint_with_dialect(sql: &str, dialect: Option<SqlDia
         None
     }
 
-    fn is_cast_target(tokens: &[String], dialect: Option<SqlDialect>) -> bool {
+    fn is_cast_target(tokens: &[String], backend: Option<&dyn ValueFormatRenderer>) -> bool {
         let compact = tokens
             .iter()
             .filter(|token| !matches!(token.as_str(), "(" | ")" | ","))
             .map(String::as_str)
             .collect::<String>();
-        let compact = if dialect.is_none() || dialect == Some(SqlDialect::Mysql) {
-            compact
-                .split_once("charset")
-                .map_or(compact.as_str(), |(base, _)| base)
-        } else {
-            compact.as_str()
-        };
-        matches!(
-            compact,
-            "text"
-                | "character"
-                | "charactervarying"
-                | "varchar"
-                | "char"
-                | "smallint"
-                | "integer"
-                | "bigint"
-                | "int"
-                | "int2"
-                | "int4"
-                | "int8"
-                | "numeric"
-                | "decimal"
-                | "real"
-                | "double"
-                | "doubleprecision"
-                | "boolean"
-                | "bool"
-                | "bytea"
-                | "blob"
-                | "binary"
-                | "uuid"
-        ) || [
-            "character",
-            "charactervarying",
-            "varchar",
-            "char",
-            "numeric",
-            "decimal",
-        ]
-        .iter()
-        .any(|prefix| {
-            compact.starts_with(prefix)
-                && compact[prefix.len()..]
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit())
-        })
+        backend.map_or_else(
+            || {
+                crate::render::backends::value_format_renderers()
+                    .any(|backend| backend.is_catalog_cast_target(&compact))
+            },
+            |backend| backend.is_catalog_cast_target(&compact),
+        )
     }
 
-    fn cast_target(tokens: &[String], dialect: Option<SqlDialect>) -> String {
+    fn cast_target(tokens: &[String], backend: Option<&dyn ValueFormatRenderer>) -> String {
         let compact = tokens
             .iter()
             .filter(|token| !matches!(token.as_str(), "(" | ")"))
             .map(String::as_str)
             .collect::<String>();
-        if dialect.is_none() || dialect == Some(SqlDialect::Mysql) {
-            compact
-                .split_once("charset")
-                .map_or(compact.as_str(), |(base, _)| base)
-                .to_string()
+        if let Some(backend) = backend {
+            backend.canonical_catalog_cast_target(&compact)
         } else {
-            compact
+            crate::render::backends::value_format_renderers()
+                .find_map(|backend| backend.canonical_unattributed_catalog_cast_target(&compact))
+                .unwrap_or(compact)
         }
     }
 
@@ -1381,14 +987,17 @@ fn catalog_expression_fingerprint_with_dialect(sql: &str, dialect: Option<SqlDia
         None
     }
 
-    fn normalize_embedded_literals(tokens: &[String], dialect: Option<SqlDialect>) -> Vec<String> {
+    fn normalize_embedded_literals(
+        tokens: &[String],
+        backend: Option<&dyn ValueFormatRenderer>,
+    ) -> Vec<String> {
         let mut normalized = Vec::with_capacity(tokens.len());
         let mut cursor = 0_usize;
         while cursor < tokens.len() {
             let mut best = None;
             for end in cursor + 1..=tokens.len() {
                 if let Some(literal) =
-                    sql_literal_fingerprint_with_dialect(&tokens[cursor..end].join(" "), dialect)
+                    sql_literal_fingerprint_with_backend(&tokens[cursor..end].join(" "), backend)
                 {
                     best = Some((end, literal));
                 }
@@ -1404,15 +1013,18 @@ fn catalog_expression_fingerprint_with_dialect(sql: &str, dialect: Option<SqlDia
         normalized
     }
 
-    fn remove_implicit_case_else_null(tokens: &mut Vec<String>, dialect: Option<SqlDialect>) {
+    fn remove_implicit_case_else_null(
+        tokens: &mut Vec<String>,
+        backend: Option<&dyn ValueFormatRenderer>,
+    ) {
         let mut cursor = 0_usize;
         while cursor + 2 < tokens.len() {
             if tokens[cursor] == "else" {
                 let implicit_end = (cursor + 2..tokens.len()).find(|end| {
                     tokens[*end] == "end"
-                        && sql_literal_fingerprint_with_dialect(
+                        && sql_literal_fingerprint_with_backend(
                             &tokens[cursor + 1..*end].join(" "),
-                            dialect,
+                            backend,
                         )
                         .as_deref()
                             == Some("null")
@@ -1473,18 +1085,18 @@ fn catalog_expression_fingerprint_with_dialect(sql: &str, dialect: Option<SqlDia
         }
     }
 
-    fn expression(tokens: &[String], dialect: Option<SqlDialect>) -> String {
+    fn expression(tokens: &[String], backend: Option<&dyn ValueFormatRenderer>) -> String {
         let tokens = strip_outer_token_parens(tokens);
         // PostgreSQL annotates otherwise-untyped scalar constants while resolving
         // function overloads (`'X'::text`, `'-1'::integer`, ...). Reuse the
         // typed-literal normalizer recursively so those catalog casts compare to
         // the authored scalar value, while nonliteral/value-changing casts remain.
-        if let Some(literal) = sql_literal_fingerprint_with_dialect(&tokens.join(" "), dialect) {
+        if let Some(literal) = sql_literal_fingerprint_with_backend(&tokens.join(" "), backend) {
             return format!("literal:{literal}");
         }
         if let Some(sign @ ("+" | "-")) = tokens.first().map(String::as_str) {
             if let Some(number) =
-                sql_literal_fingerprint_with_dialect(&tokens[1..].join(" "), dialect)
+                sql_literal_fingerprint_with_backend(&tokens[1..].join(" "), backend)
                     .and_then(|number| canonical_decimal_sql_literal(&number))
             {
                 return if sign == "-" {
@@ -1505,59 +1117,65 @@ fn catalog_expression_fingerprint_with_dialect(sql: &str, dialect: Option<SqlDia
                     "{operator}({})",
                     parts
                         .iter()
-                        .map(|part| expression(part, dialect))
+                        .map(|part| expression(part, backend))
                         .collect::<Vec<_>>()
                         .join(",")
                 );
             }
         }
 
-        if let Some((operand, target)) = cast_parts(tokens, dialect) {
-            let target = cast_target(target, dialect);
-            return format!("cast:{target}({})", expression(operand, dialect));
+        if let Some((operand, target)) = cast_parts(tokens, backend) {
+            let target = cast_target(target, backend);
+            return format!("cast:{target}({})", expression(operand, backend));
         }
 
         if let Some((name, body)) = call_parts(tokens) {
-            if (dialect.is_none() || dialect == Some(SqlDialect::Postgres))
-                && name == "trim"
+            if backend.map_or_else(
+                || {
+                    crate::render::backends::value_format_renderers()
+                        .any(|backend| backend.normalizes_trim_both_from())
+                },
+                |backend| backend.normalizes_trim_both_from(),
+            ) && name == "trim"
                 && body.first().map(String::as_str) == Some("both")
                 && body.get(1).map(String::as_str) == Some("from")
             {
-                return format!("call:trim({})", expression(&body[2..], dialect));
+                return format!("call:trim({})", expression(&body[2..], backend));
             }
             let args = split_top_level(body, ",");
             let args = if args.is_empty() && body.is_empty() {
                 Vec::new()
             } else if args.is_empty() {
-                vec![expression(body, dialect)]
+                vec![expression(body, backend)]
             } else {
                 args.into_iter()
-                    .map(|argument| expression(argument, dialect))
+                    .map(|argument| expression(argument, backend))
                     .collect()
             };
-            let name = match (dialect, name) {
-                (Some(SqlDialect::Mysql), "now" | "current_timestamp") => "current_timestamp",
-                (Some(SqlDialect::Mysql), "ceil" | "ceiling") => "ceil",
-                (Some(SqlDialect::Postgres) | None, "btrim") => "trim",
-                _ => name,
-            };
+            let name = backend.map_or_else(
+                || {
+                    crate::render::backends::value_format_renderers()
+                        .find_map(|backend| {
+                            backend.canonical_unattributed_catalog_function_name(name)
+                        })
+                        .unwrap_or(name)
+                },
+                |backend| backend.canonical_catalog_function_name(name),
+            );
             return format!("call:{name}({})", args.join(","));
         }
         // PostgreSQL materializes an omitted searched-CASE ELSE arm as a typed
         // `ELSE NULL::<resolved type>`. SQL defines omission as exactly ELSE
         // NULL, so erase that deparser-only arm before general leaf rewriting.
         let mut tokens = tokens.to_vec();
-        remove_implicit_case_else_null(&mut tokens, dialect);
-        let mut tokens = normalize_embedded_literals(&tokens, dialect);
+        remove_implicit_case_else_null(&mut tokens, backend);
+        let mut tokens = normalize_embedded_literals(&tokens, backend);
         normalize_unary_numeric_literals(&mut tokens);
         serialize_tokens(&tokens)
     }
 
-    let mut tokens = catalog_sql_tokens_with_dialect(None, sql, dialect);
-    if dialect.is_none() || dialect == Some(SqlDialect::Postgres) {
-        strip_pg_catalog_qualifiers(&mut tokens);
-    }
-    expression(&tokens, dialect)
+    let tokens = catalog_sql_tokens_with_backend(None, sql, backend, CatalogSqlContext::Expression);
+    expression(&tokens, backend)
 }
 
 /// Lower a logical UUID column to the portable textual contract used on MySQL
@@ -1573,37 +1191,7 @@ pub(crate) fn uuid_column_metadata(
         crate::render::backends::renderer(dialect),
     )
     .map_err(|error| error.to_string())?;
-    let metadata = match dialect {
-        SqlDialect::Postgres => return Ok(None),
-        SqlDialect::Mysql => {
-            let regex = mysql_grammar_string_literal(
-                "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
-            );
-            ValueFormatColumnMetadata {
-                ddl_type: "VARCHAR(36) CHARACTER SET ascii COLLATE ascii_bin".to_string(),
-                collation: None,
-                inline_check: format!(
-                    "CHECK ({quoted} IS NULL OR (CHAR_LENGTH({quoted}) = {UUID_TEXT_LEN} AND \
-                     REGEXP_LIKE({quoted}, {regex}, 'c')))"
-                ),
-            }
-        }
-        SqlDialect::Sqlite => ValueFormatColumnMetadata {
-            ddl_type: "TEXT COLLATE BINARY".to_string(),
-            // BINARY is SQLite's canonical default and is represented by None.
-            collation: None,
-            inline_check: format!(
-                "CHECK ({quoted} IS NULL OR (typeof({quoted}) = 'text' AND \
-                 length({quoted}) = {UUID_TEXT_LEN} AND \
-                 length(CAST({quoted} AS BLOB)) = {UUID_TEXT_LEN} AND \
-                 substr({quoted}, 9, 1) = '-' AND substr({quoted}, 14, 1) = '-' AND \
-                 substr({quoted}, 19, 1) = '-' AND substr({quoted}, 24, 1) = '-' AND \
-                 length({quoted}) - length(replace({quoted}, '-', '')) = 4 AND \
-                 replace({quoted}, '-', '') NOT GLOB '*[^0-9a-f]*'))"
-            ),
-        },
-    };
-    Ok(Some(metadata))
+    Ok(crate::render::backends::value_format_renderer(dialect).uuid_column_metadata(&quoted))
 }
 
 /// Lower one logical value format to its dialect-specific text representation.
@@ -1633,46 +1221,8 @@ fn ulid_column_metadata(
     )
     .map_err(|error| error.to_string())?;
     let regex = ulid_regex();
-
-    let (ddl_type, inline_check) = match dialect {
-        SqlDialect::Postgres => {
-            let regex = sql_string_literal(&regex);
-            (
-                "text COLLATE \"C\"".to_string(),
-                format!(
-                    "CHECK ({quoted} IS NULL OR (octet_length({quoted}) = {ULID_LEN} AND \
-                     ({quoted} COLLATE \"C\") ~ {regex}))"
-                ),
-            )
-        }
-        SqlDialect::Mysql => {
-            let regex = mysql_grammar_string_literal(&regex);
-            (
-                "VARCHAR(191) CHARACTER SET ascii COLLATE ascii_bin".to_string(),
-                format!(
-                    "CHECK ({quoted} IS NULL OR (CHAR_LENGTH({quoted}) = {ULID_LEN} AND \
-                     REGEXP_LIKE({quoted}, {regex}, 'c')))"
-                ),
-            )
-        }
-        SqlDialect::Sqlite => (
-            "TEXT COLLATE BINARY".to_string(),
-            format!(
-                "CHECK ({quoted} IS NULL OR (typeof({quoted}) = 'text' AND \
-                 length({quoted}) = {ULID_LEN} AND \
-                 length(CAST({quoted} AS BLOB)) = {ULID_LEN} AND \
-                 substr({quoted}, 1, 1) GLOB '[0-7]' AND \
-                 substr({quoted}, 1, {ULID_LEN}) NOT GLOB \
-                 '*[^{ULID_ALPHABET}]*'))"
-            ),
-        ),
-    };
-
-    Ok(ValueFormatColumnMetadata {
-        ddl_type,
-        collation: bytewise_catalog_collation(dialect),
-        inline_check,
-    })
+    Ok(crate::render::backends::value_format_renderer(dialect)
+        .ulid_column_metadata(&quoted, &regex, ULID_LEN))
 }
 
 fn type_id_column_metadata(
@@ -1699,64 +1249,17 @@ fn type_id_column_metadata(
         "^{stored_prefix}[0-7][{TYPE_ID_ALPHABET}]{{{}}}$",
         TYPE_ID_SUFFIX_LEN - 1
     );
-
-    let (ddl_type, inline_check) = match dialect {
-        SqlDialect::Postgres => {
-            let regex = sql_string_literal(&regex);
-            (
-                "text COLLATE \"C\"".to_string(),
-                format!(
-                    "CHECK ({quoted} IS NULL OR (octet_length({quoted}) = {total_len} AND \
-                     ({quoted} COLLATE \"C\") ~ {regex}))"
-                ),
-            )
-        }
-        SqlDialect::Mysql => {
-            let regex = mysql_grammar_string_literal(&regex);
-            (
-                "VARCHAR(191) CHARACTER SET ascii COLLATE ascii_bin".to_string(),
-                format!(
-                    "CHECK ({quoted} IS NULL OR (CHAR_LENGTH({quoted}) = {total_len} AND \
-                     REGEXP_LIKE({quoted}, {regex}, 'c')))"
-                ),
-            )
-        }
-        SqlDialect::Sqlite => {
-            let prefix_predicate = if stored_prefix.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    " AND substr({quoted}, 1, {}) = {} COLLATE BINARY",
-                    stored_prefix.len(),
-                    sql_string_literal(&stored_prefix)
-                )
-            };
-            (
-                "TEXT COLLATE BINARY".to_string(),
-                format!(
-                    "CHECK ({quoted} IS NULL OR (typeof({quoted}) = 'text' AND \
-                     length({quoted}) = {total_len} AND \
-                     length(CAST({quoted} AS BLOB)) = {total_len}{prefix_predicate} AND \
-                     substr({quoted}, {suffix_start}, 1) GLOB '[0-7]' AND \
-                     substr({quoted}, {suffix_start}, {TYPE_ID_SUFFIX_LEN}) NOT GLOB \
-                     '*[^{TYPE_ID_ALPHABET}]*'))"
-                ),
-            )
-        }
-    };
-
-    Ok(ValueFormatColumnMetadata {
-        ddl_type,
-        collation: bytewise_catalog_collation(dialect),
-        inline_check,
-    })
-}
-
-fn bytewise_catalog_collation(dialect: SqlDialect) -> Option<ColumnCollationSnapshot> {
-    matches!(dialect, SqlDialect::Postgres).then(|| ColumnCollationSnapshot {
-        schema: Some("pg_catalog".to_string()),
-        name: "C".to_string(),
-    })
+    Ok(
+        crate::render::backends::value_format_renderer(dialect).type_id_column_metadata(
+            &quoted,
+            &stored_prefix,
+            suffix_start,
+            total_len,
+            TYPE_ID_SUFFIX_LEN,
+            TYPE_ID_ALPHABET,
+            &regex,
+        ),
+    )
 }
 
 /// The physical column details implied by a bare
@@ -1788,21 +1291,7 @@ pub(crate) fn bytewise_column_metadata(
     rendered_type: &str,
     dialect: SqlDialect,
 ) -> (String, Option<ColumnCollationSnapshot>) {
-    let ddl_type = match dialect {
-        SqlDialect::Postgres => format!("{rendered_type} COLLATE \"C\""),
-        SqlDialect::Sqlite => format!("{rendered_type} COLLATE BINARY"),
-        SqlDialect::Mysql => {
-            format!("{} CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin", {
-                // MySQL character types already carry an explicit charset+collation
-                // suffix from `mysql_type_override_with_collation`. Replace it rather
-                // than append a second one.
-                rendered_type
-                    .split_once(" CHARACTER SET ")
-                    .map_or(rendered_type, |(base, _)| base)
-            })
-        }
-    };
-    (ddl_type, bytewise_catalog_collation(dialect))
+    crate::render::backends::value_format_renderer(dialect).bytewise_column_metadata(rendered_type)
 }
 
 #[cfg(test)]

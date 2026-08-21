@@ -3,13 +3,13 @@ name = "zero-migrate-backend"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The zero-migrate backend CONTRACT: the DmlRenderer, SchemaRenderer and MigrationGuard traits, the render errors and guard vocabulary their signatures name (IrLowerError, DeclarativeError, DmlError, VendorError, GuardConfig, GuardError, GuardOutcome, Advisory), the identifier/expression spelling seam, and the vendor-registry shape a backend crate hands back. Sits between zero-migrate-ir and the per-vendor crates; names no dialect, ships no vendor, and carries no SQL parser."
+description = "The zero-migrate backend CONTRACT: required DML, schema, DDL, value-format, stored-DDL and guard surfaces, their shared vocabulary, and the vendor-registry shape a backend crate hands back. Sits between zero-migrate-ir and the per-vendor crates; names no dialect and ships no vendor."
 
 [dependencies]
 # The wire contract: the closed `Op` enum, the closed `Expr` AST, `IrScalar`,
 # `SqlDialect`, `DialectId`, `Capability`, `BackendDescriptor` and the
 # `BackendRegistry` this crate's `VendorSet::descriptors` composes into. Every type
-# the two renderer traits name that is not declared here comes from this crate.
+# the renderer traits name that is not declared here comes from this crate.
 zero-migrate-ir = { workspace = true }
 # The Policy Decision Point. `guard::GuardConfig` HOLDS an unforgeable
 # `EffectivePolicy` and every guard decision is a query against it (grants /

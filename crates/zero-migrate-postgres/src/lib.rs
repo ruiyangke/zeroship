@@ -1,7 +1,7 @@
 //! # `zero-migrate-postgres` — the PostgreSQL backend
 //!
-//! One vendor, two spellings, no engine. This crate holds PostgreSQL's
-//! `DmlRenderer` impl (`dml`) and its `SchemaRenderer` impl (`schema`), and it
+//! One vendor, no engine. This crate holds PostgreSQL's DML, schema, DDL, and
+//! value-format renderers plus its guard, and it
 //! depends on `zero-migrate-backend` and `zero-migrate-ir` — never on the engine.
 //! That is the whole point of the split: the engine names this crate for its
 //! registry, so this crate must not name the engine back.
@@ -26,6 +26,7 @@ mod ddl;
 mod dml;
 pub mod guard;
 mod schema;
+mod value_format;
 mod vendor;
 
 // `render_vendor_op` IS NOT RE-EXPORTED, and its absence is the enforcement.
@@ -52,7 +53,7 @@ pub use guard::PgGuard;
 
 use zero_migrate_backend::registry::BackendVendor;
 
-/// Everything the engine needs from this crate: the capability descriptor, the three
+/// Everything the engine needs from this crate: the capability descriptor, the four
 /// renderers, and the line-1 guard.
 ///
 /// The renderer structs themselves are deliberately private. A caller reaches this
@@ -60,7 +61,7 @@ use zero_migrate_backend::registry::BackendVendor;
 /// in-crate `match` used to give for free and which `pub` statics would have thrown
 /// away at exactly the moment the vendor became separately linkable.
 ///
-/// `ddl` and `guard` are REQUIRED. Delete either line and this literal stops
+/// `value_format`, `ddl`, and `guard` are REQUIRED. Delete any line and this literal stops
 /// compiling, here, with this crate named — which is the point: a backend cannot
 /// inherit another backend's DDL or acquire a trusting guard by omission. See
 /// `zero_migrate_backend::registry::BackendVendor`.
@@ -68,6 +69,7 @@ pub static VENDOR: BackendVendor = BackendVendor {
     descriptor: &zero_migrate_ir::backend::POSTGRES_DESCRIPTOR,
     dml: &dml::RENDERER,
     schema: &schema::RENDERER,
+    value_format: &value_format::RENDERER,
     ddl: ddl::emitter,
     guard: guard::guard,
 };

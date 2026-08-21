@@ -20,12 +20,11 @@
 //! `"CURRENT_TIMESTAMP"`, `"bytea"` vs `"blob"`, `` `x` `` vs `"x"`,
 //! `OR REPLACE VIEW` vs a `DROP VIEW IF EXISTS` prelude.
 //!
-//! **SEMANTICS stays in the engine, dialect-PARAMETERIZED.** Comparison and
-//! normalization ("does this catalog default MEAN the same as that one", "is this
-//! authored width equivalent to that reported width") are the engine's job even when
-//! the answer depends on the dialect. `render::value_format` is the worked example:
-//! its dialect branches are drift-comparison rules, and moving them into a vendor
-//! crate would scatter one comparison across three vendors.
+//! **COMPARISON stays in the engine; vendor FACTS do not.** Core still decides whether
+//! two defaults or checks are equivalent, but `ValueFormatRenderer` supplies each
+//! backend's catalog decorations, aliases, storage spellings, and format DDL. The
+//! comparison is one algorithm without a vendor match; the facts live with their
+//! vendors.
 //!
 //! The test is the DIRECTION of the arrow. Spelling is the engine ASKING a vendor how
 //! to write something. Semantics is the engine DECIDING something about a vendor.
@@ -134,6 +133,21 @@ pub(crate) fn schema_renderer(
     vendor(dialect).schema
 }
 
+/// The value-format renderer and catalog normalizer registered by a dialect's vendor.
+pub(crate) fn value_format_renderer(
+    dialect: SqlDialect,
+) -> &'static dyn zero_migrate_backend::value_format::ValueFormatRenderer {
+    vendor(dialect).value_format
+}
+
+/// Every shipping value-format renderer, used only when a legacy snapshot has
+/// no backend provenance and the neutral comparator must compose the vendors'
+/// explicitly declared normalization rules.
+pub(crate) fn value_format_renderers(
+) -> impl Iterator<Item = &'static dyn zero_migrate_backend::value_format::ValueFormatRenderer> {
+    VENDORS.as_slice().iter().map(|vendor| vendor.value_format)
+}
+
 /// The vendor-owned parser for catalog-stored table DDL, when this backend
 /// explicitly provides one.
 pub(crate) fn stored_ddl(
@@ -207,7 +221,7 @@ mod tests {
         }
     }
 
-    /// Each vendor's three renderers agree with the descriptor they are filed under.
+    /// Each vendor's identity-bearing renderers agree with the descriptor they are filed under.
     ///
     /// A `BackendVendor` is a hand-written struct literal in each vendor crate, so
     /// nothing but this stops a crate from pairing PostgreSQL's descriptor with
@@ -221,6 +235,12 @@ mod tests {
                 v.schema.dialect(),
                 v.descriptor.id,
                 "{} registered a SchemaRenderer for a different dialect",
+                v.descriptor.display_name
+            );
+            assert_eq!(
+                v.value_format.dialect(),
+                v.descriptor.id,
+                "{} registered a ValueFormatRenderer for a different dialect",
                 v.descriptor.display_name
             );
             // The DmlRenderer answers through its descriptor now rather than a

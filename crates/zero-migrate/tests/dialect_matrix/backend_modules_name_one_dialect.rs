@@ -1,7 +1,8 @@
 //! The one-dialect-literal rule of the backend module directories, enforced rather
 //! than documented.
 //!
-//! There are THREE renderer module families: DML, schema typing, and DDL emission.
+//! There are FOUR renderer module families: DML, schema typing, DDL emission, and
+//! value-format normalization.
 //! All are covered here. The schema family came later
 //! — `SchemaRenderer`'s three vendors lived as bare structs and `impl` blocks in
 //! the middle of `schema/query.rs` long after the DML vendors had modules — and it
@@ -140,6 +141,41 @@ fn a_backend_module_names_only_its_own_dialect_and_only_once() {
             "Mysql",
         ),
     ];
+
+    let open_id_cases = [
+        (
+            "zero-migrate-postgres/src/value_format.rs",
+            include_str!("../../../zero-migrate-postgres/src/value_format.rs"),
+            "postgres",
+        ),
+        (
+            "zero-migrate-sqlite/src/value_format.rs",
+            include_str!("../../../zero-migrate-sqlite/src/value_format.rs"),
+            "sqlite",
+        ),
+        (
+            "zero-migrate-mysql/src/value_format.rs",
+            include_str!("../../../zero-migrate-mysql/src/value_format.rs"),
+            "mysql",
+        ),
+    ];
+    for (file, src, own) in open_id_cases {
+        for other in ["postgres", "sqlite", "mysql"] {
+            let needle = format!("DialectId::new(\"{other}\")");
+            let hits = src.matches(needle.as_str()).count();
+            let expected = usize::from(other == own);
+            assert_eq!(
+                hits, expected,
+                "{file} names {needle} {hits} time(s); expected {expected} (its own open \
+                 dialect id exactly once, as the DIALECT const; no other dialect)"
+            );
+        }
+        let declaration = format!("const DIALECT: DialectId = DialectId::new(\"{own}\");");
+        assert!(
+            src.lines().map(str::trim).any(|line| line == declaration),
+            "{file} must carry its identity in `{declaration}`"
+        );
+    }
 
     // The two vendor-crate files that carry spelling but NO renderer, and therefore
     // no `DIALECT` const: PostgreSQL's vendor-op renderer is PostgreSQL by

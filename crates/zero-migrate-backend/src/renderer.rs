@@ -15,10 +15,9 @@
 //!
 //! A method belongs on [`DmlRenderer`] when the answer is "how does this vendor
 //! WRITE it" — `now()` vs `CURRENT_TIMESTAMP`, `bytea` vs `blob`. It does NOT
-//! belong here when the answer is "what does this vendor MEAN by it": catalog
-//! normalization, drift comparison and equivalence are core's decisions even
-//! though they read the dialect, and they stay parameterized in core. See
-//! `render::value_format` for the worked counter-example.
+//! belong here when the question is catalog value-format normalization; that
+//! separate required surface is [`crate::value_format::ValueFormatRenderer`]. Core
+//! composes the comparison, while each backend owns the facts the comparison reads.
 //!
 //! # And a THIRD class that is neither: the capability tautology
 //!

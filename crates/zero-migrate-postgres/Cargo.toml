@@ -3,10 +3,10 @@ name = "zero-migrate-postgres"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The PostgreSQL backend for zero-migrate: this vendor's DML/view/trigger spelling and its column/DDL spelling, and nothing else. Implements the zero-migrate-backend contract; does NOT depend on the engine."
+description = "The PostgreSQL backend for zero-migrate: this vendor's DML, schema, DDL, value-format and guard behavior. Implements the zero-migrate-backend contract; does NOT depend on the engine."
 
 [dependencies]
-# The CONTRACT: the two renderer traits, the render errors their signatures name,
+# The CONTRACT: the required renderer traits, the render errors their signatures name,
 # the identifier/expression spelling seam this vendor calls, and the VendorSet shape
 # `VENDOR` below is registered through. This is the ONLY zero-migrate crate a
 # backend may depend on - depending on the engine is the cycle the split removed.
@@ -22,6 +22,7 @@ zero-migrate-guard = { workspace = true }
 zero-migrate-ir = { workspace = true }
 # The schema-field shape `SchemaRenderer` reads is the SDK's field JSON.
 serde_json = { workspace = true }
+uuid = { workspace = true }
 
 [lints]
 workspace = true

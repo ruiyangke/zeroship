@@ -26,15 +26,18 @@ use zero_migrate_backend::dml::DmlError;
 use zero_migrate_backend::error::IrLowerError;
 use zero_migrate_backend::renderer::DmlRenderer;
 use zero_migrate_backend::schema::SchemaRenderer;
-use zero_migrate_backend::snapshot::ColumnSnapshot;
+use zero_migrate_backend::snapshot::{ColumnCollationSnapshot, ColumnSnapshot, IdDefaultSnapshot};
 use zero_migrate_backend::step::BindValue;
+use zero_migrate_backend::value_format::{
+    CatalogSqlContext, LiteralCastKind, ValueFormatColumnMetadata, ValueFormatRenderer,
+};
 use zero_migrate_backend::vendor::VendorStatement;
 use zero_migrate_ir::backend::{
     BackendDescriptor, Capability, CapabilitySet, IdentifierLimit, Limits,
 };
 use zero_migrate_ir::dialect::DialectId;
-use zero_migrate_ir::expr::{CastTarget, ExtractField, ScalarFn};
-use zero_migrate_ir::ir::{IrScalar, Op, TableRef};
+use zero_migrate_ir::expr::{CastTarget, Expr, ExtractField, ScalarFn};
+use zero_migrate_ir::ir::{IrScalar, Op, TableRef, ValueFormat};
 
 /// The outsider's own identity, declared at item scope in a crate that owns
 /// neither `SqlDialect` nor the shipping registry. `DialectId::new` is `const`,
@@ -63,6 +66,9 @@ struct DuckDbDmlRenderer;
 
 #[derive(Debug)]
 struct DuckDbSchemaRenderer;
+
+#[derive(Debug)]
+struct DuckDbValueFormatRenderer;
 
 impl DmlRenderer for DuckDbDmlRenderer {
     fn descriptor(&self) -> &'static BackendDescriptor {
@@ -317,6 +323,128 @@ impl SchemaRenderer for DuckDbSchemaRenderer {
     }
 }
 
+impl ValueFormatRenderer for DuckDbValueFormatRenderer {
+    fn dialect(&self) -> DialectId {
+        DUCKDB
+    }
+
+    fn normalize_authored_default_expr(&self, _expr: &Expr) -> Option<Expr> {
+        None
+    }
+
+    fn normalize_text_literal_snapshot(&self, snapshot: IdDefaultSnapshot) -> IdDefaultSnapshot {
+        snapshot
+    }
+
+    fn normalize_uuid_literal_snapshot(&self, snapshot: IdDefaultSnapshot) -> IdDefaultSnapshot {
+        snapshot
+    }
+
+    fn catalog_default_is_unquoted_literal(&self, _expression_default: Option<bool>) -> bool {
+        false
+    }
+
+    fn catalog_default_marker_is_authoritative(&self) -> bool {
+        false
+    }
+
+    fn authored_storage_uses_rendered_literal(&self) -> bool {
+        true
+    }
+
+    fn literal_cast_kind(&self, _compact_target: &str) -> Option<LiteralCastKind> {
+        None
+    }
+
+    fn is_catalog_cast_target(&self, _compact_target: &str) -> bool {
+        false
+    }
+
+    fn canonical_catalog_cast_target(&self, compact_target: &str) -> String {
+        compact_target.to_string()
+    }
+
+    fn canonical_unattributed_catalog_cast_target(&self, _compact_target: &str) -> Option<String> {
+        None
+    }
+
+    fn catalog_literal_hex_carrier<'a>(&self, _tokens: &'a [String]) -> Option<&'a str> {
+        None
+    }
+
+    fn is_catalog_string_introducer(&self, _word: &str, _followed_by_quote: bool) -> bool {
+        false
+    }
+
+    fn normalize_catalog_tokens(&self, _context: CatalogSqlContext, _tokens: &mut Vec<String>) {}
+
+    fn normalizes_trim_both_from(&self) -> bool {
+        false
+    }
+
+    fn canonical_catalog_function_name<'a>(&self, name: &'a str) -> &'a str {
+        name
+    }
+
+    fn canonical_unattributed_catalog_function_name<'a>(&self, _name: &'a str) -> Option<&'a str> {
+        None
+    }
+
+    fn uuid_generator_candidates(&self, rendered: &str) -> Vec<String> {
+        vec![rendered.to_string()]
+    }
+
+    fn recovery_candidates(
+        &self,
+        _literals: &[String],
+        _type_id_alphabet: &str,
+        _ulid_alphabet: &str,
+    ) -> Vec<ValueFormat> {
+        Vec::new()
+    }
+
+    fn uuid_column_metadata(&self, _quoted: &str) -> Option<ValueFormatColumnMetadata> {
+        None
+    }
+
+    fn ulid_column_metadata(
+        &self,
+        _quoted: &str,
+        _regex: &str,
+        _len: usize,
+    ) -> ValueFormatColumnMetadata {
+        ValueFormatColumnMetadata {
+            ddl_type: "VARCHAR".to_string(),
+            collation: None,
+            inline_check: String::new(),
+        }
+    }
+
+    fn type_id_column_metadata(
+        &self,
+        _quoted: &str,
+        _stored_prefix: &str,
+        _suffix_start: usize,
+        _total_len: usize,
+        _suffix_len: usize,
+        _alphabet: &str,
+        _regex: &str,
+    ) -> ValueFormatColumnMetadata {
+        ValueFormatColumnMetadata {
+            ddl_type: "VARCHAR".to_string(),
+            collation: None,
+            inline_check: String::new(),
+        }
+    }
+
+    fn bytewise_column_metadata(
+        &self,
+        rendered_type: &str,
+    ) -> (String, Option<ColumnCollationSnapshot>) {
+        (rendered_type.to_string(), None)
+    }
+}
+
 /// The claim, stated as a value: an outsider's `dialect()` returns its OWN id.
 ///
 /// Before the signature change the only body that type-checked here was
@@ -326,6 +454,7 @@ impl SchemaRenderer for DuckDbSchemaRenderer {
 fn a_fourth_backend_answers_dialect_with_its_own_id() {
     let dml: &dyn DmlRenderer = &DuckDbDmlRenderer;
     let schema: &dyn SchemaRenderer = &DuckDbSchemaRenderer;
+    let value_format: &dyn ValueFormatRenderer = &DuckDbValueFormatRenderer;
 
     assert_eq!(dml.dialect(), DUCKDB);
     assert_eq!(schema.dialect(), DUCKDB);
@@ -337,6 +466,11 @@ fn a_fourth_backend_answers_dialect_with_its_own_id() {
         "the outsider writes its own pass-through instead of inheriting one"
     );
     assert_eq!(schema.strip_collation("VARCHAR"), "VARCHAR");
+    assert_eq!(
+        value_format.bytewise_column_metadata("VARCHAR"),
+        ("VARCHAR".to_string(), None),
+        "the outsider writes its own value-format refusal/pass-through"
+    );
 
     // Capabilities come off the outsider's OWN descriptor, so the answers are the
     // ones it declared — not the "no to everything" a core-owned id->capability

@@ -13,7 +13,7 @@
 //! So there are two registries and they answer different questions. The descriptor
 //! registry answers "what can this vendor do", and `-ir` owns it. This one answers
 //! "who spells this vendor's SQL, and who refuses to run it", and it pairs each
-//! descriptor with the three renderers and the one guard that go with it.
+//! descriptor with the registered renderers and the one guard that go with it.
 //! [`VendorSet::descriptors`] derives the first from the second, so the two cannot
 //! drift: a vendor that ships a renderer ships exactly one descriptor, and the id rule
 //! is enforced by `-ir`'s builder rather than restated here.
@@ -44,6 +44,7 @@ use crate::ddl::DdlEmitter;
 use crate::guard::{GuardConfig, MigrationGuard};
 use crate::renderer::DmlRenderer;
 use crate::schema::SchemaRenderer;
+use crate::value_format::ValueFormatRenderer;
 use zero_migrate_ir::backend::{BackendDescriptor, BackendRegistry, RegistryError};
 
 /// Build this vendor's line-1 guard for a config.
@@ -64,7 +65,7 @@ pub type GuardFactory = fn(&GuardConfig) -> Box<dyn MigrationGuard>;
 /// author receives an owned, schema-bound emitter.
 pub type DdlFactory = fn(&str) -> Box<dyn DdlEmitter>;
 
-/// Everything one backend crate exports: its capability row, its three renderers,
+/// Everything one backend crate exports: its capability row, its renderers,
 /// and its line-1 guard.
 ///
 /// A vendor crate declares exactly one of these as a `pub static` and the engine
@@ -75,7 +76,7 @@ pub type DdlFactory = fn(&str) -> Box<dyn DdlEmitter>;
 /// # Every field is REQUIRED, and `guard` is why that matters
 ///
 /// This struct derives no `Default`, has no `Default` impl, and is not
-/// `#[non_exhaustive]`. All five fields must be written out in a struct literal at the
+/// `#[non_exhaustive]`. All six fields must be written out in a struct literal at the
 /// vendor's own definition site. A new backend that ships no DDL emitter or no guard
 /// therefore fails to compile **in its own crate, named** — E0063 for the missing
 /// field — rather than picking one up by omission.
@@ -97,6 +98,11 @@ pub struct BackendVendor {
     pub dml: &'static dyn DmlRenderer,
     /// How this vendor spells columns and DDL.
     pub schema: &'static dyn SchemaRenderer,
+    /// How this vendor renders and recognizes logical value-format contracts.
+    ///
+    /// Required, never defaulted. Catalog normalization is a vendor fact just as
+    /// surely as emitted DDL is; a future backend must write its own answer.
+    pub value_format: &'static dyn ValueFormatRenderer,
     /// How this vendor spells schema-changing statements.
     ///
     /// Required, never defaulted. A vendor cannot silently inherit another backend's
@@ -144,15 +150,18 @@ pub struct BackendVendor {
 /// use zero_migrate_backend::registry::DdlFactory;
 /// use zero_migrate_backend::renderer::DmlRenderer;
 /// use zero_migrate_backend::schema::SchemaRenderer;
+/// use zero_migrate_backend::value_format::ValueFormatRenderer;
 /// fn vendor(
 ///     dml: &'static dyn DmlRenderer,
 ///     schema: &'static dyn SchemaRenderer,
+///     value_format: &'static dyn ValueFormatRenderer,
 ///     ddl: DdlFactory,
 /// ) -> BackendVendor {
 ///     BackendVendor {
 ///         descriptor: &zero_migrate_ir::backend::POSTGRES_DESCRIPTOR,
 ///         dml,
 ///         schema,
+///         value_format,
 ///         ddl,
 ///     }
 /// }
