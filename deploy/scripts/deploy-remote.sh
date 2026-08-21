@@ -90,6 +90,16 @@ usage() {
 say()  { printf '\n== %s\n' "$*"; }
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
+# REFUSED IS NOT FAILED, and keeping them apart is the whole point of a
+# preflight. FAILED means a check ruled on this tree or this host and said no.
+# REFUSED means it could not rule at all -- its input was absent, or its
+# extraction came back empty. Both stop the deploy; only one of them is a
+# finding about what you were about to ship, and an operator who cannot tell
+# them apart will "fix" a refusal by deleting the check. Folding the two
+# together is also how a check that examines nothing comes to print exactly
+# what a clean tree prints.
+refuse() { printf 'REFUSED: %s\n' "$*" >&2; exit 1; }
+
 # ====================================================================
 # THE FROZEN-MIGRATION LEDGER
 # ====================================================================
@@ -303,6 +313,101 @@ submodule_manifests() {
     | sed 's/:$//; s/^  //; s|$|/package.json|'
   grep -oE "\"${path}(/[A-Za-z0-9._/-]+)?\"" "${3:-Cargo.toml}" \
     | tr -d '"' | sed 's|$|/Cargo.toml|'
+}
+
+# ====================================================================
+# THE HOSTNAMES THE EDGE CLAIMS
+# ====================================================================
+#
+# An app's name IS its hostname label. The gateway derives the app from the
+# FIRST label of the Host header and the edge serves creator apps off the
+# `*.{domain}` wildcard, so every host the edge claims is a name no creator app
+# may hold. Taking `auth` gets an app that silently never receives a request;
+# taking `console` gets the one origin the auth service allows to frame its real
+# login page. crates/control/src/reserved_names.rs states both failure modes in
+# full and holds `RESERVED_APP_NAMES` -- the list `create_app` refuses against.
+#
+# That list is already bound to the edge, in both directions, by
+# `reserved_set_matches_the_edge`: a cargo test reading
+# `deploy/ops/caddy-claimed-hosts.json`, which is deploy/ops/Caddyfile as
+# `caddy adapt` lowers it. So why here as well?
+#
+# BECAUSE THIS PATH IS NOT GATED ON THAT TEST. It runs from an operator's
+# checkout, and the `scp deploy/ops/Caddyfile` further down is what puts the
+# edge config into production. Nothing between "edit the Caddyfile" and "roll"
+# consults either the artifact or the reserved list -- so a tree CI has never
+# seen ships an edge that routes a name away from creator apps while the
+# control plane still hands that name out. Checked before the build and before
+# the --dry-run exit, for the same reason the migration ledger is: telling an
+# operator what would go wrong is what a dry run is for.
+#
+# WHY THIS DOES NOT REIMPLEMENT THE RUST WALK. `claimed_host_labels` decides
+# WHICH matcher claims a host, and refuses by name the ones it cannot decide.
+# A second copy of that in bash could disagree with the authority, which is the
+# defect a second list always is. So this asks a strictly COARSER question that
+# cannot be quietly wrong in the direction that matters: every string ANYWHERE
+# in the lowered config ending in the sentinel domain names a host, whatever
+# claimed it, so its label must be reserved. It over-fires on a host string in
+# a non-claiming position and it does NOT see the cases that claim a host
+# without naming it -- a CEL `expression` matcher is undecidable here exactly
+# as it is there, and the Rust gate is what refuses those. Over-firing prints a
+# refusal an operator reads; under-firing ships the name.
+
+# The domain the artifact was adapted against, read out of the artifact rather
+# than written here: `caddy-claimed-hosts.sh` owns that choice, and a second
+# copy of the value is a second thing to keep in step.
+edge_sentinel_domain() {
+  sed -n 's/^  "sentinel_domain": "\([A-Za-z0-9._-]*\)",$/\1/p' \
+    "${1:-deploy/ops/caddy-claimed-hosts.json}"
+}
+
+# The Caddyfile digest the artifact records. Empty when the field is absent.
+edge_artifact_sha() {
+  sed -n 's/^  "caddyfile_sha256": "\([0-9a-f]*\)",$/\1/p' \
+    "${1:-deploy/ops/caddy-claimed-hosts.json}"
+}
+
+# Every hostname label the adapted edge config names under the sentinel domain,
+# lowercased, deduplicated and sorted.
+#
+# The wildcard is the creator-app catch-all and the apex cannot shadow a
+# `{app}.{domain}` name, so neither is emitted -- the apex never matches at all,
+# because the pattern requires a label and a dot in front of the domain.
+# Lowercased because hostnames are case-insensitive (RFC 4343) while Caddy
+# leaves matcher hosts in source case, so a mixed-case claim must not read as a
+# different name than the one browsers resolve.
+#
+# Returns non-zero, with no output, when the sentinel cannot be read: an
+# artifact whose shape moved must not answer "no hosts".
+edge_claimed_labels() {
+  local art="${1:-deploy/ops/caddy-claimed-hosts.json}" sentinel escaped
+  sentinel="$(edge_sentinel_domain "$art")"
+  [ -n "$sentinel" ] || return 1
+  escaped="$(printf '%s' "$sentinel" | sed 's/\./\\./g')"
+  grep -oE "[A-Za-z0-9_*-]+\.$escaped" "$art" \
+    | sed "s/\.$escaped\$//" \
+    | grep -vxF '*' \
+    | tr '[:upper:]' '[:lower:]' \
+    | sort -u
+}
+
+# RESERVED_APP_NAMES, read out of the const that IS the contract.
+#
+# A shell script scraping Rust source is allowed here for exactly the reason
+# crates/zeroship-gatekit/tests/generated_secret_scrape.rs gives for the
+# generated-secret table: this path has no Rust toolchain requirement today,
+# and adding `cargo run` to a deploy to read four strings is a worse trade than
+# a pinned pattern. PINNED IT IS --
+# `the_deploy_scripts_sed_still_yields_reserved_app_names` in
+# crates/control/src/reserved_names.rs reproduces this extraction character for
+# character and asserts it yields the const exactly, and asserts this file
+# still runs it. It cannot go blind without that test going red.
+#
+# $1 is the source file, defaulting to the real one; tests pass fixtures.
+reserved_app_names() {
+  sed -n 's/^pub const RESERVED_APP_NAMES: &\[&str\] = &\[\(.*\)\];$/\1/p' \
+    "${1:-crates/control/src/reserved_names.rs}" \
+    | grep -oE '"[a-z0-9_-]+"' | tr -d '"' | sort -u
 }
 
 rename_norm() {
@@ -661,6 +766,72 @@ main() {
       git -C $ROOT submodule update --init --recursive"
     echo "ok  every declared submodule is populated ($(echo $SUB_PATHS))"
   fi
+
+  # ------------------------------------- the edge config this roll would ship
+  #
+  # See "THE HOSTNAMES THE EDGE CLAIMS" above for why this is here and not only
+  # in the cargo test.
+  #
+  # UNCONDITIONAL, unlike the source-tree check just above. --skip-build and
+  # --image build no image, so the source tree is not their input; they still
+  # scp deploy/ops/Caddyfile, so the edge IS.
+  say "checking the edge config claims only hostnames the reserved list covers"
+  EDGE_ARTIFACT="deploy/ops/caddy-claimed-hosts.json"
+  [ -f "$EDGE_ARTIFACT" ] || refuse "$EDGE_ARTIFACT is not in this tree, so nothing here knows
+  what deploy/ops/Caddyfile claims. It is the adapted edge config and is tracked.
+  Restore it, or regenerate it with:
+      deploy/ops/caddy-claimed-hosts.sh --write"
+
+  EDGE_SHA_RECORDED="$(edge_artifact_sha "$EDGE_ARTIFACT")"
+  [ -n "$EDGE_SHA_RECORDED" ] || refuse "$EDGE_ARTIFACT has no caddyfile_sha256 field, so it
+  cannot be tied to the Caddyfile this roll ships and its host list may describe
+  some other edge entirely. Regenerate it:
+      deploy/ops/caddy-claimed-hosts.sh --write"
+  EDGE_SHA_ACTUAL="$(sha256sum deploy/ops/Caddyfile | cut -d' ' -f1)"
+  [ "$EDGE_SHA_RECORDED" = "$EDGE_SHA_ACTUAL" ] || refuse "the committed edge artifact does not describe the Caddyfile this roll would scp to $HOST:
+      $EDGE_ARTIFACT records sha256
+        $EDGE_SHA_RECORDED
+      deploy/ops/Caddyfile hashes to
+        $EDGE_SHA_ACTUAL
+  The edge changed without the artifact being regenerated, so NOTHING in this
+  tree knows what the edge now claims. This cannot RULE, so it refuses instead
+  of passing -- an unchecked edge and a checked one must not print the same
+  thing. NOTHING WAS SHIPPED. Run:
+      deploy/ops/caddy-claimed-hosts.sh --write
+  and commit the artifact in the same change as the Caddyfile."
+
+  EDGE_LABELS="$(edge_claimed_labels "$EDGE_ARTIFACT")" || refuse "$EDGE_ARTIFACT has no
+  sentinel_domain field, so a host in it cannot be told from a literal domain
+  baked into the edge. Regenerate it:
+      deploy/ops/caddy-claimed-hosts.sh --write"
+  [ -n "$EDGE_LABELS" ] || refuse "read ZERO hostnames out of $EDGE_ARTIFACT. The edge claims
+  at least the platform's own hosts, so an empty answer means the artifact's
+  shape moved or the extraction rotted -- and an empty set compares clean
+  against any reserved list, which is the vacuous green this refuses to print."
+
+  EDGE_RESERVED="$(reserved_app_names)"
+  [ -n "$EDGE_RESERVED" ] || refuse "read ZERO names out of RESERVED_APP_NAMES in
+  crates/control/src/reserved_names.rs; the const moved or the pattern rotted.
+  Refusing rather than treating every host the edge claims as unreserved, which
+  is the direction that ships the name."
+
+  EDGE_UNRESERVED=""
+  for label in $EDGE_LABELS; do
+    printf '%s\n' "$EDGE_RESERVED" | grep -qx "$label" && continue
+    EDGE_UNRESERVED="$EDGE_UNRESERVED $label"
+  done
+  [ -z "$EDGE_UNRESERVED" ] || fail "the edge config claims hostnames RESERVED_APP_NAMES does not cover:$EDGE_UNRESERVED
+  NOTHING WAS SHIPPED. deploy/ops/Caddyfile is scp'd to $HOST on every roll, so
+  after this one the edge would route <name>.<domain> somewhere of its own while
+  the control plane still lets a creator register <name>. That is either an app
+  which silently never receives a request, or -- for a host the edge proxies on
+  to the gateway -- creator content served from a platform ORIGIN, which for
+  \`console\` is the one origin allowed to frame the real login page.
+  Fix it in ONE of the two places that disagree:
+      add the label(s) to RESERVED_APP_NAMES in crates/control/src/reserved_names.rs
+      or drop the claim from deploy/ops/Caddyfile and re-run
+        deploy/ops/caddy-claimed-hosts.sh --write"
+  echo "ok  every host the edge claims is reserved ($(echo $EDGE_LABELS))"
 
   # Every file a deploy overwrites has to already be there, because every one is
   # backed up first and a backup of an absent file cannot be taken or restored.
