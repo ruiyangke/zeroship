@@ -23,6 +23,19 @@
 //!   * SIDECAR ⟷ TABLE: the generated `DIALECT_TABLE` matches the hand-authored,
 //!     human-reviewed `dialect-support.toml` row-for-row (the same drift the TS
 //!     `dialect-table-drift` test byte-checks; here checked Rust-side, node-free).
+//!   * CENSUS FLOOR over the DIALECT axis: every row declares the same non-empty
+//!     set of `DialectId`s, on both sides. See below for why this is not
+//!     redundant with the row-for-row comparison.
+//!
+//! WHY THE CENSUS FLOOR EXISTS. The row used to carry three fields named after
+//! vendors, so "every dialect was compared" held BY TYPE. It is now a slice keyed
+//! by `DialectId`, and every scan over it iterates a DISCOVERED set — which fails
+//! OPEN. Drop a cell from the sidecar and the generator and the table both stop
+//! carrying it, the row-for-row comparison compares two rows that agree about the
+//! two dialects that remain, and the suite reports clean while the artifact has
+//! silently stopped making a claim it used to make. That is not hypothetical: it
+//! was MEASURED here by removing one cell from both sides, and the comparison
+//! above passed. The floor is what the three fields used to do for free.
 //!
 //! The disposition vocabulary is portable / vendor (both supported cells),
 //! transparentDegradable, and unsupported. `transparentDegradable` is LIVE, not
@@ -42,7 +55,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use crate::dialect_corpus::corpus;
-use zero_migrate::model::dialect_table::{Disposition, DIALECT_TABLE};
+use zero_migrate::model::dialect_table::{Disposition, DispositionRow, DIALECT_TABLE};
 use zero_migrate::model::ir::Op;
 
 /// The `op` wire tag (op-kind discriminant) of a concrete op, via its serde image.
@@ -63,13 +76,16 @@ fn sidecar_path() -> PathBuf {
 /// disposition), read with the SAME restricted grammar the generator
 /// (`gen-dialect-table.mjs`) enforces: blank lines, `#` comments, `[[row]]`
 /// headers, and `key = "string"` assignments only.
+///
+/// `dispositions` is keyed by DIALECT ID, matching the generated row. `kind` and
+/// `variant` are the only structural keys; every other key in a `[[row]]` is a
+/// dialect id, which is what lets a fourth backend add a column without this
+/// parser (or the generator) learning its name.
 #[derive(Debug, PartialEq, Eq)]
 struct SidecarRow {
     kind: String,
     variant: String,
-    pg: String,
-    sqlite: String,
-    mysql: String,
+    dispositions: std::collections::BTreeMap<String, String>,
 }
 
 fn parse_sidecar() -> Vec<SidecarRow> {
@@ -112,12 +128,15 @@ fn parse_sidecar() -> Vec<SidecarRow> {
         cur.insert(key, value);
     }
     rows.into_iter()
-        .map(|mut m| SidecarRow {
-            kind: m.remove("kind").expect("row has kind"),
-            variant: m.remove("variant").expect("row has variant"),
-            pg: m.remove("pg").expect("row has pg"),
-            sqlite: m.remove("sqlite").expect("row has sqlite"),
-            mysql: m.remove("mysql").expect("row has mysql"),
+        .map(|mut m| {
+            let kind = m.remove("kind").expect("row has kind");
+            let variant = m.remove("variant").expect("row has variant");
+            // Whatever remains is this row's per-dialect dispositions, keyed by id.
+            SidecarRow {
+                kind,
+                variant,
+                dispositions: m,
+            }
         })
         .collect()
 }
@@ -245,9 +264,11 @@ fn op_variant_matches_the_corpus_and_the_generated_table_matches_the_sidecar() {
         .map(|row| SidecarRow {
             kind: row.kind.to_string(),
             variant: row.variant.to_string(),
-            pg: disposition_token(row.postgres).to_string(),
-            sqlite: disposition_token(row.sqlite).to_string(),
-            mysql: disposition_token(row.mysql).to_string(),
+            dispositions: row
+                .dispositions
+                .iter()
+                .map(|(id, d)| (id.as_str().to_string(), disposition_token(*d).to_string()))
+                .collect(),
         })
         .collect();
     generated.sort_by(|a, b| (a.kind.as_str(), a.variant.as_str()).cmp(&(&b.kind, &b.variant)));
@@ -257,14 +278,72 @@ fn op_variant_matches_the_corpus_and_the_generated_table_matches_the_sidecar() {
          `pnpm --filter zero-migrate gen:dialect-table`"
     );
 
+    // 4b. CENSUS FLOOR for the dialect axis.
+    //
+    // The row used to carry three NAMED fields, so "every dialect was compared"
+    // was true by TYPE and needed no assertion. It is now a slice keyed by
+    // `DialectId`, and every scan over it — the comparison just above, the
+    // transparent-degradable sweep just below, `unsupported_reason_is_operator_facing`,
+    // and the live conformance suite — iterates a DISCOVERED set. A scan over a
+    // discovered set FAILS OPEN: shrink the discovery and it iterates nothing, finds
+    // nothing, and reports clean. The comparison above would then be `{}` == `{}`
+    // and pass. This floor is what the three fields used to do for free, and it is
+    // asserted on BOTH sides, because a cell can go missing on either.
+    let census: BTreeSet<&str> = DIALECT_TABLE
+        .iter()
+        .flat_map(|row| row.dialects())
+        .map(zero_migrate_ir::dialect::DialectId::as_str)
+        .collect();
+    assert!(
+        census.len() >= 3,
+        "the dialect census collapsed to {} ({census:?}); every scan over the table \
+         is only as wide as this set",
+        census.len()
+    );
+    assert_eq!(
+        census,
+        BTreeSet::from(["mysql", "postgres", "sqlite"]),
+        "the shipping dialect census changed; a backend was added or lost"
+    );
+    for row in DIALECT_TABLE {
+        let row_ids: BTreeSet<&str> = row
+            .dialects()
+            .map(zero_migrate_ir::dialect::DialectId::as_str)
+            .collect();
+        assert_eq!(
+            row_ids, census,
+            "table row {}/{} declares {:?}, not the table census {census:?} — a row \
+             that declares fewer dialects makes no claim where it used to make one",
+            row.kind, row.variant, row_ids
+        );
+    }
+    for row in &sidecar {
+        let row_ids: BTreeSet<&str> = row.dispositions.keys().map(String::as_str).collect();
+        assert_eq!(
+            row_ids, census,
+            "sidecar row {}/{} declares {:?}, not the table census {census:?}",
+            row.kind, row.variant, row_ids
+        );
+    }
+    // The ids are the CANONICAL `DialectId` spellings, with no aliases. The sidecar
+    // said `pg` while every artifact it fed said `postgres`, so `pg → postgres` was
+    // an alias in the pipeline — against `DialectId`'s own "no aliases and no
+    // display names" rule. Assert the rule, not just today's three names.
+    for id in DIALECT_TABLE.iter().flat_map(DispositionRow::dialects) {
+        assert!(
+            id.is_well_formed(),
+            "dialect id {id} in the generated table violates the DialectId rule"
+        );
+    }
+
     // TransparentDegradable is not a general escape hatch. It is currently
     // reserved for the explicit partition-collapse affirmation path only.
     let transparent_rows: BTreeSet<(&str, &str)> = DIALECT_TABLE
         .iter()
         .filter(|row| {
-            row.postgres == Disposition::TransparentDegradable
-                || row.sqlite == Disposition::TransparentDegradable
-                || row.mysql == Disposition::TransparentDegradable
+            row.dispositions
+                .iter()
+                .any(|(_, d)| *d == Disposition::TransparentDegradable)
         })
         .map(|row| (row.kind, row.variant))
         .collect();

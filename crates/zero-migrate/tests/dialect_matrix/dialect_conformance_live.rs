@@ -1478,17 +1478,23 @@ const _: () = {
 // The tests
 // ---------------------------------------------------------------------------
 
+/// The table's disposition for a (kind, variant) on a dialect NAMED BY ITS ID.
+///
+/// `dialect` is the dialect id, so this is a table lookup rather than a
+/// three-arm match on vendor names — the row is keyed by `DialectId` now. It
+/// still panics on a name the table does not carry, which is the same failure the
+/// old `other =>` arm produced, and is what keeps a typo'd dialect from silently
+/// resolving to nothing.
 fn disposition_for(kind: &str, variant: &str, dialect: &str) -> Disposition {
     let row = DIALECT_TABLE
         .iter()
         .find(|row| row.kind == kind && row.variant == variant)
         .unwrap_or_else(|| panic!("no DIALECT_TABLE row for {kind}/{variant}"));
-    match dialect {
-        "postgres" => row.postgres,
-        "sqlite" => row.sqlite,
-        "mysql" => row.mysql,
-        other => panic!("this suite covers postgres, sqlite and mysql, not {other}"),
-    }
+    row.dispositions
+        .iter()
+        .find(|(id, _)| id.as_str() == dialect)
+        .map(|(_, disposition)| *disposition)
+        .unwrap_or_else(|| panic!("the dialect table has no {dialect} cell for {kind}/{variant}"))
 }
 
 /// Compare the whole ledger against the declarations and the named allowances.

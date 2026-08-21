@@ -1,8 +1,8 @@
 # dialect-support.toml - the single-source dialect-support sidecar.
 #
 # WHAT: one hand-authored row per (op-kind, variant) recording that token's
-# DISPOSITION on each of the three dialects (postgres / sqlite / mysql). The
-# generator (`packages/zero-migrate/scripts/gen-dialect-table.mjs`) reads this file and
+# DISPOSITION on each dialect. The generator
+# (`packages/zero-migrate/scripts/gen-dialect-table.mjs`) reads this file and
 # emits BOTH:
 #   - crates/zero-migrate/src/model/dialect_table.rs (const lookup table)
 #   - packages/zero-migrate/src/generated/dialect-table.ts        (the TS mirror)
@@ -32,9 +32,17 @@
 #   Supported + Core   -> portable
 #   Supported + Vendor -> vendor
 #   Unsupported        -> unsupported
-# The Rust test `tests/dialect_table_faithfulness.rs` proves the generated table
-# agrees with `Op::support()` for every op-kind × variant × dialect, so this file
-# cannot silently drift from the engine's dialect truth.
+# WHICH TEST PROVES WHICH HALF. This comment used to say
+# `tests/dialect_table_faithfulness.rs` "proves the generated table agrees with
+# `Op::support()` for every op-kind × variant × dialect". IT DOES NOT, and cannot:
+# `Op::support()` READS this table, so that comparison is TAUTOLOGICAL — the
+# faithfulness test says so in its own header. What it actually proves is
+# (a) the corpus covers the schema's 56 op-kinds, (b) `op_variant()` agrees with
+# each corpus label, (c) the corpus ⟷ table row BIJECTION, and (d) sidecar ⟷
+# generated table, row for row and cell for cell. The BEHAVIOURAL gate — that a
+# decision matches what validate/lower actually do — is `op_support_matrix.rs`, and
+# the LIVE one is `dialect_conformance_live.rs`. Three tests, three claims; naming
+# one of them for all three is how a gap hides.
 #
 # CONSUMERS differ per side, so state them separately. The Rust table IS read by
 # engine code: `crates/zero-migrate/src/model/op_support.rs` calls
@@ -43,6 +51,20 @@
 # against the same sidecar, and a grep for `generated/dialect-table`,
 # `DIALECT_TABLE` or `dialectTable` finds no other reference. Do not collapse
 # these into one claim; they have already drifted apart once.
+#
+# ROW KEYS: `kind` and `variant` are the two STRUCTURAL keys. EVERY OTHER KEY IS A
+# DIALECT ID, and the generator treats it as one without being taught the name — a
+# fourth backend adds `duckdb = "..."` to each row and changes NOTHING ELSE. There
+# is no per-vendor column in the generator, no per-vendor field in either emitted
+# artifact, and no list of dialect names in core code.
+#
+# The key must be the CANONICAL `DialectId` (lowercase `[a-z][a-z0-9_]*`, matching
+# `zero_migrate_ir::dialect::DialectId`), because it is emitted verbatim as
+# `DialectId::new("<key>")`. It used to be `pg` here while every artifact this file
+# fed said `postgres`, so `pg → postgres` was an ALIAS baked into the generator —
+# and `DialectId`'s own rule is "no aliases and no display names in the id". The
+# key is now `postgres`; `tests/dialect-table-drift.test.ts` pins that no alias
+# comes back.
 #
 # VARIANT keys: payload-independent ops carry a single `variant = "base"` row.
 # Ops whose `Support::decision()` depends on a node/option carry one row per
@@ -56,70 +78,70 @@
 [[row]]
 kind = "alterPrimaryKey"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "portable"
 mysql = "portable"
 
 [[row]]
 kind = "synchronizeIdentity"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "portable"
 mysql = "portable"
 
 [[row]]
 kind = "setTableOptions"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "portable"
 mysql = "portable"
 
 [[row]]
 kind = "dropTable"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "portable"
 mysql = "portable"
 
 [[row]]
 kind = "renameTable"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "portable"
 mysql = "portable"
 
 [[row]]
 kind = "dropColumn"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "portable"
 mysql = "portable"
 
 [[row]]
 kind = "dropIndex"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "portable"
 mysql = "portable"
 
 [[row]]
 kind = "setColumnNotNull"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
 kind = "dropColumnNotNull"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
 kind = "dropColumnDefault"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "unsupported"
 mysql = "portable"
 
@@ -140,63 +162,63 @@ mysql = "portable"
 [[row]]
 kind = "dropConstraint"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "portable"
 mysql = "portable"
 
 [[row]]
 kind = "update"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "portable"
 mysql = "portable"
 
 [[row]]
 kind = "delete"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "portable"
 mysql = "portable"
 
 [[row]]
 kind = "backfill"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "portable"
 mysql = "portable"
 
 [[row]]
 kind = "dialectal"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "portable"
 mysql = "portable"
 
 [[row]]
 kind = "createEnum"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "portable"
 mysql = "portable"
 
 [[row]]
 kind = "dropEnum"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "portable"
 mysql = "portable"
 
 [[row]]
 kind = "dropDomain"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "portable"
 mysql = "portable"
 
 [[row]]
 kind = "dropTrigger"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "portable"
 mysql = "portable"
 
@@ -207,56 +229,56 @@ mysql = "portable"
 [[row]]
 kind = "comment"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
 kind = "createPartition"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "transparentDegradable"
 mysql = "transparentDegradable"
 
 [[row]]
 kind = "attachPartition"
 variant = "base"
-pg = "vendor"
+postgres = "vendor"
 sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
 kind = "detachPartition"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
 kind = "dropPartition"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "portable"
 mysql = "portable"
 
 [[row]]
 kind = "createSequence"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
 kind = "alterSequence"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
 kind = "dropSequence"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "unsupported"
 mysql = "unsupported"
 
@@ -266,7 +288,7 @@ mysql = "unsupported"
 [[row]]
 kind = "validateConstraint"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "unsupported"
 mysql = "unsupported"
 
@@ -277,105 +299,105 @@ mysql = "unsupported"
 [[row]]
 kind = "createSchema"
 variant = "base"
-pg = "vendor"
+postgres = "vendor"
 sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
 kind = "dropSchema"
 variant = "base"
-pg = "vendor"
+postgres = "vendor"
 sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
 kind = "createExtension"
 variant = "base"
-pg = "vendor"
+postgres = "vendor"
 sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
 kind = "dropExtension"
 variant = "base"
-pg = "vendor"
+postgres = "vendor"
 sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
 kind = "alterRole"
 variant = "base"
-pg = "vendor"
+postgres = "vendor"
 sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
 kind = "dropRole"
 variant = "base"
-pg = "vendor"
+postgres = "vendor"
 sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
 kind = "dropOwnedBy"
 variant = "base"
-pg = "vendor"
+postgres = "vendor"
 sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
 kind = "grant"
 variant = "base"
-pg = "vendor"
+postgres = "vendor"
 sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
 kind = "revoke"
 variant = "base"
-pg = "vendor"
+postgres = "vendor"
 sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
 kind = "setRls"
 variant = "base"
-pg = "vendor"
+postgres = "vendor"
 sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
 kind = "createPolicy"
 variant = "base"
-pg = "vendor"
+postgres = "vendor"
 sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
 kind = "dropPolicy"
 variant = "base"
-pg = "vendor"
+postgres = "vendor"
 sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
 kind = "createFunction"
 variant = "base"
-pg = "vendor"
+postgres = "vendor"
 sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
 kind = "dropFunction"
 variant = "base"
-pg = "vendor"
+postgres = "vendor"
 sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
 kind = "pgRaw"
 variant = "base"
-pg = "vendor"
+postgres = "vendor"
 sqlite = "unsupported"
 mysql = "unsupported"
 
@@ -389,49 +411,49 @@ mysql = "unsupported"
 [[row]]
 kind = "createTable"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "portable"
 mysql = "portable"
 
 [[row]]
 kind = "createTable"
 variant = "partitioned"
-pg = "portable"
+postgres = "portable"
 sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
 kind = "createTable"
 variant = "partitionedCollapse"
-pg = "portable"
+postgres = "portable"
 sqlite = "transparentDegradable"
 mysql = "transparentDegradable"
 
 [[row]]
 kind = "createTable"
 variant = "pgOnlyIndexFeature"
-pg = "portable"
+postgres = "portable"
 sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
 kind = "createTable"
 variant = "nextvalDefault"
-pg = "portable"
+postgres = "portable"
 sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
 kind = "createTable"
 variant = "identityAlways"
-pg = "portable"
+postgres = "portable"
 sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
 kind = "createTable"
 variant = "nonportableByDefaultIdentity"
-pg = "portable"
+postgres = "portable"
 sqlite = "unsupported"
 mysql = "unsupported"
 
@@ -439,21 +461,21 @@ mysql = "unsupported"
 [[row]]
 kind = "addColumn"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "portable"
 mysql = "portable"
 
 [[row]]
 kind = "addColumn"
 variant = "identity"
-pg = "portable"
+postgres = "portable"
 sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
 kind = "addColumn"
 variant = "nextvalDefault"
-pg = "portable"
+postgres = "portable"
 sqlite = "unsupported"
 mysql = "unsupported"
 
@@ -463,28 +485,28 @@ mysql = "unsupported"
 [[row]]
 kind = "createIndex"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "portable"
 mysql = "portable"
 
 [[row]]
 kind = "createIndex"
 variant = "pgOnlyMethodOrFeature"
-pg = "portable"
+postgres = "portable"
 sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
 kind = "createIndex"
 variant = "exprElement"
-pg = "portable"
+postgres = "portable"
 sqlite = "portable"
 mysql = "unsupported"
 
 [[row]]
 kind = "createIndex"
 variant = "partialWhere"
-pg = "portable"
+postgres = "portable"
 sqlite = "portable"
 mysql = "unsupported"
 
@@ -505,14 +527,14 @@ mysql = "unsupported"
 [[row]]
 kind = "setColumnType"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "unsupported"
 mysql = "portable"
 
 [[row]]
 kind = "setColumnType"
 variant = "using"
-pg = "unsupported"
+postgres = "unsupported"
 sqlite = "unsupported"
 mysql = "unsupported"
 
@@ -524,21 +546,21 @@ mysql = "unsupported"
 [[row]]
 kind = "setColumnDefault"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "unsupported"
 mysql = "portable"
 
 [[row]]
 kind = "setColumnDefault"
 variant = "containerOrJson"
-pg = "portable"
+postgres = "portable"
 sqlite = "unsupported"
 mysql = "portable"
 
 [[row]]
 kind = "setColumnDefault"
 variant = "nextval"
-pg = "portable"
+postgres = "portable"
 sqlite = "unsupported"
 mysql = "unsupported"
 
@@ -548,14 +570,14 @@ mysql = "unsupported"
 [[row]]
 kind = "renameColumn"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "portable"
 mysql = "unsupported"
 
 [[row]]
 kind = "renameColumn"
 variant = "existenceGuard"
-pg = "unsupported"
+postgres = "unsupported"
 sqlite = "unsupported"
 mysql = "unsupported"
 
@@ -565,7 +587,7 @@ mysql = "unsupported"
 [[row]]
 kind = "addConstraint"
 variant = "fkSimple"
-pg = "portable"
+postgres = "portable"
 sqlite = "portable"
 mysql = "portable"
 
@@ -575,35 +597,35 @@ mysql = "portable"
 [[row]]
 kind = "addConstraint"
 variant = "unique"
-pg = "portable"
+postgres = "portable"
 sqlite = "unsupported"
 mysql = "portable"
 
 [[row]]
 kind = "addConstraint"
 variant = "check"
-pg = "portable"
+postgres = "portable"
 sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
 kind = "addConstraint"
 variant = "exclusion"
-pg = "portable"
+postgres = "portable"
 sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
 kind = "addConstraint"
 variant = "fkComposite"
-pg = "portable"
+postgres = "portable"
 sqlite = "portable"
 mysql = "portable"
 
 [[row]]
 kind = "addConstraint"
 variant = "fkNonId"
-pg = "portable"
+postgres = "portable"
 sqlite = "portable"
 mysql = "portable"
 
@@ -613,14 +635,14 @@ mysql = "portable"
 [[row]]
 kind = "addConstraint"
 variant = "fkNotValid"
-pg = "portable"
+postgres = "portable"
 sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
 kind = "addConstraint"
 variant = "fkNoLocalColumn"
-pg = "unsupported"
+postgres = "unsupported"
 sqlite = "unsupported"
 mysql = "unsupported"
 
@@ -630,21 +652,21 @@ mysql = "unsupported"
 [[row]]
 kind = "insert"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "portable"
 mysql = "portable"
 
 [[row]]
 kind = "insert"
 variant = "onConflictDoUpdate"
-pg = "portable"
+postgres = "portable"
 sqlite = "portable"
 mysql = "portable"
 
 [[row]]
 kind = "insert"
 variant = "onConflictDoNothing"
-pg = "portable"
+postgres = "portable"
 sqlite = "portable"
 mysql = "unsupported"
 
@@ -653,21 +675,21 @@ mysql = "unsupported"
 [[row]]
 kind = "createView"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "portable"
 mysql = "portable"
 
 [[row]]
 kind = "createView"
 variant = "materialized"
-pg = "vendor"
+postgres = "vendor"
 sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
 kind = "createView"
 variant = "materializedReplace"
-pg = "unsupported"
+postgres = "unsupported"
 sqlite = "unsupported"
 mysql = "unsupported"
 
@@ -676,14 +698,14 @@ mysql = "unsupported"
 [[row]]
 kind = "dropView"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "portable"
 mysql = "portable"
 
 [[row]]
 kind = "dropView"
 variant = "materialized"
-pg = "vendor"
+postgres = "vendor"
 sqlite = "unsupported"
 mysql = "unsupported"
 
@@ -691,14 +713,14 @@ mysql = "unsupported"
 [[row]]
 kind = "createDomain"
 variant = "base"
-pg = "portable"
+postgres = "portable"
 sqlite = "portable"
 mysql = "portable"
 
 [[row]]
 kind = "createDomain"
 variant = "nextvalDefault"
-pg = "portable"
+postgres = "portable"
 sqlite = "unsupported"
 mysql = "unsupported"
 
@@ -707,14 +729,14 @@ mysql = "unsupported"
 [[row]]
 kind = "createRole"
 variant = "base"
-pg = "vendor"
+postgres = "vendor"
 sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
 kind = "createRole"
 variant = "superuserIfNotExists"
-pg = "unsupported"
+postgres = "unsupported"
 sqlite = "unsupported"
 mysql = "unsupported"
 
@@ -725,28 +747,28 @@ mysql = "unsupported"
 [[row]]
 kind = "createTrigger"
 variant = "executeFunction"
-pg = "portable"
+postgres = "portable"
 sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
 kind = "createTrigger"
 variant = "bodySimple"
-pg = "unsupported"
+postgres = "unsupported"
 sqlite = "portable"
 mysql = "portable"
 
 [[row]]
 kind = "createTrigger"
 variant = "bodyTruncateEvent"
-pg = "unsupported"
+postgres = "unsupported"
 sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
 kind = "createTrigger"
 variant = "bodyStatementLevel"
-pg = "unsupported"
+postgres = "unsupported"
 sqlite = "unsupported"
 mysql = "unsupported"
 
@@ -758,27 +780,27 @@ mysql = "unsupported"
 [[row]]
 kind = "createTrigger"
 variant = "bodyMultipleEvents"
-pg = "unsupported"
+postgres = "unsupported"
 sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
 kind = "createTrigger"
 variant = "bodyInsteadOf"
-pg = "unsupported"
+postgres = "unsupported"
 sqlite = "portable"
 mysql = "unsupported"
 
 [[row]]
 kind = "createTrigger"
 variant = "bodyWhen"
-pg = "unsupported"
+postgres = "unsupported"
 sqlite = "portable"
 mysql = "unsupported"
 
 [[row]]
 kind = "createTrigger"
 variant = "bodyRaiseIgnore"
-pg = "unsupported"
+postgres = "unsupported"
 sqlite = "portable"
 mysql = "unsupported"
