@@ -14,7 +14,7 @@
 
 use crate::client::SocketConfig;
 use crate::config::{SslMode, SslNegotiation};
-use crate::connect::first_encryption_for_addr;
+use crate::connect::{first_encryption_for_addr, with_connect_timeout};
 use crate::tls::MakeTlsConnect;
 use crate::{Error, Socket, cancel_query_raw, connect_socket};
 use std::io;
@@ -40,32 +40,33 @@ where
         }
     };
 
-    let encryption = first_encryption_for_addr(&config.addr, ssl_mode);
+    with_connect_timeout(config.connect_timeout, async move {
+        let encryption = first_encryption_for_addr(&config.addr, ssl_mode);
+        let tls = tls
+            .make_tls_connect(config.hostname.as_deref().unwrap_or(""))
+            .map_err(|e| Error::tls(e.into()))?;
+        let has_hostname = config.hostname.is_some();
 
-    let tls = tls
-        .make_tls_connect(config.hostname.as_deref().unwrap_or(""))
-        .map_err(|e| Error::tls(e.into()))?;
-    let has_hostname = config.hostname.is_some();
+        let socket = connect_socket::connect_socket(
+            &config.addr,
+            config.port,
+            config.tcp_user_timeout,
+            config.keepalive.as_ref(),
+        )
+        .await?;
 
-    let socket = connect_socket::connect_socket(
-        &config.addr,
-        config.port,
-        config.connect_timeout,
-        config.tcp_user_timeout,
-        config.keepalive.as_ref(),
-    )
-    .await?;
-
-    cancel_query_raw::cancel_query_with_encryption(
-        socket,
-        encryption,
-        ssl_mode,
-        ssl_negotiation,
-        tls,
-        has_hostname,
-        process_id,
-        secret_key,
-    )
+        cancel_query_raw::cancel_query_with_encryption(
+            socket,
+            encryption,
+            ssl_mode,
+            ssl_negotiation,
+            tls,
+            has_hostname,
+            process_id,
+            secret_key,
+        )
+        .await
+    })
     .await
 }
 
