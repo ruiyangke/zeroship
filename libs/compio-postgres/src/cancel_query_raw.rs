@@ -8,10 +8,12 @@
 use crate::Error;
 use crate::config::{SslMode, SslNegotiation};
 use crate::connect_tls;
+use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::tls::TlsConnect;
 use bytes::BytesMut;
 use compio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use postgres_protocol::message::frontend;
+use std::io;
 
 pub async fn cancel_query_raw<S, T>(
     stream: S,
@@ -80,6 +82,40 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     T: TlsConnect<S>,
 {
+    send_cancel_request_with_encryption(
+        stream,
+        encryption,
+        mode,
+        negotiation,
+        tls,
+        has_hostname,
+        process_id,
+        secret_key,
+    )
+    .await
+    .map(drop)
+}
+
+/// Send and flush a cancel packet, returning its half-closed connection.
+///
+/// Returning the stream lets pool recovery wait for the postmaster's EOF
+/// outside `connect_timeout`. That setting remains clock (4), not a socket read
+/// deadline; the pool's separately bounded recovery grace owns the EOF wait.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn send_cancel_request_with_encryption<S, T>(
+    stream: S,
+    encryption: connect_tls::Encryption,
+    mode: SslMode,
+    negotiation: SslNegotiation,
+    tls: T,
+    has_hostname: bool,
+    process_id: i32,
+    secret_key: i32,
+) -> Result<MaybeTlsStream<S, T::Stream>, Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    T: TlsConnect<S>,
+{
     let mut stream =
         connect_tls::negotiate_tls(stream, encryption, mode, negotiation, tls, has_hostname)
             .await?;
@@ -93,5 +129,35 @@ where
     stream.flush().await.map_err(Error::io)?;
     stream.shutdown().await.map_err(Error::io)?;
 
-    Ok(())
+    Ok(stream)
+}
+
+/// Wait until the postmaster closes a connection whose cancel packet was sent.
+///
+/// `CancelRequest` has no protocol response. EOF is nevertheless a delivery
+/// barrier: `PostgreSQL` closes this dedicated connection only after consuming
+/// the startup packet. Without it, a delayed cancel could arrive after the
+/// main session's `Sync` and cancel that backend's next query.
+pub(crate) async fn wait_for_server_close<S, T>(
+    mut stream: MaybeTlsStream<S, T>,
+) -> Result<(), Error>
+where
+    S: AsyncRead + Unpin,
+    T: AsyncRead + Unpin,
+{
+    let tls = matches!(&stream, MaybeTlsStream::Tls(_));
+    let compio::BufResult(result, _) = stream.read(vec![0; 1]).await;
+    match result {
+        Ok(0) => Ok(()),
+        Ok(_) => Err(Error::io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "PostgreSQL sent data on a CancelRequest connection",
+        ))),
+        // PostgreSQL closes the cancel connection without a TLS close_notify.
+        // rustls reports that confirmed TCP EOF as UnexpectedEof; accepting it
+        // here is specific to this one-way startup packet, not a general
+        // relaxation of TLS truncation.
+        Err(error) if tls && error.kind() == io::ErrorKind::UnexpectedEof => Ok(()),
+        Err(error) => Err(Error::io(error)),
+    }
 }

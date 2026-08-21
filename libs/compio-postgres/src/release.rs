@@ -120,6 +120,19 @@ impl ConnectionRelease {
             socket: Arc::downgrade(&self.socket),
         }
     }
+
+    /// End the session synchronously while client handles still exist.
+    ///
+    /// Timeout recovery uses this when it cannot prove that the connection
+    /// reached `ReadyForQuery`. Closing only the request channel would let the
+    /// connection task keep draining an unacknowledged cancelled query, so the
+    /// backend could remain occupied indefinitely.
+    pub(crate) fn shutdown(&self) {
+        // A peer close or another release guard may win the race. In every
+        // error case the socket is already unusable, which is the requested
+        // postcondition, so there is no useful error to propagate.
+        let _ = self.socket.shutdown(Shutdown::Both);
+    }
 }
 
 impl Drop for ConnectionDropRelease {
@@ -141,7 +154,7 @@ impl Drop for ConnectionRelease {
         // socket is already down - the server closed first, the connection task
         // shut it down, the peer reset it - and there is no caller left to tell:
         // the client half is being dropped.
-        let _ = self.socket.shutdown(Shutdown::Both);
+        self.shutdown();
         // `self.socket` drops next, closing the dup.
     }
 }

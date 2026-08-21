@@ -52,6 +52,61 @@
 //! previous query completes. In contrast, pipelining allows the client to send all of the queries to the server up
 //! front, minimizing time spent by one side waiting for the other to finish sending data.
 //!
+//! # Client command deadlines
+//!
+//! [`PoolConfig::command_timeout`] and [`PooledClient::command`] provide the
+//! automatic, genuinely cancelling command deadline. The pool is the natural
+//! owner because [`CancelToken::cancel_query`] needs a TLS connector at cancel
+//! time, while a bare [`Client`] deliberately does not retain that connector.
+//! Keeping it out of `Client` also avoids making `Client` generic over transport.
+//!
+//! With a bare client, compose the timer and cancellation token explicitly.
+//! The simplest honest policy is to consume and discard that client when the
+//! timer wins, because the fire-and-forget cancellation API does not expose the
+//! pool's postmaster-EOF delivery barrier:
+//!
+//! ```no_run
+//! use compio_postgres::{Client, Error, NoTls, Row};
+//! use std::time::Duration;
+//!
+//! #[derive(Debug)]
+//! enum RunError {
+//!     Deadline,
+//!     Driver(Error),
+//! }
+//!
+//! async fn query_with_deadline(client: Client) -> Result<(Client, Vec<Row>), RunError> {
+//!     let mut query = Box::pin(client.query("SELECT pg_sleep(10)", &[]));
+//!
+//!     let outcome = compio::time::timeout(Duration::from_secs(1), query.as_mut()).await;
+//!     // End the response consumer before either returning or cancelling.
+//!     drop(query);
+//!     match outcome {
+//!         Ok(result) => result
+//!             .map(|rows| (client, rows))
+//!             .map_err(RunError::Driver),
+//!         Err(_) => {
+//!             let cancel_result = client
+//!                 .cancel_token()
+//!                 .cancel_query(NoTls)
+//!                 .await;
+//!             // Do not let a late CancelRequest race this backend's next
+//!             // query; dropping the client deterministically retires it.
+//!             drop(client);
+//!             cancel_result.map_err(RunError::Driver)?;
+//!             Err(RunError::Deadline)
+//!         }
+//!     }
+//! }
+//! ```
+//!
+//! `NoTls` above is correct only for a plaintext session; pass the connector
+//! matching a TLS session instead. Advanced bare-client code can retain the
+//! session by using [`CancelToken::cancel_query_raw`], waiting for EOF on that
+//! caller-owned cancellation connection, and then awaiting
+//! [`Client::check_connection`]. The pool wrapper performs both barriers,
+//! restores an idle transaction state, and otherwise retires the session.
+//!
 //! # SSL/TLS support
 //!
 //! `Client::connect` and `Config::connect` take a TLS implementation as an argument. The `NoTls` type in this crate can
