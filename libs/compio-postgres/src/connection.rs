@@ -63,7 +63,7 @@ use crate::codec::{BackendMessage, BackendMessages, FrontendMessage, read_backen
 use crate::copy_in::CopyInReceiver;
 use crate::error::DbError;
 use crate::maybe_tls_stream::MaybeTlsStream;
-use crate::{AsyncMessage, Error, Notification};
+use crate::{AsyncMessage, Error, Notification, Statement};
 use compio::io::{AsyncRead, AsyncWrite};
 use fallible_iterator::FallibleIterator;
 use futures_channel::mpsc;
@@ -86,6 +86,7 @@ pub struct Request {
     pub(crate) disposition: RequestDisposition,
     pub(crate) transaction_effect: TransactionEffect,
     pub(crate) prepare_cleanup: Option<crate::prepare::PrepareCleanup>,
+    pub(crate) statement: Option<Statement>,
     pub(crate) observation: Option<QueryObservation>,
 }
 
@@ -125,6 +126,7 @@ struct Response {
     disposition: RequestDisposition,
     transaction_effect: TransactionEffect,
     prepare_cleanup: Option<crate::prepare::PrepareCleanup>,
+    statement: Option<Statement>,
     observation: Option<QueryObservation>,
 }
 
@@ -455,6 +457,7 @@ where
             disposition,
             transaction_effect,
             prepare_cleanup,
+            statement,
             observation,
         } = request;
         let copy_observation = observation.clone();
@@ -463,6 +466,7 @@ where
             disposition,
             transaction_effect,
             prepare_cleanup,
+            statement,
             observation,
         });
 
@@ -582,6 +586,15 @@ impl Dispatch<'_> {
                 }
                 _ => {}
             }
+        }
+
+        // The response consumer may already be gone, but this dispatch point
+        // still sees every server error. Retiring poison here keeps a cancelled
+        // borrower from returning it to the pool for somebody else to hit.
+        if let Some(statement) = response.statement.as_ref()
+            && let Some(body) = messages.error_response().map_err(Error::parse)?
+        {
+            statement.invalidate_cache_on_error(&Error::db(body));
         }
 
         if let Some(status) = ready_status
@@ -1280,6 +1293,7 @@ where
                         disposition,
                         transaction_effect,
                         prepare_cleanup,
+                        statement,
                         observation,
                     } = request;
                     let request_observation = observation.clone();
@@ -1288,6 +1302,7 @@ where
                         disposition,
                         transaction_effect,
                         prepare_cleanup,
+                        statement,
                         observation,
                     });
                     match messages {
@@ -1686,6 +1701,7 @@ mod tests {
             disposition: RequestDisposition::Housekeeping,
             transaction_effect: TransactionEffect::Neutral,
             prepare_cleanup: None,
+            statement: None,
             observation: None,
         }]);
         let mut pending_responses = VecDeque::new();

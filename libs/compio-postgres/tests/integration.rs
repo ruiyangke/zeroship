@@ -4525,6 +4525,75 @@ async fn statement_cache_evicts_stale_result_shape_after_0a000() {
         .unwrap();
 }
 
+/// A borrower can disappear after its cached execution reaches the request
+/// queue but before it receives PostgreSQL's error. The connection task still
+/// drains that response, so it must also retire the statement before returning
+/// the physical session to another borrower.
+#[compio::test]
+async fn cancelled_cached_plan_error_is_not_handed_to_the_next_borrower() {
+    use std::future::Future;
+    use std::task::{Context, Waker};
+    use std::time::Duration;
+
+    let Some(url) = require_pg().await else { return };
+    let mut connection_config: Config = url.parse().unwrap();
+    connection_config.statement_cache_capacity(2);
+    let mut pool_config = PoolConfig::new();
+    pool_config
+        .max_size(1)
+        .min_idle(1)
+        .validation_bypass(Duration::from_secs(60));
+    let pool = Pool::connect_with_config(connection_config, pool_config)
+        .await
+        .unwrap();
+
+    const SQL: &str = "SELECT * FROM cpg_cancelled_cache_plan_shape";
+    let backend_pid;
+    {
+        let client = pool.get().await.unwrap();
+        backend_pid = client.process_id();
+        client
+            .batch_execute(
+                "CREATE TEMP TABLE cpg_cancelled_cache_plan_shape (id int4); \
+                 INSERT INTO cpg_cancelled_cache_plan_shape VALUES (60)",
+            )
+            .await
+            .unwrap();
+
+        let first_rows = client.query(SQL, &[]).await.unwrap();
+        assert_eq!(first_rows[0].get::<_, i32>("id"), 60);
+        drop(first_rows);
+
+        client
+            .batch_execute(
+                "ALTER TABLE cpg_cancelled_cache_plan_shape \
+                 ADD COLUMN label text NOT NULL DEFAULT 'borrower'",
+            )
+            .await
+            .unwrap();
+
+        let mut stale = Box::pin(client.query_raw(SQL, std::iter::empty::<&i32>()));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(
+            stale.as_mut().poll(&mut context).is_pending(),
+            "the connection task ran during the caller's first poll, so the \
+             cancellation cut no longer precedes PostgreSQL's response"
+        );
+        drop(stale);
+    }
+
+    let client = pool.get().await.unwrap();
+    assert_eq!(
+        client.process_id(),
+        backend_pid,
+        "the pool replaced the physical session instead of testing cache reuse"
+    );
+    let refreshed_rows = client.query(SQL, &[]).await.unwrap();
+    assert_eq!(refreshed_rows[0].len(), 2);
+    assert_eq!(refreshed_rows[0].get::<_, i32>("id"), 60);
+    assert_eq!(refreshed_rows[0].get::<_, &str>("label"), "borrower");
+}
+
 /// If server-side state is cleared behind the cache, the first use surfaces
 /// PostgreSQL's 26000 and evicts the missing Statement. The following use
 /// reparses it on the same still-usable connection.

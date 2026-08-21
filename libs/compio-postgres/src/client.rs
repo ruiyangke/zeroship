@@ -611,6 +611,25 @@ impl InnerClient {
             RequestDisposition::Awaited,
             TransactionEffect::MayChange,
             None,
+            None,
+        )
+    }
+
+    /// Retain a potentially cached statement with the connection-side response
+    /// state. That task outlives a cancelled caller and is therefore the only
+    /// place guaranteed to see an error which must invalidate the cache.
+    pub(crate) fn send_statement(
+        &self,
+        messages: RequestMessages,
+        statement: &Statement,
+    ) -> Result<Responses, Error> {
+        let statement = (self.statement_cache_capacity() != 0).then(|| statement.clone());
+        self.send_inner(
+            messages,
+            RequestDisposition::Awaited,
+            TransactionEffect::MayChange,
+            None,
+            statement,
         )
     }
 
@@ -626,6 +645,7 @@ impl InnerClient {
             RequestDisposition::Awaited,
             TransactionEffect::MayChange,
             Some(cleanup),
+            None,
         )
     }
 
@@ -637,7 +657,7 @@ impl InnerClient {
         disposition: RequestDisposition,
         transaction_effect: TransactionEffect,
     ) -> Result<Responses, Error> {
-        self.send_inner(messages, disposition, transaction_effect, None)
+        self.send_inner(messages, disposition, transaction_effect, None, None)
     }
 
     fn send_inner(
@@ -646,6 +666,7 @@ impl InnerClient {
         disposition: RequestDisposition,
         transaction_effect: TransactionEffect,
         prepare_cleanup: Option<prepare::PrepareCleanup>,
+        statement: Option<Statement>,
     ) -> Result<Responses, Error> {
         let observation = self.start_observation(&messages);
         let (sender, receiver) = mpsc::channel(1);
@@ -655,6 +676,7 @@ impl InnerClient {
             disposition,
             transaction_effect,
             prepare_cleanup,
+            statement,
             observation: observation.clone(),
         };
         if transaction_effect == TransactionEffect::MayChange {
