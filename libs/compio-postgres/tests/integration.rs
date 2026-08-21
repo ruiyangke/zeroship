@@ -2583,7 +2583,6 @@ async fn execute_failure_pipeline(
     value_base: i32,
 ) -> Vec<Result<i32, Error>> {
     futures_util::future::join_all((0..FAILURE_PIPELINE_LEN).map(|index| {
-        let client = client;
         async move {
             if index == failure_index {
                 client
@@ -2608,7 +2607,6 @@ async fn bind_failure_pipeline(
     value_base: i32,
 ) -> Vec<Result<i32, Error>> {
     futures_util::future::join_all((0..FAILURE_PIPELINE_LEN).map(|index| {
-        let client = client;
         async move {
             let value = value_base + index as i32;
             let encoded = if index == failure_index {
@@ -2631,7 +2629,6 @@ async fn prepare_failure_pipeline(
     value_base: i32,
 ) -> Vec<Result<i32, Error>> {
     futures_util::future::join_all((0..FAILURE_PIPELINE_LEN).map(|index| {
-        let client = client;
         async move {
             if index == failure_index {
                 client
@@ -2655,7 +2652,6 @@ async fn multiple_failure_pipeline(
     value_base: i32,
 ) -> Vec<Result<i32, Error>> {
     futures_util::future::join_all((0..FAILURE_PIPELINE_LEN).map(|index| {
-        let client = client;
         async move {
             match index {
                 1 => client
