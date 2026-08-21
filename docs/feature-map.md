@@ -874,7 +874,7 @@ snapshots are shared across threads via a process-wide RwLock.
 | Prometheus metrics endpoint | 🟢 | GET /metrics | `crates/worker/src/metrics.rs` | — | — | 13 counters; no auth. |
 | Health + readiness endpoints | 🟢 | GET /healthz, GET /readyz | `crates/worker/src/health.rs` | — | `tests/e2e_platform.sh` | /healthz is a constant 200 (liveness); /readyz needs a current control poll AND a reachable blob store. |
 | Config validation dry-run | 🟢 | --check-config [--format] | `crates/worker/src/main.rs` | — | `tests/config_check_e2e.sh` | Non-secret summary. |
-| Secret reference resolution | 🟢 | ZEROSHIP_CONTROL_KEY / ZEROSHIP_WORKER_KEY / ... | `crates/zeroship-secret-policy/src/lib.rs` | — | `tests/config_check_e2e.sh` | Literal or urn:zeroship:file only; secrets sit at their canonical overlay path. |
+| Secret reference resolution | 🟢 | ZEROSHIP_CONTROL_KEY / ZEROSHIP_WORKER_KEY / ... | `crates/core/src/config/secrets.rs` | — | `tests/config_check_e2e.sh` | Literal or urn:zeroship:file only; secrets sit at their canonical overlay path. |
 | Unix domain socket listener | 🟢 | --socket / ZEROSHIP_WORKER_SOCKET | `crates/worker/src/main.rs` | — | — | Stale socket removed at startup. |
 | Graceful shutdown with drain timeout | 🟢 | --shutdown-timeout | `crates/worker/src/main.rs` | — | — | 0 skips the drain and drops in-flight work at once; use a large value to wait. |
 | mimalloc global allocator | 🟢 | internal | `crates/worker/src/main.rs` | — | — | #[global_allocator]. |
@@ -929,9 +929,9 @@ observability, and OIDC/OAuth protocol primitives.
 | Auth utils — is_pairwise_subject check | 🟢 | internal | `crates/core/src/auth/mod.rs` | — | `crates/core/src/auth/mod.rs` | Shape check only, not a forgery gate. |
 | Auth utils — trusted OAuth client resolution | 🟢 | internal | `crates/core/src/auth/trusted_clients.rs` | — | — | Empty default (fail-closed). |
 | Config — FileConfig TOML overlay | 🟢 | internal (bootstrap_or_exit) | `crates/core/src/config/file.rs`, `source.rs`, `bootstrap.rs` | — | — | deny_unknown_fields; XDG discovery. |
-| Config — secret reference system | 🟡 | internal | `crates/zeroship-secret-policy/src/lib.rs` | — | `crates/zeroship-secret-policy/src/lib.rs` | env/file resolve; vault/awssm parse-but-unresolvable. |
-| Config - secret strength validation | green | internal | `crates/zeroship-secret-policy/src/lib.rs` | - | `crates/zeroship-secret-policy/src/lib.rs` | At least 32 bytes; enforced in every environment. |
-| Config — loopback URL check | 🟢 | internal | `crates/zeroship-secret-policy/src/lib.rs` | — | `crates/zeroship-secret-policy/src/lib.rs` | Literal-only; no DNS. |
+| Config — secret reference system | 🟡 | internal | `crates/core/src/config/secrets.rs` | — | `crates/core/src/config/secrets.rs` | env/file resolve; vault/awssm parse-but-unresolvable. |
+| Config - secret strength validation | green | internal | `crates/core/src/config/secrets.rs` | - | `crates/core/src/config/secrets.rs` | At least 32 bytes; enforced in every environment. |
+| Config — loopback URL check | 🟢 | internal | `crates/core/src/config/secrets.rs` | — | `crates/core/src/config/secrets.rs` | Literal-only; no DNS. |
 | Config — bootstrap_or_exit | 🟢 | internal | `crates/core/src/config/bootstrap.rs` | — | — | CheckConfigReport for --check-config. |
 | Observability — tracing subscriber init | 🟢 | ZEROSHIP_OBSERVABILITY_LOG_FORMAT / --observability-log-format | `crates/core/src/observability.rs` | — | `crates/core/src/observability.rs` | 5 formats; LogTracer bridge; idempotent. |
 | OIDC — JWKS cache + ID token verifier | 🟢 | internal (gateway/control RP) | `crates/core/src/oidc_verify.rs` | `docs/reference/auth.md` | `crates/core/src/oidc_verify.rs` (inline `mod tests`) | 5-min TTL; stale-on-error; RS/ES algos. |

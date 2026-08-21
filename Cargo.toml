@@ -45,11 +45,6 @@ url = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value", "preserve_order"] }
 toml = "0.8"
-# YAML, for the shared docker-compose model in `crates/zeroship-gatekit`. This
-# is the maintained fork of `serde_yaml`, which upstream marked deprecated at
-# 0.9.34 and no longer fixes. NOT used by any service - the repository gates
-# are its only consumer, and compose files are the only YAML this tree parses.
-serde_norway = "0.9"
 indexmap = { version = "2", features = ["serde"] }
 
 # CLI argument parsing
@@ -210,10 +205,6 @@ tempfile = "3"
 
 # Internal crates
 zeroship-core = { path = "crates/core" }
-# The secret table, its strength rules and validators. A LEAF, split out of
-# `zeroship-core` so a consumer of the policy does not link core's HTTP client
-# (cyper -> hyper -> tokio) to read it. See its crate docs.
-zeroship-secret-policy = { path = "crates/zeroship-secret-policy" }
 zeroship-bundle = { path = "crates/bundle" }
 compio-postgres = { path = "libs/compio-postgres" }
 compio-redis = { path = "libs/compio-redis" }

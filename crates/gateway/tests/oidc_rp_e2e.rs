@@ -602,7 +602,7 @@ fn test_auth_config(db_url: &str) -> (AuthConfig, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("temp dir for auth secrets");
     // `write_secret_file`, not a bare `std::fs::write`: all three of these are
     // Secret<String> settings and resolve through
-    // `zeroship_secret_policy::read_secret_file`, which refuses anything a
+    // `zeroship_core::config::read_secret_file`, which refuses anything a
     // second local account could read. The default 022 umask leaves 0644.
     let write = |name: &str, contents: &str| -> String {
         let path = dir.path().join(name);

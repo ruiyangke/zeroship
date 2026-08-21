@@ -6,8 +6,10 @@ use clap::Parser;
 use compio_postgres::NoTls;
 use ntex::web;
 use zeroship_core::auth_provider::{AuthProvider, PlatformConfig, PlatformProvider};
-use zeroship_core::config::{audit_credentials, bootstrap_or_exit, mark_dev_escape_active, BuildProfile, CheckConfigReport, CheckValue, CredentialPosture, CredentialVerdict, SubsystemCredential};
-use zeroship_secret_policy::{require_nonempty};
+use zeroship_core::config::{
+    audit_credentials, bootstrap_or_exit, mark_dev_escape_active, require_nonempty, BuildProfile,
+    CheckConfigReport, CheckValue, CredentialPosture, CredentialVerdict, SubsystemCredential,
+};
 use zeroship_migrated::auth::ControlPlaneAuthenticator;
 use zeroship_migrated::config::{MigratedSettings, MigratedSettingsSources, DEFAULT_LOG_FILTER};
 use zeroship_migrated::policy::ManagedPolicyConfig;

@@ -4987,19 +4987,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_norway"
-version = "0.9.42"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e408f29489b5fd500fab51ff1484fc859bb655f32c671f307dcd733b72e8168c"
-dependencies = [
- "indexmap 2.14.0",
- "itoa",
- "ryu",
- "serde",
- "unsafe-libyaml-norway",
-]
-
-[[package]]
 name = "serde_spanned"
 version = "0.6.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5993,12 +5980,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "unsafe-libyaml-norway"
-version = "0.2.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b39abd59bf32521c7f2301b52d05a6a2c975b6003521cbd0c6dc1582f0a22104"
-
-[[package]]
 name = "untrusted"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6969,7 +6950,6 @@ dependencies = [
  "zeroship-plugin-storage",
  "zeroship-plugin-workflow",
  "zeroship-runtime",
- "zeroship-secret-policy",
 ]
 
 [[package]]
@@ -7007,7 +6987,6 @@ dependencies = [
  "zeroship-authz",
  "zeroship-core",
  "zeroship-mailer",
- "zeroship-secret-policy",
  "zeroship-test-support",
 ]
 
@@ -7155,7 +7134,6 @@ dependencies = [
  "zeroship-migrated",
  "zeroship-plugin-workflow",
  "zeroship-runtime",
- "zeroship-secret-policy",
  "zeroship-stream",
  "zeroship-test-support",
  "zeroship-testkit",
@@ -7201,17 +7179,7 @@ dependencies = [
  "zeroship-bundle",
  "zeroship-config-contract",
  "zeroship-config-macros",
- "zeroship-secret-policy",
  "zeroship-test-support",
-]
-
-[[package]]
-name = "zeroship-gatekit"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_norway",
- "zeroship-secret-policy",
 ]
 
 [[package]]
@@ -7255,7 +7223,6 @@ dependencies = [
  "zeroship-core",
  "zeroship-mailer",
  "zeroship-metering",
- "zeroship-secret-policy",
  "zeroship-test-support",
 ]
 
@@ -7317,7 +7284,6 @@ dependencies = [
  "zero-migrate-policy",
  "zeroship-core",
  "zeroship-runtime",
- "zeroship-secret-policy",
  "zeroship-test-support",
 ]
 
@@ -7348,7 +7314,6 @@ dependencies = [
  "zeroship-authz",
  "zeroship-core",
  "zeroship-migrate-adapter",
- "zeroship-secret-policy",
 ]
 
 [[package]]
@@ -7515,16 +7480,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zeroship-secret-policy"
-version = "0.1.0"
-dependencies = [
- "base64",
- "hex",
- "thiserror 2.0.18",
- "url",
-]
-
-[[package]]
 name = "zeroship-stream"
 version = "0.1.0"
 dependencies = [
@@ -7585,7 +7540,6 @@ dependencies = [
  "zeroship-plugin-storage",
  "zeroship-plugin-workflow",
  "zeroship-runtime",
- "zeroship-secret-policy",
  "zeroship-stream",
  "zstd",
 ]

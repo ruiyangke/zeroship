@@ -174,11 +174,15 @@ fn framed_route_csp(origins: &[String]) -> String {
 ///
 /// The resolution is [`zeroship_core::client_ip`], shared with the gateway and
 /// the control plane. `trust_proxy` is passed as `true` unconditionally here,
-/// and only here: this service is never published to the internet (the compose
-/// port-exposure gate, `tests/compose_port_exposure_gate.sh`, allows only the
-/// edge to publish on all interfaces), so the edge proxy is the only writer of
-/// the header it reads. The gateway and control take the flag from
-/// configuration because they can be fronted or not.
+/// and only here: this service is never published to the internet, so the edge
+/// proxy is the only writer of the header it reads. The gateway and control
+/// take the flag from configuration because they can be fronted or not.
+///
+/// THAT PREMISE IS NOW UNCHECKED. It was held by
+/// `tests/compose_port_exposure_gate.sh`, which allowed only the edge to
+/// publish on all interfaces; that gate was deleted on 2026-08-21. Publishing
+/// this service in `deploy/compose/docker-compose.yml` would make the
+/// unconditional `true` above a client-IP spoof, and nothing would say so.
 #[must_use]
 pub(crate) fn client_ip(req: &HttpRequest) -> String {
     trusted_client_ip(req.headers(), req.peer_addr().map(|addr| addr.ip()))

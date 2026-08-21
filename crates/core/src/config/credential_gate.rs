@@ -8,7 +8,7 @@
 //! Five properties, each of which exists because some project shipped its
 //! opposite:
 //!
-//! 1. **A named sentinel**, [`zeroship_secret_policy::SERVICE_CREDENTIAL_SENTINEL`], never a
+//! 1. **A named sentinel**, [`SERVICE_CREDENTIAL_SENTINEL`], never a
 //!    plausible-looking random string. The whole value of the constant is that
 //!    it is unmistakable in a config file, in a boot log and in a grep.
 //! 2. **Empty and sentinel are ONE state.** Gitaly's
@@ -17,7 +17,7 @@
 //!    configured-but-weak case is refused. Here [`is_unset_credential`] is the
 //!    single predicate, and
 //!    `empty_and_the_sentinel_produce_byte_identical_refusals` drives every
-//!    row of [`zeroship_secret_policy::PLATFORM_SECRETS`] at both values and requires
+//!    row of [`crate::config::PLATFORM_SECRETS`] at both values and requires
 //!    the two messages to be equal, so the identity is measured rather than
 //!    asserted in prose.
 //! 3. **Refuse to boot**, with a banner naming the KEY, the FILE, and the
@@ -56,8 +56,6 @@
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
-
-use zeroship_secret_policy::{is_unset_credential, REMEDIATION_COMMAND};
 
 use crate::config::names::Secret;
 use crate::config::source::ConfigSource;
@@ -106,6 +104,58 @@ pub fn mark_dev_escape_active() {
 #[must_use]
 pub fn dev_escape_active() -> bool {
     DEV_ESCAPE_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// The placeholder an operator is meant to replace, and which the platform
+/// refuses to start on.
+///
+/// DELIBERATELY NOT RANDOM-LOOKING. A default like `changeme123` or a 32-byte
+/// hex string reads as a configured value in a diff, in a `docker compose
+/// config` dump and in a boot log; this one cannot. It is also shorter than
+/// [`crate::config::MIN_SECRET_BYTES`] (30 bytes against 32), which matters:
+/// a reader must not be able to conclude "the length floor catches it anyway",
+/// because the two secrets this gate exists for -- `ZEROSHIP_CONTROL_KEY` and
+/// `ZEROSHIP_MIGRATED_POLICY_SEAL_KEY` -- are
+/// [`crate::config::SecretStrength::Unrestricted`] and have no length floor at
+/// all. The sentinel branch, not the length branch, is what refuses them.
+pub const SERVICE_CREDENTIAL_SENTINEL: &str = "CHANGE_ME_ZEROSHIP_SERVICE_KEY";
+
+/// The exact command that provisions every platform secret.
+///
+/// Interpolated into the banner so the remediation is a command an operator can
+/// paste, not a description of one.
+pub const REMEDIATION_COMMAND: &str = "zeroship dev init";
+
+/// True when `value` carries no credential at all.
+///
+/// THE SINGLE BRANCH. Empty and [`SERVICE_CREDENTIAL_SENTINEL`] are the same
+/// state -- "nobody set this" -- and they are one predicate so that no later
+/// edit can give one of them a different fate without giving it to the other.
+/// That is the whole of Gitaly's bug: it had a branch for the empty token and
+/// the branch returned success.
+///
+/// Surrounding whitespace is trimmed before the comparison, because a `.env`
+/// file and a compose `environment:` block both pick up a trailing space
+/// without the operator seeing it, and `CHANGE_ME_ZEROSHIP_SERVICE_KEY ` is the
+/// same unreplaced placeholder as `CHANGE_ME_ZEROSHIP_SERVICE_KEY`. The trim
+/// applies to BOTH arms, so the two stay symmetric.
+#[must_use]
+pub fn is_unset_credential(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.is_empty() || trimmed == SERVICE_CREDENTIAL_SENTINEL
+}
+
+/// The refusal every validator produces for an unset credential.
+///
+/// One format string shared by every caller, so the message an operator reads
+/// for an empty value and the message they read for the sentinel are the same
+/// bytes. `label` is the caller's operator-facing spelling of the variable.
+#[must_use]
+pub fn unset_credential_message(label: &str) -> String {
+    format!(
+        "{label} is required and is not configured: it is empty or still the \
+         {SERVICE_CREDENTIAL_SENTINEL} placeholder; run `{REMEDIATION_COMMAND}`"
+    )
 }
 
 /// Which build this binary is.
@@ -403,16 +453,15 @@ pub fn audit_credentials(credentials: &[SubsystemCredential<'_>]) -> CredentialP
 
 #[cfg(test)]
 mod tests {
-    use zeroship_secret_policy::{
-        is_unset_credential, require_nonempty, unset_credential_message, validate_worker_key,
-        MIN_SECRET_BYTES, PLATFORM_SECRETS, SERVICE_CREDENTIAL_SENTINEL,
-    };
-
     use super::{
-        audit_credentials, BuildProfile, CredentialPosture, CredentialVerdict, SubsystemCredential,
+        audit_credentials, is_unset_credential, unset_credential_message, BuildProfile,
+        CredentialPosture, CredentialVerdict, SubsystemCredential, SERVICE_CREDENTIAL_SENTINEL,
     };
     use crate::config::names::{Secret, SourceKind};
     use crate::config::source::ConfigSource;
+    use crate::config::{
+        require_nonempty, validate_worker_key, MIN_SECRET_BYTES, PLATFORM_SECRETS,
+    };
 
     const LABEL: &str = "ZEROSHIP_WORKER_KEY / --worker-key-file";
     const STRONG: &str = "0123456789abcdef0123456789abcdef";

@@ -898,7 +898,7 @@ mod tests {
     /// host [`RESERVED_APP_NAMES`] does not cover. It cannot ask this module:
     /// it runs on an operator's machine, has no Rust toolchain requirement, and
     /// `cargo run` to read four strings is a worse trade than a pinned pattern
-    /// (the same trade `crates/zeroship-gatekit/tests/generated_secret_scrape.rs`
+    /// (the same trade `crates/core/tests/generated_secret_scrape.rs`
     /// documents for the generated-secret table).
     ///
     /// So it scrapes the const, and the scrape is pinned HERE. The failure this
