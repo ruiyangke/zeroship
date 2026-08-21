@@ -31,6 +31,15 @@ use zeroship_migrate_adapter::CompioPgSession;
 /// `["id"]` PK + `author_primary_key = "forbid"`) — a `RootCharter` document composed
 /// into an `EffectivePolicy` via the engine's `effective_policy_from_charter_toml`.
 /// (The old `PolicyProfile::confined()` is gone; the confined shape is now policy data.)
+///
+/// The `[[inject]]` rule below is the SHIPPED one, byte for byte, and
+/// `tests/inject_policy_mirror_gate.sh` holds it to that. It was NOT until
+/// 2026-08-20: `ddf636140` added the created_at/updated_at/version DDL defaults
+/// to the two ceilings the mirror gate then compared, and this fixture -- which
+/// its own doc comment calls "the confined table-shape ceiling" -- kept the
+/// pre-fix shape for eleven days. This test never inserts a row, so nothing here
+/// went red; it simply stopped exercising the shape a creator actually gets,
+/// which is the one thing a fixture calling itself the confined ceiling is for.
 const CONFINED_CEILING_TOML: &str = r#"policy_version = 1
 
 [[grant]]
@@ -60,11 +69,11 @@ primary_key = ["id"]
 author_primary_key = "forbid"
 columns = [
   { name = "id",         type = "text",        nullable = false },
-  { name = "created_at", type = "timestamptz", nullable = false },
-  { name = "updated_at", type = "timestamptz", nullable = false },
+  { name = "created_at", type = "timestamptz", nullable = false, default = "NOW()" },
+  { name = "updated_at", type = "timestamptz", nullable = false, default = "NOW()" },
   { name = "created_by", type = "text",        nullable = true  },
   { name = "updated_by", type = "text",        nullable = true  },
-  { name = "version",    type = "integer",     nullable = false },
+  { name = "version",    type = "integer",     nullable = false, default = "1" },
   { name = "deleted_at", type = "timestamptz", nullable = true  },
 ]
 indexes = [
