@@ -8,23 +8,22 @@
 //!   it did before — COPY … PROGRAM (RCE) and a `CREATE EXTENSION` outside the
 //!   allowlist — and still **passes** benign DDL, now through the neutral
 //!   `GuardOutcome` (no PG-specific `classes` on the seam).
-//! - `SqliteDescriptorGuard` (the `SQLite` line-1) **trusts** descriptor-diff DDL
+//! - `SqliteGuard` (the `SQLite` line-1) **trusts** descriptor-diff DDL
 //!   (its `check` returns the empty clean outcome) — the apply/plan path on
 //!   `SQLite` feeds it descriptor-generated DDL, which must NOT be rejected.
 //! - The raw-untrusted-SQLite-SQL fail-closed survives on `SqlGuard` itself: a
 //!   SQLite-keyed `SqlGuard` (the PG guard mis-handed a `SQLite` config) still
 //!   refuses with `SqliteRawSqlRejected` rather than mis-parsing — the defensive
 //!   property the engine no longer relies on (it routes `SQLite` through
-//!   `SqliteDescriptorGuard`), kept as a backstop for the wrong caller.
+//!   `SqliteGuard`), kept as a backstop for the wrong caller.
 //! - `guard_for` selects the right per-engine guard by dialect, with no by-name
 //!   `SQLite` knowledge in the core.
 
 use crate::support;
 
-use zero_migrate::guard::{
-    guard_for, GuardConfig, GuardError, MigrationGuard, PgGuard, SqlGuard, SqliteDescriptorGuard,
-};
+use zero_migrate::guard::{GuardConfig, GuardError, MigrationGuard, SqlGuard};
 use zero_migrate::SqlDialect;
+use zero_migrate::{guard_for, PgGuard, SqliteGuard};
 
 /// A realistic PG project guard: project schema `project_acme`, extension
 /// allowlist = `pgcrypto` + `uuid-ossp` (mirrors the `guard_security` matrix).
@@ -83,12 +82,12 @@ fn pg_guard_flags_destructive_through_seam() {
 }
 
 // ---------------------------------------------------------------------------
-// SqliteDescriptorGuard — the descriptor-diff path is trusted (empty outcome).
+// SqliteGuard — the descriptor-diff path is trusted (empty outcome).
 // ---------------------------------------------------------------------------
 
 #[test]
 fn sqlite_descriptor_guard_passes_descriptor_create_table() {
-    let guard = SqliteDescriptorGuard::new();
+    let guard = SqliteGuard::new();
     // Descriptor-generated DDL is trusted by construction (author-boundary line-1 +
     // backend-authorizer line-2). The engine's apply/plan path feeds exactly this.
     let outcome = guard
@@ -112,7 +111,7 @@ fn sqlite_descriptor_guard_passes_descriptor_create_table() {
 fn sqlite_keyed_sqlguard_rejects_raw_sql_backstop() {
     // A raw, untrusted SQLite string handed to the PG guard (a SQLite-keyed config)
     // is refused rather than mis-parsed by libpg_query — the defensive property the
-    // engine no longer relies on (it routes SQLite through SqliteDescriptorGuard).
+    // engine no longer relies on (it routes SQLite through SqliteGuard).
     let guard = SqlGuard::new(GuardConfig::from_policy(
         support::no_inject("project_acme"),
         SqlDialect::Sqlite,

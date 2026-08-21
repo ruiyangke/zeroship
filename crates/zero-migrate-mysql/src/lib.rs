@@ -24,19 +24,27 @@
 
 pub mod collation;
 mod dml;
+pub mod guard;
 mod schema;
+
+pub use guard::MysqlGuard;
 
 use zero_migrate_backend::registry::BackendVendor;
 
-/// Everything the engine needs from this crate: the capability descriptor and the
-/// two renderers.
+/// Everything the engine needs from this crate: the capability descriptor, the two
+/// renderers, and the line-1 guard.
 ///
 /// The renderer structs themselves are deliberately private. A caller reaches this
 /// vendor's spelling through a registry or not at all, which is the property the
 /// in-crate `match` used to give for free and which `pub` statics would have thrown
 /// away at exactly the moment the vendor became separately linkable.
+///
+/// `guard` is REQUIRED. Delete that line and this literal stops compiling, here, with
+/// this crate named — which is the point: a backend cannot acquire a trusting guard by
+/// omitting one. See `zero_migrate_backend::registry::BackendVendor`.
 pub static VENDOR: BackendVendor = BackendVendor {
     descriptor: &zero_migrate_ir::backend::MYSQL_DESCRIPTOR,
     dml: &dml::RENDERER,
     schema: &schema::RENDERER,
+    guard: guard::guard,
 };

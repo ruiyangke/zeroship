@@ -23,6 +23,7 @@
 //! (`*_for_dialect(.., DIALECT)`) is how this crate stays clear of it.
 
 mod dml;
+pub mod guard;
 mod schema;
 mod vendor;
 
@@ -36,17 +37,26 @@ mod vendor;
 /// part of a backend the engine still knows by name rather than by contract.
 pub use vendor::render_vendor_op;
 
+/// This vendor's line-1 guard, re-exported because the engine's public API has
+/// surfaced it since before the vendor crates existed.
+pub use guard::PgGuard;
+
 use zero_migrate_backend::registry::BackendVendor;
 
-/// Everything the engine needs from this crate: the capability descriptor and the
-/// two renderers.
+/// Everything the engine needs from this crate: the capability descriptor, the two
+/// renderers, and the line-1 guard.
 ///
 /// The renderer structs themselves are deliberately private. A caller reaches this
 /// vendor's spelling through a registry or not at all, which is the property the
 /// in-crate `match` used to give for free and which `pub` statics would have thrown
 /// away at exactly the moment the vendor became separately linkable.
+///
+/// `guard` is REQUIRED. Delete that line and this literal stops compiling, here, with
+/// this crate named — which is the point: a backend cannot acquire a trusting guard by
+/// omitting one. See `zero_migrate_backend::registry::BackendVendor`.
 pub static VENDOR: BackendVendor = BackendVendor {
     descriptor: &zero_migrate_ir::backend::POSTGRES_DESCRIPTOR,
     dml: &dml::RENDERER,
     schema: &schema::RENDERER,
+    guard: guard::guard,
 };

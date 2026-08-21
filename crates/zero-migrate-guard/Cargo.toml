@@ -23,6 +23,13 @@ thiserror = { workspace = true }
 # `VendorCapabilities`/`OperatorCapability`/`DestructiveOps`), and the
 # `SqlDialect` deploy-target enum the guard keys dialect behaviour on.
 zero-migrate-ir = { workspace = true }
+# The backend CONTRACT. `MigrationGuard`, `GuardConfig`, `GuardError`, `GuardOutcome`,
+# `ParseError` and the `Advisory` vocabulary live there rather than here, because a
+# vendor crate must be able to implement the trait, and a vendor crate may not depend
+# on this one - `libpg_query` would follow it down and land under the two dialects that
+# build without it today. This crate supplies PostgreSQL's IMPLEMENTATION of that
+# contract, and the parser it needs.
+zero-migrate-backend = { workspace = true }
 # The Policy Decision Point: the unforgeable EffectivePolicy the guard now queries
 # (grants/obligations) for its capability + data-security gate, plus the KnobKey/
 # KnobValue vocabulary and the object model (ObjectName). The guard holds an

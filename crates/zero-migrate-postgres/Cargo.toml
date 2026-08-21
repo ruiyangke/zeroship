@@ -11,6 +11,12 @@ description = "The PostgreSQL backend for zero-migrate: this vendor's DML/view/t
 # `VENDOR` below is registered through. This is the ONLY zero-migrate crate a
 # backend may depend on - depending on the engine is the cycle the split removed.
 zero-migrate-backend = { workspace = true }
+# This vendor's LINE-1 guard. `PgGuard` is a seven-line adapter over `SqlGuard`, and
+# `SqlGuard` is the libpg_query deny-list, which stays in its own crate: it is 6,700
+# lines and it also holds `check_ir_data_security_policy`, which enforces the
+# data-security posture for SQLite and MySQL as well. Only THIS vendor pulls it in, so
+# the other two still build without libpg_query.
+zero-migrate-guard = { workspace = true }
 # The closed `Op` / `Expr` / `IrScalar` vocabulary the trait methods are handed, plus
 # `SqlDialect` and this vendor's `BackendDescriptor`.
 zero-migrate-ir = { workspace = true }

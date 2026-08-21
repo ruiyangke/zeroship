@@ -1109,13 +1109,14 @@ async fn apply_locked<B: MigrationBackend>(
     // `ExecutorConfig`, not the backend):
     //   - Postgres → `PgGuard` (libpg_query deny-list) — byte-identical to the
     //     pre-seam `SqlGuard::new(cfg.guard_config())`;
-    //   - SQLite → `SqliteDescriptorGuard` — the trusted descriptor-diff path
+    //   - SQLite → `SqliteGuard` (from `zero-migrate-sqlite`) — the trusted descriptor-diff path
     //     (`check` returns the empty clean outcome: `libpg_query` cannot vet SQLite,
     //     the first-line vet is the descriptor emitter at the author boundary and the
     //     second-line defense is the backend authorizer applied per statement at apply).
     // The non-txn idempotency check still runs through the trait (`validate_non_txn`),
     // which for SQLite rejects `transaction:false` at the dialect boundary.
-    let guard = crate::guard::guard_for(&cfg.guard_config().for_dialect(backend.dialect()));
+    let guard =
+        crate::render::backends::guard_for(&cfg.guard_config().for_dialect(backend.dialect()));
 
     // FIRST PASS — static validation over EVERY pending migration BEFORE any
     // execution. The guard runs per-migration inside the apply loop in the
@@ -1450,7 +1451,7 @@ fn guard_repeatable_batch(
     dialect: crate::schema::query::SqlDialect,
     migrations: &[&Migration],
 ) -> Result<(), ApplyError> {
-    let guard = crate::guard::guard_for(&cfg.guard_config().for_dialect(dialect));
+    let guard = crate::render::backends::guard_for(&cfg.guard_config().for_dialect(dialect));
     for migration in migrations {
         guard
             .check(&migration.up)

@@ -1538,3 +1538,70 @@ fn trusted_early_return_is_gated_on_trust_trusted_only() {
          the Trusted deny-list-off branch must NOT fire under Platform"
     );
 }
+
+// ---------------------------------------------------------------------------
+// What a descriptor-only vendor's EMPTY guard does NOT cover.
+// ---------------------------------------------------------------------------
+
+/// `destructive_ops = forbid` is enforced for SQLite and MySQL, and it is enforced
+/// HERE — over the structured IR — because their `MigrationGuard::check` trusts
+/// everything it is handed.
+///
+/// # Why this test exists
+///
+/// `zero_migrate_sqlite::SqliteGuard::check` and `zero_migrate_mysql::MysqlGuard::check`
+/// both return `Ok(GuardOutcome::default())`. Read on its own, either one says "this
+/// dialect vets nothing", and the obvious conclusion — that the two dialects have no
+/// data-security posture, and that this arm of `check_ir_data_security_policy` is dead
+/// code for them — is exactly backwards. The arm exists BECAUSE those guards are empty
+/// and are constructed without the policy, so nothing else can read the knob for them.
+///
+/// Every one of the sibling `destructive_ops` tests above runs at
+/// `SqlDialect::Postgres`, where the denial comes from the SQL-TEXT deny-list instead.
+/// So before this test, deleting the `!matches!(cfg.dialect(), SqlDialect::Postgres)`
+/// gate left the whole suite green while silently making `forbid` inert on two of the
+/// three shipping dialects — the precise regression the posture was added to fix.
+///
+/// PostgreSQL is asserted alongside as the CONTROL, and deliberately with the OPPOSITE
+/// assertion: this arm must NOT fire there, because PostgreSQL's denial comes from the
+/// text guard. A change that made the arm fire for every dialect would satisfy the loop
+/// and fail the control.
+#[test]
+fn destructive_ops_forbid_is_enforced_over_the_ir_for_the_descriptor_only_dialects() {
+    let ir = ir_with(vec![Op::DropTable {
+        table: "users".to_string(),
+        schema: None,
+        existence_guard: None,
+        cascade: None,
+    }]);
+    let policy = || {
+        crate::test_fixtures::no_inject_with_data_security("public", false, DestructiveOps::Forbid)
+    };
+
+    for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
+        let cfg = GuardConfig::from_policy(policy(), dialect);
+        let err = check_ir_data_security_policy(&cfg, &ir).expect_err(
+            "a trusting MigrationGuard means this IR walk is the dialect's ONLY \
+             destructive_ops=forbid enforcement - it must deny a dropTable",
+        );
+        assert_eq!(err.op_index, 0, "{dialect:?}");
+        assert!(
+            matches!(
+                err.source,
+                GuardError::DataSecurityPolicy {
+                    rule: data_security_rule::DESTRUCTIVE_OPS_FORBID,
+                    ..
+                }
+            ),
+            "{dialect:?} must deny under DESTRUCTIVE_OPS_FORBID, got: {:?}",
+            err.source
+        );
+    }
+
+    let pg = GuardConfig::from_policy(policy(), SqlDialect::Postgres);
+    assert!(
+        check_ir_data_security_policy(&pg, &ir).is_ok(),
+        "the IR arm is for the dialects whose guard cannot read the knob; PostgreSQL's \
+         denial comes from SqlGuard::check over the rendered SQL"
+    );
+}
