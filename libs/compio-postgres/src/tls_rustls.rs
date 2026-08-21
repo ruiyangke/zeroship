@@ -48,13 +48,14 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use compio::io::compat::AsyncStream;
 use compio::io::{AsyncRead, AsyncWrite};
 use pkcs8::der::pem::PemLabel;
 use pkcs8::{EncryptedPrivateKeyInfo, SecretDocument};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::client::{VerifierBuilderError, WebPkiServerVerifier};
+use rustls::client::{ResolvesClientCert, VerifierBuilderError, WebPkiServerVerifier};
 use rustls::crypto::{
     CryptoProvider, KeyProvider, WebPkiSupportedAlgorithms, verify_tls12_signature,
     verify_tls13_signature,
@@ -62,19 +63,22 @@ use rustls::crypto::{
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{
     CertificateDer, CertificateRevocationListDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName,
-    UnixTime,
+    SubjectPublicKeyInfoDer, UnixTime,
 };
+use rustls::sign::{CertifiedKey, SigningKey};
 use rustls::{
-    CertificateError, ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme,
-    SupportedProtocolVersion,
+    CertificateError, ClientConfig, DigitallySignedStruct, RootCertStore, SignatureAlgorithm,
+    SignatureScheme, SupportedProtocolVersion,
 };
 use sha1::Digest as _;
 use x509_parser::asn1_rs::{Any, Class, Tag, ToDer};
 use zeroize::Zeroize;
 
 use crate::Error;
-use crate::config::{Config, SslMode, SslProtocolVersion, SslRootCert};
-use crate::tls::{ChannelBinding, MakeTlsConnect, TlsConnect, TlsStream};
+use crate::config::{Config, SslCertMode, SslMode, SslProtocolVersion, SslRootCert};
+use crate::tls::{
+    ChannelBinding, ClientCertStatus, MakeTlsConnect, TlsConnect, TlsStream,
+};
 
 /// `PostgreSQL`'s registered ALPN protocol identifier.
 const POSTGRESQL_ALPN_PROTOCOL: &[u8] = b"postgresql";
@@ -785,16 +789,105 @@ fn crls_from_config(config: &Config) -> ConfiguredCrls {
     ConfiguredCrls { file, directory }
 }
 
+/// Per-handshake evidence for `sslcertmode=require`.
+///
+/// This cannot live on [`MakeRustlsConnect`]: pools may perform concurrent
+/// handshakes, and one connection's certificate request must never satisfy
+/// another connection's requirement.
+#[derive(Debug, Default)]
+struct ClientCertObservation {
+    requested: AtomicBool,
+    sent: AtomicBool,
+}
+
+impl ClientCertObservation {
+    fn status(&self) -> ClientCertStatus {
+        if self.sent.load(Ordering::Relaxed) {
+            ClientCertStatus::Sent
+        } else if self.requested.load(Ordering::Relaxed) {
+            ClientCertStatus::NotSent
+        } else {
+            ClientCertStatus::NotRequested
+        }
+    }
+}
+
+/// Records the server's CertificateRequest and wraps the selected key so the
+/// later signature-scheme decision is observable too.
+#[derive(Debug)]
+struct ObservingClientCertResolver {
+    inner: Arc<dyn ResolvesClientCert>,
+    observation: Arc<ClientCertObservation>,
+}
+
+impl ResolvesClientCert for ObservingClientCertResolver {
+    fn resolve(
+        &self,
+        root_hint_subjects: &[&[u8]],
+        sigschemes: &[SignatureScheme],
+    ) -> Option<Arc<CertifiedKey>> {
+        self.observation.requested.store(true, Ordering::Relaxed);
+        let selected = self.inner.resolve(root_hint_subjects, sigschemes)?;
+        Some(Arc::new(CertifiedKey {
+            cert: selected.cert.clone(),
+            key: Arc::new(ObservingSigningKey {
+                inner: selected.key.clone(),
+                observation: self.observation.clone(),
+            }),
+            ocsp: selected.ocsp.clone(),
+        }))
+    }
+
+    fn only_raw_public_keys(&self) -> bool {
+        self.inner.only_raw_public_keys()
+    }
+
+    fn has_certs(&self) -> bool {
+        self.inner.has_certs()
+    }
+}
+
+/// Marks a certificate as sent only when rustls finds a signature scheme it
+/// can actually use. Resolver success alone is insufficient: rustls sends an
+/// empty Certificate message when `choose_scheme` returns `None`.
+#[derive(Debug)]
+struct ObservingSigningKey {
+    inner: Arc<dyn SigningKey>,
+    observation: Arc<ClientCertObservation>,
+}
+
+impl SigningKey for ObservingSigningKey {
+    fn choose_scheme(
+        &self,
+        offered: &[SignatureScheme],
+    ) -> Option<Box<dyn rustls::sign::Signer>> {
+        let signer = self.inner.choose_scheme(offered)?;
+        self.observation.sent.store(true, Ordering::Relaxed);
+        Some(signer)
+    }
+
+    fn public_key(&self) -> Option<SubjectPublicKeyInfoDer<'_>> {
+        self.inner.public_key()
+    }
+
+    fn algorithm(&self) -> SignatureAlgorithm {
+        self.inner.algorithm()
+    }
+}
+
 /// A [`MakeTlsConnect`] that performs handshakes with rustls.
 ///
 /// Build one from a [`Config`] with [`MakeRustlsConnect::from_config`] (which
-/// reads the protocol bounds, `sslrootcert`, both CRL sources, and the
-/// client-certificate settings), or hand it a fully built [`ClientConfig`]
-/// with [`MakeRustlsConnect::new`] when the trust decisions are made in code
-/// rather than in the connection string.
+/// reads the protocol bounds, SNI policy, `sslrootcert`, both CRL sources, and
+/// the client-certificate mode and identity), or hand it a fully built
+/// [`ClientConfig`] with [`MakeRustlsConnect::new`] when the TLS decisions are
+/// made in code rather than in the connection string. The connection path
+/// refuses a connector whose SNI or certificate mode does not match its
+/// [`Config`].
 #[derive(Clone, Debug)]
 pub struct MakeRustlsConnect {
     config: Arc<ClientConfig>,
+    ssl_cert_mode: SslCertMode,
     /// A CRL directory is mutable verification policy. libpq observes it for
     /// each new connection, so retain only the public verification inputs
     /// needed to rebuild the verifier instead of freezing the first directory
@@ -824,17 +917,19 @@ impl MakeRustlsConnect {
         };
         MakeRustlsConnect {
             config,
+            ssl_cert_mode: SslCertMode::Allow,
             crl_directory_reload: None,
         }
     }
 
     /// Build a connector from the TLS parameters of a connection string.
     ///
-    /// Reads the TLS protocol bounds, `sslrootcert` / `sslcrl` / `sslcrldir`
-    /// (server authentication), and the `sslcert` / `sslkey` / `sslpassword`
-    /// client-authentication settings. The certificate and key must be given
-    /// together; naming one without the other is an error rather than a
-    /// silently ignored half-configuration.
+    /// Reads the TLS protocol bounds, SNI policy, `sslrootcert` / `sslcrl` /
+    /// `sslcrldir` (server authentication), and `sslcertmode` plus the
+    /// `sslcert` / `sslkey` / `sslpassword` client-authentication settings.
+    /// Except when certificate use is disabled, the certificate and key must
+    /// be given together; naming one without the other is an error rather than
+    /// a silently ignored half-configuration.
     pub fn from_config(config: &Config) -> Result<MakeRustlsConnect, Error> {
         let protocol_versions = protocol_versions_from_config(config)?;
         let mut roots = RootCertStore::empty();
@@ -915,44 +1010,68 @@ impl MakeRustlsConnect {
             .dangerous()
             .with_custom_certificate_verifier(verifier);
 
-        let mut client_config = match (config.get_ssl_cert(), config.get_ssl_key()) {
-            (Some(cert_path), Some(key_path)) => {
-                let certs = CertificateDer::pem_file_iter(cert_path)
-                    .and_then(|it| it.collect::<Result<Vec<_>, _>>())
-                    .map_err(|e| {
-                        Error::tls(format!("sslcert={cert_path}: cannot read PEM: {e}").into())
-                    })?;
-                let key = private_key_from_config(key_path, config.get_ssl_password())?;
-                builder
-                    .with_client_auth_cert(certs, key)
-                    .map_err(|e| Error::tls(Box::new(e)))?
-            }
-            (None, None) => builder.with_no_client_auth(),
-            (Some(_), None) => {
-                return Err(Error::tls(
-                    "sslcert was given without sslkey; client-certificate authentication needs \
-                     both"
-                        .into(),
-                ));
-            }
-            (None, Some(_)) => {
-                return Err(Error::tls(
-                    "sslkey was given without sslcert; client-certificate authentication needs \
-                     both"
-                        .into(),
-                ));
+        let mut client_config = match config.get_ssl_cert_mode() {
+            // Do not even open the named files. Besides needless failure, that
+            // could prompt/decrypt a private key for a mode whose promise is
+            // that the identity never leaves the client.
+            SslCertMode::Disable => builder.with_no_client_auth(),
+            SslCertMode::Allow | SslCertMode::Require => {
+                match (config.get_ssl_cert(), config.get_ssl_key()) {
+                    (Some(cert_path), Some(key_path)) => {
+                        let certs = CertificateDer::pem_file_iter(cert_path)
+                            .and_then(|it| it.collect::<Result<Vec<_>, _>>())
+                            .map_err(|e| {
+                                Error::tls(
+                                    format!("sslcert={cert_path}: cannot read PEM: {e}").into(),
+                                )
+                            })?;
+                        let key = private_key_from_config(key_path, config.get_ssl_password())?;
+                        builder
+                            .with_client_auth_cert(certs, key)
+                            .map_err(|e| Error::tls(Box::new(e)))?
+                    }
+                    (None, None) if config.get_ssl_cert_mode() == SslCertMode::Require => {
+                        return Err(Error::tls(
+                            "sslcertmode=require needs sslcert and sslkey because \
+                             compio-postgres does not read libpq's default client-certificate \
+                             files"
+                                .into(),
+                        ));
+                    }
+                    (None, None) => builder.with_no_client_auth(),
+                    (Some(_), None) => {
+                        return Err(Error::tls(
+                            "sslcert was given without sslkey; client-certificate \
+                             authentication needs both"
+                                .into(),
+                        ));
+                    }
+                    (None, Some(_)) => {
+                        return Err(Error::tls(
+                            "sslkey was given without sslcert; client-certificate \
+                             authentication needs both"
+                                .into(),
+                        ));
+                    }
+                }
             }
         };
 
-        if crl_directory_reload.is_some() {
-            // A resumed session skips certificate verification. rustls also
-            // keys tickets to verifier identity today, but disabling them
-            // makes fresh directory policy an explicit invariant rather than
-            // an incidental property of its session-cache implementation.
+        // This field controls emission of the SNI extension without changing
+        // the ServerName that rustls still uses for certificate verification.
+        client_config.enable_sni = config.get_ssl_sni();
+
+        if crl_directory_reload.is_some() || config.get_ssl_cert_mode() == SslCertMode::Require {
+            // Resumption can skip both server-certificate verification and a
+            // fresh CertificateRequest. rustls also keys tickets to verifier
+            // and client-resolver identity today, but disabling them makes
+            // both policies explicit invariants rather than incidental
+            // properties of its session-cache implementation.
             client_config.resumption = rustls::client::Resumption::disabled();
         }
 
         let mut connector = MakeRustlsConnect::new(Arc::new(client_config));
+        connector.ssl_cert_mode = config.get_ssl_cert_mode();
         connector.crl_directory_reload = crl_directory_reload;
         Ok(connector)
     }
@@ -984,6 +1103,7 @@ where
         Ok(RustlsConnect {
             config,
             domain: domain.to_string(),
+            ssl_cert_mode: self.ssl_cert_mode,
         })
     }
 }
@@ -992,6 +1112,7 @@ where
 pub struct RustlsConnect {
     config: Arc<ClientConfig>,
     domain: String,
+    ssl_cert_mode: SslCertMode,
 }
 
 impl<S> TlsConnect<S> for RustlsConnect
@@ -1007,7 +1128,19 @@ where
         Box::pin(async move {
             let server_name = ServerName::try_from(self.domain.clone())
                 .map_err(|e| io::Error::other(format!("invalid TLS hostname: {e}")))?;
-            let connector = futures_rustls::TlsConnector::from(self.config);
+            let (config, client_cert_observation) =
+                if self.ssl_cert_mode == SslCertMode::Require {
+                    let observation = Arc::new(ClientCertObservation::default());
+                    let mut config = (*self.config).clone();
+                    config.client_auth_cert_resolver = Arc::new(ObservingClientCertResolver {
+                        inner: config.client_auth_cert_resolver.clone(),
+                        observation: observation.clone(),
+                    });
+                    (Arc::new(config), Some(observation))
+                } else {
+                    (self.config, None)
+                };
+            let connector = futures_rustls::TlsConnector::from(config);
             let tls = connector
                 .connect(server_name, AsyncStream::new(stream))
                 .await?;
@@ -1021,12 +1154,24 @@ where
                 .peer_certificates()
                 .and_then(<[CertificateDer<'_>]>::first)
                 .and_then(tls_server_end_point);
+            let client_cert_status = client_cert_observation
+                .as_deref()
+                .map_or(ClientCertStatus::Unknown, ClientCertObservation::status);
 
             Ok(RustlsStream {
                 inner: compio_tls::TlsStream::from(tls),
                 tls_server_end_point,
+                client_cert_status,
             })
         })
+    }
+
+    fn can_honor_sslsni(&self, enabled: bool) -> bool {
+        self.config.enable_sni == enabled
+    }
+
+    fn can_honor_sslcertmode(&self, mode: SslCertMode) -> bool {
+        self.ssl_cert_mode == mode
     }
 }
 
@@ -1034,6 +1179,7 @@ where
 pub struct RustlsStream<S> {
     inner: compio_tls::TlsStream<S>,
     tls_server_end_point: Option<Vec<u8>>,
+    client_cert_status: ClientCertStatus,
 }
 
 impl<S: AsyncRead + AsyncWrite + 'static> AsyncRead for RustlsStream<S> {
@@ -1062,6 +1208,10 @@ impl<S: AsyncRead + AsyncWrite + 'static> TlsStream for RustlsStream<S> {
             Some(hash) => ChannelBinding::tls_server_end_point(hash.clone()),
             None => ChannelBinding::none(),
         }
+    }
+
+    fn client_cert_status(&self) -> ClientCertStatus {
+        self.client_cert_status
     }
 }
 

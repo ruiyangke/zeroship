@@ -268,6 +268,21 @@ if docker exec -e PGPASSWORD="$password" "$clientcert_name" \
     exit 1
 fi
 
+# Prove the exact sslcertmode discriminator with libpq before testing our
+# driver. Both commands name the same client identity: the cert-auth server
+# requests it and satisfies `require`, while the ordinary TLS server must not
+# request it and therefore cannot satisfy `require` even though password auth
+# would otherwise succeed.
+docker exec "$clientcert_name" \
+    psql "host=localhost user=postgres dbname=postgres sslmode=verify-ca sslrootcert=/certs/ca.crt sslcert=/certs/client.crt sslkey=/certs/client.key sslcertmode=require" \
+    -tAc "select 1" | grep -qx 1
+if docker exec -e PGPASSWORD="$password" "$tls_name" \
+    psql "host=localhost user=postgres dbname=postgres sslmode=require sslcert=/certs/client.crt sslkey=/certs/client.key sslcertmode=require" \
+    -tAc "select 1" >/dev/null 2>&1; then
+    echo "FATAL: $tls_name requested a client certificate; it cannot discriminate sslcertmode=require" >&2
+    exit 1
+fi
+
 cat >"$live/tls_live.conf" <<EOF
 tls_url=host=localhost port=$tls_port user=postgres password=$password dbname=postgres
 plain_url=host=localhost port=$plain_port user=postgres password=$password dbname=postgres

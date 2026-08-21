@@ -1347,6 +1347,7 @@ pub(crate) struct SocketConfig {
     pub connect_timeout: Option<Duration>,
     pub tcp_user_timeout: Option<Duration>,
     pub keepalive: Option<KeepaliveConfig>,
+    pub require_peer: Option<String>,
 }
 
 /// Resolved transport endpoint: either a concrete IP or a Unix socket

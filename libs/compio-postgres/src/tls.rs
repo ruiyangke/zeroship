@@ -8,6 +8,7 @@
 //! TLS support.
 
 use crate::Error;
+use crate::config::SslCertMode;
 use compio::io::{AsyncRead, AsyncWrite};
 use std::error;
 use std::fmt;
@@ -21,6 +22,27 @@ pub(crate) mod private {
 /// Channel binding information returned from a TLS handshake.
 pub struct ChannelBinding {
     pub(crate) tls_server_end_point: Option<Vec<u8>>,
+}
+
+/// What a completed TLS handshake observed about client-certificate use.
+///
+/// [`SslCertMode::Require`](crate::config::SslCertMode::Require) consumes this
+/// after PostgreSQL authentication succeeds. A custom TLS backend that cannot
+/// report the observation returns [`Unknown`](ClientCertStatus::Unknown),
+/// which is refused under that mode rather than approximated as success.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ClientCertStatus {
+    /// The connection is plaintext, so no TLS certificate could be requested.
+    NotApplicable,
+    /// The TLS server did not request a client certificate.
+    NotRequested,
+    /// The server requested a certificate, but the client did not select one.
+    NotSent,
+    /// The server requested a certificate and the client selected one to send.
+    Sent,
+    /// The TLS backend cannot report whether it sent a certificate.
+    Unknown,
 }
 
 impl ChannelBinding {
@@ -66,6 +88,26 @@ pub trait TlsConnect<S> {
     /// Returns a future performing a TLS handshake over the stream.
     fn connect(self, stream: S) -> Self::Future;
 
+    /// Reports whether this connector will apply the requested SNI policy.
+    ///
+    /// The default accepts enabled SNI because [`MakeTlsConnect`] has always
+    /// received a domain for certificate verification and SNI. A connector
+    /// that can disable SNI must override this method and attest that its
+    /// handshake configuration matches `enabled`.
+    fn can_honor_sslsni(&self, enabled: bool) -> bool {
+        enabled
+    }
+
+    /// Reports whether this connector will apply the client-certificate mode.
+    ///
+    /// The default accepts only libpq's permissive `allow` mode. Connectors
+    /// supporting `disable` or `require` must override this method; `require`
+    /// is also checked after authentication through
+    /// [`TlsStream::client_cert_status`].
+    fn can_honor_sslcertmode(&self, mode: SslCertMode) -> bool {
+        mode == SslCertMode::Allow
+    }
+
     #[doc(hidden)]
     fn can_connect(&self, _: private::ForcePrivateApi) -> bool {
         true
@@ -76,6 +118,11 @@ pub trait TlsConnect<S> {
 pub trait TlsStream: AsyncRead + AsyncWrite {
     /// Returns channel binding information for the session.
     fn channel_binding(&self) -> ChannelBinding;
+
+    /// Reports whether the handshake requested and sent a client certificate.
+    fn client_cert_status(&self) -> ClientCertStatus {
+        ClientCertStatus::Unknown
+    }
 }
 
 /// A `MakeTlsConnect` and `TlsConnect` implementation which simply returns an error.
