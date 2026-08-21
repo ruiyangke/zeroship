@@ -2431,7 +2431,18 @@ pub fn mysql_canonical_type(data_type: &str) -> String {
     if let Some(len) = parse_character_type_len(&no_width) {
         return format!("character({len})");
     }
-    if no_width.starts_with("varchar(") || no_width.ends_with("text") || no_width == "char" {
+    // `character varying(n)` is the DIALECT-NEUTRAL spelling a bounded `t.string({
+    // length })` carries in `data_type`; `varchar(n)` is what MySQL's catalog reports for
+    // the same column. Both must fold to the same family or the differ sees a phantom
+    // type change on every bounded string and refuses the deploy. Measured: a live
+    // MySQL declarative re-deploy of a `character varying(191)` id column was refused
+    // with `MysqlAlterColumnUnsupported { change: "type" }` until this arm existed.
+    if no_width.starts_with("varchar(")
+        || no_width.starts_with("character varying(")
+        || no_width == "character varying"
+        || no_width.ends_with("text")
+        || no_width == "char"
+    {
         return "text".to_string();
     }
     if no_width.starts_with("varbinary(") || no_width.ends_with("blob") || no_width == "bytea" {

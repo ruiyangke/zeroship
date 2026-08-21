@@ -47,7 +47,7 @@ use crate::model::table_shape::ResolvedInject;
 use crate::render::expand_contract::{ExpandContractAuthor, ExpandContractPlan, OnlineIntent};
 use crate::render::plan::TableRebuildSpec;
 use crate::render::renderer::{Capability, DialectSupports};
-use crate::schema::query::SqlDialect;
+use crate::schema::query::{canonical_type_for_dialect, SqlDialect};
 use crate::IndexSortOrder;
 // The per-dialect DDL emission seam. Declared below the engine so the three impls
 // can leave it for the three vendor crates without Cargo seeing a cycle.
@@ -5926,13 +5926,23 @@ impl DeclarativeAuthor {
                         // the IR lane's `require_alter_column_rendering`, so an
                         // authored change and a declarative one refuse alike rather
                         // than one lane silently planning invalid DDL.
+                        // Compare the two sides in ONE vocabulary. The LIVE snapshot
+                        // arrives already folded by `mysql_canonical_type` (the catalog
+                        // reader applies it), while the DESIRED side carries the
+                        // dialect-neutral spelling — so a bounded `t.string({ length })`
+                        // reads `character varying(191)` against a live `text` and every
+                        // such column looks like a type change. Same idiom as
+                        // `existence_probe`'s `dtypes_match`, which canonicalises both
+                        // sides before asking whether they differ.
+                        let live_ct = canonical_type_for_dialect(&lc.data_type, self.dialect);
+                        let desired_ct = canonical_type_for_dialect(&c.data_type, self.dialect);
                         if self.dialect == SqlDialect::Mysql
-                            && (lc.data_type != c.data_type
+                            && (live_ct != desired_ct
                                 || lc.case_sensitive != c.case_sensitive
                                 || lc.nullable != c.nullable)
                         {
                             let change = if lc.nullable != c.nullable
-                                && lc.data_type == c.data_type
+                                && live_ct == desired_ct
                                 && lc.case_sensitive == c.case_sensitive
                             {
                                 "nullability"
@@ -5945,7 +5955,7 @@ impl DeclarativeAuthor {
                                 change,
                             });
                         }
-                        if lc.data_type != c.data_type || lc.case_sensitive != c.case_sensitive {
+                        if live_ct != desired_ct || lc.case_sensitive != c.case_sensitive {
                             // The differ's half of the identity rule. It keys on the
                             // LIVE identity property, not the desired one: the
                             // statement about to be rendered runs against the column
