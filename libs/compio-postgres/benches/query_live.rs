@@ -1,6 +1,35 @@
 //! Hot-path cost of the opt-in per-operation work, measured against a live
 //! server.
 //!
+//! THIS BENCHMARK CANNOT ANSWER THE QUESTION IT WAS BUILT FOR, and the
+//! measurement that says so is worth more than the one it was meant to
+//! produce. Measured 2026-08-21 on an otherwise idle machine, two runs of this
+//! file at one commit, against one database, nothing changed in between:
+//!
+//!   mode                     run 1        run 2      drift
+//!   baseline                 358.49 us    416.28 us   +16%
+//!   cache_immediate          144.33 us    202.16 us   +40%
+//!   cache_counting_only      317.25 us    332.43 us    +5%
+//!   read_deadline_armed      342.01 us    337.53 us    -1%
+//!   observer_never_reports   341.51 us    574.49 us   +68%
+//!
+//! Each iteration is a full round trip to PostgreSQL, so the sample is
+//! dominated by server and socket variance. The costs this file set out to
+//! price - an atomic load, a counter check, an Option test - are tens of
+//! nanoseconds against ~350 us of round trip, a ratio near 1:10000. They are
+//! not small here; they are INVISIBLE, and a run that reports them is
+//! reporting noise. Three of the five modes came out FASTER than baseline in
+//! run 1, which they cannot be, because they only add work.
+//!
+//! What survives: `cache_immediate` runs at 0.40 and 0.49 of baseline in the
+//! two runs. That agrees in direction and rough size across the noise and
+//! matches the mechanism (a named prepared statement is reused instead of
+//! reparsed). Quote that one; do not quote the others.
+//!
+//! To price the per-operation work, write an IN-PROCESS microbenchmark of the
+//! code path, the way `benches/buf_fill.rs` does. Do not add samples here: the
+//! noise floor is a property of the round trip, not of the sample count.
+//!
 //! Four features added work to paths every query crosses, and each was
 //! justified on correctness rather than cost: the socket read deadline
 //! consults an obligation counter on the read poll, the statement cache's
