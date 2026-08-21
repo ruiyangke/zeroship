@@ -362,6 +362,32 @@ impl DmlRenderer for MysqlDmlRenderer {
             )),
         }
     }
+
+    /// This vendor renders NO vendor ops, and that is written here rather than
+    /// inherited.
+    ///
+    /// The sixteen privileged op kinds — roles, grants, RLS, policies, functions,
+    /// extensions, schemas, `pgRaw` — are every one of them `dialect_scope = PgOnly`.
+    /// MySQL has no analogue for any of them, so there is nothing to render. The
+    /// engine refuses earlier and more informatively (the lower seam checks
+    /// `Capability::PostgresVendorPrimitives` and reports the op KIND), so nothing in
+    /// the shipping paths reaches this.
+    ///
+    /// It is written out anyway because
+    /// [`zero_migrate_backend::renderer::DmlRenderer`] gives no method a default
+    /// body. An `Option` or an inherited refusal would let the NEXT backend acquire
+    /// this posture by omitting something, which is the exact failure
+    /// [`zero_migrate_backend::registry::BackendVendor::guard`] exists to prevent.
+    fn render_vendor_op(
+        &self,
+        _op: &Op,
+        _eff_schema: &str,
+    ) -> Result<
+        Vec<zero_migrate_backend::vendor::VendorStatement>,
+        zero_migrate_backend::vendor::VendorError,
+    > {
+        Err(zero_migrate_backend::vendor::VendorError::VendorOpsUnsupported(DIALECT))
+    }
 }
 
 fn mysql_trigger_name(name: &str, eff_schema: &str) -> Result<String, IrLowerError> {

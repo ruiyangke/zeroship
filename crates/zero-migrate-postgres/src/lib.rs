@@ -27,15 +27,23 @@ pub mod guard;
 mod schema;
 mod vendor;
 
-/// The privileged PostgreSQL vendor ops (roles, grants, policies, functions,
-/// triggers, RLS, `pgRaw`) lowered to structured DDL.
-///
-/// PUBLIC because the engine calls it directly at three sites covering sixteen op
-/// kinds that never reach `DmlRenderer::render_trigger_op` — so unlike the two
-/// renderers, this one is not reachable through the registry and has to be named.
-/// That asymmetry is real and is worth stating: the vendor-op surface is the one
-/// part of a backend the engine still knows by name rather than by contract.
-pub use vendor::render_vendor_op;
+// `render_vendor_op` IS NOT RE-EXPORTED, and its absence is the enforcement.
+//
+// It used to be `pub use vendor::render_vendor_op`, because the engine called it
+// directly at three sites covering sixteen op kinds that never reach
+// `DmlRenderer::render_trigger_op`. That made the vendor-op surface the one part of
+// a backend the engine knew by NAME rather than by contract, and both this file and
+// `zero_migrate::render::vendor` said so in as many words.
+//
+// It is behind `DmlRenderer::render_vendor_op` now. `mod vendor` above is private,
+// so with this re-export gone the function is UNREACHABLE from outside this crate:
+// core naming it again is an E0603 privacy error at the use site, not a review
+// comment and not a census finding. That is strictly stronger than the textual
+// census in `tests/dialect_matrix/core_names_no_vendor_crate.rs`, which stays as the
+// backstop for the couplings a privacy rule cannot express across a crate boundary.
+//
+// The function itself did not move and did not change. `crate::vendor` is the same
+// module it was; what changed is who may ask for it.
 
 /// This vendor's line-1 guard, re-exported because the engine's public API has
 /// surfaced it since before the vendor crates existed.

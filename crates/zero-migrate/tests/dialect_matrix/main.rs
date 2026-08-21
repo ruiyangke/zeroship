@@ -38,3 +38,4 @@ mod sqlite_trigger_quoting_reaches_postgres;
 mod sqlite_trigger_render_bytes;
 mod touched_tables_dialect_legs;
 mod unsupported_reason_is_operator_facing;
+mod vendor_ops_dispatch_per_vendor;

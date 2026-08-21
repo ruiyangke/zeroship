@@ -243,6 +243,46 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
         op: &Op,
         eff_schema: &str,
     ) -> Result<Vec<crate::vendor::VendorStatement>, IrLowerError>;
+
+    /// This vendor's rendering of the PRIVILEGED vendor ops — schemas, extensions,
+    /// roles, grants, RLS, policies, functions and the raw escape.
+    ///
+    /// # Why this is on the trait, and what it replaced
+    ///
+    /// The engine used to reach PostgreSQL's renderer BY NAME:
+    /// `zero_migrate::render::vendor` re-exported `zero_migrate_postgres::render_vendor_op`
+    /// and `render::lower` called it at three sites covering sixteen op kinds. Those
+    /// op kinds never touch [`DmlRenderer::render_trigger_op`], which is exactly why
+    /// they were left behind when the two renderers went behind the contract, and
+    /// `render/vendor.rs` recorded the gap honestly rather than hiding it. This
+    /// method closes it: the vendor-op surface is now reached the same way every
+    /// other spelling decision is, through the registry.
+    ///
+    /// # Two vendors REFUSE, and they refuse in writing
+    ///
+    /// Measured rather than assumed: `zero-migrate-sqlite` and `zero-migrate-mysql`
+    /// contain no vendor-op renderer and never did, every one of the sixteen op kinds
+    /// is `dialect_scope = PgOnly`, and the engine's lower seam refuses a target
+    /// without `Capability::PostgresVendorPrimitives` before it ever gets here.
+    ///
+    /// So the obvious shape was an `Option` or a default body returning a refusal —
+    /// and it is the wrong one, for the reason
+    /// [`crate::registry::BackendVendor::guard`] spells out at length. A default body
+    /// is an answer a future backend acquires by OMITTING something. This method has
+    /// none, like every other method on this trait, so a fourth vendor has to answer
+    /// the question in its own crate and in its own diff. The two refusals cost five
+    /// lines each and each one names its own dialect through its `DIALECT` const.
+    ///
+    /// # Errors
+    /// [`crate::vendor::VendorError`] on an invalid identifier, an unrenderable
+    /// predicate or an empty required list; and
+    /// [`crate::vendor::VendorError::VendorOpsUnsupported`] from a vendor that renders
+    /// no vendor ops at all.
+    fn render_vendor_op(
+        &self,
+        op: &Op,
+        eff_schema: &str,
+    ) -> Result<Vec<crate::vendor::VendorStatement>, crate::vendor::VendorError>;
 }
 
 #[cfg(test)]

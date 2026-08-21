@@ -309,17 +309,46 @@ impl DmlRenderer for SqliteDmlRenderer {
     /// pass has to finish, not a boundary that is done". Nothing about the emitted
     /// SQL changed when it moved — that is what made it a move.
     ///
-    /// PostgreSQL is STILL in the position SQLite just left, via `render::vendor`,
-    /// and that one is not the same shape: `render::vendor` is PostgreSQL by
-    /// CONSTRUCTION rather than by gate (it carries no dialect literal at all), so
-    /// every dialect-match census scores it zero. Do not read this resolved note as
-    /// covering it.
+    /// PostgreSQL used to be STILL in the position SQLite just left, via
+    /// `render::vendor`, and that one was not the same shape: `render::vendor` was
+    /// PostgreSQL by CONSTRUCTION rather than by gate (it carried no dialect literal
+    /// at all), so every dialect-match census scored it zero. RESOLVED as well now —
+    /// see [`Self::render_vendor_op`] below and `zero_migrate::render::vendor`. The
+    /// census that DOES see it is `core_names_no_vendor_crate.rs`, which counts crate
+    /// idents rather than dialect literals.
     fn render_trigger_op(
         &self,
         op: &Op,
         eff_schema: &str,
     ) -> Result<Vec<zero_migrate_backend::vendor::VendorStatement>, IrLowerError> {
         Ok(vec![render_sqlite_trigger_op(op, eff_schema)?])
+    }
+
+    /// This vendor renders NO vendor ops, and that is written here rather than
+    /// inherited.
+    ///
+    /// This is the other half of the note above: PostgreSQL is no longer "in the
+    /// position SQLite just left", because the engine no longer names
+    /// `zero_migrate_postgres::render_vendor_op`. It asks whichever vendor it
+    /// resolved, and this is what this one answers.
+    ///
+    /// The sixteen privileged op kinds are every one of them
+    /// `dialect_scope = PgOnly` and SQLite has no analogue for any of them, so there
+    /// is nothing to render and no partial answer worth giving. The engine refuses
+    /// earlier and more informatively — the lower seam checks
+    /// `Capability::PostgresVendorPrimitives` and reports the op KIND — so nothing in
+    /// the shipping paths reaches this. It is here because
+    /// [`zero_migrate_backend::renderer::DmlRenderer`] gives no method a default
+    /// body: a vendor's posture has to be visible in that vendor's own diff.
+    fn render_vendor_op(
+        &self,
+        _op: &Op,
+        _eff_schema: &str,
+    ) -> Result<
+        Vec<zero_migrate_backend::vendor::VendorStatement>,
+        zero_migrate_backend::vendor::VendorError,
+    > {
+        Err(zero_migrate_backend::vendor::VendorError::VendorOpsUnsupported(DIALECT))
     }
 }
 

@@ -217,6 +217,24 @@ impl DmlRenderer for PostgresDmlRenderer {
         Ok(sql)
     }
 
+    /// This vendor OWNS the vendor-op surface: all sixteen op kinds are
+    /// `dialect_scope = PgOnly` and every one of them is this crate's spelling.
+    ///
+    /// A one-line delegation to the module that already held them. Nothing about the
+    /// rendering changed when the engine stopped naming it — `crate::vendor` is the
+    /// same ~720 lines it was, and this method exists so that reaching them requires
+    /// going through the registry.
+    fn render_vendor_op(
+        &self,
+        op: &Op,
+        eff_schema: &str,
+    ) -> Result<
+        Vec<zero_migrate_backend::vendor::VendorStatement>,
+        zero_migrate_backend::vendor::VendorError,
+    > {
+        crate::vendor::render_vendor_op(op, eff_schema)
+    }
+
     fn render_trigger_op(
         &self,
         op: &Op,

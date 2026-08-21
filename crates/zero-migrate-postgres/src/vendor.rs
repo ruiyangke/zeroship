@@ -176,12 +176,22 @@ fn type_ref_sql<'a>(value: &'a str, slot: &'static str) -> Result<&'a str, Vendo
 /// `schema` qualifier → connection default → project schema), used to qualify
 /// table-/policy-/trigger-scoped objects.
 ///
+/// `pub(crate)` DELIBERATELY: the one door to this is
+/// `DmlRenderer::render_vendor_op`, which `crate::dml` implements by delegating
+/// here. The engine used to name this function through a re-export at this crate's
+/// root; with that gone and `mod vendor` private, a caller outside this crate cannot
+/// reach it at all. Widening this back to `pub` would hand the engine the ability to
+/// resolve one vendor by name again, which is the coupling the contract removed.
+///
 /// # Errors
 /// [`VendorError`] on an invalid identifier, an unrenderable predicate, or an
 /// empty required list. The caller (`IrAuthor`) is responsible for the SQLite
 /// `PgOnly` refusal BEFORE calling this.
 #[allow(clippy::too_many_lines)]
-pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement>, VendorError> {
+pub(crate) fn render_vendor_op(
+    op: &Op,
+    eff_schema: &str,
+) -> Result<Vec<VendorStatement>, VendorError> {
     Ok(match op {
         // ── Schemas ──────────────────────────────────────────────────────────
         Op::CreateSchema {

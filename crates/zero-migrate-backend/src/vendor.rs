@@ -20,6 +20,7 @@
 //! This module is render-only; it assumes the op already passed both gates.
 
 use crate::dml::IdentQuoteError;
+use zero_migrate_ir::dialect::SqlDialect;
 
 /// A single rendered vendor statement: a name (for the journaled `Migration`), the
 /// forward SQL (no trailing `;`), and the reverse SQL (or `None` for an
@@ -87,4 +88,23 @@ pub enum VendorError {
         /// A human description of the contradiction.
         what: &'static str,
     },
+    /// This vendor renders NO vendor ops at all, and says so itself.
+    ///
+    /// The privileged op kinds — roles, grants, RLS, policies, functions,
+    /// extensions, schemas and the raw escape — are every one of them
+    /// `dialect_scope = PgOnly`. Two of the three shipping vendors have no
+    /// counterpart to render and never had one, so this is the whole of their
+    /// answer to [`crate::renderer::DmlRenderer::render_vendor_op`].
+    ///
+    /// It carries the refusing vendor's own dialect, read from that module's
+    /// `DIALECT` const rather than written as a literal, so the one-dialect-literal
+    /// rule is unaffected.
+    ///
+    /// Reaching this is defence in depth rather than the live refusal path: the
+    /// engine's lower seam already refuses a target that lacks
+    /// `Capability::PostgresVendorPrimitives` BEFORE it asks a renderer, and it
+    /// refuses with `IrLowerError::VendorPgOnly`, which names the op kind. This
+    /// variant is what a vendor returns when something reaches it anyway.
+    #[error("vendor render: {0:?} renders no vendor ops (every vendor op is PgOnly)")]
+    VendorOpsUnsupported(SqlDialect),
 }

@@ -224,6 +224,12 @@ fn a_dml_emitter_holding_a_backend_never_resolves_another() {
         // `render/lower.rs`: the two that already carried, plus the view-query
         // subtree below its `render_view_query` door.
         "zero-migrate/src/render/lower.rs::trigger_inverse_from_history",
+        // Added when the vendor-op surface went behind
+        // `DmlRenderer::render_vendor_op`: this one used to call
+        // `crate::render::vendor::render_vendor_op` — a re-export of one vendor
+        // crate — where its trigger sibling directly above had always taken the
+        // resolved backend. It takes one now too.
+        "zero-migrate/src/render/lower.rs::vendor_inverse_from_history",
         "zero-migrate/src/render/lower.rs::render_view_op",
         "zero-migrate/src/render/lower.rs::render_select_ast",
         "zero-migrate/src/render/lower.rs::render_join",

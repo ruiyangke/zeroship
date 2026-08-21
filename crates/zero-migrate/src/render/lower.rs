@@ -5881,8 +5881,9 @@ impl IrAuthor {
                     return Err(IrLowerError::VendorPgOnly(op_kind_tag(op)));
                 }
                 enforce_vendor_capability_at_lower(op, &self.effective, &eff_schema)?;
-                let stmts = crate::render::vendor::render_vendor_op(op, &eff_schema)?;
-                let history_down = vendor_inverse_from_history(op, live_schema, &eff_schema);
+                let stmts = self.backend.render_vendor_op(op, &eff_schema)?;
+                let history_down =
+                    vendor_inverse_from_history(op, live_schema, &eff_schema, self.backend);
                 stmts
                     .into_iter()
                     .map(|s| {
@@ -8464,10 +8465,18 @@ fn trigger_inverse_from_history(
 /// is a native `IF EXISTS` clause, not the catalog-probe mechanism - so reading it
 /// would report every guarded drop as unguarded and re-create an object that may
 /// never have been dropped.
+///
+/// Takes the resolved `backend` rather than reaching for one, which is what its
+/// sibling [`trigger_inverse_from_history`] has always done. Both re-render a
+/// recovered CREATE to recover its SQL, and the renderer is the caller's to choose:
+/// this function used to call `crate::render::vendor::render_vendor_op` — the
+/// engine naming one vendor crate — while the trigger side already asked whichever
+/// vendor the lowering had resolved.
 fn vendor_inverse_from_history(
     op: &Op,
     live_schema: &LiveSchema,
     eff_schema: &str,
+    backend: &dyn DmlRenderer,
 ) -> Option<String> {
     match op {
         Op::DropExtension { name, if_exists } if !if_exists.unwrap_or(false) => {
@@ -8510,7 +8519,8 @@ fn vendor_inverse_from_history(
                 volatility: snapshot.volatility,
                 body: snapshot.body.clone(),
             };
-            let mut statements = crate::render::vendor::render_vendor_op(&create, eff_schema)
+            let mut statements = backend
+                .render_vendor_op(&create, eff_schema)
                 .ok()?
                 .into_iter();
             let statement = statements.next()?;
@@ -8540,7 +8550,8 @@ fn vendor_inverse_from_history(
                 using: snapshot.using.clone(),
                 with_check: snapshot.with_check.clone(),
             };
-            let mut statements = crate::render::vendor::render_vendor_op(&create, &key.schema)
+            let mut statements = backend
+                .render_vendor_op(&create, &key.schema)
                 .ok()?
                 .into_iter();
             let statement = statements.next()?;

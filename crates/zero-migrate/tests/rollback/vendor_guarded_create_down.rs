@@ -8,7 +8,26 @@
 //! operator who accepts the loss.
 
 use zero_migrate::model::ir::Op;
-use zero_migrate::render::vendor::render_vendor_op;
+use zero_migrate::render::vendor::{VendorError, VendorStatement};
+
+/// PostgreSQL's vendor-op rendering, reached through that vendor's REGISTERED
+/// renderer.
+///
+/// This file used to `use zero_migrate::render::vendor::render_vendor_op`, a
+/// re-export of `zero_migrate_postgres::render_vendor_op` at the engine's crate root.
+/// Both are gone: the function is `pub(crate)` behind a private module now, so no
+/// caller outside `zero-migrate-postgres` can name it, and the only door is
+/// `DmlRenderer::render_vendor_op`.
+///
+/// A test naming the vendor whose spelling it asserts on is the legitimate case — the
+/// seven assertions below are all about PostgreSQL's `CREATE SCHEMA` / `CREATE
+/// EXTENSION` output. The shim keeps every call site below byte-identical, so this
+/// commit changed the ROUTE these tests take and not one thing they assert.
+fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement>, VendorError> {
+    zero_migrate_postgres::VENDOR
+        .dml
+        .render_vendor_op(op, eff_schema)
+}
 
 #[test]
 fn a_guarded_create_schema_synthesises_no_down() {
