@@ -836,10 +836,20 @@ jobs:
       # build input is missing - which is why the `pnpm build` and WPT steps
       # earlier in this job are load-bearing for it.
       #
-      # The invocation, including the feature list and the deliberate absence of
-      # `-D warnings`, now lives in the script and nowhere else, so a developer
-      # running it locally and this step cannot lint different things. The
-      # reasoning for both is in the script header.
+      # The `--features <the two live-db ones>` above became `--all-features` on
+      # 2026-08-20, because "every in-scope target" was scoped BY that list. The
+      # workspace declares 28 features; the list named 2, and the 18 it left off
+      # gated 10 declared targets that arm 3 did not count as unlinted - it
+      # filtered them out of its own expectation. One of them,
+      # zeroship-migrate-adapter's `platform_migrate`, held eleven deny-level
+      # `clippy::await_holding_lock` errors throughout. A fourth arm now checks
+      # the resolution itself against the manifests and names any feature that
+      # did not come out enabled.
+      #
+      # The invocation, including the feature selection and the deliberate
+      # absence of `-D warnings`, lives in the script and nowhere else, so a
+      # developer running it locally and this step cannot lint different things.
+      # The reasoning for both is in the script header.
       - name: Clippy, with proof every crate was linted
         run: tests/clippy_gate.sh
 

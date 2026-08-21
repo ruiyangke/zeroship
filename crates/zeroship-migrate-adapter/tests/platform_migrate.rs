@@ -15,6 +15,35 @@
 //! a test database (set `PG_TEST_URL`; skips clean when unset).
 
 #[cfg(feature = "platform-cli")]
+// `DB_APPLY_LOCK` is held across the awaits of every live-PG test below, on
+// purpose, and this is the one topology in which that is not the bug the lint
+// describes.
+//
+// The lint fires when a `MutexGuard` outlives an await point, because on a
+// multi-task executor the holder can yield to a task that wants the same lock
+// and neither can proceed. Neither half of that applies here:
+//
+//   - `#[compio::test]` expands to a plain `#[test]` fn that builds its OWN
+//     `compio::runtime::Runtime` and `block_on`s the body (compio-macros
+//     test_fn.rs). One runtime per test, one test per harness thread, and the
+//     future is driven to completion on the thread that created it - a
+//     `MutexGuard` is `!Send`, so it could not be otherwise.
+//   - No OTHER task in that runtime takes this lock. The only contenders are
+//     the harness's other test threads, which is exactly what the lock is for:
+//     these tests `CREATE ROLE` in the cluster-global `pg_authid` catalog and
+//     PG aborts one of two concurrent creators with "tuple concurrently
+//     updated" (see DB_APPLY_LOCK's own comment). Serializing THREADS is the
+//     point, and blocking a thread that has nothing else to run costs nothing.
+//
+// `concurrent_migrates_creating_the_same_roles_both_succeed` is the case worth
+// checking against this: it holds the guard and spawns a second OS thread with
+// its own runtime, but that thread never takes the lock, so there is no cycle.
+//
+// The suppression is module-scope with this reason rather than eleven
+// attributes, and clippy.toml's "only permitted local suppressions" rule is
+// about `clippy::disallowed_methods` and the raw-environment boundary, not this
+// lint.
+#[allow(clippy::await_holding_lock)]
 mod platform_cli {
     use std::path::{Path, PathBuf};
 
