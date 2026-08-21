@@ -509,7 +509,15 @@ the deploy and names each pair until that is done.
 
 `ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL` is the odd one and the only one that must be
 privileged: `migrated` uses it to `CREATE SCHEMA "<app_id>"` and
-`CREATE ROLE migrator_<app_id>` for each deployed app.
+`CREATE ROLE migrator_<app_id>` for each deployed app. Because it is privileged
+it is also the one whose compose default is NOT a DSN: since 2026-08-21 it
+defaults to `urn:zeroship:file:/etc/zeroship/secrets/migrate-dsn`, the same
+mounted file the platform-migration one-shot reads. Setting the variable to a
+literal DSN still works and is what a `.env` override does; the point is that
+the checked-in file no longer carries superuser material, and that repointing
+`secrets/migrate-dsn` at a real database now moves BOTH privileged readers
+instead of only the one-shot. `check 6d` of `tests/config_name_alignment_gate.sh`
+refuses a superuser DSN reappearing in any `environment:` value.
 
 Optional: `OPENAI_API_KEY` (defaults empty).
 

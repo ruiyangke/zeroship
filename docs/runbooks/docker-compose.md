@@ -428,6 +428,15 @@ The privileged DSN is mounted as a file, not passed as an argument: there is no
 `docker inspect`, `docker ps --no-trunc` and /proc/<pid>/cmdline. The file must
 be mode 0600.
 
+`migrated` mounts the SAME file and reads it through
+`ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL`, which defaults to
+`urn:zeroship:file:/etc/zeroship/secrets/migrate-dsn`. Those are the only two
+readers of a superuser credential in the deployment and they now take it from
+one place: repointing `secrets/migrate-dsn` at a real database moves both. Until
+2026-08-21 `migrated` carried its own inline superuser DSN default, so the same
+repointing moved the one-shot and silently left `migrated` provisioning against
+the in-compose Postgres.
+
 The source of truth is the committed JS DSL corpus in `db/migrations-ts/`; the
 runner records each `.ts` file to transient IR and applies that plan.
 control/auth `depends_on` it with

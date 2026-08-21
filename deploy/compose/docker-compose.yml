@@ -414,7 +414,30 @@ services:
       # SUPERUSER DSN, and the reason this service exists: applying an app's
       # migrations means CREATE SCHEMA "<app_id>" + CREATE ROLE migrator_<app_id>,
       # which the least-priv role above cannot do.
-      ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL: ${ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL:-postgres://postgres:zeroship@postgres:5432/zeroship}
+      #
+      # A FILE REFERENCE, NOT A LITERAL, and the same file the `migrate`
+      # one-shot above opens. Until 2026-08-21 the default here was the inline
+      # DSN `postgres://postgres:<password>@postgres:5432/zeroship`, which put
+      # the cluster SUPERUSER credential in a tracked file that people copy and
+      # in this container's /proc/<pid>/environ. Check 6c of
+      # tests/config_name_alignment_gate.sh had banned exactly that grammar in
+      # argv since 2026-08-16 and could not see an `environment:` default;
+      # check 6d now does, and it derives the superuser's name from the
+      # postgres service in this same file rather than from a list.
+      #
+      # ONE SOURCE, not two. `migrate` and `migrated` need the SAME privileged
+      # credential against the SAME cluster, and until this change they took it
+      # from different places: an operator who repointed secrets/migrate-dsn at
+      # a real database - which crates/cli/src/dev.rs invites, writing the file
+      # only when absent so a repointed value survives re-runs - moved the
+      # platform migration one-shot and left `migrated` still provisioning
+      # against the in-compose postgres. That is a divergence with no signal.
+      #
+      # `urn:zeroship:file:<path>` is the environment-surface spelling of a
+      # `--<name>-file` flag: crates/core/src/config/names.rs resolves it
+      # through the same read_secret_file() the flag uses, so the owner-only
+      # (0600) permission refusal applies here too.
+      ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL: ${ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL:-urn:zeroship:file:/etc/zeroship/secrets/migrate-dsn}
       # The SAME internal key every other service reads, under the SAME name.
       # It used to be spelled differently here, which is precisely the split
       # this migration removed.
@@ -434,6 +457,13 @@ services:
       ZEROSHIP_AUTH_PLATFORM_JWKS_URL: http://auth:9092/oauth2/.well-known/jwks.json
     volumes:
       - ../ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
+      # The privileged DSN the provision setting above references. Same file,
+      # same container path and same `zeroship dev init` output as the
+      # `migrate` one-shot's mount; deploy/scripts/deploy-remote.sh discovers
+      # both by grepping `/etc/zeroship/secrets/<name>` out of this file and
+      # `sort -u`s the result, so a second reference costs it nothing and its
+      # per-service readability probe now covers this container too.
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/migrate-dsn:/etc/zeroship/secrets/migrate-dsn:ro
     # compio/io_uring, same as every other native service here.
     security_opt:
       - seccomp:unconfined
