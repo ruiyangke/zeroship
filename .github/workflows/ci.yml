@@ -2115,11 +2115,11 @@ jobs:
         with:
           node-version: 22
       - uses: pnpm/action-setup@v4
-      # lsof because the harness frees its port band with `lsof -ti :$PORT`
-      # before binding; without it a stale listener is not cleared and the
-      # failure reads as a service that would not start.
+      # No lsof: the harness allocates its ports per run (tests/lib/e2e_ports.sh)
+      # instead of pinning a band and SIGKILLing whatever holds it, so there is
+      # no stale listener to clear. This comment used to explain the opposite.
       - name: Install harness prerequisites
-        run: sudo apt-get update && sudo apt-get install -y lsof postgresql-client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
       - run: pnpm install --frozen-lockfile
       # The vendored engine ships no dist/ and the vite-plugin imports it, so it
       # builds before the SDKs. Same ordering as the `sdk` and golden-path jobs.
