@@ -107,9 +107,10 @@ fn unsigned_advance_bind_allowed(bind_host: &str, unsigned_advance: bool) -> boo
     !unsigned_advance || is_loopback_bind(bind_host)
 }
 
-// The usage-stream producer wiring (`UsageStreamSettings::from_env` +
-// `build_usage_outbox`) is shared with the gateway producer; it lives in
-// `zeroship_metering`.
+// The usage-stream producer wiring (`build_usage_outbox`) is shared with the
+// gateway producer and lives in `zeroship_metering`. What it is fed comes from
+// this binary's own `metering.*` declarations - see
+// `zeroship_worker::config::usage_stream_settings`.
 
 #[allow(missing_debug_implementations)]
 pub struct WorkerConfig {
@@ -328,28 +329,22 @@ fn main() -> std::io::Result<()> {
             "storage_remote",
             CheckValue::Flag(storage_backend.as_ref().is_some_and(StorageBackendConfig::is_remote)),
         );
+        // Both from the RESOLVED settings, which is the same expression the
+        // producer boots from. They used to be two independent readings of
+        // `REDPANDA_BROKERS` / `USAGE_EVENTS_TOPIC` straight out of the
+        // environment, so the report could only agree with the producer while
+        // the environment was the sole channel; with a flag it would have
+        // reported `usage_stream_configured=false` on a worker whose outbox was
+        // running. This field is the surface a harness asserts the producer on
+        // BEFORE it launches anything, so it disagreeing is worse than useless.
+        let usage_stream = zeroship_worker::config::usage_stream_settings(&settings);
         report.field(
             "usage_stream_configured",
-            CheckValue::Flag(
-                zeroship_core::declared_env!(
-                    external,
-                    "REDPANDA_BROKERS",
-                    WorkerSettingsConsumer
-                )
-                .is_some_and(|s| !s.trim().is_empty()),
-            ),
+            CheckValue::Flag(usage_stream.producer_enabled()),
         );
         report.field(
             "usage_events_topic",
-            CheckValue::Plain(
-                zeroship_core::declared_env!(
-                    external,
-                    "USAGE_EVENTS_TOPIC",
-                    WorkerSettingsConsumer
-                )
-                    .filter(|s| !s.trim().is_empty())
-                    .unwrap_or_else(|| zeroship_metering::DEFAULT_USAGE_EVENTS_TOPIC.to_string()),
-            ),
+            CheckValue::Plain(usage_stream.effective_topic().to_string()),
         );
 
         report.emit(*settings.check_config_format.get());
@@ -482,18 +477,13 @@ fn main() -> std::io::Result<()> {
         .unwrap_or_else(|| bind_addr.to_string());
     let meter_source = format!("{worker_base}-{}", uuid::Uuid::new_v4());
     let meter = Arc::new(zeroship_metering::Meter::with_source(meter_source.clone()));
-    // Resolve the usage-stream producer config from the environment. Worker
-    // overlay loading is disabled as a credential boundary, so `fm` contains
-    // only compiled defaults.
-    let fm = &boot.overlay.config.metering;
-    let stream_settings = zeroship_metering::UsageStreamSettings::from_env().or(
-        zeroship_metering::UsageStreamSettings {
-            brokers: fm.redpanda_brokers.clone(),
-            topic: fm.usage_events_topic.clone(),
-            group_id: fm.producer_group_id.clone(),
-            wal_path: fm.outbox_wal_path.clone(),
-        },
-    );
+    // The producer's four `metering.*` declarations, already resolved. The
+    // worker deliberately has no TOML overlay source (9b205f6ed, a credential
+    // boundary), so its tiers are flag then `ZEROSHIP_METERING_*` then the
+    // compiled default - and the flag is what nine e2e harnesses had to fake
+    // with ambient variables on the command prefix until 2026-08-20, because
+    // `UsageStreamSettings::from_env` was the only channel that existed.
+    let stream_settings = zeroship_worker::config::usage_stream_settings(&settings);
     // Keyed on the host, NOT on `meter_source`: the source carries a per-boot
     // uuid so two live producers never share a client id, and naming the WAL
     // after it meant every restart opened a new empty file and orphaned
@@ -515,11 +505,20 @@ fn main() -> std::io::Result<()> {
                 "metering usage-event outbox started"
             );
         }
+        // NOT a refusal, and the choice is load-bearing. A worker with no
+        // brokers is a supported deployment - `zeroship dev` and every
+        // non-billing e2e harness run one - so exiting here would break far
+        // more launches than it protects. What it must not be is INVISIBLE:
+        // this arm drains the meter and DROPS every event for the life of the
+        // process, which on a billing rail is indistinguishable from an app
+        // that served no traffic. So the disabled state is announced with a
+        // fixed phrase a harness can assert on, and `--check-config` reports
+        // `usage_stream_configured=false` before a byte is served.
         Ok(None) => {
             zeroship_metering::spawn_disabled_drain_task(
                 Arc::clone(&meter),
                 zeroship_metering::DEFAULT_OUTBOX_INTERVAL,
-                "REDPANDA_BROKERS is not set".to_string(),
+                "no --metering-brokers / ZEROSHIP_METERING_BROKERS".to_string(),
             );
         }
         // FATAL, not a warning. Brokers are configured, so the operator

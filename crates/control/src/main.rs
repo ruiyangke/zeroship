@@ -790,7 +790,7 @@ fn main() -> std::io::Result<()> {
         .map(str::to_string)
         .or_else(|| {
             file_metering
-                .redpanda_brokers
+                .brokers
                 .as_deref()
                 .filter(|s| !s.trim().is_empty())
                 .map(|_| "redpanda".to_string())
@@ -800,13 +800,13 @@ fn main() -> std::io::Result<()> {
     {
         settings.stream_config.get().clone()
     } else if let Some(brokers) = file_metering
-        .redpanda_brokers
+        .brokers
         .as_deref()
         .filter(|s| !s.trim().is_empty())
     {
         // Matches zeroship_metering::DEFAULT_USAGE_EVENTS_TOPIC.
         let topic = file_metering
-            .usage_events_topic
+            .events_topic
             .as_deref()
             .filter(|s| !s.trim().is_empty())
             .unwrap_or("usage-events");

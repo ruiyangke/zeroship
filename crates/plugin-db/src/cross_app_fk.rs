@@ -12,20 +12,53 @@
 //! which storage engine an app is running on.
 //!
 //! **Why not under `backend/sqlite/`?** This module was lifted out
-//! of the old SQLite-only subtree: the rule applies on
-//! the PG build too (where the orchestrator's `register_model` pipeline
-//! enforces it for every deploy), so gating the file behind the
-//! optional `sqlite` Cargo feature would mean PG-only builds never run
-//! the check. The design-lineage signal that the rule originated in the
-//! SQLite ATTACH design lives in the rustdoc here; the implementation
-//! is engine-agnostic (pure-Rust JSON walk, no SQL).
+//! of the old SQLite-only subtree so that a PG-only build would still
+//! compile it. The implementation is engine-agnostic (pure-Rust JSON
+//! walk, no SQL); the design-lineage signal that the rule originated in
+//! the SQLite ATTACH design lives in the rustdoc here.
 //!
-//! Hook point: [`crate::register_model::bootstrap::build_ctx`]
-//! invokes [`reject_cross_app_fk`] after the strictness read and BEFORE
-//! the advisory-lock acquire. The order is load-bearing: rejecting a
-//! malformed schema at parse time means we never take the per-app
-//! `register_model` lock for a deploy that will fail validation, so
-//! concurrent deploys for the same app stay un-blocked.
+//! # THIS VALIDATOR HAS NO PRODUCTION CALL SITE
+//!
+//! Enumerated 2026-08-20. Exactly two lines in the tree call
+//! [`reject_cross_app_fk`], and neither is reachable from a running
+//! worker:
+//!
+//! - `register_model/bootstrap.rs:133`, in `bootstrap` - NOT in
+//!   `build_ctx`, which this paragraph named until 2026-08-20 and which
+//!   does not call it and runs on the far side of the advisory lock.
+//!   The whole `bootstrap` module is `#[cfg(any(test, feature =
+//!   "test-helpers"))]` (`register_model/mod.rs:126`), so it is absent
+//!   from a default build. Its only caller is `run_pipeline`, gated the
+//!   same way (`register_model/mod.rs:344`).
+//! - `register_model/sqlite_engine.rs:102`, in `run_sqlite_via_engine`.
+//!   That function is ungated, but every call to it is inside
+//!   `#[cfg(test)] mod tests` in `register_model/mod.rs` (which starts
+//!   at line 460; the calls are at 519-713).
+//!
+//! What production `registerModel` does instead is in
+//! `register_model::exec_register_model`: the PG arm returns `Ok(())`
+//! with no DDL and no validation (the migration engine is the PG schema
+//! authority, applying at deploy), and the SQLite dev arm only calls
+//! `ensure_app_schema`. Neither passes through here.
+//!
+//! **So do not read this module as the thing that keeps foreign keys
+//! inside an app.** That property does hold, but it is owned by the
+//! migration engine, which applies schema at deploy: a dot-qualified
+//! column ref is refused by `reject_cross_app_ref` in the vendored
+//! `zero-migrate` (`render/declarative.rs`), the renderer qualifies
+//! every `REFERENCES` with the schema it was called FOR, and
+//! `crates/migrated` derives that schema from the app id server-side.
+//! The foreign keys section of `docs/reference/db.md` lays out the four
+//! layers with file:line. `crates/zeroship-schema` is NOT one of them -
+//! its FK builders are reached only from the same cfg-gated pipeline
+//! this module sits in, and the engine carries its own copy.
+//!
+//! This module is kept because `tests/integration.rs` and
+//! `tests/sqlite_integration.rs` pin its rejection contract, and
+//! because the four-phase pipeline it belongs to is still the reference
+//! shape for an apply. Whether the pipeline (and this with it) should
+//! be deleted outright under the repo's no-back-compat stance is an
+//! open call, flagged the same way at `register_model/mod.rs:41`.
 
 use crate::error::DbError;
 
@@ -43,9 +76,9 @@ use crate::error::DbError;
 /// - a dot-qualified `<app>.<collection>` (e.g. `"other_app.users"`) —
 ///   accepted iff `<app> == app_id`, rejected otherwise.
 ///
-/// The `register_model` pipeline calls this hook once per collection
-/// (one call per `bootstrap::build_ctx` invocation, with the per-
-/// collection field set), so the walk is O(fields-in-one-collection).
+/// Each caller passes ONE collection's field set, so the walk is
+/// O(fields-in-one-collection). See the module header for who those
+/// callers are - in a default build, nobody.
 ///
 /// **Error envelope** matches the contract in `docs/archive/p1-sqlite-implementation-plan.md`
 /// §6: `DbError::Configuration { code: "cross_app_fk_forbidden", ... }`.

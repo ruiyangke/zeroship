@@ -116,12 +116,16 @@ pub(crate) async fn bootstrap<'p, B: RegisterBackend + AuditWriter>(
     // Cross-app FK parse-time check (design §18 Q1, plan §6).
     //
     // Pure-Rust JSON walk over the field set; rejects any `t.ref` whose
-    // `refTarget` carries an `<other_app>.` prefix. Runs on BOTH
-    // backends (PG and SQLite) — the rule is platform policy, not a
-    // SQLite-specific limitation. The implementation lives at
-    // `crate::cross_app_fk` (lifted out of `backend/sqlite/` so PG-only
-    // builds also enforce it); the design lineage (SQLite ATTACH file
-    // isolation) is documented in that module's rustdoc.
+    // `refTarget` carries an `<other_app>.` prefix. The implementation
+    // lives at `crate::cross_app_fk`; the design lineage (SQLite ATTACH
+    // file isolation) is documented in that module's rustdoc.
+    //
+    // THIS LINE IS NOT A PRODUCTION ENFORCEMENT POINT. The enclosing
+    // `bootstrap` module is `#[cfg(any(test, feature =
+    // "test-helpers"))]` (see `super`'s `mod` declarations), so no
+    // running worker executes it. What actually keeps an FK inside one
+    // app is the DDL renderer in `zeroship_schema::query` - see the
+    // enumeration in `crate::cross_app_fk`'s module header.
     //
     // **Order is load-bearing**: this check runs BEFORE the advisory
     // lock acquire. A malformed schema (cross-app FK) rejected here
