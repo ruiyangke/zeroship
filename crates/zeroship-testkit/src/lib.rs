@@ -47,4 +47,9 @@ pub mod exit {
     pub const NO: i32 = 1;
     /// A refusal or a failure: bad input, unreachable server, lost race lost.
     pub const FATAL: i32 = 2;
+    /// The check could not look. Distinct from [`OK`] on purpose: "scanned
+    /// everything, found nothing to do" and "could not scan, so found nothing"
+    /// used to be the same zero, and the sweeper dropped databases on the
+    /// second one. See [`crate::sweep::verdict`].
+    pub const BLIND: i32 = 3;
 }
