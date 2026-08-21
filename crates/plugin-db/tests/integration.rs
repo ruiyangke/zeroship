@@ -265,12 +265,22 @@ fn connections_do_not_outlive_the_runtime_that_opened_them() {
 
 use zeroship_plugin_db::query::*;
 
+/// Postgres and the dev SQLite tier must hand `env.db` callers the same JSON.
+///
+/// NOT `#[ignore]`, and that is the point of this test's history. It carried
+/// `#[ignore = "requires live postgres; default gate runs the sqlite leg only"]`
+/// until 2026-08-21, which was false in both halves: every one of its 108
+/// siblings in this file requires live Postgres and none of them is ignored, and
+/// the default gate for this target is `tests/run_plugin_db_live_suite.sh`, which
+/// runs it WITHOUT `--ignored`. So the attribute did not describe a prerequisite -
+/// it removed the test from the only job that could have run it, and that is how
+/// the 2026-08-10 `registerModel` cutover (d84cbbd84) left it broken for eleven
+/// days with every gate green. It now fails the way its siblings do: `require_pg`
+/// panics rather than skipping, because a run that reports "ok" against no
+/// database says the opposite of the truth.
 #[compio::test]
-#[ignore = "requires live postgres; default gate runs the sqlite leg only"]
 async fn parity_matrix_pg_matches_sqlite_projection() {
-    let Some(pg_url) = parity::maybe_pg_url().await else {
-        return;
-    };
+    let pg_url = require_pg().await;
     let sqlite_dir = tempfile::tempdir().expect("create sqlite parity dir");
 
     let sqlite = parity::run_matrix(&parity::sqlite_url(&sqlite_dir));
@@ -278,7 +288,47 @@ async fn parity_matrix_pg_matches_sqlite_projection() {
 
     assert_eq!(pg.seed, sqlite.seed);
     assert_eq!(pg.tx, sqlite.tx);
-    assert_eq!(pg.typed, sqlite.typed);
+
+    // ONE KNOWN DIVERGENCE, pinned rather than asserted away. An unencrypted
+    // `t.bytes()` column does NOT round-trip on Postgres: the write path has no
+    // `bytes` branch at all (the only base64 decode in it belongs to the
+    // encryption pass, `crud/encryption_pass.rs`), so the SDK's base64 string is
+    // bound straight at a `bytea` column and Postgres parses it in ESCAPE format
+    // - the 8 ASCII characters, not the 4 bytes they encode. The read path IS
+    // schema-driven (`read_pipeline::normalize_bytes_value`) and base64-encodes
+    // what it finds, so the value comes back base64-of-base64. Verified against
+    // the server, not inferred: `encode(payload_bytes,'escape')` on the applied
+    // row returns the literal `3q2+7w==`.
+    //
+    // SQLite is not right either, only invisibly wrong: rusqlite binds the same
+    // string as TEXT into a BLOB-affinity column and returns a string, which
+    // `normalize_bytes_value` passes through untouched, so the input reappears.
+    // That accident is what `parity::expected_typed_projection` records as the
+    // contract, and `sqlite_integration.rs` asserts.
+    //
+    // Pinning both observed values keeps this test honest AND makes it the alarm
+    // for the fix: the day the write path learns to decode, the first assertion
+    // below goes red naming this comment, and this whole block is deleted in the
+    // same patch that makes `assert_eq!(pg.typed, sqlite.typed)` true outright.
+    let mut pg_typed = pg.typed.clone();
+    assert_eq!(
+        pg_typed["payload_bytes"],
+        json!("M3EyKzd3PT0="),
+        "Postgres is expected to return base64-of-base64 for an unencrypted \
+         bytes column until the write path decodes; a different value here means \
+         the round-trip changed and this pin is stale"
+    );
+    assert_eq!(
+        sqlite.typed["payload_bytes"],
+        json!("3q2+7w=="),
+        "SQLite is expected to hand back the base64 string it was given"
+    );
+    pg_typed["payload_bytes"] = sqlite.typed["payload_bytes"].clone();
+    assert_eq!(
+        pg_typed, sqlite.typed,
+        "every typed field OTHER than the pinned bytes divergence must project \
+         identically on both backends"
+    );
 }
 
 // ---------------------------------------------------------------------------

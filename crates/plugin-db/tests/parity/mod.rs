@@ -17,6 +17,35 @@ pub struct MatrixSnapshot {
 
 static MATRIX_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+thread_local! {
+    /// ONE compio runtime per test thread, alive for the whole thread.
+    ///
+    /// This harness used to build a fresh `compio::runtime::Runtime` inside each
+    /// `dispatch_zs` and drop it on the way out, which is invisible on SQLite and
+    /// fatal on Postgres. plugin-db parks its `compio_postgres::Pool` in a
+    /// THREAD-LOCAL `IsolateDbContext` that outlives any one dispatch, and
+    /// `DbPlugin::register` only clears it when the DB URL changes. So the second
+    /// PG dispatch submits a pooled query on sockets registered with an io_uring
+    /// that no longer exists, and it never completes.
+    ///
+    /// Measured on this matrix, not inferred: `setup` returned 200 and `seed`
+    /// died on the 15s `pending timeout` with `pg_stat_activity` showing two
+    /// connections sitting `idle`/`ClientRead` for the whole window - the runtime
+    /// never issued the INSERT. `crates/plugin-db/tests/native_transaction.rs`
+    /// hit the identical wall and carries the same thread-local; its header is
+    /// the long-form account.
+    ///
+    /// Production has one compio runtime per worker thread for the process
+    /// lifetime, so this is the faithful shape as well as the working one.
+    static RT: compio::runtime::Runtime =
+        compio::runtime::Runtime::new().expect("build the per-thread compio runtime");
+}
+
+/// Drive `fut` on this thread's long-lived compio runtime.
+fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+    RT.with(|rt| rt.block_on(fut))
+}
+
 pub fn sqlite_url(root: &tempfile::TempDir) -> String {
     format!("sqlite:{}", root.path().join("parity.sqlite").display())
 }
@@ -54,16 +83,11 @@ fn matrix_schema() -> Value {
 /// these three tests broke.
 fn apply_matrix_schema_ahead_of_runtime(url: &str, collection: &str) {
     let Some(path) = url.strip_prefix("sqlite:") else {
-        // The Postgres leg (`parity_matrix_pg_matches_sqlite_projection`, which
-        // is `#[ignore]`d and needs a live server) has no in-process apply-ahead
-        // here: plugin-db does not depend on `zeroship-migrate-adapter`, the only
-        // compio-postgres bridge to the engine. Refuse loudly rather than boot a
-        // runtime against a schema-less database and report `column does not
-        // exist` from three layers down.
-        panic!(
-            "parity matrix has no apply-ahead for the non-SQLite url {url}; \
-             wire the Postgres leg through zeroship-migrate-adapter before running it"
-        );
+        // The Postgres leg. Same engine, same confined ceiling, same declared
+        // shape - only the dialect and the driver differ, which is the whole
+        // point of a parity matrix. See `apply_matrix_schema_ahead_of_postgres`.
+        apply_matrix_schema_ahead_of_postgres(url, collection);
+        return;
     };
     let db_dir = std::path::Path::new(path)
         .parent()
@@ -71,40 +95,230 @@ fn apply_matrix_schema_ahead_of_runtime(url: &str, collection: &str) {
         .to_path_buf();
     let backend = zeroship_plugin_db::backend::SqliteBackend::new(db_dir)
         .expect("open a SQLite backend on the matrix db_dir");
-    compio::runtime::Runtime::new()
-        .expect("compio runtime build")
-        .block_on(async {
-            zeroship_plugin_db::register_model::apply_declared_schema_to_dev_sqlite_for_tests(
-                &backend,
-                MATRIX_APP_ID,
-                collection,
-                &matrix_schema(),
-                &json!([]),
-            )
-            .await
-            .expect("apply the matrix schema ahead of the runtime")
-        });
+    block_on(async {
+        zeroship_plugin_db::register_model::apply_declared_schema_to_dev_sqlite_for_tests(
+            &backend,
+            MATRIX_APP_ID,
+            collection,
+            &matrix_schema(),
+            &json!([]),
+        )
+        .await
+        .expect("apply the matrix schema ahead of the runtime")
+    });
 }
 
-#[allow(
-    dead_code,
-    reason = "the Postgres parity target uses this helper; sqlite_integration compiles the shared module without calling it"
-)]
-pub async fn maybe_pg_url() -> Option<String> {
-    let url = zeroship_core::config::test_database_url_opt()
-        .unwrap_or_else(|| "postgres://postgres:test@localhost:5434/postgres".to_string());
-    match compio_postgres::connect(&url, compio_postgres::NoTls).await {
-        Ok((client, connection)) => {
-            compio::runtime::spawn(async move {
-                let _ = connection.run().await;
-            })
-            .detach();
-            drop(client);
-            Some(url)
-        }
-        Err(_) => None,
-    }
+/// The confined table-shape ceiling plugin-db's own SQLite arm compiles in.
+///
+/// Read from THE SAME FILE rather than restated here on purpose: the two legs of
+/// this matrix must inject the identical seven system columns, `["id"]` PK and
+/// three system indexes, or the projections they produce differ for a reason
+/// that has nothing to do with the dialect. `tests/inject_policy_mirror_gate.sh`
+/// pins the copies of that rule that exist in the tree; a seventh copy here
+/// would be a copy the gate would then have to be taught about.
+const CONFINED_CEILING_TOML: &str = include_str!("../../policies/confined.policy.toml");
+
+/// Bind that ceiling to the matrix app's schema, the way the Postgres path does.
+///
+/// `plugin-db/policies/confined.policy.toml` carries NO `schema.cross_schema`
+/// grant, and on SQLite it does not need one - the dialect has no schemas, so the
+/// guard's cross-schema gate is inert and the SQLite arm composes the file as
+/// authored. On Postgres it is load-bearing: `GuardConfig` takes schema authority
+/// from the effective policy and NOTHING else ("Schema authority comes only from
+/// the explicit effective policy", `zero-migrate-guard/src/guard/mod.rs`), so the
+/// unbound ceiling denies the engine's own `CREATE TABLE "default"."<coll>"` with
+/// `CrossSchema { schema: "default" }`. Measured: that is exactly how this leg
+/// failed before this grant was appended.
+///
+/// This mirrors `bind_confined_charter_to_schema`
+/// (`crates/migrated/src/policy.rs`), which the managed PG server runs over the
+/// SAME ceiling shape before composing it. IN ONE RESPECT IT IS WEAKER: the
+/// production binder also NARROWS the authored `schema.create_table` and
+/// `schema.rename` grants from `scope = "all"` to this one schema. Skipping that
+/// leaves the test's policy strictly LOOSER than production's, so this matrix
+/// cannot be read as evidence that the confined binding confines anything - it is
+/// a schema applier for a projection test, not a proof about the guard. What it
+/// does have to get right is the table SHAPE, and that comes from the `[[inject]]`
+/// rule, which is the file's verbatim.
+///
+/// It also cannot silently stop applying: `effective_policy_from_charter_toml`
+/// refuses an unknown key, and a ceiling that ever grows its own cross-schema
+/// grant would make this a duplicate rather than a no-op.
+fn matrix_effective_policy() -> zero_migrate::EffectivePolicy {
+    let charter = format!(
+        "{CONFINED_CEILING_TOML}\n\
+         [[grant]]\n\
+         key = \"schema.cross_schema\"\n\
+         value = true\n\
+         scope = {{ include = [\"{MATRIX_APP_ID}\"] }}\n"
+    );
+    zero_migrate::effective_policy_from_charter_toml(&charter)
+        .expect("plugin-db's confined ceiling composes once bound to the matrix app schema")
 }
+
+/// Create the matrix collection's table on POSTGRES before the runtime boots.
+///
+/// # Why this is not a smaller `CREATE TABLE`
+///
+/// The PG arm of `registerModel` has been a pure no-op since long before the
+/// SQLite one became one: on Postgres the schema authority is `crates/migrated`,
+/// which applies ahead of the worker at deploy. A hand-written `CREATE TABLE`
+/// here would test the projection of a table shape no creator ever gets. Driving
+/// the engine, under plugin-db's own confined ceiling, is what makes the two
+/// legs comparable - the system columns, their DDL defaults, the PK and the
+/// three system indexes all arrive from the same policy document on both.
+///
+/// # What this reproduces, and what it does NOT
+///
+/// Same caveat as the SQLite helper, in the same direction. `crates/migrated`
+/// replays AUTHORED migration-IR envelopes; this plans a declarative diff of the
+/// declared schema against live introspection. So a defect in envelope lowering,
+/// in journal versioning of authored migrations, or in the recorder is invisible
+/// on both legs of this matrix. What it does pin is everything downstream of the
+/// applied table: types, defaults, ordering, transaction nesting and the JSON
+/// projection `env.db` hands back.
+///
+/// # Why it drops its two schemas first
+///
+/// The SQLite leg gets a fresh `tempfile::tempdir` per run; Postgres does not.
+/// `run_matrix` mints its collection name from a per-PROCESS counter, so a second
+/// run of this test reuses `fixtures_parity_1` and finds the previous run's rows
+/// already in it - measured, as a `seed` projection with every row DUPLICATED
+/// against a single-copy SQLite side. Dropping the app schema and its journal
+/// schema makes the leg repeatable and, unlike a unique-name-per-run scheme,
+/// leaves nothing behind on a shared server. It is the same pair of statements
+/// `crates/zeroship-migrate-adapter/tests/smoke_apply_pg.rs` opens with, and it
+/// touches only the two schemas this function itself creates.
+fn apply_matrix_schema_ahead_of_postgres(url: &str, collection: &str) {
+    use zero_migrate::apply::backend::MigrationBackend;
+    use zero_migrate::driver::SqlSession;
+    use zero_migrate::{
+        desired_snapshot_for_dialect, Approval, DeclarativeAuthor, ExecutorConfig, GuardConfig,
+        MigrationEngine, PostgresBackend, SqlDialect,
+    };
+    use zeroship_migrate_adapter::CompioPgSession;
+
+    let descriptor = zeroship_plugin_db::register_model::collection_descriptor_for_tests(
+        MATRIX_APP_ID,
+        collection,
+        &matrix_schema(),
+        &json!([]),
+    )
+    .expect("the matrix schema translates to an engine descriptor");
+
+    block_on(async move {
+            let session = CompioPgSession::connect(url)
+                .await
+                .expect("connect the migration session to the parity database");
+
+            // ONE policy, not two. `plan_declarative` and `apply_declarative` both
+            // OVERWRITE the config's policy with this argument
+            // (`engine.rs`: `cfg.clone().with_effective_policy(effective.clone())`
+            // and `policy_exec_cfg.effective = effective.clone()`), so a guard
+            // composed separately would be discarded before it decided anything.
+            let effective = matrix_effective_policy();
+            // project_schema == app_id: plugin-db's PG data plane resolves a
+            // collection to `"<app_id>"."<collection>"`
+            // (`backend/postgres.rs::build_ensure_app_schema`), so the engine has
+            // to own that same schema or the runtime would read a different table
+            // from the one this applied.
+            let exec_cfg =
+                ExecutorConfig::new(MATRIX_APP_ID, MATRIX_APP_ID, effective.clone());
+            session
+                .batch(&format!(
+                    "DROP SCHEMA IF EXISTS \"{}\" CASCADE; \
+                     DROP SCHEMA IF EXISTS \"{}\" CASCADE; \
+                     CREATE SCHEMA \"{}\"",
+                    exec_cfg.project_schema, exec_cfg.pg.meta_schema, exec_cfg.project_schema
+                ))
+                .await
+                .expect("reset the parity app schema and its migration journal");
+
+            let desired = desired_snapshot_for_dialect(
+                MATRIX_APP_ID,
+                std::slice::from_ref(&descriptor),
+                SqlDialect::Postgres,
+                &effective,
+            )
+            .expect("desired snapshot for the matrix collection");
+
+            let engine = MigrationEngine::new();
+            let backend = PostgresBackend::new_generic(&session);
+            // Introspected rather than assumed empty, even though the drop above
+            // guarantees it is: a real applier diffs against what the server
+            // actually holds, and an assumed-empty `live` would author a CREATE
+            // over an existing table on the day someone removes the drop.
+            let live = backend
+                .snapshot_schema(&exec_cfg)
+                .await
+                .expect("introspect the live parity schema");
+            let live_ownership: std::collections::HashMap<String, String> = live
+                .tables
+                .keys()
+                .map(|t| (t.clone(), MATRIX_APP_ID.to_string()))
+                .collect();
+
+            let author = DeclarativeAuthor::new_for_dialect(
+                MATRIX_APP_ID,
+                MATRIX_APP_ID,
+                SqlDialect::Postgres,
+            );
+            let guard_cfg = GuardConfig::confined_with_effective(MATRIX_APP_ID, effective.clone())
+                .for_dialect(SqlDialect::Postgres);
+            let plan = engine
+                .plan_declarative(
+                    &desired,
+                    &live,
+                    &live_ownership,
+                    &author,
+                    &[],
+                    &guard_cfg,
+                    &effective,
+                )
+                .expect("plan the matrix collection against live Postgres");
+
+            engine
+                .apply_declarative(
+                    &plan,
+                    &effective,
+                    Approval::Approved,
+                    &backend,
+                    &exec_cfg,
+                    "parity-matrix",
+                )
+                .await
+                .expect("apply the matrix schema ahead of the runtime");
+
+            // The engine creates the table as the ADMIN role. plugin-db's PG data
+            // plane then reads it as the per-app role, which at this point has no
+            // USAGE on the schema - measured, as `permission denied for schema
+            // default` in the server log, surfacing to the caller as a bare
+            // `500 internal error`.
+            //
+            // Provisioning that role is part of the deploy-time apply, not an
+            // afterthought: `crates/migrated` grants exactly this
+            // (`GRANT USAGE ON SCHEMA ... TO <role>` + table/sequence privileges,
+            // `apply.rs`) immediately after its own apply, for the same reason.
+            // Here the equivalent step is plugin-db's own `ensure_per_app_role`,
+            // which must run AFTER the table exists because it grants `ON ALL
+            // TABLES IN SCHEMA`.
+            let pool = compio_postgres::Pool::connect(url, 2)
+                .await
+                .expect("admin pool for the parity role provisioning");
+            zeroship_plugin_db::auth::ensure_admin_schema(&pool)
+                .await
+                .expect("ensure the platform admin schema");
+            zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, MATRIX_APP_ID)
+                .await
+                .expect("provision the matrix app's runtime role");
+    });
+}
+
+// `maybe_pg_url` lived here and is DELETED. It answered "is there a Postgres?"
+// with `Option`, and its one caller turned `None` into an early `return` - a test
+// that reports "ok" for work it did not do, which is the exact failure
+// `integration.rs::require_pg` was rewritten to stop making. The Postgres parity
+// leg now calls `require_pg` like its 108 siblings and fails without a database.
 
 const SHIM: &str = r#"
 async function _shimRpc(name, input, ctx) {
@@ -338,7 +552,7 @@ pub fn dispatch_zs(url: &str, source: &str, name: &str) -> (u16, Value) {
     let (status, body) = match outcome {
         FetchOutcome::Response { status, body, .. } => (status, body),
         FetchOutcome::Pending { rx, cancel: _ } => {
-            compio::runtime::Runtime::new().unwrap().block_on(async {
+            block_on(async {
                 runtime.start_pump();
                 let settled = compio::time::timeout(Duration::from_secs(15), rx.recv())
                     .await
