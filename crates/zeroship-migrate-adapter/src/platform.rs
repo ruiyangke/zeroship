@@ -269,12 +269,18 @@ fn load_migration_file(path: PathBuf) -> Result<MigrationFile, PlatformMigrateEr
     })
 }
 
-/// Derive the STABLE per-file version anchor from a `db/migrations-ts` filename:
-/// its leading `NNNNNNNNNNNNNN_` timestamp prefix (the standard
-/// filename-as-version convention). This is the deterministic identity every
-/// lowered step of the file is re-stamped from (see [`restamp_stable_versions`]),
-/// so an idempotent re-run reproduces byte-identical journal versions and the
-/// engine's already-applied skip matches across runs.
+/// A HUMAN LABEL for one `db/migrations-ts` file: its leading
+/// `NNNNNNNNNNNNNN_` timestamp prefix.
+///
+/// THIS IS NOT THE VERSION ANCHOR, and this comment said it was until
+/// 2026-08-20 ("the deterministic identity every lowered step of the file is
+/// re-stamped from"). The value returned here reaches only
+/// [`restamp_stable_versions`]'s `debug_assert!` text and its error label;
+/// the journal version is derived from the file's ORDINAL in sorted-filename
+/// order and never consults this prefix. Read `restamp_stable_versions` for
+/// what actually determines a version, and
+/// `docs/decisions/2026-08-20-migration-version-derivation.md` for why the
+/// ordinal is kept rather than this prefix promoted.
 ///
 /// Falls back to the whole file stem when a filename has no digit prefix (never
 /// the case for the committed platform migrations, all `NNNN_slug.ts`).

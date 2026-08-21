@@ -2,9 +2,11 @@
 #
 # One row per file, `<filename>\t<sha256 of the file's bytes>`, sorted by
 # filename -- a verbatim dump of `zeroship_migrations.platform_migration_files`
-# on the production cluster. Refresh it with:
-#
-#     deploy/scripts/deploy-remote.sh --refresh-released-migrations
+# on the production cluster. There is NO flag that refreshes it -- this line
+# named `--refresh-released-migrations` until 2026-08-20 and no such option has
+# ever been parsed. `deploy/scripts/deploy-remote.sh` rewrites this file from
+# the journal on EVERY roll, and exits non-zero when that produced a diff, so a
+# refresh is a deploy and never a separate command.
 #
 # WHY THE CHECKSUMS COME FROM THE JOURNAL AND NOT FROM THE TREE. The migrate
 # runner hashes each file's source bytes and refuses every later run against a
