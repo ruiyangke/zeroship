@@ -1075,14 +1075,19 @@ impl Config {
     /// connection-string parser intentionally does not accept a spelling for
     /// it.
     ///
-    /// This does not replace [`Config::connect_timeout`] (clock 4: resolution,
-    /// TCP/TLS setup, startup, and authentication),
-    /// [`crate::PoolConfig::command_timeout`] (clock 1: a whole pooled command
-    /// plus `CancelRequest` recovery), or
-    /// [`crate::PoolConfig::acquire_timeout`] (clock 5: pool acquisition).
-    /// It also does not replace `tcp_user_timeout`, which bounds how long
-    /// transmitted TCP data may remain unacknowledged rather than silence from
-    /// a connected peer.
+    /// Five clocks bound a query and none substitutes for another. This is
+    /// clock (3); the others are
+    /// [`crate::PoolConfig::command_timeout`] (1: a whole pooled command plus
+    /// `CancelRequest` recovery), the server's own `statement_timeout`
+    /// (2: PostgreSQL-side execution, a GUC with no client knob here, set it
+    /// with `options=-c statement_timeout=...`),
+    /// [`Config::connect_timeout`] (4: resolution, TCP/TLS setup, startup and
+    /// authentication), and [`crate::PoolConfig::acquire_timeout`]
+    /// (5: waiting for a pooled connection).
+    ///
+    /// None of them is `tcp_user_timeout`, which bounds how long transmitted
+    /// TCP data may remain unacknowledged rather than silence from a peer that
+    /// is connected and healthy.
     pub fn read_timeout(&mut self, read_timeout: Duration) -> &mut Config {
         self.read_timeout = Some(read_timeout);
         self
