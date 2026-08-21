@@ -10,8 +10,9 @@ use zeroship_core::auth_provider::{
     SupabaseProvider,
 };
 use zeroship_core::config::{
-    bootstrap_or_exit, validate_master_key_material,
-    AuthProviderKind, CheckConfigReport, CheckValue,
+    audit_credentials, bootstrap_or_exit, mark_dev_escape_active, require_nonempty,
+    validate_master_key_material, AuthProviderKind, BuildProfile, CheckConfigReport, CheckValue,
+    CredentialPosture, CredentialVerdict, SubsystemCredential,
 };
 use zeroship_bundle::{
     build_blob_store, build_workflow_blob_store, BlobStore, StoreUrl, WorkflowBlobStore,
@@ -112,6 +113,84 @@ const LEGACY_MASTER_KEYS_LABEL: &str = "ZEROSHIP_CONTROL_LEGACY_MASTER_KEYS";
 const WORKER_KEY_LABEL: &str = "ZEROSHIP_WORKER_KEY / --worker-key-file";
 /// Same, for the shared pairwise salt (`canonical: "pairwise_salt"`).
 const PAIRWISE_SALT_LABEL: &str = "ZEROSHIP_PAIRWISE_SALT / --pairwise-salt-file";
+/// Operator-facing spelling of the shared internal control key.
+const CONTROL_KEY_LABEL: &str = "ZEROSHIP_CONTROL_KEY / --control-key-file";
+
+/// Every credential the control plane needs, tagged by subsystem.
+///
+/// All four are unconditional. The control plane is the ONE service that
+/// cannot have a disabled subsystem here: it mints the app-scoped tokens
+/// (`worker_key`), serves the internal route registry (`control_key`),
+/// decrypts creator environments (`master_key`) and seeds every app's pairwise
+/// anchor (`pairwise_salt`). Optional credentials it does have - the Stripe
+/// webhook secret, the Stripe API key, the mailer credentials - are NOT rows
+/// here, because a deployment without Stripe is a supported deployment and the
+/// webhook handler already fails closed on an empty secret
+/// (`crates/control/src/stripe_handlers.rs`). Adding them would be exactly the
+/// "blocked on a credential for a service they never enabled" outage the
+/// per-subsystem rule forbids.
+fn control_credentials(settings: &ControlSettings) -> Vec<SubsystemCredential<'_>> {
+    vec![
+        SubsystemCredential {
+            subsystem: "internal-route-registry",
+            enabled: true,
+            label: CONTROL_KEY_LABEL,
+            secret: &settings.control_key,
+            validate: require_nonempty,
+        },
+        SubsystemCredential {
+            subsystem: "worker-token-derivation",
+            enabled: true,
+            label: WORKER_KEY_LABEL,
+            secret: &settings.worker_key,
+            validate: zeroship_core::config::validate_worker_key,
+        },
+        SubsystemCredential {
+            subsystem: "app-env-encryption",
+            enabled: true,
+            label: MASTER_KEY_LABEL,
+            secret: &settings.master_key,
+            validate: validate_master_key_material,
+        },
+        SubsystemCredential {
+            subsystem: "pairwise-subject-anchor",
+            enabled: true,
+            label: PAIRWISE_SALT_LABEL,
+            secret: &settings.pairwise_salt,
+            validate: zeroship_core::config::validate_pairwise_salt,
+        },
+    ]
+}
+
+/// Apply the boot gate, or exit.
+fn enforce_control_credentials(
+    settings: &ControlSettings,
+    overlay: &zeroship_core::config::ConfigSource,
+    check_config: bool,
+) -> CredentialPosture {
+    let posture = audit_credentials(&control_credentials(settings));
+    let verdict = posture.verdict(BuildProfile::current(), check_config);
+    if let Some(banner) = posture.banner("zeroship-control", overlay, verdict) {
+        eprint!("{banner}");
+        tracing::error!(
+            subsystems = %posture
+                .weak()
+                .iter()
+                .map(|weak| weak.subsystem)
+                .collect::<Vec<_>>()
+                .join(","),
+            "control: unconfigured service credential"
+        );
+    }
+    match verdict {
+        CredentialVerdict::Proceed => posture,
+        CredentialVerdict::Refuse => std::process::exit(1),
+        CredentialVerdict::DevEscape => {
+            mark_dev_escape_active();
+            posture
+        }
+    }
+}
 
 fn build_control_auth_provider(
     auth_provider: AuthProviderKind,
@@ -344,36 +423,17 @@ fn main() -> std::io::Result<()> {
     // old `if !check_config || !is_secret_ref(..)` conditional existed only
     // because a check run held the reference TEXT in the value's place; nothing
     // does that now, so the branch is gone rather than restated.
-    if let Err(message) = zeroship_core::config::validate_secret_material(
-        &settings.worker_key,
-        |value| zeroship_core::config::validate_worker_key(WORKER_KEY_LABEL, value),
-    ) {
-        eprintln!("control: {message}");
-        tracing::error!(error = %message, "control: refusing to start with unsafe worker key");
-        std::process::exit(1);
-    }
-
-    let mut missing = Vec::new();
-    if !settings.master_key.is_configured() {
-        missing.push("--master-key-file / ZEROSHIP_CONTROL_MASTER_KEY");
-    }
-    if !settings.control_key.is_configured() {
-        missing.push("--control-key-file / ZEROSHIP_CONTROL_KEY");
-    }
-    if !missing.is_empty() {
-        tracing::error!(
-            missing = %missing.join(", "),
-            "control: refusing to start; required secrets missing"
-        );
-        std::process::exit(1);
-    }
-    if let Err(message) = zeroship_core::config::validate_secret_material(
-        &settings.master_key,
-        |material| validate_master_key_material(MASTER_KEY_LABEL, material),
-    ) {
-        tracing::error!(error = %message, "control: refusing to start with weak master key");
-        std::process::exit(1);
-    }
+    //
+    // THE BOOT GATE replaces three separate guards here, one of which failed
+    // OPEN. `control_key` was checked with a bare `is_configured()`, and
+    // `crates/core/src/config/env.rs` resolves `ZEROSHIP_CONTROL_KEY=` to
+    // `Secret::supplied(Env, Some(""))` - configured, empty, accepted. That is
+    // Gitaly's `if len(conf.GetToken()) == 0 { return ctx, nil }` in a different
+    // language: the credential that is ABSENT gets a branch of its own and that
+    // branch says yes. Every row now runs a validator over the MATERIAL, so
+    // empty, the sentinel and a weak value share one fate.
+    let credentials =
+        enforce_control_credentials(&settings, &boot.overlay.source, check_config);
     // The list is one secret, so its ENTRIES are always material by the time
     // they are split: either the run resolved the whole value, or it is a dry
     // run that read nothing and `legacy_keys` is empty.
@@ -403,13 +463,7 @@ fn main() -> std::io::Result<()> {
     //
     // The dedicated pairwise-salt secret must be strong and stable. It seeds
     // the permanent per-app `pws_` anchor and must equal the gateway's value.
-    if let Err(message) = zeroship_core::config::validate_secret_material(
-        &settings.pairwise_salt,
-        |value| zeroship_core::config::validate_pairwise_salt(PAIRWISE_SALT_LABEL, value),
-    ) {
-        tracing::error!(error = %message, "control: refusing to start with unsafe pairwise salt");
-        std::process::exit(1);
-    }
+    // It is a row of `control_credentials` above, with the same validator.
 
     // Control plane resource-server prerequisites. The console is now a
     // gateway-fronted regular app authenticated via `@zeroship/auth` (BFF) —
@@ -528,6 +582,22 @@ fn main() -> std::io::Result<()> {
         report.field("workers_count", CheckValue::Count(workers_count));
         report.field("gateway_url", CheckValue::Plain(gateway_url.clone()));
         report.field("migrated_url", CheckValue::Plain(migrated_url.clone()));
+        report.field(
+            "service_credentials",
+            CheckValue::Plain(credentials.summary().to_string()),
+        );
+        report.field(
+            "service_credentials_checked",
+            CheckValue::Count(credentials.checked()),
+        );
+        report.field(
+            "service_credentials_skipped",
+            CheckValue::Count(credentials.skipped()),
+        );
+        report.field(
+            "service_credentials_unread",
+            CheckValue::Count(credentials.unread()),
+        );
 
         report.emit(*settings.check_config_format.get());
         return Ok(());

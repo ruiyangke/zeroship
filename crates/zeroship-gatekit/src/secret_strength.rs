@@ -37,12 +37,21 @@
 //!   - ENTROPY of a literal. Length is not strength; generated values are
 //!     covered by the CLI generator tests, while this gate verifies the wiring
 //!     that requires them.
-//!   - secrets with NO floor (`SecretStrength::Unrestricted`). They are
-//!     excluded from the rule set by construction and counted separately.
 //!   - WHICH SERVICE gets which secret. That mapping is asserted by the CLI
 //!     provisioning tests and ultimately by a stack bring-up.
 //!   - files mounted as secrets (`*_FILE` variables pointing into
 //!     `/etc/zeroship/secrets`). Their contents are not in the repository.
+//!   - any credential NOT in `PLATFORM_SECRETS`. Every DSN, the Stripe keys and
+//!     the mailer credentials are outside the table and outside this gate.
+//!
+//! WHAT IT DOES CHECK THAT THE BULLET LIST ABOVE USED TO DISCLAIM. It said
+//! "secrets with NO floor (`SecretStrength::Unrestricted`) ... are excluded
+//! from the rule set by construction and counted separately", and that was
+//! true and was a hole: the two floorless rows are `ZEROSHIP_CONTROL_KEY` and
+//! `ZEROSHIP_MIGRATED_POLICY_SEAL_KEY`, and a compose file shipping either as
+//! empty or as `CHANGE_ME_ZEROSHIP_SERVICE_KEY` printed a clean green. Every
+//! row is now judged by its own validator; the length-floor subset survives as
+//! the arm count.
 
 use zeroship_core::config::{PlatformSecret, SecretStrength};
 
@@ -68,12 +77,24 @@ pub fn enforced_rules(rules: &'static [PlatformSecret]) -> Vec<&'static Platform
 /// `PLATFORM_SECRETS` so the anti-vacuity guard is reachable from a test: pass
 /// an empty slice and the report must REFUSE. The binary passes the real
 /// table.
+///
+/// IT JUDGES EVERY ROW, INCLUDING THE FLOORLESS ONES, and until 2026-08-21 it
+/// did not. The loop ran over [`enforced_rules`], which drops every
+/// [`SecretStrength::Unrestricted`] row, so `ZEROSHIP_CONTROL_KEY` and
+/// `ZEROSHIP_MIGRATED_POLICY_SEAL_KEY` - the two credentials that gate the
+/// internal control surface and creator-migration sealing - went through this
+/// file entirely unexamined. Dropping them was right for a LENGTH comparison,
+/// which they have nothing to compare against, and wrong for the gate: their
+/// validator still refuses an empty value and now refuses
+/// `CHANGE_ME_ZEROSHIP_SERVICE_KEY`, and a compose file that shipped either
+/// would have printed exactly what a clean one prints. `enforced_rules` still
+/// exists and still means "rows with a length floor"; it is now used for the
+/// arm COUNT, not to decide what gets looked at.
 #[must_use]
 pub fn run(compose: &ComposeFile, rules: &'static [PlatformSecret]) -> Report {
     let mut report = Report::new();
 
-    let enforced = enforced_rules(rules);
-    if enforced.is_empty() {
+    if rules.is_empty() {
         report.refuse(
             "zeroship_core::config::PLATFORM_SECRETS yielded ZERO strength rules. Either the \
              table was emptied or every row lost its floor; a gate that checks nothing must not \
@@ -91,11 +112,16 @@ pub fn run(compose: &ComposeFile, rules: &'static [PlatformSecret]) -> Report {
         return report;
     }
 
-    for rule in enforced {
+    for rule in rules {
         let floor = match rule.strength {
             SecretStrength::RawBytes(n) => format!("{n}-byte minimum"),
             SecretStrength::DecodedBytes(n) => format!("{n}-decoded-byte minimum"),
-            SecretStrength::Unrestricted => unreachable!("filtered by enforced_rules"),
+            // Not "no rule". The floorless rows still refuse an empty value and
+            // the named placeholder, which is the whole of what a shipped
+            // deployment file can get wrong about them.
+            SecretStrength::Unrestricted => {
+                "no length floor; must not be empty or the placeholder".to_owned()
+            }
         };
 
         let occurrences = compose.environment_occurrences(rule.env);
@@ -207,7 +233,9 @@ fn measure(
 
 #[cfg(test)]
 mod tests {
-    use zeroship_core::config::{PlatformSecret, MIN_SECRET_BYTES, PLATFORM_SECRETS};
+    use zeroship_core::config::{
+        PlatformSecret, MIN_SECRET_BYTES, PLATFORM_SECRETS, SERVICE_CREDENTIAL_SENTINEL,
+    };
 
     use super::{enforced_rules, run};
     use crate::compose::ComposeFile;
@@ -340,6 +368,98 @@ mod tests {
         match run(&file, PLATFORM_SECRETS).verdict() {
             Verdict::Refused(reason) => assert!(reason.contains("ZERO services"), "{reason}"),
             other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// THE HOLE THIS CHANGE CLOSED. `ZEROSHIP_CONTROL_KEY` has no length floor,
+    /// so the gate used to drop it before looking at compose at all. A file
+    /// shipping the placeholder for it printed a clean green.
+    #[test]
+    fn a_floorless_credential_shipping_the_placeholder_is_red() {
+        let file = ComposeFile::from_yaml(&format!(
+            "services:\n  control:\n    environment:\n      \
+             ZEROSHIP_CONTROL_KEY: {SERVICE_CREDENTIAL_SENTINEL}\n"
+        ))
+        .expect("fixture parses");
+        let report = run(&file, PLATFORM_SECRETS);
+        assert!(
+            matches!(report.verdict(), Verdict::Red { failures: 1, .. }),
+            "got {:?}",
+            report.verdict()
+        );
+        let failure = report
+            .checks()
+            .iter()
+            .find(|check| !check.ok)
+            .expect("one failure");
+        assert!(failure.detail.contains("ZEROSHIP_CONTROL_KEY"), "{failure:?}");
+        assert!(
+            failure.detail.contains(SERVICE_CREDENTIAL_SENTINEL),
+            "the failure must quote the placeholder it found: {failure:?}"
+        );
+
+        // The one-variable control: the SAME floorless credential with one byte
+        // of real material is green, so the failure is about the placeholder and
+        // not about the row being floorless.
+        let ok = ComposeFile::from_yaml(
+            "services:\n  control:\n    environment:\n      ZEROSHIP_CONTROL_KEY: x\n",
+        )
+        .expect("fixture parses");
+        assert!(matches!(
+            run(&ok, PLATFORM_SECRETS).verdict(),
+            Verdict::Green { .. }
+        ));
+    }
+
+    /// Empty and the placeholder must be the SAME verdict on a floorless row -
+    /// the two `${VAR:-}` spellings a deployment file actually takes.
+    #[test]
+    fn an_empty_default_and_the_placeholder_default_fail_alike() {
+        let judge = |value: &str| {
+            let file = ComposeFile::from_yaml(&format!(
+                "services:\n  migrated:\n    environment:\n      \
+                 ZEROSHIP_MIGRATED_POLICY_SEAL_KEY: ${{ZEROSHIP_MIGRATED_POLICY_SEAL_KEY:-{value}}}\n"
+            ))
+            .expect("fixture parses");
+            run(&file, PLATFORM_SECRETS).verdict()
+        };
+        assert!(matches!(judge(""), Verdict::Red { failures: 1, .. }));
+        assert!(matches!(
+            judge(SERVICE_CREDENTIAL_SENTINEL),
+            Verdict::Red { failures: 1, .. }
+        ));
+
+        // The one-variable partner: the same `:-` default carrying real
+        // material passes, so both refusals are about the VALUE.
+        assert!(matches!(judge("real-seal-key"), Verdict::Green { .. }));
+    }
+
+    /// The compose file this repository actually ships must pass. That is the
+    /// binary's job, but asserting it here as well means the Loki case - a safe
+    /// code default defeated by the project's own deployment artifact - is a
+    /// `cargo test` failure and not only a CI-script failure.
+    #[test]
+    fn the_shipped_compose_file_passes_every_row() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../deploy/compose/docker-compose.yml");
+        let compose = ComposeFile::load(&path).expect("the shipped compose file parses");
+        let report = run(&compose, PLATFORM_SECRETS);
+        assert!(
+            matches!(report.verdict(), Verdict::Green { .. }),
+            "deploy/compose/docker-compose.yml must satisfy every platform secret rule: {:?}",
+            report
+                .checks()
+                .iter()
+                .filter(|check| !check.ok)
+                .collect::<Vec<_>>()
+        );
+        // Not a vacuous green: the file really supplies the two floorless
+        // credentials, so the rows this change added are rows that ran.
+        for env in ["ZEROSHIP_CONTROL_KEY", "ZEROSHIP_MIGRATED_POLICY_SEAL_KEY"] {
+            assert!(
+                !compose.environment_occurrences(env).is_empty(),
+                "{env} is absent from the shipped compose file, so its check was vacuous"
+            );
         }
     }
 

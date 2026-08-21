@@ -11,8 +11,9 @@ use clap::Parser;
 use ntex::web;
 use zeroship_worker::config::{WorkerSettings, WorkerSettingsSources, WorkerSettingsConsumer};
 use zeroship_core::config::{
-    bootstrap_or_exit, require_nonempty, validate_secret_material, validate_worker_key,
-    CheckConfigReport, CheckValue,
+    audit_credentials, bootstrap_or_exit, mark_dev_escape_active, require_nonempty,
+    validate_worker_key, BuildProfile, CheckConfigReport, CheckValue, CredentialPosture,
+    CredentialVerdict, SubsystemCredential,
 };
 use zeroship_bundle::{
     build_blob_store, build_workflow_blob_store, BlobStore, StoreUrl, WorkflowBlobStore,
@@ -33,40 +34,66 @@ const CONTROL_KEY_LABEL: &str = "ZEROSHIP_CONTROL_KEY / --control-key-file";
 /// this environment name; the flag comes from the same declaration.
 const WORKER_KEY_LABEL: &str = "ZEROSHIP_WORKER_KEY / --worker-key-file";
 
-/// Every secret-strength guard the worker applies, returning the log context and
-/// the validator's own message rather than exiting - so a test can drive the
-/// exact set `main` runs instead of a re-spelling of it.
+/// Every credential the worker needs, tagged by the subsystem that needs it.
 ///
-/// Both go through [`validate_secret_material`], the single bridge from a
-/// resolved [`zeroship_core::config::Secret`] to the `&str` validators. That
-/// bridge - not a `check_config` conditional at each site - is what keeps a
-/// `--check-config` run from judging a secret it deliberately did not read,
-/// while still running each validator on real material at boot.
-///
-/// # Errors
-///
-/// Returns `(log context, validator message)` for the first guard that fails.
-fn validate_worker_secrets(
+/// Both are unconditional: a worker that cannot poll control for versions and
+/// cannot authenticate dispatch is a worker with nothing to do.
+/// [`zeroship_core::config::audit_credentials`] handles the three material
+/// cases, so a `--check-config` run still never judges a secret it deliberately
+/// did not read.
+fn worker_credentials(
     settings: &zeroship_worker::config::WorkerSettings,
-) -> Result<(), (&'static str, String)> {
-    validate_secret_material(&settings.control_key, |value| {
-        require_nonempty(CONTROL_KEY_LABEL, value)
-    })
-    .map_err(|message| {
-        (
-            "worker: refusing to start without control key",
-            message,
-        )
-    })?;
+) -> Vec<SubsystemCredential<'_>> {
+    vec![
+        SubsystemCredential {
+            subsystem: "control-version-poll",
+            enabled: true,
+            label: CONTROL_KEY_LABEL,
+            secret: &settings.control_key,
+            validate: require_nonempty,
+        },
+        // The worker key authenticates dispatch and the ZeroShip-User HMAC, so
+        // every worker requires the same 32-byte floor regardless of bind
+        // address.
+        SubsystemCredential {
+            subsystem: "gateway-dispatch",
+            enabled: true,
+            label: WORKER_KEY_LABEL,
+            secret: &settings.worker_key,
+            validate: validate_worker_key,
+        },
+    ]
+}
 
-    // The worker key authenticates dispatch and the ZeroShip-User HMAC, so every
-    // worker requires the same 32-byte floor regardless of bind address.
-    validate_secret_material(&settings.worker_key, |value| {
-        validate_worker_key(WORKER_KEY_LABEL, value)
-    })
-    .map_err(|message| ("worker: refusing to start with unsafe worker key", message))?;
-
-    Ok(())
+/// Apply the boot gate, or exit. See `crates/gateway/src/main.rs` for the shape;
+/// it is deliberately identical across services so an operator reads one banner.
+fn enforce_worker_credentials(
+    settings: &zeroship_worker::config::WorkerSettings,
+    overlay: &zeroship_core::config::ConfigSource,
+    check_config: bool,
+) -> CredentialPosture {
+    let posture = audit_credentials(&worker_credentials(settings));
+    let verdict = posture.verdict(BuildProfile::current(), check_config);
+    if let Some(banner) = posture.banner("zeroship-worker", overlay, verdict) {
+        eprint!("{banner}");
+        tracing::error!(
+            subsystems = %posture
+                .weak()
+                .iter()
+                .map(|weak| weak.subsystem)
+                .collect::<Vec<_>>()
+                .join(","),
+            "worker: unconfigured service credential"
+        );
+    }
+    match verdict {
+        CredentialVerdict::Proceed => posture,
+        CredentialVerdict::Refuse => std::process::exit(1),
+        CredentialVerdict::DevEscape => {
+            mark_dev_escape_active();
+            posture
+        }
+    }
 }
 
 /// `true` iff the worker must REFUSE to start with this `DATABASE_URL` (SQLite-
@@ -219,13 +246,13 @@ fn main() -> std::io::Result<()> {
     let bind_host = settings.bind.get().clone();
     let socket_path = settings.socket.get().clone();
 
-    // Both secret guards, before the bind guard below. The worker_key strength
-    // check used to sit AFTER it; the two are independent refusals and only the
-    // order in which a doubly-misconfigured launch reports changes.
-    if let Err((context, message)) = validate_worker_secrets(&settings) {
-        tracing::error!(error = %message, "{context}");
-        std::process::exit(1);
-    }
+    // THE BOOT GATE, before the bind guard below and before the
+    // `--check-config` report, so a dry run over a placeholder credential exits
+    // non-zero. The worker_key strength check used to sit AFTER the bind guard;
+    // the two are independent refusals and only the order in which a
+    // doubly-misconfigured launch reports changes.
+    let credentials =
+        enforce_worker_credentials(&settings, &boot.overlay.source, check_config);
 
     // `--workflow-advance-unsigned` makes POST /internal/workflow/advance-unsigned
     // live. That route is registered unconditionally (handler.rs) and performs NO
@@ -345,6 +372,26 @@ fn main() -> std::io::Result<()> {
         report.field(
             "usage_events_topic",
             CheckValue::Plain(usage_stream.effective_topic().to_string()),
+        );
+        // The credential posture, plus how much of it was measured. The field
+        // above is the cautionary example: `usage_stream_configured=false` was
+        // reported truthfully for 43 days while nothing read it, which is why
+        // the posture rides the EXIT CODE as well as this report.
+        report.field(
+            "service_credentials",
+            CheckValue::Plain(credentials.summary().to_string()),
+        );
+        report.field(
+            "service_credentials_checked",
+            CheckValue::Count(credentials.checked()),
+        );
+        report.field(
+            "service_credentials_skipped",
+            CheckValue::Count(credentials.skipped()),
+        );
+        report.field(
+            "service_credentials_unread",
+            CheckValue::Count(credentials.unread()),
         );
 
         report.emit(*settings.check_config_format.get());
@@ -614,7 +661,7 @@ fn main() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeroship_core::config::{GeneratedConfig, SourceKind};
+    use zeroship_core::config::{GeneratedConfig, SourceKind, SERVICE_CREDENTIAL_SENTINEL};
 
     /// A temp file that removes itself even when an assertion panics.
     struct SecretFile(std::path::PathBuf);
@@ -806,43 +853,90 @@ mod tests {
             weak.arg(),
         ]);
         assert_eq!(settings.worker_key.source(), Some(SourceKind::CliFile));
-        let (context, message) =
-            validate_worker_secrets(&settings).expect_err("a short worker key must be rejected");
-        assert_eq!(context, "worker: refusing to start with unsafe worker key");
-        assert!(message.contains("too short"), "{message}");
+        let posture = audit_credentials(&worker_credentials(&settings));
+        assert_eq!(posture.weak().len(), 1, "{posture:?}");
+        assert_eq!(posture.weak()[0].subsystem, "gateway-dispatch");
+        assert!(posture.weak()[0].message.contains("too short"), "{posture:?}");
 
         // 1b. The one-variable partner: same flags, a strong key at the path.
-        validate_worker_secrets(&resolve(&[
+        let ok = audit_credentials(&worker_credentials(&resolve(&[
             "--control-key-file",
             control.arg(),
             "--worker-key-file",
             good.arg(),
-        ]))
-        .expect("a strong worker key passes every guard");
+        ])));
+        assert!(ok.is_ok(), "a strong worker key passes every guard: {ok:?}");
+        assert_eq!(ok.checked(), 2, "both worker credentials were judged");
 
-        // 2. ABSENT: nothing supplies the worker key. The bridge runs the
+        // 2. ABSENT: nothing supplies the worker key. The audit runs the
         // validator on "", which is how it produces its own "is required".
         let settings = resolve(&["--control-key-file", control.arg()]);
         assert!(!settings.worker_key.is_configured());
-        let (context, message) =
-            validate_worker_secrets(&settings).expect_err("an unset worker key must be rejected");
-        assert_eq!(context, "worker: refusing to start with unsafe worker key");
-        assert!(message.contains("required"), "{message}");
+        let absent = audit_credentials(&worker_credentials(&settings));
+        assert_eq!(absent.weak().len(), 1, "{absent:?}");
+        assert_eq!(absent.weak()[0].subsystem, "gateway-dispatch");
+        assert!(absent.weak()[0].unset);
+        assert!(absent.weak()[0].message.contains("required"), "{absent:?}");
 
-        // 3. The CONTROL key guard is a separate refusal with its own context,
-        // so a test that only ever saw the worker-key message could not tell the
-        // two apart.
+        // 2b. THE SENTINEL, on the same credential: the SAME message as absent,
+        // because empty and the placeholder are one branch. A gate that gave
+        // them separate branches is the Gitaly defect.
+        let sentinel = SecretFile::new("worker_sentinel", SERVICE_CREDENTIAL_SENTINEL);
+        let settings = resolve(&[
+            "--control-key-file",
+            control.arg(),
+            "--worker-key-file",
+            sentinel.arg(),
+        ]);
+        let placeholder = audit_credentials(&worker_credentials(&settings));
+        assert_eq!(placeholder.weak().len(), 1, "{placeholder:?}");
+        assert_eq!(placeholder.weak()[0].message, absent.weak()[0].message);
+
+        // 3. The CONTROL key is a separate subsystem, so a test that only ever
+        // saw the worker-key message could not tell the two apart.
         let settings = resolve(&["--worker-key-file", good.arg()]);
-        let (context, message) =
-            validate_worker_secrets(&settings).expect_err("an unset control key must be rejected");
-        assert_eq!(context, "worker: refusing to start without control key");
-        assert!(message.contains("ZEROSHIP_CONTROL_KEY"), "{message}");
+        let control_only = audit_credentials(&worker_credentials(&settings));
+        assert_eq!(control_only.weak().len(), 1, "{control_only:?}");
+        assert_eq!(control_only.weak()[0].subsystem, "control-version-poll");
+        assert!(
+            control_only.weak()[0].message.contains("ZEROSHIP_CONTROL_KEY"),
+            "{control_only:?}"
+        );
+
+        // 3b. THE SENTINEL ON A CREDENTIAL WITH NO LENGTH FLOOR. `control_key`
+        // is `SecretStrength::Unrestricted`, so nothing but the sentinel branch
+        // can refuse a placeholder here - which is the case this whole gate
+        // exists for.
+        let sentinel_control = SecretFile::new("control_sentinel", SERVICE_CREDENTIAL_SENTINEL);
+        let settings = resolve(&[
+            "--control-key-file",
+            sentinel_control.arg(),
+            "--worker-key-file",
+            good.arg(),
+        ]);
+        let floorless = audit_credentials(&worker_credentials(&settings));
+        assert_eq!(floorless.weak().len(), 1, "{floorless:?}");
+        assert_eq!(floorless.weak()[0].subsystem, "control-version-poll");
+        assert_eq!(floorless.weak()[0].message, control_only.weak()[0].message);
+
+        // 3c. The one-variable partner for 3b: one byte of REAL material in the
+        // same floorless credential passes, so the refusal is about the
+        // placeholder and not about length.
+        let one_byte = SecretFile::new("control_one_byte", "x");
+        let settings = resolve(&[
+            "--control-key-file",
+            one_byte.arg(),
+            "--worker-key-file",
+            good.arg(),
+        ]);
+        assert!(audit_credentials(&worker_credentials(&settings)).is_ok());
 
         // Does NOT cover the environment or TOML tiers of these secrets: the env
         // tier is process-global and would race sibling tests, and the overlay
         // tier is `resolve_secret_sources`'s, asserted in core. It also does not
-        // prove `main` calls `validate_worker_secrets` - only that the function
-        // main calls behaves this way.
+        // prove `main` calls `worker_credentials` - only that the function main
+        // calls behaves this way. That link is covered by
+        // `tests/service_credential_boot_gate.sh`, against the real binary.
     }
 
     /// The `--check-config` half: a dry run must not open the file, and an
@@ -863,13 +957,15 @@ mod tests {
             None,
             "--check-config must not have read the file"
         );
+        let posture = audit_credentials(&worker_credentials(&dry));
         assert!(
-            validate_secret_material(&dry.worker_key, |value| {
-                validate_worker_key(WORKER_KEY_LABEL, value)
-            })
-            .is_ok(),
-            "an unread secret must not be judged"
+            posture
+                .weak()
+                .iter()
+                .all(|weak| weak.subsystem != "gateway-dispatch"),
+            "an unread secret must not be judged: {posture:?}"
         );
+        assert_eq!(posture.unread(), 1, "and it must be COUNTED as unread");
 
         // The one-variable partner: only `--check-config` differs, and the boot
         // run does try to open the same path.

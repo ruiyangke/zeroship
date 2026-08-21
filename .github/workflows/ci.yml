@@ -490,6 +490,23 @@ jobs:
       # minimum, so worker and control refused to start. Text-only.
       - name: compose secrets meet the enforced minimum
         run: tests/compose_secret_strength_gate.sh
+      # The boot gate against a silent weak service credential
+      # (docs/proposals/2026-08-16-service-identity.md section 6.5.2, modelled
+      # on Superset's fix for CVE-2023-27524). The unit tests all rule on the
+      # functions `main` calls and none of them rules on whether `main` CALLS
+      # them; this launches the compiled binaries and reads exit codes.
+      #
+      # It builds the four binaries first because a gate whose subject is
+      # absent prints "not built; its arms did not run" and, without the arm
+      # census, would look like a pass. The release gateway is what proves the
+      # dev escape is keyed to the build profile: no debug binary can measure
+      # that about itself, so the `profile` arm reports ZERO without it and the
+      # arm floor turns that into a refusal.
+      - name: services refuse to boot on a placeholder service credential
+        run: |
+          cargo build --bins -p zeroship-gateway -p zeroship-worker -p zeroship-migrated
+          cargo build --release -p zeroship-gateway --bin zeroship-gate
+          tests/service_credential_boot_gate.sh
       # deploy/scripts/{deploy-remote,deploy-app}.sh had no test of any kind.
       # The compose-variable extraction in deploy-remote.sh produced two false
       # results while it was written - it counted `$${VAR}` escapes and refs in

@@ -97,6 +97,61 @@ with `ZEROSHIP_CONFIG`.
 
 ---
 
+## The placeholder a service refuses to start on
+
+Every platform credential has one value that is not a credential:
+
+```
+CHANGE_ME_ZEROSHIP_SERVICE_KEY
+```
+
+**A service treats it exactly as it treats an empty value.** Not similarly -
+identically: both take one branch, produce the same refusal text, and reach the
+same verdict. Give one of them a branch of its own and you have rebuilt the
+failure this exists to prevent, where the *absent* credential is waved through
+while the *weak* one is refused.
+
+What a service does when it finds either:
+
+| build | invocation | behaviour |
+| --- | --- | --- |
+| release (every published image) | boot | prints a banner naming the key, the config file and the remediation command, then exits 1 |
+| release | `--check-config` | the same banner, exit 1, and NO report |
+| debug (`cargo run`) | `--check-config` | the same banner, exit 1, and no report |
+| debug | boot | prints the banner, continues, and `/readyz` answers 503 for the life of the process |
+
+The last row is the only escape and it is keyed to `cfg!(debug_assertions)` -
+the build profile, decided at compile time. There is no flag and no environment
+variable that reaches it. `--dev-insecure` and `ZEROSHIP_DEV_INSECURE` were both
+deleted and `crates/auth/src/config.rs` carries a test that refuses to let
+either return.
+
+`--check-config` **exits non-zero** for a placeholder credential in every build,
+because a dry run asks "is this configuration deployable" and the answer does
+not depend on what the asking binary was compiled with. It is also what
+`deploy/scripts/deploy-remote.sh` runs, and that script reads the exit code and
+discards stdout - so the exit code is the only channel a posture reaches a
+deploy decision through.
+
+Each service also publishes the posture in its `--check-config` report:
+
+```
+check-config: service_credentials = configured | weak | unverified
+check-config: service_credentials_checked = <n>
+check-config: service_credentials_skipped = <n>
+check-config: service_credentials_unread  = <n>
+```
+
+`unverified` is not a failure. A dry run does not open a `-file` secret, so a
+deployment supplying its credentials as files judges nothing and says so rather
+than reporting a green built out of zero readings. `skipped` is the
+per-subsystem count: a credential whose subsystem this process did not enable is
+never demanded, and `zeroship-migrated` reports `skipped = 1` on a deployment
+that gives it no `ZEROSHIP_CONTROL_KEY` - which is correct, because it makes no
+credentialed platform call.
+
+---
+
 ## A name is not an address
 
 Two settings describe the platform OP, and they are not interchangeable. The

@@ -73,23 +73,34 @@ pub async fn readyz(
             }
         })
         .await;
-    if is_ready(control_ok, blob_ok) {
+    let dev_escape = zeroship_core::config::dev_escape_active();
+    if is_ready(control_ok, blob_ok, dev_escape) {
         web::HttpResponse::Ok().json(&serde_json::json!({"ready": true}))
     } else {
         tracing::warn!(
             control_ok,
             blob_ok,
+            dev_escape,
             "worker readiness: refusing traffic"
         );
         web::HttpResponse::ServiceUnavailable().json(&serde_json::json!({"ready": false}))
     }
 }
 
-/// BOTH dependencies, not either. Split out from the HTTP shell so the
-/// and/or mistake is testable without standing up a `WorkerConfig`.
+/// BOTH dependencies, not either, AND no credential escape. Split out from the
+/// HTTP shell so the and/or mistake is testable without standing up a
+/// `WorkerConfig`.
+///
+/// `dev_escape` is the credential gate's readiness half: a worker that booted
+/// on an empty or `CHANGE_ME_ZEROSHIP_SERVICE_KEY` credential in a
+/// `debug_assertions` build must not be routed traffic, however healthy its two
+/// dependencies are. It is a PARAMETER, not a call to
+/// [`zeroship_core::config::dev_escape_active`], because the underlying flag is
+/// process-wide and write-once: a test that set it would change the answer for
+/// every later test in this binary.
 #[must_use]
-fn is_ready(control_ok: bool, blob_ok: bool) -> bool {
-    control_ok && blob_ok
+fn is_ready(control_ok: bool, blob_ok: bool, dev_escape: bool) -> bool {
+    control_ok && blob_ok && !dev_escape
 }
 
 #[cfg(test)]
@@ -99,10 +110,20 @@ mod tests {
 
     #[test]
     fn either_dependency_alone_is_not_enough() {
-        assert!(is_ready(true, true));
-        assert!(!is_ready(true, false));
-        assert!(!is_ready(false, true));
-        assert!(!is_ready(false, false));
+        assert!(is_ready(true, true, false));
+        assert!(!is_ready(true, false, false));
+        assert!(!is_ready(false, true, false));
+        assert!(!is_ready(false, false, false));
+    }
+
+    /// A worker running on the development credential escape must not be routed
+    /// traffic, even with both dependencies healthy.
+    #[test]
+    fn the_dev_credential_escape_alone_makes_a_healthy_worker_not_ready() {
+        assert!(!is_ready(true, true, true));
+        // The one-variable partner: identical inputs with the escape inactive
+        // ARE ready, so the refusal is about the escape and nothing else.
+        assert!(is_ready(true, true, false));
     }
 
     #[test]
