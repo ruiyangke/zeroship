@@ -6518,3 +6518,33 @@ async fn an_abandoned_copy_in_returns_a_usable_entry_to_the_pool() {
         .await
         .unwrap();
 }
+#[compio::test]
+async fn statement_cache_threshold_one_does_not_cache_wrong_parameter_arity() {
+    compio::time::timeout(std::time::Duration::from_secs(10), async {
+        let url = test_url();
+        let client = connect_with_statement_cache_threshold(&url, 2, 1)
+            .await
+            .unwrap();
+
+        const SQL: &str = "SELECT count(*)::int8 FROM pg_prepared_statements \
+            WHERE statement = $1::text AND NOT from_sql \
+            /* cpg_cache_threshold_one_rejected_execution */";
+
+        client
+            .query(SQL, &[])
+            .await
+            .expect_err("the SQL requires one parameter");
+        assert!(
+            prepared_statement_names(&client, SQL).await.is_empty(),
+            "wrong parameter arity populated the threshold-one statement cache"
+        );
+
+        let first_valid: i64 = client.query_one_scalar(SQL, &[&SQL]).await.unwrap();
+        assert_eq!(
+            first_valid, 1,
+            "the first validated execution did not earn threshold-one admission"
+        );
+    })
+    .await
+    .expect("threshold-one rejected-execution test exceeded its watchdog");
+}
