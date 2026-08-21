@@ -338,18 +338,18 @@ pub(crate) async fn prepare_cached_with_origin(
             unnamed: false,
         });
     }
-    if client.statement_cache_execution_threshold().get() == 1 {
-        let (statement, cache_hit) = prepare_and_cache(client, query).await?;
-        return Ok(CachedStatement {
-            statement,
-            cache_hit,
-            unnamed: false,
-        });
-    }
-
     // Discover parameter and result types without earning execution credit.
     // The operation finalizes admission only after its local arity check, so a
     // wrong-arity call cannot push SQL toward promotion.
+    //
+    // A threshold of one - the default - takes this path too, and used to have
+    // a fast path above that prepared and cached before the arity check. That
+    // let a call the caller got wrong install a connection-lived statement.
+    // Removing it does NOT weaken `statement_cache_execution_threshold`'s
+    // documented "preserving immediate preparation": admission still lands
+    // before the operation executes, it just now follows validation instead of
+    // preceding it, and `statement_cache_execution_threshold_one_promotes_
+    // immediately` still passes.
     Ok(CachedStatement {
         statement: prepare_unnamed(client, query, &[]).await?,
         cache_hit: false,
