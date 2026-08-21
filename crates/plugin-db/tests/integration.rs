@@ -289,46 +289,104 @@ async fn parity_matrix_pg_matches_sqlite_projection() {
     assert_eq!(pg.seed, sqlite.seed);
     assert_eq!(pg.tx, sqlite.tx);
 
-    // ONE KNOWN DIVERGENCE, pinned rather than asserted away. An unencrypted
-    // `t.bytes()` column does NOT round-trip on Postgres: the write path has no
-    // `bytes` branch at all (the only base64 decode in it belongs to the
-    // encryption pass, `crud/encryption_pass.rs`), so the SDK's base64 string is
-    // bound straight at a `bytea` column and Postgres parses it in ESCAPE format
-    // - the 8 ASCII characters, not the 4 bytes they encode. The read path IS
-    // schema-driven (`read_pipeline::normalize_bytes_value`) and base64-encodes
-    // what it finds, so the value comes back base64-of-base64. Verified against
-    // the server, not inferred: `encode(payload_bytes,'escape')` on the applied
-    // row returns the literal `3q2+7w==`.
+    // THE BYTES DIVERGENCE IS GONE, and it used to be pinned right here. Until
+    // `crud::bytes_pass` landed, this block excluded `payload_bytes` from the
+    // comparison and pinned the two OBSERVED values instead: `M3EyKzd3PT0=` on
+    // Postgres and `3q2+7w==` on SQLite. The first of those is the base64 of the
+    // second - the write path had no `bytes` branch, so the SDK's base64 string
+    // was bound as text at a `bytea` column, Postgres parsed it in ESCAPE format
+    // and stored the 8 ASCII characters, and the read path (which is correct)
+    // base64'd those 8 bytes back out. Both pins were copied from what the code
+    // returned, which is why neither ever went red.
     //
-    // SQLite is not right either, only invisibly wrong: rusqlite binds the same
-    // string as TEXT into a BLOB-affinity column and returns a string, which
-    // `normalize_bytes_value` passes through untouched, so the input reappears.
-    // That accident is what `parity::expected_typed_projection` records as the
-    // contract, and `sqlite_integration.rs` asserts.
-    //
-    // Pinning both observed values keeps this test honest AND makes it the alarm
-    // for the fix: the day the write path learns to decode, the first assertion
-    // below goes red naming this comment, and this whole block is deleted in the
-    // same patch that makes `assert_eq!(pg.typed, sqlite.typed)` true outright.
-    let mut pg_typed = pg.typed.clone();
+    // What replaces them is not another pin: `expected_typed_projection` derives
+    // the expectation from `parity::TYPED_BYTES_RAW`, the four bytes the caller
+    // wrote, and `bytes_column_stores_raw_bytes_on_postgres` (below) reads the
+    // stored cell with a query that does not go through the SDK.
     assert_eq!(
-        pg_typed["payload_bytes"],
-        json!("M3EyKzd3PT0="),
-        "Postgres is expected to return base64-of-base64 for an unencrypted \
-         bytes column until the write path decodes; a different value here means \
-         the round-trip changed and this pin is stale"
+        pg.typed, sqlite.typed,
+        "every typed field must project identically on both backends"
     );
     assert_eq!(
-        sqlite.typed["payload_bytes"],
-        json!("3q2+7w=="),
-        "SQLite is expected to hand back the base64 string it was given"
+        pg.typed,
+        parity::expected_typed_projection(),
+        "and both must match the independently-derived expectation"
     );
-    pg_typed["payload_bytes"] = sqlite.typed["payload_bytes"].clone();
+}
+
+/// A `t.bytes()` value written through `env.db` must reach Postgres AS BYTES.
+///
+/// THE SDK IS NOT ALLOWED TO BE ITS OWN WITNESS HERE. `parity_matrix_*` above
+/// compares what `env.db` reads back against what `env.db` was given, and that
+/// pair was self-consistent all through the defect on SQLite: a value stored as
+/// TEXT and read back as TEXT round-trips perfectly while the cell holds the
+/// wrong thing. So this test goes around the SDK entirely and asks the server
+/// what is in the column.
+///
+/// RED BEFORE THE FIX, and measured that way rather than assumed: against the
+/// pre-fix binary the stored cell is `\x3371322b37773d3d`, the 8-byte ASCII of
+/// the base64 `3q2+7w==`, and this assertion fails naming both. After
+/// `crud::bytes_pass` it is `\xdeadbeef`.
+#[compio::test]
+async fn bytes_column_stores_raw_bytes_on_postgres() {
+    let pg_url = require_pg().await;
+    let pg = parity::run_matrix(&pg_url);
+
+    // The expectation is DERIVED, not copied from a run: `TYPED_BYTES_RAW` is
+    // what the caller handed `env.db` (base64-encoded, per the `t.bytes()` wire
+    // contract), so it is what the column must hold.
+    let expected: Vec<u8> = parity::TYPED_BYTES_RAW.to_vec();
+
+    let (client, connection) = compio_postgres::connect(&pg_url, NoTls)
+        .await
+        .expect("dial the parity database directly");
+    compio::runtime::spawn(async move {
+        let _ = connection.run().await;
+    })
+    .detach();
+
+    let sql = format!(
+        "SELECT payload_bytes FROM \"default\".\"{}\" WHERE title = $1",
+        pg.collection
+    );
+    let rows = client
+        .query(&sql, &[&"typed-roundtrip"])
+        .await
+        .expect("read the stored cell");
+    assert_eq!(rows.len(), 1, "the typed round-trip row must exist");
+    let stored: Vec<u8> = rows[0].get::<_, Vec<u8>>(0);
+
+    // Hand the socket back BEFORE the assertions: a panic skips whatever
+    // follows it, and `direct_connection_sites_do_not_grow` counts this site on
+    // the promise that it is paired with a teardown.
+    drop(client);
+    drain_pg().await;
+
     assert_eq!(
-        pg_typed, sqlite.typed,
-        "every typed field OTHER than the pinned bytes divergence must project \
-         identically on both backends"
+        stored,
+        expected,
+        "the bytea cell must hold the caller's bytes. Got {} bytes ({}), wanted \
+         {} ({}). An 8-byte cell spelling the base64 in ASCII is the write path \
+         binding the base64 string as text at a bytea column.",
+        stored.len(),
+        hex_of(&stored),
+        expected.len(),
+        hex_of(&expected),
     );
+
+    // And the value the caller reads back through `env.db` is the base64 of
+    // exactly those bytes - one encode, not two.
+    assert_eq!(
+        pg.typed["payload_bytes"],
+        json!(parity::typed_bytes_b64()),
+        "env.db must hand back the base64 of the stored bytes"
+    );
+}
+
+/// Render bytes as lowercase hex for the failure messages above. Not a helper
+/// worth a crate: `format!("{:02x?}")` prints a debug list, not a hex string.
+fn hex_of(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -5306,7 +5364,7 @@ async fn p4_round_trip_encrypted_masked_vector_via_introspected_metadata() {
         .await
         .expect("write pipeline");
 
-    // The write pipeline encrypted `ssn` (base64 blob + `__zsenc__ssn` marker)
+    // The write pipeline encrypted `ssn` (base64 blob + `__zsbin__ssn` marker)
     // and derived the masked sibling `phone_masked` from the plaintext.
     let doc = &docs[0];
     assert!(
@@ -5314,7 +5372,7 @@ async fn p4_round_trip_encrypted_masked_vector_via_introspected_metadata() {
         "ssn must be replaced by ciphertext on write, got {:?}",
         doc["ssn"]
     );
-    assert_eq!(doc["__zsenc__ssn"], json!(true), "encrypt marker set");
+    assert_eq!(doc["__zsbin__ssn"], json!(true), "encrypt marker set");
     assert_eq!(
         doc["phone_masked"], json!("***-***-0142"),
         "mask pass must derive the last4 sibling on write, got {:?}",
@@ -5604,7 +5662,7 @@ async fn p5_pg_crud_works_via_engine_created_schema_no_runtime_ddl() {
         "ssn must be ciphertext on write, got {:?}",
         doc["ssn"]
     );
-    assert_eq!(doc["__zsenc__ssn"], json!(true), "encrypt marker set");
+    assert_eq!(doc["__zsbin__ssn"], json!(true), "encrypt marker set");
     assert_eq!(
         doc["phone_masked"], json!("***-***-0199"),
         "mask pass derives the last4 sibling on write, got {:?}",
@@ -7798,7 +7856,13 @@ fn direct_connection_sites_do_not_grow() {
     //   +1  parity::maybe_pg_url, unchanged since 2026-05-24 and older than this
     //       test. Not a new connection - a newly VISIBLE one, in scope only
     //       because the walk now descends.
-    const PINNED: usize = 121;
+    // Raised to 122 for one more:
+    //   +1  bytes_column_stores_raw_bytes_on_postgres. It has to dial the server
+    //       itself - the whole point of the test is that it reads the stored
+    //       cell WITHOUT going through `env.db`, and the SDK path is the thing
+    //       under suspicion. It drops the client and calls `drain_pg` before its
+    //       first assertion, so the socket is returned even on the failing path.
+    const PINNED: usize = 122;
     // 10 files today, one of them nested. This floor alone does NOT catch a walk
     // that stops descending - measured: flattening it reads 9 and clears 9. That
     // is what the second assertion is for. This one catches the scan being

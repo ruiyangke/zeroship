@@ -77,6 +77,8 @@ fn validate_update_patch_keys(patch: &Value) -> Result<(), DbError> {
 /// 2. any mode-specific row-id rewrite required before encryption (`upsert`)
 /// 3. encrypt encrypted columns
 /// 4. derive masked sibling columns from plaintext / sidechannel
+/// 5. lower binary columns to the dialect's bind: SQLite vector/geoPoint blobs,
+///    then plain `t.bytes()` (base64 wire string -> raw bytes) on both dialects
 ///
 /// The SQL builders still own dialect lowering and UPDATE auto-bump
 /// emission. This module centralises the transform stages that were
@@ -88,7 +90,7 @@ pub(crate) async fn apply(
     mode: ApplyMode<'_>,
 ) -> Result<(), DbError> {
     // DB-8: validate every USER-supplied document field key BEFORE the system /
-    // encryption / mask passes below add their own (reserved-suffix / `__zsenc__`)
+    // encryption / mask passes below add their own (reserved-suffix / `__zsbin__`)
     // sibling columns. The write SQL builders only `quote_ident`'d these keys —
     // they skipped the `validate_field_name` fence the read/filter path enforces,
     // letting a write smuggle a null-byte key, a >63-byte key (NAMEDATALEN
@@ -184,6 +186,7 @@ struct WriteStages<'a> {
     has_encrypted: bool,
     has_masked: bool,
     has_sqlite_binary: bool,
+    has_plain_bytes: bool,
 }
 
 impl<'a> WriteStages<'a> {
@@ -192,8 +195,16 @@ impl<'a> WriteStages<'a> {
             has_encrypted: schema.is_some_and(super::schema_has_encrypted_columns),
             has_masked: schema.is_some_and(super::schema_has_masked_columns),
             has_sqlite_binary: schema.is_some_and(super::schema_has_sqlite_binary_columns),
+            has_plain_bytes: schema
+                .is_some_and(super::bytes_pass::schema_has_plain_bytes_columns),
             schema,
         }
+    }
+
+    /// Does any stage below have work to do for this collection? A schema with
+    /// none of these facets skips the whole pipeline.
+    fn any(&self) -> bool {
+        self.has_encrypted || self.has_masked || self.has_sqlite_binary || self.has_plain_bytes
     }
 
     async fn apply_to_doc(
@@ -206,7 +217,7 @@ impl<'a> WriteStages<'a> {
         let Some(schema) = self.schema else {
             return Ok(());
         };
-        if !self.has_encrypted && !self.has_masked && !self.has_sqlite_binary {
+        if !self.any() {
             return Ok(());
         }
 
@@ -228,6 +239,17 @@ impl<'a> WriteStages<'a> {
         if self.has_sqlite_binary && super::current_sql_dialect() == query::SqlDialect::Sqlite {
             super::encode_sqlite_binary_doc_with_schema(schema, row)?;
         }
+        // AFTER encryption: a `t.encrypted({ wraps: t.bytes() })` column is the
+        // encryption pass's, and this pass skips it by construction, but the
+        // ordering also means the ciphertext it deposits is never re-read as a
+        // plain bytes value.
+        if self.has_plain_bytes {
+            super::bytes_pass::encode_bytes_on_write(
+                schema,
+                super::current_sql_dialect(),
+                row,
+            )?;
+        }
         Ok(())
     }
 
@@ -241,7 +263,7 @@ impl<'a> WriteStages<'a> {
         let Some(schema) = self.schema else {
             return Ok(());
         };
-        if !self.has_encrypted && !self.has_masked && !self.has_sqlite_binary {
+        if !self.any() {
             return Ok(());
         }
 
@@ -263,6 +285,13 @@ impl<'a> WriteStages<'a> {
         }
         if self.has_sqlite_binary && super::current_sql_dialect() == query::SqlDialect::Sqlite {
             super::encode_sqlite_binary_update_with_schema(schema, patch)?;
+        }
+        if self.has_plain_bytes {
+            super::bytes_pass::encode_bytes_on_update(
+                schema,
+                super::current_sql_dialect(),
+                patch,
+            )?;
         }
         Ok(())
     }
@@ -373,7 +402,7 @@ fn update_touches_randomised_encrypted_field(schema: &Value, patch: &Value) -> b
     }
 
     update_obj.iter().any(|(field, value)| {
-        if field.starts_with('$') || field.starts_with("__zsenc__") {
+        if field.starts_with('$') || field.starts_with("__zsbin__") {
             return false;
         }
         schema_obj
@@ -392,7 +421,7 @@ fn doc_touches_randomised_encrypted_field(schema: &Value, doc: &Value) -> bool {
     };
 
     doc_obj.iter().any(|(field, value)| {
-        if field.starts_with("__zsenc__") || value.is_null() {
+        if field.starts_with("__zsbin__") || value.is_null() {
             return false;
         }
         schema_obj
@@ -600,9 +629,9 @@ mod tests {
         assert!(validate_user_doc_keys(&json!({ "name": "a", "ssn": "x" })).is_ok());
         // The user must not forge the masked sibling suffix the platform emits.
         assert!(validate_user_doc_keys(&json!({ "ssn_masked": "x" })).is_err());
-        // Nor a platform-internal `_`-prefixed name (covers `__zsenc__` markers,
+        // Nor a platform-internal `_`-prefixed name (covers `__zsbin__` markers,
         // `__zs_`, synthetic `_rank`/`_score`).
-        assert!(validate_user_doc_keys(&json!({ "__zsenc__ssn": true })).is_err());
+        assert!(validate_user_doc_keys(&json!({ "__zsbin__ssn": true })).is_err());
         assert!(validate_user_doc_keys(&json!({ "_rank": 1 })).is_err());
         // Null-byte and >63-byte keys (NAMEDATALEN truncation collision).
         assert!(validate_user_doc_keys(&json!({ "a\u{0}b": 1 })).is_err());

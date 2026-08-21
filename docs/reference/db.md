@@ -133,10 +133,40 @@ Use the `t.*` factories. Every builder is chainable.
 | `t.object({ ... })`    | nested inferred object        | JSONB           |
 | `t.literal("login")`   | `"login"`                     | underlying type |
 | `t.union(v1, v2, ...)` | discriminated union           | flat columns    |
+| `t.bytes()`            | `string` (base64)             | BYTEA           |
 
 `t.date()` is **not** in the surface — use `t.timestamp()` for a TIMESTAMPTZ
 (Unix-ms numbers at the JS layer) or `t.calendarDate()` for a Postgres DATE
 (`YYYY-MM-DD` strings).
+
+`t.bytes()` is the one field whose JS type is not the shape it stores. The
+column is BYTEA and holds RAW BYTES; the value you write and the value you read
+back are the **base64 encoding** of those bytes, because `serde_json::Value`
+has no binary variant and every `env.db` argument crosses a JSON boundary. So a
+round trip is `base64(x)` in, `base64(x)` out, and `x` on disk: encode once,
+never twice:
+
+```ts
+const toBase64 = (bytes: Uint8Array) => {
+  // Chunked: `String.fromCharCode(...bytes)` spreads every byte as an
+  // argument and blows the call stack on a real file.
+  let s = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(s);
+};
+
+const png = new Uint8Array(await file.arrayBuffer());
+await env.db.uploads.insert({ blob: toBase64(png) });
+
+const row = await env.db.uploads.find({ id }, { limit: 1 });
+const back = Uint8Array.from(atob(row[0].blob), (c) => c.charCodeAt(0));
+```
+
+A value that is not a base64 string is rejected at the write boundary with
+`invalid_bytes_arg` rather than stored. Passing raw binary, a byte array, or
+base64 with embedded newlines is an error, not a second encoding.
 
 ### Refinements
 
