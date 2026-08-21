@@ -221,8 +221,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
             // while no live-MySQL fixture has measured the pairing; the cost is that a
             // MySQL `DROP EXPRESSION` equivalent stays invisible.
             generated_kind: None,
-            data_type: crate::schema::query::renderer(&SqlDialect::Mysql.id())
-                .canonical_type(&raw_type),
+            data_type: zero_migrate_mysql::VENDOR.schema.canonical_type(&raw_type),
             mysql_physical_type: Some(MysqlPhysicalType::parse(&raw_type)),
             nullable: nullable.eq_ignore_ascii_case("YES"),
             default: default.clone(),
