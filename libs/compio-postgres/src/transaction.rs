@@ -277,10 +277,13 @@ impl<'a> Transaction<'a> {
     /// are created, and can only be used on the connection that created
     /// them.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the number of parameters provided does not match the
-    /// number expected.
+    /// Returns an error, rather than panicking, when the number of parameters
+    /// provided does not match the number the statement expects. That is the
+    /// same outcome `query`, `execute` and their `_raw` forms produce for the
+    /// same mistake; one arity error reported two ways would be decided by
+    /// which method the caller happened to reach for.
     pub async fn bind<T>(
         &self,
         statement: &T,

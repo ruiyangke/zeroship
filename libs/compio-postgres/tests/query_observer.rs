@@ -1,3 +1,4 @@
+use compio_postgres::error::SqlState;
 use compio_postgres::{Client, NoTls, QueryEvent, QueryOutcome};
 use futures_channel::mpsc;
 use futures_util::StreamExt;
@@ -234,6 +235,47 @@ async fn observer_reports_database_error_once() {
 }
 
 #[compio::test]
+async fn observer_reports_server_query_canceled_as_cancelled() {
+    const SQL: &str = "SELECT pg_sleep(3) /* cpg_obs_server_cancelled */";
+    const BARRIER: &str = "SELECT 3::int4 /* cpg_obs_server_cancelled_barrier */";
+
+    compio::time::timeout(Duration::from_secs(10), async {
+        let client = connect().await;
+        let mut events = client.query_events();
+
+        client
+            .batch_execute("SET statement_timeout = '50ms'")
+            .await
+            .unwrap();
+        let error = client
+            .query(SQL, &[])
+            .await
+            .expect_err("statement_timeout did not cancel pg_sleep");
+        assert_eq!(error.code(), Some(&SqlState::QUERY_CANCELED));
+        client
+            .batch_execute("RESET statement_timeout")
+            .await
+            .unwrap();
+
+        client.simple_query(BARRIER).await.unwrap();
+        let observed = events_through(&mut events, BARRIER).await;
+        let target: Vec<_> = observed
+            .iter()
+            .filter(|event| event.sql() == SQL)
+            .collect();
+        assert_eq!(
+            target.len(),
+            1,
+            "server cancellation emitted zero or multiple events"
+        );
+        assert_eq!(target[0].outcome(), &QueryOutcome::Cancelled);
+        assert_eq!(target[0].rows(), None);
+    })
+    .await
+    .expect("server-cancellation observer claim exceeded its watchdog");
+}
+
+#[compio::test]
 async fn observer_reports_each_portal_chunk_once() {
     const SQL: &str =
         "SELECT i::int4 FROM generate_series(1, 5) AS i /* cpg_obs_portal_chunks */";
@@ -425,6 +467,54 @@ async fn observer_reports_dropped_in_flight_future_cancelled_once() {
     assert_eq!(target.len(), 1, "dropped future emitted zero or multiple events");
     assert_eq!(target[0].outcome(), &QueryOutcome::Cancelled);
     assert_eq!(target[0].rows(), None);
+}
+
+#[compio::test]
+async fn replacing_observer_preserves_the_in_flight_requests_receiver() {
+    const SQL: &str =
+        "SELECT pg_advisory_lock($1) /* cpg_obs_replacement_in_flight */";
+    const BARRIER: &str = "SELECT 8::int4 /* cpg_obs_replacement_barrier */";
+    const LOCK_KEY: i64 = 0x6370_675f_6f62_7302;
+
+    compio::time::timeout(Duration::from_secs(10), async {
+        let client = connect().await;
+        let blocker = connect().await;
+        blocker
+            .query("SELECT pg_advisory_lock($1)", &[&LOCK_KEY])
+            .await
+            .unwrap();
+
+        let mut original_events = client.query_events();
+        let statement = client.prepare(SQL).await.unwrap();
+        let mut query = Box::pin(client.query(&statement, &[&LOCK_KEY]));
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert!(
+            query.as_mut().poll(&mut context).is_pending(),
+            "the blocked query completed during its enqueue poll"
+        );
+
+        let mut replacement_events = client.query_events();
+        let unlocked: bool = blocker
+            .query_one_scalar("SELECT pg_advisory_unlock($1)", &[&LOCK_KEY])
+            .await
+            .unwrap();
+        assert!(unlocked);
+
+        query.await.expect("the in-flight observed query failed");
+        client.simple_query(BARRIER).await.unwrap();
+
+        let original = next_event(&mut original_events, SQL).await;
+        assert_eq!(original.outcome(), &QueryOutcome::Success);
+
+        let replacement = events_through(&mut replacement_events, BARRIER).await;
+        assert!(
+            replacement.iter().all(|event| event.sql() != SQL),
+            "the replacement observer stole an already-in-flight request"
+        );
+    })
+    .await
+    .expect("observer-replacement claim exceeded its watchdog");
 }
 
 #[compio::test]

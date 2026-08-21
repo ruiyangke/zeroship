@@ -2399,6 +2399,55 @@ mod tests {
         (address, finish_tx, server)
     }
 
+    fn two_session_postgres_server() -> (
+        std::net::SocketAddr,
+        futures_channel::oneshot::Receiver<[bool; 2]>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (eof_tx, eof_rx) = futures_channel::oneshot::channel();
+        let server = std::thread::spawn(move || {
+            let mut streams = Vec::with_capacity(2);
+            for process_id in [45_u32, 46] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut length = [0u8; 4];
+                stream.read_exact(&mut length).unwrap();
+                let remaining = u32::from_be_bytes(length) as usize - length.len();
+                let mut startup = vec![0u8; remaining];
+                stream.read_exact(&mut startup).unwrap();
+
+                let pid = process_id.to_be_bytes();
+                stream
+                    .write_all(&[
+                        b'R', 0, 0, 0, 8, 0, 0, 0, 0, b'K', 0, 0, 0, 12, pid[0], pid[1],
+                        pid[2], pid[3], 0, 0, 0, 46, b'Z', 0, 0, 0, 5, b'I',
+                    ])
+                    .unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                streams.push(stream);
+            }
+
+            let mut closed = [false; 2];
+            for (index, stream) in streams.iter_mut().enumerate() {
+                closed[index] = match stream.read(&mut [0_u8; 1]) {
+                    Ok(0) => true,
+                    Err(error) => matches!(
+                        error.kind(),
+                        ErrorKind::ConnectionAborted
+                            | ErrorKind::ConnectionReset
+                            | ErrorKind::BrokenPipe
+                    ),
+                    _ => false,
+                };
+            }
+            let _ = eof_tx.send(closed);
+        });
+        (address, eof_rx, server)
+    }
+
     fn test_pool(config: PoolConfig, idle: Vec<PoolEntry>, active: usize, total: usize) -> Pool {
         Pool {
             transport: Transport::resolve(
@@ -2417,6 +2466,22 @@ mod tests {
             close_waiters: RefCell::new(Vec::new()),
             housekeeper: RefCell::new(None),
             metrics: PoolMetrics::new(),
+        }
+    }
+
+    #[test]
+    fn lifetime_jitter_stays_within_twenty_five_percent() {
+        let base = Duration::from_secs(4);
+        let lower = base.mul_f64(0.75);
+        let upper = base.mul_f64(1.25);
+
+        JITTER_RNG.with(|rng| rng.set(1));
+        for _ in 0..4_096 {
+            let jittered = jittered_lifetime(base);
+            assert!(
+                (lower..=upper).contains(&jittered),
+                "jittered lifetime {jittered:?} escaped {lower:?}..={upper:?}"
+            );
         }
     }
 
@@ -2593,6 +2658,54 @@ mod tests {
             poll_with_waker(waiter.as_mut(), &waker),
             Poll::Ready(None)
         ));
+    }
+
+    fn counting_after_release_config(calls: &Rc<Cell<usize>>) -> PoolConfig {
+        let hook_calls = Rc::clone(calls);
+        let mut config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            ..PoolConfig::default()
+        };
+        config.after_release(move |_| {
+            hook_calls.set(hook_calls.get() + 1);
+            true
+        });
+        config
+    }
+
+    #[test]
+    fn after_release_skips_connections_already_expired() {
+        let calls = Rc::new(Cell::new(0));
+        let config = counting_after_release_config(&calls);
+        let (expired_client, _expired_receiver) = fake_client(342);
+        let expired_pool = test_pool(config, Vec::new(), 1, 1);
+        drop(PooledClient {
+            entry: Some(PoolEntry::new(expired_client, Duration::ZERO)),
+            pool: &expired_pool,
+        });
+        assert_eq!(calls.get(), 0, "after_release ran for an expired entry");
+        assert_eq!(expired_pool.total_count(), 0);
+    }
+
+    #[test]
+    fn after_release_skips_connections_already_closed() {
+        let calls = Rc::new(Cell::new(0));
+        let config = counting_after_release_config(&calls);
+        let (closed_client, closed_receiver) = fake_client(343);
+        let closed_entry = PoolEntry::new(closed_client, config.max_lifetime);
+        drop(closed_receiver);
+        assert!(
+            closed_entry.client.is_closed(),
+            "fixture entry did not close"
+        );
+        let closed_pool = test_pool(config, Vec::new(), 1, 1);
+        drop(PooledClient {
+            entry: Some(closed_entry),
+            pool: &closed_pool,
+        });
+        assert_eq!(calls.get(), 0, "after_release ran for a closed entry");
+        assert_eq!(closed_pool.total_count(), 0);
     }
 
     #[test]
@@ -3090,6 +3203,41 @@ mod tests {
     }
 
     #[compio::test]
+    async fn idle_timeout_eviction_preserves_min_idle() {
+        let config = PoolConfig {
+            max_size: 2,
+            min_idle: 1,
+            idle_timeout: Duration::from_millis(1),
+            ..PoolConfig::default()
+        };
+        let (first_client, _first_receiver) = fake_client(451);
+        let (second_client, _second_receiver) = fake_client(452);
+        let mut first = PoolEntry::new(first_client, config.max_lifetime);
+        let mut second = PoolEntry::new(second_client, config.max_lifetime);
+        first.last_used = Instant::now() - Duration::from_secs(1);
+        second.last_used = Instant::now() - Duration::from_secs(1);
+
+        let mut pool = test_pool(config, vec![first, second], 0, 2);
+        pool.transport = Transport::resolve(
+            "postgres://postgres@127.0.0.1:1/test?sslmode=disable"
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
+        let pool = Rc::new(pool);
+        let weak = Rc::downgrade(&pool);
+
+        assert!(
+            compio::time::timeout(Duration::from_millis(250), Pool::housekeep(&weak))
+                .await
+                .expect("idle eviction dipped below min_idle and attempted a refill")
+        );
+        assert_eq!(pool.idle_count(), 1, "idle eviction crossed min_idle");
+        assert_eq!(pool.total_count(), 1);
+        assert_eq!(pool.metrics.evictions.get(), 1);
+    }
+
+    #[compio::test]
     async fn housekeeping_without_available_resource_does_not_wake_waiter() {
         let config = PoolConfig {
             max_size: 2,
@@ -3141,6 +3289,54 @@ mod tests {
         drop(pool);
         let _ = finish_tx.send(());
         server.join().expect("fake PostgreSQL server panicked");
+    }
+
+    #[compio::test]
+    async fn later_warmup_after_connect_failure_closes_earlier_sessions() {
+        let (address, eof_rx, server) = two_session_postgres_server();
+        let connection_config: Config = format!(
+            "postgres://postgres@{address}/fake?sslmode=disable"
+        )
+        .parse()
+        .unwrap();
+        let calls = Rc::new(Cell::new(0));
+        let hook_calls = Rc::clone(&calls);
+        let mut pool_config = PoolConfig {
+            max_size: 2,
+            min_idle: 2,
+            ..PoolConfig::default()
+        };
+        pool_config.after_connect(move |_client| {
+            let invocation = hook_calls.get() + 1;
+            hook_calls.set(invocation);
+            Box::pin(async move {
+                if invocation == 2 {
+                    Err(pool_error("scripted second warm-up rejection"))
+                } else {
+                    Ok(())
+                }
+            })
+        });
+
+        let outcome = compio::time::timeout(
+            Duration::from_secs(5),
+            Pool::connect_with_config(connection_config, pool_config),
+        )
+        .await
+        .expect("pool warm-up did not finish");
+        assert!(outcome.is_err(), "second after_connect rejection was ignored");
+        assert_eq!(calls.get(), 2);
+
+        let closed = compio::time::timeout(Duration::from_secs(5), eof_rx)
+            .await
+            .expect("server did not observe warm-up session teardown")
+            .expect("server stopped before reporting warm-up session teardown");
+        server.join().expect("fake PostgreSQL server panicked");
+        assert_eq!(
+            closed,
+            [true, true],
+            "warm-up failure left an earlier session open"
+        );
     }
 
     #[compio::test]

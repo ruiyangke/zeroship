@@ -661,3 +661,116 @@ async fn acquire_timeout_cannot_steal_a_connection_in_command_recovery() {
     .await
     .expect("acquire/recovery timeout interaction exceeded its outer watchdog");
 }
+
+/// The pool must use confirmed cancellation, not the public fire-and-forget
+/// primitive. Holding the dedicated cancel socket open while making the
+/// cancelled response available proves that recovery does not send its Sync
+/// barrier until postmaster-style EOF establishes cross-connection ordering.
+#[compio::test]
+async fn command_recovery_waits_for_cancel_eof_before_sync_and_reuse() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let (sync_before_eof_tx, sync_before_eof_rx) = oneshot::channel();
+        let (release_cancel_tx, release_cancel_rx) = mpsc::channel();
+        let server = StubServer::spawn(move |listener| {
+            let mut primary = accept_bounded(&listener);
+            complete_startup(&mut primary, 505);
+            assert_eq!(expect_simple_query(&mut primary), b"SELECT pg_sleep(30)\0");
+
+            let mut cancel = accept_bounded(&listener);
+            expect_cancel_request(&mut cancel, 505);
+
+            // Make the original request fully drainable while the dedicated
+            // cancel connection remains open. A fire-and-forget pool call can
+            // now advance to Sync; confirmed cancellation cannot.
+            answer_cancelled_query(&mut primary);
+            primary
+                .set_read_timeout(Some(Duration::from_millis(200)))
+                .expect("set pre-EOF Sync probe timeout");
+            let mut tag = [0u8; 1];
+            let sync_before_eof = match primary.peek(&mut tag) {
+                Ok(1) => {
+                    assert_eq!(tag[0], b'S', "unexpected frontend frame before cancel EOF");
+                    expect_sync(&mut primary);
+                    answer_ready(&mut primary);
+                    true
+                }
+                Err(error)
+                    if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) =>
+                {
+                    false
+                }
+                Ok(0) => panic!("primary connection closed during the pre-EOF Sync probe"),
+                Ok(_) => unreachable!("the Sync probe buffer holds one byte"),
+                Err(error) => panic!("pre-EOF Sync probe failed: {error}"),
+            };
+            sync_before_eof_tx
+                .send(sync_before_eof)
+                .expect("command test dropped its pre-EOF Sync report");
+
+            release_cancel_rx
+                .recv_timeout(SOCKET_WATCHDOG)
+                .expect("command test did not release the cancel EOF gate");
+            drop(cancel);
+
+            if !sync_before_eof {
+                expect_sync(&mut primary);
+                answer_ready(&mut primary);
+            }
+            primary
+                .set_read_timeout(Some(SOCKET_WATCHDOG))
+                .expect("restore scripted primary watchdog");
+            assert_eq!(expect_simple_query(&mut primary), b"\0");
+            answer_empty_query(&mut primary);
+            expect_disconnect(&mut primary);
+        });
+
+        let connection_config = stub_config(server.addr, None);
+        let pool_config = pool_config(Some(COMMAND_FIRST_TIMEOUT), Duration::from_secs(1));
+        let pool = Pool::connect_with_config(connection_config, pool_config)
+            .await
+            .expect("open pool against cancel-EOF-gated peer");
+        let mut client = pool.get().await.expect("check out cancel-EOF-gated session");
+
+        let command = Box::pin(
+            client.command(async |client| client.batch_execute("SELECT pg_sleep(30)").await),
+        );
+        let gate = Box::pin(async {
+            let sync_before_eof = sync_before_eof_rx
+                .await
+                .expect("server ended before reporting its pre-EOF Sync probe");
+            release_cancel_tx
+                .send(())
+                .expect("scripted cancel connection dropped its EOF gate");
+            sync_before_eof
+        });
+
+        let (command_result, sync_before_eof) = compio::time::timeout(
+            LIVE_OPERATION_WATCHDOG,
+            futures_util::future::join(command, gate),
+        )
+        .await
+        .expect("cancel EOF recovery join exceeded its watchdog");
+        assert!(
+            !sync_before_eof,
+            "pool sent recovery Sync before confirmed cancellation EOF"
+        );
+        let error = command_result.expect_err("scripted long command was not cancelled");
+        assert!(error.is_command_timeout());
+        assert!(!error.is_read_timeout());
+
+        compio::time::timeout(OPERATION_WATCHDOG, client.simple_query(""))
+            .await
+            .expect("same-session post-EOF query exceeded its watchdog")
+            .expect("same session was not reusable after confirmed cancellation EOF");
+        assert_eq!(client.process_id(), 505);
+        assert!(!client.is_closed());
+        drop(client);
+
+        compio::time::timeout(OPERATION_WATCHDOG, pool.close())
+            .await
+            .expect("cancel-EOF-gated pool close exceeded its watchdog");
+        server.finish();
+    })
+    .await
+    .expect("cancel EOF ordering test exceeded its outer watchdog");
+}
