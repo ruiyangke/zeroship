@@ -61,6 +61,13 @@ impl CopyInReceiver {
             done: false,
         }
     }
+
+    /// True after this stream emitted its terminal CopyDone/CopyFail + Sync
+    /// frame. The connection uses this to start the final server-response
+    /// read clock only after that frame finishes flushing.
+    pub(crate) fn is_done(&self) -> bool {
+        self.done
+    }
 }
 
 impl Stream for CopyInReceiver {

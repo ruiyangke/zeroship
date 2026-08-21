@@ -7,6 +7,7 @@ use postgres_protocol::message::backend::{ErrorFields, ErrorResponseBody};
 use std::error::{self, Error as _Error};
 use std::fmt;
 use std::io;
+use std::time::Duration;
 
 pub use self::sqlstate::*;
 
@@ -385,6 +386,9 @@ enum Kind {
     /// A deadline configured by the caller around a pooled client command
     /// expired. This is local policy, not `PostgreSQL`'s `57014` response.
     CommandTimeout,
+    /// A post-startup socket read made no progress before the connection's
+    /// configured inactivity deadline. The protocol session is unrecoverable.
+    ReadTimeout,
 }
 
 struct ErrorInner {
@@ -433,6 +437,7 @@ impl fmt::Display for Error {
             Kind::Connect => fmt.write_str("error connecting to server"),
             Kind::TargetSessionAttrs => fmt.write_str("error checking target session attributes"),
             Kind::CommandTimeout => fmt.write_str("client command timeout expired"),
+            Kind::ReadTimeout => fmt.write_str("socket read timeout expired"),
         }
     }
 }
@@ -479,6 +484,17 @@ impl Error {
     #[must_use]
     pub fn is_command_timeout(&self) -> bool {
         self.0.kind == Kind::CommandTimeout
+    }
+
+    /// Whether the configured post-startup socket-read inactivity deadline
+    /// expired.
+    ///
+    /// This is distinct from a pooled command timeout and from a PostgreSQL
+    /// `57014` cancellation. The connection that reports it has been retired;
+    /// a possibly partial protocol read cannot be resumed safely.
+    #[must_use]
+    pub fn is_read_timeout(&self) -> bool {
+        self.0.kind == Kind::ReadTimeout
     }
 
     /// Whether this is a failure of the TLS handshake itself.
@@ -594,5 +610,32 @@ impl Error {
 
     pub(crate) fn command_timeout(cause: Option<Box<dyn error::Error + Sync + Send>>) -> Error {
         Error::new(Kind::CommandTimeout, cause)
+    }
+
+    pub(crate) fn read_timeout(timeout: Duration) -> Error {
+        Error::new(
+            Kind::ReadTimeout,
+            Some(Box::new(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "socket read made no progress for {timeout:?}; the connection was retired"
+                ),
+            ))),
+        )
+    }
+
+    /// Build the same public classification for a response channel while the
+    /// original error remains owned by `Connection::run`.
+    pub(crate) fn duplicate_read_timeout(&self) -> Option<Error> {
+        if !self.is_read_timeout() {
+            return None;
+        }
+        let detail = self
+            .source()
+            .map_or_else(|| "the connection was retired".to_string(), ToString::to_string);
+        Some(Error::new(
+            Kind::ReadTimeout,
+            Some(Box::new(io::Error::new(io::ErrorKind::TimedOut, detail))),
+        ))
     }
 }
