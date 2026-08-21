@@ -40,13 +40,20 @@ export const DEV_STATE_DIR = ".zeroship";
  * The confined charter the dev apply runs under.
  *
  * The `[[inject]]` block is copied VERBATIM from
- * `./confined-ceiling.ts`'s `CONFINED_SCHEMA_EMIT_CEILING_TOML`, including the
- * `NOW()` spelling of the timestamp defaults. That is deliberate and load-
- * bearing: the emit ceiling and the apply charter must describe the SAME table,
- * or gen-types' descriptor and the applied schema disagree — and the engine's
- * own contract is that emit and apply are byte-identical. The proposal's draft
- * spelled these `now()`; the in-tree ceiling is what actually produces the
- * committed descriptors, so the in-tree spelling wins.
+ * `./confined-ceiling.ts`'s `CONFINED_SCHEMA_EMIT_CEILING_TOML`. That the two
+ * describe the SAME table is load-bearing: if they disagree, gen-types'
+ * descriptor and the applied schema disagree, and the engine's own contract is
+ * that emit and apply are byte-identical.
+ *
+ * The `NOW()` SPELLING is not. This comment claimed it was until 2026-08-20.
+ * `inject_default_to_ir` lower-cases the token before matching it against
+ * `"now" | "now()" | "current_timestamp"`
+ * (third_party/zero-migrate/crates/zero-migrate/src/model/table_shape.rs), so
+ * all three spellings lower to the identical `SynthFn::Now`. `NOW()` is used
+ * here because every other copy uses it and
+ * `tests/inject_policy_mirror_gate.sh` compares the copies byte for byte after
+ * whitespace folding - a cosmetic difference it cannot tell from a real one is
+ * worth removing, which is a smaller claim than the one this comment made.
  *
  * The grants are what the emit path does NOT need, because emit renders no DDL:
  * creating tables, renaming, and destructive ops. Deliberately ABSENT are

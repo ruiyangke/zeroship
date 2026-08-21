@@ -35,6 +35,10 @@ struct Savepoint {
     depth: u32,
 }
 
+fn quote_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
 /// The SQL that ends a savepoint's scope: undo its work, then take the name
 /// back off the server's savepoint stack.
 ///
@@ -52,6 +56,7 @@ struct Savepoint {
 /// subtransaction is in an aborted state, where `RELEASE` is refused and
 /// `ROLLBACK TO` is the statement that recovers it.
 pub(crate) fn rollback_savepoint(name: &str) -> String {
+    let name = quote_identifier(name);
     format!("ROLLBACK TO {name}; RELEASE {name}")
 }
 
@@ -87,7 +92,8 @@ impl<'a> Transaction<'a> {
     pub async fn commit(mut self) -> Result<(), Error> {
         self.done = true;
         let query = if let Some(sp) = self.savepoint.as_ref() {
-            format!("RELEASE {}", sp.name)
+            let name = quote_identifier(&sp.name);
+            format!("RELEASE {name}")
         } else {
             "COMMIT".to_string()
         };
@@ -398,7 +404,8 @@ impl<'a> Transaction<'a> {
     async fn _savepoint(&mut self, name: Option<String>) -> Result<Transaction<'_>, Error> {
         let depth = self.savepoint.as_ref().map_or(0, |sp| sp.depth) + 1;
         let name = name.unwrap_or_else(|| format!("sp_{depth}"));
-        let query = format!("SAVEPOINT {name}");
+        let quoted_name = quote_identifier(&name);
+        let query = format!("SAVEPOINT {quoted_name}");
         self.batch_execute(&query).await?;
 
         Ok(Transaction {
