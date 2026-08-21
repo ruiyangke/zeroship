@@ -198,6 +198,40 @@ pub struct GateSettings {
     )]
     #[config(shared = TRUST_PROXY, default = false)]
     pub trust_proxy: Operational<bool>,
+
+    /// Kafka-wire brokers for the usage-event stream, e.g. `redpanda:9092`.
+    /// Empty disables the gateway's producer (drain and drop), which the boot
+    /// log says in as many words.
+    #[config(shared = METERING_BROKERS, default = String::new())]
+    pub metering_brokers: Operational<String>,
+
+    /// Topic the usage-event producer publishes to.
+    #[config(shared = METERING_EVENTS_TOPIC,
+             default = zeroship_metering::DEFAULT_USAGE_EVENTS_TOPIC.to_owned())]
+    pub metering_events_topic: Operational<String>,
+
+    /// Consumer-group id override for the producer. Empty derives one from the
+    /// per-boot producer source.
+    #[config(shared = METERING_PRODUCER_GROUP_ID, default = String::new())]
+    pub metering_producer_group_id: Operational<String>,
+
+    /// redb write-ahead-log path for the usage outbox. Empty derives one from
+    /// the stable per-host WAL identity. Must differ from the worker's on a
+    /// shared host: redb is single-writer.
+    #[config(shared = METERING_OUTBOX_WAL_PATH, default = String::new())]
+    pub metering_outbox_wal_path: Operational<String>,
+}
+
+/// The gateway's usage-stream producer settings, resolved. The peer of the
+/// worker's `usage_stream_settings`; both producers read one identity.
+#[must_use]
+pub fn usage_stream_settings(settings: &GateSettings) -> zeroship_metering::UsageStreamSettings {
+    zeroship_metering::UsageStreamSettings::from_resolved(
+        settings.metering_brokers.get(),
+        settings.metering_events_topic.get(),
+        settings.metering_producer_group_id.get(),
+        settings.metering_outbox_wal_path.get(),
+    )
 }
 
 impl OverlaySelector for GateSettingsSources {

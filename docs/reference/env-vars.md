@@ -149,7 +149,7 @@ OUTSIDE these two markers is hand-maintained and is never rewritten
 by the generator.
 -->
 
-**149 canonical settings**: 111 operational, 31 secret, 5 bootstrap controls, 2 command controls. Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is the canonical name itself, because both are computed from the one declaration rather than spelled twice.
+**153 canonical settings**: 115 operational, 31 secret, 5 bootstrap controls, 2 command controls. Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is the canonical name itself, because both are computed from the one declaration rather than spelled twice.
 
 ### shared (no scope prefix: read by more than one binary)
 
@@ -288,6 +288,15 @@ by the generator.
 | `gateway.public_url` | operational | `ZEROSHIP_GATEWAY_PUBLIC_URL` | `gateway.public_url` | zeroship-gate `--public-url` | `https://api.zeroship.ai` |
 | `gateway.signing_key_file` | operational | `ZEROSHIP_GATEWAY_SIGNING_KEY_FILE` | `gateway.signing_key_file` | zeroship-gate `--signing-key-file` | empty |
 | `gateway.stash_signing_key` | secret | `ZEROSHIP_GATEWAY_STASH_SIGNING_KEY` | `gateway.stash_signing_key` | zeroship-gate `--stash-signing-key-file` | - |
+
+### metering
+
+| Canonical | Class | Environment | Overlay path | Flag by binary | Default |
+| --- | --- | --- | --- | --- | --- |
+| `metering.brokers` | operational | `ZEROSHIP_METERING_BROKERS` | `metering.brokers` | zeroship-gate `--metering-brokers`<br>zeroship-worker `--metering-brokers` | empty |
+| `metering.events_topic` | operational | `ZEROSHIP_METERING_EVENTS_TOPIC` | `metering.events_topic` | zeroship-gate `--metering-events-topic`<br>zeroship-worker `--metering-events-topic` | `zeroship_metering::DEFAULT_USAGE_EVENTS_TOPIC` |
+| `metering.outbox_wal_path` | operational | `ZEROSHIP_METERING_OUTBOX_WAL_PATH` | `metering.outbox_wal_path` | zeroship-gate `--metering-outbox-wal-path`<br>zeroship-worker `--metering-outbox-wal-path` | empty |
+| `metering.producer_group_id` | operational | `ZEROSHIP_METERING_PRODUCER_GROUP_ID` | `metering.producer_group_id` | zeroship-gate `--metering-producer-group-id`<br>zeroship-worker `--metering-producer-group-id` | empty |
 
 ### migrated
 
@@ -527,8 +536,17 @@ the command. See `docs/reference/project-config.md`.
 process inherits rather than owns: `PATH` `HOME` `HOSTNAME` `PORT` `CI`
 `RUST_LOG` `XDG_CONFIG_HOME` `SSL_CERT_FILE` `SSL_CERT_DIR`
 `AWS_ACCESS_KEY_ID` `AWS_SECRET_ACCESS_KEY` `AWS_SESSION_TOKEN`
+`DATABASE_URL` (the `dev-provision` dev tool only).
+
 `REDPANDA_BROKERS` `REDPANDA_PRODUCER_GROUP_ID` `USAGE_EVENTS_TOPIC`
-`USAGE_OUTBOX_WAL_PATH` `DATABASE_URL` (the `dev-provision` dev tool only).
+`USAGE_OUTBOX_WAL_PATH` were in that list until 2026-08-20 and are NOT settings
+any more. They were the only channel either usage producer had, which is how the
+worker - whose TOML overlay source was removed as a credential boundary - ended
+up with no interface at all for the billing stream. They are now four canonical
+`metering.*` identities in the generated table above, so the worker and the
+gateway each take `--metering-brokers`, `ZEROSHIP_METERING_BROKERS` and
+`[metering] brokers` (and the three siblings). `REDPANDA_BROKERS` survives only
+as a TEST-ONLY name, listed below, that gates the real-broker integration tests.
 
 ---
 

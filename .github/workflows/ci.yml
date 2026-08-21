@@ -532,6 +532,18 @@ jobs:
       # is a human call for the commit that fixes it. Task #354. Text-only.
       - name: deploy does not arm the unsigned workflow-advance path
         run: tests/compose_workflow_advance_flag_gate.sh
+      # AGENTS.md's "zero tokio in the stack" invariant has never been checked by
+      # anything. It is two claims: no manifest we own declares tokio (true, and
+      # briefly false in b72fee096, caught by a human reading the diff), and the
+      # transitive edge through cyper -> hyper exists and is accepted. The gate
+      # bans the first and PINS the second, so it is green today and goes red on
+      # movement in either direction - including the edge being REMOVED, which is
+      # what investigate/cyper-tokio-removal is for and which must take the
+      # AGENTS.md paragraph with it. Runs cargo metadata and cargo tree only:
+      # both resolve from the manifests and the lockfile, so nothing is
+      # compiled. This step sits in the rust job for the toolchain, not a build.
+      - name: zero-tokio invariant
+        run: tests/zero_tokio_gate.sh
       # THE INSTRUMENTS' OWN SELF-TESTS. Every e2e harness in tests/ sources one
       # or more of tests/lib/*.sh for its run accounting: whether a binary is
       # stale against its sources, whether a Rust test skipped and still counted
@@ -1958,24 +1970,37 @@ jobs:
         run: |
           set -o pipefail
           tests/e2e_app_primitives_render.sh 2>&1 | tee "$RUNNER_TEMP/dvd-render.log"
+      # A COUNT IN A COMMENT DECAYS, and these two are why the shape is worth a
+      # warning. Both carried "run by me at HEAD: N passed, 0 failed" from the
+      # day they were wired (2026-08-11). On 2026-08-16 9b205f6ed removed the
+      # worker's `--config` overlay as a credential boundary and both harnesses
+      # kept passing it, so from that commit forward the worker exited on
+      #
+      #     error: unexpected argument '--config' found
+      #
+      # before either script's first assertion. Neither number had been true for
+      # four days, and neither comment moved, because nothing re-runs a comment.
+      # Date the measurement or delete it; an undated count reads as current
+      # forever. tests/config_check_e2e.sh case 13c is the static gate that now
+      # fails on a worker launch carrying --config.
+      #
       # Scenario 17's harness (#311) - Active / PastDue / Suspended enforced at
-      # the gateway. Same story as the render step above: WALKED and
-      # product-mutation-proven in this review, then ungated. Run by me at HEAD
-      # before wiring: 16 passed, 0 failed, rc=0 - the same 16/0 #311 recorded.
-      - name: Account status enforcement (scenario 17, 16/0 at HEAD)
+      # the gateway. Re-run on this branch 2026-08-20 against the flag fix:
+      # 18 passed, 0 failed, rc=0. It was 16/0 when wired; the two added checks
+      # are the worker's and the gateway's usage-outbox assertions.
+      - name: Account status enforcement (scenario 17)
         run: |
           set -o pipefail
           tests/e2e_account_status_enforcement.sh 2>&1 | tee "$RUNNER_TEMP/dvd-acctstatus.log"
       # Scenario 16's harness (#306) - the spend ladder, Allow -> Warn ->
-      # Degrade -> Block and recovery, enforced at the gateway. THIRD
-      # consecutive walked-and-proved harness found ungated (after render 29/0
-      # and account-status 16/0). Run by me at HEAD: 28 passed, 0 failed,
-      # rc=0 - the same 28/0 #306 recorded.
+      # Degrade -> Block and recovery, enforced at the gateway. Re-run on this
+      # branch 2026-08-20: 30 passed, 0 failed, rc=0 (28/0 when wired, plus the
+      # same two outbox assertions).
       #
       # Worth keeping because the commercial ladder is the one place a bug is
       # silently expensive: a broken Block arm serves traffic nobody is paying
       # for, and #306 found this harness had also been exiting 0 without docker.
-      - name: Spend state transitions (scenario 16, 28/0 at HEAD)
+      - name: Spend state transitions (scenario 16)
         run: |
           set -o pipefail
           tests/e2e_spend_state_transitions.sh 2>&1 | tee "$RUNNER_TEMP/dvd-spend.log"

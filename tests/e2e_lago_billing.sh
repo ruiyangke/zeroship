@@ -23,6 +23,8 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; BIN="$ROOT/target/release"
 # shellcheck source=tests/lib/runtime_secrets.sh
 source "$ROOT/tests/lib/runtime_secrets.sh"
+# shellcheck source=tests/lib/usage_producer.sh
+source "$ROOT/tests/lib/usage_producer.sh"
 PASS=0; FAIL=0
 pass(){ PASS=$((PASS+1)); echo "  ✓ $1"; }
 fail(){ FAIL=$((FAIL+1)); echo "  ✗ $1"; }
@@ -147,8 +149,8 @@ openssl rand -base64 48 > "$WORK/gate-broker-secret"; chmod 600 "$WORK/gate-brok
 CFG_TOML="$WORK/zeroship.toml"
 cat > "$CFG_TOML" <<TOML
 [metering]
-redpanda_brokers = "$RP_BROKERS"
-usage_events_topic = "$USAGE_TOPIC"
+brokers = "$RP_BROKERS"
+events_topic = "$USAGE_TOPIC"
 TOML
 
 # control with the LAGO provider (forwarder-fed) + the redpanda stream. api_key
@@ -172,28 +174,29 @@ echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 && pass "control healthy (provider=lago, stream=redpanda)" || { fail "control"; tail -30 "$WORK/control.log"; exit 1; }
 
-# The worker takes NO `--config`. 9b205f6ed (2026-08-16) removed its TOML
-# overlay source on purpose - "the worker deliberately has no TOML overlay
-# source", a credential boundary - so `--config` here is an unknown argument and
-# clap exited before the worker did anything, making every assertion below it
-# unreachable. The stream producer settings that used to arrive in the file's
-# [metering] table now have exactly one channel left, the four
-# UsageStreamSettings::from_env names; USAGE_OUTBOX_WAL_PATH was already one of
-# them. Without the brokers the worker still boots but drains and DROPS every
-# usage event, so the forwarder rail below would assert against silence.
-REDPANDA_BROKERS="$RP_BROKERS" USAGE_EVENTS_TOPIC="$USAGE_TOPIC" \
-USAGE_OUTBOX_WAL_PATH="$WORK/worker-outbox.redb" "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 \
+# The worker takes NO `--config` - 9b205f6ed removed its TOML overlay source as
+# a credential boundary - and no longer needs one: the usage-stream settings are
+# four real flags with ZEROSHIP_METERING_* twins. Without brokers the worker
+# boots and drains and DROPS every usage event, which is why the outbox
+# assertion below the health poll is here: it stops the forwarder rail further
+# down from asserting against silence.
+"$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 \
+  --metering-brokers "$RP_BROKERS" --metering-events-topic "$USAGE_TOPIC" \
+  --metering-outbox-wal-path "$WORK/worker-outbox.redb" \
   --control-url "$CONTROL_URL" --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$ZEROSHIP_WORKER_PORT/readyz" >/dev/null 2>&1 && pass "worker healthy (outbox → redpanda)" || { fail "worker"; tail -30 "$WORK/worker.log"; exit 1; }
+e2e_assert_usage_producer "$WORK/worker.log" "worker"
 
-USAGE_OUTBOX_WAL_PATH="$WORK/gate-outbox.redb" "$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "$CONTROL_URL" \
+"$BIN/zeroship-gate" --port "$ZEROSHIP_GATEWAY_PORT" --control-url "$CONTROL_URL" \
+  --metering-outbox-wal-path "$WORK/gate-outbox.redb" \
   --config "$CFG_TOML" --worker-urls "http://localhost:$ZEROSHIP_WORKER_PORT" --blob-store "$WORK/blobs" --blob-cache-disk-root "$WORK/blob-cache" \
  --poll-interval 2 --signing-key-file "$WORK/sk.pem" --broker-secret-file "$WORK/gate-broker-secret" > "$WORK/gate.log" 2>&1 &
 echo $! >> "$PIDFILE"
 for _ in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 && pass "gateway healthy" || { fail "gateway"; tail -30 "$WORK/gate.log"; exit 1; }
+e2e_assert_usage_producer "$WORK/gate.log" "gateway"
 
 echo ""; echo "=== Stage 2: bearer + creator + app + deploy + matching Lago customer/subscription ==="
 # The scope string is the action list the deleted permission_tokens policy

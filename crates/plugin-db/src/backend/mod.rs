@@ -1672,28 +1672,30 @@ impl<T> RegisterBackend for T where
 /// `crud`, `encryption` and `backend`. So under the feature these links
 /// RESOLVE, and the spans are only correct for a default-feature doc build.
 ///
-/// THE UNDECIDED QUESTION: which configuration are this crate's docs for? If
-/// the answer is "with test-helpers", these spans should go back to links AND
-/// the feature belongs in whatever command CI runs, not in a contributor's
-/// memory - otherwise the next person measures the default config and
-/// re-derives the same 27. If the answer is "default", the spans are right and
-/// this crate documents a lot of prose about items its readers cannot see.
-/// zeroship has no doc gate today, so nothing currently encodes either answer.
+/// THE QUESTION, AND ITS ANSWER AS OF 2026-08-20. Which configuration are this
+/// crate's docs for? This note said "zeroship has no doc gate today, so nothing
+/// currently encodes either answer". It does now, and it answers BOTH:
+/// `tests/run_doc_gate.sh` builds the workspace twice, default and
+/// `--all-features`, and requires zero unresolved links in each. So neither
+/// configuration is privileged, and the construct that is correct in both is a
+/// code span. The spans stay. A cfg-gated internal gets a span, not a link,
+/// and the reason is now enforced rather than remembered.
 ///
 /// The counts above are for `--document-private-items`. On a PUBLIC doc build
 /// the same question has much smaller but much sharper stakes, measured
-/// 2026-08-07 over all 26 workspace members from a clean `cargo clean --doc`:
+/// 2026-08-07 over the then-26 workspace members from a clean `cargo clean
+/// --doc` (30 members and the same shape when re-measured 2026-08-20):
 ///
 /// ```text
 /// cargo doc --no-deps --workspace                 -> 1 unresolved
 /// cargo doc --no-deps --workspace --all-features  -> 0
 /// ```
 ///
-/// That single link is `cross_app_fk.rs`'s citation of
+/// That single link was `cross_app_fk.rs` citing
 /// `register_model::bootstrap::build_ctx`, whose module is
-/// `#[cfg(any(test, feature = "test-helpers"))]`. So it is now the ONLY thing
-/// between this workspace and zero unresolved public doc links, and which way
-/// it goes is decided entirely by the answer above, not by editing that line.
+/// `#[cfg(any(test, feature = "test-helpers"))]`. It was ALSO factually wrong -
+/// `build_ctx` never called that validator. It is a span now, naming the
+/// function that does (`bootstrap`), and both arms of the gate stand at zero.
 ///
 /// It is a conformance marker, not the production abstraction: nothing takes
 /// `dyn Backend` (see the note above `BackendHandle`), dispatch goes through
