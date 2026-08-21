@@ -1,7 +1,8 @@
 use compio_postgres::error::SqlState;
+use compio_postgres::types::ToSql;
 use compio_postgres::{Client, NoTls, QueryEvent, QueryOutcome};
 use futures_channel::mpsc;
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
 use std::future::Future;
 use std::task::{Context, Waker};
 use std::time::{Duration, Instant};
@@ -9,6 +10,8 @@ use std::time::{Duration, Instant};
 mod common;
 
 const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
+const OBJECT_TEST_TIMEOUT: Duration = Duration::from_secs(30);
+const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn test_url() -> String {
     common::env::get(common::env::TestEnvKey::PgTestUrl)
@@ -27,6 +30,66 @@ async fn connect() -> Client {
     })
     .detach();
     client
+}
+
+async fn drop_test_table(table: &str) -> Result<(), String> {
+    let url = test_url();
+    let sql = format!(
+        "SET lock_timeout = '4s'; SET statement_timeout = '4s'; \
+         DROP TABLE IF EXISTS {table}"
+    );
+
+    compio::time::timeout(CLEANUP_TIMEOUT, async {
+        let (client, connection) = compio_postgres::connect(&url, NoTls)
+            .await
+            .map_err(|error| common::error_chain(&error))?;
+        compio::runtime::spawn(async move {
+            if let Err(error) = connection.run().await {
+                eprintln!("cleanup connection error: {}", common::error_chain(&error));
+            }
+        })
+        .detach();
+        client
+            .batch_execute(&sql)
+            .await
+            .map_err(|error| common::error_chain(&error))
+    })
+    .await
+    .map_err(|_| format!("dropping {table} exceeded its cleanup timeout"))?
+}
+
+async fn run_with_table_cleanup(
+    table: &str,
+    test: futures_util::future::LocalBoxFuture<'_, ()>,
+) {
+    let outcome = match compio::time::timeout(
+        OBJECT_TEST_TIMEOUT,
+        std::panic::AssertUnwindSafe(test).catch_unwind(),
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(_) => Err(Box::new(format!(
+            "test using {table} exceeded its {OBJECT_TEST_TIMEOUT:?} timeout"
+        )) as Box<dyn std::any::Any + Send>),
+    };
+    let cleanup = match std::panic::AssertUnwindSafe(drop_test_table(table))
+        .catch_unwind()
+        .await
+    {
+        Ok(cleanup) => cleanup,
+        Err(_) => Err(format!("cleanup for {table} panicked")),
+    };
+
+    match outcome {
+        Ok(()) => cleanup.unwrap_or_else(|error| panic!("failed to clean up {table}: {error}")),
+        Err(panic) => {
+            if let Err(error) = cleanup {
+                eprintln!("failed to clean up {table} after test failure: {error}");
+            }
+            std::panic::resume_unwind(panic);
+        }
+    }
 }
 
 async fn next_event(
@@ -318,175 +381,197 @@ async fn observer_reports_copy_in_once_with_inserted_rows() {
     use bytes::Bytes;
     use futures_util::SinkExt;
 
-    const SQL: &str = "COPY cpg_obs_copy_in (n) FROM STDIN";
     const BARRIER: &str = "SELECT 4::int4 /* cpg_obs_copy_in_barrier */";
 
-    let client = connect().await;
-    client
-        .execute("DROP TABLE IF EXISTS cpg_obs_copy_in", &[])
-        .await
-        .unwrap();
-    client
-        .execute("CREATE TABLE cpg_obs_copy_in (n int NOT NULL)", &[])
-        .await
-        .unwrap();
+    let table = common::test_object_name("cpg_obs_copy_in");
+    let sql = format!("COPY {table} (n) FROM STDIN");
+    run_with_table_cleanup(
+        &table,
+        async {
+            let client = connect().await;
+            client
+                .execute(&format!("DROP TABLE IF EXISTS {table}"), &[])
+                .await
+                .unwrap();
+            client
+                .execute(&format!("CREATE TABLE {table} (n int NOT NULL)"), &[])
+                .await
+                .unwrap();
 
-    let mut events = client.query_events();
-    let barrier = client.prepare(BARRIER).await.unwrap();
-    let sink = client.copy_in::<_, Bytes>(SQL).await.unwrap();
-    let mut sink = Box::pin(sink);
-    sink.as_mut()
-        .send(Bytes::from_static(b"1\n2\n3\n"))
-        .await
-        .unwrap();
-    assert_eq!(sink.as_mut().finish().await.unwrap(), 3);
+            let mut events = client.query_events();
+            let barrier = client.prepare(BARRIER).await.unwrap();
+            let sink = client.copy_in::<_, Bytes>(sql.as_str()).await.unwrap();
+            let mut sink = Box::pin(sink);
+            sink.as_mut()
+                .send(Bytes::from_static(b"1\n2\n3\n"))
+                .await
+                .unwrap();
+            assert_eq!(sink.as_mut().finish().await.unwrap(), 3);
 
-    client.query(&barrier, &[]).await.unwrap();
-    let observed = events_through(&mut events, BARRIER).await;
-    let target: Vec<_> = observed
-        .iter()
-        .filter(|event| event.sql() == SQL)
-        .collect();
-    assert_eq!(target.len(), 1, "COPY IN emitted zero or multiple events");
-    assert_eq!(target[0].outcome(), &QueryOutcome::Success);
-    assert_eq!(target[0].rows(), Some(3));
-
-    drop(sink);
-    client
-        .execute("DROP TABLE cpg_obs_copy_in", &[])
-        .await
-        .unwrap();
+            client.query(&barrier, &[]).await.unwrap();
+            let observed = events_through(&mut events, BARRIER).await;
+            let target: Vec<_> = observed
+                .iter()
+                .filter(|event| event.sql() == sql.as_str())
+                .collect();
+            assert_eq!(target.len(), 1, "COPY IN emitted zero or multiple events");
+            assert_eq!(target[0].outcome(), &QueryOutcome::Success);
+            assert_eq!(target[0].rows(), Some(3));
+        }
+        .boxed_local(),
+    )
+    .await;
 }
 
 #[compio::test]
 async fn observer_reports_copy_out_once_with_exported_rows() {
-    const SQL: &str = "COPY cpg_obs_copy_out TO STDOUT";
     const BARRIER: &str = "SELECT 5::int4 /* cpg_obs_copy_out_barrier */";
 
-    let client = connect().await;
-    client
-        .execute("DROP TABLE IF EXISTS cpg_obs_copy_out", &[])
-        .await
-        .unwrap();
-    client
-        .execute("CREATE TABLE cpg_obs_copy_out (n int NOT NULL)", &[])
-        .await
-        .unwrap();
-    client
-        .execute("INSERT INTO cpg_obs_copy_out VALUES (1), (2), (3)", &[])
-        .await
-        .unwrap();
+    let table = common::test_object_name("cpg_obs_copy_out");
+    let sql = format!("COPY {table} TO STDOUT");
+    run_with_table_cleanup(
+        &table,
+        async {
+            let client = connect().await;
+            client
+                .execute(&format!("DROP TABLE IF EXISTS {table}"), &[])
+                .await
+                .unwrap();
+            client
+                .execute(&format!("CREATE TABLE {table} (n int NOT NULL)"), &[])
+                .await
+                .unwrap();
+            client
+                .execute(&format!("INSERT INTO {table} VALUES (1), (2), (3)"), &[])
+                .await
+                .unwrap();
 
-    let mut events = client.query_events();
-    let barrier = client.prepare(BARRIER).await.unwrap();
-    let mut stream = Box::pin(client.copy_out(SQL).await.unwrap());
-    let mut bytes = 0usize;
-    while let Some(chunk) = stream.as_mut().next().await {
-        bytes += chunk.unwrap().len();
-    }
-    assert!(bytes > 0, "COPY OUT returned no data");
-    drop(stream);
+            let mut events = client.query_events();
+            let barrier = client.prepare(BARRIER).await.unwrap();
+            let mut stream = Box::pin(client.copy_out(sql.as_str()).await.unwrap());
+            let mut bytes = 0usize;
+            while let Some(chunk) = stream.as_mut().next().await {
+                bytes += chunk.unwrap().len();
+            }
+            assert!(bytes > 0, "COPY OUT returned no data");
+            drop(stream);
 
-    client.query(&barrier, &[]).await.unwrap();
-    let observed = events_through(&mut events, BARRIER).await;
-    let target: Vec<_> = observed
-        .iter()
-        .filter(|event| event.sql() == SQL)
-        .collect();
-    assert_eq!(target.len(), 1, "COPY OUT emitted zero or multiple events");
-    assert_eq!(target[0].outcome(), &QueryOutcome::Success);
-    assert_eq!(target[0].rows(), Some(3));
-
-    client
-        .execute("DROP TABLE cpg_obs_copy_out", &[])
-        .await
-        .unwrap();
+            client.query(&barrier, &[]).await.unwrap();
+            let observed = events_through(&mut events, BARRIER).await;
+            let target: Vec<_> = observed
+                .iter()
+                .filter(|event| event.sql() == sql.as_str())
+                .collect();
+            assert_eq!(target.len(), 1, "COPY OUT emitted zero or multiple events");
+            assert_eq!(target[0].outcome(), &QueryOutcome::Success);
+            assert_eq!(target[0].rows(), Some(3));
+        }
+        .boxed_local(),
+    )
+    .await;
 }
 
 #[compio::test]
 async fn observer_reports_dropped_in_flight_future_cancelled_once() {
-    const SQL: &str = "SELECT pg_advisory_lock($1) /* cpg_obs_cancelled_future */";
+    const SQL: &str = "SELECT pg_advisory_lock(hashtextextended($1, 0)) \
+        /* cpg_obs_cancelled_future */";
     const BARRIER: &str = "SELECT 6::int4 /* cpg_obs_cancelled_future_barrier */";
-    const LOCK_KEY: i64 = 0x6370_675f_6f62_7301;
+    compio::time::timeout(Duration::from_secs(10), async {
+        let lock_name = common::test_object_name("cpg_obs_cancelled_future_lock");
+        let client = connect().await;
+        let blocker = connect().await;
+        let got_lock: bool = blocker
+            .query_one_scalar(
+                "SELECT pg_try_advisory_lock(hashtextextended($1, 0))",
+                &[&lock_name],
+            )
+            .await
+            .unwrap();
+        assert!(got_lock, "another process owns this test's advisory lock");
 
-    let client = connect().await;
-    let blocker = connect().await;
-    blocker
-        .query("SELECT pg_advisory_lock($1)", &[&LOCK_KEY])
-        .await
-        .unwrap();
+        let mut events = client.query_events();
+        let statement = client.prepare(SQL).await.unwrap();
+        let barrier = client.prepare(BARRIER).await.unwrap();
+        let mut future = Box::pin(client.query_raw(&statement, std::iter::once(&lock_name)));
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert!(
+            future.as_mut().poll(&mut context).is_pending(),
+            "advisory-lock query completed while the lock was held"
+        );
+        drop(future);
 
-    let mut events = client.query_events();
-    let statement = client.prepare(SQL).await.unwrap();
-    let barrier = client.prepare(BARRIER).await.unwrap();
-    let mut future = Box::pin(client.query_raw(&statement, std::iter::once(&LOCK_KEY)));
-    let waker = Waker::noop();
-    let mut context = Context::from_waker(waker);
-    assert!(
-        future.as_mut().poll(&mut context).is_pending(),
-        "advisory-lock query completed while the lock was held"
-    );
-    drop(future);
-
-    compio::time::timeout(EVENT_TIMEOUT, async {
-        loop {
-            let waiting: bool = blocker
-                .query_one_scalar(
-                    "SELECT EXISTS (\
-                         SELECT 1 FROM pg_stat_activity \
-                         WHERE pid = $1 \
-                           AND state = 'active' \
-                           AND wait_event_type = 'Lock' \
-                           AND wait_event = 'advisory' \
-                           AND query LIKE '%cpg_obs_cancelled_future%'\
-                     )",
-                    &[&client.process_id()],
-                )
-                .await
-                .unwrap();
-            if waiting {
-                return;
+        compio::time::timeout(EVENT_TIMEOUT, async {
+            loop {
+                let waiting: bool = blocker
+                    .query_one_scalar(
+                        "SELECT EXISTS (\
+                             SELECT 1 FROM pg_stat_activity \
+                             WHERE pid = $1 \
+                               AND state = 'active' \
+                               AND wait_event_type = 'Lock' \
+                               AND wait_event = 'advisory' \
+                               AND query LIKE '%cpg_obs_cancelled_future%'\
+                         )",
+                        &[&client.process_id()],
+                    )
+                    .await
+                    .unwrap();
+                if waiting {
+                    return;
+                }
             }
-        }
+        })
+        .await
+        .expect("dropped future never reached PostgreSQL as an executing statement");
+
+        let unlocked: bool = blocker
+            .query_one_scalar(
+                "SELECT pg_advisory_unlock(hashtextextended($1, 0))",
+                &[&lock_name],
+            )
+            .await
+            .unwrap();
+        assert!(unlocked);
+
+        client.query(&barrier, &[]).await.unwrap();
+        let observed = events_through(&mut events, BARRIER).await;
+        let target: Vec<_> = observed
+            .iter()
+            .filter(|event| event.sql() == SQL)
+            .collect();
+        assert_eq!(target.len(), 1, "dropped future emitted zero or multiple events");
+        assert_eq!(target[0].outcome(), &QueryOutcome::Cancelled);
+        assert_eq!(target[0].rows(), None);
     })
     .await
-    .expect("dropped future never reached PostgreSQL as an executing statement");
-
-    let unlocked: bool = blocker
-        .query_one_scalar("SELECT pg_advisory_unlock($1)", &[&LOCK_KEY])
-        .await
-        .unwrap();
-    assert!(unlocked);
-
-    client.query(&barrier, &[]).await.unwrap();
-    let observed = events_through(&mut events, BARRIER).await;
-    let target: Vec<_> = observed
-        .iter()
-        .filter(|event| event.sql() == SQL)
-        .collect();
-    assert_eq!(target.len(), 1, "dropped future emitted zero or multiple events");
-    assert_eq!(target[0].outcome(), &QueryOutcome::Cancelled);
-    assert_eq!(target[0].rows(), None);
+    .expect("dropped-future observer test exceeded its watchdog");
 }
 
 #[compio::test]
 async fn replacing_observer_preserves_the_in_flight_requests_receiver() {
     const SQL: &str =
-        "SELECT pg_advisory_lock($1) /* cpg_obs_replacement_in_flight */";
+        "SELECT pg_advisory_lock(hashtextextended($1, 0)) \
+         /* cpg_obs_replacement_in_flight */";
     const BARRIER: &str = "SELECT 8::int4 /* cpg_obs_replacement_barrier */";
-    const LOCK_KEY: i64 = 0x6370_675f_6f62_7302;
 
     compio::time::timeout(Duration::from_secs(10), async {
+        let lock_name = common::test_object_name("cpg_obs_replacement_in_flight_lock");
         let client = connect().await;
         let blocker = connect().await;
-        blocker
-            .query("SELECT pg_advisory_lock($1)", &[&LOCK_KEY])
+        let got_lock: bool = blocker
+            .query_one_scalar(
+                "SELECT pg_try_advisory_lock(hashtextextended($1, 0))",
+                &[&lock_name],
+            )
             .await
             .unwrap();
+        assert!(got_lock, "another process owns this test's advisory lock");
 
         let mut original_events = client.query_events();
         let statement = client.prepare(SQL).await.unwrap();
-        let mut query = Box::pin(client.query(&statement, &[&LOCK_KEY]));
+        let lock_params: [&(dyn ToSql + Sync); 1] = [&lock_name];
+        let mut query = Box::pin(client.query(&statement, &lock_params));
         let waker = Waker::noop();
         let mut context = Context::from_waker(waker);
         assert!(
@@ -496,7 +581,10 @@ async fn replacing_observer_preserves_the_in_flight_requests_receiver() {
 
         let mut replacement_events = client.query_events();
         let unlocked: bool = blocker
-            .query_one_scalar("SELECT pg_advisory_unlock($1)", &[&LOCK_KEY])
+            .query_one_scalar(
+                "SELECT pg_advisory_unlock(hashtextextended($1, 0))",
+                &[&lock_name],
+            )
             .await
             .unwrap();
         assert!(unlocked);
