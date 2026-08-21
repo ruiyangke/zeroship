@@ -39,7 +39,11 @@ pub async fn healthz() -> web::HttpResponse {
 /// error text, no route count.
 pub async fn readyz(state: State<Arc<GateState>>) -> web::HttpResponse {
     let poll_interval = Duration::from_secs(state.config.poll_interval_secs);
-    if is_ready(state.routes.sync_freshness(), poll_interval) {
+    if is_ready(
+        state.routes.sync_freshness(),
+        poll_interval,
+        zeroship_core::config::dev_escape_active(),
+    ) {
         web::HttpResponse::Ok().json(&serde_json::json!({"ready": true}))
     } else {
         web::HttpResponse::ServiceUnavailable().json(&serde_json::json!({"ready": false}))
@@ -48,9 +52,21 @@ pub async fn readyz(state: State<Arc<GateState>>) -> web::HttpResponse {
 
 /// The readiness decision, split out from the HTTP shell so it can be tested
 /// without standing up a whole `GateState`.
+///
+/// TWO conditions, and the second is the credential gate's readiness half. A
+/// process that booted on the development escape - an empty or
+/// `CHANGE_ME_ZEROSHIP_SERVICE_KEY` credential in a `debug_assertions` build -
+/// is NOT ready, however fresh its route table. Gitaly's mistake was making a
+/// Prometheus label the only signal for a fail-open credential; readiness is
+/// the signal an orchestrator acts on without a human in the loop.
+///
+/// `dev_escape` is a parameter rather than a direct call to
+/// [`zeroship_core::config::dev_escape_active`] so both arms are reachable from
+/// a test: the flag is process-wide and write-once, so a test that set it would
+/// change the answer for every later test in the binary.
 #[must_use]
-fn is_ready(freshness: &SyncFreshness, poll_interval: Duration) -> bool {
-    freshness.is_fresh(staleness_budget(poll_interval))
+fn is_ready(freshness: &SyncFreshness, poll_interval: Duration, dev_escape: bool) -> bool {
+    !dev_escape && freshness.is_fresh(staleness_budget(poll_interval))
 }
 
 #[cfg(test)]
@@ -63,14 +79,27 @@ mod tests {
         // attempt, so this is also what the first seconds of every gateway
         // look like - and during them it can only 404, which is not ready.
         let freshness = SyncFreshness::new();
-        assert!(!is_ready(&freshness, Duration::from_secs(5)));
+        assert!(!is_ready(&freshness, Duration::from_secs(5), false));
+    }
+
+    /// A gateway running on the development credential escape must not be
+    /// routed traffic, even with a perfectly fresh route table.
+    #[test]
+    fn a_gateway_on_the_dev_credential_escape_is_not_ready() {
+        let freshness = SyncFreshness::new();
+        freshness.mark_success();
+        assert!(!is_ready(&freshness, Duration::from_secs(5), true));
+
+        // The one-variable partner: the SAME freshness with the escape inactive
+        // IS ready, so the refusal above is about the escape and nothing else.
+        assert!(is_ready(&freshness, Duration::from_secs(5), false));
     }
 
     #[test]
     fn a_fresh_pull_is_ready_and_a_stale_one_is_not() {
         let freshness = SyncFreshness::new();
         freshness.mark_success();
-        assert!(is_ready(&freshness, Duration::from_secs(5)));
+        assert!(is_ready(&freshness, Duration::from_secs(5), false));
         // Zero poll interval collapses the budget to the 10s floor, which the
         // stamp above is inside; the arm that must NOT be ready is the one
         // whose stamp is older than the budget, and only `SyncFreshness`'s own

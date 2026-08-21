@@ -7,6 +7,8 @@
 //! - [`env`] - the sole raw process-environment boundary, plus pure truthiness.
 //! - [`declared`] - typed keys for reads the config contract does not generate.
 //! - [`secrets`] — secret-strength validation + literal loopback checks.
+//! - [`credential_gate`] - the named sentinel, the boot refusal and its banner,
+//!   the per-subsystem audit, and the build-profile dev escape.
 //! - [`diagnostics`] - the shared env-name scanner every binary's
 //!   "this refusal names something settable" test drives.
 //! - [`bootstrap`] — the shared boot dance + structured `--check-config` emitter.
@@ -21,6 +23,7 @@
 
 pub mod auth_kind;
 pub mod bootstrap;
+pub mod credential_gate;
 pub mod declared;
 pub mod diagnostics;
 pub mod env;
@@ -38,6 +41,12 @@ pub use declared::{
 };
 
 pub use auth_kind::AuthProviderKind;
+
+pub use credential_gate::{
+    audit_credentials, dev_escape_active, is_unset_credential, mark_dev_escape_active,
+    unset_credential_message, BuildProfile, CredentialPosture, CredentialVerdict,
+    SubsystemCredential, WeakCredential, REMEDIATION_COMMAND, SERVICE_CREDENTIAL_SENTINEL,
+};
 
 pub use diagnostics::env_like_tokens;
 

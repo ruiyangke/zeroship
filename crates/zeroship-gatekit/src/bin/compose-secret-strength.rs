@@ -71,6 +71,38 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    // THE SECOND ARM, and it exists because the first one could not see the
+    // rows that matter most to the credential boot gate. `secret_rules` counts
+    // rows with a LENGTH floor, which is 6 of 8; the two it drops are
+    // `ZEROSHIP_CONTROL_KEY` and `ZEROSHIP_MIGRATED_POLICY_SEAL_KEY`, whose only
+    // rule is "not empty, not the placeholder". `run` judges every row, so this
+    // arm reports what that is - and the two counts differing is the point,
+    // because a single number could not have shown the hole.
+    //
+    // FLOOR 6 against 8 rows today, MEASURED by running this binary. Bound to
+    // the table this gate reads, not to a constant recorded elsewhere.
+    let all_rules = PLATFORM_SECRETS.len();
+    let placeholder_arm = Arm {
+        gate: "compose_secret_strength",
+        arm: "placeholder_rules",
+        examined: all_rules,
+        floor: 6,
+    };
+    println!("{}", placeholder_arm.line());
+    println!(
+        "  rules: {all_rules} platform secrets judged for the empty/placeholder case \
+         (including the {} with no length floor)",
+        all_rules - enforced
+    );
+    if !placeholder_arm.cleared() {
+        eprintln!(
+            "  x REFUSED: only {all_rules} platform secret(s) enumerated, floor {}. \
+             zeroship_core::config::PLATFORM_SECRETS stopped enumerating.",
+            placeholder_arm.floor
+        );
+        return ExitCode::FAILURE;
+    }
+
     let report = run(&compose, PLATFORM_SECRETS);
     let verdict = report.verdict();
     // `render` already carries the refusal line, so printing one here too

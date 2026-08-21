@@ -7,7 +7,8 @@ use compio_postgres::NoTls;
 use ntex::web;
 use zeroship_core::auth_provider::{AuthProvider, PlatformConfig, PlatformProvider};
 use zeroship_core::config::{
-    bootstrap_or_exit, CheckConfigReport, CheckValue,
+    audit_credentials, bootstrap_or_exit, mark_dev_escape_active, require_nonempty, BuildProfile,
+    CheckConfigReport, CheckValue, CredentialPosture, CredentialVerdict, SubsystemCredential,
 };
 use zeroship_migrated::auth::ControlPlaneAuthenticator;
 use zeroship_migrated::config::{MigratedSettings, MigratedSettingsSources, DEFAULT_LOG_FILTER};
@@ -17,6 +18,74 @@ use zeroship_migrated::MigrationServiceState;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+/// Operator-facing spelling of the migration-policy seal key.
+const POLICY_SEAL_KEY_LABEL: &str =
+    "ZEROSHIP_MIGRATED_POLICY_SEAL_KEY / --policy-seal-key-file";
+/// Operator-facing spelling of the shared internal control key.
+const CONTROL_KEY_LABEL: &str = "ZEROSHIP_CONTROL_KEY / --control-key-file";
+
+/// Every credential this service needs, tagged by subsystem.
+///
+/// THE PER-SUBSYSTEM PROPERTY IS LOAD-BEARING HERE, and this is the row that
+/// shows why the dimension exists. `control_key` is declared, reported and
+/// mounted by `deploy/compose/docker-compose.yml`, and the internal call
+/// inventory in `docs/proposals/2026-08-16-service-identity.md` section 5.2
+/// measured that `core/migrated` makes NO credentialed platform HTTP call at
+/// all - it reads the public auth JWKS and nothing else. Its credential is
+/// therefore gated on `is_configured()`: an operator who supplies it gets it
+/// checked, and one who does not is not blocked on a credential for a
+/// subsystem that does not exist. A blanket `enabled: true` here would refuse
+/// to start a service that needs nothing, which is exactly the outage the
+/// per-subsystem rule exists to prevent.
+fn migrated_credentials(settings: &MigratedSettings) -> Vec<SubsystemCredential<'_>> {
+    vec![
+        SubsystemCredential {
+            subsystem: "migration-policy-seal",
+            enabled: true,
+            label: POLICY_SEAL_KEY_LABEL,
+            secret: &settings.policy_seal_key,
+            validate: require_nonempty,
+        },
+        SubsystemCredential {
+            subsystem: "control-plane-callback",
+            enabled: settings.control_key.is_configured(),
+            label: CONTROL_KEY_LABEL,
+            secret: &settings.control_key,
+            validate: require_nonempty,
+        },
+    ]
+}
+
+/// Apply the boot gate, or exit.
+fn enforce_migrated_credentials(
+    settings: &MigratedSettings,
+    overlay: &zeroship_core::config::ConfigSource,
+    check_config: bool,
+) -> CredentialPosture {
+    let posture = audit_credentials(&migrated_credentials(settings));
+    let verdict = posture.verdict(BuildProfile::current(), check_config);
+    if let Some(banner) = posture.banner("zeroship-migrated", overlay, verdict) {
+        eprint!("{banner}");
+        tracing::error!(
+            subsystems = %posture
+                .weak()
+                .iter()
+                .map(|weak| weak.subsystem)
+                .collect::<Vec<_>>()
+                .join(","),
+            "migrated: unconfigured service credential"
+        );
+    }
+    match verdict {
+        CredentialVerdict::Proceed => posture,
+        CredentialVerdict::Refuse => std::process::exit(1),
+        CredentialVerdict::DevEscape => {
+            mark_dev_escape_active();
+            posture
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (settings, boot) = bootstrap_or_exit::<MigratedSettings>(
         MigratedSettingsSources::parse(),
@@ -25,6 +94,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let check_config = *settings.check_config.get();
     let tmp_dir = settings.tmp_dir.get().clone();
+
+    // THE BOOT GATE, and it runs BEFORE the dry-run return below. Until this
+    // moved, `zeroship-migrated --check-config` reached `report.emit` and
+    // `return Ok(())` without ever validating `policy_seal_key` or
+    // `control_key`: every credential guard this binary had sat further down,
+    // at lines the dry run never executed. A dry run that exits 0 on a
+    // placeholder seal key is the "reported but not gated" shape that let
+    // `usage_stream_configured=false` ride into a deploy for 43 days.
+    let credentials = enforce_migrated_credentials(&settings, &boot.overlay.source, check_config);
 
     // A read-only dry run: report what was configured and exit BEFORE the tmp
     // directory is created, before the control DSN is dialled, and before a
@@ -74,6 +152,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         report.field(
             "auth_platform_jwks_url",
             CheckValue::Plain(settings.auth_platform_jwks_url.get().clone()),
+        );
+        report.field(
+            "service_credentials",
+            CheckValue::Plain(credentials.summary().to_string()),
+        );
+        report.field(
+            "service_credentials_checked",
+            CheckValue::Count(credentials.checked()),
+        );
+        // NON-ZERO ON A SINGLE-VPS DEPLOYMENT that never supplies
+        // `ZEROSHIP_CONTROL_KEY` to this service. That is the per-subsystem
+        // property being reported rather than hidden: the operator can see that
+        // one credential was skipped, and why, instead of reading a green that
+        // covered less than they thought.
+        report.field(
+            "service_credentials_skipped",
+            CheckValue::Count(credentials.skipped()),
+        );
+        report.field(
+            "service_credentials_unread",
+            CheckValue::Count(credentials.unread()),
         );
         report.emit(*settings.check_config_format.get());
         return Ok(());

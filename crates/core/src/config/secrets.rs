@@ -4,6 +4,8 @@ use std::net::IpAddr;
 
 use base64::Engine;
 
+use crate::config::credential_gate::{is_unset_credential, unset_credential_message};
+
 // These values used to be shipped development defaults. They are public and
 // therefore compromised even when they happen to meet a length or decoding
 // requirement. Keep them only as denylist entries; no runtime path supplies
@@ -157,16 +159,25 @@ fn reject_known_weak(label: &str, value: &str, denylist: &[&str]) -> Result<(), 
     }
 }
 
-/// Require `value` to be non-empty.
+/// Require `value` to carry an actual credential.
+///
+/// The floorless validator: the only thing it rules on is
+/// [`is_unset_credential`], so `ZEROSHIP_CONTROL_KEY` and
+/// `ZEROSHIP_MIGRATED_POLICY_SEAL_KEY` - the two
+/// [`SecretStrength::Unrestricted`] rows - get the sentinel refusal and nothing
+/// else. That is the whole reason the sentinel cannot be left to the length
+/// floor: these two have none.
 ///
 /// # Errors
 ///
-/// Returns a startup-facing message naming `label` when the value is missing.
+/// Returns a startup-facing message naming `label` when the value is empty or
+/// is the [`crate::config::SERVICE_CREDENTIAL_SENTINEL`] placeholder. The two
+/// produce the SAME message, from the same branch.
 pub fn require_nonempty(label: &str, value: &str) -> Result<(), String> {
-    if !value.is_empty() {
-        Ok(())
+    if is_unset_credential(value) {
+        Err(unset_credential_message(label))
     } else {
-        Err(format!("{label} is required"))
+        Ok(())
     }
 }
 
@@ -188,8 +199,8 @@ pub fn require_nonempty(label: &str, value: &str) -> Result<(), String> {
 /// value, empty, or shorter than 32 bytes.
 pub fn validate_stash_key(label: &str, value: &str) -> Result<(), String> {
     reject_known_weak(label, value, KNOWN_WEAK_STASH_KEYS)?;
-    if value.is_empty() {
-        return Err(format!("{label} is required; set a strong (>={MIN_SECRET_BYTES} byte) value"));
+    if is_unset_credential(value) {
+        return Err(unset_credential_message(label));
     }
 
     if value.len() < MIN_SECRET_BYTES {
@@ -220,11 +231,8 @@ pub fn validate_stash_key(label: &str, value: &str) -> Result<(), String> {
 /// value, empty, or shorter than 32 bytes.
 pub fn validate_pairwise_salt(label: &str, value: &str) -> Result<(), String> {
     reject_known_weak(label, value, KNOWN_WEAK_PAIRWISE_SALTS)?;
-    if value.is_empty() {
-        return Err(format!(
-            "{label} is required; set a strong (>={MIN_SECRET_BYTES} byte) value \
-             (identical on gateway + control, never rotated without a migration)"
-        ));
+    if is_unset_credential(value) {
+        return Err(unset_credential_message(label));
     }
 
     if value.len() < MIN_SECRET_BYTES {
@@ -256,8 +264,8 @@ pub fn validate_pairwise_salt(label: &str, value: &str) -> Result<(), String> {
 /// value, empty, or shorter than 32 bytes.
 pub fn validate_worker_key(label: &str, value: &str) -> Result<(), String> {
     reject_known_weak(label, value, KNOWN_WEAK_WORKER_KEYS)?;
-    if value.is_empty() {
-        return Err(format!("{label} is required; set a strong (>={MIN_SECRET_BYTES} byte) value"));
+    if is_unset_credential(value) {
+        return Err(unset_credential_message(label));
     }
 
     if value.len() < MIN_SECRET_BYTES {
@@ -278,7 +286,13 @@ pub fn validate_worker_key(label: &str, value: &str) -> Result<(), String> {
 #[must_use]
 pub fn decoded_master_key_len(value: &str) -> Option<usize> {
     let trimmed = value.trim();
-    if trimmed.is_empty() {
+    // The sentinel joins the empty case HERE, in the one branch, rather than in
+    // a check of its own further up. It matters: `CHANGE_ME_ZEROSHIP_SERVICE_KEY`
+    // is 30 characters drawn entirely from the base64url alphabet and 30 % 4 == 2,
+    // so URL_SAFE_NO_PAD decodes it to 22 bytes and the validator below would
+    // otherwise refuse it as "decodes to 22 bytes" - a DIFFERENT message from the
+    // empty case, which is exactly the divergence this gate exists to prevent.
+    if is_unset_credential(trimmed) {
         return None;
     }
 
@@ -305,6 +319,11 @@ pub fn decoded_master_key_len(value: &str) -> Option<usize> {
 /// value or does not decode to at least 32 bytes.
 pub fn validate_master_key_material(label: &str, value: &str) -> Result<(), String> {
     reject_known_weak(label, value, KNOWN_WEAK_MASTER_KEYS)?;
+    // Unset FIRST, so an empty value and the sentinel share this validator's
+    // message the same way they share every other validator's.
+    if is_unset_credential(value) {
+        return Err(unset_credential_message(label));
+    }
     match decoded_master_key_len(value) {
         Some(n) if n >= MIN_DECODED_KEY_BYTES => Ok(()),
         Some(n) => Err(format!("{label} decodes to {n} bytes; minimum is {MIN_DECODED_KEY_BYTES} bytes")),
@@ -699,10 +718,17 @@ mod tests {
 
     #[test]
     fn require_nonempty_rejects_missing_values() {
-        let err = require_nonempty("ZEROSHIP_CONTROL_KEY / --control-key-file", "")
-            .expect_err("missing secret");
-        assert_eq!(err, "ZEROSHIP_CONTROL_KEY / --control-key-file is required");
-        require_nonempty("ZEROSHIP_CONTROL_KEY / --control-key-file", "secret").expect("present");
+        const LABEL: &str = "ZEROSHIP_CONTROL_KEY / --control-key-file";
+        let err = require_nonempty(LABEL, "").expect_err("missing secret");
+        assert_eq!(err, crate::config::unset_credential_message(LABEL));
+        // Empty and the placeholder are ONE branch, so the floorless validator
+        // that guards `ZEROSHIP_CONTROL_KEY` refuses both with the same bytes.
+        assert_eq!(
+            require_nonempty(LABEL, crate::config::SERVICE_CREDENTIAL_SENTINEL)
+                .expect_err("the placeholder is not a credential"),
+            err
+        );
+        require_nonempty(LABEL, "secret").expect("present");
     }
 
     /// A label no declaration could ever produce, so a message that carries it
