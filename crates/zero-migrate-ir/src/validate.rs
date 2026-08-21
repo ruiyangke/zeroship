@@ -357,7 +357,7 @@ pub enum Dialect {
 }
 
 impl Dialect {
-    /// The open [`DialectId`](crate::dialect::DialectId) this closed variant
+    /// The open [`DialectId`] this closed variant
     /// denotes.
     ///
     /// One-way, exactly like [`SqlDialect::id`](crate::dialect::SqlDialect::id):

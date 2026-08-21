@@ -4332,10 +4332,10 @@ fn effective_ops(
 /// one is what a second copy costs. Validate refusing on one leg while the fold
 /// runs another is a divergence no test in either module would catch, since each
 /// would still be self-consistent.
-fn dialectal_leg<'a>(
+fn dialectal_leg(
     target_dialect: Dialect,
-    legs: &'a BTreeMap<zero_migrate_ir::dialect::DialectId, Vec<crate::model::ir::Op>>,
-) -> &'a [crate::model::ir::Op] {
+    legs: &BTreeMap<zero_migrate_ir::dialect::DialectId, Vec<crate::model::ir::Op>>,
+) -> &[crate::model::ir::Op] {
     let sql_dialect = match target_dialect {
         Dialect::Postgres => crate::schema::query::SqlDialect::Postgres,
         Dialect::Sqlite => crate::schema::query::SqlDialect::Sqlite,

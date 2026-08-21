@@ -1094,10 +1094,10 @@ fn render_split_part(
 /// `dialect` is an OPEN [`DialectId`], and the leg map is keyed by that same
 /// identity. A fourth backend therefore selects its own key without core naming
 /// it or silently borrowing another backend's value.
-fn select_dialect_leg<'a>(
+fn select_dialect_leg(
     dialect: DialectId,
-    legs: &'a BTreeMap<DialectId, Box<Expr>>,
-) -> Result<&'a Expr, DmlError> {
+    legs: &BTreeMap<DialectId, Box<Expr>>,
+) -> Result<&Expr, DmlError> {
     legs.get(&dialect).map(Box::as_ref).ok_or_else(|| {
         DmlError::UnrenderableExpr(format!(
             "dialect() has no leg for the {} target — the structural validator \

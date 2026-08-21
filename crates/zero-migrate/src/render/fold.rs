@@ -702,10 +702,10 @@ fn rewrite_incoming_fk_column_targets(
 /// The leg an `Op::Dialectal` contributes on `dialect`: its own, else nothing.
 /// `pub(crate)` so callers outside the fold select legs the SAME way rather than
 /// re-deriving the exact-id lookup and drifting from it.
-pub(crate) fn selected_dialectal_leg<'a>(
+pub(crate) fn selected_dialectal_leg(
     dialect: SqlDialect,
-    legs: &'a std::collections::BTreeMap<zero_migrate_ir::dialect::DialectId, Vec<Op>>,
-) -> Option<&'a [Op]> {
+    legs: &std::collections::BTreeMap<zero_migrate_ir::dialect::DialectId, Vec<Op>>,
+) -> Option<&[Op]> {
     legs.get(&dialect.id()).map(Vec::as_slice)
 }
 
