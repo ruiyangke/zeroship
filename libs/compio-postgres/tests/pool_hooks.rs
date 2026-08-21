@@ -272,3 +272,48 @@ async fn after_release_false_discards_the_dirty_session() {
     drop(client);
     assert_eq!(calls.get(), 2, "after_release missed the second return");
 }
+
+/// The `target_session_attrs` probe runs BEFORE `after_connect`.
+///
+/// Both landed the same day and both hook into connection setup, so the
+/// ordering is easy to invert and nothing else would notice: `connect_one`
+/// goes through `Config::connect`, which runs the probe inside `connect_raw`
+/// before the Connection is packaged, and only then does the pool run its
+/// hook.
+///
+/// Getting this backwards would spend session setup -- `SET ROLE`,
+/// `search_path`, a `statement_timeout` -- on a host that is about to be
+/// discarded for failing the probe. Asserted by demanding `read-only` from a
+/// writable server: the probe must reject it, and the hook must never see it.
+#[compio::test]
+async fn the_session_attrs_probe_runs_before_after_connect() {
+    let url = format!("{}?target_session_attrs=read-only", test_url());
+    let calls = Rc::new(Cell::new(0));
+    let hook_calls = Rc::clone(&calls);
+
+    let hooks = PoolHooks::new().after_connect(move |_client| {
+        let hook_calls = Rc::clone(&hook_calls);
+        Box::pin(async move {
+            hook_calls.set(hook_calls.get() + 1);
+            Ok(())
+        })
+    });
+    let config = PoolConfig {
+        max_size: 1,
+        min_idle: 1,
+        ..PoolConfig::default()
+    };
+
+    // The live server is writable, so every candidate fails the read-only
+    // requirement and no connection is ever produced.
+    let outcome = Pool::connect_with_config_and_hooks(&url, config, hooks).await;
+    assert!(
+        outcome.is_err(),
+        "a writable server satisfied target_session_attrs=read-only"
+    );
+    assert_eq!(
+        calls.get(),
+        0,
+        "after_connect ran on a connection the probe had already rejected"
+    );
+}
