@@ -810,6 +810,115 @@ mod tests {
         config
     }
 
+    fn scram_config() -> Config {
+        let mut config = Config::new();
+        config
+            .user("scripted-user")
+            .password("scripted-password")
+            .ssl_mode(SslMode::Disable)
+            .connect_timeout(Duration::from_secs(5));
+        config
+    }
+
+    /// A server that offers SCRAM and then names `iteration_count` in its
+    /// server-first message.
+    ///
+    /// The count drives PBKDF2 on the CLIENT, so a server that names an absurd
+    /// one spends our CPU during authentication, before any query runs.
+    async fn scram_server_naming_iteration_count(iteration_count: u32) -> crate::Socket {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        compio::runtime::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+
+            // Startup packet: a bare length prefix, no tag.
+            let compio::BufResult(result, length) = socket.read_exact(vec![0u8; 4]).await;
+            result.unwrap();
+            let length = u32::from_be_bytes(length.try_into().unwrap()) as usize;
+            let compio::BufResult(result, _) = socket.read_exact(vec![0u8; length - 4]).await;
+            result.unwrap();
+
+            // AuthenticationSASL: offer SCRAM-SHA-256, then the list terminator.
+            let mut body = 10i32.to_be_bytes().to_vec();
+            body.extend_from_slice(b"SCRAM-SHA-256\0\0");
+            let compio::BufResult(result, _) = socket.write_all(frame(b'R', &body)).await;
+            result.unwrap();
+            socket.flush().await.unwrap();
+
+            // The client's SASLInitialResponse, so its nonce can be echoed back:
+            // the client rejects a server-first whose nonce is not its own.
+            let compio::BufResult(result, _) = socket.read_exact(vec![0u8; 1]).await;
+            result.unwrap();
+            let compio::BufResult(result, len) = socket.read_exact(vec![0u8; 4]).await;
+            result.unwrap();
+            let len = u32::from_be_bytes(len.try_into().unwrap()) as usize;
+            let compio::BufResult(result, body) = socket.read_exact(vec![0u8; len - 4]).await;
+            result.unwrap();
+            let marker = body
+                .windows(2)
+                .position(|w| w == b"r=")
+                .expect("the client-first message carries a nonce");
+            let client_nonce = String::from_utf8(body[marker + 2..].to_vec())
+                .expect("the SCRAM nonce is printable ASCII");
+
+            // AuthenticationSASLContinue. The salt is a valid base64 literal;
+            // what is under test is the iteration count beside it.
+            let server_first =
+                format!("r={client_nonce}cpgserver,s=QSXCR+Q6sek8bf92,i={iteration_count}");
+            let mut body = 11i32.to_be_bytes().to_vec();
+            body.extend_from_slice(server_first.as_bytes());
+            let compio::BufResult(result, _) = socket.write_all(frame(b'R', &body)).await;
+            result.unwrap();
+            socket.flush().await.unwrap();
+
+            let compio::BufResult(_, _) = socket.read(vec![0u8; 1]).await;
+        })
+        .detach();
+
+        crate::Socket::new_tcp(TcpStream::connect(addr).await.unwrap())
+    }
+
+    /// An absurd SCRAM iteration count must be REFUSED, not computed.
+    ///
+    /// `postgres-protocol` 0.6.11 fed the server's count straight into PBKDF2
+    /// with no ceiling; 0.6.12 rejects anything above 100000 inside
+    /// `ScramSha256::update`, before the key derivation runs. The cap lives in
+    /// the dependency, so this test exists to fail if the lockfile is ever
+    /// moved back.
+    ///
+    /// The assertion is the ERROR MESSAGE, not the timeout: PBKDF2 is a
+    /// synchronous loop, so `compio::time::timeout` cannot interrupt it. The
+    /// timeout here only stops an uncapped build from wedging the suite
+    /// forever; 5000000 iterations is absurd but still bounded, so a build
+    /// without the cap fails on the message rather than hanging for hours.
+    #[compio::test]
+    async fn an_absurd_scram_iteration_count_is_refused_rather_than_computed() {
+        let stream = scram_server_naming_iteration_count(5_000_000).await;
+
+        let result = compio::time::timeout(
+            Duration::from_secs(10),
+            scram_config().connect_raw(stream, NoTls),
+        )
+        .await
+        .expect("the client burned CPU on the server's iteration count instead of refusing it");
+
+        let error = match result {
+            Ok(_) => panic!("a 900000000-iteration server-first message was accepted"),
+            Err(error) => error,
+        };
+        let text = error.to_string();
+        let cause = error
+            .into_source()
+            .map(|c| c.to_string())
+            .unwrap_or_default();
+        let chain = format!("{text}: {cause}");
+        assert!(
+            chain.contains("iteration"),
+            "expected the iteration cap to name itself, got: {chain}"
+        );
+    }
+
     #[compio::test]
     async fn handshake_rejects_excess_delayed_messages() {
         let notices = (0..=EXPECTED_DELAYED_MESSAGE_LIMIT)
