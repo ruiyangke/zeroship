@@ -62,6 +62,9 @@ use crate::Error;
 use crate::config::{Config, SslMode, SslRootCert};
 use crate::tls::{ChannelBinding, MakeTlsConnect, TlsConnect, TlsStream};
 
+/// `PostgreSQL`'s registered ALPN protocol identifier.
+const POSTGRESQL_ALPN_PROTOCOL: &[u8] = b"postgresql";
+
 // ---------------------------------------------------------------------------
 // Verification policy - the one decision, and the one place it is made
 // ---------------------------------------------------------------------------
@@ -280,7 +283,24 @@ pub struct MakeRustlsConnect {
 
 impl MakeRustlsConnect {
     /// Wrap an existing rustls client configuration.
+    ///
+    /// `PostgreSQL` 17 requires the `postgresql` ALPN protocol for direct TLS,
+    /// and libpq offers it for traditional `PostgreSQL` TLS negotiation too. To
+    /// match that behaviour, an empty [`ClientConfig::alpn_protocols`] list is
+    /// replaced with a list containing only `postgresql`.
+    ///
+    /// A nonempty list is caller-owned configuration and is preserved exactly.
+    /// In particular, this method does not append `postgresql`; a caller that
+    /// supplies an incompatible list can cause `PostgreSQL` to reject the TLS
+    /// handshake, including when `sslnegotiation=direct` is used.
     pub fn new(config: Arc<ClientConfig>) -> MakeRustlsConnect {
+        let config = if config.alpn_protocols.is_empty() {
+            let mut config = (*config).clone();
+            config.alpn_protocols = vec![POSTGRESQL_ALPN_PROTOCOL.to_vec()];
+            Arc::new(config)
+        } else {
+            config
+        };
         MakeRustlsConnect { config }
     }
 
@@ -534,7 +554,11 @@ fn tls_server_end_point(cert: &CertificateDer<'_>) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use compio::net::{TcpListener, TcpStream};
+    use futures_channel::oneshot;
+    use rustls::server::{ClientHello, ResolvesServerCert};
     use sha2::Digest;
+    use std::sync::Mutex;
 
     /// The CA that signed [`SERVER_LOCALHOST`], and nothing else.
     const CA: &str = include_str!("../tests/data/verifier_ca.pem");
@@ -559,6 +583,111 @@ mod tests {
             .add(CertificateDer::from_pem_slice(pem.as_bytes()).unwrap())
             .unwrap();
         Arc::new(roots)
+    }
+
+    type OfferedAlpn = Option<Vec<Vec<u8>>>;
+
+    #[derive(Debug)]
+    struct AlpnRecorder {
+        sender: Mutex<Option<oneshot::Sender<OfferedAlpn>>>,
+    }
+
+    impl ResolvesServerCert for AlpnRecorder {
+        fn resolve(
+            &self,
+            client_hello: ClientHello<'_>,
+        ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+            let offered = client_hello
+                .alpn()
+                .map(|protocols| protocols.map(<[u8]>::to_vec).collect());
+            self.sender
+                .lock()
+                .expect("lock ALPN recorder")
+                .take()
+                .expect("record exactly one ClientHello")
+                .send(offered)
+                .expect("deliver offered ALPN protocols");
+
+            // Capturing the real ClientHello is the whole server's job. No
+            // certificate is needed after that point, so end the handshake.
+            None
+        }
+    }
+
+    fn client_config(alpn_protocols: Vec<Vec<u8>>) -> ClientConfig {
+        let provider = Arc::new(provider());
+        let verifier = verifier_for(
+            SslMode::Require,
+            Arc::new(RootCertStore::empty()),
+            &provider,
+        )
+        .expect("build accept-any test verifier");
+        let mut config = ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("safe protocol versions")
+            .dangerous()
+            .with_custom_certificate_verifier(verifier)
+            .with_no_client_auth();
+        config.alpn_protocols = alpn_protocols;
+        config
+    }
+
+    /// Start a real rustls server, connect the driver's rustls client to it,
+    /// and return the protocol list parsed from the serialized `ClientHello`.
+    async fn alpn_offered_on_wire(client_config: ClientConfig) -> OfferedAlpn {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ALPN recorder");
+        let address = listener.local_addr().expect("ALPN recorder address");
+        let (sender, receiver) = oneshot::channel();
+        let server_config = rustls::ServerConfig::builder_with_provider(Arc::new(provider()))
+            .with_safe_default_protocol_versions()
+            .expect("safe protocol versions")
+            .with_no_client_auth()
+            .with_cert_resolver(Arc::new(AlpnRecorder {
+                sender: Mutex::new(Some(sender)),
+            }));
+        let acceptor = compio_tls::TlsAcceptor::from(Arc::new(server_config));
+        let server = compio::runtime::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept rustls client");
+            assert!(
+                acceptor.accept(stream).await.is_err(),
+                "capture-only rustls server must end after ClientHello"
+            );
+        });
+
+        let stream = TcpStream::connect(address)
+            .await
+            .expect("connect to rustls server");
+        let mut make = MakeRustlsConnect::new(Arc::new(client_config));
+        let connector =
+            <MakeRustlsConnect as MakeTlsConnect<TcpStream>>::make_tls_connect(
+                &mut make,
+                "localhost",
+            )
+            .expect("make rustls connector");
+        assert!(
+            connector.connect(stream).await.is_err(),
+            "capture-only rustls server must end the client handshake"
+        );
+        server.await.expect("rustls server task");
+        receiver.await.expect("receive offered ALPN protocols")
+    }
+
+    #[compio::test]
+    async fn empty_client_alpn_offers_postgresql_on_wire() {
+        let offered = alpn_offered_on_wire(client_config(Vec::new())).await;
+        assert_eq!(
+            offered,
+            Some(vec![POSTGRESQL_ALPN_PROTOCOL.to_vec()])
+        );
+    }
+
+    #[compio::test]
+    async fn caller_alpn_is_preserved_on_wire() {
+        let caller_protocols = vec![b"caller/one".to_vec(), b"caller/two".to_vec()];
+        let offered = alpn_offered_on_wire(client_config(caller_protocols.clone())).await;
+        assert_eq!(offered, Some(caller_protocols));
     }
 
     /// Run the verifier a given `sslmode` really gets against the fixture
