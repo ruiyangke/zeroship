@@ -243,16 +243,54 @@ pub struct SweepLease {
     _session: compio_postgres::Client,
 }
 
-/// Take a [`SweepLease`] on `key`, blocking until any peer run releases it.
+/// How long a lease waits for a peer before FAILING rather than hanging.
+///
+/// `pg_advisory_lock` waits forever, and this lock now reaches across
+/// processes: a run wedged inside its window would park every peer's suite on
+/// the shared cluster with nothing to read but a stopped clock. That is a worse
+/// failure than the one being fixed, because a `Mutex` could only ever wedge
+/// its own process.
+///
+/// `lock_timeout` bounds it. MEASURED against the PostgreSQL 17.7 on :5440: one
+/// session holding `pg_advisory_lock(999111222)`, a second with
+/// `SET lock_timeout = 1500` gave up after 1518 ms with `ERROR: canceling
+/// statement due to lock timeout`. So the bound applies to advisory locks and
+/// not only to the table locks the manual names.
+///
+/// 900s is the figure `zeroship_testkit::suite_db::PROVISION_LOCK_TIMEOUT`
+/// already uses for the other cross-process wait in this harness. Legitimate
+/// holds are seconds; the size is for a pile-up of concurrent runs, not a test.
+const SWEEP_LEASE_TIMEOUT_MS: u32 = 900_000;
+
+/// Take a [`SweepLease`] on `key`, waiting for any peer run that holds it.
 #[allow(clippy::future_not_send)]
 pub async fn lease_sweep(key: i64) -> SweepLease {
     let db_url = zeroship_core::config::test_database_url_opt()
         .expect("a sweep lease needs the test database its caller already resolved");
     let session = dedicated_test_db(&db_url).await;
+    // A literal, because `SET` takes no bind parameters. The value is a
+    // constant in this file and reaches the server as one.
+    session
+        .batch_execute(&format!("SET lock_timeout = {SWEEP_LEASE_TIMEOUT_MS}"))
+        .await
+        .expect("bound the sweep lease wait");
     session
         .execute("SELECT pg_advisory_lock($1)", &[&key])
         .await
-        .expect("take the fleet sweep lease");
+        .unwrap_or_else(|error| {
+            // `pg_locks` SPLITS a 64-bit advisory key across two 32-bit
+            // columns - MEASURED, key 7111000001 lands as classid 1, objid
+            // 2816032705 - so the obvious `objid = {key}` predicate does not
+            // merely miss, it fails with `OID out of range`.
+            panic!(
+                "waited {}s for a peer run to release the sweep lease on {key}: {error}\n\
+                 Something holds it and is not finishing. This names it:\n\
+                 SELECT a.pid, a.state, a.query FROM pg_locks l \
+                 JOIN pg_stat_activity a USING (pid) WHERE l.locktype = 'advisory' \
+                 AND (l.classid::bigint << 32 | l.objid::bigint) = {key} AND l.granted;",
+                SWEEP_LEASE_TIMEOUT_MS / 1000,
+            )
+        });
     SweepLease { _session: session }
 }
 
