@@ -1093,6 +1093,56 @@ earlier one by shadowing it.
 Until 1 and 2 exist, this mechanism protects nothing in production, because
 nothing calls it. The code is the end state; the provisioning around it is not.
 
+### 14.4 SHIPPED 2026-08-21: the boot gate of 6.5.2 (hole 3 of 14.2)
+
+Named sentinel `CHANGE_ME_ZEROSHIP_SERVICE_KEY`, empty and sentinel as one
+branch, refuse-to-boot with a banner, a build-profile dev escape, per-subsystem
+scope, and the posture in `CheckConfigReport` and `/readyz`. Wired into
+gateway, worker, control and migrated.
+`crates/core/src/config/credential_gate.rs` is the whole policy;
+`tests/service_credential_boot_gate.sh` drives the real binaries.
+
+**Four things it fixed that were not in the plan**, each measured rather than
+anticipated:
+
+1. **Control's `control_key` guard failed OPEN.** It was
+   `if !settings.control_key.is_configured()`, and `config/env.rs` resolves
+   `ZEROSHIP_CONTROL_KEY=` to `Secret::supplied(Env, Some(""))` - configured,
+   empty, accepted. That is Gitaly's
+   `if len(conf.GetToken()) == 0 { return ctx, nil }` in another language,
+   sitting in this tree while 6.5.3 cited it as somebody else's bug. Every row
+   now runs a validator over the MATERIAL.
+2. **`zeroship-migrated --check-config` validated nothing.** Its report emitted
+   and the process returned `Ok` at `main.rs:33`; every credential guard it had
+   sat below, from line 87 on. A dry run over a placeholder seal key exited 0.
+   The gate now runs before the dry-run return.
+3. **The compose gate could not see the two credentials that matter most here.**
+   `enforced_rules` drops every `SecretStrength::Unrestricted` row, and those
+   rows are `ZEROSHIP_CONTROL_KEY` and `ZEROSHIP_MIGRATED_POLICY_SEAL_KEY` - so
+   a compose file shipping either as empty or as the placeholder printed exactly
+   what a clean one prints. It judged 9 occurrences before and judges 14 now,
+   measured by running it on both branches.
+4. **A dry run over file-sourced credentials reported `configured` while
+   reading none of them.** Found by running the real binary:
+   `service_credentials = configured` beside `..._checked = 0` and
+   `..._unread = 4`. The posture gained a third value, `unverified`.
+
+**One finding NOT fixed, recorded so it is not lost.** `PLATFORM_SECRETS` gives
+`ZEROSHIP_MIGRATED_POLICY_SEAL_KEY` `SecretStrength::Unrestricted` with
+`require_nonempty`, but the value's real consumer,
+`ManagedPolicyConfig::default_confined`, refuses anything under 32 bytes
+(`crates/migrated/src/main.rs`, test `policy_config_refuses_one_byte_key`). The
+table therefore describes a check that is not the strictest one that runs, which
+is the class of defect the table exists to prevent. Fixing it means changing the
+row's strength AND its validator together, since
+`platform_secret_rows_state_the_floor_their_validator_applies` drives both.
+
+**What the gate does NOT cover.** Auth holds no service-to-service credential
+since the mint key was deleted (2.1 is now history on that point), so it has no
+rows; its stash and TOTP keys inherit the sentinel refusal through the shared
+validators. No DSN is covered, in any service. `zeroship-workflow-scheduler`
+has one credential, a DSN, and no rows.
+
 ### 14.3 One divergence from 6.6
 
 `IdentityVerifier::verify` is now asynchronous, returning a boxed future rather

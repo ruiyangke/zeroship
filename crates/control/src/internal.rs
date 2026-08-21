@@ -57,10 +57,19 @@ pub async fn healthz() -> web::HttpResponse {
 ///
 /// Bounded, cached and single-flighted by [`ReadinessGate`]; the body carries
 /// no DSN, host, or driver error text.
+///
+/// A process that booted on the credential dev escape is NOT ready, whatever
+/// Postgres says, and it short-circuits first so a doomed process does not also
+/// generate probe traffic. The body still names nothing: `/readyz` is
+/// unauthenticated, and "this control plane runs on the default key" is the
+/// sentence an attacker most wants.
 pub async fn readyz(
     state: State<Arc<AppState>>,
     gate: State<Arc<ReadinessGate>>,
 ) -> web::HttpResponse {
+    if zeroship_core::config::dev_escape_active() {
+        return web::HttpResponse::ServiceUnavailable().json(&serde_json::json!({"ready": false}));
+    }
     let ready = gate
         .ready(|| async {
             match state.control_pg.check_connection().await {

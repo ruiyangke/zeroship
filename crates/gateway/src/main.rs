@@ -10,8 +10,9 @@ use std::sync::Arc;
 use clap::Parser;
 use ntex::web;
 use zeroship_core::config::{
-    bootstrap_or_exit, require_nonempty, validate_pairwise_salt, validate_secret_material,
-    validate_stash_key, CheckConfigReport, CheckValue,
+    audit_credentials, bootstrap_or_exit, mark_dev_escape_active, require_nonempty,
+    validate_pairwise_salt, validate_stash_key, BuildProfile, CheckConfigReport, CheckValue,
+    CredentialPosture, CredentialVerdict, SubsystemCredential,
 };
 use zeroship_bundle::{build_blob_store, BlobStore, StoreUrl};
 use zeroship_gateway::config::{GateSettings, GateSettingsSources};
@@ -56,60 +57,104 @@ fn parse_worker_urls(raw: &str) -> Vec<String> {
         .collect()
 }
 
-/// Every secret-strength guard the gateway applies, in the order `main` applied
-/// them before the conversion, returning the log context and the validator's own
-/// message rather than exiting - so a test can drive the exact set `main` runs
-/// instead of a re-spelling of it.
+/// Every credential the gateway needs, TAGGED BY THE SUBSYSTEM THAT NEEDS IT.
 ///
-/// Each guard goes through [`validate_secret_material`], the single bridge from
-/// a resolved [`zeroship_core::config::Secret`] to the `&str` validators. That
-/// bridge - not a `check_config` conditional at each site - is what keeps a
-/// `--check-config` run from judging an unread secret while still running every
-/// validator on real material at boot and on an in-memory literal in either mode.
+/// The per-subsystem property of the boot gate: a deployer who has not enabled
+/// a subsystem is never blocked on its credential. The gateway's four are all
+/// unconditional today - route sync, worker dispatch, the OIDC stash and the
+/// pairwise anchor are not optional in a gateway that serves anything - and
+/// `enabled: true` states that as a positive claim rather than leaving the
+/// dimension absent. `crates/migrated` is where a `false` actually appears.
 ///
-/// # Errors
+/// Each row carries the validator `main` runs, so
+/// [`zeroship_core::config::audit_credentials`] runs the check itself rather
+/// than a second spelling of it, and it handles the three material cases
+/// (`Some`, configured-but-unread on a dry run, unsupplied) exactly as
+/// `validate_secret_material` did.
+fn gateway_credentials(settings: &GateSettings) -> Vec<SubsystemCredential<'_>> {
+    vec![
+        SubsystemCredential {
+            subsystem: "control-route-sync",
+            enabled: true,
+            label: CONTROL_KEY_LABEL,
+            secret: &settings.control_key,
+            validate: require_nonempty,
+        },
+        SubsystemCredential {
+            subsystem: "browser-oidc-stash",
+            enabled: true,
+            label: STASH_SIGNING_KEY_LABEL,
+            secret: &settings.stash_signing_key,
+            validate: validate_stash_key,
+        },
+        // A missing or weak salt aborts boot: the per-app `pws_` anchor must be
+        // a strong, stable, operator-set secret.
+        SubsystemCredential {
+            subsystem: "pairwise-subject-anchor",
+            enabled: true,
+            label: PAIRWISE_SALT_LABEL,
+            secret: &settings.pairwise_salt,
+            validate: validate_pairwise_salt,
+        },
+        // S3 - the gateway is the caller of the worker admin endpoints, so it
+        // must refuse to start without a worker key rather than ship
+        // `Authorization: Bearer ` (empty) into a cluster that believes dispatch
+        // is authenticated.
+        //
+        // NOT symmetric with the worker: the worker and control run
+        // `validate_worker_key` and enforce a >=32-byte floor, while the gateway
+        // only requires the credential to exist. A short shared key is therefore
+        // refused on three binaries and accepted here. Presence is what closes
+        // the empty-bearer hole; the strength floor is enforced by the peers
+        // that also key the ZeroShip-User HMAC with it. The SENTINEL is refused
+        // on all four, because `require_nonempty` rules on
+        // `is_unset_credential` and not on length.
+        SubsystemCredential {
+            subsystem: "worker-dispatch",
+            enabled: true,
+            label: WORKER_KEY_LABEL,
+            secret: &settings.worker_key,
+            validate: require_nonempty,
+        },
+    ]
+}
+
+/// Apply the boot gate, or exit.
 ///
-/// Returns `(log context, validator message)` for the first guard that fails.
-fn validate_gateway_secrets(settings: &GateSettings) -> Result<(), (&'static str, String)> {
-    validate_secret_material(&settings.control_key, |value| {
-        require_nonempty(CONTROL_KEY_LABEL, value)
-    })
-    .map_err(|message| ("gateway: refusing to start without control key", message))?;
-
-    validate_secret_material(&settings.stash_signing_key, |value| {
-        validate_stash_key(STASH_SIGNING_KEY_LABEL, value)
-    })
-    .map_err(|message| {
-        (
-            "gateway: refusing to start with unsafe stash signing key",
-            message,
-        )
-    })?;
-
-    // A missing or weak salt aborts boot: the per-app `pws_` anchor must be a
-    // strong, stable, operator-set secret.
-    validate_secret_material(&settings.pairwise_salt, |value| {
-        validate_pairwise_salt(PAIRWISE_SALT_LABEL, value)
-    })
-    .map_err(|message| ("gateway: refusing to start with unsafe pairwise salt", message))?;
-
-    // S3 - the gateway is the caller of the worker admin endpoints, so it must
-    // refuse to start without a worker key rather than ship
-    // `Authorization: Bearer ` (empty) into a cluster that believes dispatch is
-    // authenticated.
-    //
-    // NOT symmetric with the worker, which this comment claimed until
-    // 2026-08-13: the worker and control run `validate_worker_key` and enforce a
-    // >=32-byte floor, while the gateway only requires non-empty. A short shared
-    // key is therefore refused on three binaries and accepted here. Presence is
-    // what closes the empty-bearer hole; the strength floor is enforced by the
-    // peers that also key the ZeroShip-User HMAC with it.
-    validate_secret_material(&settings.worker_key, |value| {
-        require_nonempty(WORKER_KEY_LABEL, value)
-    })
-    .map_err(|message| ("gateway: refusing to start without worker key", message))?;
-
-    Ok(())
+/// The shared shape every service repeats: audit, take a verdict from the build
+/// profile and whether this is a dry run, print the banner, and either exit or
+/// record that the process is running on the escape. Returns the posture so the
+/// caller can publish it in `--check-config`.
+fn enforce_gateway_credentials(
+    settings: &GateSettings,
+    overlay: &zeroship_core::config::ConfigSource,
+    check_config: bool,
+) -> CredentialPosture {
+    let posture = audit_credentials(&gateway_credentials(settings));
+    let verdict = posture.verdict(BuildProfile::current(), check_config);
+    if let Some(banner) = posture.banner("zeroship-gate", overlay, verdict) {
+        // BOTH sinks, deliberately. Tracing may be JSON-formatted and shipped
+        // somewhere nobody is watching during a bring-up; stderr is what the
+        // operator running `docker compose up` actually sees.
+        eprint!("{banner}");
+        tracing::error!(
+            subsystems = %posture
+                .weak()
+                .iter()
+                .map(|weak| weak.subsystem)
+                .collect::<Vec<_>>()
+                .join(","),
+            "gateway: unconfigured service credential"
+        );
+    }
+    match verdict {
+        CredentialVerdict::Proceed => posture,
+        CredentialVerdict::Refuse => std::process::exit(1),
+        CredentialVerdict::DevEscape => {
+            mark_dev_escape_active();
+            posture
+        }
+    }
 }
 
 fn main() -> std::io::Result<()> {
@@ -176,10 +221,11 @@ fn main() -> std::io::Result<()> {
     let prev_signing_key_path = settings.prev_signing_key_file.get().clone();
     let public_url = settings.public_url.get().clone();
 
-    if let Err((context, message)) = validate_gateway_secrets(&settings) {
-        tracing::error!(error = %message, "{context}");
-        std::process::exit(1);
-    }
+    // THE BOOT GATE. It runs BEFORE the `--check-config` report below, which is
+    // what makes a dry run over a placeholder credential exit non-zero instead
+    // of printing a truthful field into a pipe nobody reads
+    // (docs/proposals/2026-08-20-metering-transport-not-configured.md).
+    let credentials = enforce_gateway_credentials(&settings, &boot.overlay.source, check_config);
 
     // Load the gateway's session-cookie signing key. The setting is optional:
     // when empty, the boot succeeds but the signed session cookie cannot be
@@ -327,6 +373,26 @@ fn main() -> std::io::Result<()> {
         report.field(
             "pairwise_salt_configured",
             CheckValue::Secret(settings.pairwise_salt.is_configured()),
+        );
+        // The posture, PLUS how much of it was measured. `service_credentials
+        // = configured` over zero checked credentials is the vacuous green this
+        // report must not be able to print, so the counts ride alongside it and
+        // `tests/service_credential_boot_gate.sh` rules on them.
+        report.field(
+            "service_credentials",
+            CheckValue::Plain(credentials.summary().to_string()),
+        );
+        report.field(
+            "service_credentials_checked",
+            CheckValue::Count(credentials.checked()),
+        );
+        report.field(
+            "service_credentials_skipped",
+            CheckValue::Count(credentials.skipped()),
+        );
+        report.field(
+            "service_credentials_unread",
+            CheckValue::Count(credentials.unread()),
         );
         report.emit(*settings.check_config_format.get());
         return Ok(());
@@ -664,7 +730,7 @@ fn main() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeroship_core::config::{GeneratedConfig, SourceKind};
+    use zeroship_core::config::{GeneratedConfig, SourceKind, SERVICE_CREDENTIAL_SENTINEL};
 
     // WHAT LEFT THIS MODULE. The two tests that drove the ENVIRONMENT tier of
     // `GateSettings` moved to `crates/gateway/tests/config_env_tier.rs`. That
@@ -863,15 +929,18 @@ mod tests {
         let args = base(weak.arg());
         let settings = resolve(&borrow(&args));
         assert_eq!(settings.stash_signing_key.source(), Some(SourceKind::CliFile));
-        let (context, message) =
-            validate_gateway_secrets(&settings).expect_err("a short stash key must be rejected");
-        assert_eq!(context, "gateway: refusing to start with unsafe stash signing key");
-        assert!(message.contains("too short"), "{message}");
+        let posture = audit_credentials(&gateway_credentials(&settings));
+        let weak_rows = posture.weak();
+        assert_eq!(weak_rows.len(), 1, "{posture:?}");
+        assert_eq!(weak_rows[0].subsystem, "browser-oidc-stash");
+        assert!(weak_rows[0].message.contains("too short"), "{weak_rows:?}");
+        assert!(!weak_rows[0].unset, "a short key is present, not unset");
 
         // 1b. The one-variable partner: same flags, a strong key at the path.
         let args = base(good.arg());
-        validate_gateway_secrets(&resolve(&borrow(&args)))
-            .expect("a strong stash key passes every guard");
+        let ok = audit_credentials(&gateway_credentials(&resolve(&borrow(&args))));
+        assert!(ok.is_ok(), "a strong stash key passes every guard: {ok:?}");
+        assert_eq!(ok.checked(), 4, "all four gateway credentials were judged");
 
         // 2. ABSENT: nothing supplies the stash key at all. The bridge runs the
         // validator on "", which is how it produces its own "is required".
@@ -879,16 +948,111 @@ mod tests {
         args.truncate(8);
         let settings = resolve(&borrow(&args));
         assert!(!settings.stash_signing_key.is_configured());
-        let (context, message) =
-            validate_gateway_secrets(&settings).expect_err("an unset stash key must be rejected");
-        assert_eq!(context, "gateway: refusing to start with unsafe stash signing key");
-        assert!(message.contains("required"), "{message}");
+        let posture = audit_credentials(&gateway_credentials(&settings));
+        assert_eq!(posture.weak().len(), 1, "{posture:?}");
+        assert_eq!(posture.weak()[0].subsystem, "browser-oidc-stash");
+        assert!(posture.weak()[0].unset, "an absent key is the unset state");
+        assert!(posture.weak()[0].message.contains("required"), "{posture:?}");
+
+        // 3. THE SENTINEL. Same flags, same everything, and the placeholder
+        // instead of key material: refused with the SAME message the absent case
+        // produced, because they are one branch.
+        let sentinel = SecretFile::new("stash_sentinel", SERVICE_CREDENTIAL_SENTINEL);
+        let args = base(sentinel.arg());
+        let settings = resolve(&borrow(&args));
+        let sentinel_posture = audit_credentials(&gateway_credentials(&settings));
+        assert_eq!(sentinel_posture.weak().len(), 1, "{sentinel_posture:?}");
+        assert_eq!(sentinel_posture.weak()[0].message, posture.weak()[0].message);
+        assert!(sentinel_posture.weak()[0].unset);
 
         // Does NOT cover the environment or TOML tiers of this secret: the env
         // tier is process-global and would race sibling tests, and the overlay
         // tier is `resolve_secret_sources`'s, asserted in core. It also does not
-        // prove `main` calls `validate_gateway_secrets` - only that the function
-        // main calls behaves this way.
+        // prove `main` calls `gateway_credentials` - only that the function main
+        // calls behaves this way. That link is covered by
+        // `tests/service_credential_boot_gate.sh`, which drives the real binary.
+    }
+
+    /// THE PER-SUBSYSTEM PROPERTY, on the gateway's own row set: every row names
+    /// a subsystem, no two rows name the same one, and the set is not empty.
+    ///
+    /// A gate whose row set collapsed to nothing would refuse nothing and print
+    /// exactly what a correctly configured gateway prints.
+    #[test]
+    fn every_gateway_credential_names_a_distinct_subsystem() {
+        let strong = "0123456789abcdef0123456789abcdef";
+        let control = SecretFile::new("sub_control", "control-key-material");
+        let worker = SecretFile::new("sub_worker", strong);
+        let stash = SecretFile::new("sub_stash", strong);
+        let salt = SecretFile::new("sub_salt", strong);
+        let args = [
+            "--control-key-file",
+            control.arg(),
+            "--worker-key-file",
+            worker.arg(),
+            "--stash-signing-key-file",
+            stash.arg(),
+            "--pairwise-salt-file",
+            salt.arg(),
+        ];
+        let settings = resolve(&args);
+        let rows = gateway_credentials(&settings);
+        assert_eq!(rows.len(), 4, "the gateway declares four credentials");
+        let mut subsystems: Vec<&str> = rows.iter().map(|row| row.subsystem).collect();
+        subsystems.sort_unstable();
+        subsystems.dedup();
+        assert_eq!(subsystems.len(), 4, "two rows share a subsystem name");
+        assert!(rows.iter().all(|row| row.label.starts_with("ZEROSHIP_")));
+    }
+
+    /// The boot gate's three-way verdict, on the gateway's real rows.
+    #[test]
+    fn the_gateway_verdict_refuses_in_production_and_on_every_dry_run() {
+        let strong = "0123456789abcdef0123456789abcdef";
+        let control = SecretFile::new("v_control", SERVICE_CREDENTIAL_SENTINEL);
+        let worker = SecretFile::new("v_worker", strong);
+        let stash = SecretFile::new("v_stash", strong);
+        let salt = SecretFile::new("v_salt", strong);
+        let args = vec![
+            "--control-key-file".to_owned(),
+            control.arg().to_owned(),
+            "--worker-key-file".to_owned(),
+            worker.arg().to_owned(),
+            "--stash-signing-key-file".to_owned(),
+            stash.arg().to_owned(),
+            "--pairwise-salt-file".to_owned(),
+            salt.arg().to_owned(),
+        ];
+        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+        let settings = resolve(&borrowed);
+        let posture = audit_credentials(&gateway_credentials(&settings));
+        assert_eq!(posture.summary(), "weak");
+        assert_eq!(
+            posture.verdict(BuildProfile::Production, false),
+            CredentialVerdict::Refuse
+        );
+        assert_eq!(
+            posture.verdict(BuildProfile::Development, true),
+            CredentialVerdict::Refuse
+        );
+        assert_eq!(
+            posture.verdict(BuildProfile::Development, false),
+            CredentialVerdict::DevEscape
+        );
+
+        // The one-variable control: the same four flags with real material in
+        // the control-key file proceed on every profile and both modes.
+        let good = SecretFile::new("v_control_ok", "control-key-material");
+        let mut fixed = args.clone();
+        fixed[1] = good.arg().to_owned();
+        let borrowed: Vec<&str> = fixed.iter().map(String::as_str).collect();
+        let ok = audit_credentials(&gateway_credentials(&resolve(&borrowed)));
+        assert_eq!(ok.summary(), "configured");
+        for profile in [BuildProfile::Development, BuildProfile::Production] {
+            for dry_run in [false, true] {
+                assert_eq!(ok.verdict(profile, dry_run), CredentialVerdict::Proceed);
+            }
+        }
     }
 
     /// The `--check-config` half: a dry run must not open the file, and an
@@ -917,13 +1081,15 @@ mod tests {
             None,
             "--check-config must not have read the file"
         );
+        let posture = audit_credentials(&gateway_credentials(&settings));
         assert!(
-            validate_secret_material(&settings.stash_signing_key, |value| {
-                validate_stash_key(STASH_SIGNING_KEY_LABEL, value)
-            })
-            .is_ok(),
-            "an unread secret must not be judged"
+            posture
+                .weak()
+                .iter()
+                .all(|weak| weak.subsystem != "browser-oidc-stash"),
+            "an unread secret must not be judged: {posture:?}"
         );
+        assert_eq!(posture.unread(), 1, "and it must be COUNTED as unread");
 
         // The one-variable partner: only `--check-config` differs, and the boot
         // run does try to open the same path.
