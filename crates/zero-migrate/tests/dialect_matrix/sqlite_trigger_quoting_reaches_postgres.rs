@@ -382,7 +382,12 @@ fn quote_ident_body(src: &str) -> String {
 }
 
 /// Every `.rs` file under `dir`, recursively.
-fn rust_sources(dir: &Path) -> Vec<PathBuf> {
+///
+/// `pub(crate)` because it is the shared primitive of every walking census in this
+/// binary, not just this one: `core_does_not_spell_a_vendors_bytes` walks the same
+/// nine crate `src` roots for a different needle. One walker means one place where
+/// the walk can be narrowed, and therefore one place both floors are defending.
+pub(crate) fn rust_sources(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
