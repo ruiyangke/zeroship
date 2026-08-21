@@ -110,7 +110,7 @@ pub struct PlatformMigrateConfig {
     pub project_id: String,
     /// The database on this cluster that concurrent migrate runs coordinate
     /// through when applying CLUSTER-GLOBAL objects (roles, databases,
-    /// tablespaces). Defaults to [`cluster_lock::DEFAULT_CLUSTER_LOCK_DATABASE`].
+    /// tablespaces). Defaults to [`crate::config::DEFAULT_CLUSTER_LOCK_DATABASE`].
     ///
     /// It is a separate knob from `database_url` precisely BECAUSE the objects
     /// at stake are not in `database_url`'s database: a PostgreSQL advisory lock
