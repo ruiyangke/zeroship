@@ -925,6 +925,253 @@ async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
         .ok();
 }
 
+/// Regression: a password reset must still take effect when the user holds a
+/// live refresh token at an app they also have a pairwise identity row for.
+///
+/// `password_reset::complete` writes its family markers from TWO data-modifying
+/// CTEs that both `INSERT ... ON CONFLICT (client_id, sub) DO UPDATE` into
+/// `zeroship.token_revocations`: `wrapper_family_markers` (drawn from
+/// `app_user_identities`) and `refresh_family_markers` (drawn from
+/// `oauth_refresh_tokens`). For a non-brokered app client those two sources
+/// carry the SAME `(client_id, sub)` pair - `app_user_identities.pairwise_sub`
+/// and `oauth_refresh_tokens.sub` are both
+/// `Issuer::pairwise_subject(user_id, sector_identifier)`
+/// (`crates/auth/src/oidc/authorization_code.rs:1442` and
+/// `crates/auth/src/oidc/refresh.rs:376`). PostgreSQL refuses that:
+///
+///   ERROR:  ON CONFLICT DO UPDATE command cannot affect row a second time
+///
+/// and the error aborts the WHOLE statement, so NOTHING lands: the password is
+/// not changed, the reset token is not consumed, no family marker is written,
+/// no anchor is revoked. The handler renders "internal error" and every
+/// existing session survives - the exact outcome a password reset exists to
+/// prevent.
+///
+/// This is the DEFAULT path, not an exotic one: the gateway always requests
+/// `offline_access` (`crates/gateway/src/oidc_rp.rs:189`,
+/// `crates/gateway/src/browser_auth.rs:176`), so one BFF app login writes both
+/// rows.
+///
+/// The assertion is the SECURITY property - the OLD PASSWORD STOPS WORKING -
+/// checked through `credentials::verify_password_credentials`, the same
+/// function `/login` calls. Asserting on a marker row or on `revoked_at`
+/// instead would pass on a reset that silently did nothing, because a reset
+/// that never ran leaves no contradictory row behind.
+///
+/// The sibling test above (`reset_post_revokes_app_session_anchor_and_writes_\
+/// family_marker`) seeds the identity row but NO refresh token, so the two
+/// CTEs never collide there and it is green throughout this bug.
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn reset_still_applies_when_user_holds_a_refresh_token_for_the_same_app() {
+    let dsn = match zeroship_core::config::test_database_url_opt() {
+        Some(dsn) => dsn,
+        None => {
+            zeroship_test_support::skip("skipping password_reset_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
+            return;
+        }
+    };
+    let Some(client) = pg().await else {
+        zeroship_test_support::skip("skipping password_reset_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
+        return;
+    };
+
+    const OLD_PASSWORD: &str = "old reset password phrase";
+    const NEW_PASSWORD: &str = "new reset password phrase";
+
+    let email = format!("reset-refresh-{}@zeroship.test", Uuid::new_v4().simple());
+    let user = users::create(&client, &email, "Test", None)
+        .await
+        .expect("seed user");
+    let old_hash = password::hash(OLD_PASSWORD).expect("hash old password");
+    users::update_password_hash(&client, user.id, &old_hash)
+        .await
+        .expect("set old password");
+
+    // Per-app OAuth client + app (the anchor and identity rows FK to them).
+    let client_id = format!("oac_refresh_{}", Uuid::new_v4().simple());
+    client
+        .execute(
+            "INSERT INTO zeroship.oauth_clients \
+                (client_id, client_name, redirect_uris, scopes) \
+             VALUES ($1, $2, $3, $4)",
+            &[
+                &client_id,
+                &format!("Client {client_id}"),
+                &vec![format!("https://{client_id}.example/cb")],
+                &vec!["openid".to_string()],
+            ],
+        )
+        .await
+        .expect("insert oauth client");
+
+    let app_id = Uuid::new_v4();
+    let plan_id = seed_test_plan(&client).await;
+    client
+        .execute(
+            "INSERT INTO zeroship.apps (id, name, plan_id, api_key) VALUES ($1, $2, $3, $4)",
+            &[&app_id, &format!("refresh-app-{}", app_id.simple()), &plan_id, &"k"],
+        )
+        .await
+        .expect("insert app");
+
+    // ONE pairwise subject, written to BOTH tables - which is what a single
+    // real code exchange does. Derived through the production function so the
+    // collision is the production collision, not one this test invented.
+    let pairwise_sub = zeroship_core::auth::derive_pairwise(
+        &zeroship_core::crypto::derive_key("password-reset-test-salt"),
+        &user.id.to_string(),
+        &format!("https://{client_id}.zeroship.localhost"),
+    );
+    client
+        .execute(
+            "INSERT INTO zeroship.app_user_identities \
+                (app_client_id, global_user_id, pairwise_sub) \
+             VALUES ($1, $2, $3)",
+            &[&client_id, &user.id, &pairwise_sub],
+        )
+        .await
+        .expect("insert app_user_identity");
+
+    // The live refresh family the same login issued (`offline_access` is always
+    // requested by the gateway), carrying that SAME `sub`.
+    client
+        .execute(
+            "INSERT INTO zeroship.oauth_refresh_tokens \
+                (token_hash, hash_key_version, refresh_family_id, client_id, user_id, \
+                 sub, granted_scopes, family_granted_scopes, expires_at, \
+                 family_absolute_expires_at) \
+             VALUES ($1, 1, $2, $3, $4, $5, $6, $6, \
+                     NOW() + INTERVAL '7 days', NOW() + INTERVAL '30 days')",
+            &[
+                &Uuid::new_v4().as_bytes().to_vec(),
+                &format!("rfam_{}", Uuid::new_v4().simple()),
+                &client_id,
+                &user.id,
+                &pairwise_sub,
+                &vec!["openid".to_string(), "offline_access".to_string()],
+            ],
+        )
+        .await
+        .expect("insert refresh token");
+
+    let issued = password_reset::issue(&client, &email)
+        .await
+        .expect("issue reset token");
+
+    let pg = Arc::new(client);
+    let cfg = Arc::new(test_cfg(&dsn));
+    let app = test::init_service(
+        web::App::new()
+            .state(cfg.clone())
+            .state(pg.clone())
+            .service(
+                web::resource("/reset")
+                    .route(web::get().to(zeroship_auth::ui::reset::get))
+                    .route(web::post().to(zeroship_auth::ui::reset::post)),
+            ),
+    )
+    .await;
+
+    let get_req =
+        test::TestRequest::get().uri(&format!("/reset?token={}", issued.raw)).to_request();
+    let get_resp = test::call_service(&app, get_req).await;
+    assert_eq!(get_resp.status().as_u16(), 200);
+    let csrf = read_set_cookie(get_resp.headers(), "__Host-zsidp_csrf")
+        .expect("__Host-zsidp_csrf cookie set on GET /reset");
+
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("csrf", &csrf)
+        .append_pair("token", &issued.raw)
+        .append_pair("password", NEW_PASSWORD)
+        .finish();
+    let post_req = test::TestRequest::post()
+        .uri("/reset")
+        .header("x-forwarded-for", unique_loopback().to_string())
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("cookie", format!("__Host-zsidp_csrf={csrf}"))
+        .set_payload(body)
+        .to_request();
+    let post_resp = test::call_service(&app, post_req).await;
+
+    // THE SECURITY ASSERTION. Run FIRST, before the status check, so a failure
+    // reports the property that matters rather than the symptom.
+    //
+    // `verify_password_credentials` is the production credential gate
+    // `/login` calls. A fresh random email plus a per-call loopback IP keeps
+    // this out of every shared rate-limit bucket.
+    let login_ip = unique_loopback().to_string();
+    let http_req = test::TestRequest::default()
+        .header("x-forwarded-for", login_ip.as_str())
+        .to_http_request();
+    let old_password_still_works = zeroship_auth::identity::credentials::verify_password_credentials(
+        pg.as_ref(),
+        &http_req,
+        &client_id,
+        &login_ip,
+        &email,
+        OLD_PASSWORD,
+    )
+    .await;
+    let old_password_accepted = old_password_still_works.is_ok();
+
+    // Clean up before asserting so a red run does not strand rows for the next
+    // one (this test shares its database with concurrent runs).
+    let cleanup = async {
+        for (sql, ()) in [
+            ("DELETE FROM zeroship.oauth_refresh_tokens WHERE user_id = $1", ()),
+            ("DELETE FROM zeroship.app_session_anchors WHERE global_user_id = $1", ()),
+            ("DELETE FROM zeroship.audit_events WHERE actor_user_id = $1", ()),
+        ] {
+            pg.execute(sql, &[&user.id]).await.ok();
+        }
+        pg.execute(
+            "DELETE FROM zeroship.app_user_identities WHERE app_client_id = $1",
+            &[&client_id],
+        )
+        .await
+        .ok();
+        pg.execute(
+            "DELETE FROM zeroship.token_revocations WHERE client_id = $1",
+            &[&client_id],
+        )
+        .await
+        .ok();
+        pg.execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id]).await.ok();
+        pg.execute(
+            "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
+            &[&client_id],
+        )
+        .await
+        .ok();
+        pg.execute(
+            "DELETE FROM zeroship.magic_links WHERE email = $1::citext",
+            &[&email],
+        )
+        .await
+        .ok();
+        pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
+            .await
+            .ok();
+    };
+    cleanup.await;
+
+    assert!(
+        !old_password_accepted,
+        "SECURITY: after a completed password reset the OLD password must no \
+         longer authenticate. It still does, because the reset statement aborted \
+         with `ON CONFLICT DO UPDATE command cannot affect row a second time` \
+         (two CTEs upserting the same (client_id, sub) into token_revocations) \
+         and rolled back everything, including the password change."
+    );
+    assert_eq!(
+        post_resp.status().as_u16(),
+        302,
+        "a successful /reset POST redirects to /login; 200 means it re-rendered \
+         the form with an error"
+    );
+}
+
 /// Regression for security finding L4: a password-reset token must bind to the
 /// IMMUTABLE `user_id` captured at issue time, not re-resolve its target by an
 /// `email` JOIN at `complete()` time.
