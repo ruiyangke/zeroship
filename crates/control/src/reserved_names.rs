@@ -115,6 +115,19 @@
 //!   which the next roll silently reverts. Reported byte-identical on
 //!   2026-08-20; that was a check against the live host, not reproduced when
 //!   this was written, and nothing in this tree re-checks it.
+//! - **THE ROLL ITSELF used to be outside all of this.** Everything above is a
+//!   cargo test, and `deploy-remote.sh` runs from an operator's checkout
+//!   without being gated on one - so a tree CI had never seen could `scp` an
+//!   edge claiming a name the registry still hands out. That path now refuses
+//!   before the build: it reads `RESERVED_APP_NAMES` out of this file with sed
+//!   (pinned by `the_deploy_scripts_sed_still_yields_reserved_app_names`
+//!   below), checks the artifact's `caddyfile_sha256` against the Caddyfile it
+//!   is about to ship, and rules every host string in the lowered config
+//!   against the list. That check is deliberately COARSER than
+//!   [`claimed_host_labels`] - it reads host strings, not matchers, so it
+//!   cannot see a claim that names no host, and an `expression` matcher is
+//!   still this gate's to refuse. It is a floor under the roll, not a
+//!   replacement for the walk.
 //! - **Any edge that is not this Caddyfile.** A deployment fronted by
 //!   Cloudflare Workers, an ALB or an nginx of its own claims hosts this gate
 //!   never sees. `RESERVED_APP_NAMES` is then a floor, not a description.
@@ -876,6 +889,111 @@ mod tests {
     // -----------------------------------------------------------------------
     // The reservation itself
     // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // The deploy path reads this const with sed
+    // -----------------------------------------------------------------------
+
+    /// `deploy/scripts/deploy-remote.sh` refuses a roll whose edge claims a
+    /// host [`RESERVED_APP_NAMES`] does not cover. It cannot ask this module:
+    /// it runs on an operator's machine, has no Rust toolchain requirement, and
+    /// `cargo run` to read four strings is a worse trade than a pinned pattern
+    /// (the same trade `crates/zeroship-gatekit/tests/generated_secret_scrape.rs`
+    /// documents for the generated-secret table).
+    ///
+    /// So it scrapes the const, and the scrape is pinned HERE. The failure this
+    /// prevents is silent in the expensive direction: an extraction that stops
+    /// matching yields an EMPTY list, and an empty reserved list makes every
+    /// host the edge claims look unreserved. The script refuses on empty rather
+    /// than passing, so the live symptom would be a deploy that cannot run at
+    /// all -- but the diagnosis belongs next to the const, not on a roll.
+    const DEPLOY_REMOTE: &str = include_str!("../../../deploy/scripts/deploy-remote.sh");
+
+    /// The Rust twin of
+    /// `sed -n 's/^pub const RESERVED_APP_NAMES: &\[&str\] = &\[\(.*\)\];$/\1/p'`
+    /// piped through `grep -oE '"[a-z0-9_-]+"' | tr -d '"' | sort -u`.
+    fn scrape_reserved(source: &str) -> Vec<String> {
+        const HEAD: &str = "pub const RESERVED_APP_NAMES: &[&str] = &[";
+        let mut names: Vec<String> = source
+            .lines()
+            // sed's `^...$` anchors the WHOLE line, so an indented or
+            // trailing-comment line is rejected here exactly as there.
+            .filter_map(|line| line.strip_prefix(HEAD)?.strip_suffix("];"))
+            .flat_map(|body| {
+                body.split('"')
+                    // Odd-indexed fields are the quoted ones. `grep -oE` only
+                    // yields a field whose every byte is in the class.
+                    .skip(1)
+                    .step_by(2)
+                    .filter(|s| {
+                        !s.is_empty()
+                            && s.bytes().all(|b| {
+                                b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-'
+                            })
+                    })
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        names
+    }
+
+    #[test]
+    fn the_deploy_scripts_sed_still_yields_reserved_app_names() {
+        let source = include_str!("reserved_names.rs");
+        let mut expected: Vec<String> =
+            RESERVED_APP_NAMES.iter().map(|s| (*s).to_owned()).collect();
+        expected.sort_unstable();
+        expected.dedup();
+        assert!(!expected.is_empty(), "the reserved list is empty");
+
+        assert_eq!(
+            scrape_reserved(source),
+            expected,
+            "the sed in deploy/scripts/deploy-remote.sh no longer extracts \
+             RESERVED_APP_NAMES. Either restore the one-line \
+             `pub const RESERVED_APP_NAMES: &[&str] = &[...];` spelling here, or \
+             change reserved_app_names() in that script to match -- but not \
+             neither: an empty extraction makes every host the edge claims look \
+             unreserved."
+        );
+
+        // And the script must still be RUNNING that pattern. Asserting the
+        // extraction works while the script scrapes somewhere else entirely
+        // would be a test of this file and nothing more.
+        assert!(
+            DEPLOY_REMOTE.contains(
+                r"sed -n 's/^pub const RESERVED_APP_NAMES: &\[&str\] = &\[\(.*\)\];$/\1/p'"
+            ),
+            "deploy/scripts/deploy-remote.sh no longer runs the extraction this \
+             test reproduces; update both together"
+        );
+        // ...and must still be REFUSING the roll on an uncovered claim. Reading
+        // the const and then not ruling on it is the same silence.
+        assert!(
+            DEPLOY_REMOTE.contains("RESERVED_APP_NAMES does not cover:"),
+            "deploy/scripts/deploy-remote.sh reads RESERVED_APP_NAMES but no \
+             longer refuses a roll whose edge claims a host it does not cover"
+        );
+    }
+
+    /// The one-variable partner: the extraction must DISCRIMINATE, not merely
+    /// return a list. Source without the const yields nothing, which is exactly
+    /// the silent-empty case the script refuses on.
+    #[test]
+    fn the_reserved_scrape_returns_nothing_when_the_const_is_absent() {
+        assert!(scrape_reserved("fn main() {}\n").is_empty());
+        assert!(
+            scrape_reserved("    pub const RESERVED_APP_NAMES: &[&str] = &[\"api\"];\n").is_empty(),
+            "sed's ^ anchor rejects an indented line; the twin must too"
+        );
+        assert_eq!(
+            scrape_reserved("pub const RESERVED_APP_NAMES: &[&str] = &[\"api\", \"auth\"];\n"),
+            vec!["api".to_owned(), "auth".to_owned()]
+        );
+    }
 
     #[test]
     fn reservation_is_case_insensitive() {
