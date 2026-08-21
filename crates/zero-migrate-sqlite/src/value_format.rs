@@ -159,8 +159,8 @@ impl ValueFormatRenderer for SqliteValueFormatRenderer {
         ulid_alphabet: &str,
     ) -> Vec<ValueFormat> {
         let mut candidates = Vec::new();
-        let lower_guard = format!("*[^{}]*", type_id_alphabet);
-        let upper_guard = format!("*[^{}]*", ulid_alphabet);
+        let lower_guard = format!("*[^{type_id_alphabet}]*");
+        let upper_guard = format!("*[^{ulid_alphabet}]*");
         if literals.iter().any(|literal| literal == &upper_guard) {
             candidates.push(ValueFormat::Ulid);
         }
