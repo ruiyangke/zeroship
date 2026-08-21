@@ -98,3 +98,115 @@ async fn a_raw_begin_does_not_leak_to_the_next_borrower() {
         "the next borrower is inside a transaction it never opened"
     );
 }
+
+/// An ABORTED transaction must not leak either.
+///
+/// Distinct from the raw `BEGIN` above, and not covered by it: after a
+/// statement fails inside a transaction PostgreSQL enters the failed-
+/// transaction state, where every subsequent command is refused with `25P02
+/// current transaction is aborted` until a ROLLBACK arrives. A borrower that
+/// inherits that state cannot run anything at all -- the connection looks
+/// alive and answers every query with the same error.
+#[compio::test]
+async fn an_aborted_transaction_does_not_leak_to_the_next_borrower() {
+    let url = test_url();
+    let config = PoolConfig {
+        max_size: 1,
+        min_idle: 1,
+        ..PoolConfig::default()
+    };
+    let pool = match Pool::connect_with_config(&url, config).await {
+        Ok(pool) => pool,
+        Err(e) => common::postgres_unreachable(&url, &e),
+    };
+
+    // Borrower 1 poisons the session: the divide-by-zero aborts the
+    // transaction, and the release happens with the server still in that
+    // state.
+    {
+        let client = pool.get().await.expect("first checkout");
+        let err = client
+            .batch_execute("BEGIN; SELECT 1/0;")
+            .await
+            .expect_err("dividing by zero must fail");
+        assert_eq!(
+            err.code().map(compio_postgres::error::SqlState::code),
+            Some("22012"),
+            "expected division_by_zero to be what aborted the transaction"
+        );
+    }
+
+    // Borrower 2 gets the same backend. An inherited aborted transaction
+    // shows up as 25P02 on a statement that has nothing to do with the first.
+    let client = pool.get().await.expect("second checkout");
+    let rows = client
+        .query("SELECT 1::int4 AS n", &[])
+        .await
+        .unwrap_or_else(|e| {
+            panic!(
+                "the next borrower inherited an aborted transaction: {}",
+                common::error_chain(&e)
+            )
+        });
+    assert_eq!(rows[0].get::<_, i32>("n"), 1);
+}
+
+/// A backend killed underneath the pool must not be handed out as if alive.
+///
+/// The connection is not "dirty" in the pool's sense -- nothing was left
+/// queued on it -- so this exercises the alive-validation path rather than the
+/// dirty barrier. `pg_terminate_backend` is issued from a SECOND connection,
+/// because the pool is capped at one.
+#[compio::test]
+async fn a_terminated_backend_is_not_handed_to_the_next_borrower() {
+    let url = test_url();
+    let config = PoolConfig {
+        max_size: 1,
+        min_idle: 1,
+        // Force the alive-check: without this the pool may skip validation on
+        // a connection it saw moments ago, and the test would prove nothing.
+        validation_bypass: std::time::Duration::ZERO,
+        ..PoolConfig::default()
+    };
+    let pool = match Pool::connect_with_config(&url, config).await {
+        Ok(pool) => pool,
+        Err(e) => common::postgres_unreachable(&url, &e),
+    };
+
+    let pid: i32 = {
+        let client = pool.get().await.expect("first checkout");
+        let rows = client
+            .query("SELECT pg_backend_pid()::int4 AS pid", &[])
+            .await
+            .expect("read the backend pid");
+        rows[0].get("pid")
+    };
+
+    let (killer, connection) = compio_postgres::connect(&url, compio_postgres::NoTls)
+        .await
+        .expect("second connection to issue the terminate");
+    let driver = compio::runtime::spawn(async move { connection.run().await });
+    killer
+        .execute("SELECT pg_terminate_backend($1)", &[&pid])
+        .await
+        .expect("terminate the pooled backend");
+
+    // The pooled entry is now dead. A checkout must evict and replace it, not
+    // hand back the corpse.
+    let client = pool.get().await.expect("checkout after the backend was killed");
+    let rows = client
+        .query("SELECT pg_backend_pid()::int4 AS pid", &[])
+        .await
+        .unwrap_or_else(|e| {
+            panic!(
+                "the pool handed out the terminated backend: {}",
+                common::error_chain(&e)
+            )
+        });
+    assert_ne!(
+        rows[0].get::<_, i32>("pid"),
+        pid,
+        "the pool reused the pid it had just watched die"
+    );
+    drop(driver);
+}
