@@ -8,8 +8,8 @@
 //! bytes, or a blocked socket write.
 
 use compio_postgres::config::SslMode;
-use compio_postgres::{Config, NoTls, Pool, PoolConfig};
-use futures_util::TryStreamExt;
+use compio_postgres::{AsyncMessage, Config, NoTls, Pool, PoolConfig};
+use futures_util::{StreamExt, TryStreamExt};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::thread;
@@ -151,6 +151,19 @@ fn answer_empty_query(stream: &mut TcpStream) {
     stream.flush().expect("flush empty-query response");
 }
 
+fn send_notification(stream: &mut TcpStream, process_id: i32, channel: &str, payload: &str) {
+    let mut body = Vec::with_capacity(4 + channel.len() + payload.len() + 2);
+    body.extend_from_slice(&process_id.to_be_bytes());
+    body.extend_from_slice(channel.as_bytes());
+    body.push(0);
+    body.extend_from_slice(payload.as_bytes());
+    body.push(0);
+    stream
+        .write_all(&backend_frame(b'A', &body))
+        .expect("write scripted notification");
+    stream.flush().expect("flush scripted notification");
+}
+
 fn answer_large_row_prefix(stream: &mut TcpStream, complete: bool) {
     let mut row_description = Vec::new();
     row_description.extend_from_slice(&1u16.to_be_bytes());
@@ -182,7 +195,7 @@ fn answer_large_row_prefix(stream: &mut TcpStream, complete: bool) {
     stream.flush().expect("flush scripted large-row response");
 }
 
-fn answer_two_phased_rows_and_complete(stream: &mut TcpStream) {
+fn answer_two_phased_rows_and_complete(stream: &mut TcpStream, phase_delay: Duration) {
     let mut row_description = Vec::new();
     row_description.extend_from_slice(&1u16.to_be_bytes());
     row_description.extend_from_slice(b"v\0");
@@ -198,20 +211,20 @@ fn answer_two_phased_rows_and_complete(stream: &mut TcpStream) {
     data_row.extend_from_slice(&(32i32 * 1024).to_be_bytes());
     data_row.resize(data_row.len() + 32 * 1024, b'x');
 
-    // Separate writes make the three decoder batches independent of kernel
-    // packet coalescing: RowDescription fills the operation channel, the first
-    // DataRow is stashed behind it, and the final batch occupies the reader
-    // queue while that reader observes the following EOF.
+    // Separate writes make three decoder batches independent of kernel packet
+    // coalescing. RowDescription and the first DataRow exhaust the futures-mpsc
+    // channel's two effective slots (buffer + sender); the final batch reaches
+    // dispatch with ReadyForQuery while its consumer is backpressured.
     stream
         .write_all(&backend_frame(b'T', &row_description))
         .expect("write phased RowDescription");
     stream.flush().expect("flush phased RowDescription");
-    thread::sleep(Duration::from_millis(100));
+    thread::sleep(phase_delay);
     stream
         .write_all(&backend_frame(b'D', &data_row))
         .expect("write first phased DataRow");
     stream.flush().expect("flush first phased DataRow");
-    thread::sleep(Duration::from_millis(100));
+    thread::sleep(phase_delay);
 
     let mut response = backend_frame(b'D', &data_row);
     response.extend_from_slice(&backend_frame(b'C', b"SELECT 2\0"));
@@ -400,24 +413,49 @@ async fn silence_mid_frame_trips_the_deadline_and_retires_the_session() {
 #[compio::test]
 async fn an_idle_connection_does_not_spend_the_read_budget() {
     compio::time::timeout(ASYNC_WATCHDOG, async {
-        let server = StubServer::spawn(|listener| {
+        let (begin_idle_tx, begin_idle_rx) = std::sync::mpsc::channel();
+        let server = StubServer::spawn(move |listener| {
             let mut stream = accept_bounded(&listener);
             complete_startup(&mut stream, 111);
-            // The driver has an idle background read on plaintext sockets.
-            // No response is owed yet, so this wait must not age the deadline.
+            begin_idle_rx
+                .recv_timeout(SOCKET_WATCHDOG)
+                .expect("idle client did not start its bounded exposure window");
+            // The notification proves the plaintext driver's background read
+            // stayed submitted while its zero-obligation deadline was disarmed.
             thread::sleep(READ_TIMEOUT * 3);
+            send_notification(&mut stream, 111, "read_budget", "still-reading");
             let query = expect_simple_query(&mut stream);
             assert_eq!(query, b"\0");
             answer_empty_query(&mut stream);
             expect_disconnect(&mut stream);
         });
 
-        let (client, connection) = stub_config(server.addr)
+        let (client, mut connection) = stub_config(server.addr)
             .connect(NoTls)
             .await
             .expect("connect to scripted PostgreSQL peer");
+        let mut notifications = connection.notifications();
         let driver = compio::runtime::spawn(async move { connection.run().await });
-        compio::time::sleep(READ_TIMEOUT * 4).await;
+        let idle_started = Instant::now();
+        begin_idle_tx
+            .send(())
+            .expect("scripted idle peer dropped its exposure trigger");
+        let message = compio::time::timeout(SOCKET_WATCHDOG, notifications.next())
+            .await
+            .expect("idle background read did not deliver its notification")
+            .expect("idle notification channel closed without a message");
+        assert!(
+            idle_started.elapsed() >= READ_TIMEOUT * 3,
+            "idle exemption was not exposed for the scripted three budgets"
+        );
+        match message {
+            AsyncMessage::Notification(notification) => {
+                assert_eq!(notification.process_id(), 111);
+                assert_eq!(notification.channel(), "read_budget");
+                assert_eq!(notification.payload(), "still-reading");
+            }
+            other => panic!("idle peer sent an unexpected async message: {other:?}"),
+        }
         client
             .simple_query("")
             .await
@@ -460,7 +498,7 @@ async fn a_timed_out_pool_entry_is_retired_before_return() {
         pool_config
             .max_size(1)
             .min_idle(0)
-            .connection_timeout(Duration::from_secs(2))
+            .acquire_timeout(Duration::from_secs(2))
             .validation_bypass(Duration::from_secs(5));
         let pool = Pool::connect_with_config(stub_config(server.addr), pool_config)
             .await
@@ -525,7 +563,7 @@ async fn backpressure_cannot_hide_retirement_from_the_pool() {
         pool_config
             .max_size(1)
             .min_idle(0)
-            .connection_timeout(Duration::from_secs(2))
+            .acquire_timeout(Duration::from_secs(2))
             .validation_bypass(Duration::from_secs(5));
         let pool = Pool::connect_with_config(stub_config(server.addr), pool_config)
             .await
@@ -564,12 +602,20 @@ async fn backpressure_cannot_hide_retirement_from_the_pool() {
 #[compio::test]
 async fn a_complete_backpressured_response_does_not_arm_an_idle_read() {
     compio::time::timeout(ASYNC_WATCHDOG, async {
-        let server = StubServer::spawn(|listener| {
+        let (response_flushed_tx, response_flushed_rx) = futures_channel::oneshot::channel();
+        let server = StubServer::spawn(move |listener| {
             let mut stream = accept_bounded(&listener);
             complete_startup(&mut stream, 311);
             let query = expect_simple_query(&mut stream);
             assert_eq!(query, b"SELECT repeat('x', 32768)\0");
-            answer_large_row_prefix(&mut stream, true);
+            // Receiving the query proves its bytes reached the peer. Give the
+            // driver one bounded scheduling window to observe flush completion
+            // and arm the response obligation before the fast reply arrives.
+            thread::sleep(READ_TIMEOUT / 3);
+            answer_two_phased_rows_and_complete(&mut stream, READ_TIMEOUT / 8);
+            response_flushed_tx
+                .send(())
+                .expect("complete-response client dropped its flush signal");
             let query = expect_simple_query(&mut stream);
             assert_eq!(query, b"\0");
             answer_empty_query(&mut stream);
@@ -585,7 +631,16 @@ async fn a_complete_backpressured_response_does_not_arm_an_idle_read() {
             .simple_query_raw("SELECT repeat('x', 32768)")
             .await
             .expect("enqueue complete large response");
+        compio::time::timeout(SOCKET_WATCHDOG, response_flushed_rx)
+            .await
+            .expect("scripted complete response was not flushed before its watchdog")
+            .expect("scripted complete-response peer dropped its flush signal");
+        let idle_started = Instant::now();
         compio::time::sleep(READ_TIMEOUT * 3).await;
+        assert!(
+            idle_started.elapsed() >= READ_TIMEOUT * 3,
+            "completed response was not exposed for the scripted three budgets"
+        );
         assert!(
             !client.is_closed(),
             "read-ahead timed out after ReadyForQuery was already decoded"
@@ -616,7 +671,7 @@ async fn a_complete_response_is_delivered_before_the_peers_eof() {
             complete_startup(&mut stream, 312);
             let query = expect_simple_query(&mut stream);
             assert_eq!(query, b"SELECT repeat('x', 32768)\0");
-            answer_two_phased_rows_and_complete(&mut stream);
+            answer_two_phased_rows_and_complete(&mut stream, Duration::from_millis(100));
             // Close immediately after the complete response. The connection
             // must preserve wire order even though its reader can observe EOF
             // before the backpressured response consumer drains every batch.
@@ -713,7 +768,12 @@ async fn copy_input_time_is_not_charged_as_server_read_silence() {
 
         // PostgreSQL is healthy but deliberately silent here because it is
         // waiting for caller input. This is not a stalled server read.
+        let producer_started = Instant::now();
         compio::time::sleep(Duration::from_millis(350)).await;
+        assert!(
+            producer_started.elapsed() >= Duration::from_millis(350),
+            "COPY exemption was not exposed for the scripted producer delay"
+        );
         assert!(!client.is_closed(), "COPY producer time spent the read budget");
         sink.as_mut()
             .send(Bytes::from_static(b"7\n"))
