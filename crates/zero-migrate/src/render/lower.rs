@@ -7029,7 +7029,7 @@ impl IrAuthor {
                     if !self.dialect.supports(Capability::ExclusionConstraint) {
                         return Err(IrLowerError::ExclusionConstraintUnsupported {
                             kind: "exclusionConstraint",
-                            dialect: self.dialect,
+                            dialect: self.dialect.id(),
                         });
                     }
                     let name = c.name.as_deref().map_or_else(
@@ -7153,7 +7153,7 @@ impl IrAuthor {
         if !self.dialect.supports(Capability::NonPkIdentity) && identity.is_some() {
             return Err(IrLowerError::ColumnUnsupported {
                 kind: "identity",
-                dialect: self.dialect,
+                dialect: self.dialect.id(),
                 reason: Some("non-PK identity has no sound SQLite emulation"),
             });
         }
@@ -7943,7 +7943,7 @@ impl IrAuthor {
         {
             return Err(IrLowerError::ExclusionConstraintUnsupported {
                 kind: "exclusionConstraint",
-                dialect: self.dialect,
+                dialect: self.dialect.id(),
             });
         }
         self.require_capability_for(Capability::AlterTableAddConstraint, "addConstraint")?;
@@ -8341,7 +8341,7 @@ fn render_sequence_op(
     if !dialect.supports(Capability::Sequence) {
         return Err(IrLowerError::SequenceUnsupported {
             kind: "sequence",
-            dialect,
+            dialect: dialect.id(),
         });
     }
     match op {
@@ -8632,7 +8632,7 @@ fn validate_view_materialized(dialect: SqlDialect, materialized: bool) -> Result
     if materialized && !dialect.supports(Capability::MaterializedView) {
         return Err(IrLowerError::ViewUnsupported {
             kind: "materializedView",
-            dialect,
+            dialect: dialect.id(),
         });
     }
     Ok(())
@@ -10260,7 +10260,7 @@ pub(crate) fn render_exclusion_constraint_body(
     if !dialect.supports(Capability::ExclusionConstraint) {
         return Err(IrLowerError::ExclusionConstraintUnsupported {
             kind: "exclusionConstraint",
-            dialect,
+            dialect: dialect.id(),
         });
     }
     if elements.is_empty() {
@@ -11840,9 +11840,9 @@ mod tests {
             err,
             IrLowerError::ColumnUnsupported {
                 kind: "identity",
-                dialect: SqlDialect::Sqlite,
+                dialect,
                 reason: Some(reason),
-            } if reason.contains("non-PK identity")
+            } if dialect == SqlDialect::Sqlite.id() && reason.contains("non-PK identity")
         ));
     }
 

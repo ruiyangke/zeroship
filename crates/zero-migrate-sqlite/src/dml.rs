@@ -379,7 +379,7 @@ fn render_sqlite_trigger_op(
             {
                 return Err(IrLowerError::TriggerUnsupported {
                     kind: "triggerEventTruncate",
-                    dialect: DIALECT,
+                    dialect: DIALECT.id(),
                 });
             }
             if matches!(for_each, ForEach::Statement)
@@ -387,14 +387,14 @@ fn render_sqlite_trigger_op(
             {
                 return Err(IrLowerError::TriggerUnsupported {
                     kind: "forEachStatement",
-                    dialect: DIALECT,
+                    dialect: DIALECT.id(),
                 });
             }
             let TriggerAction::Body { statements } = action else {
                 if !RENDERER.supports(Capability::TriggerExecuteFunction) {
                     return Err(IrLowerError::TriggerUnsupported {
                         kind: "executeFunction",
-                        dialect: DIALECT,
+                        dialect: DIALECT.id(),
                     });
                 }
                 return Err(IrLowerError::UnsupportedOp(
@@ -404,7 +404,7 @@ fn render_sqlite_trigger_op(
             if !RENDERER.supports(Capability::TriggerBody) {
                 return Err(IrLowerError::TriggerUnsupported {
                     kind: "triggerBody",
-                    dialect: DIALECT,
+                    dialect: DIALECT.id(),
                 });
             }
             if statements.is_empty() {

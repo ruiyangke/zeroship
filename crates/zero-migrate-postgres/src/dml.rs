@@ -248,7 +248,7 @@ impl DmlRenderer for PostgresDmlRenderer {
             if !self.supports(Capability::TriggerBody) {
                 return Err(IrLowerError::TriggerUnsupported {
                     kind: "triggerBody",
-                    dialect: DIALECT,
+                    dialect: DIALECT.id(),
                 });
             }
         }
@@ -257,7 +257,7 @@ impl DmlRenderer for PostgresDmlRenderer {
             Err(zero_migrate_backend::vendor::VendorError::UnsupportedTriggerAction { kind }) => {
                 return Err(IrLowerError::TriggerUnsupported {
                     kind,
-                    dialect: DIALECT,
+                    dialect: DIALECT.id(),
                 });
             }
             Err(e) => return Err(IrLowerError::Vendor(e)),

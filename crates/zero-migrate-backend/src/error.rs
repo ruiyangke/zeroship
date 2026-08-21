@@ -27,7 +27,7 @@
 //! `zero_migrate::render::declarative::DeclarativeError`), so every existing caller
 //! and every `match` arm resolves unchanged.
 
-use zero_migrate_ir::dialect::SqlDialect;
+use zero_migrate_ir::dialect::DialectId;
 
 /// A failure to author an online expand-contract sequence.
 ///
@@ -858,48 +858,48 @@ pub enum IrLowerError {
     /// A trigger action or facet is unsupported on the target dialect. Triggers are
     /// cross-dialect core, so these are per-facet/action refusals rather than the
     /// old whole-construct vendor gate.
-    #[error("IrAuthor::lower of trigger facet/action {kind:?} is unsupported on {dialect:?}")]
+    #[error("IrAuthor::lower of trigger facet/action {kind:?} is unsupported on {dialect}")]
     TriggerUnsupported {
         /// Stable unsupported-kind token (`triggerBody`, `executeFunction`, …).
         kind: &'static str,
         /// The target dialect that cannot render the facet/action.
-        dialect: SqlDialect,
+        dialect: DialectId,
     },
     /// A view facet is unsupported on the target dialect. Plain structured views
     /// are cross-dialect core; materialized views are PostgreSQL-only.
-    #[error("IrAuthor::lower of view facet {kind:?} is unsupported on {dialect:?}")]
+    #[error("IrAuthor::lower of view facet {kind:?} is unsupported on {dialect}")]
     ViewUnsupported {
         /// Stable unsupported-kind token (`materializedView`, …).
         kind: &'static str,
         /// The target dialect that cannot render the facet.
-        dialect: SqlDialect,
+        dialect: DialectId,
     },
     /// Standalone sequences are PostgreSQL-only; SQLite/MySQL auto-increment is
     /// not a general sequence object and is never used as an emulation.
-    #[error("UNSUPPORTED {{ kind: {kind:?}, dialect: {dialect:?} }}")]
+    #[error("UNSUPPORTED {{ kind: {kind:?}, dialect: {dialect} }}")]
     SequenceUnsupported {
         /// Stable unsupported-kind token.
         kind: &'static str,
         /// The target dialect.
-        dialect: SqlDialect,
+        dialect: DialectId,
     },
     /// Exclusion constraints are PostgreSQL-only.
-    #[error("UNSUPPORTED {{ kind: {kind:?}, dialect: {dialect:?} }}")]
+    #[error("UNSUPPORTED {{ kind: {kind:?}, dialect: {dialect} }}")]
     ExclusionConstraintUnsupported {
         /// Stable unsupported-kind token.
         kind: &'static str,
         /// The target dialect.
-        dialect: SqlDialect,
+        dialect: DialectId,
     },
     /// A column facet is unsupported on the target dialect. Generated/identity
     /// columns are cross-dialect core with per-facet refusals (for example,
     /// SQLite non-PK identity or Postgres virtual generated columns).
-    #[error("IrAuthor::lower of column facet {kind:?} is unsupported on {dialect:?}: {reason:?}")]
+    #[error("IrAuthor::lower of column facet {kind:?} is unsupported on {dialect}: {reason:?}")]
     ColumnUnsupported {
         /// Stable unsupported-kind token (`virtualColumn`, `identity`, …).
         kind: &'static str,
         /// The target dialect that cannot render the facet.
-        dialect: SqlDialect,
+        dialect: DialectId,
         /// Optional precise reason.
         reason: Option<&'static str>,
     },

@@ -260,7 +260,7 @@ impl DmlRenderer for MysqlDmlRenderer {
         if materialized && !self.supports(Capability::MaterializedView) {
             return Err(IrLowerError::ViewUnsupported {
                 kind: "materializedView",
-                dialect: DIALECT,
+                dialect: DIALECT.id(),
             });
         }
         let mut create = String::from("CREATE ");
@@ -442,37 +442,37 @@ fn render_mysql_trigger_create(
     if events.len() != 1 {
         return Err(IrLowerError::TriggerUnsupported {
             kind: "triggerMultipleEvents",
-            dialect: DIALECT,
+            dialect: DIALECT.id(),
         });
     }
     if matches!(events[0], TriggerEvent::Truncate) {
         return Err(IrLowerError::TriggerUnsupported {
             kind: "triggerEventTruncate",
-            dialect: DIALECT,
+            dialect: DIALECT.id(),
         });
     }
     if matches!(timing, TriggerTiming::InsteadOf) {
         return Err(IrLowerError::TriggerUnsupported {
             kind: "triggerTimingInsteadOf",
-            dialect: DIALECT,
+            dialect: DIALECT.id(),
         });
     }
     if matches!(for_each, ForEach::Statement) {
         return Err(IrLowerError::TriggerUnsupported {
             kind: "forEachStatement",
-            dialect: DIALECT,
+            dialect: DIALECT.id(),
         });
     }
     if when.is_some() {
         return Err(IrLowerError::TriggerUnsupported {
             kind: "triggerWhen",
-            dialect: DIALECT,
+            dialect: DIALECT.id(),
         });
     }
     let TriggerAction::Body { statements } = action else {
         return Err(IrLowerError::TriggerUnsupported {
             kind: "executeFunction",
-            dialect: DIALECT,
+            dialect: DIALECT.id(),
         });
     };
     if statements.is_empty() {
@@ -629,14 +629,14 @@ fn render_mysql_trigger_stmt(stmt: &TriggerStmt, eff_schema: &str) -> Result<Str
         // `tests/refusals/mysql_trigger_body_cannot_return_a_result_set.rs`.
         TriggerStmt::Select { .. } => Err(IrLowerError::TriggerUnsupported {
             kind: "selectStatement",
-            dialect: DIALECT,
+            dialect: DIALECT.id(),
         }),
         TriggerStmt::Raise {
             level: RaiseLevel::Ignore,
             ..
         } => Err(IrLowerError::TriggerUnsupported {
             kind: "raiseIgnore",
-            dialect: DIALECT,
+            dialect: DIALECT.id(),
         }),
         TriggerStmt::Raise {
             level: _,

@@ -517,6 +517,16 @@ fn a_fourth_backend_answers_dialect_with_its_own_id() {
     assert!(!dml.supports(Capability::PostgresVendorPrimitives));
     assert!(!dml.supports(Capability::MaterializedView));
 
+    let refusal = IrLowerError::ViewUnsupported {
+        kind: "materializedView",
+        dialect: dml.dialect(),
+    };
+    assert_eq!(
+        refusal.to_string(),
+        "IrAuthor::lower of view facet \"materializedView\" is unsupported on duckdb",
+        "provenance errors must let an outsider name itself with its open id"
+    );
+
     // And the leaf contract has no shipping list to edit: declaring this row is
     // sufficient for an outsider to answer its own identity and capabilities.
 }
