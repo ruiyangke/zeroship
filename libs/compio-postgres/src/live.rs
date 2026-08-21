@@ -6,21 +6,38 @@
 //! and let the socket drop. That shutdown is asynchronous, so it only completes
 //! if the runtime is still being polled.
 //!
-//! If the runtime is torn down first, the socket is orphaned: an io_uring
-//! submission co-owns the descriptor and is never reclaimed, so the descriptor
-//! stays open for the rest of the process. THE SERVER-SIDE BACKEND NO LONGER
-//! GOES WITH IT - this said "and the server-side backend stays live" until
-//! `crate::release` landed, which is exactly the half that was worth fixing
-//! automatically. Dropping the `Client` now shuts the socket down with a
-//! synchronous syscall, so the session ends whether or not the task is ever
-//! polled again; what leaks is a descriptor in this process.
+//! If the runtime is torn down first, more is stranded than the socket, and
+//! the runtime is stranded with it. `compio_runtime::runtime::Submit` holds a
+//! strong `Rc` to the runtime's inner state, so a read that is still in flight
+//! at teardown makes `Runtime::drop` see a strong count above one and take its
+//! early return without clearing the scheduler. The cycle that leaves -
+//! inner -> scheduler -> task -> `Submit` -> inner - is never collected, so the
+//! `Proactor` is never dropped either. Measured 2026-08-20 over 24 cycles by
+//! reading `/proc/self/fd` targets: one connection per runtime leaks exactly
+//! three descriptors, and they are `anon_inode:[io_uring]`,
+//! `anon_inode:[eventfd]` and the socket. Two connections leak four. The law is
+//! `connections + 2` and it is guarded in
+//! `tests/integration.rs::a_torn_down_runtime_leaks_two_descriptors_plus_one_per_live_connection`.
+//!
+//! None of that is specific to postgres: a bare `compio::net::TcpStream` read
+//! on a detached task leaks the same three.
+//!
+//! THE SERVER-SIDE BACKEND NO LONGER GOES WITH IT - this said "and the
+//! server-side backend stays live" until `crate::release` landed, which is
+//! exactly the half that was worth fixing automatically. Dropping the `Client`
+//! now shuts the socket down with a synchronous syscall, so the session ends
+//! whether or not the task is ever polled again; what leaks is descriptors in
+//! this process.
 //!
 //! So this is no longer the way to keep a server from running out of
-//! connections. It remains the way to know that a connection has actually
-//! finished - its task returned, its buffers are gone, its descriptor is
-//! closed - which a caller tearing a runtime down deliberately (a test, a
-//! graceful shutdown path) may still want to wait for rather than guess at with
-//! a sleep.
+//! connections. It is the way to keep a process from running out of
+//! DESCRIPTORS: [`drain_connections`] leaves nothing in flight, and a runtime
+//! dropped after it leaks zero - measured `[0,0,0,...]` over the same 24
+//! cycles, against `[3,3,3,...]` without it. It remains, as before, the way to
+//! know that a connection has actually finished - its task returned, its
+//! buffers are gone, its descriptor is closed - which a caller tearing a
+//! runtime down deliberately (a test, a graceful shutdown path) may still want
+//! to wait for rather than guess at with a sleep.
 //!
 //! [`live_connections`] is that observation point and [`drain_connections`] is
 //! the wait. The counter is per-thread because a `Connection` never leaves the
