@@ -168,3 +168,7 @@ harness = false
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "query_live"
+harness = false
