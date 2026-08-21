@@ -270,3 +270,50 @@ fn run_in(server: &admin::Server, database: &str, sql: &str) -> bool {
                 .any(|m| matches!(m, compio_postgres::SimpleQueryMessage::Row(_)))
         })
 }
+
+/// Every `PgAdmin` statement builds a compio runtime of its own and must give
+/// its connection back before letting that runtime go.
+///
+/// `PgAdmin::simple` detached the connection driver and dropped the runtime a
+/// line later, with the driver still parked on a read. A pending `io_uring`
+/// submission holds a strong `Rc` to the runtime's inner state, so
+/// `Runtime::drop` takes its `strong_count > 1` early return, never clears the
+/// scheduler, and leaves an Rc cycle that keeps the whole `Proactor` alive.
+/// Measured 2026-08-20 in a standalone probe over 24 create/drop cycles: three
+/// descriptors per cycle, and they are the ring, the driver's eventfd and the
+/// socket - not one socket. This runs once per admin statement, in a harness
+/// whose job is provisioning databases for whole suites.
+///
+/// The instrument here is [`compio_postgres::live_connections`] and not
+/// `/proc/self/fd`, deliberately. The descriptor count is per PROCESS, so a
+/// sibling test opening its own connection moves it underneath the loop; the
+/// live count is per THREAD, which is why this runs the statements on a thread
+/// of its own. The connection's guard is a field of the `Connection`, so it
+/// falls exactly when the driver task is dropped - which is precisely what an
+/// abandoned task never does.
+///
+/// WHAT THIS DOES NOT CATCH: descriptors. A future leak that strands a
+/// submission without stranding a `Connection` would read zero here. The
+/// descriptor law itself is measured in `compio-postgres`'s
+/// `a_torn_down_runtime_leaks_two_descriptors_plus_one_per_live_connection`.
+#[test]
+fn admin_statements_do_not_abandon_their_connections() {
+    const STATEMENTS: usize = 8;
+
+    let Some((_, server)) = server() else { return };
+    let live = std::thread::spawn(move || {
+        let mut admin = admin::PgAdmin::new(server);
+        for _ in 0..STATEMENTS {
+            admin::DbAdmin::exists(&mut admin, "postgres").expect("probe the maintenance database");
+        }
+        compio_postgres::live_connections()
+    })
+    .join()
+    .expect("the probing thread panicked");
+
+    assert_eq!(
+        live, 0,
+        "{STATEMENTS} admin statements left {live} connections alive on their own thread; \
+         each one is a driver task the runtime that spawned it could not reclaim"
+    );
+}
