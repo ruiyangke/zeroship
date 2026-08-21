@@ -62,10 +62,13 @@
 #     invisible to arm 1. `zeroship-schema`'s `build_system_field_columns`
 #     (crates/zeroship-schema/src/query.rs) is a live example: it emits the same
 #     seven columns from Rust, is a genuine SEVENTH producer of this shape, and
-#     it CANNOT be made to consume the fragment - the two differ on purpose
-#     (varchar(255) vs text, and a COLLATE "C" pin the engine has no slot for on
-#     an injected column; see the fragment's own header and #255). Closing that
-#     needs a check of a different kind - comparing rendered DDL, not text.
+#     it cannot be made to consume the fragment: it renders DDL directly, with
+#     no policy document in the path, and the two producers disagree on the
+#     id/created_by/updated_by TYPE (varchar(255) via the engine vs TEXT here,
+#     measured 2026-08-10 on a deployed app schema). Closing that needs a check
+#     of a different kind - comparing rendered DDL, not text. See the fragment's
+#     header, which until 2026-08-20 wrongly said zeroship-schema had already
+#     pinned COLLATE "C"; neither producer has, and #255 is open on both.
 #   - It reads TRACKED files only, via `git ls-files`. Build output
 #     (sdks/vite-plugin/dist/), node_modules, target/, and sibling worktrees
 #     under .worktrees/ are all ignored and therefore unscanned. That is

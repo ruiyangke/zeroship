@@ -101,15 +101,24 @@ columns = [
   #   this file, via the engine   id / created_by / updated_by  varchar(255)
   #   zeroship-schema PG renderer id / created_by / updated_by  text
   #
-  # THE LIVE CONSEQUENCE is the collation, not the width. All three columns hold
-  # typed ids (prefix + "_" + base62(uuidv7)), whose byte order IS creation
-  # order - and the engine has no way to express a column collation for an
-  # injected column, so they land on the database default (en_US.utf8), which
-  # interleaves base62's case runs. ORDER BY id on a deployed creator app is
-  # therefore NOT creation order, while dev's SQLite (BINARY) is correct.
-  # zeroship-schema now pins COLLATE "C" on its three; this file CANNOT until
-  # the engine grows a collation slot on InjectColumn. Tracked as #255; the
-  # end-to-end red is tests/golden_path.sh step 11.
+  # THE LIVE CONSEQUENCE is the collation, and NEITHER producer fixes it. All
+  # three columns hold typed ids (prefix + "_" + base62(uuidv7)), whose byte
+  # order IS creation order, and neither producer pins a collation, so both land
+  # on the database default (en_US.utf8), which interleaves base62's case runs.
+  # ORDER BY id on a deployed creator app is therefore NOT creation order, while
+  # dev's SQLite (BINARY) is correct. Tracked as #255; the measurement is in
+  # crates/core/src/typed_id.rs (50 batches: 42/50 wrong at 100ms spacing) and
+  # the user-facing statement is docs/reference/sqlite-divergences.md.
+  #
+  # THIS COMMENT SAID THE OPPOSITE UNTIL 2026-08-20 - that "zeroship-schema now
+  # pins COLLATE "C" on its three" and only this file could not. Checked against
+  # the code: PgRenderer::system_field_columns emits bare "id TEXT PRIMARY KEY"
+  # / "created_by TEXT NULL" / "updated_by TEXT NULL", there is no COLLATE "C"
+  # anywhere in the tree outside prose, and typed_id.rs still says "Not fixed
+  # here". A claim that one side is already fixed is worse than no claim: it
+  # turns an open bug into someone else's problem. If this file ever CAN carry
+  # the pin the engine must first grow a collation slot on InjectColumn, which
+  # it has not.
   #
   # NOW() vs now(): nothing turns on the case. inject_default_to_ir lower-cases
   # the token before matching it against "now" | "now()" | "current_timestamp"
