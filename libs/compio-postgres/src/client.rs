@@ -1082,6 +1082,22 @@ impl InnerClient {
         self.send_inner(messages, disposition, transaction_effect, None, None)
     }
 
+    /// Enqueue a known-failing request and its recovery without allowing a
+    /// later caller request to overtake the recovery.
+    pub(crate) fn send_with_error_cleanup(
+        &self,
+        message: FrontendMessage,
+        cleanup: FrontendMessage,
+    ) -> Result<Responses, Error> {
+        let responses = self.send(RequestMessages::Single(message))?;
+        drop(self.send_with(
+            RequestMessages::Single(cleanup),
+            RequestDisposition::Housekeeping,
+            TransactionEffect::MayChange,
+        )?);
+        Ok(responses)
+    }
+
     fn send_inner(
         &self,
         messages: RequestMessages,
